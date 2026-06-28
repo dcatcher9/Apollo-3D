@@ -56,3 +56,7 @@ package-lock.json
 # Python
 *.pyc
 venv/
+
+# Local AI agent handoff notes (machine-specific, not for upstream)
+AGENTS.md
+GEMINI.md

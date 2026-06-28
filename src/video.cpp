@@ -826,9 +826,10 @@ namespace video {
       },
       {
         // SDR-specific options
-        {"profile"s, [](const config_t &cfg) {
-           if (cfg.profile == 66) return "baseline"s;
-           if (cfg.profile == 77) return "main"s;
+        {"profile"s, [](const config_t &) {
+           // config_t carries no explicit H.264 profile field; this codebase always
+           // encodes H.264 SDR 4:2:0 as High profile (see make_encode_device), so the
+           // AMF SDR-specific profile is always "high". (YUV444 uses its own block.)
            return "high"s;
          }},
       },
