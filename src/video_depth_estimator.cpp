@@ -556,10 +556,13 @@ namespace models {
                 device->CreateUnorderedAccessView(depth_tex2.Get(), nullptr, &depth_tex2_uav);
                 device->CreateShaderResourceView(depth_tex2.Get(), nullptr, &depth_tex2_srv);
 
-                // Clear the texture to exactly 0.0f so the EMA shader correctly initializes on the first frame
-                // instead of blending with undefined GPU garbage memory.
+                // Clear both depth textures to 0.0f: depth_tex so the EMA shader initializes
+                // correctly on the first frame instead of blending with undefined memory, and
+                // depth_tex2 so output_srv() returns flat (not garbage) depth on the frames
+                // before the first edge-dilate pass runs.
                 const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
                 context->ClearUnorderedAccessViewFloat(depth_uav.Get(), clear_color);
+                context->ClearUnorderedAccessViewFloat(depth_tex2_uav.Get(), clear_color);
                 
                 auto res1 = cuda.cuGraphicsD3D11RegisterResource(&cuda_in_res, tensor_in_buf.Get(), 0);
                 auto res2 = cuda.cuGraphicsD3D11RegisterResource(&cuda_out_res, tensor_out_buf.Get(), 0);
@@ -603,9 +606,6 @@ namespace models {
                 context->Unmap(cbuffer.Get(), 0);
             }
 
-            // IF WE REACH HERE, CUDA HAS FINISHED!
-            // tensor_out_buf holds the FINISHED raw disparity from the PREVIOUS frame, and is
-            // fully unmapped from CUDA, so these D3D11 passes run without blocking the CPU.
             if (has_previous_frame) {
                 // 3a. Per-frame min/max normalization (GPU-resident; no CPU readback).
                 if (normalize && depth_minmax_cs && depth_minmax_ema_cs && minmax_raw_uav && minmax_ema_uav) {
