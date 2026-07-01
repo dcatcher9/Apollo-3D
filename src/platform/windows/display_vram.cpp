@@ -889,6 +889,8 @@ namespace platf::dxgi {
       depth_cfg.depth_gamma = (float) config::video.sbs.depth_gamma;
       depth_cfg.minmax_alpha = (float) config::video.sbs.minmax_ema;
       depth_cfg.edge_dilation = (float) config::video.sbs.edge_dilation;
+      depth_cfg.depth_fps = (float) config::video.sbs.depth_fps;
+      depth_cfg.depth_interval = config::video.sbs.depth_interval;
 
       depth_estimator = std::make_unique<models::video_depth_estimator>(
           Microsoft::WRL::ComPtr<ID3D11Device>(device.get()),
@@ -898,12 +900,12 @@ namespace platf::dxgi {
           depth_cfg
       );
 
-      // SBS reprojection constants (see sbs_reprojection_ps.hlsl): {divergence, focal, depth_scale, pad}.
+      // SBS reprojection constants (see sbs_reprojection_ps.hlsl): {divergence, focal, depth_scale, parallax_steps}.
       float sbs_params[4] {
         (float) config::video.sbs.divergence,
         (float) config::video.sbs.focal_plane,
         (float) config::video.sbs.depth_scale,
-        0.0f
+        (float) config::video.sbs.parallax_steps
       };
       sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);
 
@@ -913,7 +915,7 @@ namespace platf::dxgi {
         0.0f,
         (float) config::video.sbs.focal_plane,
         (float) config::video.sbs.depth_scale,
-        0.0f
+        (float) config::video.sbs.parallax_steps
       };
       sbs_passthrough_cbuffer = make_buffer(device.get(), sbs_passthrough_params);
 

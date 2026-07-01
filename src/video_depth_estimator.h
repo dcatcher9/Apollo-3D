@@ -21,6 +21,8 @@ namespace models {
         float depth_gamma = 1.0f;    ///< Shaping exponent on normalized depth (normalize mode only); 1.0 = linear.
         float minmax_alpha = 0.1f;   ///< Temporal EMA blend for the normalized min/max (0-1).
         float edge_dilation = 0.0f;  ///< Foreground-biased edge smoothing strength (0 = off); reduces jaggy silhouette fringe.
+        float depth_fps = 30.0f;     ///< Target depth-update rate; inference interval auto-derived from measured video fps. 0 = every frame.
+        int depth_interval = 0;      ///< Manual override for the inference interval. 0 = auto from depth_fps.
     };
 
     class video_depth_estimator {

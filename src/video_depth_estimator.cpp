@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <chrono>
 #include <windows.h>
 #include <d3dcompiler.h>
 
@@ -150,6 +151,16 @@ namespace models {
         float depth_gamma;  // shaping exponent on normalized depth (normalize mode only)
         float minmax_alpha;  // temporal EMA blend for the normalized min/max
         float edge_dilation;  // foreground-biased edge smoothing strength (0 = off)
+        float depth_fps;  // target depth-update rate (interval auto-derived from measured video fps)
+        int depth_interval;  // manual interval override (0 = auto)
+
+        // Cadence: measure the video frame rate from the call period and derive how many
+        // frames to skip between depth inferences so depth refreshes near depth_fps.
+        unsigned frame_counter = 0;
+        float measured_fps = 0.0f;
+        int effective_interval = 1;
+        int last_logged_interval = 0;
+        std::chrono::steady_clock::time_point last_call_time {};
 
         // Caching
         int target_w = 0;
@@ -205,7 +216,8 @@ namespace models {
         impl(Microsoft::WRL::ComPtr<ID3D11Device> d, Microsoft::WRL::ComPtr<ID3D11DeviceContext> c, const std::filesystem::path& assets_dir, int w, int h, const depth_estimator_config& cfg)
             : device(d), context(c), width(w), height(h), ema_alpha(cfg.ema_alpha),
               depth_short_side(std::max(196, cfg.depth_short_side)), max_aspect(std::max(1.0f, cfg.max_aspect)),
-              normalize(cfg.normalize), depth_gamma(cfg.depth_gamma), minmax_alpha(cfg.minmax_alpha), edge_dilation(cfg.edge_dilation)
+              normalize(cfg.normalize), depth_gamma(cfg.depth_gamma), minmax_alpha(cfg.minmax_alpha), edge_dilation(cfg.edge_dilation),
+              depth_fps(cfg.depth_fps), depth_interval(std::max(0, cfg.depth_interval))
         {
             auto model_path = ensure_model_available(assets_dir);
             if (model_path.empty()) {
@@ -348,6 +360,48 @@ namespace models {
             // TRT runtime/engine are cached globally, do not destroy them here.
         }
 
+        // The depth SRV handed back to the reprojection: the edge-dilated copy when enabled,
+        // otherwise the raw depth. Also the value returned on frames where we reuse the last
+        // depth (stream busy or off-cadence).
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> output_srv() {
+            return (edge_dilation > 0.0f && depth_tex2_srv) ? depth_tex2_srv : depth_srv;
+        }
+
+        // Called once per video frame. Measures the video frame rate from the inter-call
+        // period and derives effective_interval so depth refreshes near depth_fps. A manual
+        // depth_interval override wins; a ±0.5-frame deadband keeps the interval from
+        // oscillating when the measured fps sits near an integer boundary.
+        void update_cadence() {
+            auto now = std::chrono::steady_clock::now();
+            if (last_call_time.time_since_epoch().count() != 0) {
+                float dt = std::chrono::duration<float>(now - last_call_time).count();
+                if (dt > 1e-4f && dt < 0.5f) {  // ignore first call and long stalls (paused/occluded)
+                    float inst = 1.0f / dt;
+                    measured_fps = (measured_fps <= 0.0f) ? inst : (measured_fps * 0.95f + inst * 0.05f);
+                }
+            }
+            last_call_time = now;
+
+            if (depth_interval > 0) {
+                effective_interval = depth_interval;  // manual override
+            } else if (depth_fps > 0.0f && measured_fps > 1.0f) {
+                float ideal = measured_fps / depth_fps;
+                if (ideal > effective_interval + 0.5f) {
+                    effective_interval += 1;
+                } else if (effective_interval > 1 && ideal < effective_interval - 0.5f) {
+                    effective_interval -= 1;
+                }
+            } else {
+                effective_interval = 1;  // auto disabled, or still warming up
+            }
+
+            if (effective_interval != last_logged_interval) {
+                BOOST_LOG(info) << "Depth cadence: video ~" << (int)(measured_fps + 0.5f) << "fps -> inference every "
+                                << effective_interval << " frame(s) (~" << (int)(measured_fps / effective_interval + 0.5f) << "fps depth)";
+                last_logged_interval = effective_interval;
+            }
+        }
+
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> estimate(Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input_srv, bool is_hdr) {
             if (!exec_context || !rgb_to_nchw_cs || !buffer_to_tex_cs) return nullptr;
             
@@ -360,12 +414,15 @@ namespace models {
             if (cuda_ctx) {
                 cuda.cuCtxSetCurrent(cuda_ctx);
             }
-            
+
+            // Measure video fps and derive the depth-inference interval (called every frame).
+            update_cadence();
+
             // Prevent GPU starvation: if the previous AI frame is still crunching, drop this frame.
             // This prevents an infinite queue of heavy TensorRT workloads from starving the DWM and Edge Browser.
             if (cu_stream && cuda.cuStreamQuery) {
                 if (cuda.cuStreamQuery(cu_stream) == 600) { // CUDA_ERROR_NOT_READY
-                    return (edge_dilation > 0.0f && depth_tex2_srv) ? depth_tex2_srv : depth_srv;
+                    return output_srv();
                 }
             }
 
@@ -467,11 +524,19 @@ namespace models {
             }
 
 
-            // IF WE REACH HERE, CUDA HAS FINISHED!
-            // This means tensor_out_buf contains the FINISHED depth map from the previous frame!
-            // Let's run Step 3 first to copy it into depth_tex. Since tensor_out_buf is fully unmapped
-            // from CUDA, D3D11 will execute this instantly without blocking the CPU thread!
-            
+            // Depth-update cadence: at high video framerates the depth map does not need to
+            // refresh every frame -- the temporal EMA hides a lower update rate, and skipping
+            // inference frees GPU time for the encoder (and cuts inference/encode contention).
+            // Reuse the last depth on skipped frames. Runs the first frame, then every
+            // depth_interval-th frame thereafter.
+            frame_counter++;
+            if (effective_interval > 1 && (frame_counter % (unsigned)effective_interval) != 1u) {
+                return output_srv();
+            }
+
+            // tensor_out_buf now holds the finished raw disparity from the previous inference
+            // (fully unmapped from CUDA), so the passes below don't block the CPU thread.
+
             // Populate the shared constant buffer up front; buffer_to_tex_cs, the min/max
             // passes and rgb_to_nchw_cs all read it this frame.
             D3D11_MAPPED_SUBRESOURCE mapped;
@@ -600,7 +665,7 @@ namespace models {
             
             has_previous_frame = true;
 
-            return (edge_dilation > 0.0f && depth_tex2_srv) ? depth_tex2_srv : depth_srv;
+            return output_srv();
         }
     };
 

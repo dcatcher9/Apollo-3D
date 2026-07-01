@@ -528,6 +528,9 @@ namespace config {
       1.0,  // sbs.depth_gamma (1.0 = linear)
       0.1,  // sbs.minmax_ema
       1.0,  // sbs.edge_dilation (foreground-biased silhouette smoothing)
+      30.0,  // sbs.depth_fps (target depth-update rate; interval auto-derived from video fps)
+      0,  // sbs.depth_interval (0 = auto from depth_fps)
+      8,  // sbs.parallax_steps (reprojection probes per eye)
     },  // sbs
   };
 
@@ -1233,6 +1236,9 @@ namespace config {
     double_between_f(vars, "sbs_3d_depth_gamma", video.sbs.depth_gamma, {0.1, 4.0});
     double_between_f(vars, "sbs_3d_minmax_ema", video.sbs.minmax_ema, {0.001, 1.0});
     double_between_f(vars, "sbs_3d_edge_dilation", video.sbs.edge_dilation, {0.0, 4.0});
+    double_between_f(vars, "sbs_3d_depth_fps", video.sbs.depth_fps, {0.0, 240.0});
+    int_between_f(vars, "sbs_3d_depth_interval", video.sbs.depth_interval, {0, 10});
+    int_between_f(vars, "sbs_3d_parallax_steps", video.sbs.parallax_steps, {4, 32});
 
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);

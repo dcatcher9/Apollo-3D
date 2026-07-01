@@ -26,12 +26,10 @@ cbuffer Constants : register(b2) {
     float max_divergence;  // Parallax budget as a fraction of source width (e.g. 0.03). 0 = flat.
     float focal_plane;     // Zero-parallax depth in [0,1] (e.g. 0.5).
     float depth_scale;     // Linear depth-contrast gain (e.g. 1.5).
-    float pad;
+    float parallax_steps;  // Horizontal probes per eye (from config). This pass runs full-res
+                           // every frame, so fewer steps = big GPU saving; the depth map is
+                           // small/smooth and divergence is modest, so ~8 is plenty.
 };
-
-// Number of horizontal probes per eye. Higher = crisper occlusion at depth edges,
-// but the depth map is small and smooth so a modest count is plenty.
-static const int PARALLAX_STEPS = 16;
 
 // Signed horizontal parallax for a normalized depth sample, in source-UV units.
 // Linear map: depth is ALREADY perceptually normalized upstream (buffer_to_tex_cs,
@@ -53,8 +51,9 @@ float2 Reproject(float2 uv, float eyeSign) {
         return uv;  // divergence 0 -> flat passthrough, both eyes identical
     }
 
+    int steps = (parallax_steps >= 1.0f) ? (int)parallax_steps : 8;
     float startX = uv.x - searchRadius;
-    float stepX  = (2.0f * searchRadius) / PARALLAX_STEPS;
+    float stepX  = (2.0f * searchRadius) / (float)steps;
 
     // A source at position x forward-warps to out(x) = x - eyeSign * parallax(depth(x)).
     // We want out(x) == uv.x, i.e. g(x) = (x - uv.x) - eyeSign * parallax(depth(x)) == 0.
@@ -76,8 +75,8 @@ float2 Reproject(float2 uv, float eyeSign) {
     float prevG = (prevX - uv.x) - eyeSign * DepthParallax(prevD);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
-    [unroll]
-    for (int i = 1; i <= PARALLAX_STEPS; i++) {
+    [loop]
+    for (int i = 1; i <= steps; i++) {
         float x = startX + stepX * i;
         float d = DepthTexture.SampleLevel(LinearSampler, float2(x, uv.y), 0);
         float g = (x - uv.x) - eyeSign * DepthParallax(d);
