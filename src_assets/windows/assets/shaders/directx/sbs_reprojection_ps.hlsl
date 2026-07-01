@@ -23,21 +23,29 @@ struct PS_INPUT {
 };
 
 cbuffer Constants : register(b2) {
-    float max_divergence;  // Parallax budget as a fraction of source width (e.g. 0.03). 0 = flat.
-    float focal_plane;     // Zero-parallax depth in [0,1] (e.g. 0.5).
-    float depth_scale;     // Linear depth-contrast gain (e.g. 1.5).
-    float parallax_steps;  // Horizontal probes per eye (from config). This pass runs full-res
-                           // every frame, so fewer steps = big GPU saving; the depth map is
-                           // small/smooth and divergence is modest, so ~8 is plenty.
+    float max_divergence;   // Parallax budget as a fraction of source width (e.g. 0.03). 0 = flat.
+    float focal_plane;      // Zero-parallax depth in [0,1] (e.g. 0.5).
+    float depth_scale;      // Linear depth-contrast gain (e.g. 1.5).
+    float parallax_steps;   // Horizontal probes per eye; fewer = big GPU saving on this full-res pass.
+    float border_fade;      // Ramp parallax to 0 within this fraction of the L/R edges (0 = off).
+    float pad0;
+    float pad1;
+    float pad2;
 };
 
-// Signed horizontal parallax for a normalized depth sample, in source-UV units.
-// Linear map: depth is ALREADY perceptually normalized upstream (buffer_to_tex_cs,
-// 1-exp(-raw*0.1)), so a second exponential here just double-compresses and flattens
-// the per-object depth. depth_scale is a linear contrast gain; max_divergence is the
-// overall budget. Positive => nearer than the focal plane => pops out of the screen.
-float DepthParallax(float d) {
-    return (d - focal_plane) * depth_scale * max_divergence;
+// Border fade: parallax ramps to zero within border_fade of the LEFT/RIGHT source edges, so
+// an object touching a side edge doesn't pop out of the screen -- a "window violation" that
+// causes binocular rivalry (one eye sees it clipped by the frame, the other doesn't). Only
+// the L/R edges need this: parallax is purely horizontal, so the top/bottom edges clip both
+// eyes identically (ordinary occlusion, no rivalry).
+float BorderFade(float x) {
+    return (border_fade <= 0.0f) ? 1.0f : saturate(min(x, 1.0f - x) / border_fade);
+}
+
+// Signed horizontal parallax for a normalized depth sample at source position x, in
+// source-UV units. Positive => nearer than the focal plane => pops out of the screen.
+float DepthParallax(float d, float x) {
+    return (d - focal_plane) * depth_scale * max_divergence * BorderFade(x);
 }
 
 // Find the source U coordinate that reprojects onto `uv` for one eye, choosing the
@@ -45,7 +53,8 @@ float DepthParallax(float d) {
 // eyeSign = +1 right eye, -1 left eye.
 float2 Reproject(float2 uv, float eyeSign) {
     // Widest distance any surface can travel (near or far side of the focal plane).
-    // Must include depth_scale so the search covers the full parallax range.
+    // Must include depth_scale so the search covers the full parallax range. BorderFade only
+    // shrinks parallax, so this (fade=1) remains a valid upper bound on the search span.
     float searchRadius = max_divergence * depth_scale * max(focal_plane, 1.0f - focal_plane);
     if (searchRadius <= 1e-6f) {
         return uv;  // divergence 0 -> flat passthrough, both eyes identical
@@ -72,14 +81,14 @@ float2 Reproject(float2 uv, float eyeSign) {
 
     float prevX = startX;
     float prevD = DepthTexture.SampleLevel(LinearSampler, float2(prevX, uv.y), 0);
-    float prevG = (prevX - uv.x) - eyeSign * DepthParallax(prevD);
+    float prevG = (prevX - uv.x) - eyeSign * DepthParallax(prevD, prevX);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
     for (int i = 1; i <= steps; i++) {
         float x = startX + stepX * i;
         float d = DepthTexture.SampleLevel(LinearSampler, float2(x, uv.y), 0);
-        float g = (x - uv.x) - eyeSign * DepthParallax(d);
+        float g = (x - uv.x) - eyeSign * DepthParallax(d, x);
 
         // Zero crossing between prevX and x => a source in this span reprojects onto uv.
         if ((prevG <= 0.0f && g >= 0.0f) || (prevG >= 0.0f && g <= 0.0f)) {
