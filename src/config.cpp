@@ -531,6 +531,8 @@ namespace config {
       30.0,  // sbs.depth_fps (target depth-update rate; interval auto-derived from video fps)
       0,  // sbs.depth_interval (0 = auto from depth_fps)
       8,  // sbs.parallax_steps (reprojection probes per eye)
+      "depth_anything_v2_fp16",  // sbs.depth_model (local file stem)
+      "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",  // sbs.depth_model_url
     },  // sbs
   };
 
@@ -1239,6 +1241,8 @@ namespace config {
     double_between_f(vars, "sbs_3d_depth_fps", video.sbs.depth_fps, {0.0, 240.0});
     int_between_f(vars, "sbs_3d_depth_interval", video.sbs.depth_interval, {0, 10});
     int_between_f(vars, "sbs_3d_parallax_steps", video.sbs.parallax_steps, {4, 32});
+    string_f(vars, "sbs_3d_depth_model", video.sbs.depth_model);
+    string_f(vars, "sbs_3d_depth_model_url", video.sbs.depth_model_url);
 
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);

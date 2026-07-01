@@ -3,11 +3,12 @@
 #include <d3d11.h>
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <wrl/client.h>
 
 namespace models {
 
-    void precompile_tensorrt_engine(const std::filesystem::path& assets_dir);
+    void precompile_tensorrt_engine(const std::filesystem::path& assets_dir, const std::string& model_name, const std::string& model_url);
 
     /**
      * @brief Depth-estimation tuning knobs. Values are sensible fallbacks; display_vram
@@ -23,6 +24,8 @@ namespace models {
         float edge_dilation = 0.0f;  ///< Foreground-biased edge smoothing strength (0 = off); reduces jaggy silhouette fringe.
         float depth_fps = 30.0f;     ///< Target depth-update rate; inference interval auto-derived from measured video fps. 0 = every frame.
         int depth_interval = 0;      ///< Manual override for the inference interval. 0 = auto from depth_fps.
+        std::string model_name = "depth_anything_v2_fp16";  ///< Local file stem; engine cached as <model_name>.engine. Different models coexist.
+        std::string model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< Where to download the ONNX if absent.
     };
 
     class video_depth_estimator {

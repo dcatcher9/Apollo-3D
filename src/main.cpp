@@ -177,9 +177,9 @@ int main(int argc, char *argv[]) {
   log_publisher_data();
 
   // Precompile TensorRT engine in the background
-  std::thread([]() {
+  std::thread([model_name = config::video.sbs.depth_model, model_url = config::video.sbs.depth_model_url]() {
       BOOST_LOG(info) << "Triggering background TensorRT engine precompilation..."sv;
-      models::precompile_tensorrt_engine(SUNSHINE_ASSETS_DIR);
+      models::precompile_tensorrt_engine(SUNSHINE_ASSETS_DIR, model_name, model_url);
   }).detach();
 
   // Log modified_config_settings

@@ -65,11 +65,11 @@ using TrtUniquePtr = std::unique_ptr<T, TrtDeleter<T>>;
 
 namespace models {
 
-    void precompile_tensorrt_engine(const std::filesystem::path& assets_dir) {
+    void precompile_tensorrt_engine(const std::filesystem::path& assets_dir, const std::string& model_name, const std::string& model_url) {
         static std::mutex compile_mutex;
         std::lock_guard<std::mutex> lock(compile_mutex);
 
-        auto model_path = ensure_model_available(assets_dir);
+        auto model_path = ensure_model_available(assets_dir, model_name, model_url);
         if (model_path.empty()) {
             BOOST_LOG(warning) << "Model not found. Background precompilation aborted.";
             return;
@@ -119,8 +119,9 @@ namespace models {
         
         auto serializedModel = TrtUniquePtr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
         if (serializedModel) {
-            // Save to disk so we don't rebuild next time
-            auto engine_path = assets_dir / "depth_anything_v2.engine";
+            // Save to disk (named after the onnx variant) so we don't rebuild next time.
+            auto engine_path = model_path;
+            engine_path.replace_extension("engine");
             std::ofstream p(engine_path, std::ios::binary);
             if (p) {
                 p.write(static_cast<const char*>(serializedModel->data()), serializedModel->size());
@@ -153,6 +154,8 @@ namespace models {
         float edge_dilation;  // foreground-biased edge smoothing strength (0 = off)
         float depth_fps;  // target depth-update rate (interval auto-derived from measured video fps)
         int depth_interval;  // manual interval override (0 = auto)
+        std::string model_name;  // local file stem; engine cached as <model_name>.engine
+        std::string model_url;  // where to download the onnx if absent
 
         // Cadence: measure the video frame rate from the call period and derive how many
         // frames to skip between depth inferences so depth refreshes near depth_fps.
@@ -217,16 +220,16 @@ namespace models {
             : device(d), context(c), width(w), height(h), ema_alpha(cfg.ema_alpha),
               depth_short_side(std::max(196, cfg.depth_short_side)), max_aspect(std::max(1.0f, cfg.max_aspect)),
               normalize(cfg.normalize), depth_gamma(cfg.depth_gamma), minmax_alpha(cfg.minmax_alpha), edge_dilation(cfg.edge_dilation),
-              depth_fps(cfg.depth_fps), depth_interval(std::max(0, cfg.depth_interval))
+              depth_fps(cfg.depth_fps), depth_interval(std::max(0, cfg.depth_interval)), model_name(cfg.model_name), model_url(cfg.model_url)
         {
-            auto model_path = ensure_model_available(assets_dir);
+            auto model_path = ensure_model_available(assets_dir, model_name, model_url);
             if (model_path.empty()) {
                 BOOST_LOG(error) << "Depth estimator failed: No model available.";
                 return;
             }
             if (model_path.extension() == ".onnx") {
-                precompile_tensorrt_engine(assets_dir);
-                model_path = ensure_model_available(assets_dir);
+                precompile_tensorrt_engine(assets_dir, model_name, model_url);
+                model_path = ensure_model_available(assets_dir, model_name, model_url);
             }
 
             if (model_path.extension() != ".engine") {

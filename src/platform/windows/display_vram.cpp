@@ -891,6 +891,8 @@ namespace platf::dxgi {
       depth_cfg.edge_dilation = (float) config::video.sbs.edge_dilation;
       depth_cfg.depth_fps = (float) config::video.sbs.depth_fps;
       depth_cfg.depth_interval = config::video.sbs.depth_interval;
+      depth_cfg.model_name = config::video.sbs.depth_model;
+      depth_cfg.model_url = config::video.sbs.depth_model_url;
 
       depth_estimator = std::make_unique<models::video_depth_estimator>(
           Microsoft::WRL::ComPtr<ID3D11Device>(device.get()),

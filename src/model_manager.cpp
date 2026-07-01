@@ -12,9 +12,12 @@ namespace models {
         return fwrite(ptr, size, nmemb, stream);
     }
 
-    std::filesystem::path ensure_model_available(const std::filesystem::path& assets_dir) {
-        auto onnx_path = assets_dir / "depth_anything_v2.onnx";
-        auto engine_path = assets_dir / "depth_anything_v2.engine";
+    std::filesystem::path ensure_model_available(const std::filesystem::path& assets_dir, const std::string& model_name, const std::string& model_url) {
+        // Files are named after the model (not the URL) so each model gets its own cached
+        // engine: switching sbs_3d_depth_model never reuses a stale engine, and different
+        // models coexist. To use another model, point sbs_3d_depth_model_url at its ONNX.
+        auto onnx_path = assets_dir / (model_name + ".onnx");
+        auto engine_path = assets_dir / (model_name + ".engine");
 
         if (std::filesystem::exists(engine_path)) {
             return engine_path;
@@ -23,11 +26,11 @@ namespace models {
             return onnx_path;
         }
 
-        BOOST_LOG(info) << "Depth Anything V2 ONNX model not found. Downloading from HuggingFace...";
+        BOOST_LOG(info) << "Depth model '" << model_name << "' not found. Downloading from " << model_url << " ...";
 
-        std::string url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx";
+        const std::string& url = model_url;
 
-        
+
         auto download_file = [&](const std::string& url, const std::filesystem::path& path) -> bool {
             CURL* curl = curl_easy_init();
             if (!curl) return false;
@@ -57,12 +60,12 @@ namespace models {
             return true;
         };
 
-        BOOST_LOG(info) << "Downloading model.onnx. This may take a minute (99MB)...";
+        BOOST_LOG(info) << "Downloading " << model_name << ".onnx. This may take a minute...";
         if (!download_file(url, onnx_path)) {
             return "";
         }
 
-        BOOST_LOG(info) << "Successfully downloaded Depth Anything V2 ONNX model.";
+        BOOST_LOG(info) << "Successfully downloaded Depth Anything V2 model '" << model_name << "'.";
         return onnx_path;
     }
 }

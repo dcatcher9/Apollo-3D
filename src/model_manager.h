@@ -4,12 +4,16 @@
 
 namespace models {
     /**
-     * @brief Ensures the Depth Anything V2 model is available locally.
-     * Checks if the .engine or .onnx file exists in the assets directory.
-     * If not, downloads the .onnx file from the internet.
-     * 
+     * @brief Ensures the given depth model is available locally.
+     * Looks for <model_name>.engine, then <model_name>.onnx, in the assets directory.
+     * If neither exists, downloads the ONNX from model_url and saves it as <model_name>.onnx.
+     * The name is decoupled from the URL so different models (not just variants) can coexist,
+     * each with its own cached engine.
+     *
      * @param assets_dir The base assets directory path
+     * @param model_name Local file stem identifying the model (e.g. "depth_anything_v2_fp16").
+     * @param model_url  URL to download the .onnx from if it isn't present locally.
      * @return The path to the usable model file (.engine preferred over .onnx), or empty if failed.
      */
-    std::filesystem::path ensure_model_available(const std::filesystem::path& assets_dir);
+    std::filesystem::path ensure_model_available(const std::filesystem::path& assets_dir, const std::string& model_name, const std::string& model_url);
 }

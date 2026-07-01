@@ -165,6 +165,8 @@ namespace config {
       double depth_fps;  ///< Target depth-update rate. Inference interval is auto-derived from the measured video fps (interval = round(video_fps / depth_fps)); ~30 is imperceptible with EMA, ~20 min before motion trails. 0 = update every frame.
       int depth_interval;  ///< Manual override for the inference interval (run every Nth frame). 0 = auto from depth_fps.
       int parallax_steps;  ///< Horizontal probes per eye in the SBS reprojection (runs full-res every frame). Fewer = big GPU saving; ~8 is plenty at modest divergence.
+      std::string depth_model;  ///< Local name/stem for the depth model files (<name>.onnx / <name>.engine). Identifies the model so different models coexist, each with its own cached engine.
+      std::string depth_model_url;  ///< URL to download the depth model ONNX from if <depth_model>.onnx is absent. Point this (and depth_model) elsewhere to use a different model.
     } sbs;
   };
 
