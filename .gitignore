@@ -60,3 +60,11 @@ venv/
 # Local AI agent handoff notes (machine-specific, not for upstream)
 AGENTS.md
 GEMINI.md
+sbs_history.md
+sbs_changes.txt
+
+# Local dev/build scratch (machine-specific, not for upstream)
+/assets/
+/build_out.txt
+/run_cmake.sh
+.claude/settings.local.json

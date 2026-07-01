@@ -149,6 +149,21 @@ namespace config {
     std::string fallback_mode;
     bool isolated_virtual_display_option;
     bool ignore_encoder_probe_failure;
+
+    // Real-time 2D->3D side-by-side (SBS) depth reprojection tuning.
+    struct sbs_t {
+      double divergence;  ///< Parallax budget as a fraction of image width. 0 = flat (zero-parallax passthrough).
+      double focal_plane;  ///< Zero-parallax plane in normalized depth [0,1]; lower pushes more of the scene forward.
+      double depth_scale;  ///< Linear depth-contrast gain (parallax per unit normalized depth).
+      double ema;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
+      int depth_area;  ///< Pixel-area budget for the depth model input (default 268324 = 518^2). Lower = softer/cheaper. Used only when depth_short_side == 0.
+      int depth_short_side;  ///< If > 0, budget the SHORT side (iw3-style) instead of total area: guarantees vertical depth detail regardless of aspect. 0 = area mode.
+      double depth_max_aspect;  ///< Aspect-ratio cap for short-side mode (long side <= short * this). Bounds worst-case inference cost on ultrawide.
+      bool normalize;  ///< Per-frame min/max normalization of raw disparity (Depth Anything V2 output is affine-invariant). Off = legacy 1-exp(-raw*0.1) curve.
+      double depth_gamma;  ///< Shaping exponent applied to normalized depth (normalize mode only). 1.0 = linear; <1 pushes foreground, >1 pushes background.
+      double minmax_ema;  ///< Temporal EMA blend for the normalized min/max (0-1). Lower = steadier depth scale, higher = adapts faster.
+      double edge_dilation;  ///< Foreground-biased edge smoothing of the depth map to reduce jaggy silhouette fringe. 0 = off; ~1 typical.
+    } sbs;
   };
 
   struct audio_t {

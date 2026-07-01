@@ -126,3 +126,13 @@ if("${BUILD_TYPE}" STREQUAL "XDEBUG")
 else()
     add_definitions(-DNDEBUG)
 endif()
+
+# Copy TensorRT DLLs to the build directory post-build
+if(PROJECT_TENSORRT_DLLS)
+    add_custom_command(TARGET sunshine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${PROJECT_TENSORRT_DLLS}
+        $<TARGET_FILE_DIR:sunshine>
+        COMMENT "Copying TensorRT DLLs to output directory"
+    )
+endif()

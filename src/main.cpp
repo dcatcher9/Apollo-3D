@@ -22,7 +22,7 @@
 #include "upnp.h"
 #include "uuid.h"
 #include "video.h"
-
+#include "video_depth_estimator.h"
 #ifdef _WIN32
   #include "platform/windows/misc.h"
   #include "platform/windows/virtual_display.h"
@@ -175,6 +175,12 @@ int main(int argc, char *argv[]) {
 
   // Log publisher metadata
   log_publisher_data();
+
+  // Precompile TensorRT engine in the background
+  std::thread([]() {
+      BOOST_LOG(info) << "Triggering background TensorRT engine precompilation..."sv;
+      models::precompile_tensorrt_engine(SUNSHINE_ASSETS_DIR);
+  }).detach();
 
   // Log modified_config_settings
   for (auto &[name, val] : config::modified_config_settings) {

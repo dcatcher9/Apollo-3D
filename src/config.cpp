@@ -516,6 +516,20 @@ namespace config {
     "1920x1080x60",  // fallback_mode
     false, // isolated Display
     false, // ignore_encoder_probe_failure
+
+    {
+      0.015,  // sbs.divergence (tuned for the normalized depth range)
+      0.5,  // sbs.focal_plane
+      0.9,  // sbs.depth_scale (linear contrast gain; tuned for normalized depth)
+      0.4,  // sbs.ema
+      268324,  // sbs.depth_area (518^2)
+      0,  // sbs.depth_short_side (0 = area mode, back-compat)
+      4.0,  // sbs.depth_max_aspect
+      true,  // sbs.normalize (per-frame min/max; recommended)
+      1.0,  // sbs.depth_gamma (1.0 = linear)
+      0.1,  // sbs.minmax_ema
+      1.0,  // sbs.edge_dilation (foreground-biased silhouette smoothing)
+    },  // sbs
   };
 
   audio_t audio {
@@ -1209,6 +1223,18 @@ namespace config {
     string_f(vars, "fallback_mode", video.fallback_mode);
     bool_f(vars, "isolated_virtual_display_option", video.isolated_virtual_display_option);
     bool_f(vars, "ignore_encoder_probe_failure", video.ignore_encoder_probe_failure);
+
+    double_between_f(vars, "sbs_3d_divergence", video.sbs.divergence, {0.0, 0.2});
+    double_between_f(vars, "sbs_3d_focal_plane", video.sbs.focal_plane, {0.0, 1.0});
+    double_between_f(vars, "sbs_3d_depth_scale", video.sbs.depth_scale, {0.1, 20.0});
+    double_between_f(vars, "sbs_3d_ema", video.sbs.ema, {0.01, 1.0});
+    int_f(vars, "sbs_3d_depth_area", video.sbs.depth_area);
+    int_f(vars, "sbs_3d_depth_short_side", video.sbs.depth_short_side);
+    double_between_f(vars, "sbs_3d_depth_max_aspect", video.sbs.depth_max_aspect, {1.0, 8.0});
+    bool_f(vars, "sbs_3d_normalize", video.sbs.normalize);
+    double_between_f(vars, "sbs_3d_depth_gamma", video.sbs.depth_gamma, {0.1, 4.0});
+    double_between_f(vars, "sbs_3d_minmax_ema", video.sbs.minmax_ema, {0.001, 1.0});
+    double_between_f(vars, "sbs_3d_edge_dilation", video.sbs.edge_dilation, {0.0, 4.0});
 
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);
