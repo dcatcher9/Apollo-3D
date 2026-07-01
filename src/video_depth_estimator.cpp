@@ -266,6 +266,48 @@ namespace models {
 
             runtime = g_runtime;
             engine = g_engine;
+
+            // Validate the engine's I/O once against what the D3D pipeline binds: FP32 tensors
+            // named "pixel_values" (input) and "predicted_depth" (output). The model is
+            // user-selectable (sbs_3d_depth_model_url), so a model with FP16/other I/O dtypes or
+            // different tensor names would otherwise bind mismatched buffers and silently produce
+            // garbage depth. We log the actual bindings and warn loudly on any mismatch.
+            static bool io_validated = false;  // guarded by g_trt_mutex (held here)
+            if (engine && !io_validated) {
+                io_validated = true;
+                auto dtype_name = [](nvinfer1::DataType t) -> const char* {
+                    switch (t) {
+                        case nvinfer1::DataType::kFLOAT: return "FP32";
+                        case nvinfer1::DataType::kHALF:  return "FP16";
+                        case nvinfer1::DataType::kINT8:  return "INT8";
+                        case nvinfer1::DataType::kINT32: return "INT32";
+                        default: return "other";
+                    }
+                };
+                bool have_in = false, have_out = false;
+                for (int i = 0; i < engine->getNbIOTensors(); i++) {
+                    const char* tname = engine->getIOTensorName(i);
+                    auto dt = engine->getTensorDataType(tname);
+                    bool is_input = engine->getTensorIOMode(tname) == nvinfer1::TensorIOMode::kINPUT;
+                    BOOST_LOG(info) << "Depth engine tensor '" << tname << "' " << (is_input ? "(input)" : "(output)")
+                                    << " dtype=" << dtype_name(dt);
+                    if (std::string(tname) == "pixel_values") {
+                        have_in = true;
+                        if (dt != nvinfer1::DataType::kFLOAT)
+                            BOOST_LOG(error) << "Depth model input 'pixel_values' is " << dtype_name(dt)
+                                             << ", not FP32 -> the FP32 NCHW buffer will feed garbage. Use a keep_io_types (FP32 I/O) model.";
+                    } else if (std::string(tname) == "predicted_depth") {
+                        have_out = true;
+                        if (dt != nvinfer1::DataType::kFLOAT)
+                            BOOST_LOG(error) << "Depth model output 'predicted_depth' is " << dtype_name(dt)
+                                             << ", not FP32 -> the FP32 depth/min-max passes will read garbage.";
+                    }
+                }
+                if (!have_in || !have_out)
+                    BOOST_LOG(error) << "Depth model is missing the expected tensor name(s) 'pixel_values'/'predicted_depth'; "
+                                        "the pipeline binds those by name and will not work with this model.";
+            }
+
             if (engine) {
                 // Reuse a pooled context if one is free; otherwise pay the one-time cost of
                 // creating one. Contexts are returned to the pool (not destroyed) on teardown.
