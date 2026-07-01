@@ -883,7 +883,6 @@ namespace platf::dxgi {
 
       models::depth_estimator_config depth_cfg;
       depth_cfg.ema_alpha = (float) config::video.sbs.ema;
-      depth_cfg.depth_area = config::video.sbs.depth_area;
       depth_cfg.depth_short_side = config::video.sbs.depth_short_side;
       depth_cfg.max_aspect = (float) config::video.sbs.depth_max_aspect;
       depth_cfg.normalize = config::video.sbs.normalize;

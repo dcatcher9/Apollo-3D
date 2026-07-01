@@ -144,8 +144,7 @@ namespace models {
         int width;
         int height;
         float ema_alpha;
-        int depth_area;  // target pixel-area budget for the model input (dims derived from this)
-        int depth_short_side;  // if > 0, budget the short side instead of the area
+        int depth_short_side;  // depth map short-side resolution (clamped to native short side)
         float max_aspect;  // aspect cap for short-side mode
         bool normalize;  // per-frame min/max normalization of raw disparity
         float depth_gamma;  // shaping exponent on normalized depth (normalize mode only)
@@ -204,8 +203,8 @@ namespace models {
         }
 
         impl(Microsoft::WRL::ComPtr<ID3D11Device> d, Microsoft::WRL::ComPtr<ID3D11DeviceContext> c, const std::filesystem::path& assets_dir, int w, int h, const depth_estimator_config& cfg)
-            : device(d), context(c), width(w), height(h), ema_alpha(cfg.ema_alpha), depth_area(std::max(196, cfg.depth_area)),
-              depth_short_side(cfg.depth_short_side), max_aspect(std::max(1.0f, cfg.max_aspect)),
+            : device(d), context(c), width(w), height(h), ema_alpha(cfg.ema_alpha),
+              depth_short_side(std::max(196, cfg.depth_short_side)), max_aspect(std::max(1.0f, cfg.max_aspect)),
               normalize(cfg.normalize), depth_gamma(cfg.depth_gamma), minmax_alpha(cfg.minmax_alpha), edge_dilation(cfg.edge_dilation)
         {
             auto model_path = ensure_model_available(assets_dir);
@@ -387,32 +386,29 @@ namespace models {
                     return nullptr;
                 }
                 float aspect_ratio = (float)input_desc.Width / (float)input_desc.Height;
-                if (depth_short_side > 0) {
-                    // Short-side budget (iw3-style): pin the short side to the target so
-                    // vertical depth detail is constant regardless of aspect ratio; the
-                    // long side grows with aspect, capped by max_aspect to bound cost.
-                    int short_side = std::max(14, (int)std::round((float)depth_short_side / 14.0f) * 14);
-                    if (aspect_ratio >= 1.0f) {
-                        target_h = short_side;
-                        target_w = (int)std::round(short_side * std::min(aspect_ratio, max_aspect));
-                    } else {
-                        target_w = short_side;
-                        target_h = (int)std::round(short_side * std::min(1.0f / aspect_ratio, max_aspect));
-                    }
+                // Short-side budget (iw3-style): pin the short side so vertical depth detail
+                // is constant regardless of aspect ratio; the long side grows with aspect,
+                // capped by max_aspect to bound cost.
+                int short_side = std::max(14, (int)std::round((float)depth_short_side / 14.0f) * 14);
+                if (aspect_ratio >= 1.0f) {
+                    target_h = short_side;
+                    target_w = (int)std::round(short_side * std::min(aspect_ratio, max_aspect));
                 } else {
-                    // Area budget (legacy): fixed total pixel count across aspect ratios.
-                    target_h = std::round(std::sqrt((float)depth_area / aspect_ratio));
-                    target_w = std::round(aspect_ratio * target_h);
+                    target_w = short_side;
+                    target_h = (int)std::round(short_side * std::min(1.0f / aspect_ratio, max_aspect));
                 }
 
                 target_h = std::max(14, (int)std::round((float)target_h / 14.0f) * 14);
                 target_w = std::max(14, (int)std::round((float)target_w / 14.0f) * 14);
 
-                // TensorRT engine's MAX profile is 1008x1008. Scale down aspect-preserving
-                // (rather than clamping each axis independently, which would distort depth).
-                int longest = std::max(target_w, target_h);
-                if (longest > 1008) {
-                    float s = 1008.0f / (float)longest;
+                // Cap the model input aspect-preserving against two limits: the TensorRT
+                // engine's MAX profile (1008), and the frame's native resolution -- never
+                // upscale a small input up to the budget (matches iw3's limit_resolution).
+                // Scaling both axes by a single factor keeps the depth undistorted.
+                int max_w = std::min(1008, (int)input_desc.Width);
+                int max_h = std::min(1008, (int)input_desc.Height);
+                if (target_w > max_w || target_h > max_h) {
+                    float s = std::min((float)max_w / (float)target_w, (float)max_h / (float)target_h);
                     target_w = std::max(14, (int)std::round((float)target_w * s / 14.0f) * 14);
                     target_h = std::max(14, (int)std::round((float)target_h * s / 14.0f) * 14);
                 }

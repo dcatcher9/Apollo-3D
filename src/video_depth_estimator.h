@@ -15,9 +15,8 @@ namespace models {
      */
     struct depth_estimator_config {
         float ema_alpha = 0.2f;      ///< Temporal smoothing of the depth map (0-1); higher = snappier.
-        int depth_area = 268324;     ///< Pixel-area budget for the model input (518^2). Used only when depth_short_side == 0.
-        int depth_short_side = 0;    ///< If > 0, budget the short side instead of total area (iw3-style). 0 = area mode.
-        float max_aspect = 4.0f;     ///< Aspect-ratio cap for short-side mode (long side <= short * this).
+        int depth_short_side = 392;  ///< Depth map short-side resolution (iw3-style); clamped to the frame's native short side (never upscales).
+        float max_aspect = 4.0f;     ///< Aspect-ratio cap (long side <= short * this).
         bool normalize = true;       ///< Per-frame min/max normalization of raw disparity. False = legacy 1-exp curve.
         float depth_gamma = 1.0f;    ///< Shaping exponent on normalized depth (normalize mode only); 1.0 = linear.
         float minmax_alpha = 0.1f;   ///< Temporal EMA blend for the normalized min/max (0-1).

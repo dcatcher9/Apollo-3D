@@ -522,8 +522,7 @@ namespace config {
       0.5,  // sbs.focal_plane
       0.9,  // sbs.depth_scale (linear contrast gain; tuned for normalized depth)
       0.4,  // sbs.ema
-      268324,  // sbs.depth_area (518^2)
-      0,  // sbs.depth_short_side (0 = area mode, back-compat)
+      392,  // sbs.depth_short_side
       4.0,  // sbs.depth_max_aspect
       true,  // sbs.normalize (per-frame min/max; recommended)
       1.0,  // sbs.depth_gamma (1.0 = linear)
@@ -1228,7 +1227,6 @@ namespace config {
     double_between_f(vars, "sbs_3d_focal_plane", video.sbs.focal_plane, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_depth_scale", video.sbs.depth_scale, {0.1, 20.0});
     double_between_f(vars, "sbs_3d_ema", video.sbs.ema, {0.01, 1.0});
-    int_f(vars, "sbs_3d_depth_area", video.sbs.depth_area);
     int_f(vars, "sbs_3d_depth_short_side", video.sbs.depth_short_side);
     double_between_f(vars, "sbs_3d_depth_max_aspect", video.sbs.depth_max_aspect, {1.0, 8.0});
     bool_f(vars, "sbs_3d_normalize", video.sbs.normalize);
