@@ -446,38 +446,48 @@ namespace platf::dxgi {
           rtvs_cleared = true;
         }
 
-        // Run depth estimator. On failure it returns null; we fall back to a zero-parallax
-        // (flat) SBS frame rather than a globally-shifted one, and warn only once.
-        auto depth_srv = depth_estimator->estimate_depth(Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>(img_ctx.encoder_input_res.get()), display->is_hdr());
-        if (!depth_srv && !depth_warned) {
-          BOOST_LOG(error) << "Depth estimation unavailable; streaming flat (zero-parallax) SBS."sv;
-          depth_warned = true;
+        if (sbs_mode != ::video::SBS_OFF) {
+          // Lazy-create the depth estimator on the first SBS frame.
+          ensure_depth_estimator();
+
+          // Run depth estimator. On failure it returns null; we fall back to a zero-parallax
+          // (flat) SBS frame rather than a globally-shifted one, and warn only once.
+          auto depth_srv = depth_estimator ?
+            depth_estimator->estimate_depth(Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>(img_ctx.encoder_input_res.get()), display->is_hdr()) :
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>();
+          if (!depth_srv && !depth_warned) {
+            BOOST_LOG(error) << "Depth estimation unavailable; streaming flat (zero-parallax) SBS."sv;
+            depth_warned = true;
+          }
+
+          // Draw SBS intermediate
+          device_ctx->OMSetRenderTargets(1, &sbs_intermediate_rtv, nullptr);
+          device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
+          device_ctx->PSSetShader(sbs_reprojection_ps.get(), nullptr, 0);
+          device_ctx->RSSetViewports(1, &sbs_viewport);
+          // Bind the sampler explicitly rather than relying on it persisting from init().
+          device_ctx->PSSetSamplers(0, 1, &sampler_linear);
+
+          ID3D11ShaderResourceView* srvs[] = {img_ctx.encoder_input_res.get(), depth_srv.Get()};
+          device_ctx->PSSetShaderResources(0, 2, srvs);
+          ID3D11Buffer* sbs_cb[] = {depth_srv ? sbs_reprojection_cbuffer.get() : sbs_passthrough_cbuffer.get()};
+          device_ctx->PSSetConstantBuffers(2, 1, sbs_cb);
+          device_ctx->Draw(3, 0); // Fullscreen triangle
+
+          // Unbind the Render Target so D3D11 doesn't nullify our SRV in the next pass!
+          ID3D11RenderTargetView* null_rtvs[] = {nullptr};
+          device_ctx->OMSetRenderTargets(1, null_rtvs, nullptr);
+
+          // Clear shader resources
+          ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr};
+          device_ctx->PSSetShaderResources(0, 2, null_srvs);
+
+          // Draw captured frame (now SBS)
+          draw(sbs_intermediate_srv, out_Y_or_YUV_viewports, out_UV_viewport);
+        } else {
+          // Plain 2D: draw the captured frame straight into the output.
+          draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewports, out_UV_viewport);
         }
-
-        // Draw SBS intermediate
-        device_ctx->OMSetRenderTargets(1, &sbs_intermediate_rtv, nullptr);
-        device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
-        device_ctx->PSSetShader(sbs_reprojection_ps.get(), nullptr, 0);
-        device_ctx->RSSetViewports(1, &sbs_viewport);
-        // Bind the sampler explicitly rather than relying on it persisting from init().
-        device_ctx->PSSetSamplers(0, 1, &sampler_linear);
-
-        ID3D11ShaderResourceView* srvs[] = {img_ctx.encoder_input_res.get(), depth_srv.Get()};
-        device_ctx->PSSetShaderResources(0, 2, srvs);
-        ID3D11Buffer* sbs_cb[] = {depth_srv ? sbs_reprojection_cbuffer.get() : sbs_passthrough_cbuffer.get()};
-        device_ctx->PSSetConstantBuffers(2, 1, sbs_cb);
-        device_ctx->Draw(3, 0); // Fullscreen triangle
-
-        // Unbind the Render Target so D3D11 doesn't nullify our SRV in the next pass!
-        ID3D11RenderTargetView* null_rtvs[] = {nullptr};
-        device_ctx->OMSetRenderTargets(1, null_rtvs, nullptr);
-
-        // Clear shader resources
-        ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr};
-        device_ctx->PSSetShaderResources(0, 2, null_srvs);
-
-        // Draw captured frame (now SBS)
-        draw(sbs_intermediate_srv, out_Y_or_YUV_viewports, out_UV_viewport);
 
         // Release encoder mutex to allow capture code to reuse this image
         img_ctx.encoder_mutex->ReleaseSync(0);
@@ -514,10 +524,41 @@ namespace platf::dxgi {
       this->color_matrix = std::move(color_matrix);
     }
 
-    int init_output(ID3D11Texture2D *frame_texture, int width, int height) {
+    // Create the depth estimator on demand (first SBS frame). Returns false on failure.
+    bool ensure_depth_estimator() {
+      if (depth_estimator) {
+        return true;
+      }
+
+      models::depth_estimator_config depth_cfg;
+      depth_cfg.ema_alpha = (float) config::video.sbs.ema;
+      depth_cfg.depth_short_side = config::video.sbs.depth_short_side;
+      depth_cfg.max_aspect = (float) config::video.sbs.depth_max_aspect;
+      depth_cfg.normalize = config::video.sbs.normalize;
+      depth_cfg.depth_gamma = (float) config::video.sbs.depth_gamma;
+      depth_cfg.minmax_alpha = (float) config::video.sbs.minmax_ema;
+      depth_cfg.edge_dilation = (float) config::video.sbs.edge_dilation;
+      depth_cfg.depth_fps = (float) config::video.sbs.depth_fps;
+      depth_cfg.depth_interval = config::video.sbs.depth_interval;
+      depth_cfg.model_name = config::video.sbs.depth_model;
+      depth_cfg.model_url = config::video.sbs.depth_model_url;
+
+      BOOST_LOG(info) << "Host SBS enabled; loading depth model \""sv << depth_cfg.model_name << "\"..."sv;
+      depth_estimator = std::make_unique<models::video_depth_estimator>(
+          Microsoft::WRL::ComPtr<ID3D11Device>(device.get()),
+          Microsoft::WRL::ComPtr<ID3D11DeviceContext>(device_ctx.get()),
+          std::filesystem::path(SUNSHINE_ASSETS_DIR),
+          this->display->width, this->display->height,
+          depth_cfg
+      );
+      return (bool) depth_estimator;
+    }
+
+    int init_output(ID3D11Texture2D *frame_texture, int width, int height, int sbs_mode_param = ::video::SBS_OFF) {
       // The underlying frame pool owns the texture, so we must reference it for ourselves
       frame_texture->AddRef();
       output_texture.reset(frame_texture);
+      sbs_mode = sbs_mode_param;
 
       HRESULT status = S_OK;
 
@@ -619,10 +660,15 @@ namespace platf::dxgi {
 #undef create_vertex_shader_helper
 #undef create_pixel_shader_helper
 
+      const bool sbs_on = sbs_mode != ::video::SBS_OFF;
+
       auto out_width = width;
       auto out_height = height;
 
-      float in_width = display->width * 2;
+      // When SBS is on the source content is a double-width side-by-side frame; otherwise it
+      // is the plain captured frame. The output (width x height) already carries the doubling
+      // (the client-negotiated width was doubled by the encode pipeline for SBS).
+      float in_width = sbs_on ? display->width * 2 : display->width;
       float in_height = display->height;
 
       // Ensure aspect ratio is maintained
@@ -634,25 +680,35 @@ namespace platf::dxgi {
       auto offsetX = (out_width - out_width_f) / 2;
       auto offsetY = (out_height - out_height_f) / 2;
 
-      D3D11_TEXTURE2D_DESC tex_desc = {};
-      tex_desc.Width = display->width * 2;
-      tex_desc.Height = display->height;
-      tex_desc.MipLevels = 1;
-      tex_desc.ArraySize = 1;
-      tex_desc.Format = display->is_hdr() ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
-      tex_desc.SampleDesc.Count = 1;
-      tex_desc.Usage = D3D11_USAGE_DEFAULT;
-      tex_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+      // The SBS reprojection intermediate is only needed when host SBS is active. Plain 2D
+      // (SBS_OFF) draws the captured frame straight into the output.
+      //
+      // Size the intermediate to the FITTED output content (out_width_f x out_height_f), not the
+      // full 2*capture size. This makes the reprojection render directly at the (possibly capped)
+      // encode resolution: the depth warp's per-eye color sampling of the full-res source does the
+      // down-resolution, so there's no post-warp resample of the disoccluded/warped frame. The
+      // final draw of this intermediate into the output viewport is then 1:1.
+      if (sbs_on) {
+        D3D11_TEXTURE2D_DESC tex_desc = {};
+        tex_desc.Width = (UINT) std::lround(out_width_f);
+        tex_desc.Height = (UINT) std::lround(out_height_f);
+        tex_desc.MipLevels = 1;
+        tex_desc.ArraySize = 1;
+        tex_desc.Format = display->is_hdr() ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
+        tex_desc.SampleDesc.Count = 1;
+        tex_desc.Usage = D3D11_USAGE_DEFAULT;
+        tex_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
 
-      status = device->CreateTexture2D(&tex_desc, nullptr, &sbs_intermediate_texture);
-      if (FAILED(status)) {
-        BOOST_LOG(error) << "Failed to create SBS texture";
-        return -1;
+        status = device->CreateTexture2D(&tex_desc, nullptr, &sbs_intermediate_texture);
+        if (FAILED(status)) {
+          BOOST_LOG(error) << "Failed to create SBS texture";
+          return -1;
+        }
+        device->CreateRenderTargetView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_rtv);
+        device->CreateShaderResourceView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_srv);
+
+        sbs_viewport = {0.0f, 0.0f, (float) tex_desc.Width, (float) tex_desc.Height, 0.0f, 1.0f};
       }
-      device->CreateRenderTargetView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_rtv);
-      device->CreateShaderResourceView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_srv);
-
-      sbs_viewport = {0.0f, 0.0f, (float) tex_desc.Width, (float) tex_desc.Height, 0.0f, 1.0f};
 
       out_Y_or_YUV_viewports[0] = {offsetX, offsetY, out_width_f, out_height_f, 0.0f, 1.0f};  // Y plane
       out_Y_or_YUV_viewports[1] = out_Y_or_YUV_viewports[0];  // U plane
@@ -881,26 +937,9 @@ namespace platf::dxgi {
       device_ctx->PSSetSamplers(0, 1, &sampler_linear);
       device_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-      models::depth_estimator_config depth_cfg;
-      depth_cfg.ema_alpha = (float) config::video.sbs.ema;
-      depth_cfg.depth_short_side = config::video.sbs.depth_short_side;
-      depth_cfg.max_aspect = (float) config::video.sbs.depth_max_aspect;
-      depth_cfg.normalize = config::video.sbs.normalize;
-      depth_cfg.depth_gamma = (float) config::video.sbs.depth_gamma;
-      depth_cfg.minmax_alpha = (float) config::video.sbs.minmax_ema;
-      depth_cfg.edge_dilation = (float) config::video.sbs.edge_dilation;
-      depth_cfg.depth_fps = (float) config::video.sbs.depth_fps;
-      depth_cfg.depth_interval = config::video.sbs.depth_interval;
-      depth_cfg.model_name = config::video.sbs.depth_model;
-      depth_cfg.model_url = config::video.sbs.depth_model_url;
-
-      depth_estimator = std::make_unique<models::video_depth_estimator>(
-          Microsoft::WRL::ComPtr<ID3D11Device>(device.get()),
-          Microsoft::WRL::ComPtr<ID3D11DeviceContext>(device_ctx.get()),
-          std::filesystem::path(SUNSHINE_ASSETS_DIR),
-          this->display->width, this->display->height,
-          depth_cfg
-      );
+      // The depth estimator (heavy: model download + TensorRT engine build/load) is created
+      // lazily on the first SBS frame via ensure_depth_estimator(), so plain 2D (SBS_OFF)
+      // sessions never pay for it.
 
       // SBS reprojection constants (see sbs_reprojection_ps.hlsl):
       // {divergence, focal, depth_scale, parallax_steps, border_fade, pad, pad, pad}.
@@ -1072,6 +1111,7 @@ namespace platf::dxgi {
 
     std::unique_ptr<models::video_depth_estimator> depth_estimator;
     bool depth_warned = false;
+    int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
     buf_t rgb_to_nchw_cbuffer;
     vs_t sbs_reprojection_vs;
     ps_t sbs_reprojection_ps;
@@ -1207,7 +1247,7 @@ namespace platf::dxgi {
       }
 
       base.apply_colorspace(colorspace);
-      return base.init_output(nvenc_d3d->get_input_texture(), client_config.width, client_config.height) == 0;
+      return base.init_output(nvenc_d3d->get_input_texture(), client_config.width, client_config.height, client_config.sbs_mode) == 0;
     }
 
     int convert(platf::img_t &img_base) override {

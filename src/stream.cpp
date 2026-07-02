@@ -53,6 +53,7 @@ extern "C" {
 #define IDX_SET_CLIPBOARD 16
 #define IDX_FILE_TRANSFER_NONCE_REQUEST 17
 #define IDX_SET_ADAPTIVE_TRIGGERS 18
+#define IDX_SET_SBS_MODE 19
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -74,6 +75,7 @@ static const short packetTypes[] = {
   0x3001,  // Set Clipboard (Apollo protocol extension)
   0x3002,  // File transfer nonce request (Apollo protocol extension)
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
+  0x3003,  // Set SBS Mode (Apollo protocol extension)
 };
 
 namespace asio = boost::asio;
@@ -1050,6 +1052,29 @@ namespace stream {
         BOOST_LOG(debug) << "Permission File Upload deined for [" << session->device_name << "]";
         return;
       }
+    });
+
+    server->map(packetTypes[IDX_SET_SBS_MODE], [server](session_t *session, const std::string_view &payload) {
+      if (payload.empty()) {
+        BOOST_LOG(warning) << "type [IDX_SET_SBS_MODE]: empty payload"sv;
+        return;
+      }
+
+      // Host-side SBS mode requested by the client (Apollo protocol extension).
+      // Must match SBS_MODE_* in the client's moonlight-common-c Limelight.h.
+      auto mode = *(uint8_t *) payload.data();
+      std::string_view mode_name =
+        mode == 0 ? "OFF"sv :
+        mode == 1 ? "GAME (async)"sv :
+        mode == 2 ? "MOVIE (sync)"sv :
+                    "UNKNOWN"sv;
+      BOOST_LOG(info) << "type [IDX_SET_SBS_MODE]: client requested host SBS "sv << mode_name
+                      << " ("sv << (int) mode << ") for ["sv << session->device_name << ']';
+
+      // Hand the requested mode to this session's video pipeline. capture_async consumes it,
+      // rebuilds the encode device at the new resolution (W x H for OFF, 2W x H for GAME/MOVIE)
+      // and lazy-loads the depth model. MOVIE currently reuses the GAME (async) pipeline.
+      session->mail->event<int>(mail::sbs_mode)->raise((int) mode);
     });
 
     server->map(packetTypes[IDX_ENCRYPTED], [server](session_t *session, const std::string_view &payload) {

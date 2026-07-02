@@ -534,6 +534,7 @@ namespace config {
       0.02,  // sbs.border_fade (edge parallax fade; prevents window violations)
       "depth_anything_v2_fp16",  // sbs.depth_model (local file stem)
       "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",  // sbs.depth_model_url
+      8192,  // sbs.max_encode_width (NVENC HEVC/AV1 cap; 2*client_width must fit or host stays flat 2D)
     },  // sbs
   };
 
@@ -1245,6 +1246,7 @@ namespace config {
     double_between_f(vars, "sbs_3d_border_fade", video.sbs.border_fade, {0.0, 0.2});
     string_f(vars, "sbs_3d_depth_model", video.sbs.depth_model);
     string_f(vars, "sbs_3d_depth_model_url", video.sbs.depth_model_url);
+    int_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width);
 
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);

@@ -19,6 +19,14 @@ struct AVPacket;
 
 namespace video {
 
+  /* Host-side SBS 3D mode requested by the client via the 0x3003 control message.
+     Must match the SBS_MODE_* wire values in the client's moonlight-common-c Limelight.h. */
+  enum sbs_mode_e : int {
+    SBS_OFF = 0,  ///< No host depth; encoder emits a plain W x H frame.
+    SBS_GAME = 1,  ///< Async low-latency depth pipeline; encoder emits 2W x H.
+    SBS_MOVIE = 2,  ///< Sync high-latency depth pipeline; encoder emits 2W x H (not implemented yet).
+  };
+
   /* Encoding configuration requested by remote client */
   struct config_t {
     // DO NOT CHANGE ORDER OR ADD FIELDS IN THE MIDDLE!!!!!
@@ -48,6 +56,11 @@ namespace video {
 
     int encodingFramerate; // Requested display framerate
     bool input_only;
+
+    // APPEND-ONLY (see warning above). Host-side SBS mode (sbs_mode_e); not wire-serialized
+    // as part of this struct - it is toggled at runtime via the 0x3003 control message.
+    // When != SBS_OFF the encoder output width is doubled to carry the side-by-side frame.
+    int sbs_mode = SBS_OFF;
   };
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);

@@ -1954,6 +1954,9 @@ namespace video {
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
+    // A pending host SBS mode change means we must rebuild the encode session at the new
+    // resolution. We only peek here; capture_async pops it and applies the new mode.
+    auto sbs_mode_event = mail->event<int>(mail::sbs_mode);
 
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
@@ -1976,7 +1979,7 @@ namespace video {
       }
 
       while (true) {
-        if (shutdown_event->peek() || !images->running() || (reinit_event.peek())) {
+        if (shutdown_event->peek() || !images->running() || (reinit_event.peek()) || sbs_mode_event->peek()) {
           return;
         } else {
           std::this_thread::sleep_for(300ms);
@@ -1995,7 +1998,7 @@ namespace video {
       //
       // If we have to reinit before we have received any captured frames, we will encode
       // the blank dummy frame just to let Moonlight know that we're alive.
-      if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1)) {
+      if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1) || sbs_mode_event->peek()) {
         break;
       }
 
@@ -2393,6 +2396,12 @@ namespace video {
     auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
 
+    // Host SBS toggle (0x3003 control message). The client-negotiated width is the "base"
+    // width; when SBS is on we double it so the encoder emits a 2W x H side-by-side frame.
+    auto sbs_mode_event = mail->event<int>(mail::sbs_mode);
+    const int base_width = config.width;
+    int current_sbs_mode = config.sbs_mode;
+
     // Encoding takes place on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
 
@@ -2415,13 +2424,45 @@ namespace video {
 
       auto &encoder = *chosen_encoder;
 
-      auto encode_device = make_encode_device(*display, encoder, config);
+      // Apply the latest requested host SBS mode (drain to the most recent value).
+      while (sbs_mode_event->peek()) {
+        if (auto m = sbs_mode_event->pop(0ms)) {
+          current_sbs_mode = *m;
+        }
+      }
+
+      // Build the effective config for this encode session. SBS doubles the output width to
+      // 2*base. If that exceeds the encoder's max width, cap the packed width and scale the
+      // height proportionally to preserve the per-eye aspect. The SBS pipeline then renders
+      // directly at this capped target (see display_vram init_output), so the down-resolution
+      // is folded into the depth warp's color sampling rather than a post-warp resample.
+      config_t session_config = config;
+      session_config.sbs_mode = current_sbs_mode;
+      if (current_sbs_mode != SBS_OFF) {
+        const int cap = config::video.sbs.max_encode_width;
+        const int packed_w = base_width * 2;
+        if (packed_w <= cap) {
+          session_config.width = packed_w;  // height unchanged (already config.height)
+        } else {
+          session_config.width = cap & ~1;
+          session_config.height = (int) std::lround((double) config.height * cap / packed_w) & ~1;
+          BOOST_LOG(info) << "Host SBS: packed width "sv << packed_w << " exceeds max ("sv << cap
+                          << "); capping to "sv << session_config.width << 'x' << session_config.height
+                          << " (per-eye "sv << (session_config.width / 2) << 'x' << session_config.height << ')';
+        }
+      } else {
+        session_config.width = base_width;
+      }
+      BOOST_LOG(info) << "Encode session: host SBS mode "sv << current_sbs_mode
+                      << ", output "sv << session_config.width << 'x' << session_config.height;
+
+      auto encode_device = make_encode_device(*display, encoder, session_config);
       if (!encode_device) {
         return;
       }
 
       // absolute mouse coordinates require that the dimensions of the screen are known
-      touch_port_event->raise(make_port(display.get(), config));
+      touch_port_event->raise(make_port(display.get(), session_config));
 
       // Update client with our current HDR display state
       hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);
@@ -2438,7 +2479,7 @@ namespace video {
         frame_nr,
         mail,
         images,
-        config,
+        session_config,
         display,
         std::move(encode_device),
         ref->reinit_event,
