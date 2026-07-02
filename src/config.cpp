@@ -521,14 +521,14 @@ namespace config {
       0.015,  // sbs.divergence (tuned for the normalized depth range)
       0.5,  // sbs.focal_plane
       0.9,  // sbs.depth_scale (linear contrast gain; tuned for normalized depth)
-      0.4,  // sbs.ema
-      392,  // sbs.depth_short_side
+      0.6,  // sbs.ema (tuned: snappier than 0.4, less moving-edge trailing)
+      336,  // sbs.depth_short_side (tuned: enough vertical detail without extra GPU)
       4.0,  // sbs.depth_max_aspect
       true,  // sbs.normalize (per-frame min/max; recommended)
       1.0,  // sbs.depth_gamma (1.0 = linear)
       0.1,  // sbs.minmax_ema
       1.0,  // sbs.edge_dilation (foreground-biased silhouette smoothing)
-      30.0,  // sbs.depth_fps (target depth-update rate; interval auto-derived from video fps)
+      45.0,  // sbs.depth_fps (target depth-update rate -> interval 2 at 90fps; balances ghost vs GPU)
       0,  // sbs.depth_interval (0 = auto from depth_fps)
       8,  // sbs.parallax_steps (reprojection probes per eye)
       0.02,  // sbs.border_fade (edge parallax fade; prevents window violations)
