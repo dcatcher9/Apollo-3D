@@ -33,8 +33,10 @@ Known residuals:
   disocclusion quality needs a learned/multi-layer approach, not more branches.
 - `sbs_3d_parallax_steps >= 22` is a **correctness requirement** with the guided
   (texel-sharp) depth: probe spacing must stay under the ~8px smoothed depth transition.
-  The baked default (8) predates guided depth; conf overrides to 24. Bake 24 next time
-  config defaults are touched.
+  24 is the baked default since 2026-07-03. Note `depth_scale` was folded into
+  `divergence` the same day (default 0.0135 = old 0.015*0.9; sim-verified equivalent),
+  and the legacy `normalize`/`depth_gamma`/`edge_dilation`/`depth_interval` knobs were
+  removed — defaults now live in config.h (`sbs_t` member initializers), not config.cpp.
 - DA-V2 is trained at 518²; pushing inference resolution far past ~1.5× training area
   degrades global depth coherence. A big "1080p engine" rebuild is NOT the free win it
   looks like; prefer model-capacity upgrades and modest resolution changes, measured.

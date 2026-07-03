@@ -517,28 +517,7 @@ namespace config {
     false, // isolated Display
     false, // ignore_encoder_probe_failure
 
-    {
-      0.015,  // sbs.divergence (tuned for the normalized depth range)
-      0.5,  // sbs.focal_plane
-      0.9,  // sbs.depth_scale (linear contrast gain; tuned for normalized depth)
-      0.6,  // sbs.ema (tuned: snappier than 0.4, less moving-edge trailing)
-      336,  // sbs.depth_short_side (tuned: enough vertical detail without extra GPU)
-      4.0,  // sbs.depth_max_aspect
-      true,  // sbs.normalize (per-frame min/max; recommended)
-      1.0,  // sbs.depth_gamma (1.0 = linear)
-      0.1,  // sbs.minmax_ema
-      1.0,  // sbs.edge_dilation (foreground-biased silhouette smoothing)
-      45.0,  // sbs.depth_fps (target depth-update rate -> interval 2 at 90fps; balances ghost vs GPU)
-      0,  // sbs.depth_interval (0 = auto from depth_fps)
-      8,  // sbs.parallax_steps (reprojection probes per eye)
-      0.02,  // sbs.border_fade (edge parallax fade; prevents window violations)
-      "depth_anything_v2_fp16",  // sbs.depth_model (local file stem)
-      "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",  // sbs.depth_model_url
-      8192,  // sbs.max_encode_width (NVENC HEVC/AV1 cap; 2*client_width must fit or host stays flat 2D)
-      0.25,  // sbs.depth_floor (compress far depth; narrows the silhouette disocclusion band ~25%)
-      true,  // sbs.guided_upsample (snap depth silhouettes to color edges; fixes bent thin objects)
-      0.1,  // sbs.guided_sigma (color-distance sigma for the guided upsample)
-    },  // sbs
+    {},  // sbs (tuned defaults are the sbs_t member initializers in config.h)
   };
 
   audio_t audio {
@@ -1235,17 +1214,12 @@ namespace config {
 
     double_between_f(vars, "sbs_3d_divergence", video.sbs.divergence, {0.0, 0.2});
     double_between_f(vars, "sbs_3d_focal_plane", video.sbs.focal_plane, {0.0, 1.0});
-    double_between_f(vars, "sbs_3d_depth_scale", video.sbs.depth_scale, {0.1, 20.0});
     double_between_f(vars, "sbs_3d_ema", video.sbs.ema, {0.01, 1.0});
     int_f(vars, "sbs_3d_depth_short_side", video.sbs.depth_short_side);
     double_between_f(vars, "sbs_3d_depth_max_aspect", video.sbs.depth_max_aspect, {1.0, 8.0});
-    bool_f(vars, "sbs_3d_normalize", video.sbs.normalize);
-    double_between_f(vars, "sbs_3d_depth_gamma", video.sbs.depth_gamma, {0.1, 4.0});
     double_between_f(vars, "sbs_3d_minmax_ema", video.sbs.minmax_ema, {0.001, 1.0});
-    double_between_f(vars, "sbs_3d_edge_dilation", video.sbs.edge_dilation, {0.0, 4.0});
     double_between_f(vars, "sbs_3d_depth_fps", video.sbs.depth_fps, {0.0, 240.0});
-    int_between_f(vars, "sbs_3d_depth_interval", video.sbs.depth_interval, {0, 10});
-    int_between_f(vars, "sbs_3d_parallax_steps", video.sbs.parallax_steps, {4, 32});
+    int_between_f(vars, "sbs_3d_parallax_steps", video.sbs.parallax_steps, {4, 64});
     double_between_f(vars, "sbs_3d_border_fade", video.sbs.border_fade, {0.0, 0.2});
     string_f(vars, "sbs_3d_depth_model", video.sbs.depth_model);
     string_f(vars, "sbs_3d_depth_model_url", video.sbs.depth_model_url);

@@ -8,7 +8,8 @@ typedef int CUdevice;
 typedef struct CUctx_st* CUcontext;
 typedef unsigned long long CUdeviceptr;
 typedef enum cudaError_enum {
-    CUDA_SUCCESS = 0
+    CUDA_SUCCESS = 0,
+    CUDA_ERROR_NOT_READY = 600
 } CUresult;
 
 typedef CUresult(__stdcall* PFN_cuInit)(unsigned int Flags);

@@ -1066,11 +1066,15 @@ namespace stream {
       // Host-side SBS mode requested by the client (Apollo protocol extension).
       // Must match SBS_MODE_* in the client's moonlight-common-c Limelight.h.
       auto mode = *(uint8_t *) payload.data();
+      if (mode > ::video::SBS_MOVIE) {
+        BOOST_LOG(warning) << "type [IDX_SET_SBS_MODE]: unknown mode "sv << (int) mode
+                           << " from ["sv << session->device_name << "]; ignored"sv;
+        return;
+      }
       std::string_view mode_name =
-        mode == 0 ? "OFF"sv :
-        mode == 1 ? "GAME (async)"sv :
-        mode == 2 ? "MOVIE (sync)"sv :
-                    "UNKNOWN"sv;
+        mode == ::video::SBS_OFF  ? "OFF"sv :
+        mode == ::video::SBS_GAME ? "GAME (async)"sv :
+                                    "MOVIE (sync)"sv;
       BOOST_LOG(info) << "type [IDX_SET_SBS_MODE]: client requested host SBS "sv << mode_name
                       << " ("sv << (int) mode << ") for ["sv << session->device_name << ']';
 

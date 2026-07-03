@@ -213,7 +213,13 @@ namespace platf::sbs_debug {
     } else {
       dir_ = "sbs_dump";
     }
-    BOOST_LOG(info) << "SBS debug frame dump dir: "sv << dir_.string();
+    // Encode devices (and with them this dumper) are recreated on every SBS toggle / HDR /
+    // resolution change; log the resolved dir once per process, not once per device.
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      BOOST_LOG(info) << "SBS debug frame dump dir: "sv << dir_.string();
+    }
   }
 
   void dumper::maybe_dump(ID3D11Device *device, ID3D11DeviceContext *ctx,
@@ -225,9 +231,20 @@ namespace platf::sbs_debug {
     std::error_code ec;
     auto trigger = dir_ / "dump.trigger";
     bool by_button = ::video::sbs_debug_dump_pending.exchange(false, std::memory_order_relaxed);
-    bool by_file = std::filesystem::exists(trigger, ec);
-    if (!by_button && !by_file) {
-      return;
+    bool by_file = false;
+    if (by_button) {
+      // Also consume a trigger file if one happens to be present, so it doesn't fire again.
+      by_file = std::filesystem::exists(trigger, ec);
+    } else {
+      // The manual trigger file is a dev fallback; polling the filesystem every frame on the
+      // encode thread is wasted syscalls, so only stat it about once a second.
+      if ((poll_counter_++ & 63) != 0) {
+        return;
+      }
+      by_file = std::filesystem::exists(trigger, ec);
+      if (!by_file) {
+        return;
+      }
     }
 
     // One timestamped subfolder per dump so successive dumps never overwrite each other and the

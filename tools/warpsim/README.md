@@ -49,11 +49,15 @@ replica (Reproject/SampleDepth/DepthParallax) or mode-0 validation will drift.
    stream reconnect (no rebuild). Then headset confirmation.
 
 ## Key numbers (current tuned pipeline)
-- searchRadius = divergence*depth_scale*max(focal,1-focal) in source UV
-  (0.015*0.9*0.5 = 0.00675 ≈ 34.6 src px); probe spacing = 2*radius*5120/steps.
+- searchRadius = divergence*max(focal,1-focal) in source UV. depth_scale was folded into
+  divergence on 2026-07-03 (they only ever appeared as a product): default divergence
+  0.0135 = old 0.015*0.9, so 0.0135*0.5 = 0.00675 ≈ 34.6 src px, unchanged. Fold verified
+  in this sim: arm scene byte-identical, head scene 2-3 px of ±1 (rounding ties).
+  Probe spacing = 2*radius*5120/steps.
 - Stability: probe spacing must stay below the smoothed depth transition (~8 px from the
   2x2 SampleDepth) → **parallax_steps >= 22 is a correctness requirement** with guided
-  depth. Default 8 predates the guided upsample; sunshine.conf overrides to 24.
+  depth. The baked default is 24 (since 2026-07-03; it was 8 before, guarded only by a
+  sunshine.conf override).
 
 ## 2026-07-03 conclusions (why the warp rewrite was reverted)
 - The visible edge fringe = the stretch band at silhouettes: contact-shadow/outline source

@@ -454,7 +454,7 @@ namespace platf::dxgi {
           // Run depth estimator. On failure it returns null; we fall back to a zero-parallax
           // (flat) SBS frame rather than a globally-shifted one, and warn only once.
           auto depth_srv = depth_estimator ?
-            depth_estimator->estimate_depth(Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>(img_ctx.encoder_input_res.get()), display->is_hdr()) :
+            depth_estimator->estimate_depth(img_ctx.encoder_input_res.get(), display->is_hdr()) :
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>();
           if (!depth_srv && !depth_warned) {
             BOOST_LOG(error) << "Depth estimation unavailable; streaming flat (zero-parallax) SBS."sv;
@@ -537,28 +537,26 @@ namespace platf::dxgi {
         return true;
       }
 
-      models::depth_estimator_config depth_cfg;
-      depth_cfg.ema_alpha = (float) config::video.sbs.ema;
-      depth_cfg.depth_short_side = config::video.sbs.depth_short_side;
-      depth_cfg.max_aspect = (float) config::video.sbs.depth_max_aspect;
-      depth_cfg.normalize = config::video.sbs.normalize;
-      depth_cfg.depth_gamma = (float) config::video.sbs.depth_gamma;
-      depth_cfg.minmax_alpha = (float) config::video.sbs.minmax_ema;
-      depth_cfg.edge_dilation = (float) config::video.sbs.edge_dilation;
-      depth_cfg.depth_fps = (float) config::video.sbs.depth_fps;
-      depth_cfg.depth_interval = config::video.sbs.depth_interval;
-      depth_cfg.guided_upsample = config::video.sbs.guided_upsample;
-      depth_cfg.guided_sigma = (float) config::video.sbs.guided_sigma;
-      depth_cfg.model_name = config::video.sbs.depth_model;
-      depth_cfg.model_url = config::video.sbs.depth_model_url;
+      // Non-blocking gate: only construct once the TensorRT engine is on disk. Downloading
+      // the model / building the engine takes minutes, and this runs on the encode thread --
+      // blocking here would freeze the stream. main.cpp kicks off a background precompile at
+      // startup; until it finishes we stream flat (zero-parallax) SBS and keep polling.
+      std::error_code ec;
+      auto engine_path = std::filesystem::path(SUNSHINE_ASSETS_DIR) / (config::video.sbs.depth_model + ".engine");
+      if (!std::filesystem::exists(engine_path, ec)) {
+        if (engine_poll_counter++ % 1800 == 0) {  // ~every 20 s at 90 fps
+          BOOST_LOG(warning) << "Host SBS requested but the TensorRT engine ("sv << engine_path.string()
+                             << ") is not built yet; streaming flat until the background build finishes."sv;
+        }
+        return false;
+      }
 
-      BOOST_LOG(info) << "Host SBS enabled; loading depth model \""sv << depth_cfg.model_name << "\"..."sv;
+      BOOST_LOG(info) << "Host SBS enabled; loading depth model \""sv << config::video.sbs.depth_model << "\"..."sv;
       depth_estimator = std::make_unique<models::video_depth_estimator>(
           Microsoft::WRL::ComPtr<ID3D11Device>(device.get()),
           Microsoft::WRL::ComPtr<ID3D11DeviceContext>(device_ctx.get()),
           std::filesystem::path(SUNSHINE_ASSETS_DIR),
-          this->display->width, this->display->height,
-          depth_cfg
+          config::video.sbs
       );
       return (bool) depth_estimator;
     }
@@ -951,14 +949,14 @@ namespace platf::dxgi {
       // sessions never pay for it.
 
       // SBS reprojection constants (see sbs_reprojection_ps.hlsl):
-      // {divergence, focal, depth_scale, parallax_steps, border_fade, depth_floor, pad, pad}.
+      // {divergence, focal, parallax_steps, border_fade, depth_floor, pad, pad, pad}.
       float sbs_params[8] {
         (float) config::video.sbs.divergence,
         (float) config::video.sbs.focal_plane,
-        (float) config::video.sbs.depth_scale,
         (float) config::video.sbs.parallax_steps,
         (float) config::video.sbs.border_fade,
         (float) config::video.sbs.depth_floor,
+        0.0f,
         0.0f,
         0.0f
       };
@@ -969,10 +967,10 @@ namespace platf::dxgi {
       float sbs_passthrough_params[8] {
         0.0f,
         (float) config::video.sbs.focal_plane,
-        (float) config::video.sbs.depth_scale,
         (float) config::video.sbs.parallax_steps,
         (float) config::video.sbs.border_fade,
         (float) config::video.sbs.depth_floor,
+        0.0f,
         0.0f,
         0.0f
       };
@@ -1120,8 +1118,8 @@ namespace platf::dxgi {
 
     std::unique_ptr<models::video_depth_estimator> depth_estimator;
     bool depth_warned = false;
+    unsigned engine_poll_counter = 0;  ///< Rate-limits the "engine not built yet" warning.
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
-    buf_t rgb_to_nchw_cbuffer;
     vs_t sbs_reprojection_vs;
     ps_t sbs_reprojection_ps;
     buf_t sbs_reprojection_cbuffer;

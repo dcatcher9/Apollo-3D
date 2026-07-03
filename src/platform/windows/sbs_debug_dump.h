@@ -43,6 +43,7 @@ namespace platf::sbs_debug {
   private:
     std::filesystem::path dir_;
     int counter_ = 0;
+    unsigned poll_counter_ = 0;  ///< Rate-limits the dump.trigger file stat to ~1/s.
   };
 
 }  // namespace platf::sbs_debug

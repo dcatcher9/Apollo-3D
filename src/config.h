@@ -151,27 +151,24 @@ namespace config {
     bool ignore_encoder_probe_failure;
 
     // Real-time 2D->3D side-by-side (SBS) depth reprojection tuning.
+    // Defaults live HERE (member initializers) -- the single source of truth. config.cpp
+    // only parses the sbs_3d_* overrides; do not re-list defaults there.
     struct sbs_t {
-      double divergence;  ///< Parallax budget as a fraction of image width. 0 = flat (zero-parallax passthrough).
-      double focal_plane;  ///< Zero-parallax plane in normalized depth [0,1]; lower pushes more of the scene forward.
-      double depth_scale;  ///< Linear depth-contrast gain (parallax per unit normalized depth).
-      double ema;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
-      int depth_short_side;  ///< Depth map short-side resolution (iw3-style): guarantees vertical depth detail regardless of aspect. Clamped to the frame's native short side (never upscales).
-      double depth_max_aspect;  ///< Aspect-ratio cap (long side <= short * this). Bounds worst-case inference cost on ultrawide.
-      bool normalize;  ///< Per-frame min/max normalization of raw disparity (Depth Anything V2 output is affine-invariant). Off = legacy 1-exp(-raw*0.1) curve.
-      double depth_gamma;  ///< Shaping exponent applied to normalized depth (normalize mode only). 1.0 = linear; <1 pushes foreground, >1 pushes background.
-      double minmax_ema;  ///< Temporal EMA blend for the normalized min/max (0-1). Lower = steadier depth scale, higher = adapts faster.
-      double edge_dilation;  ///< Foreground-biased edge smoothing of the depth map to reduce jaggy silhouette fringe. 0 = off; ~1 typical.
-      double depth_fps;  ///< Target depth-update rate. Inference interval is auto-derived from the measured video fps (interval = round(video_fps / depth_fps)); ~30 is imperceptible with EMA, ~20 min before motion trails. 0 = update every frame.
-      int depth_interval;  ///< Manual override for the inference interval (run every Nth frame). 0 = auto from depth_fps.
-      int parallax_steps;  ///< Horizontal probes per eye in the SBS reprojection (runs full-res every frame). Fewer = big GPU saving; ~8 is plenty at modest divergence.
-      double border_fade;  ///< Ramp parallax to zero within this fraction of the left/right frame edges to avoid stereo "window violations". 0 = off; ~0.02-0.05 typical.
-      std::string depth_model;  ///< Local name/stem for the depth model files (<name>.onnx / <name>.engine). Identifies the model so different models coexist, each with its own cached engine.
-      std::string depth_model_url;  ///< URL to download the depth model ONNX from if <depth_model>.onnx is absent. Point this (and depth_model) elsewhere to use a different model.
-      int max_encode_width;  ///< Max encoder output width for host SBS. SBS doubles the client width to 2W; if 2W exceeds this, the host caps the packed frame to this width (scaling height to keep the per-eye aspect) rather than failing NVENC create. NVENC HEVC/AV1 = 8192, H.264 = 4096.
-      double depth_floor;  ///< Far-depth compression in the reprojection (d' = floor + (1-floor)*d). Narrows the disocclusion band at foreground silhouettes (its width scales with the near-far parallax gap). 0 = off; ~0.2-0.4 typical.
-      bool guided_upsample;  ///< Color-guided (joint-bilateral) depth upsample: snaps the depth model's soft silhouettes to the frame's color edges at 2x depth res. Fixes bent/smeared thin-object contours. Supersedes edge_dilation when on.
-      double guided_sigma;  ///< Color-distance sigma for the guided upsample (tonemapped RGB, 0-1 domain). Lower = stricter edge snapping (risk: speckle on textured surfaces), higher = smoother.
+      double divergence = 0.0135;  ///< Parallax gain: signed parallax = (depth - focal_plane) * divergence, as a fraction of image width. 0 = flat (zero-parallax passthrough).
+      double focal_plane = 0.5;  ///< Zero-parallax plane in normalized depth [0,1]; lower pushes more of the scene forward.
+      double ema = 0.6;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
+      int depth_short_side = 336;  ///< Depth map short-side resolution (iw3-style): guarantees vertical depth detail regardless of aspect. Clamped to the frame's native short side (never upscales).
+      double depth_max_aspect = 4.0;  ///< Aspect-ratio cap (long side <= short * this). Bounds worst-case inference cost on ultrawide.
+      double minmax_ema = 0.1;  ///< Temporal EMA blend for the normalized disparity min/max (0-1). Lower = steadier depth scale, higher = adapts faster.
+      double depth_fps = 45.0;  ///< Target depth-update rate. Inference interval is auto-derived from the measured video fps (interval = round(video_fps / depth_fps)). 0 = update every frame.
+      int parallax_steps = 24;  ///< Horizontal probes per eye in the SBS reprojection (runs full-res every frame). REQUIRED >= 22 with guided depth: probe spacing must stay below the smoothed depth transition (~8px) or the crossing search dithers at silhouettes.
+      double border_fade = 0.02;  ///< Ramp parallax to zero within this fraction of the left/right frame edges to avoid stereo "window violations". 0 = off; ~0.02-0.05 typical.
+      std::string depth_model = "depth_anything_v2_fp16";  ///< Local name/stem for the depth model files (<name>.onnx / <name>.engine). Identifies the model so different models coexist, each with its own cached engine.
+      std::string depth_model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< URL to download the depth model ONNX from if <depth_model>.onnx is absent. Point this (and depth_model) elsewhere to use a different model.
+      int max_encode_width = 8192;  ///< Max encoder output width for host SBS. SBS doubles the client width to 2W; if 2W exceeds this, the host caps the packed frame to this width (scaling height to keep the per-eye aspect) rather than failing NVENC create. NVENC HEVC/AV1 = 8192, H.264 = 4096.
+      double depth_floor = 0.25;  ///< Far-depth compression in the reprojection (d' = floor + (1-floor)*d). Narrows the disocclusion band at foreground silhouettes (its width scales with the near-far parallax gap). 0 = off; ~0.2-0.4 typical.
+      bool guided_upsample = true;  ///< Color-guided (joint-bilateral) depth upsample: snaps the depth model's soft silhouettes to the frame's color edges at 2x depth res. Fixes bent/smeared thin-object contours.
+      double guided_sigma = 0.1;  ///< Color-distance sigma for the guided upsample (tonemapped RGB, 0-1 domain). Lower = stricter edge snapping (risk: speckle on textured surfaces), higher = smoother.
     } sbs;
   };
 

@@ -23,14 +23,15 @@ struct PS_INPUT {
 };
 
 cbuffer Constants : register(b2) {
-    float max_divergence;   // Parallax budget as a fraction of source width (e.g. 0.03). 0 = flat.
+    float max_divergence;   // Parallax gain as a fraction of source width: signed parallax =
+                            // (depth - focal_plane) * max_divergence. 0 = flat.
     float focal_plane;      // Zero-parallax depth in [0,1] (e.g. 0.5).
-    float depth_scale;      // Linear depth-contrast gain (e.g. 1.5).
     float parallax_steps;   // Horizontal probes per eye; fewer = big GPU saving on this full-res pass.
     float border_fade;      // Ramp parallax to 0 within this fraction of the L/R edges (0 = off).
     float depth_floor;      // Far-depth compression: d' = floor + (1-floor)*d. Shrinks the
                             // foreground-vs-background parallax gap at silhouettes, and with it
                             // the disocclusion band that gets stretch-filled there. 0 = off.
+    float pad0;
     float pad1;
     float pad2;
 };
@@ -51,7 +52,7 @@ float BorderFade(float x) {
 // far floor narrows that band without touching foreground pop.
 float DepthParallax(float d, float x) {
     d = depth_floor + (1.0f - depth_floor) * d;
-    return (d - focal_plane) * depth_scale * max_divergence * BorderFade(x);
+    return (d - focal_plane) * max_divergence * BorderFade(x);
 }
 
 // Silhouette-stable depth read: a 2x2 spread of taps so any depth step spans ~2.5 probe
@@ -62,15 +63,12 @@ float DepthParallax(float d, float x) {
 // (the dotted/mesh fringe along occlusion edges). Widening the transition in x keeps g()
 // continuous and the lerped crossings stable; widening in y turns the row staircase into a
 // smooth diagonal. Costs ~6px of silhouette softness -- still ~10x sharper than pre-guided.
-float SampleDepth(float sx, float sy) {
-    uint dw, dh;
-    DepthTexture.GetDimensions(dw, dh);
-    float ox = 0.75f / (float) dw;
-    float oy = 0.75f / (float) dh;
-    return 0.25f * (DepthTexture.SampleLevel(LinearSampler, float2(sx - ox, sy - oy), 0)
-                  + DepthTexture.SampleLevel(LinearSampler, float2(sx + ox, sy - oy), 0)
-                  + DepthTexture.SampleLevel(LinearSampler, float2(sx - ox, sy + oy), 0)
-                  + DepthTexture.SampleLevel(LinearSampler, float2(sx + ox, sy + oy), 0));
+// ofs = 0.75 / depth texture dims, computed once per pixel in Reproject.
+float SampleDepth(float sx, float sy, float2 ofs) {
+    return 0.25f * (DepthTexture.SampleLevel(LinearSampler, float2(sx - ofs.x, sy - ofs.y), 0)
+                  + DepthTexture.SampleLevel(LinearSampler, float2(sx + ofs.x, sy - ofs.y), 0)
+                  + DepthTexture.SampleLevel(LinearSampler, float2(sx - ofs.x, sy + ofs.y), 0)
+                  + DepthTexture.SampleLevel(LinearSampler, float2(sx + ofs.x, sy + ofs.y), 0));
 }
 
 // Find the source U coordinate that reprojects onto `uv` for one eye, choosing the
@@ -78,16 +76,21 @@ float SampleDepth(float sx, float sy) {
 // eyeSign = +1 right eye, -1 left eye.
 float2 Reproject(float2 uv, float eyeSign) {
     // Widest distance any surface can travel (near or far side of the focal plane).
-    // Must include depth_scale so the search covers the full parallax range. BorderFade only
-    // shrinks parallax, so this (fade=1) remains a valid upper bound on the search span.
-    float searchRadius = max_divergence * depth_scale * max(focal_plane, 1.0f - focal_plane);
+    // BorderFade only shrinks parallax, so this (fade=1) remains a valid upper bound on
+    // the search span.
+    float searchRadius = max_divergence * max(focal_plane, 1.0f - focal_plane);
     if (searchRadius <= 1e-6f) {
         return uv;  // divergence 0 -> flat passthrough, both eyes identical
     }
 
-    int steps = (parallax_steps >= 1.0f) ? (int)parallax_steps : 8;
+    int steps = (parallax_steps >= 1.0f) ? (int)parallax_steps : 24;
     float startX = uv.x - searchRadius;
     float stepX  = (2.0f * searchRadius) / (float)steps;
+
+    // Depth-read tap spread (see SampleDepth), hoisted out of the probe loop.
+    uint dw, dh;
+    DepthTexture.GetDimensions(dw, dh);
+    float2 ofs = float2(0.75f / (float) dw, 0.75f / (float) dh);
 
     // A source at position x forward-warps to out(x) = x - eyeSign * parallax(depth(x)).
     // We want out(x) == uv.x, i.e. g(x) = (x - uv.x) - eyeSign * parallax(depth(x)) == 0.
@@ -105,14 +108,14 @@ float2 Reproject(float2 uv, float eyeSign) {
     float bgDepth = 2.0f;  // above any normalized depth (<= 1)
 
     float prevX = startX;
-    float prevD = SampleDepth(prevX, uv.y);
+    float prevD = SampleDepth(prevX, uv.y, ofs);
     float prevG = (prevX - uv.x) - eyeSign * DepthParallax(prevD, prevX);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
     for (int i = 1; i <= steps; i++) {
         float x = startX + stepX * i;
-        float d = SampleDepth(x, uv.y);
+        float d = SampleDepth(x, uv.y, ofs);
         float g = (x - uv.x) - eyeSign * DepthParallax(d, x);
 
         // Zero crossing between prevX and x => a source in this span reprojects onto uv.

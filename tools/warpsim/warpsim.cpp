@@ -22,7 +22,9 @@ static const int EOX = 1600, EOY = 720;        // output origin in eye coords (4
 static std::vector<unsigned char> g_depth, g_src;
 
 // --- shader constants (from sunshine.conf / config defaults) ---
-static const float DIVERGENCE = 0.015f, FOCAL = 0.5f, DEPTH_SCALE = 0.9f;
+// divergence folded the old depth_scale in (0.015 * 0.9 = 0.0135); the shader no longer
+// has a separate depth_scale.
+static const float DIVERGENCE = 0.0135f, FOCAL = 0.5f;
 static const float BORDER_FADE = 0.02f, DEPTH_FLOOR = 0.25f;
 static const int   STEPS = 24;
 static const float EYE_SIGN = 1.0f;  // right eye
@@ -56,7 +58,7 @@ static float border_fade(float x) {
 }
 static float depth_parallax(float d, float x) {
     d = DEPTH_FLOOR + (1.0f - DEPTH_FLOOR) * d;
-    return (d - FOCAL) * DEPTH_SCALE * DIVERGENCE * border_fade(x);
+    return (d - FOCAL) * DIVERGENCE * border_fade(x);
 }
 
 // Bilinear sample of the source crop (uv in full-frame normalized coords).
@@ -77,7 +79,7 @@ static void src_sample(float u, float v, unsigned char *rgb) {
 
 // ---- mode 0/1/2: the marching search with variants ----
 static float reproject_march(float ux, float vy, int mode) {
-    float searchRadius = DIVERGENCE * DEPTH_SCALE * std::max(FOCAL, 1.0f - FOCAL);
+    float searchRadius = DIVERGENCE * std::max(FOCAL, 1.0f - FOCAL);
     float startX = ux - searchRadius;
     float stepX = 2.0f * searchRadius / STEPS;
 
@@ -125,7 +127,7 @@ static float reproject_march(float ux, float vy, int mode) {
 
 // ---- mode 3: splat/coverage ----
 static float reproject_splat(float ux, float vy) {
-    float searchRadius = DIVERGENCE * DEPTH_SCALE * std::max(FOCAL, 1.0f - FOCAL);
+    float searchRadius = DIVERGENCE * std::max(FOCAL, 1.0f - FOCAL);
     float startX = ux - searchRadius;
     float stepX = 2.0f * searchRadius / STEPS;
     float h = 0.75f * stepX;          // footprint half-width
@@ -153,7 +155,7 @@ static float reproject_splat(float ux, float vy) {
 // the FRONT surface continued at its own parallax and the BACK surface at its parallax,
 // weighted by the ramp fraction. Both layers sample coherent, unstretched texture.
 static void reproject_blend(float ux, float vy, unsigned char *rgb) {
-    float searchRadius = DIVERGENCE * DEPTH_SCALE * std::max(FOCAL, 1.0f - FOCAL);
+    float searchRadius = DIVERGENCE * std::max(FOCAL, 1.0f - FOCAL);
     float startX = ux - searchRadius;
     float stepX = 2.0f * searchRadius / STEPS;
 

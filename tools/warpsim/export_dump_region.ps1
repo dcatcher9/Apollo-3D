@@ -48,7 +48,7 @@ function Export-Raw($bmpPath, $rx, $ry, $rw, $rh, $outPath, $depthMode) {
                 }
             }
             [IO.File]::WriteAllBytes($outPath, $out)
-            Write-Output "wrote $outPath ($rw x $rh)"
+            Write-Host "wrote $outPath ($rw x $rh)"
             return @($rw, $rh)
         } finally { if ($crop -ne $bmp) { $crop.Dispose() } }
     } finally { $bmp.Dispose() }
@@ -59,7 +59,7 @@ $sbs = [System.Drawing.Bitmap]::FromFile("$Dump\sbs.png"); $sw2 = $sbs.Width; $s
 $eyeW = [int]($sw2 / 2); $scale = $eyeW / $fw   # eye coords = scale * source coords
 
 $dd = Export-Raw "$Dump\depth.png" 0 0 0 0 "$OutDir\depth_full.bin" $true
-Rename-Item "$OutDir\depth_full.bin" "depth_$($dd[0])x$($dd[1]).bin" -Force
+Move-Item "$OutDir\depth_full.bin" "$OutDir\depth_$($dd[0])x$($dd[1]).bin" -Force
 Export-Raw "$Dump\source.png" $SrcX $SrcY $SrcW $SrcH "$OutDir\source_x${SrcX}y${SrcY}_${SrcW}x${SrcH}.bin" $false | Out-Null
 
 $ex = [int]($SrcX * $scale); $ey = [int]($SrcY * $scale)

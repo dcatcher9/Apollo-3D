@@ -15,8 +15,6 @@ cbuffer Constants : register(b0) {
     uint target_h;
     uint is_hdr;
     float ema_alpha;
-    uint normalize;
-    float depth_gamma;
     float minmax_alpha;
     uint reduce_threads;  // total threads in this dispatch (groups * GROUP_SIZE)
 };

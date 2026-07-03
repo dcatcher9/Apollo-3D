@@ -6,7 +6,7 @@
 #include <algorithm>
 static const int DW=1596,DH=672;
 static std::vector<unsigned char> g_depth;
-static const float DIVERGENCE=0.015f,FOCAL=0.5f,DEPTH_SCALE=0.9f,BORDER_FADE=0.02f,DEPTH_FLOOR=0.25f;
+static const float DIVERGENCE=0.0135f,FOCAL=0.5f,BORDER_FADE=0.02f,DEPTH_FLOOR=0.25f;  // divergence = old 0.015*0.9 (depth_scale folded in)
 static const int STEPS=24; static const float EYE_SIGN=1.0f;
 static float clampf(float v,float lo,float hi){return v<lo?lo:(v>hi?hi:v);}
 static float depth_bilinear(float u,float v){
@@ -21,7 +21,7 @@ static float sample_depth(float u,float v){
   float ox=0.75f/DW,oy=0.75f/DH;
   return 0.25f*(depth_bilinear(u-ox,v-oy)+depth_bilinear(u+ox,v-oy)+depth_bilinear(u-ox,v+oy)+depth_bilinear(u+ox,v+oy));}
 static float border_fade(float x){return clampf(std::min(x,1.0f-x)/BORDER_FADE,0,1);}
-static float depth_parallax(float d,float x){d=DEPTH_FLOOR+(1.0f-DEPTH_FLOOR)*d;return (d-FOCAL)*DEPTH_SCALE*DIVERGENCE*border_fade(x);}
+static float depth_parallax(float d,float x){d=DEPTH_FLOOR+(1.0f-DEPTH_FLOOR)*d;return (d-FOCAL)*DIVERGENCE*border_fade(x);}
 int main(int argc,char**argv){
   FILE*f=fopen("depth_1596x672.bin","rb");g_depth.resize((size_t)DW*DH);fread(g_depth.data(),1,g_depth.size(),f);fclose(f);
   int py=atoi(argv[1]); int px0=atoi(argv[2]); int px1=atoi(argv[3]);
@@ -29,7 +29,7 @@ int main(int argc,char**argv){
   printf("px |  bestD | disp(eye px) | ncross\n");
   for(int px=px0;px<=px1;px++){
     float ux=(1600+px+0.5f)/4096.0f;
-    float r=DIVERGENCE*DEPTH_SCALE*0.5f,startX=ux-r,stepX=2.0f*r/STEPS;
+    float r=DIVERGENCE*0.5f,startX=ux-r,stepX=2.0f*r/STEPS;
     float bestX=ux,bestDepth=-1;int ncross=0;
     float prevX=startX,prevD=sample_depth(prevX,vy);
     float prevG=(prevX-ux)-EYE_SIGN*depth_parallax(prevD,prevX);

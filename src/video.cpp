@@ -2462,6 +2462,15 @@ namespace video {
 
       auto encode_device = make_encode_device(*display, encoder, session_config);
       if (!encode_device) {
+        // A client SBS toggle must never end the stream: if the encoder rejected the doubled
+        // SBS resolution (e.g. codec width cap below sbs_3d_max_encode_width), drop back to
+        // flat 2D and rebuild instead of killing the video thread.
+        if (session_config.sbs_mode != SBS_OFF) {
+          BOOST_LOG(error) << "Failed to create encoder at SBS resolution "sv << session_config.width << 'x'
+                           << session_config.height << "; falling back to flat 2D."sv;
+          current_sbs_mode = SBS_OFF;
+          continue;
+        }
         return;
       }
 

@@ -1,8 +1,8 @@
 #include "model_manager.h"
 #include "logging.h"
 #include <curl/curl.h>
-#include <fstream>
 #include <cstdio>
+#include <system_error>
 
 using namespace std::literals;
 
@@ -26,32 +26,32 @@ namespace models {
             return onnx_path;
         }
 
-        BOOST_LOG(info) << "Depth model '" << model_name << "' not found. Downloading from " << model_url << " ...";
-
-        const std::string& url = model_url;
-
+        // Download to a .part file and rename into place only on success, so an interrupted
+        // download never leaves a truncated .onnx that would be treated as valid forever
+        // (and a concurrent download of the same model can't corrupt the final file).
+        auto part_path = onnx_path;
+        part_path += ".part";
 
         auto download_file = [&](const std::string& url, const std::filesystem::path& path) -> bool {
             CURL* curl = curl_easy_init();
             if (!curl) return false;
-            
+
             FILE* fp = fopen(path.string().c_str(), "wb");
             if (!fp) {
                 curl_easy_cleanup(curl);
                 return false;
             }
-            
+
             curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
             curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-            
+            curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);  // treat HTTP >= 400 as failure, don't save an error page
+
             CURLcode res = curl_easy_perform(curl);
             fclose(fp);
             curl_easy_cleanup(curl);
-            
+
             if (res != CURLE_OK) {
                 BOOST_LOG(error) << "Failed to download " << path.filename() << ": " << curl_easy_strerror(res);
                 std::filesystem::remove(path);
@@ -60,12 +60,20 @@ namespace models {
             return true;
         };
 
-        BOOST_LOG(info) << "Downloading " << model_name << ".onnx. This may take a minute...";
-        if (!download_file(url, onnx_path)) {
+        BOOST_LOG(info) << "Depth model '" << model_name << "' not found. Downloading from " << model_url << " (this may take a minute)...";
+        if (!download_file(model_url, part_path)) {
             return "";
         }
 
-        BOOST_LOG(info) << "Successfully downloaded Depth Anything V2 model '" << model_name << "'.";
+        std::error_code ec;
+        std::filesystem::rename(part_path, onnx_path, ec);
+        if (ec) {
+            BOOST_LOG(error) << "Failed to move downloaded model into place: " << ec.message();
+            std::filesystem::remove(part_path, ec);
+            return "";
+        }
+
+        BOOST_LOG(info) << "Successfully downloaded depth model '" << model_name << "'.";
         return onnx_path;
     }
 }
