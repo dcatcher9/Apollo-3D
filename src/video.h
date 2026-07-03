@@ -4,6 +4,9 @@
  */
 #pragma once
 
+// standard includes
+#include <atomic>
+
 // local includes
 #include "input.h"
 #include "platform/common.h"
@@ -26,6 +29,11 @@ namespace video {
     SBS_GAME = 1,  ///< Async low-latency depth pipeline; encoder emits 2W x H.
     SBS_MOVIE = 2,  ///< Sync high-latency depth pipeline; encoder emits 2W x H (not implemented yet).
   };
+
+  /* Debug: set true by the 0x3004 "SBS Debug Dump" control message (client button). The next
+     SBS convert() in display_vram consumes it (exchange->false) and dumps one frame's source,
+     depth and SBS-result images to the configured debug dir. */
+  extern std::atomic<bool> sbs_debug_dump_pending;
 
   /* Encoding configuration requested by remote client */
   struct config_t {

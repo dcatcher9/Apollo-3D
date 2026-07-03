@@ -42,6 +42,10 @@ using namespace std::literals;
 
 namespace video {
 
+  // Debug frame-dump request flag (declared in video.h); set by the 0x3004 control message
+  // handler in stream.cpp, consumed by display_vram's SBS convert().
+  std::atomic<bool> sbs_debug_dump_pending{false};
+
   /**
    * @brief Check if we can allow probing for the encoders.
    * @return True if there should be no issues with the probing, false if we should prevent it.

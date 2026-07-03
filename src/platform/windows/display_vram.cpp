@@ -27,6 +27,7 @@ extern "C" {
 #include "src/nvenc/nvenc_d3d11_native.h"
 #include "src/nvenc/nvenc_d3d11_on_cuda.h"
 #include "src/nvenc/nvenc_utils.h"
+#include "sbs_debug_dump.h"
 #include "src/video.h"
 #include "src/video_depth_estimator.h"
 
@@ -484,6 +485,12 @@ namespace platf::dxgi {
 
           // Draw captured frame (now SBS)
           draw(sbs_intermediate_srv, out_Y_or_YUV_viewports, out_UV_viewport);
+
+          // Debug frame dump (offline artifact inspection): on the client "Dump 3D" button or a
+          // "dump.trigger" file, save this frame's 2D source, depth map and SBS result. See
+          // sbs_debug_dump.h. No-op unless APOLLO_SBS_DUMP is set.
+          sbs_dumper.maybe_dump(device.get(), device_ctx.get(),
+            img_ctx.encoder_input_res.get(), depth_srv.Get(), sbs_intermediate_srv.get());
         } else {
           // Plain 2D: draw the captured frame straight into the output.
           draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewports, out_UV_viewport);
@@ -1121,6 +1128,8 @@ namespace platf::dxgi {
     render_target_t sbs_intermediate_rtv;
     shader_res_t sbs_intermediate_srv;
     D3D11_VIEWPORT sbs_viewport;
+
+    platf::sbs_debug::dumper sbs_dumper;  ///< Debug: dumps SBS frames on the client button (see sbs_debug_dump.h).
   };
 
   class d3d_avcodec_encode_device_t: public avcodec_encode_device_t {

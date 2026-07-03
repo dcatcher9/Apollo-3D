@@ -33,6 +33,7 @@ extern "C" {
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
+#include "video.h"
 #include "utility.h"
 
 #define IDX_START_A 0
@@ -54,6 +55,7 @@ extern "C" {
 #define IDX_FILE_TRANSFER_NONCE_REQUEST 17
 #define IDX_SET_ADAPTIVE_TRIGGERS 18
 #define IDX_SET_SBS_MODE 19
+#define IDX_SBS_DEBUG_DUMP 20
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -76,6 +78,7 @@ static const short packetTypes[] = {
   0x3002,  // File transfer nonce request (Apollo protocol extension)
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
   0x3003,  // Set SBS Mode (Apollo protocol extension)
+  0x3004,  // SBS Debug Dump (Apollo protocol extension)
 };
 
 namespace asio = boost::asio;
@@ -1075,6 +1078,14 @@ namespace stream {
       // rebuilds the encode device at the new resolution (W x H for OFF, 2W x H for GAME/MOVIE)
       // and lazy-loads the depth model. MOVIE currently reuses the GAME (async) pipeline.
       session->mail->event<int>(mail::sbs_mode)->raise((int) mode);
+    });
+
+    server->map(packetTypes[IDX_SBS_DEBUG_DUMP], [server](session_t *session, const std::string_view &payload) {
+      // Debug: client tapped the "Dump 3D" button. Flag the next SBS convert() to dump one
+      // frame's source/depth/SBS images to the configured debug dir (Apollo protocol extension).
+      BOOST_LOG(info) << "type [IDX_SBS_DEBUG_DUMP]: client requested SBS debug frame dump for ["sv
+                      << session->device_name << ']';
+      ::video::sbs_debug_dump_pending.store(true, std::memory_order_relaxed);
     });
 
     server->map(packetTypes[IDX_ENCRYPTED], [server](session_t *session, const std::string_view &payload) {
