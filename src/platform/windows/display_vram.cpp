@@ -547,6 +547,8 @@ namespace platf::dxgi {
       depth_cfg.edge_dilation = (float) config::video.sbs.edge_dilation;
       depth_cfg.depth_fps = (float) config::video.sbs.depth_fps;
       depth_cfg.depth_interval = config::video.sbs.depth_interval;
+      depth_cfg.guided_upsample = config::video.sbs.guided_upsample;
+      depth_cfg.guided_sigma = (float) config::video.sbs.guided_sigma;
       depth_cfg.model_name = config::video.sbs.depth_model;
       depth_cfg.model_url = config::video.sbs.depth_model_url;
 
@@ -949,14 +951,14 @@ namespace platf::dxgi {
       // sessions never pay for it.
 
       // SBS reprojection constants (see sbs_reprojection_ps.hlsl):
-      // {divergence, focal, depth_scale, parallax_steps, border_fade, pad, pad, pad}.
+      // {divergence, focal, depth_scale, parallax_steps, border_fade, depth_floor, pad, pad}.
       float sbs_params[8] {
         (float) config::video.sbs.divergence,
         (float) config::video.sbs.focal_plane,
         (float) config::video.sbs.depth_scale,
         (float) config::video.sbs.parallax_steps,
         (float) config::video.sbs.border_fade,
-        0.0f,
+        (float) config::video.sbs.depth_floor,
         0.0f,
         0.0f
       };
@@ -970,7 +972,7 @@ namespace platf::dxgi {
         (float) config::video.sbs.depth_scale,
         (float) config::video.sbs.parallax_steps,
         (float) config::video.sbs.border_fade,
-        0.0f,
+        (float) config::video.sbs.depth_floor,
         0.0f,
         0.0f
       };

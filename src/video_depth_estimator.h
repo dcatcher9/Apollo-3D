@@ -24,6 +24,8 @@ namespace models {
         float edge_dilation = 0.0f;  ///< Foreground-biased edge smoothing strength (0 = off); reduces jaggy silhouette fringe.
         float depth_fps = 30.0f;     ///< Target depth-update rate; inference interval auto-derived from measured video fps. 0 = every frame.
         int depth_interval = 0;      ///< Manual override for the inference interval. 0 = auto from depth_fps.
+        bool guided_upsample = true;  ///< Color-guided (joint-bilateral) depth upsample: snaps the model's soft silhouettes to the frame's color edges (2x depth res). Supersedes edge_dilation when on.
+        float guided_sigma = 0.1f;   ///< Color-distance sigma for the guided upsample (on tonemapped RGB, 0-1). Lower = stricter edge snapping, higher = smoother/safer.
         std::string model_name = "depth_anything_v2_fp16";  ///< Local file stem; engine cached as <model_name>.engine. Different models coexist.
         std::string model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< Where to download the ONNX if absent.
     };

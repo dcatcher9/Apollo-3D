@@ -28,7 +28,9 @@ cbuffer Constants : register(b2) {
     float depth_scale;      // Linear depth-contrast gain (e.g. 1.5).
     float parallax_steps;   // Horizontal probes per eye; fewer = big GPU saving on this full-res pass.
     float border_fade;      // Ramp parallax to 0 within this fraction of the L/R edges (0 = off).
-    float pad0;
+    float depth_floor;      // Far-depth compression: d' = floor + (1-floor)*d. Shrinks the
+                            // foreground-vs-background parallax gap at silhouettes, and with it
+                            // the disocclusion band that gets stretch-filled there. 0 = off.
     float pad1;
     float pad2;
 };
@@ -44,8 +46,31 @@ float BorderFade(float x) {
 
 // Signed horizontal parallax for a normalized depth sample at source position x, in
 // source-UV units. Positive => nearer than the focal plane => pops out of the screen.
+// depth_floor first compresses the far range (d' = floor + (1-floor)*d): the visible cost of a
+// depth cliff is the disocclusion band, whose width scales with |d_near - d_far|; lifting the
+// far floor narrows that band without touching foreground pop.
 float DepthParallax(float d, float x) {
+    d = depth_floor + (1.0f - depth_floor) * d;
     return (d - focal_plane) * depth_scale * max_divergence * BorderFade(x);
+}
+
+// Silhouette-stable depth read: a 2x2 spread of taps so any depth step spans ~2.5 probe
+// steps of the reprojection search, in BOTH axes. The guided-upsampled depth is texel-sharp;
+// read raw, a silhouette transition is only ~1 probe step wide horizontally -- the zero-
+// crossing detection then flips with probe phase pixel to pixel -- and a diagonal silhouette
+// is a texel staircase vertically, so adjacent ROWS resolve the contested strip differently
+// (the dotted/mesh fringe along occlusion edges). Widening the transition in x keeps g()
+// continuous and the lerped crossings stable; widening in y turns the row staircase into a
+// smooth diagonal. Costs ~6px of silhouette softness -- still ~10x sharper than pre-guided.
+float SampleDepth(float sx, float sy) {
+    uint dw, dh;
+    DepthTexture.GetDimensions(dw, dh);
+    float ox = 0.75f / (float) dw;
+    float oy = 0.75f / (float) dh;
+    return 0.25f * (DepthTexture.SampleLevel(LinearSampler, float2(sx - ox, sy - oy), 0)
+                  + DepthTexture.SampleLevel(LinearSampler, float2(sx + ox, sy - oy), 0)
+                  + DepthTexture.SampleLevel(LinearSampler, float2(sx - ox, sy + oy), 0)
+                  + DepthTexture.SampleLevel(LinearSampler, float2(sx + ox, sy + oy), 0));
 }
 
 // Find the source U coordinate that reprojects onto `uv` for one eye, choosing the
@@ -80,14 +105,14 @@ float2 Reproject(float2 uv, float eyeSign) {
     float bgDepth = 2.0f;  // above any normalized depth (<= 1)
 
     float prevX = startX;
-    float prevD = DepthTexture.SampleLevel(LinearSampler, float2(prevX, uv.y), 0);
+    float prevD = SampleDepth(prevX, uv.y);
     float prevG = (prevX - uv.x) - eyeSign * DepthParallax(prevD, prevX);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
     for (int i = 1; i <= steps; i++) {
         float x = startX + stepX * i;
-        float d = DepthTexture.SampleLevel(LinearSampler, float2(x, uv.y), 0);
+        float d = SampleDepth(x, uv.y);
         float g = (x - uv.x) - eyeSign * DepthParallax(d, x);
 
         // Zero crossing between prevX and x => a source in this span reprojects onto uv.

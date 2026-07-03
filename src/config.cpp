@@ -535,6 +535,9 @@ namespace config {
       "depth_anything_v2_fp16",  // sbs.depth_model (local file stem)
       "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",  // sbs.depth_model_url
       8192,  // sbs.max_encode_width (NVENC HEVC/AV1 cap; 2*client_width must fit or host stays flat 2D)
+      0.25,  // sbs.depth_floor (compress far depth; narrows the silhouette disocclusion band ~25%)
+      true,  // sbs.guided_upsample (snap depth silhouettes to color edges; fixes bent thin objects)
+      0.1,  // sbs.guided_sigma (color-distance sigma for the guided upsample)
     },  // sbs
   };
 
@@ -1247,6 +1250,9 @@ namespace config {
     string_f(vars, "sbs_3d_depth_model", video.sbs.depth_model);
     string_f(vars, "sbs_3d_depth_model_url", video.sbs.depth_model_url);
     int_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width);
+    double_between_f(vars, "sbs_3d_depth_floor", video.sbs.depth_floor, {0.0, 0.9});
+    bool_f(vars, "sbs_3d_guided_upsample", video.sbs.guided_upsample);
+    double_between_f(vars, "sbs_3d_guided_sigma", video.sbs.guided_sigma, {0.01, 1.0});
 
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);

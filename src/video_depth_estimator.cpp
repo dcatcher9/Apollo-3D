@@ -154,6 +154,8 @@ namespace models {
         float edge_dilation;  // foreground-biased edge smoothing strength (0 = off)
         float depth_fps;  // target depth-update rate (interval auto-derived from measured video fps)
         int depth_interval;  // manual interval override (0 = auto)
+        bool guided_upsample;  // color-guided depth upsample (snaps silhouettes to color edges)
+        float guided_sigma;  // color-distance sigma for the guided upsample
         std::string model_name;  // local file stem; engine cached as <model_name>.engine
         std::string model_url;  // where to download the onnx if absent
 
@@ -200,6 +202,20 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex2;
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_tex2_uav;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_tex2_srv;
+
+        // Color-guided (joint-bilateral) depth upsample: guide_tex holds the full-res color
+        // downsampled to the depth grid; guided_depth_tex is the 2x-res, color-edge-snapped
+        // depth the reprojection samples when guided_upsample is on. Refreshed EVERY frame
+        // against the current frame's color, so silhouettes track between inference frames.
+        Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_guide_downsample_cs;
+        Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_guided_upsample_cs;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> guided_cbuffer;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> guide_tex;
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> guide_uav;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> guide_srv;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> guided_depth_tex;
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> guided_depth_uav;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> guided_depth_srv;
         
         CUgraphicsResource cuda_in_res = nullptr;
         CUgraphicsResource cuda_out_res = nullptr;
@@ -220,7 +236,9 @@ namespace models {
             : device(d), context(c), width(w), height(h), ema_alpha(cfg.ema_alpha),
               depth_short_side(std::max(196, cfg.depth_short_side)), max_aspect(std::max(1.0f, cfg.max_aspect)),
               normalize(cfg.normalize), depth_gamma(cfg.depth_gamma), minmax_alpha(cfg.minmax_alpha), edge_dilation(cfg.edge_dilation),
-              depth_fps(cfg.depth_fps), depth_interval(std::max(0, cfg.depth_interval)), model_name(cfg.model_name), model_url(cfg.model_url)
+              depth_fps(cfg.depth_fps), depth_interval(std::max(0, cfg.depth_interval)),
+              guided_upsample(cfg.guided_upsample), guided_sigma(std::max(0.01f, cfg.guided_sigma)),
+              model_name(cfg.model_name), model_url(cfg.model_url)
         {
             auto model_path = ensure_model_available(assets_dir, model_name, model_url);
             if (model_path.empty()) {
@@ -328,6 +346,19 @@ namespace models {
             compile_shader(assets_dir / "shaders" / "directx" / "depth_minmax_cs.hlsl", depth_minmax_cs);
             compile_shader(assets_dir / "shaders" / "directx" / "depth_minmax_ema_cs.hlsl", depth_minmax_ema_cs);
             compile_shader(assets_dir / "shaders" / "directx" / "depth_edge_dilate_cs.hlsl", depth_edge_dilate_cs);
+            if (guided_upsample) {
+                bool ok = compile_shader(assets_dir / "shaders" / "directx" / "depth_guide_downsample_cs.hlsl", depth_guide_downsample_cs) &&
+                          compile_shader(assets_dir / "shaders" / "directx" / "depth_guided_upsample_cs.hlsl", depth_guided_upsample_cs);
+                if (ok) {
+                    // Guided snapping supersedes edge dilation: dilation expands the foreground
+                    // silhouette into background-COLORED texels, which corrupts exactly the
+                    // depth<->color correspondence the guided filter relies on. Skip dilation.
+                    BOOST_LOG(info) << "Guided depth upsample enabled (sigma " << guided_sigma << "); edge dilation bypassed.";
+                } else {
+                    BOOST_LOG(warning) << "Guided depth upsample shaders failed to compile; falling back to plain depth.";
+                    guided_upsample = false;
+                }
+            }
 
             // Min/max reduction accumulator (2 uints), pre-seeded to the reduction identity
             // {min = 0xFFFFFFFF, max = 0}. depth_minmax_ema_cs resets it after each frame.
@@ -379,6 +410,11 @@ namespace models {
             cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
             cb_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
             device->CreateBuffer(&cb_desc, nullptr, &cbuffer);
+
+            if (guided_upsample) {
+                cb_desc.ByteWidth = 32;  // guided passes: {in_w,in_h,out_w,out_h, inv2sig_sp2,inv2sig_r2, is_hdr,radius}
+                device->CreateBuffer(&cb_desc, nullptr, &guided_cbuffer);
+            }
         }
 
         ~impl() {
@@ -405,11 +441,67 @@ namespace models {
             // TRT runtime/engine are cached globally, do not destroy them here.
         }
 
-        // The depth SRV handed back to the reprojection: the edge-dilated copy when enabled,
-        // otherwise the raw depth. Also the value returned on frames where we reuse the last
-        // depth (stream busy or off-cadence).
+        // The depth SRV handed back to the reprojection: the color-guided 2x upsample when
+        // enabled, else the edge-dilated copy, else the raw depth. Also the value returned on
+        // frames where we reuse the last depth (stream busy or off-cadence).
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> output_srv() {
+            if (guided_upsample && guided_depth_srv) {
+                return guided_depth_srv;
+            }
             return (edge_dilation > 0.0f && depth_tex2_srv) ? depth_tex2_srv : depth_srv;
+        }
+
+        // Re-snap the (possibly stale) low-res depth to the CURRENT frame's color edges: pass 1
+        // downsamples the color to the depth grid, pass 2 joint-bilaterally upsamples depth to
+        // 2x res using the full-res color as the reference. Runs every frame (cheap: taps hit
+        // two low-res textures), including cadence-skip frames -- that is what keeps silhouettes
+        // tracking the image while the depth itself refreshes at depth_fps.
+        void run_guided(ID3D11ShaderResourceView* color_srv, bool is_hdr) {
+            if (!guided_upsample || !guided_depth_uav || !guide_uav || !color_srv ||
+                !depth_guide_downsample_cs || !depth_guided_upsample_cs) {
+                return;
+            }
+
+            const UINT out_w = (UINT) target_w * 2, out_h = (UINT) target_h * 2;
+            const float kernel_radius = 5.0f;  // low-res texels; spans the model's ~8-9 texel edge ramp
+            const float sigma_sp = kernel_radius * 0.5f;
+
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            if (SUCCEEDED(context->Map(guided_cbuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+                uint32_t* u = (uint32_t*) mapped.pData;
+                float* f = (float*) mapped.pData;
+                u[0] = (uint32_t) target_w;
+                u[1] = (uint32_t) target_h;
+                u[2] = out_w;
+                u[3] = out_h;
+                f[4] = 1.0f / (2.0f * sigma_sp * sigma_sp);
+                f[5] = 1.0f / (2.0f * guided_sigma * guided_sigma);
+                u[6] = is_hdr ? 1u : 0u;
+                f[7] = kernel_radius;
+                context->Unmap(guided_cbuffer.Get(), 0);
+            }
+
+            ID3D11UnorderedAccessView* null_uav = nullptr;
+            ID3D11ShaderResourceView* null_srvs[3] = {nullptr, nullptr, nullptr};
+
+            // Pass 1: full-res color -> low-res guide.
+            context->CSSetShader(depth_guide_downsample_cs.Get(), nullptr, 0);
+            context->CSSetConstantBuffers(0, 1, guided_cbuffer.GetAddressOf());
+            context->CSSetShaderResources(0, 1, &color_srv);
+            context->CSSetUnorderedAccessViews(0, 1, guide_uav.GetAddressOf(), nullptr);
+            context->CSSetSamplers(0, 1, linear_sampler.GetAddressOf());
+            context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+            context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+            context->CSSetShaderResources(0, 1, null_srvs);
+
+            // Pass 2: joint-bilateral upsample of the UN-dilated depth, guided by color.
+            context->CSSetShader(depth_guided_upsample_cs.Get(), nullptr, 0);
+            ID3D11ShaderResourceView* srvs[3] = {depth_srv.Get(), guide_srv.Get(), color_srv};
+            context->CSSetShaderResources(0, 3, srvs);
+            context->CSSetUnorderedAccessViews(0, 1, guided_depth_uav.GetAddressOf(), nullptr);
+            context->Dispatch((out_w + 15) / 16, (out_h + 15) / 16, 1);
+            context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+            context->CSSetShaderResources(0, 3, null_srvs);
         }
 
         // Called once per video frame. Measures the video frame rate from the inter-call
@@ -467,6 +559,8 @@ namespace models {
             // This prevents an infinite queue of heavy TensorRT workloads from starving the DWM and Edge Browser.
             if (cu_stream && cuda.cuStreamQuery) {
                 if (cuda.cuStreamQuery(cu_stream) == 600) { // CUDA_ERROR_NOT_READY
+                    // Still re-snap the stale depth to THIS frame's color edges (D3D-only, cheap).
+                    run_guided(input_srv.Get(), is_hdr);
                     return output_srv();
                 }
             }
@@ -556,6 +650,25 @@ namespace models {
                 device->CreateUnorderedAccessView(depth_tex2.Get(), nullptr, &depth_tex2_uav);
                 device->CreateShaderResourceView(depth_tex2.Get(), nullptr, &depth_tex2_srv);
 
+                if (guided_upsample) {
+                    // Low-res color guide (same grid as the depth map). RGBA16F: guaranteed
+                    // UAV-store format, read back as an SRV in the upsample pass.
+                    D3D11_TEXTURE2D_DESC guide_desc = tex_desc;
+                    guide_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                    device->CreateTexture2D(&guide_desc, nullptr, &guide_tex);
+                    device->CreateUnorderedAccessView(guide_tex.Get(), nullptr, &guide_uav);
+                    device->CreateShaderResourceView(guide_tex.Get(), nullptr, &guide_srv);
+
+                    // Color-edge-snapped depth at 2x the model resolution; what the
+                    // reprojection actually samples when guided upsampling is on.
+                    D3D11_TEXTURE2D_DESC gd_desc = tex_desc;
+                    gd_desc.Width = (UINT) target_w * 2;
+                    gd_desc.Height = (UINT) target_h * 2;
+                    device->CreateTexture2D(&gd_desc, nullptr, &guided_depth_tex);
+                    device->CreateUnorderedAccessView(guided_depth_tex.Get(), nullptr, &guided_depth_uav);
+                    device->CreateShaderResourceView(guided_depth_tex.Get(), nullptr, &guided_depth_srv);
+                }
+
                 // Clear both depth textures to 0.0f: depth_tex so the EMA shader initializes
                 // correctly on the first frame instead of blending with undefined memory, and
                 // depth_tex2 so output_srv() returns flat (not garbage) depth on the frames
@@ -563,6 +676,9 @@ namespace models {
                 const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
                 context->ClearUnorderedAccessViewFloat(depth_uav.Get(), clear_color);
                 context->ClearUnorderedAccessViewFloat(depth_tex2_uav.Get(), clear_color);
+                if (guided_depth_uav) {
+                    context->ClearUnorderedAccessViewFloat(guided_depth_uav.Get(), clear_color);
+                }
                 
                 auto res1 = cuda.cuGraphicsD3D11RegisterResource(&cuda_in_res, tensor_in_buf.Get(), 0);
                 auto res2 = cuda.cuGraphicsD3D11RegisterResource(&cuda_out_res, tensor_out_buf.Get(), 0);
@@ -579,6 +695,9 @@ namespace models {
             // depth_interval-th frame thereafter.
             frame_counter++;
             if (effective_interval > 1 && (frame_counter % (unsigned)effective_interval) != 1u) {
+                // Off-cadence frame: depth is reused, but re-snap it to this frame's color edges
+                // so silhouettes keep tracking the image between inference frames.
+                run_guided(input_srv.Get(), is_hdr);
                 return output_srv();
             }
 
@@ -648,7 +767,10 @@ namespace models {
                 // 3c. Edge dilation: smooth the depth silhouette into depth_tex2 (reduces the
                 // jaggy fringe at object edges). depth_tex keeps the un-dilated depth so the
                 // temporal EMA above doesn't compound the smoothing frame over frame.
-                if (edge_dilation > 0.0f && depth_edge_dilate_cs) {
+                // Bypassed when guided upsampling is on: dilation writes foreground depth into
+                // background-COLORED texels, corrupting the depth<->color correspondence the
+                // guided filter keys on (it would bleed face depth into the window as a halo).
+                if (edge_dilation > 0.0f && depth_edge_dilate_cs && !guided_upsample) {
                     context->CSSetShader(depth_edge_dilate_cs.Get(), nullptr, 0);
                     context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
                     context->CSSetShaderResources(0, 1, depth_srv.GetAddressOf());
@@ -662,6 +784,9 @@ namespace models {
                     context->CSSetShaderResources(0, 1, &null_srv_d);
                 }
             }
+
+            // 3d. Guided upsample: snap the freshly-updated depth to this frame's color edges.
+            run_guided(input_srv.Get(), is_hdr);
 
             // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
             context->CSSetShader(rgb_to_nchw_cs.Get(), nullptr, 0);
