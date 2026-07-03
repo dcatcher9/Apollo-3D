@@ -71,6 +71,17 @@ Unit tests are in [tests/unit/](tests/unit) (one `test_<module>.cpp` per source 
 `test_video.cpp`, `test_stream.cpp`, `test_http_pairing.cpp`), with integration tests in
 [tests/integration/](tests/integration) and shared HTTP fixtures in [tests/fixtures/](tests/fixtures).
 
+## SBS 3D quality / shader work — use the offline simulator FIRST
+
+Before changing the SBS reprojection shader or debugging visual artifacts in the 2D→3D
+pipeline, read [tools/warpsim/README.md](tools/warpsim/README.md) and follow its workflow:
+capture a frame with the client's "Dump 3D" button, reproduce the artifact in the CPU
+simulator (it replicates `sbs_reprojection_ps.hlsl` pixel-exactly), test theories with the
+instrumentation tools and numbers, and validate candidate changes offline — on BOTH eyes and
+MULTIPLE scenes — before deploying anything to the headset. Do NOT iterate guess→deploy→
+headset-check; that loop has repeatedly failed here. When `sbs_reprojection_ps.hlsl` changes,
+update the simulator's replica functions to match.
+
 ## Web UI (Vue 3 + Vite)
 
 The config web UI is a separate Vite build. Sources are in
