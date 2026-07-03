@@ -73,6 +73,10 @@ Unit tests are in [tests/unit/](tests/unit) (one `test_<module>.cpp` per source 
 
 ## SBS 3D quality / shader work — use the offline simulator FIRST
 
+The SBS 3D feature's status, known residual artifacts, hard-won constraints, and the
+prioritized roadmap live in [docs/sbs-3d-roadmap.md](docs/sbs-3d-roadmap.md) — read it
+before planning any SBS work.
+
 Before changing the SBS reprojection shader or debugging visual artifacts in the 2D→3D
 pipeline, read [tools/warpsim/README.md](tools/warpsim/README.md) and follow its workflow:
 capture a frame with the client's "Dump 3D" button, reproduce the artifact in the CPU
