@@ -1,16 +1,37 @@
 # SBS 3D — status and roadmap
 
 The living plan for Apollo's real-time 2D→3D side-by-side feature (host-side depth
-estimation + reprojection for the Galaxy XR / Artemis client). Updated 2026-07-03.
+estimation + reprojection for the Galaxy XR / Artemis client). Updated 2026-07-05.
+
+> **TL;DR of the 2026-07-05 depth investigation (read before more depth work):** the two
+> problems are (1) the **stretch band / jagged edges** at silhouettes and (2) **flat pop**
+> on DA-V3. Both were chased hard:
+> - **Edges are a WARP problem, not a depth problem** — proven both directions: DA-V3 depth
+>   through the current probe warp still shows the band (warpsim, ~6–10% only), while DA-V2
+>   depth through **MLBW** makes it vanish (eval sheets). The fix is the learned warp
+>   (**MLBW, already stashed**) plus a learned **inpaint** for the disocclusion holes —
+>   this is exactly iw3's pipeline (depth → warp emits hole mask → light_inpaint fills it).
+> - **DA-V3 flat pop was a MODEL/EXPORT problem, not inherent.** The onnx-community DA-V3
+>   exports (small/base/**large**) all output *compressed* monocular depth (pop ~0.55–0.66).
+>   The monocular-specialized **DA3MONO-LARGE** (depth-anything/DA3MONO-LARGE, 0.35B) gives
+>   V2-level pop (0.74–0.90) — but needs a torch→ONNX export and is movie-mode cost.
+> - **Depth normalization is now iw3's shifted reciprocal** `1/(depth + sbs_3d_depth_shift)`
+>   (bounds the near spike) — the whole `1/depth` + sigma-clip / norm_sigma saga was a
+>   band-aid and has been **removed**. Config: `sbs_3d_depth_shift` (default 0.2).
 
 ## Current state (what ships today)
 
-Pipeline: Depth Anything V2 small (fp16, TensorRT) at ~798×336 → GPU normalization
-(min/max EMA) → **color-guided joint-bilateral upsample to 2× with foreground bias and
-bimodal edge snap** → occlusion-aware backward reprojection (`sbs_reprojection_ps.hlsl`)
-with far-depth floor and smoothed depth reads. Client switches host modes mid-stream via
-the `0x3003` control message (OFF / GAME async / MOVIE reserved); `0x3004` triggers a
-one-frame debug dump (source/depth/SBS PNGs) from the XR bar's "Dump 3D" button.
+Pipeline: selectable depth model (default DA-V2 small fp16, TensorRT) at ~798×336 → per-model
+transform (DA-V2 identity disparity / DA-V3 shifted reciprocal `1/(depth+shift)`) → GPU
+min/max-EMA normalization → **color-guided joint-bilateral upsample to 2× with foreground
+bias and bimodal edge snap** → occlusion-aware backward reprojection (`sbs_reprojection_ps.hlsl`)
+with far-depth floor and smoothed depth reads. Client switches host modes mid-stream via the
+`0x3003` control message (OFF / GAME async / MOVIE reserved) and the depth **model** via
+`0x3005`; `0x3004` triggers a one-frame debug dump (source/depth/SBS PNGs) from the XR bar.
+
+Note (2026-07-05): DA-V3's guided upsample is measured to NOT be tunable — its silhouettes
+are inherently softer than V2's and the guided pass can relocate but not manufacture sharpness;
+edge crispness for V3 (as for V2) comes from the learned warp (roadmap #1), not the guided pass.
 
 Verified quality (vs. pre-guided): thin objects straight (no bent sword handles), facial
 silhouettes real (nose/brow/lips exist in depth), per-eye widths consistent, narrower
@@ -43,17 +64,36 @@ Known residuals:
 - iw3's temporal tricks (look-ahead EMA, Video-Depth-Anything) need future frames —
   incompatible with a live stream. Its synchronous mode = the design basis for MOVIE mode.
 
+## Model switching — SHIPPED (2026-07-04)
+
+On-the-fly depth-model switching is done and headset-verified: model registry +
+per-name TRT engine slots (`g_engines`) + `0x3005 Set Depth Model` control message + an
+XR-bar "Model" cycle tile. Startup engine prebuild (`sbs_3d_prebuild_models`), engine-file
+versioning by build recipe, and DA-V3 (rank-5 input, output pruning, shifted-reciprocal
+transform) all landed. Client pushed to the dcatcher9 forks (host **not committed**). Full
+detail + the verified per-model contracts: [depth-model-switching-plan.md](depth-model-switching-plan.md).
+The registry has DA-V2 small/base and DA-V3 small/base (fp16 + fp32); the DA-V3 exports are
+onnx-community's, which turned out to be flat-pop (see TL;DR).
+
 ## Roadmap (priority order)
 
-1. **Learned warp** — port iw3's `mlbw` (multi-layer backward warp, optionally with
-   inpainting) as a second small TensorRT engine replacing the hand-written reprojection
-   at silhouettes. This is the principled fix for the stretch-band fringe and hair
-   fold-over. Validate offline in warpsim against the dump library first.
-2. **Depth model upgrade** — swap to DA-V2 **base** (config-only: `sbs_3d_depth_model` +
-   URL; same ONNX I/O contract via onnx-community fp16 exports). Targets missing
-   small-feature relief via stronger priors. ~3–4× inference cost: movie-mode budget,
-   not 90fps game mode. A/B on dumps (nose/sword depth crops) before headset time.
-   DA-V3 only after base validates the direction.
+1. **Learned warp + inpaint (THE edge fix)** — the current probe reprojection fills
+   disocclusions by *stretching* → the stretch band / jagged edges. iw3's proven pipeline:
+   depth → **MLBW** learned warp (emits a disocclusion hole mask) → a small learned
+   **inpaint** model (`light_inpaint_v1`, ¼-res gMLP) fills the holes. MLBW is **already
+   implemented and stashed** (`git stash`: "MLBW learned warp WIP + SBS reprime fix",
+   0.53 ms/eye, eval sheets show the arm-edge staircase gone); it needs (a) merging onto
+   the current master, (b) emitting the hole mask (iw3 `return_mask`), (c) porting the
+   inpaint model as a third TRT engine. This also unlocks pop: once holes are inpainted,
+   divergence can be cranked without the stretch band. Warpsim-gate every change.
+2. **DA3MONO-LARGE depth (THE pop fix)** — the onnx-community DA-V3 exports give flat
+   monocular pop; the monocular-specialized **DA3MONO-LARGE** (depth-anything/DA3MONO-LARGE,
+   0.35B, DINO ViT-L) gives V2-level pop (0.74–0.90) *and* DA-V3 geometric accuracy.
+   No ONNX exists (iw3 runs it in PyTorch; only the general DA3 is on onnx-community) —
+   needs a torch→ONNX export: wrap `{depth,sky}` → single `predicted_depth`, rank-5 input,
+   fp16 via the ORT converter recipe. Weights + code are local (`E:\Git\Repo\nunif` venv,
+   1.3 GB checkpoint). Drops into the shifted-reciprocal pipeline. Cost: 0.35B = movie-mode;
+   game mode needs a lower depth_fps or stays on v2-small (no smaller monocular variant exists).
 3. **MOVIE mode host implementation** — synchronous depth (enqueue current frame,
    `cuStreamSynchronize`, warp current-with-current): zero motion ghost, full framerate
    for ≤30fps video content. Wire (`SBS_MODE_MOVIE`) and client tile already exist;
