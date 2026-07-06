@@ -694,7 +694,12 @@ namespace config {
     parse_option(::std::string_view::const_iterator begin, ::std::string_view::const_iterator end) {
     begin = std::find_if_not(begin, end, whitespace);
     auto endl = std::find_if(begin, end, endline);
+    // Inline comments: '#' starts a comment at line start or when preceded by whitespace,
+    // so `key = value  # note` works while values containing '#' (URLs, fragments) survive.
     auto endc = std::find(begin, endl, '#');
+    while (endc != endl && endc != begin && !whitespace(*(endc - 1))) {
+      endc = std::find(endc + 1, endl, '#');
+    }
     endc = std::find_if(std::make_reverse_iterator(endc), std::make_reverse_iterator(begin), std::not_fn(whitespace)).base();
 
     auto eq = std::find(begin, endc, '=');
@@ -705,9 +710,13 @@ namespace config {
     auto end_name = std::find_if_not(std::make_reverse_iterator(eq), std::make_reverse_iterator(begin), space_tab).base();
     auto begin_val = std::find_if_not(eq + 1, endc, space_tab);
 
-    if (begin_val == endl) {
+    if (begin_val == endc) {
+      // Empty value (or nothing but an inline comment after '=').
       return std::make_pair(endl, std::nullopt);
     }
+
+    // The value ends at the inline comment (whitespace-trimmed); lists extend to their ']'.
+    auto val_end = endc;
 
     // Lists might contain newlines
     if (*begin_val == '[') {
@@ -721,11 +730,12 @@ namespace config {
         BOOST_LOG(warning) << "config: Missing ']' in config option: " << to_string(begin, end_name);
         return std::make_pair(endl, std::nullopt);
       }
+      val_end = endl;
     }
 
     return std::make_pair(
       endl,
-      std::make_pair(to_string(begin, end_name), to_string(begin_val, endl))
+      std::make_pair(to_string(begin, end_name), to_string(begin_val, val_end))
     );
   }
 
