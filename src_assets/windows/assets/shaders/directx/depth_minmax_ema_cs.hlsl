@@ -12,6 +12,8 @@ cbuffer Constants : register(b0) {
     float ema_alpha;
     float minmax_alpha;
     uint reduce_threads;
+    uint output_transform;  // unused here; kept so the shared cbuffer layout matches the other passes
+    float depth_shift;      // unused here; layout parity
 };
 
 [numthreads(1, 1, 1)]

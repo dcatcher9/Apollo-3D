@@ -36,6 +36,12 @@ extern "C" {
 #include "video.h"
 #include "utility.h"
 
+#ifdef _WIN32
+  // For models::precompile_tensorrt_engine (background engine build on model switch).
+  // Windows-only: the depth pipeline (D3D11 + TensorRT) is Windows-only.
+  #include "video_depth_estimator.h"
+#endif
+
 #define IDX_START_A 0
 #define IDX_START_B 1
 #define IDX_INVALIDATE_REF_FRAMES 2
@@ -56,6 +62,8 @@ extern "C" {
 #define IDX_SET_ADAPTIVE_TRIGGERS 18
 #define IDX_SET_SBS_MODE 19
 #define IDX_SBS_DEBUG_DUMP 20
+#define IDX_SET_DEPTH_MODEL 21
+#define IDX_DEPTH_STATUS 22
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -79,6 +87,8 @@ static const short packetTypes[] = {
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
   0x3003,  // Set SBS Mode (Apollo protocol extension)
   0x3004,  // SBS Debug Dump (Apollo protocol extension)
+  0x3005,  // Set Depth Model (Apollo protocol extension)
+  0x3006,  // Depth Status (Apollo protocol extension, host->client)
 };
 
 namespace asio = boost::asio;
@@ -222,6 +232,15 @@ namespace stream {
 
     // Sunshine protocol extension
     SS_HDR_METADATA metadata;
+  };
+
+  // Host->client push of the SBS depth-engine state so the client can show a "loading" indicator
+  // while a model builds/loads/warms up (Apollo protocol extension 0x3006).
+  struct control_depth_status_t {
+    control_header_v2 header;
+
+    std::uint8_t phase;  // 0 = idle (depth off), 1 = loading (build/load/warmup), 2 = ready (live)
+    std::uint8_t model_id;  // depth_model_registry() index of the active model (0xFF = unknown)
   };
 
   typedef struct control_encrypted_t {
@@ -414,6 +433,7 @@ namespace stream {
 
       platf::feedback_queue_t feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
+      int last_depth_phase = -1;  // last depth-engine phase pushed to this client (see IDX_DEPTH_STATUS)
     } control;
 
     std::uint32_t launch_session_id;
@@ -932,6 +952,32 @@ namespace stream {
     return 0;
   }
 
+  int send_depth_status(session_t *session, int phase, int model_id) {
+    if (!session->control.peer) {
+      // Still waiting for PING from Moonlight; the periodic poll will retry on the next change.
+      return -1;
+    }
+
+    control_depth_status_t plaintext {};
+    plaintext.header.type = packetTypes[IDX_DEPTH_STATUS];
+    plaintext.header.payloadLength = sizeof(control_depth_status_t) - sizeof(control_header_v2);
+    plaintext.phase = (std::uint8_t) phase;
+    plaintext.model_id = (std::uint8_t) model_id;
+
+    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
+      encrypted_payload;
+
+    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
+    if (session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+      TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
+      BOOST_LOG(warning) << "Couldn't send depth status to ["sv << addr << ':' << port << ']';
+      return -1;
+    }
+
+    BOOST_LOG(debug) << "Sent depth status: phase="sv << phase << " model="sv << model_id;
+    return 0;
+  }
+
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -1078,6 +1124,13 @@ namespace stream {
       BOOST_LOG(info) << "type [IDX_SET_SBS_MODE]: client requested host SBS "sv << mode_name
                       << " ("sv << (int) mode << ") for ["sv << session->device_name << ']';
 
+      // Turning SBS off tears down the depth estimator with no replacement, so mark the depth
+      // engine idle here (display_vram only ever sets loading/ready). This clears any "loading"
+      // indicator on the client if the user switches to Normal mid-spin-up.
+      if (mode == ::video::SBS_OFF) {
+        ::video::depth_engine_phase.store(0, std::memory_order_relaxed);
+      }
+
       // Hand the requested mode to this session's video pipeline. capture_async consumes it,
       // rebuilds the encode device at the new resolution (W x H for OFF, 2W x H for GAME/MOVIE)
       // and lazy-loads the depth model. MOVIE currently reuses the GAME (async) pipeline.
@@ -1090,6 +1143,42 @@ namespace stream {
       BOOST_LOG(info) << "type [IDX_SBS_DEBUG_DUMP]: client requested SBS debug frame dump for ["sv
                       << session->device_name << ']';
       ::video::sbs_debug_dump_pending.store(true, std::memory_order_relaxed);
+    });
+
+    server->map(packetTypes[IDX_SET_DEPTH_MODEL], [server](session_t *session, const std::string_view &payload) {
+      // Client selected a depth model by registry id (Apollo protocol extension 0x3005).
+      // Payload byte 0 = index into config::depth_model_registry().
+      if (payload.empty()) {
+        BOOST_LOG(warning) << "type [IDX_SET_DEPTH_MODEL]: empty payload"sv;
+        return;
+      }
+      auto id = *(uint8_t *) payload.data();
+      const auto &reg = config::depth_model_registry();
+      if (id >= reg.size()) {
+        BOOST_LOG(warning) << "type [IDX_SET_DEPTH_MODEL]: unknown model id "sv << (int) id
+                           << " from ["sv << session->device_name << "]; ignored"sv;
+        return;
+      }
+      const auto &model_info = reg[id];
+
+      if (!::video::set_active_depth_model(id)) {
+        BOOST_LOG(warning) << "type [IDX_SET_DEPTH_MODEL]: failed to select model id "sv << (int) id;
+        return;
+      }
+      BOOST_LOG(info) << "type [IDX_SET_DEPTH_MODEL]: client ["sv << session->device_name
+                      << "] selected depth model '"sv << model_info.name << "' (id "sv << (int) id << ')';
+
+#ifdef _WIN32
+      // Kick a background engine build if this model's engine isn't cached yet, so the switch
+      // never stalls the encode thread. precompile_tensorrt_engine serializes internally and
+      // no-ops if the engine already exists; ensure_depth_estimator streams flat until it lands.
+      std::thread([m = model_info]() {
+        models::precompile_tensorrt_engine(SUNSHINE_ASSETS_DIR, m);
+      }).detach();
+#endif
+
+      // Force an encode-session rebuild so the recreated estimator loads the new active model.
+      session->mail->event<bool>(mail::depth_model_reload)->raise(true);
     });
 
     server->map(packetTypes[IDX_ENCRYPTED], [server](session_t *session, const std::string_view &payload) {
@@ -1222,6 +1311,16 @@ namespace stream {
               auto hdr_info = hdr_queue->pop();
 
               send_hdr_mode(session, std::move(hdr_info));
+            }
+
+            // Push the SBS depth-engine phase (loading/ready/idle) when it changes, so the client
+            // can show/hide a "loading depth model" indicator. Global state (one depth engine), so
+            // it's polled here and de-duplicated per session against the last value we sent.
+            int depth_phase = ::video::depth_engine_phase.load(std::memory_order_relaxed);
+            if (depth_phase != session->control.last_depth_phase) {
+              if (send_depth_status(session, depth_phase, ::video::active_depth_model_index()) == 0) {
+                session->control.last_depth_phase = depth_phase;
+              }
             }
           }
 

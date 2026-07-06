@@ -11,6 +11,8 @@ cbuffer Constants : register(b0) {
     float ema_alpha;
     float minmax_alpha;
     uint reduce_threads;
+    uint output_transform;  // 0 = identity (DA-V2 disparity); 1 = shifted reciprocal (DA-V3 depth -> disparity)
+    float depth_shift;  // shift in 1/(depth + depth_shift) when output_transform == 1
 };
 
 [numthreads(16, 16, 1)]
@@ -20,6 +22,11 @@ void main(uint3 DTid : SV_DispatchThreadID) {
 
     uint idx = DTid.y * target_w + DTid.x;
     float raw = InputBuffer[idx];
+
+    // DA-V3 emits DEPTH (larger = farther); shifted reciprocal -> disparity (larger = closer)
+    // so the normalization below (tuned for DA-V2 disparity) is unchanged. Must match the exact
+    // transform in depth_minmax_cs so min/max and this map agree. The shift bounds the near end.
+    if (output_transform == 1) raw = 1.0f / (raw + depth_shift);
 
     // Per-frame min/max normalization. Depth Anything V2 relative output is
     // affine-invariant (scale/shift arbitrary and drifting), so a fixed curve

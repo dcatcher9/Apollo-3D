@@ -7,6 +7,7 @@
 #include <NvOnnxParser.h>
 #include <NvInferPlugin.h>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -44,8 +45,19 @@ static Logger gLogger;
 // out of memory and the device was removed. Pooling caps live contexts at peak concurrency.
 static std::mutex g_trt_mutex;
 static nvinfer1::IRuntime* g_runtime = nullptr;
-static nvinfer1::ICudaEngine* g_engine = nullptr;
-static std::vector<nvinfer1::IExecutionContext*> g_context_pool;
+
+// One resident engine per depth model (keyed by config::depth_model_info::name), so switching
+// models mid-stream loads/keeps a distinct engine instead of being pinned to the first model
+// (the old single-g_engine design required a restart). Engines are never evicted: an
+// IExecutionContext holds ~1.3 GB scratch and cannot be safely destroyed across the MinGW/MSVC
+// ABI boundary, so contexts are pooled per engine and reused (see the ctor/dtor). With
+// sequential model testing this leaves 2-3 engines resident, which is acceptable.
+struct engine_slot {
+    nvinfer1::ICudaEngine* engine = nullptr;
+    std::vector<nvinfer1::IExecutionContext*> context_pool;
+    bool io_validated = false;
+};
+static std::map<std::string, engine_slot> g_engines;  // guarded by g_trt_mutex
 
 template <typename T>
 struct TrtDeleter {
@@ -65,11 +77,14 @@ using TrtUniquePtr = std::unique_ptr<T, TrtDeleter<T>>;
 
 namespace models {
 
-    void precompile_tensorrt_engine(const std::filesystem::path& assets_dir, const std::string& model_name, const std::string& model_url) {
+    void precompile_tensorrt_engine(const std::filesystem::path& assets_dir, const config::depth_model_info& model) {
         static std::mutex compile_mutex;
         std::lock_guard<std::mutex> lock(compile_mutex);
 
-        auto model_path = ensure_model_available(assets_dir, model_name, model_url);
+        const std::string& model_name = model.name;
+        const std::string& model_url = model.url;
+        const std::string engine_name = engine_filename(model);
+        auto model_path = ensure_model_available(assets_dir, model_name, model_url, engine_name);
         if (model_path.empty()) {
             BOOST_LOG(warning) << "Model not found. Background precompilation aborted.";
             return;
@@ -106,22 +121,67 @@ namespace models {
             return;
         }
         
-        // For Depth Anything V2 we assume input tensor "pixel_values" and output tensor "predicted_depth"
+        // Input tensor "pixel_values" (DA-V2: rank-4 [1,3,H,W]; DA-V3: rank-5 [1,1,3,H,W]),
+        // output tensor "predicted_depth". Build the optimization profile at the model's input
+        // rank. Passing Dims INTO TensorRT is ABI-safe (only returning Dims by value faults).
         auto profile = builder->createOptimizationProfile();
-        if (network->getNbInputs() > 0) {
+        // Fixed-shape models (static input dims baked into the ONNX) need no optimization profile;
+        // adding one with a different range would violate the static shape (DA3MONO-LARGE's dynamic
+        // export baked resolution-dependent shape math, so it is exported at a fixed resolution).
+        if (!model.fixed_shape && network->getNbInputs() > 0) {
             auto input = network->getInput(0);
-            // Dims4 is (batch, channels, height, width)
-            profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{1, 3, 14, 14});
-            profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{1, 3, 518, 518});
-            profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{1, 3, 1008, 1008});
+            auto dims_for = [&](int h, int w) -> nvinfer1::Dims {
+                nvinfer1::Dims d {};
+                if (model.input_rank == 5) {
+                    d.nbDims = 5;
+                    d.d[0] = 1; d.d[1] = 1; d.d[2] = 3; d.d[3] = h; d.d[4] = w;
+                } else {
+                    d.nbDims = 4;
+                    d.d[0] = 1; d.d[1] = 3; d.d[2] = h; d.d[3] = w;
+                }
+                return d;
+            };
+            if (model.dynamic_width) {
+                // Height is baked into the ONNX (fixed_h); only width is a real dynamic axis.
+                // Pin H and range W from 1:1 up to ~4:1 so a single engine serves every landscape
+                // aspect (4:3 -> 16:9 -> ultrawide/32:9). OPT is the common ultrawide (~2.37:1).
+                const int p = std::max(1, model.patch);
+                const int h = model.fixed_h;
+                auto r14 = [&](double x) { return std::max(p, (int)std::round(x / p) * p); };
+                profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, dims_for(h, h));
+                profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, dims_for(h, r14(h * 2.37)));
+                profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, dims_for(h, r14(h * 4.0)));
+            } else {
+                profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, dims_for(14, 14));
+                profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, dims_for(518, 518));
+                profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, dims_for(1008, 1008));
+            }
             config->addOptimizationProfile(profile);
         }
-        
+
+        // Prune outputs the pipeline doesn't consume (DA-V3 emits confidence/extrinsics/intrinsics
+        // alongside predicted_depth). unmarkOutput drops them from the engine I/O and lets the
+        // builder dead-code-eliminate their exclusive branches, so enqueueV3 only needs the two
+        // tensors the pipeline binds. Names via getName()/getNbOutputs() are ABI-safe (no Dims).
+        {
+            std::vector<nvinfer1::ITensor*> to_unmark;
+            for (int i = 0; i < network->getNbOutputs(); i++) {
+                auto* t = network->getOutput(i);
+                std::string nm = t->getName();
+                bool keep = (nm == model.output_tensor) || (model.keep_confidence && nm == "confidence");
+                if (!keep) to_unmark.push_back(t);
+            }
+            for (auto* t : to_unmark) {
+                BOOST_LOG(info) << "Depth engine: pruning unused output '" << t->getName() << "'.";
+                network->unmarkOutput(*t);
+            }
+        }
+
         auto serializedModel = TrtUniquePtr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
         if (serializedModel) {
-            // Save to disk (named after the onnx variant) so we don't rebuild next time.
-            auto engine_path = model_path;
-            engine_path.replace_extension("engine");
+            // Save under the recipe-specific engine name so a later recipe change rebuilds
+            // rather than silently reusing this engine's (now-wrong) I/O layout.
+            auto engine_path = assets_dir / engine_name;
             std::ofstream p(engine_path, std::ios::binary);
             if (p) {
                 p.write(static_cast<const char*>(serializedModel->data()), serializedModel->size());
@@ -152,6 +212,13 @@ namespace models {
         float guided_sigma;  // color-distance sigma for the guided upsample
         std::string model_name;  // local file stem; engine cached as <model_name>.engine
         std::string model_url;  // where to download the onnx if absent
+        int input_rank;  // model input rank: 4 = [1,3,H,W] (DA-V2), 5 = [1,1,3,H,W] (DA-V3)
+        uint32_t output_transform;  // applied to raw model output before normalization: 0=identity, 1=shifted reciprocal 1/(depth+depth_shift) (DA-V3 depth->disparity)
+        float depth_shift;  // shift in the DA-V3 disparity transform (bounds the near spike; foreground-scale knob)
+        bool fixed_shape;  // ONNX has static input dims; skip runtime setInputShape (dims are baked)
+        bool dynamic_width;  // ONNX height is baked (fixed_h) but width is dynamic; pin height, set width from aspect
+        int fixed_h;         // baked model input height for dynamic_width (e.g. 336); 0 otherwise
+        std::string output_tensor_name;  // depth output tensor bound for inference
 
         // Cadence: measure the video frame rate from the call period and derive how many
         // frames to skip between depth inferences so depth refreshes near depth_fps.
@@ -221,22 +288,33 @@ namespace models {
             return SUCCEEDED(device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &out_cs));
         }
 
-        impl(Microsoft::WRL::ComPtr<ID3D11Device> d, Microsoft::WRL::ComPtr<ID3D11DeviceContext> c, const std::filesystem::path& assets_dir, const config::video_t::sbs_t& cfg)
+        impl(Microsoft::WRL::ComPtr<ID3D11Device> d, Microsoft::WRL::ComPtr<ID3D11DeviceContext> c, const std::filesystem::path& assets_dir, const config::video_t::sbs_t& cfg, const config::depth_model_info& model)
             : device(d), context(c), ema_alpha((float)cfg.ema),
               depth_short_side(std::max(196, cfg.depth_short_side)), max_aspect(std::max(1.0f, (float)cfg.depth_max_aspect)),
               minmax_alpha((float)cfg.minmax_ema),
               depth_fps((float)cfg.depth_fps),
               guided_upsample(cfg.guided_upsample), guided_sigma(std::max(0.01f, (float)cfg.guided_sigma)),
-              model_name(cfg.depth_model), model_url(cfg.depth_model_url)
+              model_name(model.name), model_url(model.url),
+              input_rank(model.input_rank), output_transform((uint32_t)model.output_transform),
+              depth_shift(std::max(0.001f, (float)cfg.depth_shift)),
+              fixed_shape(model.fixed_shape),
+              dynamic_width(model.dynamic_width), fixed_h(model.fixed_h),
+              output_tensor_name(model.output_tensor)
         {
-            auto model_path = ensure_model_available(assets_dir, model_name, model_url);
+            // Per-model depth-rate override (heavier models that can't hold the global rate);
+            // 0 = use the config depth_fps.
+            if (model.depth_fps_override > 0.0) {
+                depth_fps = (float) model.depth_fps_override;
+            }
+            const std::string engine_name = engine_filename(model);
+            auto model_path = ensure_model_available(assets_dir, model_name, model_url, engine_name);
             if (model_path.empty()) {
                 BOOST_LOG(error) << "Depth estimator failed: No model available.";
                 return;
             }
             if (model_path.extension() == ".onnx") {
-                precompile_tensorrt_engine(assets_dir, model_name, model_url);
-                model_path = ensure_model_available(assets_dir, model_name, model_url);
+                precompile_tensorrt_engine(assets_dir, model);
+                model_path = ensure_model_available(assets_dir, model_name, model_url, engine_name);
             }
 
             if (model_path.extension() != ".engine") {
@@ -261,36 +339,32 @@ namespace models {
                 }
             }
 
+            {  // Scope this lock to the g_engines/g_runtime access only: it MUST be released before
+               // warmup_inference() at the end of the ctor (which re-locks g_trt_mutex) -- a
+               // non-recursive std::mutex would otherwise self-deadlock and hang construction.
             std::lock_guard<std::mutex> lock(g_trt_mutex);
-            // The runtime/engine (and the pooled execution contexts, which belong to the engine)
-            // are process-lifetime singletons keyed to the FIRST model loaded. A different
-            // sbs_3d_depth_model cannot take effect without a full process restart -- make that
-            // loud instead of silently serving depth from the old model.
-            static std::string g_engine_model;  // guarded by g_trt_mutex
+            // Load (once) the engine for THIS model into its own slot. Different models coexist;
+            // switching models never reuses a stale engine and never needs a restart.
+            auto& slot = g_engines[model_name];
             if (!g_runtime) {
                 g_runtime = nvinfer1::createInferRuntime(gLogger);
-                if (g_runtime) {
-                    std::ifstream file(model_path, std::ios::binary);
-                    std::vector<char> trtModelStream((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-                    g_engine = g_runtime->deserializeCudaEngine(trtModelStream.data(), trtModelStream.size());
-                    g_engine_model = model_name;
-                }
-            } else if (g_engine_model != model_name) {
-                BOOST_LOG(error) << "Depth model changed to '" << model_name << "' but the TensorRT engine for '"
-                                 << g_engine_model << "' is already loaded; restart Apollo to apply the new model.";
+            }
+            if (g_runtime && !slot.engine) {
+                std::ifstream file(model_path, std::ios::binary);
+                std::vector<char> trtModelStream((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+                slot.engine = g_runtime->deserializeCudaEngine(trtModelStream.data(), trtModelStream.size());
             }
 
             runtime = g_runtime;
-            engine = g_engine;
+            engine = slot.engine;
 
-            // Validate the engine's I/O once against what the D3D pipeline binds: FP32 tensors
-            // named "pixel_values" (input) and "predicted_depth" (output). The model is
+            // Validate the engine's I/O once per model against what the D3D pipeline binds: FP32
+            // tensors named "pixel_values" (input) and "predicted_depth" (output). The model is
             // user-selectable (sbs_3d_depth_model_url), so a model with FP16/other I/O dtypes or
             // different tensor names would otherwise bind mismatched buffers and silently produce
             // garbage depth. We log the actual bindings and warn loudly on any mismatch.
-            static bool io_validated = false;  // guarded by g_trt_mutex (held here)
-            if (engine && !io_validated) {
-                io_validated = true;
+            if (engine && !slot.io_validated) {
+                slot.io_validated = true;
                 auto dtype_name = [](nvinfer1::DataType t) -> const char* {
                     switch (t) {
                         case nvinfer1::DataType::kFLOAT: return "FP32";
@@ -326,10 +400,11 @@ namespace models {
 
             if (engine) {
                 // Reuse a pooled context if one is free; otherwise pay the one-time cost of
-                // creating one. Contexts are returned to the pool (not destroyed) on teardown.
-                if (!g_context_pool.empty()) {
-                    exec_context = g_context_pool.back();
-                    g_context_pool.pop_back();
+                // creating one. Contexts are returned to this model's pool (not destroyed) on
+                // teardown. Pool is per-engine: a context is bound to the engine that made it.
+                if (!slot.context_pool.empty()) {
+                    exec_context = slot.context_pool.back();
+                    slot.context_pool.pop_back();
                     BOOST_LOG(info) << "Reusing pooled TensorRT execution context.";
                 } else {
                     BOOST_LOG(info) << "Creating TensorRT execution context (allocates device scratch; may take several seconds)...";
@@ -337,7 +412,8 @@ namespace models {
                 }
             }
             trt_mutex = &g_trt_mutex;
-            
+            }  // release g_trt_mutex before the shader/buffer setup and warmup below
+
             // Compile Shaders
             compile_shader(assets_dir / "shaders" / "directx" / "rgb_to_nchw_cs.hlsl", rgb_to_nchw_cs);
             compile_shader(assets_dir / "shaders" / "directx" / "buffer_to_tex_cs.hlsl", buffer_to_tex_cs);
@@ -401,6 +477,66 @@ namespace models {
             // Constant buffers are created in ensure_cbuffers() once the model resolution is
             // known: every field is fixed for the session, so they are built once (immutable)
             // instead of being re-mapped on the encode thread every frame.
+
+            // Warm up here so TensorRT's CUDA lazy kernel load / JIT (~20 s on the big models)
+            // happens during construction -- which ensure_depth_estimator() runs on a background
+            // thread -- rather than stalling the first real convert() on the encode thread and
+            // freezing the stream right after a host-SBS / model switch.
+            warmup_inference();
+        }
+
+        // Run one throwaway inference at the engine's optimization shape so TensorRT loads its
+        // CUDA modules now. The bulk of the "first inference" cost is module loading, which is
+        // shape-independent, so a warmup at the OPT shape spares the first real frame the stall
+        // even if its resolution differs. Uses its own scratch device buffers because the per-
+        // frame D3D-interop buffers aren't allocated until convert() knows the frame resolution.
+        // Pure CUDA + TensorRT (no D3D immediate context), so it's safe on the construction thread.
+        void warmup_inference() {
+            if (!exec_context || !cu_stream) return;
+            auto& cuda = cuda_driver_api::get();
+            if (!cuda.is_valid()) return;
+            if (cuda_ctx) cuda.cuCtxSetCurrent(cuda_ctx);
+
+            int h, w;
+            if (dynamic_width) {
+                h = fixed_h;
+                w = std::max(14, (int)std::round(fixed_h * 2.37 / 14.0) * 14);
+            } else if (fixed_shape) {
+                return;  // baked shape; querying engine dims here is ABI-unsafe and none ship today
+            } else {
+                h = w = 518;  // square OPT profile point shared by the DA-V2/V3 dynamic engines
+            }
+
+            const size_t in_elems = (size_t) 3 * h * w;  // batch/view dims are 1 for rank-4 and rank-5
+            const size_t out_elems = (size_t) h * w;
+            CUdeviceptr d_in = 0, d_out = 0;
+            if (cuda.cuMemAlloc(&d_in, in_elems * sizeof(float)) != 0) return;
+            if (cuda.cuMemAlloc(&d_out, out_elems * sizeof(float)) != 0) {
+                cuda.cuMemFree(d_in);
+                return;
+            }
+
+            nvinfer1::Dims in_dims {};
+            if (input_rank == 5) {
+                in_dims.nbDims = 5;
+                in_dims.d[0] = 1; in_dims.d[1] = 1; in_dims.d[2] = 3; in_dims.d[3] = h; in_dims.d[4] = w;
+            } else {
+                in_dims.nbDims = 4;
+                in_dims.d[0] = 1; in_dims.d[1] = 3; in_dims.d[2] = h; in_dims.d[3] = w;
+            }
+            exec_context->setInputShape("pixel_values", in_dims);
+            exec_context->setTensorAddress("pixel_values", (void*) d_in);
+            exec_context->setTensorAddress(output_tensor_name.c_str(), (void*) d_out);
+            bool ok;
+            {
+                std::lock_guard<std::mutex> lock(*trt_mutex);
+                ok = exec_context->enqueueV3(cu_stream);
+            }
+            if (ok && cuda.cuStreamSynchronize) cuda.cuStreamSynchronize(cu_stream);
+            cuda.cuMemFree(d_in);
+            cuda.cuMemFree(d_out);
+            BOOST_LOG(info) << "Depth estimator warmup inference complete (" << w << 'x' << h
+                            << (ok ? ")." : "); enqueue failed, first frame may stall.");
         }
 
         ~impl() {
@@ -421,7 +557,7 @@ namespace models {
             // instance's tensor bindings, making the context safe for another instance to reuse.
             if (exec_context) {
                 std::lock_guard<std::mutex> lock(g_trt_mutex);
-                g_context_pool.push_back(exec_context);
+                g_engines[model_name].context_pool.push_back(exec_context);
                 exec_context = nullptr;
             }
             // TRT runtime/engine are cached globally, do not destroy them here.
@@ -449,7 +585,7 @@ namespace models {
             cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
             // Shared depth-pass constants: {target_w, target_h, is_hdr, ema_alpha,
-            // minmax_alpha, reduce_threads, pad, pad} (see buffer_to_tex_cs.hlsl).
+            // minmax_alpha, reduce_threads, output_transform, depth_shift} (see buffer_to_tex_cs.hlsl).
             uint32_t cb[8] = {};
             float* cbf = (float*)cb;
             cb[0] = (uint32_t)target_w;
@@ -458,6 +594,8 @@ namespace models {
             cbf[3] = ema_alpha;
             cbf[4] = minmax_alpha;
             cb[5] = reduce_groups * 256u;  // total threads for the reduction grid-stride
+            cb[6] = output_transform;  // 0=identity (DA-V2 disparity), 1=shifted reciprocal (DA-V3 depth)
+            cbf[7] = depth_shift;  // shift in 1/(depth + depth_shift) when output_transform==1
             D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
             cbuffer.Reset();
             device->CreateBuffer(&cb_desc, &sd, &cbuffer);
@@ -605,31 +743,43 @@ namespace models {
                     return nullptr;
                 }
                 float aspect_ratio = (float)input_desc.Width / (float)input_desc.Height;
-                // Short-side budget (iw3-style): pin the short side so vertical depth detail
-                // is constant regardless of aspect ratio; the long side grows with aspect,
-                // capped by max_aspect to bound cost.
-                int short_side = std::max(14, (int)std::round((float)depth_short_side / 14.0f) * 14);
-                if (aspect_ratio >= 1.0f) {
-                    target_h = short_side;
-                    target_w = (int)std::round(short_side * std::min(aspect_ratio, max_aspect));
+                if (dynamic_width) {
+                    // Height is baked into the engine (fixed_h); only the width tracks the source
+                    // aspect. The engine's width profile spans [fixed_h .. fixed_h*4] (1:1 .. 4:1),
+                    // so this covers every landscape aspect (4:3 -> 16:9 -> ultrawide/32:9) with one
+                    // engine. Height must NOT be rescaled (that would break the baked binding), so the
+                    // generic short-side/native-downscale path below is deliberately bypassed.
+                    // Portrait (aspect < 1) is not a streaming case; it clamps to 1:1 (square).
+                    target_h = fixed_h;
+                    float a = std::min(std::max(aspect_ratio, 1.0f), std::min(max_aspect, 4.0f));
+                    target_w = std::max(14, (int)std::round(fixed_h * a / 14.0f) * 14);
                 } else {
-                    target_w = short_side;
-                    target_h = (int)std::round(short_side * std::min(1.0f / aspect_ratio, max_aspect));
-                }
+                    // Short-side budget (iw3-style): pin the short side so vertical depth detail
+                    // is constant regardless of aspect ratio; the long side grows with aspect,
+                    // capped by max_aspect to bound cost.
+                    int short_side = std::max(14, (int)std::round((float)depth_short_side / 14.0f) * 14);
+                    if (aspect_ratio >= 1.0f) {
+                        target_h = short_side;
+                        target_w = (int)std::round(short_side * std::min(aspect_ratio, max_aspect));
+                    } else {
+                        target_w = short_side;
+                        target_h = (int)std::round(short_side * std::min(1.0f / aspect_ratio, max_aspect));
+                    }
 
-                target_h = std::max(14, (int)std::round((float)target_h / 14.0f) * 14);
-                target_w = std::max(14, (int)std::round((float)target_w / 14.0f) * 14);
+                    target_h = std::max(14, (int)std::round((float)target_h / 14.0f) * 14);
+                    target_w = std::max(14, (int)std::round((float)target_w / 14.0f) * 14);
 
-                // Cap the model input aspect-preserving against two limits: the TensorRT
-                // engine's MAX profile (1008), and the frame's native resolution -- never
-                // upscale a small input up to the budget (matches iw3's limit_resolution).
-                // Scaling both axes by a single factor keeps the depth undistorted.
-                int max_w = std::min(1008, (int)input_desc.Width);
-                int max_h = std::min(1008, (int)input_desc.Height);
-                if (target_w > max_w || target_h > max_h) {
-                    float s = std::min((float)max_w / (float)target_w, (float)max_h / (float)target_h);
-                    target_w = std::max(14, (int)std::round((float)target_w * s / 14.0f) * 14);
-                    target_h = std::max(14, (int)std::round((float)target_h * s / 14.0f) * 14);
+                    // Cap the model input aspect-preserving against two limits: the TensorRT
+                    // engine's MAX profile (1008), and the frame's native resolution -- never
+                    // upscale a small input up to the budget (matches iw3's limit_resolution).
+                    // Scaling both axes by a single factor keeps the depth undistorted.
+                    int max_w = std::min(1008, (int)input_desc.Width);
+                    int max_h = std::min(1008, (int)input_desc.Height);
+                    if (target_w > max_w || target_h > max_h) {
+                        float s = std::min((float)max_w / (float)target_w, (float)max_h / (float)target_h);
+                        target_w = std::max(14, (int)std::round((float)target_w * s / 14.0f) * 14);
+                        target_h = std::max(14, (int)std::round((float)target_h * s / 14.0f) * 14);
+                    }
                 }
 
                 // Threads for the min/max reduction; grid-stride handles any element count.
@@ -806,12 +956,24 @@ namespace models {
             if (!d_in || !d_out) {
                 BOOST_LOG(error) << "Failed to get mapped pointer for TensorRT.";
             } else {
-                if (!exec_context->setInputShape("pixel_values", nvinfer1::Dims4{1, 3, target_h, target_w})) {
-                    BOOST_LOG(error) << "TensorRT setInputShape failed for " << target_w << "x" << target_h
-                                     << " (outside the engine's optimization profile?)";
+                // Fixed-shape engines have their input dims baked in; setInputShape is unnecessary
+                // (and target_w/target_h MUST equal the export resolution or the bindings mismatch).
+                if (!fixed_shape) {
+                    nvinfer1::Dims in_dims {};
+                    if (input_rank == 5) {
+                        in_dims.nbDims = 5;
+                        in_dims.d[0] = 1; in_dims.d[1] = 1; in_dims.d[2] = 3; in_dims.d[3] = target_h; in_dims.d[4] = target_w;
+                    } else {
+                        in_dims.nbDims = 4;
+                        in_dims.d[0] = 1; in_dims.d[1] = 3; in_dims.d[2] = target_h; in_dims.d[3] = target_w;
+                    }
+                    if (!exec_context->setInputShape("pixel_values", in_dims)) {
+                        BOOST_LOG(error) << "TensorRT setInputShape failed for " << target_w << "x" << target_h
+                                         << " (outside the engine's optimization profile?)";
+                    }
                 }
                 exec_context->setTensorAddress("pixel_values", (void*)d_in);
-                exec_context->setTensorAddress("predicted_depth", (void*)d_out);
+                exec_context->setTensorAddress(output_tensor_name.c_str(), (void*)d_out);
                 {
                     // Serialize TensorRT async enqueue to avoid driver-level concurrent execution faults
                     std::lock_guard<std::mutex> lock(*trt_mutex);
@@ -833,8 +995,9 @@ namespace models {
     video_depth_estimator::video_depth_estimator(Microsoft::WRL::ComPtr<ID3D11Device> device,
                           Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
                           const std::filesystem::path& assets_dir,
-                          const config::video_t::sbs_t& cfg)
-        : pimpl(std::make_unique<impl>(device, context, assets_dir, cfg)) {}
+                          const config::video_t::sbs_t& cfg,
+                          const config::depth_model_info& model)
+        : pimpl(std::make_unique<impl>(device, context, assets_dir, cfg, model)) {}
 
     video_depth_estimator::~video_depth_estimator() = default;
 

@@ -7,6 +7,7 @@
 #include <csignal>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 
 // local includes
 #include "confighttp.h"
@@ -176,10 +177,40 @@ int main(int argc, char *argv[]) {
   // Log publisher metadata
   log_publisher_data();
 
-  // Precompile TensorRT engine in the background
-  std::thread([model_name = config::video.sbs.depth_model, model_url = config::video.sbs.depth_model_url]() {
+  // Precompile TensorRT engine(s) in the background: the configured (active) depth model, plus
+  // any models listed in sbs_3d_prebuild_models, so switching to them mid-stream is instant
+  // instead of triggering a first-use build (which streams flat for a minute or few). The builds
+  // run sequentially (precompile serializes internally); each is a no-op once its engine exists.
+  std::thread([active = video::active_depth_model(), prebuild = config::video.sbs.prebuild_models]() {
       BOOST_LOG(info) << "Triggering background TensorRT engine precompilation..."sv;
-      models::precompile_tensorrt_engine(SUNSHINE_ASSETS_DIR, model_name, model_url);
+      models::precompile_tensorrt_engine(SUNSHINE_ASSETS_DIR, active);
+
+      const auto &registry = config::depth_model_registry();
+      std::stringstream ss(prebuild);
+      std::string name;
+      while (std::getline(ss, name, ',')) {
+          auto b = name.find_first_not_of(" \t");
+          auto e = name.find_last_not_of(" \t");
+          if (b == std::string::npos) {
+              continue;  // blank entry
+          }
+          name = name.substr(b, e - b + 1);
+          if (name == active.name) {
+              continue;  // built above
+          }
+          bool found = false;
+          for (const auto &m : registry) {
+              if (m.name == name) {
+                  BOOST_LOG(info) << "Prebuilding depth-model engine for '"sv << name << "'..."sv;
+                  models::precompile_tensorrt_engine(SUNSHINE_ASSETS_DIR, m);
+                  found = true;
+                  break;
+              }
+          }
+          if (!found) {
+              BOOST_LOG(warning) << "sbs_3d_prebuild_models: '"sv << name << "' is not a known depth model; skipping."sv;
+          }
+      }
   }).detach();
 
   // Log modified_config_settings

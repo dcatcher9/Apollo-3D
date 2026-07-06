@@ -19,6 +19,30 @@ namespace config {
   // track modified config options
   inline std::unordered_map<std::string, std::string> modified_config_settings;
 
+  // A selectable depth model for the SBS 3D pipeline. The built-in roster
+  // (depth_model_registry()) is indexed by a stable id used as the wire value of the
+  // 0x3005 "Set Depth Model" control message, so the client can switch models mid-stream.
+  // The per-model fields capture how each model differs from the current DA-V2-small
+  // default; the ones past name/url are consumed by the depth estimator in Phase C
+  // (DA-V3: rank-5 input, inverted depth, confidence output).
+  struct depth_model_info {
+    std::string name;  ///< File stem: <name>.onnx / <name>.engine in the assets dir (also the g_engines key).
+    std::string url;  ///< Download source for <name>.onnx if absent. Empty = local-only (must be pre-staged, e.g. locally fp16-converted DA-V3).
+    int input_rank = 4;  ///< ONNX pixel_values rank. 4 = [1,3,H,W] (DA-V2); 5 = [1,1,3,H,W] (DA-V3 any-view). Rank-5 engine support lands in Phase C.
+    int patch = 14;  ///< Patch size; inference dims are rounded to a multiple of this.
+    int output_transform = 0;  ///< Applied to raw model output before normalization. 0 = identity (DA-V2 disparity); 1 = shifted reciprocal disparity = 1/(depth + sbs.depth_shift) (DA-V3). The shift bounds the near-pixel spike (depth->0 stays finite), so no outliers hijack the min/max -- the clean fix vs the old 1/depth + robust-clip band-aids (iw3's approach).
+    bool keep_confidence = false;  ///< Keep the model's confidence output (DA-V3) for confidence-guided warp (Phase C4).
+    bool fixed_shape = false;  ///< The ONNX has a FIXED input resolution (no dynamic H/W) — build the engine WITHOUT an optimization profile and skip runtime setInputShape. Needed for models whose dynamic-shape export bakes resolution-dependent shape math. The runtime depth resolution MUST equal the export resolution. Superseded for DA3MONO by dynamic_width.
+    bool dynamic_width = false;  ///< The ONNX has a FIXED input HEIGHT (baked short side) but DYNAMIC width — build a height-pinned, width-range optimization profile and set only the width at runtime. DA3MONO-LARGE uses this: its DINOv3 pos-embed export bakes the patch grid, but with height locked at fixed_h only the width patch count varies, which exports cleanly. Covers every landscape aspect (16:9 .. ultrawide) with ONE engine. Mutually exclusive with fixed_shape.
+    int fixed_h = 0;  ///< Baked input height (patch multiple) for dynamic_width models, e.g. 336. Runtime depth height is pinned to this; only the width tracks the source aspect.
+    std::string input_tensor = "pixel_values";  ///< Input tensor name bound by the pipeline.
+    std::string output_tensor = "predicted_depth";  ///< Depth output tensor name bound by the pipeline.
+    double depth_fps_override = 0.0;  ///< Per-model target depth fps; 0 = use sbs.depth_fps. For heavier models that can't hold the global rate.
+  };
+
+  /// Built-in depth-model roster. Index = the 0x3005 wire id. Stable ordering.
+  const std::vector<depth_model_info> &depth_model_registry();
+
   struct video_t {
     bool headless_mode;
     bool limit_framerate;
@@ -165,6 +189,8 @@ namespace config {
       double border_fade = 0.02;  ///< Ramp parallax to zero within this fraction of the left/right frame edges to avoid stereo "window violations". 0 = off; ~0.02-0.05 typical.
       std::string depth_model = "depth_anything_v2_fp16";  ///< Local name/stem for the depth model files (<name>.onnx / <name>.engine). Identifies the model so different models coexist, each with its own cached engine.
       std::string depth_model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< URL to download the depth model ONNX from if <depth_model>.onnx is absent. Point this (and depth_model) elsewhere to use a different model.
+      double depth_shift = 0.2;  ///< Shift in the DA-V3 disparity transform 1/(depth + depth_shift) (models with output_transform=1). Bounds the near spike; also the foreground-scale/pop knob (smaller = more pop). iw3 default 0.2. Ignored by DA-V2 (output_transform=0).
+      std::string prebuild_models = "";  ///< Comma-separated depth-model names (registry stems, e.g. "depth_anything_v3_small_fp16,depth_anything_v3_base_fp16") to build TensorRT engines for AT STARTUP, in addition to the active model. Makes a mid-stream switch to them instant instead of a first-use build (which streams flat while building). Empty = only the active model.
       int max_encode_width = 8192;  ///< Max encoder output width for host SBS. SBS doubles the client width to 2W; if 2W exceeds this, the host caps the packed frame to this width (scaling height to keep the per-eye aspect) rather than failing NVENC create. NVENC HEVC/AV1 = 8192, H.264 = 4096.
       double depth_floor = 0.25;  ///< Far-depth compression in the reprojection (d' = floor + (1-floor)*d). Narrows the disocclusion band at foreground silhouettes (its width scales with the near-far parallax gap). 0 = off; ~0.2-0.4 typical.
       bool guided_upsample = true;  ///< Color-guided (joint-bilateral) depth upsample: snaps the depth model's soft silhouettes to the frame's color edges at 2x depth res. Fixes bent/smeared thin-object contours.

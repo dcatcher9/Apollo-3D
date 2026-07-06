@@ -12,12 +12,21 @@ namespace models {
         return fwrite(ptr, size, nmemb, stream);
     }
 
-    std::filesystem::path ensure_model_available(const std::filesystem::path& assets_dir, const std::string& model_name, const std::string& model_url) {
+    std::string engine_filename(const config::depth_model_info& model) {
+        std::string tag;
+        if (model.input_rank != 4) tag += ".r" + std::to_string(model.input_rank);
+        if (model.keep_confidence) tag += "c";
+        if (model.dynamic_width) tag += "w";  // height-pinned width-range profile; distinct from a fixed-shape engine
+        return model.name + tag + ".engine";
+    }
+
+    std::filesystem::path ensure_model_available(const std::filesystem::path& assets_dir, const std::string& model_name, const std::string& model_url, const std::string& engine_name) {
         // Files are named after the model (not the URL) so each model gets its own cached
         // engine: switching sbs_3d_depth_model never reuses a stale engine, and different
         // models coexist. To use another model, point sbs_3d_depth_model_url at its ONNX.
+        // The engine is looked up under its recipe-specific name (see engine_filename()).
         auto onnx_path = assets_dir / (model_name + ".onnx");
-        auto engine_path = assets_dir / (model_name + ".engine");
+        auto engine_path = assets_dir / (engine_name.empty() ? (model_name + ".engine") : engine_name);
 
         if (std::filesystem::exists(engine_path)) {
             return engine_path;

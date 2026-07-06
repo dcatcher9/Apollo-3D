@@ -6,6 +6,8 @@
 #include <atomic>
 #include <bitset>
 #include <list>
+#include <mutex>
+#include <optional>
 #include <thread>
 
 // lib includes
@@ -45,6 +47,60 @@ namespace video {
   // Debug frame-dump request flag (declared in video.h); set by the 0x3004 control message
   // handler in stream.cpp, consumed by display_vram's SBS convert().
   std::atomic<bool> sbs_debug_dump_pending{false};
+
+  // SBS depth-engine phase (declared in video.h): 0 = idle, 1 = loading (engine build/load/warmup),
+  // 2 = ready. Set by display_vram (loading/ready) and the 0x3003-OFF handler (idle); polled by
+  // stream.cpp's control thread, which pushes it to the client (0x3006) so it can show a "loading
+  // depth model" indicator during the one-time-per-model spin-up.
+  std::atomic<int> depth_engine_phase{0};
+
+  // Runtime-selected depth model (see video.h). Follows config::video.sbs.depth_model until a
+  // 0x3005 control message explicitly overrides it. The override is only set by
+  // set_active_depth_model(); until then active_depth_model() re-reads config on every call, so a
+  // config reload (which does NOT restart the process) is honoured rather than latched at startup.
+  static std::mutex active_depth_model_mutex;
+  static std::optional<config::depth_model_info> active_depth_model_override;
+
+  // Resolve the configured model name against the registry, else synthesize a custom entry from
+  // the sbs_3d_depth_model/_url keys (the escape hatch). Caller holds active_depth_model_mutex.
+  static config::depth_model_info resolve_configured_depth_model() {
+    for (const auto &m : config::depth_model_registry()) {
+      if (m.name == config::video.sbs.depth_model) {
+        return m;
+      }
+    }
+    config::depth_model_info custom;
+    custom.name = config::video.sbs.depth_model;
+    custom.url = config::video.sbs.depth_model_url;
+    return custom;
+  }
+
+  config::depth_model_info active_depth_model() {
+    std::lock_guard<std::mutex> lock(active_depth_model_mutex);
+    // A runtime (0x3005) selection wins; otherwise follow the current config each call.
+    return active_depth_model_override ? *active_depth_model_override : resolve_configured_depth_model();
+  }
+
+  bool set_active_depth_model(int registry_index) {
+    const auto &reg = config::depth_model_registry();
+    if (registry_index < 0 || registry_index >= (int) reg.size()) {
+      return false;
+    }
+    std::lock_guard<std::mutex> lock(active_depth_model_mutex);
+    active_depth_model_override = reg[registry_index];
+    return true;
+  }
+
+  int active_depth_model_index() {
+    const auto active = active_depth_model();
+    const auto &reg = config::depth_model_registry();
+    for (int i = 0; i < (int) reg.size(); i++) {
+      if (reg[i].name == active.name) {
+        return i;
+      }
+    }
+    return 0xFF;  // custom/unknown model (not in the registry)
+  }
 
   /**
    * @brief Check if we can allow probing for the encoders.
@@ -1961,6 +2017,9 @@ namespace video {
     // A pending host SBS mode change means we must rebuild the encode session at the new
     // resolution. We only peek here; capture_async pops it and applies the new mode.
     auto sbs_mode_event = mail->event<int>(mail::sbs_mode);
+    // A depth-model switch (0x3005) also forces a rebuild so the recreated estimator loads
+    // the new active model. Same peek-here / pop-in-capture_async contract as sbs_mode.
+    auto depth_model_reload_event = mail->event<bool>(mail::depth_model_reload);
 
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
@@ -1983,7 +2042,7 @@ namespace video {
       }
 
       while (true) {
-        if (shutdown_event->peek() || !images->running() || (reinit_event.peek()) || sbs_mode_event->peek()) {
+        if (shutdown_event->peek() || !images->running() || (reinit_event.peek()) || sbs_mode_event->peek() || depth_model_reload_event->peek()) {
           return;
         } else {
           std::this_thread::sleep_for(300ms);
@@ -1994,6 +2053,13 @@ namespace video {
     std::chrono::steady_clock::time_point encode_frame_timestamp;
     bool missing_frame_timestamp_warning_logged = false;
 
+    // Most recent real captured frame. On a session rebuild (host SBS toggle / depth model
+    // switch) the display and its capture session survive, so no new frame is delivered until
+    // the desktop actually changes; the fresh session would encode its dummy (black) prime at
+    // min-FPS until then. Re-queue this frame on rebuild so the next session starts with the
+    // current desktop instead.
+    std::shared_ptr<platf::img_t> last_img;
+
     while (true) {
       // Break out of the encoding loop if any of the following are true:
       // a) The stream is ending
@@ -2002,7 +2068,14 @@ namespace video {
       //
       // If we have to reinit before we have received any captured frames, we will encode
       // the blank dummy frame just to let Moonlight know that we're alive.
-      if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1) || sbs_mode_event->peek()) {
+      if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1) || sbs_mode_event->peek() || depth_model_reload_event->peek()) {
+        // Same-display session rebuild: hand the current desktop to the next session. (Not on
+        // reinit -- the display is recreated there and old images must not outlive it. Not when
+        // a frame is already queued -- raise() overwrites the slot and would replace newer with
+        // older.)
+        if (last_img && images->running() && !images->peek() && !shutdown_event->peek() && !reinit_event.peek() && (sbs_mode_event->peek() || depth_model_reload_event->peek())) {
+          images->raise(std::move(last_img));
+        }
         break;
       }
 
@@ -2028,6 +2101,7 @@ namespace video {
       // Encode at a minimum FPS to avoid image quality issues with static content
       if (!requested_idr_frame || images->peek()) {
         if (auto img = images->pop(max_frametime)) {
+          last_img = img;
           frame_timestamp = img->frame_timestamp;
           if (!frame_timestamp) {
             if (!missing_frame_timestamp_warning_logged) {
@@ -2403,6 +2477,7 @@ namespace video {
     // Host SBS toggle (0x3003 control message). The client-negotiated width is the "base"
     // width; when SBS is on we double it so the encoder emits a 2W x H side-by-side frame.
     auto sbs_mode_event = mail->event<int>(mail::sbs_mode);
+    auto depth_model_reload_event = mail->event<bool>(mail::depth_model_reload);
     const int base_width = config.width;
     int current_sbs_mode = config.sbs_mode;
 
@@ -2433,6 +2508,13 @@ namespace video {
         if (auto m = sbs_mode_event->pop(0ms)) {
           current_sbs_mode = *m;
         }
+      }
+
+      // Drain any depth-model reload requests (0x3005). The active model is read when the
+      // estimator is recreated below; we only need to clear the event so encode_run's peek
+      // doesn't immediately break the fresh session into an endless rebuild loop.
+      while (depth_model_reload_event->peek()) {
+        depth_model_reload_event->pop(0ms);
       }
 
       // Build the effective config for this encode session. SBS doubles the output width to
@@ -2508,6 +2590,11 @@ namespace video {
     void *channel_data
   ) {
     auto idr_events = mail->event<bool>(mail::idr);
+
+    // A new stream starts with no depth estimator; reset the (process-global) depth-engine phase
+    // so a stale value from a previous stream (e.g. one that ended mid-load, leaving phase at
+    // "loading") can't be pushed to this client as an indicator that never clears.
+    depth_engine_phase.store(0, std::memory_order_relaxed);
 
     idr_events->raise(true);
     if (chosen_encoder->flags & PARALLEL_ENCODING) {

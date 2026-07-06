@@ -8,6 +8,7 @@
 #include <atomic>
 
 // local includes
+#include "config.h"
 #include "input.h"
 #include "platform/common.h"
 #include "thread_safe.h"
@@ -70,6 +71,20 @@ namespace video {
     // When != SBS_OFF the encoder output width is doubled to carry the side-by-side frame.
     int sbs_mode = SBS_OFF;
   };
+
+  /* Runtime-selected depth model for the host SBS pipeline. Defaults to the configured
+     model (matched against config::depth_model_registry(), else synthesized from the
+     sbs_3d_depth_model/_url config keys). Switched live via the 0x3005 control message.
+     active_depth_model() returns a COPY because set_active_depth_model() can run
+     concurrently on the control thread. */
+  config::depth_model_info active_depth_model();
+  bool set_active_depth_model(int registry_index);
+  /** Registry index of the active depth model (0xFF if it's a custom/non-registry model). */
+  int active_depth_model_index();
+
+  /** SBS depth-engine phase pushed to the client (0x3006): 0 = idle, 1 = loading, 2 = ready.
+      Set by the depth pipeline (display_vram) + the SBS-off handler; read by the control thread. */
+  extern std::atomic<int> depth_engine_phase;
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
   platf::pix_fmt_e map_pix_fmt(AVPixelFormat fmt);

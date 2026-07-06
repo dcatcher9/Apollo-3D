@@ -3,7 +3,10 @@
  * @brief Definitions for handling video ram.
  */
 // standard includes
+#include <chrono>
 #include <cmath>
+#include <future>
+#include <memory>
 
 // platform includes
 #include <d3dcompiler.h>
@@ -28,6 +31,7 @@ extern "C" {
 #include "src/nvenc/nvenc_d3d11_on_cuda.h"
 #include "src/nvenc/nvenc_utils.h"
 #include "sbs_debug_dump.h"
+#include "src/model_manager.h"
 #include "src/video.h"
 #include "src/video_depth_estimator.h"
 
@@ -531,18 +535,52 @@ namespace platf::dxgi {
       this->color_matrix = std::move(color_matrix);
     }
 
-    // Create the depth estimator on demand (first SBS frame). Returns false on failure.
+    // Create the depth estimator on demand (first SBS frame). Returns true once it's ready.
+    // Construction (TensorRT context creation + a CUDA warmup inference) takes seconds and runs
+    // on a background thread; this call returns false and the pipeline streams flat SBS until the
+    // build completes, so a host-SBS / model switch never freezes the encode thread.
     bool ensure_depth_estimator() {
       if (depth_estimator) {
         return true;
       }
 
-      // Non-blocking gate: only construct once the TensorRT engine is on disk. Downloading
-      // the model / building the engine takes minutes, and this runs on the encode thread --
-      // blocking here would freeze the stream. main.cpp kicks off a background precompile at
-      // startup; until it finishes we stream flat (zero-parallax) SBS and keep polling.
+      // A failed build streams flat SBS for the rest of this encode device's life instead of
+      // re-kicking a doomed build every frame; a mode/model switch recreates the device and retries.
+      if (depth_estimator_failed) {
+        return false;
+      }
+
+      // A build is already in flight: take the result once ready, otherwise keep streaming flat.
+      if (depth_estimator_building) {
+        if (depth_estimator_build.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+          depth_estimator_building = false;
+          try {
+            depth_estimator = depth_estimator_build.get();
+          } catch (const std::exception &e) {
+            // Don't let a background-build exception propagate on the encode thread (it would end
+            // the stream); log it, clear the client's "loading" indicator, and stream flat.
+            BOOST_LOG(error) << "Depth estimator build failed: "sv << e.what();
+            depth_estimator_failed = true;
+            ::video::depth_engine_phase.store(0, std::memory_order_relaxed);
+            return false;
+          }
+          if (depth_estimator) {
+            BOOST_LOG(info) << "Depth estimator ready; host SBS depth is now live."sv;
+            ::video::depth_engine_phase.store(2, std::memory_order_relaxed);  // ready -> client hides indicator
+          }
+          return (bool) depth_estimator;
+        }
+        return false;
+      }
+
+      // Non-blocking gate: only build once the TensorRT engine is on disk. Building the engine
+      // takes minutes; main.cpp kicks off a background precompile at startup, and until it exists
+      // we stream flat (zero-parallax) SBS and keep polling. Resolve the runtime-selected model
+      // (switchable mid-stream via 0x3005); a model switch recreates this encode device, so the
+      // next SBS frame lands here and loads the newly active model's engine.
+      auto active = ::video::active_depth_model();
       std::error_code ec;
-      auto engine_path = std::filesystem::path(SUNSHINE_ASSETS_DIR) / (config::video.sbs.depth_model + ".engine");
+      auto engine_path = std::filesystem::path(SUNSHINE_ASSETS_DIR) / models::engine_filename(active);
       if (!std::filesystem::exists(engine_path, ec)) {
         if (engine_poll_counter++ % 1800 == 0) {  // ~every 20 s at 90 fps
           BOOST_LOG(warning) << "Host SBS requested but the TensorRT engine ("sv << engine_path.string()
@@ -551,14 +589,25 @@ namespace platf::dxgi {
         return false;
       }
 
-      BOOST_LOG(info) << "Host SBS enabled; loading depth model \""sv << config::video.sbs.depth_model << "\"..."sv;
-      depth_estimator = std::make_unique<models::video_depth_estimator>(
-          Microsoft::WRL::ComPtr<ID3D11Device>(device.get()),
-          Microsoft::WRL::ComPtr<ID3D11DeviceContext>(device_ctx.get()),
-          std::filesystem::path(SUNSHINE_ASSETS_DIR),
-          config::video.sbs
-      );
-      return (bool) depth_estimator;
+      // Kick construction on a background thread. The D3D device/context are free-threaded for the
+      // resource creation the constructor does (it makes no immediate-context calls), and the ComPtr
+      // wrap AddRefs them so they outlive this device if needed. The raw pointers are safe because
+      // the future joins in this object's destructor before device/device_ctx are torn down.
+      BOOST_LOG(info) << "Host SBS enabled; building depth model \""sv << active.name
+                      << "\" in the background (streaming flat until ready)..."sv;
+      auto *dev = device.get();
+      auto *ctx = device_ctx.get();
+      depth_estimator_build = std::async(std::launch::async, [dev, ctx, active]() {
+        return std::make_unique<models::video_depth_estimator>(
+            Microsoft::WRL::ComPtr<ID3D11Device>(dev),
+            Microsoft::WRL::ComPtr<ID3D11DeviceContext>(ctx),
+            std::filesystem::path(SUNSHINE_ASSETS_DIR),
+            config::video.sbs,
+            active);
+      });
+      depth_estimator_building = true;
+      ::video::depth_engine_phase.store(1, std::memory_order_relaxed);  // loading -> client shows indicator
+      return false;
     }
 
     int init_output(ID3D11Texture2D *frame_texture, int width, int height, int sbs_mode_param = ::video::SBS_OFF) {
@@ -1117,6 +1166,13 @@ namespace platf::dxgi {
     texture2d_t output_texture;
 
     std::unique_ptr<models::video_depth_estimator> depth_estimator;
+    // The estimator is built on a background thread (TensorRT context creation + CUDA warmup take
+    // seconds); ensure_depth_estimator() polls this and streams flat until it's ready, so a switch
+    // never blocks the encode thread. The future is declared after device/device_ctx so its
+    // destructor (which joins the build) runs while those are still alive.
+    std::future<std::unique_ptr<models::video_depth_estimator>> depth_estimator_build;
+    bool depth_estimator_building = false;
+    bool depth_estimator_failed = false;  ///< Build threw; stream flat, don't retry on this device.
     bool depth_warned = false;
     unsigned engine_poll_counter = 0;  ///< Rate-limits the "engine not built yet" warning.
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
