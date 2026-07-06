@@ -300,6 +300,7 @@ namespace models {
         bool warp_pending = false;  // inference enqueued; outputs not yet consumed
         bool depth_context_pooled = false;  // context reused from the pool (modules already loaded -> skip warmup)
         bool warp_context_pooled = false;  // ditto for the warp context
+        bool warp_resources_registered = false;  // CUDA-D3D interop registered (lazily, on the encode thread)
         bool warp_fields_valid = false;  // field textures hold a usable result
         bool warp_error_logged = false;
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> mlbw_input_cs;
@@ -487,16 +488,13 @@ namespace models {
                 device->CreateUnorderedAccessView(weight_tex[e].Get(), nullptr, &weight_tex_uav[e]);
                 device->CreateShaderResourceView(weight_tex[e].Get(), nullptr, &weight_tex_srv[e]);
             }
-            ID3D11Resource* to_register[6] = {
-                mlbw_in_buf[0].Get(), mlbw_in_buf[1].Get(),
-                mlbw_delta_buf[0].Get(), mlbw_weight_buf[0].Get(),
-                mlbw_delta_buf[1].Get(), mlbw_weight_buf[1].Get()
-            };
-            for (int i = 0; i < 6; i++) {
-                if (cuda.cuGraphicsD3D11RegisterResource(&cuda_warp_res[i], to_register[i], 0) != CUDA_SUCCESS) {
-                    return fail("cuGraphicsD3D11RegisterResource failed for a warp tensor");
-                }
-            }
+            // NOTE: the CUDA-D3D registration of these buffers is deliberately DEFERRED to the
+            // first enqueue_warp() on the ENCODE thread (see register_warp_resources). Doing
+            // cuGraphicsD3D11RegisterResource here -- on the background build thread while the
+            // encode thread is actively driving the same D3D device (flat SBS + NVENC) -- hung
+            // the constructor twice (driver-level CUDA/D3D lock inversion; sessions became
+            // unkillable). The depth pipeline's interop registration has always run on the
+            // encode thread inside estimate(), which is the proven-safe pattern.
 
             // Feature-plane constants (iw3 make_divergence_feature_value): the config warp is
             // parallax = (floor + (1-floor)*d - focal) * divergence, which in iw3 terms is
@@ -941,6 +939,25 @@ namespace models {
         void enqueue_warp(cuda_driver_api& cuda) {
             if (!learned_warp || !warp_context || warp_pending) {
                 return;
+            }
+
+            // Lazy CUDA-D3D registration on the ENCODE thread (this thread owns the device's
+            // immediate work; registering from the background build thread deadlocked in the
+            // driver -- see the note in setup_learned_warp). One-time, ~ms.
+            if (!warp_resources_registered) {
+                ID3D11Resource* to_register[6] = {
+                    mlbw_in_buf[0].Get(), mlbw_in_buf[1].Get(),
+                    mlbw_delta_buf[0].Get(), mlbw_weight_buf[0].Get(),
+                    mlbw_delta_buf[1].Get(), mlbw_weight_buf[1].Get()
+                };
+                for (int i = 0; i < 6; i++) {
+                    if (cuda.cuGraphicsD3D11RegisterResource(&cuda_warp_res[i], to_register[i], 0) != CUDA_SUCCESS) {
+                        BOOST_LOG(error) << "cuGraphicsD3D11RegisterResource failed for a warp tensor; learned warp disabled.";
+                        learned_warp = false;  // permanent fallback to the probe reprojection
+                        return;
+                    }
+                }
+                warp_resources_registered = true;
             }
 
             // Build both eyes' input tensors (right = horizontally flipped depth).
