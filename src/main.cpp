@@ -181,9 +181,34 @@ int main(int argc, char *argv[]) {
   // any models listed in sbs_3d_prebuild_models, so switching to them mid-stream is instant
   // instead of triggering a first-use build (which streams flat for a minute or few). The builds
   // run sequentially (precompile serializes internally); each is a no-op once its engine exists.
-  std::thread([active = video::active_depth_model(), prebuild = config::video.sbs.prebuild_models]() {
+  std::thread([active = video::active_depth_model(), prebuild = config::video.sbs.prebuild_models,
+               learned_warp = config::video.sbs.learned_warp, warp_model_url = config::video.sbs.warp_model_url,
+               warp_model = config::video.sbs.warp_model, warp_model_movie = config::video.sbs.warp_model_movie]() {
       BOOST_LOG(info) << "Triggering background TensorRT engine precompilation..."sv;
       models::precompile_tensorrt_engine(SUNSHINE_ASSETS_DIR, active);
+
+      if (learned_warp) {
+          // The MLBW warp engine(s): fixed-shape (no optimization profile), keep ALL outputs
+          // (delta + layer_weight -- empty output_tensor disables pruning). ~14 s first build.
+          // Build both the game (warp_model) and movie (warp_model_movie) variants so a mode
+          // switch never waits on a first-use build.
+          auto build_warp = [&](const std::string &stem) {
+              if (stem.empty()) {
+                  return;
+              }
+              config::depth_model_info warp_info;
+              warp_info.name = stem;
+              warp_info.url = warp_model_url;
+              warp_info.fixed_shape = true;
+              warp_info.output_tensor = "";
+              BOOST_LOG(info) << "Prebuilding learned-warp engine for '"sv << stem << "'..."sv;
+              models::precompile_tensorrt_engine(SUNSHINE_ASSETS_DIR, warp_info);
+          };
+          build_warp(warp_model);
+          if (warp_model_movie != warp_model) {
+              build_warp(warp_model_movie);
+          }
+      }
 
       const auto &registry = config::depth_model_registry();
       std::stringstream ss(prebuild);

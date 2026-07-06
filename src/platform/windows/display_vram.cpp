@@ -135,6 +135,7 @@ namespace platf::dxgi {
   blob_t cursor_vs_hlsl;
   blob_t sbs_reprojection_ps_hlsl;
   blob_t sbs_reprojection_vs_hlsl;
+  blob_t sbs_mlbw_composite_ps_hlsl;
 
   struct img_d3d_t: public platf::img_t {
     // These objects are owned by the display_t's ID3D11Device
@@ -457,35 +458,50 @@ namespace platf::dxgi {
 
           // Run depth estimator. On failure it returns null; we fall back to a zero-parallax
           // (flat) SBS frame rather than a globally-shifted one, and warn only once.
-          auto depth_srv = depth_estimator ?
+          auto est = depth_estimator ?
             depth_estimator->estimate_depth(img_ctx.encoder_input_res.get(), display->is_hdr()) :
-            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>();
-          if (!depth_srv && !depth_warned) {
+            models::estimate_result {};
+          if (!est.depth && !depth_warned) {
             BOOST_LOG(error) << "Depth estimation unavailable; streaming flat (zero-parallax) SBS."sv;
             depth_warned = true;
           }
 
+          // Learned warp (MLBW) composite when the estimator has warp fields; otherwise the
+          // probe-search reprojection (also the automatic fallback for the first frames
+          // before the MLBW engine has produced output).
+          const bool use_mlbw = est.delta_left && est.weight_left && est.delta_right && est.weight_right && sbs_mlbw_composite_ps;
+
           // Draw SBS intermediate
           device_ctx->OMSetRenderTargets(1, &sbs_intermediate_rtv, nullptr);
           device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
-          device_ctx->PSSetShader(sbs_reprojection_ps.get(), nullptr, 0);
+          device_ctx->PSSetShader(use_mlbw ? sbs_mlbw_composite_ps.get() : sbs_reprojection_ps.get(), nullptr, 0);
           device_ctx->RSSetViewports(1, &sbs_viewport);
           // Bind the sampler explicitly rather than relying on it persisting from init().
           device_ctx->PSSetSamplers(0, 1, &sampler_linear);
 
-          ID3D11ShaderResourceView* srvs[] = {img_ctx.encoder_input_res.get(), depth_srv.Get()};
-          device_ctx->PSSetShaderResources(0, 2, srvs);
-          ID3D11Buffer* sbs_cb[] = {depth_srv ? sbs_reprojection_cbuffer.get() : sbs_passthrough_cbuffer.get()};
-          device_ctx->PSSetConstantBuffers(2, 1, sbs_cb);
-          device_ctx->Draw(3, 0); // Fullscreen triangle
+          if (use_mlbw) {
+            ensure_mlbw_cbuffer(est.field_w, est.field_h, est.layers);
+            ID3D11ShaderResourceView* srvs[] = {img_ctx.encoder_input_res.get(),
+                                                est.delta_left.Get(), est.weight_left.Get(),
+                                                est.delta_right.Get(), est.weight_right.Get()};
+            device_ctx->PSSetShaderResources(0, 5, srvs);
+            ID3D11Buffer* sbs_cb[] = {sbs_mlbw_cbuffer.get()};
+            device_ctx->PSSetConstantBuffers(2, 1, sbs_cb);
+          } else {
+            ID3D11ShaderResourceView* srvs[] = {img_ctx.encoder_input_res.get(), est.depth.Get()};
+            device_ctx->PSSetShaderResources(0, 2, srvs);
+            ID3D11Buffer* sbs_cb[] = {est.depth ? sbs_reprojection_cbuffer.get() : sbs_passthrough_cbuffer.get()};
+            device_ctx->PSSetConstantBuffers(2, 1, sbs_cb);
+          }
+          device_ctx->Draw(3, 0);  // Fullscreen triangle
 
           // Unbind the Render Target so D3D11 doesn't nullify our SRV in the next pass!
           ID3D11RenderTargetView* null_rtvs[] = {nullptr};
           device_ctx->OMSetRenderTargets(1, null_rtvs, nullptr);
 
           // Clear shader resources
-          ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr};
-          device_ctx->PSSetShaderResources(0, 2, null_srvs);
+          ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+          device_ctx->PSSetShaderResources(0, 5, null_srvs);
 
           // Draw captured frame (now SBS)
           draw(sbs_intermediate_srv, out_Y_or_YUV_viewports, out_UV_viewport);
@@ -494,7 +510,7 @@ namespace platf::dxgi {
           // "dump.trigger" file, save this frame's 2D source, depth map and SBS result. See
           // sbs_debug_dump.h. No-op unless APOLLO_SBS_DUMP is set.
           sbs_dumper.maybe_dump(device.get(), device_ctx.get(),
-            img_ctx.encoder_input_res.get(), depth_srv.Get(), sbs_intermediate_srv.get());
+            img_ctx.encoder_input_res.get(), est.depth.Get(), sbs_intermediate_srv.get());
         } else {
           // Plain 2D: draw the captured frame straight into the output.
           draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewports, out_UV_viewport);
@@ -593,21 +609,64 @@ namespace platf::dxgi {
       // resource creation the constructor does (it makes no immediate-context calls), and the ComPtr
       // wrap AddRefs them so they outlive this device if needed. The raw pointers are safe because
       // the future joins in this object's destructor before device/device_ctx are torn down.
+      // Movie mode gets a heavier/sharper warp and a slower depth rate (its DA3MONO model is
+      // costly and film is slow content), since there is no game rendering competing for the GPU.
+      // Game keeps the light warp + full depth rate. Copy the config and apply the per-mode
+      // overrides, then hand the copy to the estimator (built on a background thread).
+      auto sbs_cfg = config::video.sbs;
+      if (sbs_mode == ::video::SBS_MOVIE) {
+        if (!sbs_cfg.warp_model_movie.empty()) {
+          sbs_cfg.warp_model = sbs_cfg.warp_model_movie;
+        }
+        if (sbs_cfg.movie_depth_fps > 0.0) {
+          sbs_cfg.depth_fps = sbs_cfg.movie_depth_fps;
+        }
+      }
       BOOST_LOG(info) << "Host SBS enabled; building depth model \""sv << active.name
                       << "\" in the background (streaming flat until ready)..."sv;
       auto *dev = device.get();
       auto *ctx = device_ctx.get();
-      depth_estimator_build = std::async(std::launch::async, [dev, ctx, active]() {
+      depth_estimator_build = std::async(std::launch::async, [dev, ctx, active, sbs_cfg]() {
         return std::make_unique<models::video_depth_estimator>(
             Microsoft::WRL::ComPtr<ID3D11Device>(dev),
             Microsoft::WRL::ComPtr<ID3D11DeviceContext>(ctx),
             std::filesystem::path(SUNSHINE_ASSETS_DIR),
-            config::video.sbs,
+            sbs_cfg,
             active);
       });
       depth_estimator_building = true;
       ::video::depth_engine_phase.store(1, std::memory_order_relaxed);  // loading -> client shows indicator
       return false;
+    }
+
+    // Build the MLBW composite constants once the field dims are known (they come with the
+    // first estimate result). See sbs_mlbw_composite_ps.hlsl.
+    void ensure_mlbw_cbuffer(int field_w, int field_h, int layers) {
+      if (sbs_mlbw_cbuffer && mlbw_cb_field_w == field_w && mlbw_cb_layers == layers) {
+        return;
+      }
+      mlbw_cb_field_w = field_w;
+      mlbw_cb_layers = layers;
+
+      const float eye_w = sbs_viewport.Width / 2.0f;
+      const float eye_h = sbs_viewport.Height;
+      // Source-u offset per delta unit (deltas are in field-grid pixels; grid_sample
+      // align_corners units). Validated against iw3's composite in tools/warpsim/mlbwsim.cpp.
+      const float delta_to_u = (eye_w - 1.0f) / (2.0f * (float) (field_w / 2 - 1)) / eye_w;
+      float params[8] {
+        eye_w,
+        eye_h,
+        (float) field_w,
+        (float) field_h,
+        delta_to_u,
+        (float) layers,
+        0.0f,
+        0.0f
+      };
+      sbs_mlbw_cbuffer = make_buffer(device.get(), params);
+      if (!sbs_mlbw_cbuffer) {
+        BOOST_LOG(error) << "Failed to create the MLBW composite constant buffer"sv;
+      }
     }
 
     int init_output(ID3D11Texture2D *frame_texture, int width, int height, int sbs_mode_param = ::video::SBS_OFF) {
@@ -633,6 +692,7 @@ namespace platf::dxgi {
 
       create_pixel_shader_helper(sbs_reprojection_ps_hlsl, sbs_reprojection_ps);
       create_vertex_shader_helper(sbs_reprojection_vs_hlsl, sbs_reprojection_vs);
+      create_pixel_shader_helper(sbs_mlbw_composite_ps_hlsl, sbs_mlbw_composite_ps);
 
       switch (format) {
         case DXGI_FORMAT_NV12:
@@ -1178,8 +1238,12 @@ namespace platf::dxgi {
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
     vs_t sbs_reprojection_vs;
     ps_t sbs_reprojection_ps;
+    ps_t sbs_mlbw_composite_ps;
     buf_t sbs_reprojection_cbuffer;
     buf_t sbs_passthrough_cbuffer;
+    buf_t sbs_mlbw_cbuffer;  ///< Composite constants; built once the MLBW field dims are known.
+    int mlbw_cb_field_w = 0;  ///< Field width baked into sbs_mlbw_cbuffer (0 = not built).
+    int mlbw_cb_layers = 0;  ///< Layer count baked into sbs_mlbw_cbuffer.
     texture2d_t sbs_intermediate_texture;
     render_target_t sbs_intermediate_rtv;
     shader_res_t sbs_intermediate_srv;
@@ -2192,6 +2256,7 @@ namespace platf::dxgi {
     compile_pixel_shader_helper(cursor_ps);
     compile_pixel_shader_helper(cursor_ps_normalize_white);
     compile_pixel_shader_helper(sbs_reprojection_ps);
+    compile_pixel_shader_helper(sbs_mlbw_composite_ps);
     compile_vertex_shader_helper(sbs_reprojection_vs);
     compile_vertex_shader_helper(cursor_vs);
 

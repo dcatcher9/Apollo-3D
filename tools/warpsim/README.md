@@ -14,6 +14,13 @@ numbers — is the established method for all SBS quality work (2026-07-03).
 - `warpdiag.cpp`      per-pixel path visualization (red=bg-fill, green=winner depth, blue=#crossings)
 - `warptrace.cpp`     numeric scanline of bestDepth / displacement along one output row
 - `shcheck2.cpp`      offline HLSL validation: `shcheck2 <file> ps_5_0 main_ps` (cs_5_0 main for CS)
+- `mlbwsim.cpp`       learned-warp (MLBW) composite replica: validates the exact math of
+                      sbs_mlbw_composite_ps.hlsl against iw3's own composite (byte-match).
+                      Consumes delta/weight/ccrop bins from E:\ApolloDev\mlbw_eval\scripts\
+                      mlbw_fields.py (needs the nunif venv). NOTE: torch's
+                      F.interpolate(antialias=True) changes bilinear UPSAMPLING too; iw3
+                      antialiases its weight upsample, HW bilinear does not (tiny, benign
+                      silhouette difference).
 - `export_dump_region.ps1`  one-command raw export from a dump folder (depth/source/both-eye GT
                       bins + prints the region constants to paste into a sim copy)
 

@@ -34,6 +34,10 @@ namespace models {
         if (std::filesystem::exists(onnx_path)) {
             return onnx_path;
         }
+        if (model_url.empty()) {
+            BOOST_LOG(warning) << "Model '" << model_name << "' not found in assets and no download URL configured.";
+            return "";
+        }
 
         // Download to a .part file and rename into place only on success, so an interrupted
         // download never leaves a truncated .onnx that would be treated as valid forever
