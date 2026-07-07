@@ -394,19 +394,35 @@ namespace platf::dxgi {
 
   class d3d_base_encode_device final {
   public:
-    int convert(platf::img_t &img_base) {
-      // Garbage collect mapped capture images whose weak references have expired
-      for (auto it = img_ctx_map.begin(); it != img_ctx_map.end();) {
-        if (it->second.img_weak.expired()) {
-          it = img_ctx_map.erase(it);
-        } else {
-          it++;
-        }
+    ~d3d_base_encode_device() {
+      // The background estimator build captures raw device/device_ctx pointers, so it MUST be
+      // joined before those members are destroyed. Member declaration order (the future is
+      // declared after device/device_ctx) already guarantees this via the future's blocking
+      // destructor; waiting here first makes the dependency explicit so it can't be silently
+      // broken by a member reorder. (This class is never moved, so a user-declared dtor is safe.)
+      if (depth_estimator_build.valid()) {
+        depth_estimator_build.wait();
       }
+    }
 
+    int convert(platf::img_t &img_base) {
       auto &img = (img_d3d_t &) img_base;
       if (!img.blank) {
-        auto &img_ctx = img_ctx_map[img.id];
+        // Look up (or create) this image's encoder context. Only when a new id first appears do
+        // we garbage-collect contexts whose capture img_t has since expired -- the set of live
+        // ids is bounded by the capture pool, so this replaces an every-frame scan with one that
+        // runs only on the rare new-image insertion. (Erasing other map nodes leaves `it` valid.)
+        auto [it, inserted] = img_ctx_map.try_emplace(img.id);
+        if (inserted) {
+          for (auto gc = img_ctx_map.begin(); gc != img_ctx_map.end();) {
+            if (gc != it && gc->second.img_weak.expired()) {
+              gc = img_ctx_map.erase(gc);
+            } else {
+              ++gc;
+            }
+          }
+        }
+        auto &img_ctx = it->second;
 
         // Open the shared capture texture with our ID3D11Device
         if (initialize_image_context(img, img_ctx)) {
@@ -642,10 +658,11 @@ namespace platf::dxgi {
     // Build the MLBW composite constants once the field dims are known (they come with the
     // first estimate result). See sbs_mlbw_composite_ps.hlsl.
     void ensure_mlbw_cbuffer(int field_w, int field_h, int layers) {
-      if (sbs_mlbw_cbuffer && mlbw_cb_field_w == field_w && mlbw_cb_layers == layers) {
+      if (sbs_mlbw_cbuffer && mlbw_cb_field_w == field_w && mlbw_cb_field_h == field_h && mlbw_cb_layers == layers) {
         return;
       }
       mlbw_cb_field_w = field_w;
+      mlbw_cb_field_h = field_h;
       mlbw_cb_layers = layers;
 
       const float eye_w = sbs_viewport.Width / 2.0f;
@@ -1243,6 +1260,7 @@ namespace platf::dxgi {
     buf_t sbs_passthrough_cbuffer;
     buf_t sbs_mlbw_cbuffer;  ///< Composite constants; built once the MLBW field dims are known.
     int mlbw_cb_field_w = 0;  ///< Field width baked into sbs_mlbw_cbuffer (0 = not built).
+    int mlbw_cb_field_h = 0;  ///< Field height baked into sbs_mlbw_cbuffer.
     int mlbw_cb_layers = 0;  ///< Layer count baked into sbs_mlbw_cbuffer.
     texture2d_t sbs_intermediate_texture;
     render_target_t sbs_intermediate_rtv;

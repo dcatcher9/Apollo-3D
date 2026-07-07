@@ -77,6 +77,54 @@ struct TrtDeleter {
 template <typename T>
 using TrtUniquePtr = std::unique_ptr<T, TrtDeleter<T>>;
 
+// Build the model input Dims for a given rank: rank-4 = [1,3,H,W] (DA-V2),
+// rank-5 = [1,1,3,H,W] (DA-V3). Passing Dims INTO TensorRT is ABI-safe (only RETURNING a Dims
+// by value across the MinGW/MSVC boundary faults), so this helper is safe to hand to the API.
+static nvinfer1::Dims make_input_dims(int rank, int h, int w) {
+    nvinfer1::Dims d {};
+    if (rank == 5) {
+        d.nbDims = 5;
+        d.d[0] = 1; d.d[1] = 1; d.d[2] = 3; d.d[3] = h; d.d[4] = w;
+    } else {
+        d.nbDims = 4;
+        d.d[0] = 1; d.d[1] = 3; d.d[2] = h; d.d[3] = w;
+    }
+    return d;
+}
+
+// Round x to the nearest positive multiple of `patch` (the model's spatial patch size; 14 for the
+// Depth Anything family). Model input dims must be patch-aligned or TensorRT rejects the shape.
+static int round_to_patch(float x, int patch = 14) {
+    return std::max(patch, (int) std::round(x / patch) * patch);
+}
+
+// Ensure the shared runtime exists, deserialize `model_name`'s engine into its global slot if not
+// already resident, and hand back a spare pooled execution context if one is available. The CALLER
+// must hold g_trt_mutex. Context CREATION is deliberately left to the caller OUTSIDE the lock:
+// createExecutionContext() allocates ~1.3 GB of scratch and takes seconds, and holding the lock
+// across it would block concurrent teardowns' pool returns and other sessions' enqueues.
+static nvinfer1::ICudaEngine* acquire_engine_locked(
+        const std::string& model_name, const std::filesystem::path& engine_path,
+        nvinfer1::IExecutionContext*& out_context, bool& out_pooled) {
+    out_context = nullptr;
+    out_pooled = false;
+    auto& slot = g_engines[model_name];
+    if (!g_runtime) {
+        g_runtime = nvinfer1::createInferRuntime(gLogger);
+    }
+    if (g_runtime && !slot.engine) {
+        std::ifstream file(engine_path, std::ios::binary);
+        std::vector<char> blob((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        slot.engine = g_runtime->deserializeCudaEngine(blob.data(), blob.size());
+    }
+    if (slot.engine && !slot.context_pool.empty()) {
+        out_context = slot.context_pool.back();
+        slot.context_pool.pop_back();
+        out_pooled = true;
+    }
+    return slot.engine;
+}
+
 namespace models {
 
     void precompile_tensorrt_engine(const std::filesystem::path& assets_dir, const config::depth_model_info& model) {
@@ -132,24 +180,14 @@ namespace models {
         // export baked resolution-dependent shape math, so it is exported at a fixed resolution).
         if (!model.fixed_shape && network->getNbInputs() > 0) {
             auto input = network->getInput(0);
-            auto dims_for = [&](int h, int w) -> nvinfer1::Dims {
-                nvinfer1::Dims d {};
-                if (model.input_rank == 5) {
-                    d.nbDims = 5;
-                    d.d[0] = 1; d.d[1] = 1; d.d[2] = 3; d.d[3] = h; d.d[4] = w;
-                } else {
-                    d.nbDims = 4;
-                    d.d[0] = 1; d.d[1] = 3; d.d[2] = h; d.d[3] = w;
-                }
-                return d;
-            };
+            auto dims_for = [&](int h, int w) { return make_input_dims(model.input_rank, h, w); };
             if (model.dynamic_width) {
                 // Height is baked into the ONNX (fixed_h); only width is a real dynamic axis.
                 // Pin H and range W from 1:1 up to ~4:1 so a single engine serves every landscape
                 // aspect (4:3 -> 16:9 -> ultrawide/32:9). OPT is the common ultrawide (~2.37:1).
                 const int p = std::max(1, model.patch);
                 const int h = model.fixed_h;
-                auto r14 = [&](double x) { return std::max(p, (int)std::round(x / p) * p); };
+                auto r14 = [&](double x) { return round_to_patch((float) x, p); };
                 profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, dims_for(h, h));
                 profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, dims_for(h, r14(h * 2.37)));
                 profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, dims_for(h, r14(h * 4.0)));
@@ -371,22 +409,10 @@ namespace models {
             nvinfer1::ICudaEngine* warp_engine = nullptr;
             {
                 std::lock_guard<std::mutex> lock(g_trt_mutex);
-                auto& slot = g_engines[warp_model];
-                if (!g_runtime) {
-                    g_runtime = nvinfer1::createInferRuntime(gLogger);
-                }
-                if (g_runtime && !slot.engine) {
-                    std::ifstream file(path, std::ios::binary);
-                    std::vector<char> blob((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-                    slot.engine = g_runtime->deserializeCudaEngine(blob.data(), blob.size());
-                }
-                warp_engine = slot.engine;
-                if (warp_engine && !slot.context_pool.empty()) {
-                    warp_context = slot.context_pool.back();
-                    slot.context_pool.pop_back();
-                    warp_context_pooled = true;
-                    BOOST_LOG(info) << "Reusing pooled TensorRT execution context (" << warp_model << ").";
-                }
+                warp_engine = acquire_engine_locked(warp_model, path, warp_context, warp_context_pooled);
+            }
+            if (warp_context_pooled) {
+                BOOST_LOG(info) << "Reusing pooled TensorRT execution context (" << warp_model << ").";
             }
             if (warp_engine && !warp_context) {
                 // Outside g_trt_mutex (same rationale as the depth context): creation takes
@@ -625,20 +651,15 @@ namespace models {
                // warmup_inference() at the end of the ctor (which re-locks g_trt_mutex) -- a
                // non-recursive std::mutex would otherwise self-deadlock and hang construction.
             std::lock_guard<std::mutex> lock(g_trt_mutex);
-            // Load (once) the engine for THIS model into its own slot. Different models coexist;
-            // switching models never reuses a stale engine and never needs a restart.
-            auto& slot = g_engines[model_name];
-            if (!g_runtime) {
-                g_runtime = nvinfer1::createInferRuntime(gLogger);
-            }
-            if (g_runtime && !slot.engine) {
-                std::ifstream file(model_path, std::ios::binary);
-                std::vector<char> trtModelStream((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-                slot.engine = g_runtime->deserializeCudaEngine(trtModelStream.data(), trtModelStream.size());
-            }
-
+            // Load (once) the engine for THIS model into its own slot and take a pooled execution
+            // context if one is free. Different models coexist; switching models never reuses a
+            // stale engine and never needs a restart.
+            engine = acquire_engine_locked(model_name, model_path, exec_context, depth_context_pooled);
             runtime = g_runtime;
-            engine = slot.engine;
+            if (depth_context_pooled) {
+                BOOST_LOG(info) << "Reusing pooled TensorRT execution context.";
+            }
+            auto& slot = g_engines[model_name];
 
             // Validate the engine's I/O once per model against what the D3D pipeline binds: FP32
             // tensors named "pixel_values" (input) and "predicted_depth" (output). The model is
@@ -680,12 +701,6 @@ namespace models {
                                         "the pipeline binds those by name and will not work with this model.";
             }
 
-            if (engine && !slot.context_pool.empty()) {
-                exec_context = slot.context_pool.back();
-                slot.context_pool.pop_back();
-                depth_context_pooled = true;
-                BOOST_LOG(info) << "Reusing pooled TensorRT execution context.";
-            }
             trt_mutex = &g_trt_mutex;
             }  // release g_trt_mutex before the shader/buffer setup and warmup below
 
@@ -809,7 +824,7 @@ namespace models {
             int h, w;
             if (dynamic_width) {
                 h = fixed_h;
-                w = std::max(14, (int)std::round(fixed_h * 2.37 / 14.0) * 14);
+                w = round_to_patch(fixed_h * 2.37f);
             } else if (fixed_shape) {
                 return;  // baked shape; querying engine dims here is ABI-unsafe and none ship today
             } else {
@@ -825,14 +840,7 @@ namespace models {
                 return;
             }
 
-            nvinfer1::Dims in_dims {};
-            if (input_rank == 5) {
-                in_dims.nbDims = 5;
-                in_dims.d[0] = 1; in_dims.d[1] = 1; in_dims.d[2] = 3; in_dims.d[3] = h; in_dims.d[4] = w;
-            } else {
-                in_dims.nbDims = 4;
-                in_dims.d[0] = 1; in_dims.d[1] = 3; in_dims.d[2] = h; in_dims.d[3] = w;
-            }
+            nvinfer1::Dims in_dims = make_input_dims(input_rank, h, w);
             exec_context->setInputShape("pixel_values", in_dims);
             exec_context->setTensorAddress("pixel_values", (void*) d_in);
             exec_context->setTensorAddress(output_tensor_name.c_str(), (void*) d_out);
@@ -1212,12 +1220,12 @@ namespace models {
                     // Portrait (aspect < 1) is not a streaming case; it clamps to 1:1 (square).
                     target_h = fixed_h;
                     float a = std::min(std::max(aspect_ratio, 1.0f), std::min(max_aspect, 4.0f));
-                    target_w = std::max(14, (int)std::round(fixed_h * a / 14.0f) * 14);
+                    target_w = round_to_patch(fixed_h * a);
                 } else {
                     // Short-side budget (iw3-style): pin the short side so vertical depth detail
                     // is constant regardless of aspect ratio; the long side grows with aspect,
                     // capped by max_aspect to bound cost.
-                    int short_side = std::max(14, (int)std::round((float)depth_short_side / 14.0f) * 14);
+                    int short_side = round_to_patch((float)depth_short_side);
                     if (aspect_ratio >= 1.0f) {
                         target_h = short_side;
                         target_w = (int)std::round(short_side * std::min(aspect_ratio, max_aspect));
@@ -1226,8 +1234,8 @@ namespace models {
                         target_h = (int)std::round(short_side * std::min(1.0f / aspect_ratio, max_aspect));
                     }
 
-                    target_h = std::max(14, (int)std::round((float)target_h / 14.0f) * 14);
-                    target_w = std::max(14, (int)std::round((float)target_w / 14.0f) * 14);
+                    target_h = round_to_patch((float)target_h);
+                    target_w = round_to_patch((float)target_w);
 
                     // Cap the model input aspect-preserving against two limits: the TensorRT
                     // engine's MAX profile (1008), and the frame's native resolution -- never
@@ -1237,8 +1245,8 @@ namespace models {
                     int max_h = std::min(1008, (int)input_desc.Height);
                     if (target_w > max_w || target_h > max_h) {
                         float s = std::min((float)max_w / (float)target_w, (float)max_h / (float)target_h);
-                        target_w = std::max(14, (int)std::round((float)target_w * s / 14.0f) * 14);
-                        target_h = std::max(14, (int)std::round((float)target_h * s / 14.0f) * 14);
+                        target_w = round_to_patch((float)target_w * s);
+                        target_h = round_to_patch((float)target_h * s);
                     }
                 }
 
@@ -1423,14 +1431,7 @@ namespace models {
                 // Fixed-shape engines have their input dims baked in; setInputShape is unnecessary
                 // (and target_w/target_h MUST equal the export resolution or the bindings mismatch).
                 if (!fixed_shape) {
-                    nvinfer1::Dims in_dims {};
-                    if (input_rank == 5) {
-                        in_dims.nbDims = 5;
-                        in_dims.d[0] = 1; in_dims.d[1] = 1; in_dims.d[2] = 3; in_dims.d[3] = target_h; in_dims.d[4] = target_w;
-                    } else {
-                        in_dims.nbDims = 4;
-                        in_dims.d[0] = 1; in_dims.d[1] = 3; in_dims.d[2] = target_h; in_dims.d[3] = target_w;
-                    }
+                    nvinfer1::Dims in_dims = make_input_dims(input_rank, target_h, target_w);
                     if (!exec_context->setInputShape("pixel_values", in_dims)) {
                         BOOST_LOG(error) << "TensorRT setInputShape failed for " << target_w << "x" << target_h
                                          << " (outside the engine's optimization profile?)";
