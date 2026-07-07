@@ -7,6 +7,15 @@ Design for two reproducible, host-side benchmarks so every SBS change ships with
 > deterministic, real-pipeline measurement. Each improvement produces a scorecard diff
 > (`pop +6%, stretch-band −22%, flicker −15%`, `movie warp p95 6.8 → 2.1 ms`).
 
+> **STATUS (2026-07-07): both benchmarks implemented + validated.**
+> - **Perf** — in-app `sbs_3d_perf_stats` (src/sbs_perf.*): per-stage p50/p95/max + sbs_perf.json.
+>   Live-validated both modes (game depth 2.0/warp 1.6 ms, movie 11.0/12.9 ms).
+> - **Visual** — `tools/sbsbench/` (no-reference pop / vmisalign / stretch-band + `--seq` flicker),
+>   `split_video.py`, and the **Tier-1 headless harness** `sunshine --sbs-bench` (src/sbs_bench_harness.cpp:
+>   real estimator + real composite over a frames dir → SBS PNGs). Full chain validated:
+>   video → frames → harness → sbsbench --seq.
+> Remaining: reference PSNR/SSIM (needs GT stereo), ghost metric, optional depth dump in seq mode.
+
 ## Why the offline warpsim disagrees with the headset (the problem to design around)
 
 The CPU simulator (`tools/warpsim/`) is invaluable for the reprojection math but structurally

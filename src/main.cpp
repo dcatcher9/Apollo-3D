@@ -22,6 +22,7 @@
 #include "system_tray.h"
 #include "upnp.h"
 #include "uuid.h"
+#include "sbs_bench_harness.h"
 #include "video.h"
 #include "video_depth_estimator.h"
 #ifdef _WIN32
@@ -56,6 +57,9 @@ std::map<std::string_view, std::function<int(const char *name, int argc, char **
    }},
   {"help"sv, [](const char *name, int argc, char **argv) {
      return args::help(name);
+   }},
+  {"sbs-bench"sv, [](const char *name, int argc, char **argv) {
+     return sbs_bench::run(argc, argv);
    }},
   {"version"sv, [](const char *name, int argc, char **argv) {
      return args::version();
