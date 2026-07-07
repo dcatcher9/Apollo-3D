@@ -1285,6 +1285,7 @@ namespace config {
     string_f(vars, "sbs_3d_warp_model_movie", video.sbs.warp_model_movie);
     string_f(vars, "sbs_3d_warp_model_url", video.sbs.warp_model_url);
     double_f(vars, "sbs_3d_movie_depth_fps", video.sbs.movie_depth_fps);
+    bool_f(vars, "sbs_3d_perf_stats", video.sbs.perf_stats);
 
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);

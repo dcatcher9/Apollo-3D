@@ -32,6 +32,16 @@ typedef CUresult(__stdcall* PFN_cuStreamSynchronize)(CUstream hStream);
 typedef CUresult(__stdcall* PFN_cuStreamQuery)(CUstream hStream);
 typedef struct CUgraphicsResource_st* CUgraphicsResource;
 typedef CUresult(__stdcall* PFN_cuGraphicsD3D11RegisterResource)(CUgraphicsResource* pCudaResource, ID3D11Resource* pD3DResource, unsigned int Flags);
+
+// Events (for GPU-stream timing of async TensorRT enqueues; see src/sbs_perf.*)
+typedef struct CUevent_st* CUevent;
+#define CU_EVENT_DEFAULT 0x0
+typedef CUresult(__stdcall* PFN_cuEventCreate)(CUevent* phEvent, unsigned int Flags);
+typedef CUresult(__stdcall* PFN_cuEventRecord)(CUevent hEvent, CUstream hStream);
+typedef CUresult(__stdcall* PFN_cuEventQuery)(CUevent hEvent);
+typedef CUresult(__stdcall* PFN_cuEventSynchronize)(CUevent hEvent);
+typedef CUresult(__stdcall* PFN_cuEventElapsedTime)(float* pMilliseconds, CUevent hStart, CUevent hEnd);
+typedef CUresult(__stdcall* PFN_cuEventDestroy)(CUevent hEvent);
 typedef CUresult(__stdcall* PFN_cuGraphicsMapResources)(unsigned int count, CUgraphicsResource* resources, CUstream hStream);
 typedef CUresult(__stdcall* PFN_cuGraphicsUnmapResources)(unsigned int count, CUgraphicsResource* resources, CUstream hStream);
 typedef CUresult(__stdcall* PFN_cuGraphicsResourceGetMappedPointer)(CUdeviceptr* pDevPtr, size_t* pSize, CUgraphicsResource resource);
@@ -59,6 +69,13 @@ struct cuda_driver_api {
     PFN_cuGraphicsUnmapResources cuGraphicsUnmapResources = nullptr;
     PFN_cuGraphicsResourceGetMappedPointer cuGraphicsResourceGetMappedPointer = nullptr;
     PFN_cuGraphicsUnregisterResource cuGraphicsUnregisterResource = nullptr;
+
+    PFN_cuEventCreate cuEventCreate = nullptr;
+    PFN_cuEventRecord cuEventRecord = nullptr;
+    PFN_cuEventQuery cuEventQuery = nullptr;
+    PFN_cuEventSynchronize cuEventSynchronize = nullptr;
+    PFN_cuEventElapsedTime cuEventElapsedTime = nullptr;
+    PFN_cuEventDestroy cuEventDestroy = nullptr;
 
     bool is_valid() const {
         return cuInit && cuMemAlloc && cuGraphicsD3D11RegisterResource;
@@ -93,6 +110,14 @@ struct cuda_driver_api {
                     api.cuGraphicsResourceGetMappedPointer = (PFN_cuGraphicsResourceGetMappedPointer)GetProcAddress(api.hMod, "cuGraphicsResourceGetMappedPointer");
                 }
                 api.cuGraphicsUnregisterResource = (PFN_cuGraphicsUnregisterResource)GetProcAddress(api.hMod, "cuGraphicsUnregisterResource");
+
+                api.cuEventCreate = (PFN_cuEventCreate)GetProcAddress(api.hMod, "cuEventCreate");
+                api.cuEventRecord = (PFN_cuEventRecord)GetProcAddress(api.hMod, "cuEventRecord");
+                api.cuEventQuery = (PFN_cuEventQuery)GetProcAddress(api.hMod, "cuEventQuery");
+                api.cuEventSynchronize = (PFN_cuEventSynchronize)GetProcAddress(api.hMod, "cuEventSynchronize");
+                api.cuEventElapsedTime = (PFN_cuEventElapsedTime)GetProcAddress(api.hMod, "cuEventElapsedTime");
+                api.cuEventDestroy = (PFN_cuEventDestroy)GetProcAddress(api.hMod, "cuEventDestroy_v2");
+                if (!api.cuEventDestroy) api.cuEventDestroy = (PFN_cuEventDestroy)GetProcAddress(api.hMod, "cuEventDestroy");
             }
         }
         return api;

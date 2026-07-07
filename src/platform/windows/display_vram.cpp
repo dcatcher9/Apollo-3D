@@ -31,6 +31,7 @@ extern "C" {
 #include "src/nvenc/nvenc_d3d11_on_cuda.h"
 #include "src/nvenc/nvenc_utils.h"
 #include "sbs_debug_dump.h"
+#include "src/sbs_perf.h"
 #include "src/model_manager.h"
 #include "src/video.h"
 #include "src/video_depth_estimator.h"
@@ -469,6 +470,12 @@ namespace platf::dxgi {
         }
 
         if (sbs_mode != ::video::SBS_OFF) {
+          // Perf benchmark: CPU wall time of the whole SBS block (estimator dispatch + composite
+          // draw submission). GPU-side inference times are measured separately via CUDA events in
+          // the estimator. No-op unless sbs_3d_perf_stats is on.
+          const bool perf = sbs_perf::enabled();
+          const auto perf_t0 = perf ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+
           // Lazy-create the depth estimator on the first SBS frame.
           ensure_depth_estimator();
 
@@ -527,6 +534,12 @@ namespace platf::dxgi {
           // sbs_debug_dump.h. No-op unless APOLLO_SBS_DUMP is set.
           sbs_dumper.maybe_dump(device.get(), device_ctx.get(),
             img_ctx.encoder_input_res.get(), est.depth.Get(), sbs_intermediate_srv.get());
+
+          if (perf) {
+            auto dt = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - perf_t0).count();
+            sbs_perf::add_sample_ms("sbs_convert_cpu", dt);
+            sbs_perf::tick();  // once per SBS frame: periodic p50/p95 summary + JSON snapshot
+          }
         } else {
           // Plain 2D: draw the captured frame straight into the output.
           draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewports, out_UV_viewport);

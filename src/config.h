@@ -202,6 +202,7 @@ namespace config {
       std::string warp_model_movie = "";  ///< Warp model stem for MOVIE mode (sharper/heavier, e.g. mlbw_l4_1596x672_fp16). Empty = reuse warp_model. Movie has GPU headroom (no game rendering) so it can afford the bigger warp.
       std::string warp_model_url = "";  ///< Optional URL to download the warp ONNX from if absent. Empty = must be placed in assets manually.
       double movie_depth_fps = 0.0;  ///< Depth-update rate override for MOVIE mode (its model is the heavy DA3MONO and film is slow content, so a lower rate is cheap and invisible). 0 = use depth_fps. Also throttles the warp, which runs per depth update.
+      bool perf_stats = false;  ///< Emit per-stage host-SBS timing (depth/warp/inpaint inference + convert CPU) as a rolling p50/p95/max log line + sbs_perf.json snapshot. Off by default (the perf benchmark; see docs/sbs-benchmark-plan.md).
     } sbs;
   };
 

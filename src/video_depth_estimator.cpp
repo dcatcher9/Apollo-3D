@@ -3,6 +3,7 @@
 #include "logging.h"
 #include "platform/windows/utils.h"
 #include "cuda_driver_api.h"
+#include "sbs_perf.h"
 #include <NvInfer.h>
 #include <NvOnnxParser.h>
 #include <NvInferPlugin.h>
@@ -272,6 +273,68 @@ namespace models {
         int effective_interval = 1;
         int last_logged_interval = 0;
         std::chrono::steady_clock::time_point last_call_time {};
+
+        // GPU-stream timing of the async TensorRT enqueues (perf benchmark; sbs_3d_perf_stats).
+        // A small ring of CUDA event pairs per engine lets several inferences be in flight; the
+        // elapsed time is resolved lazily once the stop event completes and pushed to sbs_perf.
+        // All CUDA calls here run on the estimator thread with cuda_ctx current, like the rest
+        // of estimate(); no-ops entirely when perf stats are off.
+        struct perf_evt_ring {
+            static constexpr int N = 4;
+            CUevent start[N] {};
+            CUevent stop[N] {};
+            bool busy[N] {};
+            int head = 0;
+            const char* stage = nullptr;
+        };
+        perf_evt_ring perf_depth;  // "depth_infer": one DA-V2/DA3MONO inference
+        perf_evt_ring perf_warp;   // "warp_infer": both eyes of the MLBW warp
+
+        void perf_try_resolve(perf_evt_ring& r, int slot, cuda_driver_api& cuda) {
+            if (!r.busy[slot] || !cuda.cuEventQuery) return;
+            if (cuda.cuEventQuery(r.stop[slot]) != CUDA_SUCCESS) return;  // not finished yet
+            float ms = 0.0f;
+            if (cuda.cuEventElapsedTime && cuda.cuEventElapsedTime(&ms, r.start[slot], r.stop[slot]) == CUDA_SUCCESS) {
+                sbs_perf::add_sample_ms(r.stage, ms);
+            }
+            r.busy[slot] = false;
+        }
+        void perf_drain(perf_evt_ring& r) {
+            auto& cuda = cuda_driver_api::get();
+            for (int i = 0; i < perf_evt_ring::N; i++) perf_try_resolve(r, i, cuda);
+        }
+        // Record a start event before an enqueue; returns the ring slot (or -1 to skip timing).
+        int perf_begin(perf_evt_ring& r, CUstream stream) {
+            if (!sbs_perf::enabled()) return -1;
+            auto& cuda = cuda_driver_api::get();
+            if (!cuda.cuEventCreate || !cuda.cuEventRecord) return -1;
+            int slot = r.head;
+            perf_try_resolve(r, slot, cuda);   // reclaim the slot if its prior sample is ready
+            if (r.busy[slot]) return -1;       // still in flight -> drop this measurement
+            if (!r.start[slot] && cuda.cuEventCreate(&r.start[slot], CU_EVENT_DEFAULT) != CUDA_SUCCESS) return -1;
+            if (!r.stop[slot] && cuda.cuEventCreate(&r.stop[slot], CU_EVENT_DEFAULT) != CUDA_SUCCESS) return -1;
+            if (cuda.cuEventRecord(r.start[slot], stream) != CUDA_SUCCESS) return -1;
+            return slot;
+        }
+        // Record the stop event after the enqueue and mark the slot pending.
+        void perf_end(perf_evt_ring& r, int slot, CUstream stream) {
+            if (slot < 0) return;
+            auto& cuda = cuda_driver_api::get();
+            if (!cuda.cuEventRecord || cuda.cuEventRecord(r.stop[slot], stream) != CUDA_SUCCESS) return;
+            r.busy[slot] = true;
+            r.head = (r.head + 1) % perf_evt_ring::N;
+        }
+        void perf_destroy_events() {
+            auto& cuda = cuda_driver_api::get();
+            if (!cuda.cuEventDestroy) return;
+            for (auto* r : {&perf_depth, &perf_warp}) {
+                for (int i = 0; i < perf_evt_ring::N; i++) {
+                    if (r->start[i]) cuda.cuEventDestroy(r->start[i]);
+                    if (r->stop[i]) cuda.cuEventDestroy(r->stop[i]);
+                    r->start[i] = r->stop[i] = nullptr;
+                }
+            }
+        }
 
         // Caching
         int target_w = 0;
@@ -609,6 +672,13 @@ namespace models {
               warp_divergence((float)cfg.divergence), warp_focal((float)cfg.focal_plane),
               warp_floor((float)cfg.depth_floor), warp_border((float)cfg.border_fade)
         {
+            // Perf benchmark: enable per-stage timing for this run and reset the rolling window
+            // so it reflects this model/mode rather than blending across a switch.
+            perf_depth.stage = "depth_infer";
+            perf_warp.stage = "warp_infer";
+            sbs_perf::set_enabled(cfg.perf_stats);
+            if (cfg.perf_stats) sbs_perf::reset();
+
             // Per-model depth-rate override (heavier models that can't hold the global rate);
             // 0 = use the config depth_fps.
             if (model.depth_fps_override > 0.0) {
@@ -873,6 +943,7 @@ namespace models {
                 for (auto& res : cuda_warp_res) {
                     if (res) cuda.cuGraphicsUnregisterResource(res);
                 }
+                perf_destroy_events();  // free the timing events while cuda_ctx is still current
             }
 
             // Return the execution contexts to their engine's pool for reuse instead of leaking
@@ -1005,6 +1076,7 @@ namespace models {
                 // One context, sequential enqueues (left then right); addresses are captured
                 // at enqueue time, so rebinding between enqueues on the same stream is safe.
                 std::lock_guard<std::mutex> lock(*trt_mutex);
+                int perf_slot = perf_begin(perf_warp, warp_stream);  // times both eyes together
                 for (int e = 0; e < 2 && ok; e++) {
                     warp_context->setTensorAddress("mlbw_input", p[e]);
                     warp_context->setTensorAddress("delta", p[2 + 2 * e]);
@@ -1017,6 +1089,7 @@ namespace models {
                         ok = false;
                     }
                 }
+                perf_end(perf_warp, perf_slot, warp_stream);
             }
             cuda.cuGraphicsUnmapResources(6, cuda_warp_res, warp_stream);
             warp_pending = ok;
@@ -1175,6 +1248,12 @@ namespace models {
             // every frame so the ~1 ms result lands one video frame after its depth update.
             if (learned_warp) {
                 poll_warp_fields(cuda);
+            }
+
+            // Perf benchmark: resolve any completed inference-timing events into samples.
+            if (sbs_perf::enabled()) {
+                perf_drain(perf_depth);
+                perf_drain(perf_warp);
             }
 
             // Prevent GPU starvation: if the previous AI frame is still crunching, drop this frame.
@@ -1442,10 +1521,12 @@ namespace models {
                 {
                     // Serialize TensorRT async enqueue to avoid driver-level concurrent execution faults
                     std::lock_guard<std::mutex> lock(*trt_mutex);
+                    int perf_slot = perf_begin(perf_depth, cu_stream);
                     if (!exec_context->enqueueV3(cu_stream) && !stream_error_logged) {
                         BOOST_LOG(error) << "TensorRT enqueueV3 failed; depth will stop updating.";
                         stream_error_logged = true;
                     }
+                    perf_end(perf_depth, perf_slot, cu_stream);
                 }
             }
             

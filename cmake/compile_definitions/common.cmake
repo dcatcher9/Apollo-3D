@@ -101,6 +101,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/model_manager.h"
         "${CMAKE_SOURCE_DIR}/src/video_depth_estimator.cpp"
         "${CMAKE_SOURCE_DIR}/src/video_depth_estimator.h"
+        "${CMAKE_SOURCE_DIR}/src/sbs_perf.cpp"
+        "${CMAKE_SOURCE_DIR}/src/sbs_perf.h"
         "${CMAKE_SOURCE_DIR}/src/platform/common.h"
         "${CMAKE_SOURCE_DIR}/src/process.cpp"
         "${CMAKE_SOURCE_DIR}/src/process.h"
