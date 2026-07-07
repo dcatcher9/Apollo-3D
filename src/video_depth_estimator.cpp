@@ -211,6 +211,9 @@ namespace models {
         int depth_short_side;  // depth map short-side resolution (clamped to native short side)
         float max_aspect;  // aspect cap for short-side mode
         float minmax_alpha;  // temporal EMA blend for the normalized min/max
+        float minmax_snap;   // A1: raw-vs-EMA range ratio that snaps the scale on a scene cut (0 = off)
+        float range_floor_frac;      // A3: current range < ref*frac -> compress parallax (0 = off)
+        float range_floor_ref_alpha; // A3: slow-max reference-range decay
         float depth_fps;  // target depth-update rate (interval auto-derived from measured video fps)
         bool guided_upsample;  // color-guided depth upsample (snaps silhouettes to color edges)
         float guided_sigma;  // color-distance sigma for the guided upsample
@@ -562,6 +565,9 @@ namespace models {
             : device(d), context(c), ema_alpha((float)cfg.ema),
               depth_short_side(std::max(196, cfg.depth_short_side)), max_aspect(std::max(1.0f, (float)cfg.depth_max_aspect)),
               minmax_alpha((float)cfg.minmax_ema),
+              minmax_snap((float)cfg.minmax_snap),
+              range_floor_frac((float)cfg.range_floor),
+              range_floor_ref_alpha(0.004f),  // ~decays over a few hundred depth updates
               depth_fps((float)cfg.depth_fps),
               // The learned warp wants the model's raw SOFT depth: texel-sharp guided edges
               // are out of its training distribution (they render as a staircase fringe).
@@ -752,10 +758,11 @@ namespace models {
                 device->CreateUnorderedAccessView(minmax_raw_buf.Get(), &uav, &minmax_raw_uav);
             }
 
-            // EMA'd min/max {min, max, initialized, pad}; initialized = 0 so the first
-            // frame seeds directly instead of blending from zero.
+            // EMA'd min/max, 2 float4 elements: [0]={min, max, initialized, ref_range},
+            // [1]={range_scale, pad...}. initialized = 0 so the first frame seeds directly;
+            // range_scale = 1 so the range floor is a no-op until depth_minmax_ema_cs runs.
             {
-                float init_ema[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                float init_ema[8] = {0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
                 D3D11_BUFFER_DESC bd = {};
                 bd.Usage = D3D11_USAGE_DEFAULT;
                 bd.ByteWidth = sizeof(init_ema);
@@ -1018,12 +1025,13 @@ namespace models {
 
             D3D11_BUFFER_DESC cb_desc = {};
             cb_desc.Usage = D3D11_USAGE_IMMUTABLE;
-            cb_desc.ByteWidth = 32;
+            cb_desc.ByteWidth = 48;  // shared depth-pass cbuffer (12 floats/uints; see below)
             cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
-            // Shared depth-pass constants: {target_w, target_h, is_hdr, ema_alpha,
-            // minmax_alpha, reduce_threads, output_transform, depth_shift} (see buffer_to_tex_cs.hlsl).
-            uint32_t cb[8] = {};
+            // Shared depth-pass constants: {target_w, target_h, is_hdr, ema_alpha, minmax_alpha,
+            // reduce_threads, output_transform, depth_shift, snap_ratio, floor_frac,
+            // floor_ref_alpha, pad} (see buffer_to_tex_cs.hlsl / depth_minmax_ema_cs.hlsl).
+            uint32_t cb[12] = {};
             float* cbf = (float*)cb;
             cb[0] = (uint32_t)target_w;
             cb[1] = (uint32_t)target_h;
@@ -1033,10 +1041,15 @@ namespace models {
             cb[5] = reduce_groups * 256u;  // total threads for the reduction grid-stride
             cb[6] = output_transform;  // 0=identity (DA-V2 disparity), 1=shifted reciprocal (DA-V3 depth)
             cbf[7] = depth_shift;  // shift in 1/(depth + depth_shift) when output_transform==1
+            cbf[8] = minmax_snap;       // A1 scene-cut snap ratio (0 = off)
+            cbf[9] = range_floor_frac;  // A3 range-floor fraction (0 = off)
+            cbf[10] = range_floor_ref_alpha;  // A3 reference-range decay
+            cbf[11] = 0.0f;
             D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
             cbuffer.Reset();
             device->CreateBuffer(&cb_desc, &sd, &cbuffer);
 
+            cb_desc.ByteWidth = 32;  // guided cbuffer keeps the original 8-slot layout
             if (guided_upsample) {
                 // Guided passes: {in_w, in_h, out_w, out_h, inv2sig_sp2, inv2sig_r2, is_hdr, radius}.
                 const float kernel_radius = 5.0f;  // low-res texels; spans the model's ~8-9 texel edge ramp

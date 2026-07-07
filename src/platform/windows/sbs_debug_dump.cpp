@@ -136,10 +136,24 @@ namespace platf::sbs_debug {
       write_chunk("IEND", nullptr, 0);
     }
 
-    // Save an SRV's texture to <tag>.png inside dir (grayscale for R32_FLOAT depth). HDR scRGB
-    // (R16G16B16A16_FLOAT) is Reinhard+sRGB tonemapped; B8G8R8A8 is passed through.
+    // Jet colormap (t: 0=far/blue -> 1=near/red); vivid enough to reveal subtle depth structure
+    // (e.g. a depth model hallucinating parallax on flat desktop/page content).
+    inline void colormap_jet(float t, uint8_t &r, uint8_t &g, uint8_t &b) {
+      t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+      auto ch = [](float x) {
+        x = x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
+        return (uint8_t) std::lround(x * 255.0f);
+      };
+      r = ch(1.5f - std::fabs(4.0f * t - 3.0f));
+      g = ch(1.5f - std::fabs(4.0f * t - 2.0f));
+      b = ch(1.5f - std::fabs(4.0f * t - 1.0f));
+    }
+
+    // Save an SRV's texture to <tag>.png inside dir (grayscale for R32_FLOAT depth, or a jet
+    // heatmap when heatmap=true). HDR scRGB (R16G16B16A16_FLOAT) is Reinhard+sRGB tonemapped;
+    // B8G8R8A8 is passed through.
     void dump_srv(ID3D11Device *device, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv,
-      const std::filesystem::path &dir, const char *tag) {
+      const std::filesystem::path &dir, const char *tag, bool heatmap = false) {
       if (!srv) {
         return;
       }
@@ -183,8 +197,12 @@ namespace platf::sbs_debug {
             b = tonemap_srgb(half_to_float(px[2]));
           } else if (desc.Format == DXGI_FORMAT_R32_FLOAT) {
             float v = *(const float *) (in_row + (size_t) x * 4);
-            v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-            r = g = b = (uint8_t) std::lround(v * 255.0f);
+            if (heatmap) {
+              colormap_jet(v, r, g, b);
+            } else {
+              v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+              r = g = b = (uint8_t) std::lround(v * 255.0f);
+            }
           } else {  // assume 8-bit BGRA (B8G8R8A8_UNORM)
             const uint8_t *px = in_row + (size_t) x * 4;
             b = px[0];
@@ -265,6 +283,7 @@ namespace platf::sbs_debug {
 
     dump_srv(device, ctx, source, out_dir, "source");
     dump_srv(device, ctx, depth, out_dir, "depth");
+    dump_srv(device, ctx, depth, out_dir, "depth_heat", /*heatmap=*/true);  // A4: jet colormap
     dump_srv(device, ctx, sbs, out_dir, "sbs");
 
     // Attribute the dump to the model that produced it (for cross-model A/B).

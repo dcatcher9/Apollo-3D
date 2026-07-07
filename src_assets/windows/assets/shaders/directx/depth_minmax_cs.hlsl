@@ -18,6 +18,10 @@ cbuffer Constants : register(b0) {
     uint reduce_threads;  // total threads in this dispatch (groups * GROUP_SIZE)
     uint output_transform;  // 0 = identity (DA-V2 disparity); 1 = shifted reciprocal (DA-V3 depth -> disparity)
     float depth_shift;  // shift in 1/(depth + depth_shift) when output_transform == 1
+    float snap_ratio;       // unused here; shared 48-byte cbuffer layout parity
+    float floor_frac;       // unused here; layout parity
+    float floor_ref_alpha;  // unused here; layout parity
+    float pad0;
 };
 
 #define GROUP_SIZE 256

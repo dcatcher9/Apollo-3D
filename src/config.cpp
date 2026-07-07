@@ -1267,6 +1267,8 @@ namespace config {
     int_f(vars, "sbs_3d_depth_short_side", video.sbs.depth_short_side);
     double_between_f(vars, "sbs_3d_depth_max_aspect", video.sbs.depth_max_aspect, {1.0, 8.0});
     double_between_f(vars, "sbs_3d_minmax_ema", video.sbs.minmax_ema, {0.001, 1.0});
+    double_between_f(vars, "sbs_3d_minmax_snap", video.sbs.minmax_snap, {0.0, 100.0});
+    double_between_f(vars, "sbs_3d_range_floor", video.sbs.range_floor, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_depth_fps", video.sbs.depth_fps, {0.0, 240.0});
     int_between_f(vars, "sbs_3d_parallax_steps", video.sbs.parallax_steps, {4, 64});
     double_between_f(vars, "sbs_3d_border_fade", video.sbs.border_fade, {0.0, 0.2});
