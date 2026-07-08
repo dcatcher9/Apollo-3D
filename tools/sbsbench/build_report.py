@@ -284,32 +284,58 @@ def gate_strip():
 
 
 def issue_sections():
-    by_metric = {}
-    for i in CTRL["issues"]:
-        by_metric.setdefault(i["metric"], []).append(i)
+    # Per metric, gather two kinds of clips: ABSOLUTE issues (value over the trigger, in either
+    # run) and REGRESSIONS (the treatment worsened it past tolerance, even if still under the
+    # trigger). The second kind is why the biggest MOVER — e.g. c525 stretch 1.5->3.5, a
+    # regression that stays below the 4.0 trigger — still gets its crop shown.
+    metrics = [m for m in ISSUE_DEFS]
+    reg_by = {}
+    for r in TREAT.get("regressions", []):
+        reg_by.setdefault(r["metric"], {})[r["clip"]] = r.get("frame")
     html = []
-    for metric, items in by_metric.items():
-        if metric not in ISSUE_DEFS:
-            continue
+    for metric in metrics:
         title, temporal, desc = ISSUE_DEFS[metric]
-        items.sort(key=lambda i: -i["value"] / i["trigger"])
-        cards = []
-        for i in items[:3]:  # top-3 clips per issue keeps the report digestible
-            c = i["clip"]
+        trig = THR.get(metric, {}).get("trigger", 1e9)
+        entries = {}  # clip -> (kind, frame, sort_severity)
+        for i in CTRL["issues"]:
+            if i["metric"] == metric:
+                entries[i["clip"]] = ("issue", i.get("frame"), i["value"] / i["trigger"])
+        for c, frame in reg_by.get(metric, {}).items():
             a, b = ctrl_agg[c].get(metric, 0), treat_agg[c].get(metric, 0)
+            if c in entries:  # already an absolute issue; note it also regressed
+                entries[c] = ("issue+regressed", entries[c][1], entries[c][2])
+            else:
+                entries[c] = ("regressed", frame, max(b, a) / trig)
+        if not entries:
+            continue
+        # Separate quotas so a mover is never crowded out by absolute issues: top-3 absolute
+        # issues + up to 2 pure regressions (the clips the treatment pushed the worse way).
+        abs_e = sorted((e for e in entries.items() if not e[1][0] == "regressed"),
+                       key=lambda kv: -kv[1][2])[:3]
+        reg_e = sorted((e for e in entries.items() if e[1][0] == "regressed"),
+                       key=lambda kv: -kv[1][2])[:2]
+        order = abs_e + reg_e
+        cards = []
+        for c, (kind, frame, _) in order:
+            a, b = ctrl_agg[c].get(metric, 0), treat_agg[c].get(metric, 0)
+            pct = (b - a) / a * 100 if a else (100 if b else 0)
+            badge = ('<span class="pill p-crit">regressed</span>' if kind == "regressed"
+                     else '<span class="pill p-crit">also regressed</span>' if "regressed" in kind
+                     else '<span class="pill p-warn">issue</span>')
             imgs = ""
-            pair = crop_at_silhouette(c, i.get("frame", mid_frame(ctrl_dir, c)))
+            pair = crop_at_silhouette(c, frame if frame is not None else mid_frame(ctrl_dir, c))
             if pair:
                 if temporal:
                     imgs = (f'<div class="pair single"><figure><span class="tag">{CTRL_TAG} · worst '
-                            f'frame {i.get("frame", "?")}</span><img src="{pair[0]}"></figure></div>')
+                            f'frame {frame}</span><img src="{pair[0]}"></figure></div>')
                 else:
                     imgs = (f'<div class="pair"><figure><span class="tag">{CTRL_TAG}</span>'
                             f'<img src="{pair[0]}"></figure><figure><span class="tag t-treat">'
                             f'{TREAT_TAG}</span><img src="{pair[1]}"></figure></div>')
             cards.append(f'<div class="issue-clip"><div class="ic-head"><span class="clipname">{c}'
-                         f'</span><span class="metricval">{SHORT.get(metric, metric)}: <b>{a:.2f}</b>'
-                         f' &rarr; {b:.2f} &middot; worst frame {i.get("frame", "?")}</span></div>{imgs}</div>')
+                         f'</span> {badge} <span class="metricval">{SHORT.get(metric, metric)}: '
+                         f'<b>{a:.2f}</b> &rarr; {b:.2f} ({pct:+.0f}%) &middot; worst frame {frame}'
+                         f'</span></div>{imgs}</div>')
         note = ' <span class="pill p-info">temporal</span>' if temporal else ""
         html.append(f'<section><h2>{title}{note}</h2><p class="sub">{desc}</p>{"".join(cards)}</section>')
     return "\n".join(html)
