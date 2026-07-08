@@ -24,14 +24,22 @@ SIG = {  # per-clip plain-language read + severity class
     "c647": ("stretch band + unstable depth", "crit"),
     "c841": ("calm / stable", "good"),
 }
-# scorecard columns (focused so they all fit without horizontal scroll): key, header, worse-is-higher?
-# vmisalign (0 everywhere), disocc_smear (0 everywhere), depth_spread and pop95 are dropped from the
-# table to keep the artifact metrics visible; the full set is still in each clip's JSON.
+# All metrics are candidate columns. A column is SHOWN if `always` or its max across clips exceeds
+# `notable` -- so a metric that is flat today (vmisalign, disocc_smear) auto-promotes to a visible
+# column the moment a run makes it non-zero (a regression can't hide). Flat ones collapse to a
+# footer line with their max. key, header, worse-is-higher, always-show, notable-threshold.
 COLS = [
-    ("pop_px_p50", "pop", False), ("edge_acc_p50", "edge_acc", True),
-    ("stretch_area", "stretch", True), ("rim_over_p95", "rim", True),
-    ("swim_p50", "swim", True), ("flicker_p50", "flick", True),
-    ("flicker_disocc_p50", "flick_dis", True),
+    ("pop_px_p50", "pop", False, True, 0),
+    ("edge_acc_p50", "edge_acc", True, False, 2.0),
+    ("stretch_area", "stretch", True, False, 2.0),
+    ("rim_over_p95", "rim", True, False, 1.0),
+    ("swim_p50", "swim", True, False, 1.0),
+    ("flicker_p50", "flick", True, True, 0),
+    ("flicker_disocc_p50", "flick_dis", True, True, 0),
+    ("vmisalign_px", "vmis", True, False, 0.5),
+    ("disocc_smear", "smear", True, False, 0.02),
+    ("depth_spread", "dspread", False, False, 9e9),  # context; kept in JSON, off the table
+    ("pop_px_p95", "pop95", False, False, 9e9),
 ]
 
 
@@ -45,8 +53,11 @@ def durl(path, w=None):
 
 
 data = {c: json.load(open(os.path.join(alld, c + ".json")))["aggregate"] for c in CLIPS}
-# per-column max (of the worse-is-higher ones) for a light heat tint
-colmax = {k: (max(data[c].get(k, 0) for c in CLIPS) or 1) for k, _, _ in COLS}
+colmax = {k: max(data[c].get(k, 0) for c in CLIPS) for k, *_ in COLS}
+# A column is shown if `always` or its max crosses `notable`; otherwise it collapses. Worse-is-high
+# metrics that stay flat go to a "clean" footer (with their max) so a regression can't hide.
+ACTIVE = [col for col in COLS if col[3] or colmax[col[0]] > col[4]]
+CLEAN = [col for col in COLS if col not in ACTIVE and col[2]]  # flat correctness/artifact metrics
 
 
 def thumb(clip, w=132):
@@ -71,7 +82,7 @@ def scorecard_rows():
                  f'<div class="idmeta"><span class="clipname">{c}</span>'
                  f'<span class="pill p-{cls}">{sig}</span></div></td>')
         tds = [ident]
-        for k, _, worse in COLS:
+        for k, _, worse, _, _ in ACTIVE:
             v = a.get(k, 0)
             tint = ""
             if worse and colmax[k] > 0:
@@ -83,12 +94,22 @@ def scorecard_rows():
     return "\n".join(out)
 
 
+def clean_footer():
+    if not CLEAN:
+        return ""
+    items = ", ".join(f"{h} {colmax[k]:.2f}" for k, h, *_ in CLEAN)
+    return (f'<p style="margin-top:14px;color:var(--muted);font-size:13px">'
+            f'<b style="color:var(--ink)">Clean this run (max &asymp; 0, so collapsed):</b> {items}. '
+            f'These are still measured every run &mdash; any one auto-appears as a red column the '
+            f'moment it crosses threshold (a geometry fault or smear regression can\'t hide).</p>')
+
+
 full = durl(os.path.join(ab, "c525_control", "sbs_00016.png"), 1200)
 ctrl = durl(os.path.join(assets, "crop_control.png"), 720)
 treat = durl(os.path.join(assets, "crop_treat.png"), 720)
 depth = durl(os.path.join(assets, "crop_depth.png"), 720)
 
-hdr_cells = "".join(f"<th>{h}</th>" for _, h, _ in COLS)
+hdr_cells = "".join(f"<th>{h}</th>" for _, h, *_ in ACTIVE)
 
 HTML = """<style>
 :root {
@@ -225,9 +246,7 @@ pre{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px so
       <thead><tr><th>clip</th>__HDR__</tr></thead>
       <tbody>__ROWS__</tbody>
     </table></div>
-    <p style="margin-top:14px;color:var(--muted);font-size:13px"><b style="color:var(--ink)">vmisalign
-    = 0 on all 160 frames</b> (geometry clean). <code>pop</code>: higher is better (not tinted).
-    <code>edge_acc</code>/<code>stretch</code>/<code>rim</code>/<code>swim</code>/<code>flick</code>: higher is worse.</p>
+    __FOOTER__
   </section>
 
   <section>
@@ -279,6 +298,7 @@ python tools/sbsbench/sbsbench.py --seq out/NEW --frames clips/c525 --baseline c
 """
 
 HTML = (HTML.replace("__HDR__", hdr_cells).replace("__ROWS__", scorecard_rows())
+        .replace("__FOOTER__", clean_footer())
         .replace("__FULL__", full).replace("__CTRL__", ctrl)
         .replace("__TREAT__", treat).replace("__DEPTH__", depth))
 with open(out_html, "w", encoding="utf-8") as f:
