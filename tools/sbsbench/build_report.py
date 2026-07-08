@@ -208,6 +208,20 @@ METRIC_DEFS = [
 ]
 
 
+DEF_BY_KEY = {k: (what, d) for k, h, what, d in METRIC_DEFS}
+
+
+def tip_text(metric):
+    d = DEF_BY_KEY.get(metric)
+    return f"{d[0]} ({d[1]})".replace('"', "'") if d else ""
+
+
+def mtip(metric, label):
+    """Metric label wrapped with a native-title tooltip (reliable inside the scroll container)."""
+    t = tip_text(metric)
+    return f'<span class="mtip" title="{t}">{label}</span>' if t else label
+
+
 def metrics_section():
     present = {k for k, *_ in COLS if k in colmax} | {i["metric"] for i in CTRL["issues"]}
     rows = "".join(
@@ -239,7 +253,7 @@ def conclusion_section():
         # In a mode comparison neither direction is "better/worse" globally (it's a tradeoff);
         # split by which run each metric favors instead.
         favors_treat = (pct < 0) if worse else (pct > 0)
-        txt = f"<b>{h}</b> {CTRL_TAG} {a:.2f} → {TREAT_TAG} {b:.2f} ({pct:+.0f}%)"
+        txt = f"{mtip(k, '<b>' + h + '</b>')} {CTRL_TAG} {a:.2f} → {TREAT_TAG} {b:.2f} ({pct:+.0f}%)"
         (wins if favors_treat else costs).append(txt)
     li = ""
     if IS_MODE_CMP:
@@ -333,7 +347,7 @@ def issue_sections():
                             f'<img src="{pair[0]}"></figure><figure><span class="tag t-treat">'
                             f'{TREAT_TAG}</span><img src="{pair[1]}"></figure></div>')
             cards.append(f'<div class="issue-clip"><div class="ic-head"><span class="clipname">{c}'
-                         f'</span> {badge} <span class="metricval">{SHORT.get(metric, metric)}: '
+                         f'</span> {badge} <span class="metricval">{mtip(metric, SHORT.get(metric, metric))}: '
                          f'<b>{a:.2f}</b> &rarr; {b:.2f} ({pct:+.0f}%) &middot; worst frame {frame}'
                          f'</span></div>{imgs}</div>')
         note = ' <span class="pill p-info">temporal</span>' if temporal else ""
@@ -350,7 +364,7 @@ def clean_footer():
 
 
 meta = CTRL["meta"]
-hdr_cells = "".join(f"<th>{h}</th>" for _, h, *_ in ACTIVE)
+hdr_cells = "".join(f'<th title="{tip_text(k)}">{h}</th>' for k, h, *_ in ACTIVE)
 
 HTML = """<style>
 :root{--bg:#f5f6f7;--panel:#fff;--ink:#12181d;--muted:#5c6a74;--line:#dbe1e6;--accent:#0e8f9c;
@@ -387,6 +401,7 @@ table{border-collapse:collapse;width:100%;font-size:13.5px}
 th,td{text-align:right;padding:11px 13px;border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:middle}
 th:first-child,td:first-child{text-align:left;min-width:225px}
 thead th{font-family:var(--mono);font-size:11px;letter-spacing:.02em;text-transform:uppercase;color:var(--muted);font-weight:600;background:var(--panel)}
+thead th[title]:not([title=""]),.mtip{cursor:help;text-decoration:underline dotted;text-underline-offset:3px;text-decoration-color:color-mix(in srgb,var(--muted) 60%,transparent)}
 tbody tr:last-child td{border-bottom:none}
 td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .cv{font-size:14px;color:var(--ink)}
