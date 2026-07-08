@@ -104,6 +104,17 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   `<build-dir>/sbs_eval/<label>/results.json`. After an INTENDED metric change, re-baseline with
   `--update-baselines` and commit the baselines together with the change. A/B levers pass through:
   `--extra --divergence 0.027`. Changing bench.conf or the clip set invalidates baselines.
+- **Adding a clip to the eval set**: a clip is just a directory of same-size `frame_%05d.jpg`
+  frames under `tools/sbsbench/clips/<name>/` — `run_eval.py` auto-discovers it, no registration.
+  From a video: `python tools/sbsbench/split_video.py video.mp4 -o tools/sbsbench/clips/<name>
+  --width 854 --jpg --max 24` (854/24 matches the committed set's speed; full-res frames are also
+  valid — the eval never resizes input, so a big clip is simply a slower, more sensitive eval).
+  Synthetic/spliced clips: add a generator to `tools/sbsbench/make_synth_clips.py` (keeps the
+  clip deterministic and licensing-free). Pick content that isolates ONE failure mode (see the
+  clip table in the README). Then run `run_eval.py --update-baselines` and **commit the frames,
+  the generator change (if any), and the new `baselines/<name>.json` together**; sanity-check the
+  new clip's baseline numbers and worst frames before committing (a mis-sized or mis-ordered clip
+  shows up as nonsense metrics, not an error).
 - **Visual** — the headless frame-fed harness `sunshine --sbs-bench` (implemented in
   [src/sbs_bench_harness.cpp](src/sbs_bench_harness.cpp)): runs the real depth estimator + real
   composite shaders over a fixed directory of frames (split a short video with
