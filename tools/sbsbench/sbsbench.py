@@ -116,33 +116,67 @@ def hdilate(mask, px):
     return out
 
 
-def disocclusion_metrics(eye, depth, edge_pct=99.3, band_px=28):
-    """Locate disocclusion bands from the DEPTH map (silhouettes = the strongest horizontal depth
-    steps; the revealed gap the warp must fill sits right beside them) and measure the fill's
-    horizontal-detail deficit there -- stretched/smeared fill loses horizontal texture.
-
-    Returns:
-      disocc_frac  fraction of eye pixels in a narrow band beside a real silhouette (top ~0.7% of
-                   depth edges). Context: how much of the frame is disocclusion-adjacent.
-      disocc_smear horizontal-detail deficit in those bands: 1 - mean|d/dx eye|(band) /
-                   mean|d/dx eye|(undisturbed background). 0 = fill as crisp as clean regions;
-                   ->1 = smeared/stretched. This is the disocclusion artifact severity."""
-    eh, ew = eye.shape
-    depth_up = np.asarray(
-        Image.fromarray((depth * 255).astype(np.uint8)).resize((ew, eh), Image.BILINEAR),
+def resize_to(gray, w, h):
+    return np.asarray(
+        Image.fromarray((gray * 255).astype(np.uint8)).resize((w, h), Image.BILINEAR),
         dtype=np.float32) / 255.0
+
+
+def silhouette_band(depth, ew, eh, edge_pct=99.3, band_px=28):
+    """Depth silhouettes (top ~0.7% horizontal depth steps) upsampled to eye size, and the
+    narrow disocclusion band beside them. Returns (edge, band, ref) boolean masks at eye res."""
+    depth_up = resize_to(depth, ew, eh)
     gx_d = np.abs(np.diff(depth_up, axis=1, prepend=depth_up[:, :1]))
     edge = gx_d >= np.percentile(gx_d, edge_pct)
-    near = hdilate(edge, band_px)
-    band = near & ~hdilate(edge, 2)   # beside the silhouette, excluding the hard edge itself
-    ref = ~hdilate(edge, band_px + 8)  # undisturbed regions away from any silhouette
-    frac = float(band.mean())
+    band = hdilate(edge, band_px) & ~hdilate(edge, 2)   # beside the silhouette, not the edge itself
+    ref = ~hdilate(edge, band_px + 8)                    # undisturbed regions away from silhouettes
+    return edge, band, ref
 
+
+def disocclusion_metrics(eye, depth):
+    """From the depth silhouettes, measure the fill quality in the disocclusion band.
+
+    disocc_frac  fraction of eye pixels in a band beside a real silhouette (how much the warp had
+                 to invent). disocc_smear  horizontal-detail deficit there: 1 - |d/dx eye|(band) /
+                 |d/dx eye|(clean). 0 = fill as crisp as clean regions; ->1 = smeared/stretched."""
+    eh, ew = eye.shape
+    _, band, ref = silhouette_band(depth, ew, eh)
     gx = np.abs(np.diff(eye, axis=1, prepend=eye[:, :1]))
     b = float(gx[band].mean()) if band.any() else 0.0
     r = float(gx[ref].mean()) if ref.any() else 0.0
     smear = float(np.clip(1.0 - b / (r + 1e-4), 0.0, 1.0)) if r > 0 else 0.0
-    return frac, smear
+    return float(band.mean()), smear
+
+
+def hdist_x(src, maxd):
+    """Per-pixel horizontal distance (px) to the nearest True in `src`, capped at maxd."""
+    dist = np.full(src.shape, maxd, np.float32)
+    dist[src] = 0.0
+    acc = src.copy()
+    for s in range(1, maxd + 1):
+        acc = hdilate(acc, 1)
+        hit = acc & (dist == maxd)
+        dist[hit] = s
+    return dist
+
+
+def edge_accuracy(depth, src_gray, edge_pct=99.3, col_pct=97.0, maxd=24):
+    """Depth-silhouette accuracy vs the true object edge (targets soft/bent/floating silhouettes).
+
+    At depth resolution: distance from each depth silhouette to the nearest strong SOURCE color
+    edge (both horizontal edges, since silhouettes are vertical). Small = the depth model's
+    silhouette sits on the real object boundary; large = it floats off it. Returns p50/p95 in
+    depth-px. Needs the source frame (only computed when --frames is given)."""
+    dh, dw = depth.shape
+    src = resize_to(src_gray, dw, dh)
+    gxd = np.abs(np.diff(depth, axis=1, prepend=depth[:, :1]))
+    de = gxd >= np.percentile(gxd, edge_pct)
+    if not de.any():
+        return 0.0, 0.0
+    gxs = np.abs(np.diff(src, axis=1, prepend=src[:, :1]))
+    ce = gxs >= np.percentile(gxs, col_pct)
+    dist = hdist_x(ce, maxd)[de]
+    return float(np.percentile(dist, 50)), float(np.percentile(dist, 95))
 
 
 # ----------------------------------------------------------------------- per-frame
@@ -184,8 +218,9 @@ def measure(dump_dir):
     return out
 
 
-def measure_seq_frame(path, depth_path=None):
-    """Spatial metrics for one harness SBS frame; disocclusion metrics too if its depth is given."""
+def measure_seq_frame(path, depth=None, src_gray=None):
+    """Spatial metrics for one harness SBS frame. depth (0-1 array) adds disocclusion; the source
+    frame (src_gray, 0-1) adds depth-silhouette edge accuracy."""
     sbs = load_gray(path)
     left, right = split_eyes(sbs)
     ew = left.shape[1]
@@ -198,37 +233,59 @@ def measure_seq_frame(path, depth_path=None):
         out["pop_px_p95"] = weighted_pct(adx, wts, 0.95)
         out["pop_pct_p50"] = out["pop_px_p50"] / ew * 100.0
         out["vmisalign_px"] = float(np.median(np.abs(dys)))
-    if depth_path and os.path.exists(depth_path):
-        d = load_gray(depth_path)
-        out["depth_spread"] = float(np.percentile(d, 95) - np.percentile(d, 5))
-        out["disocc_frac"], out["disocc_smear"] = disocclusion_metrics(left, d)
-    return out, sbs
+    if depth is not None:
+        out["depth_spread"] = float(np.percentile(depth, 95) - np.percentile(depth, 5))
+        out["disocc_frac"], out["disocc_smear"] = disocclusion_metrics(left, depth)
+        if src_gray is not None:
+            out["edge_acc_p50"], out["edge_acc_p95"] = edge_accuracy(depth, src_gray)
+    return out, sbs, left
 
 
-def measure_sequence(seq_dir):
-    """A harness clip: sbs_*.png in order. Per-frame spatial metrics + temporal flicker.
+def measure_sequence(seq_dir, frames_dir=None):
+    """A harness clip: sbs_*.png (+ depth_*.png) in order. Per-frame spatial metrics plus the
+    temporal metrics that target the current pipeline's failure modes:
 
-    flicker = frame-to-frame mean|delta| of the SBS luma (x255). On the SAME clip the real
-    motion is identical across runs, so a flicker DELTA vs baseline isolates added shimmer
-    (e.g. inpaint re-hallucination) -- the metric the offline sim can't produce."""
+      flicker         frame-to-frame mean|delta| of the whole SBS luma (x255).
+      flicker_disocc  same, but restricted to the disocclusion bands -- isolates inpaint/stretch
+                      re-hallucination shimmer from ordinary motion (the ~1/4-res inpaint problem).
+      swim            frame-to-frame |depth change| where the SOURCE is static (needs --frames) --
+                      the scene-cut / flat-content depth instability, separated from real motion.
+
+    On the SAME clip the real motion is identical, so these DELTAS vs baseline are pure changes."""
     paths = sorted(glob.glob(os.path.join(seq_dir, "sbs_*.png")))
     if not paths:
         return None
-    rows = []
-    flicks = []
-    prev = None
-    for p in paths:
+    srcs = sorted(glob.glob(os.path.join(frames_dir, "*.png"))) if frames_dir else []
+    rows, flicks, bflicks, swims = [], [], [], []
+    prev_sbs = prev_left = prev_depth = prev_src = None
+    for i, p in enumerate(paths):
         depth_p = p.replace("sbs_", "depth_")
-        row, sbs = measure_seq_frame(p, depth_p)
-        if prev is not None:
-            row["flicker"] = float(np.mean(np.abs(sbs - prev)) * 255.0)
+        depth = load_gray(depth_p) if os.path.exists(depth_p) else None
+        src = load_gray(srcs[i]) if i < len(srcs) else None
+        row, sbs, left = measure_seq_frame(p, depth, src)
+        if prev_sbs is not None:
+            row["flicker"] = float(np.mean(np.abs(sbs - prev_sbs)) * 255.0)
             flicks.append(row["flicker"])
+            if depth is not None:
+                _, band, _ = silhouette_band(depth, left.shape[1], left.shape[0])
+                if band.any():
+                    row["flicker_disocc"] = float(np.mean(np.abs(left - prev_left)[band]) * 255.0)
+                    bflicks.append(row["flicker_disocc"])
+            if depth is not None and prev_depth is not None and src is not None and prev_src is not None:
+                dh, dw = depth.shape
+                a = resize_to(src, dw, dh)
+                b = resize_to(prev_src, dw, dh)
+                static = np.abs(a - b) < (3.0 / 255.0)  # source pixels that didn't move
+                if static.any():
+                    row["swim"] = float(np.median(np.abs(depth - prev_depth)[static]) * 255.0)
+                    swims.append(row["swim"])
         rows.append(row)
-        prev = sbs
+        prev_sbs, prev_left, prev_depth, prev_src = sbs, left, depth, src
     agg = aggregate(rows)
-    if flicks:
-        agg["flicker_p50"] = float(np.percentile(flicks, 50))
-        agg["flicker_p95"] = float(np.percentile(flicks, 95))
+    for name, vals in [("flicker", flicks), ("flicker_disocc", bflicks), ("swim", swims)]:
+        if vals:
+            agg[name + "_p50"] = float(np.percentile(vals, 50))
+            agg[name + "_p95"] = float(np.percentile(vals, 95))
     return rows, agg
 
 
@@ -248,7 +305,9 @@ def aggregate(rows):
 
 FMT = ["pop_px_p50", "pop_px_p95", "pop_pct_p50", "vmisalign_px", "depth_spread",
        "disocc_frac", "disocc_smear"]
-SEQ_FMT = ["pop_px_p50", "pop_px_p95", "vmisalign_px", "disocc_frac", "disocc_smear", "flicker"]
+SEQ_FMT = ["pop_px_p50", "pop_px_p95", "vmisalign_px", "disocc_smear", "edge_acc_p50", "flicker"]
+TEMPORAL_KEYS = ["flicker_p50", "flicker_p95", "flicker_disocc_p50", "flicker_disocc_p95",
+                 "swim_p50", "swim_p95"]
 
 
 def print_table(rows, agg, fmt=FMT):
@@ -264,12 +323,15 @@ def print_table(rows, agg, fmt=FMT):
     line += "".join(f"{agg[k]:>13.3f}" if k in agg else f"{'-':>13}" for k in fmt)
     print(line)
     if "flicker_p50" in agg:
-        print(f"{'temporal':<48}flicker p50={agg['flicker_p50']:.3f} p95={agg['flicker_p95']:.3f} (x255)")
+        def t(name, key):
+            return f"{name} p50={agg[key+'_p50']:.2f} p95={agg[key+'_p95']:.2f}" if key + "_p50" in agg else ""
+        parts = [t("flicker", "flicker"), t("disocc", "flicker_disocc"), t("swim", "swim")]
+        print(f"{'temporal (x255)':<48}" + "   ".join(p for p in parts if p))
 
 
 def print_diff(agg, base, fmt=FMT):
     print("\nvs baseline:")
-    for k in list(fmt) + ["flicker_p50", "flicker_p95"]:
+    for k in list(fmt) + TEMPORAL_KEYS:
         if k in agg and k in base:
             d = agg[k] - base[k]
             pct = (d / base[k] * 100.0) if base[k] else 0.0
@@ -281,13 +343,14 @@ def main():
     ap = argparse.ArgumentParser(description="No-reference visual metrics for host SBS dumps.")
     ap.add_argument("dumps", nargs="*", help="dump_* folders, or a harness output dir with --seq")
     ap.add_argument("--glob", help="glob pattern for dump folders (quote it)")
-    ap.add_argument("--seq", help="harness clip: a directory of sbs_*.png (adds temporal flicker)")
+    ap.add_argument("--seq", help="harness clip: a directory of sbs_*.png (adds temporal metrics)")
+    ap.add_argument("--frames", help="the harness INPUT frames dir (enables swim + edge accuracy)")
     ap.add_argument("--json", help="write the scorecard JSON here")
     ap.add_argument("--baseline", help="print deltas vs this scorecard JSON")
     args = ap.parse_args()
 
     if args.seq:
-        res = measure_sequence(args.seq)
+        res = measure_sequence(args.seq, args.frames)
         if not res:
             sys.exit(f"no sbs_*.png in {args.seq}")
         rows, agg = res

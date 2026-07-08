@@ -46,29 +46,36 @@ python tools/sbsbench/sbsbench.py --seq NEW_OUT --baseline base.json
 The harness settles the async depth per frame (`--settle`, default 3) so each output uses depth
 caught up to its own frame. Same input frames every run → a metric delta is your change alone.
 
-## Metrics (single frame; spatial)
+The metrics split cleanly by subsystem: **warp**-side changes move pop / disocc / flicker_disocc;
+**depth**-side changes move edge_acc / swim / depth_spread. So a delta tells you *where* the change
+landed. (Validated: a 2× `--divergence` warp change moved pop +90% and left edge_acc/swim flat;
+swapping da3mono→v2 moved edge_acc −96% and swim −100% and left the warp lever untouched.)
+
+## Metrics — spatial (per frame)
 | metric | meaning | direction |
 |--------|---------|-----------|
 | `pop_px_p50` / `p95` | L↔R horizontal disparity (tile phase-correlation), median & p95 | higher = more 3D pop |
 | `pop_pct_p50` | same as % of eye width | higher = more pop |
 | `vmisalign_px` | median vertical L↔R offset — must be ~0 | nonzero = geometry fault |
-| `depth_spread` | p95−p5 of the normalized depth map = pop available at the source | separates flat-model from flat-warp |
-| `stretch_band` | **experimental** proxy: excess horizontal smoothness in the band beside strong depth edges (the disocclusion smear) | higher = more visible band |
+| `depth_spread` | p95−p5 of the normalized depth = pop available at the source | separates flat-model from flat-warp |
+| `disocc_frac` | fraction of the eye in a band beside a real depth silhouette | context for smear (how much was invented) |
+| `disocc_smear` | horizontal-detail deficit in those bands: 1 − \|dI/dx\|<sub>band</sub>/\|dI/dx\|<sub>clean</sub> | 0 = clean fill · →1 = stretched/smeared |
+| `edge_acc_p50` / `p95` | depth-px distance from each depth silhouette to the nearest **source** color edge (needs `--frames`) | small = silhouette on the real edge · large = soft/bent/floating |
 
-Notes:
-- `vmisalign_px == 0` across frames is the built-in correctness check (parallax must be
-  horizontal-only); if it ever goes nonzero, a geometry regression slipped in.
-- Flat/paused frames legitimately score `pop=0` (no parallax) — curate scenes with real depth.
-- `stretch_band` is a heuristic; trust it once you've confirmed it moves on a case you can see.
-  Refine it against a known-bad silhouette before leaning on the absolute value.
-
-## Metric (temporal; `--seq` on a harness clip)
+## Metrics — temporal (`--seq` on a harness clip)
 | metric | meaning | direction |
 |--------|---------|-----------|
-| `flicker` | frame-to-frame mean\|Δ\| of the SBS luma (×255) | lower = steadier; on the SAME clip the shared motion cancels in the baseline diff, isolating added shimmer (e.g. ¼-res inpaint re-hallucination) |
+| `flicker` | frame-to-frame mean\|Δ\| of the SBS luma (×255) | lower = steadier |
+| `flicker_disocc` | flicker restricted to the disocclusion bands — isolates inpaint/stretch re-hallucination from ordinary motion | lower = less shimmer where it matters (runs ~2–3× frame flicker) |
+| `swim` | frame-to-frame \|depth change\| where the **source** is static (needs `--frames`) — scene-cut / flat-content depth instability, separated from real motion | lower = steadier depth |
 
-This is the metric the offline sim structurally cannot produce (it is single-frame). Validated:
-a static clip (one frame repeated) converges toward flicker≈0 as the async depth EMA settles.
+Notes:
+- `vmisalign_px == 0` is the built-in correctness check (parallax must be horizontal-only).
+- Flat/paused frames legitimately score `pop=0` — curate scenes with real depth.
+- On the SAME clip real motion cancels in the `--baseline` diff, so the temporal deltas are the
+  change alone. Temporal metrics need a multi-frame clip; the offline sim (single-frame) can't produce them.
+- `--frames <input dir>` unlocks `edge_acc` and `swim` (they compare against the source frames).
+- The dumped depth is 8-bit, so `swim` has a ~1/255 quantization floor; dump 16-bit depth if you need finer.
 
 ## Not yet (roadmap)
 - **Ghost** — a lag-band metric on a known-motion clip (double-image energy).
