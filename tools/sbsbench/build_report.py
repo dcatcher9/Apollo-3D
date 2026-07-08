@@ -270,20 +270,6 @@ pre{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px so
   </section>
 
   <section>
-    <h2>Artifact metrics &mdash; injection-validated</h2>
-    <p class="sub">Each artifact metric was checked by injecting the artifact into a real frame and
-    confirming it fires (and stays quiet on look-alikes).</p>
-    <div class="tablewrap"><table>
-      <thead><tr><th>metric</th><th>clean</th><th>artifact injected</th><th>look-alike (must stay low)</th></tr></thead>
-      <tbody>
-        <tr><td class="lab">rim_over (white line)</td><td>2.0</td><td>206 &nbsp;<span class="pill p-crit">1px white line</span></td><td>2.0 &nbsp;<span class="pill p-good">broad bright patch</span></td></tr>
-        <tr><td class="lab">stretch_area</td><td>1.7</td><td>6.5 &nbsp;<span class="pill p-crit">textured stretch</span></td><td>1.6 &nbsp;<span class="pill p-good">smooth fill</span></td></tr>
-        <tr><td class="lab">flicker</td><td>&asymp;0</td><td colspan="2">converges to 0 on a static clip as the depth EMA settles</td></tr>
-      </tbody>
-    </table></div>
-  </section>
-
-  <section>
     <h2>Reproduce</h2>
     <pre>python tools/sbsbench/split_video.py clip.mp4 -o clips/c525 --max 32
 cd cmake-build-relwithdebinfo
