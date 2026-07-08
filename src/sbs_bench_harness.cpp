@@ -364,6 +364,7 @@ namespace sbs_bench {
       const bool use_mlbw = est.delta_left && est.weight_left && est.delta_right && est.weight_right;
 
       // Composite (mirrors display_vram::convert()'s SBS block).
+      const auto comp_t0 = std::chrono::steady_clock::now();
       ctx->OMSetRenderTargets(1, sbs_rtv.GetAddressOf(), nullptr);
       ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
       ctx->VSSetShader(vs.Get(), nullptr, 0);
@@ -397,7 +398,10 @@ namespace sbs_bench {
       ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
       ctx->PSSetShaderResources(0, 5, null_srv);
 
-      sbs_perf::add_sample_ms("sbs_convert_cpu", 0.0);  // keep the frame counter moving for tick()
+      // Real composite-submission CPU cost (the estimator's depth_infer/warp_infer GPU times are
+      // captured separately via CUDA events); tick() advances the perf window.
+      sbs_perf::add_sample_ms("sbs_composite_cpu",
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - comp_t0).count());
       sbs_perf::tick();
 
       // Readback -> PNG.
