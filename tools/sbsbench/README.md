@@ -59,7 +59,8 @@ swapping da3mono→v2 moved edge_acc −96% and swim −100% and left the warp l
 | `vmisalign_px` | median vertical L↔R offset — must be ~0 | nonzero = geometry fault |
 | `depth_spread` | p95−p5 of the normalized depth = pop available at the source | separates flat-model from flat-warp |
 | `disocc_frac` | fraction of the eye in a band beside a real depth silhouette | context for smear (how much was invented) |
-| `disocc_smear` | horizontal-detail deficit in those bands: 1 − \|dI/dx\|<sub>band</sub>/\|dI/dx\|<sub>clean</sub> | 0 = clean fill · →1 = stretched/smeared |
+| `disocc_smear` | horizontal-detail deficit in the narrow band: 1 − \|dI/dx\|<sub>band</sub>/\|dI/dx\|<sub>clean</sub> | 0 = clean fill · →1 = smeared (small-scale) |
+| `stretch_area` | the LARGE horizontal disocclusion **stretch band** (bg rubber-banded to fill the gap; eye-asymmetric): area of wide low-horizontal-gradient / vertically-streaked runs anchored to silhouettes, per-mille of the eye | higher = more/bigger smeared patches. Ignores smooth (textureless) stretches |
 | `rim_over_p50` / `p95` | silhouette **halo / white line**: a thin bright ridge hugging the silhouette (horizontal white top-hat of the eye, sampled in the silhouette band, ×255) — the residual bright sliver where the fill doesn't reach the fg edge | ~0 = no fringe · higher = brighter white line. Ignores broad bright regions (top-hat is thin-ridge specific) |
 | `edge_acc_p50` / `p95` | depth-px distance from each depth silhouette to the nearest **source** color edge (needs `--frames`) | small = silhouette on the real edge · large = soft/bent/floating |
 

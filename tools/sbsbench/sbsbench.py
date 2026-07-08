@@ -160,6 +160,33 @@ def hdist_x(src, maxd):
     return dist
 
 
+def _herode(a, r):
+    """Horizontal erosion (min over +/-r): a boolean pixel survives iff it is in a True run of
+    length >= 2r+1, so it flags pixels inside a long horizontal run."""
+    return np.stack([np.roll(a, -o, axis=1) for o in range(-r, r + 1)]).min(0)
+
+
+def stretch_band(eye, depth, edge_pct=99.0, gthr=0.02, min_run=20, reach=220):
+    """Large horizontal DISOCCLUSION STRETCH beside silhouettes -- the background rubber-banded to
+    fill the gap the foreground uncovered (eye-asymmetric: left eye smears left, right eye right).
+    Unlike disocc_smear (narrow-band detail deficit) this measures the EXTENT of the big smear.
+
+    Signature: a wide horizontal run of LOW horizontal gradient that still has VERTICAL structure
+    (a horizontally smeared texture = vertical streaks), sitting within `reach` px of a depth
+    silhouette. A smooth background stretched invisibly (no texture) is correctly not flagged.
+
+    Returns stretch_area = fraction of the eye that is stretched fill, in per-mille (x1000)."""
+    eh, ew = eye.shape
+    gx = np.abs(np.diff(eye, axis=1, prepend=eye[:, :1]))
+    gy = np.abs(np.diff(eye, axis=0, prepend=eye[:1, :]))
+    streak = (gx < gthr) & (gy > gthr)           # smooth in x, structured in y = horizontal smear
+    long = _herode(streak, max(1, min_run // 2))  # inside a horizontal run >= min_run
+    depth_up = resize_to(depth, ew, eh)
+    gxd = np.abs(np.diff(depth_up, axis=1, prepend=depth_up[:, :1]))
+    near = hdilate(gxd >= np.percentile(gxd, edge_pct), reach)
+    return float((long & near).mean() * 1000.0)
+
+
 def _hopen(a, r):
     """Horizontal grayscale opening (erode then dilate) with radius r -- removes bright features
     narrower than 2r+1 px, leaving the broad fg/bg. eye - open = a horizontal white top-hat."""
@@ -233,6 +260,7 @@ def measure(dump_dir):
         d = load_gray(depth_p)
         out["depth_spread"] = float(np.percentile(d, 95) - np.percentile(d, 5))
         out["disocc_frac"], out["disocc_smear"] = disocclusion_metrics(left, d)
+        out["stretch_area"] = stretch_band(left, d)
         out["rim_over_p50"], out["rim_over_p95"] = silhouette_halo(left, d)
 
     model = ""
@@ -265,6 +293,7 @@ def measure_seq_frame(path, depth=None, src_gray=None):
     if depth is not None:
         out["depth_spread"] = float(np.percentile(depth, 95) - np.percentile(depth, 5))
         out["disocc_frac"], out["disocc_smear"] = disocclusion_metrics(left, depth)
+        out["stretch_area"] = stretch_band(left, depth)
         out["rim_over_p50"], out["rim_over_p95"] = silhouette_halo(left, depth)
         if src_gray is not None:
             out["edge_acc_p50"], out["edge_acc_p95"] = edge_accuracy(depth, src_gray)
@@ -333,9 +362,9 @@ def aggregate(rows):
 
 # ---------------------------------------------------------------------------- main
 
-FMT = ["pop_px_p50", "pop_px_p95", "pop_pct_p50", "vmisalign_px", "depth_spread",
-       "disocc_frac", "disocc_smear"]
-SEQ_FMT = ["pop_px_p50", "pop_px_p95", "vmisalign_px", "disocc_smear", "rim_over_p95",
+FMT = ["pop_px_p50", "pop_px_p95", "vmisalign_px", "depth_spread",
+       "disocc_smear", "stretch_area", "rim_over_p95"]
+SEQ_FMT = ["pop_px_p50", "pop_px_p95", "vmisalign_px", "stretch_area", "rim_over_p95",
            "edge_acc_p50", "flicker"]
 TEMPORAL_KEYS = ["flicker_p50", "flicker_p95", "flicker_disocc_p50", "flicker_disocc_p95",
                  "swim_p50", "swim_p95"]
