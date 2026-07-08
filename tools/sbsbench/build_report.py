@@ -24,13 +24,14 @@ SIG = {  # per-clip plain-language read + severity class
     "c647": ("stretch band + unstable depth", "crit"),
     "c841": ("calm / stable", "good"),
 }
-# scorecard columns: key, header, higher-is-worse?
+# scorecard columns (focused so they all fit without horizontal scroll): key, header, worse-is-higher?
+# vmisalign (0 everywhere), disocc_smear (0 everywhere), depth_spread and pop95 are dropped from the
+# table to keep the artifact metrics visible; the full set is still in each clip's JSON.
 COLS = [
-    ("pop_px_p50", "pop", False), ("vmisalign_px", "vmis", True),
-    ("depth_spread", "dspread", False), ("edge_acc_p50", "edge_acc", True),
-    ("disocc_smear", "smear", True), ("stretch_area", "stretch", True),
-    ("rim_over_p95", "rim", True), ("flicker_p50", "flick", True),
-    ("flicker_disocc_p50", "flick_dis", True), ("swim_p50", "swim", True),
+    ("pop_px_p50", "pop", False), ("edge_acc_p50", "edge_acc", True),
+    ("stretch_area", "stretch", True), ("rim_over_p95", "rim", True),
+    ("swim_p50", "swim", True), ("flicker_p50", "flick", True),
+    ("flicker_disocc_p50", "flick_dis", True),
 ]
 
 
@@ -45,7 +46,20 @@ def durl(path, w=None):
 
 data = {c: json.load(open(os.path.join(alld, c + ".json")))["aggregate"] for c in CLIPS}
 # per-column max (of the worse-is-higher ones) for a light heat tint
-colmax = {k: max(data[c].get(k, 0) for c in CLIPS) or 1 for k, _, _ in COLS}
+colmax = {k: (max(data[c].get(k, 0) for c in CLIPS) or 1) for k, _, _ in COLS}
+
+
+def thumb(clip, w=132):
+    """Left-eye crop of a mid clip frame as a small identity thumbnail."""
+    im = Image.open(os.path.join(alld, clip, "sbs_00016.png")).convert("RGB")
+    left = im.crop((0, 0, im.width // 2, im.height))
+    left.thumbnail((w, w * 2), Image.LANCZOS)
+    b = io.BytesIO()
+    left.save(b, "PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(b.getvalue()).decode()
+
+
+thumbs = {c: thumb(c) for c in CLIPS}
 
 
 def scorecard_rows():
@@ -53,16 +67,18 @@ def scorecard_rows():
     for c in CLIPS:
         a = data[c]
         sig, cls = SIG[c]
-        tds = [f'<td class="lab">{c}</td>']
+        ident = (f'<td class="idcell"><img class="thumb" src="{thumbs[c]}" alt="{c}">'
+                 f'<div class="idmeta"><span class="clipname">{c}</span>'
+                 f'<span class="pill p-{cls}">{sig}</span></div></td>')
+        tds = [ident]
         for k, _, worse in COLS:
             v = a.get(k, 0)
             tint = ""
             if worse and colmax[k] > 0:
                 f = min(v / colmax[k], 1.0)
                 if f > 0.15:
-                    tint = f' style="background:color-mix(in srgb,var(--crit) {int(f*22)}%,transparent)"'
+                    tint = f' style="background:color-mix(in srgb,var(--crit) {int(f*24)}%,transparent)"'
             tds.append(f"<td{tint}>{v:.2f}</td>")
-        tds.append(f'<td class="lab"><span class="pill p-{cls}">{sig}</span></td>')
         out.append("<tr>" + "".join(tds) + "</tr>")
     return "\n".join(out)
 
@@ -115,6 +131,11 @@ thead th{font-family:var(--mono);font-size:11px;letter-spacing:.02em;text-transf
 tbody tr:last-child td{border-bottom:none}
 td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 td.lab{font-family:var(--sans)}
+.idcell{display:flex;align-items:center;gap:11px;text-align:left}
+.thumb{width:66px;height:auto;border-radius:5px;border:1px solid var(--line);display:block;flex:0 0 auto}
+.idmeta{display:flex;flex-direction:column;gap:5px;align-items:flex-start}
+.clipname{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--ink)}
+th:first-child,td:first-child{min-width:230px}
 .pill{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:20px;font-weight:600;white-space:nowrap}
 .p-good{color:var(--good);background:color-mix(in srgb,var(--good) 15%,transparent)}
 .p-warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 15%,transparent)}
@@ -196,16 +217,17 @@ pre{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px so
   <section>
     <h2>Real-data scorecard &mdash; 5 clips</h2>
     <p class="sub">Same movie pipeline, five clips. Each lights up a different artifact, so the row
-    reads as a fingerprint. Red tint = worse (per column). Note <code>disocc_smear</code> is 0
-    everywhere while <code>stretch_area</code> ranges 1.3&ndash;9.8 &mdash; the l4 warp keeps the
-    <em>narrow</em> band clean, but the <em>large</em> stretch is real; that gap is why both exist.</p>
+    reads as a fingerprint (red tint = worse, per column). The most telling columns are shown; the
+    always-flat ones are omitted (<code>vmisalign</code> and <code>disocc_smear</code> are 0 on
+    every clip, and <code>stretch_area</code> up to 9.8 is what actually catches the large smear the
+    narrow-band <code>disocc_smear</code> misses). Every metric is in each clip's JSON.</p>
     <div class="tablewrap"><table>
-      <thead><tr><th>clip</th>__HDR__<th>signature</th></tr></thead>
+      <thead><tr><th>clip</th>__HDR__</tr></thead>
       <tbody>__ROWS__</tbody>
     </table></div>
     <p style="margin-top:14px;color:var(--muted);font-size:13px"><b style="color:var(--ink)">vmisalign
-    = 0 on all 160 frames.</b> pop / depth_spread: higher is better (not tinted). Everything else:
-    higher is worse.</p>
+    = 0 on all 160 frames</b> (geometry clean). <code>pop</code>: higher is better (not tinted).
+    <code>edge_acc</code>/<code>stretch</code>/<code>rim</code>/<code>swim</code>/<code>flick</code>: higher is worse.</p>
   </section>
 
   <section>
