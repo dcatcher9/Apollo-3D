@@ -403,6 +403,8 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
   <div class="meta"><span>__DATE__</span><span>git __SHA____DIRTY__</span>
   <span>__NCLIPS__ clips</span><span>__MODELS__</span></div>
 
+  __METRICS__
+
   __CONCLUSION__
 
   <section>
@@ -410,16 +412,14 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
     <p class="sub">One row per clip (auto-discovered; signature = its strongest triggered issue,
     as value×trigger ratio). Each cell shows the <b>__CTRL_TAG__</b> value on top and a chip for
     <b>__TREAT_TAG__</b> below (its value + %Δ; green = __TREAT_TAG__ better on this metric, red =
-    worse, grey &lt; 5%). pop is higher-is-better; the rest higher-is-worse. Metric definitions are
-    in the next section. Flat metrics collapse to the footer and auto-return when non-zero.</p>
+    worse, grey &lt; 5%). pop is higher-is-better; the rest higher-is-worse (see the definitions
+    above). Flat metrics collapse to the footer and auto-return when non-zero.</p>
     <div class="tablewrap"><table>
       <thead><tr><th>clip</th>__HDR__</tr></thead>
       <tbody>__ROWS__</tbody>
     </table></div>
     __FOOTER__
   </section>
-
-  __METRICS__
 
   __ISSUES__
 
