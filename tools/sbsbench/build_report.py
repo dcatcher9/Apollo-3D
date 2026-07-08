@@ -59,6 +59,27 @@ COLS = [
     ("flicker_disocc_p50", "flick_dis", True, True, 0), ("vmisalign_px", "vmis", True, False, 0.5),
     ("disocc_smear", "smear", True, False, 0.02),
 ]
+
+# Quality impact = the max points a metric can move the overall score, so tables and sections
+# read high-impact -> low. score itself leads; pop drives the depth term; artifacts scale by
+# their penalty weight; context metrics (depth_spread) fall to the end.
+_SC = sbsbench.SCORE_CFG
+_DW = _SC.get("depth", {}).get("weight", 0.2)
+_PEN = _SC.get("penalties", {})
+_DEPTH_METRIC = _SC.get("depth", {}).get("metric", "pop_pct_p50")
+
+
+def impact(k):
+    if k == "score":
+        return 1e9
+    if k in _PEN:
+        return (1.0 - _DW) * _PEN[k]["weight"]
+    if k in ("pop_px_p50", "pop_px_p95", _DEPTH_METRIC):
+        return _DW * 100.0
+    return 0.0
+
+
+COLS = sorted(COLS, key=lambda c: -impact(c[0]))
 SHORT = {k: h for k, h, *_ in COLS}
 ISSUE_DEFS = {  # metric -> (title, temporal?, description)
     "stretch_area": ("Disocclusion stretch band", False,
@@ -238,6 +259,7 @@ METRIC_DEFS = [
     ("flicker_disocc_p50", "flick_dis", "Flicker restricted to the disocclusion bands — inpaint/stretch re-hallucination shimmer.", "lower = less boiling along edges"),
     ("vmisalign_px", "vmis", "Median vertical L↔R offset — parallax must be horizontal-only, so this is a geometry correctness check.", "must be ≈ 0"),
 ]
+METRIC_DEFS = sorted(METRIC_DEFS, key=lambda m: -impact(m[0]))  # high quality-impact first
 
 
 DEF_BY_KEY = {k: (what, d) for k, h, what, d in METRIC_DEFS}
@@ -341,7 +363,7 @@ def issue_sections():
     # run) and REGRESSIONS (the treatment worsened it past tolerance, even if still under the
     # trigger). The second kind is why the biggest MOVER — e.g. c525 stretch 1.5->3.5, a
     # regression that stays below the 4.0 trigger — still gets its crop shown.
-    metrics = [m for m in ISSUE_DEFS]
+    metrics = sorted(ISSUE_DEFS, key=lambda m: -impact(m))  # high quality-impact first
     reg_by = {}
     for r in TREAT.get("regressions", []):
         reg_by.setdefault(r["metric"], {})[r["clip"]] = r.get("frame")
