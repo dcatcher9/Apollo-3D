@@ -181,10 +181,20 @@ def main():
                 issues.append({"clip": clip, "metric": k, "value": round(agg[k], 3),
                                "trigger": spec["trigger"], **worst.get(k, {})})
 
-        # Regression gate vs baseline.
+        # Regression gate vs baseline. A baseline is only valid for the exact frames it was made
+        # from: if the clip content changed, gating against it is meaningless -- skip it loudly
+        # instead of silently comparing apples to oranges.
         bp = os.path.join(base_dir, clip + ".json")
         if os.path.exists(bp) and not args.update_baselines:
             base = json.load(open(bp))
+            base_sha = base.get("meta", {}).get("clip_sha1")
+            if base_sha and base_sha != meta["clip_set_sha1"][clip]:
+                print(f"run_eval: WARNING {clip} frames changed since its baseline "
+                      f"({base_sha} -> {meta['clip_set_sha1'][clip]}); skipping its gate. "
+                      f"Re-baseline with --update-baselines.")
+                entry["stale_baseline"] = True
+                results[clip] = entry
+                continue
             for k, spec in thresholds["metrics"].items():
                 b, n = base["aggregate"].get(k), agg.get(k)
                 if b is None or n is None:
