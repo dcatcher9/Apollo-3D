@@ -1,17 +1,20 @@
 {
   "aggregate": {
-    "pop_px_p50": 2.853591825610421,
-    "pop_px_p95": 9.1243328927675,
-    "pop_pct_p50": 0.3341442418747566,
-    "vmisalign_px": 0.019351048259219777,
     "depth_spread": 0.8766942943135897,
     "disocc_frac": 0.04193999235623211,
     "disocc_smear": 0.0,
-    "stretch_area": 8.932840554254488,
-    "rim_over_p50": 0.0,
-    "rim_over_p95": 5.716223696867625,
     "edge_acc_p50": 0.2916666666666667,
     "edge_acc_p95": 24.0,
+    "flicker": 8.068583005148431,
+    "flicker_disocc": 16.111864165119503,
+    "pop_pct_p50": 0.3341442418747566,
+    "pop_px_p50": 2.853591825610421,
+    "pop_px_p95": 9.1243328927675,
+    "rim_over_p50": 0.0,
+    "rim_over_p95": 5.716223696867625,
+    "stretch_area": 8.932840554254488,
+    "swim": 6.411689407151679,
+    "vmisalign_px": 0.019351048259219777,
     "_n": 24,
     "_models": [
       ""
@@ -21,15 +24,18 @@
     "flicker_disocc_p50": 3.4421353340148926,
     "flicker_disocc_p95": 46.4253059387207,
     "swim_p50": 3.214008092880249,
-    "swim_p95": 18.77704133987426
+    "swim_p95": 18.77704133987426,
+    "q_clean": 83.1,
+    "q_depth": 55.7,
+    "score": 77.6
   },
   "perf_ms": {
-    "depth_infer": 9.28877,
-    "sbs_composite_cpu": 0.0022,
-    "warp_infer": 12.9835
+    "depth_infer": 9.17747,
+    "sbs_composite_cpu": 0.0024,
+    "warp_infer": 12.9579
   },
   "meta": {
-    "git_sha": "c971430d",
+    "git_sha": "9a15b3c8",
     "git_dirty": true,
     "clip_set_sha1": {
       "c339": "1923c16a8356",
@@ -45,9 +51,11 @@
     "extra_args": [],
     "conf": "tools\\sbsbench\\bench.conf",
     "gpu_contention": false,
-    "timestamp": "2026-07-08T08:39:41",
+    "timestamp": "2026-07-08T13:36:34",
     "model": "da3mono_large_fp16",
     "warp": "mlbw_l4_1596x672_fp16",
+    "name": "scene_cut",
+    "description": "Hard cut spliced kitchen-vlog -> washerwoman-pond: depth-normalization swim across cuts (A1).",
     "clip_sha1": "cf56985a05de"
   }
 }

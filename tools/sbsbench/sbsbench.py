@@ -432,7 +432,9 @@ def sbs_score(agg):
 
 
 def aggregate(rows):
-    keys = [k for k in rows[0] if not k.startswith("_")]
+    # Union of keys across ALL rows: a metric missing from frame 0 (e.g. its depth file failed)
+    # must not silently vanish from every aggregate.
+    keys = sorted({k for r in rows for k in r if not k.startswith("_")})
     agg = {}
     for k in keys:
         vals = [r[k] for r in rows if k in r]

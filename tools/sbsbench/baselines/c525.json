@@ -1,17 +1,20 @@
 {
   "aggregate": {
-    "pop_px_p50": 6.695072821326936,
-    "pop_px_p95": 9.070096010031014,
-    "pop_pct_p50": 0.7839663725207185,
-    "vmisalign_px": 0.006529161143892755,
     "depth_spread": 0.8347985322276751,
     "disocc_frac": 0.027484666575969888,
     "disocc_smear": 0.0007088410543419355,
-    "stretch_area": 1.5442746039304096,
-    "rim_over_p50": 0.0,
-    "rim_over_p95": 6.310941964387894,
     "edge_acc_p50": 9.833333333333334,
     "edge_acc_p95": 23.21875,
+    "flicker": 5.650145355126132,
+    "flicker_disocc": 8.68081814536582,
+    "pop_pct_p50": 0.7839663725207185,
+    "pop_px_p50": 6.695072821326936,
+    "pop_px_p95": 9.070096010031014,
+    "rim_over_p50": 0.0,
+    "rim_over_p95": 6.310941964387894,
+    "stretch_area": 1.5442746039304096,
+    "swim": 3.6897305211295253,
+    "vmisalign_px": 0.006529161143892755,
     "_n": 24,
     "_models": [
       ""
@@ -21,15 +24,18 @@
     "flicker_disocc_p50": 3.19514799118042,
     "flicker_disocc_p95": 59.77511487007133,
     "swim_p50": 2.8171207904815674,
-    "swim_p95": 9.785214424133299
+    "swim_p95": 9.785214424133299,
+    "q_clean": 87.3,
+    "q_depth": 100.0,
+    "score": 89.8
   },
   "perf_ms": {
-    "depth_infer": 9.32099,
-    "sbs_composite_cpu": 0.0023,
-    "warp_infer": 12.9957
+    "depth_infer": 9.18589,
+    "sbs_composite_cpu": 0.0021,
+    "warp_infer": 12.9659
   },
   "meta": {
-    "git_sha": "c971430d",
+    "git_sha": "9a15b3c8",
     "git_dirty": true,
     "clip_set_sha1": {
       "c339": "1923c16a8356",
@@ -45,9 +51,11 @@
     "extra_args": [],
     "conf": "tools\\sbsbench\\bench.conf",
     "gpu_contention": false,
-    "timestamp": "2026-07-08T08:39:41",
+    "timestamp": "2026-07-08T13:36:34",
     "model": "da3mono_large_fp16",
     "warp": "mlbw_l4_1596x672_fp16",
+    "name": "warrior-cliff",
+    "description": "Banner-bearing warrior on a cloudy mountaintop, hair against bright sky.",
     "clip_sha1": "aa00a6b08fb6"
   }
 }

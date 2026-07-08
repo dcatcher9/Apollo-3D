@@ -1,17 +1,20 @@
 {
   "aggregate": {
-    "pop_px_p50": 1.0901535982988309,
-    "pop_px_p95": 4.2721048182561425,
-    "pop_pct_p50": 0.12765264617082328,
-    "vmisalign_px": 0.0027189014484368577,
     "depth_spread": 0.574379950761795,
     "disocc_frac": 0.005727743624772313,
     "disocc_smear": 0.2828564777382978,
-    "stretch_area": 0.0004065833983866771,
-    "rim_over_p50": 0.0,
-    "rim_over_p95": 0.6975293780366579,
     "edge_acc_p50": 24.0,
     "edge_acc_p95": 24.0,
+    "flicker": 3.285132325213888,
+    "flicker_disocc": 0.4474509977128195,
+    "pop_pct_p50": 0.12765264617082328,
+    "pop_px_p50": 1.0901535982988309,
+    "pop_px_p95": 4.2721048182561425,
+    "rim_over_p50": 0.0,
+    "rim_over_p95": 0.6975293780366579,
+    "stretch_area": 0.0004065833983866771,
+    "swim": 9.11131677420243,
+    "vmisalign_px": 0.0027189014484368577,
     "_n": 24,
     "_models": [
       ""
@@ -21,15 +24,18 @@
     "flicker_disocc_p50": 0.37809908390045166,
     "flicker_disocc_p95": 0.7558034121990203,
     "swim_p50": 9.046690940856934,
-    "swim_p95": 15.879766464233397
+    "swim_p95": 15.879766464233397,
+    "q_clean": 80.8,
+    "q_depth": 21.3,
+    "score": 68.9
   },
   "perf_ms": {
-    "depth_infer": 9.29789,
-    "sbs_composite_cpu": 0.0021,
-    "warp_infer": 13.0725
+    "depth_infer": 9.17987,
+    "sbs_composite_cpu": 0.0022,
+    "warp_infer": 12.9639
   },
   "meta": {
-    "git_sha": "c971430d",
+    "git_sha": "9a15b3c8",
     "git_dirty": true,
     "clip_set_sha1": {
       "c339": "1923c16a8356",
@@ -45,9 +51,11 @@
     "extra_args": [],
     "conf": "tools\\sbsbench\\bench.conf",
     "gpu_contention": false,
-    "timestamp": "2026-07-08T08:39:41",
+    "timestamp": "2026-07-08T13:36:34",
     "model": "da3mono_large_fp16",
     "warp": "mlbw_l4_1596x672_fp16",
+    "name": "fast_motion",
+    "description": "Synthetic textured block crossing a textured background at 30 px/frame: async-depth ghost.",
     "clip_sha1": "6396d4a3435b"
   }
 }

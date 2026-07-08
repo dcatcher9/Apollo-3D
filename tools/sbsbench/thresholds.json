@@ -1,6 +1,7 @@
 {
   "_doc": "Shared gate for run_eval.py (and the report). Per metric: better = which direction is an improvement; a change is a REGRESSION when it moves the worse way by more than max(abs_floor, baseline*rel_tol). trigger = absolute value above which the metric counts as an active ISSUE on a clip (independent of any baseline).",
   "metrics": {
+    "score": {"better": "higher", "rel_tol": 0.03, "abs_floor": 1.5},
     "pop_px_p50": {"better": "higher", "rel_tol": 0.15, "abs_floor": 1.0},
     "pop_px_p95": {"better": "higher", "rel_tol": 0.2, "abs_floor": 2.0},
     "vmisalign_px": {"better": "lower", "rel_tol": 0.0, "abs_floor": 0.4, "trigger": 0.5},
