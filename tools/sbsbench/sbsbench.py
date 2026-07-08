@@ -160,6 +160,34 @@ def hdist_x(src, maxd):
     return dist
 
 
+def _hopen(a, r):
+    """Horizontal grayscale opening (erode then dilate) with radius r -- removes bright features
+    narrower than 2r+1 px, leaving the broad fg/bg. eye - open = a horizontal white top-hat."""
+    shifts = lambda x: np.stack([np.roll(x, -o, axis=1) for o in range(-r, r + 1)])
+    return shifts(shifts(a).min(0)).max(0)
+
+
+def silhouette_halo(eye, depth, edge_pct=98.5, ridge_r=2, band_px=6):
+    """Bright thin FRINGE hugging the silhouette -- the 'white line around the nose': the residual
+    bright sliver where the warp/inpaint fill doesn't reach the foreground edge. It is a thin
+    bright RIDGE in the eye (brighter than the fg and bg it separates, only a few px wide), sitting
+    on the depth silhouette. We detect thin bright ridges with a horizontal white top-hat
+    (eye - horizontal-opening, radius ridge_r px) and sample them in the silhouette band. This
+    ignores broad bright regions (top-hat ~0) and clean monotonic edges (no ridge).
+
+    Returns (rim_over_p50, rim_over_p95) in luma/255 -- the white-line severity."""
+    eh, ew = eye.shape
+    depth_up = resize_to(depth, ew, eh)
+    gxd = np.abs(np.diff(depth_up, axis=1, prepend=depth_up[:, :1]))
+    edge = gxd >= np.percentile(gxd, edge_pct)
+    band = hdilate(edge, band_px)  # look for the rim within a few px of the depth silhouette
+    if not band.any():
+        return 0.0, 0.0
+    ridge = np.clip(eye - _hopen(eye, ridge_r), 0.0, None)  # thin bright ridges (white top-hat)
+    vals = ridge[band] * 255.0
+    return float(np.percentile(vals, 50)), float(np.percentile(vals, 95))
+
+
 def edge_accuracy(depth, src_gray, edge_pct=99.3, col_pct=97.0, maxd=24):
     """Depth-silhouette accuracy vs the true object edge (targets soft/bent/floating silhouettes).
 
@@ -205,6 +233,7 @@ def measure(dump_dir):
         d = load_gray(depth_p)
         out["depth_spread"] = float(np.percentile(d, 95) - np.percentile(d, 5))
         out["disocc_frac"], out["disocc_smear"] = disocclusion_metrics(left, d)
+        out["rim_over_p50"], out["rim_over_p95"] = silhouette_halo(left, d)
 
     model = ""
     meta_p = os.path.join(dump_dir, "meta.txt")
@@ -236,6 +265,7 @@ def measure_seq_frame(path, depth=None, src_gray=None):
     if depth is not None:
         out["depth_spread"] = float(np.percentile(depth, 95) - np.percentile(depth, 5))
         out["disocc_frac"], out["disocc_smear"] = disocclusion_metrics(left, depth)
+        out["rim_over_p50"], out["rim_over_p95"] = silhouette_halo(left, depth)
         if src_gray is not None:
             out["edge_acc_p50"], out["edge_acc_p95"] = edge_accuracy(depth, src_gray)
     return out, sbs, left
@@ -305,7 +335,8 @@ def aggregate(rows):
 
 FMT = ["pop_px_p50", "pop_px_p95", "pop_pct_p50", "vmisalign_px", "depth_spread",
        "disocc_frac", "disocc_smear"]
-SEQ_FMT = ["pop_px_p50", "pop_px_p95", "vmisalign_px", "disocc_smear", "edge_acc_p50", "flicker"]
+SEQ_FMT = ["pop_px_p50", "pop_px_p95", "vmisalign_px", "disocc_smear", "rim_over_p95",
+           "edge_acc_p50", "flicker"]
 TEMPORAL_KEYS = ["flicker_p50", "flicker_p95", "flicker_disocc_p50", "flicker_disocc_p95",
                  "swim_p50", "swim_p95"]
 
