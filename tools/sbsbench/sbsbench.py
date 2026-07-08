@@ -68,21 +68,29 @@ def split_eyes(sbs_gray):
 # ------------------------------------------------------------------- pop / geometry
 
 def phase_shift(a, b):
-    """Sub-tile (dy, dx) that best aligns b onto a, via phase correlation. Signed, in pixels."""
+    """Sub-tile (dy, dx) that best aligns b onto a, via phase correlation with sub-pixel
+    parabolic refinement around the peak (wraparound-safe). Signed, in pixels. Without the
+    refinement pop quantizes to integers, which is coarse on small-resolution clips."""
     fa = np.fft.rfft2(a)
     fb = np.fft.rfft2(b)
     r = fa * np.conj(fb)
     mag = np.abs(r)
     mag[mag < 1e-8] = 1e-8
     corr = np.fft.irfft2(r / mag, s=a.shape)
-    peak = np.unravel_index(np.argmax(corr), corr.shape)
-    dy, dx = peak
     h, w = a.shape
-    if dy > h // 2:
+    py, px = np.unravel_index(np.argmax(corr), corr.shape)
+
+    def refine(cm, c0, cp):
+        d = cm - 2.0 * c0 + cp
+        return 0.5 * (cm - cp) / d if abs(d) > 1e-12 else 0.0
+
+    dy = py + refine(corr[(py - 1) % h, px], corr[py, px], corr[(py + 1) % h, px])
+    dx = px + refine(corr[py, (px - 1) % w], corr[py, px], corr[py, (px + 1) % w])
+    if dy > h / 2:
         dy -= h
-    if dx > w // 2:
+    if dx > w / 2:
         dx -= w
-    return dy, dx
+    return float(dy), float(dx)
 
 
 def disparity_field(left, right, tile=192, stride=128, min_var=1e-3):

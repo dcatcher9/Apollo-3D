@@ -51,7 +51,15 @@ harness — runs the real estimator + real composite shaders, no game/client).
 
 ### The committed clip set (quick eval)
 A small pre-resized clip set lives in **`tools/sbsbench/clips/<name>/frame_*.jpg`** (854 px wide,
-24 frames, JPEG) so eval is fast and reproducible with no per-run preprocessing. The harness sizes
+24 frames, JPEG) so eval is fast and reproducible with no per-run preprocessing. Five recorded
+movie clips (c339/c525/c647/c747/c841, each fingerprinting different artifacts) plus three
+generated failure-mode clips from [make_synth_clips.py](make_synth_clips.py):
+
+| clip | targets | validated fingerprint |
+|------|---------|----------------------|
+| `scene_cut` | depth-normalization swim across a hard cut (A1) | swim/flicker worst frame lands exactly on the cut (frame 12; swim 3.2 → 41.6 there) |
+| `flat_page` | flat-content depth hallucination + amplification (A3) | pop ≈ 0, flicker = 0 (static input = pipeline noise floor); disocc_smear 1.0 flags hallucinated text-edge silhouettes |
+| `fast_motion` | async-depth ghost (known 30 px/frame motion) | highest swim of the set (9.0) + trailing-disocclusion smear | The harness sizes
 the SBS output to the **input** resolution, so these small clips make a full 5-clip A/B take
 seconds (≈8 s harness + 3 s scoring per clip) instead of a minute:
 
