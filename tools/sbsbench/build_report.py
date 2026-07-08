@@ -138,6 +138,9 @@ TREAT_MODE = TREAT["meta"].get("mode")
 IS_MODE_CMP = bool(CTRL_MODE and TREAT_MODE and CTRL_MODE != TREAT_MODE)
 CTRL_NAME = run_label(CTRL, "control")
 TREAT_NAME = run_label(TREAT, "treatment")
+# Short tags for inline value labels and image captions (arrow is always CTRL -> TREAT).
+CTRL_TAG = CTRL_MODE if IS_MODE_CMP else "control"
+TREAT_TAG = TREAT_MODE if IS_MODE_CMP else "treatment"
 
 
 def treatment_name():
@@ -190,6 +193,34 @@ def scorecard_rows():
     return "\n".join(out)
 
 
+# metric -> (short header, what it measures, direction). Only the ones that appear render.
+METRIC_DEFS = [
+    ("pop_px_p50", "pop", "L↔R horizontal disparity (sub-pixel tile phase-correlation) — the amount of stereo depth.", "higher = more 3D"),
+    ("depth_spread", "dspread", "p95−p5 of the normalized depth = pop available at the source.", "higher = more depth to work with"),
+    ("edge_acc_p50", "edge_acc", "Distance (depth-px) from each depth silhouette to the nearest true SOURCE color edge.", "lower = silhouette sits on the real edge"),
+    ("swim_p50", "swim", "Frame-to-frame depth change where the SOURCE is static — depth instability, separated from real motion.", "lower = steadier depth"),
+    ("stretch_area", "stretch", "Area (‰ of the eye) of the large horizontal disocclusion smear beside silhouettes (bg rubber-banded to fill the gap).", "lower = less smear"),
+    ("rim_over_p95", "rim", "Brightness of the thin white line hugging a silhouette (the residual fill fringe), luma ×255.", "lower = fainter fringe"),
+    ("disocc_smear", "smear", "Horizontal-detail deficit in the narrow band beside silhouettes; on flat content also fingerprints hallucinated depth edges.", "lower = crisper fill"),
+    ("flicker_p50", "flick", "Whole-frame temporal change of the SBS luma (×255).", "lower = steadier"),
+    ("flicker_disocc_p50", "flick_dis", "Flicker restricted to the disocclusion bands — inpaint/stretch re-hallucination shimmer.", "lower = less boiling along edges"),
+    ("vmisalign_px", "vmis", "Median vertical L↔R offset — parallax must be horizontal-only, so this is a geometry correctness check.", "must be ≈ 0"),
+]
+
+
+def metrics_section():
+    present = {k for k, *_ in COLS if k in colmax} | {i["metric"] for i in CTRL["issues"]}
+    rows = "".join(
+        f'<tr><td class="mname">{h}</td><td class="mwhat">{what}</td><td class="mdir">{d}</td></tr>'
+        for k, h, what, d in METRIC_DEFS if k in present)
+    return (f'<section><h2>What the metrics mean</h2>'
+            f'<p class="sub">Definitions for the metrics used below. All are computed on the real '
+            f'SBS frames the headset would receive (no CPU replica). Absolute values are '
+            f'resolution-dependent, so compare within a run, not across clip sets.</p>'
+            f'<div class="tablewrap"><table class="mtab"><thead><tr><th>metric</th>'
+            f'<th>what it measures</th><th>direction</th></tr></thead><tbody>{rows}</tbody></table></div></section>')
+
+
 def conclusion_section():
     """Auto-derived verdict: per-metric mean across clips, classified into wins/costs, plus a
     shippability call from the gate. Regenerated with every report, so it always reflects the run."""
@@ -208,7 +239,7 @@ def conclusion_section():
         # In a mode comparison neither direction is "better/worse" globally (it's a tradeoff);
         # split by which run each metric favors instead.
         favors_treat = (pct < 0) if worse else (pct > 0)
-        txt = f"<b>{h}</b> {a:.2f} → {b:.2f} ({pct:+.0f}%)"
+        txt = f"<b>{h}</b> {CTRL_TAG} {a:.2f} → {TREAT_TAG} {b:.2f} ({pct:+.0f}%)"
         (wins if favors_treat else costs).append(txt)
     li = ""
     if IS_MODE_CMP:
@@ -270,12 +301,12 @@ def issue_sections():
             pair = crop_at_silhouette(c, i.get("frame", mid_frame(ctrl_dir, c)))
             if pair:
                 if temporal:
-                    imgs = (f'<div class="pair single"><figure><span class="tag">{CTRL_NAME} · worst '
+                    imgs = (f'<div class="pair single"><figure><span class="tag">{CTRL_TAG} · worst '
                             f'frame {i.get("frame", "?")}</span><img src="{pair[0]}"></figure></div>')
                 else:
-                    imgs = (f'<div class="pair"><figure><span class="tag">{CTRL_NAME}</span>'
+                    imgs = (f'<div class="pair"><figure><span class="tag">{CTRL_TAG}</span>'
                             f'<img src="{pair[0]}"></figure><figure><span class="tag t-treat">'
-                            f'{TREAT_NAME}</span><img src="{pair[1]}"></figure></div>')
+                            f'{TREAT_TAG}</span><img src="{pair[1]}"></figure></div>')
             cards.append(f'<div class="issue-clip"><div class="ic-head"><span class="clipname">{c}'
                          f'</span><span class="metricval">{SHORT.get(metric, metric)}: <b>{a:.2f}</b>'
                          f' &rarr; {b:.2f} &middot; worst frame {i.get("frame", "?")}</span></div>{imgs}</div>')
@@ -333,6 +364,10 @@ thead th{font-family:var(--mono);font-size:11px;letter-spacing:.02em;text-transf
 tbody tr:last-child td{border-bottom:none}
 td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .cv{font-size:14px;color:var(--ink)}
+.mtab td,.mtab th{text-align:left;white-space:normal}
+.mtab .mname{font-family:var(--mono);font-size:12.5px;color:var(--accent);font-weight:600;white-space:nowrap;vertical-align:top}
+.mtab .mwhat{font-family:var(--sans);font-size:13.5px;color:var(--ink);max-width:60ch}
+.mtab .mdir{font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:nowrap;vertical-align:top}
 .d{font-size:11px;font-family:var(--mono);display:inline-block;margin-top:3px;padding:1px 6px;border-radius:20px;font-weight:600}
 .d-flat{color:var(--muted);background:color-mix(in srgb,var(--muted) 12%,transparent)}
 .d-good{color:var(--good);background:color-mix(in srgb,var(--good) 15%,transparent)}
@@ -373,15 +408,18 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
   <section>
     <h2>Scorecard — __CTRL_NAME__ → __TREAT_NAME__</h2>
     <p class="sub">One row per clip (auto-discovered; signature = its strongest triggered issue,
-    as value×trigger ratio). Each cell: __CTRL_NAME__ value + a chip for __TREAT_NAME__ (green =
-    that run is better on this metric, red = worse, grey &lt; 5%). pop is higher-is-better; the
-    rest higher-is-worse. Flat metrics collapse to the footer and auto-return when non-zero.</p>
+    as value×trigger ratio). Each cell shows the <b>__CTRL_TAG__</b> value on top and a chip for
+    <b>__TREAT_TAG__</b> below (its value + %Δ; green = __TREAT_TAG__ better on this metric, red =
+    worse, grey &lt; 5%). pop is higher-is-better; the rest higher-is-worse. Metric definitions are
+    in the next section. Flat metrics collapse to the footer and auto-return when non-zero.</p>
     <div class="tablewrap"><table>
       <thead><tr><th>clip</th>__HDR__</tr></thead>
       <tbody>__ROWS__</tbody>
     </table></div>
     __FOOTER__
   </section>
+
+  __METRICS__
 
   __ISSUES__
 
@@ -412,7 +450,9 @@ HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
         .replace("__DIRTY__", "+dirty" if meta["git_dirty"] else "")
         .replace("__NCLIPS__", str(len(CLIPS)))
         .replace("__MODELS__", models).replace("__CONCLUSION__", conclusion_section())
+        .replace("__CTRL_TAG__", CTRL_TAG).replace("__TREAT_TAG__", TREAT_TAG)
         .replace("__HDR__", hdr_cells).replace("__ROWS__", scorecard_rows())
+        .replace("__METRICS__", metrics_section())
         .replace("__FOOTER__", clean_footer()).replace("__ISSUES__", issue_sections())
         .replace("__TREAT_ARGS__", " ".join(TREAT["meta"].get("extra_args") or ["--mode game"])))
 with open(out_html, "w", encoding="utf-8") as f:
