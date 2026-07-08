@@ -105,38 +105,44 @@ def weighted_pct(vals, wts, q):
     return float(np.interp(q, c, vals))
 
 
-# --------------------------------------------------------------- stretch-band proxy
+# --------------------------------------------------------- disocclusion metrics
 
-def grad_mag(a, axis):
-    return np.abs(np.diff(a, axis=axis, prepend=a[:, :1] if axis == 1 else a[:1, :]))
+def hdilate(mask, px):
+    """Dilate a boolean mask horizontally by +/- px columns."""
+    out = mask.copy()
+    for s in range(1, px + 1):
+        out[:, s:] |= mask[:, :-s]
+        out[:, :-s] |= mask[:, s:]
+    return out
 
 
-def stretch_band(eye, depth, band_px=40, edge_pct=97.0):
-    """Excess horizontal smoothness in the disocclusion band next to strong depth edges.
+def disocclusion_metrics(eye, depth, edge_pct=99.3, band_px=28):
+    """Locate disocclusion bands from the DEPTH map (silhouettes = the strongest horizontal depth
+    steps; the revealed gap the warp must fill sits right beside them) and measure the fill's
+    horizontal-detail deficit there -- stretched/smeared fill loses horizontal texture.
 
-    Disocclusion fill stretches content horizontally -> |d/dx| collapses relative to |d/dy|.
-    We measure vdom = |Gy| / (|Gx| + |Gy|) inside a band around strong vertical depth edges and
-    subtract the whole-frame vdom. A positive, larger value = more smeared band. Proxy only."""
-    dh, dw = depth.shape
+    Returns:
+      disocc_frac  fraction of eye pixels in a narrow band beside a real silhouette (top ~0.7% of
+                   depth edges). Context: how much of the frame is disocclusion-adjacent.
+      disocc_smear horizontal-detail deficit in those bands: 1 - mean|d/dx eye|(band) /
+                   mean|d/dx eye|(undisturbed background). 0 = fill as crisp as clean regions;
+                   ->1 = smeared/stretched. This is the disocclusion artifact severity."""
     eh, ew = eye.shape
     depth_up = np.asarray(
         Image.fromarray((depth * 255).astype(np.uint8)).resize((ew, eh), Image.BILINEAR),
         dtype=np.float32) / 255.0
     gx_d = np.abs(np.diff(depth_up, axis=1, prepend=depth_up[:, :1]))
-    thr = np.percentile(gx_d, edge_pct)
-    edge = gx_d >= thr
-    # Horizontal dilation by band_px on both sides (disocclusion sits beside the silhouette).
-    band = edge.copy()
-    for s in range(1, band_px + 1):
-        band[:, s:] |= edge[:, :-s]
-        band[:, :-s] |= edge[:, s:]
+    edge = gx_d >= np.percentile(gx_d, edge_pct)
+    near = hdilate(edge, band_px)
+    band = near & ~hdilate(edge, 2)   # beside the silhouette, excluding the hard edge itself
+    ref = ~hdilate(edge, band_px + 8)  # undisturbed regions away from any silhouette
+    frac = float(band.mean())
 
     gx = np.abs(np.diff(eye, axis=1, prepend=eye[:, :1]))
-    gy = np.abs(np.diff(eye, axis=0, prepend=eye[:1, :]))
-    vdom = gy / (gx + gy + 1e-4)
-    global_v = float(vdom.mean())
-    band_v = float(vdom[band].mean()) if band.any() else global_v
-    return band_v - global_v
+    b = float(gx[band].mean()) if band.any() else 0.0
+    r = float(gx[ref].mean()) if ref.any() else 0.0
+    smear = float(np.clip(1.0 - b / (r + 1e-4), 0.0, 1.0)) if r > 0 else 0.0
+    return frac, smear
 
 
 # ----------------------------------------------------------------------- per-frame
@@ -164,7 +170,7 @@ def measure(dump_dir):
     if os.path.exists(depth_p):
         d = load_gray(depth_p)
         out["depth_spread"] = float(np.percentile(d, 95) - np.percentile(d, 5))
-        out["stretch_band"] = stretch_band(left, d)
+        out["disocc_frac"], out["disocc_smear"] = disocclusion_metrics(left, d)
 
     model = ""
     meta_p = os.path.join(dump_dir, "meta.txt")
@@ -178,8 +184,8 @@ def measure(dump_dir):
     return out
 
 
-def measure_seq_frame(path):
-    """Spatial metrics for one standalone SBS frame (harness output; no depth.png)."""
+def measure_seq_frame(path, depth_path=None):
+    """Spatial metrics for one harness SBS frame; disocclusion metrics too if its depth is given."""
     sbs = load_gray(path)
     left, right = split_eyes(sbs)
     ew = left.shape[1]
@@ -192,6 +198,10 @@ def measure_seq_frame(path):
         out["pop_px_p95"] = weighted_pct(adx, wts, 0.95)
         out["pop_pct_p50"] = out["pop_px_p50"] / ew * 100.0
         out["vmisalign_px"] = float(np.median(np.abs(dys)))
+    if depth_path and os.path.exists(depth_path):
+        d = load_gray(depth_path)
+        out["depth_spread"] = float(np.percentile(d, 95) - np.percentile(d, 5))
+        out["disocc_frac"], out["disocc_smear"] = disocclusion_metrics(left, d)
     return out, sbs
 
 
@@ -208,7 +218,8 @@ def measure_sequence(seq_dir):
     flicks = []
     prev = None
     for p in paths:
-        row, sbs = measure_seq_frame(p)
+        depth_p = p.replace("sbs_", "depth_")
+        row, sbs = measure_seq_frame(p, depth_p)
         if prev is not None:
             row["flicker"] = float(np.mean(np.abs(sbs - prev)) * 255.0)
             flicks.append(row["flicker"])
@@ -235,8 +246,9 @@ def aggregate(rows):
 
 # ---------------------------------------------------------------------------- main
 
-FMT = ["pop_px_p50", "pop_px_p95", "pop_pct_p50", "vmisalign_px", "depth_spread", "stretch_band"]
-SEQ_FMT = ["pop_px_p50", "pop_px_p95", "pop_pct_p50", "vmisalign_px", "flicker"]
+FMT = ["pop_px_p50", "pop_px_p95", "pop_pct_p50", "vmisalign_px", "depth_spread",
+       "disocc_frac", "disocc_smear"]
+SEQ_FMT = ["pop_px_p50", "pop_px_p95", "vmisalign_px", "disocc_frac", "disocc_smear", "flicker"]
 
 
 def print_table(rows, agg, fmt=FMT):

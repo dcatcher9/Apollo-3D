@@ -100,6 +100,59 @@ namespace sbs_bench {
       return SUCCEEDED(fe->Commit()) && SUCCEEDED(enc->Commit());
     }
 
+    bool save_gray_png(const fs::path &path, UINT w, UINT h, const std::vector<uint8_t> &gray) {
+      ComPtr<IWICStream> stream;
+      if (FAILED(g_wic->CreateStream(&stream))) return false;
+      if (FAILED(stream->InitializeFromFilename(path.wstring().c_str(), GENERIC_WRITE))) return false;
+      ComPtr<IWICBitmapEncoder> enc;
+      if (FAILED(g_wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc))) return false;
+      if (FAILED(enc->Initialize(stream.Get(), WICBitmapEncoderNoCache))) return false;
+      ComPtr<IWICBitmapFrameEncode> fe;
+      ComPtr<IPropertyBag2> props;
+      if (FAILED(enc->CreateNewFrame(&fe, &props))) return false;
+      if (FAILED(fe->Initialize(props.Get()))) return false;
+      fe->SetSize(w, h);
+      WICPixelFormatGUID fmt = GUID_WICPixelFormat8bppGray;
+      fe->SetPixelFormat(&fmt);
+      if (FAILED(fe->WritePixels(h, w, (UINT) gray.size(), const_cast<uint8_t *>(gray.data()))))
+        return false;
+      return SUCCEEDED(fe->Commit()) && SUCCEEDED(enc->Commit());
+    }
+
+    // Read back an R32_FLOAT depth SRV and save it as an 8-bit grayscale PNG (values clamped to
+    // [0,1] and scaled to 0-255), so sbsbench can locate silhouettes for the disocclusion metric.
+    void dump_depth(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv,
+      const fs::path &path) {
+      if (!srv) return;
+      ComPtr<ID3D11Resource> res;
+      srv->GetResource(&res);
+      ComPtr<ID3D11Texture2D> tex;
+      if (FAILED(res.As(&tex))) return;
+      D3D11_TEXTURE2D_DESC d = {};
+      tex->GetDesc(&d);
+      D3D11_TEXTURE2D_DESC sd = d;
+      sd.Usage = D3D11_USAGE_STAGING;
+      sd.BindFlags = 0;
+      sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      sd.MiscFlags = 0;
+      ComPtr<ID3D11Texture2D> stage;
+      if (FAILED(dev->CreateTexture2D(&sd, nullptr, &stage))) return;
+      ctx->CopyResource(stage.Get(), tex.Get());
+      D3D11_MAPPED_SUBRESOURCE m = {};
+      if (FAILED(ctx->Map(stage.Get(), 0, D3D11_MAP_READ, 0, &m))) return;
+      std::vector<uint8_t> gray((size_t) d.Width * d.Height);
+      for (UINT y = 0; y < d.Height; y++) {
+        const float *row = (const float *) ((const uint8_t *) m.pData + (size_t) y * m.RowPitch);
+        for (UINT x = 0; x < d.Width; x++) {
+          float v = row[x];
+          v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+          gray[(size_t) y * d.Width + x] = (uint8_t) (v * 255.0f + 0.5f);
+        }
+      }
+      ctx->Unmap(stage.Get(), 0);
+      save_gray_png(path, d.Width, d.Height, gray);
+    }
+
     // ---- D3D helpers ----
 
     ComPtr<ID3DBlob> compile(const char *file, const char *entry, const char *model) {
@@ -136,6 +189,7 @@ namespace sbs_bench {
       int settle = 3;      // estimate passes per frame so async depth/warp catch up
       int settle_ms = 40;  // sleep between passes so the CUDA streams finish
       int limit = 0;       // 0 -> all
+      double divergence = -1.0;  // <0 -> use the conf's value; else override (parallax/disocclusion size)
     };
 
     bool parse_opts(int argc, char **argv, opts &o) {
@@ -154,6 +208,7 @@ namespace sbs_bench {
         else if (a == "--settle") o.settle = std::max(1, std::stoi(next("--settle")));
         else if (a == "--settle-ms") o.settle_ms = std::stoi(next("--settle-ms"));
         else if (a == "--limit") o.limit = std::stoi(next("--limit"));
+        else if (a == "--divergence") o.divergence = std::stod(next("--divergence"));
         else { BOOST_LOG(error) << "sbs-bench: unknown arg '" << a << "'"; return false; }
       }
       if (o.frames.empty() || o.out.empty()) {
@@ -200,6 +255,7 @@ namespace sbs_bench {
       if (!sbs_cfg.warp_model_movie.empty()) sbs_cfg.warp_model = sbs_cfg.warp_model_movie;
       if (sbs_cfg.movie_depth_fps > 0.0) sbs_cfg.depth_fps = sbs_cfg.movie_depth_fps;
     }
+    if (o.divergence >= 0.0) sbs_cfg.divergence = o.divergence;  // A/B lever: parallax/disocclusion size
     sbs_cfg.perf_stats = true;  // the harness always measures
     sbs_perf::set_enabled(true);
     sbs_perf::reset();
@@ -355,6 +411,9 @@ namespace sbs_bench {
         char name[32];
         snprintf(name, sizeof(name), "sbs_%05zu.png", fi);
         if (save_png(fs::path(o.out) / name, sbs_w, sbs_h, buf)) written++;
+        char dname[32];
+        snprintf(dname, sizeof(dname), "depth_%05zu.png", fi);
+        dump_depth(dev.Get(), ctx.Get(), est.depth.Get(), fs::path(o.out) / dname);
       }
       if (((fi + 1) % 20) == 0)
         BOOST_LOG(info) << "sbs-bench: " << (fi + 1) << "/" << frames.size();

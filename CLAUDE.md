@@ -86,6 +86,33 @@ MULTIPLE scenes — before deploying anything to the headset. Do NOT iterate gue
 headset-check; that loop has repeatedly failed here. When `sbs_reprojection_ps.hlsl` changes,
 update the simulator's replica functions to match.
 
+### Quantify every SBS change with the two host benchmarks (offline, real pipeline)
+
+The warpsim above is for iterating the reprojection *math*; it is a CPU replica on
+pre-normalized depth and cannot see model/normalization/temporal effects. To evaluate what a
+change actually does to the shipped pipeline, ALWAYS use the two host benchmarks — they run the
+real estimator + real shaders and produce numbers to diff against a baseline. Do not judge an
+SBS change by eyeballing the headset; produce the before/after numbers. See
+[docs/sbs-benchmark-plan.md](docs/sbs-benchmark-plan.md) and
+[tools/sbsbench/README.md](tools/sbsbench/README.md).
+
+- **Visual** — the headless frame-fed harness `sunshine --sbs-bench` (implemented in
+  [src/sbs_bench_harness.cpp](src/sbs_bench_harness.cpp)): runs the real depth estimator + real
+  composite shaders over a fixed directory of frames (split a short video with
+  `tools/sbsbench/split_video.py`), writing `sbs_%05d.png` + `depth_%05d.png`, deterministically
+  and with no game/client. Score with `python tools/sbsbench/sbsbench.py --seq <out> --baseline
+  base.json` → pop (stereo depth), vmisalign (geometry, must stay ~0), disocc_frac/disocc_smear
+  (disocclusion severity), flicker (temporal shimmer, which the offline sim can't measure).
+  Capture a baseline before the change; the `--divergence` and `--model`/`--movie` flags are the
+  A/B levers. Run it from `cmake-build-relwithdebinfo` so `assets/` resolves.
+- **Perf** — the in-app `sbs_3d_perf_stats = enabled` config knob ([src/sbs_perf.cpp](src/sbs_perf.cpp)):
+  logs per-stage p50/p95/max (`depth_infer`, `warp_infer` via CUDA events; `sbs_convert_cpu`)
+  every 300 SBS frames and writes `sbs_perf.json`. The harness enables it automatically, so a
+  `--sbs-bench` run yields both the visual scorecard and the perf snapshot in one pass.
+
+When these tools change (new metric, harness contract, or a shader they replicate), update their
+READMEs and this section so the workflow stays discoverable.
+
 ## Web UI (Vue 3 + Vite)
 
 The config web UI is a separate Vite build. Sources are in
