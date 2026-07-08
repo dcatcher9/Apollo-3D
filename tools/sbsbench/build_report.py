@@ -18,6 +18,8 @@ from PIL import Image
 
 ctrl_dir, treat_dir, out_html = sys.argv[1], sys.argv[2], sys.argv[3]
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+import sbsbench  # noqa: E402  (sbs_score, shared with run_eval)
 
 CTRL = json.load(open(os.path.join(ctrl_dir, "results.json")))
 TREAT = json.load(open(os.path.join(treat_dir, "results.json")))
@@ -50,6 +52,7 @@ CLIPS = sorted(CTRL["clips"])
 
 # metric, header, worse-is-higher, always-show, notable-threshold
 COLS = [
+    ("score", "score", False, True, 0),
     ("pop_px_p50", "pop", False, True, 0), ("edge_acc_p50", "edge_acc", True, False, 2.0),
     ("stretch_area", "stretch", True, False, 2.0), ("rim_over_p95", "rim", True, False, 1.0),
     ("swim_p50", "swim", True, False, 1.0), ("flicker_p50", "flick", True, True, 0),
@@ -185,6 +188,10 @@ def delta_chip(a, b, worse_high):
 
 ctrl_agg = {c: CTRL["clips"][c]["aggregate"] for c in CLIPS}
 treat_agg = {c: TREAT["clips"][c]["aggregate"] for c in CLIPS}
+# Ensure the overall score is present (older run dirs predate it; recompute from the aggregates).
+for _agg in list(ctrl_agg.values()) + list(treat_agg.values()):
+    if "score" not in _agg:
+        _agg.update(sbsbench.sbs_score(_agg))
 colmax = {k: max(max(ctrl_agg[c].get(k, 0), treat_agg[c].get(k, 0)) for c in CLIPS) for k, *_ in COLS}
 ACTIVE = [col for col in COLS if col[3] or colmax[col[0]] > col[4]]
 CLEAN = [col for col in COLS if col not in ACTIVE and col[2]]
@@ -219,6 +226,7 @@ def scorecard_rows():
 
 # metric -> (short header, what it measures, direction). Only the ones that appear render.
 METRIC_DEFS = [
+    ("score", "score", "Overall 0-100 SBS quality: 100 minus weighted artifact penalties, blended with realized stereo depth (see thresholds.json 'score'). A heuristic for ranking on a clip.", "higher = better"),
     ("pop_px_p50", "pop", "L↔R horizontal disparity (sub-pixel tile phase-correlation) — the amount of stereo depth.", "higher = more 3D"),
     ("depth_spread", "dspread", "p95−p5 of the normalized depth = pop available at the source.", "higher = more depth to work with"),
     ("edge_acc_p50", "edge_acc", "Distance (depth-px) from each depth silhouette to the nearest true SOURCE color edge.", "lower = silhouette sits on the real edge"),
@@ -262,8 +270,15 @@ def metrics_section():
 def conclusion_section():
     """Auto-derived verdict: per-metric mean across clips, classified into wins/costs, plus a
     shippability call from the gate. Regenerated with every report, so it always reflects the run."""
+    # Overall-score headline (mean across clips) — the single-number verdict.
+    sc_a = np.mean([ctrl_agg[c].get("score", 0) for c in CLIPS])
+    sc_b = np.mean([treat_agg[c].get("score", 0) for c in CLIPS])
+    score_line = (f'<li class="c-score">Overall SBS quality (0-100): {CTRL_TAG} <b>{sc_a:.1f}</b> '
+                  f'&rarr; {TREAT_TAG} <b>{sc_b:.1f}</b> ({sc_b - sc_a:+.1f})</li>')
     wins, costs = [], []
     for k, h, worse, _, _ in COLS:
+        if k == "score":  # the headline, not a component metric
+            continue
         a = np.mean([ctrl_agg[c].get(k, 0) for c in CLIPS])
         b = np.mean([treat_agg[c].get(k, 0) for c in CLIPS])
         if a < 1e-6 and b < 1e-6:
@@ -279,7 +294,7 @@ def conclusion_section():
         favors_treat = (pct < 0) if worse else (pct > 0)
         txt = f"{mtip(k, '<b>' + h + '</b>')} {CTRL_TAG} {a:.2f} → {TREAT_TAG} {b:.2f} ({pct:+.0f}%)"
         (wins if favors_treat else costs).append(txt)
-    li = ""
+    li = score_line
     if IS_MODE_CMP:
         if wins:
             li += f'<li class="c-win">{TREAT_NAME} is better on: {" · ".join(wins)}</li>'
@@ -420,6 +435,7 @@ h2{font-size:15px;font-family:var(--mono);letter-spacing:.03em;text-transform:up
 .concl b{color:var(--ink)}
 .c-win{color:var(--good)}.c-win b{color:var(--good)}
 .c-cost{color:var(--crit)}.c-cost b{color:var(--crit)}
+.c-score{font-size:15.5px;color:var(--ink)}.c-score b{color:var(--accent);font-size:16px}
 .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px}
 table{border-collapse:collapse;width:100%;font-size:13.5px}
 th,td{text-align:right;padding:11px 13px;border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:middle}

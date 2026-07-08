@@ -16,5 +16,19 @@
   "perf_ms": {
     "depth_infer": {"rel_tol": 0.3, "abs_floor": 1.0},
     "warp_infer": {"rel_tol": 0.3, "abs_floor": 1.0}
+  },
+  "score": {
+    "_doc": "Overall 0-100 SBS quality. q_clean = 100 - sum of artifact penalties, each = weight * min(value/scale, 1) (saturating; scale = value that costs the full weight). q_depth = 100 * min(pop_pct_p50/depth.target, 1) = how much comfortable stereo was realized (content-dependent: a genuinely flat scene scores low here). score = (1-depth.weight)*q_clean + depth.weight*q_depth. Heuristic for ranking on a clip, tunable; the per-metric numbers stay the source of truth.",
+    "penalties": {
+      "vmisalign_px":       {"weight": 15, "scale": 2.0},
+      "stretch_area":       {"weight": 18, "scale": 15.0},
+      "flicker_disocc_p50": {"weight": 16, "scale": 45.0},
+      "rim_over_p95":       {"weight": 12, "scale": 25.0},
+      "edge_acc_p50":       {"weight": 10, "scale": 20.0},
+      "swim_p50":           {"weight": 8,  "scale": 15.0},
+      "disocc_smear":       {"weight": 6,  "scale": 0.5},
+      "flicker_p50":        {"weight": 5,  "scale": 30.0}
+    },
+    "depth": {"metric": "pop_pct_p50", "target": 0.6, "weight": 0.2}
   }
 }

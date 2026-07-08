@@ -398,7 +398,37 @@ def measure_sequence(seq_dir, frames_dir=None):
         if vals:
             agg[name + "_p50"] = float(np.percentile(vals, 50))
             agg[name + "_p95"] = float(np.percentile(vals, 95))
+    agg.update(sbs_score(agg))  # overall quality score from the assembled metrics
     return rows, agg
+
+
+def _load_score_cfg():
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thresholds.json")
+    try:
+        return json.load(open(p))["score"]
+    except Exception:
+        return {"penalties": {}, "depth": {"metric": "pop_pct_p50", "target": 0.6, "weight": 0.2}}
+
+
+SCORE_CFG = _load_score_cfg()
+
+
+def sbs_score(agg):
+    """Overall 0-100 SBS quality from an aggregate metric dict (see thresholds.json 'score').
+    q_clean penalizes artifacts; q_depth rewards realized stereo; score blends them."""
+    pen = 0.0
+    for k, spec in SCORE_CFG.get("penalties", {}).items():
+        v = agg.get(k)
+        if v is None:
+            continue
+        pen += spec["weight"] * min(v / spec["scale"], 1.0) if spec["scale"] else 0.0
+    q_clean = max(0.0, 100.0 - pen)
+    d = SCORE_CFG.get("depth", {})
+    pop = agg.get(d.get("metric", "pop_pct_p50"), 0.0)
+    q_depth = 100.0 * min(pop / d.get("target", 0.6), 1.0) if d.get("target") else 0.0
+    dw = d.get("weight", 0.2)
+    score = (1.0 - dw) * q_clean + dw * q_depth
+    return {"q_clean": round(q_clean, 1), "q_depth": round(q_depth, 1), "score": round(score, 1)}
 
 
 def aggregate(rows):
