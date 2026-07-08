@@ -121,9 +121,27 @@ def crop_at_silhouette(clip, idx):
     return out
 
 
+def run_label(run, default):
+    """Human name for a run: its extra harness args, else 'mode (model)', else a default."""
+    ex = run["meta"].get("extra_args") or []
+    if ex:
+        return " ".join(ex).replace("--", "")
+    mode = run["meta"].get("mode", "")
+    models = sorted({e["meta"].get("model", "") for e in run["clips"].values()})
+    if mode:
+        return f"{mode}" + (f" ({models[0]})" if len(models) == 1 and models[0] else "")
+    return default
+
+
+CTRL_MODE = CTRL["meta"].get("mode")
+TREAT_MODE = TREAT["meta"].get("mode")
+IS_MODE_CMP = bool(CTRL_MODE and TREAT_MODE and CTRL_MODE != TREAT_MODE)
+CTRL_NAME = run_label(CTRL, "control")
+TREAT_NAME = run_label(TREAT, "treatment")
+
+
 def treatment_name():
-    ex = TREAT["meta"].get("extra_args") or []
-    return " ".join(ex).replace("--", "") or "treatment"
+    return TREAT_NAME
 
 
 def delta_chip(a, b, worse_high):
@@ -187,39 +205,51 @@ def conclusion_section():
         floor = THR.get(k, {}).get("abs_floor", 0.0) / 2.0
         if abs(pct) < 5 or abs(b - a) < floor:
             continue
-        better = (pct < 0) if worse else (pct > 0)
+        # In a mode comparison neither direction is "better/worse" globally (it's a tradeoff);
+        # split by which run each metric favors instead.
+        favors_treat = (pct < 0) if worse else (pct > 0)
         txt = f"<b>{h}</b> {a:.2f} → {b:.2f} ({pct:+.0f}%)"
-        (wins if better else costs).append(txt)
-    regs = TREAT.get("regressions", [])
-    if regs:
-        ship = (f"<b>Not shippable as-is:</b> the gate fails with {len(regs)} regression(s) past "
-                f"threshold — at these settings the costs outweigh the wins above.")
-    elif wins:
-        ship = "<b>Shippable:</b> measurable wins with no regressions past threshold."
-    else:
-        ship = "<b>No meaningful effect:</b> all metrics within noise of the baseline."
+        (wins if favors_treat else costs).append(txt)
     li = ""
-    if wins:
-        li += f'<li class="c-win">Improved: {" · ".join(wins)}</li>'
-    if costs:
-        li += f'<li class="c-cost">Worsened: {" · ".join(costs)}</li>'
+    if IS_MODE_CMP:
+        if wins:
+            li += f'<li class="c-win">{TREAT_NAME} is better on: {" · ".join(wins)}</li>'
+        if costs:
+            li += f'<li class="c-cost">{CTRL_NAME} is better on: {" · ".join(costs)}</li>'
+        verdict = (f"<b>Tradeoff, not a regression:</b> these are two different pipeline "
+                   f"configs, so the gate below (which compares {TREAT_NAME} to the committed "
+                   f"{CTRL_MODE} baselines) reads as differences, not regressions. Pick per the "
+                   f"tradeoff above and the per-clip evidence.")
+    else:
+        regs = TREAT.get("regressions", [])
+        if wins:
+            li += f'<li class="c-win">Improved: {" · ".join(wins)}</li>'
+        if costs:
+            li += f'<li class="c-cost">Worsened: {" · ".join(costs)}</li>'
+        verdict = (f"<b>Not shippable as-is:</b> the gate fails with {len(regs)} regression(s) "
+                   f"past threshold — the costs outweigh the wins above." if regs
+                   else "<b>Shippable:</b> measurable wins with no regressions past threshold."
+                   if wins else "<b>No meaningful effect:</b> all metrics within baseline noise.")
+    head = (f"{CTRL_NAME} → {TREAT_NAME}" if IS_MODE_CMP else f"Treatment: <b>{treatment_name()}</b>")
     return (f'<section><h2>Conclusion</h2>'
-            f'<p class="sub" style="margin-bottom:12px">Treatment: <b>{treatment_name()}</b> — '
-            f'mean movement across all {len(CLIPS)} clips; the gate verdict below is '
-            f'run_eval\'s own exit code.</p>'
-            f'<ul class="concl">{li}<li>{ship}</li></ul>{gate_strip()}</section>')
+            f'<p class="sub" style="margin-bottom:12px">{head} — mean movement across all '
+            f'{len(CLIPS)} clips.</p>'
+            f'<ul class="concl">{li}<li>{verdict}</li></ul>{gate_strip()}</section>')
 
 
 def gate_strip():
     regs = TREAT.get("regressions", [])
+    noun = "difference(s) vs " + CTRL_MODE + " baseline" if IS_MODE_CMP else "regression(s)"
     if not regs:
-        return ('<div class="gate gate-pass"><b>Gate: PASS</b> — treatment introduced no '
-                'regressions past threshold (run_eval exit 0).</div>')
-    items = "".join(f'<li><code>{r["clip"]}.{r["metric"]}</code> {r["baseline"]} → {r["value"]}'
+        return ('<div class="gate gate-pass"><b>Gate: PASS</b> — no '
+                + noun + ' past threshold (run_eval exit 0).</div>')
+    arrow = "→"
+    items = "".join(f'<li><code>{r["clip"]}.{r["metric"]}</code> {r["baseline"]} {arrow} {r["value"]}'
                     + (f' <span class="wf">worst frame {r["frame"]}</span>' if "frame" in r else "")
                     + "</li>" for r in regs)
-    return (f'<div class="gate gate-fail"><b>Gate: {len(regs)} REGRESSION(S)</b> — run_eval '
-            f'exit 1.<ul>{items}</ul></div>')
+    cls = "gate-fail" if not IS_MODE_CMP else "gate-info"
+    label = (f"{len(regs)} {noun}" if IS_MODE_CMP else f"{len(regs)} REGRESSION(S) — run_eval exit 1")
+    return f'<div class="gate {cls}"><b>Gate: {label}</b><ul>{items}</ul></div>'
 
 
 def issue_sections():
@@ -240,12 +270,12 @@ def issue_sections():
             pair = crop_at_silhouette(c, i.get("frame", mid_frame(ctrl_dir, c)))
             if pair:
                 if temporal:
-                    imgs = (f'<div class="pair single"><figure><span class="tag">control · worst '
+                    imgs = (f'<div class="pair single"><figure><span class="tag">{CTRL_NAME} · worst '
                             f'frame {i.get("frame", "?")}</span><img src="{pair[0]}"></figure></div>')
                 else:
-                    imgs = (f'<div class="pair"><figure><span class="tag">control</span>'
+                    imgs = (f'<div class="pair"><figure><span class="tag">{CTRL_NAME}</span>'
                             f'<img src="{pair[0]}"></figure><figure><span class="tag t-treat">'
-                            f'{treatment_name()}</span><img src="{pair[1]}"></figure></div>')
+                            f'{TREAT_NAME}</span><img src="{pair[1]}"></figure></div>')
             cards.append(f'<div class="issue-clip"><div class="ic-head"><span class="clipname">{c}'
                          f'</span><span class="metricval">{SHORT.get(metric, metric)}: <b>{a:.2f}</b>'
                          f' &rarr; {b:.2f} &middot; worst frame {i.get("frame", "?")}</span></div>{imgs}</div>')
@@ -287,6 +317,7 @@ h2{font-size:15px;font-family:var(--mono);letter-spacing:.03em;text-transform:up
 .gate{border-radius:10px;padding:14px 18px;font-size:14px;margin-top:26px;border:1px solid var(--line)}
 .gate-pass{background:color-mix(in srgb,var(--good) 9%,transparent);border-color:color-mix(in srgb,var(--good) 40%,var(--line))}
 .gate-fail{background:color-mix(in srgb,var(--crit) 8%,transparent);border-color:color-mix(in srgb,var(--crit) 40%,var(--line))}
+.gate-info{background:color-mix(in srgb,var(--accent) 8%,transparent);border-color:color-mix(in srgb,var(--accent) 40%,var(--line))}
 .gate ul{margin:8px 0 0;padding-left:20px}.gate li{margin:2px 0}
 .gate .wf{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
 .concl{margin:0 0 18px;padding-left:20px;font-size:14.5px}
@@ -331,21 +362,20 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
 
 <div class="wrap">
   <div class="eyebrow">Apollo SBS 3D &middot; run_eval A/B report</div>
-  <h1>Control vs. treatment, by issue</h1>
+  <h1>__H1__</h1>
   <p class="lede">Generated from two <code>run_eval.py</code> runs over the committed clip set —
-  the real pipeline, gated metrics, and the gate's own verdict. Treatment under test:
-  <b>__TREATMENT__</b>.</p>
+  the real pipeline and gated metrics. __LEDE__</p>
   <div class="meta"><span>__DATE__</span><span>git __SHA____DIRTY__</span>
-  <span>__NCLIPS__ clips &middot; mode __MODE__</span><span>__MODELS__</span></div>
+  <span>__NCLIPS__ clips</span><span>__MODELS__</span></div>
 
   __CONCLUSION__
 
   <section>
-    <h2>Scorecard — control → treatment</h2>
+    <h2>Scorecard — __CTRL_NAME__ → __TREAT_NAME__</h2>
     <p class="sub">One row per clip (auto-discovered; signature = its strongest triggered issue,
-    as value×trigger ratio). Each cell: control value + treatment chip (red = worse, green =
-    better, grey &lt; 5%). pop is higher-is-better; the rest higher-is-worse. Flat metrics collapse
-    to the footer and auto-return as columns when non-zero.</p>
+    as value×trigger ratio). Each cell: __CTRL_NAME__ value + a chip for __TREAT_NAME__ (green =
+    that run is better on this metric, red = worse, grey &lt; 5%). pop is higher-is-better; the
+    rest higher-is-worse. Flat metrics collapse to the footer and auto-return when non-zero.</p>
     <div class="tablewrap"><table>
       <thead><tr><th>clip</th>__HDR__</tr></thead>
       <tbody>__ROWS__</tbody>
@@ -366,15 +396,25 @@ python tools/sbsbench/build_report.py &lt;build&gt;/sbs_eval/ctrl &lt;build&gt;/
 </div>
 """
 
-models = ", ".join(sorted({e["meta"].get("model", "?") for e in CTRL["clips"].values()}))
-HTML = (HTML.replace("__TREATMENT__", treatment_name())
+models = ", ".join(sorted({m for r in (CTRL, TREAT)
+                           for m in {e["meta"].get("model", "?") for e in r["clips"].values()}}))
+if IS_MODE_CMP:
+    h1 = f"{CTRL_NAME} vs. {TREAT_NAME}"
+    lede = (f"Comparing two pipeline modes on identical clips: <b>{CTRL_NAME}</b> against "
+            f"<b>{TREAT_NAME}</b>. Neither is a regression of the other — it is a tradeoff, "
+            f"read from the per-metric split and the per-clip evidence below.")
+else:
+    h1 = "Control vs. treatment, by issue"
+    lede = f"Treatment under test: <b>{TREAT_NAME}</b>, gated against the committed baselines."
+HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
+        .replace("__CTRL_NAME__", CTRL_NAME).replace("__TREAT_NAME__", TREAT_NAME)
         .replace("__DATE__", meta["timestamp"][:10]).replace("__SHA__", meta["git_sha"])
         .replace("__DIRTY__", "+dirty" if meta["git_dirty"] else "")
-        .replace("__NCLIPS__", str(len(CLIPS))).replace("__MODE__", meta["mode"])
+        .replace("__NCLIPS__", str(len(CLIPS)))
         .replace("__MODELS__", models).replace("__CONCLUSION__", conclusion_section())
         .replace("__HDR__", hdr_cells).replace("__ROWS__", scorecard_rows())
         .replace("__FOOTER__", clean_footer()).replace("__ISSUES__", issue_sections())
-        .replace("__TREAT_ARGS__", " ".join(TREAT["meta"].get("extra_args") or [])))
+        .replace("__TREAT_ARGS__", " ".join(TREAT["meta"].get("extra_args") or ["--mode game"])))
 with open(out_html, "w", encoding="utf-8") as f:
     f.write(HTML)
 print("wrote", out_html, f"({len(HTML) // 1024} KB)")
