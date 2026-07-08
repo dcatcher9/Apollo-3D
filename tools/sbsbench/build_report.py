@@ -172,6 +172,44 @@ def scorecard_rows():
     return "\n".join(out)
 
 
+def conclusion_section():
+    """Auto-derived verdict: per-metric mean across clips, classified into wins/costs, plus a
+    shippability call from the gate. Regenerated with every report, so it always reflects the run."""
+    wins, costs = [], []
+    for k, h, worse, _, _ in COLS:
+        a = np.mean([ctrl_agg[c].get(k, 0) for c in CLIPS])
+        b = np.mean([treat_agg[c].get(k, 0) for c in CLIPS])
+        if a < 1e-6 and b < 1e-6:
+            continue
+        pct = (b - a) / a * 100 if a else 100.0
+        # Significant = both a relative move AND an absolute one (half the gate's abs_floor),
+        # so sub-pixel noise on near-zero metrics doesn't read as a headline.
+        floor = THR.get(k, {}).get("abs_floor", 0.0) / 2.0
+        if abs(pct) < 5 or abs(b - a) < floor:
+            continue
+        better = (pct < 0) if worse else (pct > 0)
+        txt = f"<b>{h}</b> {a:.2f} → {b:.2f} ({pct:+.0f}%)"
+        (wins if better else costs).append(txt)
+    regs = TREAT.get("regressions", [])
+    if regs:
+        ship = (f"<b>Not shippable as-is:</b> the gate fails with {len(regs)} regression(s) past "
+                f"threshold — at these settings the costs outweigh the wins above.")
+    elif wins:
+        ship = "<b>Shippable:</b> measurable wins with no regressions past threshold."
+    else:
+        ship = "<b>No meaningful effect:</b> all metrics within noise of the baseline."
+    li = ""
+    if wins:
+        li += f'<li class="c-win">Improved: {" · ".join(wins)}</li>'
+    if costs:
+        li += f'<li class="c-cost">Worsened: {" · ".join(costs)}</li>'
+    return (f'<section><h2>Conclusion</h2>'
+            f'<p class="sub" style="margin-bottom:12px">Treatment: <b>{treatment_name()}</b> — '
+            f'mean movement across all {len(CLIPS)} clips; the gate verdict below is '
+            f'run_eval\'s own exit code.</p>'
+            f'<ul class="concl">{li}<li>{ship}</li></ul>{gate_strip()}</section>')
+
+
 def gate_strip():
     regs = TREAT.get("regressions", [])
     if not regs:
@@ -251,6 +289,11 @@ h2{font-size:15px;font-family:var(--mono);letter-spacing:.03em;text-transform:up
 .gate-fail{background:color-mix(in srgb,var(--crit) 8%,transparent);border-color:color-mix(in srgb,var(--crit) 40%,var(--line))}
 .gate ul{margin:8px 0 0;padding-left:20px}.gate li{margin:2px 0}
 .gate .wf{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.concl{margin:0 0 18px;padding-left:20px;font-size:14.5px}
+.concl li{margin:7px 0;max-width:78ch}
+.concl b{color:var(--ink)}
+.c-win{color:var(--good)}.c-win b{color:var(--good)}
+.c-cost{color:var(--crit)}.c-cost b{color:var(--crit)}
 .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px}
 table{border-collapse:collapse;width:100%;font-size:13.5px}
 th,td{text-align:right;padding:11px 13px;border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:middle}
@@ -294,7 +337,8 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
   <b>__TREATMENT__</b>.</p>
   <div class="meta"><span>__DATE__</span><span>git __SHA____DIRTY__</span>
   <span>__NCLIPS__ clips &middot; mode __MODE__</span><span>__MODELS__</span></div>
-  __GATE__
+
+  __CONCLUSION__
 
   <section>
     <h2>Scorecard — control → treatment</h2>
@@ -327,7 +371,7 @@ HTML = (HTML.replace("__TREATMENT__", treatment_name())
         .replace("__DATE__", meta["timestamp"][:10]).replace("__SHA__", meta["git_sha"])
         .replace("__DIRTY__", "+dirty" if meta["git_dirty"] else "")
         .replace("__NCLIPS__", str(len(CLIPS))).replace("__MODE__", meta["mode"])
-        .replace("__MODELS__", models).replace("__GATE__", gate_strip())
+        .replace("__MODELS__", models).replace("__CONCLUSION__", conclusion_section())
         .replace("__HDR__", hdr_cells).replace("__ROWS__", scorecard_rows())
         .replace("__FOOTER__", clean_footer()).replace("__ISSUES__", issue_sections())
         .replace("__TREAT_ARGS__", " ".join(TREAT["meta"].get("extra_args") or [])))
