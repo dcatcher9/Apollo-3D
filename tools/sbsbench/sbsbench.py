@@ -48,6 +48,17 @@ def load_gray(path):
     return a[..., 0] * 0.2126 + a[..., 1] * 0.7152 + a[..., 2] * 0.0722
 
 
+def load_depth(path):
+    """Depth map -> float 0-1. Handles the harness's 16-bit gray PNG (full swim precision), plus
+    8-bit gray and the live dump's RGB depth.png."""
+    im = Image.open(path)
+    if im.mode in ("I;16", "I;16B", "I"):
+        return np.asarray(im, dtype=np.float32) / 65535.0
+    if im.mode == "L":
+        return np.asarray(im, dtype=np.float32) / 255.0
+    return load_gray(path)
+
+
 def split_eyes(sbs_gray):
     """SBS is [left | right], each half the width."""
     w = sbs_gray.shape[1] // 2
@@ -122,14 +133,41 @@ def resize_to(gray, w, h):
         dtype=np.float32) / 255.0
 
 
+# Reference eye width the pixel-unit tuning was done at (full-res movie runs). All band/run/reach
+# windows scale by (ew / REF_EW) so a metric means the same thing at any output resolution.
+REF_EW = 3066.0
+# Absolute floor for a "real" silhouette: normalized-depth step per NATIVE depth pixel. Percentile
+# thresholds alone always find "edges" (even pure noise on flat content); AND-ing this floor makes
+# flat scenes legitimately return zero. Real silhouettes measure ~0.1-0.3/px at depth res.
+MIN_DEPTH_STEP = 0.04
+
+
+def eye_scale(ew):
+    return ew / REF_EW
+
+
+def silhouette_edges(depth, ew, eh, edge_pct=99.3):
+    """Depth-silhouette mask at eye resolution, resolution-independently: the gradient test runs at
+    the NATIVE depth resolution (constant ~602x336 regardless of clip size), with an absolute
+    depth-step floor AND'd with the percentile, then the boolean mask is nearest-upsampled."""
+    gx_d = np.abs(np.diff(depth, axis=1, prepend=depth[:, :1]))
+    thr = max(float(np.percentile(gx_d, edge_pct)), MIN_DEPTH_STEP)
+    edge_d = gx_d >= thr
+    if not edge_d.any():
+        return np.zeros((eh, ew), bool)
+    up = Image.fromarray(edge_d.astype(np.uint8) * 255).resize((ew, eh), Image.NEAREST)
+    return np.asarray(up) > 127
+
+
 def silhouette_band(depth, ew, eh, edge_pct=99.3, band_px=28):
-    """Depth silhouettes (top ~0.7% horizontal depth steps) upsampled to eye size, and the
-    narrow disocclusion band beside them. Returns (edge, band, ref) boolean masks at eye res."""
-    depth_up = resize_to(depth, ew, eh)
-    gx_d = np.abs(np.diff(depth_up, axis=1, prepend=depth_up[:, :1]))
-    edge = gx_d >= np.percentile(gx_d, edge_pct)
-    band = hdilate(edge, band_px) & ~hdilate(edge, 2)   # beside the silhouette, not the edge itself
-    ref = ~hdilate(edge, band_px + 8)                    # undisturbed regions away from silhouettes
+    """Silhouette edge mask plus the narrow disocclusion band beside it and a clean reference
+    region, all at eye res. band_px is in REF_EW pixels and scales with the eye width."""
+    edge = silhouette_edges(depth, ew, eh, edge_pct)
+    s = eye_scale(ew)
+    band_s = max(4, round(band_px * s))
+    excl = max(1, round(2 * s))
+    band = hdilate(edge, band_s) & ~hdilate(edge, excl)  # beside the silhouette, not the edge itself
+    ref = ~hdilate(edge, band_s + max(2, round(8 * s)))  # undisturbed regions away from silhouettes
     return edge, band, ref
 
 
@@ -141,8 +179,10 @@ def disocclusion_metrics(eye, depth):
                  |d/dx eye|(clean). 0 = fill as crisp as clean regions; ->1 = smeared/stretched."""
     eh, ew = eye.shape
     _, band, ref = silhouette_band(depth, ew, eh)
+    if not band.any():
+        return 0.0, 0.0
     gx = np.abs(np.diff(eye, axis=1, prepend=eye[:, :1]))
-    b = float(gx[band].mean()) if band.any() else 0.0
+    b = float(gx[band].mean())
     r = float(gx[ref].mean()) if ref.any() else 0.0
     smear = float(np.clip(1.0 - b / (r + 1e-4), 0.0, 1.0)) if r > 0 else 0.0
     return float(band.mean()), smear
@@ -172,18 +212,20 @@ def stretch_band(eye, depth, edge_pct=99.0, gthr=0.02, min_run=20, reach=220):
     Unlike disocc_smear (narrow-band detail deficit) this measures the EXTENT of the big smear.
 
     Signature: a wide horizontal run of LOW horizontal gradient that still has VERTICAL structure
-    (a horizontally smeared texture = vertical streaks), sitting within `reach` px of a depth
-    silhouette. A smooth background stretched invisibly (no texture) is correctly not flagged.
+    (a horizontally smeared texture = vertical streaks), sitting within `reach` (REF_EW px) of a
+    depth silhouette. A smooth background stretched invisibly (no texture) is correctly not
+    flagged. Window/threshold params scale with the eye width (per-px gradients scale inversely
+    with resolution, so gthr scales by 1/s).
 
     Returns stretch_area = fraction of the eye that is stretched fill, in per-mille (x1000)."""
     eh, ew = eye.shape
+    s = eye_scale(ew)
+    gthr_s = min(0.1, gthr / max(s, 1e-3))
     gx = np.abs(np.diff(eye, axis=1, prepend=eye[:, :1]))
     gy = np.abs(np.diff(eye, axis=0, prepend=eye[:1, :]))
-    streak = (gx < gthr) & (gy > gthr)           # smooth in x, structured in y = horizontal smear
-    long = _herode(streak, max(1, min_run // 2))  # inside a horizontal run >= min_run
-    depth_up = resize_to(depth, ew, eh)
-    gxd = np.abs(np.diff(depth_up, axis=1, prepend=depth_up[:, :1]))
-    near = hdilate(gxd >= np.percentile(gxd, edge_pct), reach)
+    streak = (gx < gthr_s) & (gy > gthr_s)       # smooth in x, structured in y = horizontal smear
+    long = _herode(streak, max(3, round(min_run * s / 2)))  # inside a run >= min_run (scaled)
+    near = hdilate(silhouette_edges(depth, ew, eh, edge_pct), max(20, round(reach * s)))
     return float((long & near).mean() * 1000.0)
 
 
@@ -202,15 +244,16 @@ def silhouette_halo(eye, depth, edge_pct=98.5, ridge_r=2, band_px=6):
     (eye - horizontal-opening, radius ridge_r px) and sample them in the silhouette band. This
     ignores broad bright regions (top-hat ~0) and clean monotonic edges (no ridge).
 
-    Returns (rim_over_p50, rim_over_p95) in luma/255 -- the white-line severity."""
+    Returns (rim_over_p50, rim_over_p95) in luma/255 -- the white-line severity. ridge_r/band_px
+    are in REF_EW pixels and scale with eye width; a full-res-thin line becomes sub-pixel at low
+    output resolution, where this metric correctly loses sensitivity (use full-res clips for it)."""
     eh, ew = eye.shape
-    depth_up = resize_to(depth, ew, eh)
-    gxd = np.abs(np.diff(depth_up, axis=1, prepend=depth_up[:, :1]))
-    edge = gxd >= np.percentile(gxd, edge_pct)
-    band = hdilate(edge, band_px)  # look for the rim within a few px of the depth silhouette
+    s = eye_scale(ew)
+    edge = silhouette_edges(depth, ew, eh, edge_pct)
+    band = hdilate(edge, max(2, round(band_px * s)))  # the rim sits within a few px of the edge
     if not band.any():
         return 0.0, 0.0
-    ridge = np.clip(eye - _hopen(eye, ridge_r), 0.0, None)  # thin bright ridges (white top-hat)
+    ridge = np.clip(eye - _hopen(eye, max(1, round(ridge_r * s))), 0.0, None)  # white top-hat
     vals = ridge[band] * 255.0
     return float(np.percentile(vals, 50)), float(np.percentile(vals, 95))
 
@@ -225,7 +268,7 @@ def edge_accuracy(depth, src_gray, edge_pct=99.3, col_pct=97.0, maxd=24):
     dh, dw = depth.shape
     src = resize_to(src_gray, dw, dh)
     gxd = np.abs(np.diff(depth, axis=1, prepend=depth[:, :1]))
-    de = gxd >= np.percentile(gxd, edge_pct)
+    de = gxd >= max(float(np.percentile(gxd, edge_pct)), MIN_DEPTH_STEP)
     if not de.any():
         return 0.0, 0.0
     gxs = np.abs(np.diff(src, axis=1, prepend=src[:, :1]))
@@ -257,7 +300,7 @@ def measure(dump_dir):
         out["tiles"] = int(len(dxs))
 
     if os.path.exists(depth_p):
-        d = load_gray(depth_p)
+        d = load_depth(depth_p)
         out["depth_spread"] = float(np.percentile(d, 95) - np.percentile(d, 5))
         out["disocc_frac"], out["disocc_smear"] = disocclusion_metrics(left, d)
         out["stretch_area"] = stretch_band(left, d)
@@ -319,8 +362,9 @@ def measure_sequence(seq_dir, frames_dir=None):
     rows, flicks, bflicks, swims = [], [], [], []
     prev_sbs = prev_left = prev_depth = prev_src = None
     for i, p in enumerate(paths):
-        depth_p = p.replace("sbs_", "depth_")
-        depth = load_gray(depth_p) if os.path.exists(depth_p) else None
+        # Replace only the basename (the containing dir may legitimately contain "sbs_").
+        depth_p = os.path.join(os.path.dirname(p), os.path.basename(p).replace("sbs_", "depth_"))
+        depth = load_depth(depth_p) if os.path.exists(depth_p) else None
         src = load_gray(srcs[i]) if i < len(srcs) else None
         row, sbs, left = measure_seq_frame(p, depth, src)
         if prev_sbs is not None:

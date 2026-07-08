@@ -100,7 +100,7 @@ namespace sbs_bench {
       return SUCCEEDED(fe->Commit()) && SUCCEEDED(enc->Commit());
     }
 
-    bool save_gray_png(const fs::path &path, UINT w, UINT h, const std::vector<uint8_t> &gray) {
+    bool save_gray16_png(const fs::path &path, UINT w, UINT h, const std::vector<uint16_t> &gray) {
       ComPtr<IWICStream> stream;
       if (FAILED(g_wic->CreateStream(&stream))) return false;
       if (FAILED(stream->InitializeFromFilename(path.wstring().c_str(), GENERIC_WRITE))) return false;
@@ -112,17 +112,18 @@ namespace sbs_bench {
       if (FAILED(enc->CreateNewFrame(&fe, &props))) return false;
       if (FAILED(fe->Initialize(props.Get()))) return false;
       fe->SetSize(w, h);
-      WICPixelFormatGUID fmt = GUID_WICPixelFormat8bppGray;
+      WICPixelFormatGUID fmt = GUID_WICPixelFormat16bppGray;
       fe->SetPixelFormat(&fmt);
-      if (FAILED(fe->WritePixels(h, w, (UINT) gray.size(), const_cast<uint8_t *>(gray.data()))))
+      if (FAILED(fe->WritePixels(h, w * 2, (UINT) (gray.size() * 2), (BYTE *) const_cast<uint16_t *>(gray.data()))))
         return false;
       return SUCCEEDED(fe->Commit()) && SUCCEEDED(enc->Commit());
     }
 
-    // Read back an R32_FLOAT depth SRV and save it as an 8-bit grayscale PNG (values clamped to
-    // [0,1] and scaled to 0-255), so sbsbench can locate silhouettes for the disocclusion metric.
+    // Read back an R32_FLOAT depth SRV and save it as a 16-bit grayscale PNG (values clamped to
+    // [0,1] scaled to 0-65535). 16-bit matters: the swim metric measures frame-to-frame depth
+    // deltas that sit below 1/255. The staging texture is cached across frames (constant size).
     void dump_depth(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv,
-      const fs::path &path) {
+      const fs::path &path, ComPtr<ID3D11Texture2D> &stage_cache) {
       if (!srv) return;
       ComPtr<ID3D11Resource> res;
       srv->GetResource(&res);
@@ -130,27 +131,28 @@ namespace sbs_bench {
       if (FAILED(res.As(&tex))) return;
       D3D11_TEXTURE2D_DESC d = {};
       tex->GetDesc(&d);
-      D3D11_TEXTURE2D_DESC sd = d;
-      sd.Usage = D3D11_USAGE_STAGING;
-      sd.BindFlags = 0;
-      sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      sd.MiscFlags = 0;
-      ComPtr<ID3D11Texture2D> stage;
-      if (FAILED(dev->CreateTexture2D(&sd, nullptr, &stage))) return;
-      ctx->CopyResource(stage.Get(), tex.Get());
+      if (!stage_cache) {
+        D3D11_TEXTURE2D_DESC sd = d;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.BindFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        sd.MiscFlags = 0;
+        if (FAILED(dev->CreateTexture2D(&sd, nullptr, &stage_cache))) return;
+      }
+      ctx->CopyResource(stage_cache.Get(), tex.Get());
       D3D11_MAPPED_SUBRESOURCE m = {};
-      if (FAILED(ctx->Map(stage.Get(), 0, D3D11_MAP_READ, 0, &m))) return;
-      std::vector<uint8_t> gray((size_t) d.Width * d.Height);
+      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &m))) return;
+      std::vector<uint16_t> gray((size_t) d.Width * d.Height);
       for (UINT y = 0; y < d.Height; y++) {
         const float *row = (const float *) ((const uint8_t *) m.pData + (size_t) y * m.RowPitch);
         for (UINT x = 0; x < d.Width; x++) {
           float v = row[x];
           v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-          gray[(size_t) y * d.Width + x] = (uint8_t) (v * 255.0f + 0.5f);
+          gray[(size_t) y * d.Width + x] = (uint16_t) (v * 65535.0f + 0.5f);
         }
       }
-      ctx->Unmap(stage.Get(), 0);
-      save_gray_png(path, d.Width, d.Height, gray);
+      ctx->Unmap(stage_cache.Get(), 0);
+      save_gray16_png(path, d.Width, d.Height, gray);
     }
 
     // ---- D3D helpers ----
@@ -323,6 +325,7 @@ namespace sbs_bench {
     ComPtr<ID3D11Buffer> mlbw_cb;
     int mlbw_fw = 0, mlbw_fh = 0, mlbw_layers = 0;
     UINT sbs_w = 0, sbs_h = 0;
+    ComPtr<ID3D11Texture2D> depth_stage;  // dump_depth staging cache (depth size is constant)
 
     int written = 0;
     for (size_t fi = 0; fi < frames.size(); fi++) {
@@ -427,7 +430,7 @@ namespace sbs_bench {
         if (save_png(fs::path(o.out) / name, sbs_w, sbs_h, buf)) written++;
         char dname[32];
         snprintf(dname, sizeof(dname), "depth_%05zu.png", fi);
-        dump_depth(dev.Get(), ctx.Get(), est.depth.Get(), fs::path(o.out) / dname);
+        dump_depth(dev.Get(), ctx.Get(), est.depth.Get(), fs::path(o.out) / dname, depth_stage);
       }
       if (((fi + 1) % 20) == 0)
         BOOST_LOG(info) << "sbs-bench: " << (fi + 1) << "/" << frames.size();

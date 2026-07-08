@@ -23,6 +23,27 @@ see on the headset. This is the visual half of the host benchmark; see
 
 Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 
+## One-command eval loop (start here)
+
+```
+python tools/sbsbench/run_eval.py                     # all committed clips vs committed baselines
+python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change: re-baseline + commit
+python tools/sbsbench/run_eval.py --extra --divergence 0.027   # pass A/B levers to the harness
+```
+
+Exit code is the verdict (0 pass / 1 regression / 2 setup error), so the eval→fix→eval loop is
+scriptable. `results.json` carries provenance (git sha+dirty, models, clip hashes, gpu-contention
+flag) and, for every triggered/regressed metric, the **worst frame index** to look at. The gate
+thresholds live in [thresholds.json](thresholds.json); the pinned SBS config in
+[bench.conf](bench.conf); baselines in `baselines/` (regenerate in the same commit whenever
+bench.conf, the clip set, or a metric definition changes). Guards: fails fast if TRT engines
+aren't prebuilt; warns + skips the perf gate if another sunshine.exe is running.
+
+Metric notes: silhouette detection runs at the native depth resolution with an absolute
+depth-step floor (flat scenes legitimately read 0), and all pixel windows scale with the eye
+width — but absolute values are still not comparable across clip resolutions; baselines are
+per-clip-set. The harness writes 16-bit depth PNGs so `swim` resolves below 1/255.
+
 ## Deterministic clips via the headless harness (recommended)
 Single dumps are sporadic and headset-bound. For repeatable A/B and **temporal** metrics, drive
 the real pipeline over a fixed frame sequence with the built-in `--sbs-bench` subcommand (Tier-1

@@ -96,6 +96,14 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
 [docs/sbs-benchmark-plan.md](docs/sbs-benchmark-plan.md) and
 [tools/sbsbench/README.md](tools/sbsbench/README.md).
 
+- **One command runs the whole loop**: `python tools/sbsbench/run_eval.py` — harnesses every
+  committed clip (`tools/sbsbench/clips/`) through the real pipeline with the pinned
+  `tools/sbsbench/bench.conf`, scores all metrics, and gates against the committed baselines
+  (`tools/sbsbench/baselines/` + `thresholds.json`). **Exit 0 = pass, 1 = regression (named, with
+  worst frame), 2 = setup error.** Results + provenance (git sha, models, clip hashes) land in
+  `<build-dir>/sbs_eval/<label>/results.json`. After an INTENDED metric change, re-baseline with
+  `--update-baselines` and commit the baselines together with the change. A/B levers pass through:
+  `--extra --divergence 0.027`. Changing bench.conf or the clip set invalidates baselines.
 - **Visual** — the headless frame-fed harness `sunshine --sbs-bench` (implemented in
   [src/sbs_bench_harness.cpp](src/sbs_bench_harness.cpp)): runs the real depth estimator + real
   composite shaders over a fixed directory of frames (split a short video with

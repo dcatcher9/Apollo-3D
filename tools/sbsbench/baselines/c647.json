@@ -1,0 +1,50 @@
+{
+  "aggregate": {
+    "pop_px_p50": 4.648217212032585,
+    "pop_px_p95": 9.75,
+    "pop_pct_p50": 0.5442877297462043,
+    "vmisalign_px": 0.0,
+    "depth_spread": 0.9259936461846033,
+    "disocc_frac": 0.05434830779989591,
+    "disocc_smear": 0.0,
+    "stretch_area": 13.52997739396305,
+    "rim_over_p50": 0.0,
+    "rim_over_p95": 8.364013731479645,
+    "edge_acc_p50": 0.0,
+    "edge_acc_p95": 24.0,
+    "_n": 24,
+    "_models": [
+      ""
+    ],
+    "flicker_p50": 8.807991027832031,
+    "flicker_p95": 14.40044136047363,
+    "flicker_disocc_p50": 26.7004451751709,
+    "flicker_disocc_p95": 45.916020965576166,
+    "swim_p50": 0.36186739802360535,
+    "swim_p95": 1.1568073153495788
+  },
+  "perf_ms": {
+    "depth_infer": 9.14909,
+    "sbs_composite_cpu": 0.0022,
+    "warp_infer": 13.0198
+  },
+  "meta": {
+    "git_sha": "90497460",
+    "git_dirty": true,
+    "clip_set_sha1": {
+      "c339": "1923c16a8356",
+      "c525": "aa00a6b08fb6",
+      "c647": "b3f63745dd4b",
+      "c747": "9091ee592460",
+      "c841": "df5a3384753e"
+    },
+    "mode": "movie",
+    "extra_args": [],
+    "conf": "tools\\sbsbench\\bench.conf",
+    "gpu_contention": false,
+    "timestamp": "2026-07-08T08:32:22",
+    "model": "da3mono_large_fp16",
+    "warp": "mlbw_l4_1596x672_fp16",
+    "clip_sha1": "b3f63745dd4b"
+  }
+}

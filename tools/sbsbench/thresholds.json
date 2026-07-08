@@ -1,0 +1,20 @@
+{
+  "_doc": "Shared gate for run_eval.py (and the report). Per metric: better = which direction is an improvement; a change is a REGRESSION when it moves the worse way by more than max(abs_floor, baseline*rel_tol). trigger = absolute value above which the metric counts as an active ISSUE on a clip (independent of any baseline).",
+  "metrics": {
+    "pop_px_p50": {"better": "higher", "rel_tol": 0.15, "abs_floor": 1.0},
+    "pop_px_p95": {"better": "higher", "rel_tol": 0.2, "abs_floor": 2.0},
+    "vmisalign_px": {"better": "lower", "rel_tol": 0.0, "abs_floor": 0.4, "trigger": 0.5},
+    "depth_spread": {"better": "higher", "rel_tol": 0.2, "abs_floor": 0.05},
+    "disocc_smear": {"better": "lower", "rel_tol": 0.2, "abs_floor": 0.05, "trigger": 0.15},
+    "stretch_area": {"better": "lower", "rel_tol": 0.25, "abs_floor": 0.5, "trigger": 4.0},
+    "rim_over_p95": {"better": "lower", "rel_tol": 0.25, "abs_floor": 0.5, "trigger": 3.0},
+    "edge_acc_p50": {"better": "lower", "rel_tol": 0.25, "abs_floor": 0.5, "trigger": 5.0},
+    "flicker_p50": {"better": "lower", "rel_tol": 0.25, "abs_floor": 0.3},
+    "flicker_disocc_p50": {"better": "lower", "rel_tol": 0.3, "abs_floor": 0.5, "trigger": 8.0},
+    "swim_p50": {"better": "lower", "rel_tol": 0.3, "abs_floor": 0.2}
+  },
+  "perf_ms": {
+    "depth_infer": {"rel_tol": 0.3, "abs_floor": 1.0},
+    "warp_infer": {"rel_tol": 0.3, "abs_floor": 1.0}
+  }
+}
