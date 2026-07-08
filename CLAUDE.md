@@ -110,7 +110,10 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   --width 854 --jpg --max 24` (854/24 matches the committed set's speed; full-res frames are also
   valid — the eval never resizes input, so a big clip is simply a slower, more sensitive eval).
   Synthetic/spliced clips: add a generator to `tools/sbsbench/make_synth_clips.py` (keeps the
-  clip deterministic and licensing-free). Pick content that isolates ONE failure mode (see the
+  clip deterministic and licensing-free). Add a `clips/<id>/meta.json` = `{"name": "<scene-name>",
+  "description": "..."}` — the report labels clips by that name and run_eval copies it into
+  results.json (the frame content, not meta.json, defines the clip's identity hash, so editing the
+  name never invalidates a baseline). Pick content that isolates ONE failure mode (see the
   clip table in the README). Then run `run_eval.py --update-baselines` and **commit the frames,
   the generator change (if any), and the new `baselines/<name>.json` together**; sanity-check the
   new clip's baseline numbers and worst frames before committing (a mis-sized or mis-ordered clip

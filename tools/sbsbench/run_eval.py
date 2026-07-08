@@ -40,8 +40,10 @@ MODE_MODEL = {"movie": "da3mono_large_fp16", "game": "depth_anything_v2_fp16"}
 
 
 def sha1_dir(path):
+    # Hash only the FRAME content (not meta.json / other sidecars) so a clip's identity is its
+    # pixels -- editing its scene name must not invalidate a baseline.
     h = hashlib.sha1()
-    for f in sorted(glob.glob(os.path.join(path, "*"))):
+    for f in sorted(glob.glob(os.path.join(path, "frame_*"))):
         with open(f, "rb") as fh:
             h.update(os.path.basename(f).encode())
             h.update(fh.read())
@@ -153,6 +155,15 @@ def main():
             sys.exit(f"run_eval: harness failed on {clip} (exit {r.returncode})")
         m = re.search(r"model '([^']+)', warp '([^']+)'", stdout)
         clip_meta = {"model": m.group(1), "warp": m.group(2)} if m else {}
+        # Carry the clip's own metadata (scene name/description) into results so the run dir is
+        # self-describing and the report can label clips without the source clips dir.
+        cmp_path = os.path.join(clip_dir, "meta.json")
+        if os.path.exists(cmp_path):
+            try:
+                clip_meta.update({k: v for k, v in json.load(open(cmp_path)).items()
+                                  if k in ("name", "description")})
+            except Exception:
+                pass
 
         print(f"[{clip}] scoring...", flush=True)
         rows, agg = sbsbench.measure_sequence(out_dir, clip_dir)

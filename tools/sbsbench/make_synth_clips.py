@@ -14,6 +14,7 @@ changing a clip's design, and regenerate baselines in the same commit.
                -- depth-normalization swim across cuts (A1 snap validation); expect the swim /
                flicker worst frame AT the cut.
 """
+import json
 import os
 
 import numpy as np
@@ -22,6 +23,18 @@ from PIL import Image
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLIPS = os.path.join(HERE, "clips")
 W, H, N = 854, 480, 24
+
+# name + description written to each clip's meta.json (self-describing; the report labels by name).
+DESC = {
+    "flat_page": "Synthetic static document/desktop page: flat-content depth hallucination (A3).",
+    "fast_motion": "Synthetic textured block crossing a textured background at 30 px/frame: async-depth ghost.",
+    "scene_cut": "Hard cut spliced kitchen-vlog -> washerwoman-pond: depth-normalization swim across cuts (A1).",
+}
+
+
+def write_meta(clip):
+    json.dump({"name": clip, "description": DESC.get(clip, "")},
+              open(os.path.join(CLIPS, clip, "meta.json"), "w"), indent=2)
 
 
 def save(clip, i, arr):
@@ -73,5 +86,6 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(CLIPS, "scene_cut"), exist_ok=True)
     scene_cut()
     for c in ("flat_page", "fast_motion", "scene_cut"):
-        n = len(os.listdir(os.path.join(CLIPS, c)))
+        write_meta(c)
+        n = len([f for f in os.listdir(os.path.join(CLIPS, c)) if f.startswith("frame_")])
         print(f"{c}: {n} frames")

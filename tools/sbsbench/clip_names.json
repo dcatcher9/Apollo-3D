@@ -1,8 +1,0 @@
-{
-  "_doc": "Display names for the eval clips. The directory name (clips/<id>/) stays the stable id used by run_eval, baselines, and results.json; the report shows these scene names instead. Add an entry when you add a clip; unmapped ids (e.g. the synthetic flat_page/fast_motion/scene_cut) show their id.",
-  "c339": "soldier-battlefield",
-  "c525": "warrior-cliff",
-  "c647": "washerwoman-pond",
-  "c747": "palace-hall",
-  "c841": "kitchen-vlog"
-}

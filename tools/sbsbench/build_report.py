@@ -22,13 +22,30 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CTRL = json.load(open(os.path.join(ctrl_dir, "results.json")))
 TREAT = json.load(open(os.path.join(treat_dir, "results.json")))
 THR = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json")))["metrics"]
-NAMES = {k: v for k, v in json.load(open(os.path.join(SCRIPT_DIR, "clip_names.json"))).items()
-         if not k.startswith("_")}
+
+
+def _clip_name(clip):
+    # Prefer the name run_eval captured into results.json; else the repo clip's meta.json; else id.
+    nm = CTRL["clips"].get(clip, {}).get("meta", {}).get("name")
+    if nm:
+        return nm
+    mp = os.path.join(SCRIPT_DIR, "clips", clip, "meta.json")
+    if os.path.exists(mp):
+        try:
+            return json.load(open(mp)).get("name", clip)
+        except Exception:
+            pass
+    return clip
+
+
+_NAME_CACHE = {}
 
 
 def name(clip):
-    """Scene display name for a clip id (falls back to the id)."""
-    return NAMES.get(clip, clip)
+    """Scene display name for a clip id (from its meta.json; falls back to the id)."""
+    if clip not in _NAME_CACHE:
+        _NAME_CACHE[clip] = _clip_name(clip)
+    return _NAME_CACHE[clip]
 CLIPS = sorted(CTRL["clips"])
 
 # metric, header, worse-is-higher, always-show, notable-threshold
