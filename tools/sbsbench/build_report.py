@@ -22,6 +22,13 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CTRL = json.load(open(os.path.join(ctrl_dir, "results.json")))
 TREAT = json.load(open(os.path.join(treat_dir, "results.json")))
 THR = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json")))["metrics"]
+NAMES = {k: v for k, v in json.load(open(os.path.join(SCRIPT_DIR, "clip_names.json"))).items()
+         if not k.startswith("_")}
+
+
+def name(clip):
+    """Scene display name for a clip id (falls back to the id)."""
+    return NAMES.get(clip, clip)
 CLIPS = sorted(CTRL["clips"])
 
 # metric, header, worse-is-higher, always-show, notable-threshold
@@ -183,7 +190,7 @@ def scorecard_rows():
     for c in CLIPS:
         s, cls = sig[c]
         ident = (f'<td class="idcell"><img class="thumb" src="{thumb(c)}" alt="{c}">'
-                 f'<div class="idmeta"><span class="clipname">{c}</span>'
+                 f'<div class="idmeta"><span class="clipname">{name(c)}</span>'
                  f'<span class="pill p-{cls}">{s}</span></div></td>')
         cells = [ident]
         for k, _, worse, _, _ in ACTIVE:
@@ -289,7 +296,7 @@ def gate_strip():
         return ('<div class="gate gate-pass"><b>Gate: PASS</b> — no '
                 + noun + ' past threshold (run_eval exit 0).</div>')
     arrow = "→"
-    items = "".join(f'<li><code>{r["clip"]}.{r["metric"]}</code> {r["baseline"]} {arrow} {r["value"]}'
+    items = "".join(f'<li><code>{name(r["clip"])}.{r["metric"]}</code> {r["baseline"]} {arrow} {r["value"]}'
                     + (f' <span class="wf">worst frame {r["frame"]}</span>' if "frame" in r else "")
                     + "</li>" for r in regs)
     cls = "gate-fail" if not IS_MODE_CMP else "gate-info"
@@ -346,7 +353,7 @@ def issue_sections():
                     imgs = (f'<div class="pair"><figure><span class="tag">{CTRL_TAG}</span>'
                             f'<img src="{pair[0]}"></figure><figure><span class="tag t-treat">'
                             f'{TREAT_TAG}</span><img src="{pair[1]}"></figure></div>')
-            cards.append(f'<div class="issue-clip"><div class="ic-head"><span class="clipname">{c}'
+            cards.append(f'<div class="issue-clip"><div class="ic-head"><span class="clipname">{name(c)}'
                          f'</span> {badge} <span class="metricval">{mtip(metric, SHORT.get(metric, metric))}: '
                          f'<b>{a:.2f}</b> &rarr; {b:.2f} ({pct:+.0f}%) &middot; worst frame {frame}'
                          f'</span></div>{imgs}</div>')
