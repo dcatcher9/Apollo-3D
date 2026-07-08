@@ -54,12 +54,12 @@ ISSUE_DEFS = {  # metric -> (title, temporal?, description)
 }
 
 
-def durl(im, w=None, jpg=False):
+def durl(im, w=None, jpg=False, q=82):
     if w and im.width > w:
         im = im.resize((w, round(im.height * w / im.width)), Image.LANCZOS)
     b = io.BytesIO()
     if jpg:
-        im.convert("RGB").save(b, "JPEG", quality=88)
+        im.convert("RGB").save(b, "JPEG", quality=q)
         return "data:image/jpeg;base64," + base64.b64encode(b.getvalue()).decode()
     im.convert("RGB").save(b, "PNG", optimize=True)
     return "data:image/png;base64," + base64.b64encode(b.getvalue()).decode()
@@ -115,9 +115,9 @@ def crop_at_silhouette(clip, idx):
     y0 = max(0, min(eh - ch, cy - ch // 2))
     out = []
     for img in (sbs_c, sbs_t):
-        # Native-resolution crop as JPEG; the page CSS scales it up (browsers interpolate fine,
-        # and a 2x-nearest PNG here balloons the report size).
-        out.append(durl(img.crop((x0, y0, x0 + cw, y0 + ch)), jpg=True))
+        # Crop as a modest-width JPEG; the page CSS scales it up. Keep the report light (many
+        # crops embed as data URIs) so the artifact viewer loads reliably.
+        out.append(durl(img.crop((x0, y0, x0 + cw, y0 + ch)), w=380, jpg=True, q=78))
     return out
 
 
