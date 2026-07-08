@@ -184,7 +184,8 @@ namespace sbs_bench {
     struct opts {
       std::string frames, out, model;
       bool movie = false;
-      int eye_h = 1728;
+      int eye_h = 0;       // 0 -> match the input frame height (so the input size controls eval
+                           // resolution/speed; a bigger clip = a bigger eval). Override to pin one.
       int max_width = 0;   // 0 -> use config max_encode_width
       int settle = 3;      // estimate passes per frame so async depth/warp catch up
       int settle_ms = 40;  // sleep between passes so the CUDA streams finish
@@ -237,15 +238,20 @@ namespace sbs_bench {
     if (!parse_opts(argc, argv, o)) return 2;
     if (!wic_init()) { BOOST_LOG(error) << "sbs-bench: WIC init failed"; return 3; }
 
-    // Collect + sort input frames (any *.png in the folder).
+    // Collect + sort input frames (png/jpg; WIC decodes both). Small pre-resized JPEG clips keep
+    // the repo light; the harness never resizes them -- the SBS output tracks the input size.
     std::vector<fs::path> frames;
     std::error_code ec;
-    for (auto &e : fs::directory_iterator(o.frames, ec))
-      if (e.is_regular_file() && e.path().extension() == ".png")
+    for (auto &e : fs::directory_iterator(o.frames, ec)) {
+      if (!e.is_regular_file()) continue;
+      auto ext = e.path().extension().string();
+      for (auto &ch : ext) ch = (char) tolower((unsigned char) ch);
+      if (ext == ".png" || ext == ".jpg" || ext == ".jpeg")
         frames.push_back(e.path());
+    }
     std::sort(frames.begin(), frames.end());
     if (o.limit > 0 && (int) frames.size() > o.limit) frames.resize(o.limit);
-    if (frames.empty()) { BOOST_LOG(error) << "sbs-bench: no .png frames in " << o.frames; return 4; }
+    if (frames.empty()) { BOOST_LOG(error) << "sbs-bench: no png/jpg frames in " << o.frames; return 4; }
     fs::create_directories(o.out, ec);
 
     // Config: inherit whatever the loaded conf set (learned_warp / warp models / divergence...),
@@ -264,7 +270,8 @@ namespace sbs_bench {
 
     BOOST_LOG(info) << "sbs-bench: " << frames.size() << " frames, model '" << model.name
                     << "', warp '" << (sbs_cfg.learned_warp ? sbs_cfg.warp_model : std::string("probe"))
-                    << "', eye_h " << o.eye_h << ", settle " << o.settle << " -> " << o.out;
+                    << "', eye_h " << (o.eye_h > 0 ? std::to_string(o.eye_h) : "match-input")
+                    << ", settle " << o.settle << " -> " << o.out;
 
     // ---- D3D device + shaders ----
     ComPtr<ID3D11Device> dev;
@@ -333,12 +340,15 @@ namespace sbs_bench {
       ComPtr<ID3D11ShaderResourceView> in_srv;
       dev->CreateShaderResourceView(in_tex.Get(), nullptr, &in_srv);
 
-      // First frame: size the SBS target from the input aspect (mirrors the live capping).
+      // First frame: size the SBS target. Per eye = the input resolution by default (so the clip
+      // size, not a fixed constant, drives eval cost); --eye-h pins a specific output height.
+      // The width is still capped at max_encode_width like the live path.
       if (!sbs_tex) {
+        int eh_target = o.eye_h > 0 ? o.eye_h : (int) img.h;
         float aspect = (float) img.w / (float) img.h;
-        int eye_w = (int) std::lround(o.eye_h * aspect);
+        int eye_w = (int) std::lround(eh_target * aspect);
         if (2 * eye_w > max_width) eye_w = max_width / 2;
-        sbs_w = (UINT) (2 * eye_w); sbs_h = (UINT) o.eye_h;
+        sbs_w = (UINT) (2 * eye_w); sbs_h = (UINT) eh_target;
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = sbs_w; td.Height = sbs_h; td.MipLevels = 1; td.ArraySize = 1;
         td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;

@@ -43,6 +43,8 @@ def main():
     ap.add_argument("--duration", type=float, help="clip length seconds")
     ap.add_argument("--width", type=int, help="scale to this width (aspect preserved)")
     ap.add_argument("--max", type=int, help="max frames")
+    ap.add_argument("--jpg", action="store_true", help="write JPEG (smaller; for the committed repo clip set)")
+    ap.add_argument("--quality", type=int, default=3, help="JPEG quality 2-31, lower=better (ffmpeg -q:v); default 3")
     args = ap.parse_args()
 
     if not os.path.exists(args.video):
@@ -64,13 +66,16 @@ def main():
         cmd += ["-vf", ",".join(vf)]
     if args.max:
         cmd += ["-frames:v", str(args.max)]
-    cmd += [os.path.join(args.out, "frame_%05d.png")]
+    if args.jpg:
+        cmd += ["-q:v", str(args.quality)]
+    ext = "jpg" if args.jpg else "png"
+    cmd += [os.path.join(args.out, f"frame_%05d.{ext}")]
 
     print(" ".join(f'"{c}"' if " " in c else c for c in cmd))
     r = subprocess.run(cmd)
     if r.returncode != 0:
         sys.exit(r.returncode)
-    n = len([f for f in os.listdir(args.out) if f.startswith("frame_") and f.endswith(".png")])
+    n = len([f for f in os.listdir(args.out) if f.startswith("frame_") and f.endswith((".png", ".jpg"))])
     print(f"wrote {n} frames to {args.out}")
 
 

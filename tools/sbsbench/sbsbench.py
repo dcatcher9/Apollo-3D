@@ -314,7 +314,8 @@ def measure_sequence(seq_dir, frames_dir=None):
     paths = sorted(glob.glob(os.path.join(seq_dir, "sbs_*.png")))
     if not paths:
         return None
-    srcs = sorted(glob.glob(os.path.join(frames_dir, "*.png"))) if frames_dir else []
+    srcs = sorted(glob.glob(os.path.join(frames_dir, "frame_*.*"))) if frames_dir else []
+    srcs = [s for s in srcs if s.lower().endswith((".png", ".jpg", ".jpeg"))]
     rows, flicks, bflicks, swims = [], [], [], []
     prev_sbs = prev_left = prev_depth = prev_src = None
     for i, p in enumerate(paths):

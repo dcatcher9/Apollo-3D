@@ -26,25 +26,33 @@ Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 ## Deterministic clips via the headless harness (recommended)
 Single dumps are sporadic and headset-bound. For repeatable A/B and **temporal** metrics, drive
 the real pipeline over a fixed frame sequence with the built-in `--sbs-bench` subcommand (Tier-1
-harness — runs the real estimator + real composite shaders, no game/client):
+harness — runs the real estimator + real composite shaders, no game/client).
+
+### The committed clip set (quick eval)
+A small pre-resized clip set lives in **`tools/sbsbench/clips/<name>/frame_*.jpg`** (854 px wide,
+24 frames, JPEG) so eval is fast and reproducible with no per-run preprocessing. The harness sizes
+the SBS output to the **input** resolution, so these small clips make a full 5-clip A/B take
+seconds (≈8 s harness + 3 s scoring per clip) instead of a minute:
 
 ```
-# 1. video -> frames (bundled ffmpeg via imageio-ffmpeg)
-python tools/sbsbench/split_video.py clip.mp4 -o E:/ApolloDev/sbs_bench/clips/movie --fps 24
-
-# 2. frames -> real SBS frames (run from the build dir so assets/ resolves; conf supplies the
-#    warp/divergence config; --movie applies the movie warp+depth overrides)
 cd cmake-build-relwithdebinfo
 ./sunshine.exe E:/ApolloDev/config/sunshine.conf --sbs-bench \
-    --frames E:/ApolloDev/sbs_bench/clips/movie --out E:/ApolloDev/sbs_bench/out/movie --movie
-
-# 3. score the sequence (adds temporal flicker) + baseline diff
-python tools/sbsbench/sbsbench.py --seq E:/ApolloDev/sbs_bench/out/movie --json base.json
-python tools/sbsbench/sbsbench.py --seq NEW_OUT --baseline base.json
+    --frames ../tools/sbsbench/clips/c525 --out out/c525 --movie
+python tools/sbsbench/sbsbench.py --seq out/c525 --frames tools/sbsbench/clips/c525 --json base.json
+python tools/sbsbench/sbsbench.py --seq out/NEW  --frames tools/sbsbench/clips/c525 --baseline base.json
 ```
 
-The harness settles the async depth per frame (`--settle`, default 3) so each output uses depth
-caught up to its own frame. Same input frames every run → a metric delta is your change alone.
+**Eval never resizes the input** — the SBS output tracks the input size, so to run a *full-res*
+(slower, more sensitive) eval, just point `--frames` at a full-resolution frame dir; use `--eye-h`
+only to pin a specific output height. Metric values are resolution-dependent, so keep baselines
+per clip-set (a small-clip baseline isn't comparable to a full-res one; A/B deltas within one are).
+
+### Adding / regenerating clips
+```
+python tools/sbsbench/split_video.py clip.mp4 -o tools/sbsbench/clips/mine --width 854 --jpg --max 24
+```
+Drop `--width/--jpg` for a full-resolution PNG clip. The harness settles the async depth per frame
+(`--settle`, default 3) so each output uses depth caught up to its own frame.
 
 The metrics split cleanly by subsystem: **warp**-side changes move pop / disocc / flicker_disocc;
 **depth**-side changes move edge_acc / swim / depth_spread. So a delta tells you *where* the change
