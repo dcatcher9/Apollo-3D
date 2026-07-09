@@ -201,6 +201,7 @@ namespace sbs_bench {
       bool subject_track = false;  // VD3D-style shaped disparity + subject anchoring
       double subject_lock = -1.0;  // subject anchor strength override (e.g. 0.95)
       bool probe = false;          // force the probe-search reprojection (learned_warp off)
+      int depth_short_side = 0;    // depth inference short-side override (0 = conf; VD3D uses 432)
       double ema = -1.0;         // per-pixel depth EMA override (1.0 = off; pair with --sync-depth)
     };
 
@@ -228,6 +229,7 @@ namespace sbs_bench {
         else if (a == "--subject-track") o.subject_track = true;
         else if (a == "--subject-lock") o.subject_lock = std::stod(next("--subject-lock"));
         else if (a == "--probe") o.probe = true;
+        else if (a == "--depth-short-side") o.depth_short_side = std::stoi(next("--depth-short-side"));
         else if (a == "--ema") o.ema = std::stod(next("--ema"));
         else { BOOST_LOG(error) << "sbs-bench: unknown arg '" << a << "'"; return false; }
       }
@@ -288,6 +290,7 @@ namespace sbs_bench {
     if (o.subject_track) sbs_cfg.subject_track = true;          // A/B lever: shaped disparity
     if (o.subject_lock >= 0.0) sbs_cfg.subject_lock = o.subject_lock;
     if (o.probe) sbs_cfg.learned_warp = false;                  // A/B lever: probe vs MLBW warp
+    if (o.depth_short_side > 0) sbs_cfg.depth_short_side = o.depth_short_side;  // VD3D uses 432
     if (o.ema > 0.0) sbs_cfg.ema = o.ema;                        // A/B lever: depth EMA (1.0 = off)
     sbs_cfg.perf_stats = true;  // the harness always measures
     sbs_perf::set_enabled(true);
