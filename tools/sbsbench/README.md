@@ -31,6 +31,11 @@ python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change
 python tools/sbsbench/run_eval.py --extra --divergence 0.027   # pass A/B levers to the harness
 ```
 
+Harness A/B levers (after `--extra`): `--divergence F` (parallax gain), `--sync-depth`
+(synchronous current-frame inference — the branch default since 2026-07-09; the lever exists to
+A/B *back* to async), `--pct-lo F --pct-hi F` (robust percentile normalization bounds, e.g.
+`1 99`; default off = raw min/max), `--ema F` (per-pixel depth EMA override, `1.0` = off).
+
 Exit code is the verdict (0 pass / 1 regression / 2 setup error), so the eval→fix→eval loop is
 scriptable. `results.json` carries provenance (git sha+dirty, models, clip hashes, gpu-contention
 flag) and, for every triggered/regressed metric, the **worst frame index** to look at. The gate

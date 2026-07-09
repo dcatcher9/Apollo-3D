@@ -250,6 +250,10 @@ namespace models {
         int depth_short_side;  // depth map short-side resolution (clamped to native short side)
         float max_aspect;  // aspect cap for short-side mode
         float minmax_alpha;  // temporal EMA blend for the normalized min/max
+        float pct_lo;        // robust normalization: low percentile as a fraction (0 = raw min)
+        float pct_hi;        // robust normalization: high percentile as a fraction (1 = raw max)
+        bool use_percentile; // either percentile bound active -> histogram pass runs
+        bool sync_depth;     // wait for THIS frame's inference so color and depth match (no async ghost)
         float minmax_snap;   // A1: raw-vs-EMA range ratio that snaps the scale on a scene cut (0 = off)
         float range_floor_frac;      // A3: current range < ref*frac -> compress parallax (0 = off)
         float range_floor_ref_alpha; // A3: slow-max reference-range decay
@@ -346,6 +350,7 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_cs;
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_cs;
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_ema_cs;
+        Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_hist_cs;
         Microsoft::WRL::ComPtr<ID3D11SamplerState> linear_sampler;
         Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
 
@@ -361,6 +366,8 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_ema_buf;  // float4 {min, max, initialized, pad}
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> minmax_ema_uav;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> minmax_ema_srv;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> hist_buf;  // 256 uint bins for percentile normalization
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> hist_uav;
         
         Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex;
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
@@ -654,6 +661,10 @@ namespace models {
             : device(d), context(c), ema_alpha((float)cfg.ema),
               depth_short_side(std::max(196, cfg.depth_short_side)), max_aspect(std::max(1.0f, (float)cfg.depth_max_aspect)),
               minmax_alpha((float)cfg.minmax_ema),
+              pct_lo((float)(cfg.norm_pct_lo / 100.0)),
+              pct_hi((float)(cfg.norm_pct_hi / 100.0)),
+              use_percentile(cfg.norm_pct_lo > 0.0 || cfg.norm_pct_hi < 100.0),
+              sync_depth(cfg.sync_depth),
               minmax_snap((float)cfg.minmax_snap),
               range_floor_frac((float)cfg.range_floor),
               range_floor_ref_alpha(0.004f),  // ~decays over a few hundred depth updates
@@ -811,6 +822,18 @@ namespace models {
             compile_shader(assets_dir / "shaders" / "directx" / "buffer_to_tex_cs.hlsl", buffer_to_tex_cs);
             compile_shader(assets_dir / "shaders" / "directx" / "depth_minmax_cs.hlsl", depth_minmax_cs);
             compile_shader(assets_dir / "shaders" / "directx" / "depth_minmax_ema_cs.hlsl", depth_minmax_ema_cs);
+            if (use_percentile) {
+                if (compile_shader(assets_dir / "shaders" / "directx" / "depth_hist_cs.hlsl", depth_hist_cs)) {
+                    BOOST_LOG(info) << "Percentile depth normalization enabled (p" << cfg.norm_pct_lo
+                                    << " .. p" << cfg.norm_pct_hi << ").";
+                } else {
+                    BOOST_LOG(warning) << "depth_hist_cs failed to compile; falling back to min/max normalization.";
+                    use_percentile = false;
+                }
+            }
+            if (sync_depth) {
+                BOOST_LOG(info) << "Synchronous depth enabled: inference waits on the encode thread (no async ghost).";
+            }
             if (guided_upsample) {
                 bool ok = compile_shader(assets_dir / "shaders" / "directx" / "depth_guide_downsample_cs.hlsl", depth_guide_downsample_cs) &&
                           compile_shader(assets_dir / "shaders" / "directx" / "depth_guided_upsample_cs.hlsl", depth_guided_upsample_cs);
@@ -858,6 +881,27 @@ namespace models {
                 device->CreateBuffer(&bd, &sd, &minmax_ema_buf);
                 device->CreateUnorderedAccessView(minmax_ema_buf.Get(), nullptr, &minmax_ema_uav);
                 device->CreateShaderResourceView(minmax_ema_buf.Get(), nullptr, &minmax_ema_srv);
+            }
+
+            // Percentile histogram: 256 uint bins, zero-init (depth_minmax_ema_cs resets them
+            // after each frame's scan, so the steady state matches this initial state).
+            if (use_percentile) {
+                uint32_t init_hist[256] = {};
+                D3D11_BUFFER_DESC bd = {};
+                bd.Usage = D3D11_USAGE_DEFAULT;
+                bd.ByteWidth = sizeof(init_hist);
+                bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+                bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+                bd.StructureByteStride = sizeof(uint32_t);
+                D3D11_SUBRESOURCE_DATA sd = {init_hist, 0, 0};
+                device->CreateBuffer(&bd, &sd, &hist_buf);
+                if (hist_buf) {
+                    device->CreateUnorderedAccessView(hist_buf.Get(), nullptr, &hist_uav);
+                }
+                if (!hist_uav) {
+                    BOOST_LOG(warning) << "Percentile histogram buffer creation failed; falling back to min/max normalization.";
+                    use_percentile = false;
+                }
             }
 
             D3D11_SAMPLER_DESC samp_desc = {};
@@ -1106,13 +1150,14 @@ namespace models {
 
             D3D11_BUFFER_DESC cb_desc = {};
             cb_desc.Usage = D3D11_USAGE_IMMUTABLE;
-            cb_desc.ByteWidth = 48;  // shared depth-pass cbuffer (12 floats/uints; see below)
+            cb_desc.ByteWidth = 64;  // shared depth-pass cbuffer (16 floats/uints; see below)
             cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
             // Shared depth-pass constants: {target_w, target_h, is_hdr, ema_alpha, minmax_alpha,
             // reduce_threads, output_transform, depth_shift, snap_ratio, floor_frac,
-            // floor_ref_alpha, pad} (see buffer_to_tex_cs.hlsl / depth_minmax_ema_cs.hlsl).
-            uint32_t cb[12] = {};
+            // floor_ref_alpha, pct_lo, pct_hi, pads} (see buffer_to_tex_cs.hlsl /
+            // depth_minmax_ema_cs.hlsl; shaders declaring only the 12-slot prefix still bind fine).
+            uint32_t cb[16] = {};
             float* cbf = (float*)cb;
             cb[0] = (uint32_t)target_w;
             cb[1] = (uint32_t)target_h;
@@ -1125,7 +1170,11 @@ namespace models {
             cbf[8] = minmax_snap;       // A1 scene-cut snap ratio (0 = off)
             cbf[9] = range_floor_frac;  // A3 range-floor fraction (0 = off)
             cbf[10] = range_floor_ref_alpha;  // A3 reference-range decay
-            cbf[11] = 0.0f;
+            cbf[11] = use_percentile ? pct_lo : 0.0f;  // robust normalization, low bound (fraction)
+            cbf[12] = use_percentile ? pct_hi : 1.0f;  // robust normalization, high bound (fraction)
+            cbf[13] = 0.0f;
+            cbf[14] = 0.0f;
+            cbf[15] = 0.0f;
             D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
             cbuffer.Reset();
             device->CreateBuffer(&cb_desc, &sd, &cbuffer);
@@ -1189,6 +1238,66 @@ namespace models {
             context->Dispatch((out_w + 15) / 16, (out_h + 15) / 16, 1);
             context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
             context->CSSetShaderResources(0, 3, null_srvs);
+        }
+
+        // Normalize the finished raw disparity in tensor_out_buf into depth_tex: the scale
+        // passes (min/max reduction, optional percentile histogram, EMA fold) followed by the
+        // mapping/temporal-EMA pass. GPU-resident throughout, no CPU readback. In async mode
+        // this consumes the PREVIOUS frame's inference; in sync mode, the current frame's.
+        void normalize_depth_output() {
+            // 3a. Per-frame scale (GPU-resident; no CPU readback). Depth Anything V2's
+            // relative output is affine-invariant, so this is required for a stable parallax scale.
+            if (depth_minmax_cs && depth_minmax_ema_cs && minmax_raw_uav && minmax_ema_uav) {
+                // Pass A: parallel reduction of the raw disparity -> min/max (uint bits).
+                context->CSSetShader(depth_minmax_cs.Get(), nullptr, 0);
+                context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
+                context->CSSetShaderResources(0, 1, tensor_out_srv.GetAddressOf());
+                context->CSSetUnorderedAccessViews(0, 1, minmax_raw_uav.GetAddressOf(), nullptr);
+                context->Dispatch(reduce_groups, 1, 1);
+
+                ID3D11UnorderedAccessView* null_uav1 = nullptr;
+                ID3D11ShaderResourceView* null_srv1 = nullptr;
+                context->CSSetUnorderedAccessViews(0, 1, &null_uav1, nullptr);
+                context->CSSetShaderResources(0, 1, &null_srv1);
+
+                // Pass A2 (percentile mode): 256-bin histogram over the raw range, so pass B
+                // can replace the outlier-sensitive min/max with robust percentile bounds.
+                if (use_percentile && depth_hist_cs && hist_uav) {
+                    context->CSSetShader(depth_hist_cs.Get(), nullptr, 0);
+                    context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
+                    context->CSSetShaderResources(0, 1, tensor_out_srv.GetAddressOf());
+                    ID3D11UnorderedAccessView* hist_uavs[2] = {hist_uav.Get(), minmax_raw_uav.Get()};
+                    context->CSSetUnorderedAccessViews(0, 2, hist_uavs, nullptr);
+                    context->Dispatch(reduce_groups, 1, 1);
+
+                    ID3D11UnorderedAccessView* null_uavs_h[2] = {nullptr, nullptr};
+                    context->CSSetUnorderedAccessViews(0, 2, null_uavs_h, nullptr);
+                    context->CSSetShaderResources(0, 1, &null_srv1);
+                }
+
+                // Pass B: fold into the EMA'd bounds and reset the accumulators (1 thread).
+                context->CSSetShader(depth_minmax_ema_cs.Get(), nullptr, 0);
+                ID3D11UnorderedAccessView* ema_uavs[3] = {minmax_ema_uav.Get(), minmax_raw_uav.Get(), hist_uav.Get()};
+                context->CSSetUnorderedAccessViews(0, 3, ema_uavs, nullptr);
+                context->Dispatch(1, 1, 1);
+
+                ID3D11UnorderedAccessView* null_uav2[3] = {nullptr, nullptr, nullptr};
+                context->CSSetUnorderedAccessViews(0, 3, null_uav2, nullptr);
+            }
+
+            // 3b. Buffer to Texture: map/normalize the disparity into depth_tex + temporal EMA.
+            context->CSSetShader(buffer_to_tex_cs.Get(), nullptr, 0);
+            context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
+            ID3D11ShaderResourceView* bt_srvs[2] = {tensor_out_srv.Get(), minmax_ema_srv.Get()};
+            context->CSSetShaderResources(0, 2, bt_srvs);
+            context->CSSetUnorderedAccessViews(0, 1, depth_uav.GetAddressOf(), nullptr);
+
+            context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+
+            ID3D11UnorderedAccessView* null_uav = nullptr;
+            ID3D11ShaderResourceView* null_srvs[2] = {nullptr, nullptr};
+            context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+            context->CSSetShaderResources(0, 2, null_srvs);
         }
 
         // Called once per video frame. Measures the video frame rate from the inter-call
@@ -1258,7 +1367,8 @@ namespace models {
 
             // Prevent GPU starvation: if the previous AI frame is still crunching, drop this frame.
             // This prevents an infinite queue of heavy TensorRT workloads from starving the DWM and Edge Browser.
-            if (cu_stream && cuda.cuStreamQuery) {
+            // Async only: sync mode drains its own stream every frame, so it can never be busy here.
+            if (!sync_depth && cu_stream && cuda.cuStreamQuery) {
                 auto q = cuda.cuStreamQuery(cu_stream);
                 if (q == CUDA_ERROR_NOT_READY) {
                     // Still re-snap the stale depth to THIS frame's color edges (D3D-only, cheap).
@@ -1415,9 +1525,6 @@ namespace models {
                 return make_result();
             }
 
-            // tensor_out_buf now holds the finished raw disparity from the previous inference
-            // (fully unmapped from CUDA), so the passes below don't block the CPU thread.
-
             // Shared constants for buffer_to_tex_cs, the min/max passes and rgb_to_nchw_cs.
             // Session-constant, so the buffer is built once (immutable), not mapped per frame.
             ensure_cbuffers(is_hdr);
@@ -1425,54 +1532,21 @@ namespace models {
                 return {};
             }
 
-            if (has_previous_frame) {
-                // 3a. Per-frame min/max normalization (GPU-resident; no CPU readback).
-                // Depth Anything V2's relative output is affine-invariant, so this is required
-                // for a stable parallax scale.
-                if (depth_minmax_cs && depth_minmax_ema_cs && minmax_raw_uav && minmax_ema_uav) {
-                    // Pass A: parallel reduction of the raw disparity -> min/max (uint bits).
-                    context->CSSetShader(depth_minmax_cs.Get(), nullptr, 0);
-                    context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-                    context->CSSetShaderResources(0, 1, tensor_out_srv.GetAddressOf());
-                    context->CSSetUnorderedAccessViews(0, 1, minmax_raw_uav.GetAddressOf(), nullptr);
-                    context->Dispatch(reduce_groups, 1, 1);
+            if (!sync_depth) {
+                // ASYNC: tensor_out_buf holds the finished raw disparity from the PREVIOUS
+                // inference (fully unmapped from CUDA), so consuming it here never blocks the
+                // encode thread -- at the cost of depth lagging color by the inference cadence.
+                if (has_previous_frame) {
+                    normalize_depth_output();
 
-                    ID3D11UnorderedAccessView* null_uav1 = nullptr;
-                    ID3D11ShaderResourceView* null_srv1 = nullptr;
-                    context->CSSetUnorderedAccessViews(0, 1, &null_uav1, nullptr);
-                    context->CSSetShaderResources(0, 1, &null_srv1);
-
-                    // Pass B: fold into the EMA'd min/max and reset the accumulator (1 thread).
-                    context->CSSetShader(depth_minmax_ema_cs.Get(), nullptr, 0);
-                    ID3D11UnorderedAccessView* ema_uavs[2] = {minmax_ema_uav.Get(), minmax_raw_uav.Get()};
-                    context->CSSetUnorderedAccessViews(0, 2, ema_uavs, nullptr);
-                    context->Dispatch(1, 1, 1);
-
-                    ID3D11UnorderedAccessView* null_uav2[2] = {nullptr, nullptr};
-                    context->CSSetUnorderedAccessViews(0, 2, null_uav2, nullptr);
+                    // 3c. Learned warp: turn the freshly-updated depth into per-eye warp fields
+                    // (both eyes, ~1 ms each on the warp stream; consumed by poll_warp_fields).
+                    enqueue_warp(cuda);
                 }
 
-                // 3b. Buffer to Texture: map/normalize the disparity into depth_tex + temporal EMA.
-                context->CSSetShader(buffer_to_tex_cs.Get(), nullptr, 0);
-                context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-                ID3D11ShaderResourceView* bt_srvs[2] = {tensor_out_srv.Get(), minmax_ema_srv.Get()};
-                context->CSSetShaderResources(0, 2, bt_srvs);
-                context->CSSetUnorderedAccessViews(0, 1, depth_uav.GetAddressOf(), nullptr);
-
-                context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
-
-                ID3D11UnorderedAccessView* null_uav = nullptr;
-                ID3D11ShaderResourceView* null_srvs[2] = {nullptr, nullptr};
-                context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
-                context->CSSetShaderResources(0, 2, null_srvs);
-
-                // 3c. Learned warp: turn the freshly-updated depth into per-eye warp fields
-                // (both eyes, ~1 ms each on the warp stream; consumed by poll_warp_fields).
-                enqueue_warp(cuda);
+                // 3d. Guided upsample: snap the freshly-updated depth to this frame's color edges.
+                run_guided(input_srv, is_hdr);
             }
-
-            // 3d. Guided upsample: snap the freshly-updated depth to this frame's color edges.
-            run_guided(input_srv, is_hdr);
 
             // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
             context->CSSetShader(rgb_to_nchw_cs.Get(), nullptr, 0);
@@ -1531,6 +1605,28 @@ namespace models {
             }
             
             cuda.cuGraphicsUnmapResources(2, resources, cu_stream);
+
+            if (sync_depth) {
+                // SYNC: wait for THIS frame's inference (~2-3 ms for DA-V2 small; measured via
+                // the perf events above) so the depth warped this frame is the depth OF this
+                // frame -- color and depth always match, eliminating the async motion ghost.
+                // The unmap above is stream-ordered, so after the wait the D3D passes read a
+                // complete, coherent tensor_out_buf.
+                if (cuda.cuStreamSynchronize) {
+                    cuda.cuStreamSynchronize(cu_stream);
+                }
+                normalize_depth_output();
+                if (learned_warp) {
+                    // The warp fields must also describe THIS frame: enqueue and wait (~1 ms
+                    // both eyes), then pack the fields immediately instead of next frame.
+                    enqueue_warp(cuda);
+                    if (cuda.cuStreamSynchronize) {
+                        cuda.cuStreamSynchronize(warp_stream);
+                    }
+                    poll_warp_fields(cuda);
+                }
+                run_guided(input_srv, is_hdr);
+            }
 
             has_previous_frame = true;
 

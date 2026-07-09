@@ -193,6 +193,11 @@ namespace sbs_bench {
       int settle_ms = 40;  // sleep between passes so the CUDA streams finish
       int limit = 0;       // 0 -> all
       double divergence = -1.0;  // <0 -> use the conf's value; else override (parallax/disocclusion size)
+      // VD3D-pipeline A/B levers; <0 / false -> use the conf's value.
+      bool sync_depth = false;   // synchronous depth (current-frame inference, no async ghost)
+      double pct_lo = -1.0;      // robust normalization low percentile (e.g. 1.0)
+      double pct_hi = -1.0;      // robust normalization high percentile (e.g. 99.0)
+      double ema = -1.0;         // per-pixel depth EMA override (1.0 = off; pair with --sync-depth)
     };
 
     bool parse_opts(int argc, char **argv, opts &o) {
@@ -212,6 +217,10 @@ namespace sbs_bench {
         else if (a == "--settle-ms") o.settle_ms = std::stoi(next("--settle-ms"));
         else if (a == "--limit") o.limit = std::stoi(next("--limit"));
         else if (a == "--divergence") o.divergence = std::stod(next("--divergence"));
+        else if (a == "--sync-depth") o.sync_depth = true;
+        else if (a == "--pct-lo") o.pct_lo = std::stod(next("--pct-lo"));
+        else if (a == "--pct-hi") o.pct_hi = std::stod(next("--pct-hi"));
+        else if (a == "--ema") o.ema = std::stod(next("--ema"));
         else { BOOST_LOG(error) << "sbs-bench: unknown arg '" << a << "'"; return false; }
       }
       if (o.frames.empty() || o.out.empty()) {
@@ -264,6 +273,10 @@ namespace sbs_bench {
       if (sbs_cfg.movie_depth_fps > 0.0) sbs_cfg.depth_fps = sbs_cfg.movie_depth_fps;
     }
     if (o.divergence >= 0.0) sbs_cfg.divergence = o.divergence;  // A/B lever: parallax/disocclusion size
+    if (o.sync_depth) sbs_cfg.sync_depth = true;                 // A/B lever: no async depth lag
+    if (o.pct_lo >= 0.0) sbs_cfg.norm_pct_lo = o.pct_lo;         // A/B lever: robust normalization
+    if (o.pct_hi >= 0.0) sbs_cfg.norm_pct_hi = o.pct_hi;
+    if (o.ema > 0.0) sbs_cfg.ema = o.ema;                        // A/B lever: depth EMA (1.0 = off)
     sbs_cfg.perf_stats = true;  // the harness always measures
     sbs_perf::set_enabled(true);
     sbs_perf::reset();

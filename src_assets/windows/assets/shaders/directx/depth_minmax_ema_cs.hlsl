@@ -12,6 +12,7 @@
 
 RWStructuredBuffer<float4> MinMaxEma : register(u0);  // [0]={min,max,initialized,ref_range}, [1]={range_scale,_,_,_}
 RWByteAddressBuffer        MinMaxRaw : register(u1);  // [0]=min bits, [4]=max bits
+RWStructuredBuffer<uint>   Histogram : register(u2);  // 256 bins from depth_hist_cs (percentile mode only)
 
 cbuffer Constants : register(b0) {
     uint target_w;
@@ -25,13 +26,55 @@ cbuffer Constants : register(b0) {
     float snap_ratio;       // A1: raw-vs-EMA range ratio (or center shift) that triggers a snap; 0 = off
     float floor_frac;       // A3: current range below ref*floor_frac -> scale parallax down; 0 = off
     float floor_ref_alpha;  // A3: reference-range decay toward smaller ranges
+    float pct_lo;           // robust normalization: low percentile as a fraction (0 = raw min)
+    float pct_hi;           // robust normalization: high percentile as a fraction (1 = raw max)
     float pad0;
+    float pad1;
+    float pad2;
 };
+
+#define NUM_BINS 256
 
 [numthreads(1, 1, 1)]
 void main() {
     float new_min = asfloat(MinMaxRaw.Load(0));
     float new_max = asfloat(MinMaxRaw.Load(4));
+
+    // Robust percentile bounds: replace the raw min/max with the norm_pct_lo/hi percentiles
+    // scanned from the 256-bin histogram (depth_hist_cs, binned over the raw range). Outlier
+    // pixels -- DA-V2's near-spike tail is the classic case -- land in the extreme bins and
+    // are excluded from the normalization range instead of squeezing the whole scene's
+    // parallax. Bin centers quantize the bound to ~0.4% of the frame range, far below the
+    // temporal EMA's smoothing. Values outside [lo,hi] saturate in buffer_to_tex_cs.
+    bool use_percentile = (pct_lo > 0.0f) || (pct_hi < 1.0f);
+    if (use_percentile) {
+        float bin_w = max(new_max - new_min, 1e-12f) / (float)NUM_BINS;
+        float total = (float)(target_w * target_h);
+        float lo_count = pct_lo * total;
+        float hi_count = pct_hi * total;
+        float pct_min = new_min;
+        float pct_max = new_max;
+        bool found_lo = (pct_lo <= 0.0f);   // disabled -> keep the raw min
+        bool found_hi = (pct_hi >= 1.0f);   // disabled -> keep the raw max
+        float cum = 0.0f;
+        [loop]
+        for (uint b = 0; b < NUM_BINS; b++) {
+            cum += (float)Histogram[b];
+            if (!found_lo && cum >= lo_count) {
+                pct_min = new_min + ((float)b + 0.5f) * bin_w;
+                found_lo = true;
+            }
+            if (!found_hi && cum >= hi_count) {
+                pct_max = new_min + ((float)b + 0.5f) * bin_w;
+                found_hi = true;
+            }
+            Histogram[b] = 0u;  // reset for the next frame's accumulation
+        }
+        if (pct_max - pct_min > 1e-9f) {
+            new_min = pct_min;
+            new_max = pct_max;
+        }
+    }
 
     float4 s = MinMaxEma[0];
     float ref = s.w;
