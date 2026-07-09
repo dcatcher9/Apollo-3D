@@ -197,6 +197,7 @@ namespace sbs_bench {
       bool sync_depth = false;   // synchronous depth (current-frame inference, no async ghost)
       double pct_lo = -1.0;      // robust normalization low percentile (e.g. 1.0)
       double pct_hi = -1.0;      // robust normalization high percentile (e.g. 99.0)
+      int lock_frames = -1;      // scene-locked normalization: updates before bounds freeze
       double ema = -1.0;         // per-pixel depth EMA override (1.0 = off; pair with --sync-depth)
     };
 
@@ -220,6 +221,7 @@ namespace sbs_bench {
         else if (a == "--sync-depth") o.sync_depth = true;
         else if (a == "--pct-lo") o.pct_lo = std::stod(next("--pct-lo"));
         else if (a == "--pct-hi") o.pct_hi = std::stod(next("--pct-hi"));
+        else if (a == "--lock-frames") o.lock_frames = std::stoi(next("--lock-frames"));
         else if (a == "--ema") o.ema = std::stod(next("--ema"));
         else { BOOST_LOG(error) << "sbs-bench: unknown arg '" << a << "'"; return false; }
       }
@@ -276,6 +278,7 @@ namespace sbs_bench {
     if (o.sync_depth) sbs_cfg.sync_depth = true;                 // A/B lever: no async depth lag
     if (o.pct_lo >= 0.0) sbs_cfg.norm_pct_lo = o.pct_lo;         // A/B lever: robust normalization
     if (o.pct_hi >= 0.0) sbs_cfg.norm_pct_hi = o.pct_hi;
+    if (o.lock_frames >= 0) sbs_cfg.norm_lock_frames = o.lock_frames;
     if (o.ema > 0.0) sbs_cfg.ema = o.ema;                        // A/B lever: depth EMA (1.0 = off)
     sbs_cfg.perf_stats = true;  // the harness always measures
     sbs_perf::set_enabled(true);

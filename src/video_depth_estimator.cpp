@@ -252,6 +252,7 @@ namespace models {
         float minmax_alpha;  // temporal EMA blend for the normalized min/max
         float pct_lo;        // robust normalization: low percentile as a fraction (0 = raw min)
         float pct_hi;        // robust normalization: high percentile as a fraction (1 = raw max)
+        float norm_lock_frames;  // scene lock: updates before the normalization bounds freeze (0 = off)
         bool use_percentile; // either percentile bound active -> histogram pass runs
         bool sync_depth;     // wait for THIS frame's inference so color and depth match (no async ghost)
         float minmax_snap;   // A1: raw-vs-EMA range ratio that snaps the scale on a scene cut (0 = off)
@@ -663,6 +664,7 @@ namespace models {
               minmax_alpha((float)cfg.minmax_ema),
               pct_lo((float)(cfg.norm_pct_lo / 100.0)),
               pct_hi((float)(cfg.norm_pct_hi / 100.0)),
+              norm_lock_frames((float)cfg.norm_lock_frames),
               use_percentile(cfg.norm_pct_lo > 0.0 || cfg.norm_pct_hi < 100.0),
               sync_depth(cfg.sync_depth),
               minmax_snap((float)cfg.minmax_snap),
@@ -1172,8 +1174,9 @@ namespace models {
             cbf[10] = range_floor_ref_alpha;  // A3 reference-range decay
             cbf[11] = use_percentile ? pct_lo : 0.0f;  // robust normalization, low bound (fraction)
             cbf[12] = use_percentile ? pct_hi : 1.0f;  // robust normalization, high bound (fraction)
-            cbf[13] = 0.0f;
-            cbf[14] = 0.0f;
+            cbf[13] = norm_lock_frames;  // scene lock: updates before the bounds freeze (0 = off)
+            cbf[14] = 0.005f;  // locked drift rate: ~4-7 s time constant, imperceptible per frame,
+                               // but a long scene that slowly changes depth range can't diverge
             cbf[15] = 0.0f;
             D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
             cbuffer.Reset();

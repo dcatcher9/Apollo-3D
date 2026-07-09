@@ -28,9 +28,9 @@ cbuffer Constants : register(b0) {
     float floor_ref_alpha;  // A3: reference-range decay toward smaller ranges
     float pct_lo;           // robust normalization: low percentile as a fraction (0 = raw min)
     float pct_hi;           // robust normalization: high percentile as a fraction (1 = raw max)
+    float lock_frames;      // scene lock: updates converging at minmax_alpha before the bounds freeze (0 = off)
+    float locked_alpha;     // blend rate while locked (near-zero drift so a long scene can't diverge)
     float pad0;
-    float pad1;
-    float pad2;
 };
 
 #define NUM_BINS 256
@@ -78,12 +78,18 @@ void main() {
 
     float4 s = MinMaxEma[0];
     float ref = s.w;
+    // Scene-lock state: how many updates the bounds have been converging since the last
+    // cut/seed. Once past lock_frames, the blend rate drops to locked_alpha (near-freeze) --
+    // the realtime stand-in for VD3D's whole-video locked percentile range: within a scene
+    // the depth scale stops breathing entirely; a scene cut (below) restarts the learning.
+    float frames_settled = MinMaxEma[1].y;
     if (s.z < 0.5f) {
         // First frame: seed the EMA (and the reference range) with the raw values.
         s.x = new_min;
         s.y = new_max;
         s.z = 1.0f;
         ref = max(new_max - new_min, 1e-6f);
+        frames_settled = 0.0f;
     } else {
         float ema_range = max(s.y - s.x, 1e-6f);
         float raw_range = max(new_max - new_min, 1e-6f);
@@ -94,9 +100,13 @@ void main() {
         if (cut) {
             s.x = new_min;  // A1: snap the scale to the new scene immediately
             s.y = new_max;
+            frames_settled = 0.0f;  // relearn the new scene's bounds before re-locking
         } else {
-            s.x = lerp(s.x, new_min, minmax_alpha);
-            s.y = lerp(s.y, new_max, minmax_alpha);
+            bool locked = (lock_frames > 0.5f) && (frames_settled >= lock_frames);
+            float alpha = locked ? locked_alpha : minmax_alpha;
+            s.x = lerp(s.x, new_min, alpha);
+            s.y = lerp(s.y, new_max, alpha);
+            frames_settled = min(frames_settled + 1.0f, 16777000.0f);  // clamp below fp32 integer limit
         }
     }
 
@@ -111,7 +121,7 @@ void main() {
     }
 
     MinMaxEma[0] = s;
-    MinMaxEma[1] = float4(range_scale, 0.0f, 0.0f, 0.0f);
+    MinMaxEma[1] = float4(range_scale, frames_settled, 0.0f, 0.0f);
 
     // Reset accumulator so next frame's InterlockedMin/Max start from the identity.
     MinMaxRaw.Store(0, 0xFFFFFFFFu);

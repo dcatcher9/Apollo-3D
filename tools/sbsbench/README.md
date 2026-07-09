@@ -34,7 +34,9 @@ python tools/sbsbench/run_eval.py --extra --divergence 0.027   # pass A/B levers
 Harness A/B levers (after `--extra`): `--divergence F` (parallax gain), `--sync-depth`
 (synchronous current-frame inference — the branch default since 2026-07-09; the lever exists to
 A/B *back* to async), `--pct-lo F --pct-hi F` (robust percentile normalization bounds, e.g.
-`1 99`; default off = raw min/max), `--ema F` (per-pixel depth EMA override, `1.0` = off).
+`1 99`; default off = raw min/max), `--ema F` (per-pixel depth EMA override, `1.0` = off),
+`--lock-frames N` (scene-locked normalization bounds; bench-falsified for DA-V2 — see the
+config.h note on sbs_3d_norm_lock_frames before using).
 
 Exit code is the verdict (0 pass / 1 regression / 2 setup error), so the eval→fix→eval loop is
 scriptable. `results.json` carries provenance (git sha+dirty, models, clip hashes, gpu-contention
