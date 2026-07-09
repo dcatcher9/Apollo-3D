@@ -7,6 +7,7 @@
 
 Texture2D<float>         DepthTexture : register(t0);  // normalized depth, high = near
 RWStructuredBuffer<uint> SubjectHist  : register(u0);  // 256 bins, weight in 1/1024 units
+RWStructuredBuffer<uint> PlainHist    : register(u1);  // 256 bins, UNWEIGHTED count (for stretch 5/95 pct)
 
 // Shared depth-pass cbuffer (only target_w/target_h are used here; layout parity).
 cbuffer Constants : register(b0) {
@@ -30,11 +31,13 @@ cbuffer Constants : register(b0) {
 
 #define NUM_BINS 256
 groupshared uint g_hist[NUM_BINS];
+groupshared uint g_plain[NUM_BINS];
 
 [numthreads(16, 16, 1)]
 void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
     uint lin = tid.y * 16 + tid.x;  // 256 threads/group: one shared bin each
     g_hist[lin] = 0u;
+    g_plain[lin] = 0u;
     GroupMemoryBarrierWithGroupSync();
 
     if (dtid.x < target_w && dtid.y < target_h) {
@@ -58,10 +61,14 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
         float w = center_w * smooth_w;
         uint bin = min((uint)(saturate(d) * (float)NUM_BINS), NUM_BINS - 1u);
         InterlockedAdd(g_hist[bin], (uint)(w * 1024.0f + 0.5f));
+        InterlockedAdd(g_plain[bin], 1u);  // unweighted, for the stretch 5/95 percentiles
     }
 
     GroupMemoryBarrierWithGroupSync();
     if (g_hist[lin] > 0u) {
         InterlockedAdd(SubjectHist[lin], g_hist[lin]);
+    }
+    if (g_plain[lin] > 0u) {
+        InterlockedAdd(PlainHist[lin], g_plain[lin]);
     }
 }

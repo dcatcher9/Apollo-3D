@@ -15,9 +15,9 @@
 
 Texture2D<float4> LeftColorTexture : register(t0);
 Texture2D<float>  DepthTexture      : register(t1);
-// Subject-tracking state from depth_subject_resolve_cs: {recenter_delta, subject_curve,
-// subject_depth_ema, initialized}. Only read when subject_track is on; an unbound/zero
-// buffer (initialized == 0) falls back to the linear mapping below.
+// Subject-tracking state from depth_subject_resolve_cs. [0] = {recenter_delta, subject_curve,
+// subject_depth_ema, initialized}; [1] = {stretch_lo_val, stretch_inv_range, _, _}. Only read
+// when subject_track is on; an unbound/zero buffer (initialized == 0) falls back to linear.
 StructuredBuffer<float4> SubjectState : register(t2);
 SamplerState      LinearSampler     : register(s0);
 
@@ -39,7 +39,9 @@ cbuffer Constants : register(b2) {
                             // instead of the linear (depth - focal_plane) mapping.
     float subject_lock;     // Fraction of the subject's own parallax subtracted everywhere
                             // (~1 pins the tracked subject to the screen plane).
-    float pad2;
+    float subject_stretch;  // > 0.5 = apply the disparity stretch using SubjectState[1] bounds.
+    float subject_plane_lock;  // Flatten residual disparity within the subject band (0 = off).
+    float subject_plane_width; // Half-width (normalized depth) of that subject band.
 };
 
 // Border fade: parallax ramps to zero within border_fade of the LEFT/RIGHT source edges, so
@@ -78,9 +80,26 @@ float BandCurve(float d) {
 // max_divergence the hard parallax bound (the probe search radius relies on this).
 float DepthParallax(float d, float x) {
     if (subject_track > 0.5f) {
-        float4 s = SubjectState[0];
+        float4 s = SubjectState[0];   // {delta, subject_curve, subj_ema, init}
         if (s.w > 0.5f) {
-            float c = BandCurve(saturate(d + s.x)) - subject_lock * s.y;
+            // Optional disparity stretch (VD3D shape_depth_for_pop): rescale the [lo,hi]
+            // percentile band to full [0,1] so the mid-range uses the whole parallax budget.
+            // lo=0, inv_range=1 (stretch off) makes this an identity.
+            float d_str = d;
+            if (subject_stretch > 0.5f) {
+                float4 s1 = SubjectState[1];  // {stretch_lo, stretch_inv_range, _, _}
+                d_str = saturate((d - s1.x) * s1.y);
+            }
+            float d_shaped = saturate(d_str + s.x);  // recenter (delta in stretched space)
+            float c = BandCurve(d_shaped);
+            // Local subject-plane lock (VD3D apply_subject_plane_lock): flatten the near-subject
+            // surround toward the subject's own parallax, so the subject band reads as one plane.
+            if (subject_plane_lock > 0.0f) {
+                float t = (d - s.z) / max(subject_plane_width, 1e-4f);
+                float band = exp(-0.5f * t * t);
+                c = lerp(c, s.y, subject_plane_lock * band);
+            }
+            c -= subject_lock * s.y;   // global anchor: subject to the screen plane
             return clamp(c, -1.0f, 1.0f) * max_divergence * BorderFade(x);
         }
     }

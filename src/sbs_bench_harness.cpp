@@ -170,9 +170,11 @@ namespace sbs_bench {
       return blob;
     }
 
-    ComPtr<ID3D11Buffer> const_buffer(ID3D11Device *dev, const float params[8]) {
+    template <int N>
+    ComPtr<ID3D11Buffer> const_buffer(ID3D11Device *dev, const float (&params)[N]) {
+      static_assert(N % 4 == 0, "cbuffer must be 16-byte aligned");
       D3D11_BUFFER_DESC bd = {};
-      bd.ByteWidth = 32;  // 8 floats, 16-byte aligned
+      bd.ByteWidth = N * 4;  // 16-byte aligned
       bd.Usage = D3D11_USAGE_IMMUTABLE;
       bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
       D3D11_SUBRESOURCE_DATA sd = {params, 0, 0};
@@ -203,6 +205,8 @@ namespace sbs_bench {
       bool probe = false;          // force the probe-search reprojection (learned_warp off)
       int depth_short_side = 0;    // depth inference short-side override (0 = conf; VD3D uses 432)
       double ema = -1.0;         // per-pixel depth EMA override (1.0 = off; pair with --sync-depth)
+      bool subject_stretch = false;  // VD3D shape_depth_for_pop 5/95 disparity stretch
+      double subject_plane_lock = -1.0;  // local subject-band flatten (e.g. 0.28); <0 = conf
     };
 
     bool parse_opts(int argc, char **argv, opts &o) {
@@ -230,6 +234,8 @@ namespace sbs_bench {
         else if (a == "--subject-lock") o.subject_lock = std::stod(next("--subject-lock"));
         else if (a == "--probe") o.probe = true;
         else if (a == "--depth-short-side") o.depth_short_side = std::stoi(next("--depth-short-side"));
+        else if (a == "--subject-stretch") o.subject_stretch = true;
+        else if (a == "--subject-plane-lock") o.subject_plane_lock = std::stod(next("--subject-plane-lock"));
         else if (a == "--ema") o.ema = std::stod(next("--ema"));
         else { BOOST_LOG(error) << "sbs-bench: unknown arg '" << a << "'"; return false; }
       }
@@ -291,6 +297,8 @@ namespace sbs_bench {
     if (o.subject_lock >= 0.0) sbs_cfg.subject_lock = o.subject_lock;
     if (o.probe) sbs_cfg.learned_warp = false;                  // A/B lever: probe vs MLBW warp
     if (o.depth_short_side > 0) sbs_cfg.depth_short_side = o.depth_short_side;  // VD3D uses 432
+    if (o.subject_stretch) sbs_cfg.subject_stretch = true;      // A/B lever: shape_depth_for_pop stretch
+    if (o.subject_plane_lock >= 0.0) sbs_cfg.subject_plane_lock = o.subject_plane_lock;
     if (o.ema > 0.0) sbs_cfg.ema = o.ema;                        // A/B lever: depth EMA (1.0 = off)
     sbs_cfg.perf_stats = true;  // the harness always measures
     sbs_perf::set_enabled(true);
@@ -335,13 +343,15 @@ namespace sbs_bench {
     }
 
     // Reprojection constants: {divergence, focal, parallax_steps, border_fade, depth_floor,
-    // subject_track, subject_lock, 0}.
-    float repro_params[8] = {(float) sbs_cfg.divergence, (float) sbs_cfg.focal_plane,
+    // subject_track, subject_lock, subject_stretch, subject_plane_lock, subject_plane_width, pad, pad}.
+    float repro_params[12] = {(float) sbs_cfg.divergence, (float) sbs_cfg.focal_plane,
       (float) sbs_cfg.parallax_steps, (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor,
-      sbs_cfg.subject_track ? 1.0f : 0.0f, (float) sbs_cfg.subject_lock, 0};
+      sbs_cfg.subject_track ? 1.0f : 0.0f, (float) sbs_cfg.subject_lock,
+      sbs_cfg.subject_stretch ? 1.0f : 0.0f, (float) sbs_cfg.subject_plane_lock,
+      (float) sbs_cfg.subject_plane_width, 0, 0};
     auto repro_cb = const_buffer(dev.Get(), repro_params);
-    float pass_params[8] = {0, (float) sbs_cfg.focal_plane, (float) sbs_cfg.parallax_steps,
-      (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor, 0, 0, 0};
+    float pass_params[12] = {0, (float) sbs_cfg.focal_plane, (float) sbs_cfg.parallax_steps,
+      (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor, 0, 0, 0, 0, 0, 0, 0};
     auto pass_cb = const_buffer(dev.Get(), pass_params);
 
     // ---- estimator ----

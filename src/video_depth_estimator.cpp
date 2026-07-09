@@ -256,6 +256,9 @@ namespace models {
         bool subject_track;      // VD3D-style shaped disparity: run the subject-estimate passes
         float subject_recenter;  // recenter strength consumed by depth_subject_resolve_cs
         float subject_lock;      // anchor strength (probe: parallax subtraction; MLBW: conv blend)
+        bool subject_stretch;    // apply the shape_depth_for_pop 5/95 disparity stretch
+        float stretch_lo;        // low percentile for the stretch (fraction)
+        float stretch_hi;        // high percentile for the stretch (fraction)
         bool use_percentile; // either percentile bound active -> histogram pass runs
         bool sync_depth;     // wait for THIS frame's inference so color and depth match (no async ghost)
         float minmax_snap;   // A1: raw-vs-EMA range ratio that snaps the scale on a scene cut (0 = off)
@@ -376,6 +379,8 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> hist_uav;
         Microsoft::WRL::ComPtr<ID3D11Buffer> subject_hist_buf;  // 256 weighted bins for subject tracking
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_hist_uav;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> subject_plain_buf;  // 256 unweighted bins for the stretch 5/95
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_plain_uav;
         Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;  // float4 {delta, scurve, subj_ema, init}
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_uav;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject_srv;
@@ -681,6 +686,8 @@ namespace models {
               subject_track(cfg.subject_track),
               subject_recenter((float)cfg.subject_recenter),
               subject_lock((float)cfg.subject_lock),
+              subject_stretch(cfg.subject_stretch),
+              stretch_lo((float)cfg.stretch_lo), stretch_hi((float)cfg.stretch_hi),
               use_percentile(cfg.norm_pct_lo > 0.0 || cfg.norm_pct_hi < 100.0),
               sync_depth(cfg.sync_depth),
               minmax_snap((float)cfg.minmax_snap),
@@ -948,8 +955,12 @@ namespace models {
                 if (subject_hist_buf) {
                     device->CreateUnorderedAccessView(subject_hist_buf.Get(), nullptr, &subject_hist_uav);
                 }
+                device->CreateBuffer(&bd, &sd, &subject_plain_buf);  // same 256-uint layout
+                if (subject_plain_buf) {
+                    device->CreateUnorderedAccessView(subject_plain_buf.Get(), nullptr, &subject_plain_uav);
+                }
 
-                float init_state[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                float init_state[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};  // 2 float4
                 bd.ByteWidth = sizeof(init_state);
                 bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
                 bd.StructureByteStride = sizeof(float) * 4;
@@ -968,7 +979,7 @@ namespace models {
                     stg.StructureByteStride = sizeof(float) * 4;
                     device->CreateBuffer(&stg, nullptr, &subject_stage);
                 }
-                if (!subject_hist_uav || !subject_uav || !subject_srv) {
+                if (!subject_hist_uav || !subject_uav || !subject_srv || !subject_plain_uav) {
                     BOOST_LOG(warning) << "Subject-tracking buffer creation failed; falling back to the linear depth mapping.";
                     subject_track = false;
                 }
@@ -1225,14 +1236,14 @@ namespace models {
 
             D3D11_BUFFER_DESC cb_desc = {};
             cb_desc.Usage = D3D11_USAGE_IMMUTABLE;
-            cb_desc.ByteWidth = 64;  // shared depth-pass cbuffer (16 floats/uints; see below)
+            cb_desc.ByteWidth = 80;  // shared depth-pass cbuffer (20 floats/uints; see below)
             cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
             // Shared depth-pass constants: {target_w, target_h, is_hdr, ema_alpha, minmax_alpha,
             // reduce_threads, output_transform, depth_shift, snap_ratio, floor_frac,
             // floor_ref_alpha, pct_lo, pct_hi, pads} (see buffer_to_tex_cs.hlsl /
             // depth_minmax_ema_cs.hlsl; shaders declaring only the 12-slot prefix still bind fine).
-            uint32_t cb[16] = {};
+            uint32_t cb[20] = {};
             float* cbf = (float*)cb;
             cb[0] = (uint32_t)target_w;
             cb[1] = (uint32_t)target_h;
@@ -1251,6 +1262,10 @@ namespace models {
             cbf[14] = 0.005f;  // locked drift rate: ~4-7 s time constant, imperceptible per frame,
                                // but a long scene that slowly changes depth range can't diverge
             cbf[15] = subject_recenter;  // subject recenter strength (depth_subject_resolve_cs)
+            cbf[16] = stretch_lo;                          // shape_depth_for_pop stretch bounds
+            cbf[17] = stretch_hi;
+            cbf[18] = subject_stretch ? 1.0f : 0.0f;
+            cbf[19] = 0.0f;
             D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
             cbuffer.Reset();
             device->CreateBuffer(&cb_desc, &sd, &cbuffer);
@@ -1381,19 +1396,21 @@ namespace models {
                 context->CSSetShader(depth_subject_hist_cs.Get(), nullptr, 0);
                 context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
                 context->CSSetShaderResources(0, 1, depth_srv.GetAddressOf());
-                context->CSSetUnorderedAccessViews(0, 1, subject_hist_uav.GetAddressOf(), nullptr);
+                ID3D11UnorderedAccessView* hist_uavs[2] = {subject_hist_uav.Get(), subject_plain_uav.Get()};
+                context->CSSetUnorderedAccessViews(0, 2, hist_uavs, nullptr);
                 context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
-                context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+                ID3D11UnorderedAccessView* null_uavs_h2[2] = {nullptr, nullptr};
+                context->CSSetUnorderedAccessViews(0, 2, null_uavs_h2, nullptr);
                 context->CSSetShaderResources(0, 1, null_srvs);
 
                 context->CSSetShader(depth_subject_resolve_cs.Get(), nullptr, 0);
-                ID3D11UnorderedAccessView* subj_uavs[2] = {subject_hist_uav.Get(), subject_uav.Get()};
-                context->CSSetUnorderedAccessViews(0, 2, subj_uavs, nullptr);
+                ID3D11UnorderedAccessView* subj_uavs[3] = {subject_hist_uav.Get(), subject_uav.Get(), subject_plain_uav.Get()};
+                context->CSSetUnorderedAccessViews(0, 3, subj_uavs, nullptr);
                 context->Dispatch(1, 1, 1);
 
-                ID3D11UnorderedAccessView* null_uavs2[2] = {nullptr, nullptr};
-                context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
+                ID3D11UnorderedAccessView* null_uavs2[3] = {nullptr, nullptr, nullptr};
+                context->CSSetUnorderedAccessViews(0, 3, null_uavs2, nullptr);
 
                 // Ground-truth log to number-match against VD3D's [3DDBG] subj=. VD3D's render
                 // depth is LOW=near; Apollo is HIGH=near, so print both subj and 1-subj (the

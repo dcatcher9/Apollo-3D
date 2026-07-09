@@ -1087,9 +1087,10 @@ namespace platf::dxgi {
       // lazily on the first SBS frame via ensure_depth_estimator(), so plain 2D (SBS_OFF)
       // sessions never pay for it.
 
-      // SBS reprojection constants (see sbs_reprojection_ps.hlsl):
-      // {divergence, focal, parallax_steps, border_fade, depth_floor, subject_track, subject_lock, pad}.
-      float sbs_params[8] {
+      // SBS reprojection constants (see sbs_reprojection_ps.hlsl): {divergence, focal,
+      // parallax_steps, border_fade, depth_floor, subject_track, subject_lock, subject_stretch,
+      // subject_plane_lock, subject_plane_width, pad, pad}.
+      float sbs_params[12] {
         (float) config::video.sbs.divergence,
         (float) config::video.sbs.focal_plane,
         (float) config::video.sbs.parallax_steps,
@@ -1097,21 +1098,22 @@ namespace platf::dxgi {
         (float) config::video.sbs.depth_floor,
         config::video.sbs.subject_track ? 1.0f : 0.0f,
         (float) config::video.sbs.subject_lock,
-        0.0f
+        config::video.sbs.subject_stretch ? 1.0f : 0.0f,
+        (float) config::video.sbs.subject_plane_lock,
+        (float) config::video.sbs.subject_plane_width,
+        0.0f, 0.0f
       };
       sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);
 
       // Passthrough variant with zero divergence, bound when depth estimation is unavailable
       // so we still emit a correctly-framed (flat) SBS frame instead of a globally-shifted one.
-      float sbs_passthrough_params[8] {
+      float sbs_passthrough_params[12] {
         0.0f,
         (float) config::video.sbs.focal_plane,
         (float) config::video.sbs.parallax_steps,
         (float) config::video.sbs.border_fade,
         (float) config::video.sbs.depth_floor,
-        0.0f,
-        0.0f,
-        0.0f
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f
       };
       sbs_passthrough_cbuffer = make_buffer(device.get(), sbs_passthrough_params);
 
