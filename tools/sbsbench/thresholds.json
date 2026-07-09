@@ -1,9 +1,9 @@
 {
   "_doc": "Shared gate for run_eval.py (and the report). Per metric: better = which direction is an improvement; a change is a REGRESSION when it moves the worse way by more than max(abs_floor, baseline*rel_tol). trigger = absolute value above which the metric counts as an active ISSUE on a clip (independent of any baseline).",
+  "_pop_note": "pop_px_p50/p95 (median/p95 |dx|) are REPORTED (see sbsbench FMT) but deliberately NOT in 'metrics', so they don't gate: subject anchoring legitimately lowers median |dx| by recentering the field on the subject without losing depth. pop_spread_px (near-to-far RANGE) is the fair volume gate and also catches a genuinely flat pipeline.",
   "metrics": {
     "score": {"better": "higher", "rel_tol": 0.03, "abs_floor": 1.5},
-    "pop_px_p50": {"better": "higher", "rel_tol": 0.15, "abs_floor": 1.0},
-    "pop_px_p95": {"better": "higher", "rel_tol": 0.2, "abs_floor": 2.0},
+    "pop_spread_px": {"better": "higher", "rel_tol": 0.15, "abs_floor": 1.0},
     "vmisalign_px": {"better": "lower", "rel_tol": 0.0, "abs_floor": 0.4, "trigger": 0.5},
     "depth_spread": {"better": "higher", "rel_tol": 0.2, "abs_floor": 0.05},
     "disocc_smear": {"better": "lower", "rel_tol": 0.2, "abs_floor": 0.05, "trigger": 0.15},
@@ -30,6 +30,6 @@
       "disocc_smear":       {"weight": 6,  "scale": 0.5},
       "flicker_p50":        {"weight": 5,  "scale": 30.0}
     },
-    "depth": {"metric": "pop_pct_p50", "target": 0.6, "weight": 0.2}
+    "depth": {"metric": "pop_spread_pct", "target": 2.5, "weight": 0.2, "_doc": "pop_spread_pct (near-to-far disparity RANGE, not median|dx|) so q_depth rewards stereo VOLUME and is invariant to where subject anchoring places the zero plane. target 2.5 ~= the achievable budget (divergence*eyewidth span); default pipeline realizes ~1.5, the shape_depth_for_pop stretch ~2.5."}
   }
 }

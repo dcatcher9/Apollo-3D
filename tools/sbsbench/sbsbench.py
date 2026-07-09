@@ -10,6 +10,10 @@ should move with a real quality change, so improvements can be A/B'd against a b
 Metrics (single frame; spatial only in this version -- temporal flicker needs a burst dump):
   pop_px / pop_pct      Horizontal L<->R disparity (the "3D depth" you get). Tile phase
                         correlation between the two eyes; p50/p95 of |dx|. Higher = more pop.
+  pop_spread_px/pct     Near-to-far disparity RANGE (weighted p95-p5 of SIGNED dx) = the stereo
+                        VOLUME, invariant to where the zero-parallax plane sits. Use this (not
+                        pop_px) to judge subject-anchored modes: they recenter the field on the
+                        subject, dropping median|dx| without losing depth. Higher = more volume.
   vmisalign_px          Median |dy| between eyes. Should be ~0; nonzero = a geometry fault
                         (eyes must differ by horizontal parallax only).
   depth_spread          p95-p5 of the normalized depth map = pop available at the SOURCE
@@ -122,6 +126,16 @@ def weighted_pct(vals, wts, q):
     c = np.cumsum(wts)
     c /= c[-1]
     return float(np.interp(q, c, vals))
+
+
+def pop_spread(dxs, wts):
+    """Near-to-far stereo VOLUME: weighted p95 - p5 of the SIGNED horizontal disparity. Unlike
+    pop_px (median |dx|), this measures the disparity RANGE independent of where the zero-parallax
+    plane sits, so subject anchoring -- which recenters the whole field on the subject (shifting
+    the median toward 0) without collapsing the range -- is scored on the depth it actually
+    delivers, not penalized for placing the subject at the screen. Also correctly gives ~0 to a
+    flat scene shifted bodily forward (high |dx|, no structure), which pop_px wrongly rewards."""
+    return weighted_pct(dxs, wts, 0.95) - weighted_pct(dxs, wts, 0.05)
 
 
 # --------------------------------------------------------- disocclusion metrics
@@ -304,6 +318,8 @@ def measure(dump_dir):
         out["pop_px_p50"] = weighted_pct(adx, wts, 0.50)
         out["pop_px_p95"] = weighted_pct(adx, wts, 0.95)
         out["pop_pct_p50"] = out["pop_px_p50"] / ew * 100.0
+        out["pop_spread_px"] = pop_spread(dxs, wts)
+        out["pop_spread_pct"] = out["pop_spread_px"] / ew * 100.0
         out["vmisalign_px"] = float(np.median(np.abs(dys)))
         out["tiles"] = int(len(dxs))
 
@@ -340,6 +356,8 @@ def measure_seq_frame(path, depth=None, src_gray=None):
         out["pop_px_p50"] = weighted_pct(adx, wts, 0.50)
         out["pop_px_p95"] = weighted_pct(adx, wts, 0.95)
         out["pop_pct_p50"] = out["pop_px_p50"] / ew * 100.0
+        out["pop_spread_px"] = pop_spread(dxs, wts)
+        out["pop_spread_pct"] = out["pop_spread_px"] / ew * 100.0
         out["vmisalign_px"] = float(np.median(np.abs(dys)))
     if depth is not None:
         out["depth_spread"] = float(np.percentile(depth, 95) - np.percentile(depth, 5))
@@ -447,9 +465,9 @@ def aggregate(rows):
 
 # ---------------------------------------------------------------------------- main
 
-FMT = ["pop_px_p50", "pop_px_p95", "vmisalign_px", "depth_spread",
+FMT = ["pop_px_p50", "pop_spread_px", "vmisalign_px", "depth_spread",
        "disocc_smear", "stretch_area", "rim_over_p95"]
-SEQ_FMT = ["pop_px_p50", "pop_px_p95", "vmisalign_px", "stretch_area", "rim_over_p95",
+SEQ_FMT = ["pop_px_p50", "pop_spread_px", "vmisalign_px", "stretch_area", "rim_over_p95",
            "edge_acc_p50", "flicker"]
 TEMPORAL_KEYS = ["flicker_p50", "flicker_p95", "flicker_disocc_p50", "flicker_disocc_p95",
                  "swim_p50", "swim_p95"]
