@@ -69,9 +69,10 @@ void main() {
             }
         }
 
-        // Heavy EMA (VD3D SubjectDepthEMA alpha 0.95): the anchor must move slowly or the
-        // whole scene appears to breathe with the subject estimate.
-        float subj = (s.w > 0.5f) ? lerp(s.z, subj_raw, 0.05f) : subj_raw;
+        // EMA (VD3D SubjectDepthEMA alpha=0.80 => new-value weight 0.20; verified against a
+        // real Bestv2 render log 2026-07-09). The anchor moves slowly so the scene doesn't
+        // breathe with the subject estimate, but not so slowly it lags cuts/motion.
+        float subj = (s.w > 0.5f) ? lerp(s.z, subj_raw, 0.20f) : subj_raw;
 
         float delta = (0.5f - subj) * subject_recenter;
         float scurve = BandCurve(saturate(subj + delta));

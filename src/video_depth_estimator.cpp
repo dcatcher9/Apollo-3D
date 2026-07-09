@@ -379,6 +379,8 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;  // float4 {delta, scurve, subj_ema, init}
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_uav;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject_srv;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> subject_stage;  // CPU-readable copy for the debug log
+        unsigned subject_log_counter = 0;  // paces the [SUBJDBG] readback (every 24 depth updates)
         
         Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex;
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
@@ -956,6 +958,15 @@ namespace models {
                 if (subject_buf) {
                     device->CreateUnorderedAccessView(subject_buf.Get(), nullptr, &subject_uav);
                     device->CreateShaderResourceView(subject_buf.Get(), nullptr, &subject_srv);
+                    // Staging copy so the debug log can read the resolved subject state back
+                    // (a GPU->CPU sync; only mapped when perf stats are on, every 24 updates).
+                    D3D11_BUFFER_DESC stg = {};
+                    stg.Usage = D3D11_USAGE_STAGING;
+                    stg.ByteWidth = sizeof(init_state);
+                    stg.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                    stg.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+                    stg.StructureByteStride = sizeof(float) * 4;
+                    device->CreateBuffer(&stg, nullptr, &subject_stage);
                 }
                 if (!subject_hist_uav || !subject_uav || !subject_srv) {
                     BOOST_LOG(warning) << "Subject-tracking buffer creation failed; falling back to the linear depth mapping.";
@@ -1383,6 +1394,25 @@ namespace models {
 
                 ID3D11UnorderedAccessView* null_uavs2[2] = {nullptr, nullptr};
                 context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
+
+                // Ground-truth log to number-match against VD3D's [3DDBG] subj=. VD3D's render
+                // depth is LOW=near; Apollo is HIGH=near, so print both subj and 1-subj (the
+                // VD3D-convention value to compare directly). Perf-gated + every 24 updates so
+                // the GPU->CPU readback never touches the shipping path.
+                if (sbs_perf::enabled() && subject_stage && (++subject_log_counter % 24u) == 1u) {
+                    context->CopyResource(subject_stage.Get(), subject_buf.Get());
+                    D3D11_MAPPED_SUBRESOURCE ms {};
+                    if (SUCCEEDED(context->Map(subject_stage.Get(), 0, D3D11_MAP_READ, 0, &ms))) {
+                        const float* s = (const float*) ms.pData;  // {delta, scurve, subj_ema, init}
+                        BOOST_LOG(info) << "[SUBJDBG] u=" << subject_log_counter
+                                        << " subj_hi_near=" << s[2]
+                                        << " subj_vd3d=" << (1.0f - s[2])
+                                        << " recenter_delta=" << s[0]
+                                        << " subject_curve=" << s[1]
+                                        << " init=" << s[3];
+                        context->Unmap(subject_stage.Get(), 0);
+                    }
+                }
             }
         }
 
