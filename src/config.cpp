@@ -1271,6 +1271,9 @@ namespace config {
     double_between_f(vars, "sbs_3d_norm_pct_hi", video.sbs.norm_pct_hi, {50.0, 100.0});
     int_between_f(vars, "sbs_3d_norm_lock_frames", video.sbs.norm_lock_frames, {0, 100000});
     bool_f(vars, "sbs_3d_sync_depth", video.sbs.sync_depth);
+    bool_f(vars, "sbs_3d_subject_track", video.sbs.subject_track);
+    double_between_f(vars, "sbs_3d_subject_lock", video.sbs.subject_lock, {0.0, 1.0});
+    double_between_f(vars, "sbs_3d_subject_recenter", video.sbs.subject_recenter, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_minmax_snap", video.sbs.minmax_snap, {0.0, 100.0});
     double_between_f(vars, "sbs_3d_range_floor", video.sbs.range_floor, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_depth_fps", video.sbs.depth_fps, {0.0, 240.0});

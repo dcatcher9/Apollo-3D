@@ -511,8 +511,8 @@ namespace platf::dxgi {
             ID3D11Buffer* sbs_cb[] = {sbs_mlbw_cbuffer.get()};
             device_ctx->PSSetConstantBuffers(2, 1, sbs_cb);
           } else {
-            ID3D11ShaderResourceView* srvs[] = {img_ctx.encoder_input_res.get(), est.depth.Get()};
-            device_ctx->PSSetShaderResources(0, 2, srvs);
+            ID3D11ShaderResourceView* srvs[] = {img_ctx.encoder_input_res.get(), est.depth.Get(), est.subject.Get()};
+            device_ctx->PSSetShaderResources(0, 3, srvs);
             ID3D11Buffer* sbs_cb[] = {est.depth ? sbs_reprojection_cbuffer.get() : sbs_passthrough_cbuffer.get()};
             device_ctx->PSSetConstantBuffers(2, 1, sbs_cb);
           }
@@ -1088,15 +1088,15 @@ namespace platf::dxgi {
       // sessions never pay for it.
 
       // SBS reprojection constants (see sbs_reprojection_ps.hlsl):
-      // {divergence, focal, parallax_steps, border_fade, depth_floor, pad, pad, pad}.
+      // {divergence, focal, parallax_steps, border_fade, depth_floor, subject_track, subject_lock, pad}.
       float sbs_params[8] {
         (float) config::video.sbs.divergence,
         (float) config::video.sbs.focal_plane,
         (float) config::video.sbs.parallax_steps,
         (float) config::video.sbs.border_fade,
         (float) config::video.sbs.depth_floor,
-        0.0f,
-        0.0f,
+        config::video.sbs.subject_track ? 1.0f : 0.0f,
+        (float) config::video.sbs.subject_lock,
         0.0f
       };
       sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);

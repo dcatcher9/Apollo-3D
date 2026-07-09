@@ -56,7 +56,28 @@ static float sample_depth(float u, float v) {
 static float border_fade(float x) {
     return clampf(std::min(x, 1.0f - x) / BORDER_FADE, 0.0f, 1.0f);
 }
+// Shaped-disparity variant (sbs_3d_subject_track, 2026-07-09): the shader can replace the
+// linear mapping below with BandCurve(saturate(d + delta)) - subject_lock * scurve, clamped
+// to [-1,1], times DIVERGENCE (searchRadius then = DIVERGENCE, not DIVERGENCE/2). delta and
+// scurve come from depth_subject_resolve_cs's SubjectState. To study that path here, set
+// SUBJECT_DELTA/SUBJECT_SCURVE from a dump and route depth_parallax through band_curve.
+static float band_curve(float d) {
+    // MUST match BandCurve in sbs_reprojection_ps.hlsl / depth_subject_resolve_cs.hlsl.
+    float wn = expf(-0.5f * ((d - 0.85f) / 0.24f) * ((d - 0.85f) / 0.24f));
+    float wm = expf(-0.5f * ((d - 0.50f) / 0.28f) * ((d - 0.50f) / 0.28f));
+    float wf = expf(-0.5f * ((d - 0.15f) / 0.24f) * ((d - 0.15f) / 0.24f));
+    return (wn * 1.0f + wm * 0.300f + wf * -0.252f) / (wn + wm + wf + 1e-6f);
+}
+static const bool  SUBJECT_TRACK = false;   // flip + fill the two constants to sim the shaped path
+static const float SUBJECT_DELTA = 0.0f;    // SubjectState.x from a dump
+static const float SUBJECT_SCURVE = 0.0f;   // SubjectState.y from a dump
+static const float SUBJECT_LOCK = 0.95f;
+
 static float depth_parallax(float d, float x) {
+    if (SUBJECT_TRACK) {
+        float c = band_curve(clampf(d + SUBJECT_DELTA, 0.0f, 1.0f)) - SUBJECT_LOCK * SUBJECT_SCURVE;
+        return clampf(c, -1.0f, 1.0f) * DIVERGENCE * border_fade(x);
+    }
     d = DEPTH_FLOOR + (1.0f - DEPTH_FLOOR) * d;
     return (d - FOCAL) * DIVERGENCE * border_fade(x);
 }
@@ -79,7 +100,7 @@ static void src_sample(float u, float v, unsigned char *rgb) {
 
 // ---- mode 0/1/2: the marching search with variants ----
 static float reproject_march(float ux, float vy, int mode) {
-    float searchRadius = DIVERGENCE * std::max(FOCAL, 1.0f - FOCAL);
+    float searchRadius = SUBJECT_TRACK ? DIVERGENCE : DIVERGENCE * std::max(FOCAL, 1.0f - FOCAL);
     float startX = ux - searchRadius;
     float stepX = 2.0f * searchRadius / STEPS;
 
@@ -127,7 +148,7 @@ static float reproject_march(float ux, float vy, int mode) {
 
 // ---- mode 3: splat/coverage ----
 static float reproject_splat(float ux, float vy) {
-    float searchRadius = DIVERGENCE * std::max(FOCAL, 1.0f - FOCAL);
+    float searchRadius = SUBJECT_TRACK ? DIVERGENCE : DIVERGENCE * std::max(FOCAL, 1.0f - FOCAL);
     float startX = ux - searchRadius;
     float stepX = 2.0f * searchRadius / STEPS;
     float h = 0.75f * stepX;          // footprint half-width
@@ -155,7 +176,7 @@ static float reproject_splat(float ux, float vy) {
 // the FRONT surface continued at its own parallax and the BACK surface at its parallax,
 // weighted by the ramp fraction. Both layers sample coherent, unstretched texture.
 static void reproject_blend(float ux, float vy, unsigned char *rgb) {
-    float searchRadius = DIVERGENCE * std::max(FOCAL, 1.0f - FOCAL);
+    float searchRadius = SUBJECT_TRACK ? DIVERGENCE : DIVERGENCE * std::max(FOCAL, 1.0f - FOCAL);
     float startX = ux - searchRadius;
     float stepX = 2.0f * searchRadius / STEPS;
 

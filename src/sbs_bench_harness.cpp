@@ -198,6 +198,9 @@ namespace sbs_bench {
       double pct_lo = -1.0;      // robust normalization low percentile (e.g. 1.0)
       double pct_hi = -1.0;      // robust normalization high percentile (e.g. 99.0)
       int lock_frames = -1;      // scene-locked normalization: updates before bounds freeze
+      bool subject_track = false;  // VD3D-style shaped disparity + subject anchoring
+      double subject_lock = -1.0;  // subject anchor strength override (e.g. 0.95)
+      bool probe = false;          // force the probe-search reprojection (learned_warp off)
       double ema = -1.0;         // per-pixel depth EMA override (1.0 = off; pair with --sync-depth)
     };
 
@@ -222,6 +225,9 @@ namespace sbs_bench {
         else if (a == "--pct-lo") o.pct_lo = std::stod(next("--pct-lo"));
         else if (a == "--pct-hi") o.pct_hi = std::stod(next("--pct-hi"));
         else if (a == "--lock-frames") o.lock_frames = std::stoi(next("--lock-frames"));
+        else if (a == "--subject-track") o.subject_track = true;
+        else if (a == "--subject-lock") o.subject_lock = std::stod(next("--subject-lock"));
+        else if (a == "--probe") o.probe = true;
         else if (a == "--ema") o.ema = std::stod(next("--ema"));
         else { BOOST_LOG(error) << "sbs-bench: unknown arg '" << a << "'"; return false; }
       }
@@ -279,6 +285,9 @@ namespace sbs_bench {
     if (o.pct_lo >= 0.0) sbs_cfg.norm_pct_lo = o.pct_lo;         // A/B lever: robust normalization
     if (o.pct_hi >= 0.0) sbs_cfg.norm_pct_hi = o.pct_hi;
     if (o.lock_frames >= 0) sbs_cfg.norm_lock_frames = o.lock_frames;
+    if (o.subject_track) sbs_cfg.subject_track = true;          // A/B lever: shaped disparity
+    if (o.subject_lock >= 0.0) sbs_cfg.subject_lock = o.subject_lock;
+    if (o.probe) sbs_cfg.learned_warp = false;                  // A/B lever: probe vs MLBW warp
     if (o.ema > 0.0) sbs_cfg.ema = o.ema;                        // A/B lever: depth EMA (1.0 = off)
     sbs_cfg.perf_stats = true;  // the harness always measures
     sbs_perf::set_enabled(true);
@@ -322,9 +331,11 @@ namespace sbs_bench {
       dev->CreateSamplerState(&sd, &sampler);
     }
 
-    // Reprojection constants: {divergence, focal, parallax_steps, border_fade, depth_floor, 0,0,0}.
+    // Reprojection constants: {divergence, focal, parallax_steps, border_fade, depth_floor,
+    // subject_track, subject_lock, 0}.
     float repro_params[8] = {(float) sbs_cfg.divergence, (float) sbs_cfg.focal_plane,
-      (float) sbs_cfg.parallax_steps, (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor, 0, 0, 0};
+      (float) sbs_cfg.parallax_steps, (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor,
+      sbs_cfg.subject_track ? 1.0f : 0.0f, (float) sbs_cfg.subject_lock, 0};
     auto repro_cb = const_buffer(dev.Get(), repro_params);
     float pass_params[8] = {0, (float) sbs_cfg.focal_plane, (float) sbs_cfg.parallax_steps,
       (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor, 0, 0, 0};
@@ -415,8 +426,8 @@ namespace sbs_bench {
         ctx->PSSetShaderResources(0, 5, srvs);
         ctx->PSSetConstantBuffers(2, 1, mlbw_cb.GetAddressOf());
       } else {
-        ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), est.depth.Get()};
-        ctx->PSSetShaderResources(0, 2, srvs);
+        ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), est.depth.Get(), est.subject.Get()};
+        ctx->PSSetShaderResources(0, 3, srvs);
         ID3D11Buffer *cb = est.depth ? repro_cb.Get() : pass_cb.Get();
         ctx->PSSetConstantBuffers(2, 1, &cb);
       }

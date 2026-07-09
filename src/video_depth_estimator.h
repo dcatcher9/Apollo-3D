@@ -22,6 +22,7 @@ namespace models {
      */
     struct estimate_result {
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject;  ///< subject-tracking state (t2 of the reprojection); null unless sbs_3d_subject_track
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> delta_left;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> weight_left;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> delta_right;

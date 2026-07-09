@@ -6,6 +6,9 @@
 // shift>0 convention); the feature planes are edge-symmetric so both eyes share values.
 
 Texture2D<float>  DepthTexture  : register(t0);  // estimator depth (normalized, EMA'd)
+// Subject-tracking state from depth_subject_resolve_cs: {delta, scurve, subject_depth_ema,
+// initialized}. Only read when subject_track is on; unbound/uninitialized -> config conv.
+StructuredBuffer<float4> SubjectState : register(t1);
 SamplerState      LinearSampler : register(s0);
 RWStructuredBuffer<float> InLeft  : register(u0);  // 3*FH*FW
 RWStructuredBuffer<float> InRight : register(u1);  // 3*FH*FW (flipped depth)
@@ -16,9 +19,9 @@ cbuffer Params : register(b0) {
     float div_feat;      // divergence_pix / 32 (iw3 make_divergence_feature_value)
     float conv_feat;     // -divergence_pix * convergence / 32
     float border_texels; // preserve-screen-border ramp width in grid texels (0 = off)
-    float pad0;
-    float pad1;
-    float pad2;
+    float subject_track; // > 0.5 = drive the convergence plane from the tracked subject depth
+    float subject_lock;  // blend from the config convergence (0) to the subject depth (1)
+    float conv_cfg;      // config convergence = (focal - floor) / (1 - floor), for the blend
 };
 
 [numthreads(16, 16, 1)]
@@ -38,12 +41,25 @@ void main(uint3 id : SV_DispatchThreadID) {
         ramp = saturate(e / (border_texels - 1.0f));
     }
 
+    // Subject anchoring under MLBW: convergence IS iw3's "which depth sits at the screen
+    // plane", so anchoring the tracked subject = moving the convergence plane to the
+    // subject's (EMA'd) depth. Stays in the model's training distribution -- convergence
+    // is a user knob in iw3 -- unlike remapping the depth plane itself.
+    float cf = conv_feat;
+    if (subject_track > 0.5f) {
+        float4 s = SubjectState[0];
+        if (s.w > 0.5f) {
+            float conv = lerp(conv_cfg, saturate(s.z), subject_lock);
+            cf = -div_feat * conv;  // conv_feat = -div_pix*conv/32 and div_feat = div_pix/32
+        }
+    }
+
     uint plane = fw * fh;
     uint idx = id.y * fw + id.x;
     InLeft[idx] = dl;
     InLeft[plane + idx] = div_feat * ramp;
-    InLeft[2 * plane + idx] = conv_feat * ramp;
+    InLeft[2 * plane + idx] = cf * ramp;
     InRight[idx] = dr;
     InRight[plane + idx] = div_feat * ramp;
-    InRight[2 * plane + idx] = conv_feat * ramp;
+    InRight[2 * plane + idx] = cf * ramp;
 }

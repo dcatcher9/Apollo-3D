@@ -15,6 +15,10 @@
 
 Texture2D<float4> LeftColorTexture : register(t0);
 Texture2D<float>  DepthTexture      : register(t1);
+// Subject-tracking state from depth_subject_resolve_cs: {recenter_delta, subject_curve,
+// subject_depth_ema, initialized}. Only read when subject_track is on; an unbound/zero
+// buffer (initialized == 0) falls back to the linear mapping below.
+StructuredBuffer<float4> SubjectState : register(t2);
 SamplerState      LinearSampler     : register(s0);
 
 struct PS_INPUT {
@@ -31,8 +35,10 @@ cbuffer Constants : register(b2) {
     float depth_floor;      // Far-depth compression: d' = floor + (1-floor)*d. Shrinks the
                             // foreground-vs-background parallax gap at silhouettes, and with it
                             // the disocclusion band that gets stretch-filled there. 0 = off.
-    float pad0;
-    float pad1;
+    float subject_track;    // > 0.5 = VD3D-style shaped disparity (band curve + subject anchor)
+                            // instead of the linear (depth - focal_plane) mapping.
+    float subject_lock;     // Fraction of the subject's own parallax subtracted everywhere
+                            // (~1 pins the tracked subject to the screen plane).
     float pad2;
 };
 
@@ -45,14 +51,41 @@ float BorderFade(float x) {
     return (border_fade <= 0.0f) ? 1.0f : saturate(min(x, 1.0f - x) / border_fade);
 }
 
+// VD3D's near/mid/far Gaussian disparity bands, translated to Apollo's high=near depth
+// (band centers mirrored) and normalized so the near band peaks at +1 (positive = pops out;
+// divergence is the master gain). Amplitudes from the VD3D Bestv2 preset: fg -9*1.11,
+// mg -3, bg +2.4*1.05 px in VD3D's negative=pop convention -> +1 / +0.300 / -0.252 here.
+// MUST stay identical to BandCurve in depth_subject_resolve_cs.hlsl (no #include support
+// in the runtime-compiled shaders) and to band_curve in tools/warpsim/warpsim.cpp.
+float BandCurve(float d) {
+    float wn = exp(-0.5f * ((d - 0.85f) / 0.24f) * ((d - 0.85f) / 0.24f));
+    float wm = exp(-0.5f * ((d - 0.50f) / 0.28f) * ((d - 0.50f) / 0.28f));
+    float wf = exp(-0.5f * ((d - 0.15f) / 0.24f) * ((d - 0.15f) / 0.24f));
+    return (wn * 1.0f + wm * 0.300f + wf * -0.252f) / (wn + wm + wf + 1e-6f);
+}
+
 // Signed horizontal parallax for a normalized depth sample at source position x, in
 // source-UV units. Positive => nearer than the focal plane => pops out of the screen.
-// depth_floor first compresses the far range (d' = floor + (1-floor)*d): the visible cost of a
-// depth cliff is the disocclusion band, whose width scales with |d_near - d_far|; lifting the
-// far floor narrows that band without touching foreground pop.
+//
+// Linear path (default): depth_floor first compresses the far range (d' = floor +
+// (1-floor)*d): the visible cost of a depth cliff is the disocclusion band, whose width
+// scales with |d_near - d_far|; lifting the far floor narrows that band without touching
+// foreground pop.
+//
+// Shaped path (subject_track): recenter depth around the tracked subject, map it through
+// the near/mid/far band curve, and subtract subject_lock x the subject's own curve value
+// so the subject sits at the screen plane. The residual is clamped to [-1, 1], making
+// max_divergence the hard parallax bound (the probe search radius relies on this).
 float DepthParallax(float d, float x) {
-    d = depth_floor + (1.0f - depth_floor) * d;
-    return (d - focal_plane) * max_divergence * BorderFade(x);
+    if (subject_track > 0.5f) {
+        float4 s = SubjectState[0];
+        if (s.w > 0.5f) {
+            float c = BandCurve(saturate(d + s.x)) - subject_lock * s.y;
+            return clamp(c, -1.0f, 1.0f) * max_divergence * BorderFade(x);
+        }
+    }
+    float df = depth_floor + (1.0f - depth_floor) * d;
+    return (df - focal_plane) * max_divergence * BorderFade(x);
 }
 
 // Silhouette-stable depth read: a 2x2 spread of taps so any depth step spans ~2.5 probe
@@ -77,8 +110,11 @@ float SampleDepth(float sx, float sy, float2 ofs) {
 float2 Reproject(float2 uv, float eyeSign) {
     // Widest distance any surface can travel (near or far side of the focal plane).
     // BorderFade only shrinks parallax, so this (fade=1) remains a valid upper bound on
-    // the search span.
-    float searchRadius = max_divergence * max(focal_plane, 1.0f - focal_plane);
+    // the search span. The shaped path clamps its curve to [-1, 1], so its bound is the
+    // full max_divergence (2x the linear path's -- probe spacing coarsens accordingly).
+    float searchRadius = (subject_track > 0.5f)
+        ? max_divergence
+        : max_divergence * max(focal_plane, 1.0f - focal_plane);
     if (searchRadius <= 1e-6f) {
         return uv;  // divergence 0 -> flat passthrough, both eyes identical
     }

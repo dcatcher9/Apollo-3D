@@ -253,6 +253,9 @@ namespace models {
         float pct_lo;        // robust normalization: low percentile as a fraction (0 = raw min)
         float pct_hi;        // robust normalization: high percentile as a fraction (1 = raw max)
         float norm_lock_frames;  // scene lock: updates before the normalization bounds freeze (0 = off)
+        bool subject_track;      // VD3D-style shaped disparity: run the subject-estimate passes
+        float subject_recenter;  // recenter strength consumed by depth_subject_resolve_cs
+        float subject_lock;      // anchor strength (probe: parallax subtraction; MLBW: conv blend)
         bool use_percentile; // either percentile bound active -> histogram pass runs
         bool sync_depth;     // wait for THIS frame's inference so color and depth match (no async ghost)
         float minmax_snap;   // A1: raw-vs-EMA range ratio that snaps the scale on a scene cut (0 = off)
@@ -352,6 +355,8 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_cs;
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_ema_cs;
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_hist_cs;
+        Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_subject_hist_cs;
+        Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_subject_resolve_cs;
         Microsoft::WRL::ComPtr<ID3D11SamplerState> linear_sampler;
         Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
 
@@ -369,6 +374,11 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> minmax_ema_srv;
         Microsoft::WRL::ComPtr<ID3D11Buffer> hist_buf;  // 256 uint bins for percentile normalization
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> hist_uav;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> subject_hist_buf;  // 256 weighted bins for subject tracking
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_hist_uav;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;  // float4 {delta, scurve, subj_ema, init}
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_uav;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject_srv;
         
         Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex;
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
@@ -611,9 +621,10 @@ namespace models {
             cbd.Usage = D3D11_USAGE_IMMUTABLE;
             cbd.ByteWidth = 32;
             cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-            struct { uint32_t fw, fh; float div_feat, conv_feat, border, pad0, pad1, pad2; } icb = {
+            struct { uint32_t fw, fh; float div_feat, conv_feat, border, subject_track_f, subject_lock_f, conv_cfg; } icb = {
                 (uint32_t) warp_w, (uint32_t) warp_h,
-                div_pix / 32.0f, -div_pix * conv / 32.0f, border_texels, 0, 0, 0
+                div_pix / 32.0f, -div_pix * conv / 32.0f, border_texels,
+                subject_track ? 1.0f : 0.0f, subject_lock, conv
             };
             D3D11_SUBRESOURCE_DATA sd = {&icb, 0, 0};
             device->CreateBuffer(&cbd, &sd, &mlbw_input_cbuffer);
@@ -665,6 +676,9 @@ namespace models {
               pct_lo((float)(cfg.norm_pct_lo / 100.0)),
               pct_hi((float)(cfg.norm_pct_hi / 100.0)),
               norm_lock_frames((float)cfg.norm_lock_frames),
+              subject_track(cfg.subject_track),
+              subject_recenter((float)cfg.subject_recenter),
+              subject_lock((float)cfg.subject_lock),
               use_percentile(cfg.norm_pct_lo > 0.0 || cfg.norm_pct_hi < 100.0),
               sync_depth(cfg.sync_depth),
               minmax_snap((float)cfg.minmax_snap),
@@ -836,6 +850,16 @@ namespace models {
             if (sync_depth) {
                 BOOST_LOG(info) << "Synchronous depth enabled: inference waits on the encode thread (no async ghost).";
             }
+            if (subject_track) {
+                bool ok = compile_shader(assets_dir / "shaders" / "directx" / "depth_subject_hist_cs.hlsl", depth_subject_hist_cs) &&
+                          compile_shader(assets_dir / "shaders" / "directx" / "depth_subject_resolve_cs.hlsl", depth_subject_resolve_cs);
+                if (ok) {
+                    BOOST_LOG(info) << "Subject tracking enabled (recenter " << subject_recenter << ").";
+                } else {
+                    BOOST_LOG(warning) << "Subject-tracking shaders failed to compile; falling back to the linear depth mapping.";
+                    subject_track = false;
+                }
+            }
             if (guided_upsample) {
                 bool ok = compile_shader(assets_dir / "shaders" / "directx" / "depth_guide_downsample_cs.hlsl", depth_guide_downsample_cs) &&
                           compile_shader(assets_dir / "shaders" / "directx" / "depth_guided_upsample_cs.hlsl", depth_guided_upsample_cs);
@@ -903,6 +927,39 @@ namespace models {
                 if (!hist_uav) {
                     BOOST_LOG(warning) << "Percentile histogram buffer creation failed; falling back to min/max normalization.";
                     use_percentile = false;
+                }
+            }
+
+            // Subject tracking: weighted histogram (256 uint bins) + the per-frame subject
+            // state (one float4, zero-init so `initialized` starts false and the reprojection
+            // uses the linear path until the first resolve).
+            if (subject_track) {
+                uint32_t init_hist[256] = {};
+                D3D11_BUFFER_DESC bd = {};
+                bd.Usage = D3D11_USAGE_DEFAULT;
+                bd.ByteWidth = sizeof(init_hist);
+                bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+                bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+                bd.StructureByteStride = sizeof(uint32_t);
+                D3D11_SUBRESOURCE_DATA sd = {init_hist, 0, 0};
+                device->CreateBuffer(&bd, &sd, &subject_hist_buf);
+                if (subject_hist_buf) {
+                    device->CreateUnorderedAccessView(subject_hist_buf.Get(), nullptr, &subject_hist_uav);
+                }
+
+                float init_state[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                bd.ByteWidth = sizeof(init_state);
+                bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+                bd.StructureByteStride = sizeof(float) * 4;
+                D3D11_SUBRESOURCE_DATA sd2 = {init_state, 0, 0};
+                device->CreateBuffer(&bd, &sd2, &subject_buf);
+                if (subject_buf) {
+                    device->CreateUnorderedAccessView(subject_buf.Get(), nullptr, &subject_uav);
+                    device->CreateShaderResourceView(subject_buf.Get(), nullptr, &subject_srv);
+                }
+                if (!subject_hist_uav || !subject_uav || !subject_srv) {
+                    BOOST_LOG(warning) << "Subject-tracking buffer creation failed; falling back to the linear depth mapping.";
+                    subject_track = false;
                 }
             }
 
@@ -1018,6 +1075,9 @@ namespace models {
         estimate_result make_result() {
             estimate_result r;
             r.depth = output_srv();
+            if (subject_track) {
+                r.subject = subject_srv;
+            }
             if (learned_warp && warp_fields_valid) {
                 r.delta_left = delta_tex_srv[0];
                 r.weight_left = weight_tex_srv[0];
@@ -1092,18 +1152,20 @@ namespace models {
                 warp_resources_registered = true;
             }
 
-            // Build both eyes' input tensors (right = horizontally flipped depth).
+            // Build both eyes' input tensors (right = horizontally flipped depth). t1 carries
+            // the subject state for the subject-anchored convergence plane (null when off).
             context->CSSetShader(mlbw_input_cs.Get(), nullptr, 0);
             context->CSSetConstantBuffers(0, 1, mlbw_input_cbuffer.GetAddressOf());
-            context->CSSetShaderResources(0, 1, depth_srv.GetAddressOf());
+            ID3D11ShaderResourceView* in_srvs[2] = {depth_srv.Get(), subject_srv.Get()};
+            context->CSSetShaderResources(0, 2, in_srvs);
             context->CSSetSamplers(0, 1, linear_sampler.GetAddressOf());
             ID3D11UnorderedAccessView* uavs[2] = {mlbw_in_uav[0].Get(), mlbw_in_uav[1].Get()};
             context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
             context->Dispatch((warp_w + 15) / 16, (warp_h + 15) / 16, 1);
             ID3D11UnorderedAccessView* null_uavs[2] = {nullptr, nullptr};
-            ID3D11ShaderResourceView* null_srv = nullptr;
+            ID3D11ShaderResourceView* null_srvs2[2] = {nullptr, nullptr};
             context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
-            context->CSSetShaderResources(0, 1, &null_srv);
+            context->CSSetShaderResources(0, 2, null_srvs2);
 
             if (cuda.cuGraphicsMapResources(6, cuda_warp_res, warp_stream) != CUDA_SUCCESS) {
                 if (!warp_error_logged) {
@@ -1177,7 +1239,7 @@ namespace models {
             cbf[13] = norm_lock_frames;  // scene lock: updates before the bounds freeze (0 = off)
             cbf[14] = 0.005f;  // locked drift rate: ~4-7 s time constant, imperceptible per frame,
                                // but a long scene that slowly changes depth range can't diverge
-            cbf[15] = 0.0f;
+            cbf[15] = subject_recenter;  // subject recenter strength (depth_subject_resolve_cs)
             D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
             cbuffer.Reset();
             device->CreateBuffer(&cb_desc, &sd, &cbuffer);
@@ -1301,6 +1363,27 @@ namespace models {
             ID3D11ShaderResourceView* null_srvs[2] = {nullptr, nullptr};
             context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
             context->CSSetShaderResources(0, 2, null_srvs);
+
+            // 3s. Subject tracking: weighted depth histogram over the freshly-normalized
+            // depth, then a 1-thread resolve into the subject state the reprojection reads.
+            if (subject_track && depth_subject_hist_cs && depth_subject_resolve_cs) {
+                context->CSSetShader(depth_subject_hist_cs.Get(), nullptr, 0);
+                context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
+                context->CSSetShaderResources(0, 1, depth_srv.GetAddressOf());
+                context->CSSetUnorderedAccessViews(0, 1, subject_hist_uav.GetAddressOf(), nullptr);
+                context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+
+                context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+                context->CSSetShaderResources(0, 1, null_srvs);
+
+                context->CSSetShader(depth_subject_resolve_cs.Get(), nullptr, 0);
+                ID3D11UnorderedAccessView* subj_uavs[2] = {subject_hist_uav.Get(), subject_uav.Get()};
+                context->CSSetUnorderedAccessViews(0, 2, subj_uavs, nullptr);
+                context->Dispatch(1, 1, 1);
+
+                ID3D11UnorderedAccessView* null_uavs2[2] = {nullptr, nullptr};
+                context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
+            }
         }
 
         // Called once per video frame. Measures the video frame rate from the inter-call
