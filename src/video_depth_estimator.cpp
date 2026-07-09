@@ -13,6 +13,7 @@
 #include <regex>
 #include <string>
 #include <string_view>
+#include <cstring>
 #include <vector>
 #include <cmath>
 #include <chrono>
@@ -375,6 +376,8 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_ema_buf;  // float4 {min, max, initialized, pad}
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> minmax_ema_uav;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> minmax_ema_srv;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_raw_stage;  // CPU-readable copy for [NORMDBG]
+        unsigned norm_log_counter = 0;  // per-frame raw-stats trajectory for the norm-window study
         Microsoft::WRL::ComPtr<ID3D11Buffer> hist_buf;  // 256 uint bins for percentile normalization
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> hist_uav;
         Microsoft::WRL::ComPtr<ID3D11Buffer> subject_hist_buf;  // 256 weighted bins for subject tracking
@@ -899,6 +902,13 @@ namespace models {
                 uav.Buffer.NumElements = 2;
                 uav.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
                 device->CreateUnorderedAccessView(minmax_raw_buf.Get(), &uav, &minmax_raw_uav);
+
+                // Staging copy for the [NORMDBG] raw-stats trajectory (the norm-window study).
+                D3D11_BUFFER_DESC stg = {};
+                stg.Usage = D3D11_USAGE_STAGING;
+                stg.ByteWidth = sizeof(init_raw);
+                stg.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                device->CreateBuffer(&stg, nullptr, &minmax_raw_stage);
             }
 
             // EMA'd min/max, 2 float4 elements: [0]={min, max, initialized, ref_range},
@@ -1364,6 +1374,27 @@ namespace models {
                     ID3D11UnorderedAccessView* null_uavs_h[2] = {nullptr, nullptr};
                     context->CSSetUnorderedAccessViews(0, 2, null_uavs_h, nullptr);
                     context->CSSetShaderResources(0, 1, &null_srv1);
+                }
+
+                // [NORMDBG] per-frame raw min/max trajectory for normalization studies. Opt-in
+                // via APOLLO_NORMDBG (NOT perf-gated: the per-frame Map is a CPU sync that would
+                // perturb perf wall-time). 2026-07-09 study: a centered/look-ahead window is
+                // WORSE than the causal EMA (short window tracks range noise); a slower EMA
+                // (minmax_ema 0.1->0.03) halves range swim for free, but it's already ~0.2
+                // levels/frame = imperceptible. Kept as a tool for future normalization work.
+                static const bool normdbg = std::getenv("APOLLO_NORMDBG") != nullptr;
+                if (normdbg && minmax_raw_stage) {
+                    context->CopyResource(minmax_raw_stage.Get(), minmax_raw_buf.Get());
+                    D3D11_MAPPED_SUBRESOURCE ms {};
+                    if (SUCCEEDED(context->Map(minmax_raw_stage.Get(), 0, D3D11_MAP_READ, 0, &ms))) {
+                        const uint32_t* u = (const uint32_t*) ms.pData;
+                        float rmin, rmax;
+                        std::memcpy(&rmin, &u[0], 4);
+                        std::memcpy(&rmax, &u[1], 4);
+                        BOOST_LOG(info) << "[NORMDBG] f=" << norm_log_counter++
+                                        << " raw_min=" << rmin << " raw_max=" << rmax;
+                        context->Unmap(minmax_raw_stage.Get(), 0);
+                    }
                 }
 
                 // Pass B: fold into the EMA'd bounds and reset the accumulators (1 thread).
