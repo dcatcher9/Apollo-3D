@@ -21,8 +21,8 @@ cbuffer Constants : register(b0) {
     float floor_ref_alpha;   // A3 reference-range decay
     float pct_lo;            // robust normalization low percentile fraction (0 = raw min)
     float pct_hi;            // robust normalization high percentile fraction (1 = raw max)
-    float lock_frames;       // scene-lock: updates before the bounds freeze (0 = off)
-    float locked_alpha;      // blend rate while scene-locked
+    float reserved0;
+    float reserved1;
     float subject_recenter;  // subject recenter strength (depth_subject_resolve)
     float stretch_lo_pct;    // shape_depth_for_pop stretch bounds (depth_subject_resolve)
     float stretch_hi_pct;

@@ -13,11 +13,12 @@
 
 // standard includes
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
-#include <thread>
 #include <vector>
 
 // platform includes
@@ -155,6 +156,50 @@ namespace sbs_bench {
       save_gray16_png(path, d.Width, d.Height, gray);
     }
 
+    // Preserve the exact raw model output for stage-by-stage parity checks. Unlike the display
+    // PNG, this is not clamped or normalized: it is row-major float32, width*height values.
+    void dump_raw_model_depth(ID3D11Device *dev, ID3D11DeviceContext *ctx,
+      ID3D11ShaderResourceView *srv, int width, int height, const fs::path &path,
+      ComPtr<ID3D11Buffer> &stage_cache) {
+      if (!srv || width <= 0 || height <= 0) return;
+      ComPtr<ID3D11Resource> res;
+      srv->GetResource(&res);
+      ComPtr<ID3D11Buffer> buf;
+      if (FAILED(res.As(&buf))) return;
+      D3D11_BUFFER_DESC d = {};
+      buf->GetDesc(&d);
+      if (!stage_cache) {
+        D3D11_BUFFER_DESC sd = d;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.BindFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        sd.MiscFlags = 0;
+        if (FAILED(dev->CreateBuffer(&sd, nullptr, &stage_cache))) return;
+      }
+      ctx->CopyResource(stage_cache.Get(), buf.Get());
+      D3D11_MAPPED_SUBRESOURCE m = {};
+      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &m))) return;
+      std::ofstream out(path, std::ios::binary);
+      if (out) {
+        out.write((const char *) m.pData, (std::streamsize) width * height * sizeof(float));
+      }
+      ctx->Unmap(stage_cache.Get(), 0);
+    }
+
+    // Keep output identities tied to source identities. Positional renumbering made a dropped
+    // source frame silently shift every depth/SBS/source comparison by one.
+    std::string frame_id(const fs::path &path, size_t fallback) {
+      std::string stem = path.stem().string();
+      size_t split = stem.find_last_of('_');
+      std::string id = split == std::string::npos ? "" : stem.substr(split + 1);
+      if (!id.empty() && std::all_of(id.begin(), id.end(), [](unsigned char c) { return std::isdigit(c); })) {
+        return id;
+      }
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%05zu", fallback);
+      return buf;
+    }
+
     // ---- D3D helpers ----
 
     ComPtr<ID3DBlob> compile(const char *file, const char *entry, const char *model) {
@@ -187,18 +232,15 @@ namespace sbs_bench {
 
     struct opts {
       std::string frames, out, model;
-      bool movie = false;
       int eye_h = 0;       // 0 -> match the input frame height (so the input size controls eval
                            // resolution/speed; a bigger clip = a bigger eval). Override to pin one.
       int max_width = 0;   // 0 -> use config max_encode_width
-      int settle = 3;      // estimate passes per frame so async depth/warp catch up
-      int settle_ms = 40;  // sleep between passes so the CUDA streams finish
       int limit = 0;       // 0 -> all
+      int output_every = 1;  // process every input for temporal state; dump only every Nth
       double divergence = -1.0;  // <0 -> use the conf's value; else override (parallax/disocclusion size)
       // VD3D-pipeline A/B levers; <0 / false -> use the conf's value.
       double pct_lo = -1.0;      // robust normalization low percentile (e.g. 1.0)
       double pct_hi = -1.0;      // robust normalization high percentile (e.g. 99.0)
-      int lock_frames = -1;      // scene-locked normalization: updates before bounds freeze
       bool subject_track = false;  // VD3D-style shaped disparity + subject anchoring
       double subject_lock = -1.0;  // subject anchor strength override (e.g. 0.95)
       int depth_short_side = 0;    // depth inference short-side override (0 = conf; VD3D uses 432)
@@ -222,16 +264,13 @@ namespace sbs_bench {
         if (a == "--frames") o.frames = next("--frames");
         else if (a == "--out") o.out = next("--out");
         else if (a == "--model") o.model = next("--model");
-        else if (a == "--movie") o.movie = true;
         else if (a == "--eye-h") o.eye_h = std::stoi(next("--eye-h"));
         else if (a == "--max-width") o.max_width = std::stoi(next("--max-width"));
-        else if (a == "--settle") o.settle = std::max(1, std::stoi(next("--settle")));
-        else if (a == "--settle-ms") o.settle_ms = std::stoi(next("--settle-ms"));
         else if (a == "--limit") o.limit = std::stoi(next("--limit"));
+        else if (a == "--output-every") o.output_every = std::max(1, std::stoi(next("--output-every")));
         else if (a == "--divergence") o.divergence = std::stod(next("--divergence"));
         else if (a == "--pct-lo") o.pct_lo = std::stod(next("--pct-lo"));
         else if (a == "--pct-hi") o.pct_hi = std::stod(next("--pct-hi"));
-        else if (a == "--lock-frames") o.lock_frames = std::stoi(next("--lock-frames"));
         else if (a == "--subject-track") o.subject_track = true;
         else if (a == "--subject-lock") o.subject_lock = std::stod(next("--subject-lock"));
         else if (a == "--depth-short-side") o.depth_short_side = std::stoi(next("--depth-short-side"));
@@ -258,7 +297,6 @@ namespace sbs_bench {
     config::depth_model_info pick_model(const opts &o) {
       const auto &reg = config::depth_model_registry();
       std::string want = o.model;
-      if (want.empty() && o.movie) want = "da3mono_large_fp16";
       if (!want.empty()) {
         for (const auto &m : reg)
           if (m.name == want) return m;
@@ -290,16 +328,14 @@ namespace sbs_bench {
     if (frames.empty()) { BOOST_LOG(error) << "sbs-bench: no png/jpg frames in " << o.frames; return 4; }
     fs::create_directories(o.out, ec);
 
-    // Config: inherit whatever the loaded conf set (divergence, subject knobs...), then apply
-    // the movie-mode depth-rate override exactly like display_vram::ensure_depth_estimator.
+    // Inherit the loaded config, then pin one depth update per source frame. The benchmark is
+    // frame-driven rather than wall-clock-driven, so cadence throttling would make the result
+    // depend on machine speed.
     auto sbs_cfg = config::video.sbs;
-    if (o.movie && sbs_cfg.movie_depth_fps > 0.0) {
-      sbs_cfg.depth_fps = sbs_cfg.movie_depth_fps;
-    }
+    sbs_cfg.depth_fps = 0.0;
     if (o.divergence >= 0.0) sbs_cfg.divergence = o.divergence;  // A/B lever: parallax/disocclusion size
     if (o.pct_lo >= 0.0) sbs_cfg.norm_pct_lo = o.pct_lo;         // A/B lever: robust normalization
     if (o.pct_hi >= 0.0) sbs_cfg.norm_pct_hi = o.pct_hi;
-    if (o.lock_frames >= 0) sbs_cfg.norm_lock_frames = o.lock_frames;
     if (o.subject_track) sbs_cfg.subject_track = true;          // A/B lever: shaped disparity
     if (o.subject_lock >= 0.0) sbs_cfg.subject_lock = o.subject_lock;
     if (o.depth_short_side > 0) sbs_cfg.depth_short_side = o.depth_short_side;  // VD3D uses 432
@@ -319,7 +355,7 @@ namespace sbs_bench {
 
     BOOST_LOG(info) << "sbs-bench: " << frames.size() << " frames, model '" << model.name
                     << "', eye_h " << (o.eye_h > 0 ? std::to_string(o.eye_h) : "match-input")
-                    << ", settle " << o.settle << " -> " << o.out;
+                    << ", depth_step current-once -> " << o.out;
 
     // ---- D3D device + shaders ----
     ComPtr<ID3D11Device> dev;
@@ -369,10 +405,11 @@ namespace sbs_bench {
     // Per-run state built lazily on the first frame (once we know the input size).
     ComPtr<ID3D11Texture2D> sbs_tex, sbs_stage;
     ComPtr<ID3D11RenderTargetView> sbs_rtv;
-    ComPtr<ID3D11ShaderResourceView> sbs_srv;
     D3D11_VIEWPORT vp = {};
     UINT sbs_w = 0, sbs_h = 0;
     ComPtr<ID3D11Texture2D> depth_stage;  // dump_depth staging cache (depth size is constant)
+    ComPtr<ID3D11Buffer> raw_depth_stage;
+    bool raw_shape_written = false;
 
     int written = 0;
     for (size_t fi = 0; fi < frames.size(); fi++) {
@@ -405,7 +442,6 @@ namespace sbs_bench {
         td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         dev->CreateTexture2D(&td, nullptr, &sbs_tex);
         dev->CreateRenderTargetView(sbs_tex.Get(), nullptr, &sbs_rtv);
-        dev->CreateShaderResourceView(sbs_tex.Get(), nullptr, &sbs_srv);
         D3D11_TEXTURE2D_DESC sd2 = td;
         sd2.Usage = D3D11_USAGE_STAGING; sd2.BindFlags = 0; sd2.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         dev->CreateTexture2D(&sd2, nullptr, &sbs_stage);
@@ -413,12 +449,14 @@ namespace sbs_bench {
         BOOST_LOG(info) << "sbs-bench: input " << img.w << "x" << img.h << " -> SBS " << sbs_w << "x" << sbs_h;
       }
 
-      // Settle: run the estimator a few times so the ASYNC depth catches up to THIS frame
-      // instead of lagging by one inference.
-      models::estimate_result est;
-      for (int s = 0; s < o.settle; s++) {
-        est = estimator.estimate_depth(in_srv.Get(), /*is_hdr=*/false);
-        if (s + 1 < o.settle) std::this_thread::sleep_for(std::chrono::milliseconds(o.settle_ms));
+      // Submit and consume exactly one inference for this source frame.
+      estimator.estimate_depth(in_srv.Get(), /*is_hdr=*/false);
+      auto est = estimator.finish_pending_depth_for_benchmark(in_srv.Get(), /*is_hdr=*/false);
+
+      // Sampling output must never sample the depth/EMA/subject pipeline itself. Every source
+      // frame above was inferred and consumed; only expensive composite/readback is skipped.
+      if ((fi % (size_t) o.output_every) != 0) {
+        continue;
       }
 
       // Composite (mirrors display_vram::convert()'s SBS block): probe reprojection.
@@ -455,12 +493,26 @@ namespace sbs_bench {
         for (UINT y = 0; y < sbs_h; y++)
           memcpy(&buf[(size_t) y * sbs_w * 4], (uint8_t *) m.pData + (size_t) y * m.RowPitch, sbs_w * 4);
         ctx->Unmap(sbs_stage.Get(), 0);
-        char name[32];
-        snprintf(name, sizeof(name), "sbs_%05zu.png", fi);
+        const std::string id = frame_id(frames[fi], fi);
+        char name[64];
+        snprintf(name, sizeof(name), "sbs_%s.png", id.c_str());
         if (save_png(fs::path(o.out) / name, sbs_w, sbs_h, buf)) written++;
-        char dname[32];
-        snprintf(dname, sizeof(dname), "depth_%05zu.png", fi);
+        char dname[64];
+        snprintf(dname, sizeof(dname), "depth_%s.png", id.c_str());
         dump_depth(dev.Get(), ctx.Get(), est.depth.Get(), fs::path(o.out) / dname, depth_stage);
+        char rname[64];
+        snprintf(rname, sizeof(rname), "raw_%s.f32", id.c_str());
+        dump_raw_model_depth(dev.Get(), ctx.Get(), est.raw_model_depth.Get(), est.raw_width,
+          est.raw_height, fs::path(o.out) / rname, raw_depth_stage);
+        if (!raw_shape_written && est.raw_width > 0 && est.raw_height > 0) {
+          std::ofstream shape(fs::path(o.out) / "raw_shape.json");
+          if (shape) {
+            shape << "{\n  \"width\": " << est.raw_width << ",\n  \"height\": "
+                  << est.raw_height << ",\n  \"dtype\": \"float32-le\",\n"
+                     "  \"stage\": \"raw model output before transform/normalization/EMA/curvature\"\n}\n";
+            raw_shape_written = true;
+          }
+        }
       }
       if (((fi + 1) % 20) == 0)
         BOOST_LOG(info) << "sbs-bench: " << (fi + 1) << "/" << frames.size();

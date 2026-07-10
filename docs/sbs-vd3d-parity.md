@@ -59,19 +59,20 @@ where Apollo transforms depth in more places than "min/max EMA."
 | aspect | VD3D (Bestv2) | Apollo | faithful? |
 |--------|---------------|--------|-----------|
 | model | DA-V2 small fp16 (PyTorch) | DA-V2 small fp16 (TensorRT) | ✅ same weights |
-| resolution | 768×432 (short 432 ≈ 1.24× DA-V2's 518² training) | **runs at baked height 336** (short side 336, ~602×336 @16:9) — the DA-V2 engine is `dynamic_width` with `fixed_h=336` baked into the ONNX, so `depth_short_side=432` is **inert** for it (it only drives non-dynamic-width engines). To actually hit 432, DA-V2 needs re-export at height 432. | ⚠️ **NOT matched** — but depth still correlates r≈0.96 with VD3D (verified 2026-07-10), so resolution isn't the bottleneck |
+| resolution | UI request 768×432; adapter snaps to patch-14 **770×434** | short-side 432 resolves to **770×434** at this aspect | ✅ matched. The old 336 claim confused DA-V2 with DA3MONO's `dynamic_width/fixed_h=336` registry entry. Runtime logs and raw-shape artifacts verify 770×434. |
 | cadence | per-frame | **async** at `depth_fps` (45 game) — depth lags color | ⚠️ **the** depth-half gap |
 
-**Sync is gone.** `sbs_3d_sync_depth` and the forked synchronous `estimate()` were removed
+**Live sync is gone.** `sbs_3d_sync_depth` and the forked synchronous `estimate()` were removed
 (commit 5e7530fe). **Both GAME and MOVIE run async today** (MOVIE maps onto GAME's async path;
 true synchronous MOVIE is roadmap #3, unbuilt). Async is the only behavior; the lag is a permanent
-architectural property, not a toggle. Kept because the harness `--settle` erases the lag before
-scoring (so eval can't justify a global sync default) and real per-frame sync only pays off for
+architectural property, not a toggle. The evaluator now uses a benchmark-only one-submit,
+one-synchronize, one-normalize operation without duplicate enqueue. This is an evaluation
+primitive, not a live mode. Real per-frame sync only pays off for
 MOVIE's heavy DA3MONO, where it stalls the encode thread (a wash).
 
-**Faithful-baseline decision:** keep async (matching VD3D's *offline result* is about depth
-*values*, not delivery cadence; the harness settles the lag anyway). Resolution already at parity.
-Nothing to change.
+**Faithful-baseline decision:** evaluate current-frame depth with exactly one state update per
+source frame. Live async cadence is a later Apollo-specific A/B; mixing it into Phase A caused the
+former duplicate-settle conclusions.
 
 ### A3–A8 · The six depth transforms
 
@@ -88,7 +89,7 @@ depth values*, it is not a resize. Group-A transforms, in order:
 | A7 | foreground curvature (`depth_curvature_cs`) | elliptical `pow(1.35)` bulge on `d>0.60`; guided-off path runs it here, guided-on runs it in B1 (fixed this session) | `enhance_foreground_curvature(0.07)` | no (ported; default-off) |
 | A8 | subject tracking (`depth_subject_hist/resolve_cs`) | weighted-hist 35%-from-near → `SubjectState` (EMA α=0.80, lock 0.95); consumed at warp time (B2) | subject estimate + `SubjectDepthEMA(0.80)` | no (number-match validated: 0.408 vs 0.391) |
 
-### A4 detail — VD3D normalizes depth *twice* (don't chase the lock)
+### A4 detail — VD3D normalizes depth *twice*
 
 VD3D's offline flow composes two percentile normalizations; only one is live-portable:
 
@@ -108,50 +109,35 @@ range there is the frozen bootstrap value. So "generated frame by frame" and "fr
 both true.
 
 **For Apollo (single-stage, live) the analog is the render stage's per-frame percentile EMA.**
-Apollo could also reproduce the bootstrap-freeze (a few frames → freeze; that's what
-`norm_lock_frames` does) but it was bench-falsified for DA-V2 — the raw output drifts affinely so a
-frozen range goes stale, and the tracking EMA is what compensates. VD3D tolerates its frozen range
-only because the render per-frame EMA corrects that drift on top. Apollo gets the same stability
-more simply from **percentile p2/p98 + a slow per-frame `minmax_ema`** — no freeze. The faithful
-config below encodes exactly that.
+The reference exporter reproduces VD3D's non-causal bootstrap exactly for checkpoint comparison.
+The live Apollo path uses **percentile p2/p98 + per-frame `minmax_ema`**; it does not expose a
+causal first-N approximation as though it were the same algorithm.
 
 ### Faithful-baseline depth config (Group A)
 
 | knob | Apollo default | Phase-A faithful | rationale |
 |------|----------------|------------------|-----------|
 | `sbs_3d_depth_short_side` | 432 | **432** | already parity |
-| `sbs_3d_norm_pct_lo`/`_hi` | **2 / 98** (was 0/100 raw) | **2 / 98** | VD3D `DepthPercentileEMA(p2/p98)`. **Flipped to default + re-baselined 2026-07-10**: +5.7 total score, 7/8 clips up (recovered depth range from DA-V2 outlier rejection). Cost: `flat_page −1.9` (percentile stretches a flat scene's tiny range and amplifies hallucinated structure — the exact thing range floor guarded, now removed; acceptable for real content, revisit for DESKTOP mode). The min/max reduction still runs (it's the histogram's bin range). |
-| `sbs_3d_minmax_ema` | 0.1 (α≈0.9) | **0.1 (keep)** | VD3D's 0.18 (α=0.82) is only safe on its pre-locked input; on Apollo's un-locked drift it flickers (c339 `flicker_disocc` 2.7→47) — **eval-proven**, keep the slow range EMA |
+| `sbs_3d_norm_pct_lo`/`_hi` | **2 / 98** (was 0/100 raw) | **2 / 98** | Direct `DepthPercentileEMA(p2/p98)` match. The min/max reduction remains because it defines the histogram range. Earlier score deltas used the superseded eval contract and are not evidence here. |
+| `sbs_3d_minmax_ema` | 0.1 (α≈0.9) | **0.18** | Direct VD3D render-stage match. The earlier temporal conclusion used duplicate settle updates and is invalid for Phase A. |
 | `sbs_3d_ema` (per-pixel) | 0.6 | **0.5** | VD3D `TemporalDepthFilter(α=0.5)` |
+| `sbs_3d_ema_pixel_first` | false | **true** | Matches temporal-before-render-percentile ordering. The config parser now exposes this key. |
 | `sbs_3d_range_floor` | 0 (off) | **off** | Apollo-only; VD3D lacks it. Was pinned 0.5 in bench.conf (so the eval ran it); **removed 2026-07-10** so the eval matches the config.h default |
-| `sbs_3d_norm_lock_frames` | 0 | **0** | VD3D's bootstrap-freeze (3–5 frames) is live-approximable, but Apollo already bench-tested it (norm_lock_frames) and DA-V2's affine drift makes a frozen range go stale (swim worse); VD3D survives it via its per-frame render EMA on top |
-| `sbs_3d_guided_upsample` | **off** (was on) | **off** | VD3D has no upsample — see B1. **Default flipped off 2026-07-10** + eval re-baselined; re-enabling it is now Phase-B #1 (edge crispness pending the concealment port) |
+| `sbs_3d_guided_upsample` | **off** (was on) | **off** | VD3D has no equivalent — see B1. Re-enable later as an Apollo-only eval lever. |
 
-The one real gap Apollo closes here is **raw min/max → per-frame percentile** (`pct 2/98`), plus
-the per-pixel `ema=0.5`. Apollo does **not** copy VD3D's α=0.82 range-bounds EMA: it keeps the
-slower `minmax_ema=0.1`, because VD3D's α is calibrated for input its bootstrap-freeze has already
-coarse-stabilized, whereas Apollo feeds raw drifting DA-V2 output straight in — using 0.18 there
-just reintroduces range breathing as disocclusion flicker (eval-proven, below). VD3D's depth-gen
-**bootstrap-freeze** is likewise not reproduced: it's live-approximable (a few frames → freeze),
-but Apollo already bench-tested it (`norm_lock_frames`) and DA-V2's affine drift makes the frozen
-range go stale (swim worse). VD3D only tolerates the frozen range because its per-frame render EMA
-corrects the drift on top; Apollo gets the same stability more simply from the per-frame percentile
-+ slow `minmax_ema` alone.
+Earlier A/B numbers in this section were produced by repeated `--settle` submissions and are not
+valid temporal evidence. Eval schema 2 replaces them: one inference and one state update per source
+frame, explicit DA-V2 pinning, identity-keyed artifacts, and full-history processing before output
+sampling. Apollo's single-stage transform is not algebraically identical to VD3D's two-stage
+bootstrap/video/render chain, but the direct checkpoint measurement below shows their resulting
+physical depth maps are already within the Phase-A gate.
 
-**Eval findings (2026-07-10, decomposed A/B vs the current default baseline):**
-- *Percentile norm alone* (`pct 2/98`, `ema 0.5`) with `minmax_ema=0.18`: severe temporal
-  regression — c339 `flicker_disocc` 2.7→47. Culprit isolated to `minmax_ema`: rerun with 0.1 and
-  the flicker regression **vanishes** (only c747 `rim_over` remains, an edge metric).
-- *Disable guided upsample alone*: edge/silhouette regressions on sharp content
-  (fast_motion `edge_acc` 0→24, `disocc_smear` 0→0.36, score 81→70; flat_page `stretch`) — the
-  expected cost of removing Apollo's edge crutch with no concealment ported yet.
-- **Corrected faithful-norm config: `pct 2/98` + `minmax_ema 0.1` + `ema 0.5`** — nearly clean
-  (only c747 `rim_over`, an edge metric concealment will address). Guided-off stays as the
-  deliberate Phase-A edge sacrifice, remedied by porting Stage B3 concealment.
-
-**Phase-A action:** commit `tools/sbsbench/bestv2_faithful.conf` with these values, capture its
-baseline, then Phase B re-enables each Apollo depth addition (`guided_upsample`, raw min/max,
-range-floor) as a gated A/B against it.
+**Measured Phase-A depth result:** `tools/sbsbench/bestv2-phase-a.conf` processes all 198 frames
+before sampling 25. Raw DA-V2 correlation mean/min = 0.99843/0.99808. Physical pre-warp depth
+correlation mean/min = 0.99848/0.99818 and mean MAE = 0.02696 after accounting for polarity
+(Apollo high-near; VD3D low-near). All depth-stage gates pass. Curvature stays off at this common
+checkpoint because VD3D applies it inside `pixel_shift_cuda`; each warp variant applies 0.07 in
+its own shaping stage.
 
 ---
 
@@ -192,8 +178,10 @@ The warp is where Apollo and VD3D fundamentally differ:
   (`render_3d.py:3335`).
 - **Apollo:** occlusion-aware backward **probe** (frontmost-wins, nearest-bg fill).
 
-Whether Phase A ports VD3D's forward warp (true stage-for-stage reproduction) or matches its *look*
-on Apollo's probe (arguably the better warp) is the open decision, taken after Group A is locked.
+Both paths will be implemented behind one evaluator switch: (A) VD3D-style 35% backward grid warp
++ 65% depth-ordered forward warp/hole fill and (B) Apollo's occlusion-aware probe. They receive the
+same saved pre-warp depth and shaping constants. Final-SBS similarity measures reproduction only;
+artifact, temporal, comfort, and performance gates decide which warp is better.
 
 ### B3 · Disocclusion concealment *(not ported — likely the real edge-look gap)*
 
@@ -209,9 +197,9 @@ fixed this session to the near plane when no subject). Heal/sharpen not ported.
 
 ---
 
-## Open decisions
+## Next controlled experiment
 
-1. **Warp fidelity (B2):** port VD3D's forward warp for true stage-for-stage reproduction, or match
-   its look on Apollo's probe? *(Deferred until Group A is locked.)*
-2. **Concealment (B3):** port smear-blend-back + directional repair now (cheap, roadmap stage 3,
-   probable edge-look driver) or after the warp decision?
+Implement both warp paths without sharing concealment. Compare bare geometry first, then apply the
+same Bestv2 smear-blend-back/directional repair to both. This prevents concealment from being
+mistaken for a warp advantage. Only after that result is frozen do Apollo-only improvements return
+one at a time.

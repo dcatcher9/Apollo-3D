@@ -19,6 +19,9 @@ namespace models {
     struct estimate_result {
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject;  ///< subject-tracking state (t2 of the reprojection); null unless sbs_3d_subject_track
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Raw model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
+        int raw_width = 0;
+        int raw_height = 0;
     };
 
     class video_depth_estimator {
@@ -54,6 +57,16 @@ namespace models {
          * @return estimate_result; all views are owned by the estimator and overwritten by later calls.
          */
         estimate_result estimate_depth(ID3D11ShaderResourceView* input_srv, bool is_hdr = false);
+
+        /**
+         * @brief Finish and consume exactly one inference previously submitted by estimate_depth().
+         *
+         * This is an offline-evaluation operation. It synchronizes the estimator stream, applies
+         * normalization/EMA/subject tracking exactly once, and does not enqueue another inference.
+         * The live capture path must continue to use estimate_depth() alone so it stays asynchronous.
+         */
+        estimate_result finish_pending_depth_for_benchmark(ID3D11ShaderResourceView* input_srv,
+                                                           bool is_hdr = false);
 
     private:
         struct impl;

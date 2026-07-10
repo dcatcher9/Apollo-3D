@@ -1264,12 +1264,12 @@ namespace config {
     double_between_f(vars, "sbs_3d_divergence", video.sbs.divergence, {0.0, 0.2});
     double_between_f(vars, "sbs_3d_focal_plane", video.sbs.focal_plane, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_ema", video.sbs.ema, {0.01, 1.0});
+    bool_f(vars, "sbs_3d_ema_pixel_first", video.sbs.ema_pixel_first);
     int_f(vars, "sbs_3d_depth_short_side", video.sbs.depth_short_side);
     double_between_f(vars, "sbs_3d_depth_max_aspect", video.sbs.depth_max_aspect, {1.0, 8.0});
     double_between_f(vars, "sbs_3d_minmax_ema", video.sbs.minmax_ema, {0.001, 1.0});
     double_between_f(vars, "sbs_3d_norm_pct_lo", video.sbs.norm_pct_lo, {0.0, 50.0});
     double_between_f(vars, "sbs_3d_norm_pct_hi", video.sbs.norm_pct_hi, {50.0, 100.0});
-    int_between_f(vars, "sbs_3d_norm_lock_frames", video.sbs.norm_lock_frames, {0, 100000});
     bool_f(vars, "sbs_3d_subject_track", video.sbs.subject_track);
     double_between_f(vars, "sbs_3d_subject_lock", video.sbs.subject_lock, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_subject_recenter", video.sbs.subject_recenter, {0.0, 1.0});

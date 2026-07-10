@@ -254,10 +254,8 @@ namespace models {
         float minmax_alpha;  // temporal EMA blend for the normalized min/max
         float pct_lo;        // robust normalization: low percentile as a fraction (0 = raw min)
         float pct_hi;        // robust normalization: high percentile as a fraction (1 = raw max)
-        float norm_lock_frames;  // scene lock: updates before the normalization bounds freeze (0 = off)
         bool subject_track;      // VD3D-style shaped disparity: run the subject-estimate passes
         float subject_recenter;  // recenter strength consumed by depth_subject_resolve_cs
-        float subject_lock;      // anchor strength (fraction of the subject's parallax subtracted)
         bool subject_stretch;    // apply the shape_depth_for_pop 5/95 disparity stretch
         float stretch_lo;        // low percentile for the stretch (fraction)
         float stretch_hi;        // high percentile for the stretch (fraction)
@@ -442,10 +440,8 @@ namespace models {
               minmax_alpha((float)cfg.minmax_ema),
               pct_lo((float)(cfg.norm_pct_lo / 100.0)),
               pct_hi((float)(cfg.norm_pct_hi / 100.0)),
-              norm_lock_frames((float)cfg.norm_lock_frames),
               subject_track(cfg.subject_track),
               subject_recenter((float)cfg.subject_recenter),
-              subject_lock((float)cfg.subject_lock),
               subject_stretch(cfg.subject_stretch),
               stretch_lo((float)cfg.stretch_lo), stretch_hi((float)cfg.stretch_hi),
               foreground_curvature((float)cfg.foreground_curvature),
@@ -855,7 +851,40 @@ namespace models {
             if (subject_track) {
                 r.subject = subject_srv;
             }
+            r.raw_model_depth = tensor_out_srv;
+            r.raw_width = target_w;
+            r.raw_height = target_h;
             return r;
+        }
+
+        // Benchmark-only current-frame path. estimate() has already submitted one inference for
+        // input_srv. Wait for that exact inference, consume it once, and deliberately do NOT
+        // enqueue a duplicate. This preserves the configured EMA coefficients and makes temporal
+        // evaluation comparable to a one-inference-per-source-frame offline pipeline.
+        estimate_result finish_pending_for_benchmark(ID3D11ShaderResourceView* input_srv, bool is_hdr) {
+            auto& cuda = cuda_driver_api::get();
+            if (!has_previous_frame || !cu_stream || !cuda.cuStreamSynchronize) {
+                return make_result();
+            }
+            if (cuda_ctx) {
+                cuda.cuCtxSetCurrent(cuda_ctx);
+            }
+            CUresult sync = cuda.cuStreamSynchronize(cu_stream);
+            if (sync != CUDA_SUCCESS) {
+                BOOST_LOG(error) << "Benchmark depth synchronization failed: " << sync;
+                return make_result();
+            }
+            if (sbs_perf::enabled()) {
+                perf_drain(perf_depth);
+            }
+            ensure_cbuffers(is_hdr);
+            if (!cbuffer) {
+                return {};
+            }
+            normalize_depth_output();
+            has_previous_frame = false;  // the output buffer has been consumed; never fold it twice
+            run_guided(input_srv, is_hdr);
+            return make_result();
         }
 
 
@@ -877,8 +906,8 @@ namespace models {
             // single source of truth for the canonical layout in
             // shaders/directx/include/depth_constants.hlsl -- every cbf[N] below must stay
             // slot-for-slot with the include (which every depth shader #includes). To add a
-            // field: append it here AND to the include (never reuse a slot; slots 3-19 are all
-            // live -- see the field list in depth_constants.hlsl).
+            // field: append it here AND to the include. Slots 13-14 are reserved so the subject
+            // fields retain their established offsets.
             uint32_t cb[20] = {};
             float* cbf = (float*)cb;
             cb[0] = (uint32_t)target_w;
@@ -894,9 +923,6 @@ namespace models {
             cbf[10] = range_floor_ref_alpha;  // A3 reference-range decay
             cbf[11] = use_percentile ? pct_lo : 0.0f;  // robust normalization, low bound (fraction)
             cbf[12] = use_percentile ? pct_hi : 1.0f;  // robust normalization, high bound (fraction)
-            cbf[13] = norm_lock_frames;  // scene lock: updates before the bounds freeze (0 = off)
-            cbf[14] = 0.005f;  // locked drift rate: ~4-7 s time constant, imperceptible per frame,
-                               // but a long scene that slowly changes depth range can't diverge
             cbf[15] = subject_recenter;  // subject recenter strength (depth_subject_resolve_cs)
             cbf[16] = stretch_lo;                          // shape_depth_for_pop stretch bounds
             cbf[17] = stretch_hi;
@@ -1043,12 +1069,9 @@ namespace models {
                     context->CSSetShaderResources(0, 1, &null_srv1);
                 }
 
-                // [NORMDBG] per-frame raw min/max trajectory for normalization studies. Opt-in
-                // via APOLLO_NORMDBG (NOT perf-gated: the per-frame Map is a CPU sync that would
-                // perturb perf wall-time). 2026-07-09 study: a centered/look-ahead window is
-                // WORSE than the causal EMA (short window tracks range noise); a slower EMA
-                // (minmax_ema 0.1->0.03) halves range swim for free, but it's already ~0.2
-                // levels/frame = imperceptible. Kept as a tool for future normalization work.
+                // [NORMDBG] opt-in raw min/max trajectory for normalization diagnosis. This is
+                // intentionally not perf-gated: its per-frame Map is a CPU sync and would distort
+                // timing measurements. Enable only with APOLLO_NORMDBG.
                 static const bool normdbg = std::getenv("APOLLO_NORMDBG") != nullptr;
                 if (normdbg && minmax_raw_stage) {
                     context->CopyResource(minmax_raw_stage.Get(), minmax_raw_buf.Get());
@@ -1458,5 +1481,10 @@ namespace models {
 
     estimate_result video_depth_estimator::estimate_depth(ID3D11ShaderResourceView* input_srv, bool is_hdr) {
         return pimpl->estimate(input_srv, is_hdr);
+    }
+
+    estimate_result video_depth_estimator::finish_pending_depth_for_benchmark(
+      ID3D11ShaderResourceView* input_srv, bool is_hdr) {
+        return pimpl->finish_pending_for_benchmark(input_srv, is_hdr);
     }
 }

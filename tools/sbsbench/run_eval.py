@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -37,6 +38,21 @@ import sbsbench  # noqa: E402  (metric implementations)
 
 # Depth models the two modes load (matches the client mode->model binding).
 MODE_MODEL = {"movie": "da3mono_large_fp16", "game": "depth_anything_v2_fp16"}
+EVAL_SCHEMA = 2  # current-once depth stepping + identity-keyed source/depth/SBS joins
+
+
+def fail(message):
+    print("run_eval: " + message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def sha256_files(paths):
+    h = hashlib.sha256()
+    for path in paths:
+        h.update(os.path.basename(path).encode())
+        with open(path, "rb") as fh:
+            h.update(fh.read())
+    return h.hexdigest()[:16]
 
 
 def sha1_dir(path):
@@ -67,7 +83,7 @@ def sunshine_running():
         return False
 
 
-def check_engines(build_dir, conf_path, mode):
+def check_engines(build_dir, mode):
     """Fail fast if a needed TRT engine isn't prebuilt (a first-use build stalls the loop for
     minutes and skews perf). Engines are named <stem>*.engine in the build assets dir."""
     assets = os.path.join(build_dir, "assets")
@@ -102,15 +118,15 @@ def main():
     clips = args.clips or sorted(os.path.basename(d) for d in glob.glob(os.path.join(clips_dir, "*"))
                                  if os.path.isdir(d))
     if not clips:
-        sys.exit("run_eval: no clips in " + clips_dir)
+        fail("no clips in " + clips_dir)
     if not os.path.exists(exe):
-        sys.exit(f"run_eval: {exe} not found -- build first (ninja -C cmake-build-relwithdebinfo sunshine)")
+        fail(f"{exe} not found -- build first (ninja -C cmake-build-relwithdebinfo sunshine)")
 
-    missing = check_engines(args.build_dir, args.conf, args.mode)
+    missing = check_engines(args.build_dir, args.mode)
     if missing and not args.allow_build:
         print(f"run_eval: TRT engine(s) missing in {args.build_dir}/assets: {missing}\n"
               f"Prebuild them (run Apollo once / sbs_3d_prebuild_models) or pass --allow-build.")
-        sys.exit(2)
+        raise SystemExit(2)
 
     contention = sunshine_running()
     if contention:
@@ -121,11 +137,17 @@ def main():
     out_root = os.path.join(args.build_dir, "sbs_eval", label)
     os.makedirs(out_root, exist_ok=True)
 
+    conf_sha = sha256_files([os.path.abspath(args.conf)])
+    metric_sha = sha256_files([os.path.join(SCRIPT_DIR, "sbsbench.py"),
+                               os.path.join(SCRIPT_DIR, "thresholds.json")])
+    expected_model = MODE_MODEL[args.mode]
     meta = {
         "git_sha": git(["rev-parse", "--short", "HEAD"]),
-        "git_dirty": bool(git(["status", "--porcelain", "-uno"])),
+        "git_dirty": bool(git(["status", "--porcelain"])),
         "clip_set_sha1": {c: sha1_dir(os.path.join(clips_dir, c)) for c in clips},
         "mode": args.mode, "extra_args": args.extra, "conf": os.path.relpath(args.conf, REPO),
+        "model": expected_model, "eval_schema": EVAL_SCHEMA, "depth_step": "current-once",
+        "conf_sha256": conf_sha, "metric_sha256": metric_sha,
         "gpu_contention": contention,
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
     }
@@ -134,22 +156,39 @@ def main():
     for clip in clips:
         clip_dir = os.path.join(clips_dir, clip)
         out_dir = os.path.join(out_root, clip)
+        shutil.rmtree(out_dir, ignore_errors=True)  # a reused label must not retain stale frame IDs
         cmd = [exe, os.path.abspath(args.conf), "--sbs-bench",
-               "--frames", clip_dir, "--out", out_dir]
-        if args.mode == "movie":
-            cmd.append("--movie")
+               "--frames", clip_dir, "--out", out_dir,
+               "--model", expected_model]
         cmd += args.extra
         print(f"[{clip}] harness...", flush=True)
         try:
             r = subprocess.run(cmd, cwd=args.build_dir, capture_output=True, text=True, timeout=900)
         except subprocess.TimeoutExpired:
-            sys.exit(f"run_eval: harness timed out on {clip}")
+            fail(f"harness timed out on {clip}")
         stdout = r.stdout + r.stderr
         if r.returncode != 0 or not glob.glob(os.path.join(out_dir, "sbs_*.png")):
             print(stdout[-2000:])
-            sys.exit(f"run_eval: harness failed on {clip} (exit {r.returncode})")
+            fail(f"harness failed on {clip} (exit {r.returncode})")
         m = re.search(r"model '([^']+)'", stdout)
-        clip_meta = {"model": m.group(1)} if m else {}
+        actual_model = m.group(1) if m else None
+        if actual_model != expected_model:
+            fail(f"{clip}: expected model {expected_model!r}, harness reported {actual_model!r}")
+        if "depth_step current-once" not in stdout:
+            fail(f"{clip}: harness did not confirm current-once depth stepping")
+        clip_meta = {"model": actual_model}
+
+        # A valid harness result has one source, raw-model, warp-input depth, and SBS artifact for
+        # every numeric frame identity. This catches dropped/renumbered outputs before metrics run.
+        source_ids = set(sbsbench.indexed_files(os.path.join(clip_dir, "frame_*.*"), "frame_"))
+        sbs_ids = set(sbsbench.indexed_files(os.path.join(out_dir, "sbs_*.png"), "sbs_"))
+        depth_ids = set(sbsbench.indexed_files(os.path.join(out_dir, "depth_*.png"), "depth_"))
+        raw_ids = set(sbsbench.indexed_files(os.path.join(out_dir, "raw_*.f32"), "raw_"))
+        if not source_ids or source_ids != sbs_ids or source_ids != depth_ids or source_ids != raw_ids:
+            fail(f"{clip}: artifact frame-id mismatch source={sorted(source_ids)} "
+                 f"sbs={sorted(sbs_ids)} depth={sorted(depth_ids)} raw={sorted(raw_ids)}")
+        if not os.path.exists(os.path.join(out_dir, "raw_shape.json")):
+            fail(f"{clip}: raw_shape.json missing")
         # Carry the clip's own metadata (scene name/description) into results so the run dir is
         # self-describing and the report can label clips without the source clips dir.
         cmp_path = os.path.join(clip_dir, "meta.json")
@@ -161,7 +200,10 @@ def main():
                 pass
 
         print(f"[{clip}] scoring...", flush=True)
-        rows, agg = sbsbench.measure_sequence(out_dir, clip_dir)
+        try:
+            rows, agg = sbsbench.measure_sequence(out_dir, clip_dir)
+        except ValueError as exc:
+            fail(f"{clip}: {exc}")
         perf = {}
         perf_p = os.path.join(out_dir, "sbs_perf.json")
         if os.path.exists(perf_p):
@@ -173,9 +215,12 @@ def main():
         worst = {}
         for k in thresholds["metrics"]:
             fk = k if any(k in r for r in rows) else (k[:-4] if k.endswith("_p50") else k)
-            vals = [(r.get(fk), i) for i, r in enumerate(rows) if fk in r]
+            vals = [(r.get(fk), r.get("_frame_id", i)) for i, r in enumerate(rows) if fk in r]
             if vals:
-                v, i = max(vals)
+                # "Worst" follows the metric direction. For score/pop/depth spread, the minimum
+                # is the bad frame; artifact metrics use the maximum.
+                choose = min if thresholds["metrics"][k].get("better") == "higher" else max
+                v, i = choose(vals)
                 worst[k] = {"frame": i, "value": round(v, 3)}
 
         entry = {"aggregate": agg, "perf_ms": perf, "meta": clip_meta, "worst_frame": worst}
@@ -193,14 +238,21 @@ def main():
         bp = os.path.join(base_dir, clip + ".json")
         if os.path.exists(bp) and not args.update_baselines:
             base = json.load(open(bp))
-            base_sha = base.get("meta", {}).get("clip_sha1")
-            if base_sha and base_sha != meta["clip_set_sha1"][clip]:
-                print(f"run_eval: WARNING {clip} frames changed since its baseline "
-                      f"({base_sha} -> {meta['clip_set_sha1'][clip]}); skipping its gate. "
-                      f"Re-baseline with --update-baselines.")
-                entry["stale_baseline"] = True
-                results[clip] = entry
-                continue
+            base_meta = base.get("meta", {})
+            required = {
+                "clip_sha1": meta["clip_set_sha1"][clip],
+                "mode": args.mode,
+                "model": expected_model,
+                "eval_schema": EVAL_SCHEMA,
+                "depth_step": "current-once",
+                "conf_sha256": conf_sha,
+                "metric_sha256": metric_sha,
+            }
+            mismatches = {k: (base_meta.get(k), v) for k, v in required.items()
+                          if base_meta.get(k) != v}
+            if mismatches:
+                fail(f"{clip}: baseline context is stale/incompatible: {mismatches}. "
+                     "Re-run with --update-baselines only after verifying the new eval contract.")
             for k, spec in thresholds["metrics"].items():
                 b, n = base["aggregate"].get(k), agg.get(k)
                 if b is None or n is None:

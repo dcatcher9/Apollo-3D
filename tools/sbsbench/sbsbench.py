@@ -34,6 +34,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 
 import numpy as np
@@ -67,6 +68,25 @@ def split_eyes(sbs_gray):
     """SBS is [left | right], each half the width."""
     w = sbs_gray.shape[1] // 2
     return sbs_gray[:, :w], sbs_gray[:, w:2 * w]
+
+
+def indexed_files(pattern, prefix):
+    """Return {numeric_frame_id: path}, rejecting ambiguous names/duplicates.
+
+    Eval assets are joined by identity, never list position. Positional zipping silently compared
+    frame N against N+1 whenever extraction or rendering dropped a frame.
+    """
+    out = {}
+    rx = re.compile(r"^" + re.escape(prefix) + r"(\d+)")
+    for path in glob.glob(pattern):
+        m = rx.match(os.path.basename(path))
+        if not m:
+            continue
+        frame_id = int(m.group(1))
+        if frame_id in out:
+            raise ValueError(f"duplicate {prefix} frame id {frame_id}: {out[frame_id]} and {path}")
+        out[frame_id] = path
+    return out
 
 
 # ------------------------------------------------------------------- pop / geometry
@@ -380,19 +400,30 @@ def measure_sequence(seq_dir, frames_dir=None):
                       the scene-cut / flat-content depth instability, separated from real motion.
 
     On the SAME clip the real motion is identical, so these DELTAS vs baseline are pure changes."""
-    paths = sorted(glob.glob(os.path.join(seq_dir, "sbs_*.png")))
-    if not paths:
+    sbs_by_id = indexed_files(os.path.join(seq_dir, "sbs_*.png"), "sbs_")
+    if not sbs_by_id:
         return None
-    srcs = sorted(glob.glob(os.path.join(frames_dir, "frame_*.*"))) if frames_dir else []
-    srcs = [s for s in srcs if s.lower().endswith((".png", ".jpg", ".jpeg"))]
+    frame_ids = sorted(sbs_by_id)
+    src_by_id = indexed_files(os.path.join(frames_dir, "frame_*.*"), "frame_") if frames_dir else {}
+    src_by_id = {i: p for i, p in src_by_id.items()
+                 if p.lower().endswith((".png", ".jpg", ".jpeg"))}
+    if frames_dir and set(src_by_id) != set(frame_ids):
+        missing_src = sorted(set(frame_ids) - set(src_by_id))
+        missing_sbs = sorted(set(src_by_id) - set(frame_ids))
+        raise ValueError(f"source/SBS frame-id mismatch: missing source={missing_src}, missing SBS={missing_sbs}")
+    depth_by_id = indexed_files(os.path.join(seq_dir, "depth_*.png"), "depth_")
+    if depth_by_id and set(depth_by_id) != set(frame_ids):
+        missing_depth = sorted(set(frame_ids) - set(depth_by_id))
+        extra_depth = sorted(set(depth_by_id) - set(frame_ids))
+        raise ValueError(f"depth/SBS frame-id mismatch: missing depth={missing_depth}, extra depth={extra_depth}")
     rows, flicks, bflicks, swims = [], [], [], []
     prev_sbs = prev_left = prev_depth = prev_src = None
-    for i, p in enumerate(paths):
-        # Replace only the basename (the containing dir may legitimately contain "sbs_").
-        depth_p = os.path.join(os.path.dirname(p), os.path.basename(p).replace("sbs_", "depth_"))
-        depth = load_depth(depth_p) if os.path.exists(depth_p) else None
-        src = load_gray(srcs[i]) if i < len(srcs) else None
+    for frame_id in frame_ids:
+        p = sbs_by_id[frame_id]
+        depth = load_depth(depth_by_id[frame_id]) if frame_id in depth_by_id else None
+        src = load_gray(src_by_id[frame_id]) if frame_id in src_by_id else None
         row, sbs, left = measure_seq_frame(p, depth, src)
+        row["_frame_id"] = frame_id
         if prev_sbs is not None:
             row["flicker"] = float(np.mean(np.abs(sbs - prev_sbs)) * 255.0)
             flicks.append(row["flicker"])

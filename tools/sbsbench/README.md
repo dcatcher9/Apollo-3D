@@ -37,7 +37,7 @@ python tools/sbsbench/run_eval.py --extra --divergence 0.027   # pass A/B levers
 game baselines. Always eval in game mode unless you deliberately want DA3MONO, and never compare
 numbers across modes (they're different models). Default was `movie` until 2026-07-10; it was
 flipped to `game` because DA-V2 is the model we test against (matches VisionDepth3D's DA-V2 at
-r≈0.996) and `--movie`/DA3MONO silently swapping the model had caused an entire wrong-model
+r≈0.996) and implicitly selecting DA3MONO had caused an entire wrong-model
 comparison.
 
 Harness A/B levers (after `--extra`):
@@ -47,8 +47,6 @@ Harness A/B levers (after `--extra`):
 - `--pct-lo F --pct-hi F` — robust percentile normalization bounds, e.g. `1 99` (default off =
   raw min/max).
 - `--ema F` — per-pixel depth EMA override (`1.0` = off).
-- `--lock-frames N` — scene-locked normalization bounds (bench-falsified for DA-V2; see the
-  config.h note on `sbs_3d_norm_lock_frames`).
 - `--subject-track` — VD3D-style shaped disparity (subject-anchored band curve). The pipeline
   is probe-reprojection-only, so the shaping is always live when this is on.
 - `--subject-lock F` — subject anchor strength (e.g. `0.95`).
@@ -73,6 +71,15 @@ depth-step floor (flat scenes legitimately read 0), and all pixel windows scale 
 width — but absolute values are still not comparable across clip resolutions; baselines are
 per-clip-set. The harness writes 16-bit depth PNGs so `swim` resolves below 1/255.
 
+**Eval schema 2 correctness contract (2026-07-10):** `run_eval.py` pins the model explicitly. The
+harness submits and consumes exactly one inference per source frame, so EMA and normalization
+update once.
+Source, raw-model (`raw_*.f32`), pre-warp depth (`depth_*.png`), and SBS artifacts are joined by
+numeric frame identity, never list position. Baselines are rejected with setup exit 2 if mode,
+model, schema, stepping semantics, config hash, metric hash, or clip hash differs. Output folders
+are cleared before reuse. `--output-every N` reduces saved artifacts while still processing every
+input frame, so sampling cannot change temporal state.
+
 ## Deterministic clips via the headless harness (recommended)
 Single dumps are sporadic and headset-bound. For repeatable A/B and **temporal** metrics, drive
 the real pipeline over a fixed frame sequence with the built-in `--sbs-bench` subcommand (Tier-1
@@ -86,16 +93,18 @@ generated failure-mode clips from [make_synth_clips.py](make_synth_clips.py):
 
 | clip | targets | validated fingerprint |
 |------|---------|----------------------|
-| `scene_cut` | depth-normalization swim across a hard cut (A1) | swim/flicker worst frame lands exactly on the cut (frame 12; swim 3.2 → 41.6 there) |
-| `flat_page` | flat-content depth hallucination + amplification (A3) | pop ≈ 0, flicker = 0 (static input = pipeline noise floor); disocc_smear 1.0 flags hallucinated text-edge silhouettes |
-| `fast_motion` | async-depth ghost (known 30 px/frame motion) | highest swim of the set (9.0) + trailing-disocclusion smear | The harness sizes
-the SBS output to the **input** resolution, so these small clips make a full 5-clip A/B take
+| `scene_cut` | depth-normalization response across a hard cut | schema-2 baseline flags the cut's stretch/rim behavior without duplicate EMA updates |
+| `flat_page` | flat-content depth hallucination + amplification | static-input noise floor; disocc_smear flags hallucinated text-edge silhouettes |
+| `fast_motion` | known 30 px/frame motion | current-frame depth separates warp/edge behavior from live async lag |
+
+The harness sizes the SBS output to the **input** resolution, so these small clips make a full 5-clip A/B take
 seconds (≈8 s harness + 3 s scoring per clip) instead of a minute:
 
 ```
 cd cmake-build-relwithdebinfo
 ./sunshine.exe E:/ApolloDev/config/sunshine.conf --sbs-bench \
-    --frames ../tools/sbsbench/clips/c525 --out out/c525 --movie
+    --frames ../tools/sbsbench/clips/c525 --out out/c525 \
+    --model depth_anything_v2_fp16
 python tools/sbsbench/sbsbench.py --seq out/c525 --frames tools/sbsbench/clips/c525 --json base.json
 python tools/sbsbench/sbsbench.py --seq out/NEW  --frames tools/sbsbench/clips/c525 --baseline base.json
 ```
@@ -109,8 +118,17 @@ per clip-set (a small-clip baseline isn't comparable to a full-res one; A/B delt
 ```
 python tools/sbsbench/split_video.py clip.mp4 -o tools/sbsbench/clips/mine --width 854 --jpg --max 24
 ```
-Drop `--width/--jpg` for a full-resolution PNG clip. The harness settles the async depth per frame
-(`--settle`, default 3) so each output uses depth caught up to its own frame.
+Drop `--width/--jpg` for a full-resolution PNG clip. The gated runner uses current-frame depth
+with one update per source frame.
+
+## Local VD3D Bestv2 reference (media stays local)
+
+`bestv2-phase-a.conf` pins the reproduction candidate. `vd3d_reference.py prepare` extracts and
+hashes the source/Bestv2 render, restores original frame identities, verifies alignment, and keeps
+all source frames so sampling cannot change history. The harness exports exact raw model floats and
+the finalized depth texture immediately before reprojection. `export_vd3d_depth_reference.py`
+produces matching VD3D checkpoints; `vd3d_reference.py score` gates the two depth stages separately
+from final-warp reproduction. Pixel similarity is never treated as a warp-quality verdict.
 
 The metrics split cleanly by subsystem: **warp**-side changes move pop / disocc / flicker_disocc;
 **depth**-side changes move edge_acc / swim / depth_spread. So a delta tells you *where* the change
