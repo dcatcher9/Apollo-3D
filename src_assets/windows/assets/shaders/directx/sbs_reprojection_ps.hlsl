@@ -26,77 +26,7 @@ struct PS_INPUT {
     float2 TexCoord : TEXCOORD0;
 };
 
-cbuffer Constants : register(b2) {
-    float max_divergence;   // Parallax gain as a fraction of source width: signed parallax =
-                            // (depth - focal_plane) * max_divergence. 0 = flat.
-    float focal_plane;      // Zero-parallax depth in [0,1] (e.g. 0.5).
-    float parallax_steps;   // Horizontal probes per eye; fewer = big GPU saving on this full-res pass.
-    float border_fade;      // Ramp parallax to 0 within this fraction of the L/R edges (0 = off).
-    float depth_floor;      // Far-depth compression: d' = floor + (1-floor)*d. Shrinks the
-                            // foreground-vs-background parallax gap at silhouettes, and with it
-                            // the disocclusion band that gets stretch-filled there. 0 = off.
-    float subject_track;    // > 0.5 = VD3D-style shaped disparity (band curve + subject anchor)
-                            // instead of the linear (depth - focal_plane) mapping.
-    float subject_lock;     // Fraction of the subject's own parallax subtracted everywhere
-                            // (~1 pins the tracked subject to the screen plane).
-    float subject_stretch;  // > 0.5 = apply the disparity stretch using SubjectState[1] bounds.
-    float subject_plane_lock;  // Flatten residual disparity within the subject band (0 = off).
-    float subject_plane_width; // Half-width (normalized depth) of that subject band.
-    float dof_strength;     // Depth-of-field: blur radius (fraction of width) at full defocus. 0 = off.
-    float dof_focus_width;  // In-focus depth half-width around the focal plane (beyond it -> full blur).
-};
-
-// Border fade: parallax ramps to zero within border_fade of the LEFT/RIGHT source edges, so
-// an object touching a side edge doesn't pop out of the screen -- a "window violation" that
-// causes binocular rivalry (one eye sees it clipped by the frame, the other doesn't). Only
-// the L/R edges need this: parallax is purely horizontal, so the top/bottom edges clip both
-// eyes identically (ordinary occlusion, no rivalry).
-float BorderFade(float x) {
-    return (border_fade <= 0.0f) ? 1.0f : saturate(min(x, 1.0f - x) / border_fade);
-}
-
-// BandCurve() -- the near/mid/far disparity shaping profile, shared with
-// depth_subject_resolve_cs.hlsl (keep tools/warpsim/warpsim.cpp band_curve in sync).
-#include "include/band_curve.hlsl"
-
-// Signed horizontal parallax for a normalized depth sample at source position x, in
-// source-UV units. Positive => nearer than the focal plane => pops out of the screen.
-//
-// Linear path (default): depth_floor first compresses the far range (d' = floor +
-// (1-floor)*d): the visible cost of a depth cliff is the disocclusion band, whose width
-// scales with |d_near - d_far|; lifting the far floor narrows that band without touching
-// foreground pop.
-//
-// Shaped path (shaped == true): recenter depth around the tracked subject, map it through
-// the near/mid/far band curve, and subtract subject_lock x the subject's own curve value so
-// the subject sits at the screen plane. The residual is clamped to [-1, 1], making
-// max_divergence the hard parallax bound (the probe search radius relies on this).
-//
-// s0 = SubjectState[0] {delta, subject_curve, subj_ema, init}; s1 = SubjectState[1]
-// {stretch_lo, stretch_inv_range, _, _}. Both are frame-uniform and are read ONCE in
-// Reproject (not per probe) and passed in; `shaped` is decided there too so the search
-// radius and this mapping can never disagree about which path is live.
-float DepthParallax(float d, float x, float4 s0, float4 s1, bool shaped) {
-    if (shaped) {
-        // Optional disparity stretch (VD3D shape_depth_for_pop): rescale the [lo,hi] percentile
-        // band to full [0,1] so the mid-range uses the whole parallax budget. lo=0, inv_range=1
-        // (stretch off) makes this an identity.
-        float d_str = (subject_stretch > 0.5f) ? saturate((d - s1.x) * s1.y) : d;
-        float d_shaped = saturate(d_str + s0.x);  // recenter (delta in stretched space)
-        float c = BandCurve(d_shaped);
-        // Local subject-plane lock (VD3D apply_subject_plane_lock): flatten the near-subject
-        // surround toward the subject's own parallax, so the subject band reads as one plane.
-        if (subject_plane_lock > 0.0f) {
-            float t = (d - s0.z) / max(subject_plane_width, 1e-4f);
-            float band = exp(-0.5f * t * t);
-            c = lerp(c, s0.y, subject_plane_lock * band);
-        }
-        c -= subject_lock * s0.y;   // global anchor: subject to the screen plane
-        return clamp(c, -1.0f, 1.0f) * max_divergence * BorderFade(x);
-    }
-    float df = depth_floor + (1.0f - depth_floor) * d;
-    return (df - focal_plane) * max_divergence * BorderFade(x);
-}
+#include "include/sbs_warp_common.hlsl"
 
 // Silhouette-stable depth read: a 2x2 spread of taps so any depth step spans ~2.5 probe
 // steps of the reprojection search, in BOTH axes. The guided-upsampled depth is texel-sharp;

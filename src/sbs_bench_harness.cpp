@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 // platform includes
@@ -231,7 +232,7 @@ namespace sbs_bench {
     // ---- argument parsing ----
 
     struct opts {
-      std::string frames, out, model;
+      std::string frames, out, model, warp;
       int eye_h = 0;       // 0 -> match the input frame height (so the input size controls eval
                            // resolution/speed; a bigger clip = a bigger eval). Override to pin one.
       int max_width = 0;   // 0 -> use config max_encode_width
@@ -249,6 +250,7 @@ namespace sbs_bench {
       double subject_plane_lock = -1.0;  // local subject-band flatten (e.g. 0.28); <0 = conf
       double curvature = -1.0;     // foreground curvature strength (e.g. 0.07); <0 = conf
       double dof = -1.0;           // depth-of-field strength (e.g. 0.3); <0 = conf
+      double vd3d_forward_blend = -1.0;  // VD3D backward/forward blend override; <0 = conf
       double minmax_ema = -1.0;    // range-bounds EMA new-weight (VD3D DepthPercentileEMA a=0.82 -> 0.18); <0 = conf
       int guided = -1;             // guided upsample: -1 = conf, 0 = off, 1 = on
       bool pixel_ema_first = false;  // VD3D EMA order: per-pixel smooth raw BEFORE normalizing
@@ -264,6 +266,7 @@ namespace sbs_bench {
         if (a == "--frames") o.frames = next("--frames");
         else if (a == "--out") o.out = next("--out");
         else if (a == "--model") o.model = next("--model");
+        else if (a == "--warp") o.warp = next("--warp");
         else if (a == "--eye-h") o.eye_h = std::stoi(next("--eye-h"));
         else if (a == "--max-width") o.max_width = std::stoi(next("--max-width"));
         else if (a == "--limit") o.limit = std::stoi(next("--limit"));
@@ -278,6 +281,7 @@ namespace sbs_bench {
         else if (a == "--subject-plane-lock") o.subject_plane_lock = std::stod(next("--subject-plane-lock"));
         else if (a == "--curvature") o.curvature = std::stod(next("--curvature"));
         else if (a == "--dof") o.dof = std::stod(next("--dof"));
+        else if (a == "--vd3d-forward-blend") o.vd3d_forward_blend = std::stod(next("--vd3d-forward-blend"));
         else if (a == "--ema") o.ema = std::stod(next("--ema"));
         else if (a == "--minmax-ema") o.minmax_ema = std::stod(next("--minmax-ema"));
         else if (a == "--guided-upsample") {
@@ -333,6 +337,13 @@ namespace sbs_bench {
     // depend on machine speed.
     auto sbs_cfg = config::video.sbs;
     sbs_cfg.depth_fps = 0.0;
+    if (!o.warp.empty()) {
+      if (o.warp != "apollo" && o.warp != "vd3d") {
+        BOOST_LOG(error) << "sbs-bench: --warp must be 'apollo' or 'vd3d'";
+        return 2;
+      }
+      sbs_cfg.warp = o.warp;
+    }
     if (o.divergence >= 0.0) sbs_cfg.divergence = o.divergence;  // A/B lever: parallax/disocclusion size
     if (o.pct_lo >= 0.0) sbs_cfg.norm_pct_lo = o.pct_lo;         // A/B lever: robust normalization
     if (o.pct_hi >= 0.0) sbs_cfg.norm_pct_hi = o.pct_hi;
@@ -343,6 +354,7 @@ namespace sbs_bench {
     if (o.subject_plane_lock >= 0.0) sbs_cfg.subject_plane_lock = o.subject_plane_lock;
     if (o.curvature >= 0.0) sbs_cfg.foreground_curvature = o.curvature;
     if (o.dof >= 0.0) sbs_cfg.dof_strength = o.dof;
+    if (o.vd3d_forward_blend >= 0.0) sbs_cfg.vd3d_forward_blend = o.vd3d_forward_blend;
     if (o.ema > 0.0) sbs_cfg.ema = o.ema;                        // A/B lever: depth EMA (1.0 = off)
     if (o.minmax_ema >= 0.0) sbs_cfg.minmax_ema = o.minmax_ema;  // A/B lever: range-bounds EMA (VD3D 0.18)
     if (o.guided >= 0) sbs_cfg.guided_upsample = (o.guided != 0);  // A/B lever: guided upsample on/off
@@ -355,7 +367,7 @@ namespace sbs_bench {
 
     BOOST_LOG(info) << "sbs-bench: " << frames.size() << " frames, model '" << model.name
                     << "', eye_h " << (o.eye_h > 0 ? std::to_string(o.eye_h) : "match-input")
-                    << ", depth_step current-once -> " << o.out;
+                    << ", depth_step current-once, warp " << sbs_cfg.warp << " -> " << o.out;
 
     // ---- D3D device + shaders ----
     ComPtr<ID3D11Device> dev;
@@ -368,13 +380,27 @@ namespace sbs_bench {
       return 5;
     }
 
+    // Harness-only GPU timestamps. CPU submission time is not a useful comparison between the
+    // probe draw and VD3D's compute+splat+resolve sequence.
+    ComPtr<ID3D11Query> warp_disjoint, warp_start, warp_end;
+    D3D11_QUERY_DESC qd = {D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
+    dev->CreateQuery(&qd, &warp_disjoint);
+    qd.Query = D3D11_QUERY_TIMESTAMP;
+    dev->CreateQuery(&qd, &warp_start);
+    dev->CreateQuery(&qd, &warp_end);
+
     auto vs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0");
     auto ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0");
-    if (!vs_blob || !ps_blob) return 6;
+    auto vd3d_cs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_vd3d_forward_cs.hlsl", "main", "cs_5_0");
+    auto vd3d_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_vd3d_reprojection_ps.hlsl", "main_ps", "ps_5_0");
+    if (!vs_blob || !ps_blob || !vd3d_cs_blob || !vd3d_ps_blob) return 6;
     ComPtr<ID3D11VertexShader> vs;
-    ComPtr<ID3D11PixelShader> ps;
+    ComPtr<ID3D11PixelShader> ps, vd3d_ps;
+    ComPtr<ID3D11ComputeShader> vd3d_cs;
     dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &vs);
     dev->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &ps);
+    dev->CreateComputeShader(vd3d_cs_blob->GetBufferPointer(), vd3d_cs_blob->GetBufferSize(), nullptr, &vd3d_cs);
+    dev->CreatePixelShader(vd3d_ps_blob->GetBufferPointer(), vd3d_ps_blob->GetBufferSize(), nullptr, &vd3d_ps);
 
     ComPtr<ID3D11SamplerState> sampler;
     {
@@ -386,17 +412,18 @@ namespace sbs_bench {
       dev->CreateSamplerState(&sd, &sampler);
     }
 
-    // Reprojection constants: {divergence, focal, parallax_steps, border_fade, depth_floor,
-    // subject_track, subject_lock, subject_stretch, subject_plane_lock, subject_plane_width, pad, pad}.
-    float repro_params[12] = {(float) sbs_cfg.divergence, (float) sbs_cfg.focal_plane,
+    // Shared disparity constants. The last register carries VD3D's hybrid/fill parameters.
+    float repro_params[16] = {(float) sbs_cfg.divergence, (float) sbs_cfg.focal_plane,
       (float) sbs_cfg.parallax_steps, (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor,
       sbs_cfg.subject_track ? 1.0f : 0.0f, (float) sbs_cfg.subject_lock,
       sbs_cfg.subject_stretch ? 1.0f : 0.0f, (float) sbs_cfg.subject_plane_lock,
       (float) sbs_cfg.subject_plane_width, (float) sbs_cfg.dof_strength,
-      (float) sbs_cfg.dof_focus_width};
+      (float) sbs_cfg.dof_focus_width, (float) sbs_cfg.vd3d_forward_blend,
+      (float) sbs_cfg.vd3d_fill_radius, 0.0f, 0.0f};
     auto repro_cb = const_buffer(dev.Get(), repro_params);
-    float pass_params[12] = {0, (float) sbs_cfg.focal_plane, (float) sbs_cfg.parallax_steps,
-      (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor, 0, 0, 0, 0, 0, 0, 0};
+    float pass_params[16] = {0, (float) sbs_cfg.focal_plane, (float) sbs_cfg.parallax_steps,
+      (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor, 0, 0, 0, 0, 0, 0, 0,
+      (float) sbs_cfg.vd3d_forward_blend, (float) sbs_cfg.vd3d_fill_radius, 0, 0};
     auto pass_cb = const_buffer(dev.Get(), pass_params);
 
     // ---- estimator ----
@@ -405,6 +432,9 @@ namespace sbs_bench {
     // Per-run state built lazily on the first frame (once we know the input size).
     ComPtr<ID3D11Texture2D> sbs_tex, sbs_stage;
     ComPtr<ID3D11RenderTargetView> sbs_rtv;
+    ComPtr<ID3D11Texture2D> vd3d_winner_tex;
+    ComPtr<ID3D11UnorderedAccessView> vd3d_winner_uav;
+    ComPtr<ID3D11ShaderResourceView> vd3d_winner_srv;
     D3D11_VIEWPORT vp = {};
     UINT sbs_w = 0, sbs_h = 0;
     ComPtr<ID3D11Texture2D> depth_stage;  // dump_depth staging cache (depth size is constant)
@@ -442,6 +472,17 @@ namespace sbs_bench {
         td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         dev->CreateTexture2D(&td, nullptr, &sbs_tex);
         dev->CreateRenderTargetView(sbs_tex.Get(), nullptr, &sbs_rtv);
+        if (sbs_cfg.warp == "vd3d") {
+          D3D11_TEXTURE2D_DESC wd = td;
+          wd.Format = DXGI_FORMAT_R32_UINT;
+          wd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+          if (FAILED(dev->CreateTexture2D(&wd, nullptr, &vd3d_winner_tex)) ||
+              FAILED(dev->CreateUnorderedAccessView(vd3d_winner_tex.Get(), nullptr, &vd3d_winner_uav)) ||
+              FAILED(dev->CreateShaderResourceView(vd3d_winner_tex.Get(), nullptr, &vd3d_winner_srv))) {
+            BOOST_LOG(error) << "sbs-bench: VD3D winner texture creation failed";
+            return 6;
+          }
+        }
         D3D11_TEXTURE2D_DESC sd2 = td;
         sd2.Usage = D3D11_USAGE_STAGING; sd2.BindFlags = 0; sd2.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         dev->CreateTexture2D(&sd2, nullptr, &sbs_stage);
@@ -461,28 +502,67 @@ namespace sbs_bench {
 
       // Composite (mirrors display_vram::convert()'s SBS block): probe reprojection.
       const auto comp_t0 = std::chrono::steady_clock::now();
+      const bool time_warp = warp_disjoint && warp_start && warp_end;
+      if (time_warp) {
+        ctx->Begin(warp_disjoint.Get());
+        ctx->End(warp_start.Get());
+      }
+      if (sbs_cfg.warp == "vd3d" && est.depth) {
+        const UINT clear_winner[4] = {0, 0, 0, 0};
+        ctx->ClearUnorderedAccessViewUint(vd3d_winner_uav.Get(), clear_winner);
+        ctx->CSSetShader(vd3d_cs.Get(), nullptr, 0);
+        ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
+        ID3D11ShaderResourceView *cs_srvs[] = {est.depth.Get(), est.subject.Get()};
+        ctx->CSSetShaderResources(1, 2, cs_srvs);
+        ctx->CSSetUnorderedAccessViews(0, 1, vd3d_winner_uav.GetAddressOf(), nullptr);
+        ctx->CSSetConstantBuffers(2, 1, repro_cb.GetAddressOf());
+        ctx->Dispatch(((sbs_w / 2u) + 15u) / 16u, (sbs_h + 15u) / 16u, 1u);
+        ID3D11UnorderedAccessView *null_uav[] = {nullptr};
+        ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr};
+        ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
+        ctx->CSSetShaderResources(1, 2, null_cs_srvs);
+      }
       ctx->OMSetRenderTargets(1, sbs_rtv.GetAddressOf(), nullptr);
       ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
       ctx->VSSetShader(vs.Get(), nullptr, 0);
-      ctx->PSSetShader(ps.Get(), nullptr, 0);
+      ctx->PSSetShader(sbs_cfg.warp == "vd3d" && est.depth ? vd3d_ps.Get() : ps.Get(), nullptr, 0);
       ctx->RSSetViewports(1, &vp);
       ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
 
-      ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), est.depth.Get(), est.subject.Get()};
-      ctx->PSSetShaderResources(0, 3, srvs);
+      ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), est.depth.Get(), est.subject.Get(),
+        sbs_cfg.warp == "vd3d" && est.depth ? vd3d_winner_srv.Get() : nullptr};
+      ctx->PSSetShaderResources(0, 4, srvs);
       ID3D11Buffer *cb = est.depth ? repro_cb.Get() : pass_cb.Get();
       ctx->PSSetConstantBuffers(2, 1, &cb);
       ctx->Draw(3, 0);
 
       ID3D11RenderTargetView *null_rtv[] = {nullptr};
       ctx->OMSetRenderTargets(1, null_rtv, nullptr);
-      ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr};
-      ctx->PSSetShaderResources(0, 3, null_srv);
+      ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr, nullptr};
+      ctx->PSSetShaderResources(0, 4, null_srv);
+      if (time_warp) {
+        ctx->End(warp_end.Get());
+        ctx->End(warp_disjoint.Get());
+      }
 
-      // Real composite-submission CPU cost (the estimator's depth_infer/warp_infer GPU times are
-      // captured separately via CUDA events); tick() advances the perf window.
+      // Real composite-submission CPU cost. GPU warp time is captured separately below with D3D
+      // timestamp queries; tick() advances the perf window.
       sbs_perf::add_sample_ms("sbs_composite_cpu",
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - comp_t0).count());
+      if (time_warp) {
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT timing = {};
+        UINT64 start_tick = 0, end_tick = 0;
+        ctx->Flush();
+        while (ctx->GetData(warp_disjoint.Get(), &timing, sizeof(timing), 0) == S_FALSE) {
+          std::this_thread::yield();
+        }
+        HRESULT hs = ctx->GetData(warp_start.Get(), &start_tick, sizeof(start_tick), 0);
+        HRESULT he = ctx->GetData(warp_end.Get(), &end_tick, sizeof(end_tick), 0);
+        if (SUCCEEDED(hs) && SUCCEEDED(he) && !timing.Disjoint && timing.Frequency > 0 && end_tick >= start_tick) {
+          sbs_perf::add_sample_ms("warp_infer",
+            (double)(end_tick - start_tick) * 1000.0 / (double)timing.Frequency);
+        }
+      }
       sbs_perf::tick();
 
       // Readback -> PNG.

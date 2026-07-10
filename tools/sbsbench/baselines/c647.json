@@ -32,11 +32,12 @@
     "score": 68.5
   },
   "perf_ms": {
-    "depth_infer": 2.17142,
-    "sbs_composite_cpu": 0.0019
+    "depth_infer": 2.03872,
+    "sbs_composite_cpu": 0.007,
+    "warp_infer": 0.097888
   },
   "meta": {
-    "git_sha": "1c13bf96",
+    "git_sha": "2a4a647c",
     "git_dirty": true,
     "clip_set_sha1": {
       "c339": "1923c16a8356",
@@ -52,12 +53,13 @@
     "extra_args": [],
     "conf": "tools\\sbsbench\\bench.conf",
     "model": "depth_anything_v2_fp16",
+    "warp": "apollo",
     "eval_schema": 2,
     "depth_step": "current-once",
     "conf_sha256": "f5b0eda8bffc9437",
     "metric_sha256": "6a7faf57152aab11",
     "gpu_contention": false,
-    "timestamp": "2026-07-10T10:54:05",
+    "timestamp": "2026-07-10T12:38:35",
     "name": "washerwoman-pond",
     "description": "Woman washing laundry by a lantern-lit courtyard pond at night.",
     "clip_sha1": "b3f63745dd4b"

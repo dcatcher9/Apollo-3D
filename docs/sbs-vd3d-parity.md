@@ -167,7 +167,7 @@ guided-vs-concealment question concrete and measurable instead of hand-waved.
 > us measure how much saturation is A4 (per-frame min/max pinning the nearest object) vs B1 (FG
 > bias) — which the combined pipeline can't separate.
 
-### B2 · Warp + shaping *(the irreducible divergence — deferred)*
+### B2 · Warp + shaping *(dual geometry implemented)*
 
 Shaping is **not** a separate pre-warp stage; it runs inside the reprojection shader at warp time,
 reading `SubjectState` (A8): depth-floor compression, subject recenter/stretch/band-curve/plane-lock
@@ -178,10 +178,18 @@ The warp is where Apollo and VD3D fundamentally differ:
   (`render_3d.py:3335`).
 - **Apollo:** occlusion-aware backward **probe** (frontmost-wins, nearest-bg fill).
 
-Both paths will be implemented behind one evaluator switch: (A) VD3D-style 35% backward grid warp
-+ 65% depth-ordered forward warp/hole fill and (B) Apollo's occlusion-aware probe. They receive the
-same saved pre-warp depth and shaping constants. Final-SBS similarity measures reproduction only;
-artifact, temporal, comfort, and performance gates decide which warp is better.
+Both paths are implemented behind `sbs_3d_warp` / evaluator `--warp`: (A) VD3D's Bestv2 35%
+backward grid warp + 65% depth-ordered forward splat with 96-pixel directional hole fill, and
+(B) Apollo's occlusion-aware probe. They receive the same saved pre-warp depth and disparity field.
+The first A/B deliberately stops before concealment. Final-SBS similarity measures reproduction
+only; artifact, temporal, comfort, and performance gates decide which warp is better.
+
+**Bare-warp result (2026-07-10):** the Apollo baseline remains metric-stable. VD3D hybrid reduces
+`stretch_area` slightly on the affected clips, but raises `rim_over_p95` past the regression gate
+on 6/8 clips because Bestv2's later repair is intentionally absent. At 3840×1080 on RTX 5080,
+harness GPU timestamps measure Apollo-probe at 0.478 ms p50 versus VD3D hybrid at 0.051 ms p50.
+The hybrid is therefore the performance leader, but neither geometry is the quality winner until
+the same concealment stage has been evaluated on both.
 
 ### B3 · Disocclusion concealment *(not ported — likely the real edge-look gap)*
 
@@ -199,7 +207,6 @@ fixed this session to the near plane when no subject). Heal/sharpen not ported.
 
 ## Next controlled experiment
 
-Implement both warp paths without sharing concealment. Compare bare geometry first, then apply the
-same Bestv2 smear-blend-back/directional repair to both. This prevents concealment from being
-mistaken for a warp advantage. Only after that result is frozen do Apollo-only improvements return
-one at a time.
+Compare the bare geometry, then apply the same Bestv2 smear-blend-back/directional repair to both.
+This prevents concealment from being mistaken for a warp advantage. Only after that result is
+frozen do Apollo-only improvements return one at a time.

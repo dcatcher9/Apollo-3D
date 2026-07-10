@@ -66,6 +66,31 @@ def sha1_dir(path):
     return h.hexdigest()[:12]
 
 
+def extra_value(args, name, default=None):
+    """Return the last explicit value for a two-token harness override."""
+    value = default
+    for i, token in enumerate(args[:-1]):
+        if token == name:
+            value = args[i + 1]
+    return value
+
+
+def conf_value(path, name, default=None):
+    """Read a simple Sunshine `name = value` setting without interpreting unrelated config."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, value = (part.strip() for part in line.split("=", 1))
+                if key == name:
+                    default = value
+    except OSError:
+        pass
+    return default
+
+
 def git(args):
     try:
         return subprocess.run(["git", "-C", REPO] + args, capture_output=True, text=True,
@@ -141,12 +166,17 @@ def main():
     metric_sha = sha256_files([os.path.join(SCRIPT_DIR, "sbsbench.py"),
                                os.path.join(SCRIPT_DIR, "thresholds.json")])
     expected_model = MODE_MODEL[args.mode]
+    expected_warp = extra_value(
+        args.extra, "--warp", conf_value(args.conf, "sbs_3d_warp", "apollo"))
+    if expected_warp not in {"apollo", "vd3d"}:
+        fail(f"invalid --warp override {expected_warp!r}")
     meta = {
         "git_sha": git(["rev-parse", "--short", "HEAD"]),
         "git_dirty": bool(git(["status", "--porcelain"])),
         "clip_set_sha1": {c: sha1_dir(os.path.join(clips_dir, c)) for c in clips},
         "mode": args.mode, "extra_args": args.extra, "conf": os.path.relpath(args.conf, REPO),
-        "model": expected_model, "eval_schema": EVAL_SCHEMA, "depth_step": "current-once",
+        "model": expected_model, "warp": expected_warp,
+        "eval_schema": EVAL_SCHEMA, "depth_step": "current-once",
         "conf_sha256": conf_sha, "metric_sha256": metric_sha,
         "gpu_contention": contention,
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -176,7 +206,11 @@ def main():
             fail(f"{clip}: expected model {expected_model!r}, harness reported {actual_model!r}")
         if "depth_step current-once" not in stdout:
             fail(f"{clip}: harness did not confirm current-once depth stepping")
-        clip_meta = {"model": actual_model}
+        warp_match = re.search(r"depth_step current-once, warp ([a-z0-9_-]+)", stdout)
+        actual_warp = warp_match.group(1) if warp_match else None
+        if actual_warp != expected_warp:
+            fail(f"{clip}: expected warp {expected_warp!r}, harness reported {actual_warp!r}")
+        clip_meta = {"model": actual_model, "warp": actual_warp}
 
         # A valid harness result has one source, raw-model, warp-input depth, and SBS artifact for
         # every numeric frame identity. This catches dropped/renumbered outputs before metrics run.

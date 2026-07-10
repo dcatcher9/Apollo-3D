@@ -8,9 +8,23 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sbsbench
+import run_eval
 
 
 class EvalContractTests(unittest.TestCase):
+    def test_warp_override_uses_last_explicit_value(self):
+        self.assertEqual(run_eval.extra_value(
+            ["--warp", "apollo", "--warp", "vd3d"], "--warp", "apollo"), "vd3d")
+
+    def test_warp_is_read_from_config(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
+            fh.write("# sbs_3d_warp = apollo\nsbs_3d_warp = vd3d # active\n")
+            path = fh.name
+        try:
+            self.assertEqual(run_eval.conf_value(path, "sbs_3d_warp", "apollo"), "vd3d")
+        finally:
+            os.unlink(path)
+
     def test_phase_shift_recovers_known_translation(self):
         rng = np.random.default_rng(1234)
         a = rng.random((64, 64))

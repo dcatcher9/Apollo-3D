@@ -178,6 +178,7 @@ namespace config {
     // Defaults live HERE (member initializers) -- the single source of truth. config.cpp
     // only parses the sbs_3d_* overrides; do not re-list defaults there.
     struct sbs_t {
+      std::string warp = "apollo";  ///< Geometry implementation: "apollo" = occlusion-aware backward probe; "vd3d" = Bestv2 backward/forward hybrid.
       double divergence = 0.0135;  ///< Parallax gain: signed parallax = (depth - focal_plane) * divergence, as a fraction of image width. 0 = flat (zero-parallax passthrough).
       double focal_plane = 0.5;  ///< Zero-parallax plane in normalized depth [0,1]; lower pushes more of the scene forward.
       double ema = 0.6;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
@@ -198,6 +199,8 @@ namespace config {
       double foreground_curvature = 0.0;  ///< VD3D foreground-volume shaping. Pushes near-region interiors toward the viewer with a centered elliptical profile. 0 = off; VD3D Bestv2 0.07.
       double dof_strength = 0.0;  ///< VD3D depth-of-field: blur the reprojected color by distance from the focal plane -- the tracked subject depth when subject_track is on, else the near plane (depth 1.0) so the nearest content stays sharp and the background blurs (standard bokeh; also softens off-focus disocclusion). Post-warp in the reprojection. Value = max blur RADIUS as a fraction of source width (NOT VD3D's 0.3 strength -- different parameterization); sane range ~0.004-0.015. 0 = off.
       double dof_focus_width = 0.35;  ///< In-focus depth half-width for dof_strength (VD3D focus_width): depth within this of the focal plane stays sharp; beyond it ramps to full blur.
+      double vd3d_forward_blend = 0.65;  ///< VD3D hybrid weight: 0 = classic backward grid warp, 1 = depth-ordered forward splat. Bestv2 code uses 0.65.
+      int vd3d_fill_radius = 96;  ///< Maximum horizontal forward-splat hole-fill distance in pixels. Bestv2 code uses 96.
       double minmax_snap = 1.6;  ///< Scene-cut snap: when a frame's raw depth range (or its center) jumps by more than this factor vs the EMA'd range, snap the normalization scale to the new scene instead of slowly blending (which makes depth "swim" for ~0.2-0.7s after a hard cut). 0 = off (always blend).
       double range_floor = 0.0;  ///< Range floor (0 = off): when the current depth range drops below this fraction of a slow-max reference range (near-flat content, e.g. a desktop page), compress the depth contrast toward the focal plane so min/max normalization doesn't stretch it to full parallax and amplify the model's hallucinated flat-scene structure. ~0.5 to enable; experimental.
       double depth_fps = 45.0;  ///< Target depth-update rate. Inference interval is auto-derived from the measured video fps (interval = round(video_fps / depth_fps)). 0 = update every frame.

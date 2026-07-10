@@ -1261,6 +1261,12 @@ namespace config {
     bool_f(vars, "isolated_virtual_display_option", video.isolated_virtual_display_option);
     bool_f(vars, "ignore_encoder_probe_failure", video.ignore_encoder_probe_failure);
 
+    string_f(vars, "sbs_3d_warp", video.sbs.warp);
+    if (video.sbs.warp != "apollo" && video.sbs.warp != "vd3d") {
+      BOOST_LOG(warning) << "Invalid sbs_3d_warp '" << video.sbs.warp
+                         << "'; expected 'apollo' or 'vd3d'. Using 'apollo'.";
+      video.sbs.warp = "apollo";
+    }
     double_between_f(vars, "sbs_3d_divergence", video.sbs.divergence, {0.0, 0.2});
     double_between_f(vars, "sbs_3d_focal_plane", video.sbs.focal_plane, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_ema", video.sbs.ema, {0.01, 1.0});
@@ -1281,6 +1287,8 @@ namespace config {
     double_between_f(vars, "sbs_3d_foreground_curvature", video.sbs.foreground_curvature, {0.0, 0.5});
     double_between_f(vars, "sbs_3d_dof_strength", video.sbs.dof_strength, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_dof_focus_width", video.sbs.dof_focus_width, {0.05, 1.0});
+    double_between_f(vars, "sbs_3d_vd3d_forward_blend", video.sbs.vd3d_forward_blend, {0.0, 1.0});
+    int_between_f(vars, "sbs_3d_vd3d_fill_radius", video.sbs.vd3d_fill_radius, {0, 256});
     double_between_f(vars, "sbs_3d_minmax_snap", video.sbs.minmax_snap, {0.0, 100.0});
     double_between_f(vars, "sbs_3d_range_floor", video.sbs.range_floor, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_depth_fps", video.sbs.depth_fps, {0.0, 240.0});

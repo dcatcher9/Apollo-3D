@@ -41,6 +41,10 @@ r≈0.996) and implicitly selecting DA3MONO had caused an entire wrong-model
 comparison.
 
 Harness A/B levers (after `--extra`):
+- `--warp apollo|vd3d` — choose Apollo's occlusion-aware probe or VD3D's Bestv2 hybrid
+  (`35%` backward grid warp + `65%` depth-ordered forward splat and directional hole fill).
+- `--vd3d-forward-blend F` — override the VD3D forward weight (`0.65` in Bestv2; `0` isolates
+  its classic backward warp and `1` isolates the forward splat).
 - `--divergence F` — parallax gain.
 - `--depth-short-side N` — depth inference short side (default 432; VD3D parity). 336 to A/B
   back to the old under-resolved default.
@@ -65,6 +69,9 @@ thresholds live in [thresholds.json](thresholds.json); the pinned SBS config in
 [bench.conf](bench.conf); baselines in `baselines/` (regenerate in the same commit whenever
 bench.conf, the clip set, or a metric definition changes). Guards: fails fast if TRT engines
 aren't prebuilt; warns + skips the perf gate if another sunshine.exe is running.
+
+The harness records `warp_infer` with D3D11 GPU timestamps around the selected warp. Use this for
+the dual-warp performance comparison; `sbs_composite_cpu` measures submission overhead only.
 
 Metric notes: silhouette detection runs at the native depth resolution with an absolute
 depth-step floor (flat scenes legitimately read 0), and all pixel windows scale with the eye

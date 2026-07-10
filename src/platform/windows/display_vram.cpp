@@ -136,6 +136,8 @@ namespace platf::dxgi {
   blob_t cursor_vs_hlsl;
   blob_t sbs_reprojection_ps_hlsl;
   blob_t sbs_reprojection_vs_hlsl;
+  blob_t sbs_vd3d_forward_cs_hlsl;
+  blob_t sbs_vd3d_reprojection_ps_hlsl;
 
   struct img_d3d_t: public platf::img_t {
     // These objects are owned by the display_t's ID3D11Device
@@ -392,6 +394,10 @@ namespace platf::dxgi {
     return compile_shader(file, "main_vs", "vs_5_0");
   }
 
+  blob_t compile_compute_shader(LPCSTR file) {
+    return compile_shader(file, "main", "cs_5_0");
+  }
+
   class d3d_base_encode_device final {
   public:
     ~d3d_base_encode_device() {
@@ -488,16 +494,42 @@ namespace platf::dxgi {
             depth_warned = true;
           }
 
-          // Draw SBS intermediate via the occlusion-aware probe reprojection.
+          // VD3D's hybrid starts with a depth-ordered forward splat. The compute pass records the
+          // nearest source x at every destination pixel; the resolve PS performs horizontal hole
+          // fill and blends it with the classic backward warp. Apollo-probe skips this pass.
+          if (est.depth && sbs_vd3d_warp) {
+            const UINT clear_winner[4] = {0, 0, 0, 0};
+            device_ctx->ClearUnorderedAccessViewUint(sbs_vd3d_winner_uav.get(), clear_winner);
+            device_ctx->CSSetShader(sbs_vd3d_forward_cs.get(), nullptr, 0);
+            device_ctx->CSSetSamplers(0, 1, &sampler_linear);
+            ID3D11ShaderResourceView* cs_srvs[] = {est.depth.Get(), est.subject.Get()};
+            device_ctx->CSSetShaderResources(1, 2, cs_srvs);
+            ID3D11UnorderedAccessView* cs_uavs[] = {sbs_vd3d_winner_uav.get()};
+            device_ctx->CSSetUnorderedAccessViews(0, 1, cs_uavs, nullptr);
+            ID3D11Buffer* cs_cb[] = {sbs_reprojection_cbuffer.get()};
+            device_ctx->CSSetConstantBuffers(2, 1, cs_cb);
+            const UINT eye_w = (UINT) sbs_viewport.Width / 2u;
+            const UINT eye_h = (UINT) sbs_viewport.Height;
+            device_ctx->Dispatch((eye_w + 15u) / 16u, (eye_h + 15u) / 16u, 1u);
+
+            ID3D11UnorderedAccessView* null_uav[] = {nullptr};
+            ID3D11ShaderResourceView* null_cs_srvs[] = {nullptr, nullptr};
+            device_ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
+            device_ctx->CSSetShaderResources(1, 2, null_cs_srvs);
+          }
+
+          // Draw the selected geometry implementation into the shared SBS intermediate.
           device_ctx->OMSetRenderTargets(1, &sbs_intermediate_rtv, nullptr);
           device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
-          device_ctx->PSSetShader(sbs_reprojection_ps.get(), nullptr, 0);
+          device_ctx->PSSetShader(est.depth && sbs_vd3d_warp ?
+            sbs_vd3d_reprojection_ps.get() : sbs_reprojection_ps.get(), nullptr, 0);
           device_ctx->RSSetViewports(1, &sbs_viewport);
           // Bind the sampler explicitly rather than relying on it persisting from init().
           device_ctx->PSSetSamplers(0, 1, &sampler_linear);
 
-          ID3D11ShaderResourceView* srvs[] = {img_ctx.encoder_input_res.get(), est.depth.Get(), est.subject.Get()};
-          device_ctx->PSSetShaderResources(0, 3, srvs);
+          ID3D11ShaderResourceView* srvs[] = {img_ctx.encoder_input_res.get(), est.depth.Get(),
+            est.subject.Get(), est.depth && sbs_vd3d_warp ? sbs_vd3d_winner_srv.get() : nullptr};
+          device_ctx->PSSetShaderResources(0, 4, srvs);
           ID3D11Buffer* sbs_cb[] = {est.depth ? sbs_reprojection_cbuffer.get() : sbs_passthrough_cbuffer.get()};
           device_ctx->PSSetConstantBuffers(2, 1, sbs_cb);
           device_ctx->Draw(3, 0);  // Fullscreen triangle
@@ -507,8 +539,8 @@ namespace platf::dxgi {
           device_ctx->OMSetRenderTargets(1, null_rtvs, nullptr);
 
           // Clear shader resources
-          ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr, nullptr};
-          device_ctx->PSSetShaderResources(0, 3, null_srvs);
+          ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr, nullptr, nullptr};
+          device_ctx->PSSetShaderResources(0, 4, null_srvs);
 
           // Draw captured frame (now SBS)
           draw(sbs_intermediate_srv, out_Y_or_YUV_viewports, out_UV_viewport);
@@ -651,6 +683,7 @@ namespace platf::dxgi {
       frame_texture->AddRef();
       output_texture.reset(frame_texture);
       sbs_mode = sbs_mode_param;
+      sbs_vd3d_warp = sbs_mode != ::video::SBS_OFF && config::video.sbs.warp == "vd3d";
 
       HRESULT status = S_OK;
 
@@ -664,11 +697,20 @@ namespace platf::dxgi {
     BOOST_LOG(error) << "Failed to create pixel shader " << #x << ": " << util::log_hex(status); \
     return -1; \
   }
+#define create_compute_shader_helper(x, y) \
+  if (FAILED(status = device->CreateComputeShader(x->GetBufferPointer(), x->GetBufferSize(), nullptr, &y))) { \
+    BOOST_LOG(error) << "Failed to create compute shader " << #x << ": " << util::log_hex(status); \
+    return -1; \
+  }
 
       const bool downscaling = display->width > width || display->height > height;
 
       create_pixel_shader_helper(sbs_reprojection_ps_hlsl, sbs_reprojection_ps);
       create_vertex_shader_helper(sbs_reprojection_vs_hlsl, sbs_reprojection_vs);
+      if (sbs_vd3d_warp) {
+        create_compute_shader_helper(sbs_vd3d_forward_cs_hlsl, sbs_vd3d_forward_cs);
+        create_pixel_shader_helper(sbs_vd3d_reprojection_ps_hlsl, sbs_vd3d_reprojection_ps);
+      }
 
       switch (format) {
         case DXGI_FORMAT_NV12:
@@ -751,6 +793,7 @@ namespace platf::dxgi {
 
 #undef create_vertex_shader_helper
 #undef create_pixel_shader_helper
+#undef create_compute_shader_helper
 
       const bool sbs_on = sbs_mode != ::video::SBS_OFF;
 
@@ -798,6 +841,29 @@ namespace platf::dxgi {
         }
         device->CreateRenderTargetView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_rtv);
         device->CreateShaderResourceView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_srv);
+
+        if (sbs_vd3d_warp) {
+          D3D11_TEXTURE2D_DESC winner_desc = tex_desc;
+          winner_desc.Format = DXGI_FORMAT_R32_UINT;
+          winner_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+          status = device->CreateTexture2D(&winner_desc, nullptr, &sbs_vd3d_winner_texture);
+          if (FAILED(status)) {
+            BOOST_LOG(error) << "Failed to create VD3D forward-warp winner texture";
+            return -1;
+          }
+          if (FAILED(device->CreateUnorderedAccessView(
+                sbs_vd3d_winner_texture.get(), nullptr, &sbs_vd3d_winner_uav)) ||
+              FAILED(device->CreateShaderResourceView(
+                sbs_vd3d_winner_texture.get(), nullptr, &sbs_vd3d_winner_srv))) {
+            BOOST_LOG(error) << "Failed to create VD3D forward-warp winner views";
+            return -1;
+          }
+          BOOST_LOG(info) << "Host SBS warp: VD3D Bestv2 hybrid (backward "
+                          << (1.0 - config::video.sbs.vd3d_forward_blend) * 100.0 << "%, forward "
+                          << config::video.sbs.vd3d_forward_blend * 100.0 << "%).";
+        } else {
+          BOOST_LOG(info) << "Host SBS warp: Apollo occlusion-aware probe.";
+        }
 
         sbs_viewport = {0.0f, 0.0f, (float) tex_desc.Width, (float) tex_desc.Height, 0.0f, 1.0f};
       }
@@ -1036,7 +1102,7 @@ namespace platf::dxgi {
       // SBS reprojection constants (see sbs_reprojection_ps.hlsl): {divergence, focal,
       // parallax_steps, border_fade, depth_floor, subject_track, subject_lock, subject_stretch,
       // subject_plane_lock, subject_plane_width, pad, pad}.
-      float sbs_params[12] {
+      float sbs_params[16] {
         (float) config::video.sbs.divergence,
         (float) config::video.sbs.focal_plane,
         (float) config::video.sbs.parallax_steps,
@@ -1048,19 +1114,25 @@ namespace platf::dxgi {
         (float) config::video.sbs.subject_plane_lock,
         (float) config::video.sbs.subject_plane_width,
         (float) config::video.sbs.dof_strength,
-        (float) config::video.sbs.dof_focus_width
+        (float) config::video.sbs.dof_focus_width,
+        (float) config::video.sbs.vd3d_forward_blend,
+        (float) config::video.sbs.vd3d_fill_radius,
+        0.0f, 0.0f
       };
       sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);
 
       // Passthrough variant with zero divergence, bound when depth estimation is unavailable
       // so we still emit a correctly-framed (flat) SBS frame instead of a globally-shifted one.
-      float sbs_passthrough_params[12] {
+      float sbs_passthrough_params[16] {
         0.0f,
         (float) config::video.sbs.focal_plane,
         (float) config::video.sbs.parallax_steps,
         (float) config::video.sbs.border_fade,
         (float) config::video.sbs.depth_floor,
-        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+        (float) config::video.sbs.vd3d_forward_blend,
+        (float) config::video.sbs.vd3d_fill_radius,
+        0.0f, 0.0f
       };
       sbs_passthrough_cbuffer = make_buffer(device.get(), sbs_passthrough_params);
 
@@ -1217,11 +1289,17 @@ namespace platf::dxgi {
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
     vs_t sbs_reprojection_vs;
     ps_t sbs_reprojection_ps;
+    cs_t sbs_vd3d_forward_cs;
+    ps_t sbs_vd3d_reprojection_ps;
     buf_t sbs_reprojection_cbuffer;
     buf_t sbs_passthrough_cbuffer;
     texture2d_t sbs_intermediate_texture;
     render_target_t sbs_intermediate_rtv;
     shader_res_t sbs_intermediate_srv;
+    bool sbs_vd3d_warp = false;
+    texture2d_t sbs_vd3d_winner_texture;
+    unordered_access_t sbs_vd3d_winner_uav;
+    shader_res_t sbs_vd3d_winner_srv;
     D3D11_VIEWPORT sbs_viewport;
 
     platf::sbs_debug::dumper sbs_dumper;  ///< Debug: dumps SBS frames on the client button (see sbs_debug_dump.h).
@@ -2205,6 +2283,9 @@ namespace platf::dxgi {
 #define compile_pixel_shader_helper(x) \
   if (!(x##_hlsl = compile_pixel_shader(SUNSHINE_SHADERS_DIR "/" #x ".hlsl"))) \
     return -1;
+#define compile_compute_shader_helper(x) \
+  if (!(x##_hlsl = compile_compute_shader(SUNSHINE_SHADERS_DIR "/" #x ".hlsl"))) \
+    return -1;
 
     compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps);
     compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_linear);
@@ -2232,12 +2313,15 @@ namespace platf::dxgi {
     compile_pixel_shader_helper(cursor_ps_normalize_white);
     compile_pixel_shader_helper(sbs_reprojection_ps);
     compile_vertex_shader_helper(sbs_reprojection_vs);
+    compile_compute_shader_helper(sbs_vd3d_forward_cs);
+    compile_pixel_shader_helper(sbs_vd3d_reprojection_ps);
     compile_vertex_shader_helper(cursor_vs);
 
     BOOST_LOG(info) << "Compiled shaders"sv;
 
 #undef compile_vertex_shader_helper
 #undef compile_pixel_shader_helper
+#undef compile_compute_shader_helper
 
     return 0;
   }
