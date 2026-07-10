@@ -869,19 +869,17 @@ namespace models {
                     BOOST_LOG(warning) << "Subject-tracking shaders failed to compile; falling back to the linear depth mapping.";
                     subject_track = false;
                 }
-                // The shaped-disparity knobs (stretch, plane-lock, band curve) only feed the
-                // PROBE reprojection. The MLBW learned warp anchors the subject via its
-                // convergence plane instead and ignores them -- warn so a MLBW user isn't
-                // silently tuning dead knobs.
-                if (subject_track && learned_warp && (subject_stretch || cfg.subject_plane_lock > 0.0)) {
-                    BOOST_LOG(warning) << "sbs_3d_subject_stretch / subject_plane_lock only affect the probe reprojection; "
-                                          "the active learned warp (sbs_3d_learned_warp) anchors the subject via its "
-                                          "convergence plane and ignores them.";
-                }
-            } else if (subject_stretch || cfg.subject_plane_lock > 0.0) {
-                // These require the subject estimate; with tracking off they are silent no-ops.
-                BOOST_LOG(warning) << "sbs_3d_subject_stretch / subject_plane_lock have no effect without "
-                                      "sbs_3d_subject_track = enabled -- ignoring them.";
+            }
+            // Diagnostics for the probe-path shaping (subject_stretch/plane_lock/band curve),
+            // which is live only when subject tracking runs on the PROBE reprojection. subject_stretch
+            // defaults ON, so keying off it would warn on every default run -- flag only the MLBW
+            // case (informational) and an explicitly-set subject_plane_lock (defaults off) with
+            // tracking inactive. Evaluated after the block so a compile-failure fallback counts too.
+            if (subject_track && learned_warp) {
+                BOOST_LOG(info) << "Subject tracking on the learned warp anchors via its convergence plane; "
+                                   "the probe-path shaping (sbs_3d_subject_stretch / subject_plane_lock) is inactive.";
+            } else if (!subject_track && cfg.subject_plane_lock > 0.0) {
+                BOOST_LOG(warning) << "sbs_3d_subject_plane_lock has no effect without sbs_3d_subject_track = enabled.";
             }
             if (guided_upsample) {
                 bool ok = compile_shader(assets_dir / "shaders" / "directx" / "depth_guide_downsample_cs.hlsl", depth_guide_downsample_cs) &&
@@ -1260,10 +1258,12 @@ namespace models {
             cb_desc.ByteWidth = 80;  // shared depth-pass cbuffer (20 floats/uints; see below)
             cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
-            // Shared depth-pass constants: {target_w, target_h, is_hdr, ema_alpha, minmax_alpha,
-            // reduce_threads, output_transform, depth_shift, snap_ratio, floor_frac,
-            // floor_ref_alpha, pct_lo, pct_hi, pads} (see buffer_to_tex_cs.hlsl /
-            // depth_minmax_ema_cs.hlsl; shaders declaring only the 12-slot prefix still bind fine).
+            // Shared depth-pass constants, 20 scalars = 5 float4 registers. THIS fill is the
+            // single source of truth for the canonical layout in
+            // shaders/directx/include/depth_constants.hlsl -- every cbf[N] below must stay
+            // slot-for-slot with the include (which every depth shader #includes). To add a
+            // field: append it here AND to the include (never reuse a slot; slots 3-19 are all
+            // live -- see the field list in depth_constants.hlsl).
             uint32_t cb[20] = {};
             float* cbf = (float*)cb;
             cb[0] = (uint32_t)target_w;

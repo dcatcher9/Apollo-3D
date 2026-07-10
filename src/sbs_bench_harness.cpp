@@ -203,7 +203,7 @@ namespace sbs_bench {
       double subject_lock = -1.0;  // subject anchor strength override (e.g. 0.95)
       bool probe = false;          // force the probe-search reprojection (learned_warp off)
       int depth_short_side = 0;    // depth inference short-side override (0 = conf; VD3D uses 432)
-      double ema = -1.0;         // per-pixel depth EMA override (1.0 = off; pair with --sync-depth)
+      double ema = -1.0;         // per-pixel depth EMA override (1.0 = off)
       bool subject_stretch = false;  // VD3D shape_depth_for_pop 5/95 disparity stretch
       double subject_plane_lock = -1.0;  // local subject-band flatten (e.g. 0.28); <0 = conf
     };

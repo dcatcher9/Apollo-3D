@@ -9,7 +9,7 @@ Texture2D<float>         DepthTexture : register(t0);  // normalized depth, high
 RWStructuredBuffer<uint> SubjectHist  : register(u0);  // 256 bins, weight in 1/1024 units
 RWStructuredBuffer<uint> PlainHist    : register(u1);  // 256 bins, UNWEIGHTED count (for stretch 5/95 pct)
 
-// Shared depth-pass cbuffer (only target_w/target_h are used here; layout parity).
+// Shared depth-pass cbuffer (only target_w/target_h are used here).
 #include "include/depth_constants.hlsl"
 
 #define NUM_BINS 256
