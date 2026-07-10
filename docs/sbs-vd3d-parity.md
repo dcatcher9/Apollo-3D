@@ -65,7 +65,7 @@ The pipeline is two cadence groups, not a flat list. Steps ordered by execution:
 | **B. Frame synthesis** | | *runs every output frame* | | |
 | B1 | guided upsample (+ curvature, guided-on path) | per-frame | `depth_guided_upsample_cs` + `depth_curvature_cs` | ✅ |
 | B2 | warp incl. shaping (depth-floor, subject recenter/stretch/band-curve/plane-lock, probe search) | per-frame | `sbs_reprojection_ps.hlsl` | mechanism differs |
-| B3 | disocclusion concealment | per-frame | — (not ported) | ✅ VD3D-only |
+| B3 | disocclusion concealment | per-frame | evaluated, rejected, removed | VD3D-only; no measured gain |
 | B4 | post (DOF, heal, sharpen) | per-frame | `sbs_reprojection_ps.hlsl` (DOF only) | partial |
 
 Two timeline facts that drive everything:
@@ -218,15 +218,25 @@ only; artifact, temporal, comfort, and performance gates decide which warp is be
 `stretch_area` slightly on the affected clips, but raises `rim_over_p95` on 6/8 clips and crosses
 the regression gate on 5/8 because Bestv2's later repair is intentionally absent. At 3840×1080 on RTX 5080,
 harness GPU timestamps measure Apollo-probe at 0.478 ms p50 versus VD3D hybrid at 0.051 ms p50.
-The hybrid is therefore the performance leader, but neither geometry is the quality winner until
-the same concealment stage has been evaluated on both.
+The hybrid is therefore the performance leader. The shared concealment experiment below does not
+change the quality ordering: Apollo remains slightly ahead on the aggregate exact-field score,
+while the per-metric tradeoffs do not establish a decisive visual-quality winner.
 
-### B3 · Disocclusion concealment *(not ported — likely the real edge-look gap)*
+### B3 · Disocclusion concealment *(evaluated and rejected)*
 
 VD3D: smear-blend-back (shift-grad>0.006 → 5×5 dilate → 60% blend back to flat 2D) + one-sided
-directional repair ("Fast" for Bestv2) (`render_3d.py:3372+`). Apollo: none (probe fill only). The
-smear-blend-back trades pop for cleanliness in disocclusion zones — the most probable single source
-of VD3D's "clean" look, and roadmap stage 3.
+directional repair ("Fast" for Bestv2) (`render_3d.py:3372+`). Apollo: none (probe fill only).
+
+**Bestv2 concealment result (2026-07-10):** a shared GPU implementation was applied after each
+geometry and evaluated as separate smear-only, repair-only, and combined treatments. Raw and
+pre-warp depth remained byte-identical. Fast repair produced byte-identical SBS frames on the
+evaluation corpus because its validity/gradient mask never activated. Smear-only was therefore
+also the combined result: Apollo exact-field score fell 74.2250 → 74.1125, rim-over-p95 rose
+5.9818 → 6.3212, and disocclusion flicker rose 5.0052 → 5.0308; VD3D hybrid score fell
+73.7375 → 73.7250 with the same rim/flicker direction. Both paths cost about 0.059 ms more warp
+time. Against the aligned 1920×1080 real Bestv2 reference, combined output was byte-identical to
+shift-only output, so MAE/PSNR did not improve. The treatment is rejected and its runtime code and
+switches were removed; local HTML reports remain under `cmake-build-relwithdebinfo/sbs_eval/`.
 
 ### B4 · Post *(partial)*
 
@@ -237,6 +247,7 @@ fixed this session to the near plane when no subject). Heal/sharpen not ported.
 
 ## Next controlled experiment
 
-Compare the bare geometry, then apply the same Bestv2 smear-blend-back/directional repair to both.
-This prevents concealment from being mistaken for a warp advantage. Only after that result is
-frozen do Apollo-only improvements return one at a time.
+Evaluate Bestv2 foreground curvature/window sculpting as the next isolated reproduction step,
+with the accepted shift profile fixed and both warp geometries reported. Keep raw and pre-warp
+depth identity as hard gates. After faithful Bestv2 shaping is exhausted, return Apollo-only
+improvements one at a time.
