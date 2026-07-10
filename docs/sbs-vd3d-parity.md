@@ -123,9 +123,9 @@ config below encodes exactly that.
 | `sbs_3d_norm_pct_lo`/`_hi` | 0 / 100 (raw min/max) | **2 / 98** | VD3D `DepthPercentileEMA(p2/p98)` |
 | `sbs_3d_minmax_ema` | 0.1 (α≈0.9) | **0.1 (keep)** | VD3D's 0.18 (α=0.82) is only safe on its pre-locked input; on Apollo's un-locked drift it flickers (c339 `flicker_disocc` 2.7→47) — **eval-proven**, keep the slow range EMA |
 | `sbs_3d_ema` (per-pixel) | 0.6 | **0.5** | VD3D `TemporalDepthFilter(α=0.5)` |
-| `sbs_3d_range_floor` | 0.0 (off) | **off** | Apollo-only; VD3D lacks it |
+| `sbs_3d_range_floor` | 0 (off) | **off** | Apollo-only; VD3D lacks it. Was pinned 0.5 in bench.conf (so the eval ran it); **removed 2026-07-10** so the eval matches the config.h default |
 | `sbs_3d_norm_lock_frames` | 0 | **0** | VD3D's bootstrap-freeze (3–5 frames) is live-approximable, but Apollo already bench-tested it (norm_lock_frames) and DA-V2's affine drift makes a frozen range go stale (swim worse); VD3D survives it via its per-frame render EMA on top |
-| `sbs_3d_guided_upsample` | on | **off** | VD3D has no upsample — see B1; this is Phase-B #1 |
+| `sbs_3d_guided_upsample` | **off** (was on) | **off** | VD3D has no upsample — see B1. **Default flipped off 2026-07-10** + eval re-baselined; re-enabling it is now Phase-B #1 (edge crispness pending the concealment port) |
 
 The one real gap Apollo closes here is **raw min/max → per-frame percentile** (`pct 2/98`), plus
 the per-pixel `ema=0.5`. Apollo does **not** copy VD3D's α=0.82 range-bounds EMA: it keeps the
