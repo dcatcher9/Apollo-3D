@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Assemble the SBS A/B report directly from two run_eval.py runs (control + treatment):
-a control-vs-treatment scorecard (row per clip, auto-discovered), the gate's verdict, and one
+control-vs-treatment bar charts (one pair per clip), the gate's verdict, and one
 section per triggered issue with control/treatment crops at each issue's WORST frame.
 
 Usage: build_report.py <control_run_dir> <treat_run_dir> <out.html>
@@ -132,13 +132,6 @@ def mid_frame(run, clip):
     return max(0, n // 2)
 
 
-def thumb(clip):
-    im = Image.open(frame_path(ctrl_dir, clip, mid_frame(ctrl_dir, clip)))
-    left = im.crop((0, 0, im.width // 2, im.height))
-    left.thumbnail((132, 264), Image.LANCZOS)
-    return durl(left)
-
-
 def crop_at_silhouette(clip, idx):
     """Control/treatment left-eye crops at the strongest depth silhouette of frame idx (falls
     back to center if the depth is flat). Returns (ctrl_durl, treat_durl) or None."""
@@ -169,6 +162,45 @@ def crop_at_silhouette(clip, idx):
     return out
 
 
+def visual_evidence_images(clip, idx):
+    """Matched control/treatment crops plus an amplified RGB difference heatmap.
+
+    The crop is selected from the shared control depth, so both modes show exactly the same
+    source region.  The heatmap is deliberately labelled as amplified: it is evidence of where
+    the renderers differ, while the adjacent metric supplies the direction of the change.
+    """
+    pair = crop_at_silhouette(clip, idx)
+    if not pair:
+        return None
+    cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
+    dp = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
+    depth = load_depth(dp)
+    ctrl, treat = Image.open(cp).convert("RGB"), Image.open(tp).convert("RGB")
+    ew, eh = ctrl.width // 2, ctrl.height
+    gx = np.abs(np.diff(depth, axis=1, prepend=depth[:, :1]))
+    dh, dw = depth.shape
+    band = gx[int(dh * 0.15):int(dh * 0.85)]
+    score = band.sum(0)
+    lo, hi = int(dw * 0.1), int(dw * 0.9)
+    cx_d = int(np.argmax(score[lo:hi]) + lo) if score[lo:hi].max() > 0.1 else dw // 2
+    rows = gx[:, max(0, cx_d - 2):cx_d + 3].sum(1)
+    cy_d = int(np.argmax(rows)) if rows.max() > 0 else dh // 2
+    cx, cy = int(cx_d / dw * ew), int(cy_d / dh * eh)
+    cw, ch = min(480, ew), min(360, eh)
+    x0 = max(0, min(ew - cw, cx - cw // 2))
+    y0 = max(0, min(eh - ch, cy - ch // 2))
+    a = np.asarray(ctrl.crop((x0, y0, x0 + cw, y0 + ch)), np.float32)
+    b = np.asarray(treat.crop((x0, y0, x0 + cw, y0 + ch)), np.float32)
+    delta = np.mean(np.abs(b - a), axis=2)
+    # Black means unchanged. Red/yellow/white means progressively larger RGB disagreement.
+    v = np.clip(delta * 5.0, 0, 255)
+    heat = np.zeros((*v.shape, 3), np.uint8)
+    heat[..., 0] = v.astype(np.uint8)
+    heat[..., 1] = np.clip((v - 64) * 1.7, 0, 255).astype(np.uint8)
+    heat[..., 2] = np.clip((v - 160) * 2.7, 0, 255).astype(np.uint8)
+    return pair[0], pair[1], durl(Image.fromarray(heat), w=380, jpg=True, q=82)
+
+
 def run_label(run, default):
     """Human name for a run: its extra harness args, else 'mode (model)', else a default."""
     ex = run["meta"].get("extra_args") or []
@@ -195,18 +227,6 @@ def treatment_name():
     return TREAT_NAME
 
 
-def delta_chip(a, b, worse_high):
-    if a == 0 and b == 0:
-        return '<span class="d d-flat">—</span>'
-    d = b - a
-    pct = d / a * 100 if a else (100.0 if b else 0.0)
-    if abs(pct) < 5:
-        return f'<span class="d d-flat">{b:.2f}</span>'
-    better = (d < 0) if worse_high else (d > 0)
-    cls = "d-good" if better else "d-bad"
-    return f'<span class="d {cls}">{b:.2f} {"▼" if d < 0 else "▲"}{abs(pct):.0f}%</span>'
-
-
 ctrl_agg = {c: CTRL["clips"][c]["aggregate"] for c in CLIPS}
 treat_agg = {c: TREAT["clips"][c]["aggregate"] for c in CLIPS}
 # Ensure the overall score is present (older run dirs predate it; recompute from the aggregates).
@@ -217,32 +237,34 @@ colmax = {k: max(max(ctrl_agg[c].get(k, 0), treat_agg[c].get(k, 0)) for c in CLI
 ACTIVE = [col for col in COLS if col[3] or colmax[col[0]] > col[4]]
 CLEAN = [col for col in COLS if col not in ACTIVE and col[2]]
 
-# Per-clip signature: the control issue with the highest value/trigger ratio.
-sig = {}
-for c in CLIPS:
-    best = None
-    for i in CTRL["issues"]:
-        if i["clip"] == c:
-            ratio = i["value"] / i["trigger"]
-            if not best or ratio > best[1]:
-                best = (i["metric"], ratio)
-    sig[c] = (f"{SHORT.get(best[0], best[0])} ×{best[1]:.1f}", "crit" if best[1] > 2 else "warn") \
-        if best else ("clean", "good")
-
-
-def scorecard_rows():
-    out = []
-    for c in CLIPS:
-        s, cls = sig[c]
-        ident = (f'<td class="idcell"><img class="thumb" src="{thumb(c)}" alt="{c}">'
-                 f'<div class="idmeta"><span class="clipname">{name(c)}</span>'
-                 f'<span class="pill p-{cls}">{s}</span></div></td>')
-        cells = [ident]
-        for k, _, worse, _, _ in ACTIVE:
-            a, b = ctrl_agg[c].get(k, 0), treat_agg[c].get(k, 0)
-            cells.append(f'<td><div class="cv">{a:.2f}</div>{delta_chip(a, b, worse)}</td>')
-        out.append("<tr>" + "".join(cells) + "</tr>")
-    return "\n".join(out)
+def scorecard_charts():
+    """Grouped horizontal bars retain every table value while making A/B movement scannable."""
+    charts = []
+    for metric, label, worse, _, _ in ACTIVE:
+        values = [(c, ctrl_agg[c].get(metric, 0.0), treat_agg[c].get(metric, 0.0)) for c in CLIPS]
+        scale = max((max(abs(a), abs(b)) for _, a, b in values), default=1.0) or 1.0
+        rows = []
+        for c, a, b in values:
+            aw = max(0.8, abs(a) / scale * 100.0) if a else 0.0
+            bw = max(0.8, abs(b) / scale * 100.0) if b else 0.0
+            delta = b - a
+            floor = THR.get(metric, {}).get("abs_floor", 0.0) / 2.0
+            flat = abs(delta) < max(floor, abs(a) * 0.05)
+            better = (delta < 0) if worse else (delta > 0)
+            move_cls = "bar-flat" if flat else "bar-good" if better else "bar-bad"
+            pct = delta / a * 100.0 if a else (100.0 if b else 0.0)
+            delta_text = "within noise" if flat else f'{"better" if better else "worse"} {abs(pct):.0f}%'
+            rows.append(
+                f'<div class="bar-row"><div class="bar-scene" title="{c}">{name(c)}</div>'
+                f'<div class="bar-pair"><div class="bar-line"><span class="bar-tag">{CTRL_TAG}</span>'
+                f'<span class="bar-track"><i class="bar-fill bar-control" style="width:{aw:.1f}%"></i></span>'
+                f'<b>{a:.2f}</b></div><div class="bar-line"><span class="bar-tag">{TREAT_TAG}</span>'
+                f'<span class="bar-track"><i class="bar-fill {move_cls}" style="width:{bw:.1f}%"></i></span>'
+                f'<b>{b:.2f}</b></div></div><span class="bar-delta {move_cls}">{delta_text}</span></div>')
+        direction = "lower is better" if worse else "higher is better"
+        charts.append(f'<article class="metric-chart"><div class="chart-head">'
+                      f'<h3>{mtip(metric, label)}</h3><span>{direction}</span></div>{"".join(rows)}</article>')
+    return '<div class="chart-grid">' + "".join(charts) + '</div>'
 
 
 # metric -> (short header, what it measures, direction). Only the ones that appear render.
@@ -416,6 +438,56 @@ def issue_sections():
     return "\n".join(html)
 
 
+def visual_evidence_section():
+    """Show the strongest spatial win and regression with matched images and a diff map."""
+    spatial = ("stretch_area", "rim_over_p95", "edge_acc_p50", "disocc_smear")
+    candidates = []
+    for metric in spatial:
+        floor = THR.get(metric, {}).get("abs_floor", 0.0)
+        for c in CLIPS:
+            a, b = ctrl_agg[c].get(metric, 0.0), treat_agg[c].get(metric, 0.0)
+            delta = b - a  # all spatial artifact metrics are lower-is-better
+            if abs(delta) < max(floor / 2.0, 1e-6):
+                continue
+            denom = max(floor, abs(a) * 0.05, 1e-6)
+            candidates.append((abs(delta) / denom, delta, metric, c, a, b))
+
+    def card(item, kind):
+        _, delta, metric, c, a, b = item
+        # For a treatment regression use its worst frame; for an improvement show the frame
+        # where the control had the artifact that treatment is reducing.
+        source = TREAT if delta > 0 else CTRL
+        wf = source["clips"][c].get("worst_frame", {}).get(metric, {})
+        frame = wf.get("frame", mid_frame(ctrl_dir, c))
+        imgs = visual_evidence_images(c, frame)
+        if not imgs:
+            return ""
+        pct = delta / a * 100 if a else 100.0
+        cls = "evidence-cost" if kind == "regression" else "evidence-win"
+        badge = "regression" if kind == "regression" else "improvement"
+        return (f'<article class="evidence-card {cls}"><div class="ic-head">'
+                f'<span class="clipname">{name(c)}</span><span class="pill">{badge}</span>'
+                f'<span class="metricval">{mtip(metric, SHORT.get(metric, metric))}: '
+                f'<b>{a:.2f}</b> &rarr; {b:.2f} ({pct:+.0f}%) &middot; frame {frame}</span></div>'
+                f'<div class="triplet"><figure><span class="tag">{CTRL_TAG}</span>'
+                f'<img src="{imgs[0]}"></figure><figure><span class="tag t-treat">{TREAT_TAG}</span>'
+                f'<img src="{imgs[1]}"></figure><figure><span class="tag t-diff">abs diff &times;5</span>'
+                f'<img src="{imgs[2]}"></figure></div></article>')
+
+    wins = sorted((x for x in candidates if x[1] < 0), reverse=True)[:2]
+    costs = sorted((x for x in candidates if x[1] > 0), reverse=True)[:2]
+    cards = "".join(card(x, "improvement") for x in wins)
+    cards += "".join(card(x, "regression") for x in costs)
+    if not cards:
+        return ""
+    return (f'<section><h2>Visual evidence: improvements and regressions</h2>'
+            f'<p class="sub">Matched left-eye crops at the metric\'s worst frame. The first two '
+            f'panels are identical source locations; the third is an amplified absolute RGB '
+            f'difference map (black = unchanged, red/yellow/white = increasing change). The '
+            f'metric, not the heatmap color, determines whether the change is a win or cost.</p>'
+            f'{cards}</section>')
+
+
 def clean_footer():
     if not CLEAN:
         return ""
@@ -425,7 +497,6 @@ def clean_footer():
 
 
 meta = CTRL["meta"]
-hdr_cells = "".join(f'<th title="{tip_text(k)}">{h}</th>' for k, h, *_ in ACTIVE)
 
 HTML = """<style>
 :root{--bg:#f5f6f7;--panel:#fff;--ink:#12181d;--muted:#5c6a74;--line:#dbe1e6;--accent:#0e8f9c;
@@ -466,21 +537,25 @@ thead th{font-family:var(--mono);font-size:11px;letter-spacing:.02em;text-transf
 thead th[title]:not([title=""]),.mtip{cursor:help;text-decoration:underline dotted;text-underline-offset:3px;text-decoration-color:color-mix(in srgb,var(--muted) 60%,transparent)}
 tbody tr:last-child td{border-bottom:none}
 td{font-family:var(--mono);font-variant-numeric:tabular-nums}
-.cv{font-size:14px;color:var(--ink)}
 .mtab td,.mtab th{text-align:left;white-space:normal}
 .mtab .mname{font-family:var(--mono);font-size:12.5px;color:var(--accent);font-weight:600;white-space:nowrap;vertical-align:top}
 .mtab .mwhat{font-family:var(--sans);font-size:13.5px;color:var(--ink);max-width:60ch}
 .mtab .mdir{font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:nowrap;vertical-align:top}
-.d{font-size:11px;font-family:var(--mono);display:inline-block;margin-top:3px;padding:1px 6px;border-radius:20px;font-weight:600}
-.d-flat{color:var(--muted);background:color-mix(in srgb,var(--muted) 12%,transparent)}
-.d-good{color:var(--good);background:color-mix(in srgb,var(--good) 15%,transparent)}
-.d-bad{color:var(--crit);background:color-mix(in srgb,var(--crit) 15%,transparent)}
-.idcell{display:flex;align-items:center;gap:11px}
-.thumb{width:64px;height:auto;border-radius:5px;border:1px solid var(--line);display:block;flex:0 0 auto}
-.idmeta{display:flex;flex-direction:column;gap:5px;align-items:flex-start}
+.chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.metric-chart{border:1px solid var(--line);border-radius:11px;background:var(--panel);padding:14px 14px 10px;min-width:0}
+.chart-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:9px}
+.chart-head h3{font-family:var(--mono);font-size:13px;color:var(--ink);margin:0}.chart-head>span{font-family:var(--mono);font-size:10px;color:var(--muted)}
+.bar-row{display:grid;grid-template-columns:112px minmax(130px,1fr) 72px;align-items:center;gap:8px;padding:6px 0;border-top:1px solid color-mix(in srgb,var(--line) 65%,transparent)}
+.bar-scene{font-family:var(--mono);font-size:10.5px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar-pair{display:grid;gap:3px}.bar-line{display:grid;grid-template-columns:34px minmax(50px,1fr) 42px;align-items:center;gap:5px}
+.bar-tag{font-family:var(--mono);font-size:9px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar-line b{font-family:var(--mono);font-size:9.5px;font-weight:500;text-align:right;font-variant-numeric:tabular-nums}
+.bar-track{height:5px;background:color-mix(in srgb,var(--muted) 10%,transparent);border-radius:5px;overflow:hidden}
+.bar-fill{display:block;height:100%;min-width:0;border-radius:5px}.bar-control{background:var(--accent)}
+.bar-good{background:var(--good)}.bar-bad{background:var(--crit)}.bar-flat{background:var(--muted)}
+.bar-delta{font-family:var(--mono);font-size:9.5px;text-align:right;background:none}.bar-delta.bar-good{color:var(--good)}.bar-delta.bar-bad{color:var(--crit)}.bar-delta.bar-flat{color:var(--muted)}
 .clipname{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--ink)}
 .pill{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:20px;font-weight:600;white-space:nowrap}
-.p-good{color:var(--good);background:color-mix(in srgb,var(--good) 15%,transparent)}
 .p-warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 15%,transparent)}
 .p-crit{color:var(--crit);background:color-mix(in srgb,var(--crit) 15%,transparent)}
 .p-info{color:var(--accent);background:var(--accent-soft)}
@@ -491,11 +566,18 @@ td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .pair.single{grid-template-columns:1fr;max-width:540px}
 .pair figure{margin:0;position:relative}
 .pair img{width:100%;border-radius:9px;border:1px solid var(--line);display:block}
+.evidence-card{margin-top:22px;padding:14px;border:1px solid var(--line);border-radius:11px;background:var(--panel)}
+.evidence-card .pill{color:var(--good);background:color-mix(in srgb,var(--good) 15%,transparent)}
+.evidence-card.evidence-cost .pill{color:var(--crit);background:color-mix(in srgb,var(--crit) 15%,transparent)}
+.triplet{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.triplet figure{margin:0;position:relative}.triplet img{width:100%;border-radius:8px;border:1px solid var(--line);display:block}
+.tag.t-diff{color:var(--accent)}
 .tag{position:absolute;top:8px;left:8px;font-family:var(--mono);font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;background:color-mix(in srgb,var(--bg) 82%,transparent);border:1px solid var(--line);color:var(--ink)}
 .tag.t-treat{color:var(--warn)}
 pre{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:16px;overflow-x:auto;color:var(--ink);line-height:1.7}
 code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);padding:1px 6px;border-radius:5px}
-@media (max-width:640px){.pair{grid-template-columns:1fr}h1{font-size:28px}}
+@media (max-width:800px){.chart-grid{grid-template-columns:1fr}}
+@media (max-width:640px){.pair,.triplet{grid-template-columns:1fr}.bar-row{grid-template-columns:88px minmax(110px,1fr) 62px}h1{font-size:28px}}
 </style>
 
 <div class="wrap">
@@ -510,17 +592,15 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
 
   __CONCLUSION__
 
+  __VISUAL_EVIDENCE__
+
   <section>
-    <h2>Scorecard — __CTRL_NAME__ → __TREAT_NAME__</h2>
-    <p class="sub">One row per clip (auto-discovered; signature = its strongest triggered issue,
-    as value×trigger ratio). Each cell shows the <b>__CTRL_TAG__</b> value on top and a chip for
-    <b>__TREAT_TAG__</b> below (its value + %Δ; green = __TREAT_TAG__ better on this metric, red =
-    worse, grey &lt; 5%). pop is higher-is-better; the rest higher-is-worse (see the definitions
-    above). Flat metrics collapse to the footer and auto-return when non-zero.</p>
-    <div class="tablewrap"><table>
-      <thead><tr><th>clip</th>__HDR__</tr></thead>
-      <tbody>__ROWS__</tbody>
-    </table></div>
+    <h2>Bar comparison — __CTRL_NAME__ → __TREAT_NAME__</h2>
+    <p class="sub">One grouped horizontal chart per metric, with matched <b>__CTRL_TAG__</b> and
+    <b>__TREAT_TAG__</b> bars for every clip. Bars share a scale within each metric; exact values
+    remain printed beside them. Treatment bars are green when better, red when worse, and grey
+    when the movement is within noise. Flat metrics collapse below and return automatically.</p>
+    __CHARTS__
     __FOOTER__
   </section>
 
@@ -553,8 +633,9 @@ HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
         .replace("__DIRTY__", "+dirty" if meta["git_dirty"] else "")
         .replace("__NCLIPS__", str(len(CLIPS)))
         .replace("__MODELS__", models).replace("__CONCLUSION__", conclusion_section())
+        .replace("__VISUAL_EVIDENCE__", visual_evidence_section())
         .replace("__CTRL_TAG__", CTRL_TAG).replace("__TREAT_TAG__", TREAT_TAG)
-        .replace("__HDR__", hdr_cells).replace("__ROWS__", scorecard_rows())
+        .replace("__CHARTS__", scorecard_charts())
         .replace("__METRICS__", metrics_section())
         .replace("__FOOTER__", clean_footer()).replace("__ISSUES__", issue_sections())
         .replace("__TREAT_ARGS__", " ".join(TREAT["meta"].get("extra_args") or ["--mode game"])))
