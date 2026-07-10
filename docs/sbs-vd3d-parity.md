@@ -233,6 +233,18 @@ corpus, stereo spread rises on both geometries and mean score is essentially fla
 too small to justify the consistent pop/rim cost. The treatment is rejected and removed; its
 local HTML reports remain as evidence.
 
+**Rejected exact fitted-curvature result (2026-07-10):** VD3D's actual three-pass operation was
+ported for evaluation: separable 31×31 mask feathering, mask-weighted centroid/variance ellipse
+fit, gamma 1.35, and strength 0.07. Because VD3D's render tensor is low-near despite the helper's
+white-near docstring, the port mirrored the code's actual polarity rather than its semantic name.
+Raw-model and saved pre-warp artifacts were byte-identical. Ordinary-scene score changed only
+about +0.09 (Apollo) / +0.04 (VD3D); mean rim improved by only 0.050/0.074 and volume movement was
+small. The aligned reference changed MAE 0.061374603 → 0.061373916 and PSNR 20.878422 →
+20.878621 dB—effectively zero. The apparent +0.79 VD3D mean-score headline came almost entirely
+from `flat_page`, where false stereo fell 0.25 px. Three compute passes and multiple GPU resources
+are not justified by that isolated effect, so the fitted port was removed. Reports remain under
+`sbs_eval/bestv2-curvature-{apollo,vd3d}/`.
+
 ### B3 · Disocclusion concealment *(evaluated and rejected)*
 
 VD3D: smear-blend-back (shift-grad>0.006 → 5×5 dilate → 60% blend back to flat 2D) + one-sided
@@ -258,8 +270,8 @@ fixed this session to the near plane when no subject). Heal/sharpen not ported.
 
 ## Next controlled experiment
 
-Replace Apollo's fixed-centered foreground-curvature approximation with Bestv2's fitted,
-31×31-feathered foreground ellipse and evaluate it as the next isolated reproduction step on both
-warp geometries. Keep the raw and saved pre-warp depth checkpoints fixed by applying curvature in
-the disparity-shaping stage. After faithful Bestv2 shaping is exhausted, return Apollo-only
-improvements one at a time.
+Evaluate Bestv2's exact subject-plane-lock morphology as the next isolated reproduction step:
+center weighting, 21×21 dilation, 15×15 closing, 13×13 smoothing, shift-weighted subject mean, and
+the 0.75 correction-mask exponent. Keep the accepted shift-only profile fixed and report both warp
+geometries. After faithful Bestv2 shaping is exhausted, return Apollo-only improvements one at a
+time.
