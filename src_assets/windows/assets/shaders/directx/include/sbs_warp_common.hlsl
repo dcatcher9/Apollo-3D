@@ -51,32 +51,11 @@ float Bestv2RawShiftPx(float d) {
     return (wn * 9.99f + wm * 3.0f + wf * -2.52f) / (wn + wm + wf + 1e-6f);
 }
 
-// Bestv2's cinematic_window_depth_sculpt, mirrored from VD3D low=near depth into Apollo's
-// high=near convention. The preset activates this even with depth_pop_gamma=1: its
-// bg_push_multiplier=1.05 produces window_strength=(1.05-1)*1.20=.06. The remaining values are
-// derived directly from Bestv2: subject_hold=.35+.20*.28=.406, near_pull=.06+.06*.11=.0666,
-// subject_width=.12. This is disparity shaping only; the saved pre-warp depth stays untouched.
-float Bestv2WindowDepth(float d, float raw_subject_depth) {
-    float rel = d - raw_subject_depth;  // high=near: positive is in front of the subject
-    float far_mask = smoothstep(0.04f, 0.42f, -rel);
-    float near_mask = smoothstep(0.04f, 0.32f, rel);
-    float subject_mask = exp(-0.5f * (rel / 0.12f) * (rel / 0.12f));
-
-    // Mirrored VD3D operations: pushing low=near depth upward moves high=near depth downward;
-    // pulling it downward moves high=near depth upward.
-    float far_boost = far_mask * 0.06f * d * 0.65f;
-    float near_boost = near_mask * 0.0666f * (1.0f - d) * 0.45f;
-    float sculpted = saturate(d - far_boost + near_boost);
-    float hold = saturate(subject_mask * 0.406f);
-    return lerp(sculpted, d, min(hold, 0.95f));
-}
-
 float Bestv2Parallax(float d, float4 s0, float4 s1, float source_width) {
-    float shaped_depth = Bestv2WindowDepth(WarpDepth(d, s0, s1, true), s0.z);
+    float shaped_depth = WarpDepth(d, s0, s1, true);
+    float subject_depth = WarpDepth(s0.z, s0, s1, true);
     float shift_px = Bestv2RawShiftPx(shaped_depth);
-    // VD3D computes its subject anchor from subject_depth_track directly, not from the
-    // stretched/recentered/sculpted copy used for the per-pixel disparity field.
-    float subject_shift_px = Bestv2RawShiftPx(s0.z);
+    float subject_shift_px = Bestv2RawShiftPx(subject_depth);
 
     // Bestv2 apply_subject_plane_lock(.28, width=.12), expressed on the shift field. Apollo's
     // current depth-band mask is the real-time equivalent; concealment/silhouette morphology is

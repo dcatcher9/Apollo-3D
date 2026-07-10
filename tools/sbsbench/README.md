@@ -51,10 +51,9 @@ Harness A/B levers (after `--extra`):
 - `--shift-profile apollo|bestv2` — choose the disparity field independently of geometry.
   `bestv2` uses the preset's source-pixel FG/MG/BG shifts (`-9/-3/+2.4`), `.35` parallax
   balance, `1.11/1.05` multipliers, `.008` zero-parallax trim, dynamic convergence `.006`,
-  `.071` safety cap, and cinematic-window depth sculpt derived from the preset's `gamma=1.0`,
-  `bg_push=1.05`, `fg_pop=1.11`, and plane-lock settings. The tracked-subject anchor uses the
-  unshaped subject depth like VD3D. This is resolution-calibrated; `--divergence` remains the
-  Apollo profile and uninitialized-depth fallback.
+  and `.071` safety cap. This is resolution-calibrated; `--divergence` remains the Apollo
+  profile and uninitialized-depth fallback. Bestv2 cinematic-window sculpt was evaluated and
+  rejected; see `docs/sbs-vd3d-parity.md`.
 - `--depth-short-side N` — depth inference short side (default 432; VD3D parity). 336 to A/B
   back to the old under-resolved default.
 - `--pct-lo F --pct-hi F` — robust percentile normalization bounds, e.g. `1 99` (default off =

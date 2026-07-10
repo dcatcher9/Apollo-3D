@@ -222,15 +222,16 @@ The hybrid is therefore the performance leader. The shared concealment experimen
 change the quality ordering: Apollo remains slightly ahead on the aggregate exact-field score,
 while the per-metric tradeoffs do not establish a decisive visual-quality winner.
 
-**Bestv2 cinematic-window result (2026-07-10):** the shared Bestv2 disparity field now applies
+**Rejected Bestv2 cinematic-window result (2026-07-10):** the treatment applied
 VD3D's active window sculpt (`strength=.06`, subject hold `.406`, near pull `.0666`, width `.12`)
 and computes the subject anchor from raw tracked-subject depth rather than the transformed pixel
 depth. Raw-model and pre-warp artifacts are byte-identical to the control. Against the aligned
 real Bestv2 output, MAE improves 0.061375 → 0.061302 and PSNR 20.878 → 20.902 dB. On the generic
 corpus, stereo spread rises on both geometries and mean score is essentially flat/slightly higher
 (Apollo +0.0875, VD3D +0.1000 under the expected-flat contract), while rim-over-p95 worsens
-(+0.517/+0.845). This is retained as a
-faithful reproduction behavior, not claimed as an Apollo quality improvement.
+(+0.517/+0.845), and median pop falls on nearly every meaningful clip. The reference change is
+too small to justify the consistent pop/rim cost. The treatment is rejected and removed; its
+local HTML reports remain as evidence.
 
 ### B3 · Disocclusion concealment *(evaluated and rejected)*
 
