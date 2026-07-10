@@ -15,12 +15,12 @@ cbuffer Constants : register(b2) {
     float subject_stretch;
     float subject_plane_lock;
     float subject_plane_width;
-    float dof_strength;
-    float dof_focus_width;
+    float warp_pad0;
+    float warp_pad1;
     float vd3d_forward_blend;
     float vd3d_fill_radius;
     float bestv2_shift_profile;
-    float warp_pad1;
+    float warp_pad3;
 };
 
 #include "include/band_curve.hlsl"

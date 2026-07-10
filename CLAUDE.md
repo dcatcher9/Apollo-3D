@@ -128,7 +128,7 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   disocc_frac/disocc_smear (disocclusion severity), flicker (temporal shimmer, which the offline
   sim can't measure). Capture a baseline before the change; `--divergence`, `--model`/`--movie`,
   `--depth-short-side`, `--subject-track`/`--subject-lock`/`--subject-stretch`/`--subject-plane-lock`,
-  `--curvature`, `--dof`, `--pct-lo`/`--pct-hi` are the A/B levers (see the harness README). Run
+  `--curvature`, `--pct-lo`/`--pct-hi` are the A/B levers (see the harness README). Run
   it from `cmake-build-relwithdebinfo` so `assets/` resolves.
 - **Perf** — the in-app `sbs_3d_perf_stats = enabled` config knob ([src/sbs_perf.cpp](src/sbs_perf.cpp)):
   logs per-stage p50/p95/max (`depth_infer`, `warp_infer` via CUDA events; `sbs_convert_cpu`)

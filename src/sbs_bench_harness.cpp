@@ -249,7 +249,6 @@ namespace sbs_bench {
       bool subject_stretch = false;  // VD3D shape_depth_for_pop 5/95 disparity stretch
       double subject_plane_lock = -1.0;  // local subject-band flatten (e.g. 0.28); <0 = conf
       double curvature = -1.0;     // foreground curvature strength (e.g. 0.07); <0 = conf
-      double dof = -1.0;           // depth-of-field strength (e.g. 0.3); <0 = conf
       double vd3d_forward_blend = -1.0;  // VD3D backward/forward blend override; <0 = conf
       double minmax_ema = -1.0;    // range-bounds EMA new-weight (VD3D DepthPercentileEMA a=0.82 -> 0.18); <0 = conf
       int guided = -1;             // guided upsample: -1 = conf, 0 = off, 1 = on
@@ -281,7 +280,6 @@ namespace sbs_bench {
         else if (a == "--subject-stretch") o.subject_stretch = true;
         else if (a == "--subject-plane-lock") o.subject_plane_lock = std::stod(next("--subject-plane-lock"));
         else if (a == "--curvature") o.curvature = std::stod(next("--curvature"));
-        else if (a == "--dof") o.dof = std::stod(next("--dof"));
         else if (a == "--vd3d-forward-blend") o.vd3d_forward_blend = std::stod(next("--vd3d-forward-blend"));
         else if (a == "--ema") o.ema = std::stod(next("--ema"));
         else if (a == "--minmax-ema") o.minmax_ema = std::stod(next("--minmax-ema"));
@@ -361,7 +359,6 @@ namespace sbs_bench {
     if (o.subject_stretch) sbs_cfg.subject_stretch = true;      // A/B lever: shape_depth_for_pop stretch
     if (o.subject_plane_lock >= 0.0) sbs_cfg.subject_plane_lock = o.subject_plane_lock;
     if (o.curvature >= 0.0) sbs_cfg.foreground_curvature = o.curvature;
-    if (o.dof >= 0.0) sbs_cfg.dof_strength = o.dof;
     if (o.vd3d_forward_blend >= 0.0) sbs_cfg.vd3d_forward_blend = o.vd3d_forward_blend;
     if (o.ema > 0.0) sbs_cfg.ema = o.ema;                        // A/B lever: depth EMA (1.0 = off)
     if (o.minmax_ema >= 0.0) sbs_cfg.minmax_ema = o.minmax_ema;  // A/B lever: range-bounds EMA (VD3D 0.18)
@@ -426,8 +423,8 @@ namespace sbs_bench {
       (float) sbs_cfg.parallax_steps, (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor,
       sbs_cfg.subject_track ? 1.0f : 0.0f, (float) sbs_cfg.subject_lock,
       sbs_cfg.subject_stretch ? 1.0f : 0.0f, (float) sbs_cfg.subject_plane_lock,
-      (float) sbs_cfg.subject_plane_width, (float) sbs_cfg.dof_strength,
-      (float) sbs_cfg.dof_focus_width, (float) sbs_cfg.vd3d_forward_blend,
+      (float) sbs_cfg.subject_plane_width, 0.0f,
+      0.0f, (float) sbs_cfg.vd3d_forward_blend,
       (float) sbs_cfg.vd3d_fill_radius, sbs_cfg.shift_profile == "bestv2" ? 1.0f : 0.0f, 0.0f};
     auto repro_cb = const_buffer(dev.Get(), repro_params);
     float pass_params[16] = {0, (float) sbs_cfg.focal_plane, (float) sbs_cfg.parallax_steps,

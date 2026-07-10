@@ -1102,7 +1102,7 @@ namespace platf::dxgi {
 
       // SBS reprojection constants (see sbs_reprojection_ps.hlsl): {divergence, focal,
       // parallax_steps, border_fade, depth_floor, subject_track, subject_lock, subject_stretch,
-      // subject_plane_lock, subject_plane_width, DOF, VD3D hybrid, Bestv2-profile flag, pad}.
+      // subject_plane_lock, subject_plane_width, two pads, VD3D hybrid, Bestv2-profile flag, pad}.
       float sbs_params[16] {
         (float) config::video.sbs.divergence,
         (float) config::video.sbs.focal_plane,
@@ -1114,8 +1114,8 @@ namespace platf::dxgi {
         config::video.sbs.subject_stretch ? 1.0f : 0.0f,
         (float) config::video.sbs.subject_plane_lock,
         (float) config::video.sbs.subject_plane_width,
-        (float) config::video.sbs.dof_strength,
-        (float) config::video.sbs.dof_focus_width,
+        0.0f,
+        0.0f,
         (float) config::video.sbs.vd3d_forward_blend,
         (float) config::video.sbs.vd3d_fill_radius,
         config::video.sbs.shift_profile == "bestv2" ? 1.0f : 0.0f, 0.0f
