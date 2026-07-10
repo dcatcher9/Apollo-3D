@@ -31,6 +31,15 @@ python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change
 python tools/sbsbench/run_eval.py --extra --divergence 0.027   # pass A/B levers to the harness
 ```
 
+**Mode / model (important):** `--mode` defaults to **`game`** (depth model **DA-V2 small**,
+`depth_anything_v2_fp16`) — the committed baselines are game/DA-V2. `--mode movie` swaps in
+**DA3MONO** (`da3mono_large_fp16`, a different, more aggressive model) and would NOT match the
+game baselines. Always eval in game mode unless you deliberately want DA3MONO, and never compare
+numbers across modes (they're different models). Default was `movie` until 2026-07-10; it was
+flipped to `game` because DA-V2 is the model we test against (matches VisionDepth3D's DA-V2 at
+r≈0.996) and `--movie`/DA3MONO silently swapping the model had caused an entire wrong-model
+comparison.
+
 Harness A/B levers (after `--extra`):
 - `--divergence F` — parallax gain.
 - `--depth-short-side N` — depth inference short side (default 432; VD3D parity). 336 to A/B

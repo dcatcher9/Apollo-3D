@@ -86,7 +86,7 @@ def main():
     ap.add_argument("--build-dir", default=os.path.join(REPO, "cmake-build-relwithdebinfo"))
     ap.add_argument("--conf", default=os.path.join(SCRIPT_DIR, "bench.conf"))
     ap.add_argument("--clips", nargs="*", help="clip names (default: all in clips/)")
-    ap.add_argument("--mode", choices=["movie", "game"], default="movie")
+    ap.add_argument("--mode", choices=["movie", "game"], default="game")
     ap.add_argument("--label", default=None, help="run label (default: timestamp)")
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[],
                     help="extra harness args, e.g. --extra --divergence 0.027")
