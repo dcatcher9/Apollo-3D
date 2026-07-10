@@ -222,6 +222,15 @@ The hybrid is therefore the performance leader. The shared concealment experimen
 change the quality ordering: Apollo remains slightly ahead on the aggregate exact-field score,
 while the per-metric tradeoffs do not establish a decisive visual-quality winner.
 
+**Bestv2 cinematic-window result (2026-07-10):** the shared Bestv2 disparity field now applies
+VD3D's active window sculpt (`strength=.06`, subject hold `.406`, near pull `.0666`, width `.12`)
+and computes the subject anchor from raw tracked-subject depth rather than the transformed pixel
+depth. Raw-model and pre-warp artifacts are byte-identical to the control. Against the aligned
+real Bestv2 output, MAE improves 0.061375 → 0.061302 and PSNR 20.878 → 20.902 dB. On the generic
+corpus, stereo spread rises on both geometries and mean score is essentially flat/slightly higher
+(Apollo +0.0625, VD3D +0.0125), while rim-over-p95 worsens (+0.517/+0.845). This is retained as a
+faithful reproduction behavior, not claimed as an Apollo quality improvement.
+
 ### B3 · Disocclusion concealment *(evaluated and rejected)*
 
 VD3D: smear-blend-back (shift-grad>0.006 → 5×5 dilate → 60% blend back to flat 2D) + one-sided
@@ -247,7 +256,8 @@ fixed this session to the near plane when no subject). Heal/sharpen not ported.
 
 ## Next controlled experiment
 
-Evaluate Bestv2 foreground curvature/window sculpting as the next isolated reproduction step,
-with the accepted shift profile fixed and both warp geometries reported. Keep raw and pre-warp
-depth identity as hard gates. After faithful Bestv2 shaping is exhausted, return Apollo-only
+Replace Apollo's fixed-centered foreground-curvature approximation with Bestv2's fitted,
+31×31-feathered foreground ellipse and evaluate it as the next isolated reproduction step on both
+warp geometries. Keep the raw and saved pre-warp depth checkpoints fixed by applying curvature in
+the disparity-shaping stage. After faithful Bestv2 shaping is exhausted, return Apollo-only
 improvements one at a time.
