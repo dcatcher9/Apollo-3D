@@ -397,14 +397,16 @@ namespace sbs_bench {
 
     auto vs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0");
     auto ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0");
+    auto sharpen_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_sharpen_ps.hlsl", "main_ps", "ps_5_0");
     auto vd3d_cs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_vd3d_forward_cs.hlsl", "main", "cs_5_0");
     auto vd3d_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_vd3d_reprojection_ps.hlsl", "main_ps", "ps_5_0");
-    if (!vs_blob || !ps_blob || !vd3d_cs_blob || !vd3d_ps_blob) return 6;
+    if (!vs_blob || !ps_blob || !sharpen_ps_blob || !vd3d_cs_blob || !vd3d_ps_blob) return 6;
     ComPtr<ID3D11VertexShader> vs;
-    ComPtr<ID3D11PixelShader> ps, vd3d_ps;
+    ComPtr<ID3D11PixelShader> ps, sharpen_ps, vd3d_ps;
     ComPtr<ID3D11ComputeShader> vd3d_cs;
     dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &vs);
     dev->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &ps);
+    dev->CreatePixelShader(sharpen_ps_blob->GetBufferPointer(), sharpen_ps_blob->GetBufferSize(), nullptr, &sharpen_ps);
     dev->CreateComputeShader(vd3d_cs_blob->GetBufferPointer(), vd3d_cs_blob->GetBufferSize(), nullptr, &vd3d_cs);
     dev->CreatePixelShader(vd3d_ps_blob->GetBufferPointer(), vd3d_ps_blob->GetBufferSize(), nullptr, &vd3d_ps);
 
@@ -438,6 +440,10 @@ namespace sbs_bench {
     // Per-run state built lazily on the first frame (once we know the input size).
     ComPtr<ID3D11Texture2D> sbs_tex, sbs_stage;
     ComPtr<ID3D11RenderTargetView> sbs_rtv;
+    ComPtr<ID3D11ShaderResourceView> sbs_srv;
+    ComPtr<ID3D11Texture2D> sharpen_tex;
+    ComPtr<ID3D11RenderTargetView> sharpen_rtv;
+    ComPtr<ID3D11ShaderResourceView> sharpen_srv;
     ComPtr<ID3D11Texture2D> vd3d_winner_tex;
     ComPtr<ID3D11UnorderedAccessView> vd3d_winner_uav;
     ComPtr<ID3D11ShaderResourceView> vd3d_winner_srv;
@@ -478,6 +484,15 @@ namespace sbs_bench {
         td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         dev->CreateTexture2D(&td, nullptr, &sbs_tex);
         dev->CreateRenderTargetView(sbs_tex.Get(), nullptr, &sbs_rtv);
+        dev->CreateShaderResourceView(sbs_tex.Get(), nullptr, &sbs_srv);
+        if (sbs_cfg.shift_profile == "bestv2") {
+          if (FAILED(dev->CreateTexture2D(&td, nullptr, &sharpen_tex)) ||
+              FAILED(dev->CreateRenderTargetView(sharpen_tex.Get(), nullptr, &sharpen_rtv)) ||
+              FAILED(dev->CreateShaderResourceView(sharpen_tex.Get(), nullptr, &sharpen_srv))) {
+            BOOST_LOG(error) << "sbs-bench: sharpen texture creation failed";
+            return 6;
+          }
+        }
         if (sbs_cfg.warp == "vd3d") {
           D3D11_TEXTURE2D_DESC wd = td;
           wd.Format = DXGI_FORMAT_R32_UINT;
@@ -546,6 +561,19 @@ namespace sbs_bench {
       ctx->OMSetRenderTargets(1, null_rtv, nullptr);
       ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
       ctx->PSSetShaderResources(0, 5, null_srv);
+      ID3D11Texture2D *final_sbs_tex = sbs_tex.Get();
+      ID3D11ShaderResourceView *post_input_srv = sbs_srv.Get();
+      if (est.depth && sharpen_rtv && sharpen_srv) {
+        ctx->OMSetRenderTargets(1, sharpen_rtv.GetAddressOf(), nullptr);
+        ctx->VSSetShader(vs.Get(), nullptr, 0);
+        ctx->PSSetShader(sharpen_ps.Get(), nullptr, 0);
+        ctx->RSSetViewports(1, &vp);
+        ctx->PSSetShaderResources(0, 1, &post_input_srv);
+        ctx->Draw(3, 0);
+        ctx->OMSetRenderTargets(1, null_rtv, nullptr);
+        ctx->PSSetShaderResources(0, 1, null_srv);
+        final_sbs_tex = sharpen_tex.Get();
+      }
       if (time_warp) {
         ctx->End(warp_end.Get());
         ctx->End(warp_disjoint.Get());
@@ -572,7 +600,7 @@ namespace sbs_bench {
       sbs_perf::tick();
 
       // Readback -> PNG.
-      ctx->CopyResource(sbs_stage.Get(), sbs_tex.Get());
+      ctx->CopyResource(sbs_stage.Get(), final_sbs_tex);
       D3D11_MAPPED_SUBRESOURCE m = {};
       if (SUCCEEDED(ctx->Map(sbs_stage.Get(), 0, D3D11_MAP_READ, 0, &m))) {
         std::vector<uint8_t> buf((size_t) sbs_w * sbs_h * 4);

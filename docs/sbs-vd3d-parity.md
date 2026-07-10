@@ -66,7 +66,7 @@ The pipeline is two cadence groups, not a flat list. Steps ordered by execution:
 | B1 | guided upsample (+ curvature, guided-on path) | per-frame | `depth_guided_upsample_cs` + `depth_curvature_cs` | ✅ |
 | B2 | warp incl. shaping (depth-floor, subject recenter/stretch/band-curve/plane-lock, probe search) | per-frame | `sbs_reprojection_ps.hlsl` | mechanism differs |
 | B3 | disocclusion concealment | per-frame | evaluated, rejected, removed | VD3D-only; no measured gain |
-| B4 | post (DOF, heal, sharpen) | per-frame | DOF evaluated/rejected/removed | sharpen pending; heal helper is not called |
+| B4 | post (DOF, heal, sharpen) | per-frame | exact SDR sharpen retained for parity | DOF rejected; heal helper is not called |
 
 Two timeline facts that drive everything:
 - **Async ordering.** In async mode A-group consumes the *previous* frame's inference, so B-group
@@ -279,7 +279,8 @@ switches were removed; local HTML reports remain under `cmake-build-relwithdebin
 ### B4 · Post *(partial)*
 
 VD3D: DOF (0.3, five-level Gaussian pyramid) + sharpen 0.2. Its `heal_missing_pixels` helper is
-defined but never called by either active render path. Apollo: neither post effect retained.
+defined but never called by either active render path. Apollo retains only exact SDR sharpen as a
+Phase-A parity operation.
 
 **Rejected exact Bestv2 DOF result (2026-07-10):** a shared post-warp pass reproduced the five
 Gaussian levels from sigma 0 through 0.3, per-pixel level interpolation from
@@ -293,12 +294,29 @@ the aligned VD3D render, MAE slightly worsened 0.05683363 → 0.05683677 and PSN
 improve fidelity, so the treatment and the stale DOF configuration/evaluator switches were
 removed. Reports remain under `sbs_eval/bestv2-dof-{apollo,vd3d}/`.
 
+Testing DOF again in its intended position immediately before sharpen did not rescue it: versus
+sharpen-only, ordinary-scene score changed -0.014/0.000, rim p95 only -0.027/-0.029, GPU time
+rose another 0.011 ms, and aligned-reference MAE changed just 0.01604888 → 0.01604809. The
+combination reports remain under `sbs_eval/bestv2-dof-sharpen-{apollo,vd3d}/`; DOF stays removed.
+
+**Accepted exact Bestv2 SDR sharpen reproduction (2026-07-10):** a shared post-warp, per-eye
+3×3 convolution matches `tensor_sharpen(.2)`: center coefficient 5.2, four axial neighbors -1,
+zero padding, then clamp. Raw-model and pre-warp depth artifacts are byte-identical. Against the
+aligned VD3D render, MAE improves 0.056834 → 0.016049 and PSNR 22.193 → 30.152 dB; median pop
+12.59 px is nearly the 12.56 px reference and spread 9.96 px approaches the 10.57 px reference.
+This is the largest remaining Phase-A fidelity gain and is retained.
+
+It is deliberately not called an Apollo quality improvement. Excluding `flat_page`, score falls
+6.20/6.46, rim p95 rises 25.78/37.73, and pop spread falls 0.35/0.59 px on Apollo/VD3D geometry.
+The generic reports at `sbs_eval/bestv2-sharpen-{apollo,vd3d}/` visualize those regressions. The
+Phase-B Apollo experiments start from this faithful-but-harsh parity checkpoint and must beat it.
+
 ---
 
 ## Next controlled experiment
 
-Evaluate Bestv2's active sharpen 0.2 as the next isolated reproduction step on top of the accepted
-exact plane lock. Do not port `heal_missing_pixels`: repository search confirms it is dead VD3D
-code, not part of the Bestv2 output. Keep reporting both warp geometries and preserve the raw and
-saved pre-warp depth checkpoints. After faithful Bestv2 post-processing is exhausted, return
-Apollo-only improvements one at a time.
+Phase A is complete. Begin Phase B with Apollo's color-guided depth upsample as the first isolated
+improvement on top of the faithful Bestv2 checkpoint. Keep the raw-model checkpoint fixed; the
+saved pre-warp depth is expected to change and must be reported explicitly because guided
+upsampling snaps depth silhouettes to current-frame color edges. Evaluate both warp geometries and
+retain it only if the independent quality/temporal metrics justify the depth-stage divergence.

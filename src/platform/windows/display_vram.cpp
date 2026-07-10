@@ -135,6 +135,7 @@ namespace platf::dxgi {
   blob_t cursor_ps_normalize_white_hlsl;
   blob_t cursor_vs_hlsl;
   blob_t sbs_reprojection_ps_hlsl;
+  blob_t sbs_sharpen_ps_hlsl;
   blob_t sbs_reprojection_vs_hlsl;
   blob_t sbs_vd3d_forward_cs_hlsl;
   blob_t sbs_vd3d_reprojection_ps_hlsl;
@@ -543,14 +544,30 @@ namespace platf::dxgi {
           ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
           device_ctx->PSSetShaderResources(0, 5, null_srvs);
 
-          // Draw captured frame (now SBS)
-          draw(sbs_intermediate_srv, out_Y_or_YUV_viewports, out_UV_viewport);
+          // Bestv2 SDR sharpen is post-warp and per-eye. Both geometry paths feed the same pass.
+          ID3D11ShaderResourceView* final_sbs_srv = sbs_intermediate_srv.get();
+          if (est.depth && sbs_sharpen_rtv && sbs_sharpen_srv) {
+            ID3D11RenderTargetView* sharpen_rtv = sbs_sharpen_rtv.get();
+            device_ctx->OMSetRenderTargets(1, &sharpen_rtv, nullptr);
+            device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
+            device_ctx->PSSetShader(sbs_sharpen_ps.get(), nullptr, 0);
+            device_ctx->RSSetViewports(1, &sbs_viewport);
+            ID3D11ShaderResourceView* sharpen_input = final_sbs_srv;
+            device_ctx->PSSetShaderResources(0, 1, &sharpen_input);
+            device_ctx->Draw(3, 0);
+            device_ctx->OMSetRenderTargets(1, null_rtvs, nullptr);
+            device_ctx->PSSetShaderResources(0, 1, null_srvs);
+            final_sbs_srv = sbs_sharpen_srv.get();
+          }
+
+          // Draw captured frame (now SBS, optionally post-warp sharpened).
+          draw(final_sbs_srv, out_Y_or_YUV_viewports, out_UV_viewport);
 
           // Debug frame dump (offline artifact inspection): on the client "Dump 3D" button or a
           // "dump.trigger" file, save this frame's 2D source, depth map and SBS result. See
           // sbs_debug_dump.h. No-op unless APOLLO_SBS_DUMP is set.
           sbs_dumper.maybe_dump(device.get(), device_ctx.get(),
-            img_ctx.encoder_input_res.get(), est.depth.Get(), sbs_intermediate_srv.get());
+            img_ctx.encoder_input_res.get(), est.depth.Get(), final_sbs_srv);
 
           if (perf) {
             auto dt = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - perf_t0).count();
@@ -707,6 +724,7 @@ namespace platf::dxgi {
       const bool downscaling = display->width > width || display->height > height;
 
       create_pixel_shader_helper(sbs_reprojection_ps_hlsl, sbs_reprojection_ps);
+      create_pixel_shader_helper(sbs_sharpen_ps_hlsl, sbs_sharpen_ps);
       create_vertex_shader_helper(sbs_reprojection_vs_hlsl, sbs_reprojection_vs);
       if (sbs_vd3d_warp) {
         create_compute_shader_helper(sbs_vd3d_forward_cs_hlsl, sbs_vd3d_forward_cs);
@@ -842,6 +860,16 @@ namespace platf::dxgi {
         }
         device->CreateRenderTargetView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_rtv);
         device->CreateShaderResourceView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_srv);
+
+        if (!display->is_hdr() && config::video.sbs.shift_profile == "bestv2") {
+          status = device->CreateTexture2D(&tex_desc, nullptr, &sbs_sharpen_texture);
+          if (FAILED(status) ||
+              FAILED(device->CreateRenderTargetView(sbs_sharpen_texture.get(), nullptr, &sbs_sharpen_rtv)) ||
+              FAILED(device->CreateShaderResourceView(sbs_sharpen_texture.get(), nullptr, &sbs_sharpen_srv))) {
+            BOOST_LOG(error) << "Failed to create SBS sharpen texture/views";
+            return -1;
+          }
+        }
 
         if (sbs_vd3d_warp) {
           D3D11_TEXTURE2D_DESC winner_desc = tex_desc;
@@ -1290,6 +1318,7 @@ namespace platf::dxgi {
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
     vs_t sbs_reprojection_vs;
     ps_t sbs_reprojection_ps;
+    ps_t sbs_sharpen_ps;
     cs_t sbs_vd3d_forward_cs;
     ps_t sbs_vd3d_reprojection_ps;
     buf_t sbs_reprojection_cbuffer;
@@ -1297,6 +1326,9 @@ namespace platf::dxgi {
     texture2d_t sbs_intermediate_texture;
     render_target_t sbs_intermediate_rtv;
     shader_res_t sbs_intermediate_srv;
+    texture2d_t sbs_sharpen_texture;
+    render_target_t sbs_sharpen_rtv;
+    shader_res_t sbs_sharpen_srv;
     bool sbs_vd3d_warp = false;
     texture2d_t sbs_vd3d_winner_texture;
     unordered_access_t sbs_vd3d_winner_uav;
@@ -2313,6 +2345,7 @@ namespace platf::dxgi {
     compile_pixel_shader_helper(cursor_ps);
     compile_pixel_shader_helper(cursor_ps_normalize_white);
     compile_pixel_shader_helper(sbs_reprojection_ps);
+    compile_pixel_shader_helper(sbs_sharpen_ps);
     compile_vertex_shader_helper(sbs_reprojection_vs);
     compile_compute_shader_helper(sbs_vd3d_forward_cs);
     compile_pixel_shader_helper(sbs_vd3d_reprojection_ps);

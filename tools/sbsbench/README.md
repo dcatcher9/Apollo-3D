@@ -52,6 +52,7 @@ Harness A/B levers (after `--extra`):
   `bestv2` uses the preset's source-pixel FG/MG/BG shifts (`-9/-3/+2.4`), `.35` parallax
   balance, `1.11/1.05` multipliers, `.008` zero-parallax trim, dynamic convergence `.006`,
   `.071` safety cap, and the exact center-weighted/morphologically filled subject-plane lock.
+  The completed SDR frame then receives Bestv2's exact per-eye sharpen 0.2 convolution.
   This is resolution-calibrated; `--divergence` remains the Apollo profile and uninitialized-depth
   fallback. Bestv2 cinematic-window sculpt was evaluated and rejected; see
   `docs/sbs-vd3d-parity.md`.
