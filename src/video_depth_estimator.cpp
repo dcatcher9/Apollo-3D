@@ -248,6 +248,7 @@ namespace models {
         CUstream cu_stream = nullptr;
         
         float ema_alpha;
+        bool ema_pixel_first;  // per-pixel EMA order: true = smooth raw disparity before normalizing
         int depth_short_side;  // depth map short-side resolution (clamped to native short side)
         float max_aspect;  // aspect cap for short-side mode
         float minmax_alpha;  // temporal EMA blend for the normalized min/max
@@ -394,6 +395,9 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex;
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_srv;
+        // Per-pixel EMA history in RAW disparity units (pixel->range order only; see ema_pixel_first).
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> raw_ema_tex;
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> raw_ema_uav;
 
         // Color-guided (joint-bilateral) depth upsample: guide_tex holds the full-res color
         // downsampled to the depth grid; guided_depth_tex is the 2x-res, color-edge-snapped
@@ -433,6 +437,7 @@ namespace models {
 
         impl(Microsoft::WRL::ComPtr<ID3D11Device> d, Microsoft::WRL::ComPtr<ID3D11DeviceContext> c, const std::filesystem::path& assets_dir, const config::video_t::sbs_t& cfg, const config::depth_model_info& model)
             : device(d), context(c), ema_alpha((float)cfg.ema),
+              ema_pixel_first(cfg.ema_pixel_first),
               depth_short_side(std::max(196, cfg.depth_short_side)), max_aspect(std::max(1.0f, (float)cfg.depth_max_aspect)),
               minmax_alpha((float)cfg.minmax_ema),
               pct_lo((float)(cfg.norm_pct_lo / 100.0)),
@@ -896,7 +901,7 @@ namespace models {
             cbf[16] = stretch_lo;                          // shape_depth_for_pop stretch bounds
             cbf[17] = stretch_hi;
             cbf[18] = subject_stretch ? 1.0f : 0.0f;
-            cbf[19] = 0.0f;
+            cbf[19] = ema_pixel_first ? 1.0f : 0.0f;  // buffer_to_tex: pixel->range EMA order
             D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
             cbuffer.Reset();
             device->CreateBuffer(&cb_desc, &sd, &cbuffer);
@@ -924,16 +929,37 @@ namespace models {
             // Foreground-curvature constants (session-constant once the resolution is fixed):
             // {cv_w, cv_h, strength, near_start, gamma, spread, pad, pad}. Internal params match
             // VD3D enhance_foreground_curvature (near_start 0.60, shape_gamma 1.35); spread 0.60
-            // is a frame-centered stand-in for VD3D's fitted foreground ellipse.
+            // is a frame-centered stand-in for VD3D's fitted foreground ellipse. Sized at the
+            // OUTPUT resolution the curvature lands on: 2x guided_depth_tex when guided upsample
+            // is on (so the guided pass can't re-flatten it), else 1x depth_tex.
             if (foreground_curvature > 0.0f) {
+                const uint32_t cv_w = guided_upsample ? (uint32_t) target_w * 2 : (uint32_t) target_w;
+                const uint32_t cv_h = guided_upsample ? (uint32_t) target_h * 2 : (uint32_t) target_h;
                 struct { uint32_t w, h; float strength, near_start, gamma, spread, pad0, pad1; } cvb = {
-                    (uint32_t) target_w, (uint32_t) target_h,
+                    cv_w, cv_h,
                     foreground_curvature, 0.60f, 1.35f, 0.60f, 0.0f, 0.0f
                 };
                 D3D11_SUBRESOURCE_DATA cvsd = {&cvb, 0, 0};
                 curvature_cbuffer.Reset();
                 device->CreateBuffer(&cb_desc, &cvsd, &curvature_cbuffer);  // cb_desc.ByteWidth == 32
             }
+        }
+
+        // Reshape the near foreground with a centered bulge (VD3D enhance_foreground_curvature)
+        // on the depth UAV the warp actually samples, at that UAV's resolution. Must run on the
+        // FINAL depth the reprojection reads: post-guided-upsample (guided_depth_tex) when guided
+        // is on, else depth_tex -- running it pre-guided lets the joint-bilateral upsample's
+        // foreground bias re-flatten the bulge. curvature_cbuffer carries the matching cv_w/cv_h.
+        void apply_curvature(ID3D11UnorderedAccessView* uav, UINT w, UINT h) {
+            if (foreground_curvature <= 0.0f || !depth_curvature_cs || !curvature_cbuffer) {
+                return;
+            }
+            context->CSSetShader(depth_curvature_cs.Get(), nullptr, 0);
+            context->CSSetConstantBuffers(0, 1, curvature_cbuffer.GetAddressOf());
+            context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+            context->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
+            ID3D11UnorderedAccessView* null_uav = nullptr;
+            context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
         }
 
         // Re-snap the (possibly stale) low-res depth to the CURRENT frame's color edges: pass 1
@@ -974,6 +1000,12 @@ namespace models {
             context->Dispatch((out_w + 15) / 16, (out_h + 15) / 16, 1);
             context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
             context->CSSetShaderResources(0, 3, null_srvs);
+
+            // Curve the FINAL (post-upsample) depth the warp samples, so the joint-bilateral
+            // upsample above can't re-flatten the bulge. Regenerated fresh from depth_tex every
+            // frame -> no accumulation. (When guided is off, normalize_depth_output curves
+            // depth_tex directly instead.)
+            apply_curvature(guided_depth_uav.Get(), out_w, out_h);
         }
 
         // Normalize the finished raw disparity in tensor_out_buf into depth_tex: the scale
@@ -1047,23 +1079,22 @@ namespace models {
             context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
             ID3D11ShaderResourceView* bt_srvs[2] = {tensor_out_srv.Get(), minmax_ema_srv.Get()};
             context->CSSetShaderResources(0, 2, bt_srvs);
-            context->CSSetUnorderedAccessViews(0, 1, depth_uav.GetAddressOf(), nullptr);
+            ID3D11UnorderedAccessView* bt_uavs[2] = {depth_uav.Get(), raw_ema_uav.Get()};
+            context->CSSetUnorderedAccessViews(0, 2, bt_uavs, nullptr);
 
             context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
-            ID3D11UnorderedAccessView* null_uav = nullptr;
+            ID3D11UnorderedAccessView* null_uav2[2] = {nullptr, nullptr};
             ID3D11ShaderResourceView* null_srvs[2] = {nullptr, nullptr};
-            context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+            context->CSSetUnorderedAccessViews(0, 2, null_uav2, nullptr);
             context->CSSetShaderResources(0, 2, null_srvs);
 
-            // 3c. Foreground curvature: reshape depth_tex in place BEFORE subject tracking + warp
-            // (so the subject estimate and both warp paths see the rounded foreground).
-            if (foreground_curvature > 0.0f && depth_curvature_cs && curvature_cbuffer) {
-                context->CSSetShader(depth_curvature_cs.Get(), nullptr, 0);
-                context->CSSetConstantBuffers(0, 1, curvature_cbuffer.GetAddressOf());
-                context->CSSetUnorderedAccessViews(0, 1, depth_uav.GetAddressOf(), nullptr);
-                context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
-                context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+            // 3c. Foreground curvature (guided-OFF path only): reshape depth_tex in place before
+            // subject tracking + warp. When guided upsample is ON, the warp samples guided_depth_tex
+            // instead, and curving here would just be re-flattened by the guided pass -- so the
+            // curvature is applied at the end of run_guided() on the 2x output in that case.
+            if (!guided_upsample) {
+                apply_curvature(depth_uav.Get(), (UINT) target_w, (UINT) target_h);
             }
 
             // 3s. Subject tracking: weighted depth histogram over the freshly-normalized
@@ -1278,6 +1309,10 @@ namespace models {
                 device->CreateUnorderedAccessView(depth_tex.Get(), nullptr, &depth_uav);
                 device->CreateShaderResourceView(depth_tex.Get(), nullptr, &depth_srv);
 
+                // Raw-disparity per-pixel EMA history (pixel->range order). Same grid as depth_tex.
+                device->CreateTexture2D(&tex_desc, nullptr, &raw_ema_tex);
+                device->CreateUnorderedAccessView(raw_ema_tex.Get(), nullptr, &raw_ema_uav);
+
                 if (guided_upsample) {
                     // Low-res color guide (same grid as the depth map). RGBA16F: guaranteed
                     // UAV-store format, read back as an SRV in the upsample pass.
@@ -1303,6 +1338,9 @@ namespace models {
                 // frames before the first guided pass runs.
                 const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
                 context->ClearUnorderedAccessViewFloat(depth_uav.Get(), clear_color);
+                if (raw_ema_uav) {
+                    context->ClearUnorderedAccessViewFloat(raw_ema_uav.Get(), clear_color);
+                }
                 if (guided_depth_uav) {
                     context->ClearUnorderedAccessViewFloat(guided_depth_uav.Get(), clear_color);
                 }

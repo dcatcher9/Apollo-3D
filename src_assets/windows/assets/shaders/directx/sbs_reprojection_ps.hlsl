@@ -218,11 +218,13 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
 
     // Depth-of-field (VD3D apply_dof_cuda, post-warp): blur the reprojected color by how far the
     // sampled surface sits from the focal plane -- the tracked subject depth when subject
-    // anchoring is live, else focal_plane. In focus stays sharp; off-focus gets a bokeh gather.
-    // Softens off-focus disocclusion fills and adds cinematic separation.
+    // anchoring is live, else the near plane (depth 1.0). Focusing the near plane keeps the
+    // nearest content sharp and blurs the background (standard bokeh); focusing focal_plane (0.5)
+    // instead would blur the near subject, the opposite of what DOF is for. In focus stays sharp;
+    // off-focus gets a bokeh gather. Softens off-focus disocclusion fills and adds separation.
     if (dof_strength > 0.0f) {
         float4 s0 = SubjectState[0];
-        float focal = (subject_track > 0.5f && s0.w > 0.5f) ? s0.z : focal_plane;
+        float focal = (subject_track > 0.5f && s0.w > 0.5f) ? s0.z : 1.0f;
         float dsamp = DepthTexture.SampleLevel(LinearSampler, sample_uv, 0);
         float defocus = saturate(abs(dsamp - focal) / max(dof_focus_width, 1e-3f));
         if (defocus > 0.01f) {

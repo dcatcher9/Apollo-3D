@@ -27,7 +27,8 @@ cbuffer Constants : register(b0) {
     float stretch_lo_pct;    // shape_depth_for_pop stretch bounds (depth_subject_resolve)
     float stretch_hi_pct;
     float subject_stretch;   // > 0.5 = apply the disparity stretch (depth_subject_resolve)
-    float pad_dc;
+    float pixel_ema_first;   // > 0.5 = pixel->range EMA order (buffer_to_tex): smooth raw disparity
+                             // before normalizing, instead of EMA'ing the normalized depth
 };
 
 #endif

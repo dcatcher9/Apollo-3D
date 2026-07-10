@@ -207,6 +207,9 @@ namespace sbs_bench {
       double subject_plane_lock = -1.0;  // local subject-band flatten (e.g. 0.28); <0 = conf
       double curvature = -1.0;     // foreground curvature strength (e.g. 0.07); <0 = conf
       double dof = -1.0;           // depth-of-field strength (e.g. 0.3); <0 = conf
+      double minmax_ema = -1.0;    // range-bounds EMA new-weight (VD3D DepthPercentileEMA a=0.82 -> 0.18); <0 = conf
+      int guided = -1;             // guided upsample: -1 = conf, 0 = off, 1 = on
+      bool pixel_ema_first = false;  // VD3D EMA order: per-pixel smooth raw BEFORE normalizing
     };
 
     bool parse_opts(int argc, char **argv, opts &o) {
@@ -237,6 +240,12 @@ namespace sbs_bench {
         else if (a == "--curvature") o.curvature = std::stod(next("--curvature"));
         else if (a == "--dof") o.dof = std::stod(next("--dof"));
         else if (a == "--ema") o.ema = std::stod(next("--ema"));
+        else if (a == "--minmax-ema") o.minmax_ema = std::stod(next("--minmax-ema"));
+        else if (a == "--guided-upsample") {
+          std::string v = next("--guided-upsample");
+          o.guided = (v == "off" || v == "0" || v == "false") ? 0 : 1;
+        }
+        else if (a == "--pixel-ema-first") o.pixel_ema_first = true;
         else { BOOST_LOG(error) << "sbs-bench: unknown arg '" << a << "'"; return false; }
       }
       if (o.frames.empty() || o.out.empty()) {
@@ -299,6 +308,9 @@ namespace sbs_bench {
     if (o.curvature >= 0.0) sbs_cfg.foreground_curvature = o.curvature;
     if (o.dof >= 0.0) sbs_cfg.dof_strength = o.dof;
     if (o.ema > 0.0) sbs_cfg.ema = o.ema;                        // A/B lever: depth EMA (1.0 = off)
+    if (o.minmax_ema >= 0.0) sbs_cfg.minmax_ema = o.minmax_ema;  // A/B lever: range-bounds EMA (VD3D 0.18)
+    if (o.guided >= 0) sbs_cfg.guided_upsample = (o.guided != 0);  // A/B lever: guided upsample on/off
+    if (o.pixel_ema_first) sbs_cfg.ema_pixel_first = true;         // A/B lever: VD3D pixel->range EMA order
     sbs_cfg.perf_stats = true;  // the harness always measures
     sbs_perf::set_enabled(true);
     sbs_perf::reset();
