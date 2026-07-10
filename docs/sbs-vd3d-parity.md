@@ -59,7 +59,7 @@ where Apollo transforms depth in more places than "min/max EMA."
 | aspect | VD3D (Bestv2) | Apollo | faithful? |
 |--------|---------------|--------|-----------|
 | model | DA-V2 small fp16 (PyTorch) | DA-V2 small fp16 (TensorRT) | ✅ same weights |
-| resolution | 768×432 (short 432 ≈ 1.24× DA-V2's 518² training) | `depth_short_side=432`, clamped to source short side, patch-14 rounded | ✅ matched (361fa7ed) |
+| resolution | 768×432 (short 432 ≈ 1.24× DA-V2's 518² training) | **runs at baked height 336** (short side 336, ~602×336 @16:9) — the DA-V2 engine is `dynamic_width` with `fixed_h=336` baked into the ONNX, so `depth_short_side=432` is **inert** for it (it only drives non-dynamic-width engines). To actually hit 432, DA-V2 needs re-export at height 432. | ⚠️ **NOT matched** — but depth still correlates r≈0.96 with VD3D (verified 2026-07-10), so resolution isn't the bottleneck |
 | cadence | per-frame | **async** at `depth_fps` (45 game) — depth lags color | ⚠️ **the** depth-half gap |
 
 **Sync is gone.** `sbs_3d_sync_depth` and the forked synchronous `estimate()` were removed
@@ -120,7 +120,7 @@ config below encodes exactly that.
 | knob | Apollo default | Phase-A faithful | rationale |
 |------|----------------|------------------|-----------|
 | `sbs_3d_depth_short_side` | 432 | **432** | already parity |
-| `sbs_3d_norm_pct_lo`/`_hi` | 0 / 100 (raw min/max) | **2 / 98** | VD3D `DepthPercentileEMA(p2/p98)` |
+| `sbs_3d_norm_pct_lo`/`_hi` | **2 / 98** (was 0/100 raw) | **2 / 98** | VD3D `DepthPercentileEMA(p2/p98)`. **Flipped to default + re-baselined 2026-07-10**: +5.7 total score, 7/8 clips up (recovered depth range from DA-V2 outlier rejection). Cost: `flat_page −1.9` (percentile stretches a flat scene's tiny range and amplifies hallucinated structure — the exact thing range floor guarded, now removed; acceptable for real content, revisit for DESKTOP mode). The min/max reduction still runs (it's the histogram's bin range). |
 | `sbs_3d_minmax_ema` | 0.1 (α≈0.9) | **0.1 (keep)** | VD3D's 0.18 (α=0.82) is only safe on its pre-locked input; on Apollo's un-locked drift it flickers (c339 `flicker_disocc` 2.7→47) — **eval-proven**, keep the slow range EMA |
 | `sbs_3d_ema` (per-pixel) | 0.6 | **0.5** | VD3D `TemporalDepthFilter(α=0.5)` |
 | `sbs_3d_range_floor` | 0 (off) | **off** | Apollo-only; VD3D lacks it. Was pinned 0.5 in bench.conf (so the eval ran it); **removed 2026-07-10** so the eval matches the config.h default |
