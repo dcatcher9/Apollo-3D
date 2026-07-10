@@ -261,7 +261,6 @@ namespace models {
         float stretch_lo;        // low percentile for the stretch (fraction)
         float stretch_hi;        // high percentile for the stretch (fraction)
         bool use_percentile; // either percentile bound active -> histogram pass runs
-        bool sync_depth;     // wait for THIS frame's inference so color and depth match (no async ghost)
         float minmax_snap;   // A1: raw-vs-EMA range ratio that snaps the scale on a scene cut (0 = off)
         float range_floor_frac;      // A3: current range < ref*frac -> compress parallax (0 = off)
         float range_floor_ref_alpha; // A3: slow-max reference-range decay
@@ -692,7 +691,6 @@ namespace models {
               subject_stretch(cfg.subject_stretch),
               stretch_lo((float)cfg.stretch_lo), stretch_hi((float)cfg.stretch_hi),
               use_percentile(cfg.norm_pct_lo > 0.0 || cfg.norm_pct_hi < 100.0),
-              sync_depth(cfg.sync_depth),
               minmax_snap((float)cfg.minmax_snap),
               range_floor_frac((float)cfg.range_floor),
               range_floor_ref_alpha(0.004f),  // ~decays over a few hundred depth updates
@@ -858,9 +856,6 @@ namespace models {
                     BOOST_LOG(warning) << "depth_hist_cs failed to compile; falling back to min/max normalization.";
                     use_percentile = false;
                 }
-            }
-            if (sync_depth) {
-                BOOST_LOG(info) << "Synchronous depth enabled: inference waits on the encode thread (no async ghost).";
             }
             if (subject_track) {
                 bool ok = compile_shader(assets_dir / "shaders" / "directx" / "depth_subject_hist_cs.hlsl", depth_subject_hist_cs) &&
@@ -1533,8 +1528,7 @@ namespace models {
 
             // Prevent GPU starvation: if the previous AI frame is still crunching, drop this frame.
             // This prevents an infinite queue of heavy TensorRT workloads from starving the DWM and Edge Browser.
-            // Async only: sync mode drains its own stream every frame, so it can never be busy here.
-            if (!sync_depth && cu_stream && cuda.cuStreamQuery) {
+            if (cu_stream && cuda.cuStreamQuery) {
                 auto q = cuda.cuStreamQuery(cu_stream);
                 if (q == CUDA_ERROR_NOT_READY) {
                     // Still re-snap the stale depth to THIS frame's color edges (D3D-only, cheap).
@@ -1698,21 +1692,19 @@ namespace models {
                 return {};
             }
 
-            if (!sync_depth) {
-                // ASYNC: tensor_out_buf holds the finished raw disparity from the PREVIOUS
-                // inference (fully unmapped from CUDA), so consuming it here never blocks the
-                // encode thread -- at the cost of depth lagging color by the inference cadence.
-                if (has_previous_frame) {
-                    normalize_depth_output();
+            // tensor_out_buf holds the finished raw disparity from the PREVIOUS inference (fully
+            // unmapped from CUDA), so consuming it here never blocks the encode thread -- at the
+            // cost of depth lagging color by the inference cadence (the temporal EMA hides it).
+            if (has_previous_frame) {
+                normalize_depth_output();
 
-                    // 3c. Learned warp: turn the freshly-updated depth into per-eye warp fields
-                    // (both eyes, ~1 ms each on the warp stream; consumed by poll_warp_fields).
-                    enqueue_warp(cuda);
-                }
-
-                // 3d. Guided upsample: snap the freshly-updated depth to this frame's color edges.
-                run_guided(input_srv, is_hdr);
+                // 3c. Learned warp: turn the freshly-updated depth into per-eye warp fields
+                // (both eyes, ~1 ms each on the warp stream; consumed by poll_warp_fields).
+                enqueue_warp(cuda);
             }
+
+            // 3d. Guided upsample: snap the freshly-updated depth to this frame's color edges.
+            run_guided(input_srv, is_hdr);
 
             // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
             context->CSSetShader(rgb_to_nchw_cs.Get(), nullptr, 0);
@@ -1771,28 +1763,6 @@ namespace models {
             }
             
             cuda.cuGraphicsUnmapResources(2, resources, cu_stream);
-
-            if (sync_depth) {
-                // SYNC: wait for THIS frame's inference (~2-3 ms for DA-V2 small; measured via
-                // the perf events above) so the depth warped this frame is the depth OF this
-                // frame -- color and depth always match, eliminating the async motion ghost.
-                // The unmap above is stream-ordered, so after the wait the D3D passes read a
-                // complete, coherent tensor_out_buf.
-                if (cuda.cuStreamSynchronize) {
-                    cuda.cuStreamSynchronize(cu_stream);
-                }
-                normalize_depth_output();
-                if (learned_warp) {
-                    // The warp fields must also describe THIS frame: enqueue and wait (~1 ms
-                    // both eyes), then pack the fields immediately instead of next frame.
-                    enqueue_warp(cuda);
-                    if (cuda.cuStreamSynchronize) {
-                        cuda.cuStreamSynchronize(warp_stream);
-                    }
-                    poll_warp_fields(cuda);
-                }
-                run_guided(input_srv, is_hdr);
-            }
 
             has_previous_frame = true;
 

@@ -35,8 +35,6 @@ Harness A/B levers (after `--extra`):
 - `--divergence F` — parallax gain.
 - `--depth-short-side N` — depth inference short side (default 432; VD3D parity). 336 to A/B
   back to the old under-resolved default.
-- `--sync-depth` — synchronous current-frame inference (the branch default since 2026-07-09;
-  the lever exists to A/B *back* to async).
 - `--pct-lo F --pct-hi F` — robust percentile normalization bounds, e.g. `1 99` (default off =
   raw min/max).
 - `--ema F` — per-pixel depth EMA override (`1.0` = off).
