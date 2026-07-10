@@ -29,6 +29,7 @@ Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 python tools/sbsbench/run_eval.py                     # all committed clips vs committed baselines
 python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change: re-baseline + commit
 python tools/sbsbench/run_eval.py --extra --divergence 0.027   # pass A/B levers to the harness
+python tools/sbsbench/run_eval.py --label treat --report-control cmake-build-relwithdebinfo/sbs_eval/control --extra --warp vd3d
 ```
 
 **Mode / model (important):** `--mode` defaults to **`game`** (depth model **DA-V2 small**,
@@ -72,6 +73,8 @@ aren't prebuilt; warns + skips the perf gate if another sunshine.exe is running.
 
 The harness records `warp_infer` with D3D11 GPU timestamps around the selected warp. Use this for
 the dual-warp performance comparison; `sbs_composite_cpu` measures submission overhead only.
+For A/B runs, pass `--report-control <control-run-dir>` and the evaluator writes `report.html`
+before printing its conclusion, including when the treatment exits with regressions.
 
 Metric notes: silhouette detection runs at the native depth resolution with an absolute
 depth-step floor (flat scenes legitimately read 0), and all pixel windows scale with the eye

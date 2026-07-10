@@ -133,6 +133,10 @@ def main():
                     help="extra harness args, e.g. --extra --divergence 0.027")
     ap.add_argument("--update-baselines", action="store_true",
                     help="write this run as the new committed baselines (use after intended changes)")
+    ap.add_argument("--report-control",
+                    help="control run directory; generate an A/B HTML report after this run")
+    ap.add_argument("--report-out",
+                    help="report path (default: <this run>/report.html; requires --report-control)")
     ap.add_argument("--allow-build", action="store_true", help="proceed even if engines are missing")
     args = ap.parse_args()
 
@@ -255,7 +259,7 @@ def main():
                 # is the bad frame; artifact metrics use the maximum.
                 choose = min if thresholds["metrics"][k].get("better") == "higher" else max
                 v, i = choose(vals)
-                worst[k] = {"frame": i, "value": round(v, 3)}
+                worst[k] = {"frame": i, "worst_value": round(v, 3)}
 
         entry = {"aggregate": agg, "perf_ms": perf, "meta": clip_meta, "worst_frame": worst}
         results[clip] = entry
@@ -263,8 +267,8 @@ def main():
         # Issue triggers (absolute, baseline-independent).
         for k, spec in thresholds["metrics"].items():
             if "trigger" in spec and agg.get(k, 0) > spec["trigger"]:
-                issues.append({"clip": clip, "metric": k, "value": round(agg[k], 3),
-                               "trigger": spec["trigger"], **worst.get(k, {})})
+                issues.append({"clip": clip, "metric": k, "trigger": spec["trigger"],
+                               **worst.get(k, {}), "value": round(agg[k], 3)})
 
         # Regression gate vs baseline. A baseline is only valid for the exact frames it was made
         # from: if the clip content changed, gating against it is meaningless -- skip it loudly
@@ -294,7 +298,7 @@ def main():
                 wd = worse_delta(b, n, spec)
                 if wd > max(spec["abs_floor"], abs(b) * spec["rel_tol"]):
                     regressions.append({"clip": clip, "metric": k, "baseline": round(b, 3),
-                                        "value": round(n, 3), **worst.get(k, {})})
+                                        **worst.get(k, {}), "value": round(n, 3)})
             if not contention:
                 for k, spec in thresholds["perf_ms"].items():
                     b, n = base.get("perf_ms", {}).get(k), perf.get(k)
@@ -314,13 +318,30 @@ def main():
     res_path = os.path.join(out_root, "results.json")
     json.dump(out, open(res_path, "w"), indent=2)
 
+    report_path = None
+    if args.report_out and not args.report_control:
+        fail("--report-out requires --report-control")
+    if args.report_control:
+        control_dir = os.path.abspath(args.report_control)
+        if not os.path.exists(os.path.join(control_dir, "results.json")):
+            fail(f"report control has no results.json: {control_dir}")
+        report_path = os.path.abspath(args.report_out or os.path.join(out_root, "report.html"))
+        report_cmd = [sys.executable, os.path.join(SCRIPT_DIR, "build_report.py"),
+                      control_dir, out_root, report_path]
+        report_run = subprocess.run(report_cmd, capture_output=True, text=True)
+        if report_run.returncode:
+            fail("report generation failed: " + (report_run.stderr or report_run.stdout)[-2000:])
+
     print(f"\n=== {verdict.upper()} ===  ({res_path})")
     for r in regressions:
         print(f"  REGRESSION {r['clip']}.{r['metric']}: {r['baseline']} -> {r['value']}"
-              + (f"  (worst frame {r['frame']})" if "frame" in r else ""))
+              + (f"  (worst frame {r['frame']}, frame value {r['worst_value']})"
+                 if "frame" in r else ""))
     for i in issues:
         print(f"  issue {i['clip']}.{i['metric']} = {i['value']} (> {i['trigger']},"
-              f" worst frame {i.get('frame', '?')})")
+              f" worst frame {i.get('frame', '?')}, frame value {i.get('worst_value', '?')})")
+    if report_path:
+        print(f"  report: {report_path}")
     if args.update_baselines:
         print(f"  baselines updated in {base_dir} -- commit them with the change that justified it.")
     sys.exit(1 if regressions else 0)

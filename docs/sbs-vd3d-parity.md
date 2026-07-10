@@ -185,8 +185,8 @@ The first A/B deliberately stops before concealment. Final-SBS similarity measur
 only; artifact, temporal, comfort, and performance gates decide which warp is better.
 
 **Bare-warp result (2026-07-10):** the Apollo baseline remains metric-stable. VD3D hybrid reduces
-`stretch_area` slightly on the affected clips, but raises `rim_over_p95` past the regression gate
-on 6/8 clips because Bestv2's later repair is intentionally absent. At 3840×1080 on RTX 5080,
+`stretch_area` slightly on the affected clips, but raises `rim_over_p95` on 6/8 clips and crosses
+the regression gate on 5/8 because Bestv2's later repair is intentionally absent. At 3840×1080 on RTX 5080,
 harness GPU timestamps measure Apollo-probe at 0.478 ms p50 versus VD3D hybrid at 0.051 ms p50.
 The hybrid is therefore the performance leader, but neither geometry is the quality winner until
 the same concealment stage has been evaluated on both.
