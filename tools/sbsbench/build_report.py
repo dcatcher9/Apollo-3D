@@ -25,6 +25,16 @@ CTRL = json.load(open(os.path.join(ctrl_dir, "results.json")))
 TREAT = json.load(open(os.path.join(treat_dir, "results.json")))
 THR = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json")))["metrics"]
 
+# An A/B report may compare different code, warp, or treatment arguments, but its evidence is
+# invalid if the source set, model, base config, or metric contract changed underneath it.
+_SAME_CONTEXT = ("clip_set_sha1", "mode", "model", "eval_schema", "depth_step",
+                 "conf_sha256", "metric_sha256")
+_mismatched_context = {k: (CTRL.get("meta", {}).get(k), TREAT.get("meta", {}).get(k))
+                       for k in _SAME_CONTEXT
+                       if CTRL.get("meta", {}).get(k) != TREAT.get("meta", {}).get(k)}
+if _mismatched_context:
+    raise SystemExit(f"refusing incompatible A/B report: {_mismatched_context}")
+
 
 def _clip_name(clip):
     # Prefer the name run_eval captured into results.json; else the repo clip's meta.json; else id.
@@ -216,6 +226,8 @@ def run_label(run, default):
 CTRL_MODE = CTRL["meta"].get("mode")
 TREAT_MODE = TREAT["meta"].get("mode")
 IS_MODE_CMP = bool(CTRL_MODE and TREAT_MODE and CTRL_MODE != TREAT_MODE)
+IS_COMPARISON_ONLY = TREAT.get("verdict") == "comparison_only"
+IS_TRADEOFF_CMP = IS_MODE_CMP or IS_COMPARISON_ONLY
 CTRL_NAME = run_label(CTRL, "control")
 TREAT_NAME = run_label(TREAT, "treatment")
 # Short tags for inline value labels and image captions (arrow is always CTRL -> TREAT).
@@ -339,14 +351,16 @@ def conclusion_section():
         txt = f"{mtip(k, '<b>' + h + '</b>')} {CTRL_TAG} {a:.2f} → {TREAT_TAG} {b:.2f} ({pct:+.0f}%)"
         (wins if favors_treat else costs).append(txt)
     li = score_line
-    if IS_MODE_CMP:
+    if IS_TRADEOFF_CMP:
         if wins:
             li += f'<li class="c-win">{TREAT_NAME} is better on: {" · ".join(wins)}</li>'
         if costs:
             li += f'<li class="c-cost">{CTRL_NAME} is better on: {" · ".join(costs)}</li>'
-        verdict = (f"<b>Tradeoff, not a regression:</b> these are two different pipeline "
-                   f"configs, so the gate below (which compares {TREAT_NAME} to the committed "
-                   f"{CTRL_MODE} baselines) reads as differences, not regressions. Pick per the "
+        verdict = (f"<b>Matched A/B comparison:</b> both runs are measured directly from their "
+                   f"artifacts; committed-baseline gating is intentionally disabled. Pick per "
+                   f"the tradeoff above and the per-clip evidence." if IS_COMPARISON_ONLY else
+                   f"<b>Tradeoff, not a regression:</b> these are two different pipeline configs, "
+                   f"so the gate below reads as differences, not regressions. Pick per the "
                    f"tradeoff above and the per-clip evidence.")
     else:
         regs = TREAT.get("regressions", [])
@@ -358,7 +372,7 @@ def conclusion_section():
                    f"past threshold — the costs outweigh the wins above." if regs
                    else "<b>Shippable:</b> measurable wins with no regressions past threshold."
                    if wins else "<b>No meaningful effect:</b> all metrics within baseline noise.")
-    head = (f"{CTRL_NAME} → {TREAT_NAME}" if IS_MODE_CMP else f"Treatment: <b>{treatment_name()}</b>")
+    head = (f"{CTRL_NAME} → {TREAT_NAME}" if IS_TRADEOFF_CMP else f"Treatment: <b>{treatment_name()}</b>")
     return (f'<section><h2>Conclusion</h2>'
             f'<p class="sub" style="margin-bottom:12px">{head} — mean movement across all '
             f'{len(CLIPS)} clips.</p>'
@@ -366,6 +380,9 @@ def conclusion_section():
 
 
 def gate_strip():
+    if IS_COMPARISON_ONLY:
+        return ('<div class="gate gate-info"><b>Gate: COMPARISON ONLY</b> — committed baselines '
+                'were not consulted; conclusions come from this matched control/treatment pair.</div>')
     regs = TREAT.get("regressions", [])
     noun = "difference(s) vs " + CTRL_MODE + " baseline" if IS_MODE_CMP else "regression(s)"
     if not regs:

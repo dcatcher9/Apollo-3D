@@ -232,7 +232,7 @@ namespace sbs_bench {
     // ---- argument parsing ----
 
     struct opts {
-      std::string frames, out, model, warp;
+      std::string frames, out, model, warp, shift_profile;
       int eye_h = 0;       // 0 -> match the input frame height (so the input size controls eval
                            // resolution/speed; a bigger clip = a bigger eval). Override to pin one.
       int max_width = 0;   // 0 -> use config max_encode_width
@@ -267,6 +267,7 @@ namespace sbs_bench {
         else if (a == "--out") o.out = next("--out");
         else if (a == "--model") o.model = next("--model");
         else if (a == "--warp") o.warp = next("--warp");
+        else if (a == "--shift-profile") o.shift_profile = next("--shift-profile");
         else if (a == "--eye-h") o.eye_h = std::stoi(next("--eye-h"));
         else if (a == "--max-width") o.max_width = std::stoi(next("--max-width"));
         else if (a == "--limit") o.limit = std::stoi(next("--limit"));
@@ -344,6 +345,13 @@ namespace sbs_bench {
       }
       sbs_cfg.warp = o.warp;
     }
+    if (!o.shift_profile.empty()) {
+      if (o.shift_profile != "apollo" && o.shift_profile != "bestv2") {
+        BOOST_LOG(error) << "sbs-bench: --shift-profile must be 'apollo' or 'bestv2'";
+        return 2;
+      }
+      sbs_cfg.shift_profile = o.shift_profile;
+    }
     if (o.divergence >= 0.0) sbs_cfg.divergence = o.divergence;  // A/B lever: parallax/disocclusion size
     if (o.pct_lo >= 0.0) sbs_cfg.norm_pct_lo = o.pct_lo;         // A/B lever: robust normalization
     if (o.pct_hi >= 0.0) sbs_cfg.norm_pct_hi = o.pct_hi;
@@ -367,7 +375,8 @@ namespace sbs_bench {
 
     BOOST_LOG(info) << "sbs-bench: " << frames.size() << " frames, model '" << model.name
                     << "', eye_h " << (o.eye_h > 0 ? std::to_string(o.eye_h) : "match-input")
-                    << ", depth_step current-once, warp " << sbs_cfg.warp << " -> " << o.out;
+                    << ", depth_step current-once, warp " << sbs_cfg.warp
+                    << ", shift_profile " << sbs_cfg.shift_profile << " -> " << o.out;
 
     // ---- D3D device + shaders ----
     ComPtr<ID3D11Device> dev;
@@ -419,7 +428,7 @@ namespace sbs_bench {
       sbs_cfg.subject_stretch ? 1.0f : 0.0f, (float) sbs_cfg.subject_plane_lock,
       (float) sbs_cfg.subject_plane_width, (float) sbs_cfg.dof_strength,
       (float) sbs_cfg.dof_focus_width, (float) sbs_cfg.vd3d_forward_blend,
-      (float) sbs_cfg.vd3d_fill_radius, 0.0f, 0.0f};
+      (float) sbs_cfg.vd3d_fill_radius, sbs_cfg.shift_profile == "bestv2" ? 1.0f : 0.0f, 0.0f};
     auto repro_cb = const_buffer(dev.Get(), repro_params);
     float pass_params[16] = {0, (float) sbs_cfg.focal_plane, (float) sbs_cfg.parallax_steps,
       (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor, 0, 0, 0, 0, 0, 0, 0,

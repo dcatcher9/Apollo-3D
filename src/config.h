@@ -179,6 +179,7 @@ namespace config {
     // only parses the sbs_3d_* overrides; do not re-list defaults there.
     struct sbs_t {
       std::string warp = "apollo";  ///< Geometry implementation: "apollo" = occlusion-aware backward probe; "vd3d" = Bestv2 backward/forward hybrid.
+      std::string shift_profile = "apollo";  ///< Disparity field: "apollo" = normalized divergence/focal mapping; "bestv2" = VisionDepth3D Bestv2's pixel-calibrated FG/MG/BG bands, subject anchor, zero-parallax trim, dynamic convergence, and 7.1% safety cap.
       double divergence = 0.0135;  ///< Parallax gain: signed parallax = (depth - focal_plane) * divergence, as a fraction of image width. 0 = flat (zero-parallax passthrough).
       double focal_plane = 0.5;  ///< Zero-parallax plane in normalized depth [0,1]; lower pushes more of the scene forward.
       double ema = 0.6;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.

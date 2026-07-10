@@ -17,6 +17,36 @@ Companion to the validated findings in the sbs-vd3d-port memory and the roadmap 
 2. **Phase B — integrate Apollo improvements.** Re-enable Apollo's additions one lever per eval
    run (`run_eval.py --extra …`), keep only what the numbers say beats Phase A, diff every step.
 
+## Validated status — Bestv2 shift calibration (2026-07-10)
+
+The original Phase-A candidate used fixed normalized divergence `0.00285`. That was only fitted to
+one resolution and was not the Bestv2 formula. `sbs_3d_shift_profile = bestv2` now evaluates the
+preset in source-pixel units for both warp implementations:
+
+- FG/MG/BG shifts `-9/-3/+2.4`, multipliers `1.11/1/1.05`, parallax balance `.35`;
+- subject anchor `.95`, zero-parallax trim `.008`;
+- dynamic convergence `.006` with its `.90` EMA;
+- maximum shift cap `.071`.
+
+Fresh comparison-only runs used the identical `bestv2-phase-a.conf` and verified every raw-model
+and pre-warp depth artifact byte-identical across control/treatment and Apollo/VD3D geometry. Mean
+movement across the committed clip set:
+
+| geometry | score | pop p50 | pop spread | bright rim | disocc flicker |
+|----------|------:|--------:|-----------:|-----------:|---------------:|
+| Apollo, provisional → Bestv2 | `+2.88` | `+205%` | `+89%` | `-43%` | `+50%` |
+| VD3D, provisional → Bestv2 | `+2.21` | `+226%` | `+67%` | `-38%` | `+46%` |
+
+Against the aligned real Bestv2 render, pixel reproduction improved from MAE `0.0961` / PSNR
+`16.1 dB` to MAE `0.0614` / PSNR `20.9 dB`. The remaining disparity-spread mismatch (`19.90 px`
+Apollo versus `10.57 px` reference) is not hidden: the core pixel formula is now calibrated, but
+Bestv2's curvature, cinematic window sculpt, silhouette-aware plane lock, smear suppression and
+Fast repair are still absent or approximate. Those stages can change the measured final field.
+
+With the exact field held constant, Apollo geometry scores `74.23` versus VD3D `73.74`; VD3D is
+about `6.1×` faster in the warp (`0.0171 ms` versus `0.1036 ms`) and reduces stretch slightly,
+while Apollo has lower bright rims. This remains a tradeoff, not a warp winner.
+
 ## Timeline of the pipeline
 
 The pipeline is two cadence groups, not a flat list. Steps ordered by execution:

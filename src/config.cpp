@@ -1267,6 +1267,12 @@ namespace config {
                          << "'; expected 'apollo' or 'vd3d'. Using 'apollo'.";
       video.sbs.warp = "apollo";
     }
+    string_f(vars, "sbs_3d_shift_profile", video.sbs.shift_profile);
+    if (video.sbs.shift_profile != "apollo" && video.sbs.shift_profile != "bestv2") {
+      BOOST_LOG(warning) << "Invalid sbs_3d_shift_profile '" << video.sbs.shift_profile
+                         << "'; expected 'apollo' or 'bestv2'. Using 'apollo'.";
+      video.sbs.shift_profile = "apollo";
+    }
     double_between_f(vars, "sbs_3d_divergence", video.sbs.divergence, {0.0, 0.2});
     double_between_f(vars, "sbs_3d_focal_plane", video.sbs.focal_plane, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_ema", video.sbs.ema, {0.01, 1.0});

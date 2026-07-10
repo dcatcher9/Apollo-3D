@@ -30,6 +30,7 @@ python tools/sbsbench/run_eval.py                     # all committed clips vs c
 python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change: re-baseline + commit
 python tools/sbsbench/run_eval.py --extra --divergence 0.027   # pass A/B levers to the harness
 python tools/sbsbench/run_eval.py --label treat --report-control cmake-build-relwithdebinfo/sbs_eval/control --extra --warp vd3d
+python tools/sbsbench/run_eval.py --comparison-only --label ab-control  # fresh A/B; no committed gate
 ```
 
 **Mode / model (important):** `--mode` defaults to **`game`** (depth model **DA-V2 small**,
@@ -47,6 +48,11 @@ Harness A/B levers (after `--extra`):
 - `--vd3d-forward-blend F` — override the VD3D forward weight (`0.65` in Bestv2; `0` isolates
   its classic backward warp and `1` isolates the forward splat).
 - `--divergence F` — parallax gain.
+- `--shift-profile apollo|bestv2` — choose the disparity field independently of geometry.
+  `bestv2` uses the preset's source-pixel FG/MG/BG shifts (`-9/-3/+2.4`), `.35` parallax
+  balance, `1.11/1.05` multipliers, `.008` zero-parallax trim, dynamic convergence `.006`,
+  and `.071` safety cap. This is resolution-calibrated; `--divergence` remains the Apollo
+  profile and uninitialized-depth fallback.
 - `--depth-short-side N` — depth inference short side (default 432; VD3D parity). 336 to A/B
   back to the old under-resolved default.
 - `--pct-lo F --pct-hi F` — robust percentile normalization bounds, e.g. `1 99` (default off =

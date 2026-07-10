@@ -133,12 +133,16 @@ def main():
                     help="extra harness args, e.g. --extra --divergence 0.027")
     ap.add_argument("--update-baselines", action="store_true",
                     help="write this run as the new committed baselines (use after intended changes)")
+    ap.add_argument("--comparison-only", action="store_true",
+                    help="measure without committed-baseline gating (for a fresh matched A/B pair)")
     ap.add_argument("--report-control",
                     help="control run directory; generate an A/B HTML report after this run")
     ap.add_argument("--report-out",
                     help="report path (default: <this run>/report.html; requires --report-control)")
     ap.add_argument("--allow-build", action="store_true", help="proceed even if engines are missing")
     args = ap.parse_args()
+    if args.comparison_only and args.update_baselines:
+        fail("--comparison-only and --update-baselines are mutually exclusive")
 
     exe = os.path.join(args.build_dir, "sunshine.exe")
     clips_dir = os.path.join(SCRIPT_DIR, "clips")
@@ -174,12 +178,16 @@ def main():
         args.extra, "--warp", conf_value(args.conf, "sbs_3d_warp", "apollo"))
     if expected_warp not in {"apollo", "vd3d"}:
         fail(f"invalid --warp override {expected_warp!r}")
+    expected_shift_profile = extra_value(
+        args.extra, "--shift-profile", conf_value(args.conf, "sbs_3d_shift_profile", "apollo"))
+    if expected_shift_profile not in {"apollo", "bestv2"}:
+        fail(f"invalid --shift-profile override {expected_shift_profile!r}")
     meta = {
         "git_sha": git(["rev-parse", "--short", "HEAD"]),
         "git_dirty": bool(git(["status", "--porcelain"])),
         "clip_set_sha1": {c: sha1_dir(os.path.join(clips_dir, c)) for c in clips},
         "mode": args.mode, "extra_args": args.extra, "conf": os.path.relpath(args.conf, REPO),
-        "model": expected_model, "warp": expected_warp,
+        "model": expected_model, "warp": expected_warp, "shift_profile": expected_shift_profile,
         "eval_schema": EVAL_SCHEMA, "depth_step": "current-once",
         "conf_sha256": conf_sha, "metric_sha256": metric_sha,
         "gpu_contention": contention,
@@ -214,7 +222,13 @@ def main():
         actual_warp = warp_match.group(1) if warp_match else None
         if actual_warp != expected_warp:
             fail(f"{clip}: expected warp {expected_warp!r}, harness reported {actual_warp!r}")
-        clip_meta = {"model": actual_model, "warp": actual_warp}
+        profile_match = re.search(r"shift_profile ([a-z0-9_-]+)", stdout)
+        actual_shift_profile = profile_match.group(1) if profile_match else None
+        if actual_shift_profile != expected_shift_profile:
+            fail(f"{clip}: expected shift profile {expected_shift_profile!r}, "
+                 f"harness reported {actual_shift_profile!r}")
+        clip_meta = {"model": actual_model, "warp": actual_warp,
+                     "shift_profile": actual_shift_profile}
 
         # A valid harness result has one source, raw-model, warp-input depth, and SBS artifact for
         # every numeric frame identity. This catches dropped/renumbered outputs before metrics run.
@@ -274,7 +288,7 @@ def main():
         # from: if the clip content changed, gating against it is meaningless -- skip it loudly
         # instead of silently comparing apples to oranges.
         bp = os.path.join(base_dir, clip + ".json")
-        if os.path.exists(bp) and not args.update_baselines:
+        if os.path.exists(bp) and not args.update_baselines and not args.comparison_only:
             base = json.load(open(bp))
             base_meta = base.get("meta", {})
             required = {
@@ -312,7 +326,7 @@ def main():
                        "meta": {**meta, **clip_meta, "clip_sha1": meta["clip_set_sha1"][clip]}},
                       open(bp, "w"), indent=2)
 
-    verdict = "regressions" if regressions else "pass"
+    verdict = "comparison_only" if args.comparison_only else "regressions" if regressions else "pass"
     out = {"meta": meta, "verdict": verdict, "regressions": regressions, "issues": issues,
            "clips": results}
     res_path = os.path.join(out_root, "results.json")

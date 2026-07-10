@@ -57,12 +57,16 @@ float2 Reproject(float2 uv, float eyeSign) {
     float4 s0 = SubjectState[0];
     float4 s1 = SubjectState[1];
     bool shaped = (subject_track > 0.5f) && (s0.w > 0.5f);
+    uint dw, dh;
+    DepthTexture.GetDimensions(dw, dh);
 
     // Widest distance any surface can travel (near or far side of the focal plane). BorderFade
     // only shrinks parallax, so this (fade=1) remains a valid upper bound on the search span.
     // The shaped path clamps its curve to [-1, 1], so its bound is the full max_divergence
     // (2x the linear path's -- probe spacing coarsens accordingly).
-    float searchRadius = shaped
+    float searchRadius = shaped && bestv2_shift_profile > 0.5f
+        ? Bestv2SearchRadius((float)dw)
+        : shaped
         ? max_divergence
         : max_divergence * max(focal_plane, 1.0f - focal_plane);
     if (searchRadius <= 1e-6f) {
@@ -74,8 +78,6 @@ float2 Reproject(float2 uv, float eyeSign) {
     float stepX  = (2.0f * searchRadius) / (float)steps;
 
     // Depth-read tap spread (see SampleDepth), hoisted out of the probe loop.
-    uint dw, dh;
-    DepthTexture.GetDimensions(dw, dh);
     float2 ofs = float2(0.75f / (float) dw, 0.75f / (float) dh);
 
     // A source at position x forward-warps to out(x) = x - eyeSign * parallax(depth(x)).
@@ -95,14 +97,14 @@ float2 Reproject(float2 uv, float eyeSign) {
 
     float prevX = startX;
     float prevD = SampleDepth(prevX, uv.y, ofs);
-    float prevG = (prevX - uv.x) - eyeSign * DepthParallax(prevD, prevX, s0, s1, shaped);
+    float prevG = (prevX - uv.x) - eyeSign * DepthParallax(prevD, prevX, s0, s1, shaped, (float)dw);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
     for (int i = 1; i <= steps; i++) {
         float x = startX + stepX * i;
         float d = SampleDepth(x, uv.y, ofs);
-        float g = (x - uv.x) - eyeSign * DepthParallax(d, x, s0, s1, shaped);
+        float g = (x - uv.x) - eyeSign * DepthParallax(d, x, s0, s1, shaped, (float)dw);
 
         // Zero crossing between prevX and x => a source in this span reprojects onto uv.
         if ((prevG <= 0.0f && g >= 0.0f) || (prevG >= 0.0f && g <= 0.0f)) {

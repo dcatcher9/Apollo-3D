@@ -63,7 +63,7 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
     float4 s0 = SubjectState[0];
     float4 s1 = SubjectState[1];
     bool shaped = (subject_track > 0.5f) && (s0.w > 0.5f);
-    float parallax = DepthParallax(d, uv.x, s0, s1, shaped);
+    float parallax = DepthParallax(d, uv.x, s0, s1, shaped, (float)eye_w);
 
     // torch grid_sample uses normalized [-1,1] coordinates; DepthParallax is UV [0,1], hence
     // this is the same left:+shift/right:-shift convention after polarity translation.

@@ -25,6 +25,21 @@ class EvalContractTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_shift_profile_override_uses_last_explicit_value(self):
+        self.assertEqual(run_eval.extra_value(
+            ["--shift-profile", "apollo", "--shift-profile", "bestv2"],
+            "--shift-profile", "apollo"), "bestv2")
+
+    def test_shift_profile_is_read_from_config(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
+            fh.write("sbs_3d_shift_profile = bestv2 # active\n")
+            path = fh.name
+        try:
+            self.assertEqual(
+                run_eval.conf_value(path, "sbs_3d_shift_profile", "apollo"), "bestv2")
+        finally:
+            os.unlink(path)
+
     def test_phase_shift_recovers_known_translation(self):
         rng = np.random.default_rng(1234)
         a = rng.random((64, 64))

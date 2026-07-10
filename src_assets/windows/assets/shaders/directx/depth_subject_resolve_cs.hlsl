@@ -2,6 +2,7 @@
 // (depth_subject_hist_cs), EMA it for stability, and precompute everything the
 // reprojection needs per pixel:
 //   SubjectState[0] = { recenter_delta, subject_curve, subject_depth_ema, initialized }
+//   SubjectState[1] = { stretch_lo, stretch_inv_range, Bestv2 convergence EMA, 0 }
 // The reprojection's shaped path then evaluates BandCurve(saturate(d + recenter_delta))
 // and subtracts subject_lock * subject_curve -- anchoring the subject at the screen
 // plane. Because a global depth-scale drift moves the subject's parallax too, the
@@ -47,7 +48,8 @@ void main() {
         // EMA (VD3D SubjectDepthEMA alpha=0.80 => new-value weight 0.20; verified against a
         // real Bestv2 render log 2026-07-09). The anchor moves slowly so the scene doesn't
         // breathe with the subject estimate, but not so slowly it lags cuts/motion.
-        float subj = (s.w > 0.5f) ? lerp(s.z, subj_raw, 0.20f) : subj_raw;
+        bool initialized = s.w > 0.5f;
+        float subj = initialized ? lerp(s.z, subj_raw, 0.20f) : subj_raw;
 
         // Disparity stretch (VD3D shape_depth_for_pop): rescale the [lo,hi] percentile band of
         // the (unweighted) depth distribution to full [0,1] so the mid-range uses the whole
@@ -74,7 +76,11 @@ void main() {
         float delta = (0.5f - subj_str) * subject_recenter;
         float scurve = BandCurve(saturate(subj_str + delta));
         s = float4(delta, scurve, subj, 1.0f);
-        s1 = float4(lo_val, inv_range, 0.0f, 0.0f);
+        // VD3D ConvergenceEMA(alpha=.90), driven by its low-near subject convention. Stored even
+        // when the Apollo profile is selected so switching profiles cannot expose stale state.
+        float conv_target = (1.0f - subj) * 0.006f;
+        float conv_ema = initialized ? lerp(s1.z, conv_target, 0.10f) : conv_target;
+        s1 = float4(lo_val, inv_range, conv_ema, 0.0f);
     }
     // total == 0 (uninitialized depth): keep previous state.
 
