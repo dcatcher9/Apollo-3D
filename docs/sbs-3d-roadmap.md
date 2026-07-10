@@ -102,6 +102,31 @@ onnx-community's, which turned out to be flat-pop (see TL;DR).
 4. **DESKTOP mode** — movie mode on a region-of-interest: depth on a crop (the video
    window), flat composite outside. Manual/config rect first; ddup dirty-rect
    auto-detection later.
+5. **3D Style assistant (intuitive preset system, ported from VisionDepth3D)** — VD3D's
+   "3D Assistant" is a two-tier front-end over its ~19 backend knobs, and it's a clean fit
+   for Apollo now that the subject-tracked shaped-disparity pipeline exists (sync depth +
+   `subject_track`/`subject_stretch`/`subject_lock`/`stretch_lo·hi`/`subject_plane_lock` +
+   `divergence`/`focal_plane`/`border_fade`). Two layers to port
+   (`ui/pages/stereo_generator_page.py`: `SIMPLE_3D_ADVANCED_PRESETS`, `SIMPLE_3D_PRESETS`,
+   `_apply_simple_3d_controls`):
+   - **Named style bundles** — a handful of tuned Apollo `sbs_3d_*` param sets
+     (Comfortable Cinema / Deep Background / Close-Up Safe / VR Comfortable / Showcase …),
+     selectable as one unit.
+   - **~6 intuitive sliders → params via curves** — Strength→`divergence` (+ max shift),
+     Pop-Out→`subject_stretch` on + fg-weighted shaping/convergence bias,
+     Comfort→caps `divergence` + `border_fade`, Stability→`subject_lock`/`subject_plane_lock`
+     (+ depth EMA), Screen Depth→`focal_plane`, Subject Zero-Lock→`subject_lock`. Mirror
+     VD3D's lerp/curve mapping (`strength**0.85`, `comfort_limit = 1 - 0.1·comfort`, …).
+   - **Apollo-specific divergence**: the 2026-07-09 finding is that Apollo's edge quality is
+     NOT parallax-coupled (its probe/MLBW fill doesn't stretch, unlike VD3D's forward warp),
+     so Apollo's "Showcase"/"Strong Pop-Out" styles can push `divergence` HIGHER than VD3D's
+     without the stretch-band cost that makes VD3D's Showcase the worst-edge style. Retune,
+     don't copy, the aggressive styles.
+   - **Surfaces**: the Vue config UI (best for setup — a Style dropdown + the sliders writing
+     `sbs_3d_*`), and/or client XR-bar Style tiles for on-headset cycling (like the existing
+     mode/model tiles; would need a control message to push style/param overrides, à la
+     `0x3003`/`0x3005`). Style overrides config last-writer-wins, exactly like VD3D's
+     assistant overrides a loaded preset.
 
 ## Key references
 
