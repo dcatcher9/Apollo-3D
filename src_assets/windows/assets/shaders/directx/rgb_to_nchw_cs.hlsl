@@ -2,11 +2,7 @@ Texture2D<float4> InputTexture : register(t0);
 RWStructuredBuffer<float> OutputBuffer : register(u0);
 SamplerState LinearSampler : register(s0);
 
-cbuffer Constants : register(b0) {
-    uint target_w;
-    uint target_h;
-    uint is_hdr;
-};
+#include "include/depth_constants.hlsl"
 
 // Linear -> sRGB OETF (gamma encode). Depth Anything V2 is trained on sRGB-encoded
 // images, so a linear-light signal must be gamma-encoded before ImageNet normalization.

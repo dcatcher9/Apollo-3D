@@ -10,24 +10,7 @@ RWStructuredBuffer<uint> SubjectHist  : register(u0);  // 256 bins, weight in 1/
 RWStructuredBuffer<uint> PlainHist    : register(u1);  // 256 bins, UNWEIGHTED count (for stretch 5/95 pct)
 
 // Shared depth-pass cbuffer (only target_w/target_h are used here; layout parity).
-cbuffer Constants : register(b0) {
-    uint target_w;
-    uint target_h;
-    uint is_hdr;
-    float ema_alpha;
-    float minmax_alpha;
-    uint reduce_threads;
-    uint output_transform;
-    float depth_shift;
-    float snap_ratio;
-    float floor_frac;
-    float floor_ref_alpha;
-    float pct_lo;
-    float pct_hi;
-    float lock_frames;
-    float locked_alpha;
-    float subject_recenter;
-};
+#include "include/depth_constants.hlsl"
 
 #define NUM_BINS 256
 groupshared uint g_hist[NUM_BINS];

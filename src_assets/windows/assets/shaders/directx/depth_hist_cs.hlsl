@@ -11,24 +11,7 @@ RWByteAddressBuffer      MinMaxRaw   : register(u1);  // read-only here: [0]=min
 
 // Shared depth-pass cbuffer (prefix-compatible with the 12-slot layout in the other
 // depth shaders; slots 11-12 are the percentile bounds consumed by depth_minmax_ema_cs).
-cbuffer Constants : register(b0) {
-    uint target_w;
-    uint target_h;
-    uint is_hdr;
-    float ema_alpha;
-    float minmax_alpha;
-    uint reduce_threads;  // total threads in this dispatch (groups * GROUP_SIZE)
-    uint output_transform;  // 0 = identity (DA-V2 disparity); 1 = shifted reciprocal (DA-V3 depth -> disparity)
-    float depth_shift;  // shift in 1/(depth + depth_shift) when output_transform == 1
-    float snap_ratio;       // unused here; layout parity
-    float floor_frac;       // unused here; layout parity
-    float floor_ref_alpha;  // unused here; layout parity
-    float pct_lo;           // unused here (consumed by depth_minmax_ema_cs)
-    float pct_hi;           // unused here (consumed by depth_minmax_ema_cs)
-    float pad0;
-    float pad1;
-    float pad2;
-};
+#include "include/depth_constants.hlsl"
 
 #define GROUP_SIZE 256
 #define NUM_BINS 256

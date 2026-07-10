@@ -456,7 +456,10 @@ namespace models {
             Microsoft::WRL::ComPtr<ID3DBlob> blob;
             Microsoft::WRL::ComPtr<ID3DBlob> err;
             DWORD flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
-            if (FAILED(D3DCompileFromFile(path.wstring().c_str(), nullptr, nullptr, "main", "cs_5_0", flags, 0, &blob, &err))) {
+            // D3D_COMPILE_STANDARD_FILE_INCLUDE resolves #include relative to the .hlsl's dir
+            // (matches display_vram.cpp / sbs_bench_harness.cpp), so the depth shaders can share
+            // include/band_curve.hlsl etc. instead of hand-synced copies.
+            if (FAILED(D3DCompileFromFile(path.wstring().c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "main", "cs_5_0", flags, 0, &blob, &err))) {
                 if (err) BOOST_LOG(error) << "Shader compile error (" << path << "): " << (char*)err->GetBufferPointer();
                 return false;
             }
@@ -866,6 +869,19 @@ namespace models {
                     BOOST_LOG(warning) << "Subject-tracking shaders failed to compile; falling back to the linear depth mapping.";
                     subject_track = false;
                 }
+                // The shaped-disparity knobs (stretch, plane-lock, band curve) only feed the
+                // PROBE reprojection. The MLBW learned warp anchors the subject via its
+                // convergence plane instead and ignores them -- warn so a MLBW user isn't
+                // silently tuning dead knobs.
+                if (subject_track && learned_warp && (subject_stretch || cfg.subject_plane_lock > 0.0)) {
+                    BOOST_LOG(warning) << "sbs_3d_subject_stretch / subject_plane_lock only affect the probe reprojection; "
+                                          "the active learned warp (sbs_3d_learned_warp) anchors the subject via its "
+                                          "convergence plane and ignores them.";
+                }
+            } else if (subject_stretch || cfg.subject_plane_lock > 0.0) {
+                // These require the subject estimate; with tracking off they are silent no-ops.
+                BOOST_LOG(warning) << "sbs_3d_subject_stretch / subject_plane_lock have no effect without "
+                                      "sbs_3d_subject_track = enabled -- ignoring them.";
             }
             if (guided_upsample) {
                 bool ok = compile_shader(assets_dir / "shaders" / "directx" / "depth_guide_downsample_cs.hlsl", depth_guide_downsample_cs) &&

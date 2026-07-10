@@ -12,46 +12,13 @@ RWStructuredBuffer<uint>   SubjectHist  : register(u0);  // 256 weighted bins (s
 RWStructuredBuffer<float4> SubjectState : register(u1);  // [0]={delta,scurve,subj_ema,init} [1]={lo,inv_range,_,_}
 RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 unweighted bins (stretch 5/95 pct)
 
-// Shared depth-pass cbuffer; slots 15-18 (subject_recenter, stretch_lo/hi pct, subject_stretch)
-// are consumed here. The C++ buffer is >= this size; shaders may declare only a prefix.
-cbuffer Constants : register(b0) {
-    uint target_w;
-    uint target_h;
-    uint is_hdr;
-    float ema_alpha;
-    float minmax_alpha;
-    uint reduce_threads;
-    uint output_transform;
-    float depth_shift;
-    float snap_ratio;
-    float floor_frac;
-    float floor_ref_alpha;
-    float pct_lo;
-    float pct_hi;
-    float lock_frames;
-    float locked_alpha;
-    float subject_recenter;
-    float stretch_lo_pct;    // VD3D shape_depth_for_pop stretch bounds (fractions)
-    float stretch_hi_pct;
-    float subject_stretch;   // > 0.5 = apply the disparity stretch
-    float pad_sr;
-};
+#include "include/depth_constants.hlsl"
 
 #define NUM_BINS 256
 
-// VD3D's near/mid/far Gaussian disparity bands, translated to Apollo's high=near depth
-// (band centers mirrored). Amplitudes from the Bestv2 preset: fg -9*1.11, mg -3,
-// bg +2.4*1.05 px in VD3D's negative=pop convention -> +1 / +0.300 / -0.252 here (positive =
-// pops out; divergence is the master gain). Note the weighted-average curve PEAKS at ~0.86
-// (d=1), not literally +1 (the mid band dilutes the near amplitude). MUST stay identical to
-// BandCurve in sbs_reprojection_ps.hlsl (no #include support in the runtime-compiled shaders)
-// and to band_curve in tools/warpsim/warpsim.cpp.
-float BandCurve(float d) {
-    float wn = exp(-0.5f * ((d - 0.85f) / 0.24f) * ((d - 0.85f) / 0.24f));
-    float wm = exp(-0.5f * ((d - 0.50f) / 0.28f) * ((d - 0.50f) / 0.28f));
-    float wf = exp(-0.5f * ((d - 0.15f) / 0.24f) * ((d - 0.15f) / 0.24f));
-    return (wn * 1.0f + wm * 0.300f + wf * -0.252f) / (wn + wm + wf + 1e-6f);
-}
+// BandCurve() -- the near/mid/far disparity shaping profile, shared with
+// sbs_reprojection_ps.hlsl (keep tools/warpsim/warpsim.cpp band_curve in sync).
+#include "include/band_curve.hlsl"
 
 [numthreads(1, 1, 1)]
 void main() {

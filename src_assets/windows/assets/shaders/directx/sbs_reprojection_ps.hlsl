@@ -53,20 +53,9 @@ float BorderFade(float x) {
     return (border_fade <= 0.0f) ? 1.0f : saturate(min(x, 1.0f - x) / border_fade);
 }
 
-// VD3D's near/mid/far Gaussian disparity bands, translated to Apollo's high=near depth
-// (band centers mirrored). Band amplitudes from the VD3D Bestv2 preset: fg -9*1.11, mg -3,
-// bg +2.4*1.05 px in VD3D's negative=pop convention -> +1 / +0.300 / -0.252 here (positive =
-// pops out; divergence is the master gain). Note the weighted-average curve PEAKS at ~0.86
-// (d=1), not literally +1 -- the mid band dilutes the near amplitude -- so do not tighten the
-// probe search radius assuming a +-1 range. MUST stay identical to BandCurve in
-// depth_subject_resolve_cs.hlsl (no #include support in the runtime-compiled shaders) and to
-// band_curve in tools/warpsim/warpsim.cpp.
-float BandCurve(float d) {
-    float wn = exp(-0.5f * ((d - 0.85f) / 0.24f) * ((d - 0.85f) / 0.24f));
-    float wm = exp(-0.5f * ((d - 0.50f) / 0.28f) * ((d - 0.50f) / 0.28f));
-    float wf = exp(-0.5f * ((d - 0.15f) / 0.24f) * ((d - 0.15f) / 0.24f));
-    return (wn * 1.0f + wm * 0.300f + wf * -0.252f) / (wn + wm + wf + 1e-6f);
-}
+// BandCurve() -- the near/mid/far disparity shaping profile, shared with
+// depth_subject_resolve_cs.hlsl (keep tools/warpsim/warpsim.cpp band_curve in sync).
+#include "include/band_curve.hlsl"
 
 // Signed horizontal parallax for a normalized depth sample at source position x, in
 // source-UV units. Positive => nearer than the focal plane => pops out of the screen.
@@ -76,34 +65,32 @@ float BandCurve(float d) {
 // scales with |d_near - d_far|; lifting the far floor narrows that band without touching
 // foreground pop.
 //
-// Shaped path (subject_track): recenter depth around the tracked subject, map it through
-// the near/mid/far band curve, and subtract subject_lock x the subject's own curve value
-// so the subject sits at the screen plane. The residual is clamped to [-1, 1], making
+// Shaped path (shaped == true): recenter depth around the tracked subject, map it through
+// the near/mid/far band curve, and subtract subject_lock x the subject's own curve value so
+// the subject sits at the screen plane. The residual is clamped to [-1, 1], making
 // max_divergence the hard parallax bound (the probe search radius relies on this).
-float DepthParallax(float d, float x) {
-    if (subject_track > 0.5f) {
-        float4 s = SubjectState[0];   // {delta, subject_curve, subj_ema, init}
-        if (s.w > 0.5f) {
-            // Optional disparity stretch (VD3D shape_depth_for_pop): rescale the [lo,hi]
-            // percentile band to full [0,1] so the mid-range uses the whole parallax budget.
-            // lo=0, inv_range=1 (stretch off) makes this an identity.
-            float d_str = d;
-            if (subject_stretch > 0.5f) {
-                float4 s1 = SubjectState[1];  // {stretch_lo, stretch_inv_range, _, _}
-                d_str = saturate((d - s1.x) * s1.y);
-            }
-            float d_shaped = saturate(d_str + s.x);  // recenter (delta in stretched space)
-            float c = BandCurve(d_shaped);
-            // Local subject-plane lock (VD3D apply_subject_plane_lock): flatten the near-subject
-            // surround toward the subject's own parallax, so the subject band reads as one plane.
-            if (subject_plane_lock > 0.0f) {
-                float t = (d - s.z) / max(subject_plane_width, 1e-4f);
-                float band = exp(-0.5f * t * t);
-                c = lerp(c, s.y, subject_plane_lock * band);
-            }
-            c -= subject_lock * s.y;   // global anchor: subject to the screen plane
-            return clamp(c, -1.0f, 1.0f) * max_divergence * BorderFade(x);
+//
+// s0 = SubjectState[0] {delta, subject_curve, subj_ema, init}; s1 = SubjectState[1]
+// {stretch_lo, stretch_inv_range, _, _}. Both are frame-uniform and are read ONCE in
+// Reproject (not per probe) and passed in; `shaped` is decided there too so the search
+// radius and this mapping can never disagree about which path is live.
+float DepthParallax(float d, float x, float4 s0, float4 s1, bool shaped) {
+    if (shaped) {
+        // Optional disparity stretch (VD3D shape_depth_for_pop): rescale the [lo,hi] percentile
+        // band to full [0,1] so the mid-range uses the whole parallax budget. lo=0, inv_range=1
+        // (stretch off) makes this an identity.
+        float d_str = (subject_stretch > 0.5f) ? saturate((d - s1.x) * s1.y) : d;
+        float d_shaped = saturate(d_str + s0.x);  // recenter (delta in stretched space)
+        float c = BandCurve(d_shaped);
+        // Local subject-plane lock (VD3D apply_subject_plane_lock): flatten the near-subject
+        // surround toward the subject's own parallax, so the subject band reads as one plane.
+        if (subject_plane_lock > 0.0f) {
+            float t = (d - s0.z) / max(subject_plane_width, 1e-4f);
+            float band = exp(-0.5f * t * t);
+            c = lerp(c, s0.y, subject_plane_lock * band);
         }
+        c -= subject_lock * s0.y;   // global anchor: subject to the screen plane
+        return clamp(c, -1.0f, 1.0f) * max_divergence * BorderFade(x);
     }
     float df = depth_floor + (1.0f - depth_floor) * d;
     return (df - focal_plane) * max_divergence * BorderFade(x);
@@ -129,11 +116,21 @@ float SampleDepth(float sx, float sy, float2 ofs) {
 // nearest (frontmost) surface so foreground occludes rather than duplicates.
 // eyeSign = +1 right eye, -1 left eye.
 float2 Reproject(float2 uv, float eyeSign) {
-    // Widest distance any surface can travel (near or far side of the focal plane).
-    // BorderFade only shrinks parallax, so this (fade=1) remains a valid upper bound on
-    // the search span. The shaped path clamps its curve to [-1, 1], so its bound is the
-    // full max_divergence (2x the linear path's -- probe spacing coarsens accordingly).
-    float searchRadius = (subject_track > 0.5f)
+    // Subject anchoring is live this frame only if configured AND the resolve pass has
+    // produced state (init != 0 -- it is 0 for the first frames, or when the subject shaders
+    // failed to compile so the SubjectState SRV is unbound and reads 0). Decide it ONCE here
+    // from the runtime state, and read the frame-uniform SubjectState once, so the probe loop
+    // below issues no per-probe buffer loads (DepthParallax gets s0/s1 as args). `shaped` also
+    // gates searchRadius, so the search span and the parallax mapping can never disagree.
+    float4 s0 = SubjectState[0];
+    float4 s1 = SubjectState[1];
+    bool shaped = (subject_track > 0.5f) && (s0.w > 0.5f);
+
+    // Widest distance any surface can travel (near or far side of the focal plane). BorderFade
+    // only shrinks parallax, so this (fade=1) remains a valid upper bound on the search span.
+    // The shaped path clamps its curve to [-1, 1], so its bound is the full max_divergence
+    // (2x the linear path's -- probe spacing coarsens accordingly).
+    float searchRadius = shaped
         ? max_divergence
         : max_divergence * max(focal_plane, 1.0f - focal_plane);
     if (searchRadius <= 1e-6f) {
@@ -166,14 +163,14 @@ float2 Reproject(float2 uv, float eyeSign) {
 
     float prevX = startX;
     float prevD = SampleDepth(prevX, uv.y, ofs);
-    float prevG = (prevX - uv.x) - eyeSign * DepthParallax(prevD, prevX);
+    float prevG = (prevX - uv.x) - eyeSign * DepthParallax(prevD, prevX, s0, s1, shaped);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
     for (int i = 1; i <= steps; i++) {
         float x = startX + stepX * i;
         float d = SampleDepth(x, uv.y, ofs);
-        float g = (x - uv.x) - eyeSign * DepthParallax(d, x);
+        float g = (x - uv.x) - eyeSign * DepthParallax(d, x, s0, s1, shaped);
 
         // Zero crossing between prevX and x => a source in this span reprojects onto uv.
         if ((prevG <= 0.0f && g >= 0.0f) || (prevG >= 0.0f && g <= 0.0f)) {

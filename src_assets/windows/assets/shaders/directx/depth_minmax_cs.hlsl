@@ -9,20 +9,7 @@
 StructuredBuffer<float> InputBuffer : register(t0);
 RWByteAddressBuffer     MinMaxOut   : register(u0);  // [0]=min bits, [4]=max bits
 
-cbuffer Constants : register(b0) {
-    uint target_w;
-    uint target_h;
-    uint is_hdr;
-    float ema_alpha;
-    float minmax_alpha;
-    uint reduce_threads;  // total threads in this dispatch (groups * GROUP_SIZE)
-    uint output_transform;  // 0 = identity (DA-V2 disparity); 1 = shifted reciprocal (DA-V3 depth -> disparity)
-    float depth_shift;  // shift in 1/(depth + depth_shift) when output_transform == 1
-    float snap_ratio;       // unused here; shared 48-byte cbuffer layout parity
-    float floor_frac;       // unused here; layout parity
-    float floor_ref_alpha;  // unused here; layout parity
-    float pad0;
-};
+#include "include/depth_constants.hlsl"
 
 #define GROUP_SIZE 256
 groupshared uint g_min[GROUP_SIZE];

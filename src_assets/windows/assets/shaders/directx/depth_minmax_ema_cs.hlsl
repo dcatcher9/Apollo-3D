@@ -14,24 +14,7 @@ RWStructuredBuffer<float4> MinMaxEma : register(u0);  // [0]={min,max,initialize
 RWByteAddressBuffer        MinMaxRaw : register(u1);  // [0]=min bits, [4]=max bits
 RWStructuredBuffer<uint>   Histogram : register(u2);  // 256 bins from depth_hist_cs (percentile mode only)
 
-cbuffer Constants : register(b0) {
-    uint target_w;
-    uint target_h;
-    uint is_hdr;
-    float ema_alpha;
-    float minmax_alpha;
-    uint reduce_threads;
-    uint output_transform;  // unused here; shared layout
-    float depth_shift;      // unused here; shared layout
-    float snap_ratio;       // A1: raw-vs-EMA range ratio (or center shift) that triggers a snap; 0 = off
-    float floor_frac;       // A3: current range below ref*floor_frac -> scale parallax down; 0 = off
-    float floor_ref_alpha;  // A3: reference-range decay toward smaller ranges
-    float pct_lo;           // robust normalization: low percentile as a fraction (0 = raw min)
-    float pct_hi;           // robust normalization: high percentile as a fraction (1 = raw max)
-    float lock_frames;      // scene lock: updates converging at minmax_alpha before the bounds freeze (0 = off)
-    float locked_alpha;     // blend rate while locked (near-zero drift so a long scene can't diverge)
-    float pad0;
-};
+#include "include/depth_constants.hlsl"
 
 #define NUM_BINS 256
 
