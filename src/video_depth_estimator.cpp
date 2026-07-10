@@ -1445,9 +1445,11 @@ namespace models {
 
                 // Ground-truth log to number-match against VD3D's [3DDBG] subj=. VD3D's render
                 // depth is LOW=near; Apollo is HIGH=near, so print both subj and 1-subj (the
-                // VD3D-convention value to compare directly). Perf-gated + every 24 updates so
-                // the GPU->CPU readback never touches the shipping path.
-                if (sbs_perf::enabled() && subject_stage && (++subject_log_counter % 24u) == 1u) {
+                // VD3D-convention value to compare directly). Opt-in via APOLLO_SUBJDBG (NOT
+                // perf-gated: CopyResource+Map is a CPU/GPU sync that would perturb the very
+                // perf numbers a benchmark run measures), every 24 updates, off the ship path.
+                static const bool subjdbg = std::getenv("APOLLO_SUBJDBG") != nullptr;
+                if (subjdbg && subject_stage && (++subject_log_counter % 24u) == 1u) {
                     context->CopyResource(subject_stage.Get(), subject_buf.Get());
                     D3D11_MAPPED_SUBRESOURCE ms {};
                     if (SUCCEEDED(context->Map(subject_stage.Get(), 0, D3D11_MAP_READ, 0, &ms))) {

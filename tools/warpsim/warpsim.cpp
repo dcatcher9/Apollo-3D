@@ -57,25 +57,43 @@ static float border_fade(float x) {
     return clampf(std::min(x, 1.0f - x) / BORDER_FADE, 0.0f, 1.0f);
 }
 // Shaped-disparity variant (sbs_3d_subject_track, 2026-07-09): the shader can replace the
-// linear mapping below with BandCurve(saturate(d + delta)) - subject_lock * scurve, clamped
-// to [-1,1], times DIVERGENCE (searchRadius then = DIVERGENCE, not DIVERGENCE/2). delta and
-// scurve come from depth_subject_resolve_cs's SubjectState. To study that path here, set
-// SUBJECT_DELTA/SUBJECT_SCURVE from a dump and route depth_parallax through band_curve.
+// linear mapping below with the near/mid/far band curve of the recentered (optionally
+// stretched) depth, minus subject_lock * scurve, with an optional local plane-lock band --
+// clamped to [-1,1], times DIVERGENCE (searchRadius then = DIVERGENCE, not DIVERGENCE/2).
+// The per-frame values (delta, scurve, subject depth, stretch bounds) come from
+// depth_subject_resolve_cs's SubjectState; fill the SUBJECT_* constants from a dump to study
+// this path here. Replica of DepthParallax in sbs_reprojection_ps.hlsl (keep in sync).
 static float band_curve(float d) {
-    // MUST match BandCurve in sbs_reprojection_ps.hlsl / depth_subject_resolve_cs.hlsl.
+    // MUST match BandCurve in sbs_reprojection_ps.hlsl / depth_subject_resolve_cs.hlsl. The
+    // near band dominates but the weighted average peaks at ~0.86 (d=1), not literally +1.
     float wn = expf(-0.5f * ((d - 0.85f) / 0.24f) * ((d - 0.85f) / 0.24f));
     float wm = expf(-0.5f * ((d - 0.50f) / 0.28f) * ((d - 0.50f) / 0.28f));
     float wf = expf(-0.5f * ((d - 0.15f) / 0.24f) * ((d - 0.15f) / 0.24f));
     return (wn * 1.0f + wm * 0.300f + wf * -0.252f) / (wn + wm + wf + 1e-6f);
 }
-static const bool  SUBJECT_TRACK = false;   // flip + fill the two constants to sim the shaped path
-static const float SUBJECT_DELTA = 0.0f;    // SubjectState.x from a dump
-static const float SUBJECT_SCURVE = 0.0f;   // SubjectState.y from a dump
+static const bool  SUBJECT_TRACK = false;   // flip + fill the constants to sim the shaped path
+static const float SUBJECT_DELTA = 0.0f;    // SubjectState[0].x (recenter delta, stretched space)
+static const float SUBJECT_SCURVE = 0.0f;   // SubjectState[0].y (subject_curve)
+static const float SUBJECT_EMA = 0.6f;      // SubjectState[0].z (subject depth, high=near; for plane-lock band)
 static const float SUBJECT_LOCK = 0.95f;
+static const bool  SUBJECT_STRETCH = true;  // config sbs_3d_subject_stretch (default on in subject path)
+static const float SUBJECT_STRETCH_LO = 0.0f;   // SubjectState[1].x
+static const float SUBJECT_STRETCH_INV = 1.0f;  // SubjectState[1].y (1/(hi-lo))
+static const float SUBJECT_PLANE_LOCK = 0.0f;   // config sbs_3d_subject_plane_lock (default off)
+static const float SUBJECT_PLANE_WIDTH = 0.12f; // config sbs_3d_subject_plane_width
 
 static float depth_parallax(float d, float x) {
     if (SUBJECT_TRACK) {
-        float c = band_curve(clampf(d + SUBJECT_DELTA, 0.0f, 1.0f)) - SUBJECT_LOCK * SUBJECT_SCURVE;
+        float d_str = d;
+        if (SUBJECT_STRETCH) d_str = clampf((d - SUBJECT_STRETCH_LO) * SUBJECT_STRETCH_INV, 0.0f, 1.0f);
+        float d_shaped = clampf(d_str + SUBJECT_DELTA, 0.0f, 1.0f);
+        float c = band_curve(d_shaped);
+        if (SUBJECT_PLANE_LOCK > 0.0f) {
+            float t = (d - SUBJECT_EMA) / std::max(SUBJECT_PLANE_WIDTH, 1e-4f);
+            float band = expf(-0.5f * t * t);
+            c = c + (SUBJECT_SCURVE - c) * (SUBJECT_PLANE_LOCK * band);  // lerp(c, scurve, lock*band)
+        }
+        c -= SUBJECT_LOCK * SUBJECT_SCURVE;
         return clampf(c, -1.0f, 1.0f) * DIVERGENCE * border_fade(x);
     }
     d = DEPTH_FLOOR + (1.0f - DEPTH_FLOOR) * d;

@@ -123,10 +123,13 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   composite shaders over a fixed directory of frames (split a short video with
   `tools/sbsbench/split_video.py`), writing `sbs_%05d.png` + `depth_%05d.png`, deterministically
   and with no game/client. Score with `python tools/sbsbench/sbsbench.py --seq <out> --baseline
-  base.json` → pop (stereo depth), vmisalign (geometry, must stay ~0), disocc_frac/disocc_smear
-  (disocclusion severity), flicker (temporal shimmer, which the offline sim can't measure).
-  Capture a baseline before the change; the `--divergence` and `--model`/`--movie` flags are the
-  A/B levers. Run it from `cmake-build-relwithdebinfo` so `assets/` resolves.
+  base.json` → pop_spread (near-to-far stereo VOLUME, the gated pop metric — subject-anchoring-fair,
+  unlike median-|dx| pop_px which is reported-only), vmisalign (geometry, must stay ~0),
+  disocc_frac/disocc_smear (disocclusion severity), flicker (temporal shimmer, which the offline
+  sim can't measure). Capture a baseline before the change; `--divergence`, `--model`/`--movie`,
+  `--depth-short-side`, `--subject-track`/`--subject-lock`/`--subject-stretch`/`--subject-plane-lock`,
+  `--probe`, `--sync-depth`, `--pct-lo`/`--pct-hi` are the A/B levers (see the harness README). Run
+  it from `cmake-build-relwithdebinfo` so `assets/` resolves.
 - **Perf** — the in-app `sbs_3d_perf_stats = enabled` config knob ([src/sbs_perf.cpp](src/sbs_perf.cpp)):
   logs per-stage p50/p95/max (`depth_infer`, `warp_infer` via CUDA events; `sbs_convert_cpu`)
   every 300 SBS frames and writes `sbs_perf.json`. The harness enables it automatically, so a

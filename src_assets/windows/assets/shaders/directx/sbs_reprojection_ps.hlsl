@@ -54,11 +54,13 @@ float BorderFade(float x) {
 }
 
 // VD3D's near/mid/far Gaussian disparity bands, translated to Apollo's high=near depth
-// (band centers mirrored) and normalized so the near band peaks at +1 (positive = pops out;
-// divergence is the master gain). Amplitudes from the VD3D Bestv2 preset: fg -9*1.11,
-// mg -3, bg +2.4*1.05 px in VD3D's negative=pop convention -> +1 / +0.300 / -0.252 here.
-// MUST stay identical to BandCurve in depth_subject_resolve_cs.hlsl (no #include support
-// in the runtime-compiled shaders) and to band_curve in tools/warpsim/warpsim.cpp.
+// (band centers mirrored). Band amplitudes from the VD3D Bestv2 preset: fg -9*1.11, mg -3,
+// bg +2.4*1.05 px in VD3D's negative=pop convention -> +1 / +0.300 / -0.252 here (positive =
+// pops out; divergence is the master gain). Note the weighted-average curve PEAKS at ~0.86
+// (d=1), not literally +1 -- the mid band dilutes the near amplitude -- so do not tighten the
+// probe search radius assuming a +-1 range. MUST stay identical to BandCurve in
+// depth_subject_resolve_cs.hlsl (no #include support in the runtime-compiled shaders) and to
+// band_curve in tools/warpsim/warpsim.cpp.
 float BandCurve(float d) {
     float wn = exp(-0.5f * ((d - 0.85f) / 0.24f) * ((d - 0.85f) / 0.24f));
     float wm = exp(-0.5f * ((d - 0.50f) / 0.28f) * ((d - 0.50f) / 0.28f));

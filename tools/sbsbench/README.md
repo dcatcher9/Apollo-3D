@@ -31,12 +31,24 @@ python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change
 python tools/sbsbench/run_eval.py --extra --divergence 0.027   # pass A/B levers to the harness
 ```
 
-Harness A/B levers (after `--extra`): `--divergence F` (parallax gain), `--sync-depth`
-(synchronous current-frame inference — the branch default since 2026-07-09; the lever exists to
-A/B *back* to async), `--pct-lo F --pct-hi F` (robust percentile normalization bounds, e.g.
-`1 99`; default off = raw min/max), `--ema F` (per-pixel depth EMA override, `1.0` = off),
-`--lock-frames N` (scene-locked normalization bounds; bench-falsified for DA-V2 — see the
-config.h note on sbs_3d_norm_lock_frames before using).
+Harness A/B levers (after `--extra`):
+- `--divergence F` — parallax gain.
+- `--depth-short-side N` — depth inference short side (default 432; VD3D parity). 336 to A/B
+  back to the old under-resolved default.
+- `--sync-depth` — synchronous current-frame inference (the branch default since 2026-07-09;
+  the lever exists to A/B *back* to async).
+- `--pct-lo F --pct-hi F` — robust percentile normalization bounds, e.g. `1 99` (default off =
+  raw min/max).
+- `--ema F` — per-pixel depth EMA override (`1.0` = off).
+- `--lock-frames N` — scene-locked normalization bounds (bench-falsified for DA-V2; see the
+  config.h note on `sbs_3d_norm_lock_frames`).
+- `--subject-track` — VD3D-style shaped disparity (subject-anchored band curve). `--probe`
+  forces the probe reprojection so the shaped path is exercised (bench.conf pins MLBW, which
+  ignores the probe-only shaping — A/B subject shaping with `--probe --subject-track`).
+- `--subject-lock F` — subject anchor strength (e.g. `0.95`).
+- `--subject-stretch` — shape_depth_for_pop 5/95 percentile stretch (default on within the
+  subject path).
+- `--subject-plane-lock F` — local subject-band flatten (e.g. `0.28`; default off).
 
 Exit code is the verdict (0 pass / 1 regression / 2 setup error), so the eval→fix→eval loop is
 scriptable. `results.json` carries provenance (git sha+dirty, models, clip hashes, gpu-contention
@@ -98,7 +110,8 @@ swapping da3mono→v2 moved edge_acc −96% and swim −100% and left the warp l
 ## Overall score (0–100)
 `sbs_score(agg)` collapses the metric vector into one number per clip: `q_clean` = 100 − weighted
 artifact penalties (each `weight × min(value/scale, 1)`, saturating), `q_depth` = realized stereo
-(`pop_pct` vs a target — content-dependent, so a flat scene scores low), blended
+(`pop_spread_pct` vs a target — the near-to-far VOLUME, not median \|dx\|, so subject anchoring is
+scored on delivered depth; content-dependent, so a flat scene scores low), blended
 `score = (1−w)·q_clean + w·q_depth`. Weights/scales live in [thresholds.json](thresholds.json)
 `"score"` (retuning them also reorders the report, which sorts metrics by quality impact). The
 score is gated by run_eval like any metric (a >1.5-point drop = regression) and best used to rank
@@ -112,8 +125,9 @@ that scene name and run_eval copies it into results.json. The clip identity hash
 ## Metrics — spatial (per frame)
 | metric | meaning | direction |
 |--------|---------|-----------|
-| `pop_px_p50` / `p95` | L↔R horizontal disparity (tile phase-correlation), median & p95 | higher = more 3D pop |
+| `pop_px_p50` / `p95` | L↔R horizontal disparity (tile phase-correlation), median & p95 of \|dx\|. REPORTED but NOT gated — subject anchoring legitimately lowers median \|dx\| | higher = more 3D pop |
 | `pop_pct_p50` | same as % of eye width | higher = more pop |
+| `pop_spread_px` / `pop_spread_pct` | near-to-far disparity RANGE = weighted p95−p5 of **signed** dx (px / % of eye width). The stereo VOLUME, invariant to where the zero-parallax plane sits — the **gated** pop metric and the `q_depth` driver (subject-mode-fair; also ~0 for a flat scene shifted bodily forward) | higher = more volume |
 | `vmisalign_px` | median vertical L↔R offset — must be ~0 | nonzero = geometry fault |
 | `depth_spread` | p95−p5 of the normalized depth = pop available at the source | separates flat-model from flat-warp |
 | `disocc_frac` | fraction of the eye in a band beside a real depth silhouette | context for smear (how much was invented) |
