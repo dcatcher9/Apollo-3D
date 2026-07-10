@@ -521,15 +521,15 @@ namespace sbs_bench {
         ctx->ClearUnorderedAccessViewUint(vd3d_winner_uav.Get(), clear_winner);
         ctx->CSSetShader(vd3d_cs.Get(), nullptr, 0);
         ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
-        ID3D11ShaderResourceView *cs_srvs[] = {est.depth.Get(), est.subject.Get()};
-        ctx->CSSetShaderResources(1, 2, cs_srvs);
+        ID3D11ShaderResourceView *cs_srvs[] = {est.depth.Get(), est.subject.Get(), nullptr, est.plane_lock.Get()};
+        ctx->CSSetShaderResources(1, 4, cs_srvs);
         ctx->CSSetUnorderedAccessViews(0, 1, vd3d_winner_uav.GetAddressOf(), nullptr);
         ctx->CSSetConstantBuffers(2, 1, repro_cb.GetAddressOf());
         ctx->Dispatch(((sbs_w / 2u) + 15u) / 16u, (sbs_h + 15u) / 16u, 1u);
         ID3D11UnorderedAccessView *null_uav[] = {nullptr};
-        ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr};
+        ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr, nullptr};
         ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
-        ctx->CSSetShaderResources(1, 2, null_cs_srvs);
+        ctx->CSSetShaderResources(1, 4, null_cs_srvs);
       }
       ctx->OMSetRenderTargets(1, sbs_rtv.GetAddressOf(), nullptr);
       ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -539,16 +539,16 @@ namespace sbs_bench {
       ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
 
       ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), est.depth.Get(), est.subject.Get(),
-        sbs_cfg.warp == "vd3d" && est.depth ? vd3d_winner_srv.Get() : nullptr};
-      ctx->PSSetShaderResources(0, 4, srvs);
+        sbs_cfg.warp == "vd3d" && est.depth ? vd3d_winner_srv.Get() : nullptr, est.plane_lock.Get()};
+      ctx->PSSetShaderResources(0, 5, srvs);
       ID3D11Buffer *cb = est.depth ? repro_cb.Get() : pass_cb.Get();
       ctx->PSSetConstantBuffers(2, 1, &cb);
       ctx->Draw(3, 0);
 
       ID3D11RenderTargetView *null_rtv[] = {nullptr};
       ctx->OMSetRenderTargets(1, null_rtv, nullptr);
-      ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr, nullptr};
-      ctx->PSSetShaderResources(0, 4, null_srv);
+      ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+      ctx->PSSetShaderResources(0, 5, null_srv);
       if (time_warp) {
         ctx->End(warp_end.Get());
         ctx->End(warp_disjoint.Get());

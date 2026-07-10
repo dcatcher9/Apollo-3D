@@ -4,6 +4,7 @@
 
 Texture2D<float> DepthTexture : register(t1);
 StructuredBuffer<float4> SubjectState : register(t2);
+Texture2D<float> PlaneLockTexture : register(t4);
 RWTexture2D<uint> WinnerTexture : register(u0);
 SamplerState LinearSampler : register(s0);
 
@@ -22,8 +23,10 @@ void main(uint3 id : SV_DispatchThreadID) {
     float d = DepthTexture.SampleLevel(LinearSampler, uv, 0);
     float4 s0 = SubjectState[0];
     float4 s1 = SubjectState[1];
+    float4 s2 = SubjectState[2];
     bool shaped = (subject_track > 0.5f) && (s0.w > 0.5f);
-    float parallax = DepthParallax(d, uv.x, s0, s1, shaped, (float)eye_w);
+    float plane_mask = PlaneLockTexture.SampleLevel(LinearSampler, uv, 0);
+    float parallax = DepthParallax(d, plane_mask, uv.x, s0, s1, s2, shaped, (float)eye_w);
 
     // Apollo is high=near. Store a 16-bit near priority plus the 16-bit source x; max wins.
     uint depth_key = 1u + (uint)round(saturate(WarpDepth(d, s0, s1, shaped)) * 65533.0f);

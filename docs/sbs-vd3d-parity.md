@@ -245,6 +245,21 @@ from `flat_page`, where false stereo fell 0.25 px. Three compute passes and mult
 are not justified by that isolated effect, so the fitted port was removed. Reports remain under
 `sbs_eval/bestv2-curvature-{apollo,vd3d}/`.
 
+**Accepted exact subject-plane-lock reproduction (2026-07-10):** Bestv2 now uses its actual
+center-weighted depth band, separable equivalents of the 21×21 dilation and 15×15 closing, the
+70% silhouette-fill blend, 13×13 smoothing, mask-weighted mean of the current shift field, and
+the `weight^0.75` local correction. One shared GPU mask/mean feeds both warp geometries; no new
+configuration switch was added. Raw-model and saved pre-warp depth artifacts are byte-identical
+to the control. Against the aligned real Bestv2 output, MAE improves 0.061375 → 0.056834 (-7.4%)
+and PSNR improves 20.878 → 22.193 dB; median pop moves from 15.48 px to 11.60 px versus VD3D's
+12.56 px. This is a meaningful Phase-A reproduction gain and is retained.
+
+It is not an Apollo quality improvement: excluding `flat_page`, generic-corpus score changes
+-0.56 (Apollo) / -1.03 (VD3D), pop spread falls 0.58/0.62 px, and `rim_over_p95` rises 0.94/1.87.
+That regression is explicit evidence for the later Apollo-improvement phase, not hidden by the
+reference-fidelity verdict. Reports are under `sbs_eval/bestv2-plane-{apollo,vd3d}/`; fresh
+controls are `sbs_eval/bestv2-plane-control-{apollo,vd3d}/`.
+
 ### B3 · Disocclusion concealment *(evaluated and rejected)*
 
 VD3D: smear-blend-back (shift-grad>0.006 → 5×5 dilate → 60% blend back to flat 2D) + one-sided
@@ -270,8 +285,8 @@ fixed this session to the near plane when no subject). Heal/sharpen not ported.
 
 ## Next controlled experiment
 
-Evaluate Bestv2's exact subject-plane-lock morphology as the next isolated reproduction step:
-center weighting, 21×21 dilation, 15×15 closing, 13×13 smoothing, shift-weighted subject mean, and
-the 0.75 correction-mask exponent. Keep the accepted shift-only profile fixed and report both warp
-geometries. After faithful Bestv2 shaping is exhausted, return Apollo-only improvements one at a
-time.
+Evaluate Bestv2's DOF 0.3 as the next isolated reproduction step on top of the now-accepted exact
+plane lock. Match its focus convention and pyramid behavior before considering `heal_missing_pixels`
+and sharpen 0.2 as separate treatments. Keep reporting both warp geometries and preserve the raw
+and saved pre-warp depth checkpoints. After faithful Bestv2 post-processing is exhausted, return
+Apollo-only improvements one at a time.

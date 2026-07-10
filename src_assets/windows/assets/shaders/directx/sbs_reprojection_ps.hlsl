@@ -19,6 +19,7 @@ Texture2D<float>  DepthTexture      : register(t1);
 // subject_depth_ema, initialized}; [1] = {stretch_lo_val, stretch_inv_range, _, _}. Only read
 // when subject_track is on; an unbound/zero buffer (initialized == 0) falls back to linear.
 StructuredBuffer<float4> SubjectState : register(t2);
+Texture2D<float> PlaneLockTexture : register(t4);
 SamplerState      LinearSampler     : register(s0);
 
 struct PS_INPUT {
@@ -56,6 +57,7 @@ float2 Reproject(float2 uv, float eyeSign) {
     // gates searchRadius, so the search span and the parallax mapping can never disagree.
     float4 s0 = SubjectState[0];
     float4 s1 = SubjectState[1];
+    float4 s2 = SubjectState[2];
     bool shaped = (subject_track > 0.5f) && (s0.w > 0.5f);
     uint dw, dh;
     DepthTexture.GetDimensions(dw, dh);
@@ -97,14 +99,16 @@ float2 Reproject(float2 uv, float eyeSign) {
 
     float prevX = startX;
     float prevD = SampleDepth(prevX, uv.y, ofs);
-    float prevG = (prevX - uv.x) - eyeSign * DepthParallax(prevD, prevX, s0, s1, shaped, (float)dw);
+    float prevMask = PlaneLockTexture.SampleLevel(LinearSampler, float2(prevX, uv.y), 0);
+    float prevG = (prevX - uv.x) - eyeSign * DepthParallax(prevD, prevMask, prevX, s0, s1, s2, shaped, (float)dw);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
     for (int i = 1; i <= steps; i++) {
         float x = startX + stepX * i;
         float d = SampleDepth(x, uv.y, ofs);
-        float g = (x - uv.x) - eyeSign * DepthParallax(d, x, s0, s1, shaped, (float)dw);
+        float planeMask = PlaneLockTexture.SampleLevel(LinearSampler, float2(x, uv.y), 0);
+        float g = (x - uv.x) - eyeSign * DepthParallax(d, planeMask, x, s0, s1, s2, shaped, (float)dw);
 
         // Zero crossing between prevX and x => a source in this span reprojects onto uv.
         if ((prevG <= 0.0f && g >= 0.0f) || (prevG >= 0.0f && g <= 0.0f)) {

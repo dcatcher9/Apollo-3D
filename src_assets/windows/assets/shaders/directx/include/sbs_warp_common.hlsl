@@ -51,16 +51,15 @@ float Bestv2RawShiftPx(float d) {
     return (wn * 9.99f + wm * 3.0f + wf * -2.52f) / (wn + wm + wf + 1e-6f);
 }
 
-float Bestv2Parallax(float d, float4 s0, float4 s1, float source_width) {
+float Bestv2Parallax(float d, float plane_mask, float4 s0, float4 s1, float4 s2, float source_width) {
     float shaped_depth = WarpDepth(d, s0, s1, true);
     float subject_depth = WarpDepth(s0.z, s0, s1, true);
     float shift_px = Bestv2RawShiftPx(shaped_depth);
     float subject_shift_px = Bestv2RawShiftPx(subject_depth);
 
-    // Bestv2 apply_subject_plane_lock(.28, width=.12), expressed on the shift field. Apollo's
-    // current depth-band mask is the real-time equivalent; concealment/silhouette morphology is
-    // deliberately a later controlled step.
-    if (subject_plane_lock > 0.0f) {
+    // Fallback used only if exact morphology could not initialize. The normal Bestv2 path below
+    // consumes its center-weighted, closed and smoothed silhouette plus weighted mean shift.
+    if (subject_plane_lock > 0.0f && s2.y <= 0.5f) {
         float t = (d - s0.z) / max(subject_plane_width, 1e-4f);
         shift_px = lerp(shift_px, subject_shift_px, subject_plane_lock * exp(-0.5f * t * t));
     }
@@ -69,6 +68,12 @@ float Bestv2Parallax(float d, float4 s0, float4 s1, float source_width) {
     // zero_parallax_strength=.008, convergence_strength=.006 with dynamic convergence enabled.
     float parallax = (shift_px - subject_lock * subject_shift_px) * 0.35f / source_width;
     parallax -= 0.008f * 0.5f;
+    if (subject_plane_lock > 0.0f && s2.y > 0.5f) {
+        float correction_mask = pow(saturate(plane_mask * subject_plane_lock), 0.75f);
+        float subject_mean = (s2.x - subject_lock * subject_shift_px) * 0.35f / source_width;
+        subject_mean -= 0.008f * 0.5f;
+        parallax -= subject_mean * correction_mask;
+    }
     // s1.z is VD3D's ConvergenceEMA(alpha=.90) of (low-near subject depth * .006).
     parallax += s1.z * 4.0f / source_width;
     return clamp(parallax, -0.071f, 0.071f);
@@ -86,10 +91,11 @@ float Bestv2SearchRadius(float source_width) {
 // Signed parallax in source UV units. Positive values move near content right in the left eye and
 // left in the right eye. SubjectState[0] is {recenter_delta, subject_curve, subject_depth, init};
 // SubjectState[1] is {stretch_lo, stretch_inv_range, _, _}.
-float DepthParallax(float d, float x, float4 s0, float4 s1, bool shaped, float source_width) {
+float DepthParallax(float d, float plane_mask, float x, float4 s0, float4 s1, float4 s2,
+                    bool shaped, float source_width) {
     if (shaped) {
         if (bestv2_shift_profile > 0.5f) {
-            return Bestv2Parallax(d, s0, s1, source_width) * BorderFade(x);
+            return Bestv2Parallax(d, plane_mask, s0, s1, s2, source_width) * BorderFade(x);
         }
         float c = BandCurve(WarpDepth(d, s0, s1, true));
         if (subject_plane_lock > 0.0f) {

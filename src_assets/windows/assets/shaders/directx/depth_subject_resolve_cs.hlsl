@@ -3,6 +3,7 @@
 // reprojection needs per pixel:
 //   SubjectState[0] = { recenter_delta, subject_curve, subject_depth_ema, initialized }
 //   SubjectState[1] = { stretch_lo, stretch_inv_range, Bestv2 convergence EMA, 0 }
+//   SubjectState[2] = { exact plane-lock weighted mean raw shift, initialized, 0, 0 }
 // The reprojection's shaped path then evaluates BandCurve(saturate(d + recenter_delta))
 // and subtracts subject_lock * subject_curve -- anchoring the subject at the screen
 // plane. Because a global depth-scale drift moves the subject's parallax too, the
@@ -10,7 +11,7 @@
 // Resets the histogram for the next frame's accumulation.
 
 RWStructuredBuffer<uint>   SubjectHist  : register(u0);  // 256 weighted bins (subject estimate)
-RWStructuredBuffer<float4> SubjectState : register(u1);  // [0]={delta,scurve,subj_ema,init} [1]={lo,inv_range,_,_}
+RWStructuredBuffer<float4> SubjectState : register(u1);  // [0..2], see header above
 RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 unweighted bins (stretch 5/95 pct)
 
 #include "include/depth_constants.hlsl"

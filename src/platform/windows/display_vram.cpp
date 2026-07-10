@@ -502,8 +502,8 @@ namespace platf::dxgi {
             device_ctx->ClearUnorderedAccessViewUint(sbs_vd3d_winner_uav.get(), clear_winner);
             device_ctx->CSSetShader(sbs_vd3d_forward_cs.get(), nullptr, 0);
             device_ctx->CSSetSamplers(0, 1, &sampler_linear);
-            ID3D11ShaderResourceView* cs_srvs[] = {est.depth.Get(), est.subject.Get()};
-            device_ctx->CSSetShaderResources(1, 2, cs_srvs);
+            ID3D11ShaderResourceView* cs_srvs[] = {est.depth.Get(), est.subject.Get(), nullptr, est.plane_lock.Get()};
+            device_ctx->CSSetShaderResources(1, 4, cs_srvs);
             ID3D11UnorderedAccessView* cs_uavs[] = {sbs_vd3d_winner_uav.get()};
             device_ctx->CSSetUnorderedAccessViews(0, 1, cs_uavs, nullptr);
             ID3D11Buffer* cs_cb[] = {sbs_reprojection_cbuffer.get()};
@@ -513,9 +513,9 @@ namespace platf::dxgi {
             device_ctx->Dispatch((eye_w + 15u) / 16u, (eye_h + 15u) / 16u, 1u);
 
             ID3D11UnorderedAccessView* null_uav[] = {nullptr};
-            ID3D11ShaderResourceView* null_cs_srvs[] = {nullptr, nullptr};
+            ID3D11ShaderResourceView* null_cs_srvs[] = {nullptr, nullptr, nullptr, nullptr};
             device_ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
-            device_ctx->CSSetShaderResources(1, 2, null_cs_srvs);
+            device_ctx->CSSetShaderResources(1, 4, null_cs_srvs);
           }
 
           // Draw the selected geometry implementation into the shared SBS intermediate.
@@ -528,8 +528,9 @@ namespace platf::dxgi {
           device_ctx->PSSetSamplers(0, 1, &sampler_linear);
 
           ID3D11ShaderResourceView* srvs[] = {img_ctx.encoder_input_res.get(), est.depth.Get(),
-            est.subject.Get(), est.depth && sbs_vd3d_warp ? sbs_vd3d_winner_srv.get() : nullptr};
-          device_ctx->PSSetShaderResources(0, 4, srvs);
+            est.subject.Get(), est.depth && sbs_vd3d_warp ? sbs_vd3d_winner_srv.get() : nullptr,
+            est.plane_lock.Get()};
+          device_ctx->PSSetShaderResources(0, 5, srvs);
           ID3D11Buffer* sbs_cb[] = {est.depth ? sbs_reprojection_cbuffer.get() : sbs_passthrough_cbuffer.get()};
           device_ctx->PSSetConstantBuffers(2, 1, sbs_cb);
           device_ctx->Draw(3, 0);  // Fullscreen triangle
@@ -539,8 +540,8 @@ namespace platf::dxgi {
           device_ctx->OMSetRenderTargets(1, null_rtvs, nullptr);
 
           // Clear shader resources
-          ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr, nullptr, nullptr};
-          device_ctx->PSSetShaderResources(0, 4, null_srvs);
+          ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+          device_ctx->PSSetShaderResources(0, 5, null_srvs);
 
           // Draw captured frame (now SBS)
           draw(sbs_intermediate_srv, out_Y_or_YUV_viewports, out_UV_viewport);

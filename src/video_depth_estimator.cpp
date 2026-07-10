@@ -259,6 +259,9 @@ namespace models {
         bool subject_stretch;    // apply the shape_depth_for_pop 5/95 disparity stretch
         float stretch_lo;        // low percentile for the stretch (fraction)
         float stretch_hi;        // high percentile for the stretch (fraction)
+        bool exact_plane_lock;   // Bestv2's full silhouette morphology + weighted shift mean
+        float plane_lock_strength;
+        float plane_lock_width;
         float foreground_curvature;  // rounded-foreground bulge strength (0 = off)
         bool use_percentile; // either percentile bound active -> histogram pass runs
         float minmax_snap;   // A1: raw-vs-EMA range ratio that snaps the scale on a scene cut (0 = off)
@@ -359,8 +362,14 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_hist_cs;
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_subject_hist_cs;
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_subject_resolve_cs;
+        Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_plane_band_cs;
+        Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_plane_filter_cs;
+        Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_plane_combine_cs;
+        Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_plane_reduce_cs;
+        Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_plane_resolve_cs;
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_curvature_cs;
         Microsoft::WRL::ComPtr<ID3D11Buffer> curvature_cbuffer;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> plane_cbuffer;
         Microsoft::WRL::ComPtr<ID3D11SamplerState> linear_sampler;
         Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
 
@@ -389,6 +398,19 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject_srv;
         Microsoft::WRL::ComPtr<ID3D11Buffer> subject_stage;  // CPU-readable copy for the debug log
         unsigned subject_log_counter = 0;  // paces the [SUBJDBG] readback (every 24 depth updates)
+
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> plane_band_tex;
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> plane_band_uav;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> plane_band_srv;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> plane_work_a_tex;
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> plane_work_a_uav;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> plane_work_a_srv;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> plane_work_b_tex;
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> plane_work_b_uav;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> plane_work_b_srv;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> plane_group_buf;
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> plane_group_uav;
+        UINT plane_group_count = 0;
         
         Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex;
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
@@ -444,6 +466,9 @@ namespace models {
               subject_recenter((float)cfg.subject_recenter),
               subject_stretch(cfg.subject_stretch),
               stretch_lo((float)cfg.stretch_lo), stretch_hi((float)cfg.stretch_hi),
+              exact_plane_lock(cfg.shift_profile == "bestv2" && cfg.subject_track && cfg.subject_plane_lock > 0.0),
+              plane_lock_strength((float)cfg.subject_plane_lock),
+              plane_lock_width((float)cfg.subject_plane_width),
               foreground_curvature((float)cfg.foreground_curvature),
               use_percentile(cfg.norm_pct_lo > 0.0 || cfg.norm_pct_hi < 100.0),
               minmax_snap((float)cfg.minmax_snap),
@@ -611,6 +636,30 @@ namespace models {
                     subject_track = false;
                 }
             }
+            if (exact_plane_lock && subject_track) {
+                bool ok = compile_shader(assets_dir / "shaders" / "directx" / "depth_plane_band_cs.hlsl", depth_plane_band_cs) &&
+                          compile_shader(assets_dir / "shaders" / "directx" / "depth_plane_filter_cs.hlsl", depth_plane_filter_cs) &&
+                          compile_shader(assets_dir / "shaders" / "directx" / "depth_plane_combine_cs.hlsl", depth_plane_combine_cs) &&
+                          compile_shader(assets_dir / "shaders" / "directx" / "depth_plane_reduce_cs.hlsl", depth_plane_reduce_cs) &&
+                          compile_shader(assets_dir / "shaders" / "directx" / "depth_plane_resolve_cs.hlsl", depth_plane_resolve_cs);
+                if (ok) {
+                    D3D11_BUFFER_DESC bd = {};
+                    bd.Usage = D3D11_USAGE_DYNAMIC;
+                    bd.ByteWidth = 32;
+                    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+                    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+                    if (FAILED(device->CreateBuffer(&bd, nullptr, &plane_cbuffer))) ok = false;
+                }
+                if (ok) {
+                    BOOST_LOG(info) << "Bestv2 exact subject-plane lock enabled (strength "
+                                    << plane_lock_strength << ", width " << plane_lock_width << ").";
+                } else {
+                    BOOST_LOG(warning) << "Bestv2 subject-plane-lock shaders failed; using the depth-band fallback.";
+                    exact_plane_lock = false;
+                }
+            } else {
+                exact_plane_lock = false;
+            }
             // subject_plane_lock needs the subject estimate; with tracking off it is a no-op.
             // (subject_stretch defaults ON, so warning on it would fire on every default run.)
             if (!subject_track && cfg.subject_plane_lock > 0.0) {
@@ -701,9 +750,8 @@ namespace models {
                 }
             }
 
-            // Subject tracking: weighted histogram (256 uint bins) + the per-frame subject
-            // state (one float4, zero-init so `initialized` starts false and the reprojection
-            // uses the linear path until the first resolve).
+            // Subject tracking: weighted histogram (256 uint bins) + per-frame state. The third
+            // float4 carries the exact Bestv2 plane-lock mean and its initialized flag.
             if (subject_track) {
                 uint32_t init_hist[256] = {};
                 D3D11_BUFFER_DESC bd = {};
@@ -722,7 +770,9 @@ namespace models {
                     device->CreateUnorderedAccessView(subject_plain_buf.Get(), nullptr, &subject_plain_uav);
                 }
 
-                float init_state[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};  // 2 float4
+                float init_state[12] = {0.0f, 0.0f, 0.0f, 0.0f,
+                                        0.0f, 1.0f, 0.0f, 0.0f,
+                                        0.0f, 0.0f, 0.0f, 0.0f};  // 3 float4
                 bd.ByteWidth = sizeof(init_state);
                 bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
                 bd.StructureByteStride = sizeof(float) * 4;
@@ -845,11 +895,99 @@ namespace models {
             return (guided_upsample && guided_depth_srv) ? guided_depth_srv : depth_srv;
         }
 
+        struct plane_constants_t {
+            uint32_t w, h;
+            float strength, width;
+            uint32_t axis, radius, op, group_count;
+        };
+
+        bool set_plane_constants(uint32_t axis = 0, uint32_t radius = 0, uint32_t op = 0) {
+            if (!plane_cbuffer) return false;
+            D3D11_MAPPED_SUBRESOURCE mapped {};
+            if (FAILED(context->Map(plane_cbuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+            plane_constants_t pc {(uint32_t)target_w, (uint32_t)target_h,
+                                  plane_lock_strength, plane_lock_width,
+                                  axis, radius, op, plane_group_count};
+            std::memcpy(mapped.pData, &pc, sizeof(pc));
+            context->Unmap(plane_cbuffer.Get(), 0);
+            return true;
+        }
+
+        void run_exact_plane_lock() {
+            if (!exact_plane_lock || !depth_srv || !subject_srv || !subject_uav ||
+                !plane_band_uav || !plane_work_a_uav || !plane_work_b_uav || !plane_group_uav ||
+                !set_plane_constants()) return;
+
+            ID3D11Buffer* cb = plane_cbuffer.Get();
+            context->CSSetConstantBuffers(1, 1, &cb);
+            const UINT gx = ((UINT)target_w + 15u) / 16u;
+            const UINT gy = ((UINT)target_h + 15u) / 16u;
+
+            // Depth band + Bestv2 center weighting.
+            context->CSSetShader(depth_plane_band_cs.Get(), nullptr, 0);
+            ID3D11ShaderResourceView* band_srvs[2] = {depth_srv.Get(), subject_srv.Get()};
+            context->CSSetShaderResources(0, 2, band_srvs);
+            context->CSSetUnorderedAccessViews(0, 1, plane_band_uav.GetAddressOf(), nullptr);
+            context->Dispatch(gx, gy, 1);
+            ID3D11ShaderResourceView* null_srvs3[3] = {nullptr, nullptr, nullptr};
+            ID3D11UnorderedAccessView* null_uavs2[2] = {nullptr, nullptr};
+            context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
+            context->CSSetShaderResources(0, 2, null_srvs3);
+
+            auto filter = [&](ID3D11ShaderResourceView* input, ID3D11UnorderedAccessView* output,
+                              uint32_t axis, uint32_t radius, uint32_t op) {
+                set_plane_constants(axis, radius, op);
+                context->CSSetShader(depth_plane_filter_cs.Get(), nullptr, 0);
+                context->CSSetShaderResources(0, 1, &input);
+                context->CSSetUnorderedAccessViews(0, 1, &output, nullptr);
+                context->Dispatch(gx, gy, 1);
+                context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
+                context->CSSetShaderResources(0, 1, null_srvs3);
+            };
+
+            // Exact separable equivalents of 21x21 dilation and 15x15 closing.
+            filter(plane_band_srv.Get(), plane_work_a_uav.Get(), 0, 10, 0);
+            filter(plane_work_a_srv.Get(), plane_work_b_uav.Get(), 1, 10, 0);
+            filter(plane_work_b_srv.Get(), plane_work_a_uav.Get(), 0, 7, 1);
+            filter(plane_work_a_srv.Get(), plane_work_b_uav.Get(), 1, 7, 1);
+
+            // max(original, closed*.70), then exact 13x13 average smoothing.
+            set_plane_constants();
+            context->CSSetShader(depth_plane_combine_cs.Get(), nullptr, 0);
+            ID3D11ShaderResourceView* combine_srvs[2] = {plane_band_srv.Get(), plane_work_b_srv.Get()};
+            context->CSSetShaderResources(0, 2, combine_srvs);
+            context->CSSetUnorderedAccessViews(0, 1, plane_work_a_uav.GetAddressOf(), nullptr);
+            context->Dispatch(gx, gy, 1);
+            context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
+            context->CSSetShaderResources(0, 2, null_srvs3);
+            filter(plane_work_a_srv.Get(), plane_work_b_uav.Get(), 0, 6, 2);
+            filter(plane_work_b_srv.Get(), plane_work_a_uav.Get(), 1, 6, 2);
+
+            // Weighted mean of the actual Bestv2 raw shift field.
+            set_plane_constants();
+            context->CSSetShader(depth_plane_reduce_cs.Get(), nullptr, 0);
+            ID3D11ShaderResourceView* reduce_srvs[3] = {depth_srv.Get(), plane_work_a_srv.Get(), subject_srv.Get()};
+            context->CSSetShaderResources(0, 3, reduce_srvs);
+            context->CSSetUnorderedAccessViews(0, 1, plane_group_uav.GetAddressOf(), nullptr);
+            context->Dispatch(gx, gy, 1);
+            context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
+            context->CSSetShaderResources(0, 3, null_srvs3);
+
+            context->CSSetShader(depth_plane_resolve_cs.Get(), nullptr, 0);
+            ID3D11UnorderedAccessView* resolve_uavs[2] = {plane_group_uav.Get(), subject_uav.Get()};
+            context->CSSetUnorderedAccessViews(0, 2, resolve_uavs, nullptr);
+            context->Dispatch(1, 1, 1);
+            context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
+        }
+
         estimate_result make_result() {
             estimate_result r;
             r.depth = output_srv();
             if (subject_track) {
                 r.subject = subject_srv;
+            }
+            if (exact_plane_lock) {
+                r.plane_lock = plane_work_a_srv;
             }
             r.raw_model_depth = tensor_out_srv;
             r.raw_width = target_w;
@@ -1142,6 +1280,8 @@ namespace models {
                 ID3D11UnorderedAccessView* null_uavs2[3] = {nullptr, nullptr, nullptr};
                 context->CSSetUnorderedAccessViews(0, 3, null_uavs2, nullptr);
 
+                run_exact_plane_lock();
+
                 // Ground-truth log to number-match against VD3D's [3DDBG] subj=. VD3D's render
                 // depth is LOW=near; Apollo is HIGH=near, so print both subj and 1-subj (the
                 // VD3D-convention value to compare directly). Opt-in via APOLLO_SUBJDBG (NOT
@@ -1332,6 +1472,39 @@ namespace models {
                 device->CreateUnorderedAccessView(depth_tex.Get(), nullptr, &depth_uav);
                 device->CreateShaderResourceView(depth_tex.Get(), nullptr, &depth_srv);
 
+                if (exact_plane_lock) {
+                    auto create_plane_texture = [&](Microsoft::WRL::ComPtr<ID3D11Texture2D>& tex,
+                                                    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>& uav,
+                                                    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>& srv) {
+                        return SUCCEEDED(device->CreateTexture2D(&tex_desc, nullptr, &tex)) &&
+                               SUCCEEDED(device->CreateUnorderedAccessView(tex.Get(), nullptr, &uav)) &&
+                               SUCCEEDED(device->CreateShaderResourceView(tex.Get(), nullptr, &srv));
+                    };
+                    bool ok = create_plane_texture(plane_band_tex, plane_band_uav, plane_band_srv) &&
+                              create_plane_texture(plane_work_a_tex, plane_work_a_uav, plane_work_a_srv) &&
+                              create_plane_texture(plane_work_b_tex, plane_work_b_uav, plane_work_b_srv);
+
+                    const UINT groups_x = ((UINT)target_w + 15u) / 16u;
+                    const UINT groups_y = ((UINT)target_h + 15u) / 16u;
+                    plane_group_count = groups_x * groups_y;
+                    D3D11_BUFFER_DESC pbd = {};
+                    pbd.Usage = D3D11_USAGE_DEFAULT;
+                    pbd.ByteWidth = plane_group_count * sizeof(float) * 2u;
+                    pbd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+                    pbd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+                    pbd.StructureByteStride = sizeof(float) * 2u;
+                    ok = ok && SUCCEEDED(device->CreateBuffer(&pbd, nullptr, &plane_group_buf)) &&
+                         SUCCEEDED(device->CreateUnorderedAccessView(plane_group_buf.Get(), nullptr, &plane_group_uav));
+                    if (!ok) {
+                        BOOST_LOG(warning) << "Bestv2 subject-plane-lock resource creation failed; using the depth-band fallback.";
+                        exact_plane_lock = false;
+                        plane_band_tex.Reset(); plane_band_uav.Reset(); plane_band_srv.Reset();
+                        plane_work_a_tex.Reset(); plane_work_a_uav.Reset(); plane_work_a_srv.Reset();
+                        plane_work_b_tex.Reset(); plane_work_b_uav.Reset(); plane_work_b_srv.Reset();
+                        plane_group_buf.Reset(); plane_group_uav.Reset();
+                    }
+                }
+
                 // Raw-disparity per-pixel EMA history (pixel->range order). Same grid as depth_tex.
                 device->CreateTexture2D(&tex_desc, nullptr, &raw_ema_tex);
                 device->CreateUnorderedAccessView(raw_ema_tex.Get(), nullptr, &raw_ema_uav);
@@ -1364,6 +1537,9 @@ namespace models {
                 if (raw_ema_uav) {
                     context->ClearUnorderedAccessViewFloat(raw_ema_uav.Get(), clear_color);
                 }
+                if (plane_band_uav) context->ClearUnorderedAccessViewFloat(plane_band_uav.Get(), clear_color);
+                if (plane_work_a_uav) context->ClearUnorderedAccessViewFloat(plane_work_a_uav.Get(), clear_color);
+                if (plane_work_b_uav) context->ClearUnorderedAccessViewFloat(plane_work_b_uav.Get(), clear_color);
                 if (guided_depth_uav) {
                     context->ClearUnorderedAccessViewFloat(guided_depth_uav.Get(), clear_color);
                 }

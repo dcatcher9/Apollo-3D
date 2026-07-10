@@ -7,6 +7,7 @@ Texture2D<float4> LeftColorTexture : register(t0);
 Texture2D<float> DepthTexture : register(t1);
 StructuredBuffer<float4> SubjectState : register(t2);
 Texture2D<uint> WinnerTexture : register(t3);
+Texture2D<float> PlaneLockTexture : register(t4);
 SamplerState LinearSampler : register(s0);
 
 #include "include/sbs_warp_common.hlsl"
@@ -62,8 +63,10 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
     float d = DepthTexture.SampleLevel(LinearSampler, uv, 0);
     float4 s0 = SubjectState[0];
     float4 s1 = SubjectState[1];
+    float4 s2 = SubjectState[2];
     bool shaped = (subject_track > 0.5f) && (s0.w > 0.5f);
-    float parallax = DepthParallax(d, uv.x, s0, s1, shaped, (float)eye_w);
+    float plane_mask = PlaneLockTexture.SampleLevel(LinearSampler, uv, 0);
+    float parallax = DepthParallax(d, plane_mask, uv.x, s0, s1, s2, shaped, (float)eye_w);
 
     // torch grid_sample uses normalized [-1,1] coordinates; DepthParallax is UV [0,1], hence
     // this is the same left:+shift/right:-shift convention after polarity translation.

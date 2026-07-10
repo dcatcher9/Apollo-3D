@@ -19,6 +19,7 @@ namespace models {
     struct estimate_result {
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject;  ///< subject-tracking state (t2 of the reprojection); null unless sbs_3d_subject_track
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> plane_lock;  ///< Bestv2's smoothed subject silhouette mask (t4); null outside the exact Bestv2 path.
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Raw model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
         int raw_width = 0;
         int raw_height = 0;
