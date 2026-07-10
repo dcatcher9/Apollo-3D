@@ -1101,7 +1101,8 @@ namespace platf::dxgi {
         config::video.sbs.subject_stretch ? 1.0f : 0.0f,
         (float) config::video.sbs.subject_plane_lock,
         (float) config::video.sbs.subject_plane_width,
-        0.0f, 0.0f
+        (float) config::video.sbs.dof_strength,
+        (float) config::video.sbs.dof_focus_width
       };
       sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);
 

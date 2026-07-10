@@ -260,6 +260,7 @@ namespace models {
         bool subject_stretch;    // apply the shape_depth_for_pop 5/95 disparity stretch
         float stretch_lo;        // low percentile for the stretch (fraction)
         float stretch_hi;        // high percentile for the stretch (fraction)
+        float foreground_curvature;  // rounded-foreground bulge strength (0 = off)
         bool use_percentile; // either percentile bound active -> histogram pass runs
         float minmax_snap;   // A1: raw-vs-EMA range ratio that snaps the scale on a scene cut (0 = off)
         float range_floor_frac;      // A3: current range < ref*frac -> compress parallax (0 = off)
@@ -360,6 +361,8 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_hist_cs;
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_subject_hist_cs;
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_subject_resolve_cs;
+        Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_curvature_cs;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> curvature_cbuffer;
         Microsoft::WRL::ComPtr<ID3D11SamplerState> linear_sampler;
         Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
 
@@ -693,6 +696,7 @@ namespace models {
               subject_lock((float)cfg.subject_lock),
               subject_stretch(cfg.subject_stretch),
               stretch_lo((float)cfg.stretch_lo), stretch_hi((float)cfg.stretch_hi),
+              foreground_curvature((float)cfg.foreground_curvature),
               use_percentile(cfg.norm_pct_lo > 0.0 || cfg.norm_pct_hi < 100.0),
               minmax_snap((float)cfg.minmax_snap),
               range_floor_frac((float)cfg.range_floor),
@@ -880,6 +884,14 @@ namespace models {
                                    "the probe-path shaping (sbs_3d_subject_stretch / subject_plane_lock) is inactive.";
             } else if (!subject_track && cfg.subject_plane_lock > 0.0) {
                 BOOST_LOG(warning) << "sbs_3d_subject_plane_lock has no effect without sbs_3d_subject_track = enabled.";
+            }
+            if (foreground_curvature > 0.0f) {
+                if (compile_shader(assets_dir / "shaders" / "directx" / "depth_curvature_cs.hlsl", depth_curvature_cs)) {
+                    BOOST_LOG(info) << "Foreground curvature enabled (strength " << foreground_curvature << ").";
+                } else {
+                    BOOST_LOG(warning) << "depth_curvature_cs failed to compile; foreground curvature disabled.";
+                    foreground_curvature = 0.0f;
+                }
             }
             if (guided_upsample) {
                 bool ok = compile_shader(assets_dir / "shaders" / "directx" / "depth_guide_downsample_cs.hlsl", depth_guide_downsample_cs) &&
@@ -1310,6 +1322,20 @@ namespace models {
                 guided_cbuffer.Reset();
                 device->CreateBuffer(&cb_desc, &gsd, &guided_cbuffer);
             }
+
+            // Foreground-curvature constants (session-constant once the resolution is fixed):
+            // {cv_w, cv_h, strength, near_start, gamma, spread, pad, pad}. Internal params match
+            // VD3D enhance_foreground_curvature (near_start 0.60, shape_gamma 1.35); spread 0.60
+            // is a frame-centered stand-in for VD3D's fitted foreground ellipse.
+            if (foreground_curvature > 0.0f) {
+                struct { uint32_t w, h; float strength, near_start, gamma, spread, pad0, pad1; } cvb = {
+                    (uint32_t) target_w, (uint32_t) target_h,
+                    foreground_curvature, 0.60f, 1.35f, 0.60f, 0.0f, 0.0f
+                };
+                D3D11_SUBRESOURCE_DATA cvsd = {&cvb, 0, 0};
+                curvature_cbuffer.Reset();
+                device->CreateBuffer(&cb_desc, &cvsd, &curvature_cbuffer);  // cb_desc.ByteWidth == 32
+            }
         }
 
         // Re-snap the (possibly stale) low-res depth to the CURRENT frame's color edges: pass 1
@@ -1431,6 +1457,16 @@ namespace models {
             ID3D11ShaderResourceView* null_srvs[2] = {nullptr, nullptr};
             context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
             context->CSSetShaderResources(0, 2, null_srvs);
+
+            // 3c. Foreground curvature: reshape depth_tex in place BEFORE subject tracking + warp
+            // (so the subject estimate and both warp paths see the rounded foreground).
+            if (foreground_curvature > 0.0f && depth_curvature_cs && curvature_cbuffer) {
+                context->CSSetShader(depth_curvature_cs.Get(), nullptr, 0);
+                context->CSSetConstantBuffers(0, 1, curvature_cbuffer.GetAddressOf());
+                context->CSSetUnorderedAccessViews(0, 1, depth_uav.GetAddressOf(), nullptr);
+                context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+                context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+            }
 
             // 3s. Subject tracking: weighted depth histogram over the freshly-normalized
             // depth, then a 1-thread resolve into the subject state the reprojection reads.

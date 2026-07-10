@@ -206,6 +206,8 @@ namespace sbs_bench {
       double ema = -1.0;         // per-pixel depth EMA override (1.0 = off)
       bool subject_stretch = false;  // VD3D shape_depth_for_pop 5/95 disparity stretch
       double subject_plane_lock = -1.0;  // local subject-band flatten (e.g. 0.28); <0 = conf
+      double curvature = -1.0;     // foreground curvature strength (e.g. 0.07); <0 = conf
+      double dof = -1.0;           // depth-of-field strength (e.g. 0.3); <0 = conf
     };
 
     bool parse_opts(int argc, char **argv, opts &o) {
@@ -234,6 +236,8 @@ namespace sbs_bench {
         else if (a == "--depth-short-side") o.depth_short_side = std::stoi(next("--depth-short-side"));
         else if (a == "--subject-stretch") o.subject_stretch = true;
         else if (a == "--subject-plane-lock") o.subject_plane_lock = std::stod(next("--subject-plane-lock"));
+        else if (a == "--curvature") o.curvature = std::stod(next("--curvature"));
+        else if (a == "--dof") o.dof = std::stod(next("--dof"));
         else if (a == "--ema") o.ema = std::stod(next("--ema"));
         else { BOOST_LOG(error) << "sbs-bench: unknown arg '" << a << "'"; return false; }
       }
@@ -296,6 +300,8 @@ namespace sbs_bench {
     if (o.depth_short_side > 0) sbs_cfg.depth_short_side = o.depth_short_side;  // VD3D uses 432
     if (o.subject_stretch) sbs_cfg.subject_stretch = true;      // A/B lever: shape_depth_for_pop stretch
     if (o.subject_plane_lock >= 0.0) sbs_cfg.subject_plane_lock = o.subject_plane_lock;
+    if (o.curvature >= 0.0) sbs_cfg.foreground_curvature = o.curvature;
+    if (o.dof >= 0.0) sbs_cfg.dof_strength = o.dof;
     if (o.ema > 0.0) sbs_cfg.ema = o.ema;                        // A/B lever: depth EMA (1.0 = off)
     sbs_cfg.perf_stats = true;  // the harness always measures
     sbs_perf::set_enabled(true);
@@ -345,7 +351,8 @@ namespace sbs_bench {
       (float) sbs_cfg.parallax_steps, (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor,
       sbs_cfg.subject_track ? 1.0f : 0.0f, (float) sbs_cfg.subject_lock,
       sbs_cfg.subject_stretch ? 1.0f : 0.0f, (float) sbs_cfg.subject_plane_lock,
-      (float) sbs_cfg.subject_plane_width, 0, 0};
+      (float) sbs_cfg.subject_plane_width, (float) sbs_cfg.dof_strength,
+      (float) sbs_cfg.dof_focus_width};
     auto repro_cb = const_buffer(dev.Get(), repro_params);
     float pass_params[12] = {0, (float) sbs_cfg.focal_plane, (float) sbs_cfg.parallax_steps,
       (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor, 0, 0, 0, 0, 0, 0, 0};

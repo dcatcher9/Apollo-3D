@@ -1278,6 +1278,9 @@ namespace config {
     double_between_f(vars, "sbs_3d_stretch_hi", video.sbs.stretch_hi, {0.5, 1.0});
     double_between_f(vars, "sbs_3d_subject_plane_lock", video.sbs.subject_plane_lock, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_subject_plane_width", video.sbs.subject_plane_width, {0.01, 0.5});
+    double_between_f(vars, "sbs_3d_foreground_curvature", video.sbs.foreground_curvature, {0.0, 0.5});
+    double_between_f(vars, "sbs_3d_dof_strength", video.sbs.dof_strength, {0.0, 1.0});
+    double_between_f(vars, "sbs_3d_dof_focus_width", video.sbs.dof_focus_width, {0.05, 1.0});
     double_between_f(vars, "sbs_3d_minmax_snap", video.sbs.minmax_snap, {0.0, 100.0});
     double_between_f(vars, "sbs_3d_range_floor", video.sbs.range_floor, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_depth_fps", video.sbs.depth_fps, {0.0, 240.0});

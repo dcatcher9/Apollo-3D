@@ -42,6 +42,8 @@ cbuffer Constants : register(b2) {
     float subject_stretch;  // > 0.5 = apply the disparity stretch using SubjectState[1] bounds.
     float subject_plane_lock;  // Flatten residual disparity within the subject band (0 = off).
     float subject_plane_width; // Half-width (normalized depth) of that subject band.
+    float dof_strength;     // Depth-of-field: blur radius (fraction of width) at full defocus. 0 = off.
+    float dof_focus_width;  // In-focus depth half-width around the focal plane (beyond it -> full blur).
 };
 
 // Border fade: parallax ramps to zero within border_fade of the LEFT/RIGHT source edges, so
@@ -212,5 +214,35 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
     // Disoccluded regions clamp to the nearest valid column instead of wrapping.
     sample_uv.x = saturate(sample_uv.x);
 
-    return LeftColorTexture.Sample(LinearSampler, sample_uv);
+    float4 col = LeftColorTexture.Sample(LinearSampler, sample_uv);
+
+    // Depth-of-field (VD3D apply_dof_cuda, post-warp): blur the reprojected color by how far the
+    // sampled surface sits from the focal plane -- the tracked subject depth when subject
+    // anchoring is live, else focal_plane. In focus stays sharp; off-focus gets a bokeh gather.
+    // Softens off-focus disocclusion fills and adds cinematic separation.
+    if (dof_strength > 0.0f) {
+        float4 s0 = SubjectState[0];
+        float focal = (subject_track > 0.5f && s0.w > 0.5f) ? s0.z : focal_plane;
+        float dsamp = DepthTexture.SampleLevel(LinearSampler, sample_uv, 0);
+        float defocus = saturate(abs(dsamp - focal) / max(dof_focus_width, 1e-3f));
+        if (defocus > 0.01f) {
+            // Two-ring disc gather (inner 6 @ 0.5r + outer 6 @ r + center = 13 taps) for a
+            // smoother bokeh than a single ring. Round via the source aspect so the radius is
+            // isotropic. r is a fraction of source width; per-eye the source is sampled directly.
+            uint cw, ch;
+            LeftColorTexture.GetDimensions(cw, ch);
+            float r = defocus * dof_strength;
+            float2 rad = float2(r, r * (float) cw / (float) ch);
+            float4 acc = col;
+            [unroll] for (int k = 0; k < 6; k++) {
+                float a = 6.2831853f * (k / 6.0f);
+                float2 dir = float2(cos(a), sin(a));
+                acc += LeftColorTexture.Sample(LinearSampler, sample_uv + dir * rad * 0.5f);
+                acc += LeftColorTexture.Sample(LinearSampler, sample_uv + dir * rad);
+            }
+            col = acc / 13.0f;
+        }
+    }
+
+    return col;
 }

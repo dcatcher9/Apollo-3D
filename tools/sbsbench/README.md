@@ -47,6 +47,10 @@ Harness A/B levers (after `--extra`):
 - `--subject-stretch` — shape_depth_for_pop 5/95 percentile stretch (default on within the
   subject path).
 - `--subject-plane-lock F` — local subject-band flatten (e.g. `0.28`; default off).
+- `--curvature F` — foreground-curvature bulge strength (e.g. `0.07`; reshapes the depth
+  texture, both warp paths; default off).
+- `--dof F` — depth-of-field blur radius as a fraction of width (e.g. `0.008`; post-warp,
+  probe path only; default off).
 
 Exit code is the verdict (0 pass / 1 regression / 2 setup error), so the eval→fix→eval loop is
 scriptable. `results.json` carries provenance (git sha+dirty, models, clip hashes, gpu-contention
