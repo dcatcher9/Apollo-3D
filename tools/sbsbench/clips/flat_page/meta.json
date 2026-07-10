@@ -1,4 +1,5 @@
 {
   "name": "flat_page",
-  "description": "Synthetic static document/desktop page: flat-content depth hallucination (A3)."
+  "description": "Synthetic static document/desktop page: flat-content depth hallucination (A3).",
+  "expected_flat": true
 }

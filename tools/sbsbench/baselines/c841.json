@@ -32,12 +32,12 @@
     "score": 87.4
   },
   "perf_ms": {
-    "depth_infer": 1.9825,
-    "sbs_composite_cpu": 0.0067,
-    "warp_infer": 0.097856
+    "depth_infer": 1.97107,
+    "sbs_composite_cpu": 0.006,
+    "warp_infer": 0.097632
   },
   "meta": {
-    "git_sha": "2a4a647c",
+    "git_sha": "df1970da",
     "git_dirty": true,
     "clip_set_sha1": {
       "c339": "1923c16a8356",
@@ -54,12 +54,14 @@
     "conf": "tools\\sbsbench\\bench.conf",
     "model": "depth_anything_v2_fp16",
     "warp": "apollo",
+    "shift_profile": "apollo",
     "eval_schema": 2,
     "depth_step": "current-once",
     "conf_sha256": "f5b0eda8bffc9437",
-    "metric_sha256": "6a7faf57152aab11",
+    "metric_sha256": "8f912ccc4a79d23b",
     "gpu_contention": false,
-    "timestamp": "2026-07-10T12:38:35",
+    "timestamp": "2026-07-10T15:39:54",
+    "run_name": "eval-contract-flat-support",
     "name": "kitchen-vlog",
     "description": "Talking-head vlogger in a kitchen; near-flat depth.",
     "clip_sha1": "df5a3384753e"

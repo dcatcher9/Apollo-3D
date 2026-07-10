@@ -228,7 +228,8 @@ and computes the subject anchor from raw tracked-subject depth rather than the t
 depth. Raw-model and pre-warp artifacts are byte-identical to the control. Against the aligned
 real Bestv2 output, MAE improves 0.061375 → 0.061302 and PSNR 20.878 → 20.902 dB. On the generic
 corpus, stereo spread rises on both geometries and mean score is essentially flat/slightly higher
-(Apollo +0.0625, VD3D +0.0125), while rim-over-p95 worsens (+0.517/+0.845). This is retained as a
+(Apollo +0.0875, VD3D +0.1000 under the expected-flat contract), while rim-over-p95 worsens
+(+0.517/+0.845). This is retained as a
 faithful reproduction behavior, not claimed as an Apollo quality improvement.
 
 ### B3 · Disocclusion concealment *(evaluated and rejected)*
@@ -240,9 +241,9 @@ directional repair ("Fast" for Bestv2) (`render_3d.py:3372+`). Apollo: none (pro
 geometry and evaluated as separate smear-only, repair-only, and combined treatments. Raw and
 pre-warp depth remained byte-identical. Fast repair produced byte-identical SBS frames on the
 evaluation corpus because its validity/gradient mask never activated. Smear-only was therefore
-also the combined result: Apollo exact-field score fell 74.2250 → 74.1125, rim-over-p95 rose
+also the combined result: Apollo exact-field score fell by 0.1125, rim-over-p95 rose
 5.9818 → 6.3212, and disocclusion flicker rose 5.0052 → 5.0308; VD3D hybrid score fell
-73.7375 → 73.7250 with the same rim/flicker direction. Both paths cost about 0.059 ms more warp
+by 0.0125 with the same rim/flicker direction. Both paths cost about 0.059 ms more warp
 time. Against the aligned 1920×1080 real Bestv2 reference, combined output was byte-identical to
 shift-only output, so MAE/PSNR did not improve. The treatment is rejected and its runtime code and
 switches were removed; local HTML reports remain under `cmake-build-relwithdebinfo/sbs_eval/`.

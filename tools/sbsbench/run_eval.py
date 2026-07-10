@@ -191,7 +191,7 @@ def main():
         "eval_schema": EVAL_SCHEMA, "depth_step": "current-once",
         "conf_sha256": conf_sha, "metric_sha256": metric_sha,
         "gpu_contention": contention,
-        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"), "run_name": label,
     }
 
     results, regressions, issues = {}, [], []
@@ -247,13 +247,14 @@ def main():
         if os.path.exists(cmp_path):
             try:
                 clip_meta.update({k: v for k, v in json.load(open(cmp_path)).items()
-                                  if k in ("name", "description")})
+                                  if k in ("name", "description", "expected_flat")})
             except Exception:
                 pass
 
         print(f"[{clip}] scoring...", flush=True)
         try:
-            rows, agg = sbsbench.measure_sequence(out_dir, clip_dir)
+            rows, agg = sbsbench.measure_sequence(
+                out_dir, clip_dir, expected_flat=bool(clip_meta.get("expected_flat")))
         except ValueError as exc:
             fail(f"{clip}: {exc}")
         perf = {}
@@ -266,6 +267,8 @@ def main():
         # so a triggered/regressed metric comes with a place to look.
         worst = {}
         for k in thresholds["metrics"]:
+            if clip_meta.get("expected_flat") and k == "pop_spread_px":
+                continue  # expected-flat score rewards lower false stereo
             fk = k if any(k in r for r in rows) else (k[:-4] if k.endswith("_p50") else k)
             vals = [(r.get(fk), r.get("_frame_id", i)) for i, r in enumerate(rows) if fk in r]
             if vals:
@@ -280,6 +283,8 @@ def main():
 
         # Issue triggers (absolute, baseline-independent).
         for k, spec in thresholds["metrics"].items():
+            if clip_meta.get("expected_flat") and k == "pop_spread_px":
+                continue
             if "trigger" in spec and agg.get(k, 0) > spec["trigger"]:
                 issues.append({"clip": clip, "metric": k, "trigger": spec["trigger"],
                                **worst.get(k, {}), "value": round(agg[k], 3)})
@@ -306,6 +311,8 @@ def main():
                 fail(f"{clip}: baseline context is stale/incompatible: {mismatches}. "
                      "Re-run with --update-baselines only after verifying the new eval contract.")
             for k, spec in thresholds["metrics"].items():
+                if clip_meta.get("expected_flat") and k == "pop_spread_px":
+                    continue
                 b, n = base["aggregate"].get(k), agg.get(k)
                 if b is None or n is None:
                     continue

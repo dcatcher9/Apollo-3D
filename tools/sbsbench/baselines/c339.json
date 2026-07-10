@@ -32,12 +32,12 @@
     "score": 85.0
   },
   "perf_ms": {
-    "depth_infer": 2.00691,
-    "sbs_composite_cpu": 0.0053,
-    "warp_infer": 0.097312
+    "depth_infer": 2.00733,
+    "sbs_composite_cpu": 0.0066,
+    "warp_infer": 0.09728
   },
   "meta": {
-    "git_sha": "2a4a647c",
+    "git_sha": "df1970da",
     "git_dirty": true,
     "clip_set_sha1": {
       "c339": "1923c16a8356",
@@ -54,12 +54,14 @@
     "conf": "tools\\sbsbench\\bench.conf",
     "model": "depth_anything_v2_fp16",
     "warp": "apollo",
+    "shift_profile": "apollo",
     "eval_schema": 2,
     "depth_step": "current-once",
     "conf_sha256": "f5b0eda8bffc9437",
-    "metric_sha256": "6a7faf57152aab11",
+    "metric_sha256": "8f912ccc4a79d23b",
     "gpu_contention": false,
-    "timestamp": "2026-07-10T12:38:35",
+    "timestamp": "2026-07-10T15:39:54",
+    "run_name": "eval-contract-flat-support",
     "name": "soldier-battlefield",
     "description": "Soldier walking a dark night battlefield; profile silhouette against dead trees.",
     "clip_sha1": "1923c16a8356"

@@ -211,8 +211,14 @@ def visual_evidence_images(clip, idx):
     return pair[0], pair[1], durl(Image.fromarray(heat), w=380, jpg=True, q=82)
 
 
-def run_label(run, default):
-    """Human name for a run: its extra harness args, else 'mode (model)', else a default."""
+def run_label(run, run_dir, default):
+    """Human name for a run. The run identity must survive identical harness arguments."""
+    stored = run.get("meta", {}).get("run_name")
+    if stored:
+        return stored
+    dirname = os.path.basename(os.path.normpath(run_dir))
+    if dirname:
+        return dirname
     ex = run["meta"].get("extra_args") or []
     if ex:
         return " ".join(ex).replace("--", "")
@@ -228,8 +234,8 @@ TREAT_MODE = TREAT["meta"].get("mode")
 IS_MODE_CMP = bool(CTRL_MODE and TREAT_MODE and CTRL_MODE != TREAT_MODE)
 IS_COMPARISON_ONLY = TREAT.get("verdict") == "comparison_only"
 IS_TRADEOFF_CMP = IS_MODE_CMP or IS_COMPARISON_ONLY
-CTRL_NAME = run_label(CTRL, "control")
-TREAT_NAME = run_label(TREAT, "treatment")
+CTRL_NAME = run_label(CTRL, ctrl_dir, "control")
+TREAT_NAME = run_label(TREAT, treat_dir, "treatment")
 # Short tags for inline value labels and image captions (arrow is always CTRL -> TREAT).
 CTRL_TAG = CTRL_MODE if IS_MODE_CMP else "control"
 TREAT_TAG = TREAT_MODE if IS_MODE_CMP else "treatment"
@@ -241,10 +247,25 @@ def treatment_name():
 
 ctrl_agg = {c: CTRL["clips"][c]["aggregate"] for c in CLIPS}
 treat_agg = {c: TREAT["clips"][c]["aggregate"] for c in CLIPS}
-# Ensure the overall score is present (older run dirs predate it; recompute from the aggregates).
-for _agg in list(ctrl_agg.values()) + list(treat_agg.values()):
-    if "score" not in _agg:
-        _agg.update(sbsbench.sbs_score(_agg))
+
+def expected_flat(run, clip):
+    value = run["clips"].get(clip, {}).get("meta", {}).get("expected_flat")
+    if value is not None:
+        return bool(value)
+    mp = os.path.join(SCRIPT_DIR, "clips", clip, "meta.json")
+    try:
+        return bool(json.load(open(mp)).get("expected_flat"))
+    except Exception:
+        return False
+
+
+# Re-apply eligibility to old run artifacts so a regenerated report uses today's metric contract.
+for _run, _aggs in ((CTRL, ctrl_agg), (TREAT, treat_agg)):
+    for _clip, _agg in _aggs.items():
+        if _agg.get("disocc_frac", 0.0) < sbsbench.MIN_DISOCC_FRAC:
+            for _key in ("disocc_smear", "flicker_disocc", "flicker_disocc_p50", "flicker_disocc_p95"):
+                _agg.pop(_key, None)
+        _agg.update(sbsbench.sbs_score(_agg, expected_flat=expected_flat(_run, _clip)))
 colmax = {k: max(max(ctrl_agg[c].get(k, 0), treat_agg[c].get(k, 0)) for c in CLIPS) for k, *_ in COLS}
 ACTIVE = [col for col in COLS if col[3] or colmax[col[0]] > col[4]]
 CLEAN = [col for col in COLS if col not in ACTIVE and col[2]]
@@ -412,7 +433,7 @@ def issue_sections():
         trig = THR.get(metric, {}).get("trigger", 1e9)
         entries = {}  # clip -> (kind, frame, sort_severity)
         for i in CTRL["issues"]:
-            if i["metric"] == metric:
+            if i["metric"] == metric and metric in ctrl_agg.get(i["clip"], {}):
                 entries[i["clip"]] = ("issue", i.get("frame"), i["value"] / i["trigger"])
         for c, frame in reg_by.get(metric, {}).items():
             a, b = ctrl_agg[c].get(metric, 0), treat_agg[c].get(metric, 0)
@@ -602,7 +623,8 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
   <h1>__H1__</h1>
   <p class="lede">Generated from two <code>run_eval.py</code> runs over the committed clip set —
   the real pipeline and gated metrics. __LEDE__</p>
-  <div class="meta"><span>__DATE__</span><span>git __SHA____DIRTY__</span>
+  <div class="meta"><span>__DATE__</span><span>control __CTRL_SHA__</span>
+  <span>treatment __TREAT_SHA__</span>
   <span>__NCLIPS__ clips</span><span>__MODELS__</span></div>
 
   __METRICS__
@@ -643,11 +665,15 @@ if IS_MODE_CMP:
             f"read from the per-metric split and the per-clip evidence below.")
 else:
     h1 = "Control vs. treatment, by issue"
-    lede = f"Treatment under test: <b>{TREAT_NAME}</b>, gated against the committed baselines."
+    lede = (f"Matched comparison-only run: <b>{CTRL_NAME}</b> against <b>{TREAT_NAME}</b>; "
+            "committed baselines were not consulted." if IS_COMPARISON_ONLY else
+            f"Treatment under test: <b>{TREAT_NAME}</b>, gated against the committed baselines.")
+ctrl_sha = CTRL["meta"].get("git_sha", "?") + ("+dirty" if CTRL["meta"].get("git_dirty") else "")
+treat_sha = TREAT["meta"].get("git_sha", "?") + ("+dirty" if TREAT["meta"].get("git_dirty") else "")
 HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
         .replace("__CTRL_NAME__", CTRL_NAME).replace("__TREAT_NAME__", TREAT_NAME)
-        .replace("__DATE__", meta["timestamp"][:10]).replace("__SHA__", meta["git_sha"])
-        .replace("__DIRTY__", "+dirty" if meta["git_dirty"] else "")
+        .replace("__DATE__", meta["timestamp"][:10]).replace("__CTRL_SHA__", ctrl_sha)
+        .replace("__TREAT_SHA__", treat_sha)
         .replace("__NCLIPS__", str(len(CLIPS)))
         .replace("__MODELS__", models).replace("__CONCLUSION__", conclusion_section())
         .replace("__VISUAL_EVIDENCE__", visual_evidence_section())

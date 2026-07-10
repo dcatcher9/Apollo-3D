@@ -2,11 +2,9 @@
   "aggregate": {
     "depth_spread": 0.8247098053495089,
     "disocc_frac": 2.9172358834244082e-05,
-    "disocc_smear": 0.0,
     "edge_acc_p50": 6.708333333333333,
     "edge_acc_p95": 7.345833400885264,
     "flicker": 3.1190795483796494,
-    "flicker_disocc": 1.2527912068383202,
     "pop_pct_p50": 0.08659983063014343,
     "pop_px_p50": 0.7395625535814249,
     "pop_px_p95": 4.138624120236891,
@@ -23,21 +21,19 @@
     ],
     "flicker_p50": 2.9219534397125244,
     "flicker_p95": 4.091284084320067,
-    "flicker_disocc_p50": 0.8331286311149597,
-    "flicker_disocc_p95": 3.5282613515853862,
     "swim_p50": 3.7937772274017334,
     "swim_p95": 17.485605335235586,
-    "q_clean": 93.8,
+    "q_clean": 94.1,
     "q_depth": 20.8,
-    "score": 79.2
+    "score": 79.4
   },
   "perf_ms": {
-    "depth_infer": 2.01795,
-    "sbs_composite_cpu": 0.0065,
-    "warp_infer": 0.097952
+    "depth_infer": 2.0224,
+    "sbs_composite_cpu": 0.0064,
+    "warp_infer": 0.09824
   },
   "meta": {
-    "git_sha": "2a4a647c",
+    "git_sha": "df1970da",
     "git_dirty": true,
     "clip_set_sha1": {
       "c339": "1923c16a8356",
@@ -54,12 +50,14 @@
     "conf": "tools\\sbsbench\\bench.conf",
     "model": "depth_anything_v2_fp16",
     "warp": "apollo",
+    "shift_profile": "apollo",
     "eval_schema": 2,
     "depth_step": "current-once",
     "conf_sha256": "f5b0eda8bffc9437",
-    "metric_sha256": "6a7faf57152aab11",
+    "metric_sha256": "8f912ccc4a79d23b",
     "gpu_contention": false,
-    "timestamp": "2026-07-10T12:38:35",
+    "timestamp": "2026-07-10T15:39:54",
+    "run_name": "eval-contract-flat-support",
     "name": "fast_motion",
     "description": "Synthetic textured block crossing a textured background at 30 px/frame: async-depth ghost.",
     "clip_sha1": "6396d4a3435b"

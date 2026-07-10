@@ -182,6 +182,7 @@ REF_EW = 3066.0
 # thresholds alone always find "edges" (even pure noise on flat content); AND-ing this floor makes
 # flat scenes legitimately return zero. Real silhouettes measure ~0.1-0.3/px at depth res.
 MIN_DEPTH_STEP = 0.04
+MIN_DISOCC_FRAC = 0.001  # ratios below 0.1% eye support are statistically meaningless
 
 
 def eye_scale(ew):
@@ -221,13 +222,14 @@ def disocclusion_metrics(eye, depth):
                  |d/dx eye|(clean). 0 = fill as crisp as clean regions; ->1 = smeared/stretched."""
     eh, ew = eye.shape
     _, band, ref = silhouette_band(depth, ew, eh)
-    if not band.any():
-        return 0.0, 0.0
+    frac = float(band.mean())
+    if frac < MIN_DISOCC_FRAC:
+        return frac, None
     gx = np.abs(np.diff(eye, axis=1, prepend=eye[:, :1]))
     b = float(gx[band].mean())
     r = float(gx[ref].mean()) if ref.any() else 0.0
     smear = float(np.clip(1.0 - b / (r + 1e-4), 0.0, 1.0)) if r > 0 else 0.0
-    return float(band.mean()), smear
+    return frac, smear
 
 
 def hdist_x(src, maxd):
@@ -346,7 +348,9 @@ def measure(dump_dir):
     if os.path.exists(depth_p):
         d = load_depth(depth_p)
         out["depth_spread"] = float(np.percentile(d, 95) - np.percentile(d, 5))
-        out["disocc_frac"], out["disocc_smear"] = disocclusion_metrics(left, d)
+        out["disocc_frac"], smear = disocclusion_metrics(left, d)
+        if smear is not None:
+            out["disocc_smear"] = smear
         out["stretch_area"] = stretch_band(left, d)
         out["rim_over_p50"], out["rim_over_p95"] = silhouette_halo(left, d)
 
@@ -381,7 +385,9 @@ def measure_seq_frame(path, depth=None, src_gray=None):
         out["vmisalign_px"] = float(np.median(np.abs(dys)))
     if depth is not None:
         out["depth_spread"] = float(np.percentile(depth, 95) - np.percentile(depth, 5))
-        out["disocc_frac"], out["disocc_smear"] = disocclusion_metrics(left, depth)
+        out["disocc_frac"], smear = disocclusion_metrics(left, depth)
+        if smear is not None:
+            out["disocc_smear"] = smear
         out["stretch_area"] = stretch_band(left, depth)
         out["rim_over_p50"], out["rim_over_p95"] = silhouette_halo(left, depth)
         if src_gray is not None:
@@ -389,7 +395,7 @@ def measure_seq_frame(path, depth=None, src_gray=None):
     return out, sbs, left
 
 
-def measure_sequence(seq_dir, frames_dir=None):
+def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
     """A harness clip: sbs_*.png (+ depth_*.png) in order. Per-frame spatial metrics plus the
     temporal metrics that target the current pipeline's failure modes:
 
@@ -429,7 +435,7 @@ def measure_sequence(seq_dir, frames_dir=None):
             flicks.append(row["flicker"])
             if depth is not None:
                 _, band, _ = silhouette_band(depth, left.shape[1], left.shape[0])
-                if band.any():
+                if float(band.mean()) >= MIN_DISOCC_FRAC:
                     row["flicker_disocc"] = float(np.mean(np.abs(left - prev_left)[band]) * 255.0)
                     bflicks.append(row["flicker_disocc"])
             if depth is not None and prev_depth is not None and src is not None and prev_src is not None:
@@ -447,7 +453,7 @@ def measure_sequence(seq_dir, frames_dir=None):
         if vals:
             agg[name + "_p50"] = float(np.percentile(vals, 50))
             agg[name + "_p95"] = float(np.percentile(vals, 95))
-    agg.update(sbs_score(agg))  # overall quality score from the assembled metrics
+    agg.update(sbs_score(agg, expected_flat=expected_flat))
     return rows, agg
 
 
@@ -462,7 +468,7 @@ def _load_score_cfg():
 SCORE_CFG = _load_score_cfg()
 
 
-def sbs_score(agg):
+def sbs_score(agg, expected_flat=False):
     """Overall 0-100 SBS quality from an aggregate metric dict (see thresholds.json 'score').
     q_clean penalizes artifacts; q_depth rewards realized stereo; score blends them."""
     pen = 0.0
@@ -474,7 +480,9 @@ def sbs_score(agg):
     q_clean = max(0.0, 100.0 - pen)
     d = SCORE_CFG.get("depth", {})
     pop = agg.get(d.get("metric", "pop_pct_p50"), 0.0)
-    q_depth = 100.0 * min(pop / d.get("target", 0.6), 1.0) if d.get("target") else 0.0
+    target = d.get("expected_flat_target", 0.1) if expected_flat else d.get("target", 0.6)
+    realized = min(pop / target, 1.0) if target else 0.0
+    q_depth = 100.0 * (1.0 - realized) if expected_flat else 100.0 * realized
     dw = d.get("weight", 0.2)
     score = (1.0 - dw) * q_clean + dw * q_depth
     return {"q_clean": round(q_clean, 1), "q_depth": round(q_depth, 1), "score": round(score, 1)}

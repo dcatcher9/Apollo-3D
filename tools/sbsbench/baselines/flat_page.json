@@ -2,11 +2,9 @@
   "aggregate": {
     "depth_spread": 0.8361072887976965,
     "disocc_frac": 1.7076502732240437e-05,
-    "disocc_smear": 1.0,
     "edge_acc_p50": 0.0,
     "edge_acc_p95": 0.0,
     "flicker": 0.008041018228556388,
-    "flicker_disocc": 0.0,
     "pop_pct_p50": 0.000572871218186619,
     "pop_px_p50": 0.0048923202033137264,
     "pop_px_p95": 0.029998769671081272,
@@ -23,21 +21,19 @@
     ],
     "flicker_p50": 4.878982053924119e-06,
     "flicker_p95": 0.04175083078444,
-    "flicker_disocc_p50": 0.0,
-    "flicker_disocc_p95": 0.0,
     "swim_p50": 0.0,
     "swim_p95": 8.152921938896172,
-    "q_clean": 94.0,
-    "q_depth": 0.3,
-    "score": 75.2
+    "q_clean": 100.0,
+    "q_depth": 93.3,
+    "score": 98.7
   },
   "perf_ms": {
-    "depth_infer": 1.96595,
-    "sbs_composite_cpu": 0.0066,
-    "warp_infer": 0.09792
+    "depth_infer": 1.99322,
+    "sbs_composite_cpu": 0.0063,
+    "warp_infer": 0.097824
   },
   "meta": {
-    "git_sha": "2a4a647c",
+    "git_sha": "df1970da",
     "git_dirty": true,
     "clip_set_sha1": {
       "c339": "1923c16a8356",
@@ -54,14 +50,17 @@
     "conf": "tools\\sbsbench\\bench.conf",
     "model": "depth_anything_v2_fp16",
     "warp": "apollo",
+    "shift_profile": "apollo",
     "eval_schema": 2,
     "depth_step": "current-once",
     "conf_sha256": "f5b0eda8bffc9437",
-    "metric_sha256": "6a7faf57152aab11",
+    "metric_sha256": "8f912ccc4a79d23b",
     "gpu_contention": false,
-    "timestamp": "2026-07-10T12:38:35",
+    "timestamp": "2026-07-10T15:39:54",
+    "run_name": "eval-contract-flat-support",
     "name": "flat_page",
     "description": "Synthetic static document/desktop page: flat-content depth hallucination (A3).",
+    "expected_flat": true,
     "clip_sha1": "4aa82c2ea091"
   }
 }

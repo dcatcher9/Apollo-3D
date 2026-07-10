@@ -98,6 +98,13 @@ model, schema, stepping semantics, config hash, metric hash, or clip hash differ
 are cleared before reuse. `--output-every N` reduces saved artifacts while still processing every
 input frame, so sampling cannot change temporal state.
 
+Clips may declare `"expected_flat": true` in `meta.json`. Their score rewards near-zero false
+stereo instead of rewarding volume, while still measuring depth hallucination and temporal swim.
+Disocclusion ratios require at least 0.1% eye-area support; below that, smear and disocclusion
+flicker are omitted rather than turning a handful of pixels into a maximum penalty. Reports name
+both run directories and show control/treatment provenance separately, even when their CLI args
+are identical because the treatment is a code change.
+
 ## Deterministic clips via the headless harness (recommended)
 Single dumps are sporadic and headset-bound. For repeatable A/B and **temporal** metrics, drive
 the real pipeline over a fixed frame sequence with the built-in `--sbs-bench` subcommand (Tier-1

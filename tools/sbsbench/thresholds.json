@@ -30,6 +30,6 @@
       "disocc_smear":       {"weight": 6,  "scale": 0.5},
       "flicker_p50":        {"weight": 5,  "scale": 30.0}
     },
-    "depth": {"metric": "pop_spread_pct", "target": 2.5, "weight": 0.2, "_doc": "pop_spread_pct (near-to-far disparity RANGE, not median|dx|) so q_depth rewards stereo VOLUME and is invariant to where subject anchoring places the zero plane. target 2.5 ~= the achievable budget (divergence*eyewidth span); default pipeline realizes ~1.5, the shape_depth_for_pop stretch ~2.5."}
+    "depth": {"metric": "pop_spread_pct", "target": 2.5, "expected_flat_target": 0.1, "weight": 0.2, "_doc": "Normal clips reward stereo volume toward target=2.5%. Clips marked expected_flat invert the term and reward false stereo below 0.1%."}
   }
 }

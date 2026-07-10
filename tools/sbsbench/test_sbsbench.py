@@ -81,6 +81,23 @@ class EvalContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 sbsbench.indexed_files(os.path.join(root, "frame_*.*"), "frame_")
 
+    def test_disocclusion_ratio_requires_minimum_support(self):
+        eye = np.zeros((64, 64), dtype=np.float32)
+        depth = np.full((16, 16), 0.5, dtype=np.float32)
+        frac, smear = sbsbench.disocclusion_metrics(eye, depth)
+        self.assertLess(frac, sbsbench.MIN_DISOCC_FRAC)
+        self.assertIsNone(smear)
+
+    def test_expected_flat_score_rewards_zero_false_stereo(self):
+        clean = {"pop_spread_pct": 0.0}
+        false_stereo = {"pop_spread_pct": 0.2}
+        self.assertGreater(
+            sbsbench.sbs_score(clean, expected_flat=True)["score"],
+            sbsbench.sbs_score(false_stereo, expected_flat=True)["score"])
+        self.assertLess(
+            sbsbench.sbs_score(clean)["score"],
+            sbsbench.sbs_score(false_stereo)["score"])
+
 
 if __name__ == "__main__":
     unittest.main()
