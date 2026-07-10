@@ -7,10 +7,13 @@ estimation + reprojection for the Galaxy XR / Artemis client). Updated 2026-07-0
 > problems are (1) the **stretch band / jagged edges** at silhouettes and (2) **flat pop**
 > on DA-V3. Both were chased hard:
 > - **Edges are a WARP problem, not a depth problem** — proven both directions: DA-V3 depth
->   through the current probe warp still shows the band (warpsim, ~6–10% only), while DA-V2
->   depth through **MLBW** makes it vanish (eval sheets). The fix is the learned warp
->   (**MLBW, already stashed**) plus a learned **inpaint** for the disocclusion holes —
->   this is exactly iw3's pipeline (depth → warp emits hole mask → light_inpaint fills it).
+>   through the probe warp still shows the band (warpsim, ~6–10% only), while DA-V2 depth
+>   through a learned warp made it vanish (eval sheets). **UPDATE 2026-07-10: the MLBW learned
+>   warp was REMOVED** — it's iw3's lineage (a learned *backward* warp) and ignored the whole
+>   VD3D subject-tracked shaping pipeline this project committed to (subject anchoring / band
+>   curve / stretch / DOF all run on the probe path; MLBW composited its own fields and consumed
+>   none of them). The edge fix is now a learned **inpaint** for the disocclusion holes *on top
+>   of the probe warp* (probe emits a hole mask → light_inpaint fills it), keeping the shaping.
 > - **DA-V3 flat pop was a MODEL/EXPORT problem, not inherent.** The onnx-community DA-V3
 >   exports (small/base/**large**) all output *compressed* monocular depth (pop ~0.55–0.66).
 >   The monocular-specialized **DA3MONO-LARGE** (depth-anything/DA3MONO-LARGE, 0.35B) gives
@@ -31,7 +34,7 @@ with far-depth floor and smoothed depth reads. Client switches host modes mid-st
 
 Note (2026-07-05): DA-V3's guided upsample is measured to NOT be tunable — its silhouettes
 are inherently softer than V2's and the guided pass can relocate but not manufacture sharpness;
-edge crispness for V3 (as for V2) comes from the learned warp (roadmap #1), not the guided pass.
+edge crispness for V3 (as for V2) comes from a learned inpaint on the probe warp (roadmap #1), not the guided pass.
 
 Verified quality (vs. pre-guided): thin objects straight (no bent sword handles), facial
 silhouettes real (nose/brow/lips exist in depth), per-eye widths consistent, narrower
@@ -77,15 +80,16 @@ onnx-community's, which turned out to be flat-pop (see TL;DR).
 
 ## Roadmap (priority order)
 
-1. **Learned warp + inpaint (THE edge fix)** — the current probe reprojection fills
-   disocclusions by *stretching* → the stretch band / jagged edges. iw3's proven pipeline:
-   depth → **MLBW** learned warp (emits a disocclusion hole mask) → a small learned
-   **inpaint** model (`light_inpaint_v1`, ¼-res gMLP) fills the holes. MLBW is **already
-   implemented and stashed** (`git stash`: "MLBW learned warp WIP + SBS reprime fix",
-   0.53 ms/eye, eval sheets show the arm-edge staircase gone); it needs (a) merging onto
-   the current master, (b) emitting the hole mask (iw3 `return_mask`), (c) porting the
-   inpaint model as a third TRT engine. This also unlocks pop: once holes are inpainted,
-   divergence can be cranked without the stretch band. Warpsim-gate every change.
+1. **Learned inpaint on the probe warp (THE edge fix)** — the probe reprojection fills
+   disocclusions by *stretching* → the stretch band / jagged edges. The fix: have the probe
+   emit a disocclusion **hole mask**, then a small learned **inpaint** model
+   (`light_inpaint_v1`, ¼-res gMLP, iw3) fills the holes — clean edges WITHOUT replacing the
+   warp, so the VD3D subject-tracked shaping keeps working. (The MLBW *learned warp* — a full
+   warp replacement from iw3's lineage — was REMOVED 2026-07-10 because it consumed none of the
+   shaping; do not re-add it. The inpaint is the salvageable half.) Needs: (a) probe emits the
+   hole mask, (b) port `light_inpaint_v1` as a second TRT engine, (c) composite the inpaint over
+   the probe output. Unlocks pop too: once holes are inpainted, divergence can be cranked
+   without the stretch band. Warpsim-gate every change.
 2. **DA3MONO-LARGE depth (THE pop fix)** — the onnx-community DA-V3 exports give flat
    monocular pop; the monocular-specialized **DA3MONO-LARGE** (depth-anything/DA3MONO-LARGE,
    0.35B, DINO ViT-L) gives V2-level pop (0.74–0.90) *and* DA-V3 geometric accuracy.
@@ -118,7 +122,7 @@ onnx-community's, which turned out to be flat-pop (see TL;DR).
      (+ depth EMA), Screen Depth→`focal_plane`, Subject Zero-Lock→`subject_lock`. Mirror
      VD3D's lerp/curve mapping (`strength**0.85`, `comfort_limit = 1 - 0.1·comfort`, …).
    - **Apollo-specific divergence**: the 2026-07-09 finding is that Apollo's edge quality is
-     NOT parallax-coupled (its probe/MLBW fill doesn't stretch, unlike VD3D's forward warp),
+     NOT parallax-coupled (the probe fill doesn't stretch, unlike VD3D's forward warp),
      so Apollo's "Showcase"/"Strong Pop-Out" styles can push `divergence` HIGHER than VD3D's
      without the stretch-band cost that makes VD3D's Showcase the worst-edge style. Retune,
      don't copy, the aggressive styles.

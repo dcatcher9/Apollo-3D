@@ -205,8 +205,8 @@ namespace models {
         // alongside predicted_depth). unmarkOutput drops them from the engine I/O and lets the
         // builder dead-code-eliminate their exclusive branches, so enqueueV3 only needs the two
         // tensors the pipeline binds. Names via getName()/getNbOutputs() are ABI-safe (no Dims).
-        // An EMPTY output_tensor means "keep every output" -- used for non-depth engines whose
-        // outputs are all consumed (e.g. the MLBW warp model: delta + layer_weight).
+        // An EMPTY output_tensor means "keep every output" -- for engines whose outputs are all
+        // consumed (e.g. a future multi-output model); depth engines set it to "predicted_depth".
         if (!model.output_tensor.empty()) {
             std::vector<nvinfer1::ITensor*> to_unmark;
             for (int i = 0; i < network->getNbOutputs(); i++) {
@@ -256,7 +256,7 @@ namespace models {
         float norm_lock_frames;  // scene lock: updates before the normalization bounds freeze (0 = off)
         bool subject_track;      // VD3D-style shaped disparity: run the subject-estimate passes
         float subject_recenter;  // recenter strength consumed by depth_subject_resolve_cs
-        float subject_lock;      // anchor strength (probe: parallax subtraction; MLBW: conv blend)
+        float subject_lock;      // anchor strength (fraction of the subject's parallax subtracted)
         bool subject_stretch;    // apply the shape_depth_for_pop 5/95 disparity stretch
         float stretch_lo;        // low percentile for the stretch (fraction)
         float stretch_hi;        // high percentile for the stretch (fraction)
@@ -300,7 +300,6 @@ namespace models {
             const char* stage = nullptr;
         };
         perf_evt_ring perf_depth;  // "depth_infer": one DA-V2/DA3MONO inference
-        perf_evt_ring perf_warp;   // "warp_infer": both eyes of the MLBW warp
 
         void perf_try_resolve(perf_evt_ring& r, int slot, cuda_driver_api& cuda) {
             if (!r.busy[slot] || !cuda.cuEventQuery) return;
@@ -339,7 +338,7 @@ namespace models {
         void perf_destroy_events() {
             auto& cuda = cuda_driver_api::get();
             if (!cuda.cuEventDestroy) return;
-            for (auto* r : {&perf_depth, &perf_warp}) {
+            for (auto* r : {&perf_depth}) {
                 for (int i = 0; i < perf_evt_ring::N; i++) {
                     if (r->start[i]) cuda.cuEventDestroy(r->start[i]);
                     if (r->stop[i]) cuda.cuEventDestroy(r->stop[i]);
@@ -414,46 +413,8 @@ namespace models {
         CUgraphicsResource cuda_out_res = nullptr;
         bool has_previous_frame = false;
         bool stream_error_logged = false;
-
-        // Learned warp (iw3 MLBW): a second, tiny TRT engine that turns the depth map into
-        // per-eye multi-layer warp fields (2 deltas + 2 softmax weights per texel), composited
-        // by sbs_mlbw_composite_ps instead of the probe-search reprojection. Runs on its OWN
-        // CUDA stream so its ~1 ms result can be consumed as soon as it lands, without waiting
-        // behind the much longer depth inference on cu_stream.
-        bool learned_warp;
-        std::string warp_model;  // file stem; engine cached as <warp_model>.engine
-        std::string warp_model_url;
-        float warp_divergence;  // config divergence (parallax fraction of width)
-        float warp_focal;  // config focal_plane
-        float warp_floor;  // config depth_floor
-        float warp_border;  // config border_fade (>0 = ramp features near L/R edges)
-        nvinfer1::IExecutionContext* warp_context = nullptr;
-        CUstream warp_stream = nullptr;
-        int warp_w = 0, warp_h = 0;  // model grid (from the stem naming convention)
-        int warp_layers = 0;  // model layer count (from the stem, e.g. mlbw_l2/l4; <= 4)
-        bool warp_pending = false;  // inference enqueued; outputs not yet consumed
         bool depth_context_pooled = false;  // context reused from the pool (modules already loaded -> skip warmup)
-        bool warp_context_pooled = false;  // ditto for the warp context
-        bool warp_resources_registered = false;  // CUDA-D3D interop registered (lazily, on the encode thread)
-        bool warp_fields_valid = false;  // field textures hold a usable result
-        bool warp_error_logged = false;
-        Microsoft::WRL::ComPtr<ID3D11ComputeShader> mlbw_input_cs;
-        Microsoft::WRL::ComPtr<ID3D11ComputeShader> mlbw_field_cs;
-        Microsoft::WRL::ComPtr<ID3D11Buffer> mlbw_input_cbuffer;
-        Microsoft::WRL::ComPtr<ID3D11Buffer> mlbw_field_cbuffer[2];  // per eye
-        Microsoft::WRL::ComPtr<ID3D11Buffer> mlbw_in_buf[2];  // [3*H*W] fp32, left/right
-        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> mlbw_in_uav[2];
-        Microsoft::WRL::ComPtr<ID3D11Buffer> mlbw_delta_buf[2];  // [L*H*W] fp32
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> mlbw_delta_srv[2];
-        Microsoft::WRL::ComPtr<ID3D11Buffer> mlbw_weight_buf[2];
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> mlbw_weight_srv[2];
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> delta_tex[2];  // RGBA32F per-layer deltas
-        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> delta_tex_uav[2];
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> delta_tex_srv[2];
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> weight_tex[2];  // RGBA32F per-layer weights
-        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> weight_tex_uav[2];
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> weight_tex_srv[2];
-        CUgraphicsResource cuda_warp_res[6] = {};  // in_l, in_r, delta_l, weight_l, delta_r, weight_r
+
 
         bool compile_shader(const std::filesystem::path& path, Microsoft::WRL::ComPtr<ID3D11ComputeShader>& out_cs) {
             Microsoft::WRL::ComPtr<ID3DBlob> blob;
@@ -469,220 +430,6 @@ namespace models {
             return SUCCEEDED(device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &out_cs));
         }
 
-        // Load the MLBW warp engine and create every GPU resource it needs. Called from the
-        // ctor WITHOUT g_trt_mutex held (a first-ever engine build takes ~14 s and must not
-        // block other sessions' enqueues); the engine-slot access below takes the lock itself.
-        // On any failure, learned_warp is switched off and the pipeline falls back to the
-        // probe-search reprojection.
-        void setup_learned_warp(const std::filesystem::path& assets_dir) {
-            auto fail = [&](const char* why) {
-                BOOST_LOG(warning) << "Learned warp disabled: " << why << " -- falling back to the probe-search reprojection.";
-                learned_warp = false;
-            };
-
-            // The warp model is not a depth model, but it reuses the same engine plumbing: a
-            // synthesized registry entry with fixed_shape (no optimization profile) and an empty
-            // output_tensor (keep ALL outputs: delta + layer_weight). Engine cached as
-            // "<warp_model>.engine" (rank-4 default = no recipe tag).
-            config::depth_model_info warp_info;
-            warp_info.name = warp_model;
-            warp_info.url = warp_model_url;
-            warp_info.fixed_shape = true;
-            warp_info.output_tensor = "";
-
-            auto path = ensure_model_available(assets_dir, warp_model, warp_model_url);
-            if (path.empty()) {
-                return fail("warp model not found (place <warp_model>.onnx in the assets dir or set sbs_3d_warp_model_url)");
-            }
-            if (path.extension() == ".onnx") {
-                precompile_tensorrt_engine(assets_dir, warp_info);
-                path = ensure_model_available(assets_dir, warp_model, warp_model_url);
-            }
-            if (path.extension() != ".engine") {
-                return fail("no engine after compilation");
-            }
-
-            nvinfer1::ICudaEngine* warp_engine = nullptr;
-            {
-                std::lock_guard<std::mutex> lock(g_trt_mutex);
-                warp_engine = acquire_engine_locked(warp_model, path, warp_context, warp_context_pooled);
-            }
-            if (warp_context_pooled) {
-                BOOST_LOG(info) << "Reusing pooled TensorRT execution context (" << warp_model << ").";
-            }
-            if (warp_engine && !warp_context) {
-                // Outside g_trt_mutex (same rationale as the depth context): creation takes
-                // seconds and must not block a concurrent teardown's pool return or enqueues.
-                BOOST_LOG(info) << "Creating TensorRT execution context for '" << warp_model << "'...";
-                warp_context = warp_engine->createExecutionContext();
-            }
-            if (!warp_context || !warp_engine) {
-                return fail("engine load failed");
-            }
-
-            // The export is fixed-shape; the grid dims come from the model STEM (naming
-            // convention "..._<W>x<H>...", e.g. mlbw_l2_798x336_fp16), and depth is resampled
-            // onto that grid by mlbw_input_cs, so it need not match the DA resolution.
-            //
-            // ABI WARNING: the dims can NOT be read from the engine -- getTensorShape() returns
-            // a Dims struct BY VALUE, which crashes across the MinGW/MSVC boundary (return-slot
-            // pointer ordering differs; this SIGSEGV'd in nvinfer when tried). Only const char*
-            // / enum / integer-returning TRT APIs are safe here.
-            {
-                std::smatch m;
-                static const std::regex grid_re("_(\\d+)x(\\d+)");
-                if (!std::regex_search(warp_model, m, grid_re)) {
-                    return fail("cannot determine the warp grid: name the model '<stem>_<W>x<H>[_...]' (e.g. mlbw_l2_798x336_fp16)");
-                }
-                warp_w = std::stoi(m[1].str());
-                warp_h = std::stoi(m[2].str());
-                if (warp_w < 64 || warp_h < 64 || warp_w > 4096 || warp_h > 4096) {
-                    return fail("implausible warp grid parsed from the model name");
-                }
-                std::smatch lm;
-                static const std::regex layers_re("mlbw_l(\\d+)");
-                if (!std::regex_search(warp_model, lm, layers_re)) {
-                    return fail("cannot determine the layer count: name the model 'mlbw_l<N>_...' (e.g. mlbw_l2_798x336_fp16)");
-                }
-                warp_layers = std::stoi(lm[1].str());
-                if (warp_layers < 1 || warp_layers > 4) {
-                    return fail("unsupported layer count (the field textures pack at most 4 layers)");
-                }
-            }
-            auto* eng = warp_engine;
-            bool have_in = false, have_delta = false, have_weight = false;
-            for (int i = 0; i < eng->getNbIOTensors(); i++) {
-                std::string_view tname = eng->getIOTensorName(i);
-                have_in = have_in || tname == "mlbw_input";
-                have_delta = have_delta || tname == "delta";
-                have_weight = have_weight || tname == "layer_weight";
-            }
-            if (!have_in || !have_delta || !have_weight) {
-                return fail("engine is missing mlbw_input/delta/layer_weight tensors (is this an mlbw_l2 delta_output export?)");
-            }
-            for (const char* tname : {"mlbw_input", "delta", "layer_weight"}) {
-                if (eng->getTensorDataType(tname) != nvinfer1::DataType::kFLOAT) {
-                    return fail("warp engine I/O is not FP32 (use an fp16-weights/fp32-IO export)");
-                }
-            }
-            BOOST_LOG(info) << "Learned warp (MLBW) engine loaded: grid " << warp_w << "x" << warp_h
-                            << ", " << warp_layers << " layers";
-
-            if (!compile_shader(assets_dir / "shaders" / "directx" / "mlbw_input_cs.hlsl", mlbw_input_cs) ||
-                !compile_shader(assets_dir / "shaders" / "directx" / "mlbw_field_cs.hlsl", mlbw_field_cs)) {
-                return fail("mlbw shaders failed to compile");
-            }
-
-            auto& cuda = cuda_driver_api::get();
-            if (!cuda.is_valid() || cuda.cuStreamCreate(&warp_stream, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS) {
-                return fail("could not create the warp CUDA stream");
-            }
-
-            // Tensor buffers: input [3*H*W] and outputs [2*H*W] per eye, CUDA-mapped.
-            const UINT plane = (UINT) warp_w * (UINT) warp_h;
-            D3D11_BUFFER_DESC bd = {};
-            bd.Usage = D3D11_USAGE_DEFAULT;
-            bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-            bd.StructureByteStride = sizeof(float);
-            for (int e = 0; e < 2; e++) {
-                bd.ByteWidth = plane * 3 * sizeof(float);
-                bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-                device->CreateBuffer(&bd, nullptr, &mlbw_in_buf[e]);
-                device->CreateUnorderedAccessView(mlbw_in_buf[e].Get(), nullptr, &mlbw_in_uav[e]);
-
-                bd.ByteWidth = plane * (UINT) warp_layers * sizeof(float);
-                bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                device->CreateBuffer(&bd, nullptr, &mlbw_delta_buf[e]);
-                device->CreateShaderResourceView(mlbw_delta_buf[e].Get(), nullptr, &mlbw_delta_srv[e]);
-                device->CreateBuffer(&bd, nullptr, &mlbw_weight_buf[e]);
-                device->CreateShaderResourceView(mlbw_weight_buf[e].Get(), nullptr, &mlbw_weight_srv[e]);
-
-                D3D11_TEXTURE2D_DESC td = {};
-                td.Width = (UINT) warp_w;
-                td.Height = (UINT) warp_h;
-                td.MipLevels = 1;
-                td.ArraySize = 1;
-                td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-                td.SampleDesc.Count = 1;
-                td.Usage = D3D11_USAGE_DEFAULT;
-                td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-                device->CreateTexture2D(&td, nullptr, &delta_tex[e]);
-                device->CreateUnorderedAccessView(delta_tex[e].Get(), nullptr, &delta_tex_uav[e]);
-                device->CreateShaderResourceView(delta_tex[e].Get(), nullptr, &delta_tex_srv[e]);
-                device->CreateTexture2D(&td, nullptr, &weight_tex[e]);
-                device->CreateUnorderedAccessView(weight_tex[e].Get(), nullptr, &weight_tex_uav[e]);
-                device->CreateShaderResourceView(weight_tex[e].Get(), nullptr, &weight_tex_srv[e]);
-            }
-            // NOTE: the CUDA-D3D registration of these buffers is deliberately DEFERRED to the
-            // first enqueue_warp() on the ENCODE thread (see register_warp_resources). Doing
-            // cuGraphicsD3D11RegisterResource here -- on the background build thread while the
-            // encode thread is actively driving the same D3D device (flat SBS + NVENC) -- hung
-            // the constructor twice (driver-level CUDA/D3D lock inversion; sessions became
-            // unkillable). The depth pipeline's interop registration has always run on the
-            // encode thread inside estimate(), which is the proven-safe pattern.
-
-            // Feature-plane constants (iw3 make_divergence_feature_value): the config warp is
-            // parallax = (floor + (1-floor)*d - focal) * divergence, which in iw3 terms is
-            //   divergence% = (1-floor)*divergence / 0.005,  convergence = (focal-floor)/(1-floor)
-            // so divergence_pix = iw3_div * 0.5 * 0.01 * max(W,H) = (1-floor)*divergence * max(W,H).
-            const float slope = (1.0f - warp_floor) * warp_divergence;
-            const float base_size = (float) std::max(warp_w, warp_h);
-            const float div_pix = slope * base_size;
-            const float conv = std::min(1.0f, std::max(0.0f, (warp_focal - warp_floor) / std::max(1e-6f, 1.0f - warp_floor)));
-            // Border ramp width per iw3's preserve_screen_border, gated by border_fade > 0.
-            const float border_texels = (warp_border > 0.0f) ? std::round(1.5f * slope * (float) warp_w) : 0.0f;
-
-            D3D11_BUFFER_DESC cbd = {};
-            cbd.Usage = D3D11_USAGE_IMMUTABLE;
-            cbd.ByteWidth = 32;
-            cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-            struct { uint32_t fw, fh; float div_feat, conv_feat, border, subject_track_f, subject_lock_f, conv_cfg; } icb = {
-                (uint32_t) warp_w, (uint32_t) warp_h,
-                div_pix / 32.0f, -div_pix * conv / 32.0f, border_texels,
-                subject_track ? 1.0f : 0.0f, subject_lock, conv
-            };
-            D3D11_SUBRESOURCE_DATA sd = {&icb, 0, 0};
-            device->CreateBuffer(&cbd, &sd, &mlbw_input_cbuffer);
-            for (uint32_t e = 0; e < 2; e++) {
-                struct { uint32_t fw, fh, is_right, layers; float pad2[4]; } fcb = {(uint32_t) warp_w, (uint32_t) warp_h, e, (uint32_t) warp_layers, {}};
-                D3D11_SUBRESOURCE_DATA fsd = {&fcb, 0, 0};
-                device->CreateBuffer(&cbd, &fsd, &mlbw_field_cbuffer[e]);
-            }
-            if (!mlbw_input_cbuffer || !mlbw_field_cbuffer[0] || !mlbw_field_cbuffer[1]) {
-                return fail("constant buffer creation failed");
-            }
-
-            // Warm up the warp engine here (background construction thread) so its one-time CUDA
-            // module load doesn't stall the encode thread on the first real enqueue_warp() --
-            // the same treatment warmup_inference() gives the depth engine. Pure CUDA/TRT into
-            // throwaway scratch (no D3D immediate-context calls, which the encode thread owns).
-            // POOLED contexts skip this: their engine's modules are already loaded process-wide,
-            // so the warmup is pure waste -- and an immediate re-enqueue on a pooled context of a
-            // MULTI-STREAM engine (l4 uses TRT aux streams) hung the constructor once (2026-07-06
-            // log: build stuck after "engine loaded", session unkillable). Fresh contexts only.
-            if (!warp_context_pooled) {
-                const size_t in_elems = (size_t) 3 * warp_w * warp_h;
-                const size_t out_elems = (size_t) warp_layers * warp_w * warp_h;
-                CUdeviceptr d_in = 0, d_delta = 0, d_weight = 0;
-                if (cuda.cuMemAlloc(&d_in, in_elems * sizeof(float)) == CUDA_SUCCESS &&
-                    cuda.cuMemAlloc(&d_delta, out_elems * sizeof(float)) == CUDA_SUCCESS &&
-                    cuda.cuMemAlloc(&d_weight, out_elems * sizeof(float)) == CUDA_SUCCESS) {
-                    bool ok;
-                    {
-                        std::lock_guard<std::mutex> lock(g_trt_mutex);
-                        warp_context->setTensorAddress("mlbw_input", (void*) d_in);
-                        warp_context->setTensorAddress("delta", (void*) d_delta);
-                        warp_context->setTensorAddress("layer_weight", (void*) d_weight);
-                        ok = warp_context->enqueueV3(warp_stream);
-                    }
-                    if (ok && cuda.cuStreamSynchronize) cuda.cuStreamSynchronize(warp_stream);
-                    BOOST_LOG(info) << "Learned warp warmup inference complete" << (ok ? "." : " (enqueue failed).");
-                }
-                if (d_in) cuda.cuMemFree(d_in);
-                if (d_delta) cuda.cuMemFree(d_delta);
-                if (d_weight) cuda.cuMemFree(d_weight);
-            }
-        }
 
         impl(Microsoft::WRL::ComPtr<ID3D11Device> d, Microsoft::WRL::ComPtr<ID3D11DeviceContext> c, const std::filesystem::path& assets_dir, const config::video_t::sbs_t& cfg, const config::depth_model_info& model)
             : device(d), context(c), ema_alpha((float)cfg.ema),
@@ -702,24 +449,18 @@ namespace models {
               range_floor_frac((float)cfg.range_floor),
               range_floor_ref_alpha(0.004f),  // ~decays over a few hundred depth updates
               depth_fps((float)cfg.depth_fps),
-              // The learned warp wants the model's raw SOFT depth: texel-sharp guided edges
-              // are out of its training distribution (they render as a staircase fringe).
-              guided_upsample(cfg.learned_warp ? false : cfg.guided_upsample),
+              guided_upsample(cfg.guided_upsample),
               guided_sigma(std::max(0.01f, (float)cfg.guided_sigma)),
               model_name(model.name), model_url(model.url),
               input_rank(model.input_rank), output_transform((uint32_t)model.output_transform),
               depth_shift(std::max(0.001f, (float)cfg.depth_shift)),
               fixed_shape(model.fixed_shape),
               dynamic_width(model.dynamic_width), fixed_h(model.fixed_h),
-              output_tensor_name(model.output_tensor),
-              learned_warp(cfg.learned_warp), warp_model(cfg.warp_model), warp_model_url(cfg.warp_model_url),
-              warp_divergence((float)cfg.divergence), warp_focal((float)cfg.focal_plane),
-              warp_floor((float)cfg.depth_floor), warp_border((float)cfg.border_fade)
+              output_tensor_name(model.output_tensor)
         {
             // Perf benchmark: enable per-stage timing for this run and reset the rolling window
             // so it reflects this model/mode rather than blending across a switch.
             perf_depth.stage = "depth_infer";
-            perf_warp.stage = "warp_infer";
             sbs_perf::set_enabled(cfg.perf_stats);
             if (cfg.perf_stats) sbs_perf::reset();
 
@@ -844,11 +585,6 @@ namespace models {
                 }
             }
 
-            // Learned warp engine + resources (takes g_trt_mutex itself, briefly; a first-ever
-            // engine build ~14 s runs here on the background construction thread).
-            if (learned_warp) {
-                setup_learned_warp(assets_dir);
-            }
 
             // Compile Shaders
             compile_shader(assets_dir / "shaders" / "directx" / "rgb_to_nchw_cs.hlsl", rgb_to_nchw_cs);
@@ -874,15 +610,9 @@ namespace models {
                     subject_track = false;
                 }
             }
-            // Diagnostics for the probe-path shaping (subject_stretch/plane_lock/band curve),
-            // which is live only when subject tracking runs on the PROBE reprojection. subject_stretch
-            // defaults ON, so keying off it would warn on every default run -- flag only the MLBW
-            // case (informational) and an explicitly-set subject_plane_lock (defaults off) with
-            // tracking inactive. Evaluated after the block so a compile-failure fallback counts too.
-            if (subject_track && learned_warp) {
-                BOOST_LOG(info) << "Subject tracking on the learned warp anchors via its convergence plane; "
-                                   "the probe-path shaping (sbs_3d_subject_stretch / subject_plane_lock) is inactive.";
-            } else if (!subject_track && cfg.subject_plane_lock > 0.0) {
+            // subject_plane_lock needs the subject estimate; with tracking off it is a no-op.
+            // (subject_stretch defaults ON, so warning on it would fire on every default run.)
+            if (!subject_track && cfg.subject_plane_lock > 0.0) {
                 BOOST_LOG(warning) << "sbs_3d_subject_plane_lock has no effect without sbs_3d_subject_track = enabled.";
             }
             if (foreground_curvature > 0.0f) {
@@ -1090,15 +820,8 @@ namespace models {
                     if (cuda.cuStreamSynchronize) cuda.cuStreamSynchronize(cu_stream);
                     cuda.cuStreamDestroy(cu_stream);
                 }
-                if (warp_stream) {
-                    if (cuda.cuStreamSynchronize) cuda.cuStreamSynchronize(warp_stream);
-                    cuda.cuStreamDestroy(warp_stream);
-                }
                 if (cuda_in_res) cuda.cuGraphicsUnregisterResource(cuda_in_res);
                 if (cuda_out_res) cuda.cuGraphicsUnregisterResource(cuda_out_res);
-                for (auto& res : cuda_warp_res) {
-                    if (res) cuda.cuGraphicsUnregisterResource(res);
-                }
                 perf_destroy_events();  // free the timing events while cuda_ctx is still current
             }
 
@@ -1110,10 +833,6 @@ namespace models {
             if (exec_context) {
                 g_engines[model_name].context_pool.push_back(exec_context);
                 exec_context = nullptr;
-            }
-            if (warp_context) {
-                g_engines[warp_model].context_pool.push_back(warp_context);
-                warp_context = nullptr;
             }
             // TRT runtime/engines are cached globally, do not destroy them here.
         }
@@ -1131,130 +850,9 @@ namespace models {
             if (subject_track) {
                 r.subject = subject_srv;
             }
-            if (learned_warp && warp_fields_valid) {
-                r.delta_left = delta_tex_srv[0];
-                r.weight_left = weight_tex_srv[0];
-                r.delta_right = delta_tex_srv[1];
-                r.weight_right = weight_tex_srv[1];
-                r.field_w = warp_w;
-                r.field_h = warp_h;
-                r.layers = warp_layers;
-            }
             return r;
         }
 
-        // Consume a finished MLBW inference: pack the raw output buffers into the per-eye
-        // field textures. Called every frame; cheap no-op unless an inference just landed.
-        void poll_warp_fields(cuda_driver_api& cuda) {
-            if (!warp_pending || !cuda.cuStreamQuery) {
-                return;
-            }
-            auto q = cuda.cuStreamQuery(warp_stream);
-            if (q == CUDA_ERROR_NOT_READY) {
-                return;
-            }
-            warp_pending = false;
-            if (q != CUDA_SUCCESS) {
-                if (!warp_error_logged) {
-                    BOOST_LOG(error) << "MLBW warp stream failed: " << q;
-                    warp_error_logged = true;
-                }
-                return;  // keep the last good fields (if any)
-            }
-
-            context->CSSetShader(mlbw_field_cs.Get(), nullptr, 0);
-            for (int e = 0; e < 2; e++) {
-                context->CSSetConstantBuffers(0, 1, mlbw_field_cbuffer[e].GetAddressOf());
-                ID3D11ShaderResourceView* srvs[2] = {mlbw_delta_srv[e].Get(), mlbw_weight_srv[e].Get()};
-                context->CSSetShaderResources(0, 2, srvs);
-                ID3D11UnorderedAccessView* uavs[2] = {delta_tex_uav[e].Get(), weight_tex_uav[e].Get()};
-                context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
-                context->Dispatch((warp_w + 15) / 16, (warp_h + 15) / 16, 1);
-            }
-            ID3D11UnorderedAccessView* null_uavs[2] = {nullptr, nullptr};
-            ID3D11ShaderResourceView* null_srvs[2] = {nullptr, nullptr};
-            context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
-            context->CSSetShaderResources(0, 2, null_srvs);
-            warp_fields_valid = true;
-        }
-
-        // Kick off MLBW for both eyes from the freshly-updated depth_tex. Runs on its own
-        // CUDA stream (~1 ms per eye) so the result can be consumed as soon as it lands,
-        // instead of waiting behind the much longer depth inference on cu_stream.
-        void enqueue_warp(cuda_driver_api& cuda) {
-            if (!learned_warp || !warp_context || warp_pending) {
-                return;
-            }
-
-            // Lazy CUDA-D3D registration on the ENCODE thread (this thread owns the device's
-            // immediate work; registering from the background build thread deadlocked in the
-            // driver -- see the note in setup_learned_warp). One-time, ~ms.
-            if (!warp_resources_registered) {
-                ID3D11Resource* to_register[6] = {
-                    mlbw_in_buf[0].Get(), mlbw_in_buf[1].Get(),
-                    mlbw_delta_buf[0].Get(), mlbw_weight_buf[0].Get(),
-                    mlbw_delta_buf[1].Get(), mlbw_weight_buf[1].Get()
-                };
-                for (int i = 0; i < 6; i++) {
-                    if (cuda.cuGraphicsD3D11RegisterResource(&cuda_warp_res[i], to_register[i], 0) != CUDA_SUCCESS) {
-                        BOOST_LOG(error) << "cuGraphicsD3D11RegisterResource failed for a warp tensor; learned warp disabled.";
-                        learned_warp = false;  // permanent fallback to the probe reprojection
-                        return;
-                    }
-                }
-                warp_resources_registered = true;
-            }
-
-            // Build both eyes' input tensors (right = horizontally flipped depth). t1 carries
-            // the subject state for the subject-anchored convergence plane (null when off).
-            context->CSSetShader(mlbw_input_cs.Get(), nullptr, 0);
-            context->CSSetConstantBuffers(0, 1, mlbw_input_cbuffer.GetAddressOf());
-            ID3D11ShaderResourceView* in_srvs[2] = {depth_srv.Get(), subject_srv.Get()};
-            context->CSSetShaderResources(0, 2, in_srvs);
-            context->CSSetSamplers(0, 1, linear_sampler.GetAddressOf());
-            ID3D11UnorderedAccessView* uavs[2] = {mlbw_in_uav[0].Get(), mlbw_in_uav[1].Get()};
-            context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
-            context->Dispatch((warp_w + 15) / 16, (warp_h + 15) / 16, 1);
-            ID3D11UnorderedAccessView* null_uavs[2] = {nullptr, nullptr};
-            ID3D11ShaderResourceView* null_srvs2[2] = {nullptr, nullptr};
-            context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
-            context->CSSetShaderResources(0, 2, null_srvs2);
-
-            if (cuda.cuGraphicsMapResources(6, cuda_warp_res, warp_stream) != CUDA_SUCCESS) {
-                if (!warp_error_logged) {
-                    BOOST_LOG(error) << "cuGraphicsMapResources failed for the MLBW warp tensors.";
-                    warp_error_logged = true;
-                }
-                return;
-            }
-            void* p[6] = {};
-            bool ok = true;
-            for (int i = 0; i < 6; i++) {
-                cuda.cuGraphicsResourceGetMappedPointer((CUdeviceptr*) &p[i], nullptr, cuda_warp_res[i]);
-                ok = ok && p[i];
-            }
-            if (ok) {
-                // One context, sequential enqueues (left then right); addresses are captured
-                // at enqueue time, so rebinding between enqueues on the same stream is safe.
-                std::lock_guard<std::mutex> lock(*trt_mutex);
-                int perf_slot = perf_begin(perf_warp, warp_stream);  // times both eyes together
-                for (int e = 0; e < 2 && ok; e++) {
-                    warp_context->setTensorAddress("mlbw_input", p[e]);
-                    warp_context->setTensorAddress("delta", p[2 + 2 * e]);
-                    warp_context->setTensorAddress("layer_weight", p[3 + 2 * e]);
-                    if (!warp_context->enqueueV3(warp_stream)) {
-                        if (!warp_error_logged) {
-                            BOOST_LOG(error) << "MLBW enqueueV3 failed; learned warp will stop updating.";
-                            warp_error_logged = true;
-                        }
-                        ok = false;
-                    }
-                }
-                perf_end(perf_warp, perf_slot, warp_stream);
-            }
-            cuda.cuGraphicsUnmapResources(6, cuda_warp_res, warp_stream);
-            warp_pending = ok;
-        }
 
         // (Re)build the two constant buffers. All contents are session-constant once the model
         // resolution is fixed, so they are immutable buffers created once -- rebuilt only if
@@ -1566,16 +1164,9 @@ namespace models {
             // Measure video fps and derive the depth-inference interval (called every frame).
             update_cadence();
 
-            // Consume a finished MLBW warp inference (if any) into the field textures. Done
-            // every frame so the ~1 ms result lands one video frame after its depth update.
-            if (learned_warp) {
-                poll_warp_fields(cuda);
-            }
-
             // Perf benchmark: resolve any completed inference-timing events into samples.
             if (sbs_perf::enabled()) {
                 perf_drain(perf_depth);
-                perf_drain(perf_warp);
             }
 
             // Prevent GPU starvation: if the previous AI frame is still crunching, drop this frame.
@@ -1749,10 +1340,6 @@ namespace models {
             // cost of depth lagging color by the inference cadence (the temporal EMA hides it).
             if (has_previous_frame) {
                 normalize_depth_output();
-
-                // 3c. Learned warp: turn the freshly-updated depth into per-eye warp fields
-                // (both eyes, ~1 ms each on the warp stream; consumed by poll_warp_fields).
-                enqueue_warp(cuda);
             }
 
             // 3d. Guided upsample: snap the freshly-updated depth to this frame's color edges.

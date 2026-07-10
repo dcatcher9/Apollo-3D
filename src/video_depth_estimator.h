@@ -13,23 +13,12 @@ namespace models {
     void precompile_tensorrt_engine(const std::filesystem::path& assets_dir, const config::depth_model_info& model);
 
     /**
-     * @brief Result of one estimate call: the depth map, plus (when the learned warp is
-     *        active and has produced output) the per-eye MLBW warp-field textures for
-     *        sbs_mlbw_composite_ps (RGBA32F: delta = per-layer horizontal offsets, weight =
-     *        softmax blend weights; up to 4 layers, unused channels zero). The field views
-     *        are null until the first MLBW inference completes; callers must fall back to
-     *        the probe-search reprojection in that case.
+     * @brief Result of one estimate call: the depth map for the reprojection (t1), plus the
+     *        subject-tracking state (t2) when sbs_3d_subject_track is on.
      */
     struct estimate_result {
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject;  ///< subject-tracking state (t2 of the reprojection); null unless sbs_3d_subject_track
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> delta_left;
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> weight_left;
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> delta_right;
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> weight_right;
-        int field_w = 0;  ///< MLBW model grid width (from the model-stem naming convention)
-        int field_h = 0;
-        int layers = 0;  ///< MLBW layer count (from the stem, e.g. mlbw_l2/l4)
     };
 
     class video_depth_estimator {
@@ -59,8 +48,7 @@ namespace models {
         video_depth_estimator& operator=(const video_depth_estimator&) = delete;
 
         /**
-         * @brief Estimate depth (and, with sbs_3d_learned_warp, the MLBW warp fields) for
-         *        the given RGB frame.
+         * @brief Estimate depth (and the subject-tracking state) for the given RGB frame.
          *
          * @param input_srv D3D11 ShaderResourceView containing the RGB image (usually B8G8R8A8_UNORM or R8G8B8A8_UNORM).
          * @return estimate_result; all views are owned by the estimator and overwritten by later calls.

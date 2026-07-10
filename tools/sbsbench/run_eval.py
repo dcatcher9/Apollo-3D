@@ -72,11 +72,6 @@ def check_engines(build_dir, conf_path, mode):
     minutes and skews perf). Engines are named <stem>*.engine in the build assets dir."""
     assets = os.path.join(build_dir, "assets")
     stems = [MODE_MODEL[mode]]
-    conf = open(conf_path, encoding="utf-8").read()
-    for key in ("sbs_3d_warp_model", "sbs_3d_warp_model_movie"):
-        m = re.search(rf"^{key}\s*=\s*([^\s#]+)", conf, re.M)
-        if m:
-            stems.append(m.group(1))
     missing = [s for s in stems if not glob.glob(os.path.join(assets, s + "*.engine"))]
     return missing
 
@@ -153,8 +148,8 @@ def main():
         if r.returncode != 0 or not glob.glob(os.path.join(out_dir, "sbs_*.png")):
             print(stdout[-2000:])
             sys.exit(f"run_eval: harness failed on {clip} (exit {r.returncode})")
-        m = re.search(r"model '([^']+)', warp '([^']+)'", stdout)
-        clip_meta = {"model": m.group(1), "warp": m.group(2)} if m else {}
+        m = re.search(r"model '([^']+)'", stdout)
+        clip_meta = {"model": m.group(1)} if m else {}
         # Carry the clip's own metadata (scene name/description) into results so the run dir is
         # self-describing and the report can label clips without the source clips dir.
         cmp_path = os.path.join(clip_dir, "meta.json")

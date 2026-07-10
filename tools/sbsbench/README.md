@@ -40,9 +40,8 @@ Harness A/B levers (after `--extra`):
 - `--ema F` — per-pixel depth EMA override (`1.0` = off).
 - `--lock-frames N` — scene-locked normalization bounds (bench-falsified for DA-V2; see the
   config.h note on `sbs_3d_norm_lock_frames`).
-- `--subject-track` — VD3D-style shaped disparity (subject-anchored band curve). `--probe`
-  forces the probe reprojection so the shaped path is exercised (bench.conf pins MLBW, which
-  ignores the probe-only shaping — A/B subject shaping with `--probe --subject-track`).
+- `--subject-track` — VD3D-style shaped disparity (subject-anchored band curve). The pipeline
+  is probe-reprojection-only, so the shaping is always live when this is on.
 - `--subject-lock F` — subject anchor strength (e.g. `0.95`).
 - `--subject-stretch` — shape_depth_for_pop 5/95 percentile stretch (default on within the
   subject path).

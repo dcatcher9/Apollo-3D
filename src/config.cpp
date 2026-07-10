@@ -1294,10 +1294,6 @@ namespace config {
     double_between_f(vars, "sbs_3d_depth_floor", video.sbs.depth_floor, {0.0, 0.9});
     bool_f(vars, "sbs_3d_guided_upsample", video.sbs.guided_upsample);
     double_between_f(vars, "sbs_3d_guided_sigma", video.sbs.guided_sigma, {0.01, 1.0});
-    bool_f(vars, "sbs_3d_learned_warp", video.sbs.learned_warp);
-    string_f(vars, "sbs_3d_warp_model", video.sbs.warp_model);
-    string_f(vars, "sbs_3d_warp_model_movie", video.sbs.warp_model_movie);
-    string_f(vars, "sbs_3d_warp_model_url", video.sbs.warp_model_url);
     double_f(vars, "sbs_3d_movie_depth_fps", video.sbs.movie_depth_fps);
     bool_f(vars, "sbs_3d_perf_stats", video.sbs.perf_stats);
 

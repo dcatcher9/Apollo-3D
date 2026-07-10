@@ -201,7 +201,6 @@ namespace sbs_bench {
       int lock_frames = -1;      // scene-locked normalization: updates before bounds freeze
       bool subject_track = false;  // VD3D-style shaped disparity + subject anchoring
       double subject_lock = -1.0;  // subject anchor strength override (e.g. 0.95)
-      bool probe = false;          // force the probe-search reprojection (learned_warp off)
       int depth_short_side = 0;    // depth inference short-side override (0 = conf; VD3D uses 432)
       double ema = -1.0;         // per-pixel depth EMA override (1.0 = off)
       bool subject_stretch = false;  // VD3D shape_depth_for_pop 5/95 disparity stretch
@@ -232,7 +231,6 @@ namespace sbs_bench {
         else if (a == "--lock-frames") o.lock_frames = std::stoi(next("--lock-frames"));
         else if (a == "--subject-track") o.subject_track = true;
         else if (a == "--subject-lock") o.subject_lock = std::stod(next("--subject-lock"));
-        else if (a == "--probe") o.probe = true;
         else if (a == "--depth-short-side") o.depth_short_side = std::stoi(next("--depth-short-side"));
         else if (a == "--subject-stretch") o.subject_stretch = true;
         else if (a == "--subject-plane-lock") o.subject_plane_lock = std::stod(next("--subject-plane-lock"));
@@ -283,12 +281,11 @@ namespace sbs_bench {
     if (frames.empty()) { BOOST_LOG(error) << "sbs-bench: no png/jpg frames in " << o.frames; return 4; }
     fs::create_directories(o.out, ec);
 
-    // Config: inherit whatever the loaded conf set (learned_warp / warp models / divergence...),
-    // then apply the movie-mode warp/depth overrides exactly like display_vram::ensure_depth_estimator.
+    // Config: inherit whatever the loaded conf set (divergence, subject knobs...), then apply
+    // the movie-mode depth-rate override exactly like display_vram::ensure_depth_estimator.
     auto sbs_cfg = config::video.sbs;
-    if (o.movie) {
-      if (!sbs_cfg.warp_model_movie.empty()) sbs_cfg.warp_model = sbs_cfg.warp_model_movie;
-      if (sbs_cfg.movie_depth_fps > 0.0) sbs_cfg.depth_fps = sbs_cfg.movie_depth_fps;
+    if (o.movie && sbs_cfg.movie_depth_fps > 0.0) {
+      sbs_cfg.depth_fps = sbs_cfg.movie_depth_fps;
     }
     if (o.divergence >= 0.0) sbs_cfg.divergence = o.divergence;  // A/B lever: parallax/disocclusion size
     if (o.pct_lo >= 0.0) sbs_cfg.norm_pct_lo = o.pct_lo;         // A/B lever: robust normalization
@@ -296,7 +293,6 @@ namespace sbs_bench {
     if (o.lock_frames >= 0) sbs_cfg.norm_lock_frames = o.lock_frames;
     if (o.subject_track) sbs_cfg.subject_track = true;          // A/B lever: shaped disparity
     if (o.subject_lock >= 0.0) sbs_cfg.subject_lock = o.subject_lock;
-    if (o.probe) sbs_cfg.learned_warp = false;                  // A/B lever: probe vs MLBW warp
     if (o.depth_short_side > 0) sbs_cfg.depth_short_side = o.depth_short_side;  // VD3D uses 432
     if (o.subject_stretch) sbs_cfg.subject_stretch = true;      // A/B lever: shape_depth_for_pop stretch
     if (o.subject_plane_lock >= 0.0) sbs_cfg.subject_plane_lock = o.subject_plane_lock;
@@ -310,7 +306,6 @@ namespace sbs_bench {
     const int max_width = o.max_width > 0 ? o.max_width : config::video.sbs.max_encode_width;
 
     BOOST_LOG(info) << "sbs-bench: " << frames.size() << " frames, model '" << model.name
-                    << "', warp '" << (sbs_cfg.learned_warp ? sbs_cfg.warp_model : std::string("probe"))
                     << "', eye_h " << (o.eye_h > 0 ? std::to_string(o.eye_h) : "match-input")
                     << ", settle " << o.settle << " -> " << o.out;
 
@@ -327,13 +322,11 @@ namespace sbs_bench {
 
     auto vs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0");
     auto ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0");
-    auto mlbw_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_mlbw_composite_ps.hlsl", "main_ps", "ps_5_0");
-    if (!vs_blob || !ps_blob || !mlbw_blob) return 6;
+    if (!vs_blob || !ps_blob) return 6;
     ComPtr<ID3D11VertexShader> vs;
-    ComPtr<ID3D11PixelShader> ps, mlbw_ps;
+    ComPtr<ID3D11PixelShader> ps;
     dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &vs);
     dev->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &ps);
-    dev->CreatePixelShader(mlbw_blob->GetBufferPointer(), mlbw_blob->GetBufferSize(), nullptr, &mlbw_ps);
 
     ComPtr<ID3D11SamplerState> sampler;
     {
@@ -366,8 +359,6 @@ namespace sbs_bench {
     ComPtr<ID3D11RenderTargetView> sbs_rtv;
     ComPtr<ID3D11ShaderResourceView> sbs_srv;
     D3D11_VIEWPORT vp = {};
-    ComPtr<ID3D11Buffer> mlbw_cb;
-    int mlbw_fw = 0, mlbw_fh = 0, mlbw_layers = 0;
     UINT sbs_w = 0, sbs_h = 0;
     ComPtr<ID3D11Texture2D> depth_stage;  // dump_depth staging cache (depth size is constant)
 
@@ -410,50 +401,33 @@ namespace sbs_bench {
         BOOST_LOG(info) << "sbs-bench: input " << img.w << "x" << img.h << " -> SBS " << sbs_w << "x" << sbs_h;
       }
 
-      // Settle: run the estimator a few times so the ASYNC depth (and MLBW warp fields, which
-      // land one call after their depth update) catch up to THIS frame instead of lagging by one.
+      // Settle: run the estimator a few times so the ASYNC depth catches up to THIS frame
+      // instead of lagging by one inference.
       models::estimate_result est;
       for (int s = 0; s < o.settle; s++) {
         est = estimator.estimate_depth(in_srv.Get(), /*is_hdr=*/false);
         if (s + 1 < o.settle) std::this_thread::sleep_for(std::chrono::milliseconds(o.settle_ms));
       }
 
-      const bool use_mlbw = est.delta_left && est.weight_left && est.delta_right && est.weight_right;
-
-      // Composite (mirrors display_vram::convert()'s SBS block).
+      // Composite (mirrors display_vram::convert()'s SBS block): probe reprojection.
       const auto comp_t0 = std::chrono::steady_clock::now();
       ctx->OMSetRenderTargets(1, sbs_rtv.GetAddressOf(), nullptr);
       ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
       ctx->VSSetShader(vs.Get(), nullptr, 0);
-      ctx->PSSetShader(use_mlbw ? mlbw_ps.Get() : ps.Get(), nullptr, 0);
+      ctx->PSSetShader(ps.Get(), nullptr, 0);
       ctx->RSSetViewports(1, &vp);
       ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
 
-      if (use_mlbw) {
-        if (!mlbw_cb || mlbw_fw != est.field_w || mlbw_fh != est.field_h || mlbw_layers != est.layers) {
-          const float eye_w = sbs_w / 2.0f, eye_h = (float) sbs_h;
-          const float delta_to_u = (eye_w - 1.0f) / (2.0f * (float) (est.field_w / 2 - 1)) / eye_w;
-          float p[8] = {eye_w, eye_h, (float) est.field_w, (float) est.field_h, delta_to_u,
-            (float) est.layers, 0, 0};
-          mlbw_cb = const_buffer(dev.Get(), p);
-          mlbw_fw = est.field_w; mlbw_fh = est.field_h; mlbw_layers = est.layers;
-        }
-        ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), est.delta_left.Get(), est.weight_left.Get(),
-          est.delta_right.Get(), est.weight_right.Get()};
-        ctx->PSSetShaderResources(0, 5, srvs);
-        ctx->PSSetConstantBuffers(2, 1, mlbw_cb.GetAddressOf());
-      } else {
-        ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), est.depth.Get(), est.subject.Get()};
-        ctx->PSSetShaderResources(0, 3, srvs);
-        ID3D11Buffer *cb = est.depth ? repro_cb.Get() : pass_cb.Get();
-        ctx->PSSetConstantBuffers(2, 1, &cb);
-      }
+      ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), est.depth.Get(), est.subject.Get()};
+      ctx->PSSetShaderResources(0, 3, srvs);
+      ID3D11Buffer *cb = est.depth ? repro_cb.Get() : pass_cb.Get();
+      ctx->PSSetConstantBuffers(2, 1, &cb);
       ctx->Draw(3, 0);
 
       ID3D11RenderTargetView *null_rtv[] = {nullptr};
       ctx->OMSetRenderTargets(1, null_rtv, nullptr);
-      ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
-      ctx->PSSetShaderResources(0, 5, null_srv);
+      ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr};
+      ctx->PSSetShaderResources(0, 3, null_srv);
 
       // Real composite-submission CPU cost (the estimator's depth_infer/warp_infer GPU times are
       // captured separately via CUDA events); tick() advances the perf window.
