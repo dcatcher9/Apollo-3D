@@ -1,6 +1,9 @@
 #pragma once
 
 #include <windows.h>
+#include <d3d11.h>
+#include <dxgi.h>
+#include <mutex>
 #include <string>
 
 // Essential CUDA Driver API types and functions
@@ -32,6 +35,7 @@ typedef CUresult(__stdcall* PFN_cuStreamSynchronize)(CUstream hStream);
 typedef CUresult(__stdcall* PFN_cuStreamQuery)(CUstream hStream);
 typedef struct CUgraphicsResource_st* CUgraphicsResource;
 typedef CUresult(__stdcall* PFN_cuGraphicsD3D11RegisterResource)(CUgraphicsResource* pCudaResource, ID3D11Resource* pD3DResource, unsigned int Flags);
+typedef CUresult(__stdcall* PFN_cuD3D11GetDevice)(CUdevice* pCudaDevice, IDXGIAdapter* pAdapter);
 
 // Events (for GPU-stream timing of async TensorRT enqueues; see src/sbs_perf.*)
 typedef struct CUevent_st* CUevent;
@@ -65,6 +69,7 @@ struct cuda_driver_api {
     PFN_cuStreamQuery cuStreamQuery = nullptr;
     
     PFN_cuGraphicsD3D11RegisterResource cuGraphicsD3D11RegisterResource = nullptr;
+    PFN_cuD3D11GetDevice cuD3D11GetDevice = nullptr;
     PFN_cuGraphicsMapResources cuGraphicsMapResources = nullptr;
     PFN_cuGraphicsUnmapResources cuGraphicsUnmapResources = nullptr;
     PFN_cuGraphicsResourceGetMappedPointer cuGraphicsResourceGetMappedPointer = nullptr;
@@ -83,7 +88,8 @@ struct cuda_driver_api {
 
     static cuda_driver_api& get() {
         static cuda_driver_api api;
-        if (!api.hMod) {
+        static std::once_flag load_once;
+        std::call_once(load_once, []() {
             api.hMod = LoadLibraryA("nvcuda.dll");
             if (api.hMod) {
                 api.cuInit = (PFN_cuInit)GetProcAddress(api.hMod, "cuInit");
@@ -103,6 +109,7 @@ struct cuda_driver_api {
                 api.cuStreamQuery = (PFN_cuStreamQuery)GetProcAddress(api.hMod, "cuStreamQuery");
                 
                 api.cuGraphicsD3D11RegisterResource = (PFN_cuGraphicsD3D11RegisterResource)GetProcAddress(api.hMod, "cuGraphicsD3D11RegisterResource");
+                api.cuD3D11GetDevice = (PFN_cuD3D11GetDevice)GetProcAddress(api.hMod, "cuD3D11GetDevice");
                 api.cuGraphicsMapResources = (PFN_cuGraphicsMapResources)GetProcAddress(api.hMod, "cuGraphicsMapResources");
                 api.cuGraphicsUnmapResources = (PFN_cuGraphicsUnmapResources)GetProcAddress(api.hMod, "cuGraphicsUnmapResources");
                 api.cuGraphicsResourceGetMappedPointer = (PFN_cuGraphicsResourceGetMappedPointer)GetProcAddress(api.hMod, "cuGraphicsResourceGetMappedPointer_v2");
@@ -119,7 +126,7 @@ struct cuda_driver_api {
                 api.cuEventDestroy = (PFN_cuEventDestroy)GetProcAddress(api.hMod, "cuEventDestroy_v2");
                 if (!api.cuEventDestroy) api.cuEventDestroy = (PFN_cuEventDestroy)GetProcAddress(api.hMod, "cuEventDestroy");
             }
-        }
+        });
         return api;
     }
 };

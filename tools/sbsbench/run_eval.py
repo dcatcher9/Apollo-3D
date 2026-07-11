@@ -38,7 +38,7 @@ import sbsbench  # noqa: E402  (metric implementations)
 
 # Depth models the two modes load (matches the client mode->model binding).
 MODE_MODEL = {"movie": "da3mono_large_fp16", "game": "depth_anything_v2_fp16"}
-EVAL_SCHEMA = 6  # schema 5 + resolution-independent spatial gates and aspect-robust pipeline
+EVAL_SCHEMA = 7  # profile provenance + stricter source/ground-truth validity
 
 
 def suite_defaults(name):
@@ -115,6 +115,39 @@ def conf_value(path, name, default=None):
     return default
 
 
+def normalize_cli_paths(args):
+    """Resolve path arguments before constructing outputs or selecting a subprocess cwd."""
+    args.build_dir = os.path.abspath(args.build_dir)
+    args.conf = os.path.abspath(args.conf)
+    if args.clips_root:
+        args.clips_root = os.path.abspath(args.clips_root)
+    if args.baseline_dir:
+        args.baseline_dir = os.path.abspath(args.baseline_dir)
+    if args.report_control:
+        args.report_control = os.path.abspath(args.report_control)
+    if args.report_out:
+        args.report_out = os.path.abspath(args.report_out)
+    return args
+
+
+def expected_profile(conf, extra):
+    """Apply the production contract: profile defaults first, explicit keys/CLI last."""
+    profile = conf_value(conf, "sbs_3d_profile", "apollo")
+    if profile not in {"apollo", "vd3d"}:
+        fail(f"invalid sbs_3d_profile {profile!r}")
+    warp = "vd3d" if profile == "vd3d" else "apollo"
+    shift_profile = "bestv2"
+    warp = conf_value(conf, "sbs_3d_warp", warp)
+    shift_profile = conf_value(conf, "sbs_3d_shift_profile", shift_profile)
+    warp = extra_value(extra, "--warp", warp)
+    shift_profile = extra_value(extra, "--shift-profile", shift_profile)
+    if warp not in {"apollo", "vd3d"}:
+        fail(f"invalid --warp override {warp!r}")
+    if shift_profile not in {"apollo", "bestv2"}:
+        fail(f"invalid --shift-profile override {shift_profile!r}")
+    return profile, warp, shift_profile
+
+
 def git(args):
     try:
         return subprocess.run(["git", "-C", REPO] + args, capture_output=True, text=True,
@@ -165,7 +198,7 @@ def main():
     ap.add_argument("--report-allow-config-diff", action="store_true",
                     help="allow an explicit profile-vs-profile report with different config hashes; clips/model/metrics must still match")
     ap.add_argument("--allow-build", action="store_true", help="proceed even if engines are missing")
-    args = ap.parse_args()
+    args = normalize_cli_paths(ap.parse_args())
     if args.comparison_only and args.update_baselines:
         fail("--comparison-only and --update-baselines are mutually exclusive")
 
@@ -207,14 +240,8 @@ def main():
                                os.path.join(SCRIPT_DIR, "thresholds.json"),
                                os.path.abspath(__file__)])
     expected_model = MODE_MODEL[args.mode]
-    expected_warp = extra_value(
-        args.extra, "--warp", conf_value(args.conf, "sbs_3d_warp", "apollo"))
-    if expected_warp not in {"apollo", "vd3d"}:
-        fail(f"invalid --warp override {expected_warp!r}")
-    expected_shift_profile = extra_value(
-        args.extra, "--shift-profile", conf_value(args.conf, "sbs_3d_shift_profile", "apollo"))
-    if expected_shift_profile not in {"apollo", "bestv2"}:
-        fail(f"invalid --shift-profile override {expected_shift_profile!r}")
+    expected_config_profile, expected_warp, expected_shift_profile = expected_profile(
+        args.conf, args.extra)
     meta = {
         "git_sha": git(["rev-parse", "--short", "HEAD"]),
         "git_dirty": bool(git(["status", "--porcelain"])),
@@ -222,7 +249,8 @@ def main():
         "mode": args.mode, "suite": args.suite, "clips_root": clips_dir,
         "extra_args": args.extra,
         "conf": os.path.relpath(args.conf, REPO),
-        "model": expected_model, "warp": expected_warp, "shift_profile": expected_shift_profile,
+        "model": expected_model, "profile": expected_config_profile,
+        "warp": expected_warp, "shift_profile": expected_shift_profile,
         "eval_schema": EVAL_SCHEMA, "depth_step": "current-once",
         "conf_sha256": conf_sha, "metric_sha256": metric_sha,
         "gpu_contention": contention,
@@ -253,7 +281,13 @@ def main():
             fail(f"{clip}: expected model {expected_model!r}, harness reported {actual_model!r}")
         if "depth_step current-once" not in stdout:
             fail(f"{clip}: harness did not confirm current-once depth stepping")
-        warp_match = re.search(r"depth_step current-once, warp ([a-z0-9_-]+)", stdout)
+        config_profile_match = re.search(
+            r"depth_step current-once, profile ([a-z0-9_-]+)", stdout)
+        actual_config_profile = config_profile_match.group(1) if config_profile_match else None
+        if actual_config_profile != expected_config_profile:
+            fail(f"{clip}: expected config profile {expected_config_profile!r}, "
+                 f"harness reported {actual_config_profile!r}")
+        warp_match = re.search(r", warp ([a-z0-9_-]+)", stdout)
         actual_warp = warp_match.group(1) if warp_match else None
         if actual_warp != expected_warp:
             fail(f"{clip}: expected warp {expected_warp!r}, harness reported {actual_warp!r}")
@@ -262,7 +296,7 @@ def main():
         if actual_shift_profile != expected_shift_profile:
             fail(f"{clip}: expected shift profile {expected_shift_profile!r}, "
                  f"harness reported {actual_shift_profile!r}")
-        clip_meta = {"model": actual_model, "warp": actual_warp,
+        clip_meta = {"model": actual_model, "profile": actual_config_profile, "warp": actual_warp,
                      "shift_profile": actual_shift_profile}
 
         # A valid harness result has one source, raw-model, warp-input depth, and SBS artifact for

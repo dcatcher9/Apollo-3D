@@ -1,8 +1,8 @@
 // Foreground curvature (VD3D enhance_foreground_curvature, GPU port): add a rounded bulge to
 // the near/foreground region so the subject reads as VOLUME instead of a flat cutout -- Apollo's
 // documented "no true small-feature relief (nose reads flat)" residual. Reshapes the NORMALIZED
-// depth in place, BEFORE subject tracking and the warp, so it affects the probe and MLBW paths
-// alike. VD3D fits an ellipse to the foreground centroid/spread; this port uses a frame-centered
+// depth in place, BEFORE subject tracking and either retained warp path, so both see the same
+// shaped depth. VD3D fits an ellipse to the foreground centroid/spread; this port uses a centered
 // ellipse (subjects sit near center) gated by the foreground mask, which concentrates the bulge
 // on the foreground regardless -- a cheaper approximation with the same visible effect.
 

@@ -25,6 +25,16 @@ Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 
 ## One-command eval loop (start here)
 
+Production configuration uses one validated profile selector:
+
+```
+sbs_3d_profile = apollo   # default; or vd3d
+```
+
+The profile supplies the complete accepted stack. Any individual `sbs_3d_*` key in the same
+configuration is applied afterward and therefore overrides that one profile value. Benchmark
+profile files use the same selector, preventing production and evaluation defaults from drifting.
+
 ```
 python tools/sbsbench/run_eval.py                     # all committed clips vs committed baselines
 python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change: re-baseline + commit
@@ -54,8 +64,8 @@ Harness A/B levers (after `--extra`):
 - `--shift-profile apollo|bestv2` — choose the disparity field independently of geometry.
   `bestv2` uses the preset's source-pixel FG/MG/BG shifts (`-9/-3/+2.4`), `.35` parallax
   balance, `1.11/1.05` multipliers, `.008` zero-parallax trim, dynamic convergence `.006`,
-  `.071` safety cap, and the exact center-weighted/morphologically filled subject-plane lock.
-  The completed SDR frame then receives Bestv2's exact per-eye sharpen 0.2 convolution.
+  `.071` safety cap. Subject-plane lock and the exact per-eye sharpen are independent switches;
+  both are disabled in the validated quality profiles.
   This is resolution-calibrated; `--divergence` remains the Apollo profile and uninitialized-depth
   fallback. Bestv2 cinematic-window sculpt was evaluated and rejected; see
   `docs/sbs-vd3d-parity.md`.

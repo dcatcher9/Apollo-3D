@@ -1261,17 +1261,38 @@ namespace config {
     bool_f(vars, "isolated_virtual_display_option", video.isolated_virtual_display_option);
     bool_f(vars, "ignore_encoder_probe_failure", video.ignore_encoder_probe_failure);
 
+    // Apply one complete validated SBS profile first. Every individual key below is parsed
+    // afterwards, so an explicitly configured parameter always overrides its profile value.
+    // Reinitializing the struct also clears stale values when a config reload removes an override.
+    std::string sbs_profile = "apollo";
+    string_f(vars, "sbs_3d_profile", sbs_profile);
+    if (sbs_profile != "apollo" && sbs_profile != "vd3d") {
+      BOOST_LOG(warning) << "Invalid sbs_3d_profile '" << sbs_profile
+                         << "'; expected 'apollo' or 'vd3d'. Using 'apollo'.";
+      sbs_profile = "apollo";
+    }
+    video.sbs = video_t::sbs_t {};
+    video.sbs.profile = sbs_profile;
+    if (sbs_profile == "vd3d") {
+      video.sbs.warp = "vd3d";
+      video.sbs.vd3d_forward_blend = 0.35;
+    }
+
+    const std::string profile_warp = video.sbs.warp;
     string_f(vars, "sbs_3d_warp", video.sbs.warp);
     if (video.sbs.warp != "apollo" && video.sbs.warp != "vd3d") {
       BOOST_LOG(warning) << "Invalid sbs_3d_warp '" << video.sbs.warp
-                         << "'; expected 'apollo' or 'vd3d'. Using 'apollo'.";
-      video.sbs.warp = "apollo";
+                         << "'; expected 'apollo' or 'vd3d'. Keeping profile value '"
+                         << profile_warp << "'.";
+      video.sbs.warp = profile_warp;
     }
+    const std::string profile_shift = video.sbs.shift_profile;
     string_f(vars, "sbs_3d_shift_profile", video.sbs.shift_profile);
     if (video.sbs.shift_profile != "apollo" && video.sbs.shift_profile != "bestv2") {
       BOOST_LOG(warning) << "Invalid sbs_3d_shift_profile '" << video.sbs.shift_profile
-                         << "'; expected 'apollo' or 'bestv2'. Using 'apollo'.";
-      video.sbs.shift_profile = "apollo";
+                         << "'; expected 'apollo' or 'bestv2'. Keeping profile value '"
+                         << profile_shift << "'.";
+      video.sbs.shift_profile = profile_shift;
     }
     double_between_f(vars, "sbs_3d_divergence", video.sbs.divergence, {0.0, 0.2});
     double_between_f(vars, "sbs_3d_focal_plane", video.sbs.focal_plane, {0.0, 1.0});

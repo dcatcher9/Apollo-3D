@@ -12,6 +12,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <mutex>
 #include <system_error>
 #include <vector>
 
@@ -257,11 +258,10 @@ namespace platf::sbs_debug {
     }
     // Encode devices (and with them this dumper) are recreated on every SBS toggle / HDR /
     // resolution change; log the resolved dir once per process, not once per device.
-    static bool logged = false;
-    if (!logged) {
-      logged = true;
+    static std::once_flag log_once;
+    std::call_once(log_once, [this]() {
       BOOST_LOG(info) << "SBS debug frame dump dir: "sv << dir_.string();
-    }
+    });
   }
 
   void dumper::maybe_dump(ID3D11Device *device, ID3D11DeviceContext *ctx,

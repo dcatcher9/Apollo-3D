@@ -26,10 +26,6 @@ namespace platf::sbs_debug {
   public:
     dumper();  ///< Resolves the output directory (APOLLO_SBS_DUMP, else <log dir>/sbs_dump).
 
-    bool enabled() const {
-      return !dir_.empty();
-    }
-
     /**
      * @brief If a dump is pending, save the current frame's source, depth and SBS-result SRVs
      *        as PNG images (grayscale for R32_FLOAT depth) into a fresh timestamped subfolder.

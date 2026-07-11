@@ -191,6 +191,16 @@ def hdilate(mask, px):
     return out
 
 
+def dilate2d(mask, px):
+    """Dilate a boolean mask in both image axes without wraparound."""
+    padded = np.pad(mask, px, mode="constant")
+    h, w = mask.shape
+    return np.logical_or.reduce([
+        padded[px + dy:px + dy + h, px + dx:px + dx + w]
+        for dy in range(-px, px + 1) for dx in range(-px, px + 1)
+    ])
+
+
 def resize_to(gray, w, h):
     return np.asarray(
         Image.fromarray((gray * 255).astype(np.uint8)).resize((w, h), Image.BILINEAR),
@@ -370,18 +380,33 @@ def _box3(a):
 
 
 def source_align_map(eye, src_gray, max_shift=None):
-    """Best source patch error plus the selected source sample for every output pixel."""
+    """Regularized source patch error and selected source sample for every output pixel.
+
+    A completely independent winner at every pixel can assemble an impossible output from
+    unrelated source locations and hide stretch/halo artifacts. The second pass mildly penalizes
+    shifts that disagree with the local five-pixel median while preserving real disparity steps.
+    """
     eh, ew = eye.shape
     src = resize_to(src_gray, ew, eh)
     radius = max_shift if max_shift is not None else max(4, round(40 * eye_scale(ew)))
-    best = np.full_like(eye, np.inf, dtype=np.float32)
-    aligned = np.zeros_like(eye, dtype=np.float32)
-    for shift in range(-radius, radius + 1):
+    shifts = np.arange(-radius, radius + 1, dtype=np.int16)
+    costs = []
+    candidates = []
+    for shift in shifts:
         candidate = _shift_x_edge(src, shift)
-        diff = _box3(np.abs(eye - candidate))
-        take = diff < best
-        best[take] = diff[take]
-        aligned[take] = candidate[take]
+        candidates.append(candidate)
+        costs.append(_box3(np.abs(eye - candidate)).astype(np.float32))
+    costs = np.stack(costs)
+    candidates = np.stack(candidates)
+    first = np.argmin(costs, axis=0)
+    first_shift = shifts[first]
+    neighborhood = np.stack([_shift_x_edge(first_shift, dx) for dx in (-2, -1, 0, 1, 2)])
+    local_shift = np.median(neighborhood, axis=0)
+    regularized = costs + (2.0 / 255.0) * np.abs(
+        shifts[:, None, None].astype(np.float32) - local_shift[None, :, :])
+    selected = np.argmin(regularized, axis=0)
+    best = np.take_along_axis(costs, selected[None, :, :], axis=0)[0]
+    aligned = np.take_along_axis(candidates, selected[None, :, :], axis=0)[0]
     return best, aligned, radius
 
 
@@ -533,16 +558,22 @@ def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity"):
     gy_t = np.abs(np.diff(target, axis=0, prepend=target[:1, :]))
     gx_p = np.abs(np.diff(aligned, axis=1, prepend=aligned[:, :1]))
     gy_p = np.abs(np.diff(aligned, axis=0, prepend=aligned[:1, :]))
+    # A gradient is valid only when both samples used to form it are valid. Otherwise the edge of
+    # a missing/zero metric-depth region is incorrectly scored as scene geometry.
+    valid_x = valid & np.concatenate((valid[:, :1], valid[:, :-1]), axis=1)
+    valid_y = valid & np.concatenate((valid[:1, :], valid[:-1, :]), axis=0)
     edge_threshold = max(0.02, trange * 0.08)
-    gt_edge = valid & (np.hypot(gx_t, gy_t) >= edge_threshold)
-    pred_edge = valid & (np.hypot(gx_p, gy_p) >= edge_threshold)
+    gt_edge = ((valid_x & (gx_t >= edge_threshold)) |
+               (valid_y & (gy_t >= edge_threshold)))
+    pred_edge = ((valid_x & (gx_p >= edge_threshold)) |
+                 (valid_y & (gy_p >= edge_threshold)))
     if not gt_edge.any():
         edge_f1 = 100.0 if not pred_edge.any() else 0.0
     elif not pred_edge.any():
         edge_f1 = 0.0
     else:
-        gt_near = hdilate(gt_edge, 1)
-        pred_near = hdilate(pred_edge, 1)
+        gt_near = dilate2d(gt_edge, 1)
+        pred_near = dilate2d(pred_edge, 1)
         precision = float(np.mean(gt_near[pred_edge]))
         recall = float(np.mean(pred_near[gt_edge]))
         edge_f1 = 200.0 * precision * recall / max(precision + recall, 1e-9)

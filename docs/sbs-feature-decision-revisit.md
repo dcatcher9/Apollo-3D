@@ -1,8 +1,13 @@
 # SBS feature-decision revisit after evaluator and pipeline fixes
 
-Reviewed 2026-07-11 against eval schema 6 after the stereo-volume correction, source-relative
+Reviewed 2026-07-11 against eval schema 7 after the stereo-volume correction, source-relative
 warp metrics, comfort/integrity gates, GT/flow validation, resolution normalization, expanded
 public data, anime/AI clips, and color/HDR fixes.
+
+Schema 7 excludes invalid metric-depth boundaries from GT edge scoring, regularizes the
+source-relative correspondence field so per-pixel shift hopping cannot hide artifacts, and records
+the named production profile in run provenance. A fresh full-core comparison preserves the prior
+warp verdict: VD3D has one halo win, one halo cost, and one stability cost versus Apollo.
 
 ## Decision rule
 
@@ -85,7 +90,7 @@ Every newly generated report also writes `decision.json`. The HTML and JSON reus
 from the outer per-clip result wrappers. `audit_depth_transform.py` writes a separate native-depth
 spread/saturation audit for processors that can reshape depth.
 
-## Removed processors: not yet schema-6 validated
+## Removed processors: schema-6 revalidation history
 
 These implementations were deleted before the corrected evaluator existed. Their old decisions
 must not be presented as current schema-6 evidence:
@@ -130,7 +135,11 @@ on both suites (~7.4x faster). This is not enough evidence to delete Apollo beca
 a tradeoff on core and neutral on public. Retain both paths until headset A/B testing resolves the
 different halo/rim/stability character; use VD3D when geometry cost is the deciding constraint.
 
-Final reports:
+Schema-7 profile-contract report:
+
+- `sbs_eval/evalv7-profile-vd3d/report.html` (control: `evalv7-profile-apollo`)
+
+Earlier schema-6 final reports:
 
 - `sbs_eval/final-warp-comparison-core/report.html`
 - `sbs_eval/final-warp-comparison-extended/report.html`

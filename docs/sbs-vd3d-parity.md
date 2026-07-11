@@ -19,7 +19,7 @@ Companion to the validated findings in the sbs-vd3d-port memory and the roadmap 
 
 ## Phase-B per-warp quality profiles
 
-> **Revalidated 2026-07-11:** the earlier decisions in this working history predate schema 6,
+> **Revalidated 2026-07-11:** the earlier decisions in this working history predate schema 7,
 > resolution/color fixes, and the expanded datasets. The current ledger and exact evidence are in
 > [sbs-feature-decision-revisit.md](sbs-feature-decision-revisit.md). It supersedes the old numeric
 > conclusions below where they disagree.
@@ -46,7 +46,8 @@ produce a real tradeoff with a decisive stereo-volume concern rather than a scal
 VD3D stays within noise on both validated primary axes, so it has no demonstrated benefit. Legacy
 rim/stretch/edge/flicker movements remain diagnostic because visual audit showed scene-content and
 motion confounds. Current reports are under `sbs_eval/evalv3-guided-apollo` and
-`sbs_eval/evalv3-guided-vd3d`. Min/max snap and range floor remain pending.
+`sbs_eval/evalv3-guided-vd3d`. Later schema-6 ablations found min/max snap neutral and range
+floor ineffective; both remain disabled (see the decision ledger).
 
 The starting profile comparison (flat-page clip excluded) is Apollo `74.13` versus VD3D `73.46`.
 Apollo has `+0.67 px` pop spread and `0.84` lower bright-rim p95; VD3D has `0.23` lower stretch and

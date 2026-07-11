@@ -474,7 +474,8 @@ namespace sbs_bench {
     BOOST_LOG(info) << "sbs-bench: " << frames.size() << " frames, model '" << model.name
                     << "', eye " << (o.eye_w > 0 ? std::to_string(o.eye_w) : "auto") << 'x'
                     << (o.eye_h > 0 ? std::to_string(o.eye_h) : "auto")
-                    << ", depth_step current-once, warp " << sbs_cfg.warp
+                    << ", depth_step current-once, profile " << sbs_cfg.profile
+                    << ", warp " << sbs_cfg.warp
                     << ", shift_profile " << sbs_cfg.shift_profile << " -> " << o.out;
 
     // ---- D3D device + shaders ----

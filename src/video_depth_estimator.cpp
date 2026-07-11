@@ -49,8 +49,51 @@ static Logger gLogger;
 // out of memory and the device was removed. Pooling caps live contexts at peak concurrency.
 static std::mutex g_trt_mutex;
 static nvinfer1::IRuntime* g_runtime = nullptr;
+static std::once_flag g_cuda_init_once;
+static CUresult g_cuda_init_result = CUDA_ERROR_NOT_READY;
+static std::mutex g_cuda_context_mutex;
+static std::map<CUdevice, CUcontext> g_cuda_primary_contexts;
 
-// One resident engine per depth model (keyed by config::depth_model_info::name), so switching
+static bool ensure_cuda_initialized(cuda_driver_api& cuda) {
+    std::call_once(g_cuda_init_once, [&cuda]() { g_cuda_init_result = cuda.cuInit(0); });
+    return g_cuda_init_result == CUDA_SUCCESS;
+}
+
+// Retain each primary context once for the process lifetime. TensorRT engines/contexts are also
+// process-resident, so releasing it from an estimator destructor would invalidate pooled state.
+static CUcontext primary_context(cuda_driver_api& cuda, CUdevice device) {
+    std::lock_guard<std::mutex> lock(g_cuda_context_mutex);
+    auto found = g_cuda_primary_contexts.find(device);
+    if (found != g_cuda_primary_contexts.end()) return found->second;
+    CUcontext context = nullptr;
+    if (cuda.cuDevicePrimaryCtxRetain &&
+        cuda.cuDevicePrimaryCtxRetain(&context, device) == CUDA_SUCCESS && context) {
+        g_cuda_primary_contexts.emplace(device, context);
+    }
+    return context;
+}
+
+static bool cuda_device_for_d3d(cuda_driver_api& cuda, ID3D11Device* d3d, CUdevice& out) {
+    if (cuda.cuD3D11GetDevice && d3d) {
+        IDXGIDevice* dxgi_device = nullptr;
+        IDXGIAdapter* adapter = nullptr;
+        if (SUCCEEDED(d3d->QueryInterface(__uuidof(IDXGIDevice),
+                                         reinterpret_cast<void**>(&dxgi_device))) &&
+            SUCCEEDED(dxgi_device->GetAdapter(&adapter))) {
+            const CUresult result = cuda.cuD3D11GetDevice(&out, adapter);
+            adapter->Release();
+            dxgi_device->Release();
+            if (result == CUDA_SUCCESS) return true;
+        } else if (dxgi_device) {
+            dxgi_device->Release();
+        }
+    }
+    BOOST_LOG(warning) << "Could not map the D3D11 adapter to CUDA; falling back to CUDA device 0.";
+    return cuda.cuDeviceGet && cuda.cuDeviceGet(&out, 0) == CUDA_SUCCESS;
+}
+
+// One resident engine per CUDA-device/model pair, so multi-adapter sessions never reuse a
+// TensorRT engine or execution context deserialized under another CUDA primary context. Switching
 // models mid-stream loads/keeps a distinct engine instead of being pinned to the first model
 // (the old single-g_engine design required a restart). Engines are never evicted: an
 // IExecutionContext holds ~1.3 GB scratch and cannot be safely destroyed across the MinGW/MSVC
@@ -130,11 +173,11 @@ static std::pair<int, int> aspect_aligned_dims(float aspect, int short_side,
 // createExecutionContext() allocates ~1.3 GB of scratch and takes seconds, and holding the lock
 // across it would block concurrent teardowns' pool returns and other sessions' enqueues.
 static nvinfer1::ICudaEngine* acquire_engine_locked(
-        const std::string& model_name, const std::filesystem::path& engine_path,
+        const std::string& engine_key, const std::filesystem::path& engine_path,
         nvinfer1::IExecutionContext*& out_context, bool& out_pooled) {
     out_context = nullptr;
     out_pooled = false;
-    auto& slot = g_engines[model_name];
+    auto& slot = g_engines[engine_key];
     if (!g_runtime) {
         g_runtime = nvinfer1::createInferRuntime(gLogger);
     }
@@ -173,13 +216,10 @@ namespace models {
         BOOST_LOG(info) << "Building TensorRT engine from ONNX... This will take a few minutes.";
         
         auto& cuda = cuda_driver_api::get();
-        if (cuda.is_valid()) {
-            cuda.cuInit(0);
+        if (cuda.is_valid() && ensure_cuda_initialized(cuda)) {
             CUdevice cu_dev;
             if (cuda.cuDeviceGet(&cu_dev, 0) == 0) {
-                CUcontext ctx;
-                cuda.cuDevicePrimaryCtxRetain(&ctx, cu_dev);
-                cuda.cuCtxSetCurrent(ctx);
+                if (CUcontext ctx = primary_context(cuda, cu_dev)) cuda.cuCtxSetCurrent(ctx);
             }
         }
 
@@ -264,12 +304,13 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11Device> device;
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
         
-        nvinfer1::IRuntime* runtime = nullptr;
         nvinfer1::ICudaEngine* engine = nullptr;
         nvinfer1::IExecutionContext* exec_context = nullptr;
         std::mutex* trt_mutex = nullptr;
         CUcontext cuda_ctx = nullptr;
         CUstream cu_stream = nullptr;
+        CUdevice cuda_device = -1;
+        std::string engine_key;
         
         float ema_alpha;
         bool ema_pixel_first;  // per-pixel EMA order: true = smooth raw disparity before normalizing
@@ -538,21 +579,16 @@ namespace models {
             }
 
             auto& cuda = cuda_driver_api::get();
-            if (cuda.is_valid()) {
-                static bool cuda_init = false;
-                if (!cuda_init) {
-                    cuda.cuInit(0);
-                    cuda_init = true;
-                }
-                CUdevice cu_dev;
-                if (cuda.cuDeviceGet(&cu_dev, 0) == 0) {
-                    cuda.cuDevicePrimaryCtxRetain(&cuda_ctx, cu_dev);
+            if (cuda.is_valid() && ensure_cuda_initialized(cuda)) {
+                if (cuda_device_for_d3d(cuda, device.Get(), cuda_device)) {
+                    cuda_ctx = primary_context(cuda, cuda_device);
                     if (cuda_ctx) {
                         cuda.cuCtxSetCurrent(cuda_ctx);
                         cuda.cuStreamCreate(&cu_stream, CU_STREAM_NON_BLOCKING);
                     }
                 }
             }
+            engine_key = std::to_string(cuda_device) + ":" + model_name;
 
             {  // Scope this lock to the g_engines/g_runtime access only: it MUST be released before
                // warmup_inference() at the end of the ctor (which re-locks g_trt_mutex) -- a
@@ -561,12 +597,11 @@ namespace models {
             // Load (once) the engine for THIS model into its own slot and take a pooled execution
             // context if one is free. Different models coexist; switching models never reuses a
             // stale engine and never needs a restart.
-            engine = acquire_engine_locked(model_name, model_path, exec_context, depth_context_pooled);
-            runtime = g_runtime;
+            engine = acquire_engine_locked(engine_key, model_path, exec_context, depth_context_pooled);
             if (depth_context_pooled) {
                 BOOST_LOG(info) << "Reusing pooled TensorRT execution context.";
             }
-            auto& slot = g_engines[model_name];
+            auto& slot = g_engines[engine_key];
 
             // Validate the engine's I/O once per model against what the D3D pipeline binds: FP32
             // tensors named "pixel_values" (input) and "predicted_depth" (output). The model is
@@ -619,7 +654,7 @@ namespace models {
                 for (int i = 0; i < 10 && !exec_context; i++) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     std::lock_guard<std::mutex> lock(g_trt_mutex);
-                    auto& pool = g_engines[model_name].context_pool;
+                    auto& pool = g_engines[engine_key].context_pool;
                     if (!pool.empty()) {
                         exec_context = pool.back();
                         pool.pop_back();
@@ -908,7 +943,7 @@ namespace models {
             // instance's tensor bindings, making the contexts safe for another instance to reuse.
             std::lock_guard<std::mutex> lock(g_trt_mutex);
             if (exec_context) {
-                g_engines[model_name].context_pool.push_back(exec_context);
+                g_engines[engine_key].context_pool.push_back(exec_context);
                 exec_context = nullptr;
             }
             // TRT runtime/engines are cached globally, do not destroy them here.
@@ -1127,14 +1162,12 @@ namespace models {
             // Foreground-curvature constants (session-constant once the resolution is fixed):
             // {cv_w, cv_h, strength, near_start, gamma, spread, pad, pad}. Internal params match
             // VD3D enhance_foreground_curvature (near_start 0.60, shape_gamma 1.35); spread 0.60
-            // is a frame-centered stand-in for VD3D's fitted foreground ellipse. Sized at the
-            // OUTPUT resolution the curvature lands on: 2x guided_depth_tex when guided upsample
-            // is on (so the guided pass can't re-flatten it), else 1x depth_tex.
+            // is a frame-centered stand-in for VD3D's fitted foreground ellipse. Curvature is
+            // applied on the normalized low-resolution depth before both subject tracking and
+            // optional guided upsampling, so both consumers see the same shaped depth field.
             if (foreground_curvature > 0.0f) {
-                const uint32_t cv_w = guided_upsample ? (uint32_t) guided_w : (uint32_t) target_w;
-                const uint32_t cv_h = guided_upsample ? (uint32_t) guided_h : (uint32_t) target_h;
                 struct { uint32_t w, h; float strength, near_start, gamma, spread, pad0, pad1; } cvb = {
-                    cv_w, cv_h,
+                    (uint32_t) target_w, (uint32_t) target_h,
                     foreground_curvature, 0.60f, 1.35f, 0.60f, 0.0f, 0.0f
                 };
                 D3D11_SUBRESOURCE_DATA cvsd = {&cvb, 0, 0};
@@ -1144,10 +1177,7 @@ namespace models {
         }
 
         // Reshape the near foreground with a centered bulge (VD3D enhance_foreground_curvature)
-        // on the depth UAV the warp actually samples, at that UAV's resolution. Must run on the
-        // FINAL depth the reprojection reads: post-guided-upsample (guided_depth_tex) when guided
-        // is on, else depth_tex -- running it pre-guided lets the joint-bilateral upsample's
-        // foreground bias re-flatten the bulge. curvature_cbuffer carries the matching cv_w/cv_h.
+        // on normalized depth before subject analysis and any guided upsample.
         void apply_curvature(ID3D11UnorderedAccessView* uav, UINT w, UINT h) {
             if (foreground_curvature <= 0.0f || !depth_curvature_cs || !curvature_cbuffer) {
                 return;
@@ -1199,11 +1229,6 @@ namespace models {
             context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
             context->CSSetShaderResources(0, 3, null_srvs);
 
-            // Curve the FINAL (post-upsample) depth the warp samples, so the joint-bilateral
-            // upsample above can't re-flatten the bulge. Regenerated fresh from depth_tex every
-            // frame -> no accumulation. (When guided is off, normalize_depth_output curves
-            // depth_tex directly instead.)
-            apply_curvature(guided_depth_uav.Get(), out_w, out_h);
         }
 
         // Normalize the finished raw disparity in tensor_out_buf into depth_tex: the scale
@@ -1284,13 +1309,9 @@ namespace models {
             context->CSSetUnorderedAccessViews(0, 2, null_uav2, nullptr);
             context->CSSetShaderResources(0, 2, null_srvs);
 
-            // 3c. Foreground curvature (guided-OFF path only): reshape depth_tex in place before
-            // subject tracking + warp. When guided upsample is ON, the warp samples guided_depth_tex
-            // instead, and curving here would just be re-flattened by the guided pass -- so the
-            // curvature is applied at the end of run_guided() on the 2x output in that case.
-            if (!guided_upsample) {
-                apply_curvature(depth_uav.Get(), (UINT) target_w, (UINT) target_h);
-            }
+            // 3c. Reshape before subject tracking and guided upsampling. This avoids the old
+            // mismatch where tracking measured uncurved depth while the warp sampled curved depth.
+            apply_curvature(depth_uav.Get(), (UINT) target_w, (UINT) target_h);
 
             // 3s. Subject tracking: weighted depth histogram over the freshly-normalized
             // depth, then a 1-thread resolve into the subject state the reprojection reads.

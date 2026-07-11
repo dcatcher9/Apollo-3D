@@ -3,6 +3,7 @@ import io
 import sys
 import tarfile
 import tempfile
+import argparse
 import unittest
 import zipfile
 
@@ -37,6 +38,27 @@ class EvalContractTests(unittest.TestCase):
             self.assertEqual(run_eval.conf_value(path, "sbs_3d_warp", "apollo"), "vd3d")
         finally:
             os.unlink(path)
+
+    def test_named_profiles_and_explicit_overrides_share_production_precedence(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
+            fh.write("sbs_3d_profile = vd3d\nsbs_3d_warp = apollo\n")
+            path = fh.name
+        try:
+            self.assertEqual(run_eval.expected_profile(path, []),
+                             ("vd3d", "apollo", "bestv2"))
+            self.assertEqual(run_eval.expected_profile(
+                path, ["--warp", "vd3d", "--shift-profile", "apollo"]),
+                ("vd3d", "vd3d", "apollo"))
+        finally:
+            os.unlink(path)
+
+    def test_relative_cli_paths_are_resolved_before_subprocess_cwd(self):
+        args = argparse.Namespace(build_dir="cmake-build-relwithdebinfo", conf="bench.conf",
+                                  clips_root=None, baseline_dir=None,
+                                  report_control=None, report_out=None)
+        run_eval.normalize_cli_paths(args)
+        self.assertTrue(os.path.isabs(args.build_dir))
+        self.assertTrue(os.path.isabs(args.conf))
 
     def test_apollo_bestv2_normalizes_pixel_shifts_by_source_width(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -415,6 +437,14 @@ class EvalContractTests(unittest.TestCase):
         self.assertGreater(bad["depth_gt_si_rmse"], 40.0)
         self.assertLess(bad["depth_gt_edge_f1"], 1.0)
 
+    def test_ground_truth_edge_tolerance_works_in_both_axes(self):
+        gt = np.full((96, 160), 0.25, np.float32)
+        gt[48:, :] = 0.75
+        shifted = np.full_like(gt, 0.25)
+        shifted[49:, :] = 0.75
+        metrics = sbsbench.depth_ground_truth_metrics(shifted, gt)
+        self.assertGreater(metrics["depth_gt_edge_f1"], 99.0)
+
     def test_metric_depth_resize_does_not_invert_interpolated_invalid_holes(self):
         gt = np.full((48, 80), 2.0, np.float32)
         gt[12:36, 38:42] = 0.0
@@ -424,6 +454,7 @@ class EvalContractTests(unittest.TestCase):
         prediction = np.full((24, 40), 0.5, np.float32)
         metrics = sbsbench.depth_ground_truth_metrics(prediction, gt, "metric")
         self.assertLess(metrics["depth_gt_si_rmse"], 0.01)
+        self.assertGreater(metrics["depth_gt_edge_f1"], 99.0)
 
     def test_optical_flow_temporal_metric_compensates_motion(self):
         rng = np.random.default_rng(31)
