@@ -370,6 +370,34 @@ def source_match_residual(eye, src_gray, max_shift=None):
     return float(np.percentile(vals, 50)), float(np.percentile(vals, 95))
 
 
+def static_region_mask(src, prev_src, ew, eh, motion_threshold=3.0 / 255.0):
+    """Source-static eye-resolution mask with disparity-radius exclusion around motion."""
+    now = resize_to(src, ew, eh)
+    before = resize_to(prev_src, ew, eh)
+    moving = np.abs(now - before) >= motion_threshold
+    radius = max(4, round(40 * eye_scale(ew)))
+    return ~hdilate(moving, radius)
+
+
+def static_region_jitter(left, right, prev_left, prev_right, src, prev_src,
+                         motion_threshold=3.0 / 255.0, min_support=0.1):
+    """Worst-eye temporal change over source regions that did not move.
+
+    Source-motion pixels are horizontally dilated by the normal disparity radius before exclusion,
+    so an output sample that legitimately originated from nearby moving content cannot be mistaken
+    for warp jitter. Returns (p95 luma/255, stable support fraction), or (None, support) when too
+    little static evidence remains (camera motion / scene cut).
+    """
+    eh, ew = left.shape
+    stable = static_region_mask(src, prev_src, ew, eh, motion_threshold)
+    support = float(stable.mean())
+    if support < min_support:
+        return None, support
+    l = np.abs(left - prev_left)[stable] * 255.0
+    r = np.abs(right - prev_right)[stable] * 255.0
+    return max(float(np.percentile(l, 95)), float(np.percentile(r, 95))), support
+
+
 # ----------------------------------------------------------------------- per-frame
 
 def measure(dump_dir):
@@ -458,6 +486,8 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
                       re-hallucination shimmer from ordinary motion (the ~1/4-res inpaint problem).
       swim            frame-to-frame |depth change| where the SOURCE is static (needs --frames) --
                       the scene-cut / flat-content depth instability, separated from real motion.
+      static_jitter   worst-eye p95 output change where a disparity-dilated SOURCE neighborhood
+                      stayed static; rejects warp/depth shimmer without counting normal motion.
 
     On the SAME clip the real motion is identical, so these DELTAS vs baseline are pure changes."""
     sbs_by_id = indexed_files(os.path.join(seq_dir, "sbs_*.png"), "sbs_")
@@ -476,13 +506,14 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         missing_depth = sorted(set(frame_ids) - set(depth_by_id))
         extra_depth = sorted(set(depth_by_id) - set(frame_ids))
         raise ValueError(f"depth/SBS frame-id mismatch: missing depth={missing_depth}, extra depth={extra_depth}")
-    rows, flicks, bflicks, swims = [], [], [], []
-    prev_sbs = prev_left = prev_depth = prev_src = None
+    rows, flicks, bflicks, swims, static_jitters = [], [], [], [], []
+    prev_sbs = prev_left = prev_right = prev_depth = prev_src = None
     for frame_id in frame_ids:
         p = sbs_by_id[frame_id]
         depth = load_depth(depth_by_id[frame_id]) if frame_id in depth_by_id else None
         src = load_gray(src_by_id[frame_id]) if frame_id in src_by_id else None
         row, sbs, left = measure_seq_frame(p, depth, src)
+        _, right = split_eyes(sbs)
         row["_frame_id"] = frame_id
         if prev_sbs is not None:
             row["flicker"] = float(np.mean(np.abs(sbs - prev_sbs)) * 255.0)
@@ -500,13 +531,23 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
                 if static.any():
                     row["swim"] = float(np.median(np.abs(depth - prev_depth)[static]) * 255.0)
                     swims.append(row["swim"])
+            if src is not None and prev_src is not None:
+                jitter, support = static_region_jitter(
+                    left, right, prev_left, prev_right, src, prev_src)
+                row["static_support"] = support
+                if jitter is not None:
+                    row["static_jitter"] = jitter
+                    static_jitters.append(jitter)
         rows.append(row)
-        prev_sbs, prev_left, prev_depth, prev_src = sbs, left, depth, src
+        prev_sbs, prev_left, prev_right, prev_depth, prev_src = sbs, left, right, depth, src
     agg = aggregate(rows)
     for name, vals in [("flicker", flicks), ("flicker_disocc", bflicks), ("swim", swims)]:
         if vals:
             agg[name + "_p50"] = float(np.percentile(vals, 50))
             agg[name + "_p95"] = float(np.percentile(vals, 95))
+    if static_jitters:
+        agg["static_jitter_p50"] = float(np.percentile(static_jitters, 50))
+        agg["static_jitter_p95"] = float(np.percentile(static_jitters, 95))
     agg.update(sbs_score(agg, expected_flat=expected_flat))
     return rows, agg
 
@@ -634,9 +675,9 @@ def aggregate(rows):
 FMT = ["pop_px_p50", "pop_spread_px", "vmisalign_px", "depth_spread",
        "disocc_smear", "stretch_area", "rim_over_p95"]
 SEQ_FMT = ["pop_px_p50", "pop_spread_px", "vmisalign_px", "source_residual_p95",
-           "stretch_area", "rim_over_p95", "edge_acc_p50", "flicker"]
+           "static_jitter_p95", "stretch_area", "rim_over_p95", "edge_acc_p50", "flicker"]
 TEMPORAL_KEYS = ["flicker_p50", "flicker_p95", "flicker_disocc_p50", "flicker_disocc_p95",
-                 "swim_p50", "swim_p95"]
+                 "swim_p50", "swim_p95", "static_jitter_p50", "static_jitter_p95"]
 
 
 def print_table(rows, agg, fmt=FMT):

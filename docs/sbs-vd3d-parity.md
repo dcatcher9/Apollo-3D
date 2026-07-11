@@ -36,7 +36,8 @@ and `sbs_eval/bestv2-profile-plane-vd3d`.
 
 Guided upsample remains disabled for both warps under the overhauled multi-axis contract. Apollo
 loses stereo spread on all 7 ordinary clips while its source-relative warp residual is mixed (2
-wins, 2 costs), so the coequal axes produce a tradeoff with a decisive stereo-volume concern.
+wins, 2 costs), but it improves static-region stability on 3 clips. The coequal axes therefore
+produce a real tradeoff with a decisive stereo-volume concern rather than a scalar verdict.
 VD3D stays within noise on both validated primary axes, so it has no demonstrated benefit. Legacy
 rim/stretch/edge/flicker movements remain diagnostic because visual audit showed scene-content and
 motion confounds. Current reports are under `sbs_eval/evalv3-guided-apollo` and

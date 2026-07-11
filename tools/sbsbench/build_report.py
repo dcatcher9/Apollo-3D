@@ -67,6 +67,7 @@ CLIPS = sorted(CTRL["clips"])
 COLS = [
     ("score", "score", False, True, 0),
     ("source_residual_p95", "warp_resid", True, True, 0),
+    ("static_jitter_p95", "static_jitter", True, True, 0),
     ("pop_px_p50", "pop", False, True, 0), ("edge_acc_p50", "edge_acc", True, False, 2.0),
     ("stretch_area", "stretch", True, False, 2.0), ("rim_over_p95", "rim", True, False, 1.0),
     ("swim_p50", "swim", True, False, 1.0), ("flicker_p50", "flick", True, True, 0),
@@ -213,6 +214,51 @@ def source_residual_evidence(clip, idx):
             durl(Image.fromarray(heat), w=380, jpg=True, q=88))
 
 
+def static_jitter_evidence(clip, idx):
+    """Source-static mask, per-run temporal delta, and signed treatment movement."""
+    prev_idx = idx - 1
+    if prev_idx < 1:
+        return None
+    paths = [frame_path(run, clip, i) for run in (ctrl_dir, treat_dir)
+             for i in (prev_idx, idx)]
+    src_now = glob.glob(os.path.join(SCRIPT_DIR, "clips", clip, f"frame_{idx:05d}.*"))
+    src_prev = glob.glob(os.path.join(SCRIPT_DIR, "clips", clip, f"frame_{prev_idx:05d}.*"))
+    if not all(os.path.exists(p) for p in paths) or not src_now or not src_prev:
+        return None
+    images = [Image.open(p).convert("RGB") for p in paths]
+    ew, eh = images[0].width // 2, images[0].height
+    stable = sbsbench.static_region_mask(
+        sbsbench.load_gray(src_now[0]), sbsbench.load_gray(src_prev[0]), ew, eh)
+    deltas = []
+    for before, now in ((images[0], images[1]), (images[2], images[3])):
+        bg = np.asarray(before.convert("L"), np.float32) / 255.0
+        ng = np.asarray(now.convert("L"), np.float32) / 255.0
+        be, ne = sbsbench.split_eyes(bg), sbsbench.split_eyes(ng)
+        deltas.append([np.abs(ne[i] - be[i]) * stable for i in range(2)])
+    eye_idx = max(range(2), key=lambda i: float(np.percentile(
+        np.abs(deltas[1][i] - deltas[0][i])[stable], 95)) if stable.any() else 0.0)
+    signed = (deltas[1][eye_idx] - deltas[0][eye_idx]) * 255.0
+    score = sbsbench._box3(np.abs(signed))
+    cy, cx = np.unravel_index(np.argmax(score), score.shape)
+    cw, ch = min(480, ew), min(360, eh)
+    x0 = max(0, min(ew - cw, int(cx) - cw // 2))
+    y0 = max(0, min(eh - ch, int(cy) - ch // 2))
+    xoff = eye_idx * ew
+    source = Image.open(src_now[0]).convert("RGB").resize((ew, eh), Image.BILINEAR)
+    source_a = np.asarray(source).copy()
+    source_a[~stable] = (source_a[~stable] * 0.18).astype(np.uint8)
+    ctrl_heat = np.zeros((eh, ew, 3), np.uint8)
+    treat_heat = np.zeros((eh, ew, 3), np.uint8)
+    ctrl_heat[..., 0] = np.clip(deltas[0][eye_idx] * 255.0 * 8.0, 0, 255).astype(np.uint8)
+    treat_heat[..., 0] = np.clip(deltas[1][eye_idx] * 255.0 * 8.0, 0, 255).astype(np.uint8)
+    signed_heat = np.zeros((eh, ew, 3), np.uint8)
+    signed_heat[..., 0] = np.clip(signed * 8.0, 0, 255).astype(np.uint8)
+    signed_heat[..., 2] = np.clip(-signed * 8.0, 0, 255).astype(np.uint8)
+    crop = (x0, y0, x0 + cw, y0 + ch)
+    return tuple(durl(Image.fromarray(a).crop(crop), w=380, jpg=True, q=88) for a in
+                 (source_a, ctrl_heat, treat_heat, signed_heat))
+
+
 def visual_evidence_images(clip, idx, metric=None):
     """Matched control/treatment crops plus an amplified RGB difference heatmap.
 
@@ -222,6 +268,8 @@ def visual_evidence_images(clip, idx, metric=None):
     """
     if metric == "source_residual_p95":
         return source_residual_evidence(clip, idx)
+    if metric == "static_jitter_p95":
+        return static_jitter_evidence(clip, idx)
     pair = crop_at_silhouette(clip, idx)
     if not pair:
         return None
@@ -356,6 +404,7 @@ METRIC_DEFS = [
     ("score", "score", "Overall 0-100 artifact cleanliness after weighted penalties. Stereo volume is reported and gated separately, so it cannot cancel artifact regressions.", "higher = better"),
     ("pop_px_p50", "pop", "L↔R horizontal disparity (sub-pixel tile phase-correlation) — the amount of stereo depth.", "higher = more 3D"),
     ("source_residual_p95", "warp_resid", "Worst-eye patch difference from the source after allowing a small horizontal stereo displacement. Detects monocular warp corruption without penalizing intended parallax.", "lower = more source-faithful"),
+    ("static_jitter_p95", "static_jitter", "Worst-eye temporal change over regions whose source neighborhood stayed static after allowing for horizontal disparity. Camera/object motion is excluded.", "lower = steadier static content"),
     ("depth_spread", "dspread", "p95−p5 of the normalized depth = pop available at the source.", "higher = more depth to work with"),
     ("edge_acc_p50", "edge_acc", "Distance (depth-px) from each depth silhouette to the nearest true SOURCE color edge.", "lower = silhouette sits on the real edge"),
     ("swim_p50", "swim", "Frame-to-frame depth change where the SOURCE is static — depth instability, separated from real motion.", "lower = steadier depth"),
@@ -544,7 +593,8 @@ def issue_sections():
 
 def visual_evidence_section():
     """Show the strongest spatial win and regression with matched images and a diff map."""
-    spatial = ("source_residual_p95", "stretch_area", "rim_over_p95", "edge_acc_p50", "disocc_smear")
+    spatial = ("source_residual_p95", "static_jitter_p95", "stretch_area", "rim_over_p95",
+               "edge_acc_p50", "disocc_smear")
     candidates = []
     for metric in spatial:
         floor = THR.get(metric, {}).get("abs_floor", 0.0)
@@ -569,10 +619,13 @@ def visual_evidence_section():
         pct = delta / a * 100 if a else 100.0
         cls = "evidence-cost" if kind == "regression" else "evidence-win"
         badge = "regression" if kind == "regression" else "improvement"
-        panels = (f'<div class="triplet"><figure><span class="tag">source</span><img src="{imgs[0]}"></figure>'
-                  f'<figure><span class="tag">{CTRL_TAG}</span><img src="{imgs[1]}"></figure>'
-                  f'<figure><span class="tag t-treat">{TREAT_TAG}</span><img src="{imgs[2]}"></figure>'
-                  f'<figure><span class="tag t-diff">residual delta: red worse / blue better</span>'
+        source_label = "source · bright = evaluated static region" if metric == "static_jitter_p95" else "source"
+        ctrl_label = f"{CTRL_TAG} · temporal change" if metric == "static_jitter_p95" else CTRL_TAG
+        treat_label = f"{TREAT_TAG} · temporal change" if metric == "static_jitter_p95" else TREAT_TAG
+        panels = (f'<div class="triplet"><figure><span class="tag">{source_label}</span><img src="{imgs[0]}"></figure>'
+                  f'<figure><span class="tag">{ctrl_label}</span><img src="{imgs[1]}"></figure>'
+                  f'<figure><span class="tag t-treat">{treat_label}</span><img src="{imgs[2]}"></figure>'
+                  f'<figure><span class="tag t-diff">delta: red worse / blue better</span>'
                   f'<img src="{imgs[3]}"></figure></div>' if len(imgs) == 4 else
                   f'<div class="triplet"><figure><span class="tag">{CTRL_TAG}</span>'
                   f'<img src="{imgs[0]}"></figure><figure><span class="tag t-treat">{TREAT_TAG}</span>'

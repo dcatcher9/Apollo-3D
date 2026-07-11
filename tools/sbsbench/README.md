@@ -32,6 +32,7 @@ python tools/sbsbench/run_eval.py --extra --divergence 0.027   # pass A/B levers
 python tools/sbsbench/run_eval.py --label treat --report-control cmake-build-relwithdebinfo/sbs_eval/control --extra --warp vd3d
 python tools/sbsbench/run_eval.py --label profile-b --conf profile-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/profile-a --report-allow-config-diff
 python tools/sbsbench/run_eval.py --comparison-only --label ab-control  # fresh A/B; no committed gate
+python tools/sbsbench/rescore_run.py cmake-build-relwithdebinfo/sbs_eval/<run> --in-place  # metrics only
 ```
 
 **Mode / model (important):** `--mode` defaults to **`game`** (depth model **DA-V2 small**,
@@ -184,6 +185,16 @@ source patch within the allowed horizontal disparity radius, then reports the wo
 residual. Intended stereo displacement is free; holes, blur, ringing, duplication and stretched
 texture rise. Its visual card shows source/control/treatment plus a signed residual-delta mask.
 
+`static_jitter_p95` is the validated stability-axis metric. It excludes every source pixel that
+moved, expands that exclusion horizontally by the allowed disparity radius, and measures the
+worse eye's p95 output change only on the remaining static support. Scene cuts/camera moves with
+less than 10% support do not vote. Its evidence card shows the evaluated mask, each run's temporal
+change and a signed red/blue treatment delta.
+
+`rescore_run.py` refreshes a comparison-only run directly from its preserved source/depth/SBS
+artifacts after metric-code changes. It refuses committed-baseline verdicts, updates the metric
+contract hash and writes atomically; use `run_eval.py` for any committed gate.
+
 Each clip directory carries a `meta.json` (`{"name", "description"}`): the report labels clips by
 that scene name and run_eval copies it into results.json. The clip identity hash covers only the
 `frame_*` files, so renaming a scene never invalidates its baseline.
@@ -205,20 +216,20 @@ that scene name and run_eval copies it into results.json. The clip identity hash
 ## Metrics — temporal (`--seq` on a harness clip)
 | metric | meaning | direction |
 |--------|---------|-----------|
-| `flicker` | frame-to-frame mean\|Δ\| of the SBS luma (×255) | lower = steadier |
-| `flicker_disocc` | flicker restricted to the disocclusion bands — isolates inpaint/stretch re-hallucination from ordinary motion | lower = less shimmer where it matters (runs ~2–3× frame flicker) |
-| `swim` | frame-to-frame \|depth change\| where the **source** is static (needs `--frames`) — scene-cut / flat-content depth instability, separated from real motion | lower = steadier depth |
+| `static_jitter_p50` / `p95` | worse-eye output change over source-static support after disparity-radius motion exclusion | lower = steadier; **primary stability axis** |
+| `flicker` | frame-to-frame mean\|Δ\| of the SBS luma (×255) | diagnostic only; includes normal motion |
+| `flicker_disocc` | unregistered frame difference restricted to the current depth-silhouette band | diagnostic only; motion-confounded |
+| `swim` | frame-to-frame \|depth change\| where the **source** is static (needs `--frames`) | diagnostic until support/locality handling is upgraded |
 
 Notes:
 - `vmisalign_px == 0` is the built-in correctness check (parallax must be horizontal-only).
 - Flat/paused frames legitimately score `pop=0` — curate scenes with real depth.
-- On the SAME clip real motion cancels in the `--baseline` diff, so the temporal deltas are the
-  change alone. Temporal metrics need a multi-frame clip; the offline sim (single-frame) can't produce them.
+- A matched clip does not make raw flicker perceptual: a processor can move the sampling mask or
+  disparity and change how legitimate motion is counted. Only motion-excluded `static_jitter` votes.
+- Temporal metrics need a multi-frame clip; the offline sim (single-frame) cannot produce them.
 - `--frames <input dir>` unlocks `edge_acc` and `swim` (they compare against the source frames).
-- The dumped depth is 8-bit, so `swim` has a ~1/255 quantization floor; dump 16-bit depth if you need finer.
+- Harness depth is dumped as 16-bit grayscale so sub-1/255 temporal changes remain measurable.
 
 ## Not yet (roadmap)
 - **Ghost** — a lag-band metric on a known-motion clip (double-image energy).
 - **Reference PSNR/SSIM** — needs ground-truth stereo content (rendered second eye).
-- **Depth-based metrics in `--seq`** — the harness could also dump `depth_%05d.png` to enable
-  `depth_spread` / `stretch_band` per sequence frame (currently spatial-only in seq mode).

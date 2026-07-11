@@ -155,6 +155,24 @@ class EvalContractTests(unittest.TestCase):
         self.assertLess(clean[1], 0.01)
         self.assertGreater(damaged[1], clean[1] + 5.0)
 
+    def test_static_region_jitter_ignores_source_motion_but_detects_static_warp_change(self):
+        rng = np.random.default_rng(9)
+        src = np.round(rng.random((64, 96), dtype=np.float32) * 255.0) / 255.0
+        stable, support = sbsbench.static_region_jitter(src, src, src, src, src, src,
+                                                        min_support=0.5)
+        self.assertAlmostEqual(stable, 0.0)
+        self.assertEqual(support, 1.0)
+        changed = src.copy()
+        changed[16:48, 30:66] = np.clip(changed[16:48, 30:66] + 0.2, 0, 1)
+        jitter, _ = sbsbench.static_region_jitter(changed, changed, src, src, src, src,
+                                                  min_support=0.5)
+        self.assertGreater(jitter, 20.0)
+        moving_src = np.roll(src, 8, axis=1)
+        skipped, moving_support = sbsbench.static_region_jitter(
+            moving_src, moving_src, src, src, moving_src, src, min_support=0.5)
+        self.assertIsNone(skipped)
+        self.assertLess(moving_support, 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

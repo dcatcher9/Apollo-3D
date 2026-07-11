@@ -4,6 +4,7 @@
   "metrics": {
     "pop_spread_px": {"role": "primary", "axis": "stereo", "better": "higher", "rel_tol": 0.15, "abs_floor": 1.0},
     "source_residual_p95": {"role": "primary", "axis": "warp", "better": "lower", "rel_tol": 0.15, "abs_floor": 1.0},
+    "static_jitter_p95": {"role": "primary", "axis": "stability", "better": "lower", "rel_tol": 0.2, "abs_floor": 0.5},
     "vmisalign_px": {"role": "hard", "axis": "comfort", "better": "lower", "rel_tol": 0.0, "abs_floor": 0.4, "trigger": 0.5, "hard_max": 0.5},
     "depth_spread": {"role": "diagnostic", "axis": "depth", "better": "higher", "rel_tol": 0.2, "abs_floor": 0.05},
     "disocc_smear": {"role": "diagnostic", "axis": "warp", "better": "lower", "rel_tol": 0.2, "abs_floor": 0.05, "trigger": 0.15},
