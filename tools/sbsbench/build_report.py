@@ -73,11 +73,11 @@ COLS = [
     ("disocc_smear", "smear", True, False, 0.02),
 ]
 
-# Quality impact = the max points a metric can move the overall score, so tables and sections
-# read high-impact -> low. score itself leads; pop drives the depth term; artifacts scale by
-# their penalty weight; context metrics (depth_spread) fall to the end.
+# Quality impact = the max points a metric can move the artifact score, so tables and sections
+# read high-impact -> low. Score itself leads; artifacts scale by their penalty weight; stereo
+# volume and context metrics remain visible but do not gain artificial score importance.
 _SC = sbsbench.SCORE_CFG
-_DW = _SC.get("depth", {}).get("weight", 0.2)
+_DW = _SC.get("depth", {}).get("weight", 0.0)
 _PEN = _SC.get("penalties", {})
 _DEPTH_METRIC = _SC.get("depth", {}).get("metric", "pop_pct_p50")
 
@@ -236,7 +236,10 @@ CTRL_MODE = CTRL["meta"].get("mode")
 TREAT_MODE = TREAT["meta"].get("mode")
 IS_MODE_CMP = bool(CTRL_MODE and TREAT_MODE and CTRL_MODE != TREAT_MODE)
 IS_COMPARISON_ONLY = TREAT.get("verdict") == "comparison_only"
-IS_TRADEOFF_CMP = IS_MODE_CMP or IS_COMPARISON_ONLY
+CTRL_WARPS = {e.get("meta", {}).get("warp") for e in CTRL["clips"].values()}
+TREAT_WARPS = {e.get("meta", {}).get("warp") for e in TREAT["clips"].values()}
+IS_WARP_CMP = CTRL_WARPS != TREAT_WARPS
+IS_TRADEOFF_CMP = IS_MODE_CMP or IS_WARP_CMP
 CTRL_NAME = run_label(CTRL, ctrl_dir, "control")
 TREAT_NAME = run_label(TREAT, treat_dir, "treatment")
 # Short tags for inline value labels and image captions (arrow is always CTRL -> TREAT).
@@ -260,6 +263,11 @@ def expected_flat(run, clip):
         return bool(json.load(open(mp)).get("expected_flat"))
     except Exception:
         return False
+
+
+# Expected-flat clips remain visible as false-stereo diagnostics but cannot raise or lower the
+# general-content feature verdict. They exercise a different objective from ordinary scenes.
+DECISION_CLIPS = [c for c in CLIPS if not expected_flat(CTRL, c)] or CLIPS
 
 
 # Re-apply eligibility to old run artifacts so a regenerated report uses today's metric contract.
@@ -305,7 +313,7 @@ def scorecard_charts():
 
 # metric -> (short header, what it measures, direction). Only the ones that appear render.
 METRIC_DEFS = [
-    ("score", "score", "Overall 0-100 SBS quality: 100 minus weighted artifact penalties, blended with realized stereo depth (see thresholds.json 'score'). A heuristic for ranking on a clip.", "higher = better"),
+    ("score", "score", "Overall 0-100 artifact cleanliness after weighted penalties. Stereo volume is reported and gated separately, so it cannot cancel artifact regressions.", "higher = better"),
     ("pop_px_p50", "pop", "L↔R horizontal disparity (sub-pixel tile phase-correlation) — the amount of stereo depth.", "higher = more 3D"),
     ("depth_spread", "dspread", "p95−p5 of the normalized depth = pop available at the source.", "higher = more depth to work with"),
     ("edge_acc_p50", "edge_acc", "Distance (depth-px) from each depth silhouette to the nearest true SOURCE color edge.", "lower = silhouette sits on the real edge"),
@@ -348,19 +356,18 @@ def metrics_section():
 
 
 def conclusion_section():
-    """Auto-derived verdict: per-metric mean across clips, classified into wins/costs, plus a
-    shippability call from the gate. Regenerated with every report, so it always reflects the run."""
-    # Overall-score headline (mean across clips) — the single-number verdict.
-    sc_a = np.mean([ctrl_agg[c].get("score", 0) for c in CLIPS])
-    sc_b = np.mean([treat_agg[c].get("score", 0) for c in CLIPS])
-    score_line = (f'<li class="c-score">Overall SBS quality (0-100): {CTRL_TAG} <b>{sc_a:.1f}</b> '
+    """Auto-derived verdict using per-clip metric gates; means summarize but never decide."""
+    sc_a = np.mean([ctrl_agg[c].get("score", 0) for c in DECISION_CLIPS])
+    sc_b = np.mean([treat_agg[c].get("score", 0) for c in DECISION_CLIPS])
+    score_line = (f'<li class="c-score">Artifact score (0-100, diagnostic mean): '
+                  f'{CTRL_TAG} <b>{sc_a:.1f}</b> '
                   f'&rarr; {TREAT_TAG} <b>{sc_b:.1f}</b> ({sc_b - sc_a:+.1f})</li>')
     wins, costs = [], []
     for k, h, worse, _, _ in COLS:
         if k == "score":  # the headline, not a component metric
             continue
-        a = np.mean([ctrl_agg[c].get(k, 0) for c in CLIPS])
-        b = np.mean([treat_agg[c].get(k, 0) for c in CLIPS])
+        a = np.mean([ctrl_agg[c].get(k, 0) for c in DECISION_CLIPS])
+        b = np.mean([treat_agg[c].get(k, 0) for c in DECISION_CLIPS])
         if a < 1e-6 and b < 1e-6:
             continue
         pct = (b - a) / a * 100 if a else 100.0
@@ -375,31 +382,44 @@ def conclusion_section():
         txt = f"{mtip(k, '<b>' + h + '</b>')} {CTRL_TAG} {a:.2f} → {TREAT_TAG} {b:.2f} ({pct:+.0f}%)"
         (wins if favors_treat else costs).append(txt)
     li = score_line
+    gated_regressions, gated_improvements = [], []
+    for c in DECISION_CLIPS:
+        for k, spec in THR.items():
+            if k == "score":
+                continue  # derived diagnostic; source metrics make the decision
+            a, b = ctrl_agg[c].get(k), treat_agg[c].get(k)
+            if a is None or b is None:
+                continue
+            movement = sbsbench.metric_delta_class(a, b, spec)
+            if movement == "regressed":
+                gated_regressions.append((c, k))
+            elif movement == "improved":
+                gated_improvements.append((c, k))
     if IS_TRADEOFF_CMP:
         if wins:
             li += f'<li class="c-win">{TREAT_NAME} is better on: {" · ".join(wins)}</li>'
         if costs:
             li += f'<li class="c-cost">{CTRL_NAME} is better on: {" · ".join(costs)}</li>'
-        verdict = (f"<b>Matched A/B comparison:</b> both runs are measured directly from their "
-                   f"artifacts; committed-baseline gating is intentionally disabled. Pick per "
-                   f"the tradeoff above and the per-clip evidence." if IS_COMPARISON_ONLY else
-                   f"<b>Tradeoff, not a regression:</b> these are two different pipeline configs, "
-                   f"so the gate below reads as differences, not regressions. Pick per the "
-                   f"tradeoff above and the per-clip evidence.")
+        verdict = (f"<b>Geometry tradeoff:</b> compare the per-metric and per-clip evidence; a "
+                   f"single scalar does not select between different warp objectives.")
     else:
-        regs = TREAT.get("regressions", [])
         if wins:
             li += f'<li class="c-win">Improved: {" · ".join(wins)}</li>'
         if costs:
             li += f'<li class="c-cost">Worsened: {" · ".join(costs)}</li>'
-        verdict = (f"<b>Not shippable as-is:</b> the gate fails with {len(regs)} regression(s) "
-                   f"past threshold — the costs outweigh the wins above." if regs
-                   else "<b>Shippable:</b> measurable wins with no regressions past threshold."
-                   if wins else "<b>No meaningful effect:</b> all metrics within baseline noise.")
+        reg_clips = len({c for c, _ in gated_regressions})
+        imp_clips = len({c for c, _ in gated_improvements})
+        verdict = (f"<b>Reject treatment:</b> {len(gated_regressions)} metric regression(s) past "
+                   f"threshold across {reg_clips} clip(s); improvements cannot cancel them."
+                   if gated_regressions else
+                   f"<b>Candidate improvement:</b> {len(gated_improvements)} gated improvement(s) "
+                   f"across {imp_clips} clip(s), with no gated regressions."
+                   if gated_improvements else
+                   "<b>No meaningful effect:</b> all source metrics remain within gate noise.")
     head = (f"{CTRL_NAME} → {TREAT_NAME}" if IS_TRADEOFF_CMP else f"Treatment: <b>{treatment_name()}</b>")
     return (f'<section><h2>Conclusion</h2>'
-            f'<p class="sub" style="margin-bottom:12px">{head} — mean movement across all '
-            f'{len(CLIPS)} clips.</p>'
+            f'<p class="sub" style="margin-bottom:12px">{head} — decision over '
+            f'{len(DECISION_CLIPS)} non-flat clip(s); expected-flat diagnostics remain below.</p>'
             f'<ul class="concl">{li}<li>{verdict}</li></ul>{gate_strip()}</section>')
 
 

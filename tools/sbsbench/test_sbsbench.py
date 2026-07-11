@@ -88,15 +88,23 @@ class EvalContractTests(unittest.TestCase):
         self.assertLess(frac, sbsbench.MIN_DISOCC_FRAC)
         self.assertIsNone(smear)
 
-    def test_expected_flat_score_rewards_zero_false_stereo(self):
+    def test_depth_is_diagnostic_not_part_of_artifact_score(self):
         clean = {"pop_spread_pct": 0.0}
         false_stereo = {"pop_spread_pct": 0.2}
         self.assertGreater(
-            sbsbench.sbs_score(clean, expected_flat=True)["score"],
-            sbsbench.sbs_score(false_stereo, expected_flat=True)["score"])
+            sbsbench.sbs_score(clean, expected_flat=True)["q_depth"],
+            sbsbench.sbs_score(false_stereo, expected_flat=True)["q_depth"])
         self.assertLess(
-            sbsbench.sbs_score(clean)["score"],
-            sbsbench.sbs_score(false_stereo)["score"])
+            sbsbench.sbs_score(clean)["q_depth"],
+            sbsbench.sbs_score(false_stereo)["q_depth"])
+        self.assertEqual(sbsbench.sbs_score(clean)["score"],
+                         sbsbench.sbs_score(false_stereo)["score"])
+
+    def test_metric_delta_class_uses_gate_tolerance_and_direction(self):
+        lower = {"better": "lower", "rel_tol": 0.25, "abs_floor": 0.5}
+        self.assertEqual(sbsbench.metric_delta_class(2.0, 2.4, lower), "noise")
+        self.assertEqual(sbsbench.metric_delta_class(2.0, 2.6, lower), "regressed")
+        self.assertEqual(sbsbench.metric_delta_class(2.0, 1.4, lower), "improved")
 
 
 if __name__ == "__main__":

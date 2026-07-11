@@ -34,10 +34,11 @@ Apollo lost `0.59` score and VD3D lost `1.06`; pop spread fell `0.63` / `0.66 px
 p95 worsened `0.90` / `2.01`. Visual reports are under `sbs_eval/bestv2-profile-plane-apollo`
 and `sbs_eval/bestv2-profile-plane-vd3d`.
 
-Guided upsample is independently rejected for Apollo and retained for VD3D. On Apollo it lost
-`2.14` score and `3.12 px` pop spread. On VD3D it gained `0.80` score, reduced stretch by `0.53`
-and bright-rim p95 by `1.83`, while pop spread stayed within `0.003 px`; the tradeoff is `1.21`
-worse edge accumulation. Visual reports are under `sbs_eval/bestv2-profile-guided-apollo` and
+Guided upsample is rejected for both warps. Its localized rim/stretch wins originally raised the
+old blended mean score for VD3D, but that conclusion was an eval error: the gain was dominated by
+one scene while edge alignment regressed broadly. Under the corrected artifact-only score and
+per-clip source-metric gate, Apollo has 15 regressions across all 7 ordinary clips and VD3D has 7
+across 6 clips. Visual reports are under `sbs_eval/bestv2-profile-guided-apollo` and
 `sbs_eval/bestv2-profile-guided-vd3d`. Min/max snap and range floor remain pending and must be
 evaluated independently for each warp.
 

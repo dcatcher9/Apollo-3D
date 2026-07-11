@@ -165,16 +165,17 @@ The metrics split cleanly by subsystem: **warp**-side changes move pop / disocc 
 landed. (Validated: a 2× `--divergence` warp change moved pop +90% and left edge_acc/swim flat;
 swapping da3mono→v2 moved edge_acc −96% and swim −100% and left the warp lever untouched.)
 
-## Overall score (0–100)
-`sbs_score(agg)` collapses the metric vector into one number per clip: `q_clean` = 100 − weighted
-artifact penalties (each `weight × min(value/scale, 1)`, saturating), `q_depth` = realized stereo
-(`pop_spread_pct` vs a target — the near-to-far VOLUME, not median \|dx\|, so subject anchoring is
-scored on delivered depth; content-dependent, so a flat scene scores low), blended
-`score = (1−w)·q_clean + w·q_depth`. Weights/scales live in [thresholds.json](thresholds.json)
-`"score"` (retuning them also reorders the report, which sorts metrics by quality impact). The
-score is gated by run_eval like any metric (a >1.5-point drop = regression) and best used to rank
-configs on the SAME clips; the per-metric numbers stay the source of truth. Set
-`score.depth.weight` to 0 for a purely artifact-based (content-independent) score.
+## Artifact score (0–100) and feature decision
+`sbs_score(agg)` reports `score = q_clean` = 100 − weighted artifact penalties (each
+`weight × min(value/scale, 1)`, saturating). `q_depth` remains a separate diagnostic of delivered
+stereo volume (`pop_spread_pct` versus its target); it is not blended into score, because losing
+depth must not buy artifact-quality points or cancel an artifact regression. Weights/scales live
+in [thresholds.json](thresholds.json) `"score"`.
+
+The score is a summary, never the feature verdict. Matched A/B reports apply every source metric's
+absolute/relative tolerance independently on every non-flat clip. Any regression past threshold
+rejects a general feature even if improvements elsewhere raise the mean score; expected-flat clips
+remain visible as false-stereo diagnostics but do not vote on general-content features.
 
 Each clip directory carries a `meta.json` (`{"name", "description"}`): the report labels clips by
 that scene name and run_eval copies it into results.json. The clip identity hash covers only the

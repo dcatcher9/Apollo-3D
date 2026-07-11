@@ -117,11 +117,6 @@ def check_engines(build_dir, mode):
     return missing
 
 
-def worse_delta(base, new, spec):
-    """Signed 'how much worse' (positive = worse) given the metric's better-direction."""
-    return (base - new) if spec.get("better") == "higher" else (new - base)
-
-
 def main():
     ap = argparse.ArgumentParser(description="Run the offline SBS benchmark over the committed clip set.")
     ap.add_argument("--build-dir", default=os.path.join(REPO, "cmake-build-relwithdebinfo"))
@@ -318,8 +313,7 @@ def main():
                 b, n = base["aggregate"].get(k), agg.get(k)
                 if b is None or n is None:
                     continue
-                wd = worse_delta(b, n, spec)
-                if wd > max(spec["abs_floor"], abs(b) * spec["rel_tol"]):
+                if sbsbench.metric_delta_class(b, n, spec) == "regressed":
                     regressions.append({"clip": clip, "metric": k, "baseline": round(b, 3),
                                         **worst.get(k, {}), "value": round(n, 3)})
             if not contention:

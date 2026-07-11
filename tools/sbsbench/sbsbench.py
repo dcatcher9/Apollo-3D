@@ -469,8 +469,9 @@ SCORE_CFG = _load_score_cfg()
 
 
 def sbs_score(agg, expected_flat=False):
-    """Overall 0-100 SBS quality from an aggregate metric dict (see thresholds.json 'score').
-    q_clean penalizes artifacts; q_depth rewards realized stereo; score blends them."""
+    """Overall 0-100 artifact quality from an aggregate metric dict (see thresholds.json 'score').
+    score measures artifact cleanliness only. q_depth is reported separately because stereo
+    volume is a required constraint, not quality points that may cancel an artifact regression."""
     pen = 0.0
     for k, spec in SCORE_CFG.get("penalties", {}).items():
         v = agg.get(k)
@@ -483,9 +484,19 @@ def sbs_score(agg, expected_flat=False):
     target = d.get("expected_flat_target", 0.1) if expected_flat else d.get("target", 0.6)
     realized = min(pop / target, 1.0) if target else 0.0
     q_depth = 100.0 * (1.0 - realized) if expected_flat else 100.0 * realized
-    dw = d.get("weight", 0.2)
-    score = (1.0 - dw) * q_clean + dw * q_depth
-    return {"q_clean": round(q_clean, 1), "q_depth": round(q_depth, 1), "score": round(score, 1)}
+    return {"q_clean": round(q_clean, 1), "q_depth": round(q_depth, 1),
+            "score": round(q_clean, 1)}
+
+
+def metric_delta_class(base, new, spec):
+    """Classify an A/B movement using the same tolerance contract as the baseline gate."""
+    tolerance = max(spec.get("abs_floor", 0.0), abs(base) * spec.get("rel_tol", 0.0))
+    improvement = new - base if spec.get("better") == "higher" else base - new
+    if improvement > tolerance:
+        return "improved"
+    if improvement < -tolerance:
+        return "regressed"
+    return "noise"
 
 
 def aggregate(rows):
