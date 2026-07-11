@@ -23,10 +23,15 @@ allow_config_diff = "--allow-config-diff" in sys.argv[4:]
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (sbs_score, shared with run_eval)
+import run_eval  # noqa: E402  (evaluation-contract and clip identity helpers)
 
 CTRL = json.load(open(os.path.join(ctrl_dir, "results.json")))
 TREAT = json.load(open(os.path.join(treat_dir, "results.json")))
 THR = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json")))["metrics"]
+CURRENT_METRIC_SHA = run_eval.sha256_files([
+    os.path.join(SCRIPT_DIR, "sbsbench.py"), os.path.join(SCRIPT_DIR, "thresholds.json"),
+    os.path.join(SCRIPT_DIR, "run_eval.py")])
+REPORT_SHA = run_eval.sha256_files([os.path.abspath(__file__)])
 
 # An A/B report may compare different code, warp, or treatment arguments, but its evidence is
 # invalid if the source set, model, base config, or metric contract changed underneath it.
@@ -39,6 +44,8 @@ _mismatched_context = {k: (CTRL.get("meta", {}).get(k), TREAT.get("meta", {}).ge
                        if CTRL.get("meta", {}).get(k) != TREAT.get("meta", {}).get(k)}
 if _mismatched_context:
     raise SystemExit(f"refusing incompatible A/B report: {_mismatched_context}")
+if CTRL.get("meta", {}).get("metric_sha256") != CURRENT_METRIC_SHA:
+    raise SystemExit("refusing stale evaluation artifacts: rescore or rerun both inputs with the current eval contract")
 
 CLIPS_ROOT = CTRL.get("meta", {}).get("clips_root") or os.path.join(SCRIPT_DIR, "clips")
 
@@ -75,6 +82,14 @@ def name(clip):
         _NAME_CACHE[clip] = _clip_name(clip)
     return _NAME_CACHE[clip]
 CLIPS = sorted(CTRL["clips"])
+if set(CLIPS) != set(TREAT["clips"]):
+    raise SystemExit("refusing A/B report with different clip sets")
+recorded_clip_hashes = CTRL.get("meta", {}).get("clip_set_sha1", {})
+current_clip_hashes = {clip: run_eval.sha1_dir(os.path.join(CLIPS_ROOT, clip)) for clip in CLIPS}
+stale_sources = {clip: (recorded_clip_hashes.get(clip), current_clip_hashes[clip]) for clip in CLIPS
+                 if recorded_clip_hashes.get(clip) != current_clip_hashes[clip]}
+if stale_sources:
+    raise SystemExit(f"refusing report with source/GT data changed since evaluation: {stale_sources}")
 
 # metric, header, worse-is-higher, always-show, notable-threshold
 COLS = [
@@ -91,7 +106,7 @@ COLS = [
     ("negative_disparity_pct", "disp_negative", True, True, 0),
     ("source_coverage_pct", "coverage", False, True, 0),
     ("image_integrity_pct", "integrity", False, True, 0),
-    ("vmisalign_px", "vmis", True, True, 0),
+    ("vmisalign_pct", "vmis", True, True, 0),
 ]
 
 # Quality impact = the max points a metric can move the artifact score, so tables and sections
@@ -139,6 +154,20 @@ def mid_frame(run, clip):
     return max(0, n // 2)
 
 
+def normalize_sbs_images(images):
+    """Resize packed SBS images to one common per-eye raster for visual A/B evidence.
+
+    Evaluation runs may intentionally use different output resolutions.  Comparing their raw
+    arrays would either fail or turn ordinary resampling into a spatial offset.  Keep the SBS
+    seam exact and compare at the smallest available raster so neither run is upscaled.
+    """
+    eye_w = min(image.width // 2 for image in images)
+    height = min(image.height for image in images)
+    size = (eye_w * 2, height)
+    return [image if image.size == size else image.resize(size, Image.LANCZOS)
+            for image in images]
+
+
 def crop_at_silhouette(clip, idx):
     """Control/treatment left-eye crops at the strongest depth silhouette of frame idx (falls
     back to center if the depth is flat). Returns (ctrl_durl, treat_durl) or None."""
@@ -147,7 +176,7 @@ def crop_at_silhouette(clip, idx):
     if not (os.path.exists(cp) and os.path.exists(tp) and os.path.exists(dp)):
         return None
     depth = load_depth(dp)
-    sbs_c, sbs_t = Image.open(cp), Image.open(tp)
+    sbs_c, sbs_t = normalize_sbs_images([Image.open(cp), Image.open(tp)])
     ew, eh = sbs_c.width // 2, sbs_c.height
     gx = np.abs(np.diff(depth, axis=1, prepend=depth[:, :1]))
     dh, dw = depth.shape
@@ -175,7 +204,8 @@ def source_residual_evidence(clip, idx):
     srcs = source_glob(clip, idx)
     if not (os.path.exists(cp) and os.path.exists(tp) and srcs):
         return None
-    ctrl, treat = Image.open(cp).convert("RGB"), Image.open(tp).convert("RGB")
+    ctrl, treat = normalize_sbs_images(
+        [Image.open(cp).convert("RGB"), Image.open(tp).convert("RGB")])
     ew, eh = ctrl.width // 2, ctrl.height
     src_rgb = Image.open(srcs[0]).convert("RGB").resize((ew, eh), Image.BILINEAR)
     src_gray = sbsbench.load_gray(srcs[0])
@@ -217,7 +247,7 @@ def static_jitter_evidence(clip, idx):
     src_prev = source_glob(clip, prev_idx)
     if not all(os.path.exists(p) for p in paths) or not src_now or not src_prev:
         return None
-    images = [Image.open(p).convert("RGB") for p in paths]
+    images = normalize_sbs_images([Image.open(p).convert("RGB") for p in paths])
     ew, eh = images[0].width // 2, images[0].height
     stable = sbsbench.static_region_mask(
         sbsbench.load_gray(src_now[0]), sbsbench.load_gray(src_prev[0]), ew, eh)
@@ -381,7 +411,8 @@ def visual_evidence_images(clip, idx, metric=None):
         if not (os.path.exists(cp) and os.path.exists(tp) and os.path.exists(dp)):
             return None
         depth = load_depth(dp)
-        ctrl, treat = Image.open(cp).convert("RGB"), Image.open(tp).convert("RGB")
+        ctrl, treat = normalize_sbs_images(
+            [Image.open(cp).convert("RGB"), Image.open(tp).convert("RGB")])
         ew, eh = ctrl.width // 2, ctrl.height
         gx = np.abs(np.diff(depth, axis=1, prepend=depth[:, :1]))
         dh, dw = depth.shape
@@ -419,7 +450,8 @@ def visual_evidence_images(clip, idx, metric=None):
     cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
     dp = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
     depth = load_depth(dp)
-    ctrl, treat = Image.open(cp).convert("RGB"), Image.open(tp).convert("RGB")
+    ctrl, treat = normalize_sbs_images(
+        [Image.open(cp).convert("RGB"), Image.open(tp).convert("RGB")])
     ew, eh = ctrl.width // 2, ctrl.height
     gx = np.abs(np.diff(depth, axis=1, prepend=depth[:, :1]))
     dh, dw = depth.shape
@@ -499,6 +531,10 @@ def expected_flat(run, clip):
 # Expected-flat clips remain visible as false-stereo diagnostics but cannot raise or lower the
 # general-content feature verdict. They exercise a different objective from ordinary scenes.
 DECISION_CLIPS = [c for c in CLIPS if not expected_flat(CTRL, c)] or CLIPS
+DECISION_SCOPE = ("final_candidate" if TREAT.get("meta", {}).get("suite") == "extended"
+                  else "screening")
+SOURCE_ARTIFACT_CLIPS = [c for c in CLIPS
+                         if CTRL["clips"].get(c, {}).get("meta", {}).get("source_artifacts")]
 
 
 # Re-apply eligibility to old run artifacts so a regenerated report uses today's metric contract.
@@ -508,6 +544,12 @@ for _run, _aggs in ((CTRL, ctrl_agg), (TREAT, treat_agg)):
             for _key in ("disocc_smear", "flicker_disocc", "flicker_disocc_p50", "flicker_disocc_p95"):
                 _agg.pop(_key, None)
         _agg.update(sbsbench.sbs_score(_agg, expected_flat=expected_flat(_run, _clip)))
+
+# Compute the verdict once from the aggregate dictionaries and reuse the same object for both the
+# HTML conclusion and a machine-readable sidecar. This prevents downstream automation (or a human
+# ad-hoc script) from accidentally passing the per-clip wrapper instead of its `aggregate` member.
+AB_DECISION = sbsbench.evaluate_ab_decision(
+    ctrl_agg, treat_agg, DECISION_CLIPS, THR, hard_clip_ids=CLIPS)
 colmax = {k: max(max(ctrl_agg[c].get(k, 0), treat_agg[c].get(k, 0)) for c in CLIPS) for k, *_ in COLS}
 ACTIVE = [col for col in COLS if col[3] or colmax[col[0]] > col[4]]
 CLEAN = [col for col in COLS if col not in ACTIVE and col[2]]
@@ -633,7 +675,7 @@ def grouped_quality_section():
                             [_mean_perf(TREAT, a["key"]) for a in PERF_RADAR_AXES]))
 
     hard_defs = (
-        ("vmisalign_px", "Vertical alignment", " px"),
+        ("vmisalign_pct", "Vertical alignment", "% eye height"),
         ("positive_disparity_pct", "Positive disparity tail", "%"),
         ("negative_disparity_pct", "Negative disparity tail", "%"),
         ("source_coverage_pct", "Source coverage", "%"),
@@ -707,7 +749,7 @@ def scorecard_charts():
 # metric -> (short header, what it measures, direction). Only the ones that appear render.
 METRIC_DEFS = [
     ("score", "score", "Overall 0-100 artifact cleanliness after weighted penalties. Stereo volume is reported and gated separately, so it cannot cancel artifact regressions.", "higher = better"),
-    ("pop_spread_px", "pop_spread", "Near-to-far range of horizontal stereo disparity. This is the validated stereo-volume gate; the radar displays its resolution-independent percentage form.", "higher = more stereo volume"),
+    ("pop_spread_px", "pop_spread", "Near-to-far horizontal disparity range in output pixels, shown for intuition. Decisions use pop_spread_pct so changing eye resolution cannot create a win or regression.", "higher = more stereo volume"),
     ("positive_disparity_pct", "disp_positive", "Weighted p99 of the positive signed L/R disparity tail as a percentage of eye width. Kept sign-explicit because host output lacks headset angular calibration.", "must stay below comfort limit"),
     ("negative_disparity_pct", "disp_negative", "Magnitude of the weighted p1 negative signed L/R disparity tail as a percentage of eye width.", "must stay below comfort limit"),
     ("source_coverage_pct", "coverage", "Worst-eye interior pixels whose output patch is explained by some same-scanline source patch within the allowed stereo displacement.", "must remain above integrity limit"),
@@ -725,7 +767,7 @@ METRIC_DEFS = [
     ("swim_p50", "swim", "Frame-to-frame depth change where the SOURCE is static — depth instability, separated from real motion.", "lower = steadier depth"),
     ("disocc_smear", "smear", "Horizontal-detail deficit in the narrow band beside silhouettes; on flat content also fingerprints hallucinated depth edges.", "lower = crisper fill"),
     ("flicker_disocc_p50", "flick_dis", "Flicker restricted to the disocclusion bands — inpaint/stretch re-hallucination shimmer.", "lower = less boiling along edges"),
-    ("vmisalign_px", "vmis", "Median vertical L↔R offset — parallax must be horizontal-only, so this is a geometry correctness check.", "must be ≈ 0"),
+    ("vmisalign_pct", "vmis", "Median vertical L↔R offset as a percentage of eye height — resolution-independent geometry correctness.", "must be ≈ 0"),
 ]
 _ROLE_ORDER = {"hard": 0, "primary": 1, "diagnostic": 2, "reported": 3}
 
@@ -803,47 +845,48 @@ def conclusion_section():
         txt = f"{mtip(k, '<b>' + h + '</b>')} {CTRL_TAG} {a:.2f} → {TREAT_TAG} {b:.2f} ({pct:+.0f}%)"
         (wins if favors_treat else costs).append(txt)
     li = score_line
-    decision = sbsbench.evaluate_ab_decision(
-        ctrl_agg, treat_agg, DECISION_CLIPS, THR, hard_clip_ids=CLIPS)
+    decision = AB_DECISION
     if IS_TRADEOFF_CMP:
         if wins:
             li += f'<li class="c-win">{TREAT_NAME} is better on: {" · ".join(wins)}</li>'
         if costs:
             li += f'<li class="c-cost">{CTRL_NAME} is better on: {" · ".join(costs)}</li>'
-        verdict = (f"<b>Geometry tradeoff:</b> compare the per-metric and per-clip evidence; a "
-                   f"single scalar does not select between different warp objectives.")
     else:
         if wins:
             li += f'<li class="c-win">Mean diagnostics favor treatment: {" · ".join(wins)}</li>'
         if costs:
             li += f'<li class="c-cost">Mean diagnostics favor control: {" · ".join(costs)}</li>'
-        axis_parts = []
-        for axis, movement in sorted(decision["axes"].items()):
-            axis_parts.append(f'<b>{axis}</b>: {len(movement["improved"])} win(s), '
-                              f'{len(movement["regressed"])} cost(s)')
-        if axis_parts:
-            li += f'<li class="c-score">Primary axes: {" · ".join(axis_parts)}</li>'
-        state = decision["verdict"]
-        if state == "reject_hard":
-            verdict = (f'<b>Reject treatment:</b> {len(decision["hard_failures"])} hard comfort/'
-                       f'integrity constraint(s) fail.')
-        elif state == "reject_primary":
-            verdict = (f'<b>Reject treatment:</b> {decision["regressed"]} primary-axis cost(s) '
-                       f'with no compensating primary-axis win.')
-        elif state == "tradeoff":
-            verdict = (f'<b>Primary-quality tradeoff:</b> coequal axes move in different or mixed '
-                       f'directions. Per-clip event counts are evidence, not weights. Do not '
-                       f'resolve this with the scalar score; use visual/headset evidence.')
-        elif state == "candidate":
-            verdict = (f'<b>Candidate improvement:</b> {decision["improved"]} primary-axis win(s), '
-                       f'no primary-axis costs and no hard failure.')
-        else:
-            verdict = ("<b>No validated decision:</b> hard constraints pass, but all validated "
-                       "primary metrics remain within noise. Diagnostic proxies cannot vote.")
+    axis_parts = []
+    for axis, movement in sorted(decision["axes"].items()):
+        axis_parts.append(f'<b>{axis}</b>: {len(movement["improved"])} win(s), '
+                          f'{len(movement["regressed"])} cost(s)')
+    if axis_parts:
+        li += f'<li class="c-score">Primary axes: {" · ".join(axis_parts)}</li>'
+    state = decision["verdict"]
+    if state == "reject_hard":
+        verdict = (f'<b>Reject treatment:</b> {len(decision["hard_failures"])} hard comfort/'
+                   f'integrity constraint(s) fail.')
+    elif state == "reject_primary":
+        verdict = (f'<b>Reject treatment:</b> {decision["regressed"]} primary-axis cost(s) '
+                   f'with no compensating primary-axis win.')
+    elif state == "tradeoff":
+        verdict = (f'<b>Primary-quality tradeoff:</b> coequal axes move in different or mixed '
+                   f'directions. Per-clip event counts are evidence, not weights. Do not '
+                   f'resolve this with the scalar score; use visual/headset evidence.')
+    elif state == "candidate":
+        verdict = (f'<b>Candidate improvement:</b> {decision["improved"]} primary-axis win(s), '
+                   f'no primary-axis costs and no hard failure.')
+    else:
+        verdict = ("<b>No validated decision:</b> hard constraints pass, but all validated "
+                   "primary metrics remain within noise. Diagnostic proxies cannot vote.")
     head = (f"{CTRL_NAME} → {TREAT_NAME}" if IS_TRADEOFF_CMP else f"Treatment: <b>{treatment_name()}</b>")
+    scope_note = ("Public-suite final-candidate evidence."
+                  if DECISION_SCOPE == "final_candidate" else
+                  "Core-suite screening evidence; confirm candidates on the public extended suite.")
     return (f'<section><h2>Conclusion</h2>'
             f'<p class="sub" style="margin-bottom:12px">{head} — decision over '
-            f'{len(DECISION_CLIPS)} non-flat clip(s); expected-flat diagnostics remain below.</p>'
+            f'{len(DECISION_CLIPS)} non-flat clip(s); expected-flat diagnostics remain below. '
+            f'<b>{scope_note}</b></p>'
             f'<ul class="concl">{li}<li>{verdict}</li></ul>{gate_strip()}</section>')
 
 
@@ -958,6 +1001,34 @@ def visual_evidence_section():
             f'temporal metrics use source-relative heatmaps, stereo shows both eyes, and reference '
             f'depth shows aligned prediction against ground truth. A within-noise badge means the '
             f'example is illustrative, not a decision event.</p>{cards}</section>')
+
+
+def source_artifact_section():
+    """Show inspected original frames whose baked artifacts can confound warp metrics."""
+    cards = []
+    for clip in CLIPS:
+        clip_meta = CTRL["clips"].get(clip, {}).get("meta", {})
+        note = clip_meta.get("source_artifacts")
+        if not note:
+            continue
+        frame = mid_frame(ctrl_dir, clip)
+        paths = source_glob(clip, frame)
+        if not paths:
+            continue
+        image_url = durl(Image.open(paths[0]).convert("RGB"), w=420, jpg=True, q=84)
+        kind = html.escape(clip_meta.get("content_type", "source"))
+        cards.append(
+            f'<article class="source-card"><img src="{image_url}"><div>'
+            f'<div class="ic-head"><span class="clipname">{html.escape(name(clip))}</span>'
+            f'<span class="pill p-info">{kind}</span><span class="metricval">original frame {frame}</span></div>'
+            f'<p>{html.escape(note)}</p></div></article>')
+    if not cards:
+        return ""
+    return (f'<section><h2>Original-source artifact audit</h2>'
+            f'<p class="sub">These effects are already present before depth estimation or stereo '
+            f'warping. Source-relative metrics still measure them, but visual conclusions must not '
+            f'label a baked highlight, bloom edge, rain splash or generative inconsistency as a new '
+            f'warp artifact without comparing the original.</p>{"".join(cards)}</section>')
 
 
 def diagnostic_evidence_section():
@@ -1079,6 +1150,8 @@ td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .evidence-card .pill{color:var(--good);background:color-mix(in srgb,var(--good) 15%,transparent)}
 .evidence-card.evidence-cost .pill{color:var(--crit);background:color-mix(in srgb,var(--crit) 15%,transparent)}
 .evidence-card.evidence-noise .pill{color:var(--muted);background:color-mix(in srgb,var(--muted) 14%,transparent)}
+.source-card{display:grid;grid-template-columns:minmax(260px,420px) 1fr;gap:18px;align-items:center;margin-top:16px;padding:12px;border:1px solid var(--line);border-radius:11px;background:var(--panel)}
+.source-card img{width:100%;display:block;border-radius:8px;border:1px solid var(--line)}.source-card p{font-size:13.5px;color:var(--muted);margin:6px 0 0}.source-card .ic-head{margin:0}
 .axis-label{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--accent);padding-right:4px}
 .triplet{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
 .triplet figure{margin:0;position:relative}.triplet img{width:100%;border-radius:8px;border:1px solid var(--line);display:block}
@@ -1088,7 +1161,7 @@ td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 pre{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:16px;overflow-x:auto;color:var(--ink);line-height:1.7}
 code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);padding:1px 6px;border-radius:5px}
 @media (max-width:900px){.radar-grid{grid-template-columns:1fr 1fr}.radar-card:last-child{grid-column:1/-1;max-width:480px}.chart-grid{grid-template-columns:1fr}}
-@media (max-width:640px){.radar-grid{grid-template-columns:1fr}.radar-card:last-child{grid-column:auto;max-width:none}.hard-card{grid-template-columns:1fr}.pair,.triplet{grid-template-columns:1fr}.bar-row{grid-template-columns:88px minmax(110px,1fr) 62px}h1{font-size:28px}}
+@media (max-width:640px){.radar-grid{grid-template-columns:1fr}.radar-card:last-child{grid-column:auto;max-width:none}.hard-card,.source-card{grid-template-columns:1fr}.pair,.triplet{grid-template-columns:1fr}.bar-row{grid-template-columns:88px minmax(110px,1fr) 62px}h1{font-size:28px}}
 </style>
 
 <div class="wrap">
@@ -1098,11 +1171,13 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
   the real pipeline and gated metrics. __LEDE__</p>
   <div class="meta"><span>__DATE__</span><span>control __CTRL_SHA__</span>
   <span>treatment __TREAT_SHA__</span>
-  <span>__NCLIPS__ clips</span><span>__MODELS__</span></div>
+  <span>__NCLIPS__ clips</span><span>__MODELS__</span><span>report __REPORT_SHA__</span></div>
 
   __CONCLUSION__
 
   __METRICS__
+
+  __SOURCE_ARTIFACTS__
 
   __GROUP_RADARS__
 
@@ -1149,7 +1224,9 @@ HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
         .replace("__DATE__", meta["timestamp"][:10]).replace("__CTRL_SHA__", ctrl_sha)
         .replace("__TREAT_SHA__", treat_sha)
         .replace("__NCLIPS__", str(len(CLIPS)))
+        .replace("__REPORT_SHA__", REPORT_SHA)
         .replace("__MODELS__", models).replace("__CONCLUSION__", conclusion_section())
+        .replace("__SOURCE_ARTIFACTS__", source_artifact_section())
         .replace("__VISUAL_EVIDENCE__", visual_evidence_section())
         .replace("__DIAGNOSTIC_EVIDENCE__", diagnostic_evidence_section())
         .replace("__CTRL_TAG__", CTRL_TAG).replace("__TREAT_TAG__", TREAT_TAG)
@@ -1161,4 +1238,19 @@ HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
 os.makedirs(os.path.dirname(os.path.abspath(out_html)), exist_ok=True)
 with open(out_html, "w", encoding="utf-8") as f:
     f.write(HTML)
+decision_path = os.path.join(os.path.dirname(os.path.abspath(out_html)), "decision.json")
+with open(decision_path, "w", encoding="utf-8") as f:
+    json.dump({
+        "schema": 1,
+        "control": CTRL_NAME,
+        "treatment": TREAT_NAME,
+        "eval_schema": TREAT.get("meta", {}).get("eval_schema"),
+        "metric_sha256": TREAT.get("meta", {}).get("metric_sha256"),
+        "clips": CLIPS,
+        "decision_clips": DECISION_CLIPS,
+        "decision_scope": DECISION_SCOPE,
+        "source_artifact_clips": SOURCE_ARTIFACT_CLIPS,
+        **AB_DECISION,
+    }, f, indent=2, sort_keys=True)
 print("wrote", out_html, f"({len(HTML) // 1024} KB)")
+print("decision", decision_path, AB_DECISION["verdict"])

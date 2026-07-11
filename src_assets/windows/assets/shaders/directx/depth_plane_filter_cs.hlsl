@@ -1,5 +1,6 @@
-// Separable rectangular max/min/average filters. Two passes reproduce PyTorch's
-// 21x21 max pool, 15x15 min pool (closing), and 13x13 average pool exactly.
+// Separable rectangular max/min/average filters. At Bestv2's 336px reference short side, two
+// passes reproduce its 21x21 max pool, 15x15 min pool, and 13x13 average pool. The host scales
+// the radii for other model-grid resolutions so morphology has constant normalized support.
 Texture2D<float> InputMask : register(t0);
 RWTexture2D<float> OutputMask : register(u0);
 

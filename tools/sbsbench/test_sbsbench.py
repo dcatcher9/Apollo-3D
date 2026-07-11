@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sbsbench
 import run_eval
 import prepare_public_datasets
+import audit_depth_transform
 
 
 class EvalContractTests(unittest.TestCase):
@@ -48,6 +49,114 @@ class EvalContractTests(unittest.TestCase):
         self.assertGreaterEqual(text.count("shaped, (float)sourceWidth)"), 2)
         self.assertNotIn("Bestv2SearchRadius((float)dw)", text)
 
+    def test_vd3d_bestv2_normalizes_pixel_shifts_by_source_width(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
+        for name in ("sbs_vd3d_forward_cs.hlsl", "sbs_vd3d_reprojection_ps.hlsl"):
+            with self.subTest(shader=name), open(os.path.join(shader_dir, name), encoding="utf-8") as fh:
+                text = fh.read()
+                self.assertIn("LeftColorTexture.GetDimensions(source_w, source_h)", text)
+                self.assertIn("shaped, (float)source_w)", text)
+                self.assertNotIn("shaped, (float)eye_w)", text)
+
+    def test_vd3d_fill_radius_scales_from_source_to_output_pixels(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
+                              "sbs_vd3d_reprojection_ps.hlsl")
+        with open(shader, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("vd3d_fill_radius * source_to_output", text)
+
+    def test_bestv2_sharpen_scales_taps_from_source_to_output_pixels(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        shader = os.path.join(repo, "src_assets", "windows", "assets",
+                              "shaders", "directx", "sbs_sharpen_ps.hlsl")
+        with open(shader, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("float tap = max(source_to_output", text)
+        self.assertIn("EyeSample((float)x - tap", text)
+
+    def test_warps_apply_per_eye_aspect_mapping(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
+        for name in ("sbs_reprojection_ps.hlsl", "sbs_vd3d_forward_cs.hlsl",
+                     "sbs_vd3d_reprojection_ps.hlsl", "sbs_sharpen_ps.hlsl"):
+            with self.subTest(shader=name), open(os.path.join(shader_dir, name), encoding="utf-8") as fh:
+                self.assertIn("ContentToSourceUV", fh.read())
+
+    def test_hdr_depth_input_and_guidance_share_color_transform(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
+        with open(os.path.join(shader_dir, "include", "depth_color.hlsl"), encoding="utf-8") as fh:
+            color = fh.read()
+        self.assertIn("DepthHdrScRgbToSrgb", color)
+        self.assertIn("dot(c, float3(0.2126f, 0.7152f, 0.0722f))", color)
+        self.assertNotIn("c / (1.0f + c)", color)
+        for name in ("rgb_to_nchw_cs.hlsl", "depth_guide_downsample_cs.hlsl",
+                     "depth_guided_upsample_cs.hlsl"):
+            with self.subTest(shader=name), open(os.path.join(shader_dir, name), encoding="utf-8") as fh:
+                text = fh.read()
+                self.assertIn('include/depth_color.hlsl', text)
+                self.assertIn("DepthColorToSrgb", text)
+
+    def test_hdr_warp_stays_linear_fp16_until_pq_conversion(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        display = os.path.join(repo, "src", "platform", "windows", "display_vram.cpp")
+        with open(display, encoding="utf-8") as fh:
+            pipeline = fh.read()
+        self.assertIn("tex_desc.Format = sbs_intermediate_linear ? DXGI_FORMAT_R16G16B16A16_FLOAT", pipeline)
+        self.assertIn("if (!sbs_intermediate_linear && config::video.sbs.shift_profile", pipeline)
+        self.assertIn("input_is_linear ? convert_Y_or_YUV_fp16_ps.get()", pipeline)
+        self.assertIn("models::input_color_space::linear_sdr", pipeline)
+        common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
+                              "include", "common.hlsl")
+        with open(common, encoding="utf-8") as fh:
+            color = fh.read()
+        self.assertIn("rgb = Rec709toRec2020(rgb)", color)
+        self.assertIn("rgb *= 80", color)
+        self.assertIn("return NitsToPQ(rgb)", color)
+
+    def test_hdr_debug_preview_preserves_hue(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        path = os.path.join(repo, "src", "platform", "windows", "sbs_debug_dump.cpp")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("const float luminance = std::max(0.2126f * r + 0.7152f * g", text)
+        self.assertIn("const float tone_scale = 1.0f / (1.0f + luminance)", text)
+        self.assertNotIn("c = c / (1.0f + c)", text)
+
+    def test_report_reuses_one_aggregate_decision_and_writes_sidecar(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        path = os.path.join(repo, "tools", "sbsbench", "build_report.py")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("AB_DECISION = sbsbench.evaluate_ab_decision(\n    ctrl_agg, treat_agg", text)
+        self.assertIn("decision = AB_DECISION", text)
+        self.assertIn('"decision_clips": DECISION_CLIPS', text)
+        self.assertIn('"decision_scope": DECISION_SCOPE', text)
+        self.assertIn('"source_artifact_clips": SOURCE_ARTIFACT_CLIPS', text)
+        self.assertIn('AB_DECISION["verdict"]', text)
+
+    def test_depth_transform_audit_preserves_16bit_precision(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "depth.png")
+            values = np.linspace(0, 65535, 100, dtype=np.uint16).reshape(10, 10)
+            Image.fromarray(values).save(path)
+            stats = audit_depth_transform.frame_stats(path)
+        self.assertAlmostEqual(stats["spread_p95_p05"], 0.9, delta=0.02)
+        self.assertGreater(stats["saturated_low_pct"], 0.0)
+        self.assertGreater(stats["saturated_high_pct"], 0.0)
+
+    def test_guided_depth_is_bounded_by_local_input_extrema(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        path = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
+                            "depth_guided_upsample_cs.hlsl")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("dsum += d * w", text)
+        self.assertIn("dsum / wsum", text)
+        self.assertIn("clamp(mid + (dOut - mid) * 3.0f, dmin, dmax)", text)
+
     def test_shift_profile_override_uses_last_explicit_value(self):
         self.assertEqual(run_eval.extra_value(
             ["--shift-profile", "apollo", "--shift-profile", "bestv2"],
@@ -70,6 +179,15 @@ class EvalContractTests(unittest.TestCase):
         dy, dx = sbsbench.phase_shift(a, b)
         self.assertAlmostEqual(dy, -2.0, places=5)
         self.assertAlmostEqual(dx, 5.0, places=5)
+
+    def test_disparity_field_covers_tile_sized_frame_and_final_borders(self):
+        rng = np.random.default_rng(2026)
+        left = rng.random((192, 320), dtype=np.float32)
+        right = np.roll(left, 3, axis=1)
+        field = sbsbench.disparity_field(left, right, tile=192, stride=128)
+        self.assertIsNotNone(field)
+        self.assertEqual(len(field[0]), 2)  # x=0 and the border-aligned x=128 tile
+        self.assertEqual(sbsbench._tile_positions(320, 192, 128), [0, 128])
 
     def test_sequence_joins_by_frame_identity(self):
         with tempfile.TemporaryDirectory() as root:
@@ -95,6 +213,37 @@ class EvalContractTests(unittest.TestCase):
             Image.fromarray(blank).save(os.path.join(seq, "sbs_00008.png"))
             Image.fromarray(blank[:, :16]).save(os.path.join(frames, "frame_00007.png"))
             with self.assertRaisesRegex(ValueError, "frame-id mismatch"):
+                sbsbench.measure_sequence(seq, frames)
+
+    def test_public_clip_rejects_missing_required_ground_truth(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            os.makedirs(seq)
+            os.makedirs(frames)
+            Image.fromarray(np.zeros((16, 32, 3), np.uint8)).save(
+                os.path.join(seq, "sbs_00000.png"))
+            Image.fromarray(np.zeros((16, 16, 3), np.uint8)).save(
+                os.path.join(frames, "frame_00000.png"))
+            with open(os.path.join(frames, "meta.json"), "w", encoding="utf-8") as fh:
+                fh.write('{"dataset":"Example Public Dataset","required_gt_depth":true}')
+            with self.assertRaisesRegex(ValueError, "requires GT depth"):
+                sbsbench.measure_sequence(seq, frames)
+
+    def test_public_clip_rejects_missing_required_optical_flow(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            os.makedirs(seq)
+            os.makedirs(frames)
+            for frame_id in range(2):
+                Image.fromarray(np.zeros((16, 32, 3), np.uint8)).save(
+                    os.path.join(seq, f"sbs_{frame_id:05d}.png"))
+                Image.fromarray(np.zeros((16, 16, 3), np.uint8)).save(
+                    os.path.join(frames, f"frame_{frame_id:05d}.png"))
+            with open(os.path.join(frames, "meta.json"), "w", encoding="utf-8") as fh:
+                fh.write('{"required_gt_flow":true}')
+            with self.assertRaisesRegex(ValueError, "requires GT optical flow"):
                 sbsbench.measure_sequence(seq, frames)
 
     def test_duplicate_numeric_identity_is_rejected(self):
@@ -209,11 +358,22 @@ class EvalContractTests(unittest.TestCase):
 
     def test_hard_integrity_aggregates_worst_frame_not_mean(self):
         agg = sbsbench.aggregate([
-            {"source_coverage_pct": 100.0, "positive_disparity_pct": 0.5},
-            {"source_coverage_pct": 70.0, "positive_disparity_pct": 4.0},
+            {"source_coverage_pct": 100.0, "positive_disparity_pct": 0.5,
+             "vmisalign_pct": 0.01},
+            {"source_coverage_pct": 70.0, "positive_disparity_pct": 4.0,
+             "vmisalign_pct": 0.2},
         ])
         self.assertEqual(agg["source_coverage_pct"], 70.0)
         self.assertEqual(agg["positive_disparity_pct"], 4.0)
+        self.assertEqual(agg["vmisalign_pct"], 0.2)
+
+    def test_resolution_independent_metrics_preserve_normalized_geometry(self):
+        dx_small = np.array([-4.0, 0.0, 4.0])
+        dx_large = dx_small * 2.0
+        weights = np.ones(3)
+        spread_small = sbsbench.pop_spread(dx_small, weights) / 400.0 * 100.0
+        spread_large = sbsbench.pop_spread(dx_large, weights) / 800.0 * 100.0
+        self.assertAlmostEqual(spread_small, spread_large)
 
     def test_source_coverage_and_integrity_detect_missing_content(self):
         rng = np.random.default_rng(22)

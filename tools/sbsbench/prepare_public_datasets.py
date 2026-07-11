@@ -417,6 +417,8 @@ def prepare_clip(manifest, clip_id, clip, downloads_dir, prepared_root):
             "citation": dataset["citation"], "license_note": dataset["license_note"],
             "suite": manifest["prepared_suite"],
             "gt_depth_kind": "disparity" if clip["adapter"] == "sintel_stereo_zip" else "metric",
+            "required_gt_depth": True,
+            "required_gt_flow": clip["adapter"] == "tartanair_v2_zip",
             "selection": selection,
         }
         with open(os.path.join(temp, "meta.json"), "w", encoding="utf-8") as fh:

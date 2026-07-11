@@ -443,13 +443,13 @@ namespace platf::dxgi {
           return -1;
         }
 
-        auto draw = [&](auto &input, auto &y_or_yuv_viewports, auto &uv_viewport) {
+        auto draw = [&](auto &input, auto &y_or_yuv_viewports, auto &uv_viewport, bool input_is_linear) {
           device_ctx->PSSetShaderResources(0, 1, &input);
 
           // Draw Y/YUV
           device_ctx->OMSetRenderTargets(1, &out_Y_or_YUV_rtv, nullptr);
           device_ctx->VSSetShader(convert_Y_or_YUV_vs.get(), nullptr, 0);
-          device_ctx->PSSetShader(display->is_hdr() ? convert_Y_or_YUV_fp16_ps.get() : convert_Y_or_YUV_ps.get(), nullptr, 0);
+          device_ctx->PSSetShader(input_is_linear ? convert_Y_or_YUV_fp16_ps.get() : convert_Y_or_YUV_ps.get(), nullptr, 0);
           auto viewport_count = (format == DXGI_FORMAT_R16_UINT) ? 3 : 1;
           assert(viewport_count <= y_or_yuv_viewports.size());
           device_ctx->RSSetViewports(viewport_count, y_or_yuv_viewports.data());
@@ -460,7 +460,7 @@ namespace platf::dxgi {
             assert(format == DXGI_FORMAT_NV12 || format == DXGI_FORMAT_P010);
             device_ctx->OMSetRenderTargets(1, &out_UV_rtv, nullptr);
             device_ctx->VSSetShader(convert_UV_vs.get(), nullptr, 0);
-            device_ctx->PSSetShader(display->is_hdr() ? convert_UV_fp16_ps.get() : convert_UV_ps.get(), nullptr, 0);
+            device_ctx->PSSetShader(input_is_linear ? convert_UV_fp16_ps.get() : convert_UV_ps.get(), nullptr, 0);
             device_ctx->RSSetViewports(1, &uv_viewport);
             device_ctx->Draw(3, 0);
           }
@@ -470,7 +470,7 @@ namespace platf::dxgi {
         if (!rtvs_cleared) {
           auto black = create_black_texture_for_rtv_clear();
           if (black) {
-            draw(black, out_Y_or_YUV_viewports_for_clear, out_UV_viewport_for_clear);
+            draw(black, out_Y_or_YUV_viewports_for_clear, out_UV_viewport_for_clear, false);
           }
           rtvs_cleared = true;
         }
@@ -487,8 +487,12 @@ namespace platf::dxgi {
 
           // Run depth estimator. On failure it returns null; we fall back to a zero-parallax
           // (flat) SBS frame rather than a globally-shifted one, and warn only once.
+          const auto input_color_space = img.format == DXGI_FORMAT_R16G16B16A16_FLOAT ?
+            (display->is_hdr() ? models::input_color_space::scrgb_hdr :
+                                 models::input_color_space::linear_sdr) :
+            models::input_color_space::srgb;
           auto est = depth_estimator ?
-            depth_estimator->estimate_depth(img_ctx.encoder_input_res.get(), display->is_hdr()) :
+            depth_estimator->estimate_depth(img_ctx.encoder_input_res.get(), input_color_space) :
             models::estimate_result {};
           if (!est.depth && !depth_warned) {
             BOOST_LOG(error) << "Depth estimation unavailable; streaming flat (zero-parallax) SBS."sv;
@@ -503,8 +507,9 @@ namespace platf::dxgi {
             device_ctx->ClearUnorderedAccessViewUint(sbs_vd3d_winner_uav.get(), clear_winner);
             device_ctx->CSSetShader(sbs_vd3d_forward_cs.get(), nullptr, 0);
             device_ctx->CSSetSamplers(0, 1, &sampler_linear);
-            ID3D11ShaderResourceView* cs_srvs[] = {est.depth.Get(), est.subject.Get(), nullptr, est.plane_lock.Get()};
-            device_ctx->CSSetShaderResources(1, 4, cs_srvs);
+            ID3D11ShaderResourceView* cs_srvs[] = {img_ctx.encoder_input_res.get(), est.depth.Get(),
+              est.subject.Get(), nullptr, est.plane_lock.Get()};
+            device_ctx->CSSetShaderResources(0, 5, cs_srvs);
             ID3D11UnorderedAccessView* cs_uavs[] = {sbs_vd3d_winner_uav.get()};
             device_ctx->CSSetUnorderedAccessViews(0, 1, cs_uavs, nullptr);
             ID3D11Buffer* cs_cb[] = {sbs_reprojection_cbuffer.get()};
@@ -514,9 +519,9 @@ namespace platf::dxgi {
             device_ctx->Dispatch((eye_w + 15u) / 16u, (eye_h + 15u) / 16u, 1u);
 
             ID3D11UnorderedAccessView* null_uav[] = {nullptr};
-            ID3D11ShaderResourceView* null_cs_srvs[] = {nullptr, nullptr, nullptr, nullptr};
+            ID3D11ShaderResourceView* null_cs_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
             device_ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
-            device_ctx->CSSetShaderResources(1, 4, null_cs_srvs);
+            device_ctx->CSSetShaderResources(0, 5, null_cs_srvs);
           }
 
           // Draw the selected geometry implementation into the shared SBS intermediate.
@@ -561,13 +566,13 @@ namespace platf::dxgi {
           }
 
           // Draw captured frame (now SBS, optionally post-warp sharpened).
-          draw(final_sbs_srv, out_Y_or_YUV_viewports, out_UV_viewport);
+          draw(final_sbs_srv, out_Y_or_YUV_viewports, out_UV_viewport, sbs_intermediate_linear);
 
           // Debug frame dump (offline artifact inspection): on the client "Dump 3D" button or a
           // "dump.trigger" file, save this frame's 2D source, depth map and SBS result. See
           // sbs_debug_dump.h. No-op unless APOLLO_SBS_DUMP is set.
           sbs_dumper.maybe_dump(device.get(), device_ctx.get(),
-            img_ctx.encoder_input_res.get(), est.depth.Get(), final_sbs_srv);
+            img_ctx.encoder_input_res.get(), est.depth.Get(), final_sbs_srv, display->is_hdr());
 
           if (perf) {
             auto dt = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - perf_t0).count();
@@ -576,7 +581,8 @@ namespace platf::dxgi {
           }
         } else {
           // Plain 2D: draw the captured frame straight into the output.
-          draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewports, out_UV_viewport);
+          draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewports, out_UV_viewport,
+            img.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
         }
 
         // Release encoder mutex to allow capture code to reuse this image
@@ -696,12 +702,40 @@ namespace platf::dxgi {
       return false;
     }
 
+    void update_sbs_constant_buffers(float content_scale_x, float content_scale_y,
+                                     float source_to_output = 1.0f) {
+      float sbs_params[16] {
+        (float) config::video.sbs.divergence, (float) config::video.sbs.focal_plane,
+        (float) config::video.sbs.parallax_steps, (float) config::video.sbs.border_fade,
+        (float) config::video.sbs.depth_floor, config::video.sbs.subject_track ? 1.0f : 0.0f,
+        (float) config::video.sbs.subject_lock, config::video.sbs.subject_stretch ? 1.0f : 0.0f,
+        (float) config::video.sbs.subject_plane_lock, (float) config::video.sbs.subject_plane_width,
+        content_scale_x, content_scale_y, (float) config::video.sbs.vd3d_forward_blend,
+        (float) config::video.sbs.vd3d_fill_radius,
+        config::video.sbs.shift_profile == "bestv2" ? 1.0f : 0.0f, source_to_output
+      };
+      sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);
+
+      float passthrough_params[16] {
+        0.0f, (float) config::video.sbs.focal_plane, (float) config::video.sbs.parallax_steps,
+        (float) config::video.sbs.border_fade, (float) config::video.sbs.depth_floor,
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, content_scale_x, content_scale_y,
+        (float) config::video.sbs.vd3d_forward_blend, (float) config::video.sbs.vd3d_fill_radius,
+        0.0f, source_to_output
+      };
+      sbs_passthrough_cbuffer = make_buffer(device.get(), passthrough_params);
+    }
+
     int init_output(ID3D11Texture2D *frame_texture, int width, int height, int sbs_mode_param = ::video::SBS_OFF) {
       // The underlying frame pool owns the texture, so we must reference it for ourselves
       frame_texture->AddRef();
       output_texture.reset(frame_texture);
       sbs_mode = sbs_mode_param;
       sbs_vd3d_warp = sbs_mode != ::video::SBS_OFF && config::video.sbs.warp == "vd3d";
+      // WGC uses FP16 for both HDR and 10-bit SDR capture. In either case the texture is linear;
+      // HDR only changes the later linear-scRGB -> Rec.2020/PQ conversion.
+      sbs_intermediate_linear = display->is_hdr() ||
+        display->capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT;
 
       HRESULT status = S_OK;
 
@@ -825,10 +859,27 @@ namespace platf::dxgi {
       float in_width = sbs_on ? display->width * 2 : display->width;
       float in_height = display->height;
 
-      // Ensure aspect ratio is maintained
+      // Ensure aspect ratio is maintained. SBS owns a full-size packed intermediate and performs
+      // the fit independently inside each eye in the warp shaders. Applying one packed viewport
+      // would put a pillarbox only at the far left of the left eye and far right of the right eye,
+      // which appears as a large false disparity. Plain 2D retains the normal fitted viewport.
       auto scalar = std::fminf(out_width / in_width, out_height / in_height);
-      auto out_width_f = in_width * scalar;
-      auto out_height_f = in_height * scalar;
+      auto fitted_width = in_width * scalar;
+      auto fitted_height = in_height * scalar;
+      float content_scale_x = 1.0f;
+      float content_scale_y = 1.0f;
+      if (sbs_on) {
+        const float source_aspect = (float)display->width / (float)display->height;
+        const float eye_aspect = ((float)out_width * 0.5f) / (float)out_height;
+        if (eye_aspect > source_aspect) content_scale_x = source_aspect / eye_aspect;
+        else content_scale_y = eye_aspect / source_aspect;
+      }
+      const float source_to_output = sbs_on
+        ? ((float)out_width * 0.5f * content_scale_x) / std::max((float)display->width, 1.0f)
+        : 1.0f;
+      update_sbs_constant_buffers(content_scale_x, content_scale_y, source_to_output);
+      auto out_width_f = sbs_on ? (float)out_width : fitted_width;
+      auto out_height_f = sbs_on ? (float)out_height : fitted_height;
 
       // result is always positive
       auto offsetX = (out_width - out_width_f) / 2;
@@ -837,18 +888,15 @@ namespace platf::dxgi {
       // The SBS reprojection intermediate is only needed when host SBS is active. Plain 2D
       // (SBS_OFF) draws the captured frame straight into the output.
       //
-      // Size the intermediate to the FITTED output content (out_width_f x out_height_f), not the
-      // full 2*capture size. This makes the reprojection render directly at the (possibly capped)
-      // encode resolution: the depth warp's per-eye color sampling of the full-res source does the
-      // down-resolution, so there's no post-warp resample of the disoccluded/warped frame. The
-      // final draw of this intermediate into the output viewport is then 1:1.
+      // Size the intermediate to the full encoded output. The warp renders directly at the
+      // (possibly capped) encode resolution and applies identical aspect-fit bars inside each eye.
       if (sbs_on) {
         D3D11_TEXTURE2D_DESC tex_desc = {};
         tex_desc.Width = (UINT) std::lround(out_width_f);
         tex_desc.Height = (UINT) std::lround(out_height_f);
         tex_desc.MipLevels = 1;
         tex_desc.ArraySize = 1;
-        tex_desc.Format = display->is_hdr() ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
+        tex_desc.Format = sbs_intermediate_linear ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
         tex_desc.SampleDesc.Count = 1;
         tex_desc.Usage = D3D11_USAGE_DEFAULT;
         tex_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
@@ -858,10 +906,15 @@ namespace platf::dxgi {
           BOOST_LOG(error) << "Failed to create SBS texture";
           return -1;
         }
-        device->CreateRenderTargetView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_rtv);
-        device->CreateShaderResourceView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_srv);
+        if (FAILED(device->CreateRenderTargetView(
+              sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_rtv)) ||
+            FAILED(device->CreateShaderResourceView(
+              sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_srv))) {
+          BOOST_LOG(error) << "Failed to create SBS texture views";
+          return -1;
+        }
 
-        if (!display->is_hdr() && config::video.sbs.shift_profile == "bestv2" &&
+        if (!sbs_intermediate_linear && config::video.sbs.shift_profile == "bestv2" &&
             config::video.sbs.bestv2_sharpen) {
           status = device->CreateTexture2D(&tex_desc, nullptr, &sbs_sharpen_texture);
           if (FAILED(status) ||
@@ -1129,42 +1182,8 @@ namespace platf::dxgi {
       // lazily on the first SBS frame via ensure_depth_estimator(), so plain 2D (SBS_OFF)
       // sessions never pay for it.
 
-      // SBS reprojection constants (see sbs_reprojection_ps.hlsl): {divergence, focal,
-      // parallax_steps, border_fade, depth_floor, subject_track, subject_lock, subject_stretch,
-      // subject_plane_lock, subject_plane_width, two pads, VD3D hybrid, Bestv2-profile flag, pad}.
-      float sbs_params[16] {
-        (float) config::video.sbs.divergence,
-        (float) config::video.sbs.focal_plane,
-        (float) config::video.sbs.parallax_steps,
-        (float) config::video.sbs.border_fade,
-        (float) config::video.sbs.depth_floor,
-        config::video.sbs.subject_track ? 1.0f : 0.0f,
-        (float) config::video.sbs.subject_lock,
-        config::video.sbs.subject_stretch ? 1.0f : 0.0f,
-        (float) config::video.sbs.subject_plane_lock,
-        (float) config::video.sbs.subject_plane_width,
-        0.0f,
-        0.0f,
-        (float) config::video.sbs.vd3d_forward_blend,
-        (float) config::video.sbs.vd3d_fill_radius,
-        config::video.sbs.shift_profile == "bestv2" ? 1.0f : 0.0f, 0.0f
-      };
-      sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);
-
-      // Passthrough variant with zero divergence, bound when depth estimation is unavailable
-      // so we still emit a correctly-framed (flat) SBS frame instead of a globally-shifted one.
-      float sbs_passthrough_params[16] {
-        0.0f,
-        (float) config::video.sbs.focal_plane,
-        (float) config::video.sbs.parallax_steps,
-        (float) config::video.sbs.border_fade,
-        (float) config::video.sbs.depth_floor,
-        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-        (float) config::video.sbs.vd3d_forward_blend,
-        (float) config::video.sbs.vd3d_fill_radius,
-        0.0f, 0.0f
-      };
-      sbs_passthrough_cbuffer = make_buffer(device.get(), sbs_passthrough_params);
+      // Rebuilt by init_output() once the source/output aspect relationship is known.
+      update_sbs_constant_buffers(1.0f, 1.0f);
 
       return 0;
     }
@@ -1331,6 +1350,7 @@ namespace platf::dxgi {
     render_target_t sbs_sharpen_rtv;
     shader_res_t sbs_sharpen_srv;
     bool sbs_vd3d_warp = false;
+    bool sbs_intermediate_linear = false;
     texture2d_t sbs_vd3d_winner_texture;
     unordered_access_t sbs_vd3d_winner_uav;
     shader_res_t sbs_vd3d_winner_srv;

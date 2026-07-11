@@ -148,9 +148,14 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
     bool is_right_eye = uv.x > 0.5f;
     float eyeSign = is_right_eye ? 1.0f : -1.0f;
 
-    // Map this eye's half back into the source image's [0,1] horizontal range.
-    float2 src_uv = uv;
-    src_uv.x = is_right_eye ? (uv.x - 0.5f) * 2.0f : uv.x * 2.0f;
+    // Map this eye's half into its own aspect-fitted source rectangle. Bars are identical in both
+    // eyes, so aspect conversion cannot introduce a global stereo offset.
+    float2 output_uv = uv;
+    output_uv.x = is_right_eye ? (uv.x - 0.5f) * 2.0f : uv.x * 2.0f;
+    float2 src_uv;
+    if (!ContentToSourceUV(output_uv, src_uv)) {
+        return float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
 
     float2 sample_uv = Reproject(src_uv, eyeSign);
 

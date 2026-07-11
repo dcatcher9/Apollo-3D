@@ -19,6 +19,11 @@ Companion to the validated findings in the sbs-vd3d-port memory and the roadmap 
 
 ## Phase-B per-warp quality profiles
 
+> **Revalidated 2026-07-11:** the earlier decisions in this working history predate schema 6,
+> resolution/color fixes, and the expanded datasets. The current ledger and exact evidence are in
+> [sbs-feature-decision-revisit.md](sbs-feature-decision-revisit.md). It supersedes the old numeric
+> conclusions below where they disagree.
+
 Phase B starts from two independent profiles rather than forcing the same processors onto both
 geometry implementations:
 

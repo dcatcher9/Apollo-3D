@@ -27,7 +27,11 @@ uint WinnerAt(int local_x, uint y, bool right_eye, uint eye_w) {
 
 float4 ForwardColor(uint local_x, uint y, bool right_eye, uint eye_w, uint eye_h, float2 fallback_uv) {
     uint winner = WinnerAt((int)local_x, y, right_eye, eye_w);
-    int radius = clamp((int)round(vd3d_fill_radius), 0, 256);
+    uint source_w, source_h;
+    LeftColorTexture.GetDimensions(source_w, source_h);
+    // Bestv2's fill radius is calibrated in source pixels. Scale it into the output-eye grid so
+    // a 5120->4096 capped stream uses 96*.8 ~= 77 output pixels rather than filling 25% farther.
+    int radius = clamp((int)round(vd3d_fill_radius * source_to_output), 0, 256);
 
     // Equivalent to VD3D's iterative nearest-valid fill. At equal distance the first lookup is
     // the preferred background side: +x for left eye, -x for right eye.
@@ -45,8 +49,12 @@ float4 ForwardColor(uint local_x, uint y, bool right_eye, uint eye_w, uint eye_h
         return LeftColorTexture.Sample(LinearSampler, fallback_uv);
     }
     uint source_x = winner & 0xffffu;
-    float2 source_uv = float2(((float)source_x + 0.5f) / (float)eye_w,
-                              ((float)y + 0.5f) / (float)eye_h);
+    float2 winner_output_uv = float2(((float)source_x + 0.5f) / (float)eye_w,
+                                     ((float)y + 0.5f) / (float)eye_h);
+    float2 source_uv;
+    if (!ContentToSourceUV(winner_output_uv, source_uv)) {
+        return float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
     return LeftColorTexture.Sample(LinearSampler, source_uv);
 }
 
@@ -54,19 +62,25 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
     uint full_w, eye_h;
     WinnerTexture.GetDimensions(full_w, eye_h);
     uint eye_w = full_w / 2u;
+    uint source_w, source_h;
+    LeftColorTexture.GetDimensions(source_w, source_h);
     uint2 output_px = (uint2)input.Pos.xy;
     bool right_eye = output_px.x >= eye_w;
     uint local_x = right_eye ? output_px.x - eye_w : output_px.x;
 
-    float2 uv = float2(((float)local_x + 0.5f) / (float)eye_w,
-                       ((float)output_px.y + 0.5f) / (float)eye_h);
+    float2 output_uv = float2(((float)local_x + 0.5f) / (float)eye_w,
+                              ((float)output_px.y + 0.5f) / (float)eye_h);
+    float2 uv;
+    if (!ContentToSourceUV(output_uv, uv)) {
+        return float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
     float d = DepthTexture.SampleLevel(LinearSampler, uv, 0);
     float4 s0 = SubjectState[0];
     float4 s1 = SubjectState[1];
     float4 s2 = SubjectState[2];
     bool shaped = (subject_track > 0.5f) && (s0.w > 0.5f);
     float plane_mask = PlaneLockTexture.SampleLevel(LinearSampler, uv, 0);
-    float parallax = DepthParallax(d, plane_mask, uv.x, s0, s1, s2, shaped, (float)eye_w);
+    float parallax = DepthParallax(d, plane_mask, uv.x, s0, s1, s2, shaped, (float)source_w);
 
     // torch grid_sample uses normalized [-1,1] coordinates; DepthParallax is UV [0,1], hence
     // this is the same left:+shift/right:-shift convention after polarity translation.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d11.h>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -9,6 +10,12 @@
 #include "config.h"
 
 namespace models {
+
+    enum class input_color_space : uint32_t {
+        srgb = 0,       ///< gamma-encoded SDR UNORM capture
+        linear_sdr = 1, ///< linear FP16 capture targeting an SDR stream
+        scrgb_hdr = 2,  ///< linear scRGB FP16 HDR capture; tone-map for the SDR-trained model
+    };
 
     void precompile_tensorrt_engine(const std::filesystem::path& assets_dir, const config::depth_model_info& model);
 
@@ -57,7 +64,8 @@ namespace models {
          * @param input_srv D3D11 ShaderResourceView containing the RGB image (usually B8G8R8A8_UNORM or R8G8B8A8_UNORM).
          * @return estimate_result; all views are owned by the estimator and overwritten by later calls.
          */
-        estimate_result estimate_depth(ID3D11ShaderResourceView* input_srv, bool is_hdr = false);
+        estimate_result estimate_depth(ID3D11ShaderResourceView* input_srv,
+                                       input_color_space color_space = input_color_space::srgb);
 
         /**
          * @brief Finish and consume exactly one inference previously submitted by estimate_depth().
@@ -67,7 +75,7 @@ namespace models {
          * The live capture path must continue to use estimate_depth() alone so it stays asynchronous.
          */
         estimate_result finish_pending_depth_for_benchmark(ID3D11ShaderResourceView* input_srv,
-                                                           bool is_hdr = false);
+          input_color_space color_space = input_color_space::srgb);
 
     private:
         struct impl;

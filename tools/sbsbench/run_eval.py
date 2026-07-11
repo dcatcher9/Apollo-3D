@@ -38,7 +38,7 @@ import sbsbench  # noqa: E402  (metric implementations)
 
 # Depth models the two modes load (matches the client mode->model binding).
 MODE_MODEL = {"movie": "da3mono_large_fp16", "game": "depth_anything_v2_fp16"}
-EVAL_SCHEMA = 4  # schema 3 + native metric-depth and exact optical-flow reference sidecars
+EVAL_SCHEMA = 6  # schema 5 + resolution-independent spatial gates and aspect-robust pipeline
 
 
 def suite_defaults(name):
@@ -82,7 +82,8 @@ def sha1_dir(path):
             h.update(fh.read())
     try:
         meta = json.load(open(os.path.join(path, "meta.json"), encoding="utf-8"))
-        semantic = {k: meta[k] for k in ("expected_flat", "gt_depth_kind") if k in meta}
+        semantic = {k: meta[k] for k in ("expected_flat", "gt_depth_kind", "dataset",
+                                          "required_gt_depth", "required_gt_flow") if k in meta}
         h.update(json.dumps(semantic, sort_keys=True).encode())
     except (OSError, ValueError):
         pass
@@ -203,7 +204,8 @@ def main():
 
     conf_sha = sha256_files([os.path.abspath(args.conf)])
     metric_sha = sha256_files([os.path.join(SCRIPT_DIR, "sbsbench.py"),
-                               os.path.join(SCRIPT_DIR, "thresholds.json")])
+                               os.path.join(SCRIPT_DIR, "thresholds.json"),
+                               os.path.abspath(__file__)])
     expected_model = MODE_MODEL[args.mode]
     expected_warp = extra_value(
         args.extra, "--warp", conf_value(args.conf, "sbs_3d_warp", "apollo"))
@@ -281,7 +283,10 @@ def main():
             try:
                 clip_meta.update({k: v for k, v in json.load(open(cmp_path)).items()
                                   if k in ("name", "description", "expected_flat", "gt_depth_kind",
-                                           "dataset", "homepage", "citation", "license_note", "suite")})
+                                           "required_gt_depth", "required_gt_flow",
+                                           "dataset", "homepage", "citation", "license_note", "suite",
+                                           "content_type", "source_url", "source_window",
+                                           "source_artifacts")})
             except Exception:
                 pass
 
@@ -301,7 +306,7 @@ def main():
         # so a triggered/regressed metric comes with a place to look.
         worst = {}
         for k in thresholds["metrics"]:
-            if clip_meta.get("expected_flat") and k == "pop_spread_px":
+            if clip_meta.get("expected_flat") and k in ("pop_spread_px", "pop_spread_pct"):
                 continue  # expected-flat score rewards lower false stereo
             fk = k if any(k in r for r in rows) else (
                 k[:-4] if k.endswith(("_p50", "_p95")) else k)
@@ -327,7 +332,7 @@ def main():
 
         # Issue triggers (absolute, baseline-independent).
         for k, spec in thresholds["metrics"].items():
-            if clip_meta.get("expected_flat") and k == "pop_spread_px":
+            if clip_meta.get("expected_flat") and k in ("pop_spread_px", "pop_spread_pct"):
                 continue
             if "trigger" in spec and agg.get(k, 0) > spec["trigger"]:
                 issues.append({"clip": clip, "metric": k, "trigger": spec["trigger"],
@@ -358,7 +363,7 @@ def main():
                 fail(f"{clip}: baseline context is stale/incompatible: {mismatches}. "
                      "Re-run with --update-baselines only after verifying the new eval contract.")
             for k, spec in thresholds["metrics"].items():
-                if clip_meta.get("expected_flat") and k == "pop_spread_px":
+                if clip_meta.get("expected_flat") and k in ("pop_spread_px", "pop_spread_pct"):
                     continue
                 if spec.get("role") == "hard":
                     continue  # absolute hard constraints were evaluated above, independent of baseline

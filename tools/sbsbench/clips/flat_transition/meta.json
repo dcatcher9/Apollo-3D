@@ -1,0 +1,5 @@
+{
+  "name": "flat_transition",
+  "description": "Textured depth scene cutting to a static flat page: range-floor activation and recovery.",
+  "gt_depth_kind": "disparity"
+}

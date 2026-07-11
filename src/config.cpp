@@ -1303,7 +1303,8 @@ namespace config {
     string_f(vars, "sbs_3d_depth_model_url", video.sbs.depth_model_url);
     string_f(vars, "sbs_3d_prebuild_models", video.sbs.prebuild_models);
     double_between_f(vars, "sbs_3d_depth_shift", video.sbs.depth_shift, {0.02, 2.0});
-    int_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width);
+    int_between_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width, {256, 16384});
+    video.sbs.max_encode_width &= ~1;
     double_between_f(vars, "sbs_3d_depth_floor", video.sbs.depth_floor, {0.0, 0.9});
     bool_f(vars, "sbs_3d_guided_upsample", video.sbs.guided_upsample);
     double_between_f(vars, "sbs_3d_guided_sigma", video.sbs.guided_sigma, {0.01, 1.0});

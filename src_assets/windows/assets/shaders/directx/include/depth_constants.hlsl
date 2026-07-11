@@ -10,7 +10,7 @@
 cbuffer Constants : register(b0) {
     uint  target_w;
     uint  target_h;
-    uint  is_hdr;
+    uint  color_mode;        // 0=sRGB SDR, 1=linear SDR, 2=linear scRGB HDR
     float ema_alpha;         // per-pixel depth temporal EMA blend (buffer_to_tex)
     float minmax_alpha;      // normalized min/max temporal EMA blend (depth_minmax_ema)
     uint  reduce_threads;    // total threads in the reduction dispatch (grid-stride)

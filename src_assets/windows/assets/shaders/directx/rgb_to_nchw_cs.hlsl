@@ -3,15 +3,7 @@ RWStructuredBuffer<float> OutputBuffer : register(u0);
 SamplerState LinearSampler : register(s0);
 
 #include "include/depth_constants.hlsl"
-
-// Linear -> sRGB OETF (gamma encode). Depth Anything V2 is trained on sRGB-encoded
-// images, so a linear-light signal must be gamma-encoded before ImageNet normalization.
-float3 linear_to_srgb(float3 c) {
-    c = saturate(c);
-    float3 lo = c * 12.92f;
-    float3 hi = 1.055f * pow(c, 1.0f / 2.4f) - 0.055f;
-    return (c <= 0.0031308f) ? lo : hi;
-}
+#include "include/depth_color.hlsl"
 
 // Compute shader to bilinearly resize RGB interleaved image to NCHW Float32 with ImageNet normalization
 [numthreads(16, 16, 1)]
@@ -27,14 +19,10 @@ void main(uint3 DTid : SV_DispatchThreadID) {
 
     // HDR capture is scRGB: LINEAR light with Rec.709 primaries (so primaries already match
     // the SDR-trained model; only the transfer function differs). Compress highlights with
-    // Reinhard (x/(1+x); 1.0 = SDR white) so values > 1.0 don't blind the first conv layer,
+    // luminance-preserving Reinhard (1.0 scRGB = 80 nits) so highlights don't blind the first conv,
     // then gamma-encode to sRGB so midtones land where ImageNet normalization expects them
     // (feeding linear light makes the image far too dark and degrades the depth estimate).
-    if (is_hdr != 0) {
-        float3 c = max(pixel.rgb, 0.0f);  // scRGB can be slightly negative (out of gamut)
-        c = c / (1.0f + c);
-        pixel.rgb = linear_to_srgb(c);
-    }
+    pixel.rgb = DepthColorToSrgb(pixel.rgb, color_mode);
 
     // ImageNet Normalization
     float r = (pixel.r - 0.485f) / 0.229f;

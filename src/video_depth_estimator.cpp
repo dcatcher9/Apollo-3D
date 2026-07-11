@@ -100,6 +100,30 @@ static int round_to_patch(float x, int patch = 14) {
     return std::max(patch, (int) std::round(x / patch) * patch);
 }
 
+// Pick the largest patch-aligned short side that fits both native/profile limits, deriving the
+// long side from the source aspect instead of rounding/capping both axes independently. Independent
+// rounding turned 5120x2160 into 1008x420 (2.400:1); this returns 994x420 (2.367:1), keeping the
+// model grid much closer to the 2.370:1 source without wasting a meaningful amount of inference.
+static std::pair<int, int> aspect_aligned_dims(float aspect, int short_side,
+                                               int max_w, int max_h, int patch = 14) {
+    aspect = std::max(aspect, 1e-6f);
+    max_w = std::max(patch, (max_w / patch) * patch);
+    max_h = std::max(patch, (max_h / patch) * patch);
+    const int requested_short = round_to_patch((float)short_side, patch);
+    if (aspect >= 1.0f) {
+        for (int h = std::min(requested_short, max_h); h >= patch; h -= patch) {
+            const int w = round_to_patch((float)h * aspect, patch);
+            if (w <= max_w) return {w, h};
+        }
+    } else {
+        for (int w = std::min(requested_short, max_w); w >= patch; w -= patch) {
+            const int h = round_to_patch((float)w / aspect, patch);
+            if (h <= max_h) return {w, h};
+        }
+    }
+    return {patch, patch};
+}
+
 // Ensure the shared runtime exists, deserialize `model_name`'s engine into its global slot if not
 // already resident, and hand back a spare pooled execution context if one is available. The CALLER
 // must hold g_trt_mutex. Context CREATION is deliberately left to the caller OUTSIDE the lock:
@@ -352,8 +376,10 @@ namespace models {
         // Caching
         int target_w = 0;
         int target_h = 0;
+        int guided_w = 0;
+        int guided_h = 0;
         UINT reduce_groups = 0;  // threadgroups for the min/max reduction (groups * 256 = total threads)
-        int cb_is_hdr = -1;  // is_hdr baked into the constant buffers (-1 = not built yet)
+        int cb_color_mode = -1;  // input_color_space baked into constant buffers
 
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> rgb_to_nchw_cs;
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_cs;
@@ -945,11 +971,17 @@ namespace models {
                 context->CSSetShaderResources(0, 1, null_srvs3);
             };
 
-            // Exact separable equivalents of 21x21 dilation and 15x15 closing.
-            filter(plane_band_srv.Get(), plane_work_a_uav.Get(), 0, 10, 0);
-            filter(plane_work_a_srv.Get(), plane_work_b_uav.Get(), 1, 10, 0);
-            filter(plane_work_b_srv.Get(), plane_work_a_uav.Get(), 0, 7, 1);
-            filter(plane_work_a_srv.Get(), plane_work_b_uav.Get(), 1, 7, 1);
+            // Bestv2's 21/15/13 kernels were calibrated on a 336px-short-side depth grid. Scale
+            // their radii with this model grid's short side so the silhouette support covers the
+            // same fraction of the source at 336, 420, 434, or any future inference resolution.
+            const float morphology_scale = (float)std::min(target_w, target_h) / 336.0f;
+            const uint32_t dilate_radius = std::max(1u, (uint32_t)std::lround(10.0f * morphology_scale));
+            const uint32_t close_radius = std::max(1u, (uint32_t)std::lround(7.0f * morphology_scale));
+            const uint32_t smooth_radius = std::max(1u, (uint32_t)std::lround(6.0f * morphology_scale));
+            filter(plane_band_srv.Get(), plane_work_a_uav.Get(), 0, dilate_radius, 0);
+            filter(plane_work_a_srv.Get(), plane_work_b_uav.Get(), 1, dilate_radius, 0);
+            filter(plane_work_b_srv.Get(), plane_work_a_uav.Get(), 0, close_radius, 1);
+            filter(plane_work_a_srv.Get(), plane_work_b_uav.Get(), 1, close_radius, 1);
 
             // max(original, closed*.70), then exact 13x13 average smoothing.
             set_plane_constants();
@@ -960,8 +992,8 @@ namespace models {
             context->Dispatch(gx, gy, 1);
             context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
             context->CSSetShaderResources(0, 2, null_srvs3);
-            filter(plane_work_a_srv.Get(), plane_work_b_uav.Get(), 0, 6, 2);
-            filter(plane_work_b_srv.Get(), plane_work_a_uav.Get(), 1, 6, 2);
+            filter(plane_work_a_srv.Get(), plane_work_b_uav.Get(), 0, smooth_radius, 2);
+            filter(plane_work_b_srv.Get(), plane_work_a_uav.Get(), 1, smooth_radius, 2);
 
             // Weighted mean of the actual Bestv2 raw shift field.
             set_plane_constants();
@@ -999,7 +1031,8 @@ namespace models {
         // input_srv. Wait for that exact inference, consume it once, and deliberately do NOT
         // enqueue a duplicate. This preserves the configured EMA coefficients and makes temporal
         // evaluation comparable to a one-inference-per-source-frame offline pipeline.
-        estimate_result finish_pending_for_benchmark(ID3D11ShaderResourceView* input_srv, bool is_hdr) {
+        estimate_result finish_pending_for_benchmark(
+          ID3D11ShaderResourceView* input_srv, input_color_space color_space) {
             auto& cuda = cuda_driver_api::get();
             if (!has_previous_frame || !cu_stream || !cuda.cuStreamSynchronize) {
                 return make_result();
@@ -1015,25 +1048,26 @@ namespace models {
             if (sbs_perf::enabled()) {
                 perf_drain(perf_depth);
             }
-            ensure_cbuffers(is_hdr);
+            ensure_cbuffers(color_space);
             if (!cbuffer) {
                 return {};
             }
             normalize_depth_output();
             has_previous_frame = false;  // the output buffer has been consumed; never fold it twice
-            run_guided(input_srv, is_hdr);
+            run_guided(input_srv, color_space);
             return make_result();
         }
 
 
         // (Re)build the two constant buffers. All contents are session-constant once the model
         // resolution is fixed, so they are immutable buffers created once -- rebuilt only if
-        // is_hdr ever flips (an HDR change normally recreates the whole encode device anyway).
-        void ensure_cbuffers(bool is_hdr) {
-            if (cb_is_hdr == (int)is_hdr && cbuffer) {
+        // Rebuild if capture color encoding changes during a display/mode transition.
+        void ensure_cbuffers(input_color_space color_space) {
+            const int color_mode = (int)color_space;
+            if (cb_color_mode == color_mode && cbuffer) {
                 return;
             }
-            cb_is_hdr = (int)is_hdr;
+            cb_color_mode = color_mode;
 
             D3D11_BUFFER_DESC cb_desc = {};
             cb_desc.Usage = D3D11_USAGE_IMMUTABLE;
@@ -1050,7 +1084,7 @@ namespace models {
             float* cbf = (float*)cb;
             cb[0] = (uint32_t)target_w;
             cb[1] = (uint32_t)target_h;
-            cb[2] = is_hdr ? 1u : 0u;
+            cb[2] = (uint32_t)color_mode;
             cbf[3] = ema_alpha;
             cbf[4] = minmax_alpha;
             cb[5] = reduce_groups * 256u;  // total threads for the reduction grid-stride
@@ -1072,18 +1106,18 @@ namespace models {
 
             cb_desc.ByteWidth = 32;  // guided cbuffer keeps the original 8-slot layout
             if (guided_upsample) {
-                // Guided passes: {in_w, in_h, out_w, out_h, inv2sig_sp2, inv2sig_r2, is_hdr, radius}.
+                // Guided passes: {in_w, in_h, out_w, out_h, spatial, range, color_mode, radius}.
                 const float kernel_radius = 5.0f;  // low-res texels; spans the model's ~8-9 texel edge ramp
                 const float sigma_sp = kernel_radius * 0.5f;
                 uint32_t gb[8] = {};
                 float* gbf = (float*)gb;
                 gb[0] = (uint32_t)target_w;
                 gb[1] = (uint32_t)target_h;
-                gb[2] = (uint32_t)target_w * 2;
-                gb[3] = (uint32_t)target_h * 2;
+                gb[2] = (uint32_t)guided_w;
+                gb[3] = (uint32_t)guided_h;
                 gbf[4] = 1.0f / (2.0f * sigma_sp * sigma_sp);
                 gbf[5] = 1.0f / (2.0f * guided_sigma * guided_sigma);
-                gb[6] = is_hdr ? 1u : 0u;
+                gb[6] = (uint32_t)color_mode;
                 gbf[7] = kernel_radius;
                 D3D11_SUBRESOURCE_DATA gsd = {gb, 0, 0};
                 guided_cbuffer.Reset();
@@ -1097,8 +1131,8 @@ namespace models {
             // OUTPUT resolution the curvature lands on: 2x guided_depth_tex when guided upsample
             // is on (so the guided pass can't re-flatten it), else 1x depth_tex.
             if (foreground_curvature > 0.0f) {
-                const uint32_t cv_w = guided_upsample ? (uint32_t) target_w * 2 : (uint32_t) target_w;
-                const uint32_t cv_h = guided_upsample ? (uint32_t) target_h * 2 : (uint32_t) target_h;
+                const uint32_t cv_w = guided_upsample ? (uint32_t) guided_w : (uint32_t) target_w;
+                const uint32_t cv_h = guided_upsample ? (uint32_t) guided_h : (uint32_t) target_h;
                 struct { uint32_t w, h; float strength, near_start, gamma, spread, pad0, pad1; } cvb = {
                     cv_w, cv_h,
                     foreground_curvature, 0.60f, 1.35f, 0.60f, 0.0f, 0.0f
@@ -1131,17 +1165,17 @@ namespace models {
         // 2x res using the full-res color as the reference. Runs every frame (cheap: taps hit
         // two low-res textures), including cadence-skip frames -- that is what keeps silhouettes
         // tracking the image while the depth itself refreshes at depth_fps.
-        void run_guided(ID3D11ShaderResourceView* color_srv, bool is_hdr) {
+        void run_guided(ID3D11ShaderResourceView* color_srv, input_color_space color_space) {
             if (!guided_upsample || !guided_depth_uav || !guide_uav || !color_srv ||
                 !depth_guide_downsample_cs || !depth_guided_upsample_cs) {
                 return;
             }
-            ensure_cbuffers(is_hdr);
+            ensure_cbuffers(color_space);
             if (!guided_cbuffer) {
                 return;
             }
 
-            const UINT out_w = (UINT) target_w * 2, out_h = (UINT) target_h * 2;
+            const UINT out_w = (UINT) guided_w, out_h = (UINT) guided_h;
 
             ID3D11UnorderedAccessView* null_uav = nullptr;
             ID3D11ShaderResourceView* null_srvs[3] = {nullptr, nullptr, nullptr};
@@ -1342,7 +1376,7 @@ namespace models {
             }
         }
 
-        estimate_result estimate(ID3D11ShaderResourceView* input_srv, bool is_hdr) {
+        estimate_result estimate(ID3D11ShaderResourceView* input_srv, input_color_space color_space) {
             if (!exec_context || !rgb_to_nchw_cs || !buffer_to_tex_cs || !input_srv) return {};
 
             auto& cuda = cuda_driver_api::get();
@@ -1369,14 +1403,16 @@ namespace models {
                 auto q = cuda.cuStreamQuery(cu_stream);
                 if (q == CUDA_ERROR_NOT_READY) {
                     // Still re-snap the stale depth to THIS frame's color edges (D3D-only, cheap).
-                    run_guided(input_srv, is_hdr);
+                    run_guided(input_srv, color_space);
                     return make_result();
                 }
                 if (q != CUDA_SUCCESS && !stream_error_logged) {
-                    // Anything other than success/not-ready means the stream (or context) is
-                    // broken; keep going -- enqueueV3 below will report per-frame failures.
                     BOOST_LOG(error) << "cuStreamQuery failed: " << q;
                     stream_error_logged = true;
+                }
+                if (q != CUDA_SUCCESS) {
+                    run_guided(input_srv, color_space);
+                    return make_result();
                 }
             }
 
@@ -1408,33 +1444,26 @@ namespace models {
                     float a = std::min(std::max(aspect_ratio, 1.0f), std::min(max_aspect, 4.0f));
                     target_w = round_to_patch(fixed_h * a);
                 } else {
-                    // Short-side budget (iw3-style): pin the short side so vertical depth detail
-                    // is constant regardless of aspect ratio; the long side grows with aspect,
-                    // capped by max_aspect to bound cost.
-                    int short_side = round_to_patch((float)depth_short_side);
-                    if (aspect_ratio >= 1.0f) {
-                        target_h = short_side;
-                        target_w = (int)std::round(short_side * std::min(aspect_ratio, max_aspect));
-                    } else {
-                        target_w = short_side;
-                        target_h = (int)std::round(short_side * std::min(1.0f / aspect_ratio, max_aspect));
-                    }
-
-                    target_h = round_to_patch((float)target_h);
-                    target_w = round_to_patch((float)target_w);
-
-                    // Cap the model input aspect-preserving against two limits: the TensorRT
-                    // engine's MAX profile (1008), and the frame's native resolution -- never
-                    // upscale a small input up to the budget (matches iw3's limit_resolution).
-                    // Scaling both axes by a single factor keeps the depth undistorted.
+                    // Keep the patch-aligned tensor as close as possible to source aspect while
+                    // respecting the TensorRT profile, the configured aspect cap, and native size.
+                    // Deriving the long side from each candidate short side avoids independent
+                    // axis rounding/capping, which visibly distorted ultrawide depth grids.
                     int max_w = std::min(1008, (int)input_desc.Width);
                     int max_h = std::min(1008, (int)input_desc.Height);
-                    if (target_w > max_w || target_h > max_h) {
-                        float s = std::min((float)max_w / (float)target_w, (float)max_h / (float)target_h);
-                        target_w = round_to_patch((float)target_w * s);
-                        target_h = round_to_patch((float)target_h * s);
-                    }
+                    const float fitted_aspect = aspect_ratio >= 1.0f
+                      ? std::min(aspect_ratio, max_aspect)
+                      : 1.0f / std::min(1.0f / aspect_ratio, max_aspect);
+                    const auto fitted_dims = aspect_aligned_dims(
+                      fitted_aspect, depth_short_side, max_w, max_h);
+                    target_w = fitted_dims.first;
+                    target_h = fitted_dims.second;
                 }
+
+                // Guided depth is at most 2x the model grid, but never exceeds the source color.
+                // Small eval clips previously produced a depth texture larger than their source
+                // while live ultrawide streams stayed below it, changing silhouette sharpness.
+                guided_w = std::min(target_w * 2, (int)input_desc.Width);
+                guided_h = std::min(target_h * 2, (int)input_desc.Height);
 
                 // Threads for the min/max reduction; grid-stride handles any element count.
                 int elems = target_w * target_h;
@@ -1444,6 +1473,8 @@ namespace models {
 
                 if (cuda_in_res) cuda.cuGraphicsUnregisterResource(cuda_in_res);
                 if (cuda_out_res) cuda.cuGraphicsUnregisterResource(cuda_out_res);
+                cuda_in_res = nullptr;
+                cuda_out_res = nullptr;
                 
                 D3D11_BUFFER_DESC buf_desc = {};
                 buf_desc.Usage = D3D11_USAGE_DEFAULT;
@@ -1451,13 +1482,16 @@ namespace models {
                 buf_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
                 buf_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
                 buf_desc.StructureByteStride = sizeof(float);
-                device->CreateBuffer(&buf_desc, nullptr, &tensor_in_buf);
-                device->CreateUnorderedAccessView(tensor_in_buf.Get(), nullptr, &tensor_in_uav);
+                bool resources_ok = SUCCEEDED(device->CreateBuffer(&buf_desc, nullptr, &tensor_in_buf)) &&
+                                    SUCCEEDED(device->CreateUnorderedAccessView(
+                                      tensor_in_buf.Get(), nullptr, &tensor_in_uav));
                 
                 buf_desc.ByteWidth = target_w * target_h * sizeof(float);
                 buf_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                device->CreateBuffer(&buf_desc, nullptr, &tensor_out_buf);
-                device->CreateShaderResourceView(tensor_out_buf.Get(), nullptr, &tensor_out_srv);
+                resources_ok = resources_ok &&
+                  SUCCEEDED(device->CreateBuffer(&buf_desc, nullptr, &tensor_out_buf)) &&
+                  SUCCEEDED(device->CreateShaderResourceView(
+                    tensor_out_buf.Get(), nullptr, &tensor_out_srv));
                 
                 D3D11_TEXTURE2D_DESC tex_desc = {};
                 tex_desc.Width = target_w;
@@ -1468,9 +1502,10 @@ namespace models {
                 tex_desc.SampleDesc.Count = 1;
                 tex_desc.Usage = D3D11_USAGE_DEFAULT;
                 tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-                device->CreateTexture2D(&tex_desc, nullptr, &depth_tex);
-                device->CreateUnorderedAccessView(depth_tex.Get(), nullptr, &depth_uav);
-                device->CreateShaderResourceView(depth_tex.Get(), nullptr, &depth_srv);
+                resources_ok = resources_ok &&
+                  SUCCEEDED(device->CreateTexture2D(&tex_desc, nullptr, &depth_tex)) &&
+                  SUCCEEDED(device->CreateUnorderedAccessView(depth_tex.Get(), nullptr, &depth_uav)) &&
+                  SUCCEEDED(device->CreateShaderResourceView(depth_tex.Get(), nullptr, &depth_srv));
 
                 if (exact_plane_lock) {
                     auto create_plane_texture = [&](Microsoft::WRL::ComPtr<ID3D11Texture2D>& tex,
@@ -1506,26 +1541,37 @@ namespace models {
                 }
 
                 // Raw-disparity per-pixel EMA history (pixel->range order). Same grid as depth_tex.
-                device->CreateTexture2D(&tex_desc, nullptr, &raw_ema_tex);
-                device->CreateUnorderedAccessView(raw_ema_tex.Get(), nullptr, &raw_ema_uav);
+                resources_ok = resources_ok &&
+                  SUCCEEDED(device->CreateTexture2D(&tex_desc, nullptr, &raw_ema_tex)) &&
+                  SUCCEEDED(device->CreateUnorderedAccessView(raw_ema_tex.Get(), nullptr, &raw_ema_uav));
 
                 if (guided_upsample) {
                     // Low-res color guide (same grid as the depth map). RGBA16F: guaranteed
                     // UAV-store format, read back as an SRV in the upsample pass.
                     D3D11_TEXTURE2D_DESC guide_desc = tex_desc;
                     guide_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-                    device->CreateTexture2D(&guide_desc, nullptr, &guide_tex);
-                    device->CreateUnorderedAccessView(guide_tex.Get(), nullptr, &guide_uav);
-                    device->CreateShaderResourceView(guide_tex.Get(), nullptr, &guide_srv);
+                    resources_ok = resources_ok &&
+                      SUCCEEDED(device->CreateTexture2D(&guide_desc, nullptr, &guide_tex)) &&
+                      SUCCEEDED(device->CreateUnorderedAccessView(guide_tex.Get(), nullptr, &guide_uav)) &&
+                      SUCCEEDED(device->CreateShaderResourceView(guide_tex.Get(), nullptr, &guide_srv));
 
                     // Color-edge-snapped depth at 2x the model resolution; what the
                     // reprojection actually samples when guided upsampling is on.
                     D3D11_TEXTURE2D_DESC gd_desc = tex_desc;
-                    gd_desc.Width = (UINT) target_w * 2;
-                    gd_desc.Height = (UINT) target_h * 2;
-                    device->CreateTexture2D(&gd_desc, nullptr, &guided_depth_tex);
-                    device->CreateUnorderedAccessView(guided_depth_tex.Get(), nullptr, &guided_depth_uav);
-                    device->CreateShaderResourceView(guided_depth_tex.Get(), nullptr, &guided_depth_srv);
+                    gd_desc.Width = (UINT) guided_w;
+                    gd_desc.Height = (UINT) guided_h;
+                    resources_ok = resources_ok &&
+                      SUCCEEDED(device->CreateTexture2D(&gd_desc, nullptr, &guided_depth_tex)) &&
+                      SUCCEEDED(device->CreateUnorderedAccessView(
+                        guided_depth_tex.Get(), nullptr, &guided_depth_uav)) &&
+                      SUCCEEDED(device->CreateShaderResourceView(
+                        guided_depth_tex.Get(), nullptr, &guided_depth_srv));
+                }
+
+                if (!resources_ok) {
+                    BOOST_LOG(error) << "Depth estimator D3D11 resource creation failed; retrying on a later frame.";
+                    target_w = target_h = 0;
+                    return {};
                 }
 
                 // Clear the depth textures to 0.0f: depth_tex so the EMA shader initializes
@@ -1548,6 +1594,12 @@ namespace models {
                 auto res2 = cuda.cuGraphicsD3D11RegisterResource(&cuda_out_res, tensor_out_buf.Get(), 0);
                 if (res1 != 0 || res2 != 0) {
                     BOOST_LOG(error) << "cuGraphicsD3D11RegisterResource failed: " << res1 << ", " << res2;
+                    if (cuda_in_res) cuda.cuGraphicsUnregisterResource(cuda_in_res);
+                    if (cuda_out_res) cuda.cuGraphicsUnregisterResource(cuda_out_res);
+                    cuda_in_res = nullptr;
+                    cuda_out_res = nullptr;
+                    target_w = target_h = 0;
+                    return {};
                 }
             }
 
@@ -1561,13 +1613,13 @@ namespace models {
             if (effective_interval > 1 && (frame_counter % (unsigned)effective_interval) != 1u) {
                 // Off-cadence frame: depth is reused, but re-snap it to this frame's color edges
                 // so silhouettes keep tracking the image between inference frames.
-                run_guided(input_srv, is_hdr);
+                run_guided(input_srv, color_space);
                 return make_result();
             }
 
             // Shared constants for buffer_to_tex_cs, the min/max passes and rgb_to_nchw_cs.
             // Session-constant, so the buffer is built once (immutable), not mapped per frame.
-            ensure_cbuffers(is_hdr);
+            ensure_cbuffers(color_space);
             if (!cbuffer) {
                 return {};
             }
@@ -1577,10 +1629,11 @@ namespace models {
             // cost of depth lagging color by the inference cadence (the temporal EMA hides it).
             if (has_previous_frame) {
                 normalize_depth_output();
+                has_previous_frame = false;
             }
 
             // 3d. Guided upsample: snap the freshly-updated depth to this frame's color edges.
-            run_guided(input_srv, is_hdr);
+            run_guided(input_srv, color_space);
 
             // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
             context->CSSetShader(rgb_to_nchw_cs.Get(), nullptr, 0);
@@ -1605,42 +1658,57 @@ namespace models {
             auto map_res = cuda.cuGraphicsMapResources(2, resources, cu_stream);
             if (map_res != 0) {
                 BOOST_LOG(error) << "cuGraphicsMapResources failed: " << map_res;
+                return make_result();
             }
 
             void* d_in = nullptr;
             void* d_out = nullptr;
-            cuda.cuGraphicsResourceGetMappedPointer((CUdeviceptr*)&d_in, nullptr, cuda_in_res);
-            cuda.cuGraphicsResourceGetMappedPointer((CUdeviceptr*)&d_out, nullptr, cuda_out_res);
+            auto in_ptr_res = cuda.cuGraphicsResourceGetMappedPointer(
+              (CUdeviceptr*)&d_in, nullptr, cuda_in_res);
+            auto out_ptr_res = cuda.cuGraphicsResourceGetMappedPointer(
+              (CUdeviceptr*)&d_out, nullptr, cuda_out_res);
 
-            if (!d_in || !d_out) {
-                BOOST_LOG(error) << "Failed to get mapped pointer for TensorRT.";
+            bool enqueued = false;
+            if (in_ptr_res != CUDA_SUCCESS || out_ptr_res != CUDA_SUCCESS || !d_in || !d_out) {
+                BOOST_LOG(error) << "Failed to get mapped pointer for TensorRT: "
+                                 << in_ptr_res << ", " << out_ptr_res;
             } else {
                 // Fixed-shape engines have their input dims baked in; setInputShape is unnecessary
                 // (and target_w/target_h MUST equal the export resolution or the bindings mismatch).
+                bool bindings_ok = true;
                 if (!fixed_shape) {
                     nvinfer1::Dims in_dims = make_input_dims(input_rank, target_h, target_w);
                     if (!exec_context->setInputShape("pixel_values", in_dims)) {
                         BOOST_LOG(error) << "TensorRT setInputShape failed for " << target_w << "x" << target_h
                                          << " (outside the engine's optimization profile?)";
+                        bindings_ok = false;
                     }
                 }
-                exec_context->setTensorAddress("pixel_values", (void*)d_in);
-                exec_context->setTensorAddress(output_tensor_name.c_str(), (void*)d_out);
-                {
+                bindings_ok = bindings_ok &&
+                  exec_context->setTensorAddress("pixel_values", (void*)d_in) &&
+                  exec_context->setTensorAddress(output_tensor_name.c_str(), (void*)d_out);
+                if (bindings_ok) {
                     // Serialize TensorRT async enqueue to avoid driver-level concurrent execution faults
                     std::lock_guard<std::mutex> lock(*trt_mutex);
                     int perf_slot = perf_begin(perf_depth, cu_stream);
-                    if (!exec_context->enqueueV3(cu_stream) && !stream_error_logged) {
-                        BOOST_LOG(error) << "TensorRT enqueueV3 failed; depth will stop updating.";
-                        stream_error_logged = true;
+                    enqueued = exec_context->enqueueV3(cu_stream);
+                    if (!enqueued) {
+                        if (!stream_error_logged) {
+                            BOOST_LOG(error) << "TensorRT enqueueV3 failed; retaining the last valid depth.";
+                            stream_error_logged = true;
+                        }
                     }
                     perf_end(perf_depth, perf_slot, cu_stream);
                 }
             }
             
-            cuda.cuGraphicsUnmapResources(2, resources, cu_stream);
+            auto unmap_res = cuda.cuGraphicsUnmapResources(2, resources, cu_stream);
+            if (unmap_res != CUDA_SUCCESS) {
+                BOOST_LOG(error) << "cuGraphicsUnmapResources failed: " << unmap_res;
+                enqueued = false;
+            }
 
-            has_previous_frame = true;
+            has_previous_frame = enqueued;
 
             return make_result();
         }
@@ -1655,12 +1723,13 @@ namespace models {
 
     video_depth_estimator::~video_depth_estimator() = default;
 
-    estimate_result video_depth_estimator::estimate_depth(ID3D11ShaderResourceView* input_srv, bool is_hdr) {
-        return pimpl->estimate(input_srv, is_hdr);
+    estimate_result video_depth_estimator::estimate_depth(
+      ID3D11ShaderResourceView* input_srv, input_color_space color_space) {
+        return pimpl->estimate(input_srv, color_space);
     }
 
     estimate_result video_depth_estimator::finish_pending_depth_for_benchmark(
-      ID3D11ShaderResourceView* input_srv, bool is_hdr) {
-        return pimpl->finish_pending_for_benchmark(input_srv, is_hdr);
+      ID3D11ShaderResourceView* input_srv, input_color_space color_space) {
+        return pimpl->finish_pending_for_benchmark(input_srv, color_space);
     }
 }

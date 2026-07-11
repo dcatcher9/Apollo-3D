@@ -39,7 +39,7 @@ def main():
         rows, agg = measured
         worst = {}
         for metric, spec in thresholds["metrics"].items():
-            if expected_flat and metric == "pop_spread_px":
+            if expected_flat and metric in ("pop_spread_px", "pop_spread_pct"):
                 continue
             frame_key = metric if any(metric in r for r in rows) else (
                 metric[:-4] if metric.endswith(("_p50", "_p95")) else metric)
@@ -71,7 +71,8 @@ def main():
     data["regressions"] = []
     data["verdict"] = "hard_failures" if hard_failures else "comparison_only"
     data["meta"]["metric_sha256"] = run_eval.sha256_files([
-        os.path.join(SCRIPT_DIR, "sbsbench.py"), os.path.join(SCRIPT_DIR, "thresholds.json")])
+        os.path.join(SCRIPT_DIR, "sbsbench.py"), os.path.join(SCRIPT_DIR, "thresholds.json"),
+        os.path.join(SCRIPT_DIR, "run_eval.py")])
     data["meta"]["eval_schema"] = run_eval.EVAL_SCHEMA
     data["meta"]["clip_set_sha1"] = {
         clip: run_eval.sha1_dir(os.path.join(args.clips_root, clip)) for clip in data["clips"]}

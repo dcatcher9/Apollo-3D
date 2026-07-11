@@ -1,4 +1,6 @@
 {
   "name": "soldier-battlefield",
-  "description": "Soldier walking a dark night battlefield; profile silhouette against dead trees."
+  "description": "Soldier walking a dark night battlefield; profile silhouette against dead trees.",
+  "content_type": "ai-generated",
+  "source_artifacts": "Visual inspection of frames 1, 12 and 24 found pre-existing cyan/white rim lighting and sharpening along the soldier, head wrap, shoulders and sword. The source also contains baked video-player controls/text and mild motion blur; a bright edge at these locations is not automatically a warp halo."
 }

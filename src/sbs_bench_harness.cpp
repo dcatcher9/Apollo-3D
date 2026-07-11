@@ -15,12 +15,14 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
+#include <limits>
 
 // platform includes
 #include <d3d11.h>
@@ -52,6 +54,66 @@ namespace sbs_bench {
       UINT w = 0, h = 0;
       std::vector<uint8_t> bgra;  // tightly packed B,G,R,A rows, top-to-bottom
     };
+
+    uint16_t float_to_half(float value) {
+      uint32_t bits;
+      std::memcpy(&bits, &value, sizeof(bits));
+      const uint32_t sign = (bits >> 16) & 0x8000u;
+      int exp = (int)((bits >> 23) & 0xffu) - 127 + 15;
+      uint32_t mant = bits & 0x7fffffu;
+      if (exp <= 0) {
+        if (exp < -10) return (uint16_t)sign;
+        mant = (mant | 0x800000u) >> (1 - exp);
+        return (uint16_t)(sign | ((mant + 0x1000u) >> 13));
+      }
+      if (exp >= 31) return (uint16_t)(sign | 0x7c00u);
+      mant += 0x1000u;
+      if (mant & 0x800000u) {
+        mant = 0;
+        if (++exp >= 31) return (uint16_t)(sign | 0x7c00u);
+      }
+      return (uint16_t)(sign | ((uint32_t)exp << 10) | (mant >> 13));
+    }
+
+    float half_to_float(uint16_t h) {
+      const uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+      int exp = (h >> 10) & 0x1f;
+      uint32_t mant = h & 0x3ffu;
+      uint32_t bits;
+      if (exp == 0) {
+        if (mant == 0) bits = sign;
+        else {
+          exp = 127 - 15 + 1;
+          while (!(mant & 0x400u)) { mant <<= 1; --exp; }
+          bits = sign | ((uint32_t)exp << 23) | ((mant & 0x3ffu) << 13);
+        }
+      } else if (exp == 31) {
+        bits = sign | 0x7f800000u | (mant << 13);
+      } else {
+        bits = sign | ((uint32_t)(exp - 15 + 127) << 23) | (mant << 13);
+      }
+      float value;
+      std::memcpy(&value, &bits, sizeof(value));
+      return value;
+    }
+
+    float srgb_to_linear(float value) {
+      return value <= 0.04045f ? value / 12.92f : std::pow((value + 0.055f) / 1.055f, 2.4f);
+    }
+
+    void hdr_preview_bgra(float r, float g, float b, uint8_t *out) {
+      r = std::max(r, 0.0f); g = std::max(g, 0.0f); b = std::max(b, 0.0f);
+      const float y = std::max(0.2126f * r + 0.7152f * g + 0.0722f * b, 0.0f);
+      r /= 1.0f + y; g /= 1.0f + y; b /= 1.0f + y;
+      const float peak = std::max(1.0f, std::max(r, std::max(g, b)));
+      r /= peak; g /= peak; b /= peak;
+      auto encode = [](float c) {
+        c = std::clamp(c, 0.0f, 1.0f);
+        c = c <= 0.0031308f ? 12.92f * c : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+        return (uint8_t)std::lround(std::clamp(c, 0.0f, 1.0f) * 255.0f);
+      };
+      out[0] = encode(b); out[1] = encode(g); out[2] = encode(r); out[3] = 255;
+    }
 
     // ---- WIC PNG load/save (32bpp BGRA, matching the SDR B8G8R8A8_UNORM pipeline) ----
 
@@ -233,8 +295,11 @@ namespace sbs_bench {
 
     struct opts {
       std::string frames, out, model, warp, shift_profile;
-      int eye_h = 0;       // 0 -> match the input frame height (so the input size controls eval
-                           // resolution/speed; a bigger clip = a bigger eval). Override to pin one.
+      int eye_w = 0;       // 0 -> derive from source aspect; set with eye_h to test letterboxing
+      int eye_h = 0;       // 0 -> match/derive from the input frame
+      double output_scale = 1.0;  // per-eye linear scale vs source; preserves source aspect
+      bool simulate_hdr = false;  // decode sRGB frames into linear scRGB FP16 and use HDR paths
+      double hdr_scale = 4.0;     // scRGB multiplier after sRGB EOTF (4.0 = 320-nit diffuse white)
       int max_width = 0;   // 0 -> use config max_encode_width
       int limit = 0;       // 0 -> all
       int output_every = 1;  // process every input for temporal state; dump only every Nth
@@ -242,17 +307,23 @@ namespace sbs_bench {
       // VD3D-pipeline A/B levers; <0 / false -> use the conf's value.
       double pct_lo = -1.0;      // robust normalization low percentile (e.g. 1.0)
       double pct_hi = -1.0;      // robust normalization high percentile (e.g. 99.0)
-      bool subject_track = false;  // VD3D-style shaped disparity + subject anchoring
+      int subject_track = -1;      // -1 = conf, 0 = off, 1 = on
       double subject_lock = -1.0;  // subject anchor strength override (e.g. 0.95)
+      double subject_recenter = -1.0;  // global subject recenter override
       int depth_short_side = 0;    // depth inference short-side override (0 = conf; VD3D uses 432)
       double ema = -1.0;         // per-pixel depth EMA override (1.0 = off)
-      bool subject_stretch = false;  // VD3D shape_depth_for_pop 5/95 disparity stretch
+      int subject_stretch = -1;     // -1 = conf, 0 = off, 1 = on
       double subject_plane_lock = -1.0;  // local subject-band flatten (e.g. 0.28); <0 = conf
       double curvature = -1.0;     // foreground curvature strength (e.g. 0.07); <0 = conf
       double vd3d_forward_blend = -1.0;  // VD3D backward/forward blend override; <0 = conf
       double minmax_ema = -1.0;    // range-bounds EMA new-weight (VD3D DepthPercentileEMA a=0.82 -> 0.18); <0 = conf
       int guided = -1;             // guided upsample: -1 = conf, 0 = off, 1 = on
-      bool pixel_ema_first = false;  // VD3D EMA order: per-pixel smooth raw BEFORE normalizing
+      int pixel_ema_first = -1;     // -1 = conf, 0 = range->pixel, 1 = pixel->range
+      double minmax_snap = -1.0;    // scene-cut normalization snap ratio; 0 = off
+      double range_floor = -1.0;    // flat-scene range-floor fraction; 0 = off
+      double depth_floor = -1.0;    // warp depth floor; 0 = off
+      double border_fade = -1.0;    // warp border fade; 0 = off
+      int bestv2_sharpen = -1;      // -1 = conf, 0 = off, 1 = on
     };
 
     bool parse_opts(int argc, char **argv, opts &o) {
@@ -267,17 +338,24 @@ namespace sbs_bench {
         else if (a == "--model") o.model = next("--model");
         else if (a == "--warp") o.warp = next("--warp");
         else if (a == "--shift-profile") o.shift_profile = next("--shift-profile");
+        else if (a == "--eye-w") o.eye_w = std::stoi(next("--eye-w"));
         else if (a == "--eye-h") o.eye_h = std::stoi(next("--eye-h"));
+        else if (a == "--output-scale") o.output_scale = std::stod(next("--output-scale"));
+        else if (a == "--simulate-hdr") o.simulate_hdr = true;
+        else if (a == "--hdr-scale") o.hdr_scale = std::stod(next("--hdr-scale"));
         else if (a == "--max-width") o.max_width = std::stoi(next("--max-width"));
         else if (a == "--limit") o.limit = std::stoi(next("--limit"));
         else if (a == "--output-every") o.output_every = std::max(1, std::stoi(next("--output-every")));
         else if (a == "--divergence") o.divergence = std::stod(next("--divergence"));
         else if (a == "--pct-lo") o.pct_lo = std::stod(next("--pct-lo"));
         else if (a == "--pct-hi") o.pct_hi = std::stod(next("--pct-hi"));
-        else if (a == "--subject-track") o.subject_track = true;
+        else if (a == "--subject-track") o.subject_track = 1;
+        else if (a == "--no-subject-track") o.subject_track = 0;
         else if (a == "--subject-lock") o.subject_lock = std::stod(next("--subject-lock"));
+        else if (a == "--subject-recenter") o.subject_recenter = std::stod(next("--subject-recenter"));
         else if (a == "--depth-short-side") o.depth_short_side = std::stoi(next("--depth-short-side"));
-        else if (a == "--subject-stretch") o.subject_stretch = true;
+        else if (a == "--subject-stretch") o.subject_stretch = 1;
+        else if (a == "--no-subject-stretch") o.subject_stretch = 0;
         else if (a == "--subject-plane-lock") o.subject_plane_lock = std::stod(next("--subject-plane-lock"));
         else if (a == "--curvature") o.curvature = std::stod(next("--curvature"));
         else if (a == "--vd3d-forward-blend") o.vd3d_forward_blend = std::stod(next("--vd3d-forward-blend"));
@@ -287,11 +365,28 @@ namespace sbs_bench {
           std::string v = next("--guided-upsample");
           o.guided = (v == "off" || v == "0" || v == "false") ? 0 : 1;
         }
-        else if (a == "--pixel-ema-first") o.pixel_ema_first = true;
+        else if (a == "--pixel-ema-first") o.pixel_ema_first = 1;
+        else if (a == "--no-pixel-ema-first") o.pixel_ema_first = 0;
+        else if (a == "--minmax-snap") o.minmax_snap = std::stod(next("--minmax-snap"));
+        else if (a == "--range-floor") o.range_floor = std::stod(next("--range-floor"));
+        else if (a == "--depth-floor") o.depth_floor = std::stod(next("--depth-floor"));
+        else if (a == "--border-fade") o.border_fade = std::stod(next("--border-fade"));
+        else if (a == "--bestv2-sharpen") {
+          std::string v = next("--bestv2-sharpen");
+          o.bestv2_sharpen = (v == "off" || v == "0" || v == "false") ? 0 : 1;
+        }
         else { BOOST_LOG(error) << "sbs-bench: unknown arg '" << a << "'"; return false; }
       }
       if (o.frames.empty() || o.out.empty()) {
         BOOST_LOG(error) << "sbs-bench: --frames DIR and --out DIR are required";
+        return false;
+      }
+      if (!(o.output_scale > 0.0 && o.output_scale <= 4.0)) {
+        BOOST_LOG(error) << "sbs-bench: --output-scale must be greater than 0 and at most 4";
+        return false;
+      }
+      if (!(o.hdr_scale > 0.0 && o.hdr_scale <= 64.0)) {
+        BOOST_LOG(error) << "sbs-bench: --hdr-scale must be greater than 0 and at most 64";
         return false;
       }
       return true;
@@ -353,17 +448,23 @@ namespace sbs_bench {
     if (o.divergence >= 0.0) sbs_cfg.divergence = o.divergence;  // A/B lever: parallax/disocclusion size
     if (o.pct_lo >= 0.0) sbs_cfg.norm_pct_lo = o.pct_lo;         // A/B lever: robust normalization
     if (o.pct_hi >= 0.0) sbs_cfg.norm_pct_hi = o.pct_hi;
-    if (o.subject_track) sbs_cfg.subject_track = true;          // A/B lever: shaped disparity
+    if (o.subject_track >= 0) sbs_cfg.subject_track = (o.subject_track != 0);
     if (o.subject_lock >= 0.0) sbs_cfg.subject_lock = o.subject_lock;
+    if (o.subject_recenter >= 0.0) sbs_cfg.subject_recenter = o.subject_recenter;
     if (o.depth_short_side > 0) sbs_cfg.depth_short_side = o.depth_short_side;  // VD3D uses 432
-    if (o.subject_stretch) sbs_cfg.subject_stretch = true;      // A/B lever: shape_depth_for_pop stretch
+    if (o.subject_stretch >= 0) sbs_cfg.subject_stretch = (o.subject_stretch != 0);
     if (o.subject_plane_lock >= 0.0) sbs_cfg.subject_plane_lock = o.subject_plane_lock;
     if (o.curvature >= 0.0) sbs_cfg.foreground_curvature = o.curvature;
     if (o.vd3d_forward_blend >= 0.0) sbs_cfg.vd3d_forward_blend = o.vd3d_forward_blend;
     if (o.ema > 0.0) sbs_cfg.ema = o.ema;                        // A/B lever: depth EMA (1.0 = off)
     if (o.minmax_ema >= 0.0) sbs_cfg.minmax_ema = o.minmax_ema;  // A/B lever: range-bounds EMA (VD3D 0.18)
     if (o.guided >= 0) sbs_cfg.guided_upsample = (o.guided != 0);  // A/B lever: guided upsample on/off
-    if (o.pixel_ema_first) sbs_cfg.ema_pixel_first = true;         // A/B lever: VD3D pixel->range EMA order
+    if (o.pixel_ema_first >= 0) sbs_cfg.ema_pixel_first = (o.pixel_ema_first != 0);
+    if (o.minmax_snap >= 0.0) sbs_cfg.minmax_snap = o.minmax_snap;
+    if (o.range_floor >= 0.0) sbs_cfg.range_floor = o.range_floor;
+    if (o.depth_floor >= 0.0) sbs_cfg.depth_floor = o.depth_floor;
+    if (o.border_fade >= 0.0) sbs_cfg.border_fade = o.border_fade;
+    if (o.bestv2_sharpen >= 0) sbs_cfg.bestv2_sharpen = (o.bestv2_sharpen != 0);
     sbs_cfg.perf_stats = true;  // the harness always measures
     sbs_perf::set_enabled(true);
     sbs_perf::reset();
@@ -371,7 +472,8 @@ namespace sbs_bench {
     const int max_width = o.max_width > 0 ? o.max_width : config::video.sbs.max_encode_width;
 
     BOOST_LOG(info) << "sbs-bench: " << frames.size() << " frames, model '" << model.name
-                    << "', eye_h " << (o.eye_h > 0 ? std::to_string(o.eye_h) : "match-input")
+                    << "', eye " << (o.eye_w > 0 ? std::to_string(o.eye_w) : "auto") << 'x'
+                    << (o.eye_h > 0 ? std::to_string(o.eye_h) : "auto")
                     << ", depth_step current-once, warp " << sbs_cfg.warp
                     << ", shift_profile " << sbs_cfg.shift_profile << " -> " << o.out;
 
@@ -420,19 +522,8 @@ namespace sbs_bench {
       dev->CreateSamplerState(&sd, &sampler);
     }
 
-    // Shared disparity constants. The last register carries VD3D's hybrid/fill parameters.
-    float repro_params[16] = {(float) sbs_cfg.divergence, (float) sbs_cfg.focal_plane,
-      (float) sbs_cfg.parallax_steps, (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor,
-      sbs_cfg.subject_track ? 1.0f : 0.0f, (float) sbs_cfg.subject_lock,
-      sbs_cfg.subject_stretch ? 1.0f : 0.0f, (float) sbs_cfg.subject_plane_lock,
-      (float) sbs_cfg.subject_plane_width, 0.0f,
-      0.0f, (float) sbs_cfg.vd3d_forward_blend,
-      (float) sbs_cfg.vd3d_fill_radius, sbs_cfg.shift_profile == "bestv2" ? 1.0f : 0.0f, 0.0f};
-    auto repro_cb = const_buffer(dev.Get(), repro_params);
-    float pass_params[16] = {0, (float) sbs_cfg.focal_plane, (float) sbs_cfg.parallax_steps,
-      (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor, 0, 0, 0, 0, 0, 0, 0,
-      (float) sbs_cfg.vd3d_forward_blend, (float) sbs_cfg.vd3d_fill_radius, 0, 0};
-    auto pass_cb = const_buffer(dev.Get(), pass_params);
+    // Built after the first source frame reveals the source/output aspect relationship.
+    ComPtr<ID3D11Buffer> repro_cb, pass_cb;
 
     // ---- estimator ----
     models::video_depth_estimator estimator(dev, ctx, fs::path(SUNSHINE_ASSETS_DIR), sbs_cfg, model);
@@ -452,6 +543,9 @@ namespace sbs_bench {
     ComPtr<ID3D11Texture2D> depth_stage;  // dump_depth staging cache (depth size is constant)
     ComPtr<ID3D11Buffer> raw_depth_stage;
     bool raw_shape_written = false;
+    float hdr_output_min = std::numeric_limits<float>::infinity();
+    float hdr_output_max = -std::numeric_limits<float>::infinity();
+    uint64_t hdr_nonfinite = 0;
 
     int written = 0;
     for (size_t fi = 0; fi < frames.size(); fi++) {
@@ -461,9 +555,27 @@ namespace sbs_bench {
       // Input texture + SRV.
       D3D11_TEXTURE2D_DESC id = {};
       id.Width = img.w; id.Height = img.h; id.MipLevels = 1; id.ArraySize = 1;
-      id.Format = DXGI_FORMAT_B8G8R8A8_UNORM; id.SampleDesc.Count = 1;
+      id.Format = o.simulate_hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
+      id.SampleDesc.Count = 1;
       id.Usage = D3D11_USAGE_IMMUTABLE; id.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-      D3D11_SUBRESOURCE_DATA isd = {img.bgra.data(), img.w * 4, 0};
+      std::vector<uint16_t> hdr_rgba;
+      const void *input_pixels = img.bgra.data();
+      UINT input_pitch = img.w * 4;
+      if (o.simulate_hdr) {
+        hdr_rgba.resize((size_t)img.w * img.h * 4);
+        for (size_t p = 0; p < (size_t)img.w * img.h; ++p) {
+          const float b = srgb_to_linear(img.bgra[p * 4 + 0] / 255.0f) * (float)o.hdr_scale;
+          const float g = srgb_to_linear(img.bgra[p * 4 + 1] / 255.0f) * (float)o.hdr_scale;
+          const float r = srgb_to_linear(img.bgra[p * 4 + 2] / 255.0f) * (float)o.hdr_scale;
+          hdr_rgba[p * 4 + 0] = float_to_half(r);
+          hdr_rgba[p * 4 + 1] = float_to_half(g);
+          hdr_rgba[p * 4 + 2] = float_to_half(b);
+          hdr_rgba[p * 4 + 3] = float_to_half(1.0f);
+        }
+        input_pixels = hdr_rgba.data();
+        input_pitch = img.w * 8;
+      }
+      D3D11_SUBRESOURCE_DATA isd = {input_pixels, input_pitch, 0};
       ComPtr<ID3D11Texture2D> in_tex;
       if (FAILED(dev->CreateTexture2D(&id, &isd, &in_tex))) { BOOST_LOG(error) << "sbs-bench: input tex fail"; continue; }
       ComPtr<ID3D11ShaderResourceView> in_srv;
@@ -473,19 +585,46 @@ namespace sbs_bench {
       // size, not a fixed constant, drives eval cost); --eye-h pins a specific output height.
       // The width is still capped at max_encode_width like the live path.
       if (!sbs_tex) {
-        int eh_target = o.eye_h > 0 ? o.eye_h : (int) img.h;
+        int eh_target = o.eye_h > 0 ? o.eye_h :
+          std::max(2, (int)std::lround((double)img.h * o.output_scale));
         float aspect = (float) img.w / (float) img.h;
-        int eye_w = (int) std::lround(eh_target * aspect);
-        if (2 * eye_w > max_width) eye_w = max_width / 2;
-        sbs_w = (UINT) (2 * eye_w); sbs_h = (UINT) eh_target;
+        int eye_w = o.eye_w > 0 ? o.eye_w : (o.eye_h > 0
+          ? std::max(1, (int)std::lround(eh_target * aspect))
+          : std::max(1, (int)std::lround((double)img.w * o.output_scale)));
+        int eye_h = eh_target;
+        if (o.eye_w > 0 && o.eye_h <= 0) eye_h = std::max(1, (int)std::lround(eye_w / aspect));
+        if (2 * eye_w > max_width) {
+          const double scale = (double) max_width / (double) (2 * eye_w);
+          eye_w = std::max(1, max_width / 2);
+          eye_h = std::max(2, ((int) std::lround(eh_target * scale)) & ~1);
+        }
+        sbs_w = (UINT) (2 * eye_w); sbs_h = (UINT) eye_h;
+        const float eye_aspect = (float)eye_w / (float)eye_h;
+        const float content_scale_x = eye_aspect > aspect ? aspect / eye_aspect : 1.0f;
+        const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
+        const float source_to_output = (float)eye_w * content_scale_x / (float)img.w;
+        float repro_params[16] = {(float) sbs_cfg.divergence, (float) sbs_cfg.focal_plane,
+          (float) sbs_cfg.parallax_steps, (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor,
+          sbs_cfg.subject_track ? 1.0f : 0.0f, (float) sbs_cfg.subject_lock,
+          sbs_cfg.subject_stretch ? 1.0f : 0.0f, (float) sbs_cfg.subject_plane_lock,
+          (float) sbs_cfg.subject_plane_width, content_scale_x, content_scale_y,
+          (float) sbs_cfg.vd3d_forward_blend, (float) sbs_cfg.vd3d_fill_radius,
+          sbs_cfg.shift_profile == "bestv2" ? 1.0f : 0.0f, source_to_output};
+        repro_cb = const_buffer(dev.Get(), repro_params);
+        float pass_params[16] = {0, (float) sbs_cfg.focal_plane, (float) sbs_cfg.parallax_steps,
+          (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor, 0, 0, 0, 0, 0,
+          content_scale_x, content_scale_y, (float) sbs_cfg.vd3d_forward_blend,
+          (float) sbs_cfg.vd3d_fill_radius, 0, source_to_output};
+        pass_cb = const_buffer(dev.Get(), pass_params);
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = sbs_w; td.Height = sbs_h; td.MipLevels = 1; td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
+        td.Format = o.simulate_hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         dev->CreateTexture2D(&td, nullptr, &sbs_tex);
         dev->CreateRenderTargetView(sbs_tex.Get(), nullptr, &sbs_rtv);
         dev->CreateShaderResourceView(sbs_tex.Get(), nullptr, &sbs_srv);
-        if (sbs_cfg.shift_profile == "bestv2" && sbs_cfg.bestv2_sharpen) {
+        if (!o.simulate_hdr && sbs_cfg.shift_profile == "bestv2" && sbs_cfg.bestv2_sharpen) {
           if (FAILED(dev->CreateTexture2D(&td, nullptr, &sharpen_tex)) ||
               FAILED(dev->CreateRenderTargetView(sharpen_tex.Get(), nullptr, &sharpen_rtv)) ||
               FAILED(dev->CreateShaderResourceView(sharpen_tex.Get(), nullptr, &sharpen_srv))) {
@@ -508,12 +647,16 @@ namespace sbs_bench {
         sd2.Usage = D3D11_USAGE_STAGING; sd2.BindFlags = 0; sd2.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         dev->CreateTexture2D(&sd2, nullptr, &sbs_stage);
         vp = {0, 0, (float) sbs_w, (float) sbs_h, 0, 1};
-        BOOST_LOG(info) << "sbs-bench: input " << img.w << "x" << img.h << " -> SBS " << sbs_w << "x" << sbs_h;
+        BOOST_LOG(info) << "sbs-bench: input " << img.w << "x" << img.h << " -> SBS "
+                        << sbs_w << "x" << sbs_h
+                        << (o.simulate_hdr ? " (linear scRGB FP16 HDR simulation)" : " (sRGB SDR)");
       }
 
       // Submit and consume exactly one inference for this source frame.
-      estimator.estimate_depth(in_srv.Get(), /*is_hdr=*/false);
-      auto est = estimator.finish_pending_depth_for_benchmark(in_srv.Get(), /*is_hdr=*/false);
+      const auto input_color = o.simulate_hdr ? models::input_color_space::scrgb_hdr
+                                               : models::input_color_space::srgb;
+      estimator.estimate_depth(in_srv.Get(), input_color);
+      auto est = estimator.finish_pending_depth_for_benchmark(in_srv.Get(), input_color);
 
       // Sampling output must never sample the depth/EMA/subject pipeline itself. Every source
       // frame above was inferred and consumed; only expensive composite/readback is skipped.
@@ -533,15 +676,16 @@ namespace sbs_bench {
         ctx->ClearUnorderedAccessViewUint(vd3d_winner_uav.Get(), clear_winner);
         ctx->CSSetShader(vd3d_cs.Get(), nullptr, 0);
         ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
-        ID3D11ShaderResourceView *cs_srvs[] = {est.depth.Get(), est.subject.Get(), nullptr, est.plane_lock.Get()};
-        ctx->CSSetShaderResources(1, 4, cs_srvs);
+        ID3D11ShaderResourceView *cs_srvs[] = {in_srv.Get(), est.depth.Get(), est.subject.Get(),
+          nullptr, est.plane_lock.Get()};
+        ctx->CSSetShaderResources(0, 5, cs_srvs);
         ctx->CSSetUnorderedAccessViews(0, 1, vd3d_winner_uav.GetAddressOf(), nullptr);
         ctx->CSSetConstantBuffers(2, 1, repro_cb.GetAddressOf());
         ctx->Dispatch(((sbs_w / 2u) + 15u) / 16u, (sbs_h + 15u) / 16u, 1u);
         ID3D11UnorderedAccessView *null_uav[] = {nullptr};
-        ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr, nullptr};
+        ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
         ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
-        ctx->CSSetShaderResources(1, 4, null_cs_srvs);
+        ctx->CSSetShaderResources(0, 5, null_cs_srvs);
       }
       ctx->OMSetRenderTargets(1, sbs_rtv.GetAddressOf(), nullptr);
       ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -604,8 +748,28 @@ namespace sbs_bench {
       D3D11_MAPPED_SUBRESOURCE m = {};
       if (SUCCEEDED(ctx->Map(sbs_stage.Get(), 0, D3D11_MAP_READ, 0, &m))) {
         std::vector<uint8_t> buf((size_t) sbs_w * sbs_h * 4);
-        for (UINT y = 0; y < sbs_h; y++)
-          memcpy(&buf[(size_t) y * sbs_w * 4], (uint8_t *) m.pData + (size_t) y * m.RowPitch, sbs_w * 4);
+        if (o.simulate_hdr) {
+          for (UINT y = 0; y < sbs_h; ++y) {
+            const uint16_t *row = (const uint16_t *)((const uint8_t *)m.pData + (size_t)y * m.RowPitch);
+            for (UINT x = 0; x < sbs_w; ++x) {
+              const float r = half_to_float(row[x * 4 + 0]);
+              const float g = half_to_float(row[x * 4 + 1]);
+              const float b = half_to_float(row[x * 4 + 2]);
+              for (float value : {r, g, b}) {
+                if (std::isfinite(value)) {
+                  hdr_output_min = std::min(hdr_output_min, value);
+                  hdr_output_max = std::max(hdr_output_max, value);
+                } else {
+                  ++hdr_nonfinite;
+                }
+              }
+              hdr_preview_bgra(r, g, b, &buf[((size_t)y * sbs_w + x) * 4]);
+            }
+          }
+        } else {
+          for (UINT y = 0; y < sbs_h; y++)
+            memcpy(&buf[(size_t) y * sbs_w * 4], (uint8_t *) m.pData + (size_t) y * m.RowPitch, sbs_w * 4);
+        }
         ctx->Unmap(sbs_stage.Get(), 0);
         const std::string id = frame_id(frames[fi], fi);
         char name[64];
@@ -633,6 +797,16 @@ namespace sbs_bench {
     }
 
     sbs_perf::dump_json((fs::path(o.out) / "sbs_perf.json").string());
+    if (o.simulate_hdr) {
+      std::ofstream stats(fs::path(o.out) / "hdr_output_stats.json");
+      if (stats) {
+        stats << "{\n  \"format\": \"linear-scRGB-fp16\",\n"
+              << "  \"input_scale\": " << o.hdr_scale << ",\n"
+              << "  \"output_min\": " << hdr_output_min << ",\n"
+              << "  \"output_max\": " << hdr_output_max << ",\n"
+              << "  \"nonfinite_components\": " << hdr_nonfinite << "\n}\n";
+      }
+    }
     BOOST_LOG(info) << "sbs-bench: wrote " << written << " SBS frames + sbs_perf.json to " << o.out;
     return written > 0 ? 0 : 8;
   }

@@ -129,8 +129,10 @@ def disparity_field(left, right, tile=192, stride=128, min_var=1e-3):
     Only textured tiles (variance > min_var) vote, so flat sky/UI doesn't wash out the stats."""
     h, w = left.shape
     dxs, dys, wts = [], [], []
-    for y in range(0, h - tile, stride):
-        for x in range(0, w - tile, stride):
+    tile = max(8, min(tile, h, w))
+    stride = max(1, min(stride, tile))
+    for y in _tile_positions(h, tile, stride):
+        for x in _tile_positions(w, tile, stride):
             lt = left[y:y + tile, x:x + tile]
             rt = right[y:y + tile, x:x + tile]
             v = float(lt.var())
@@ -203,7 +205,7 @@ REF_EW = 3066.0
 # flat scenes legitimately return zero. Real silhouettes measure ~0.1-0.3/px at depth res.
 MIN_DEPTH_STEP = 0.04
 MIN_DISOCC_FRAC = 0.001  # ratios below 0.1% eye support are statistically meaningless
-HARD_MAX_AGG = {"positive_disparity_pct", "negative_disparity_pct", "vmisalign_px"}
+HARD_MAX_AGG = {"positive_disparity_pct", "negative_disparity_pct", "vmisalign_pct"}
 HARD_MIN_AGG = {"source_coverage_pct", "image_integrity_pct"}
 
 
@@ -745,6 +747,7 @@ def measure(dump_dir):
         out["pop_spread_px"] = pop_spread(dxs, wts)
         out["pop_spread_pct"] = out["pop_spread_px"] / ew * 100.0
         out["vmisalign_px"] = float(np.median(np.abs(dys)))
+        out["vmisalign_pct"] = out["vmisalign_px"] / left.shape[0] * 100.0
         out["positive_disparity_pct"], out["negative_disparity_pct"] = comfort_disparity(
             dxs, wts, ew)
         out["tiles"] = int(len(dxs))
@@ -798,6 +801,7 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
         out["pop_spread_px"] = pop_spread(dxs, wts)
         out["pop_spread_pct"] = out["pop_spread_px"] / ew * 100.0
         out["vmisalign_px"] = float(np.median(np.abs(dys)))
+        out["vmisalign_pct"] = out["vmisalign_px"] / left.shape[0] * 100.0
         out["positive_disparity_pct"], out["negative_disparity_pct"] = comfort_disparity(
             dxs, wts, ew)
     if depth is not None:
@@ -873,12 +877,25 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         extra_flow = sorted(set(flow_by_id) - expected_flow_ids)
         raise ValueError(f"GT-flow/frame-id mismatch: missing GT={missing_flow}, extra GT={extra_flow}")
     gt_kind = "disparity"
+    require_gt_depth = require_gt_flow = False
     if frames_dir:
         meta_path = os.path.join(frames_dir, "meta.json")
         try:
-            gt_kind = json.load(open(meta_path, encoding="utf-8")).get("gt_depth_kind", gt_kind)
+            with open(meta_path, encoding="utf-8") as meta_file:
+                clip_meta = json.load(meta_file)
+            gt_kind = clip_meta.get("gt_depth_kind", gt_kind)
+            # Prepared public clips created before schema 5 already carry `dataset`; infer their
+            # evidence contract so upgrading the evaluator cannot silently keep the old fail-open
+            # behavior. Newly prepared clips store the explicit flags below.
+            require_gt_depth = bool(clip_meta.get("required_gt_depth", clip_meta.get("dataset")))
+            require_gt_flow = bool(clip_meta.get(
+                "required_gt_flow", clip_meta.get("dataset") == "TartanAir V2"))
         except (OSError, ValueError):
             pass
+    if require_gt_depth and not gt_by_id:
+        raise ValueError("clip requires GT depth, but no gt_depth sidecars were found")
+    if require_gt_flow and not flow_by_id:
+        raise ValueError("clip requires GT optical flow, but no gt_flow sidecars were found")
     rows, flicks, bflicks, swims, static_jitters = [], [], [], [], []
     flow_temporals, flow_depths = [], []
     prev_sbs = prev_left = prev_right = prev_depth = prev_src = None
@@ -944,6 +961,12 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
             agg[name + "_p50"] = float(np.percentile(vals, 50))
             agg[name + "_p95"] = float(np.percentile(vals, 95))
     agg.update(sbs_score(agg, expected_flat=expected_flat))
+    if require_gt_depth:
+        missing = [k for k in ("depth_gt_si_rmse", "depth_gt_edge_f1") if k not in agg]
+        if missing:
+            raise ValueError(f"required GT-depth metrics unavailable: {missing}")
+    if require_gt_flow and "flow_temporal_p95" not in agg:
+        raise ValueError("required GT-flow temporal metric unavailable")
     return rows, agg
 
 

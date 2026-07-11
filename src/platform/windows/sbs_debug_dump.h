@@ -38,7 +38,8 @@ namespace platf::sbs_debug {
     void maybe_dump(ID3D11Device *device, ID3D11DeviceContext *ctx,
       ID3D11ShaderResourceView *source,
       ID3D11ShaderResourceView *depth,
-      ID3D11ShaderResourceView *sbs);
+      ID3D11ShaderResourceView *sbs,
+      bool hdr);
 
   private:
     std::filesystem::path dir_;

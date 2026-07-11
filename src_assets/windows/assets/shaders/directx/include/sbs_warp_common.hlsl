@@ -15,15 +15,29 @@ cbuffer Constants : register(b2) {
     float subject_stretch;
     float subject_plane_lock;
     float subject_plane_width;
-    float warp_pad0;
-    float warp_pad1;
+    float content_scale_x;       // source content width / output-eye width (per-eye letterbox)
+    float content_scale_y;       // source content height / output-eye height
     float vd3d_forward_blend;
     float vd3d_fill_radius;
     float bestv2_shift_profile;
-    float warp_pad3;
+    float source_to_output;      // output-content pixels per mono-source pixel
 };
 
 #include "include/band_curve.hlsl"
+
+// Map one eye's output UV into the mono source. Letterbox/pillarbox is applied independently in
+// each eye, preventing a packed-frame viewport offset from becoming a false stereo disparity.
+bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {
+    float2 scale = max(float2(content_scale_x, content_scale_y), float2(1e-6f, 1e-6f));
+    float2 lo = 0.5f * (float2(1.0f, 1.0f) - scale);
+    float2 hi = lo + scale;
+    if (any(output_uv < lo) || any(output_uv > hi)) {
+        source_uv = float2(0.0f, 0.0f);
+        return false;
+    }
+    source_uv = saturate((output_uv - lo) / scale);
+    return true;
+}
 
 float BorderFade(float x) {
     return (border_fade <= 0.0f) ? 1.0f : saturate(min(x, 1.0f - x) / border_fade);

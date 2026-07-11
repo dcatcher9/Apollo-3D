@@ -7,6 +7,8 @@ Texture2D<float4> ColorTexture : register(t0);  // full-res captured frame (SDR 
 SamplerState      LinearSampler : register(s0);
 RWTexture2D<float4> GuideOut    : register(u0);  // in_w x in_h, RGBA16F
 
+#include "include/depth_color.hlsl"
+
 cbuffer Params : register(b0) {
     uint in_w;           // low-res depth map dims
     uint in_h;
@@ -14,16 +16,9 @@ cbuffer Params : register(b0) {
     uint out_h;
     float inv2sig_sp2;   // (unused in this pass)
     float inv2sig_r2;    // (unused in this pass)
-    uint is_hdr;
+    uint color_mode;
     float radius;        // (unused in this pass)
 };
-
-float3 Tonemap(float3 c) {
-    if (is_hdr) {
-        c = c / (1.0f + c);  // Reinhard: linear scRGB -> [0,1)
-    }
-    return saturate(c);
-}
 
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
@@ -32,5 +27,5 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
     float2 uv = (float2(id.xy) + 0.5f) / float2(in_w, in_h);
     float3 c = ColorTexture.SampleLevel(LinearSampler, uv, 0).rgb;
-    GuideOut[id.xy] = float4(Tonemap(c), 1.0f);
+    GuideOut[id.xy] = float4(DepthColorToSrgb(c, color_mode), 1.0f);
 }

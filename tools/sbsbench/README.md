@@ -61,17 +61,30 @@ Harness A/B levers (after `--extra`):
   `docs/sbs-vd3d-parity.md`.
 - `--depth-short-side N` — depth inference short side (default 432; VD3D parity). 336 to A/B
   back to the old under-resolved default.
+- `--simulate-hdr --hdr-scale F` — direct-harness color-path smoke: decode the PNG source into
+  linear FP16 scRGB, scale its luminance (`4` = 320-nit diffuse white), run the HDR depth and warp
+  paths, and write a tone-mapped PNG plus `hdr_output_stats.json`. This checks FP16 preservation,
+  finite values, and both geometry implementations through the pre-encode SBS stage. It is not a
+  PQ/NVENC/headset colorimetric evaluation; do not compare its PNG metrics to SDR baselines.
 - `--pct-lo F --pct-hi F` — robust percentile normalization bounds, e.g. `1 99` (default off =
   raw min/max).
 - `--ema F` — per-pixel depth EMA override (`1.0` = off).
 - `--subject-track` — VD3D-style shaped disparity (subject-anchored band curve). The pipeline
   is probe-reprojection-only, so the shaping is always live when this is on.
+- `--no-subject-track` — disable subject tracking even when the selected profile enables it.
 - `--subject-lock F` — subject anchor strength (e.g. `0.95`).
+- `--subject-recenter F` — subject depth-field recenter strength.
 - `--subject-stretch` — shape_depth_for_pop 5/95 percentile stretch (default on within the
   subject path).
+- `--no-subject-stretch` — disable that stretch for an accepted-feature ablation.
 - `--subject-plane-lock F` — local subject-band flatten (e.g. `0.28`; default off).
 - `--curvature F` — foreground-curvature bulge strength (e.g. `0.07`; reshapes the depth
   texture, both warp paths; default off).
+- `--pixel-ema-first` / `--no-pixel-ema-first` — explicitly select temporal-before-range or
+  range-before-temporal ordering, independent of the profile.
+- `--minmax-snap F`, `--range-floor F`, `--depth-floor F`, `--border-fade F` — isolated
+  normalization/warp processor overrides (`0` disables each).
+- `--bestv2-sharpen on|off` — explicitly ablate the exact SDR Bestv2 post-sharpen.
 
 Exit code is the verdict (0 pass / 1 regression / 2 setup error), so the eval→fix→eval loop is
 scriptable. `results.json` carries provenance (git sha+dirty, models, clip hashes, gpu-contention
@@ -129,13 +142,15 @@ the real pipeline over a fixed frame sequence with the built-in `--sbs-bench` su
 harness — runs the real estimator + real composite shaders, no game/client).
 
 ### The committed clip set (quick eval)
-A small pre-resized clip set lives in **`tools/sbsbench/clips/<name>/frame_*.jpg`** (854 px wide,
-24 frames, JPEG) so eval is fast and reproducible with no per-run preprocessing. Five recorded
-movie clips (c339/c525/c647/c747/c841, each fingerprinting different artifacts) plus three
-generated failure-mode clips from [make_synth_clips.py](make_synth_clips.py):
+A small clip set lives in **`tools/sbsbench/clips/<name>/frame_*.jpg`** (24 JPEG frames) so eval is
+fast and reproducible with no per-run preprocessing. It contains five recorded movie clips
+(c339/c525/c647/c747/c841), one open cel-anime clip, one official AI-video-model gallery clip,
+and three generated failure-mode clips from [make_synth_clips.py](make_synth_clips.py):
 
 | clip | targets | validated fingerprint |
 |------|---------|----------------------|
+| `anime_morevna_closeup` | cel outlines, flat colors, face-depth hallucination | visually clean source silhouette; intentional ink/white clothing annotated separately from warp-created halo |
+| `aigen_cogvideox_rain` | AI-video human motion, rain, splash, blur and low contrast | source already contains rain/splash rims and generative temporal inconsistency; tests whether the warp adds to them |
 | `scene_cut` | depth-normalization response across a hard cut | schema-2 baseline flags the cut's stretch/rim behavior without duplicate EMA updates |
 | `flat_page` | flat-content depth hallucination + amplification | static-input noise floor; disocc_smear flags hallucinated text-edge silhouettes |
 | `fast_motion` | known 30 px/frame motion | current-frame depth separates warp/edge behavior from live async lag |
@@ -225,6 +240,17 @@ be retained for one geometry and rejected for the other. Use `--report-allow-con
 generating their comparison report: it permits the intentional config-hash difference while still
 requiring identical clips, mode, model, eval schema, depth step and metric definition.
 
+Every A/B HTML report now writes a sibling `decision.json`. Both are generated from the same
+already-unwrapped per-clip aggregate dictionaries, so automation should consume that sidecar rather
+than reimplementing decision parsing. To check whether a depth processor compresses or clips depth:
+
+```
+python tools/sbsbench/audit_depth_transform.py <control-run> <treatment-run>
+```
+
+This compares every native 16-bit pre-warp depth frame, endpoint saturation, p95-p5 spread, final
+stereo spread, and available GT depth metrics, writing `depth_transform_audit.json`.
+
 The metrics split cleanly by subsystem: **warp**-side changes move pop / disocc / flicker_disocc;
 **depth**-side changes move edge_acc / swim / depth_spread. So a delta tells you *where* the change
 landed. (Validated: a 2× `--divergence` warp change moved pop +90% and left edge_acc/swim flat;
@@ -280,17 +306,20 @@ tolerance. Both are primary depth-axis metrics. Non-GT clips are reported as `n/
 artifacts after metric-code changes. It refuses committed-baseline verdicts, updates the metric
 contract hash and writes atomically; use `run_eval.py` for any committed gate.
 
-Each clip directory carries a `meta.json` (`{"name", "description"}`): the report labels clips by
-that scene name and run_eval copies it into results.json. The clip identity hash covers source and
-GT pixels plus scoring semantics, but excludes the human-readable name and description.
+Each clip directory carries a `meta.json` with a name and description. It may also record
+`content_type`, provenance/license fields, the exact extraction window, and `source_artifacts`
+found by visual inspection. Reports show the latter beside an original frame so baked bloom,
+outlines, rain or generative inconsistency are not misidentified as warp regressions. The clip
+identity hash covers source and GT pixels plus scoring semantics, but excludes these human-readable
+annotations.
 
 ## Metrics — spatial (per frame)
 | metric | meaning | direction |
 |--------|---------|-----------|
 | `pop_px_p50` / `p95` | L↔R horizontal disparity (tile phase-correlation), median & p95 of \|dx\|. REPORTED but NOT gated — subject anchoring legitimately lowers median \|dx\| | higher = more 3D pop |
 | `pop_pct_p50` | same as % of eye width | higher = more pop |
-| `pop_spread_px` / `pop_spread_pct` | near-to-far disparity RANGE = weighted p95−p5 of **signed** dx (px / % of eye width). The stereo VOLUME, invariant to where the zero-parallax plane sits — the **gated** pop metric and the `q_depth` driver (subject-mode-fair; also ~0 for a flat scene shifted bodily forward) | higher = more volume |
-| `vmisalign_px` | median vertical L↔R offset — must be ~0 | nonzero = geometry fault |
+| `pop_spread_px` / `pop_spread_pct` | near-to-far disparity RANGE = weighted p95−p5 of **signed** dx (px / % of eye width). The percentage is the resolution-independent **gate** and `q_depth` driver; pixels are diagnostic | higher = more volume |
+| `vmisalign_px` / `vmisalign_pct` | median vertical L↔R offset in pixels / % eye height. The percentage is the resolution-independent hard gate | must remain ≤0.1% eye height |
 | `positive_disparity_pct` / `negative_disparity_pct` | signed weighted p99 disparity tails as % eye width | each must remain ≤3% |
 | `source_coverage_pct` | output patches explainable by horizontally displaced source content | ≥90% hard integrity limit |
 | `image_integrity_pct` | retention of real source texture after alignment | ≥80% hard integrity limit |
@@ -314,7 +343,7 @@ GT pixels plus scoring semantics, but excludes the human-readable name and descr
 | `swim` | frame-to-frame \|depth change\| where the **source** is static (needs `--frames`) | diagnostic until support/locality handling is upgraded |
 
 Notes:
-- `vmisalign_px == 0` is the built-in correctness check (parallax must be horizontal-only).
+- `vmisalign_pct == 0` is the resolution-independent correctness target (parallax must be horizontal-only).
 - Flat/paused frames legitimately score `pop=0` — curate scenes with real depth.
 - A matched clip does not make raw flicker perceptual: a processor can move the sampling mask or
   disparity and change how legitimate motion is counted. Only motion-excluded `static_jitter` votes.

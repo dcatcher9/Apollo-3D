@@ -1,4 +1,6 @@
 {
   "name": "washerwoman-pond",
-  "description": "Woman washing laundry by a lantern-lit courtyard pond at night."
+  "description": "Woman washing laundry by a lantern-lit courtyard pond at night.",
+  "content_type": "ai-generated",
+  "source_artifacts": "Visual inspection of frames 1, 12 and 24 found strong pre-existing bloom and clipped white edges around the dress, arms, lantern, cloth, wet stone and water reflections. Fine hair/hand geometry also changes in the source; those effects are not automatically warp halos or white-line regressions."
 }

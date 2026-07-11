@@ -16,6 +16,7 @@ changing a clip's design, and regenerate baselines in the same commit.
 """
 import json
 import os
+import shutil
 
 import numpy as np
 from PIL import Image
@@ -29,6 +30,7 @@ DESC = {
     "flat_page": "Synthetic static document/desktop page: flat-content depth hallucination (A3).",
     "fast_motion": "Synthetic textured block crossing a textured background at 30 px/frame: async-depth ghost.",
     "scene_cut": "Hard cut spliced kitchen-vlog -> washerwoman-pond: depth-normalization swim across cuts (A1).",
+    "flat_transition": "Textured depth scene cutting to a static flat page: range-floor activation and recovery.",
 }
 
 
@@ -92,14 +94,30 @@ def scene_cut():
         Image.open(src).save(os.path.join(CLIPS, "scene_cut", f"frame_{i + 1:05d}.jpg"), quality=90)
 
 
+def flat_transition():
+    """Give the slow-max range reference a textured history before entering flat content."""
+    out = os.path.join(CLIPS, "flat_transition")
+    gt_out = os.path.join(out, "gt_depth")
+    os.makedirs(gt_out, exist_ok=True)
+    for i in range(N):
+        src_clip = "fast_motion" if i < N // 2 else "flat_page"
+        src_i = i + 1 if i < N // 2 else i - N // 2 + 1
+        name = f"frame_{src_i:05d}"
+        shutil.copyfile(os.path.join(CLIPS, src_clip, name + ".jpg"),
+                        os.path.join(out, f"frame_{i + 1:05d}.jpg"))
+        shutil.copyfile(os.path.join(CLIPS, src_clip, "gt_depth", name + ".png"),
+                        os.path.join(gt_out, f"frame_{i + 1:05d}.png"))
+
+
 if __name__ == "__main__":
     flat_page()
     fast_motion()
     os.makedirs(os.path.join(CLIPS, "scene_cut"), exist_ok=True)
     scene_cut()
-    for c in ("flat_page", "fast_motion", "scene_cut"):
+    flat_transition()
+    for c in ("flat_page", "fast_motion", "scene_cut", "flat_transition"):
         write_meta(c, **({"expected_flat": True, "gt_depth_kind": "disparity"}
                          if c == "flat_page" else
-                         {"gt_depth_kind": "disparity"} if c == "fast_motion" else {}))
+                         {"gt_depth_kind": "disparity"} if c in ("fast_motion", "flat_transition") else {}))
         n = len([f for f in os.listdir(os.path.join(CLIPS, c)) if f.startswith("frame_")])
         print(f"{c}: {n} frames")

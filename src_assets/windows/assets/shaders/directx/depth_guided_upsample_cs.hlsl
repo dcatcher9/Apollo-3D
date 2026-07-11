@@ -23,6 +23,8 @@ Texture2D<float4> ColorTexture : register(t2);  // full-res captured frame
 SamplerState      LinearSampler : register(s0);
 RWTexture2D<float> DepthOut    : register(u0);  // out_w x out_h (2x depth res), R32F
 
+#include "include/depth_color.hlsl"
+
 cbuffer Params : register(b0) {
     uint in_w;           // low-res depth map dims
     uint in_h;
@@ -30,16 +32,9 @@ cbuffer Params : register(b0) {
     uint out_h;
     float inv2sig_sp2;   // 1 / (2 * sigma_spatial^2), sigma in low-res texels
     float inv2sig_r2;    // 1 / (2 * sigma_range^2), range on tonemapped RGB distance
-    uint is_hdr;
+    uint color_mode;
     float radius;        // kernel radius in low-res texels (spans the model's edge ramp)
 };
-
-float3 Tonemap(float3 c) {
-    if (is_hdr) {
-        c = c / (1.0f + c);  // Reinhard: linear scRGB -> [0,1)
-    }
-    return saturate(c);
-}
 
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
@@ -50,7 +45,8 @@ void main(uint3 id : SV_DispatchThreadID) {
 
     // Reference color at this output position, from the FULL-RES frame (this is what makes
     // the result sharper than the low-res depth: the reference knows the true edge position).
-    float3 centerColor = Tonemap(ColorTexture.SampleLevel(LinearSampler, uv, 0).rgb);
+    float3 centerColor = DepthColorToSrgb(
+        ColorTexture.SampleLevel(LinearSampler, uv, 0).rgb, color_mode);
 
     // Position in low-res texel space (texel centers at integer coordinates).
     float2 lr = uv * float2(in_w, in_h) - 0.5f;
