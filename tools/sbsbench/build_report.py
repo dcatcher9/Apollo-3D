@@ -8,8 +8,10 @@ Usage: build_report.py <control_run_dir> <treat_run_dir> <out.html>
 """
 import base64
 import glob
+import html
 import io
 import json
+import math
 import os
 import sys
 
@@ -66,6 +68,7 @@ CLIPS = sorted(CTRL["clips"])
 # metric, header, worse-is-higher, always-show, notable-threshold
 COLS = [
     ("score", "score", False, True, 0),
+    ("pop_spread_px", "pop_spread", False, True, 0),
     ("source_residual_p95", "warp_resid", True, True, 0),
     ("static_jitter_p95", "static_jitter", True, True, 0),
     ("pop_px_p50", "pop", False, True, 0), ("edge_acc_p50", "edge_acc", True, False, 2.0),
@@ -369,6 +372,144 @@ colmax = {k: max(max(ctrl_agg[c].get(k, 0), treat_agg[c].get(k, 0)) for c in CLI
 ACTIVE = [col for col in COLS if col[3] or colmax[col[0]] > col[4]]
 CLEAN = [col for col in COLS if col not in ACTIVE and col[2]]
 
+
+# Radar charts are summaries, not decision logic. Each quality axis uses a documented reference
+# scale and is flipped where necessary so farther from the center always means better. The raw
+# means remain printed under each chart; the real decision continues to use per-clip tolerances.
+RADAR_GROUPS = [
+    ("Validated primary axes", "Can vote in the feature decision", [
+        {"key": "pop_spread_pct", "label": "Stereo volume", "better": "higher",
+         "reference": _SC.get("depth", {}).get("target", 2.5), "unit": "%"},
+        {"key": "source_residual_p95", "label": "Warp fidelity", "better": "lower",
+         "reference": 15.0, "unit": " luma"},
+        {"key": "static_jitter_p95", "label": "Static stability", "better": "lower",
+         "reference": 10.0, "unit": " luma"},
+    ]),
+    ("Artifact diagnostics", "Pattern detectors; evidence only", [
+        {"key": "depth_spread", "label": "Depth range", "better": "higher",
+         "reference": 1.0, "unit": ""},
+        {"key": "edge_acc_p50", "label": "Edge alignment", "better": "lower",
+         "reference": 20.0, "unit": " px"},
+        {"key": "rim_over_p95", "label": "Rim cleanliness", "better": "lower",
+         "reference": 25.0, "unit": " luma"},
+        {"key": "stretch_area", "label": "Stretch cleanliness", "better": "lower",
+         "reference": 15.0, "unit": " permille"},
+        {"key": "swim_p50", "label": "Depth steadiness", "better": "lower",
+         "reference": 15.0, "unit": ""},
+    ]),
+]
+
+PERF_RADAR_AXES = [
+    {"key": "depth_infer", "label": "Depth speed", "better": "lower",
+     "reference": 5.0, "unit": " ms"},
+    {"key": "warp_infer", "label": "Warp speed", "better": "lower",
+     "reference": 0.25, "unit": " ms"},
+    {"key": "sbs_composite_cpu", "label": "CPU composite", "better": "lower",
+     "reference": 0.05, "unit": " ms"},
+]
+
+
+def _mean_aggregate(aggs, key):
+    values = [aggs[c].get(key) for c in DECISION_CLIPS if aggs[c].get(key) is not None]
+    return float(np.mean(values)) if values else None
+
+
+def _mean_perf(run, key):
+    values = [run["clips"][c].get("perf_ms", {}).get(key) for c in CLIPS]
+    values = [v for v in values if v is not None]
+    return float(np.mean(values)) if values else None
+
+
+def _radar_quality(value, axis):
+    """Map a raw metric to 0..1 quality using an explicit bad-end/target reference."""
+    if value is None:
+        return 0.0
+    ref = max(float(axis["reference"]), 1e-9)
+    quality = value / ref if axis["better"] == "higher" else 1.0 - value / ref
+    return max(0.0, min(1.0, quality))
+
+
+def _radar_svg(title, axes, control_values, treatment_values):
+    width, height, cx, cy, radius = 380, 330, 190, 150, 102
+    n = len(axes)
+
+    def point(i, scale):
+        angle = -math.pi / 2 + 2 * math.pi * i / n
+        return cx + radius * scale * math.cos(angle), cy + radius * scale * math.sin(angle)
+
+    def polygon(scales):
+        return " ".join(f"{point(i, scale)[0]:.1f},{point(i, scale)[1]:.1f}"
+                        for i, scale in enumerate(scales))
+
+    rings = "".join(
+        f'<polygon class="radar-ring" points="{polygon([level] * n)}" />'
+        for level in (0.25, 0.5, 0.75, 1.0))
+    spokes = "".join(
+        f'<line class="radar-spoke" x1="{cx}" y1="{cy}" '
+        f'x2="{point(i, 1)[0]:.1f}" y2="{point(i, 1)[1]:.1f}" />'
+        for i in range(n))
+    labels = []
+    for i, axis in enumerate(axes):
+        angle = -math.pi / 2 + 2 * math.pi * i / n
+        x, y = cx + (radius + 22) * math.cos(angle), cy + (radius + 22) * math.sin(angle)
+        anchor = "middle" if abs(math.cos(angle)) < 0.25 else "start" if math.cos(angle) > 0 else "end"
+        labels.append(f'<text class="radar-label" x="{x:.1f}" y="{y + 4:.1f}" '
+                      f'text-anchor="{anchor}">{html.escape(axis["label"])}</text>')
+    ctrl_q = [_radar_quality(value, axis) for value, axis in zip(control_values, axes)]
+    treat_q = [_radar_quality(value, axis) for value, axis in zip(treatment_values, axes)]
+    title_safe = html.escape(title)
+    return (f'<svg class="radar-svg" viewBox="0 0 {width} {height}" role="img" '
+            f'aria-label="{title_safe} radar comparison"><title>{title_safe}: outward is better</title>'
+            f'{rings}{spokes}<polygon class="radar-poly radar-control" points="{polygon(ctrl_q)}" />'
+            f'<polygon class="radar-poly radar-treatment" points="{polygon(treat_q)}" />'
+            f'{"".join(labels)}</svg>')
+
+
+def _radar_card(title, note, axes, control_values, treatment_values):
+    rows = []
+    for axis, control, treatment in zip(axes, control_values, treatment_values):
+        c = "n/a" if control is None else f'{control:.2f}{axis["unit"]}'
+        t = "n/a" if treatment is None else f'{treatment:.2f}{axis["unit"]}'
+        rows.append(f'<div><span>{html.escape(axis["label"])}</span><code>{c}</code>'
+                    f'<span class="radar-arrow">&rarr;</span><code>{t}</code></div>')
+    return (f'<article class="radar-card"><div class="radar-head"><h3>{html.escape(title)}</h3>'
+            f'<span>{html.escape(note)}</span></div>'
+            f'{_radar_svg(title, axes, control_values, treatment_values)}'
+            f'<div class="radar-legend"><span class="legend-control">{html.escape(CTRL_TAG)}</span>'
+            f'<span class="legend-treatment">{html.escape(TREAT_TAG)}</span></div>'
+            f'<div class="radar-values">{"".join(rows)}</div></article>')
+
+
+def grouped_quality_section():
+    cards = []
+    for title, note, axes in RADAR_GROUPS:
+        cards.append(_radar_card(title, note, axes,
+                                [_mean_aggregate(ctrl_agg, a["key"]) for a in axes],
+                                [_mean_aggregate(treat_agg, a["key"]) for a in axes]))
+    cards.append(_radar_card("Runtime", "Performance context; not a quality vote", PERF_RADAR_AXES,
+                            [_mean_perf(CTRL, a["key"]) for a in PERF_RADAR_AXES],
+                            [_mean_perf(TREAT, a["key"]) for a in PERF_RADAR_AXES]))
+
+    hard = THR["vmisalign_px"]
+    hard_max = float(hard["hard_max"])
+    ctrl_v = _mean_aggregate(ctrl_agg, "vmisalign_px") or 0.0
+    treat_v = _mean_aggregate(treat_agg, "vmisalign_px") or 0.0
+    ctrl_w = min(100.0, ctrl_v / hard_max * 100.0)
+    treat_w = min(100.0, treat_v / hard_max * 100.0)
+    hard_card = (f'<article class="hard-card"><div><h3>Hard constraint: comfort</h3>'
+                 f'<p>Vertical mismatch must remain below <b>{hard_max:.2f} px</b>. It is shown '
+                 f'separately because one axis cannot form a meaningful radar.</p></div>'
+                 f'<div class="hard-bars"><div><span>{html.escape(CTRL_TAG)}</span>'
+                 f'<i><b style="width:{ctrl_w:.1f}%"></b></i><code>{ctrl_v:.3f} px</code></div>'
+                 f'<div><span>{html.escape(TREAT_TAG)}</span><i><b style="width:{treat_w:.1f}%"></b></i>'
+                 f'<code>{treat_v:.3f} px</code></div></div></article>')
+    return (f'<section><h2>Metrics by group</h2><p class="sub">Radar axes are normalized quality: '
+            f'<b>farther outward is always better</b>. Means use the non-flat decision clips; '
+            f'runtime uses all clips. The reference scale is the stereo target or the metric\'s '
+            f'documented penalty/engineering scale, never the best value in this A/B pair. Raw '
+            f'means are printed below every chart. These summaries do not replace the per-clip gate.</p>'
+            f'<div class="radar-grid">{"".join(cards)}</div>{hard_card}</section>')
+
 def scorecard_charts():
     """Grouped horizontal bars retain every table value while making A/B movement scannable."""
     charts = []
@@ -402,6 +543,8 @@ def scorecard_charts():
 # metric -> (short header, what it measures, direction). Only the ones that appear render.
 METRIC_DEFS = [
     ("score", "score", "Overall 0-100 artifact cleanliness after weighted penalties. Stereo volume is reported and gated separately, so it cannot cancel artifact regressions.", "higher = better"),
+    ("pop_spread_px", "pop_spread", "Near-to-far range of horizontal stereo disparity. This is the validated stereo-volume gate; unlike median absolute disparity, recentering the subject does not make it look falsely worse.", "higher = more stereo volume"),
+    ("pop_spread_pct", "pop_spread_pct", "The same near-to-far stereo range as a percentage of eye width. The primary-axis radar uses this resolution-independent display form; the per-clip gate uses pop_spread_px.", "higher = more stereo volume"),
     ("pop_px_p50", "pop", "L↔R horizontal disparity (sub-pixel tile phase-correlation) — the amount of stereo depth.", "higher = more 3D"),
     ("source_residual_p95", "warp_resid", "Worst-eye patch difference from the source after allowing a small horizontal stereo displacement. Detects monocular warp corruption without penalizing intended parallax.", "lower = more source-faithful"),
     ("static_jitter_p95", "static_jitter", "Worst-eye temporal change over regions whose source neighborhood stayed static after allowing for horizontal disparity. Camera/object motion is excluded.", "lower = steadier static content"),
@@ -415,7 +558,19 @@ METRIC_DEFS = [
     ("flicker_disocc_p50", "flick_dis", "Flicker restricted to the disocclusion bands — inpaint/stretch re-hallucination shimmer.", "lower = less boiling along edges"),
     ("vmisalign_px", "vmis", "Median vertical L↔R offset — parallax must be horizontal-only, so this is a geometry correctness check.", "must be ≈ 0"),
 ]
-METRIC_DEFS = sorted(METRIC_DEFS, key=lambda m: -impact(m[0]))  # high quality-impact first
+_ROLE_ORDER = {"hard": 0, "primary": 1, "diagnostic": 2, "reported": 3}
+
+
+def metric_group(key):
+    spec = THR.get(key, {})
+    role = spec.get("role", "reported")
+    axis = spec.get("axis", "summary" if key == "score" else "stereo")
+    return role, axis
+
+
+METRIC_DEFS = sorted(METRIC_DEFS,
+                     key=lambda m: (_ROLE_ORDER[metric_group(m[0])[0]], metric_group(m[0])[1],
+                                    -impact(m[0])))
 
 
 DEF_BY_KEY = {k: (what, d) for k, h, what, d in METRIC_DEFS}
@@ -433,15 +588,19 @@ def mtip(metric, label):
 
 
 def metrics_section():
-    present = {k for k, *_ in COLS if k in colmax} | {i["metric"] for i in CTRL["issues"]}
+    present = ({k for aggs in (ctrl_agg, treat_agg) for agg in aggs.values() for k in agg}
+               | {i["metric"] for i in CTRL["issues"]})
     rows = "".join(
-        f'<tr><td class="mname">{h}</td><td class="mwhat">{what}</td><td class="mdir">{d}</td></tr>'
+        f'<tr><td class="mgroup"><span>{metric_group(k)[0]}</span><small>{metric_group(k)[1]}</small></td>'
+        f'<td class="mname">{h}</td><td class="mwhat">{what}</td><td class="mdir">{d}</td></tr>'
         for k, h, what, d in METRIC_DEFS if k in present)
     return (f'<section><h2>What the metrics mean</h2>'
-            f'<p class="sub">Definitions for the metrics used below. All are computed on the real '
+            f'<p class="sub">Definitions and decision roles for the metrics used below. Hard '
+            f'constraints can reject; primary metrics can vote; diagnostics provide supporting '
+            f'evidence; reported values are context only. All are computed on the real '
             f'SBS frames the headset would receive (no CPU replica). Absolute values are '
             f'resolution-dependent, so compare within a run, not across clip sets.</p>'
-            f'<div class="tablewrap"><table class="mtab"><thead><tr><th>metric</th>'
+            f'<div class="tablewrap"><table class="mtab"><thead><tr><th>group / axis</th><th>metric</th>'
             f'<th>what it measures</th><th>direction</th></tr></thead><tbody>{rows}</tbody></table></div></section>')
 
 
@@ -704,6 +863,16 @@ td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .mtab .mname{font-family:var(--mono);font-size:12.5px;color:var(--accent);font-weight:600;white-space:nowrap;vertical-align:top}
 .mtab .mwhat{font-family:var(--sans);font-size:13.5px;color:var(--ink);max-width:60ch}
 .mtab .mdir{font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:nowrap;vertical-align:top}
+.mtab .mgroup{font-family:var(--mono);white-space:nowrap;vertical-align:top}.mgroup span{display:block;font-size:11.5px;color:var(--ink);font-weight:650;text-transform:uppercase}.mgroup small{display:block;font-size:10.5px;color:var(--muted)}
+.radar-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;align-items:start}
+.radar-card{border:1px solid var(--line);border-radius:11px;background:var(--panel);padding:15px;min-width:0}
+.radar-head h3,.hard-card h3{font-family:var(--mono);font-size:13px;color:var(--ink);margin:0}.radar-head>span{display:block;font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:3px}
+.radar-svg{width:100%;height:auto;display:block;margin:2px auto -12px;overflow:visible}
+.radar-ring{fill:none;stroke:var(--line);stroke-width:1;stroke-dasharray:3 4}.radar-spoke{stroke:var(--line);stroke-width:1}.radar-label{font-family:var(--mono);font-size:10px;fill:var(--muted)}
+.radar-poly{stroke-width:2;stroke-linejoin:round}.radar-control{fill:color-mix(in srgb,var(--accent) 14%,transparent);stroke:var(--accent)}.radar-treatment{fill:color-mix(in srgb,var(--warn) 14%,transparent);stroke:var(--warn)}
+.radar-legend{display:flex;justify-content:center;gap:20px;font-family:var(--mono);font-size:10.5px;margin-bottom:10px}.radar-legend span:before{content:"";display:inline-block;width:14px;height:3px;border-radius:3px;margin-right:6px;vertical-align:middle}.legend-control:before{background:var(--accent)}.legend-treatment:before{background:var(--warn)}
+.radar-values{border-top:1px solid var(--line);padding-top:8px}.radar-values>div{display:grid;grid-template-columns:minmax(0,1fr) auto 14px auto;align-items:center;gap:4px;font-family:var(--mono);font-size:9.5px;padding:2px 0}.radar-values>div>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}.radar-values code{font-size:9px;padding:0 3px}.radar-arrow{color:var(--muted);text-align:center}
+.hard-card{display:grid;grid-template-columns:minmax(220px,.75fr) minmax(300px,1.25fr);gap:24px;align-items:center;border:1px solid var(--line);border-radius:11px;background:var(--panel);padding:16px;margin-top:16px}.hard-card p{font-size:12px;color:var(--muted);margin:5px 0 0}.hard-bars{display:grid;gap:8px}.hard-bars>div{display:grid;grid-template-columns:70px minmax(120px,1fr) 72px;gap:8px;align-items:center}.hard-bars span,.hard-bars code{font-family:var(--mono);font-size:10.5px}.hard-bars i{height:8px;background:color-mix(in srgb,var(--muted) 12%,transparent);border-radius:8px;overflow:hidden}.hard-bars i b{display:block;height:100%;min-width:2px;background:var(--good);border-radius:8px}.hard-bars code{text-align:right;padding:0;border:none;background:none}
 .chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .metric-chart{border:1px solid var(--line);border-radius:11px;background:var(--panel);padding:14px 14px 10px;min-width:0}
 .chart-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:9px}
@@ -739,8 +908,8 @@ td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .tag.t-treat{color:var(--warn)}
 pre{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:16px;overflow-x:auto;color:var(--ink);line-height:1.7}
 code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);padding:1px 6px;border-radius:5px}
-@media (max-width:800px){.chart-grid{grid-template-columns:1fr}}
-@media (max-width:640px){.pair,.triplet{grid-template-columns:1fr}.bar-row{grid-template-columns:88px minmax(110px,1fr) 62px}h1{font-size:28px}}
+@media (max-width:900px){.radar-grid{grid-template-columns:1fr 1fr}.radar-card:last-child{grid-column:1/-1;max-width:480px}.chart-grid{grid-template-columns:1fr}}
+@media (max-width:640px){.radar-grid{grid-template-columns:1fr}.radar-card:last-child{grid-column:auto;max-width:none}.hard-card{grid-template-columns:1fr}.pair,.triplet{grid-template-columns:1fr}.bar-row{grid-template-columns:88px minmax(110px,1fr) 62px}h1{font-size:28px}}
 </style>
 
 <div class="wrap">
@@ -751,6 +920,8 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
   <div class="meta"><span>__DATE__</span><span>control __CTRL_SHA__</span>
   <span>treatment __TREAT_SHA__</span>
   <span>__NCLIPS__ clips</span><span>__MODELS__</span></div>
+
+  __GROUP_RADARS__
 
   __METRICS__
 
@@ -803,6 +974,7 @@ HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
         .replace("__MODELS__", models).replace("__CONCLUSION__", conclusion_section())
         .replace("__VISUAL_EVIDENCE__", visual_evidence_section())
         .replace("__CTRL_TAG__", CTRL_TAG).replace("__TREAT_TAG__", TREAT_TAG)
+        .replace("__GROUP_RADARS__", grouped_quality_section())
         .replace("__CHARTS__", scorecard_charts())
         .replace("__METRICS__", metrics_section())
         .replace("__FOOTER__", clean_footer()).replace("__ISSUES__", issue_sections())
