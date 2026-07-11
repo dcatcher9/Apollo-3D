@@ -52,12 +52,12 @@
     "score": 80.9
   },
   "perf_ms": {
-    "depth_infer": 2.02051,
-    "sbs_composite_cpu": 0.0065,
-    "warp_infer": 0.143424
+    "depth_infer": 1.97677,
+    "sbs_composite_cpu": 0.0064,
+    "warp_infer": 0.142944
   },
   "meta": {
-    "git_sha": "d54d0de0",
+    "git_sha": "6ce94bac",
     "git_dirty": true,
     "clip_set_sha1": {
       "c339": "db5f34629467",
@@ -70,18 +70,20 @@
       "scene_cut": "c912fa5c33a7"
     },
     "mode": "game",
+    "suite": "core",
+    "clips_root": "E:\\Git\\Repo\\Apollo-3D\\tools\\sbsbench\\clips",
     "extra_args": [],
     "conf": "tools\\sbsbench\\bench.conf",
     "model": "depth_anything_v2_fp16",
     "warp": "apollo",
     "shift_profile": "bestv2",
-    "eval_schema": 3,
+    "eval_schema": 4,
     "depth_step": "current-once",
     "conf_sha256": "d78305de3cb0d05f",
-    "metric_sha256": "7eab28e4d528ecd9",
+    "metric_sha256": "e0797ed1f16ad440",
     "gpu_contention": false,
-    "timestamp": "2026-07-10T22:01:44",
-    "run_name": "evalv3-baseline-final",
+    "timestamp": "2026-07-10T23:13:45",
+    "run_name": "evalv4-core-verified",
     "name": "palace-hall",
     "description": "Robed cultivator bowing in a bright golden palace hall.",
     "clip_sha1": "1ff2aa060c61"

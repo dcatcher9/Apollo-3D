@@ -14,9 +14,12 @@ Design for two reproducible, host-side benchmarks so every SBS change ships with
 >   `split_video.py`, and the **Tier-1 headless harness** `sunshine --sbs-bench` (src/sbs_bench_harness.cpp:
 >   real estimator + real composite over a frames dir → SBS PNGs). Full chain validated:
 >   video → frames → harness → sbsbench --seq.
-> - **Eval v3** — hard signed-disparity/coverage/integrity limits, source-relative halo/stretch,
->   scale/shift-invariant GT-depth accuracy on deterministic synthetic clips, and classical
->   optical-flow-compensated output/depth temporal validation.
+> - **Eval v4** — hard signed-disparity/coverage/integrity limits, source-relative halo/stretch,
+>   scale/shift-invariant GT-depth accuracy on deterministic synthetic clips, and exact-or-classical
+>   optical-flow-compensated output/depth temporal validation. Native public metric-depth and
+>   exact optical-flow sidecars are supported. The separate `extended-v1` suite adds two visually
+>   inspected Bonn RGB-D Dynamic person clips and two TartanAir V2 indoor clips; URLs, SHA-256
+>   hashes, frame windows and preparation logic are committed while media remains external.
 > Remaining: reference warp PSNR/SSIM (needs GT stereo) and a dedicated ghost/double-image metric.
 
 ## Why the offline warpsim disagrees with the headset (the problem to design around)
@@ -46,6 +49,11 @@ frame sequences. A Tier-2 in-stream capture removes 4.
 
 Both benchmarks are meaningless without identical input every run. Foundation = a fixed clip
 library fed through the real pipeline.
+
+There are two levels: the committed **core** library for rapid iteration, and the reproducibly
+prepared **extended** public-data suite for feature acceptance and the final warp decision. Run
+`prepare_public_datasets.py` once, then select it with `run_eval.py --suite extended`. Extended
+baselines live separately in `baselines_extended/`, so they cannot be mixed with core clips.
 
 - **Clip library:** `E:\ApolloDev\sbs_bench\clips\<name>\frame_%04d.png` (RGB or HDR PNG/EXR),
   each a short sequence (e.g. 60–120 frames). Chosen to span the catalogued failure modes:

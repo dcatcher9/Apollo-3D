@@ -22,7 +22,7 @@ Metric families:
   image integrity       source; catches missing, black, or collapsed output regions.
   source halo/stretch   Validated silhouette artifacts relative to aligned source structure.
   GT depth accuracy     Scale/shift-invariant RMSE and boundary F1 on clips with gt_depth sidecars.
-  flow temporal         Output/depth residual after classical source optical-flow compensation.
+  flow temporal         Output/depth residual after exact or classical optical-flow compensation.
 
 Usage:
   python sbsbench.py DUMP_DIR [DUMP_DIR ...]        # one or more dump_* folders
@@ -56,8 +56,13 @@ def load_gray(path):
 
 
 def load_depth(path):
-    """Depth map -> float 0-1. Handles the harness's 16-bit gray PNG (full swim precision), plus
-    8-bit gray and the live dump's RGB depth.png."""
+    """Depth map -> float array. NPY preserves public-dataset metric depth; image sidecars and
+    harness depth retain their existing normalized representation."""
+    if path.lower().endswith(".npy"):
+        depth = np.asarray(np.load(path, allow_pickle=False), dtype=np.float32).squeeze()
+        if depth.ndim != 2:
+            raise ValueError(f"GT depth must be HxW, got {depth.shape}: {path}")
+        return depth
     im = Image.open(path)
     if im.mode in ("I;16", "I;16B", "I"):
         return np.asarray(im, dtype=np.float32) / 65535.0
@@ -469,6 +474,22 @@ def resize_depth(depth, w, h):
     return np.asarray(im.resize((w, h), Image.BILINEAR), dtype=np.float32)
 
 
+def resize_metric_depth(depth, w, h):
+    """Resize metric depth without bleeding invalid zero/NaN pixels into valid inverse depth.
+
+    Bilinear interpolation of a valid depth beside zero creates a tiny positive value. Inverting
+    that value produces an arbitrarily large false GT error, especially on real RGB-D silhouette
+    holes. Interpolate values and validity weights separately, normalize, and accept only pixels
+    whose bilinear footprint was effectively all valid.
+    """
+    depth = np.asarray(depth, dtype=np.float32)
+    valid = np.isfinite(depth) & (depth > 1e-6)
+    values = resize_depth(np.where(valid, depth, 0.0), w, h)
+    weights = resize_depth(valid.astype(np.float32), w, h)
+    resized = np.divide(values, weights, out=np.zeros_like(values), where=weights > 1e-6)
+    return resized, weights >= 0.999
+
+
 def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity"):
     """Scale/shift-invariant relative-depth accuracy plus boundary accuracy.
 
@@ -478,10 +499,12 @@ def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity"):
     fitted away. The RMSE is normalized by GT robust range (or full normalized range for flat GT).
     """
     pred = np.asarray(prediction, np.float32)
-    gt = resize_depth(ground_truth, pred.shape[1], pred.shape[0])
-    valid = np.isfinite(gt)
     if kind in ("metric", "depth"):
-        valid &= gt > 1e-6
+        gt, valid = resize_metric_depth(ground_truth, pred.shape[1], pred.shape[0])
+    else:
+        gt = resize_depth(ground_truth, pred.shape[1], pred.shape[0])
+        valid = np.isfinite(gt)
+    if kind in ("metric", "depth"):
         target = np.zeros_like(gt)
         target[valid] = 1.0 / gt[valid]
     else:
@@ -612,9 +635,53 @@ def warp_previous_with_flow(previous, u, v):
     return sampled.astype(np.float32), valid
 
 
+def resize_forward_flow_to_current(flow, valid, width, height):
+    """Resize source-grid prev->current flow and splat it onto the current-frame grid.
+
+    Public optical-flow ground truth is conventionally indexed at previous-frame pixels, while
+    ``warp_previous_with_flow`` needs a vector at each current pixel. Nearest forward splatting
+    performs that coordinate conversion without pretending collisions/holes are valid evidence.
+    """
+    flow = np.asarray(flow, dtype=np.float32)
+    if flow.ndim != 3 or flow.shape[-1] != 2:
+        raise ValueError(f"optical flow must be HxWx2, got {flow.shape}")
+    sh, sw = flow.shape[:2]
+    valid = np.asarray(valid, dtype=bool) if valid is not None else np.isfinite(flow).all(axis=2)
+    if valid.shape != (sh, sw):
+        raise ValueError(f"optical-flow valid mask {valid.shape} does not match {(sh, sw)}")
+    def scale_plane(plane, factor):
+        image = Image.fromarray(np.nan_to_num(plane).astype(np.float32), mode="F")
+        return np.asarray(image.resize((width, height), Image.BILINEAR), np.float32) * factor
+    fu = scale_plane(flow[..., 0], width / float(sw))
+    fv = scale_plane(flow[..., 1], height / float(sh))
+    vm = np.asarray(Image.fromarray(valid.astype(np.uint8) * 255).resize(
+        (width, height), Image.NEAREST)) > 127
+    yy, xx = np.mgrid[:height, :width]
+    tx = np.rint(xx + fu).astype(np.int32)
+    ty = np.rint(yy + fv).astype(np.int32)
+    keep = vm & np.isfinite(fu) & np.isfinite(fv)
+    keep &= (tx >= 0) & (tx < width) & (ty >= 0) & (ty < height)
+    flat = (ty[keep] * width + tx[keep]).ravel()
+    sum_u = np.zeros(height * width, np.float32)
+    sum_v = np.zeros(height * width, np.float32)
+    weight = np.zeros(height * width, np.float32)
+    np.add.at(sum_u, flat, fu[keep])
+    np.add.at(sum_v, flat, fv[keep])
+    np.add.at(weight, flat, 1.0)
+    occupied = weight > 0
+    u = np.divide(sum_u, weight, out=np.zeros_like(sum_u), where=occupied).reshape(height, width)
+    v = np.divide(sum_v, weight, out=np.zeros_like(sum_v), where=occupied).reshape(height, width)
+    return u, v, occupied.reshape(height, width)
+
+
 def flow_temporal_metrics(left, right, prev_left, prev_right, src, prev_src,
-                          depth=None, prev_depth=None, min_support=0.1):
-    """Motion-compensated output/depth temporal error using source-derived optical flow."""
+                          depth=None, prev_depth=None, min_support=0.1,
+                          reference_flow=None, reference_valid=None):
+    """Motion-compensated output/depth temporal error.
+
+    Exact public-dataset flow is used when supplied; otherwise the deterministic classical
+    source-image estimator remains the fallback for ordinary clips.
+    """
     eh, ew = left.shape
     # Quarter-area validation is sufficient for temporal structure and keeps the deterministic
     # evaluator fast. Values remain luma/255; flow vectors stay in validation-pixel units.
@@ -622,7 +689,11 @@ def flow_temporal_metrics(left, right, prev_left, prev_right, src, prev_src,
     vw, vh = max(32, round(ew * scale)), max(24, round(eh * scale))
     cur_l, cur_r = resize_to(left, vw, vh), resize_to(right, vw, vh)
     old_l, old_r = resize_to(prev_left, vw, vh), resize_to(prev_right, vw, vh)
-    u, v, flow_valid = dense_source_flow(prev_src, src, vw, vh)
+    if reference_flow is not None:
+        u, v, flow_valid = resize_forward_flow_to_current(
+            reference_flow, reference_valid, vw, vh)
+    else:
+        u, v, flow_valid = dense_source_flow(prev_src, src, vw, vh)
     now_src = resize_to(src, vw, vh)
     before_src = resize_to(prev_src, vw, vh)
     warped_src, warp_valid = warp_previous_with_flow(before_src, u, v)
@@ -789,11 +860,18 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         extra_depth = sorted(set(depth_by_id) - set(frame_ids))
         raise ValueError(f"depth/SBS frame-id mismatch: missing depth={missing_depth}, extra depth={extra_depth}")
     gt_by_id = indexed_files(
-        os.path.join(frames_dir, "gt_depth", "frame_*.png"), "frame_") if frames_dir else {}
+        os.path.join(frames_dir, "gt_depth", "frame_*.*"), "frame_") if frames_dir else {}
     if gt_by_id and set(gt_by_id) != set(frame_ids):
         missing_gt = sorted(set(frame_ids) - set(gt_by_id))
         extra_gt = sorted(set(gt_by_id) - set(frame_ids))
         raise ValueError(f"GT-depth/SBS frame-id mismatch: missing GT={missing_gt}, extra GT={extra_gt}")
+    flow_by_id = indexed_files(
+        os.path.join(frames_dir, "gt_flow", "frame_*.npz"), "frame_") if frames_dir else {}
+    expected_flow_ids = set(frame_ids[1:])
+    if flow_by_id and set(flow_by_id) != expected_flow_ids:
+        missing_flow = sorted(expected_flow_ids - set(flow_by_id))
+        extra_flow = sorted(set(flow_by_id) - expected_flow_ids)
+        raise ValueError(f"GT-flow/frame-id mismatch: missing GT={missing_flow}, extra GT={extra_flow}")
     gt_kind = "disparity"
     if frames_dir:
         meta_path = os.path.join(frames_dir, "meta.json")
@@ -835,8 +913,15 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
                 if jitter is not None:
                     row["static_jitter"] = jitter
                     static_jitters.append(jitter)
+                reference_flow = reference_valid = None
+                if frame_id in flow_by_id:
+                    with np.load(flow_by_id[frame_id], allow_pickle=False) as flow_data:
+                        reference_flow = np.asarray(flow_data["flow"], dtype=np.float32)
+                        if "valid" in flow_data:
+                            reference_valid = np.asarray(flow_data["valid"], dtype=bool)
                 flow_temporal, flow_depth, flow_support = flow_temporal_metrics(
-                    left, right, prev_left, prev_right, src, prev_src, depth, prev_depth)
+                    left, right, prev_left, prev_right, src, prev_src, depth, prev_depth,
+                    reference_flow=reference_flow, reference_valid=reference_valid)
                 row["flow_support"] = flow_support
                 if flow_temporal is not None:
                     row["flow_temporal"] = flow_temporal

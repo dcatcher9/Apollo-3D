@@ -9,6 +9,7 @@ from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sbsbench
 import run_eval
+import prepare_public_datasets
 
 
 class EvalContractTests(unittest.TestCase):
@@ -232,6 +233,16 @@ class EvalContractTests(unittest.TestCase):
         self.assertGreater(bad["depth_gt_si_rmse"], 40.0)
         self.assertLess(bad["depth_gt_edge_f1"], 1.0)
 
+    def test_metric_depth_resize_does_not_invert_interpolated_invalid_holes(self):
+        gt = np.full((48, 80), 2.0, np.float32)
+        gt[12:36, 38:42] = 0.0
+        resized, valid = sbsbench.resize_metric_depth(gt, 40, 24)
+        self.assertTrue(np.all(resized[valid] > 1.9))
+        self.assertTrue(np.all(resized[valid] < 2.1))
+        prediction = np.full((24, 40), 0.5, np.float32)
+        metrics = sbsbench.depth_ground_truth_metrics(prediction, gt, "metric")
+        self.assertLess(metrics["depth_gt_si_rmse"], 0.01)
+
     def test_optical_flow_temporal_metric_compensates_motion(self):
         rng = np.random.default_rng(31)
         previous = np.round(rng.random((96, 160), dtype=np.float32) * 255.0) / 255.0
@@ -245,6 +256,45 @@ class EvalContractTests(unittest.TestCase):
         self.assertGreater(support, 0.8)
         self.assertLess(stable, 2.0)
         self.assertGreater(unstable, stable + 100.0)
+
+    def test_exact_forward_flow_temporal_metric_compensates_motion(self):
+        rng = np.random.default_rng(71)
+        previous = np.round(rng.random((96, 160), dtype=np.float32) * 255.0) / 255.0
+        current = np.zeros_like(previous)
+        current[:, 5:] = previous[:, :-5]
+        flow = np.zeros((96, 160, 2), np.float32)
+        flow[..., 0] = 5.0
+        valid = np.ones((96, 160), bool)
+        valid[:, -5:] = False
+        stable, _, support = sbsbench.flow_temporal_metrics(
+            current, current, previous, previous, current, previous, min_support=0.1,
+            reference_flow=flow, reference_valid=valid)
+        self.assertGreater(support, 0.8)
+        self.assertLess(stable, 2.0)
+
+    def test_npy_metric_depth_preserves_native_values(self):
+        with tempfile.NamedTemporaryFile(suffix=".npy", delete=False) as fh:
+            path = fh.name
+        try:
+            expected = np.array([[0.25, 4.0], [12.5, 200.0]], np.float32)
+            np.save(path, expected)
+            np.testing.assert_array_equal(sbsbench.load_depth(path), expected)
+        finally:
+            os.unlink(path)
+
+    def test_public_dataset_timestamp_association_is_nearest_and_unique(self):
+        rgb = [(0.00, "r0"), (0.10, "r1"), (0.20, "r2")]
+        depth = [(0.009, "d0"), (0.105, "d1"), (0.35, "far")]
+        pairs = prepare_public_datasets.associate_timestamps(rgb, depth, 0.03)
+        self.assertEqual([(p[1], p[3]) for p in pairs], [("r0", "d0"), ("r1", "d1")])
+
+    def test_suite_defaults_keep_core_and_extended_baselines_separate(self):
+        core_clips, core_baselines = run_eval.suite_defaults("core")
+        extended_clips, extended_baselines = run_eval.suite_defaults("extended")
+        self.assertTrue(core_clips.endswith(os.path.join("sbsbench", "clips")))
+        self.assertTrue(core_baselines.endswith(os.path.join("sbsbench", "baselines")))
+        self.assertIn(os.path.join("prepared", "extended-v1"), extended_clips)
+        self.assertTrue(extended_baselines.endswith("baselines_extended"))
 
 
 if __name__ == "__main__":

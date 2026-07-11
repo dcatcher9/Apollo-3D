@@ -30,7 +30,7 @@ THR = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json")))["metrics"]
 
 # An A/B report may compare different code, warp, or treatment arguments, but its evidence is
 # invalid if the source set, model, base config, or metric contract changed underneath it.
-_SAME_CONTEXT = ["clip_set_sha1", "mode", "model", "eval_schema", "depth_step",
+_SAME_CONTEXT = ["clip_set_sha1", "mode", "model", "eval_schema", "depth_step", "suite",
                  "metric_sha256"]
 if not allow_config_diff:
     _SAME_CONTEXT.append("conf_sha256")
@@ -40,13 +40,24 @@ _mismatched_context = {k: (CTRL.get("meta", {}).get(k), TREAT.get("meta", {}).ge
 if _mismatched_context:
     raise SystemExit(f"refusing incompatible A/B report: {_mismatched_context}")
 
+CLIPS_ROOT = CTRL.get("meta", {}).get("clips_root") or os.path.join(SCRIPT_DIR, "clips")
+
+
+def source_glob(clip, frame_id):
+    return glob.glob(os.path.join(CLIPS_ROOT, clip, f"frame_{frame_id:05d}.*"))
+
+
+def gt_depth_path(clip, frame_id):
+    paths = glob.glob(os.path.join(CLIPS_ROOT, clip, "gt_depth", f"frame_{frame_id:05d}.*"))
+    return paths[0] if paths else None
+
 
 def _clip_name(clip):
     # Prefer the name run_eval captured into results.json; else the repo clip's meta.json; else id.
     nm = CTRL["clips"].get(clip, {}).get("meta", {}).get("name")
     if nm:
         return nm
-    mp = os.path.join(SCRIPT_DIR, "clips", clip, "meta.json")
+    mp = os.path.join(CLIPS_ROOT, clip, "meta.json")
     if os.path.exists(mp):
         try:
             return json.load(open(mp)).get("name", clip)
@@ -116,13 +127,7 @@ def durl(im, w=None, jpg=False, q=82):
 
 
 def load_depth(p):
-    im = Image.open(p)
-    a = np.asarray(im).astype(np.float32)
-    if im.mode in ("I;16", "I;16B", "I"):
-        return a / 65535.0
-    if a.ndim == 3:
-        a = a[..., 0]
-    return a / 255.0
+    return sbsbench.load_depth(p)
 
 
 def frame_path(run, clip, i):
@@ -167,7 +172,7 @@ def crop_at_silhouette(clip, idx):
 def source_residual_evidence(clip, idx):
     """Metric-specific source/control/treatment crops and signed residual-delta heatmap."""
     cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
-    srcs = glob.glob(os.path.join(SCRIPT_DIR, "clips", clip, f"frame_{idx:05d}.*"))
+    srcs = source_glob(clip, idx)
     if not (os.path.exists(cp) and os.path.exists(tp) and srcs):
         return None
     ctrl, treat = Image.open(cp).convert("RGB"), Image.open(tp).convert("RGB")
@@ -208,8 +213,8 @@ def static_jitter_evidence(clip, idx):
         return None
     paths = [frame_path(run, clip, i) for run in (ctrl_dir, treat_dir)
              for i in (prev_idx, idx)]
-    src_now = glob.glob(os.path.join(SCRIPT_DIR, "clips", clip, f"frame_{idx:05d}.*"))
-    src_prev = glob.glob(os.path.join(SCRIPT_DIR, "clips", clip, f"frame_{prev_idx:05d}.*"))
+    src_now = source_glob(clip, idx)
+    src_prev = source_glob(clip, prev_idx)
     if not all(os.path.exists(p) for p in paths) or not src_now or not src_prev:
         return None
     images = [Image.open(p).convert("RGB") for p in paths]
@@ -248,18 +253,27 @@ def static_jitter_evidence(clip, idx):
 
 def ground_truth_depth_evidence(clip, idx):
     """Ground truth, aligned control/treatment depth, and signed error-delta map."""
-    gp = os.path.join(SCRIPT_DIR, "clips", clip, "gt_depth", f"frame_{idx:05d}.png")
+    gp = gt_depth_path(clip, idx)
     cp = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
     tp = os.path.join(treat_dir, clip, f"depth_{idx:05d}.png")
-    if not all(os.path.exists(p) for p in (gp, cp, tp)):
+    if not gp or not all(os.path.exists(p) for p in (gp, cp, tp)):
         return None
     gt, control, treatment = load_depth(gp), load_depth(cp), load_depth(tp)
-    gt = sbsbench.resize_depth(gt, control.shape[1], control.shape[0])
+    kind = CTRL["clips"].get(clip, {}).get("meta", {}).get("gt_depth_kind", "disparity")
+    if kind in ("metric", "depth"):
+        gt, valid = sbsbench.resize_metric_depth(gt, control.shape[1], control.shape[0])
+        target = np.zeros_like(gt)
+        target[valid] = 1.0 / gt[valid]
+    else:
+        gt = sbsbench.resize_depth(gt, control.shape[1], control.shape[0])
+        valid = np.isfinite(gt)
+        valid &= gt >= 0.0
+        target = gt
     if treatment.shape != control.shape:
         treatment = sbsbench.resize_depth(treatment, control.shape[1], control.shape[0])
 
     def align(pred):
-        pv, tv = pred.ravel(), gt.ravel()
+        pv, tv = pred[valid], target[valid]
         t5, t95 = np.percentile(tv, (5, 95))
         if t95 - t5 < 1e-4:
             return pred + float(np.median(tv) - np.median(pv))
@@ -268,25 +282,28 @@ def ground_truth_depth_evidence(clip, idx):
         return pred * float(scale) + float(shift)
 
     ca, ta = align(control), align(treatment)
-    lo, hi = np.percentile(gt, (1, 99))
+    lo, hi = np.percentile(target[valid], (1, 99))
     if hi - lo < 1e-4:
         lo, hi = 0.0, 1.0
     gray = lambda a: np.clip((a - lo) / (hi - lo), 0, 1)
-    signed = (np.abs(ta - gt) - np.abs(ca - gt)) * 255.0 / max(hi - lo, 1e-4)
+    signed = np.zeros_like(target)
+    signed[valid] = ((np.abs(ta[valid] - target[valid]) - np.abs(ca[valid] - target[valid]))
+                     * 255.0 / max(hi - lo, 1e-4))
     heat = np.zeros((*gt.shape, 3), np.uint8)
     heat[..., 0] = np.clip(signed * 5.0, 0, 255).astype(np.uint8)
     heat[..., 2] = np.clip(-signed * 5.0, 0, 255).astype(np.uint8)
-    images = [Image.fromarray((gray(a) * 255).astype(np.uint8)) for a in (gt, ca, ta)]
+    shown_gt = np.where(valid, target, lo)
+    images = [Image.fromarray((gray(a) * 255).astype(np.uint8)) for a in (shown_gt, ca, ta)]
     images.append(Image.fromarray(heat))
     return tuple(durl(im, w=380, jpg=True, q=88) for im in images)
 
 
 def flow_temporal_evidence(clip, idx):
     """Source-flow-compensated temporal residual for both runs and signed treatment delta."""
-    if idx <= 1:
+    if idx <= 0:
         return None
-    src_now = glob.glob(os.path.join(SCRIPT_DIR, "clips", clip, f"frame_{idx:05d}.*"))
-    src_prev = glob.glob(os.path.join(SCRIPT_DIR, "clips", clip, f"frame_{idx - 1:05d}.*"))
+    src_now = source_glob(clip, idx)
+    src_prev = source_glob(clip, idx - 1)
     paths = [frame_path(ctrl_dir, clip, idx - 1), frame_path(ctrl_dir, clip, idx),
              frame_path(treat_dir, clip, idx - 1), frame_path(treat_dir, clip, idx)]
     if not src_now or not src_prev or not all(os.path.exists(p) for p in paths):
@@ -298,7 +315,16 @@ def flow_temporal_evidence(clip, idx):
     vw, vh = max(32, round(ew * scale)), max(24, round(eh * scale))
     now_src = sbsbench.load_gray(src_now[0])
     prev_src = sbsbench.load_gray(src_prev[0])
-    u, v, flow_valid = sbsbench.dense_source_flow(prev_src, now_src, vw, vh)
+    gt_flow = os.path.join(CLIPS_ROOT, clip, "gt_flow", f"frame_{idx:05d}.npz")
+    if os.path.exists(gt_flow):
+        with np.load(gt_flow, allow_pickle=False) as flow_data:
+            reference_flow = np.asarray(flow_data["flow"], dtype=np.float32)
+            reference_valid = (np.asarray(flow_data["valid"], dtype=bool)
+                               if "valid" in flow_data else None)
+        u, v, flow_valid = sbsbench.resize_forward_flow_to_current(
+            reference_flow, reference_valid, vw, vh)
+    else:
+        u, v, flow_valid = sbsbench.dense_source_flow(prev_src, now_src, vw, vh)
     now_small = sbsbench.resize_to(now_src, vw, vh)
     prev_small = sbsbench.resize_to(prev_src, vw, vh)
     src_warp, valid = sbsbench.warp_previous_with_flow(prev_small, u, v)
@@ -463,7 +489,7 @@ def expected_flat(run, clip):
     value = run["clips"].get(clip, {}).get("meta", {}).get("expected_flat")
     if value is not None:
         return bool(value)
-    mp = os.path.join(SCRIPT_DIR, "clips", clip, "meta.json")
+    mp = os.path.join(CLIPS_ROOT, clip, "meta.json")
     try:
         return bool(json.load(open(mp)).get("expected_flat"))
     except Exception:
@@ -690,7 +716,7 @@ METRIC_DEFS = [
     ("source_halo_p95", "source_halo", "Excess thin-ridge brightness at depth silhouettes after subtracting the horizontally aligned source ridge. Genuine source outlines are free.", "lower = less warp-created halo"),
     ("source_stretch_pct", "source_stretch", "Source-textured silhouette-near pixels whose horizontal detail collapses below 35% of the aligned source detail.", "lower = less warp stretch"),
     ("static_jitter_p95", "static_jitter", "Worst-eye temporal change over regions whose source neighborhood stayed static after allowing for horizontal disparity. Camera/object motion is excluded.", "lower = steadier static content"),
-    ("flow_temporal_p95", "flow_temporal", "Worst-eye temporal residual after warping the previous output with classical source optical flow and rejecting photometrically unreliable flow.", "lower = steadier moving content"),
+    ("flow_temporal_p95", "flow_temporal", "Worst-eye temporal residual after warping the previous output with exact dataset flow when available, otherwise classical source flow, and rejecting photometrically unreliable samples.", "lower = steadier moving content"),
     ("depth_gt_si_rmse", "gt_depth_rmse", "Prediction error against committed ground-truth inverse depth after monocular scale/shift alignment; constant-depth GT uses shift-only alignment.", "lower = more accurate depth"),
     ("depth_gt_edge_f1", "gt_edge_f1", "Depth-boundary F1 against committed ground truth with one-pixel tolerance.", "higher = more accurate boundaries"),
     ("flow_depth_p95", "flow_depth", "Pre-warp depth change after source optical-flow compensation, on photometrically reliable support.", "lower = steadier depth"),

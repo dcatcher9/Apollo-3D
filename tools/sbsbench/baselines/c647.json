@@ -52,12 +52,12 @@
     "score": 72.1
   },
   "perf_ms": {
-    "depth_infer": 2.01446,
-    "sbs_composite_cpu": 0.0062,
-    "warp_infer": 0.142784
+    "depth_infer": 2.01923,
+    "sbs_composite_cpu": 0.0064,
+    "warp_infer": 0.142624
   },
   "meta": {
-    "git_sha": "d54d0de0",
+    "git_sha": "6ce94bac",
     "git_dirty": true,
     "clip_set_sha1": {
       "c339": "db5f34629467",
@@ -70,18 +70,20 @@
       "scene_cut": "c912fa5c33a7"
     },
     "mode": "game",
+    "suite": "core",
+    "clips_root": "E:\\Git\\Repo\\Apollo-3D\\tools\\sbsbench\\clips",
     "extra_args": [],
     "conf": "tools\\sbsbench\\bench.conf",
     "model": "depth_anything_v2_fp16",
     "warp": "apollo",
     "shift_profile": "bestv2",
-    "eval_schema": 3,
+    "eval_schema": 4,
     "depth_step": "current-once",
     "conf_sha256": "d78305de3cb0d05f",
-    "metric_sha256": "7eab28e4d528ecd9",
+    "metric_sha256": "e0797ed1f16ad440",
     "gpu_contention": false,
-    "timestamp": "2026-07-10T22:01:44",
-    "run_name": "evalv3-baseline-final",
+    "timestamp": "2026-07-10T23:13:45",
+    "run_name": "evalv4-core-verified",
     "name": "washerwoman-pond",
     "description": "Woman washing laundry by a lantern-lit courtyard pond at night.",
     "clip_sha1": "dfff8c7b9459"

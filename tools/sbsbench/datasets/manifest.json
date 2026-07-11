@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "prepared_suite": "extended-v1",
+  "default_cache": "E:/ApolloDev/sbs_bench/datasets",
+  "datasets": {
+    "bonn_dynamic": {
+      "title": "Bonn RGB-D Dynamic Dataset",
+      "homepage": "https://www.ipb.uni-bonn.de/data/rgbd-dynamic-dataset/",
+      "citation": "Palazzolo et al., ReFusion, IROS 2019",
+      "license_note": "Official page requests citation; prepared media remains external to Git.",
+      "archives": {
+        "person_tracking": {
+          "url": "https://www.ipb.uni-bonn.de/html/projects/rgbd_dynamic2019/rgbd_bonn_person_tracking.zip",
+          "filename": "rgbd_bonn_person_tracking.zip",
+          "sha256": "a4810fd91ef2ea1d630b53fe0df5d76144c1b18d86ca91fb3a035debd0c9c5f5"
+        }
+      }
+    },
+    "tartanair_v2": {
+      "title": "TartanAir V2",
+      "homepage": "https://tartanair.org/",
+      "citation": "Wang et al., TartanAir, IROS 2020",
+      "license_note": "Dataset CC BY 4.0; prepared media remains external to keep the repository small.",
+      "archives": {
+        "archviz_image": {
+          "url": "https://huggingface.co/datasets/theairlabcmu/tartanair2/resolve/main/ArchVizTinyHouseDay/Data_easy/image_lcam_front.zip?download=true",
+          "filename": "tartanair_archviz_image_lcam_front.zip",
+          "sha256": "9bea5fca9d0cf50105c7d34583d4d5db06e3715ef708262b4dfad763d34b17da"
+        },
+        "archviz_depth": {
+          "url": "https://huggingface.co/datasets/theairlabcmu/tartanair2/resolve/main/ArchVizTinyHouseDay/Data_easy/depth_lcam_front.zip?download=true",
+          "filename": "tartanair_archviz_depth_lcam_front.zip",
+          "sha256": "83e6e680297af35aa83d594ea3ed254bf71e9d9da7b26fee6d0ccb29f25ac104"
+        },
+        "archviz_flow": {
+          "url": "https://huggingface.co/datasets/theairlabcmu/tartanair2/resolve/main/ArchVizTinyHouseDay/Data_easy/flow_lcam_front.zip?download=true",
+          "filename": "tartanair_archviz_flow_lcam_front.zip",
+          "sha256": "dbcf42afe2cf504e1bc3d7096b78ca32db05f5c78d3c02f16367583e3d1f635e"
+        }
+      }
+    }
+  },
+  "clips": {
+    "bonn_person_walk": {
+      "dataset": "bonn_dynamic",
+      "adapter": "tum_rgbd_zip",
+      "archives": ["person_tracking"],
+      "name": "bonn-person-walk",
+      "description": "Real registered RGB-D person tracking with body motion and self-occlusion.",
+      "start": 180,
+      "stride": 3,
+      "count": 24,
+      "max_timestamp_delta": 0.03
+    },
+    "bonn_person_close": {
+      "dataset": "bonn_dynamic",
+      "adapter": "tum_rgbd_zip",
+      "archives": ["person_tracking"],
+      "name": "bonn-person-close",
+      "description": "Real RGB-D close pass beside robots, emphasizing silhouette and object occlusion.",
+      "start": 280,
+      "stride": 2,
+      "count": 24,
+      "max_timestamp_delta": 0.03
+    },
+    "tartanair_house_easy": {
+      "dataset": "tartanair_v2",
+      "adapter": "tartanair_v2_zip",
+      "archives": ["archviz_image", "archviz_depth", "archviz_flow"],
+      "trajectory": "P000",
+      "camera": "lcam_front",
+      "name": "tartanair-house-easy",
+      "description": "Synthetic attic/bed transition with exact metric depth and optical flow.",
+      "start": 40,
+      "stride": 1,
+      "count": 24
+    },
+    "tartanair_house_motion": {
+      "dataset": "tartanair_v2",
+      "adapter": "tartanair_v2_zip",
+      "archives": ["archviz_image", "archviz_depth", "archviz_flow"],
+      "trajectory": "P002",
+      "camera": "lcam_front",
+      "name": "tartanair-house-motion",
+      "description": "Synthetic indoor/outdoor camera rotation with exact metric depth and optical flow.",
+      "start": 60,
+      "stride": 1,
+      "count": 24
+    }
+  },
+  "future_sources": {
+    "mpi_sintel": {
+      "homepage": "https://sintel.is.tue.mpg.de/downloads",
+      "reason": "Cinematic animation, depth and flow; official image+depth archives total about 3.2 GB."
+    },
+    "virtual_kitti_2": {
+      "homepage": "https://europe.naverlabs.com/proxy-virtual-worlds-vkitti-2/",
+      "reason": "Outdoor driving with dense depth/flow; official RGB+depth archives total about 14.6 GB and are non-commercial."
+    }
+  }
+}

@@ -38,7 +38,21 @@ import sbsbench  # noqa: E402  (metric implementations)
 
 # Depth models the two modes load (matches the client mode->model binding).
 MODE_MODEL = {"movie": "da3mono_large_fp16", "game": "depth_anything_v2_fp16"}
-EVAL_SCHEMA = 3  # schema 2 joins + reference depth and flow-compensated temporal validation
+EVAL_SCHEMA = 4  # schema 3 + native metric-depth and exact optical-flow reference sidecars
+
+
+def suite_defaults(name):
+    if name == "core":
+        return os.path.join(SCRIPT_DIR, "clips"), os.path.join(SCRIPT_DIR, "baselines")
+    manifest_path = os.path.join(SCRIPT_DIR, "datasets", "manifest.json")
+    try:
+        with open(manifest_path, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError) as exc:
+        fail(f"cannot load extended-suite manifest {manifest_path}: {exc}")
+    cache = os.environ.get("APOLLO_SBS_DATASETS") or manifest["default_cache"]
+    clips = os.path.join(os.path.abspath(cache), "prepared", manifest["prepared_suite"])
+    return clips, os.path.join(SCRIPT_DIR, "baselines_extended")
 
 
 def fail(message):
@@ -60,7 +74,8 @@ def sha1_dir(path):
     # excluded, while semantic metadata that changes scoring is part of the contract.
     h = hashlib.sha1()
     files = (glob.glob(os.path.join(path, "frame_*"))
-             + glob.glob(os.path.join(path, "gt_depth", "frame_*")))
+             + glob.glob(os.path.join(path, "gt_depth", "frame_*"))
+             + glob.glob(os.path.join(path, "gt_flow", "frame_*")))
     for f in sorted(files):
         with open(f, "rb") as fh:
             h.update(os.path.relpath(f, path).replace("\\", "/").encode())
@@ -126,10 +141,14 @@ def check_engines(build_dir, mode):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Run the offline SBS benchmark over the committed clip set.")
+    ap = argparse.ArgumentParser(description="Run the offline SBS benchmark over a reproducible clip suite.")
     ap.add_argument("--build-dir", default=os.path.join(REPO, "cmake-build-relwithdebinfo"))
     ap.add_argument("--conf", default=os.path.join(SCRIPT_DIR, "bench.conf"))
     ap.add_argument("--clips", nargs="*", help="clip names (default: all in clips/)")
+    ap.add_argument("--suite", choices=["core", "extended"], default="core",
+                    help="quick committed suite or prepared public-data suite")
+    ap.add_argument("--clips-root", help="override suite source directory")
+    ap.add_argument("--baseline-dir", help="override suite baseline directory")
     ap.add_argument("--mode", choices=["movie", "game"], default="game")
     ap.add_argument("--label", default=None, help="run label (default: timestamp)")
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[],
@@ -150,13 +169,20 @@ def main():
         fail("--comparison-only and --update-baselines are mutually exclusive")
 
     exe = os.path.join(args.build_dir, "sunshine.exe")
-    clips_dir = os.path.join(SCRIPT_DIR, "clips")
-    base_dir = os.path.join(SCRIPT_DIR, "baselines")
+    default_clips, default_baselines = suite_defaults(args.suite)
+    clips_dir = os.path.abspath(args.clips_root or default_clips)
+    base_dir = os.path.abspath(args.baseline_dir or default_baselines)
     thresholds = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json")))
-    clips = args.clips or sorted(os.path.basename(d) for d in glob.glob(os.path.join(clips_dir, "*"))
-                                 if os.path.isdir(d))
+    clips = args.clips or sorted(
+        os.path.basename(d) for d in glob.glob(os.path.join(clips_dir, "*"))
+        if os.path.isdir(d) and glob.glob(os.path.join(d, "frame_*.*")))
     if not clips:
         fail("no clips in " + clips_dir)
+    if not args.update_baselines and not args.comparison_only:
+        missing_baselines = [c for c in clips if not os.path.exists(os.path.join(base_dir, c + ".json"))]
+        if missing_baselines:
+            fail(f"missing committed baseline(s) in {base_dir}: {missing_baselines}. "
+                 "Use --comparison-only for a matched A/B or --update-baselines after validation.")
     if not os.path.exists(exe):
         fail(f"{exe} not found -- build first (ninja -C cmake-build-relwithdebinfo sunshine)")
 
@@ -191,7 +217,9 @@ def main():
         "git_sha": git(["rev-parse", "--short", "HEAD"]),
         "git_dirty": bool(git(["status", "--porcelain"])),
         "clip_set_sha1": {c: sha1_dir(os.path.join(clips_dir, c)) for c in clips},
-        "mode": args.mode, "extra_args": args.extra, "conf": os.path.relpath(args.conf, REPO),
+        "mode": args.mode, "suite": args.suite, "clips_root": clips_dir,
+        "extra_args": args.extra,
+        "conf": os.path.relpath(args.conf, REPO),
         "model": expected_model, "warp": expected_warp, "shift_profile": expected_shift_profile,
         "eval_schema": EVAL_SCHEMA, "depth_step": "current-once",
         "conf_sha256": conf_sha, "metric_sha256": metric_sha,
@@ -252,7 +280,8 @@ def main():
         if os.path.exists(cmp_path):
             try:
                 clip_meta.update({k: v for k, v in json.load(open(cmp_path)).items()
-                                  if k in ("name", "description", "expected_flat", "gt_depth_kind")})
+                                  if k in ("name", "description", "expected_flat", "gt_depth_kind",
+                                           "dataset", "homepage", "citation", "license_note", "suite")})
             except Exception:
                 pass
 
