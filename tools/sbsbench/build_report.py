@@ -17,6 +17,7 @@ import numpy as np
 from PIL import Image
 
 ctrl_dir, treat_dir, out_html = sys.argv[1], sys.argv[2], sys.argv[3]
+allow_config_diff = "--allow-config-diff" in sys.argv[4:]
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (sbs_score, shared with run_eval)
@@ -27,8 +28,10 @@ THR = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json")))["metrics"]
 
 # An A/B report may compare different code, warp, or treatment arguments, but its evidence is
 # invalid if the source set, model, base config, or metric contract changed underneath it.
-_SAME_CONTEXT = ("clip_set_sha1", "mode", "model", "eval_schema", "depth_step",
-                 "conf_sha256", "metric_sha256")
+_SAME_CONTEXT = ["clip_set_sha1", "mode", "model", "eval_schema", "depth_step",
+                 "metric_sha256"]
+if not allow_config_diff:
+    _SAME_CONTEXT.append("conf_sha256")
 _mismatched_context = {k: (CTRL.get("meta", {}).get(k), TREAT.get("meta", {}).get(k))
                        for k in _SAME_CONTEXT
                        if CTRL.get("meta", {}).get(k) != TREAT.get("meta", {}).get(k)}
@@ -682,6 +685,7 @@ HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
         .replace("__METRICS__", metrics_section())
         .replace("__FOOTER__", clean_footer()).replace("__ISSUES__", issue_sections())
         .replace("__TREAT_ARGS__", " ".join(TREAT["meta"].get("extra_args") or ["--mode game"])))
+os.makedirs(os.path.dirname(os.path.abspath(out_html)), exist_ok=True)
 with open(out_html, "w", encoding="utf-8") as f:
     f.write(HTML)
 print("wrote", out_html, f"({len(HTML) // 1024} KB)")

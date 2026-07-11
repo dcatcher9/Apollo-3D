@@ -30,6 +30,7 @@ python tools/sbsbench/run_eval.py                     # all committed clips vs c
 python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change: re-baseline + commit
 python tools/sbsbench/run_eval.py --extra --divergence 0.027   # pass A/B levers to the harness
 python tools/sbsbench/run_eval.py --label treat --report-control cmake-build-relwithdebinfo/sbs_eval/control --extra --warp vd3d
+python tools/sbsbench/run_eval.py --label profile-b --conf profile-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/profile-a --report-allow-config-diff
 python tools/sbsbench/run_eval.py --comparison-only --label ab-control  # fresh A/B; no committed gate
 ```
 
@@ -153,6 +154,11 @@ all source frames so sampling cannot change history. The harness exports exact r
 the finalized depth texture immediately before reprojection. `export_vd3d_depth_reference.py`
 produces matching VD3D checkpoints; `vd3d_reference.py score` gates the two depth stages separately
 from final-warp reproduction. Pixel similarity is never treated as a warp-quality verdict.
+
+Phase-B quality tuning uses `bestv2-apollo-warp.conf` and `bestv2-vd3d-warp.conf`. A processor may
+be retained for one geometry and rejected for the other. Use `--report-allow-config-diff` when
+generating their comparison report: it permits the intentional config-hash difference while still
+requiring identical clips, mode, model, eval schema, depth step and metric definition.
 
 The metrics split cleanly by subsystem: **warp**-side changes move pop / disocc / flicker_disocc;
 **depth**-side changes move edge_acc / swim / depth_spread. So a delta tells you *where* the change

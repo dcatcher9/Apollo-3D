@@ -861,7 +861,8 @@ namespace platf::dxgi {
         device->CreateRenderTargetView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_rtv);
         device->CreateShaderResourceView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_srv);
 
-        if (!display->is_hdr() && config::video.sbs.shift_profile == "bestv2") {
+        if (!display->is_hdr() && config::video.sbs.shift_profile == "bestv2" &&
+            config::video.sbs.bestv2_sharpen) {
           status = device->CreateTexture2D(&tex_desc, nullptr, &sbs_sharpen_texture);
           if (FAILED(status) ||
               FAILED(device->CreateRenderTargetView(sbs_sharpen_texture.get(), nullptr, &sbs_sharpen_rtv)) ||

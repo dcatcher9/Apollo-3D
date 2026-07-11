@@ -485,7 +485,7 @@ namespace sbs_bench {
         dev->CreateTexture2D(&td, nullptr, &sbs_tex);
         dev->CreateRenderTargetView(sbs_tex.Get(), nullptr, &sbs_rtv);
         dev->CreateShaderResourceView(sbs_tex.Get(), nullptr, &sbs_srv);
-        if (sbs_cfg.shift_profile == "bestv2") {
+        if (sbs_cfg.shift_profile == "bestv2" && sbs_cfg.bestv2_sharpen) {
           if (FAILED(dev->CreateTexture2D(&td, nullptr, &sharpen_tex)) ||
               FAILED(dev->CreateRenderTargetView(sharpen_tex.Get(), nullptr, &sharpen_rtv)) ||
               FAILED(dev->CreateShaderResourceView(sharpen_tex.Get(), nullptr, &sharpen_srv))) {

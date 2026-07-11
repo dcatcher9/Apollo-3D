@@ -17,6 +17,28 @@ Companion to the validated findings in the sbs-vd3d-port memory and the roadmap 
 2. **Phase B — integrate Apollo improvements.** Re-enable Apollo's additions one lever per eval
    run (`run_eval.py --extra …`), keep only what the numbers say beats Phase A, diff every step.
 
+## Phase-B per-warp quality profiles
+
+Phase B starts from two independent profiles rather than forcing the same processors onto both
+geometry implementations:
+
+- `tools/sbsbench/bestv2-apollo-warp.conf`
+- `tools/sbsbench/bestv2-vd3d-warp.conf`
+
+Both currently retain the accepted Bestv2 shift, subject tracking, recentering and stretch. The
+quality profile intentionally disables exact sharpen on both warps: despite being essential to
+Phase-A pixel reproduction, it reduced the independent score by `6.20` / `6.46` points and caused
+large bright-rim regressions. Window sculpt, curvature, conceal/repair and DOF were also rejected
+and remain off. Exact plane lock is provisionally off in both profiles: current exact-versus-
+approximate and older off/on evidence disfavor it, but a final-stack off/on confirmation is still
+required. Guided upsample, min/max snap and range floor remain pending and must be evaluated
+independently for each warp.
+
+The starting profile comparison (flat-page clip excluded) is Apollo `74.13` versus VD3D `73.46`.
+Apollo has `+0.67 px` pop spread and `0.84` lower bright-rim p95; VD3D has `0.23` lower stretch and
+is about `8x` faster in the warp (`0.018 ms` versus `0.143 ms`). This is a starting report, not a
+final warp decision: `cmake-build-relwithdebinfo/sbs_eval/bestv2-profile-comparison/report.html`.
+
 ## Validated status — Bestv2 shift calibration (2026-07-10)
 
 The original Phase-A candidate used fixed normalized divergence `0.00285`. That was only fitted to

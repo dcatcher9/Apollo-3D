@@ -198,6 +198,7 @@ namespace config {
       double subject_plane_lock = 0.0;  ///< VD3D apply_subject_plane_lock: additionally flatten residual disparity WITHIN the subject depth band (local), on top of the global subject_lock. 0 = off; VD3D Bestv2 0.28. Requires subject_track.
       double subject_plane_width = 0.12;  ///< Half-width (in normalized depth) of the subject band for subject_plane_lock (VD3D subject_plane_lock_width, Bestv2 0.12).
       double foreground_curvature = 0.0;  ///< VD3D foreground-volume shaping. Pushes near-region interiors toward the viewer with a centered elliptical profile. 0 = off; VD3D Bestv2 0.07.
+      bool bestv2_sharpen = false;  ///< Apply Bestv2's exact SDR per-eye sharpen 0.2 after the completed warp. Retained for fidelity, disabled in quality-optimized profiles.
       double vd3d_forward_blend = 0.65;  ///< VD3D hybrid weight: 0 = classic backward grid warp, 1 = depth-ordered forward splat. Bestv2 code uses 0.65.
       int vd3d_fill_radius = 96;  ///< Maximum horizontal forward-splat hole-fill distance in pixels. Bestv2 code uses 96.
       double minmax_snap = 1.6;  ///< Scene-cut snap: when a frame's raw depth range (or its center) jumps by more than this factor vs the EMA'd range, snap the normalization scale to the new scene instead of slowly blending (which makes depth "swim" for ~0.2-0.7s after a hard cut). 0 = off (always blend).

@@ -139,6 +139,8 @@ def main():
                     help="control run directory; generate an A/B HTML report after this run")
     ap.add_argument("--report-out",
                     help="report path (default: <this run>/report.html; requires --report-control)")
+    ap.add_argument("--report-allow-config-diff", action="store_true",
+                    help="allow an explicit profile-vs-profile report with different config hashes; clips/model/metrics must still match")
     ap.add_argument("--allow-build", action="store_true", help="proceed even if engines are missing")
     args = ap.parse_args()
     if args.comparison_only and args.update_baselines:
@@ -349,6 +351,8 @@ def main():
         report_path = os.path.abspath(args.report_out or os.path.join(out_root, "report.html"))
         report_cmd = [sys.executable, os.path.join(SCRIPT_DIR, "build_report.py"),
                       control_dir, out_root, report_path]
+        if args.report_allow_config_diff:
+            report_cmd.append("--allow-config-diff")
         report_run = subprocess.run(report_cmd, capture_output=True, text=True)
         if report_run.returncode:
             fail("report generation failed: " + (report_run.stderr or report_run.stdout)[-2000:])

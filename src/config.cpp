@@ -1291,6 +1291,7 @@ namespace config {
     double_between_f(vars, "sbs_3d_subject_plane_lock", video.sbs.subject_plane_lock, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_subject_plane_width", video.sbs.subject_plane_width, {0.01, 0.5});
     double_between_f(vars, "sbs_3d_foreground_curvature", video.sbs.foreground_curvature, {0.0, 0.5});
+    bool_f(vars, "sbs_3d_bestv2_sharpen", video.sbs.bestv2_sharpen);
     double_between_f(vars, "sbs_3d_vd3d_forward_blend", video.sbs.vd3d_forward_blend, {0.0, 1.0});
     int_between_f(vars, "sbs_3d_vd3d_fill_radius", video.sbs.vd3d_fill_radius, {0, 256});
     double_between_f(vars, "sbs_3d_minmax_snap", video.sbs.minmax_snap, {0.0, 100.0});
