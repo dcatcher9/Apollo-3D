@@ -71,9 +71,9 @@ COLS = [
     ("pop_spread_px", "pop_spread", False, True, 0),
     ("source_residual_p95", "warp_resid", True, True, 0),
     ("static_jitter_p95", "static_jitter", True, True, 0),
-    ("pop_px_p50", "pop", False, True, 0), ("edge_acc_p50", "edge_acc", True, False, 2.0),
+    ("edge_acc_p50", "edge_acc", True, False, 2.0),
     ("stretch_area", "stretch", True, False, 2.0), ("rim_over_p95", "rim", True, False, 1.0),
-    ("swim_p50", "swim", True, False, 1.0), ("flicker_p50", "flick", True, True, 0),
+    ("swim_p50", "swim", True, False, 1.0),
     ("flicker_disocc_p50", "flick_dis", True, True, 0), ("vmisalign_px", "vmis", True, False, 0.5),
     ("disocc_smear", "smear", True, False, 0.02),
 ]
@@ -92,34 +92,13 @@ def impact(k):
         return 1e9
     if k in _PEN:
         return (1.0 - _DW) * _PEN[k]["weight"]
-    if k in ("pop_px_p50", "pop_px_p95", _DEPTH_METRIC):
+    if k in ("pop_spread_px", _DEPTH_METRIC):
         return _DW * 100.0
     return 0.0
 
 
 COLS = sorted(COLS, key=lambda c: -impact(c[0]))
 SHORT = {k: h for k, h, *_ in COLS}
-ISSUE_DEFS = {  # metric -> (title, temporal?, description)
-    "stretch_area": ("Disocclusion stretch band", False,
-                     "Background rubber-banded horizontally to fill the gap the foreground "
-                     "uncovered — eye-asymmetric (left eye smears left, right eye right)."),
-    "rim_over_p95": ("Silhouette white line", False,
-                     "A thin bright fringe hugging the silhouette — the residual sliver where "
-                     "the fill doesn't reach the foreground edge."),
-    "edge_acc_p50": ("Soft / floating silhouettes", False,
-                     "The depth silhouette sits off the true object edge, so the cut-out is "
-                     "loosely placed."),
-    "disocc_smear": ("Disocclusion fill blur", False,
-                     "Horizontal-detail deficit in the band beside silhouettes — on flat/synthetic "
-                     "content this also fingerprints hallucinated depth edges."),
-    "flicker_disocc_p50": ("Disocclusion shimmer", True,
-                           "The fill re-hallucinates frame to frame in the disocclusion bands — "
-                           "boiling along edges. Temporal: numbers, not stills."),
-    "vmisalign_px": ("Vertical misalignment", False,
-                     "Geometry fault: parallax must be horizontal-only."),
-}
-
-
 def durl(im, w=None, jpg=False, q=82):
     if w and im.width > w:
         im = im.resize((w, round(im.height * w / im.width)), Image.LANCZOS)
@@ -273,6 +252,44 @@ def visual_evidence_images(clip, idx, metric=None):
         return source_residual_evidence(clip, idx)
     if metric == "static_jitter_p95":
         return static_jitter_evidence(clip, idx)
+    if metric == "pop_spread_px":
+        cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
+        dp = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
+        if not (os.path.exists(cp) and os.path.exists(tp) and os.path.exists(dp)):
+            return None
+        depth = load_depth(dp)
+        ctrl, treat = Image.open(cp).convert("RGB"), Image.open(tp).convert("RGB")
+        ew, eh = ctrl.width // 2, ctrl.height
+        gx = np.abs(np.diff(depth, axis=1, prepend=depth[:, :1]))
+        dh, dw = depth.shape
+        band = gx[int(dh * 0.15):int(dh * 0.85)]
+        colscore = band.sum(0)
+        lo, hi = int(dw * 0.1), int(dw * 0.9)
+        cx_d = int(np.argmax(colscore[lo:hi]) + lo) if colscore[lo:hi].max() > 0.1 else dw // 2
+        rowscore = gx[:, max(0, cx_d - 2):cx_d + 3].sum(1)
+        cy_d = int(np.argmax(rowscore)) if rowscore.max() > 0 else dh // 2
+        cx, cy = int(cx_d / dw * ew), int(cy_d / dh * eh)
+        cw, ch = min(300, ew), min(300, eh)
+        x0 = max(0, min(ew - cw, cx - cw // 2))
+        y0 = max(0, min(eh - ch, cy - ch // 2))
+
+        def stereo_pair(image):
+            left = image.crop((x0, y0, x0 + cw, y0 + ch))
+            right = image.crop((ew + x0, y0, ew + x0 + cw, y0 + ch))
+            pair = Image.new("RGB", (cw * 2 + 4, ch), (18, 24, 29))
+            pair.paste(left, (0, 0))
+            pair.paste(right, (cw + 4, 0))
+            return pair
+
+        ctrl_pair, treat_pair = stereo_pair(ctrl), stereo_pair(treat)
+        a, b = np.asarray(ctrl_pair, np.float32), np.asarray(treat_pair, np.float32)
+        delta = np.mean(np.abs(b - a), axis=2)
+        v = np.clip(delta * 5.0, 0, 255)
+        heat = np.zeros((*v.shape, 3), np.uint8)
+        heat[..., 0] = v.astype(np.uint8)
+        heat[..., 1] = np.clip((v - 64) * 1.7, 0, 255).astype(np.uint8)
+        return (durl(ctrl_pair, w=520, jpg=True, q=86), durl(treat_pair, w=520, jpg=True, q=86),
+                durl(Image.fromarray(heat), w=520, jpg=True, q=82))
     pair = crop_at_silhouette(clip, idx)
     if not pair:
         return None
@@ -543,9 +560,7 @@ def scorecard_charts():
 # metric -> (short header, what it measures, direction). Only the ones that appear render.
 METRIC_DEFS = [
     ("score", "score", "Overall 0-100 artifact cleanliness after weighted penalties. Stereo volume is reported and gated separately, so it cannot cancel artifact regressions.", "higher = better"),
-    ("pop_spread_px", "pop_spread", "Near-to-far range of horizontal stereo disparity. This is the validated stereo-volume gate; unlike median absolute disparity, recentering the subject does not make it look falsely worse.", "higher = more stereo volume"),
-    ("pop_spread_pct", "pop_spread_pct", "The same near-to-far stereo range as a percentage of eye width. The primary-axis radar uses this resolution-independent display form; the per-clip gate uses pop_spread_px.", "higher = more stereo volume"),
-    ("pop_px_p50", "pop", "L↔R horizontal disparity (sub-pixel tile phase-correlation) — the amount of stereo depth.", "higher = more 3D"),
+    ("pop_spread_px", "pop_spread", "Near-to-far range of horizontal stereo disparity. This is the validated stereo-volume gate; the radar displays its resolution-independent percentage form.", "higher = more stereo volume"),
     ("source_residual_p95", "warp_resid", "Worst-eye patch difference from the source after allowing a small horizontal stereo displacement. Detects monocular warp corruption without penalizing intended parallax.", "lower = more source-faithful"),
     ("static_jitter_p95", "static_jitter", "Worst-eye temporal change over regions whose source neighborhood stayed static after allowing for horizontal disparity. Camera/object motion is excluded.", "lower = steadier static content"),
     ("depth_spread", "dspread", "p95−p5 of the normalized depth = pop available at the source.", "higher = more depth to work with"),
@@ -554,7 +569,6 @@ METRIC_DEFS = [
     ("stretch_area", "stretch", "Area (‰ of the eye) of the large horizontal disocclusion smear beside silhouettes (bg rubber-banded to fill the gap).", "lower = less smear"),
     ("rim_over_p95", "rim", "Brightness of the thin white line hugging a silhouette (the residual fill fringe), luma ×255.", "lower = fainter fringe"),
     ("disocc_smear", "smear", "Horizontal-detail deficit in the narrow band beside silhouettes; on flat content also fingerprints hallucinated depth edges.", "lower = crisper fill"),
-    ("flicker_p50", "flick", "Whole-frame temporal change of the SBS luma (×255).", "lower = steadier"),
     ("flicker_disocc_p50", "flick_dis", "Flicker restricted to the disocclusion bands — inpaint/stretch re-hallucination shimmer.", "lower = less boiling along edges"),
     ("vmisalign_px", "vmis", "Median vertical L↔R offset — parallax must be horizontal-only, so this is a geometry correctness check.", "must be ≈ 0"),
 ]
@@ -594,14 +608,15 @@ def metrics_section():
         f'<tr><td class="mgroup"><span>{metric_group(k)[0]}</span><small>{metric_group(k)[1]}</small></td>'
         f'<td class="mname">{h}</td><td class="mwhat">{what}</td><td class="mdir">{d}</td></tr>'
         for k, h, what, d in METRIC_DEFS if k in present)
-    return (f'<section><h2>What the metrics mean</h2>'
-            f'<p class="sub">Definitions and decision roles for the metrics used below. Hard '
+    return (f'<details class="fold metric-defs"><summary>Metric definitions and decision roles</summary>'
+            f'<div class="fold-body"><p class="sub">Hard '
             f'constraints can reject; primary metrics can vote; diagnostics provide supporting '
             f'evidence; reported values are context only. All are computed on the real '
             f'SBS frames the headset would receive (no CPU replica). Absolute values are '
             f'resolution-dependent, so compare within a run, not across clip sets.</p>'
             f'<div class="tablewrap"><table class="mtab"><thead><tr><th>group / axis</th><th>metric</th>'
-            f'<th>what it measures</th><th>direction</th></tr></thead><tbody>{rows}</tbody></table></div></section>')
+            f'<th>what it measures</th><th>direction</th></tr></thead><tbody>{rows}</tbody></table>'
+            f'</div></div></details>')
 
 
 def conclusion_section():
@@ -692,122 +707,105 @@ def gate_strip():
     return f'<div class="gate {cls}"><b>Gate: {label}</b><ul>{items}</ul></div>'
 
 
-def issue_sections():
-    # Per metric, gather two kinds of clips: ABSOLUTE issues (value over the trigger, in either
-    # run) and REGRESSIONS (the treatment worsened it past tolerance, even if still under the
-    # trigger). The second kind is why the biggest MOVER — e.g. c525 stretch 1.5->3.5, a
-    # regression that stays below the 4.0 trigger — still gets its crop shown.
-    metrics = sorted(ISSUE_DEFS, key=lambda m: -impact(m))  # high quality-impact first
-    reg_by = {}
-    for r in TREAT.get("regressions", []):
-        reg_by.setdefault(r["metric"], {})[r["clip"]] = r.get("frame")
-    html = []
-    for metric in metrics:
-        title, temporal, desc = ISSUE_DEFS[metric]
-        trig = THR.get(metric, {}).get("trigger", 1e9)
-        entries = {}  # clip -> (kind, frame, sort_severity)
-        for i in CTRL["issues"]:
-            if i["metric"] == metric and metric in ctrl_agg.get(i["clip"], {}):
-                entries[i["clip"]] = ("issue", i.get("frame"), i["value"] / i["trigger"])
-        for c, frame in reg_by.get(metric, {}).items():
-            a, b = ctrl_agg[c].get(metric, 0), treat_agg[c].get(metric, 0)
-            if c in entries:  # already an absolute issue; note it also regressed
-                entries[c] = ("issue+regressed", entries[c][1], entries[c][2])
-            else:
-                entries[c] = ("regressed", frame, max(b, a) / trig)
-        if not entries:
-            continue
-        # Separate quotas so a mover is never crowded out by absolute issues: top-3 absolute
-        # issues + up to 2 pure regressions (the clips the treatment pushed the worse way).
-        abs_e = sorted((e for e in entries.items() if not e[1][0] == "regressed"),
-                       key=lambda kv: -kv[1][2])[:3]
-        reg_e = sorted((e for e in entries.items() if e[1][0] == "regressed"),
-                       key=lambda kv: -kv[1][2])[:2]
-        order = abs_e + reg_e
-        cards = []
-        for c, (kind, frame, _) in order:
-            a, b = ctrl_agg[c].get(metric, 0), treat_agg[c].get(metric, 0)
-            pct = (b - a) / a * 100 if a else (100 if b else 0)
-            badge = ('<span class="pill p-crit">regressed</span>' if kind == "regressed"
-                     else '<span class="pill p-crit">also regressed</span>' if "regressed" in kind
-                     else '<span class="pill p-warn">issue</span>')
-            imgs = ""
-            pair = crop_at_silhouette(c, frame if frame is not None else mid_frame(ctrl_dir, c))
-            if pair:
-                if temporal:
-                    imgs = (f'<div class="pair single"><figure><span class="tag">{CTRL_TAG} · worst '
-                            f'frame {frame}</span><img src="{pair[0]}"></figure></div>')
-                else:
-                    imgs = (f'<div class="pair"><figure><span class="tag">{CTRL_TAG}</span>'
-                            f'<img src="{pair[0]}"></figure><figure><span class="tag t-treat">'
-                            f'{TREAT_TAG}</span><img src="{pair[1]}"></figure></div>')
-            cards.append(f'<div class="issue-clip"><div class="ic-head"><span class="clipname">{name(c)}'
-                         f'</span> {badge} <span class="metricval">{mtip(metric, SHORT.get(metric, metric))}: '
-                         f'<b>{a:.2f}</b> &rarr; {b:.2f} ({pct:+.0f}%) &middot; worst frame {frame}'
-                         f'</span></div>{imgs}</div>')
-        note = ' <span class="pill p-info">temporal</span>' if temporal else ""
-        html.append(f'<section><h2>{title}{note}</h2><p class="sub">{desc}</p>{"".join(cards)}</section>')
-    return "\n".join(html)
+def _evidence_card(item, kind, axis=None):
+    """Render one metric-specific matched visual card."""
+    _, delta, metric, c, a, b = item
+    better = THR.get(metric, {}).get("better", "lower")
+    treatment_worse = (delta > 0) if better == "lower" else (delta < 0)
+    source = TREAT if treatment_worse else CTRL
+    wf = source["clips"][c].get("worst_frame", {}).get(metric, {})
+    frame = wf.get("frame", mid_frame(ctrl_dir, c))
+    imgs = visual_evidence_images(c, frame, metric)
+    if not imgs:
+        return ""
+    pct = delta / a * 100 if a else 100.0
+    cls = ("evidence-cost" if kind == "regression" else "evidence-win" if kind == "improvement"
+           else "evidence-noise")
+    badge = kind.replace("_", " ")
+    source_label = "source · bright = evaluated static region" if metric == "static_jitter_p95" else "source"
+    ctrl_label = (f"{CTRL_TAG} · temporal change" if metric == "static_jitter_p95" else
+                  f"{CTRL_TAG} · left | right" if metric == "pop_spread_px" else CTRL_TAG)
+    treat_label = (f"{TREAT_TAG} · temporal change" if metric == "static_jitter_p95" else
+                   f"{TREAT_TAG} · left | right" if metric == "pop_spread_px" else TREAT_TAG)
+    panels = (f'<div class="triplet"><figure><span class="tag">{source_label}</span><img src="{imgs[0]}"></figure>'
+              f'<figure><span class="tag">{ctrl_label}</span><img src="{imgs[1]}"></figure>'
+              f'<figure><span class="tag t-treat">{treat_label}</span><img src="{imgs[2]}"></figure>'
+              f'<figure><span class="tag t-diff">delta: red worse / blue better</span>'
+              f'<img src="{imgs[3]}"></figure></div>' if len(imgs) == 4 else
+              f'<div class="triplet"><figure><span class="tag">{ctrl_label}</span>'
+              f'<img src="{imgs[0]}"></figure><figure><span class="tag t-treat">{treat_label}</span>'
+              f'<img src="{imgs[1]}"></figure><figure><span class="tag t-diff">abs diff &times;5</span>'
+              f'<img src="{imgs[2]}"></figure></div>')
+    axis_label = f'<span class="axis-label">{axis}</span>' if axis else ""
+    return (f'<article class="evidence-card {cls}"><div class="ic-head">{axis_label}'
+            f'<span class="clipname">{name(c)}</span><span class="pill">{badge}</span>'
+            f'<span class="metricval">{mtip(metric, SHORT.get(metric, metric))}: '
+            f'<b>{a:.2f}</b> &rarr; {b:.2f} ({pct:+.0f}%) &middot; frame {frame}</span></div>'
+            f'{panels}</article>')
+
+
+def _strongest_change(metric, clips=DECISION_CLIPS):
+    floor = THR.get(metric, {}).get("abs_floor", 0.0)
+    candidates = []
+    for c in clips:
+        a, b = ctrl_agg[c].get(metric, 0.0), treat_agg[c].get(metric, 0.0)
+        delta = b - a
+        denom = max(floor, abs(a) * 0.05, 1e-6)
+        candidates.append((abs(delta) / denom, delta, metric, c, a, b))
+    return max(candidates, default=None)
+
+
+def _change_kind(item):
+    _, delta, metric, _, a, _ = item
+    spec = THR[metric]
+    significant = abs(delta) > max(spec.get("abs_floor", 0.0), abs(a) * spec.get("rel_tol", 0.0))
+    if not significant:
+        return "within_noise"
+    improved = delta > 0 if spec.get("better") == "higher" else delta < 0
+    return "improvement" if improved else "regression"
 
 
 def visual_evidence_section():
-    """Show the strongest spatial win and regression with matched images and a diff map."""
-    spatial = ("source_residual_p95", "static_jitter_p95", "stretch_area", "rim_over_p95",
-               "edge_acc_p50", "disocc_smear")
-    candidates = []
-    for metric in spatial:
-        floor = THR.get(metric, {}).get("abs_floor", 0.0)
-        for c in CLIPS:
-            a, b = ctrl_agg[c].get(metric, 0.0), treat_agg[c].get(metric, 0.0)
-            delta = b - a  # all spatial artifact metrics are lower-is-better
-            if abs(delta) < max(floor / 2.0, 1e-6):
-                continue
-            denom = max(floor, abs(a) * 0.05, 1e-6)
-            candidates.append((abs(delta) / denom, delta, metric, c, a, b))
-
-    def card(item, kind):
-        _, delta, metric, c, a, b = item
-        # For a treatment regression use its worst frame; for an improvement show the frame
-        # where the control had the artifact that treatment is reducing.
-        source = TREAT if delta > 0 else CTRL
-        wf = source["clips"][c].get("worst_frame", {}).get(metric, {})
-        frame = wf.get("frame", mid_frame(ctrl_dir, c))
-        imgs = visual_evidence_images(c, frame, metric)
-        if not imgs:
-            return ""
-        pct = delta / a * 100 if a else 100.0
-        cls = "evidence-cost" if kind == "regression" else "evidence-win"
-        badge = "regression" if kind == "regression" else "improvement"
-        source_label = "source · bright = evaluated static region" if metric == "static_jitter_p95" else "source"
-        ctrl_label = f"{CTRL_TAG} · temporal change" if metric == "static_jitter_p95" else CTRL_TAG
-        treat_label = f"{TREAT_TAG} · temporal change" if metric == "static_jitter_p95" else TREAT_TAG
-        panels = (f'<div class="triplet"><figure><span class="tag">{source_label}</span><img src="{imgs[0]}"></figure>'
-                  f'<figure><span class="tag">{ctrl_label}</span><img src="{imgs[1]}"></figure>'
-                  f'<figure><span class="tag t-treat">{treat_label}</span><img src="{imgs[2]}"></figure>'
-                  f'<figure><span class="tag t-diff">delta: red worse / blue better</span>'
-                  f'<img src="{imgs[3]}"></figure></div>' if len(imgs) == 4 else
-                  f'<div class="triplet"><figure><span class="tag">{CTRL_TAG}</span>'
-                  f'<img src="{imgs[0]}"></figure><figure><span class="tag t-treat">{TREAT_TAG}</span>'
-                  f'<img src="{imgs[1]}"></figure><figure><span class="tag t-diff">abs diff &times;5</span>'
-                  f'<img src="{imgs[2]}"></figure></div>')
-        return (f'<article class="evidence-card {cls}"><div class="ic-head">'
-                f'<span class="clipname">{name(c)}</span><span class="pill">{badge}</span>'
-                f'<span class="metricval">{mtip(metric, SHORT.get(metric, metric))}: '
-                f'<b>{a:.2f}</b> &rarr; {b:.2f} ({pct:+.0f}%) &middot; frame {frame}</span></div>'
-                f'{panels}</article>')
-
-    wins = sorted((x for x in candidates if x[1] < 0), reverse=True)[:2]
-    costs = sorted((x for x in candidates if x[1] > 0), reverse=True)[:2]
-    cards = "".join(card(x, "improvement") for x in wins)
-    cards += "".join(card(x, "regression") for x in costs)
+    """Show one representative example for every validated primary quality axis."""
+    axes = (("Stereo volume", "pop_spread_px"),
+            ("Warp fidelity", "source_residual_p95"),
+            ("Static stability", "static_jitter_p95"))
+    cards = []
+    for axis, metric in axes:
+        item = _strongest_change(metric)
+        if item:
+            cards.append(_evidence_card(item, _change_kind(item), axis))
+    cards = "".join(cards)
     if not cards:
         return ""
-    return (f'<section><h2>Visual evidence: improvements and regressions</h2>'
-            f'<p class="sub">Metric-specific crops at the metric\'s worst frame. Source-residual '
-            f'cards select the worse eye and show the source plus a signed heatmap (red = treatment '
-            f'worse, blue = better); legacy proxies retain their matched silhouette crop. Both '
-            f'eyes are measured even when only the worse eye is shown.</p>'
-            f'{cards}</section>')
+    return (f'<section><h2>Primary-axis visual evidence</h2>'
+            f'<p class="sub">One strongest matched example for each decision axis. Warp and static '
+            f'stability use metric-specific source/heatmap views; stereo volume uses the same '
+            f'silhouette crop in both outputs. A within-noise badge means the example is illustrative, '
+            f'not a decision event.</p>{cards}</section>')
+
+
+def diagnostic_evidence_section():
+    """Only surface unusually large diagnostic moves after the primary evidence."""
+    metrics = ("stretch_area", "rim_over_p95", "edge_acc_p50", "disocc_smear",
+               "flicker_disocc_p50", "swim_p50")
+    candidates = []
+    for metric in metrics:
+        item = _strongest_change(metric)
+        if not item:
+            continue
+        _, delta, _, _, a, _ = item
+        floor = THR[metric].get("abs_floor", 0.0)
+        if abs(delta) >= max(floor * 2.0, abs(a) * 0.5):
+            candidates.append(item)
+    cards = "".join(_evidence_card(item, _change_kind(item), "Diagnostic exception")
+                    for item in sorted(candidates, reverse=True)[:3])
+    if not cards:
+        return ""
+    return (f'<section><h2>Large diagnostic changes</h2>'
+            f'<p class="sub">Shown only when a supporting metric changes by at least 50% and twice '
+            f'its absolute noise floor. These examples explain a large secondary movement but do '
+            f'not vote against the primary axes.</p>{cards}</section>')
 
 
 def clean_footer():
@@ -839,6 +837,9 @@ section{margin-top:52px}
 h2{font-size:15px;font-family:var(--mono);letter-spacing:.03em;text-transform:uppercase;color:var(--ink);padding-bottom:12px;border-bottom:1px solid var(--line);margin-bottom:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .sub{color:var(--muted);font-size:14px;margin:0 0 20px;max-width:72ch}
 .foot{margin-top:14px;color:var(--muted);font-size:13px}.foot b{color:var(--ink)}
+.fold{margin-top:26px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.fold>summary{cursor:pointer;list-style:none;padding:14px 17px;font-family:var(--mono);font-size:12px;font-weight:650;color:var(--ink);display:flex;align-items:center;gap:10px}.fold>summary::-webkit-details-marker{display:none}.fold>summary:before{content:"+";color:var(--accent);font-size:16px;line-height:1}.fold[open]>summary:before{content:"−"}.fold[open]>summary{border-bottom:1px solid var(--line)}
+.fold-body{padding:18px}.fold-body>.sub:last-child{margin-bottom:0}.metric-defs{margin-top:28px}
 .gate{border-radius:10px;padding:14px 18px;font-size:14px;margin-top:26px;border:1px solid var(--line)}
 .gate-pass{background:color-mix(in srgb,var(--good) 9%,transparent);border-color:color-mix(in srgb,var(--good) 40%,var(--line))}
 .gate-fail{background:color-mix(in srgb,var(--crit) 8%,transparent);border-color:color-mix(in srgb,var(--crit) 40%,var(--line))}
@@ -901,6 +902,8 @@ td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .evidence-card{margin-top:22px;padding:14px;border:1px solid var(--line);border-radius:11px;background:var(--panel)}
 .evidence-card .pill{color:var(--good);background:color-mix(in srgb,var(--good) 15%,transparent)}
 .evidence-card.evidence-cost .pill{color:var(--crit);background:color-mix(in srgb,var(--crit) 15%,transparent)}
+.evidence-card.evidence-noise .pill{color:var(--muted);background:color-mix(in srgb,var(--muted) 14%,transparent)}
+.axis-label{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--accent);padding-right:4px}
 .triplet{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
 .triplet figure{margin:0;position:relative}.triplet img{width:100%;border-radius:8px;border:1px solid var(--line);display:block}
 .tag.t-diff{color:var(--accent)}
@@ -921,25 +924,15 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
   <span>treatment __TREAT_SHA__</span>
   <span>__NCLIPS__ clips</span><span>__MODELS__</span></div>
 
-  __GROUP_RADARS__
+  __CONCLUSION__
 
   __METRICS__
 
-  __CONCLUSION__
+  __GROUP_RADARS__
 
   __VISUAL_EVIDENCE__
 
-  <section>
-    <h2>Bar comparison — __CTRL_NAME__ → __TREAT_NAME__</h2>
-    <p class="sub">One grouped horizontal chart per metric, with matched <b>__CTRL_TAG__</b> and
-    <b>__TREAT_TAG__</b> bars for every clip. Bars share a scale within each metric; exact values
-    remain printed beside them. Treatment bars are green when better, red when worse, and grey
-    when the movement is within noise. Flat metrics collapse below and return automatically.</p>
-    __CHARTS__
-    __FOOTER__
-  </section>
-
-  __ISSUES__
+  __DIAGNOSTIC_EVIDENCE__
 
   <section>
     <h2>Reproduce</h2>
@@ -949,6 +942,15 @@ python tools/sbsbench/build_report.py &lt;build&gt;/sbs_eval/ctrl &lt;build&gt;/
     <p style="color:var(--muted);font-size:13px;margin-top:12px">Metrics: <code>tools/sbsbench/sbsbench.py</code>
     &middot; gate: <code>thresholds.json</code> &middot; plan: <code>docs/sbs-benchmark-plan.md</code></p>
   </section>
+
+  <details class="fold bar-fold">
+    <summary>Per-clip bar comparison — __CTRL_NAME__ → __TREAT_NAME__</summary>
+    <div class="fold-body"><p class="sub">Matched <b>__CTRL_TAG__</b> and <b>__TREAT_TAG__</b> bars
+    for every clip. Bars share a scale within each metric; exact values remain printed beside them.
+    Green is better, red is worse, and grey is within noise.</p>
+    __CHARTS__
+    __FOOTER__</div>
+  </details>
 </div>
 """
 
@@ -973,11 +975,12 @@ HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
         .replace("__NCLIPS__", str(len(CLIPS)))
         .replace("__MODELS__", models).replace("__CONCLUSION__", conclusion_section())
         .replace("__VISUAL_EVIDENCE__", visual_evidence_section())
+        .replace("__DIAGNOSTIC_EVIDENCE__", diagnostic_evidence_section())
         .replace("__CTRL_TAG__", CTRL_TAG).replace("__TREAT_TAG__", TREAT_TAG)
         .replace("__GROUP_RADARS__", grouped_quality_section())
         .replace("__CHARTS__", scorecard_charts())
         .replace("__METRICS__", metrics_section())
-        .replace("__FOOTER__", clean_footer()).replace("__ISSUES__", issue_sections())
+        .replace("__FOOTER__", clean_footer())
         .replace("__TREAT_ARGS__", " ".join(TREAT["meta"].get("extra_args") or ["--mode game"])))
 os.makedirs(os.path.dirname(os.path.abspath(out_html)), exist_ok=True)
 with open(out_html, "w", encoding="utf-8") as f:
