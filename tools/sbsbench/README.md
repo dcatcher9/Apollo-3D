@@ -172,12 +172,13 @@ The v2 expansion adds independent cinematic and outdoor-driving content:
 | `vkitti_drive_clone` | Virtual KITTI 2 | clear outdoor driving and exact metric depth |
 | `vkitti_drive_rain` | Virtual KITTI 2 | rainy low-contrast driving and exact metric depth |
 
-Initial matched-profile validation (2026-07-10) found lower VD3D stereo volume on all eight clips:
-median `-22.3%`, with four clips crossing the primary gate (`bonn_person_walk`, both TartanAir
-clips, and `vkitti_drive_clone`). Close action, close person, and rainy driving were only `-6%` to
-`-8%`; the effect is scene-dependent rather than a universal gain scale. VD3D improved one
-validated stretch event, so the overall verdict remains a geometry tradeoff until artifact quality
-is compared along a matched-volume curve.
+The first matched-profile run exposed a resolution-normalization bug: Apollo divided Bestv2's
+source-pixel shifts by the smaller inference-depth width, while VD3D divided by the source/eye
+width. That unintentionally amplified Apollo according to model texture resolution and produced a
+false median `-22.3%` VD3D gap. After correcting Apollo to use source width, the fresh eight-clip
+median is `-6.0%`: seven clips are within noise (including two where VD3D is slightly higher), and only
+`bonn_person_walk` remains a just-over-one-pixel stereo regression (`-19.4%`). Artifact cleanliness
+is effectively tied (`82.8` Apollo vs `82.7` VD3D); remaining differences are geometry-specific.
 
 The manifest is [datasets/manifest.json](datasets/manifest.json). Bonn derivatives remain local;
 its official page requests citation but does not provide a redistribution grant. TartanAir V2 is

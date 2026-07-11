@@ -20,10 +20,10 @@ Design for two reproducible, host-side benchmarks so every SBS change ships with
 >   exact optical-flow sidecars are supported. The separate `extended-v2` suite adds visually
 >   inspected Bonn RGB-D Dynamic, TartanAir V2, MPI Sintel Stereo, and Virtual KITTI 2 clips; URLs, SHA-256
 >   hashes, frame windows and preparation logic are committed while media remains external.
->   The first eight-clip matched run measured lower VD3D volume on every clip (median −22.3%);
->   four clips crossed the primary regression gate, confirming the effect across real people,
->   cinematic animation, synthetic interiors, and clear outdoor driving while also showing that
->   close-action and rainy scenes can remain within noise.
+>   The first eight-clip run exposed an Apollo bug: Bestv2 source-pixel shifts were normalized by
+>   inference-depth width instead of source-color width, creating resolution-dependent amplification.
+>   After the fix, median VD3D volume delta is −6.0%; seven clips are within noise, including two
+>   where VD3D is slightly higher. Only Bonn walking retains a just-over-one-pixel geometry difference.
 > Remaining: reference warp PSNR/SSIM (needs GT stereo) and a dedicated ghost/double-image metric.
 
 ## Why the offline warpsim disagrees with the headset (the problem to design around)

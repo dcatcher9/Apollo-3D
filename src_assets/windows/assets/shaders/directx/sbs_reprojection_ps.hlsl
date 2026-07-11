@@ -61,13 +61,18 @@ float2 Reproject(float2 uv, float eyeSign) {
     bool shaped = (subject_track > 0.5f) && (s0.w > 0.5f);
     uint dw, dh;
     DepthTexture.GetDimensions(dw, dh);
+    // Bestv2's calibrated bands are SOURCE-COLOR pixel shifts. Normalizing by the smaller
+    // inference-depth width amplified Apollo whenever the model texture was downscaled, while
+    // VD3D correctly used the eye/source width. Depth dimensions remain correct for tap offsets.
+    uint sourceWidth, sourceHeight;
+    LeftColorTexture.GetDimensions(sourceWidth, sourceHeight);
 
     // Widest distance any surface can travel (near or far side of the focal plane). BorderFade
     // only shrinks parallax, so this (fade=1) remains a valid upper bound on the search span.
     // The shaped path clamps its curve to [-1, 1], so its bound is the full max_divergence
     // (2x the linear path's -- probe spacing coarsens accordingly).
     float searchRadius = shaped && bestv2_shift_profile > 0.5f
-        ? Bestv2SearchRadius((float)dw)
+        ? Bestv2SearchRadius((float)sourceWidth)
         : shaped
         ? max_divergence
         : max_divergence * max(focal_plane, 1.0f - focal_plane);
@@ -100,7 +105,8 @@ float2 Reproject(float2 uv, float eyeSign) {
     float prevX = startX;
     float prevD = SampleDepth(prevX, uv.y, ofs);
     float prevMask = PlaneLockTexture.SampleLevel(LinearSampler, float2(prevX, uv.y), 0);
-    float prevG = (prevX - uv.x) - eyeSign * DepthParallax(prevD, prevMask, prevX, s0, s1, s2, shaped, (float)dw);
+    float prevG = (prevX - uv.x) - eyeSign * DepthParallax(
+        prevD, prevMask, prevX, s0, s1, s2, shaped, (float)sourceWidth);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
@@ -108,7 +114,8 @@ float2 Reproject(float2 uv, float eyeSign) {
         float x = startX + stepX * i;
         float d = SampleDepth(x, uv.y, ofs);
         float planeMask = PlaneLockTexture.SampleLevel(LinearSampler, float2(x, uv.y), 0);
-        float g = (x - uv.x) - eyeSign * DepthParallax(d, planeMask, x, s0, s1, s2, shaped, (float)dw);
+        float g = (x - uv.x) - eyeSign * DepthParallax(
+            d, planeMask, x, s0, s1, s2, shaped, (float)sourceWidth);
 
         // Zero crossing between prevX and x => a source in this span reprojects onto uv.
         if ((prevG <= 0.0f && g >= 0.0f) || (prevG >= 0.0f && g <= 0.0f)) {

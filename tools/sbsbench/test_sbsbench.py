@@ -37,6 +37,17 @@ class EvalContractTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_apollo_bestv2_normalizes_pixel_shifts_by_source_width(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
+                              "sbs_reprojection_ps.hlsl")
+        with open(shader, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("LeftColorTexture.GetDimensions(sourceWidth, sourceHeight)", text)
+        self.assertIn("Bestv2SearchRadius((float)sourceWidth)", text)
+        self.assertGreaterEqual(text.count("shaped, (float)sourceWidth)"), 2)
+        self.assertNotIn("Bestv2SearchRadius((float)dw)", text)
+
     def test_shift_profile_override_uses_last_explicit_value(self):
         self.assertEqual(run_eval.extra_value(
             ["--shift-profile", "apollo", "--shift-profile", "bestv2"],
