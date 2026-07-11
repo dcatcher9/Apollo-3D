@@ -114,6 +114,10 @@ class EvalContractTests(unittest.TestCase):
         self.assertFalse(sbsbench.metric_gate_failed(0.0, 99.0, diagnostic))
         self.assertFalse(sbsbench.metric_gate_failed(0.0, 0.49, hard))
         self.assertTrue(sbsbench.metric_gate_failed(0.0, 0.51, hard))
+        hard_min = {"role": "hard", "better": "higher", "hard_min": 90.0,
+                    "rel_tol": 0.0, "abs_floor": 1.0}
+        self.assertFalse(sbsbench.metric_gate_failed(95.0, 91.0, hard_min))
+        self.assertTrue(sbsbench.metric_gate_failed(95.0, 89.0, hard_min))
 
     def test_ab_decision_preserves_primary_axis_tradeoff(self):
         specs = {
@@ -172,6 +176,75 @@ class EvalContractTests(unittest.TestCase):
             moving_src, moving_src, src, src, moving_src, src, min_support=0.5)
         self.assertIsNone(skipped)
         self.assertLess(moving_support, 0.5)
+
+    def test_comfort_disparity_reports_both_signed_tails(self):
+        dx = np.array([-12.0, -8.0, 0.0, 6.0, 10.0])
+        weights = np.ones_like(dx)
+        positive, negative = sbsbench.comfort_disparity(dx, weights, eye_width=400, tail=0.8)
+        self.assertAlmostEqual(positive, 1.5)
+        self.assertAlmostEqual(negative, 3.0)
+
+    def test_hard_integrity_aggregates_worst_frame_not_mean(self):
+        agg = sbsbench.aggregate([
+            {"source_coverage_pct": 100.0, "positive_disparity_pct": 0.5},
+            {"source_coverage_pct": 70.0, "positive_disparity_pct": 4.0},
+        ])
+        self.assertEqual(agg["source_coverage_pct"], 70.0)
+        self.assertEqual(agg["positive_disparity_pct"], 4.0)
+
+    def test_source_coverage_and_integrity_detect_missing_content(self):
+        rng = np.random.default_rng(22)
+        src = np.round(rng.random((96, 160), dtype=np.float32) * 255.0) / 255.0
+        clean = sbsbench._shift_x_edge(src, 5)
+        good = sbsbench.source_relative_metrics(clean, src, max_shift=8)
+        damaged = clean.copy()
+        damaged[20:76, 60:110] = 0.0
+        bad = sbsbench.source_relative_metrics(damaged, src, max_shift=8)
+        self.assertGreater(good["source_coverage_pct"], 99.0)
+        self.assertGreater(good["image_integrity_pct"], 99.0)
+        self.assertLess(bad["source_coverage_pct"], good["source_coverage_pct"] - 15.0)
+        self.assertLess(bad["image_integrity_pct"], good["image_integrity_pct"] - 10.0)
+
+    def test_source_relative_halo_and_stretch_subtract_real_source_structure(self):
+        y, x = np.mgrid[:96, :160]
+        src = (0.35 + 0.2 * np.sin(x * 0.55) + 0.15 * np.sin(y * 0.3)).astype(np.float32)
+        depth = np.full((24, 40), 0.2, np.float32)
+        depth[:, 20:] = 0.8
+        clean = sbsbench.source_relative_metrics(src, src, depth, max_shift=4)
+        halo_eye = src.copy()
+        halo_eye[:, 79:82] = 1.0
+        halo = sbsbench.source_relative_metrics(halo_eye, src, depth, max_shift=4)
+        stretch_eye = src.copy()
+        stretch_eye[:, 82:115] = stretch_eye[:, 82:83]
+        stretch = sbsbench.source_relative_metrics(stretch_eye, src, depth, max_shift=4)
+        self.assertGreater(halo["source_halo_p95"], clean["source_halo_p95"] + 3.0)
+        self.assertGreater(stretch["source_stretch_pct"], clean["source_stretch_pct"] + 10.0)
+
+    def test_ground_truth_depth_metrics_reward_aligned_structure(self):
+        gt = np.full((96, 160), 0.25, np.float32)
+        gt[:, 80:] = 0.75
+        equivalent = gt * 0.8 + 0.1  # monocular scale/shift ambiguity is intentionally free
+        flat = np.full_like(gt, 0.5)
+        good = sbsbench.depth_ground_truth_metrics(equivalent, gt)
+        bad = sbsbench.depth_ground_truth_metrics(flat, gt)
+        self.assertLess(good["depth_gt_si_rmse"], 0.01)
+        self.assertGreater(good["depth_gt_edge_f1"], 99.0)
+        self.assertGreater(bad["depth_gt_si_rmse"], 40.0)
+        self.assertLess(bad["depth_gt_edge_f1"], 1.0)
+
+    def test_optical_flow_temporal_metric_compensates_motion(self):
+        rng = np.random.default_rng(31)
+        previous = np.round(rng.random((96, 160), dtype=np.float32) * 255.0) / 255.0
+        current = np.roll(previous, 5, axis=1)
+        stable, _, support = sbsbench.flow_temporal_metrics(
+            current, current, previous, previous, current, previous, min_support=0.1)
+        corrupted = current.copy()
+        corrupted[20:75, 60:110] = 0.0
+        unstable, _, _ = sbsbench.flow_temporal_metrics(
+            corrupted, corrupted, previous, previous, current, previous, min_support=0.1)
+        self.assertGreater(support, 0.8)
+        self.assertLess(stable, 2.0)
+        self.assertGreater(unstable, stable + 100.0)
 
 
 if __name__ == "__main__":

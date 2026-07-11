@@ -32,8 +32,8 @@ DESC = {
 }
 
 
-def write_meta(clip):
-    json.dump({"name": clip, "description": DESC.get(clip, "")},
+def write_meta(clip, **extra):
+    json.dump({"name": clip, "description": DESC.get(clip, ""), **extra},
               open(os.path.join(CLIPS, clip, "meta.json"), "w"), indent=2)
 
 
@@ -41,6 +41,14 @@ def save(clip, i, arr):
     d = os.path.join(CLIPS, clip)
     os.makedirs(d, exist_ok=True)
     Image.fromarray(arr).save(os.path.join(d, f"frame_{i + 1:05d}.jpg"), quality=90)
+
+
+def save_gt_depth(clip, i, disparity):
+    """16-bit normalized inverse-depth/disparity reference, aligned to the source frame."""
+    d = os.path.join(CLIPS, clip, "gt_depth")
+    os.makedirs(d, exist_ok=True)
+    arr = np.round(np.clip(disparity, 0.0, 1.0) * 65535.0).astype(np.uint16)
+    Image.fromarray(arr).save(os.path.join(d, f"frame_{i + 1:05d}.png"))
 
 
 def flat_page():
@@ -54,6 +62,7 @@ def flat_page():
         y += 8 + int(rng.uniform(6, 14))
     for i in range(N):  # static: every frame identical
         save("flat_page", i, page)
+        save_gt_depth("flat_page", i, np.full((H, W), 0.5, np.float32))
 
 
 def fast_motion():
@@ -70,6 +79,9 @@ def fast_motion():
         fr = bg.copy()
         fr[y0:y0 + fh, x0:x0 + fw] = fg
         save("fast_motion", i, fr)
+        gt = np.full((H, W), 0.25, np.float32)
+        gt[y0:y0 + fh, x0:x0 + fw] = 0.75
+        save_gt_depth("fast_motion", i, gt)
 
 
 def scene_cut():
@@ -86,6 +98,8 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(CLIPS, "scene_cut"), exist_ok=True)
     scene_cut()
     for c in ("flat_page", "fast_motion", "scene_cut"):
-        write_meta(c)
+        write_meta(c, **({"expected_flat": True, "gt_depth_kind": "disparity"}
+                         if c == "flat_page" else
+                         {"gt_depth_kind": "disparity"} if c == "fast_motion" else {}))
         n = len([f for f in os.listdir(os.path.join(CLIPS, c)) if f.startswith("frame_")])
         print(f"{c}: {n} frames")

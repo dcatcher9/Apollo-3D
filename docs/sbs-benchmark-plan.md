@@ -14,7 +14,10 @@ Design for two reproducible, host-side benchmarks so every SBS change ships with
 >   `split_video.py`, and the **Tier-1 headless harness** `sunshine --sbs-bench` (src/sbs_bench_harness.cpp:
 >   real estimator + real composite over a frames dir → SBS PNGs). Full chain validated:
 >   video → frames → harness → sbsbench --seq.
-> Remaining: reference PSNR/SSIM (needs GT stereo), ghost metric, optional depth dump in seq mode.
+> - **Eval v3** — hard signed-disparity/coverage/integrity limits, source-relative halo/stretch,
+>   scale/shift-invariant GT-depth accuracy on deterministic synthetic clips, and classical
+>   optical-flow-compensated output/depth temporal validation.
+> Remaining: reference warp PSNR/SSIM (needs GT stereo) and a dedicated ghost/double-image metric.
 
 ## Why the offline warpsim disagrees with the headset (the problem to design around)
 
@@ -84,7 +87,12 @@ Computed on the **real host SBS output** per clip. Ship no-reference first; add 
 - **Ghost** — lag-band width / double-image energy on `fast_motion`.
 - **Geometry sanity** — L/R object-width consistency (a known correctness check).
 
-### A.2 Reference metrics (phase 2, needs GT stereo content — DECISION PENDING)
+### A.2 Reference metrics
+Implemented for **depth**: clips may carry identity-matched 16-bit `gt_depth/frame_*.png`; prediction
+is evaluated with scale/shift-invariant RMSE and boundary F1. `flat_page` and `fast_motion` provide
+deterministic references. Missing GT remains absent.
+
+Pending for **warp imagery** (needs GT stereo content):
 For synthetic/known-stereo clips: feed one eye through the pipeline, reconstruct the other,
 compare to the true eye. `PSNR / SSIM / LPIPS`, global and disocclusion-band-restricted. Gold
 standard for warp+inpaint correctness. Requires rendered (Blender second-eye camera) or dataset

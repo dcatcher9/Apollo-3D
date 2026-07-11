@@ -38,7 +38,7 @@ import sbsbench  # noqa: E402  (metric implementations)
 
 # Depth models the two modes load (matches the client mode->model binding).
 MODE_MODEL = {"movie": "da3mono_large_fp16", "game": "depth_anything_v2_fp16"}
-EVAL_SCHEMA = 2  # current-once depth stepping + identity-keyed source/depth/SBS joins
+EVAL_SCHEMA = 3  # schema 2 joins + reference depth and flow-compensated temporal validation
 
 
 def fail(message):
@@ -56,13 +56,21 @@ def sha256_files(paths):
 
 
 def sha1_dir(path):
-    # Hash only the FRAME content (not meta.json / other sidecars) so a clip's identity is its
-    # pixels -- editing its scene name must not invalidate a baseline.
+    # Hash source pixels plus validation references. Human-readable names/descriptions remain
+    # excluded, while semantic metadata that changes scoring is part of the contract.
     h = hashlib.sha1()
-    for f in sorted(glob.glob(os.path.join(path, "frame_*"))):
+    files = (glob.glob(os.path.join(path, "frame_*"))
+             + glob.glob(os.path.join(path, "gt_depth", "frame_*")))
+    for f in sorted(files):
         with open(f, "rb") as fh:
-            h.update(os.path.basename(f).encode())
+            h.update(os.path.relpath(f, path).replace("\\", "/").encode())
             h.update(fh.read())
+    try:
+        meta = json.load(open(os.path.join(path, "meta.json"), encoding="utf-8"))
+        semantic = {k: meta[k] for k in ("expected_flat", "gt_depth_kind") if k in meta}
+        h.update(json.dumps(semantic, sort_keys=True).encode())
+    except (OSError, ValueError):
+        pass
     return h.hexdigest()[:12]
 
 
@@ -191,7 +199,7 @@ def main():
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"), "run_name": label,
     }
 
-    results, regressions, issues = {}, [], []
+    results, regressions, issues, hard_failures, baseline_updates = {}, [], [], [], {}
     for clip in clips:
         clip_dir = os.path.join(clips_dir, clip)
         out_dir = os.path.join(out_root, clip)
@@ -244,7 +252,7 @@ def main():
         if os.path.exists(cmp_path):
             try:
                 clip_meta.update({k: v for k, v in json.load(open(cmp_path)).items()
-                                  if k in ("name", "description", "expected_flat")})
+                                  if k in ("name", "description", "expected_flat", "gt_depth_kind")})
             except Exception:
                 pass
 
@@ -266,7 +274,8 @@ def main():
         for k in thresholds["metrics"]:
             if clip_meta.get("expected_flat") and k == "pop_spread_px":
                 continue  # expected-flat score rewards lower false stereo
-            fk = k if any(k in r for r in rows) else (k[:-4] if k.endswith("_p50") else k)
+            fk = k if any(k in r for r in rows) else (
+                k[:-4] if k.endswith(("_p50", "_p95")) else k)
             vals = [(r.get(fk), r.get("_frame_id", i)) for i, r in enumerate(rows) if fk in r]
             if vals:
                 # "Worst" follows the metric direction. For score/pop/depth spread, the minimum
@@ -278,12 +287,24 @@ def main():
         entry = {"aggregate": agg, "perf_ms": perf, "meta": clip_meta, "worst_frame": worst}
         results[clip] = entry
 
+        for k, spec in thresholds["metrics"].items():
+            if spec.get("role") != "hard" or k not in agg:
+                continue
+            if sbsbench.metric_gate_failed(agg[k], agg[k], spec):
+                hard_failures.append({"clip": clip, "metric": k,
+                                      **worst.get(k, {}), "value": round(agg[k], 3),
+                                      "hard_min": spec.get("hard_min"),
+                                      "hard_max": spec.get("hard_max")})
+
         # Issue triggers (absolute, baseline-independent).
         for k, spec in thresholds["metrics"].items():
             if clip_meta.get("expected_flat") and k == "pop_spread_px":
                 continue
             if "trigger" in spec and agg.get(k, 0) > spec["trigger"]:
                 issues.append({"clip": clip, "metric": k, "trigger": spec["trigger"],
+                               **worst.get(k, {}), "value": round(agg[k], 3)})
+            if "trigger_min" in spec and k in agg and agg[k] < spec["trigger_min"]:
+                issues.append({"clip": clip, "metric": k, "trigger_min": spec["trigger_min"],
                                **worst.get(k, {}), "value": round(agg[k], 3)})
 
         # Regression gate vs baseline. A baseline is only valid for the exact frames it was made
@@ -310,6 +331,8 @@ def main():
             for k, spec in thresholds["metrics"].items():
                 if clip_meta.get("expected_flat") and k == "pop_spread_px":
                     continue
+                if spec.get("role") == "hard":
+                    continue  # absolute hard constraints were evaluated above, independent of baseline
                 b, n = base["aggregate"].get(k), agg.get(k)
                 if b is None or n is None:
                     continue
@@ -324,16 +347,27 @@ def main():
                                             "baseline": round(b, 2), "value": round(n, 2)})
 
         if args.update_baselines:
-            os.makedirs(base_dir, exist_ok=True)
-            json.dump({"aggregate": agg, "perf_ms": perf,
-                       "meta": {**meta, **clip_meta, "clip_sha1": meta["clip_set_sha1"][clip]}},
-                      open(bp, "w"), indent=2)
+            baseline_updates[bp] = {
+                "aggregate": agg, "perf_ms": perf,
+                "meta": {**meta, **clip_meta, "clip_sha1": meta["clip_set_sha1"][clip]}}
 
-    verdict = "comparison_only" if args.comparison_only else "regressions" if regressions else "pass"
-    out = {"meta": meta, "verdict": verdict, "regressions": regressions, "issues": issues,
-           "clips": results}
+    verdict = ("hard_failures" if hard_failures else "comparison_only" if args.comparison_only
+               else "regressions" if regressions else "pass")
+    out = {"meta": meta, "verdict": verdict, "regressions": regressions,
+           "hard_failures": hard_failures, "issues": issues, "clips": results}
     res_path = os.path.join(out_root, "results.json")
     json.dump(out, open(res_path, "w"), indent=2)
+
+    if args.update_baselines:
+        if hard_failures:
+            fail(f"refusing baseline update: {len(hard_failures)} hard comfort/integrity "
+                 "failure(s); results preserved at " + res_path)
+        os.makedirs(base_dir, exist_ok=True)
+        for path, payload in baseline_updates.items():
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+            os.replace(tmp, path)
 
     report_path = None
     if args.report_out and not args.report_control:
@@ -356,14 +390,20 @@ def main():
         print(f"  REGRESSION {r['clip']}.{r['metric']}: {r['baseline']} -> {r['value']}"
               + (f"  (worst frame {r['frame']}, frame value {r['worst_value']})"
                  if "frame" in r else ""))
+    for r in hard_failures:
+        bounds = ", ".join(f"{k}={v}" for k, v in
+                           (("min", r.get("hard_min")), ("max", r.get("hard_max")))
+                           if v is not None)
+        print(f"  HARD FAIL {r['clip']}.{r['metric']}: {r['value']} ({bounds})")
     for i in issues:
-        print(f"  issue {i['clip']}.{i['metric']} = {i['value']} (> {i['trigger']},"
+        relation = (f"> {i['trigger']}" if "trigger" in i else f"< {i['trigger_min']}")
+        print(f"  issue {i['clip']}.{i['metric']} = {i['value']} ({relation},"
               f" worst frame {i.get('frame', '?')}, frame value {i.get('worst_value', '?')})")
     if report_path:
         print(f"  report: {report_path}")
     if args.update_baselines:
         print(f"  baselines updated in {base_dir} -- commit them with the change that justified it.")
-    sys.exit(1 if regressions else 0)
+    sys.exit(1 if regressions or hard_failures else 0)
 
 
 if __name__ == "__main__":

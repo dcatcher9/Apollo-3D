@@ -70,12 +70,17 @@ COLS = [
     ("score", "score", False, True, 0),
     ("pop_spread_px", "pop_spread", False, True, 0),
     ("source_residual_p95", "warp_resid", True, True, 0),
+    ("source_halo_p95", "source_halo", True, True, 0),
+    ("source_stretch_pct", "source_stretch", True, True, 0),
     ("static_jitter_p95", "static_jitter", True, True, 0),
-    ("edge_acc_p50", "edge_acc", True, False, 2.0),
-    ("stretch_area", "stretch", True, False, 2.0), ("rim_over_p95", "rim", True, False, 1.0),
-    ("swim_p50", "swim", True, False, 1.0),
-    ("flicker_disocc_p50", "flick_dis", True, True, 0), ("vmisalign_px", "vmis", True, False, 0.5),
-    ("disocc_smear", "smear", True, False, 0.02),
+    ("flow_temporal_p95", "flow_temporal", True, True, 0),
+    ("depth_gt_si_rmse", "gt_depth_rmse", True, True, 0),
+    ("depth_gt_edge_f1", "gt_edge_f1", False, True, 0),
+    ("positive_disparity_pct", "disp_positive", True, True, 0),
+    ("negative_disparity_pct", "disp_negative", True, True, 0),
+    ("source_coverage_pct", "coverage", False, True, 0),
+    ("image_integrity_pct", "integrity", False, True, 0),
+    ("vmisalign_px", "vmis", True, True, 0),
 ]
 
 # Quality impact = the max points a metric can move the artifact score, so tables and sections
@@ -241,6 +246,94 @@ def static_jitter_evidence(clip, idx):
                  (source_a, ctrl_heat, treat_heat, signed_heat))
 
 
+def ground_truth_depth_evidence(clip, idx):
+    """Ground truth, aligned control/treatment depth, and signed error-delta map."""
+    gp = os.path.join(SCRIPT_DIR, "clips", clip, "gt_depth", f"frame_{idx:05d}.png")
+    cp = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
+    tp = os.path.join(treat_dir, clip, f"depth_{idx:05d}.png")
+    if not all(os.path.exists(p) for p in (gp, cp, tp)):
+        return None
+    gt, control, treatment = load_depth(gp), load_depth(cp), load_depth(tp)
+    gt = sbsbench.resize_depth(gt, control.shape[1], control.shape[0])
+    if treatment.shape != control.shape:
+        treatment = sbsbench.resize_depth(treatment, control.shape[1], control.shape[0])
+
+    def align(pred):
+        pv, tv = pred.ravel(), gt.ravel()
+        t5, t95 = np.percentile(tv, (5, 95))
+        if t95 - t5 < 1e-4:
+            return pred + float(np.median(tv) - np.median(pv))
+        design = np.column_stack((pv, np.ones_like(pv)))
+        scale, shift = np.linalg.lstsq(design, tv, rcond=None)[0]
+        return pred * float(scale) + float(shift)
+
+    ca, ta = align(control), align(treatment)
+    lo, hi = np.percentile(gt, (1, 99))
+    if hi - lo < 1e-4:
+        lo, hi = 0.0, 1.0
+    gray = lambda a: np.clip((a - lo) / (hi - lo), 0, 1)
+    signed = (np.abs(ta - gt) - np.abs(ca - gt)) * 255.0 / max(hi - lo, 1e-4)
+    heat = np.zeros((*gt.shape, 3), np.uint8)
+    heat[..., 0] = np.clip(signed * 5.0, 0, 255).astype(np.uint8)
+    heat[..., 2] = np.clip(-signed * 5.0, 0, 255).astype(np.uint8)
+    images = [Image.fromarray((gray(a) * 255).astype(np.uint8)) for a in (gt, ca, ta)]
+    images.append(Image.fromarray(heat))
+    return tuple(durl(im, w=380, jpg=True, q=88) for im in images)
+
+
+def flow_temporal_evidence(clip, idx):
+    """Source-flow-compensated temporal residual for both runs and signed treatment delta."""
+    if idx <= 1:
+        return None
+    src_now = glob.glob(os.path.join(SCRIPT_DIR, "clips", clip, f"frame_{idx:05d}.*"))
+    src_prev = glob.glob(os.path.join(SCRIPT_DIR, "clips", clip, f"frame_{idx - 1:05d}.*"))
+    paths = [frame_path(ctrl_dir, clip, idx - 1), frame_path(ctrl_dir, clip, idx),
+             frame_path(treat_dir, clip, idx - 1), frame_path(treat_dir, clip, idx)]
+    if not src_now or not src_prev or not all(os.path.exists(p) for p in paths):
+        return None
+    images = [sbsbench.load_gray(p) for p in paths]
+    eyes = [sbsbench.split_eyes(a) for a in images]
+    eh, ew = eyes[0][0].shape
+    scale = min(1.0, 256.0 / ew)
+    vw, vh = max(32, round(ew * scale)), max(24, round(eh * scale))
+    now_src = sbsbench.load_gray(src_now[0])
+    prev_src = sbsbench.load_gray(src_prev[0])
+    u, v, flow_valid = sbsbench.dense_source_flow(prev_src, now_src, vw, vh)
+    now_small = sbsbench.resize_to(now_src, vw, vh)
+    prev_small = sbsbench.resize_to(prev_src, vw, vh)
+    src_warp, valid = sbsbench.warp_previous_with_flow(prev_small, u, v)
+    reliable = flow_valid & valid & (np.abs(now_small - src_warp) <= 10.0 / 255.0)
+    reliable &= ~sbsbench.hdilate(~reliable, 1)
+    deltas = []
+    for run_eyes in (eyes[:2], eyes[2:]):
+        per_eye = []
+        for eye_idx in range(2):
+            before = sbsbench.resize_to(run_eyes[0][eye_idx], vw, vh)
+            now = sbsbench.resize_to(run_eyes[1][eye_idx], vw, vh)
+            warped, ok = sbsbench.warp_previous_with_flow(before, u, v)
+            per_eye.append(np.abs(now - warped) * reliable * ok)
+        deltas.append(per_eye)
+    eye_idx = max(range(2), key=lambda i: float(np.percentile(
+        np.abs(deltas[1][i] - deltas[0][i])[reliable], 95)) if reliable.any() else 0.0)
+    signed = (deltas[1][eye_idx] - deltas[0][eye_idx]) * 255.0
+    score = sbsbench._box3(np.abs(signed))
+    cy, cx = np.unravel_index(np.argmax(score), score.shape)
+    cw, ch = min(220, vw), min(170, vh)
+    x0, y0 = max(0, min(vw - cw, int(cx) - cw // 2)), max(0, min(vh - ch, int(cy) - ch // 2))
+    source_rgb = np.repeat((now_small[..., None] * 255.0).astype(np.uint8), 3, axis=2)
+    source_rgb[~reliable] = (source_rgb[~reliable] * 0.18).astype(np.uint8)
+    ctrl_heat = np.zeros((vh, vw, 3), np.uint8)
+    treat_heat = np.zeros((vh, vw, 3), np.uint8)
+    ctrl_heat[..., 0] = np.clip(deltas[0][eye_idx] * 255.0 * 8.0, 0, 255).astype(np.uint8)
+    treat_heat[..., 0] = np.clip(deltas[1][eye_idx] * 255.0 * 8.0, 0, 255).astype(np.uint8)
+    signed_heat = np.zeros((vh, vw, 3), np.uint8)
+    signed_heat[..., 0] = np.clip(signed * 8.0, 0, 255).astype(np.uint8)
+    signed_heat[..., 2] = np.clip(-signed * 8.0, 0, 255).astype(np.uint8)
+    crop = (x0, y0, x0 + cw, y0 + ch)
+    return tuple(durl(Image.fromarray(a).crop(crop), w=380, jpg=True, q=88)
+                 for a in (source_rgb, ctrl_heat, treat_heat, signed_heat))
+
+
 def visual_evidence_images(clip, idx, metric=None):
     """Matched control/treatment crops plus an amplified RGB difference heatmap.
 
@@ -248,10 +341,14 @@ def visual_evidence_images(clip, idx, metric=None):
     source region.  The heatmap is deliberately labelled as amplified: it is evidence of where
     the renderers differ, while the adjacent metric supplies the direction of the change.
     """
-    if metric == "source_residual_p95":
+    if metric in ("source_residual_p95", "source_halo_p95", "source_stretch_pct"):
         return source_residual_evidence(clip, idx)
     if metric == "static_jitter_p95":
         return static_jitter_evidence(clip, idx)
+    if metric == "flow_temporal_p95":
+        return flow_temporal_evidence(clip, idx)
+    if metric in ("depth_gt_si_rmse", "depth_gt_edge_f1"):
+        return ground_truth_depth_evidence(clip, idx)
     if metric == "pop_spread_px":
         cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
         dp = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
@@ -399,20 +496,22 @@ RADAR_GROUPS = [
          "reference": _SC.get("depth", {}).get("target", 2.5), "unit": "%"},
         {"key": "source_residual_p95", "label": "Warp fidelity", "better": "lower",
          "reference": 15.0, "unit": " luma"},
+        {"key": "source_halo_p95", "label": "Halo fidelity", "better": "lower",
+         "reference": 15.0, "unit": " luma"},
+        {"key": "source_stretch_pct", "label": "Stretch fidelity", "better": "lower",
+         "reference": 25.0, "unit": "%"},
         {"key": "static_jitter_p95", "label": "Static stability", "better": "lower",
          "reference": 10.0, "unit": " luma"},
+        {"key": "flow_temporal_p95", "label": "Motion stability", "better": "lower",
+         "reference": 15.0, "unit": " luma"},
     ]),
-    ("Artifact diagnostics", "Pattern detectors; evidence only", [
-        {"key": "depth_spread", "label": "Depth range", "better": "higher",
-         "reference": 1.0, "unit": ""},
-        {"key": "edge_acc_p50", "label": "Edge alignment", "better": "lower",
-         "reference": 20.0, "unit": " px"},
-        {"key": "rim_over_p95", "label": "Rim cleanliness", "better": "lower",
-         "reference": 25.0, "unit": " luma"},
-        {"key": "stretch_area", "label": "Stretch cleanliness", "better": "lower",
-         "reference": 15.0, "unit": " permille"},
-        {"key": "swim_p50", "label": "Depth steadiness", "better": "lower",
-         "reference": 15.0, "unit": ""},
+    ("Reference validation", "Only clips with GT/reliable flow vote", [
+        {"key": "depth_gt_si_rmse", "label": "GT depth accuracy", "better": "lower",
+         "reference": 50.0, "unit": "%"},
+        {"key": "depth_gt_edge_f1", "label": "GT boundaries", "better": "higher",
+         "reference": 100.0, "unit": "%"},
+        {"key": "flow_depth_p95", "label": "Flow depth stability", "better": "lower",
+         "reference": 75.0, "unit": " /255"},
     ]),
 ]
 
@@ -426,8 +525,8 @@ PERF_RADAR_AXES = [
 ]
 
 
-def _mean_aggregate(aggs, key):
-    values = [aggs[c].get(key) for c in DECISION_CLIPS if aggs[c].get(key) is not None]
+def _mean_aggregate(aggs, key, clips=DECISION_CLIPS):
+    values = [aggs[c].get(key) for c in clips if aggs[c].get(key) is not None]
     return float(np.mean(values)) if values else None
 
 
@@ -507,19 +606,35 @@ def grouped_quality_section():
                             [_mean_perf(CTRL, a["key"]) for a in PERF_RADAR_AXES],
                             [_mean_perf(TREAT, a["key"]) for a in PERF_RADAR_AXES]))
 
-    hard = THR["vmisalign_px"]
-    hard_max = float(hard["hard_max"])
-    ctrl_v = _mean_aggregate(ctrl_agg, "vmisalign_px") or 0.0
-    treat_v = _mean_aggregate(treat_agg, "vmisalign_px") or 0.0
-    ctrl_w = min(100.0, ctrl_v / hard_max * 100.0)
-    treat_w = min(100.0, treat_v / hard_max * 100.0)
-    hard_card = (f'<article class="hard-card"><div><h3>Hard constraint: comfort</h3>'
-                 f'<p>Vertical mismatch must remain below <b>{hard_max:.2f} px</b>. It is shown '
-                 f'separately because one axis cannot form a meaningful radar.</p></div>'
-                 f'<div class="hard-bars"><div><span>{html.escape(CTRL_TAG)}</span>'
-                 f'<i><b style="width:{ctrl_w:.1f}%"></b></i><code>{ctrl_v:.3f} px</code></div>'
-                 f'<div><span>{html.escape(TREAT_TAG)}</span><i><b style="width:{treat_w:.1f}%"></b></i>'
-                 f'<code>{treat_v:.3f} px</code></div></div></article>')
+    hard_defs = (
+        ("vmisalign_px", "Vertical alignment", " px"),
+        ("positive_disparity_pct", "Positive disparity tail", "%"),
+        ("negative_disparity_pct", "Negative disparity tail", "%"),
+        ("source_coverage_pct", "Source coverage", "%"),
+        ("image_integrity_pct", "Image integrity", "%"),
+    )
+    checks = []
+    for key, label, unit in hard_defs:
+        spec = THR[key]
+        control = _mean_aggregate(ctrl_agg, key, CLIPS)
+        treatment = _mean_aggregate(treat_agg, key, CLIPS)
+        bound = (f'≥ {spec["hard_min"]:.1f}{unit}' if "hard_min" in spec
+                 else f'≤ {spec["hard_max"]:.1f}{unit}')
+        def value(v):
+            if v is None:
+                return "n/a", "hard-missing"
+            failed = (("hard_min" in spec and v < spec["hard_min"])
+                      or ("hard_max" in spec and v > spec["hard_max"]))
+            return f"{v:.2f}{unit}", "hard-fail" if failed else "hard-pass"
+        cv, cc = value(control)
+        tv, tc = value(treatment)
+        checks.append(f'<div class="hard-check"><span>{label}</span><code class="{cc}">{cv}</code>'
+                      f'<span class="radar-arrow">&rarr;</span><code class="{tc}">{tv}</code>'
+                      f'<small>{bound}</small></div>')
+    hard_card = (f'<article class="hard-card"><div><h3>Hard constraints: comfort and integrity</h3>'
+                 f'<p>Every row must pass independently; quality improvements cannot trade '
+                 f'against a failed limit.</p></div><div class="hard-checks">'
+                 f'{"".join(checks)}</div></article>')
     return (f'<section><h2>Metrics by group</h2><p class="sub">Radar axes are normalized quality: '
             f'<b>farther outward is always better</b>. Means use the non-flat decision clips; '
             f'runtime uses all clips. The reference scale is the stereo target or the metric\'s '
@@ -531,10 +646,16 @@ def scorecard_charts():
     """Grouped horizontal bars retain every table value while making A/B movement scannable."""
     charts = []
     for metric, label, worse, _, _ in ACTIVE:
-        values = [(c, ctrl_agg[c].get(metric, 0.0), treat_agg[c].get(metric, 0.0)) for c in CLIPS]
-        scale = max((max(abs(a), abs(b)) for _, a, b in values), default=1.0) or 1.0
+        values = [(c, ctrl_agg[c].get(metric), treat_agg[c].get(metric)) for c in CLIPS]
+        numeric = [abs(v) for _, a, b in values for v in (a, b) if v is not None]
+        scale = max(numeric, default=1.0) or 1.0
         rows = []
         for c, a, b in values:
+            if a is None or b is None:
+                rows.append(f'<div class="bar-row"><div class="bar-scene" title="{c}">{name(c)}</div>'
+                            f'<div class="bar-pair"><span class="bar-na">not applicable</span></div>'
+                            f'<span class="bar-delta bar-flat">n/a</span></div>')
+                continue
             aw = max(0.8, abs(a) / scale * 100.0) if a else 0.0
             bw = max(0.8, abs(b) / scale * 100.0) if b else 0.0
             delta = b - a
@@ -561,13 +682,21 @@ def scorecard_charts():
 METRIC_DEFS = [
     ("score", "score", "Overall 0-100 artifact cleanliness after weighted penalties. Stereo volume is reported and gated separately, so it cannot cancel artifact regressions.", "higher = better"),
     ("pop_spread_px", "pop_spread", "Near-to-far range of horizontal stereo disparity. This is the validated stereo-volume gate; the radar displays its resolution-independent percentage form.", "higher = more stereo volume"),
+    ("positive_disparity_pct", "disp_positive", "Weighted p99 of the positive signed L/R disparity tail as a percentage of eye width. Kept sign-explicit because host output lacks headset angular calibration.", "must stay below comfort limit"),
+    ("negative_disparity_pct", "disp_negative", "Magnitude of the weighted p1 negative signed L/R disparity tail as a percentage of eye width.", "must stay below comfort limit"),
+    ("source_coverage_pct", "coverage", "Worst-eye interior pixels whose output patch is explained by some same-scanline source patch within the allowed stereo displacement.", "must remain above integrity limit"),
+    ("image_integrity_pct", "integrity", "Worst-eye retention of source texture after horizontal source alignment. Detects missing, black, or collapsed image regions.", "must remain above integrity limit"),
     ("source_residual_p95", "warp_resid", "Worst-eye patch difference from the source after allowing a small horizontal stereo displacement. Detects monocular warp corruption without penalizing intended parallax.", "lower = more source-faithful"),
+    ("source_halo_p95", "source_halo", "Excess thin-ridge brightness at depth silhouettes after subtracting the horizontally aligned source ridge. Genuine source outlines are free.", "lower = less warp-created halo"),
+    ("source_stretch_pct", "source_stretch", "Source-textured silhouette-near pixels whose horizontal detail collapses below 35% of the aligned source detail.", "lower = less warp stretch"),
     ("static_jitter_p95", "static_jitter", "Worst-eye temporal change over regions whose source neighborhood stayed static after allowing for horizontal disparity. Camera/object motion is excluded.", "lower = steadier static content"),
+    ("flow_temporal_p95", "flow_temporal", "Worst-eye temporal residual after warping the previous output with classical source optical flow and rejecting photometrically unreliable flow.", "lower = steadier moving content"),
+    ("depth_gt_si_rmse", "gt_depth_rmse", "Prediction error against committed ground-truth inverse depth after monocular scale/shift alignment; constant-depth GT uses shift-only alignment.", "lower = more accurate depth"),
+    ("depth_gt_edge_f1", "gt_edge_f1", "Depth-boundary F1 against committed ground truth with one-pixel tolerance.", "higher = more accurate boundaries"),
+    ("flow_depth_p95", "flow_depth", "Pre-warp depth change after source optical-flow compensation, on photometrically reliable support.", "lower = steadier depth"),
     ("depth_spread", "dspread", "p95−p5 of the normalized depth = pop available at the source.", "higher = more depth to work with"),
     ("edge_acc_p50", "edge_acc", "Distance (depth-px) from each depth silhouette to the nearest true SOURCE color edge.", "lower = silhouette sits on the real edge"),
     ("swim_p50", "swim", "Frame-to-frame depth change where the SOURCE is static — depth instability, separated from real motion.", "lower = steadier depth"),
-    ("stretch_area", "stretch", "Area (‰ of the eye) of the large horizontal disocclusion smear beside silhouettes (bg rubber-banded to fill the gap).", "lower = less smear"),
-    ("rim_over_p95", "rim", "Brightness of the thin white line hugging a silhouette (the residual fill fringe), luma ×255.", "lower = fainter fringe"),
     ("disocc_smear", "smear", "Horizontal-detail deficit in the narrow band beside silhouettes; on flat content also fingerprints hallucinated depth edges.", "lower = crisper fill"),
     ("flicker_disocc_p50", "flick_dis", "Flicker restricted to the disocclusion bands — inpaint/stretch re-hallucination shimmer.", "lower = less boiling along edges"),
     ("vmisalign_px", "vmis", "Median vertical L↔R offset — parallax must be horizontal-only, so this is a geometry correctness check.", "must be ≈ 0"),
@@ -630,8 +759,10 @@ def conclusion_section():
     for k, h, worse, _, _ in COLS:
         if k == "score":  # the headline, not a component metric
             continue
-        a = np.mean([ctrl_agg[c].get(k, 0) for c in DECISION_CLIPS])
-        b = np.mean([treat_agg[c].get(k, 0) for c in DECISION_CLIPS])
+        a = _mean_aggregate(ctrl_agg, k)
+        b = _mean_aggregate(treat_agg, k)
+        if a is None or b is None:
+            continue
         if a < 1e-6 and b < 1e-6:
             continue
         pct = (b - a) / a * 100 if a else 100.0
@@ -646,7 +777,8 @@ def conclusion_section():
         txt = f"{mtip(k, '<b>' + h + '</b>')} {CTRL_TAG} {a:.2f} → {TREAT_TAG} {b:.2f} ({pct:+.0f}%)"
         (wins if favors_treat else costs).append(txt)
     li = score_line
-    decision = sbsbench.evaluate_ab_decision(ctrl_agg, treat_agg, DECISION_CLIPS, THR)
+    decision = sbsbench.evaluate_ab_decision(
+        ctrl_agg, treat_agg, DECISION_CLIPS, THR, hard_clip_ids=CLIPS)
     if IS_TRADEOFF_CMP:
         if wins:
             li += f'<li class="c-win">{TREAT_NAME} is better on: {" · ".join(wins)}</li>'
@@ -690,6 +822,12 @@ def conclusion_section():
 
 
 def gate_strip():
+    hard = TREAT.get("hard_failures", [])
+    if hard:
+        items = "".join(
+            f'<li><code>{name(r["clip"])}.{r["metric"]}</code> = {r["value"]}</li>' for r in hard)
+        return (f'<div class="gate gate-fail"><b>Gate: {len(hard)} HARD COMFORT/INTEGRITY '
+                f'FAILURE(S)</b><ul>{items}</ul></div>')
     if IS_COMPARISON_ONLY:
         return ('<div class="gate gate-info"><b>Gate: COMPARISON ONLY</b> — committed baselines '
                 'were not consulted; conclusions come from this matched control/treatment pair.</div>')
@@ -722,10 +860,17 @@ def _evidence_card(item, kind, axis=None):
     cls = ("evidence-cost" if kind == "regression" else "evidence-win" if kind == "improvement"
            else "evidence-noise")
     badge = kind.replace("_", " ")
-    source_label = "source · bright = evaluated static region" if metric == "static_jitter_p95" else "source"
+    is_gt = metric in ("depth_gt_si_rmse", "depth_gt_edge_f1")
+    source_label = ("source · bright = evaluated static region" if metric == "static_jitter_p95"
+                    else "source · bright = reliable optical flow" if metric == "flow_temporal_p95"
+                    else "ground-truth depth" if is_gt else "source")
     ctrl_label = (f"{CTRL_TAG} · temporal change" if metric == "static_jitter_p95" else
+                  f"{CTRL_TAG} · flow residual" if metric == "flow_temporal_p95" else
+                  f"{CTRL_TAG} · aligned depth" if is_gt else
                   f"{CTRL_TAG} · left | right" if metric == "pop_spread_px" else CTRL_TAG)
     treat_label = (f"{TREAT_TAG} · temporal change" if metric == "static_jitter_p95" else
+                   f"{TREAT_TAG} · flow residual" if metric == "flow_temporal_p95" else
+                   f"{TREAT_TAG} · aligned depth" if is_gt else
                    f"{TREAT_TAG} · left | right" if metric == "pop_spread_px" else TREAT_TAG)
     panels = (f'<div class="triplet"><figure><span class="tag">{source_label}</span><img src="{imgs[0]}"></figure>'
               f'<figure><span class="tag">{ctrl_label}</span><img src="{imgs[1]}"></figure>'
@@ -748,7 +893,9 @@ def _strongest_change(metric, clips=DECISION_CLIPS):
     floor = THR.get(metric, {}).get("abs_floor", 0.0)
     candidates = []
     for c in clips:
-        a, b = ctrl_agg[c].get(metric, 0.0), treat_agg[c].get(metric, 0.0)
+        a, b = ctrl_agg[c].get(metric), treat_agg[c].get(metric)
+        if a is None or b is None:
+            continue
         delta = b - a
         denom = max(floor, abs(a) * 0.05, 1e-6)
         candidates.append((abs(delta) / denom, delta, metric, c, a, b))
@@ -767,22 +914,24 @@ def _change_kind(item):
 
 def visual_evidence_section():
     """Show one representative example for every validated primary quality axis."""
-    axes = (("Stereo volume", "pop_spread_px"),
-            ("Warp fidelity", "source_residual_p95"),
-            ("Static stability", "static_jitter_p95"))
+    axes = (("Stereo volume", ("pop_spread_px",)),
+            ("Warp fidelity", ("source_residual_p95", "source_halo_p95", "source_stretch_pct")),
+            ("Temporal stability", ("static_jitter_p95", "flow_temporal_p95")),
+            ("Ground-truth depth", ("depth_gt_si_rmse", "depth_gt_edge_f1")))
     cards = []
-    for axis, metric in axes:
-        item = _strongest_change(metric)
+    for axis, metrics in axes:
+        item = max((item for metric in metrics if (item := _strongest_change(metric))),
+                   default=None)
         if item:
             cards.append(_evidence_card(item, _change_kind(item), axis))
     cards = "".join(cards)
     if not cards:
         return ""
     return (f'<section><h2>Primary-axis visual evidence</h2>'
-            f'<p class="sub">One strongest matched example for each decision axis. Warp and static '
-            f'stability use metric-specific source/heatmap views; stereo volume uses the same '
-            f'silhouette crop in both outputs. A within-noise badge means the example is illustrative, '
-            f'not a decision event.</p>{cards}</section>')
+            f'<p class="sub">One strongest matched example for each decision axis. Warp and '
+            f'temporal metrics use source-relative heatmaps, stereo shows both eyes, and reference '
+            f'depth shows aligned prediction against ground truth. A within-noise badge means the '
+            f'example is illustrative, not a decision event.</p>{cards}</section>')
 
 
 def diagnostic_evidence_section():
@@ -873,7 +1022,7 @@ td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .radar-poly{stroke-width:2;stroke-linejoin:round}.radar-control{fill:color-mix(in srgb,var(--accent) 14%,transparent);stroke:var(--accent)}.radar-treatment{fill:color-mix(in srgb,var(--warn) 14%,transparent);stroke:var(--warn)}
 .radar-legend{display:flex;justify-content:center;gap:20px;font-family:var(--mono);font-size:10.5px;margin-bottom:10px}.radar-legend span:before{content:"";display:inline-block;width:14px;height:3px;border-radius:3px;margin-right:6px;vertical-align:middle}.legend-control:before{background:var(--accent)}.legend-treatment:before{background:var(--warn)}
 .radar-values{border-top:1px solid var(--line);padding-top:8px}.radar-values>div{display:grid;grid-template-columns:minmax(0,1fr) auto 14px auto;align-items:center;gap:4px;font-family:var(--mono);font-size:9.5px;padding:2px 0}.radar-values>div>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}.radar-values code{font-size:9px;padding:0 3px}.radar-arrow{color:var(--muted);text-align:center}
-.hard-card{display:grid;grid-template-columns:minmax(220px,.75fr) minmax(300px,1.25fr);gap:24px;align-items:center;border:1px solid var(--line);border-radius:11px;background:var(--panel);padding:16px;margin-top:16px}.hard-card p{font-size:12px;color:var(--muted);margin:5px 0 0}.hard-bars{display:grid;gap:8px}.hard-bars>div{display:grid;grid-template-columns:70px minmax(120px,1fr) 72px;gap:8px;align-items:center}.hard-bars span,.hard-bars code{font-family:var(--mono);font-size:10.5px}.hard-bars i{height:8px;background:color-mix(in srgb,var(--muted) 12%,transparent);border-radius:8px;overflow:hidden}.hard-bars i b{display:block;height:100%;min-width:2px;background:var(--good);border-radius:8px}.hard-bars code{text-align:right;padding:0;border:none;background:none}
+.hard-card{display:grid;grid-template-columns:minmax(220px,.65fr) minmax(420px,1.35fr);gap:24px;align-items:center;border:1px solid var(--line);border-radius:11px;background:var(--panel);padding:16px;margin-top:16px}.hard-card p{font-size:12px;color:var(--muted);margin:5px 0 0}.hard-checks{display:grid;gap:5px}.hard-check{display:grid;grid-template-columns:minmax(145px,1fr) 74px 14px 74px 66px;gap:5px;align-items:center;font-family:var(--mono);font-size:10px}.hard-check code{font-size:9.5px;text-align:right;padding:1px 4px}.hard-check small{text-align:right;color:var(--muted)}.hard-pass{color:var(--good)}.hard-fail{color:var(--crit)}.hard-missing{color:var(--muted)}
 .chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .metric-chart{border:1px solid var(--line);border-radius:11px;background:var(--panel);padding:14px 14px 10px;min-width:0}
 .chart-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:9px}
@@ -887,6 +1036,7 @@ td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .bar-fill{display:block;height:100%;min-width:0;border-radius:5px}.bar-control{background:var(--accent)}
 .bar-good{background:var(--good)}.bar-bad{background:var(--crit)}.bar-flat{background:var(--muted)}
 .bar-delta{font-family:var(--mono);font-size:9.5px;text-align:right;background:none}.bar-delta.bar-good{color:var(--good)}.bar-delta.bar-bad{color:var(--crit)}.bar-delta.bar-flat{color:var(--muted)}
+.bar-na{font-family:var(--mono);font-size:9.5px;color:var(--muted);align-self:center}
 .clipname{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--ink)}
 .pill{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:20px;font-weight:600;white-space:nowrap}
 .p-warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 15%,transparent)}

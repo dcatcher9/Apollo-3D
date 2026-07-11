@@ -25,10 +25,10 @@ def main():
     args = ap.parse_args()
     result_path = os.path.join(args.run_dir, "results.json")
     data = json.load(open(result_path, encoding="utf-8"))
-    if data.get("verdict") != "comparison_only":
+    if data.get("verdict") not in ("comparison_only", "hard_failures"):
         raise SystemExit("refusing to rescore a committed-baseline verdict; rerun run_eval instead")
     thresholds = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json"), encoding="utf-8"))
-    issues = []
+    issues, hard_failures = [], []
     for clip, entry in data["clips"].items():
         clip_dir = os.path.join(args.clips_root, clip)
         expected_flat = bool(entry.get("meta", {}).get("expected_flat"))
@@ -52,13 +52,29 @@ def main():
             if "trigger" in spec and agg.get(metric, 0) > spec["trigger"]:
                 issues.append({"clip": clip, "metric": metric, "trigger": spec["trigger"],
                                **worst.get(metric, {}), "value": round(agg[metric], 3)})
+            if "trigger_min" in spec and metric in agg and agg[metric] < spec["trigger_min"]:
+                issues.append({"clip": clip, "metric": metric,
+                               "trigger_min": spec["trigger_min"],
+                               **worst.get(metric, {}), "value": round(agg[metric], 3)})
         entry["aggregate"] = agg
         entry["worst_frame"] = worst
+        for metric, spec in thresholds["metrics"].items():
+            if spec.get("role") == "hard" and metric in agg:
+                if sbsbench.metric_gate_failed(agg[metric], agg[metric], spec):
+                    hard_failures.append({"clip": clip, "metric": metric,
+                                          **worst.get(metric, {}), "value": round(agg[metric], 3),
+                                          "hard_min": spec.get("hard_min"),
+                                          "hard_max": spec.get("hard_max")})
 
     data["issues"] = issues
+    data["hard_failures"] = hard_failures
     data["regressions"] = []
+    data["verdict"] = "hard_failures" if hard_failures else "comparison_only"
     data["meta"]["metric_sha256"] = run_eval.sha256_files([
         os.path.join(SCRIPT_DIR, "sbsbench.py"), os.path.join(SCRIPT_DIR, "thresholds.json")])
+    data["meta"]["eval_schema"] = run_eval.EVAL_SCHEMA
+    data["meta"]["clip_set_sha1"] = {
+        clip: run_eval.sha1_dir(os.path.join(args.clips_root, clip)) for clip in data["clips"]}
     out = result_path if args.in_place else os.path.join(args.run_dir, "results.rescored.json")
     tmp = out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:

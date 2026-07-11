@@ -1,5 +1,6 @@
 {
   "name": "flat_page",
   "description": "Synthetic static document/desktop page: flat-content depth hallucination (A3).",
-  "expected_flat": true
+  "expected_flat": true,
+  "gt_depth_kind": "disparity"
 }
