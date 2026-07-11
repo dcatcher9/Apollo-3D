@@ -29,10 +29,11 @@ Both currently retain the accepted Bestv2 shift, subject tracking, recentering a
 quality profile intentionally disables exact sharpen on both warps: despite being essential to
 Phase-A pixel reproduction, it reduced the independent score by `6.20` / `6.46` points and caused
 large bright-rim regressions. Window sculpt, curvature, conceal/repair and DOF were also rejected
-and remain off. Exact plane lock is provisionally off in both profiles: current exact-versus-
-approximate and older off/on evidence disfavor it, but a final-stack off/on confirmation is still
-required. Guided upsample, min/max snap and range floor remain pending and must be evaluated
-independently for each warp.
+and remain off. Exact plane lock is rejected for both profiles by a final-stack off/on ablation:
+Apollo lost `0.59` score and VD3D lost `1.06`; pop spread fell `0.63` / `0.66 px` and bright-rim
+p95 worsened `0.90` / `2.01`. Visual reports are under `sbs_eval/bestv2-profile-plane-apollo`
+and `sbs_eval/bestv2-profile-plane-vd3d`. Guided upsample, min/max snap and range floor remain
+pending and must be evaluated independently for each warp.
 
 The starting profile comparison (flat-page clip excluded) is Apollo `74.13` versus VD3D `73.46`.
 Apollo has `+0.67 px` pop spread and `0.84` lower bright-rim p95; VD3D has `0.23` lower stretch and
