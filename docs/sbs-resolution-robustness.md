@@ -18,8 +18,6 @@ invariants are:
 | Raw-depth normalization and EMA | model grid / depth values | Histogram, percentile, min/max and temporal state depend on sample count or depth values, not encoder size. No output-resolution adjustment is needed. |
 | Subject histogram and recenter/stretch | normalized image/depth | Center weighting uses normalized x/y. Depth bands and convergence operate in normalized depth or Bestv2 source-pixel units. |
 | Exact plane lock | model grid | Bestv2's morphology radii now scale from its 336-pixel-short-side reference, keeping the same image-relative support on other inference grids. |
-| Guided upsample | model grid to source grid | Output is at most 2x the model grid and never larger than the source. This avoids changing edge behavior by supersampling small inputs. |
-| Foreground curvature | normalized image/depth | Radial position uses both output dimensions independently. It follows the actual guided/raw depth texture size. |
 | Apollo inverse warp | source UV | Bestv2 shifts and search bounds are normalized by mono-source width. Depth tap size comes from the depth texture. Per-eye aspect fitting is applied before reprojection. |
 | VD3D forward warp | output-eye raster + source UV | Parallax uses mono-source width; the output shift includes fitted content width. Hole-fill radius converts source pixels to output-content pixels. Integer splat placement still has unavoidable subpixel quantization on very small rasters. |
 | VD3D backward blend | source UV | Uses the same shared disparity field and per-eye aspect transform as Apollo. |

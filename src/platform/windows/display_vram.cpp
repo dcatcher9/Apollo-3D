@@ -24,15 +24,15 @@ extern "C" {
 // local includes
 #include "display.h"
 #include "misc.h"
+#include "sbs_debug_dump.h"
 #include "src/config.h"
 #include "src/logging.h"
+#include "src/model_manager.h"
 #include "src/nvenc/nvenc_config.h"
 #include "src/nvenc/nvenc_d3d11_native.h"
 #include "src/nvenc/nvenc_d3d11_on_cuda.h"
 #include "src/nvenc/nvenc_utils.h"
-#include "sbs_debug_dump.h"
 #include "src/sbs_perf.h"
-#include "src/model_manager.h"
 #include "src/video.h"
 #include "src/video_depth_estimator.h"
 
@@ -488,12 +488,12 @@ namespace platf::dxgi {
           // Run depth estimator. On failure it returns null; we fall back to a zero-parallax
           // (flat) SBS frame rather than a globally-shifted one, and warn only once.
           const auto input_color_space = img.format == DXGI_FORMAT_R16G16B16A16_FLOAT ?
-            (display->is_hdr() ? models::input_color_space::scrgb_hdr :
-                                 models::input_color_space::linear_sdr) :
-            models::input_color_space::srgb;
+                                           (display->is_hdr() ? models::input_color_space::scrgb_hdr :
+                                                                models::input_color_space::linear_sdr) :
+                                           models::input_color_space::srgb;
           auto est = depth_estimator ?
-            depth_estimator->estimate_depth(img_ctx.encoder_input_res.get(), input_color_space) :
-            models::estimate_result {};
+                       depth_estimator->estimate_depth(img_ctx.encoder_input_res.get(), input_color_space) :
+                       models::estimate_result {};
           if (!est.depth && !depth_warned) {
             BOOST_LOG(error) << "Depth estimation unavailable; streaming flat (zero-parallax) SBS."sv;
             depth_warned = true;
@@ -502,62 +502,59 @@ namespace platf::dxgi {
           // VD3D's hybrid starts with a depth-ordered forward splat. The compute pass records the
           // nearest source x at every destination pixel; the resolve PS performs horizontal hole
           // fill and blends it with the classic backward warp. Apollo-probe skips this pass.
-          if (est.depth && sbs_vd3d_warp) {
+          if (est.depth && sbs_vd3d_warp && (est.geometry_updated || !sbs_vd3d_winner_valid)) {
             const UINT clear_winner[4] = {0, 0, 0, 0};
             device_ctx->ClearUnorderedAccessViewUint(sbs_vd3d_winner_uav.get(), clear_winner);
             device_ctx->CSSetShader(sbs_vd3d_forward_cs.get(), nullptr, 0);
             device_ctx->CSSetSamplers(0, 1, &sampler_linear);
-            ID3D11ShaderResourceView* cs_srvs[] = {img_ctx.encoder_input_res.get(), est.depth.Get(),
-              est.subject.Get(), nullptr, est.plane_lock.Get()};
+            ID3D11ShaderResourceView *cs_srvs[] = {img_ctx.encoder_input_res.get(), est.depth.Get(), est.subject.Get(), nullptr, est.plane_lock.Get()};
             device_ctx->CSSetShaderResources(0, 5, cs_srvs);
-            ID3D11UnorderedAccessView* cs_uavs[] = {sbs_vd3d_winner_uav.get()};
+            ID3D11UnorderedAccessView *cs_uavs[] = {sbs_vd3d_winner_uav.get()};
             device_ctx->CSSetUnorderedAccessViews(0, 1, cs_uavs, nullptr);
-            ID3D11Buffer* cs_cb[] = {sbs_reprojection_cbuffer.get()};
+            ID3D11Buffer *cs_cb[] = {sbs_reprojection_cbuffer.get()};
             device_ctx->CSSetConstantBuffers(2, 1, cs_cb);
             const UINT eye_w = (UINT) sbs_viewport.Width / 2u;
             const UINT eye_h = (UINT) sbs_viewport.Height;
             device_ctx->Dispatch((eye_w + 15u) / 16u, (eye_h + 15u) / 16u, 1u);
 
-            ID3D11UnorderedAccessView* null_uav[] = {nullptr};
-            ID3D11ShaderResourceView* null_cs_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+            ID3D11UnorderedAccessView *null_uav[] = {nullptr};
+            ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
             device_ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
             device_ctx->CSSetShaderResources(0, 5, null_cs_srvs);
+            sbs_vd3d_winner_valid = true;
           }
 
           // Draw the selected geometry implementation into the shared SBS intermediate.
           device_ctx->OMSetRenderTargets(1, &sbs_intermediate_rtv, nullptr);
           device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
-          device_ctx->PSSetShader(est.depth && sbs_vd3d_warp ?
-            sbs_vd3d_reprojection_ps.get() : sbs_reprojection_ps.get(), nullptr, 0);
+          device_ctx->PSSetShader(est.depth && sbs_vd3d_warp ? sbs_vd3d_reprojection_ps.get() : sbs_reprojection_ps.get(), nullptr, 0);
           device_ctx->RSSetViewports(1, &sbs_viewport);
           // Bind the sampler explicitly rather than relying on it persisting from init().
           device_ctx->PSSetSamplers(0, 1, &sampler_linear);
 
-          ID3D11ShaderResourceView* srvs[] = {img_ctx.encoder_input_res.get(), est.depth.Get(),
-            est.subject.Get(), est.depth && sbs_vd3d_warp ? sbs_vd3d_winner_srv.get() : nullptr,
-            est.plane_lock.Get()};
+          ID3D11ShaderResourceView *srvs[] = {img_ctx.encoder_input_res.get(), est.depth.Get(), est.subject.Get(), est.depth && sbs_vd3d_warp ? sbs_vd3d_winner_srv.get() : nullptr, est.plane_lock.Get()};
           device_ctx->PSSetShaderResources(0, 5, srvs);
-          ID3D11Buffer* sbs_cb[] = {est.depth ? sbs_reprojection_cbuffer.get() : sbs_passthrough_cbuffer.get()};
+          ID3D11Buffer *sbs_cb[] = {est.depth ? sbs_reprojection_cbuffer.get() : sbs_passthrough_cbuffer.get()};
           device_ctx->PSSetConstantBuffers(2, 1, sbs_cb);
           device_ctx->Draw(3, 0);  // Fullscreen triangle
 
           // Unbind the Render Target so D3D11 doesn't nullify our SRV in the next pass!
-          ID3D11RenderTargetView* null_rtvs[] = {nullptr};
+          ID3D11RenderTargetView *null_rtvs[] = {nullptr};
           device_ctx->OMSetRenderTargets(1, null_rtvs, nullptr);
 
           // Clear shader resources
-          ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+          ID3D11ShaderResourceView *null_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
           device_ctx->PSSetShaderResources(0, 5, null_srvs);
 
           // Bestv2 SDR sharpen is post-warp and per-eye. Both geometry paths feed the same pass.
-          ID3D11ShaderResourceView* final_sbs_srv = sbs_intermediate_srv.get();
+          ID3D11ShaderResourceView *final_sbs_srv = sbs_intermediate_srv.get();
           if (est.depth && sbs_sharpen_rtv && sbs_sharpen_srv) {
-            ID3D11RenderTargetView* sharpen_rtv = sbs_sharpen_rtv.get();
+            ID3D11RenderTargetView *sharpen_rtv = sbs_sharpen_rtv.get();
             device_ctx->OMSetRenderTargets(1, &sharpen_rtv, nullptr);
             device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
             device_ctx->PSSetShader(sbs_sharpen_ps.get(), nullptr, 0);
             device_ctx->RSSetViewports(1, &sbs_viewport);
-            ID3D11ShaderResourceView* sharpen_input = final_sbs_srv;
+            ID3D11ShaderResourceView *sharpen_input = final_sbs_srv;
             device_ctx->PSSetShaderResources(0, 1, &sharpen_input);
             device_ctx->Draw(3, 0);
             device_ctx->OMSetRenderTargets(1, null_rtvs, nullptr);
@@ -571,8 +568,7 @@ namespace platf::dxgi {
           // Debug frame dump (offline artifact inspection): on the client "Dump 3D" button or a
           // "dump.trigger" file, save this frame's 2D source, depth map and SBS result. See
           // sbs_debug_dump.h. No-op unless APOLLO_SBS_DUMP is set.
-          sbs_dumper.maybe_dump(device.get(), device_ctx.get(),
-            img_ctx.encoder_input_res.get(), est.depth.Get(), final_sbs_srv, display->is_hdr());
+          sbs_dumper.maybe_dump(device.get(), device_ctx.get(), img_ctx.encoder_input_res.get(), est.depth.Get(), final_sbs_srv, display->is_hdr());
 
           if (perf) {
             auto dt = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - perf_t0).count();
@@ -581,8 +577,7 @@ namespace platf::dxgi {
           }
         } else {
           // Plain 2D: draw the captured frame straight into the output.
-          draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewports, out_UV_viewport,
-            img.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+          draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewports, out_UV_viewport, img.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
         }
 
         // Release encoder mutex to allow capture code to reuse this image
@@ -598,9 +593,7 @@ namespace platf::dxgi {
     void apply_colorspace(const ::video::sunshine_colorspace_t &colorspace) {
       auto color_vectors = ::video::color_vectors_from_colorspace(colorspace);
 
-      if (format == DXGI_FORMAT_AYUV ||
-          format == DXGI_FORMAT_R16_UINT ||
-          format == DXGI_FORMAT_Y410) {
+      if (format == DXGI_FORMAT_AYUV || format == DXGI_FORMAT_R16_UINT || format == DXGI_FORMAT_Y410) {
         color_vectors = ::video::new_color_vectors_from_colorspace(colorspace);
       }
 
@@ -696,33 +689,56 @@ namespace platf::dxgi {
       auto *ctx = device_ctx.get();
       depth_estimator_build = std::async(std::launch::async, [dev, ctx, active, sbs_cfg]() {
         return std::make_unique<models::video_depth_estimator>(
-            Microsoft::WRL::ComPtr<ID3D11Device>(dev),
-            Microsoft::WRL::ComPtr<ID3D11DeviceContext>(ctx),
-            std::filesystem::path(SUNSHINE_ASSETS_DIR),
-            sbs_cfg,
-            active);
+          Microsoft::WRL::ComPtr<ID3D11Device>(dev),
+          Microsoft::WRL::ComPtr<ID3D11DeviceContext>(ctx),
+          std::filesystem::path(SUNSHINE_ASSETS_DIR),
+          sbs_cfg,
+          active
+        );
       });
       depth_estimator_building = true;
       ::video::depth_engine_phase.store(1, std::memory_order_relaxed);  // loading -> client shows indicator
       return false;
     }
 
-    void update_sbs_constant_buffers(float content_scale_x, float content_scale_y,
-                                     float source_to_output = 1.0f) {
+    void update_sbs_constant_buffers(float content_scale_x, float content_scale_y, float source_to_output = 1.0f) {
       float sbs_params[16] {
-        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,  // slot 5 retained; Bestv2 subject shaping is permanent
-        (float) config::video.sbs.subject_lock, config::video.sbs.subject_stretch ? 1.0f : 0.0f,
-        (float) config::video.sbs.subject_plane_lock, (float) config::video.sbs.subject_plane_width,
-        content_scale_x, content_scale_y, (float) config::video.sbs.vd3d_forward_blend,
-        0.0f, 0.0f, source_to_output
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,  // slot 5 retained; Bestv2 subject shaping is permanent
+        (float) config::video.sbs.subject_lock,
+        config::video.sbs.subject_stretch ? 1.0f : 0.0f,
+        (float) config::video.sbs.subject_plane_lock,
+        (float) config::video.sbs.subject_plane_width,
+        content_scale_x,
+        content_scale_y,
+        (float) config::video.sbs.vd3d_forward_blend,
+        0.0f,
+        0.0f,
+        source_to_output
       };
       sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);
 
       float passthrough_params[16] {
-        0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, content_scale_x, content_scale_y,
-        (float) config::video.sbs.vd3d_forward_blend, 0.0f,
-        0.0f, source_to_output
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        content_scale_x,
+        content_scale_y,
+        (float) config::video.sbs.vd3d_forward_blend,
+        0.0f,
+        0.0f,
+        source_to_output
       };
       sbs_passthrough_cbuffer = make_buffer(device.get(), passthrough_params);
     }
@@ -733,10 +749,11 @@ namespace platf::dxgi {
       output_texture.reset(frame_texture);
       sbs_mode = sbs_mode_param;
       sbs_vd3d_warp = sbs_mode != ::video::SBS_OFF && config::video.sbs.warp == "vd3d";
+      sbs_vd3d_winner_valid = false;
       // WGC uses FP16 for both HDR and 10-bit SDR capture. In either case the texture is linear;
       // HDR only changes the later linear-scRGB -> Rec.2020/PQ conversion.
       sbs_intermediate_linear = display->is_hdr() ||
-        display->capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+                                display->capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT;
 
       HRESULT status = S_OK;
 
@@ -870,17 +887,18 @@ namespace platf::dxgi {
       float content_scale_x = 1.0f;
       float content_scale_y = 1.0f;
       if (sbs_on) {
-        const float source_aspect = (float)display->width / (float)display->height;
-        const float eye_aspect = ((float)out_width * 0.5f) / (float)out_height;
-        if (eye_aspect > source_aspect) content_scale_x = source_aspect / eye_aspect;
-        else content_scale_y = eye_aspect / source_aspect;
+        const float source_aspect = (float) display->width / (float) display->height;
+        const float eye_aspect = ((float) out_width * 0.5f) / (float) out_height;
+        if (eye_aspect > source_aspect) {
+          content_scale_x = source_aspect / eye_aspect;
+        } else {
+          content_scale_y = eye_aspect / source_aspect;
+        }
       }
-      const float source_to_output = sbs_on
-        ? ((float)out_width * 0.5f * content_scale_x) / std::max((float)display->width, 1.0f)
-        : 1.0f;
+      const float source_to_output = sbs_on ? ((float) out_width * 0.5f * content_scale_x) / std::max((float) display->width, 1.0f) : 1.0f;
       update_sbs_constant_buffers(content_scale_x, content_scale_y, source_to_output);
-      auto out_width_f = sbs_on ? (float)out_width : fitted_width;
-      auto out_height_f = sbs_on ? (float)out_height : fitted_height;
+      auto out_width_f = sbs_on ? (float) out_width : fitted_width;
+      auto out_height_f = sbs_on ? (float) out_height : fitted_height;
 
       // result is always positive
       auto offsetX = (out_width - out_width_f) / 2;
@@ -907,19 +925,14 @@ namespace platf::dxgi {
           BOOST_LOG(error) << "Failed to create SBS texture";
           return -1;
         }
-        if (FAILED(device->CreateRenderTargetView(
-              sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_rtv)) ||
-            FAILED(device->CreateShaderResourceView(
-              sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_srv))) {
+        if (FAILED(device->CreateRenderTargetView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_rtv)) || FAILED(device->CreateShaderResourceView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_srv))) {
           BOOST_LOG(error) << "Failed to create SBS texture views";
           return -1;
         }
 
         if (!sbs_intermediate_linear && config::video.sbs.bestv2_sharpen) {
           status = device->CreateTexture2D(&tex_desc, nullptr, &sbs_sharpen_texture);
-          if (FAILED(status) ||
-              FAILED(device->CreateRenderTargetView(sbs_sharpen_texture.get(), nullptr, &sbs_sharpen_rtv)) ||
-              FAILED(device->CreateShaderResourceView(sbs_sharpen_texture.get(), nullptr, &sbs_sharpen_srv))) {
+          if (FAILED(status) || FAILED(device->CreateRenderTargetView(sbs_sharpen_texture.get(), nullptr, &sbs_sharpen_rtv)) || FAILED(device->CreateShaderResourceView(sbs_sharpen_texture.get(), nullptr, &sbs_sharpen_srv))) {
             BOOST_LOG(error) << "Failed to create SBS sharpen texture/views";
             return -1;
           }
@@ -934,10 +947,7 @@ namespace platf::dxgi {
             BOOST_LOG(error) << "Failed to create VD3D forward-warp winner texture";
             return -1;
           }
-          if (FAILED(device->CreateUnorderedAccessView(
-                sbs_vd3d_winner_texture.get(), nullptr, &sbs_vd3d_winner_uav)) ||
-              FAILED(device->CreateShaderResourceView(
-                sbs_vd3d_winner_texture.get(), nullptr, &sbs_vd3d_winner_srv))) {
+          if (FAILED(device->CreateUnorderedAccessView(sbs_vd3d_winner_texture.get(), nullptr, &sbs_vd3d_winner_uav)) || FAILED(device->CreateShaderResourceView(sbs_vd3d_winner_texture.get(), nullptr, &sbs_vd3d_winner_srv))) {
             BOOST_LOG(error) << "Failed to create VD3D forward-warp winner views";
             return -1;
           }
@@ -1350,6 +1360,7 @@ namespace platf::dxgi {
     render_target_t sbs_sharpen_rtv;
     shader_res_t sbs_sharpen_srv;
     bool sbs_vd3d_warp = false;
+    bool sbs_vd3d_winner_valid = false;
     bool sbs_intermediate_linear = false;
     texture2d_t sbs_vd3d_winner_texture;
     unordered_access_t sbs_vd3d_winner_uav;
@@ -1582,8 +1593,7 @@ namespace platf::dxgi {
       auto alpha_cursor_img = make_cursor_alpha_image(img_data, shape_info);
       auto xor_cursor_img = make_cursor_xor_image(img_data, shape_info);
 
-      if (!set_cursor_texture(device.get(), cursor_alpha, std::move(alpha_cursor_img), shape_info) ||
-          !set_cursor_texture(device.get(), cursor_xor, std::move(xor_cursor_img), shape_info)) {
+      if (!set_cursor_texture(device.get(), cursor_alpha, std::move(alpha_cursor_img), shape_info) || !set_cursor_texture(device.get(), cursor_xor, std::move(xor_cursor_img), shape_info)) {
         return capture_e::error;
       }
     }

@@ -10,6 +10,8 @@ cbuffer PlaneConstants : register(b1) {
     uint filter_radius;
     uint filter_op;
     uint plane_group_count;
+    uint plane_subject_stretch;
+    uint3 plane_reserved;
 };
 
 #endif

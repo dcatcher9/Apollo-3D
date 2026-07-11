@@ -232,18 +232,26 @@ def _decode_png_rgb16(data):
     rows = np.zeros((height, row_bytes), dtype=np.uint8)
     pos = 0
     for y in range(height):
-        filter_type = raw[pos]; pos += 1
-        encoded = raw[pos:pos + row_bytes]; pos += row_bytes
+        filter_type = raw[pos]
+        pos += 1
+        encoded = raw[pos:pos + row_bytes]
+        pos += row_bytes
         for x, byte in enumerate(encoded):
             left = int(rows[y, x - bpp]) if x >= bpp else 0
             up = int(rows[y - 1, x]) if y else 0
             upper_left = int(rows[y - 1, x - bpp]) if y and x >= bpp else 0
-            if filter_type == 0: predictor = 0
-            elif filter_type == 1: predictor = left
-            elif filter_type == 2: predictor = up
-            elif filter_type == 3: predictor = (left + up) // 2
-            elif filter_type == 4: predictor = _paeth(left, up, upper_left)
-            else: fail(f"unsupported PNG filter {filter_type}")
+            if filter_type == 0:
+                predictor = 0
+            elif filter_type == 1:
+                predictor = left
+            elif filter_type == 2:
+                predictor = up
+            elif filter_type == 3:
+                predictor = (left + up) // 2
+            elif filter_type == 4:
+                predictor = _paeth(left, up, upper_left)
+            else:
+                fail(f"unsupported PNG filter {filter_type}")
             rows[y, x] = (int(byte) + predictor) & 255
     return rows.reshape(height, width, 3, 2).astype(np.uint16).dot(
         np.array([256, 1], dtype=np.uint16))
@@ -292,7 +300,9 @@ def prepare_tartanair(clip_id, clip, dataset, archives, out_dir, suite):
             selection.append({"source_index": source_i, "dataset_frame": frame_id})
         return selection
     finally:
-        image_zip.close(); depth_zip.close(); flow_zip.close()
+        image_zip.close()
+        depth_zip.close()
+        flow_zip.close()
 
 
 def _indexed_archive_members(names, marker, pattern):
@@ -381,7 +391,8 @@ def prepare_vkitti2(clip_id, clip, dataset, archives, out_dir, suite):
                               "scene": scene, "variant": variant, "camera": camera})
         return selection
     finally:
-        rgb_tar.close(); depth_tar.close()
+        rgb_tar.close()
+        depth_tar.close()
 
 
 def prepare_clip(manifest, clip_id, clip, downloads_dir, prepared_root):

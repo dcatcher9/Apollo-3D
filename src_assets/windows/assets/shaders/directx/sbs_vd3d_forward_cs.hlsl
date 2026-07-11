@@ -33,7 +33,10 @@ void main(uint3 id : SV_DispatchThreadID) {
     float4 s1 = SubjectState[1];
     float4 s2 = SubjectState[2];
     bool shaped = s0.w > 0.5f;
-    float plane_mask = PlaneLockTexture.SampleLevel(LinearSampler, uv, 0);
+    float plane_mask = 0.0f;
+    if (subject_plane_lock > 0.0f) {
+        plane_mask = PlaneLockTexture.SampleLevel(LinearSampler, uv, 0);
+    }
     float parallax = DepthParallax(d, plane_mask, uv.x, s0, s1, s2, shaped, (float)source_w);
 
     // Apollo is high=near. Store a 16-bit near priority plus the 16-bit source x; max wins.

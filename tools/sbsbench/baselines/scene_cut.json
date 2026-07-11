@@ -53,12 +53,12 @@
     "score": 77.7
   },
   "perf_ms": {
-    "depth_infer": 2.09814,
-    "sbs_composite_cpu": 0.0067,
-    "warp_infer": 0.142464
+    "depth_infer": 2.06269,
+    "sbs_composite_cpu": 0.0057,
+    "warp_infer": 0.100384
   },
   "meta": {
-    "git_sha": "d9543e08",
+    "git_sha": "5ed4d23d",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -84,10 +84,10 @@
     "eval_schema": 8,
     "depth_step": "current-once",
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "1839bd76829b6144",
+    "metric_sha256": "411da3c4c6fdec56",
     "gpu_contention": false,
-    "timestamp": "2026-07-11T14:26:34",
-    "run_name": "evalv8-cleanup-apollo",
+    "timestamp": "2026-07-11T15:43:28",
+    "run_name": "evalv9-overhaul-apollo",
     "name": "scene_cut",
     "description": "Hard cut spliced kitchen-vlog -> washerwoman-pond: depth-normalization swim across cuts (A1).",
     "clip_sha1": "c912fa5c33a7"

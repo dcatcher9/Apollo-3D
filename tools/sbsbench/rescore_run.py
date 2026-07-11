@@ -37,34 +37,12 @@ def main():
         if not measured:
             raise SystemExit(f"{clip}: no measurable SBS artifacts")
         rows, agg = measured
-        worst = {}
-        for metric, spec in thresholds["metrics"].items():
-            if expected_flat and metric in ("pop_spread_px", "pop_spread_pct"):
-                continue
-            frame_key = metric if any(metric in r for r in rows) else (
-                metric[:-4] if metric.endswith(("_p50", "_p95")) else metric)
-            vals = [(r.get(frame_key), r.get("_frame_id", i))
-                    for i, r in enumerate(rows) if frame_key in r]
-            if vals:
-                choose = min if spec.get("better") == "higher" else max
-                value, frame = choose(vals)
-                worst[metric] = {"frame": frame, "worst_value": round(value, 3)}
-            if "trigger" in spec and agg.get(metric, 0) > spec["trigger"]:
-                issues.append({"clip": clip, "metric": metric, "trigger": spec["trigger"],
-                               **worst.get(metric, {}), "value": round(agg[metric], 3)})
-            if "trigger_min" in spec and metric in agg and agg[metric] < spec["trigger_min"]:
-                issues.append({"clip": clip, "metric": metric,
-                               "trigger_min": spec["trigger_min"],
-                               **worst.get(metric, {}), "value": round(agg[metric], 3)})
+        worst, clip_issues, clip_hard_failures = run_eval.score_clip_gates(
+            rows, agg, thresholds, entry.get("meta", {}))
+        issues.extend({"clip": clip, **item} for item in clip_issues)
+        hard_failures.extend({"clip": clip, **item} for item in clip_hard_failures)
         entry["aggregate"] = agg
         entry["worst_frame"] = worst
-        for metric, spec in thresholds["metrics"].items():
-            if spec.get("role") == "hard" and metric in agg:
-                if sbsbench.metric_gate_failed(agg[metric], agg[metric], spec):
-                    hard_failures.append({"clip": clip, "metric": metric,
-                                          **worst.get(metric, {}), "value": round(agg[metric], 3),
-                                          "hard_min": spec.get("hard_min"),
-                                          "hard_max": spec.get("hard_max")})
 
     data["issues"] = issues
     data["hard_failures"] = hard_failures

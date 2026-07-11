@@ -11,19 +11,17 @@ import argparse
 import glob
 import json
 import os
+import sys
 
 import numpy as np
-from PIL import Image
 
-
-def load_depth(path):
-    a = np.asarray(Image.open(path), dtype=np.float32)
-    peak = 65535.0 if a.max(initial=0) > 255.0 else 255.0
-    return np.clip(a / peak, 0.0, 1.0)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+import sbsbench  # noqa: E402
 
 
 def frame_stats(path):
-    a = load_depth(path)
+    a = sbsbench.load_depth(path)
     q = np.percentile(a, [1, 5, 50, 95, 99])
     eps = 1.5 / 65535.0
     return {
@@ -77,9 +75,9 @@ def main():
             "pop_spread_pct": {"control": ca.get("pop_spread_pct"),
                                "treatment": ta.get("pop_spread_pct")},
             "gt_depth_si_rmse": {"control": ca.get("depth_gt_si_rmse"),
-                                  "treatment": ta.get("depth_gt_si_rmse")},
+                                 "treatment": ta.get("depth_gt_si_rmse")},
             "gt_depth_edge_f1": {"control": ca.get("depth_gt_edge_f1"),
-                                  "treatment": ta.get("depth_gt_edge_f1")},
+                                 "treatment": ta.get("depth_gt_edge_f1")},
         }
         output["clips"][clip] = entry
         all_ratios.extend(ratios)

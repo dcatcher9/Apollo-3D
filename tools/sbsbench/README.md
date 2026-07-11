@@ -74,12 +74,10 @@ Harness A/B levers (after `--extra`):
   finite values, and both geometry implementations through the pre-encode SBS stage. It is not a
   PQ/NVENC/headset colorimetric evaluation; do not compare its PNG metrics to SDR baselines.
 - `--ema F` — per-pixel depth EMA override (`1.0` = off).
-- `--subject-track` — VD3D-style shaped disparity (subject-anchored band curve). The pipeline
-  is probe-reprojection-only, so the shaping is always live when this is on.
 - `--subject-lock F` — subject anchor strength (e.g. `0.95`).
 - `--subject-recenter F` — subject depth-field recenter strength.
-- `--subject-stretch` — shape_depth_for_pop 5/95 percentile stretch (default on within the
-  subject path).
+- `--subject-stretch` — shape_depth_for_pop 5/95 percentile stretch (default on in the permanent
+  Bestv2 subject path).
 - `--no-subject-stretch` — disable that stretch for an accepted-feature ablation.
 - `--subject-plane-lock F` — local subject-band flatten (e.g. `0.28`; default off).
 - `--bestv2-sharpen on|off` — explicitly ablate the exact SDR Bestv2 post-sharpen.
@@ -297,8 +295,9 @@ current frame and only photometrically reliable support votes. `flow_depth_p95` 
 compensation to pre-warp depth as a diagnostic. This avoids counting intended motion as flicker
 without requiring an AI flow model.
 
-On GT clips, `depth_gt_si_rmse` affine-aligns predicted relative disparity to ground-truth inverse
-depth (shift-only for constant GT) and `depth_gt_edge_f1` validates boundaries with one-pixel
+On GT clips, `depth_gt_si_rmse` positive-affine-aligns predicted relative disparity to ground-truth
+inverse depth (negative scale is rejected as a polarity inversion; flat GT is shift-only), and
+`depth_gt_edge_f1` validates boundaries with one-pixel
 tolerance. Both are primary depth-axis metrics. Non-GT clips are reported as `n/a`.
 
 `rescore_run.py` refreshes a comparison-only run directly from its preserved source/depth/SBS
@@ -353,7 +352,7 @@ Notes:
 ## Metrics — ground-truth depth (clips with `gt_depth/frame_*.png`)
 | metric | meaning | direction |
 |--------|---------|-----------|
-| `depth_gt_si_rmse` | relative-disparity RMSE after monocular scale/shift alignment; shift-only on flat GT | lower = more accurate; **primary depth axis** |
+| `depth_gt_si_rmse` | relative-disparity RMSE after polarity-preserving positive scale/shift alignment; shift-only on flat GT | lower = more accurate; **primary depth axis** |
 | `depth_gt_edge_f1` | boundary F1 with one-pixel tolerance | higher = better boundaries; **primary depth axis** |
 
 ## Not yet (roadmap)

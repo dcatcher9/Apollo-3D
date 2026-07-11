@@ -30,7 +30,10 @@ DESC = {
     "flat_page": "Synthetic static document/desktop page: flat-content depth hallucination (A3).",
     "fast_motion": "Synthetic textured block crossing a textured background at 30 px/frame: async-depth ghost.",
     "scene_cut": "Hard cut spliced kitchen-vlog -> washerwoman-pond: depth-normalization swim across cuts (A1).",
-    "flat_transition": "Textured depth scene cutting to a static flat page: range-floor activation and recovery.",
+    "flat_transition": (
+        "Textured depth scene cutting to a static flat page: normalization recovery and "
+        "false-stereo decay."
+    ),
 }
 
 

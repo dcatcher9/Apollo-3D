@@ -58,7 +58,6 @@ def alignment_error(source_by_id, ref_by_id, offset):
     vals = []
     ids = sorted(source_by_id)
     ref_ids = sorted(ref_by_id)
-    ref_pos = {frame_id: pos for pos, frame_id in enumerate(ref_ids)}
     for source_pos, frame_id in enumerate(ids):
         target_pos = source_pos + offset
         if not 0 <= target_pos < len(ref_ids):
@@ -165,7 +164,8 @@ def prepare(args):
 def corr(a, b):
     x = a.astype(np.float64).ravel()
     y = b.astype(np.float64).ravel()
-    x -= x.mean(); y -= y.mean()
+    x -= x.mean()
+    y -= y.mean()
     den = np.sqrt(np.dot(x, x) * np.dot(y, y))
     return float(np.dot(x, y) / den) if den else 0.0
 
@@ -186,13 +186,14 @@ def load_raw_dir(path):
     for frame_id, file_path in files.items():
         a = np.fromfile(file_path, dtype="<f4")
         if a.size != w * h:
-            fail(f"{file_path}: expected {w*h} floats, got {a.size}")
+            fail(f"{file_path}: expected {w * h} floats, got {a.size}")
         arrays[frame_id] = a.reshape(h, w)
     return arrays
 
 
 def compare_raw(apollo_dir, vd3d_dir):
-    a = load_raw_dir(apollo_dir); v = load_raw_dir(vd3d_dir)
+    a = load_raw_dir(apollo_dir)
+    v = load_raw_dir(vd3d_dir)
     if set(a) != set(v):
         fail("raw checkpoint frame identities differ")
     rows = []
@@ -211,7 +212,8 @@ def compare_warp_depth(apollo_dir, vd3d_dir):
         fail("warp-input depth checkpoint frame identities differ")
     rows = []
     for frame_id in sorted(a):
-        aa = sbsbench.load_depth(a[frame_id]); vv = sbsbench.load_depth(v[frame_id])
+        aa = sbsbench.load_depth(a[frame_id])
+        vv = sbsbench.load_depth(v[frame_id])
         aa = resize_float(aa, vv.shape[1], vv.shape[0])
         # Apollo stores high=near; VD3D inverts its depth video before rendering (low=near).
         physical = 1.0 - aa
@@ -237,7 +239,8 @@ def score(args):
     vd3d = sbsbench.measure_sequence(vd3d_sbs_dir, source_dir)
     if not apollo or not vd3d:
         fail("missing Apollo or VD3D SBS sequence")
-    _, aagg = apollo; _, vagg = vd3d
+    _, aagg = apollo
+    _, vagg = vd3d
     shared = sorted(FINAL_SBS_COMPARABLE & set(aagg) & set(vagg))
     final = {"apollo": {k: aagg[k] for k in shared}, "vd3d": {k: vagg[k] for k in shared},
              "apollo_minus_vd3d": {k: aagg[k] - vagg[k] for k in shared}}
@@ -250,7 +253,8 @@ def score(args):
         fail("Apollo/VD3D final SBS frame identities differ")
     pixel_rows = []
     for frame_id in sorted(ap):
-        aa = sbsbench.load_rgb(ap[frame_id]); vv = sbsbench.load_rgb(vp[frame_id])
+        aa = sbsbench.load_rgb(ap[frame_id])
+        vv = sbsbench.load_rgb(vp[frame_id])
         if aa.shape != vv.shape:
             fail(f"frame {frame_id}: final SBS shape mismatch {aa.shape} vs {vv.shape}")
         mse = float(np.mean((aa - vv) ** 2))
@@ -270,13 +274,13 @@ def score(args):
     if "raw_model_checkpoint" in out:
         raw = out["raw_model_checkpoint"]
         gates["raw_model_corr_min"] = {"value": raw["corr_min"], "required": 0.995,
-                                        "pass": raw["corr_min"] >= 0.995}
+                                       "pass": raw["corr_min"] >= 0.995}
     if "warp_input_depth_checkpoint" in out:
         depth = out["warp_input_depth_checkpoint"]
         gates["warp_depth_corr_min"] = {"value": depth["physical_corr_min"], "required": 0.995,
-                                         "pass": depth["physical_corr_min"] >= 0.995}
+                                        "pass": depth["physical_corr_min"] >= 0.995}
         gates["warp_depth_mae_mean"] = {"value": depth["physical_mae_mean"], "required": 0.04,
-                                         "pass": depth["physical_mae_mean"] <= 0.04}
+                                        "pass": depth["physical_mae_mean"] <= 0.04}
     out["depth_stage_gates"] = gates
     out["depth_stage_verdict"] = "pass" if gates and all(g["pass"] for g in gates.values()) else (
         "not-run" if not gates else "fail")

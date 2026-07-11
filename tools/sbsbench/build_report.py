@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# flake8: noqa: E501 -- embedded HTML/CSS and user-facing metric prose are intentionally contiguous.
 """Assemble the SBS A/B report directly from two run_eval.py runs (control + treatment):
 control-vs-treatment bar charts (one pair per clip), the gate's verdict, and one
 section per triggered issue with control/treatment crops at each issue's WORST frame.
@@ -81,6 +82,8 @@ def name(clip):
     if clip not in _NAME_CACHE:
         _NAME_CACHE[clip] = _clip_name(clip)
     return _NAME_CACHE[clip]
+
+
 CLIPS = sorted(CTRL["clips"])
 if set(CLIPS) != set(TREAT["clips"]):
     raise SystemExit("refusing A/B report with different clip sets")
@@ -130,6 +133,8 @@ def impact(k):
 
 COLS = sorted(COLS, key=lambda c: -impact(c[0]))
 SHORT = {k: h for k, h, *_ in COLS}
+
+
 def durl(im, w=None, jpg=False, q=82):
     if w and im.width > w:
         im = im.resize((w, round(im.height * w / im.width)), Image.LANCZOS)
@@ -209,16 +214,23 @@ def source_residual_evidence(clip, idx):
     ew, eh = ctrl.width // 2, ctrl.height
     src_rgb = Image.open(srcs[0]).convert("RGB").resize((ew, eh), Image.BILINEAR)
     src_gray = sbsbench.load_gray(srcs[0])
+    match_scale = min(1.0, 256.0 / ew)
+    match_w, match_h = max(1, round(ew * match_scale)), max(1, round(eh * match_scale))
     maps = []
     for img in (ctrl, treat):
         gray = np.asarray(img.convert("L"), np.float32) / 255.0
         eyes = sbsbench.split_eyes(gray)
-        maps.append([sbsbench.source_match_map(eye, src_gray)[0] for eye in eyes])
+        maps.append([
+            sbsbench.source_match_map(sbsbench.resize_to(eye, match_w, match_h), src_gray)[0]
+            for eye in eyes
+        ])
     # Show the eye where treatment changed the residual most; both eyes are always measured.
     eye_idx = max(range(2), key=lambda i: float(np.percentile(np.abs(maps[1][i] - maps[0][i]), 95)))
     delta = maps[1][eye_idx] - maps[0][eye_idx]
     score = sbsbench._box3(np.abs(delta))
-    cy, cx = np.unravel_index(np.argmax(score), score.shape)
+    match_y, match_x = np.unravel_index(np.argmax(score), score.shape)
+    cx = int((match_x + 0.5) / match_w * ew)
+    cy = int((match_y + 0.5) / match_h * eh)
     cw, ch = min(480, ew), min(360, eh)
     x0 = max(0, min(ew - cw, int(cx) - cw // 2))
     y0 = max(0, min(eh - ch, int(cy) - ch // 2))
@@ -226,7 +238,12 @@ def source_residual_evidence(clip, idx):
     source_crop = src_rgb.crop((x0, y0, x0 + cw, y0 + ch))
     ctrl_crop = ctrl.crop((xoff + x0, y0, xoff + x0 + cw, y0 + ch))
     treat_crop = treat.crop((xoff + x0, y0, xoff + x0 + cw, y0 + ch))
-    d = delta[y0:y0 + ch, x0:x0 + cw] * 255.0
+    # Preserve the signed residual delta; sbsbench.resize_to is intentionally an 8-bit luma path.
+    delta_full = np.asarray(
+        Image.fromarray(delta.astype(np.float32)).resize((ew, eh), Image.BILINEAR),
+        dtype=np.float32,
+    )
+    d = delta_full[y0:y0 + ch, x0:x0 + cw] * 255.0
     heat = np.zeros((*d.shape, 3), np.uint8)
     heat[..., 0] = np.clip(d * 12.0, 0, 255).astype(np.uint8)       # red = worse
     heat[..., 2] = np.clip(-d * 12.0, 0, 255).astype(np.uint8)      # blue = better
@@ -239,7 +256,7 @@ def source_residual_evidence(clip, idx):
 def static_jitter_evidence(clip, idx):
     """Source-static mask, per-run temporal delta, and signed treatment movement."""
     prev_idx = idx - 1
-    if prev_idx < 1:
+    if prev_idx < 0:
         return None
     paths = [frame_path(run, clip, i) for run in (ctrl_dir, treat_dir)
              for i in (prev_idx, idx)]
@@ -265,7 +282,6 @@ def static_jitter_evidence(clip, idx):
     cw, ch = min(480, ew), min(360, eh)
     x0 = max(0, min(ew - cw, int(cx) - cw // 2))
     y0 = max(0, min(eh - ch, int(cy) - ch // 2))
-    xoff = eye_idx * ew
     source = Image.open(src_now[0]).convert("RGB").resize((ew, eh), Image.BILINEAR)
     source_a = np.asarray(source).copy()
     source_a[~stable] = (source_a[~stable] * 0.18).astype(np.uint8)
@@ -302,20 +318,13 @@ def ground_truth_depth_evidence(clip, idx):
     if treatment.shape != control.shape:
         treatment = sbsbench.resize_depth(treatment, control.shape[1], control.shape[0])
 
-    def align(pred):
-        pv, tv = pred[valid], target[valid]
-        t5, t95 = np.percentile(tv, (5, 95))
-        if t95 - t5 < 1e-4:
-            return pred + float(np.median(tv) - np.median(pv))
-        design = np.column_stack((pv, np.ones_like(pv)))
-        scale, shift = np.linalg.lstsq(design, tv, rcond=None)[0]
-        return pred * float(scale) + float(shift)
-
-    ca, ta = align(control), align(treatment)
+    ca = sbsbench.align_relative_depth(control, target, valid)[0]
+    ta = sbsbench.align_relative_depth(treatment, target, valid)[0]
     lo, hi = np.percentile(target[valid], (1, 99))
     if hi - lo < 1e-4:
         lo, hi = 0.0, 1.0
-    gray = lambda a: np.clip((a - lo) / (hi - lo), 0, 1)
+
+    def gray(a): return np.clip((a - lo) / (hi - lo), 0, 1)
     signed = np.zeros_like(target)
     signed[valid] = ((np.abs(ta[valid] - target[valid]) - np.abs(ca[valid] - target[valid]))
                      * 255.0 / max(hi - lo, 1e-4))
@@ -517,6 +526,7 @@ def treatment_name():
 ctrl_agg = {c: CTRL["clips"][c]["aggregate"] for c in CLIPS}
 treat_agg = {c: TREAT["clips"][c]["aggregate"] for c in CLIPS}
 
+
 def expected_flat(run, clip):
     value = run["clips"].get(clip, {}).get("meta", {}).get("expected_flat")
     if value is not None:
@@ -668,11 +678,11 @@ def grouped_quality_section():
     cards = []
     for title, note, axes in RADAR_GROUPS:
         cards.append(_radar_card(title, note, axes,
-                                [_mean_aggregate(ctrl_agg, a["key"]) for a in axes],
-                                [_mean_aggregate(treat_agg, a["key"]) for a in axes]))
+                                 [_mean_aggregate(ctrl_agg, a["key"]) for a in axes],
+                                 [_mean_aggregate(treat_agg, a["key"]) for a in axes]))
     cards.append(_radar_card("Runtime", "Performance context; not a quality vote", PERF_RADAR_AXES,
-                            [_mean_perf(CTRL, a["key"]) for a in PERF_RADAR_AXES],
-                            [_mean_perf(TREAT, a["key"]) for a in PERF_RADAR_AXES]))
+                             [_mean_perf(CTRL, a["key"]) for a in PERF_RADAR_AXES],
+                             [_mean_perf(TREAT, a["key"]) for a in PERF_RADAR_AXES]))
 
     hard_defs = (
         ("vmisalign_pct", "Vertical alignment", "% eye height"),
@@ -688,6 +698,7 @@ def grouped_quality_section():
         treatment = _mean_aggregate(treat_agg, key, CLIPS)
         bound = (f'≥ {spec["hard_min"]:.1f}{unit}' if "hard_min" in spec
                  else f'≤ {spec["hard_max"]:.1f}{unit}')
+
         def value(v):
             if v is None:
                 return "n/a", "hard-missing"
@@ -709,6 +720,7 @@ def grouped_quality_section():
             f'documented penalty/engineering scale, never the best value in this A/B pair. Raw '
             f'means are printed below every chart. These summaries do not replace the per-clip gate.</p>'
             f'<div class="radar-grid">{"".join(cards)}</div>{hard_card}</section>')
+
 
 def scorecard_charts():
     """Grouped horizontal bars retain every table value while making A/B movement scannable."""
@@ -748,26 +760,83 @@ def scorecard_charts():
 
 # metric -> (short header, what it measures, direction). Only the ones that appear render.
 METRIC_DEFS = [
-    ("score", "score", "Overall 0-100 artifact cleanliness after weighted penalties. Stereo volume is reported and gated separately, so it cannot cancel artifact regressions.", "higher = better"),
-    ("pop_spread_px", "pop_spread", "Near-to-far horizontal disparity range in output pixels, shown for intuition. Decisions use pop_spread_pct so changing eye resolution cannot create a win or regression.", "higher = more stereo volume"),
-    ("positive_disparity_pct", "disp_positive", "Weighted p99 of the positive signed L/R disparity tail as a percentage of eye width. Kept sign-explicit because host output lacks headset angular calibration.", "must stay below comfort limit"),
-    ("negative_disparity_pct", "disp_negative", "Magnitude of the weighted p1 negative signed L/R disparity tail as a percentage of eye width.", "must stay below comfort limit"),
-    ("source_coverage_pct", "coverage", "Worst-eye interior pixels whose output patch is explained by some same-scanline source patch within the allowed stereo displacement.", "must remain above integrity limit"),
-    ("image_integrity_pct", "integrity", "Worst-eye retention of source texture after horizontal source alignment. Detects missing, black, or collapsed image regions.", "must remain above integrity limit"),
-    ("source_residual_p95", "warp_resid", "Worst-eye patch difference from the source after allowing a small horizontal stereo displacement. Detects monocular warp corruption without penalizing intended parallax.", "lower = more source-faithful"),
-    ("source_halo_p95", "source_halo", "Excess thin-ridge brightness at depth silhouettes after subtracting the horizontally aligned source ridge. Genuine source outlines are free.", "lower = less warp-created halo"),
-    ("source_stretch_pct", "source_stretch", "Source-textured silhouette-near pixels whose horizontal detail collapses below 35% of the aligned source detail.", "lower = less warp stretch"),
-    ("static_jitter_p95", "static_jitter", "Worst-eye temporal change over regions whose source neighborhood stayed static after allowing for horizontal disparity. Camera/object motion is excluded.", "lower = steadier static content"),
-    ("flow_temporal_p95", "flow_temporal", "Worst-eye temporal residual after warping the previous output with exact dataset flow when available, otherwise classical source flow, and rejecting photometrically unreliable samples.", "lower = steadier moving content"),
-    ("depth_gt_si_rmse", "gt_depth_rmse", "Prediction error against committed ground-truth inverse depth after monocular scale/shift alignment; constant-depth GT uses shift-only alignment.", "lower = more accurate depth"),
-    ("depth_gt_edge_f1", "gt_edge_f1", "Depth-boundary F1 against committed ground truth with one-pixel tolerance.", "higher = more accurate boundaries"),
-    ("flow_depth_p95", "flow_depth", "Pre-warp depth change after source optical-flow compensation, on photometrically reliable support.", "lower = steadier depth"),
+    ("score",
+     "score",
+     "Overall 0-100 artifact cleanliness after weighted penalties. Stereo volume is reported and gated separately, so it cannot cancel artifact regressions.",
+     "higher = better"),
+    ("pop_spread_px",
+     "pop_spread",
+     "Near-to-far horizontal disparity range in output pixels, shown for intuition. Decisions use pop_spread_pct so changing eye resolution cannot create a win or regression.",
+     "higher = more stereo volume"),
+    ("positive_disparity_pct",
+     "disp_positive",
+     "Weighted p99 of the positive signed L/R disparity tail as a percentage of eye width. Kept sign-explicit because host output lacks headset angular calibration.",
+     "must stay below comfort limit"),
+    ("negative_disparity_pct",
+     "disp_negative",
+     "Magnitude of the weighted p1 negative signed L/R disparity tail as a percentage of eye width.",
+     "must stay below comfort limit"),
+    ("source_coverage_pct",
+     "coverage",
+     "Worst-eye interior pixels whose output patch is explained by some same-scanline source patch within the allowed stereo displacement.",
+     "must remain above integrity limit"),
+    ("image_integrity_pct",
+     "integrity",
+     "Worst-eye retention of source texture after horizontal source alignment. Detects missing, black, or collapsed image regions.",
+     "must remain above integrity limit"),
+    ("source_residual_p95",
+     "warp_resid",
+     "Worst-eye patch difference from the source after allowing a small horizontal stereo displacement. Detects monocular warp corruption without penalizing intended parallax.",
+     "lower = more source-faithful"),
+    ("source_halo_p95",
+     "source_halo",
+     "Excess thin-ridge brightness at depth silhouettes after subtracting the horizontally aligned source ridge. Genuine source outlines are free.",
+     "lower = less warp-created halo"),
+    ("source_stretch_pct",
+     "source_stretch",
+     "Source-textured silhouette-near pixels whose horizontal detail collapses below 35% of the aligned source detail.",
+     "lower = less warp stretch"),
+    ("static_jitter_p95",
+     "static_jitter",
+     "Worst-eye temporal change over regions whose source neighborhood stayed static after allowing for horizontal disparity. Camera/object motion is excluded.",
+     "lower = steadier static content"),
+    ("flow_temporal_p95",
+     "flow_temporal",
+     "Worst-eye temporal residual after warping the previous output with exact dataset flow when available, otherwise classical source flow, and rejecting photometrically unreliable samples.",
+     "lower = steadier moving content"),
+    ("depth_gt_si_rmse",
+     "gt_depth_rmse",
+     "Prediction error against committed ground-truth inverse depth after monocular scale/shift alignment; constant-depth GT uses shift-only alignment.",
+     "lower = more accurate depth"),
+    ("depth_gt_edge_f1",
+     "gt_edge_f1",
+     "Depth-boundary F1 against committed ground truth with one-pixel tolerance.",
+     "higher = more accurate boundaries"),
+    ("flow_depth_p95",
+     "flow_depth",
+     "Pre-warp depth change after source optical-flow compensation, on photometrically reliable support.",
+     "lower = steadier depth"),
     ("depth_spread", "dspread", "p95−p5 of the normalized depth = pop available at the source.", "higher = more depth to work with"),
-    ("edge_acc_p50", "edge_acc", "Distance (depth-px) from each depth silhouette to the nearest true SOURCE color edge.", "lower = silhouette sits on the real edge"),
-    ("swim_p50", "swim", "Frame-to-frame depth change where the SOURCE is static — depth instability, separated from real motion.", "lower = steadier depth"),
-    ("disocc_smear", "smear", "Horizontal-detail deficit in the narrow band beside silhouettes; on flat content also fingerprints hallucinated depth edges.", "lower = crisper fill"),
-    ("flicker_disocc_p50", "flick_dis", "Flicker restricted to the disocclusion bands — inpaint/stretch re-hallucination shimmer.", "lower = less boiling along edges"),
-    ("vmisalign_pct", "vmis", "Median vertical L↔R offset as a percentage of eye height — resolution-independent geometry correctness.", "must be ≈ 0"),
+    ("edge_acc_p50",
+     "edge_acc",
+     "Distance (depth-px) from each depth silhouette to the nearest true SOURCE color edge.",
+     "lower = silhouette sits on the real edge"),
+    ("swim_p50",
+     "swim",
+     "Frame-to-frame depth change where the SOURCE is static — depth instability, separated from real motion.",
+     "lower = steadier depth"),
+    ("disocc_smear",
+     "smear",
+     "Horizontal-detail deficit in the narrow band beside silhouettes; on flat content also fingerprints hallucinated depth edges.",
+     "lower = crisper fill"),
+    ("flicker_disocc_p50",
+     "flick_dis",
+     "Flicker restricted to the disocclusion bands — inpaint/stretch re-hallucination shimmer.",
+     "lower = less boiling along edges"),
+    ("vmisalign_pct",
+     "vmis",
+     "Median vertical L↔R offset as a percentage of eye height — resolution-independent geometry correctness.",
+     "must be ≈ 0"),
 ]
 _ROLE_ORDER = {"hard": 0, "primary": 1, "diagnostic": 2, "reported": 3}
 
@@ -870,7 +939,7 @@ def conclusion_section():
         verdict = (f'<b>Reject treatment:</b> {decision["regressed"]} primary-axis cost(s) '
                    f'with no compensating primary-axis win.')
     elif state == "tradeoff":
-        verdict = (f'<b>Primary-quality tradeoff:</b> coequal axes move in different or mixed '
+        verdict = ('<b>Primary-quality tradeoff:</b> coequal axes move in different or mixed '
                    f'directions. Per-clip event counts are evidence, not weights. Do not '
                    f'resolve this with the scalar score; use visual/headset evidence.')
     elif state == "candidate":

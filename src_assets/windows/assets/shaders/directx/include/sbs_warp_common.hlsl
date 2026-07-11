@@ -1,6 +1,8 @@
 #ifndef SBS_WARP_COMMON_HLSL
 #define SBS_WARP_COMMON_HLSL
 
+#include "include/bestv2_curve.hlsl"
+
 // Shared disparity field for both geometry implementations. Keeping this in one include is what
 // makes the warp A/B meaningful: Apollo-probe and VD3D-hybrid see identical depth shaping,
 // subject anchoring, parallax, and border behavior.
@@ -40,23 +42,7 @@ bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {
 // Depth after the Bestv2 percentile stretch and subject recenter. Apollo stores high=near, the
 // polarity opposite VD3D's render tensor, so the mirrored operation remains high=near here.
 float WarpDepth(float d, float4 s0, float4 s1, bool shaped) {
-    if (!shaped) {
-        return d;
-    }
-    float d_str = (subject_stretch > 0.5f) ? saturate((d - s1.x) * s1.y) : d;
-    return saturate(d_str + s0.x);
-}
-
-// Bestv2's shift field in Apollo's sign convention (positive = pop). VisionDepth3D specifies
-// the bands in SOURCE PIXELS: fg=-9*1.11, mg=-3, bg=+2.4*1.05 with low=near and negative=pop.
-// Apollo is high=near and positive=pop, hence the mirrored centers and signs below. Keeping the
-// result in pixels until the final division is essential: a fixed normalized divergence cannot
-// reproduce the preset at more than one source resolution.
-float Bestv2RawShiftPx(float d) {
-    float wn = exp(-0.5f * ((d - 0.85f) / 0.24f) * ((d - 0.85f) / 0.24f));
-    float wm = exp(-0.5f * ((d - 0.50f) / 0.28f) * ((d - 0.50f) / 0.28f));
-    float wf = exp(-0.5f * ((d - 0.15f) / 0.24f) * ((d - 0.15f) / 0.24f));
-    return (wn * 9.99f + wm * 3.0f + wf * -2.52f) / (wn + wm + wf + 1e-6f);
+    return Bestv2WarpDepth(d, s0, s1, shaped, subject_stretch > 0.5f);
 }
 
 float Bestv2Parallax(float d, float plane_mask, float4 s0, float4 s1, float4 s2, float source_width) {

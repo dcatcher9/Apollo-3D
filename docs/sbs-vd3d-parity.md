@@ -100,25 +100,20 @@ The pipeline is two cadence groups, not a flat list. Steps ordered by execution:
 | A1 | preprocess (rgb→nchw, resize to depth res) | depth-tick | `rgb_to_nchw` | — |
 | A2 | depth inference | depth-tick | TensorRT DA-V2 | — |
 | A3 | per-model output transform | depth-tick | `buffer_to_tex_cs` / `depth_minmax_cs` | no |
-| A4 | range normalize (min/max reduce + EMA + map) | depth-tick | `depth_minmax*_cs` → `buffer_to_tex_cs` | mechanism differs |
-| A5 | range floor (flat-scene contrast guard) | depth-tick | `buffer_to_tex_cs:31` | ✅ |
-| A6 | temporal per-pixel EMA | depth-tick | `buffer_to_tex_cs:37` | no |
-| A7 | foreground curvature *(guided-off path)* | depth-tick | `depth_curvature_cs` | no |
-| A8 | subject tracking (hist → resolve → `SubjectState`) | depth-tick | `depth_subject_*_cs` | no |
+| A4 | P2/P98 range normalize + bounds EMA | depth-tick | `depth_minmax*_cs` → `buffer_to_tex_cs` | no |
+| A5 | temporal per-pixel EMA | depth-tick | `buffer_to_tex_cs` | no |
+| A6 | permanent subject state (hist → resolve) | depth-tick | `depth_subject_*_cs` | no |
+| A7 | optional exact subject-plane mask | depth-tick | `depth_plane_*_cs` | no |
 | **B. Frame synthesis** | | *runs every output frame* | | |
-| B1 | guided upsample (+ curvature, guided-on path) | per-frame | `depth_guided_upsample_cs` + `depth_curvature_cs` | ✅ |
-| B2 | warp incl. shaping (depth-floor, subject recenter/stretch/band-curve/plane-lock, probe search) | per-frame | `sbs_reprojection_ps.hlsl` | mechanism differs |
-| B3 | disocclusion concealment | per-frame | evaluated, rejected, removed | VD3D-only; no measured gain |
-| B4 | post (DOF, heal, sharpen) | per-frame | exact SDR sharpen retained for parity | DOF rejected; heal helper is not called |
+| B1 | shared Bestv2 shaping + selected warp | per-frame | Apollo probe or VD3D backward resolve | mechanism differs |
+| B2 | VD3D forward winner build | depth-tick / geometry change | `sbs_vd3d_forward_cs` | VD3D only |
+| B3 | post sharpen | per-frame when explicitly enabled | `sbs_sharpen_ps` | no |
 
 Two timeline facts that drive everything:
-- **Async ordering.** In async mode A-group consumes the *previous* frame's inference, so B-group
-  warps current color against slightly stale depth (the lag). B1 re-snaps that stale depth to the
-  *current* frame's color edges every frame, which is why silhouettes track motion between ticks.
-- **Cadence split.** A runs at `depth_fps` (≈ every Nth frame); B runs every frame. VD3D offline
-  runs its whole chain per frame — so Apollo's per-frame vs depth-tick split is itself a divergence
-  from VD3D, and it's exactly why the guided upsample (B1) and shaping (B2) are per-frame while
-  normalization (A4) is not.
+- **Async ordering.** In async mode A-group consumes the *previous* frame's inference, so both
+  warps render current color against slightly stale depth. There is no color-guided resnap stage.
+- **Cadence split.** A runs at `depth_fps` (approximately every Nth frame); the color resolve runs
+  every frame. VD3D's color-independent forward winner texture is cached between geometry updates.
 
 Per the user we lock **Group A (the depth half)** first — it feeds everything downstream and is
 where Apollo transforms depth in more places than "min/max EMA."

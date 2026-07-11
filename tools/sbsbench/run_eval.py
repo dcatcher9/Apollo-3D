@@ -83,7 +83,7 @@ def sha1_dir(path):
     try:
         meta = json.load(open(os.path.join(path, "meta.json"), encoding="utf-8"))
         semantic = {k: meta[k] for k in ("expected_flat", "gt_depth_kind", "dataset",
-                                          "required_gt_depth", "required_gt_flow") if k in meta}
+                                         "required_gt_depth", "required_gt_flow") if k in meta}
         h.update(json.dumps(semantic, sort_keys=True).encode())
     except (OSError, ValueError):
         pass
@@ -113,6 +113,40 @@ def conf_value(path, name, default=None):
     except OSError:
         pass
     return default
+
+
+def metric_exempt_for_clip(spec, clip_meta):
+    """Expected-flat clips diagnose false stereo instead of gating the stereo-volume axis."""
+    return bool(clip_meta.get("expected_flat")) and spec.get("axis") == "stereo"
+
+
+def score_clip_gates(rows, agg, thresholds, clip_meta):
+    """Return worst-frame evidence, absolute issues, and hard failures for one clip."""
+    worst, issues, hard_failures = {}, [], []
+    for metric, spec in thresholds["metrics"].items():
+        if metric_exempt_for_clip(spec, clip_meta):
+            continue
+        frame_key = metric if any(metric in row for row in rows) else (
+            metric[:-4] if metric.endswith(("_p50", "_p95")) else metric)
+        values = [(row.get(frame_key), row.get("_frame_id", i))
+                  for i, row in enumerate(rows) if frame_key in row]
+        if values:
+            choose = min if spec.get("better") == "higher" else max
+            value, frame = choose(values)
+            worst[metric] = {"frame": frame, "worst_value": round(value, 3)}
+        if "trigger" in spec and agg.get(metric, 0) > spec["trigger"]:
+            issues.append({"metric": metric, "trigger": spec["trigger"],
+                           **worst.get(metric, {}), "value": round(agg[metric], 3)})
+        if "trigger_min" in spec and metric in agg and agg[metric] < spec["trigger_min"]:
+            issues.append({"metric": metric, "trigger_min": spec["trigger_min"],
+                           **worst.get(metric, {}), "value": round(agg[metric], 3)})
+        if spec.get("role") == "hard" and metric in agg:
+            if sbsbench.metric_gate_failed(agg[metric], agg[metric], spec):
+                hard_failures.append({"metric": metric, **worst.get(metric, {}),
+                                      "value": round(agg[metric], 3),
+                                      "hard_min": spec.get("hard_min"),
+                                      "hard_max": spec.get("hard_max")})
+    return worst, issues, hard_failures
 
 
 def normalize_cli_paths(args):
@@ -191,7 +225,8 @@ def main():
     ap.add_argument("--report-out",
                     help="report path (default: <this run>/report.html; requires --report-control)")
     ap.add_argument("--report-allow-config-diff", action="store_true",
-                    help="allow an explicit profile-vs-profile report with different config hashes; clips/model/metrics must still match")
+                    help="allow an explicit profile-vs-profile report with different config hashes; "
+                         "clips/model/metrics must still match")
     ap.add_argument("--allow-build", action="store_true", help="proceed even if engines are missing")
     args = normalize_cli_paths(ap.parse_args())
     if args.comparison_only and args.update_baselines:
@@ -325,44 +360,13 @@ def main():
             stages = json.load(open(perf_p)).get("stages", {})
             perf = {k: v.get("p50_ms", 0) for k, v in stages.items()}
 
-        # Worst frame per gated metric (per-frame key = aggregate key minus the _p50 suffix),
-        # so a triggered/regressed metric comes with a place to look.
-        worst = {}
-        for k in thresholds["metrics"]:
-            if clip_meta.get("expected_flat") and k in ("pop_spread_px", "pop_spread_pct"):
-                continue  # expected-flat score rewards lower false stereo
-            fk = k if any(k in r for r in rows) else (
-                k[:-4] if k.endswith(("_p50", "_p95")) else k)
-            vals = [(r.get(fk), r.get("_frame_id", i)) for i, r in enumerate(rows) if fk in r]
-            if vals:
-                # "Worst" follows the metric direction. For score/pop/depth spread, the minimum
-                # is the bad frame; artifact metrics use the maximum.
-                choose = min if thresholds["metrics"][k].get("better") == "higher" else max
-                v, i = choose(vals)
-                worst[k] = {"frame": i, "worst_value": round(v, 3)}
+        worst, clip_issues, clip_hard_failures = score_clip_gates(
+            rows, agg, thresholds, clip_meta)
+        issues.extend({"clip": clip, **item} for item in clip_issues)
+        hard_failures.extend({"clip": clip, **item} for item in clip_hard_failures)
 
         entry = {"aggregate": agg, "perf_ms": perf, "meta": clip_meta, "worst_frame": worst}
         results[clip] = entry
-
-        for k, spec in thresholds["metrics"].items():
-            if spec.get("role") != "hard" or k not in agg:
-                continue
-            if sbsbench.metric_gate_failed(agg[k], agg[k], spec):
-                hard_failures.append({"clip": clip, "metric": k,
-                                      **worst.get(k, {}), "value": round(agg[k], 3),
-                                      "hard_min": spec.get("hard_min"),
-                                      "hard_max": spec.get("hard_max")})
-
-        # Issue triggers (absolute, baseline-independent).
-        for k, spec in thresholds["metrics"].items():
-            if clip_meta.get("expected_flat") and k in ("pop_spread_px", "pop_spread_pct"):
-                continue
-            if "trigger" in spec and agg.get(k, 0) > spec["trigger"]:
-                issues.append({"clip": clip, "metric": k, "trigger": spec["trigger"],
-                               **worst.get(k, {}), "value": round(agg[k], 3)})
-            if "trigger_min" in spec and k in agg and agg[k] < spec["trigger_min"]:
-                issues.append({"clip": clip, "metric": k, "trigger_min": spec["trigger_min"],
-                               **worst.get(k, {}), "value": round(agg[k], 3)})
 
         # Regression gate vs baseline. A baseline is only valid for the exact frames it was made
         # from: if the clip content changed, gating against it is meaningless -- skip it loudly
@@ -386,7 +390,7 @@ def main():
                 fail(f"{clip}: baseline context is stale/incompatible: {mismatches}. "
                      "Re-run with --update-baselines only after verifying the new eval contract.")
             for k, spec in thresholds["metrics"].items():
-                if clip_meta.get("expected_flat") and k in ("pop_spread_px", "pop_spread_pct"):
+                if metric_exempt_for_clip(spec, clip_meta):
                     continue
                 if spec.get("role") == "hard":
                     continue  # absolute hard constraints were evaluated above, independent of baseline

@@ -6,16 +6,10 @@ StructuredBuffer<float4> SubjectState : register(t2);
 RWStructuredBuffer<float2> GroupSums : register(u0);
 
 #include "include/depth_plane_constants.hlsl"
+#include "include/bestv2_curve.hlsl"
 
 groupshared float ShiftSum[256];
 groupshared float WeightSum[256];
-
-float Bestv2RawShiftPxPlane(float d) {
-    float wn = exp(-0.5f * ((d - 0.85f) / 0.24f) * ((d - 0.85f) / 0.24f));
-    float wm = exp(-0.5f * ((d - 0.50f) / 0.28f) * ((d - 0.50f) / 0.28f));
-    float wf = exp(-0.5f * ((d - 0.15f) / 0.24f) * ((d - 0.15f) / 0.24f));
-    return (wn * 9.99f + wm * 3.0f - wf * 2.52f) / (wn + wm + wf + 1e-6f);
-}
 
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_GroupIndex) {
@@ -25,10 +19,10 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_G
         float4 s0 = SubjectState[0];
         float4 s1 = SubjectState[1];
         float d = saturate(DepthTexture.Load(int3(id.xy, 0)));
-        float d_stretched = saturate((d - s1.x) * s1.y);
-        float shaped_depth = saturate(d_stretched + s0.x);
+        float shaped_depth = Bestv2WarpDepth(
+            d, s0, s1, true, plane_subject_stretch != 0u);
         weight = saturate(SmoothedBand.Load(int3(id.xy, 0)) * plane_strength);
-        weighted_shift = Bestv2RawShiftPxPlane(shaped_depth) * weight;
+        weighted_shift = Bestv2RawShiftPx(shaped_depth) * weight;
     }
     ShiftSum[gi] = weighted_shift;
     WeightSum[gi] = weight;

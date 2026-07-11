@@ -53,12 +53,12 @@
     "score": 89.3
   },
   "perf_ms": {
-    "depth_infer": 2.10314,
-    "sbs_composite_cpu": 0.0058,
-    "warp_infer": 0.120832
+    "depth_infer": 1.86643,
+    "sbs_composite_cpu": 0.0057,
+    "warp_infer": 0.084512
   },
   "meta": {
-    "git_sha": "d9543e08",
+    "git_sha": "5ed4d23d",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -84,10 +84,10 @@
     "eval_schema": 8,
     "depth_step": "current-once",
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "1839bd76829b6144",
+    "metric_sha256": "411da3c4c6fdec56",
     "gpu_contention": false,
-    "timestamp": "2026-07-11T14:26:34",
-    "run_name": "evalv8-cleanup-apollo",
+    "timestamp": "2026-07-11T15:43:28",
+    "run_name": "evalv9-overhaul-apollo",
     "name": "aigen-cogvideox-rain",
     "description": "AI-generated child running through heavy rain, with a moving human silhouette, translucent rain streaks, splashes, atmospheric blur and low-contrast depth layers.",
     "content_type": "ai-generated",

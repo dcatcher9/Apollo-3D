@@ -103,7 +103,8 @@ def main():
     model = load_model(args.vd3d_repo, args.weights)
 
     # Sparse whole-clip bootstrap: widest p2/p98 range among linspace-selected frames.
-    lo = None; hi = None
+    lo = None
+    hi = None
     for frame_index, rgb in enumerate(frame_stream(args.ffmpeg, source_video, src_w, src_h)):
         if frame_index not in bootstrap_indices:
             continue

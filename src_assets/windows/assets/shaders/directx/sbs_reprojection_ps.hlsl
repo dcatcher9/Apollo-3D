@@ -95,16 +95,21 @@ float2 Reproject(float2 uv, float eyeSign) {
 
     float prevX = startX;
     float prevD = SampleDepth(prevX, uv.y, ofs);
-    float prevMask = PlaneLockTexture.SampleLevel(LinearSampler, float2(prevX, uv.y), 0);
+    float planeMask = 0.0f;
+    if (subject_plane_lock > 0.0f) {
+        // The exact mask is 13x13-smoothed and intentionally low-frequency. Sample it once at
+        // the destination rather than once per probe; the uniform branch removes all fetches
+        // from both shipping profiles where plane lock is disabled.
+        planeMask = PlaneLockTexture.SampleLevel(LinearSampler, uv, 0);
+    }
     float prevG = (prevX - uv.x) - eyeSign * DepthParallax(
-        prevD, prevMask, prevX, s0, s1, s2, shaped, (float)sourceWidth);
+        prevD, planeMask, prevX, s0, s1, s2, shaped, (float)sourceWidth);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
     for (int i = 1; i <= steps; i++) {
         float x = startX + stepX * i;
         float d = SampleDepth(x, uv.y, ofs);
-        float planeMask = PlaneLockTexture.SampleLevel(LinearSampler, float2(x, uv.y), 0);
         float g = (x - uv.x) - eyeSign * DepthParallax(
             d, planeMask, x, s0, s1, s2, shaped, (float)sourceWidth);
 

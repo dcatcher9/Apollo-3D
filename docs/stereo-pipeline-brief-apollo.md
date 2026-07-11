@@ -1,5 +1,9 @@
 # Adapting the "CUDA-native 2D→SBS" brief to Apollo-3D
 
+> **Archived design snapshot (2026-07-05).** Claims below about MLBW, guided upsample,
+> legacy disparity, and warpsim describe removed experiments. Use `sbs-3d-roadmap.md` and
+> `tools/sbsbench/README.md` for the current implementation and workflow.
+
 Source: `stereo-pipeline-implementation-brief.md` (external, 2026-07). That brief assumes a
 **greenfield** project (standalone `libsbs` + CLI apps, Apollo integration as a distant
 Milestone 3). Apollo-3D is already at and past its target state: the pipeline lives inside

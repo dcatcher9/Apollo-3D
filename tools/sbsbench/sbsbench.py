@@ -142,16 +142,21 @@ def disparity_field(left, right, tile=192, stride=128, min_var=1e-3):
             # A shift near the unambiguous range edge is unreliable; drop it.
             if abs(dx) >= tile // 2 - 1 or abs(dy) >= tile // 2 - 1:
                 continue
-            dxs.append(dx); dys.append(dy); wts.append(v)
+            dxs.append(dx)
+            dys.append(dy)
+            wts.append(v)
     if not dxs:
         return None
-    dxs = np.array(dxs); dys = np.array(dys); wts = np.array(wts)
+    dxs = np.array(dxs)
+    dys = np.array(dys)
+    wts = np.array(wts)
     return dxs, dys, wts
 
 
 def weighted_pct(vals, wts, q):
     order = np.argsort(vals)
-    vals = vals[order]; wts = wts[order]
+    vals = vals[order]
+    wts = wts[order]
     c = np.cumsum(wts)
     c /= c[-1]
     return float(np.interp(q, c, vals))
@@ -310,7 +315,7 @@ def stretch_band(eye, depth, edge_pct=99.0, gthr=0.02, min_run=20, reach=220):
 def _hopen(a, r):
     """Horizontal grayscale opening (erode then dilate) with radius r -- removes bright features
     narrower than 2r+1 px, leaving the broad fg/bg. eye - open = a horizontal white top-hat."""
-    shifts = lambda x: np.stack([np.roll(x, -o, axis=1) for o in range(-r, r + 1)])
+    def shifts(x): return np.stack([np.roll(x, -o, axis=1) for o in range(-r, r + 1)])
     return shifts(shifts(a).min(0)).max(0)
 
 
@@ -469,7 +474,7 @@ def source_relative_metrics(eye, src_gray, depth=None, max_shift=None,
     texture_eye = np.hypot(gx_eye, gy_eye)
     textured = valid & (texture_src >= 4.0 / 255.0)
     out["image_integrity_pct"] = (float(np.mean(texture_eye[textured] >= 0.25 * texture_src[textured])
-                                               * 100.0) if textured.any() else 100.0)
+                                        * 100.0) if textured.any() else 100.0)
 
     if depth is None:
         return out
@@ -517,6 +522,25 @@ def resize_metric_depth(depth, w, h):
     return resized, weights >= 0.999
 
 
+def align_relative_depth(prediction, target, valid):
+    """Affine-align relative disparity without allowing a polarity inversion.
+
+    A negative scale is not a monocular scale ambiguity: it swaps near and far. Collapse such a
+    fit to the best constant prediction so both structure and edge metrics reject the inversion.
+    Returns ``(aligned, scale)``; flat targets use shift-only alignment and scale 1.
+    """
+    pred = np.asarray(prediction, np.float32)
+    pv, tv = pred[valid], target[valid]
+    t5, t95 = np.percentile(tv, (5, 95))
+    if t95 - t5 < 1e-4:
+        return pred + float(np.median(tv) - np.median(pv)), 1.0
+    design = np.column_stack((pv, np.ones_like(pv)))
+    scale, shift = np.linalg.lstsq(design, tv, rcond=None)[0]
+    if scale <= 0.0:
+        return np.full_like(pred, float(np.median(tv))), float(scale)
+    return pred * float(scale) + float(shift), float(scale)
+
+
 def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity"):
     """Scale/shift-invariant relative-depth accuracy plus boundary accuracy.
 
@@ -540,16 +564,14 @@ def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity"):
     if valid.sum() < 64:
         return None
 
-    pv, tv = pred[valid], target[valid]
+    tv = target[valid]
     t5, t95 = np.percentile(tv, (5, 95))
     trange = float(t95 - t5)
     if trange < 1e-4:
-        aligned = pred + float(np.median(tv) - np.median(pv))
+        aligned, _ = align_relative_depth(pred, target, valid)
         norm = 1.0
     else:
-        design = np.column_stack((pv, np.ones_like(pv)))
-        scale, shift = np.linalg.lstsq(design, tv, rcond=None)[0]
-        aligned = pred * float(scale) + float(shift)
+        aligned, _ = align_relative_depth(pred, target, valid)
         norm = trange
     error = aligned[valid] - tv
     si_rmse = float(np.sqrt(np.mean(error * error)) / max(norm, 1e-6) * 100.0)
@@ -603,9 +625,10 @@ def static_region_jitter(left, right, prev_left, prev_right, src, prev_src,
     support = float(stable.mean())
     if support < min_support:
         return None, support
-    l = np.abs(left - prev_left)[stable] * 255.0
-    r = np.abs(right - prev_right)[stable] * 255.0
-    return max(float(np.percentile(l, 95)), float(np.percentile(r, 95))), support
+    left_delta = np.abs(left - prev_left)[stable] * 255.0
+    right_delta = np.abs(right - prev_right)[stable] * 255.0
+    return max(float(np.percentile(left_delta, 95)),
+               float(np.percentile(right_delta, 95))), support
 
 
 def _tile_positions(length, tile, stride):
@@ -682,6 +705,7 @@ def resize_forward_flow_to_current(flow, valid, width, height):
     valid = np.asarray(valid, dtype=bool) if valid is not None else np.isfinite(flow).all(axis=2)
     if valid.shape != (sh, sw):
         raise ValueError(f"optical-flow valid mask {valid.shape} does not match {(sh, sw)}")
+
     def scale_plane(plane, factor):
         image = Image.fromarray(np.nan_to_num(plane).astype(np.float32), mode="F")
         return np.asarray(image.resize((width, height), Image.BILINEAR), np.float32) * factor
@@ -1148,11 +1172,11 @@ TEMPORAL_KEYS = ["flicker_p50", "flicker_p95", "flicker_disocc_p50", "flicker_di
 
 
 def print_table(rows, agg, fmt=FMT):
-    hdr = f"{'dump':<26}{'model':<22}" + "".join(f"{k.replace('pop_','').replace('_px',''):>13}" for k in fmt)
+    hdr = f"{'dump':<26}{'model':<22}" + "".join(f"{k.replace('pop_', '').replace('_px', ''):>13}" for k in fmt)
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
-        line = f"{r.get('_dump',''):<26}{r.get('_model',''):<22}"
+        line = f"{r.get('_dump', ''):<26}{r.get('_model', ''):<22}"
         line += "".join(f"{r[k]:>13.3f}" if k in r else f"{'-':>13}" for k in fmt)
         print(line)
     print("-" * len(hdr))
@@ -1161,7 +1185,7 @@ def print_table(rows, agg, fmt=FMT):
     print(line)
     if "flicker_p50" in agg:
         def t(name, key):
-            return f"{name} p50={agg[key+'_p50']:.2f} p95={agg[key+'_p95']:.2f}" if key + "_p50" in agg else ""
+            return f"{name} p50={agg[key + '_p50']:.2f} p95={agg[key + '_p95']:.2f}" if key + "_p50" in agg else ""
         parts = [t("flicker", "flicker"), t("disocc", "flicker_disocc"), t("swim", "swim")]
         print(f"{'temporal (x255)':<48}" + "   ".join(p for p in parts if p))
 

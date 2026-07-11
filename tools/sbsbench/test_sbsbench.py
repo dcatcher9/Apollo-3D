@@ -1,5 +1,5 @@
-import os
 import io
+import os
 import sys
 import tarfile
 import tempfile
@@ -11,10 +11,10 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import sbsbench
-import run_eval
-import prepare_public_datasets
-import audit_depth_transform
+import audit_depth_transform  # noqa: E402
+import prepare_public_datasets  # noqa: E402
+import run_eval  # noqa: E402
+import sbsbench  # noqa: E402
 
 
 class EvalContractTests(unittest.TestCase):
@@ -166,6 +166,24 @@ class EvalContractTests(unittest.TestCase):
         self.assertGreater(stats["saturated_low_pct"], 0.0)
         self.assertGreater(stats["saturated_high_pct"], 0.0)
 
+    def test_depth_transform_audit_uses_image_mode_for_dark_16bit_png(self):
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+            path = fh.name
+        try:
+            values = np.linspace(0, 255, 100, dtype=np.uint16).reshape(10, 10)
+            Image.fromarray(values).save(path)
+            stats = audit_depth_transform.frame_stats(path)
+            self.assertLess(stats["p99"], 0.005)
+            self.assertLess(stats["spread_p95_p05"], 0.005)
+        finally:
+            os.unlink(path)
+
+    def test_expected_flat_exemption_is_derived_from_stereo_axis(self):
+        flat = {"expected_flat": True}
+        self.assertTrue(run_eval.metric_exempt_for_clip({"axis": "stereo"}, flat))
+        self.assertFalse(run_eval.metric_exempt_for_clip({"axis": "comfort"}, flat))
+        self.assertFalse(run_eval.metric_exempt_for_clip({"axis": "stereo"}, {}))
+
     def test_rejected_processors_and_ema_order_are_permanently_removed(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
@@ -192,10 +210,48 @@ class EvalContractTests(unittest.TestCase):
             with open(path, encoding="utf-8") as fh:
                 text[key] = fh.read()
         self.assertIn("const bool core_shaders_ok", text["estimator"])
-        self.assertIn("if (!valid || !input_srv) return {};", text["estimator"])
+        self.assertIn("if (!valid || !input_srv)", text["estimator"])
         self.assertIn("depth_estimator->is_valid()", text["display"])
         self.assertNotIn("--no-subject-track", text["harness"])
         self.assertNotIn("sbs_cfg.subject_track", text["harness"])
+
+    def test_bestv2_plane_reduce_reuses_shared_curve_and_stretch_switch(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
+        with open(os.path.join(shader_dir, "depth_plane_reduce_cs.hlsl"), encoding="utf-8") as fh:
+            reduce_shader = fh.read()
+        self.assertIn('include "include/bestv2_curve.hlsl"', reduce_shader)
+        self.assertIn("plane_subject_stretch != 0u", reduce_shader)
+        self.assertNotIn("Bestv2RawShiftPxPlane", reduce_shader)
+
+    def test_disabled_plane_lock_has_no_probe_loop_texture_fetch(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
+                              "sbs_reprojection_ps.hlsl")
+        with open(shader, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(text.count("PlaneLockTexture.SampleLevel"), 1)
+        self.assertIn("if (subject_plane_lock > 0.0f)", text)
+
+    def test_vd3d_live_forward_splat_is_cached_by_geometry_update(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        display = os.path.join(repo, "src", "platform", "windows", "display_vram.cpp")
+        estimator = os.path.join(repo, "src", "video_depth_estimator.cpp")
+        with open(display, encoding="utf-8") as fh:
+            display_text = fh.read()
+        with open(estimator, encoding="utf-8") as fh:
+            estimator_text = fh.read()
+        self.assertIn("est.geometry_updated || !sbs_vd3d_winner_valid", display_text)
+        self.assertIn("geometry_updated = true", estimator_text)
+
+    def test_report_evidence_is_bounded_and_accepts_zero_based_frames(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        report = os.path.join(repo, "tools", "sbsbench", "build_report.py")
+        with open(report, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("match_scale = min(1.0, 256.0 / ew)", text)
+        self.assertIn("if prev_idx < 0:", text)
+        self.assertNotIn("if prev_idx < 1:", text)
 
     def test_phase_shift_recovers_known_translation(self):
         rng = np.random.default_rng(1234)
@@ -440,6 +496,14 @@ class EvalContractTests(unittest.TestCase):
         self.assertGreater(bad["depth_gt_si_rmse"], 40.0)
         self.assertLess(bad["depth_gt_edge_f1"], 1.0)
 
+    def test_ground_truth_depth_metrics_reject_inverted_polarity(self):
+        gt = np.full((96, 160), 0.2, np.float32)
+        gt[:, 80:] = 0.8
+        inverted = 1.0 - gt
+        metrics = sbsbench.depth_ground_truth_metrics(inverted, gt)
+        self.assertGreater(metrics["depth_gt_si_rmse"], 20.0)
+        self.assertLess(metrics["depth_gt_edge_f1"], 1.0)
+
     def test_ground_truth_edge_tolerance_works_in_both_axes(self):
         gt = np.full((96, 160), 0.25, np.float32)
         gt[48:, :] = 0.75
@@ -522,7 +586,8 @@ class EvalContractTests(unittest.TestCase):
                                     self.png_bytes(value))
                     zf.writestr(f"training/disparities/demo/frame_{i + 1:04d}.png",
                                 self.png_bytes(10 + i))
-            out = os.path.join(root, "out"); os.makedirs(out)
+            out = os.path.join(root, "out")
+            os.makedirs(out)
             clip = {"archives": ["stereo"], "sequence": "demo", "pass": "final",
                     "start": 0, "stride": 1, "count": 2}
             rows = prepare_public_datasets.prepare_sintel(
@@ -536,7 +601,8 @@ class EvalContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             archives = {}
             for modality in ("rgb", "depth"):
-                path = os.path.join(root, modality + ".tar"); archives[modality] = path
+                path = os.path.join(root, modality + ".tar")
+                archives[modality] = path
                 with tarfile.open(path, "w") as tf:
                     for i in range(3):
                         suffix = f"rgb_{i:05d}.jpg" if modality == "rgb" else f"depth_{i:05d}.png"
@@ -544,8 +610,10 @@ class EvalContractTests(unittest.TestCase):
                         data = self.png_bytes(50 + i, "RGB" if modality == "rgb" else "L")
                         info = tarfile.TarInfo(
                             f"vkitti/{'Scene01'}/clone/frames/{folder}/Camera_0/{suffix}")
-                        info.size = len(data); tf.addfile(info, io.BytesIO(data))
-            out = os.path.join(root, "out"); os.makedirs(out)
+                        info.size = len(data)
+                        tf.addfile(info, io.BytesIO(data))
+            out = os.path.join(root, "out")
+            os.makedirs(out)
             clip = {"scene": "Scene01", "variant": "clone", "camera": "Camera_0",
                     "start": 1, "stride": 1, "count": 2}
             rows = prepare_public_datasets.prepare_vkitti2(
