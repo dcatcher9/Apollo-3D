@@ -1,7 +1,7 @@
 {
   "aggregate": {
     "depth_gt_edge_f1": 0.0,
-    "depth_gt_si_rmse": 22.919965902964275,
+    "depth_gt_si_rmse": 22.919965744018555,
     "depth_spread": 0.8086891372998556,
     "disocc_frac": 2.9883879781420765e-05,
     "edge_acc_p50": 6.75,
@@ -49,12 +49,12 @@
     "score": 92.1
   },
   "perf_ms": {
-    "depth_infer": 2.00816,
-    "sbs_composite_cpu": 0.0069,
-    "warp_infer": 0.143488
+    "depth_infer": 2.04739,
+    "sbs_composite_cpu": 0.0075,
+    "warp_infer": 0.14256
   },
   "meta": {
-    "git_sha": "c829e6b3",
+    "git_sha": "d9543e08",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -77,14 +77,13 @@
     "model": "depth_anything_v2_fp16",
     "profile": "apollo",
     "warp": "apollo",
-    "shift_profile": "bestv2",
-    "eval_schema": 7,
+    "eval_schema": 8,
     "depth_step": "current-once",
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "40246edc05700ee7",
+    "metric_sha256": "1839bd76829b6144",
     "gpu_contention": false,
-    "timestamp": "2026-07-11T13:51:17",
-    "run_name": "evalv7-profile-apollo-final",
+    "timestamp": "2026-07-11T14:26:34",
+    "run_name": "evalv8-cleanup-apollo",
     "name": "fast_motion",
     "description": "Synthetic textured block crossing a textured background at 30 px/frame: async-depth ghost.",
     "gt_depth_kind": "disparity",

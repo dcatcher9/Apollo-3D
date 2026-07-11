@@ -14,7 +14,7 @@ a machine-readable results.json with provenance, and its EXIT CODE is the verdic
 Typical use:
   python tools/sbsbench/run_eval.py                     # eval vs committed baselines
   python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change: re-baseline
-  python tools/sbsbench/run_eval.py --extra --divergence 0.027   # pass A/B levers to the harness
+  python tools/sbsbench/run_eval.py --extra --subject-lock 0.6  # pass supported A/B levers
 
 Results land in <build-dir>/sbs_eval/<label>/ (SBS+depth frames per clip + results.json).
 Baselines/thresholds/conf are committed next to this script; changing bench.conf or the clip set
@@ -38,7 +38,7 @@ import sbsbench  # noqa: E402  (metric implementations)
 
 # Depth models the two modes load (matches the client mode->model binding).
 MODE_MODEL = {"movie": "da3mono_large_fp16", "game": "depth_anything_v2_fp16"}
-EVAL_SCHEMA = 7  # profile provenance + stricter source/ground-truth validity
+EVAL_SCHEMA = 8  # permanent validated processor stack; removed legacy/rejected switches
 
 
 def suite_defaults(name):
@@ -136,16 +136,11 @@ def expected_profile(conf, extra):
     if profile not in {"apollo", "vd3d"}:
         fail(f"invalid sbs_3d_profile {profile!r}")
     warp = "vd3d" if profile == "vd3d" else "apollo"
-    shift_profile = "bestv2"
     warp = conf_value(conf, "sbs_3d_warp", warp)
-    shift_profile = conf_value(conf, "sbs_3d_shift_profile", shift_profile)
     warp = extra_value(extra, "--warp", warp)
-    shift_profile = extra_value(extra, "--shift-profile", shift_profile)
     if warp not in {"apollo", "vd3d"}:
         fail(f"invalid --warp override {warp!r}")
-    if shift_profile not in {"apollo", "bestv2"}:
-        fail(f"invalid --shift-profile override {shift_profile!r}")
-    return profile, warp, shift_profile
+    return profile, warp
 
 
 def git(args):
@@ -186,7 +181,7 @@ def main():
     ap.add_argument("--mode", choices=["movie", "game"], default="game")
     ap.add_argument("--label", default=None, help="run label (default: timestamp)")
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[],
-                    help="extra harness args, e.g. --extra --divergence 0.027")
+                    help="extra harness args, e.g. --extra --subject-lock 0.6")
     ap.add_argument("--update-baselines", action="store_true",
                     help="write this run as the new committed baselines (use after intended changes)")
     ap.add_argument("--comparison-only", action="store_true",
@@ -240,7 +235,7 @@ def main():
                                os.path.join(SCRIPT_DIR, "thresholds.json"),
                                os.path.abspath(__file__)])
     expected_model = MODE_MODEL[args.mode]
-    expected_config_profile, expected_warp, expected_shift_profile = expected_profile(
+    expected_config_profile, expected_warp = expected_profile(
         args.conf, args.extra)
     meta = {
         "git_sha": git(["rev-parse", "--short", "HEAD"]),
@@ -250,7 +245,7 @@ def main():
         "extra_args": args.extra,
         "conf": os.path.relpath(args.conf, REPO),
         "model": expected_model, "profile": expected_config_profile,
-        "warp": expected_warp, "shift_profile": expected_shift_profile,
+        "warp": expected_warp,
         "eval_schema": EVAL_SCHEMA, "depth_step": "current-once",
         "conf_sha256": conf_sha, "metric_sha256": metric_sha,
         "gpu_contention": contention,
@@ -291,13 +286,7 @@ def main():
         actual_warp = warp_match.group(1) if warp_match else None
         if actual_warp != expected_warp:
             fail(f"{clip}: expected warp {expected_warp!r}, harness reported {actual_warp!r}")
-        profile_match = re.search(r"shift_profile ([a-z0-9_-]+)", stdout)
-        actual_shift_profile = profile_match.group(1) if profile_match else None
-        if actual_shift_profile != expected_shift_profile:
-            fail(f"{clip}: expected shift profile {expected_shift_profile!r}, "
-                 f"harness reported {actual_shift_profile!r}")
-        clip_meta = {"model": actual_model, "profile": actual_config_profile, "warp": actual_warp,
-                     "shift_profile": actual_shift_profile}
+        clip_meta = {"model": actual_model, "profile": actual_config_profile, "warp": actual_warp}
 
         # A valid harness result has one source, raw-model, warp-input depth, and SBS artifact for
         # every numeric frame identity. This catches dropped/renumbered outputs before metrics run.

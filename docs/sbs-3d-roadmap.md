@@ -49,15 +49,13 @@ Known residuals:
 
 ## Constraints learned the hard way (do not relearn)
 
-- **Use the offline simulator first** for any warp/shader change: `tools/warpsim/`
-  (CLAUDE.md has the mandate). Validate the replica reproduces the artifact, instrument
-  with numbers, test BOTH eyes and MULTIPLE scenes, byte-compare "equivalent" changes.
+- **Use the real SBS evaluator first** for any warp/shader change. Run both core and extended
+  suites, inspect the generated report, and require matched profile provenance.
 - **Hand-tuned shader special-casing does not generalize** (2026-07-03 warp rewrite:
   made one arm edge perfect, destabilized everything else; fully reverted). Edge and
   disocclusion quality needs a learned/multi-layer approach, not more branches.
-- `sbs_3d_parallax_steps >= 22` is a **correctness requirement** with the guided
-  (texel-sharp) depth: probe spacing must stay under the ~8px smoothed depth transition.
-  24 is the baked default since 2026-07-03. Note `depth_scale` was folded into
+- Apollo probe count is permanently 24. Lower counts previously destabilized silhouette
+  crossings; the configuration switch was removed. Note `depth_scale` was folded into
   `divergence` the same day (default 0.0135 = old 0.015*0.9; sim-verified equivalent),
   and the legacy `normalize`/`depth_gamma`/`edge_dilation`/`depth_interval` knobs were
   removed — defaults now live in config.h (`sbs_t` member initializers), not config.cpp.

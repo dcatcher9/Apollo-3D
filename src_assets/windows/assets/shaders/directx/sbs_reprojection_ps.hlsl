@@ -15,7 +15,7 @@
 
 Texture2D<float4> LeftColorTexture : register(t0);
 Texture2D<float>  DepthTexture      : register(t1);
-// Subject-tracking state from depth_subject_resolve_cs. [0] = {recenter_delta, subject_curve,
+// Subject-tracking state from depth_subject_resolve_cs. [0] = {recenter_delta, reserved,
 // subject_depth_ema, initialized}; [1] = {stretch_lo_val, stretch_inv_range, _, _}. Only read
 // when subject_track is on; an unbound/zero buffer (initialized == 0) falls back to linear.
 StructuredBuffer<float4> SubjectState : register(t2);
@@ -67,20 +67,12 @@ float2 Reproject(float2 uv, float eyeSign) {
     uint sourceWidth, sourceHeight;
     LeftColorTexture.GetDimensions(sourceWidth, sourceHeight);
 
-    // Widest distance any surface can travel (near or far side of the focal plane). BorderFade
-    // only shrinks parallax, so this (fade=1) remains a valid upper bound on the search span.
-    // The shaped path clamps its curve to [-1, 1], so its bound is the full max_divergence
-    // (2x the linear path's -- probe spacing coarsens accordingly).
-    float searchRadius = shaped && bestv2_shift_profile > 0.5f
-        ? Bestv2SearchRadius((float)sourceWidth)
-        : shaped
-        ? max_divergence
-        : max_divergence * max(focal_plane, 1.0f - focal_plane);
+    float searchRadius = shaped ? Bestv2SearchRadius((float)sourceWidth) : 0.0f;
     if (searchRadius <= 1e-6f) {
-        return uv;  // divergence 0 -> flat passthrough, both eyes identical
+        return uv;  // subject state is not initialized yet
     }
 
-    int steps = (parallax_steps >= 1.0f) ? (int)parallax_steps : 24;
+    static const int steps = 24;
     float startX = uv.x - searchRadius;
     float stepX  = (2.0f * searchRadius) / (float)steps;
 

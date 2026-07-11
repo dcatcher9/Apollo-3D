@@ -26,10 +26,10 @@ Design for two reproducible, host-side benchmarks so every SBS change ships with
 >   where VD3D is slightly higher. Only Bonn walking retains a just-over-one-pixel geometry difference.
 > Remaining: reference warp PSNR/SSIM (needs GT stereo) and a dedicated ghost/double-image metric.
 
-## Why the offline warpsim disagrees with the headset (the problem to design around)
+## Why the offline warpsim was removed
 
-The CPU simulator (`tools/warpsim/`) is invaluable for the reprojection math but structurally
-cannot predict the live result, for five reasons. The benchmark must avoid all five.
+The former CPU simulator (`tools/warpsim/`) could not predict the live result for five reasons.
+Its code was removed after the real-pipeline evaluator became authoritative.
 
 1. **It eats post-normalization depth.** warpsim consumes `depth.png` = the already-upsampled,
    min/max-EMA-normalized *guided* depth. Everything upstream — depth model, shifted-reciprocal
@@ -154,6 +154,6 @@ Wire the A2 per-stage timing (`sbs_3d_perf_stats`), p50/p95/max over each clip.
 - **Primary tier:** Tier-1 headless first (default) vs. Tier-2 in-stream first.
 
 ## Key references
-- `tools/warpsim/README.md` — the offline sim this complements (and its limits, above).
+- `tools/warpsim/README.md` — removal notice for the obsolete CPU replica.
 - `docs/sbs-3d-roadmap.md` — the artifacts these metrics quantify (#1 stretch band, #2 pop).
 - `sbs-3d-depth-feature` memory — A2 (perf timing) + A5 (jacobian mask) design context.

@@ -31,7 +31,7 @@ float4 ForwardColor(uint local_x, uint y, bool right_eye, uint eye_w, uint eye_h
     LeftColorTexture.GetDimensions(source_w, source_h);
     // Bestv2's fill radius is calibrated in source pixels. Scale it into the output-eye grid so
     // a 5120->4096 capped stream uses 96*.8 ~= 77 output pixels rather than filling 25% farther.
-    int radius = clamp((int)round(vd3d_fill_radius * source_to_output), 0, 256);
+    int radius = clamp((int)round(96.0f * source_to_output), 0, 256);
 
     // Equivalent to VD3D's iterative nearest-valid fill. At equal distance the first lookup is
     // the preferred background side: +x for left eye, -x for right eye.

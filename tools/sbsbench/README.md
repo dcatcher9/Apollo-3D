@@ -1,8 +1,8 @@
 # sbsbench — visual metrics for host SBS 3D output
 
 No-reference visual metrics computed on **real "Dump 3D" output** (the actual `sbs.png` the
-client receives). Unlike `tools/warpsim/` (a CPU replica of the reprojection shader), this
-re-runs nothing — it measures the live pipeline's final frame — so its numbers match what you
+client receives). It runs and measures the real pipeline rather than a hand-maintained CPU
+replica, so its numbers match what you
 see on the headset. This is the visual half of the host benchmark; see
 [docs/sbs-benchmark-plan.md](../../docs/sbs-benchmark-plan.md). The perf half is the in-app
 `sbs_3d_perf_stats` timing.
@@ -38,7 +38,7 @@ profile files use the same selector, preventing production and evaluation defaul
 ```
 python tools/sbsbench/run_eval.py                     # all committed clips vs committed baselines
 python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change: re-baseline + commit
-python tools/sbsbench/run_eval.py --extra --divergence 0.027   # pass A/B levers to the harness
+python tools/sbsbench/run_eval.py --extra --subject-lock 0.6   # pass supported A/B levers
 python tools/sbsbench/run_eval.py --label treat --report-control cmake-build-relwithdebinfo/sbs_eval/control --extra --warp vd3d
 python tools/sbsbench/run_eval.py --label profile-b --conf profile-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/profile-a --report-allow-config-diff
 python tools/sbsbench/run_eval.py --comparison-only --label ab-control  # fresh A/B; no committed gate
@@ -56,19 +56,16 @@ r≈0.996) and implicitly selecting DA3MONO had caused an entire wrong-model
 comparison.
 
 Harness A/B levers (after `--extra`):
-- `--warp apollo|vd3d` — choose Apollo's occlusion-aware probe or VD3D's Bestv2 hybrid
-  (`35%` backward grid warp + `65%` depth-ordered forward splat and directional hole fill).
+- `--warp apollo|vd3d` — choose Apollo's occlusion-aware probe or VD3D's hybrid. The quality
+  profile uses `65%` backward grid sampling + `35%` depth-ordered forward splat and hole fill.
 - `--vd3d-forward-blend F` — override the VD3D forward weight (`0.65` in Bestv2; `0` isolates
   its classic backward warp and `1` isolates the forward splat).
-- `--divergence F` — parallax gain.
-- `--shift-profile apollo|bestv2` — choose the disparity field independently of geometry.
-  `bestv2` uses the preset's source-pixel FG/MG/BG shifts (`-9/-3/+2.4`), `.35` parallax
+- Bestv2 is the only disparity field. It uses the preset's source-pixel FG/MG/BG shifts
+  (`-9/-3/+2.4`), `.35` parallax
   balance, `1.11/1.05` multipliers, `.008` zero-parallax trim, dynamic convergence `.006`,
   `.071` safety cap. Subject-plane lock and the exact per-eye sharpen are independent switches;
-  both are disabled in the validated quality profiles.
-  This is resolution-calibrated; `--divergence` remains the Apollo profile and uninitialized-depth
-  fallback. Bestv2 cinematic-window sculpt was evaluated and rejected; see
-  `docs/sbs-vd3d-parity.md`.
+  both are disabled in the validated quality profiles. Before subject state initializes, output
+  remains flat instead of using the removed legacy divergence/focal-plane fallback.
 - `--depth-short-side N` — depth inference short side (default 432; VD3D parity). 336 to A/B
   back to the old under-resolved default.
 - `--simulate-hdr --hdr-scale F` — direct-harness color-path smoke: decode the PNG source into
@@ -76,8 +73,6 @@ Harness A/B levers (after `--extra`):
   paths, and write a tone-mapped PNG plus `hdr_output_stats.json`. This checks FP16 preservation,
   finite values, and both geometry implementations through the pre-encode SBS stage. It is not a
   PQ/NVENC/headset colorimetric evaluation; do not compare its PNG metrics to SDR baselines.
-- `--pct-lo F --pct-hi F` — robust percentile normalization bounds, e.g. `1 99` (default off =
-  raw min/max).
 - `--ema F` — per-pixel depth EMA override (`1.0` = off).
 - `--subject-track` — VD3D-style shaped disparity (subject-anchored band curve). The pipeline
   is probe-reprojection-only, so the shaping is always live when this is on.
@@ -88,12 +83,6 @@ Harness A/B levers (after `--extra`):
   subject path).
 - `--no-subject-stretch` — disable that stretch for an accepted-feature ablation.
 - `--subject-plane-lock F` — local subject-band flatten (e.g. `0.28`; default off).
-- `--curvature F` — foreground-curvature bulge strength (e.g. `0.07`; reshapes the depth
-  texture, both warp paths; default off).
-- `--pixel-ema-first` / `--no-pixel-ema-first` — explicitly select temporal-before-range or
-  range-before-temporal ordering, independent of the profile.
-- `--minmax-snap F`, `--range-floor F`, `--depth-floor F`, `--border-fade F` — isolated
-  normalization/warp processor overrides (`0` disables each).
 - `--bestv2-sharpen on|off` — explicitly ablate the exact SDR Bestv2 post-sharpen.
 
 Exit code is the verdict (0 pass / 1 regression / 2 setup error), so the eval→fix→eval loop is
@@ -263,7 +252,8 @@ stereo spread, and available GT depth metrics, writing `depth_transform_audit.js
 
 The metrics split cleanly by subsystem: **warp**-side changes move pop / disocc / flicker_disocc;
 **depth**-side changes move edge_acc / swim / depth_spread. So a delta tells you *where* the change
-landed. (Validated: a 2× `--divergence` warp change moved pop +90% and left edge_acc/swim flat;
+landed. (Historical validation: doubling the removed legacy divergence moved pop +90% while
+leaving edge_acc/swim flat;
 swapping da3mono→v2 moved edge_acc −96% and swim −100% and left the warp lever untouched.)
 
 ## Artifact score (0–100) and feature decision

@@ -5,11 +5,11 @@
 // makes the warp A/B meaningful: Apollo-probe and VD3D-hybrid see identical depth shaping,
 // subject anchoring, parallax, and border behavior.
 cbuffer Constants : register(b2) {
-    float max_divergence;
-    float focal_plane;
-    float parallax_steps;
-    float border_fade;
-    float depth_floor;
+    float reserved0;
+    float reserved1;
+    float reserved2;
+    float reserved3;
+    float reserved4;
     float subject_track;
     float subject_lock;
     float subject_stretch;
@@ -18,12 +18,10 @@ cbuffer Constants : register(b2) {
     float content_scale_x;       // source content width / output-eye width (per-eye letterbox)
     float content_scale_y;       // source content height / output-eye height
     float vd3d_forward_blend;
-    float vd3d_fill_radius;
-    float bestv2_shift_profile;
+    float reserved13;
+    float reserved14;
     float source_to_output;      // output-content pixels per mono-source pixel
 };
-
-#include "include/band_curve.hlsl"
 
 // Map one eye's output UV into the mono source. Letterbox/pillarbox is applied independently in
 // each eye, preventing a packed-frame viewport offset from becoming a false stereo disparity.
@@ -37,10 +35,6 @@ bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {
     }
     source_uv = saturate((output_uv - lo) / scale);
     return true;
-}
-
-float BorderFade(float x) {
-    return (border_fade <= 0.0f) ? 1.0f : saturate(min(x, 1.0f - x) / border_fade);
 }
 
 // Depth after the Bestv2 percentile stretch and subject recenter. Apollo stores high=near, the
@@ -102,26 +96,11 @@ float Bestv2SearchRadius(float source_width) {
     return 0.004f + (12.51f * 0.35f + 0.006f * 4.0f) / source_width;
 }
 
-// Signed parallax in source UV units. Positive values move near content right in the left eye and
-// left in the right eye. SubjectState[0] is {recenter_delta, subject_curve, subject_depth, init};
-// SubjectState[1] is {stretch_lo, stretch_inv_range, _, _}.
+// Signed Bestv2 parallax in source UV units. Before subject state initializes, return zero rather
+// than falling back to the removed legacy divergence/focal-plane field.
 float DepthParallax(float d, float plane_mask, float x, float4 s0, float4 s1, float4 s2,
                     bool shaped, float source_width) {
-    if (shaped) {
-        if (bestv2_shift_profile > 0.5f) {
-            return Bestv2Parallax(d, plane_mask, s0, s1, s2, source_width) * BorderFade(x);
-        }
-        float c = BandCurve(WarpDepth(d, s0, s1, true));
-        if (subject_plane_lock > 0.0f) {
-            float t = (d - s0.z) / max(subject_plane_width, 1e-4f);
-            float band = exp(-0.5f * t * t);
-            c = lerp(c, s0.y, subject_plane_lock * band);
-        }
-        c -= subject_lock * s0.y;
-        return clamp(c, -1.0f, 1.0f) * max_divergence * BorderFade(x);
-    }
-    float df = depth_floor + (1.0f - depth_floor) * d;
-    return (df - focal_plane) * max_divergence * BorderFade(x);
+    return shaped ? Bestv2Parallax(d, plane_mask, s0, s1, s2, source_width) : 0.0f;
 }
 
 #endif

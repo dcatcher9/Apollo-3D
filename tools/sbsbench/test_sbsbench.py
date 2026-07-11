@@ -44,11 +44,9 @@ class EvalContractTests(unittest.TestCase):
             fh.write("sbs_3d_profile = vd3d\nsbs_3d_warp = apollo\n")
             path = fh.name
         try:
-            self.assertEqual(run_eval.expected_profile(path, []),
-                             ("vd3d", "apollo", "bestv2"))
+            self.assertEqual(run_eval.expected_profile(path, []), ("vd3d", "apollo"))
             self.assertEqual(run_eval.expected_profile(
-                path, ["--warp", "vd3d", "--shift-profile", "apollo"]),
-                ("vd3d", "vd3d", "apollo"))
+                path, ["--warp", "vd3d"]), ("vd3d", "vd3d"))
         finally:
             os.unlink(path)
 
@@ -87,7 +85,7 @@ class EvalContractTests(unittest.TestCase):
                               "sbs_vd3d_reprojection_ps.hlsl")
         with open(shader, encoding="utf-8") as fh:
             text = fh.read()
-        self.assertIn("vd3d_fill_radius * source_to_output", text)
+        self.assertIn("96.0f * source_to_output", text)
 
     def test_bestv2_sharpen_scales_taps_from_source_to_output_pixels(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -106,7 +104,7 @@ class EvalContractTests(unittest.TestCase):
             with self.subTest(shader=name), open(os.path.join(shader_dir, name), encoding="utf-8") as fh:
                 self.assertIn("ContentToSourceUV", fh.read())
 
-    def test_hdr_depth_input_and_guidance_share_color_transform(self):
+    def test_hdr_depth_input_uses_validated_color_transform(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
         with open(os.path.join(shader_dir, "include", "depth_color.hlsl"), encoding="utf-8") as fh:
@@ -114,8 +112,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("DepthHdrScRgbToSrgb", color)
         self.assertIn("dot(c, float3(0.2126f, 0.7152f, 0.0722f))", color)
         self.assertNotIn("c / (1.0f + c)", color)
-        for name in ("rgb_to_nchw_cs.hlsl", "depth_guide_downsample_cs.hlsl",
-                     "depth_guided_upsample_cs.hlsl"):
+        for name in ("rgb_to_nchw_cs.hlsl",):
             with self.subTest(shader=name), open(os.path.join(shader_dir, name), encoding="utf-8") as fh:
                 text = fh.read()
                 self.assertIn('include/depth_color.hlsl', text)
@@ -127,7 +124,7 @@ class EvalContractTests(unittest.TestCase):
         with open(display, encoding="utf-8") as fh:
             pipeline = fh.read()
         self.assertIn("tex_desc.Format = sbs_intermediate_linear ? DXGI_FORMAT_R16G16B16A16_FLOAT", pipeline)
-        self.assertIn("if (!sbs_intermediate_linear && config::video.sbs.shift_profile", pipeline)
+        self.assertIn("if (!sbs_intermediate_linear && config::video.sbs.bestv2_sharpen)", pipeline)
         self.assertIn("input_is_linear ? convert_Y_or_YUV_fp16_ps.get()", pipeline)
         self.assertIn("models::input_color_space::linear_sdr", pipeline)
         common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
@@ -169,30 +166,18 @@ class EvalContractTests(unittest.TestCase):
         self.assertGreater(stats["saturated_low_pct"], 0.0)
         self.assertGreater(stats["saturated_high_pct"], 0.0)
 
-    def test_guided_depth_is_bounded_by_local_input_extrema(self):
+    def test_rejected_processors_and_ema_order_are_permanently_removed(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        path = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
-                            "depth_guided_upsample_cs.hlsl")
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn("dsum += d * w", text)
-        self.assertIn("dsum / wsum", text)
-        self.assertIn("clamp(mid + (dOut - mid) * 3.0f, dmin, dmax)", text)
-
-    def test_shift_profile_override_uses_last_explicit_value(self):
-        self.assertEqual(run_eval.extra_value(
-            ["--shift-profile", "apollo", "--shift-profile", "bestv2"],
-            "--shift-profile", "apollo"), "bestv2")
-
-    def test_shift_profile_is_read_from_config(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
-            fh.write("sbs_3d_shift_profile = bestv2 # active\n")
-            path = fh.name
-        try:
-            self.assertEqual(
-                run_eval.conf_value(path, "sbs_3d_shift_profile", "apollo"), "bestv2")
-        finally:
-            os.unlink(path)
+        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
+        for name in ("depth_guided_upsample_cs.hlsl", "depth_guide_downsample_cs.hlsl",
+                     "depth_curvature_cs.hlsl", os.path.join("include", "band_curve.hlsl")):
+            self.assertFalse(os.path.exists(os.path.join(shader_dir, name)))
+        with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
+            config = fh.read()
+        for key in ("sbs_3d_ema_pixel_first", "sbs_3d_guided_upsample",
+                    "sbs_3d_foreground_curvature", "sbs_3d_minmax_snap",
+                    "sbs_3d_range_floor", "sbs_3d_shift_profile"):
+            self.assertNotIn(key, config)
 
     def test_phase_shift_recovers_known_translation(self):
         rng = np.random.default_rng(1234)

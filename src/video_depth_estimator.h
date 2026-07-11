@@ -41,8 +41,7 @@ namespace models {
          * @param context D3D11 Device Context
          * @param assets_dir Path to the assets directory (for model loading)
          * @param cfg Tuning knobs; see config::video_t::sbs_t (the estimator uses the depth-side
-         *            fields: ema, depth_short_side, depth_max_aspect, minmax_ema, depth_fps,
-         *            guided_upsample, guided_sigma).
+         *            fields: ema, depth_short_side, depth_max_aspect, minmax_ema, depth_fps).
          * @param model The selected depth model: name/url (which engine to load/build) plus the
          *            per-model contract (input_rank, output_transform, output/input tensor names).
          */

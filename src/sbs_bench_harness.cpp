@@ -294,7 +294,7 @@ namespace sbs_bench {
     // ---- argument parsing ----
 
     struct opts {
-      std::string frames, out, model, warp, shift_profile;
+      std::string frames, out, model, warp;
       int eye_w = 0;       // 0 -> derive from source aspect; set with eye_h to test letterboxing
       int eye_h = 0;       // 0 -> match/derive from the input frame
       double output_scale = 1.0;  // per-eye linear scale vs source; preserves source aspect
@@ -303,10 +303,7 @@ namespace sbs_bench {
       int max_width = 0;   // 0 -> use config max_encode_width
       int limit = 0;       // 0 -> all
       int output_every = 1;  // process every input for temporal state; dump only every Nth
-      double divergence = -1.0;  // <0 -> use the conf's value; else override (parallax/disocclusion size)
       // VD3D-pipeline A/B levers; <0 / false -> use the conf's value.
-      double pct_lo = -1.0;      // robust normalization low percentile (e.g. 1.0)
-      double pct_hi = -1.0;      // robust normalization high percentile (e.g. 99.0)
       int subject_track = -1;      // -1 = conf, 0 = off, 1 = on
       double subject_lock = -1.0;  // subject anchor strength override (e.g. 0.95)
       double subject_recenter = -1.0;  // global subject recenter override
@@ -314,15 +311,8 @@ namespace sbs_bench {
       double ema = -1.0;         // per-pixel depth EMA override (1.0 = off)
       int subject_stretch = -1;     // -1 = conf, 0 = off, 1 = on
       double subject_plane_lock = -1.0;  // local subject-band flatten (e.g. 0.28); <0 = conf
-      double curvature = -1.0;     // foreground curvature strength (e.g. 0.07); <0 = conf
       double vd3d_forward_blend = -1.0;  // VD3D backward/forward blend override; <0 = conf
       double minmax_ema = -1.0;    // range-bounds EMA new-weight (VD3D DepthPercentileEMA a=0.82 -> 0.18); <0 = conf
-      int guided = -1;             // guided upsample: -1 = conf, 0 = off, 1 = on
-      int pixel_ema_first = -1;     // -1 = conf, 0 = range->pixel, 1 = pixel->range
-      double minmax_snap = -1.0;    // scene-cut normalization snap ratio; 0 = off
-      double range_floor = -1.0;    // flat-scene range-floor fraction; 0 = off
-      double depth_floor = -1.0;    // warp depth floor; 0 = off
-      double border_fade = -1.0;    // warp border fade; 0 = off
       int bestv2_sharpen = -1;      // -1 = conf, 0 = off, 1 = on
     };
 
@@ -337,7 +327,6 @@ namespace sbs_bench {
         else if (a == "--out") o.out = next("--out");
         else if (a == "--model") o.model = next("--model");
         else if (a == "--warp") o.warp = next("--warp");
-        else if (a == "--shift-profile") o.shift_profile = next("--shift-profile");
         else if (a == "--eye-w") o.eye_w = std::stoi(next("--eye-w"));
         else if (a == "--eye-h") o.eye_h = std::stoi(next("--eye-h"));
         else if (a == "--output-scale") o.output_scale = std::stod(next("--output-scale"));
@@ -346,9 +335,6 @@ namespace sbs_bench {
         else if (a == "--max-width") o.max_width = std::stoi(next("--max-width"));
         else if (a == "--limit") o.limit = std::stoi(next("--limit"));
         else if (a == "--output-every") o.output_every = std::max(1, std::stoi(next("--output-every")));
-        else if (a == "--divergence") o.divergence = std::stod(next("--divergence"));
-        else if (a == "--pct-lo") o.pct_lo = std::stod(next("--pct-lo"));
-        else if (a == "--pct-hi") o.pct_hi = std::stod(next("--pct-hi"));
         else if (a == "--subject-track") o.subject_track = 1;
         else if (a == "--no-subject-track") o.subject_track = 0;
         else if (a == "--subject-lock") o.subject_lock = std::stod(next("--subject-lock"));
@@ -357,20 +343,9 @@ namespace sbs_bench {
         else if (a == "--subject-stretch") o.subject_stretch = 1;
         else if (a == "--no-subject-stretch") o.subject_stretch = 0;
         else if (a == "--subject-plane-lock") o.subject_plane_lock = std::stod(next("--subject-plane-lock"));
-        else if (a == "--curvature") o.curvature = std::stod(next("--curvature"));
         else if (a == "--vd3d-forward-blend") o.vd3d_forward_blend = std::stod(next("--vd3d-forward-blend"));
         else if (a == "--ema") o.ema = std::stod(next("--ema"));
         else if (a == "--minmax-ema") o.minmax_ema = std::stod(next("--minmax-ema"));
-        else if (a == "--guided-upsample") {
-          std::string v = next("--guided-upsample");
-          o.guided = (v == "off" || v == "0" || v == "false") ? 0 : 1;
-        }
-        else if (a == "--pixel-ema-first") o.pixel_ema_first = 1;
-        else if (a == "--no-pixel-ema-first") o.pixel_ema_first = 0;
-        else if (a == "--minmax-snap") o.minmax_snap = std::stod(next("--minmax-snap"));
-        else if (a == "--range-floor") o.range_floor = std::stod(next("--range-floor"));
-        else if (a == "--depth-floor") o.depth_floor = std::stod(next("--depth-floor"));
-        else if (a == "--border-fade") o.border_fade = std::stod(next("--border-fade"));
         else if (a == "--bestv2-sharpen") {
           std::string v = next("--bestv2-sharpen");
           o.bestv2_sharpen = (v == "off" || v == "0" || v == "false") ? 0 : 1;
@@ -438,32 +413,15 @@ namespace sbs_bench {
       }
       sbs_cfg.warp = o.warp;
     }
-    if (!o.shift_profile.empty()) {
-      if (o.shift_profile != "apollo" && o.shift_profile != "bestv2") {
-        BOOST_LOG(error) << "sbs-bench: --shift-profile must be 'apollo' or 'bestv2'";
-        return 2;
-      }
-      sbs_cfg.shift_profile = o.shift_profile;
-    }
-    if (o.divergence >= 0.0) sbs_cfg.divergence = o.divergence;  // A/B lever: parallax/disocclusion size
-    if (o.pct_lo >= 0.0) sbs_cfg.norm_pct_lo = o.pct_lo;         // A/B lever: robust normalization
-    if (o.pct_hi >= 0.0) sbs_cfg.norm_pct_hi = o.pct_hi;
     if (o.subject_track >= 0) sbs_cfg.subject_track = (o.subject_track != 0);
     if (o.subject_lock >= 0.0) sbs_cfg.subject_lock = o.subject_lock;
     if (o.subject_recenter >= 0.0) sbs_cfg.subject_recenter = o.subject_recenter;
     if (o.depth_short_side > 0) sbs_cfg.depth_short_side = o.depth_short_side;  // VD3D uses 432
     if (o.subject_stretch >= 0) sbs_cfg.subject_stretch = (o.subject_stretch != 0);
     if (o.subject_plane_lock >= 0.0) sbs_cfg.subject_plane_lock = o.subject_plane_lock;
-    if (o.curvature >= 0.0) sbs_cfg.foreground_curvature = o.curvature;
     if (o.vd3d_forward_blend >= 0.0) sbs_cfg.vd3d_forward_blend = o.vd3d_forward_blend;
     if (o.ema > 0.0) sbs_cfg.ema = o.ema;                        // A/B lever: depth EMA (1.0 = off)
     if (o.minmax_ema >= 0.0) sbs_cfg.minmax_ema = o.minmax_ema;  // A/B lever: range-bounds EMA (VD3D 0.18)
-    if (o.guided >= 0) sbs_cfg.guided_upsample = (o.guided != 0);  // A/B lever: guided upsample on/off
-    if (o.pixel_ema_first >= 0) sbs_cfg.ema_pixel_first = (o.pixel_ema_first != 0);
-    if (o.minmax_snap >= 0.0) sbs_cfg.minmax_snap = o.minmax_snap;
-    if (o.range_floor >= 0.0) sbs_cfg.range_floor = o.range_floor;
-    if (o.depth_floor >= 0.0) sbs_cfg.depth_floor = o.depth_floor;
-    if (o.border_fade >= 0.0) sbs_cfg.border_fade = o.border_fade;
     if (o.bestv2_sharpen >= 0) sbs_cfg.bestv2_sharpen = (o.bestv2_sharpen != 0);
     sbs_cfg.perf_stats = true;  // the harness always measures
     sbs_perf::set_enabled(true);
@@ -475,8 +433,7 @@ namespace sbs_bench {
                     << "', eye " << (o.eye_w > 0 ? std::to_string(o.eye_w) : "auto") << 'x'
                     << (o.eye_h > 0 ? std::to_string(o.eye_h) : "auto")
                     << ", depth_step current-once, profile " << sbs_cfg.profile
-                    << ", warp " << sbs_cfg.warp
-                    << ", shift_profile " << sbs_cfg.shift_profile << " -> " << o.out;
+                    << ", warp " << sbs_cfg.warp << " -> " << o.out;
 
     // ---- D3D device + shaders ----
     ComPtr<ID3D11Device> dev;
@@ -604,18 +561,15 @@ namespace sbs_bench {
         const float content_scale_x = eye_aspect > aspect ? aspect / eye_aspect : 1.0f;
         const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
         const float source_to_output = (float)eye_w * content_scale_x / (float)img.w;
-        float repro_params[16] = {(float) sbs_cfg.divergence, (float) sbs_cfg.focal_plane,
-          (float) sbs_cfg.parallax_steps, (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor,
+        float repro_params[16] = {0, 0, 0, 0, 0,
           sbs_cfg.subject_track ? 1.0f : 0.0f, (float) sbs_cfg.subject_lock,
           sbs_cfg.subject_stretch ? 1.0f : 0.0f, (float) sbs_cfg.subject_plane_lock,
           (float) sbs_cfg.subject_plane_width, content_scale_x, content_scale_y,
-          (float) sbs_cfg.vd3d_forward_blend, (float) sbs_cfg.vd3d_fill_radius,
-          sbs_cfg.shift_profile == "bestv2" ? 1.0f : 0.0f, source_to_output};
+          (float) sbs_cfg.vd3d_forward_blend, 0, 0, source_to_output};
         repro_cb = const_buffer(dev.Get(), repro_params);
-        float pass_params[16] = {0, (float) sbs_cfg.focal_plane, (float) sbs_cfg.parallax_steps,
-          (float) sbs_cfg.border_fade, (float) sbs_cfg.depth_floor, 0, 0, 0, 0, 0,
+        float pass_params[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
           content_scale_x, content_scale_y, (float) sbs_cfg.vd3d_forward_blend,
-          (float) sbs_cfg.vd3d_fill_radius, 0, source_to_output};
+          0, 0, source_to_output};
         pass_cb = const_buffer(dev.Get(), pass_params);
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = sbs_w; td.Height = sbs_h; td.MipLevels = 1; td.ArraySize = 1;
@@ -625,7 +579,7 @@ namespace sbs_bench {
         dev->CreateTexture2D(&td, nullptr, &sbs_tex);
         dev->CreateRenderTargetView(sbs_tex.Get(), nullptr, &sbs_rtv);
         dev->CreateShaderResourceView(sbs_tex.Get(), nullptr, &sbs_srv);
-        if (!o.simulate_hdr && sbs_cfg.shift_profile == "bestv2" && sbs_cfg.bestv2_sharpen) {
+        if (!o.simulate_hdr && sbs_cfg.bestv2_sharpen) {
           if (FAILED(dev->CreateTexture2D(&td, nullptr, &sharpen_tex)) ||
               FAILED(dev->CreateRenderTargetView(sharpen_tex.Get(), nullptr, &sharpen_rtv)) ||
               FAILED(dev->CreateShaderResourceView(sharpen_tex.Get(), nullptr, &sharpen_srv))) {

@@ -705,22 +705,18 @@ namespace platf::dxgi {
     void update_sbs_constant_buffers(float content_scale_x, float content_scale_y,
                                      float source_to_output = 1.0f) {
       float sbs_params[16] {
-        (float) config::video.sbs.divergence, (float) config::video.sbs.focal_plane,
-        (float) config::video.sbs.parallax_steps, (float) config::video.sbs.border_fade,
-        (float) config::video.sbs.depth_floor, config::video.sbs.subject_track ? 1.0f : 0.0f,
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, config::video.sbs.subject_track ? 1.0f : 0.0f,
         (float) config::video.sbs.subject_lock, config::video.sbs.subject_stretch ? 1.0f : 0.0f,
         (float) config::video.sbs.subject_plane_lock, (float) config::video.sbs.subject_plane_width,
         content_scale_x, content_scale_y, (float) config::video.sbs.vd3d_forward_blend,
-        (float) config::video.sbs.vd3d_fill_radius,
-        config::video.sbs.shift_profile == "bestv2" ? 1.0f : 0.0f, source_to_output
+        0.0f, 0.0f, source_to_output
       };
       sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);
 
       float passthrough_params[16] {
-        0.0f, (float) config::video.sbs.focal_plane, (float) config::video.sbs.parallax_steps,
-        (float) config::video.sbs.border_fade, (float) config::video.sbs.depth_floor,
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
         0.0f, 0.0f, 0.0f, 0.0f, 0.0f, content_scale_x, content_scale_y,
-        (float) config::video.sbs.vd3d_forward_blend, (float) config::video.sbs.vd3d_fill_radius,
+        (float) config::video.sbs.vd3d_forward_blend, 0.0f,
         0.0f, source_to_output
       };
       sbs_passthrough_cbuffer = make_buffer(device.get(), passthrough_params);
@@ -914,8 +910,7 @@ namespace platf::dxgi {
           return -1;
         }
 
-        if (!sbs_intermediate_linear && config::video.sbs.shift_profile == "bestv2" &&
-            config::video.sbs.bestv2_sharpen) {
+        if (!sbs_intermediate_linear && config::video.sbs.bestv2_sharpen) {
           status = device->CreateTexture2D(&tex_desc, nullptr, &sbs_sharpen_texture);
           if (FAILED(status) ||
               FAILED(device->CreateRenderTargetView(sbs_sharpen_texture.get(), nullptr, &sbs_sharpen_rtv)) ||

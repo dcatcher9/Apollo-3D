@@ -1,6 +1,7 @@
 // VisionDepth3D depth-ordered forward splat. One thread represents one source pixel at the
 // per-eye output resolution and atomically records the nearest source x for both eyes.
-// The resolve shader performs VD3D's directional horizontal hole fill and 35/65 blend.
+// The resolve shader performs directional horizontal hole fill and applies the configured
+// forward weight (quality profile 0.35; fidelity profile 0.65).
 
 Texture2D<float4> LeftColorTexture : register(t0);
 Texture2D<float> DepthTexture : register(t1);

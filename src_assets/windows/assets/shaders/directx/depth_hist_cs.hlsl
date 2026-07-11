@@ -1,6 +1,6 @@
 // 256-bin histogram of the raw disparity buffer, binned over THIS frame's raw min/max
 // (already reduced by depth_minmax_cs into MinMaxRaw). depth_minmax_ema_cs then scans the
-// histogram for robust percentile bounds (norm_pct_lo/hi) instead of using the raw min/max
+// histogram for the permanent robust P2/P98 bounds instead of using the raw min/max
 // directly -- a handful of outlier pixels (DA-V2's near-spike tail) can otherwise stretch
 // the normalization range and squeeze the whole scene's parallax. Fully GPU-resident, no
 // CPU readback; dispatched only when percentile normalization is enabled.

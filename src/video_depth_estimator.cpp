@@ -313,28 +313,16 @@ namespace models {
         std::string engine_key;
         
         float ema_alpha;
-        bool ema_pixel_first;  // per-pixel EMA order: true = smooth raw disparity before normalizing
         int depth_short_side;  // depth map short-side resolution (clamped to native short side)
         float max_aspect;  // aspect cap for short-side mode
         float minmax_alpha;  // temporal EMA blend for the normalized min/max
-        float pct_lo;        // robust normalization: low percentile as a fraction (0 = raw min)
-        float pct_hi;        // robust normalization: high percentile as a fraction (1 = raw max)
         bool subject_track;      // VD3D-style shaped disparity: run the subject-estimate passes
         float subject_recenter;  // recenter strength consumed by depth_subject_resolve_cs
         bool subject_stretch;    // apply the shape_depth_for_pop 5/95 disparity stretch
-        float stretch_lo;        // low percentile for the stretch (fraction)
-        float stretch_hi;        // high percentile for the stretch (fraction)
         bool exact_plane_lock;   // Bestv2's full silhouette morphology + weighted shift mean
         float plane_lock_strength;
         float plane_lock_width;
-        float foreground_curvature;  // rounded-foreground bulge strength (0 = off)
-        bool use_percentile; // either percentile bound active -> histogram pass runs
-        float minmax_snap;   // A1: raw-vs-EMA range ratio that snaps the scale on a scene cut (0 = off)
-        float range_floor_frac;      // A3: current range < ref*frac -> compress parallax (0 = off)
-        float range_floor_ref_alpha; // A3: slow-max reference-range decay
         float depth_fps;  // target depth-update rate (interval auto-derived from measured video fps)
-        bool guided_upsample;  // color-guided depth upsample (snaps silhouettes to color edges)
-        float guided_sigma;  // color-distance sigma for the guided upsample
         std::string model_name;  // local file stem; engine cached as <model_name>.engine
         std::string model_url;  // where to download the onnx if absent
         int input_rank;  // model input rank: 4 = [1,3,H,W] (DA-V2), 5 = [1,1,3,H,W] (DA-V3)
@@ -417,8 +405,6 @@ namespace models {
         // Caching
         int target_w = 0;
         int target_h = 0;
-        int guided_w = 0;
-        int guided_h = 0;
         UINT reduce_groups = 0;  // threadgroups for the min/max reduction (groups * 256 = total threads)
         int cb_color_mode = -1;  // input_color_space baked into constant buffers
 
@@ -434,8 +420,6 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_plane_combine_cs;
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_plane_reduce_cs;
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_plane_resolve_cs;
-        Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_curvature_cs;
-        Microsoft::WRL::ComPtr<ID3D11Buffer> curvature_cbuffer;
         Microsoft::WRL::ComPtr<ID3D11Buffer> plane_cbuffer;
         Microsoft::WRL::ComPtr<ID3D11SamplerState> linear_sampler;
         Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
@@ -482,23 +466,6 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex;
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_srv;
-        // Per-pixel EMA history in RAW disparity units (pixel->range order only; see ema_pixel_first).
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> raw_ema_tex;
-        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> raw_ema_uav;
-
-        // Color-guided (joint-bilateral) depth upsample: guide_tex holds the full-res color
-        // downsampled to the depth grid; guided_depth_tex is the 2x-res, color-edge-snapped
-        // depth the reprojection samples when guided_upsample is on. Refreshed EVERY frame
-        // against the current frame's color, so silhouettes track between inference frames.
-        Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_guide_downsample_cs;
-        Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_guided_upsample_cs;
-        Microsoft::WRL::ComPtr<ID3D11Buffer> guided_cbuffer;
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> guide_tex;
-        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> guide_uav;
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> guide_srv;
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> guided_depth_tex;
-        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> guided_depth_uav;
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> guided_depth_srv;
         
         CUgraphicsResource cuda_in_res = nullptr;
         CUgraphicsResource cuda_out_res = nullptr;
@@ -513,7 +480,7 @@ namespace models {
             DWORD flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
             // D3D_COMPILE_STANDARD_FILE_INCLUDE resolves #include relative to the .hlsl's dir
             // (matches display_vram.cpp / sbs_bench_harness.cpp), so the depth shaders can share
-            // include/band_curve.hlsl etc. instead of hand-synced copies.
+            // shared includes instead of hand-synced copies.
             if (FAILED(D3DCompileFromFile(path.wstring().c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "main", "cs_5_0", flags, 0, &blob, &err))) {
                 if (err) BOOST_LOG(error) << "Shader compile error (" << path << "): " << (char*)err->GetBufferPointer();
                 return false;
@@ -524,26 +491,15 @@ namespace models {
 
         impl(Microsoft::WRL::ComPtr<ID3D11Device> d, Microsoft::WRL::ComPtr<ID3D11DeviceContext> c, const std::filesystem::path& assets_dir, const config::video_t::sbs_t& cfg, const config::depth_model_info& model)
             : device(d), context(c), ema_alpha((float)cfg.ema),
-              ema_pixel_first(cfg.ema_pixel_first),
               depth_short_side(std::max(196, cfg.depth_short_side)), max_aspect(std::max(1.0f, (float)cfg.depth_max_aspect)),
               minmax_alpha((float)cfg.minmax_ema),
-              pct_lo((float)(cfg.norm_pct_lo / 100.0)),
-              pct_hi((float)(cfg.norm_pct_hi / 100.0)),
               subject_track(cfg.subject_track),
               subject_recenter((float)cfg.subject_recenter),
               subject_stretch(cfg.subject_stretch),
-              stretch_lo((float)cfg.stretch_lo), stretch_hi((float)cfg.stretch_hi),
-              exact_plane_lock(cfg.shift_profile == "bestv2" && cfg.subject_track && cfg.subject_plane_lock > 0.0),
+              exact_plane_lock(cfg.subject_track && cfg.subject_plane_lock > 0.0),
               plane_lock_strength((float)cfg.subject_plane_lock),
               plane_lock_width((float)cfg.subject_plane_width),
-              foreground_curvature((float)cfg.foreground_curvature),
-              use_percentile(cfg.norm_pct_lo > 0.0 || cfg.norm_pct_hi < 100.0),
-              minmax_snap((float)cfg.minmax_snap),
-              range_floor_frac((float)cfg.range_floor),
-              range_floor_ref_alpha(0.004f),  // ~decays over a few hundred depth updates
               depth_fps((float)cfg.depth_fps),
-              guided_upsample(cfg.guided_upsample),
-              guided_sigma(std::max(0.01f, (float)cfg.guided_sigma)),
               model_name(model.name), model_url(model.url),
               input_rank(model.input_rank), output_transform((uint32_t)model.output_transform),
               depth_shift(std::max(0.001f, (float)cfg.depth_shift)),
@@ -678,14 +634,8 @@ namespace models {
             compile_shader(assets_dir / "shaders" / "directx" / "buffer_to_tex_cs.hlsl", buffer_to_tex_cs);
             compile_shader(assets_dir / "shaders" / "directx" / "depth_minmax_cs.hlsl", depth_minmax_cs);
             compile_shader(assets_dir / "shaders" / "directx" / "depth_minmax_ema_cs.hlsl", depth_minmax_ema_cs);
-            if (use_percentile) {
-                if (compile_shader(assets_dir / "shaders" / "directx" / "depth_hist_cs.hlsl", depth_hist_cs)) {
-                    BOOST_LOG(info) << "Percentile depth normalization enabled (p" << cfg.norm_pct_lo
-                                    << " .. p" << cfg.norm_pct_hi << ").";
-                } else {
-                    BOOST_LOG(warning) << "depth_hist_cs failed to compile; falling back to min/max normalization.";
-                    use_percentile = false;
-                }
+            if (!compile_shader(assets_dir / "shaders" / "directx" / "depth_hist_cs.hlsl", depth_hist_cs)) {
+                BOOST_LOG(error) << "Required P2/P98 depth histogram shader failed to compile.";
             }
             if (subject_track) {
                 bool ok = compile_shader(assets_dir / "shaders" / "directx" / "depth_subject_hist_cs.hlsl", depth_subject_hist_cs) &&
@@ -726,24 +676,6 @@ namespace models {
             if (!subject_track && cfg.subject_plane_lock > 0.0) {
                 BOOST_LOG(warning) << "sbs_3d_subject_plane_lock has no effect without sbs_3d_subject_track = enabled.";
             }
-            if (foreground_curvature > 0.0f) {
-                if (compile_shader(assets_dir / "shaders" / "directx" / "depth_curvature_cs.hlsl", depth_curvature_cs)) {
-                    BOOST_LOG(info) << "Foreground curvature enabled (strength " << foreground_curvature << ").";
-                } else {
-                    BOOST_LOG(warning) << "depth_curvature_cs failed to compile; foreground curvature disabled.";
-                    foreground_curvature = 0.0f;
-                }
-            }
-            if (guided_upsample) {
-                bool ok = compile_shader(assets_dir / "shaders" / "directx" / "depth_guide_downsample_cs.hlsl", depth_guide_downsample_cs) &&
-                          compile_shader(assets_dir / "shaders" / "directx" / "depth_guided_upsample_cs.hlsl", depth_guided_upsample_cs);
-                if (ok) {
-                    BOOST_LOG(info) << "Guided depth upsample enabled (sigma " << guided_sigma << ").";
-                } else {
-                    BOOST_LOG(warning) << "Guided depth upsample shaders failed to compile; falling back to plain depth.";
-                    guided_upsample = false;
-                }
-            }
 
             // Min/max reduction accumulator (2 uints), pre-seeded to the reduction identity
             // {min = 0xFFFFFFFF, max = 0}. depth_minmax_ema_cs resets it after each frame.
@@ -773,11 +705,9 @@ namespace models {
                 device->CreateBuffer(&stg, nullptr, &minmax_raw_stage);
             }
 
-            // EMA'd min/max, 2 float4 elements: [0]={min, max, initialized, ref_range},
-            // [1]={range_scale, pad...}. initialized = 0 so the first frame seeds directly;
-            // range_scale = 1 so the range floor is a no-op until depth_minmax_ema_cs runs.
+            // EMA'd P2/P98 bounds. initialized = 0 so the first frame seeds directly.
             {
-                float init_ema[8] = {0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
+                float init_ema[4] = {0.0f, 0.0f, 0.0f, 0.0f};
                 D3D11_BUFFER_DESC bd = {};
                 bd.Usage = D3D11_USAGE_DEFAULT;
                 bd.ByteWidth = sizeof(init_ema);
@@ -790,9 +720,8 @@ namespace models {
                 device->CreateShaderResourceView(minmax_ema_buf.Get(), nullptr, &minmax_ema_srv);
             }
 
-            // Percentile histogram: 256 uint bins, zero-init (depth_minmax_ema_cs resets them
-            // after each frame's scan, so the steady state matches this initial state).
-            if (use_percentile) {
+            // Permanent P2/P98 histogram: 256 uint bins, reset after every scan.
+            {
                 uint32_t init_hist[256] = {};
                 D3D11_BUFFER_DESC bd = {};
                 bd.Usage = D3D11_USAGE_DEFAULT;
@@ -805,10 +734,7 @@ namespace models {
                 if (hist_buf) {
                     device->CreateUnorderedAccessView(hist_buf.Get(), nullptr, &hist_uav);
                 }
-                if (!hist_uav) {
-                    BOOST_LOG(warning) << "Percentile histogram buffer creation failed; falling back to min/max normalization.";
-                    use_percentile = false;
-                }
+                if (!hist_uav) BOOST_LOG(error) << "Required P2/P98 histogram buffer creation failed.";
             }
 
             // Subject tracking: weighted histogram (256 uint bins) + per-frame state. The third
@@ -949,11 +875,8 @@ namespace models {
             // TRT runtime/engines are cached globally, do not destroy them here.
         }
 
-        // The depth SRV handed back to the reprojection: the color-guided 2x upsample when
-        // enabled, else the raw depth. Also the value returned on frames where we reuse the
-        // last depth (stream busy or off-cadence).
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> output_srv() {
-            return (guided_upsample && guided_depth_srv) ? guided_depth_srv : depth_srv;
+            return depth_srv;
         }
 
         struct plane_constants_t {
@@ -1089,7 +1012,6 @@ namespace models {
             }
             normalize_depth_output();
             has_previous_frame = false;  // the output buffer has been consumed; never fold it twice
-            run_guided(input_srv, color_space);
             return make_result();
         }
 
@@ -1125,109 +1047,11 @@ namespace models {
             cb[5] = reduce_groups * 256u;  // total threads for the reduction grid-stride
             cb[6] = output_transform;  // 0=identity (DA-V2 disparity), 1=shifted reciprocal (DA-V3 depth)
             cbf[7] = depth_shift;  // shift in 1/(depth + depth_shift) when output_transform==1
-            cbf[8] = minmax_snap;       // A1 scene-cut snap ratio (0 = off)
-            cbf[9] = range_floor_frac;  // A3 range-floor fraction (0 = off)
-            cbf[10] = range_floor_ref_alpha;  // A3 reference-range decay
-            cbf[11] = use_percentile ? pct_lo : 0.0f;  // robust normalization, low bound (fraction)
-            cbf[12] = use_percentile ? pct_hi : 1.0f;  // robust normalization, high bound (fraction)
             cbf[15] = subject_recenter;  // subject recenter strength (depth_subject_resolve_cs)
-            cbf[16] = stretch_lo;                          // shape_depth_for_pop stretch bounds
-            cbf[17] = stretch_hi;
             cbf[18] = subject_stretch ? 1.0f : 0.0f;
-            cbf[19] = ema_pixel_first ? 1.0f : 0.0f;  // buffer_to_tex: pixel->range EMA order
             D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
             cbuffer.Reset();
             device->CreateBuffer(&cb_desc, &sd, &cbuffer);
-
-            cb_desc.ByteWidth = 32;  // guided cbuffer keeps the original 8-slot layout
-            if (guided_upsample) {
-                // Guided passes: {in_w, in_h, out_w, out_h, spatial, range, color_mode, radius}.
-                const float kernel_radius = 5.0f;  // low-res texels; spans the model's ~8-9 texel edge ramp
-                const float sigma_sp = kernel_radius * 0.5f;
-                uint32_t gb[8] = {};
-                float* gbf = (float*)gb;
-                gb[0] = (uint32_t)target_w;
-                gb[1] = (uint32_t)target_h;
-                gb[2] = (uint32_t)guided_w;
-                gb[3] = (uint32_t)guided_h;
-                gbf[4] = 1.0f / (2.0f * sigma_sp * sigma_sp);
-                gbf[5] = 1.0f / (2.0f * guided_sigma * guided_sigma);
-                gb[6] = (uint32_t)color_mode;
-                gbf[7] = kernel_radius;
-                D3D11_SUBRESOURCE_DATA gsd = {gb, 0, 0};
-                guided_cbuffer.Reset();
-                device->CreateBuffer(&cb_desc, &gsd, &guided_cbuffer);
-            }
-
-            // Foreground-curvature constants (session-constant once the resolution is fixed):
-            // {cv_w, cv_h, strength, near_start, gamma, spread, pad, pad}. Internal params match
-            // VD3D enhance_foreground_curvature (near_start 0.60, shape_gamma 1.35); spread 0.60
-            // is a frame-centered stand-in for VD3D's fitted foreground ellipse. Curvature is
-            // applied on the normalized low-resolution depth before both subject tracking and
-            // optional guided upsampling, so both consumers see the same shaped depth field.
-            if (foreground_curvature > 0.0f) {
-                struct { uint32_t w, h; float strength, near_start, gamma, spread, pad0, pad1; } cvb = {
-                    (uint32_t) target_w, (uint32_t) target_h,
-                    foreground_curvature, 0.60f, 1.35f, 0.60f, 0.0f, 0.0f
-                };
-                D3D11_SUBRESOURCE_DATA cvsd = {&cvb, 0, 0};
-                curvature_cbuffer.Reset();
-                device->CreateBuffer(&cb_desc, &cvsd, &curvature_cbuffer);  // cb_desc.ByteWidth == 32
-            }
-        }
-
-        // Reshape the near foreground with a centered bulge (VD3D enhance_foreground_curvature)
-        // on normalized depth before subject analysis and any guided upsample.
-        void apply_curvature(ID3D11UnorderedAccessView* uav, UINT w, UINT h) {
-            if (foreground_curvature <= 0.0f || !depth_curvature_cs || !curvature_cbuffer) {
-                return;
-            }
-            context->CSSetShader(depth_curvature_cs.Get(), nullptr, 0);
-            context->CSSetConstantBuffers(0, 1, curvature_cbuffer.GetAddressOf());
-            context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-            context->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
-            ID3D11UnorderedAccessView* null_uav = nullptr;
-            context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
-        }
-
-        // Re-snap the (possibly stale) low-res depth to the CURRENT frame's color edges: pass 1
-        // downsamples the color to the depth grid, pass 2 joint-bilaterally upsamples depth to
-        // 2x res using the full-res color as the reference. Runs every frame (cheap: taps hit
-        // two low-res textures), including cadence-skip frames -- that is what keeps silhouettes
-        // tracking the image while the depth itself refreshes at depth_fps.
-        void run_guided(ID3D11ShaderResourceView* color_srv, input_color_space color_space) {
-            if (!guided_upsample || !guided_depth_uav || !guide_uav || !color_srv ||
-                !depth_guide_downsample_cs || !depth_guided_upsample_cs) {
-                return;
-            }
-            ensure_cbuffers(color_space);
-            if (!guided_cbuffer) {
-                return;
-            }
-
-            const UINT out_w = (UINT) guided_w, out_h = (UINT) guided_h;
-
-            ID3D11UnorderedAccessView* null_uav = nullptr;
-            ID3D11ShaderResourceView* null_srvs[3] = {nullptr, nullptr, nullptr};
-
-            // Pass 1: full-res color -> low-res guide.
-            context->CSSetShader(depth_guide_downsample_cs.Get(), nullptr, 0);
-            context->CSSetConstantBuffers(0, 1, guided_cbuffer.GetAddressOf());
-            context->CSSetShaderResources(0, 1, &color_srv);
-            context->CSSetUnorderedAccessViews(0, 1, guide_uav.GetAddressOf(), nullptr);
-            context->CSSetSamplers(0, 1, linear_sampler.GetAddressOf());
-            context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
-            context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
-            context->CSSetShaderResources(0, 1, null_srvs);
-
-            // Pass 2: joint-bilateral upsample of the UN-dilated depth, guided by color.
-            context->CSSetShader(depth_guided_upsample_cs.Get(), nullptr, 0);
-            ID3D11ShaderResourceView* srvs[3] = {depth_srv.Get(), guide_srv.Get(), color_srv};
-            context->CSSetShaderResources(0, 3, srvs);
-            context->CSSetUnorderedAccessViews(0, 1, guided_depth_uav.GetAddressOf(), nullptr);
-            context->Dispatch((out_w + 15) / 16, (out_h + 15) / 16, 1);
-            context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
-            context->CSSetShaderResources(0, 3, null_srvs);
 
         }
 
@@ -1253,7 +1077,7 @@ namespace models {
 
                 // Pass A2 (percentile mode): 256-bin histogram over the raw range, so pass B
                 // can replace the outlier-sensitive min/max with robust percentile bounds.
-                if (use_percentile && depth_hist_cs && hist_uav) {
+                if (depth_hist_cs && hist_uav) {
                     context->CSSetShader(depth_hist_cs.Get(), nullptr, 0);
                     context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
                     context->CSSetShaderResources(0, 1, tensor_out_srv.GetAddressOf());
@@ -1299,19 +1123,14 @@ namespace models {
             context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
             ID3D11ShaderResourceView* bt_srvs[2] = {tensor_out_srv.Get(), minmax_ema_srv.Get()};
             context->CSSetShaderResources(0, 2, bt_srvs);
-            ID3D11UnorderedAccessView* bt_uavs[2] = {depth_uav.Get(), raw_ema_uav.Get()};
-            context->CSSetUnorderedAccessViews(0, 2, bt_uavs, nullptr);
+            context->CSSetUnorderedAccessViews(0, 1, depth_uav.GetAddressOf(), nullptr);
 
             context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
             ID3D11UnorderedAccessView* null_uav2[2] = {nullptr, nullptr};
             ID3D11ShaderResourceView* null_srvs[2] = {nullptr, nullptr};
-            context->CSSetUnorderedAccessViews(0, 2, null_uav2, nullptr);
+            context->CSSetUnorderedAccessViews(0, 1, null_uav2, nullptr);
             context->CSSetShaderResources(0, 2, null_srvs);
-
-            // 3c. Reshape before subject tracking and guided upsampling. This avoids the old
-            // mismatch where tracking measured uncurved depth while the warp sampled curved depth.
-            apply_curvature(depth_uav.Get(), (UINT) target_w, (UINT) target_h);
 
             // 3s. Subject tracking: weighted depth histogram over the freshly-normalized
             // depth, then a 1-thread resolve into the subject state the reprojection reads.
@@ -1352,7 +1171,7 @@ namespace models {
                                         << " subj_hi_near=" << s[2]
                                         << " subj_vd3d=" << (1.0f - s[2])
                                         << " recenter_delta=" << s[0]
-                                        << " subject_curve=" << s[1]
+                                        << " reserved=" << s[1]
                                         << " init=" << s[3];
                         context->Unmap(subject_stage.Get(), 0);
                     }
@@ -1424,7 +1243,6 @@ namespace models {
                 auto q = cuda.cuStreamQuery(cu_stream);
                 if (q == CUDA_ERROR_NOT_READY) {
                     // Still re-snap the stale depth to THIS frame's color edges (D3D-only, cheap).
-                    run_guided(input_srv, color_space);
                     return make_result();
                 }
                 if (q != CUDA_SUCCESS && !stream_error_logged) {
@@ -1432,7 +1250,6 @@ namespace models {
                     stream_error_logged = true;
                 }
                 if (q != CUDA_SUCCESS) {
-                    run_guided(input_srv, color_space);
                     return make_result();
                 }
             }
@@ -1479,12 +1296,6 @@ namespace models {
                     target_w = fitted_dims.first;
                     target_h = fitted_dims.second;
                 }
-
-                // Guided depth is at most 2x the model grid, but never exceeds the source color.
-                // Small eval clips previously produced a depth texture larger than their source
-                // while live ultrawide streams stayed below it, changing silhouette sharpness.
-                guided_w = std::min(target_w * 2, (int)input_desc.Width);
-                guided_h = std::min(target_h * 2, (int)input_desc.Height);
 
                 // Threads for the min/max reduction; grid-stride handles any element count.
                 int elems = target_w * target_h;
@@ -1561,55 +1372,18 @@ namespace models {
                     }
                 }
 
-                // Raw-disparity per-pixel EMA history (pixel->range order). Same grid as depth_tex.
-                resources_ok = resources_ok &&
-                  SUCCEEDED(device->CreateTexture2D(&tex_desc, nullptr, &raw_ema_tex)) &&
-                  SUCCEEDED(device->CreateUnorderedAccessView(raw_ema_tex.Get(), nullptr, &raw_ema_uav));
-
-                if (guided_upsample) {
-                    // Low-res color guide (same grid as the depth map). RGBA16F: guaranteed
-                    // UAV-store format, read back as an SRV in the upsample pass.
-                    D3D11_TEXTURE2D_DESC guide_desc = tex_desc;
-                    guide_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-                    resources_ok = resources_ok &&
-                      SUCCEEDED(device->CreateTexture2D(&guide_desc, nullptr, &guide_tex)) &&
-                      SUCCEEDED(device->CreateUnorderedAccessView(guide_tex.Get(), nullptr, &guide_uav)) &&
-                      SUCCEEDED(device->CreateShaderResourceView(guide_tex.Get(), nullptr, &guide_srv));
-
-                    // Color-edge-snapped depth at 2x the model resolution; what the
-                    // reprojection actually samples when guided upsampling is on.
-                    D3D11_TEXTURE2D_DESC gd_desc = tex_desc;
-                    gd_desc.Width = (UINT) guided_w;
-                    gd_desc.Height = (UINT) guided_h;
-                    resources_ok = resources_ok &&
-                      SUCCEEDED(device->CreateTexture2D(&gd_desc, nullptr, &guided_depth_tex)) &&
-                      SUCCEEDED(device->CreateUnorderedAccessView(
-                        guided_depth_tex.Get(), nullptr, &guided_depth_uav)) &&
-                      SUCCEEDED(device->CreateShaderResourceView(
-                        guided_depth_tex.Get(), nullptr, &guided_depth_srv));
-                }
-
                 if (!resources_ok) {
                     BOOST_LOG(error) << "Depth estimator D3D11 resource creation failed; retrying on a later frame.";
                     target_w = target_h = 0;
                     return {};
                 }
 
-                // Clear the depth textures to 0.0f: depth_tex so the EMA shader initializes
-                // correctly on the first frame instead of blending with undefined memory, and
-                // the guided output so output_srv() returns flat (not garbage) depth on the
-                // frames before the first guided pass runs.
+                // Clear depth so the range->pixel EMA initializes from a known value.
                 const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
                 context->ClearUnorderedAccessViewFloat(depth_uav.Get(), clear_color);
-                if (raw_ema_uav) {
-                    context->ClearUnorderedAccessViewFloat(raw_ema_uav.Get(), clear_color);
-                }
                 if (plane_band_uav) context->ClearUnorderedAccessViewFloat(plane_band_uav.Get(), clear_color);
                 if (plane_work_a_uav) context->ClearUnorderedAccessViewFloat(plane_work_a_uav.Get(), clear_color);
                 if (plane_work_b_uav) context->ClearUnorderedAccessViewFloat(plane_work_b_uav.Get(), clear_color);
-                if (guided_depth_uav) {
-                    context->ClearUnorderedAccessViewFloat(guided_depth_uav.Get(), clear_color);
-                }
                 
                 auto res1 = cuda.cuGraphicsD3D11RegisterResource(&cuda_in_res, tensor_in_buf.Get(), 0);
                 auto res2 = cuda.cuGraphicsD3D11RegisterResource(&cuda_out_res, tensor_out_buf.Get(), 0);
@@ -1634,7 +1408,6 @@ namespace models {
             if (effective_interval > 1 && (frame_counter % (unsigned)effective_interval) != 1u) {
                 // Off-cadence frame: depth is reused, but re-snap it to this frame's color edges
                 // so silhouettes keep tracking the image between inference frames.
-                run_guided(input_srv, color_space);
                 return make_result();
             }
 
@@ -1654,7 +1427,6 @@ namespace models {
             }
 
             // 3d. Guided upsample: snap the freshly-updated depth to this frame's color edges.
-            run_guided(input_srv, color_space);
 
             // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
             context->CSSetShader(rgb_to_nchw_cs.Get(), nullptr, 0);

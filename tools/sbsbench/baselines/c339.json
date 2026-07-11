@@ -7,7 +7,7 @@
     "edge_acc_p95": 24.0,
     "flicker": 4.481602243431237,
     "flicker_disocc": 14.620862885661747,
-    "flow_depth": 8.978134036064148,
+    "flow_depth": 8.97813588121663,
     "flow_support": 0.9004137845849801,
     "flow_temporal": 2.6485972611800483,
     "image_integrity_pct": 99.68402314196707,
@@ -53,12 +53,12 @@
     "score": 79.7
   },
   "perf_ms": {
-    "depth_infer": 2.00134,
-    "sbs_composite_cpu": 0.0065,
-    "warp_infer": 0.142464
+    "depth_infer": 2.15766,
+    "sbs_composite_cpu": 0.0064,
+    "warp_infer": 0.141504
   },
   "meta": {
-    "git_sha": "c829e6b3",
+    "git_sha": "d9543e08",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -81,14 +81,13 @@
     "model": "depth_anything_v2_fp16",
     "profile": "apollo",
     "warp": "apollo",
-    "shift_profile": "bestv2",
-    "eval_schema": 7,
+    "eval_schema": 8,
     "depth_step": "current-once",
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "40246edc05700ee7",
+    "metric_sha256": "1839bd76829b6144",
     "gpu_contention": false,
-    "timestamp": "2026-07-11T13:51:17",
-    "run_name": "evalv7-profile-apollo-final",
+    "timestamp": "2026-07-11T14:26:34",
+    "run_name": "evalv8-cleanup-apollo",
     "name": "soldier-battlefield",
     "description": "Soldier walking a dark night battlefield; profile silhouette against dead trees.",
     "content_type": "ai-generated",

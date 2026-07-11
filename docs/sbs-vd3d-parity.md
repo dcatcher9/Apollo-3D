@@ -24,6 +24,12 @@ Companion to the validated findings in the sbs-vd3d-port memory and the roadmap 
 > [sbs-feature-decision-revisit.md](sbs-feature-decision-revisit.md). It supersedes the old numeric
 > conclusions below where they disagree.
 
+> **Cleanup after revalidation:** Bestv2 is now the only shift field; P2/P98, P5/P95 stretch,
+> 24 probes, 96-source-pixel VD3D fill, and range→pixel EMA ordering are permanent constants.
+> Guided upsample, curvature, scene snap, range/depth floor, border fade, the legacy Apollo shift,
+> and their configuration keys were deleted. Later references to those keys document historical
+> experiments only. Exact plane lock and sharpen remain solely for fidelity evaluation.
+
 Phase B starts from two independent profiles rather than forcing the same processors onto both
 geometry implementations:
 
@@ -39,7 +45,7 @@ Apollo lost `0.59` score and VD3D lost `1.06`; pop spread fell `0.63` / `0.66 px
 p95 worsened `0.90` / `2.01`. Visual reports are under `sbs_eval/bestv2-profile-plane-apollo`
 and `sbs_eval/bestv2-profile-plane-vd3d`.
 
-Guided upsample remains disabled for both warps under the overhauled multi-axis contract. Apollo
+Guided upsample was removed from both warps after the overhauled multi-axis contract. Apollo
 loses stereo spread on all 7 ordinary clips while its source-relative warp residual is mixed (2
 wins, 2 costs), but it improves static-region stability on 3 clips. The coequal axes therefore
 produce a real tradeoff with a decisive stereo-volume concern rather than a scalar verdict.
@@ -47,7 +53,7 @@ VD3D stays within noise on both validated primary axes, so it has no demonstrate
 rim/stretch/edge/flicker movements remain diagnostic because visual audit showed scene-content and
 motion confounds. Current reports are under `sbs_eval/evalv3-guided-apollo` and
 `sbs_eval/evalv3-guided-vd3d`. Later schema-6 ablations found min/max snap neutral and range
-floor ineffective; both remain disabled (see the decision ledger).
+floor ineffective; both were removed (see the decision ledger).
 
 The starting profile comparison (flat-page clip excluded) is Apollo `74.13` versus VD3D `73.46`.
 Apollo has `+0.67 px` pop spread and `0.84` lower bright-rim p95; VD3D has `0.23` lower stretch and
@@ -57,8 +63,8 @@ final warp decision: `cmake-build-relwithdebinfo/sbs_eval/bestv2-profile-compari
 ## Validated status — Bestv2 shift calibration (2026-07-10)
 
 The original Phase-A candidate used fixed normalized divergence `0.00285`. That was only fitted to
-one resolution and was not the Bestv2 formula. `sbs_3d_shift_profile = bestv2` now evaluates the
-preset in source-pixel units for both warp implementations:
+one resolution and was not the Bestv2 formula. The permanent field evaluates the preset in
+source-pixel units for both warp implementations:
 
 - FG/MG/BG shifts `-9/-3/+2.4`, multipliers `1.11/1/1.05`, parallax balance `.35`;
 - subject anchor `.95`, zero-parallax trim `.008`;
@@ -185,12 +191,12 @@ causal first-N approximation as though it were the same algorithm.
 | knob | Apollo default | Phase-A faithful | rationale |
 |------|----------------|------------------|-----------|
 | `sbs_3d_depth_short_side` | 432 | **432** | already parity |
-| `sbs_3d_norm_pct_lo`/`_hi` | **2 / 98** (was 0/100 raw) | **2 / 98** | Direct `DepthPercentileEMA(p2/p98)` match. The min/max reduction remains because it defines the histogram range. Earlier score deltas used the superseded eval contract and are not evidence here. |
+| P2/P98 bounds | **permanent** | **permanent** | Direct `DepthPercentileEMA(p2/p98)` match. The min/max reduction defines the histogram range. |
 | `sbs_3d_minmax_ema` | 0.1 (α≈0.9) | **0.18** | Direct VD3D render-stage match. The earlier temporal conclusion used duplicate settle updates and is invalid for Phase A. |
 | `sbs_3d_ema` (per-pixel) | 0.6 | **0.5** | VD3D `TemporalDepthFilter(α=0.5)` |
-| `sbs_3d_ema_pixel_first` | false | **true** | Matches temporal-before-render-percentile ordering. The config parser now exposes this key. |
-| `sbs_3d_range_floor` | 0 (off) | **off** | Apollo-only; VD3D lacks it. Was pinned 0.5 in bench.conf (so the eval ran it); **removed 2026-07-10** so the eval matches the config.h default |
-| `sbs_3d_guided_upsample` | **off** (was on) | **off** | VD3D has no equivalent — see B1. Re-enable later as an Apollo-only eval lever. |
+| EMA ordering | **range→pixel, permanent** | **range→pixel, permanent** | The alternate ordering and its configuration were removed after the quality revalidation. |
+| Range floor | **removed** | **removed** | Ineffective on semantic-flat content. |
+| Guided upsample | **removed** | **removed** | Rejected/tradeoff in the final stack; see the decision ledger. |
 
 Earlier A/B numbers in this section were produced by repeated `--settle` submissions and are not
 valid temporal evidence. Eval schema 2 replaces them: one inference and one state update per source
@@ -248,6 +254,8 @@ The warp is where Apollo and VD3D fundamentally differ:
 Both paths are implemented behind `sbs_3d_warp` / evaluator `--warp`: (A) VD3D's Bestv2 35%
 backward grid warp + 65% depth-ordered forward splat with 96-pixel directional hole fill, and
 (B) Apollo's occlusion-aware probe. They receive the same saved pre-warp depth and disparity field.
+That ratio is the fidelity preset; the final quality profile reverses it to 65% backward / 35%
+forward because the 0.35 forward weight won the later ablation.
 The first A/B deliberately stops before concealment. Final-SBS similarity measures reproduction
 only; artifact, temporal, comfort, and performance gates decide which warp is better.
 

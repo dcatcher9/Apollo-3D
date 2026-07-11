@@ -38,7 +38,8 @@ new reduction pass: in `depth_minmax_ema_cs.hlsl`, when the fresh raw range disa
 the EMA'd range by a large factor (e.g. raw min/max outside the EMA bounds by
 > 25 % of the EMA range, both ends, or range ratio > ~1.6× either way), **snap** the EMA to
 the raw values instead of blending. This detects exactly the failure (range jumps at cuts)
-without needing a frame-difference pass. Config: `sbs_3d_minmax_snap` threshold, default on.
+without needing a frame-difference pass. This experiment was neutral and the processor/configuration
+were later removed; it is retained here only as historical design context.
 Validate offline on a dump pair straddling a cut before headset (workflow mandate).
 
 ### A2 — Per-stage GPU timing (the brief's best process idea)

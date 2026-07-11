@@ -7,7 +7,7 @@
     "edge_acc_p50": 3.25,
     "edge_acc_p95": 3.475000023841858,
     "flicker": 5.87349158621383,
-    "flow_depth": 10.180586741729217,
+    "flow_depth": 10.180586365136234,
     "flow_support": 0.7743822180706523,
     "flow_temporal": 1.4528530890291387,
     "image_integrity_pct": 99.62099563844187,
@@ -49,12 +49,12 @@
     "score": 94.0
   },
   "perf_ms": {
-    "depth_infer": 2.04147,
-    "sbs_composite_cpu": 0.0068,
-    "warp_infer": 0.14336
+    "depth_infer": 2.14378,
+    "sbs_composite_cpu": 0.0069,
+    "warp_infer": 0.142848
   },
   "meta": {
-    "git_sha": "c829e6b3",
+    "git_sha": "d9543e08",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -77,14 +77,13 @@
     "model": "depth_anything_v2_fp16",
     "profile": "apollo",
     "warp": "apollo",
-    "shift_profile": "bestv2",
-    "eval_schema": 7,
+    "eval_schema": 8,
     "depth_step": "current-once",
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "40246edc05700ee7",
+    "metric_sha256": "1839bd76829b6144",
     "gpu_contention": false,
-    "timestamp": "2026-07-11T13:51:17",
-    "run_name": "evalv7-profile-apollo-final",
+    "timestamp": "2026-07-11T14:26:34",
+    "run_name": "evalv8-cleanup-apollo",
     "name": "flat_transition",
     "description": "Textured depth scene cutting to a static flat page: range-floor activation and recovery.",
     "gt_depth_kind": "disparity",
