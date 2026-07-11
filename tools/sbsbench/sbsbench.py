@@ -321,6 +321,55 @@ def edge_accuracy(depth, src_gray, edge_pct=99.3, col_pct=97.0, maxd=24):
     return float(np.percentile(dist, 50)), float(np.percentile(dist, 95))
 
 
+def _shift_x_edge(a, shift):
+    """Shift an image horizontally without wraparound; repeat the nearest border value."""
+    if shift == 0:
+        return a
+    out = np.empty_like(a)
+    if shift > 0:
+        out[:, shift:] = a[:, :-shift]
+        out[:, :shift] = a[:, :1]
+    else:
+        n = -shift
+        out[:, :-n] = a[:, n:]
+        out[:, -n:] = a[:, -1:]
+    return out
+
+
+def _box3(a):
+    """3x3 edge-padded mean used to make source matching respond to patches, not lone pixels."""
+    p = np.pad(a, ((1, 1), (1, 1)), mode="edge")
+    return sum(p[y:y + a.shape[0], x:x + a.shape[1]]
+               for y in range(3) for x in range(3)) / 9.0
+
+
+def source_match_map(eye, src_gray, max_shift=None):
+    """Per-pixel source-relative patch error and horizontal search radius."""
+    eh, ew = eye.shape
+    src = resize_to(src_gray, ew, eh)
+    radius = max_shift if max_shift is not None else max(4, round(40 * eye_scale(ew)))
+    best = np.full_like(eye, np.inf, dtype=np.float32)
+    for shift in range(-radius, radius + 1):
+        diff = _box3(np.abs(eye - _shift_x_edge(src, shift)))
+        np.minimum(best, diff, out=best)
+    return best, radius
+
+
+def source_match_residual(eye, src_gray, max_shift=None):
+    """Monocular corruption after allowing intended horizontal stereo displacement.
+
+    For every output patch, find the closest source patch on the same scanline within the normal
+    disparity search radius. A clean shifted eye remains near zero; holes, blur, ringing,
+    duplicated/stretched texture and other content not explained by horizontal parallax rise.
+    Returns p50/p95 in luma/255. Border columns are excluded because no second view exists there.
+    """
+    best, radius = source_match_map(eye, src_gray, max_shift)
+    ew = eye.shape[1]
+    valid = best[:, radius:ew - radius] if ew > 2 * radius else best
+    vals = valid * 255.0
+    return float(np.percentile(vals, 50)), float(np.percentile(vals, 95))
+
+
 # ----------------------------------------------------------------------- per-frame
 
 def measure(dump_dir):
@@ -392,6 +441,11 @@ def measure_seq_frame(path, depth=None, src_gray=None):
         out["rim_over_p50"], out["rim_over_p95"] = silhouette_halo(left, depth)
         if src_gray is not None:
             out["edge_acc_p50"], out["edge_acc_p95"] = edge_accuracy(depth, src_gray)
+    if src_gray is not None:
+        l50, l95 = source_match_residual(left, src_gray)
+        r50, r95 = source_match_residual(right, src_gray)
+        out["source_residual_p50"] = max(l50, r50)
+        out["source_residual_p95"] = max(l95, r95)
     return out, sbs, left
 
 
@@ -499,6 +553,68 @@ def metric_delta_class(base, new, spec):
     return "noise"
 
 
+def metric_gate_failed(base, new, spec):
+    """Whether a committed-baseline gate should fail for this metric role."""
+    role = spec.get("role", "diagnostic")
+    if role == "diagnostic":
+        return False
+    if role == "hard" and "hard_max" in spec:
+        return new > spec["hard_max"]
+    return metric_delta_class(base, new, spec) == "regressed"
+
+
+def evaluate_ab_decision(control, treatment, clip_ids, metric_specs):
+    """Evaluate a feature A/B without collapsing perceptual axes into one score.
+
+    `control` and `treatment` map clip id -> aggregate metrics. Metric specs declare one of:
+      hard        absolute safety/integrity constraint; `hard_max` is mandatory
+      primary     user-visible quality axis; improvements and regressions remain explicit
+      diagnostic  reported only; cannot accept or reject a feature
+
+    A primary-axis tradeoff is deliberately not auto-resolved. It needs the configured/user
+    priority plus visual or headset evidence rather than cancellation inside a scalar score.
+    """
+    hard_failures = []
+    axes = {}
+    for clip in clip_ids:
+        ca, ta = control.get(clip, {}), treatment.get(clip, {})
+        for metric, spec in metric_specs.items():
+            role = spec.get("role", "diagnostic")
+            before, after = ca.get(metric), ta.get(metric)
+            if before is None or after is None:
+                continue
+            if role == "hard":
+                hard_max = spec.get("hard_max")
+                if hard_max is not None and after > hard_max:
+                    hard_failures.append({"clip": clip, "metric": metric,
+                                          "value": after, "limit": hard_max})
+                continue
+            if role != "primary":
+                continue
+            movement = metric_delta_class(before, after, spec)
+            if movement == "noise":
+                continue
+            axis = spec.get("axis", "uncategorized")
+            bucket = axes.setdefault(axis, {"improved": [], "regressed": []})
+            bucket[movement].append({"clip": clip, "metric": metric,
+                                     "before": before, "after": after})
+
+    improved = sum(len(v["improved"]) for v in axes.values())
+    regressed = sum(len(v["regressed"]) for v in axes.values())
+    if hard_failures:
+        verdict = "reject_hard"
+    elif improved and regressed:
+        verdict = "tradeoff"
+    elif regressed:
+        verdict = "reject_primary"
+    elif improved:
+        verdict = "candidate"
+    else:
+        verdict = "neutral"
+    return {"verdict": verdict, "hard_failures": hard_failures, "axes": axes,
+            "improved": improved, "regressed": regressed}
+
+
 def aggregate(rows):
     # Union of keys across ALL rows: a metric missing from frame 0 (e.g. its depth file failed)
     # must not silently vanish from every aggregate.
@@ -517,8 +633,8 @@ def aggregate(rows):
 
 FMT = ["pop_px_p50", "pop_spread_px", "vmisalign_px", "depth_spread",
        "disocc_smear", "stretch_area", "rim_over_p95"]
-SEQ_FMT = ["pop_px_p50", "pop_spread_px", "vmisalign_px", "stretch_area", "rim_over_p95",
-           "edge_acc_p50", "flicker"]
+SEQ_FMT = ["pop_px_p50", "pop_spread_px", "vmisalign_px", "source_residual_p95",
+           "stretch_area", "rim_over_p95", "edge_acc_p50", "flicker"]
 TEMPORAL_KEYS = ["flicker_p50", "flicker_p95", "flicker_disocc_p50", "flicker_disocc_p95",
                  "swim_p50", "swim_p95"]
 

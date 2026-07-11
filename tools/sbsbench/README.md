@@ -172,10 +172,17 @@ stereo volume (`pop_spread_pct` versus its target); it is not blended into score
 depth must not buy artifact-quality points or cancel an artifact regression. Weights/scales live
 in [thresholds.json](thresholds.json) `"score"`.
 
-The score is a summary, never the feature verdict. Matched A/B reports apply every source metric's
-absolute/relative tolerance independently on every non-flat clip. Any regression past threshold
-rejects a general feature even if improvements elsewhere raise the mean score; expected-flat clips
-remain visible as false-stereo diagnostics but do not vote on general-content features.
+The score is a summary, never the feature verdict. Each metric declares a decision role in
+`thresholds.json`: `hard` comfort/integrity constraints cannot be traded; validated `primary`
+metrics vote inside named coequal axes (currently stereo and warp); unvalidated `diagnostic`
+proxies remain visible but cannot accept or reject a feature. Cross-axis movement is reported as a
+tradeoff rather than cancelled inside a scalar. Expected-flat clips remain visible as false-stereo
+diagnostics but do not vote on general-content features.
+
+`source_residual_p95` is the first validated warp-axis metric. For each eye it finds the closest
+source patch within the allowed horizontal disparity radius, then reports the worse eye's p95
+residual. Intended stereo displacement is free; holes, blur, ringing, duplication and stretched
+texture rise. Its visual card shows source/control/treatment plus a signed residual-delta mask.
 
 Each clip directory carries a `meta.json` (`{"name", "description"}`): the report labels clips by
 that scene name and run_eval copies it into results.json. The clip identity hash covers only the

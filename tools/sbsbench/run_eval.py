@@ -313,7 +313,7 @@ def main():
                 b, n = base["aggregate"].get(k), agg.get(k)
                 if b is None or n is None:
                     continue
-                if sbsbench.metric_delta_class(b, n, spec) == "regressed":
+                if sbsbench.metric_gate_failed(b, n, spec):
                     regressions.append({"clip": clip, "metric": k, "baseline": round(b, 3),
                                         **worst.get(k, {}), "value": round(n, 3)})
             if not contention:

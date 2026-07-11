@@ -106,6 +106,55 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(sbsbench.metric_delta_class(2.0, 2.6, lower), "regressed")
         self.assertEqual(sbsbench.metric_delta_class(2.0, 1.4, lower), "improved")
 
+    def test_metric_roles_control_committed_gate(self):
+        diagnostic = {"role": "diagnostic", "better": "lower",
+                      "rel_tol": 0.0, "abs_floor": 0.1}
+        hard = {"role": "hard", "better": "lower", "hard_max": 0.5,
+                "rel_tol": 0.0, "abs_floor": 0.1}
+        self.assertFalse(sbsbench.metric_gate_failed(0.0, 99.0, diagnostic))
+        self.assertFalse(sbsbench.metric_gate_failed(0.0, 0.49, hard))
+        self.assertTrue(sbsbench.metric_gate_failed(0.0, 0.51, hard))
+
+    def test_ab_decision_preserves_primary_axis_tradeoff(self):
+        specs = {
+            "pop": {"role": "primary", "axis": "stereo", "better": "higher",
+                    "rel_tol": 0.0, "abs_floor": 0.5},
+            "halo": {"role": "primary", "axis": "warp", "better": "lower",
+                     "rel_tol": 0.0, "abs_floor": 0.5},
+            "legacy_proxy": {"role": "diagnostic", "axis": "warp", "better": "lower",
+                             "rel_tol": 0.0, "abs_floor": 0.1},
+        }
+        result = sbsbench.evaluate_ab_decision(
+            {"clip": {"pop": 4.0, "halo": 2.0, "legacy_proxy": 0.0}},
+            {"clip": {"pop": 5.0, "halo": 3.0, "legacy_proxy": 99.0}},
+            ["clip"], specs)
+        self.assertEqual(result["verdict"], "tradeoff")
+        self.assertEqual(result["improved"], 1)
+        self.assertEqual(result["regressed"], 1)
+
+    def test_ab_decision_hard_constraint_cannot_be_traded(self):
+        specs = {
+            "vmis": {"role": "hard", "axis": "comfort", "hard_max": 0.5,
+                     "better": "lower", "rel_tol": 0.0, "abs_floor": 0.1},
+            "pop": {"role": "primary", "axis": "stereo", "better": "higher",
+                    "rel_tol": 0.0, "abs_floor": 0.5},
+        }
+        result = sbsbench.evaluate_ab_decision(
+            {"clip": {"vmis": 0.1, "pop": 4.0}},
+            {"clip": {"vmis": 0.6, "pop": 8.0}}, ["clip"], specs)
+        self.assertEqual(result["verdict"], "reject_hard")
+
+    def test_source_residual_accepts_horizontal_parallax_and_detects_corruption(self):
+        rng = np.random.default_rng(42)
+        src = np.round(rng.random((96, 160), dtype=np.float32) * 255.0) / 255.0
+        shifted = sbsbench._shift_x_edge(src, 5)
+        clean = sbsbench.source_match_residual(shifted, src, max_shift=8)
+        corrupted = shifted.copy()
+        corrupted[24:72, 60:100] = 0.0
+        damaged = sbsbench.source_match_residual(corrupted, src, max_shift=8)
+        self.assertLess(clean[1], 0.01)
+        self.assertGreater(damaged[1], clean[1] + 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -66,6 +66,7 @@ CLIPS = sorted(CTRL["clips"])
 # metric, header, worse-is-higher, always-show, notable-threshold
 COLS = [
     ("score", "score", False, True, 0),
+    ("source_residual_p95", "warp_resid", True, True, 0),
     ("pop_px_p50", "pop", False, True, 0), ("edge_acc_p50", "edge_acc", True, False, 2.0),
     ("stretch_area", "stretch", True, False, 2.0), ("rim_over_p95", "rim", True, False, 1.0),
     ("swim_p50", "swim", True, False, 1.0), ("flicker_p50", "flick", True, True, 0),
@@ -175,13 +176,52 @@ def crop_at_silhouette(clip, idx):
     return out
 
 
-def visual_evidence_images(clip, idx):
+def source_residual_evidence(clip, idx):
+    """Metric-specific source/control/treatment crops and signed residual-delta heatmap."""
+    cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
+    srcs = glob.glob(os.path.join(SCRIPT_DIR, "clips", clip, f"frame_{idx:05d}.*"))
+    if not (os.path.exists(cp) and os.path.exists(tp) and srcs):
+        return None
+    ctrl, treat = Image.open(cp).convert("RGB"), Image.open(tp).convert("RGB")
+    ew, eh = ctrl.width // 2, ctrl.height
+    src_rgb = Image.open(srcs[0]).convert("RGB").resize((ew, eh), Image.BILINEAR)
+    src_gray = sbsbench.load_gray(srcs[0])
+    maps = []
+    for img in (ctrl, treat):
+        gray = np.asarray(img.convert("L"), np.float32) / 255.0
+        eyes = sbsbench.split_eyes(gray)
+        maps.append([sbsbench.source_match_map(eye, src_gray)[0] for eye in eyes])
+    # Show the eye where treatment changed the residual most; both eyes are always measured.
+    eye_idx = max(range(2), key=lambda i: float(np.percentile(np.abs(maps[1][i] - maps[0][i]), 95)))
+    delta = maps[1][eye_idx] - maps[0][eye_idx]
+    score = sbsbench._box3(np.abs(delta))
+    cy, cx = np.unravel_index(np.argmax(score), score.shape)
+    cw, ch = min(480, ew), min(360, eh)
+    x0 = max(0, min(ew - cw, int(cx) - cw // 2))
+    y0 = max(0, min(eh - ch, int(cy) - ch // 2))
+    xoff = eye_idx * ew
+    source_crop = src_rgb.crop((x0, y0, x0 + cw, y0 + ch))
+    ctrl_crop = ctrl.crop((xoff + x0, y0, xoff + x0 + cw, y0 + ch))
+    treat_crop = treat.crop((xoff + x0, y0, xoff + x0 + cw, y0 + ch))
+    d = delta[y0:y0 + ch, x0:x0 + cw] * 255.0
+    heat = np.zeros((*d.shape, 3), np.uint8)
+    heat[..., 0] = np.clip(d * 12.0, 0, 255).astype(np.uint8)       # red = worse
+    heat[..., 2] = np.clip(-d * 12.0, 0, 255).astype(np.uint8)      # blue = better
+    return (durl(source_crop, w=380, jpg=True, q=82),
+            durl(ctrl_crop, w=380, jpg=True, q=82),
+            durl(treat_crop, w=380, jpg=True, q=82),
+            durl(Image.fromarray(heat), w=380, jpg=True, q=88))
+
+
+def visual_evidence_images(clip, idx, metric=None):
     """Matched control/treatment crops plus an amplified RGB difference heatmap.
 
     The crop is selected from the shared control depth, so both modes show exactly the same
     source region.  The heatmap is deliberately labelled as amplified: it is evidence of where
     the renderers differ, while the adjacent metric supplies the direction of the change.
     """
+    if metric == "source_residual_p95":
+        return source_residual_evidence(clip, idx)
     pair = crop_at_silhouette(clip, idx)
     if not pair:
         return None
@@ -315,6 +355,7 @@ def scorecard_charts():
 METRIC_DEFS = [
     ("score", "score", "Overall 0-100 artifact cleanliness after weighted penalties. Stereo volume is reported and gated separately, so it cannot cancel artifact regressions.", "higher = better"),
     ("pop_px_p50", "pop", "L↔R horizontal disparity (sub-pixel tile phase-correlation) — the amount of stereo depth.", "higher = more 3D"),
+    ("source_residual_p95", "warp_resid", "Worst-eye patch difference from the source after allowing a small horizontal stereo displacement. Detects monocular warp corruption without penalizing intended parallax.", "lower = more source-faithful"),
     ("depth_spread", "dspread", "p95−p5 of the normalized depth = pop available at the source.", "higher = more depth to work with"),
     ("edge_acc_p50", "edge_acc", "Distance (depth-px) from each depth silhouette to the nearest true SOURCE color edge.", "lower = silhouette sits on the real edge"),
     ("swim_p50", "swim", "Frame-to-frame depth change where the SOURCE is static — depth instability, separated from real motion.", "lower = steadier depth"),
@@ -382,19 +423,7 @@ def conclusion_section():
         txt = f"{mtip(k, '<b>' + h + '</b>')} {CTRL_TAG} {a:.2f} → {TREAT_TAG} {b:.2f} ({pct:+.0f}%)"
         (wins if favors_treat else costs).append(txt)
     li = score_line
-    gated_regressions, gated_improvements = [], []
-    for c in DECISION_CLIPS:
-        for k, spec in THR.items():
-            if k == "score":
-                continue  # derived diagnostic; source metrics make the decision
-            a, b = ctrl_agg[c].get(k), treat_agg[c].get(k)
-            if a is None or b is None:
-                continue
-            movement = sbsbench.metric_delta_class(a, b, spec)
-            if movement == "regressed":
-                gated_regressions.append((c, k))
-            elif movement == "improved":
-                gated_improvements.append((c, k))
+    decision = sbsbench.evaluate_ab_decision(ctrl_agg, treat_agg, DECISION_CLIPS, THR)
     if IS_TRADEOFF_CMP:
         if wins:
             li += f'<li class="c-win">{TREAT_NAME} is better on: {" · ".join(wins)}</li>'
@@ -404,18 +433,32 @@ def conclusion_section():
                    f"single scalar does not select between different warp objectives.")
     else:
         if wins:
-            li += f'<li class="c-win">Improved: {" · ".join(wins)}</li>'
+            li += f'<li class="c-win">Mean diagnostics favor treatment: {" · ".join(wins)}</li>'
         if costs:
-            li += f'<li class="c-cost">Worsened: {" · ".join(costs)}</li>'
-        reg_clips = len({c for c, _ in gated_regressions})
-        imp_clips = len({c for c, _ in gated_improvements})
-        verdict = (f"<b>Reject treatment:</b> {len(gated_regressions)} metric regression(s) past "
-                   f"threshold across {reg_clips} clip(s); improvements cannot cancel them."
-                   if gated_regressions else
-                   f"<b>Candidate improvement:</b> {len(gated_improvements)} gated improvement(s) "
-                   f"across {imp_clips} clip(s), with no gated regressions."
-                   if gated_improvements else
-                   "<b>No meaningful effect:</b> all source metrics remain within gate noise.")
+            li += f'<li class="c-cost">Mean diagnostics favor control: {" · ".join(costs)}</li>'
+        axis_parts = []
+        for axis, movement in sorted(decision["axes"].items()):
+            axis_parts.append(f'<b>{axis}</b>: {len(movement["improved"])} win(s), '
+                              f'{len(movement["regressed"])} cost(s)')
+        if axis_parts:
+            li += f'<li class="c-score">Primary axes: {" · ".join(axis_parts)}</li>'
+        state = decision["verdict"]
+        if state == "reject_hard":
+            verdict = (f'<b>Reject treatment:</b> {len(decision["hard_failures"])} hard comfort/'
+                       f'integrity constraint(s) fail.')
+        elif state == "reject_primary":
+            verdict = (f'<b>Reject treatment:</b> {decision["regressed"]} primary-axis cost(s) '
+                       f'with no compensating primary-axis win.')
+        elif state == "tradeoff":
+            verdict = (f'<b>Primary-quality tradeoff:</b> coequal axes move in different or mixed '
+                       f'directions. Per-clip event counts are evidence, not weights. Do not '
+                       f'resolve this with the scalar score; use visual/headset evidence.')
+        elif state == "candidate":
+            verdict = (f'<b>Candidate improvement:</b> {decision["improved"]} primary-axis win(s), '
+                       f'no primary-axis costs and no hard failure.')
+        else:
+            verdict = ("<b>No validated decision:</b> hard constraints pass, but all validated "
+                       "primary metrics remain within noise. Diagnostic proxies cannot vote.")
     head = (f"{CTRL_NAME} → {TREAT_NAME}" if IS_TRADEOFF_CMP else f"Treatment: <b>{treatment_name()}</b>")
     return (f'<section><h2>Conclusion</h2>'
             f'<p class="sub" style="margin-bottom:12px">{head} — decision over '
@@ -501,7 +544,7 @@ def issue_sections():
 
 def visual_evidence_section():
     """Show the strongest spatial win and regression with matched images and a diff map."""
-    spatial = ("stretch_area", "rim_over_p95", "edge_acc_p50", "disocc_smear")
+    spatial = ("source_residual_p95", "stretch_area", "rim_over_p95", "edge_acc_p50", "disocc_smear")
     candidates = []
     for metric in spatial:
         floor = THR.get(metric, {}).get("abs_floor", 0.0)
@@ -520,20 +563,26 @@ def visual_evidence_section():
         source = TREAT if delta > 0 else CTRL
         wf = source["clips"][c].get("worst_frame", {}).get(metric, {})
         frame = wf.get("frame", mid_frame(ctrl_dir, c))
-        imgs = visual_evidence_images(c, frame)
+        imgs = visual_evidence_images(c, frame, metric)
         if not imgs:
             return ""
         pct = delta / a * 100 if a else 100.0
         cls = "evidence-cost" if kind == "regression" else "evidence-win"
         badge = "regression" if kind == "regression" else "improvement"
+        panels = (f'<div class="triplet"><figure><span class="tag">source</span><img src="{imgs[0]}"></figure>'
+                  f'<figure><span class="tag">{CTRL_TAG}</span><img src="{imgs[1]}"></figure>'
+                  f'<figure><span class="tag t-treat">{TREAT_TAG}</span><img src="{imgs[2]}"></figure>'
+                  f'<figure><span class="tag t-diff">residual delta: red worse / blue better</span>'
+                  f'<img src="{imgs[3]}"></figure></div>' if len(imgs) == 4 else
+                  f'<div class="triplet"><figure><span class="tag">{CTRL_TAG}</span>'
+                  f'<img src="{imgs[0]}"></figure><figure><span class="tag t-treat">{TREAT_TAG}</span>'
+                  f'<img src="{imgs[1]}"></figure><figure><span class="tag t-diff">abs diff &times;5</span>'
+                  f'<img src="{imgs[2]}"></figure></div>')
         return (f'<article class="evidence-card {cls}"><div class="ic-head">'
                 f'<span class="clipname">{name(c)}</span><span class="pill">{badge}</span>'
                 f'<span class="metricval">{mtip(metric, SHORT.get(metric, metric))}: '
                 f'<b>{a:.2f}</b> &rarr; {b:.2f} ({pct:+.0f}%) &middot; frame {frame}</span></div>'
-                f'<div class="triplet"><figure><span class="tag">{CTRL_TAG}</span>'
-                f'<img src="{imgs[0]}"></figure><figure><span class="tag t-treat">{TREAT_TAG}</span>'
-                f'<img src="{imgs[1]}"></figure><figure><span class="tag t-diff">abs diff &times;5</span>'
-                f'<img src="{imgs[2]}"></figure></div></article>')
+                f'{panels}</article>')
 
     wins = sorted((x for x in candidates if x[1] < 0), reverse=True)[:2]
     costs = sorted((x for x in candidates if x[1] > 0), reverse=True)[:2]
@@ -542,10 +591,10 @@ def visual_evidence_section():
     if not cards:
         return ""
     return (f'<section><h2>Visual evidence: improvements and regressions</h2>'
-            f'<p class="sub">Matched left-eye crops at the metric\'s worst frame. The first two '
-            f'panels are identical source locations; the third is an amplified absolute RGB '
-            f'difference map (black = unchanged, red/yellow/white = increasing change). The '
-            f'metric, not the heatmap color, determines whether the change is a win or cost.</p>'
+            f'<p class="sub">Metric-specific crops at the metric\'s worst frame. Source-residual '
+            f'cards select the worse eye and show the source plus a signed heatmap (red = treatment '
+            f'worse, blue = better); legacy proxies retain their matched silhouette crop. Both '
+            f'eyes are measured even when only the worse eye is shown.</p>'
             f'{cards}</section>')
 
 
