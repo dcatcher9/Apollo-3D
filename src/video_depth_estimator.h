@@ -21,11 +21,11 @@ namespace models {
 
     /**
      * @brief Result of one estimate call: the depth map for the reprojection (t1), plus the
-     *        subject-tracking state (t2) when sbs_3d_subject_track is on.
+     *        permanent Bestv2 subject state (t2).
      */
     struct estimate_result {
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject;  ///< subject-tracking state (t2 of the reprojection); null unless sbs_3d_subject_track
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject;  ///< permanent Bestv2 subject state (t2 of the reprojection)
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> plane_lock;  ///< Bestv2's smoothed subject silhouette mask (t4); null outside the exact Bestv2 path.
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Raw model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
         int raw_width = 0;
@@ -52,6 +52,9 @@ namespace models {
                               const config::depth_model_info& model);
 
         ~video_depth_estimator();
+
+        /** True only when every mandatory engine, shader, and session resource initialized. */
+        bool is_valid() const;
 
         // Non-copyable
         video_depth_estimator(const video_depth_estimator&) = delete;

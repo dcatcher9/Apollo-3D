@@ -107,7 +107,7 @@ onnx-community's, which turned out to be flat-pop (see TL;DR).
 5. **3D Style assistant (intuitive preset system, ported from VisionDepth3D)** — VD3D's
    "3D Assistant" is a two-tier front-end over its ~19 backend knobs, and it's a clean fit
    for Apollo now that the subject-tracked shaped-disparity pipeline exists (sync depth +
-   `subject_track`/`subject_stretch`/`subject_lock`/`stretch_lo·hi`/`subject_plane_lock` +
+   permanent subject tracking plus `subject_stretch`/`subject_lock`/`stretch_lo·hi`/`subject_plane_lock` +
    `divergence`/`focal_plane`/`border_fade`). Two layers to port
    (`ui/pages/stereo_generator_page.py`: `SIMPLE_3D_ADVANCED_PRESETS`, `SIMPLE_3D_PRESETS`,
    `_apply_simple_3d_controls`):

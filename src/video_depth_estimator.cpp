@@ -316,7 +316,7 @@ namespace models {
         int depth_short_side;  // depth map short-side resolution (clamped to native short side)
         float max_aspect;  // aspect cap for short-side mode
         float minmax_alpha;  // temporal EMA blend for the normalized min/max
-        bool subject_track;      // VD3D-style shaped disparity: run the subject-estimate passes
+        bool valid = false;      // all mandatory engine, shader, and session resources are ready
         float subject_recenter;  // recenter strength consumed by depth_subject_resolve_cs
         bool subject_stretch;    // apply the shape_depth_for_pop 5/95 disparity stretch
         bool exact_plane_lock;   // Bestv2's full silhouette morphology + weighted shift mean
@@ -493,10 +493,9 @@ namespace models {
             : device(d), context(c), ema_alpha((float)cfg.ema),
               depth_short_side(std::max(196, cfg.depth_short_side)), max_aspect(std::max(1.0f, (float)cfg.depth_max_aspect)),
               minmax_alpha((float)cfg.minmax_ema),
-              subject_track(cfg.subject_track),
               subject_recenter((float)cfg.subject_recenter),
               subject_stretch(cfg.subject_stretch),
-              exact_plane_lock(cfg.subject_track && cfg.subject_plane_lock > 0.0),
+              exact_plane_lock(cfg.subject_plane_lock > 0.0),
               plane_lock_strength((float)cfg.subject_plane_lock),
               plane_lock_width((float)cfg.subject_plane_width),
               depth_fps((float)cfg.depth_fps),
@@ -629,25 +628,23 @@ namespace models {
             }
 
 
-            // Compile Shaders
-            compile_shader(assets_dir / "shaders" / "directx" / "rgb_to_nchw_cs.hlsl", rgb_to_nchw_cs);
-            compile_shader(assets_dir / "shaders" / "directx" / "buffer_to_tex_cs.hlsl", buffer_to_tex_cs);
-            compile_shader(assets_dir / "shaders" / "directx" / "depth_minmax_cs.hlsl", depth_minmax_cs);
-            compile_shader(assets_dir / "shaders" / "directx" / "depth_minmax_ema_cs.hlsl", depth_minmax_ema_cs);
-            if (!compile_shader(assets_dir / "shaders" / "directx" / "depth_hist_cs.hlsl", depth_hist_cs)) {
-                BOOST_LOG(error) << "Required P2/P98 depth histogram shader failed to compile.";
+            // Bestv2 normalization and subject shaping are one permanent pipeline. Never create a
+            // partially usable estimator: without any one of these shaders the warp would either
+            // consume invalid bounds or silently collapse to flat 2D.
+            const bool core_shaders_ok =
+              compile_shader(assets_dir / "shaders" / "directx" / "rgb_to_nchw_cs.hlsl", rgb_to_nchw_cs) &&
+              compile_shader(assets_dir / "shaders" / "directx" / "buffer_to_tex_cs.hlsl", buffer_to_tex_cs) &&
+              compile_shader(assets_dir / "shaders" / "directx" / "depth_minmax_cs.hlsl", depth_minmax_cs) &&
+              compile_shader(assets_dir / "shaders" / "directx" / "depth_minmax_ema_cs.hlsl", depth_minmax_ema_cs) &&
+              compile_shader(assets_dir / "shaders" / "directx" / "depth_hist_cs.hlsl", depth_hist_cs) &&
+              compile_shader(assets_dir / "shaders" / "directx" / "depth_subject_hist_cs.hlsl", depth_subject_hist_cs) &&
+              compile_shader(assets_dir / "shaders" / "directx" / "depth_subject_resolve_cs.hlsl", depth_subject_resolve_cs);
+            if (!core_shaders_ok) {
+                BOOST_LOG(error) << "Depth estimator failed: required Bestv2 shader initialization failed.";
+                return;
             }
-            if (subject_track) {
-                bool ok = compile_shader(assets_dir / "shaders" / "directx" / "depth_subject_hist_cs.hlsl", depth_subject_hist_cs) &&
-                          compile_shader(assets_dir / "shaders" / "directx" / "depth_subject_resolve_cs.hlsl", depth_subject_resolve_cs);
-                if (ok) {
-                    BOOST_LOG(info) << "Subject tracking enabled (recenter " << subject_recenter << ").";
-                } else {
-                    BOOST_LOG(warning) << "Subject-tracking shaders failed to compile; falling back to the linear depth mapping.";
-                    subject_track = false;
-                }
-            }
-            if (exact_plane_lock && subject_track) {
+            BOOST_LOG(info) << "Permanent Bestv2 subject shaping enabled (recenter " << subject_recenter << ").";
+            if (exact_plane_lock) {
                 bool ok = compile_shader(assets_dir / "shaders" / "directx" / "depth_plane_band_cs.hlsl", depth_plane_band_cs) &&
                           compile_shader(assets_dir / "shaders" / "directx" / "depth_plane_filter_cs.hlsl", depth_plane_filter_cs) &&
                           compile_shader(assets_dir / "shaders" / "directx" / "depth_plane_combine_cs.hlsl", depth_plane_combine_cs) &&
@@ -671,12 +668,6 @@ namespace models {
             } else {
                 exact_plane_lock = false;
             }
-            // subject_plane_lock needs the subject estimate; with tracking off it is a no-op.
-            // (subject_stretch defaults ON, so warning on it would fire on every default run.)
-            if (!subject_track && cfg.subject_plane_lock > 0.0) {
-                BOOST_LOG(warning) << "sbs_3d_subject_plane_lock has no effect without sbs_3d_subject_track = enabled.";
-            }
-
             // Min/max reduction accumulator (2 uints), pre-seeded to the reduction identity
             // {min = 0xFFFFFFFF, max = 0}. depth_minmax_ema_cs resets it after each frame.
             {
@@ -739,7 +730,7 @@ namespace models {
 
             // Subject tracking: weighted histogram (256 uint bins) + per-frame state. The third
             // float4 carries the exact Bestv2 plane-lock mean and its initialized flag.
-            if (subject_track) {
+            {
                 uint32_t init_hist[256] = {};
                 D3D11_BUFFER_DESC bd = {};
                 bd.Usage = D3D11_USAGE_DEFAULT;
@@ -778,10 +769,6 @@ namespace models {
                     stg.StructureByteStride = sizeof(float) * 4;
                     device->CreateBuffer(&stg, nullptr, &subject_stage);
                 }
-                if (!subject_hist_uav || !subject_uav || !subject_srv || !subject_plain_uav) {
-                    BOOST_LOG(warning) << "Subject-tracking buffer creation failed; falling back to the linear depth mapping.";
-                    subject_track = false;
-                }
             }
 
             D3D11_SAMPLER_DESC samp_desc = {};
@@ -790,6 +777,17 @@ namespace models {
             samp_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
             samp_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
             device->CreateSamplerState(&samp_desc, &linear_sampler);
+
+            valid = engine && exec_context && cu_stream && rgb_to_nchw_cs && buffer_to_tex_cs &&
+                    depth_minmax_cs && depth_minmax_ema_cs && depth_hist_cs &&
+                    depth_subject_hist_cs && depth_subject_resolve_cs &&
+                    minmax_raw_uav && minmax_ema_uav && minmax_ema_srv && hist_uav &&
+                    subject_hist_uav && subject_plain_uav && subject_uav && subject_srv &&
+                    linear_sampler;
+            if (!valid) {
+                BOOST_LOG(error) << "Depth estimator failed: required engine or Bestv2 GPU resource initialization failed.";
+                return;
+            }
 
             // Constant buffers are created in ensure_cbuffers() once the model resolution is
             // known: every field is fixed for the session, so they are built once (immutable)
@@ -973,9 +971,7 @@ namespace models {
         estimate_result make_result() {
             estimate_result r;
             r.depth = output_srv();
-            if (subject_track) {
-                r.subject = subject_srv;
-            }
+            r.subject = subject_srv;
             if (exact_plane_lock) {
                 r.plane_lock = plane_work_a_srv;
             }
@@ -1056,7 +1052,7 @@ namespace models {
         }
 
         // Normalize the finished raw disparity in tensor_out_buf into depth_tex: the scale
-        // passes (min/max reduction, optional percentile histogram, EMA fold) followed by the
+        // passes (min/max reduction, permanent percentile histogram, EMA fold) followed by the
         // mapping/temporal-EMA pass. GPU-resident throughout, no CPU readback. In async mode
         // this consumes the PREVIOUS frame's inference; in sync mode, the current frame's.
         void normalize_depth_output() {
@@ -1134,7 +1130,7 @@ namespace models {
 
             // 3s. Subject tracking: weighted depth histogram over the freshly-normalized
             // depth, then a 1-thread resolve into the subject state the reprojection reads.
-            if (subject_track && depth_subject_hist_cs && depth_subject_resolve_cs) {
+            {
                 context->CSSetShader(depth_subject_hist_cs.Get(), nullptr, 0);
                 context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
                 context->CSSetShaderResources(0, 1, depth_srv.GetAddressOf());
@@ -1217,7 +1213,7 @@ namespace models {
         }
 
         estimate_result estimate(ID3D11ShaderResourceView* input_srv, input_color_space color_space) {
-            if (!exec_context || !rgb_to_nchw_cs || !buffer_to_tex_cs || !input_srv) return {};
+            if (!valid || !input_srv) return {};
 
             auto& cuda = cuda_driver_api::get();
             if (!cuda.is_valid()) {
@@ -1406,8 +1402,7 @@ namespace models {
             // effective_interval-th frame thereafter.
             frame_counter++;
             if (effective_interval > 1 && (frame_counter % (unsigned)effective_interval) != 1u) {
-                // Off-cadence frame: depth is reused, but re-snap it to this frame's color edges
-                // so silhouettes keep tracking the image between inference frames.
+                // Off-cadence frame: reuse the last normalized depth and subject state.
                 return make_result();
             }
 
@@ -1425,8 +1420,6 @@ namespace models {
                 normalize_depth_output();
                 has_previous_frame = false;
             }
-
-            // 3d. Guided upsample: snap the freshly-updated depth to this frame's color edges.
 
             // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
             context->CSSetShader(rgb_to_nchw_cs.Get(), nullptr, 0);
@@ -1515,6 +1508,10 @@ namespace models {
         : pimpl(std::make_unique<impl>(device, context, assets_dir, cfg, model)) {}
 
     video_depth_estimator::~video_depth_estimator() = default;
+
+    bool video_depth_estimator::is_valid() const {
+        return pimpl && pimpl->valid;
+    }
 
     estimate_result video_depth_estimator::estimate_depth(
       ID3D11ShaderResourceView* input_srv, input_color_space color_space) {

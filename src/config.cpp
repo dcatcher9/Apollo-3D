@@ -1290,7 +1290,6 @@ namespace config {
     int_f(vars, "sbs_3d_depth_short_side", video.sbs.depth_short_side);
     double_between_f(vars, "sbs_3d_depth_max_aspect", video.sbs.depth_max_aspect, {1.0, 8.0});
     double_between_f(vars, "sbs_3d_minmax_ema", video.sbs.minmax_ema, {0.001, 1.0});
-    bool_f(vars, "sbs_3d_subject_track", video.sbs.subject_track);
     double_between_f(vars, "sbs_3d_subject_lock", video.sbs.subject_lock, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_subject_recenter", video.sbs.subject_recenter, {0.0, 1.0});
     bool_f(vars, "sbs_3d_subject_stretch", video.sbs.subject_stretch);

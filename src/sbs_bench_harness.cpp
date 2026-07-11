@@ -304,7 +304,6 @@ namespace sbs_bench {
       int limit = 0;       // 0 -> all
       int output_every = 1;  // process every input for temporal state; dump only every Nth
       // VD3D-pipeline A/B levers; <0 / false -> use the conf's value.
-      int subject_track = -1;      // -1 = conf, 0 = off, 1 = on
       double subject_lock = -1.0;  // subject anchor strength override (e.g. 0.95)
       double subject_recenter = -1.0;  // global subject recenter override
       int depth_short_side = 0;    // depth inference short-side override (0 = conf; VD3D uses 432)
@@ -335,8 +334,6 @@ namespace sbs_bench {
         else if (a == "--max-width") o.max_width = std::stoi(next("--max-width"));
         else if (a == "--limit") o.limit = std::stoi(next("--limit"));
         else if (a == "--output-every") o.output_every = std::max(1, std::stoi(next("--output-every")));
-        else if (a == "--subject-track") o.subject_track = 1;
-        else if (a == "--no-subject-track") o.subject_track = 0;
         else if (a == "--subject-lock") o.subject_lock = std::stod(next("--subject-lock"));
         else if (a == "--subject-recenter") o.subject_recenter = std::stod(next("--subject-recenter"));
         else if (a == "--depth-short-side") o.depth_short_side = std::stoi(next("--depth-short-side"));
@@ -413,7 +410,6 @@ namespace sbs_bench {
       }
       sbs_cfg.warp = o.warp;
     }
-    if (o.subject_track >= 0) sbs_cfg.subject_track = (o.subject_track != 0);
     if (o.subject_lock >= 0.0) sbs_cfg.subject_lock = o.subject_lock;
     if (o.subject_recenter >= 0.0) sbs_cfg.subject_recenter = o.subject_recenter;
     if (o.depth_short_side > 0) sbs_cfg.depth_short_side = o.depth_short_side;  // VD3D uses 432
@@ -562,7 +558,7 @@ namespace sbs_bench {
         const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
         const float source_to_output = (float)eye_w * content_scale_x / (float)img.w;
         float repro_params[16] = {0, 0, 0, 0, 0,
-          sbs_cfg.subject_track ? 1.0f : 0.0f, (float) sbs_cfg.subject_lock,
+          1.0f, (float) sbs_cfg.subject_lock,  // slot retained; Bestv2 subject shaping is permanent
           sbs_cfg.subject_stretch ? 1.0f : 0.0f, (float) sbs_cfg.subject_plane_lock,
           (float) sbs_cfg.subject_plane_width, content_scale_x, content_scale_y,
           (float) sbs_cfg.vd3d_forward_blend, 0, 0, source_to_output};

@@ -10,7 +10,7 @@ cbuffer Constants : register(b2) {
     float reserved2;
     float reserved3;
     float reserved4;
-    float subject_track;
+    float _subject_track_reserved;  // layout compatibility; Bestv2 subject shaping is permanent
     float subject_lock;
     float subject_stretch;
     float subject_plane_lock;

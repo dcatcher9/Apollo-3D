@@ -649,9 +649,14 @@ namespace platf::dxgi {
             ::video::depth_engine_phase.store(0, std::memory_order_relaxed);
             return false;
           }
-          if (depth_estimator) {
+          if (depth_estimator && depth_estimator->is_valid()) {
             BOOST_LOG(info) << "Depth estimator ready; host SBS depth is now live."sv;
             ::video::depth_engine_phase.store(2, std::memory_order_relaxed);  // ready -> client hides indicator
+          } else {
+            BOOST_LOG(error) << "Depth estimator build returned an invalid pipeline; streaming flat SBS."sv;
+            depth_estimator.reset();
+            depth_estimator_failed = true;
+            ::video::depth_engine_phase.store(0, std::memory_order_relaxed);
           }
           return (bool) depth_estimator;
         }
@@ -705,7 +710,7 @@ namespace platf::dxgi {
     void update_sbs_constant_buffers(float content_scale_x, float content_scale_y,
                                      float source_to_output = 1.0f) {
       float sbs_params[16] {
-        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, config::video.sbs.subject_track ? 1.0f : 0.0f,
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,  // slot 5 retained; Bestv2 subject shaping is permanent
         (float) config::video.sbs.subject_lock, config::video.sbs.subject_stretch ? 1.0f : 0.0f,
         (float) config::video.sbs.subject_plane_lock, (float) config::video.sbs.subject_plane_width,
         content_scale_x, content_scale_y, (float) config::video.sbs.vd3d_forward_blend,

@@ -76,7 +76,6 @@ Harness A/B levers (after `--extra`):
 - `--ema F` — per-pixel depth EMA override (`1.0` = off).
 - `--subject-track` — VD3D-style shaped disparity (subject-anchored band curve). The pipeline
   is probe-reprojection-only, so the shaping is always live when this is on.
-- `--no-subject-track` — disable subject tracking even when the selected profile enables it.
 - `--subject-lock F` — subject anchor strength (e.g. `0.95`).
 - `--subject-recenter F` — subject depth-field recenter strength.
 - `--subject-stretch` — shape_depth_for_pop 5/95 percentile stretch (default on within the

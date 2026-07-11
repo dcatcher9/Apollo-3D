@@ -176,8 +176,26 @@ class EvalContractTests(unittest.TestCase):
             config = fh.read()
         for key in ("sbs_3d_ema_pixel_first", "sbs_3d_guided_upsample",
                     "sbs_3d_foreground_curvature", "sbs_3d_minmax_snap",
-                    "sbs_3d_range_floor", "sbs_3d_shift_profile"):
+                    "sbs_3d_range_floor", "sbs_3d_shift_profile",
+                    "sbs_3d_subject_track"):
             self.assertNotIn(key, config)
+
+    def test_bestv2_subject_pipeline_is_mandatory_and_validated(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        paths = {
+            "estimator": os.path.join(repo, "src", "video_depth_estimator.cpp"),
+            "display": os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
+            "harness": os.path.join(repo, "src", "sbs_bench_harness.cpp"),
+        }
+        text = {}
+        for key, path in paths.items():
+            with open(path, encoding="utf-8") as fh:
+                text[key] = fh.read()
+        self.assertIn("const bool core_shaders_ok", text["estimator"])
+        self.assertIn("if (!valid || !input_srv) return {};", text["estimator"])
+        self.assertIn("depth_estimator->is_valid()", text["display"])
+        self.assertNotIn("--no-subject-track", text["harness"])
+        self.assertNotIn("sbs_cfg.subject_track", text["harness"])
 
     def test_phase_shift_recovers_known_translation(self):
         rng = np.random.default_rng(1234)

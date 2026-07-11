@@ -16,8 +16,7 @@
 Texture2D<float4> LeftColorTexture : register(t0);
 Texture2D<float>  DepthTexture      : register(t1);
 // Subject-tracking state from depth_subject_resolve_cs. [0] = {recenter_delta, reserved,
-// subject_depth_ema, initialized}; [1] = {stretch_lo_val, stretch_inv_range, _, _}. Only read
-// when subject_track is on; an unbound/zero buffer (initialized == 0) falls back to linear.
+// subject_depth_ema, initialized}; [1] = {stretch_lo_val, stretch_inv_range, _, _}.
 StructuredBuffer<float4> SubjectState : register(t2);
 Texture2D<float> PlaneLockTexture : register(t4);
 SamplerState      LinearSampler     : register(s0);
@@ -30,8 +29,8 @@ struct PS_INPUT {
 #include "include/sbs_warp_common.hlsl"
 
 // Silhouette-stable depth read: a 2x2 spread of taps so any depth step spans ~2.5 probe
-// steps of the reprojection search, in BOTH axes. The guided-upsampled depth is texel-sharp;
-// read raw, a silhouette transition is only ~1 probe step wide horizontally -- the zero-
+// steps of the reprojection search, in BOTH axes. The normalized model depth is texel-sharp;
+// read directly, a silhouette transition is only ~1 probe step wide horizontally -- the zero-
 // crossing detection then flips with probe phase pixel to pixel -- and a diagonal silhouette
 // is a texel staircase vertically, so adjacent ROWS resolve the contested strip differently
 // (the dotted/mesh fringe along occlusion edges). Widening the transition in x keeps g()
@@ -50,15 +49,15 @@ float SampleDepth(float sx, float sy, float2 ofs) {
 // eyeSign = +1 right eye, -1 left eye.
 float2 Reproject(float2 uv, float eyeSign) {
     // Subject anchoring is live this frame only if configured AND the resolve pass has
-    // produced state (init != 0 -- it is 0 for the first frames, or when the subject shaders
-    // failed to compile so the SubjectState SRV is unbound and reads 0). Decide it ONCE here
+    // produced state (init != 0 -- it is 0 for the first frames). Mandatory shader/resource
+    // initialization is validated before the estimator is published. Decide it ONCE here
     // from the runtime state, and read the frame-uniform SubjectState once, so the probe loop
     // below issues no per-probe buffer loads (DepthParallax gets s0/s1 as args). `shaped` also
     // gates searchRadius, so the search span and the parallax mapping can never disagree.
     float4 s0 = SubjectState[0];
     float4 s1 = SubjectState[1];
     float4 s2 = SubjectState[2];
-    bool shaped = (subject_track > 0.5f) && (s0.w > 0.5f);
+    bool shaped = s0.w > 0.5f;
     uint dw, dh;
     DepthTexture.GetDimensions(dw, dh);
     // Bestv2's calibrated bands are SOURCE-COLOR pixel shifts. Normalizing by the smaller

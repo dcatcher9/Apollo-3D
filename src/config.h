@@ -184,11 +184,10 @@ namespace config {
       int depth_short_side = 432;  ///< Depth map short-side resolution, clamped to the frame's native short side. At 16:9 this maps to about 768x432, matching the VisionDepth3D reference input.
       double depth_max_aspect = 4.0;  ///< Aspect-ratio cap (long side <= short * this). Bounds worst-case inference cost on ultrawide.
       double minmax_ema = 0.18;  ///< Temporal EMA blend for the normalized disparity min/max (0-1). Lower = steadier depth scale, higher = adapts faster.
-      bool subject_track = true;  ///< VD3D-style shaped disparity: estimate the tracked subject's depth (center/smoothness-weighted percentile, EMA'd), recenter depth around it, map depth->parallax through near/mid/far Gaussian bands, and anchor the subject at the screen plane by subtracting subject_lock x the subject's own parallax.
       double subject_lock = 0.5;  ///< Validated subject anchor compromise. 1 pins the subject exactly; 0 leaves the Bestv2 bands unanchored.
       double subject_recenter = 0.35;  ///< How strongly the depth field is shifted to put the tracked subject at mid-depth before the band mapping (0-1, VD3D recenter_strength).
-      bool subject_stretch = true;  ///< VD3D shape_depth_for_pop stretch: rescale the permanent P5/P95 band to [0,1]. Requires subject_track.
-      double subject_plane_lock = 0.0;  ///< VD3D apply_subject_plane_lock: additionally flatten residual disparity WITHIN the subject depth band (local), on top of the global subject_lock. 0 = off; VD3D Bestv2 0.28. Requires subject_track.
+      bool subject_stretch = true;  ///< VD3D shape_depth_for_pop stretch: rescale the permanent P5/P95 band to [0,1].
+      double subject_plane_lock = 0.0;  ///< VD3D apply_subject_plane_lock: additionally flatten residual disparity WITHIN the subject depth band (local), on top of the global subject_lock. 0 = off; VD3D Bestv2 0.28.
       double subject_plane_width = 0.12;  ///< Half-width (in normalized depth) of the subject band for subject_plane_lock (VD3D subject_plane_lock_width, Bestv2 0.12).
       bool bestv2_sharpen = false;  ///< Apply Bestv2's exact SDR per-eye sharpen 0.2 after the completed warp. Retained for fidelity, disabled in quality-optimized profiles.
       double vd3d_forward_blend = 0.65;  ///< VD3D hybrid weight: 0 = classic backward grid warp, 1 = depth-ordered forward splat. Bestv2 code uses 0.65.

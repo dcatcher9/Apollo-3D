@@ -4,7 +4,7 @@
 //
 RWStructuredBuffer<float4> MinMaxEma : register(u0);  // [0]={min,max,initialized,_}
 RWByteAddressBuffer        MinMaxRaw : register(u1);  // [0]=min bits, [4]=max bits
-RWStructuredBuffer<uint>   Histogram : register(u2);  // 256 bins from depth_hist_cs (percentile mode only)
+RWStructuredBuffer<uint>   Histogram : register(u2);  // permanent P2/P98 histogram from depth_hist_cs
 
 #include "include/depth_constants.hlsl"
 
