@@ -41,6 +41,9 @@ Controls:
 | Range floor 0.5 | **off / ineffective** | **off / ineffective** | Byte-identical even on new textured→flat transition. DA-V2 retains a large hallucinated raw range on the flat page, so raw range is not a semantic-flatness detector. |
 | Depth floor 0.25 | **not applicable** | **not applicable** | Bestv2 shift returns before the Apollo linear-depth-floor branch. |
 | Border fade 0.02 | **off / neutral** | **off / neutral** | No validated primary movement on either geometry. |
+| Bestv2 smear suppression + Fast repair | **off / rejected** | **off / rejected** | Schema-6 core: Apollo gains 0.36 px source-relative halo but loses 0.28 px rim overshoot and adds disocclusion flicker; VD3D gains only 0.11 px halo while losing 0.41 px rim. The Fast repair component is byte-identical on the strongest changed clip; changes come from the 60% blend-to-flat smear stage. Literal implementation costs ~17.2 ms/frame. All 264 raw and pre-warp depth artifacts per geometry remain byte-identical. |
+| Bestv2 cinematic-window sculpt | **off / headset candidate** | **off / rejected** | Apollo core has 6 warp wins/0 costs and extended 3/0, but normal-scale visual inspection is inconclusive, median pop falls ~10% core/~3% public, and rim overshoot rises. VD3D public has one stretch win/one halo cost, with lower stereo spread and more rim. Do not enable Apollo without a headset A/B confirming the subtle artifact redistribution is preferable. |
+| Exact Bestv2 DOF 0.3 | **off / rejected** | **off / rejected** | Schema-6 core is neutral on both profiles. Maximum per-frame mean pixel change is only ~0.0075/255 (peak 2/255), with no visible or validated benefit; GPU cost is ~0.017 ms. All 264 raw and pre-warp depth artifacts remain byte-identical per geometry. |
 | VD3D forward blend | n/a | **0.35** | 1.0 is cost-dominated; 0.0 is mixed. At 0.35 with the revised stack, core has 10 wins/0 costs and extended 4/0. |
 
 ## Final quality profiles
@@ -89,12 +92,45 @@ must not be presented as current schema-6 evidence:
 
 | Removed processor | Old status | Current status |
 |---|---|---|
-| Bestv2 cinematic-window sculpt | rejected and reverted | **stale; requires temporary restoration** |
-| VD3D conceal/smear suppression + Fast repair | rejected and removed | **stale; requires temporary restoration** |
-| Exact Bestv2 DOF | rejected and removed | **stale; requires temporary restoration** |
+| Bestv2 cinematic-window sculpt | rejected and reverted | **schema-6 Apollo headset candidate; VD3D rejected; remains removed** |
+| VD3D conceal/smear suppression + Fast repair | rejected and removed | **schema-6 rejected on both quality profiles; removed again** |
+| Exact Bestv2 DOF | rejected and removed | **schema-6 neutral/rejected on both profiles; removed again** |
 | MLBW learned field / old alternate warp | removed architecturally | **obsolete unless explicitly reconsidering a third warp** |
 
-The next revisit pass should restore each still-relevant processor one at a time on a temporary
-worktree/commit, run both final profiles on core and extended, generate the same reports, and remove
-it again unless it produces a validated primary benefit. DOF and window sculpt are lower priority
-than concealment because neither addresses the current source-relative halo/stretch failure modes.
+The three still-relevant removed processors have now been re-evaluated. Only Apollo window sculpt
+reaches automated-candidate status, and it remains off pending a headset preference A/B.
+
+Concealment reports:
+
+- `sbs_eval/revisit-conceal-v3-fast-apollo/report.html`
+- `sbs_eval/revisit-conceal-v3-fast-vd3d/report.html`
+
+Window-sculpt reports:
+
+- `sbs_eval/revisit-window-v3-apollo/report.html`
+- `sbs_eval/revisit-window-v3-vd3d/report.html`
+- `sbs_eval/revisit-window-v3-ext-apollo/report.html`
+- `sbs_eval/revisit-window-v3-ext-vd3d/report.html`
+
+DOF reports:
+
+- `sbs_eval/revisit-dof-v3-apollo/report.html`
+- `sbs_eval/revisit-dof-v3-vd3d/report.html`
+
+## Final warp comparison after the revisit
+
+The two saved quality profiles are not measurably separated on overall quality. On core, VD3D has
+one source-halo win (`c525`), one source-halo cost (`c747`), and one stability cost (`c647`). On
+the eight-clip public suite there are no validated primary differences. Aggregate clean score is
+only +0.05 for VD3D on both suites. Stereo spread is +1.4% on core and -0.05% on public, so the
+revised profiles are volume-matched within normal noise/tolerance.
+
+VD3D is the performance winner: its geometry measures about 0.019 ms versus 0.141 ms for Apollo
+on both suites (~7.4x faster). This is not enough evidence to delete Apollo because quality remains
+a tradeoff on core and neutral on public. Retain both paths until headset A/B testing resolves the
+different halo/rim/stability character; use VD3D when geometry cost is the deciding constraint.
+
+Final reports:
+
+- `sbs_eval/final-warp-comparison-core/report.html`
+- `sbs_eval/final-warp-comparison-extended/report.html`
