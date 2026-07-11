@@ -32,8 +32,14 @@ large bright-rim regressions. Window sculpt, curvature, conceal/repair and DOF w
 and remain off. Exact plane lock is rejected for both profiles by a final-stack off/on ablation:
 Apollo lost `0.59` score and VD3D lost `1.06`; pop spread fell `0.63` / `0.66 px` and bright-rim
 p95 worsened `0.90` / `2.01`. Visual reports are under `sbs_eval/bestv2-profile-plane-apollo`
-and `sbs_eval/bestv2-profile-plane-vd3d`. Guided upsample, min/max snap and range floor remain
-pending and must be evaluated independently for each warp.
+and `sbs_eval/bestv2-profile-plane-vd3d`.
+
+Guided upsample is independently rejected for Apollo and retained for VD3D. On Apollo it lost
+`2.14` score and `3.12 px` pop spread. On VD3D it gained `0.80` score, reduced stretch by `0.53`
+and bright-rim p95 by `1.83`, while pop spread stayed within `0.003 px`; the tradeoff is `1.21`
+worse edge accumulation. Visual reports are under `sbs_eval/bestv2-profile-guided-apollo` and
+`sbs_eval/bestv2-profile-guided-vd3d`. Min/max snap and range floor remain pending and must be
+evaluated independently for each warp.
 
 The starting profile comparison (flat-page clip excluded) is Apollo `74.13` versus VD3D `73.46`.
 Apollo has `+0.67 px` pop spread and `0.84` lower bright-rim p95; VD3D has `0.23` lower stretch and
