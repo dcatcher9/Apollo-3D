@@ -17,9 +17,13 @@ Design for two reproducible, host-side benchmarks so every SBS change ships with
 > - **Eval v4** — hard signed-disparity/coverage/integrity limits, source-relative halo/stretch,
 >   scale/shift-invariant GT-depth accuracy on deterministic synthetic clips, and exact-or-classical
 >   optical-flow-compensated output/depth temporal validation. Native public metric-depth and
->   exact optical-flow sidecars are supported. The separate `extended-v1` suite adds two visually
->   inspected Bonn RGB-D Dynamic person clips and two TartanAir V2 indoor clips; URLs, SHA-256
+>   exact optical-flow sidecars are supported. The separate `extended-v2` suite adds visually
+>   inspected Bonn RGB-D Dynamic, TartanAir V2, MPI Sintel Stereo, and Virtual KITTI 2 clips; URLs, SHA-256
 >   hashes, frame windows and preparation logic are committed while media remains external.
+>   The first eight-clip matched run measured lower VD3D volume on every clip (median −22.3%);
+>   four clips crossed the primary regression gate, confirming the effect across real people,
+>   cinematic animation, synthetic interiors, and clear outdoor driving while also showing that
+>   close-action and rainy scenes can remain within noise.
 > Remaining: reference warp PSNR/SSIM (needs GT stereo) and a dedicated ghost/double-image metric.
 
 ## Why the offline warpsim disagrees with the headset (the problem to design around)

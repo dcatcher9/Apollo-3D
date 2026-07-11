@@ -154,7 +154,7 @@ python tools/sbsbench/run_eval.py --suite extended --comparison-only --label pub
   --report-control cmake-build-relwithdebinfo/sbs_eval/public-apollo --extra --warp vd3d
 ```
 
-The first `extended-v1` suite contains four visually inspected 24-frame clips:
+`extended-v2` contains eight visually inspected 24-frame clips. The first four remain:
 
 | clip | source | coverage / reference |
 |------|--------|----------------------|
@@ -162,6 +162,22 @@ The first `extended-v1` suite contains four visually inspected 24-frame clips:
 | `bonn_person_close` | Bonn RGB-D Dynamic | close person/robot occlusion, registered depth |
 | `tartanair_house_easy` | TartanAir V2 | attic/bed transition, exact metric depth and flow |
 | `tartanair_house_motion` | TartanAir V2 | indoor/outdoor rotation, exact metric depth and flow |
+
+The v2 expansion adds independent cinematic and outdoor-driving content:
+
+| clip | source | coverage / reference |
+|------|--------|----------------------|
+| `sintel_ambush` | MPI Sintel Stereo | cinematic non-rigid action and rendered right-eye reference |
+| `sintel_market` | MPI Sintel Stereo | people, clutter, depth layering and rendered right-eye reference |
+| `vkitti_drive_clone` | Virtual KITTI 2 | clear outdoor driving and exact metric depth |
+| `vkitti_drive_rain` | Virtual KITTI 2 | rainy low-contrast driving and exact metric depth |
+
+Initial matched-profile validation (2026-07-10) found lower VD3D stereo volume on all eight clips:
+median `-22.3%`, with four clips crossing the primary gate (`bonn_person_walk`, both TartanAir
+clips, and `vkitti_drive_clone`). Close action, close person, and rainy driving were only `-6%` to
+`-8%`; the effect is scene-dependent rather than a universal gain scale. VD3D improved one
+validated stretch event, so the overall verdict remains a geometry tradeoff until artifact quality
+is compared along a matched-volume curve.
 
 The manifest is [datasets/manifest.json](datasets/manifest.json). Bonn derivatives remain local;
 its official page requests citation but does not provide a redistribution grant. TartanAir V2 is

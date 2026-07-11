@@ -1,7 +1,10 @@
 import os
+import io
 import sys
+import tarfile
 import tempfile
 import unittest
+import zipfile
 
 import numpy as np
 from PIL import Image
@@ -13,6 +16,14 @@ import prepare_public_datasets
 
 
 class EvalContractTests(unittest.TestCase):
+    @staticmethod
+    def png_bytes(value=64, mode="RGB"):
+        shape = (8, 12, 3) if mode == "RGB" else (8, 12)
+        array = np.full(shape, value, np.uint8)
+        stream = io.BytesIO()
+        Image.fromarray(array, mode=mode).save(stream, "PNG")
+        return stream.getvalue()
+
     def test_warp_override_uses_last_explicit_value(self):
         self.assertEqual(run_eval.extra_value(
             ["--warp", "apollo", "--warp", "vd3d"], "--warp", "apollo"), "vd3d")
@@ -293,8 +304,50 @@ class EvalContractTests(unittest.TestCase):
         extended_clips, extended_baselines = run_eval.suite_defaults("extended")
         self.assertTrue(core_clips.endswith(os.path.join("sbsbench", "clips")))
         self.assertTrue(core_baselines.endswith(os.path.join("sbsbench", "baselines")))
-        self.assertIn(os.path.join("prepared", "extended-v1"), extended_clips)
+        self.assertIn(os.path.join("prepared", "extended-v2"), extended_clips)
         self.assertTrue(extended_baselines.endswith("baselines_extended"))
+
+    def test_sintel_adapter_preserves_left_and_rendered_right_frames(self):
+        with tempfile.TemporaryDirectory() as root:
+            archive = os.path.join(root, "sintel.zip")
+            with zipfile.ZipFile(archive, "w") as zf:
+                for i in range(3):
+                    for eye, value in (("left", 40 + i), ("right", 80 + i)):
+                        zf.writestr(f"training/final_{eye}/demo/frame_{i + 1:04d}.png",
+                                    self.png_bytes(value))
+                    zf.writestr(f"training/disparities/demo/frame_{i + 1:04d}.png",
+                                self.png_bytes(10 + i))
+            out = os.path.join(root, "out"); os.makedirs(out)
+            clip = {"archives": ["stereo"], "sequence": "demo", "pass": "final",
+                    "start": 0, "stride": 1, "count": 2}
+            rows = prepare_public_datasets.prepare_sintel(
+                "demo", clip, {}, {"stereo": archive}, out, "test")
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(os.path.exists(os.path.join(out, "frame_00000.png")))
+            self.assertTrue(os.path.exists(os.path.join(out, "gt_right", "frame_00001.png")))
+            self.assertTrue(os.path.exists(os.path.join(out, "gt_depth", "frame_00001.npy")))
+
+    def test_vkitti_adapter_selects_matching_rgb_and_depth(self):
+        with tempfile.TemporaryDirectory() as root:
+            archives = {}
+            for modality in ("rgb", "depth"):
+                path = os.path.join(root, modality + ".tar"); archives[modality] = path
+                with tarfile.open(path, "w") as tf:
+                    for i in range(3):
+                        suffix = f"rgb_{i:05d}.jpg" if modality == "rgb" else f"depth_{i:05d}.png"
+                        folder = "rgb" if modality == "rgb" else "depth"
+                        data = self.png_bytes(50 + i, "RGB" if modality == "rgb" else "L")
+                        info = tarfile.TarInfo(
+                            f"vkitti/{'Scene01'}/clone/frames/{folder}/Camera_0/{suffix}")
+                        info.size = len(data); tf.addfile(info, io.BytesIO(data))
+            out = os.path.join(root, "out"); os.makedirs(out)
+            clip = {"scene": "Scene01", "variant": "clone", "camera": "Camera_0",
+                    "start": 1, "stride": 1, "count": 2}
+            rows = prepare_public_datasets.prepare_vkitti2(
+                "demo", clip, {}, archives, out, "test")
+            self.assertEqual([r["dataset_frame"] for r in rows], [1, 2])
+            self.assertTrue(os.path.exists(os.path.join(out, "frame_00000.png")))
+            self.assertTrue(os.path.exists(os.path.join(out, "gt_depth", "frame_00001.png")))
 
 
 if __name__ == "__main__":

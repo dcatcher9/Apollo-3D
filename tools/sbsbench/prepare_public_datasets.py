@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import zipfile
 import struct
 import zlib
@@ -294,6 +295,95 @@ def prepare_tartanair(clip_id, clip, dataset, archives, out_dir, suite):
         image_zip.close(); depth_zip.close(); flow_zip.close()
 
 
+def _indexed_archive_members(names, marker, pattern):
+    result = {}
+    rx = re.compile(pattern)
+    for name in names:
+        normalized = name.replace("\\", "/")
+        searchable = "/" + normalized.lstrip("/")
+        if marker not in searchable:
+            continue
+        match = rx.search(searchable)
+        if match:
+            result[int(match.group(1))] = name
+    return result
+
+
+def prepare_sintel(clip_id, clip, dataset, archives, out_dir, suite):
+    archive = archives[clip["archives"][0]]
+    sequence, render_pass = clip["sequence"], clip["pass"]
+    with zipfile.ZipFile(archive) as zf:
+        names = zf.namelist()
+        left_marker = f"/{render_pass}_left/{sequence}/"
+        right_marker = f"/{render_pass}_right/{sequence}/"
+        left = _indexed_archive_members(names, left_marker, r"frame_(\d+)\.png$")
+        right = _indexed_archive_members(names, right_marker, r"frame_(\d+)\.png$")
+        disparities = _indexed_archive_members(
+            names, f"/disparities/{sequence}/", r"frame_(\d+)\.png$")
+        if not left:
+            fail(f"no Sintel {render_pass}_left frames found for {sequence}")
+        chosen = selected(sorted(left), clip)
+        os.makedirs(os.path.join(out_dir, "gt_right"))
+        os.makedirs(os.path.join(out_dir, "gt_depth"))
+        selection = []
+        for output_id, (source_i, frame_id) in enumerate(chosen):
+            if frame_id not in right:
+                fail(f"missing Sintel right-eye frame {sequence}/{frame_id}")
+            if frame_id not in disparities:
+                fail(f"missing Sintel disparity frame {sequence}/{frame_id}")
+            _write_image_bytes(zf.read(left[frame_id]),
+                               os.path.join(out_dir, f"frame_{output_id:05d}.png"), rgb=True)
+            _write_image_bytes(zf.read(right[frame_id]),
+                               os.path.join(out_dir, "gt_right", f"frame_{output_id:05d}.png"),
+                               rgb=True)
+            with Image.open(io.BytesIO(zf.read(disparities[frame_id]))) as disparity_png:
+                encoded = np.asarray(disparity_png.convert("RGB"), dtype=np.float32)
+            disparity = encoded[..., 0] * 4.0 + encoded[..., 1] / 64.0 + encoded[..., 2] / 16384.0
+            np.save(os.path.join(out_dir, "gt_depth", f"frame_{output_id:05d}.npy"),
+                    disparity.astype(np.float32))
+            selection.append({"source_index": source_i, "dataset_frame": frame_id,
+                              "sequence": sequence, "pass": render_pass})
+        return selection
+
+
+def _tar_member_bytes(tf, member_name):
+    member = tf.getmember(member_name)
+    fh = tf.extractfile(member)
+    if fh is None:
+        fail(f"cannot read TAR member: {member_name}")
+    return fh.read()
+
+
+def prepare_vkitti2(clip_id, clip, dataset, archives, out_dir, suite):
+    scene, variant, camera = clip["scene"], clip["variant"], clip["camera"]
+    rgb_tar = tarfile.open(archives["rgb"], "r:")
+    depth_tar = tarfile.open(archives["depth"], "r:")
+    try:
+        rgb_marker = f"/{scene}/{variant}/frames/rgb/{camera}/"
+        depth_marker = f"/{scene}/{variant}/frames/depth/{camera}/"
+        rgbs = _indexed_archive_members(
+            (m.name for m in rgb_tar.getmembers() if m.isfile()), rgb_marker, r"rgb_(\d+)\.jpg$")
+        depths = _indexed_archive_members(
+            (m.name for m in depth_tar.getmembers() if m.isfile()), depth_marker,
+            r"depth_(\d+)\.png$")
+        available = sorted(set(rgbs) & set(depths))
+        if not available:
+            fail(f"no matching VKITTI RGB/depth frames for {scene}/{variant}/{camera}")
+        chosen = selected(available, clip)
+        os.makedirs(os.path.join(out_dir, "gt_depth"))
+        selection = []
+        for output_id, (source_i, frame_id) in enumerate(chosen):
+            _write_image_bytes(_tar_member_bytes(rgb_tar, rgbs[frame_id]),
+                               os.path.join(out_dir, f"frame_{output_id:05d}.png"), rgb=True)
+            _write_image_bytes(_tar_member_bytes(depth_tar, depths[frame_id]),
+                               os.path.join(out_dir, "gt_depth", f"frame_{output_id:05d}.png"))
+            selection.append({"source_index": source_i, "dataset_frame": frame_id,
+                              "scene": scene, "variant": variant, "camera": camera})
+        return selection
+    finally:
+        rgb_tar.close(); depth_tar.close()
+
+
 def prepare_clip(manifest, clip_id, clip, downloads_dir, prepared_root):
     dataset = manifest["datasets"][clip["dataset"]]
     archives = {}
@@ -313,13 +403,20 @@ def prepare_clip(manifest, clip_id, clip, downloads_dir, prepared_root):
         elif clip["adapter"] == "tartanair_v2_zip":
             selection = prepare_tartanair(clip_id, clip, dataset, archives, temp,
                                           manifest["prepared_suite"])
+        elif clip["adapter"] == "sintel_stereo_zip":
+            selection = prepare_sintel(clip_id, clip, dataset, archives, temp,
+                                       manifest["prepared_suite"])
+        elif clip["adapter"] == "vkitti2_tar":
+            selection = prepare_vkitti2(clip_id, clip, dataset, archives, temp,
+                                        manifest["prepared_suite"])
         else:
             fail(f"unsupported adapter: {clip['adapter']}")
         meta = {
             "name": clip["name"], "description": clip["description"],
             "dataset": dataset["title"], "homepage": dataset["homepage"],
             "citation": dataset["citation"], "license_note": dataset["license_note"],
-            "suite": manifest["prepared_suite"], "gt_depth_kind": "metric",
+            "suite": manifest["prepared_suite"],
+            "gt_depth_kind": "disparity" if clip["adapter"] == "sintel_stereo_zip" else "metric",
             "selection": selection,
         }
         with open(os.path.join(temp, "meta.json"), "w", encoding="utf-8") as fh:

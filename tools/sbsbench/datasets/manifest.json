@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "prepared_suite": "extended-v1",
+  "prepared_suite": "extended-v2",
   "default_cache": "E:/ApolloDev/sbs_bench/datasets",
   "datasets": {
     "bonn_dynamic": {
@@ -36,6 +36,37 @@
           "url": "https://huggingface.co/datasets/theairlabcmu/tartanair2/resolve/main/ArchVizTinyHouseDay/Data_easy/flow_lcam_front.zip?download=true",
           "filename": "tartanair_archviz_flow_lcam_front.zip",
           "sha256": "dbcf42afe2cf504e1bc3d7096b78ca32db05f5c78d3c02f16367583e3d1f635e"
+        }
+      }
+    },
+    "mpi_sintel_stereo": {
+      "title": "MPI Sintel Stereo Training Dataset",
+      "homepage": "https://sintel.is.tue.mpg.de/stereo",
+      "citation": "Butler et al., A Naturalistic Open Source Movie for Optical Flow Evaluation, ECCV 2012",
+      "license_note": "Official research dataset derived from the open Sintel film; prepared media remains external to Git.",
+      "archives": {
+        "stereo_training": {
+          "url": "https://files.is.tue.mpg.de/jwulff/sintel/MPI-Sintel-stereo-training-20150305.zip",
+          "filename": "MPI-Sintel-stereo-training-20150305.zip",
+          "sha256": "397506a0ab193189fb367f77ea772ef75435aacbc0a9f950c484df9a0ea3673f"
+        }
+      }
+    },
+    "virtual_kitti_2": {
+      "title": "Virtual KITTI 2",
+      "homepage": "https://europe.naverlabs.com/proxy-virtual-worlds-vkitti-2/",
+      "citation": "Cabon et al., Virtual KITTI 2, 2020",
+      "license_note": "CC BY-NC-SA 3.0, non-commercial only; prepared media remains external to Git.",
+      "archives": {
+        "rgb": {
+          "url": "https://download.europe.naverlabs.com/virtual_kitti_2.0.3/vkitti_2.0.3_rgb.tar",
+          "filename": "vkitti_2.0.3_rgb.tar",
+          "sha256": "a9e3238572f5997536d87255eb30bd72470e8654f29fec73a58cf134267e025f"
+        },
+        "depth": {
+          "url": "https://download.europe.naverlabs.com/virtual_kitti_2.0.3/vkitti_2.0.3_depth.tar",
+          "filename": "vkitti_2.0.3_depth.tar",
+          "sha256": "ec67537b45bba5bd6d5e630a549747827d50bfdcef3ab7faeda68338aa383079"
         }
       }
     }
@@ -86,16 +117,62 @@
       "start": 60,
       "stride": 1,
       "count": 24
+    },
+    "sintel_ambush": {
+      "dataset": "mpi_sintel_stereo",
+      "adapter": "sintel_stereo_zip",
+      "archives": ["stereo_training"],
+      "sequence": "ambush_4",
+      "pass": "final",
+      "name": "sintel-ambush",
+      "description": "Cinematic non-rigid action, layered silhouettes and rapid motion.",
+      "start": 5,
+      "stride": 1,
+      "count": 24
+    },
+    "sintel_market": {
+      "dataset": "mpi_sintel_stereo",
+      "adapter": "sintel_stereo_zip",
+      "archives": ["stereo_training"],
+      "sequence": "market_2",
+      "pass": "final",
+      "name": "sintel-market",
+      "description": "Cinematic market scene with people, clutter and depth layering.",
+      "start": 10,
+      "stride": 1,
+      "count": 24
+    },
+    "vkitti_drive_clone": {
+      "dataset": "virtual_kitti_2",
+      "adapter": "vkitti2_tar",
+      "archives": ["rgb", "depth"],
+      "scene": "Scene01",
+      "variant": "clone",
+      "camera": "Camera_0",
+      "name": "vkitti-drive-clone",
+      "description": "Outdoor urban driving with cars, vegetation and exact metric depth.",
+      "start": 80,
+      "stride": 1,
+      "count": 24
+    },
+    "vkitti_drive_rain": {
+      "dataset": "virtual_kitti_2",
+      "adapter": "vkitti2_tar",
+      "archives": ["rgb", "depth"],
+      "scene": "Scene20",
+      "variant": "rain",
+      "camera": "Camera_0",
+      "name": "vkitti-drive-rain",
+      "description": "Rainy outdoor driving with low contrast, traffic and exact metric depth.",
+      "start": 200,
+      "stride": 1,
+      "count": 24
     }
   },
   "future_sources": {
-    "mpi_sintel": {
-      "homepage": "https://sintel.is.tue.mpg.de/downloads",
-      "reason": "Cinematic animation, depth and flow; official image+depth archives total about 3.2 GB."
-    },
-    "virtual_kitti_2": {
-      "homepage": "https://europe.naverlabs.com/proxy-virtual-worlds-vkitti-2/",
-      "reason": "Outdoor driving with dense depth/flow; official RGB+depth archives total about 14.6 GB and are non-commercial."
+    "davis_2017": {
+      "homepage": "https://davischallenge.org/davis2017/code.html",
+      "reason": "Real-world people, animals and object motion without depth ground truth."
     }
   }
 }
