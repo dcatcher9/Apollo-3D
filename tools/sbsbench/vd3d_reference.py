@@ -233,7 +233,8 @@ def score(args):
     if not os.path.exists(contract_path):
         fail("Apollo output lacks contract.json; rerun the harness with --literal-bestv2")
     contract = json.load(open(contract_path, encoding="utf-8"))
-    if contract.get("schema") != 4 or contract.get("depth_step") != "current-once":
+    if (contract.get("schema") != 5 or contract.get("depth_step") != "current-once" or
+            contract.get("depth_compensation") != "none"):
         fail(f"invalid Apollo harness contract: {contract}")
     if contract.get("literal_bestv2") is not True:
         fail("Apollo output used production parallax scaling; Phase-A requires --literal-bestv2")

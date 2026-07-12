@@ -36,7 +36,7 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-EVAL_SCHEMA = 12  # exact-mask evidence plus explicit depth/color cadence contract
+EVAL_SCHEMA = 13  # explicit depth compensation contract plus GT boundary-lag evidence
 
 
 def suite_defaults(name):
@@ -122,6 +122,60 @@ def conf_value(path, name, default=None):
 def metric_exempt_for_clip(spec, clip_meta):
     """Expected-flat clips diagnose false stereo instead of gating the stereo-volume axis."""
     return bool(clip_meta.get("expected_flat")) and spec.get("axis") == "stereo"
+
+
+def validate_depth_override_manifest(root, clips_dir, clips, depth_every):
+    """Validate an offline depth treatment before the harness can consume any of it.
+
+    The override is deliberately fail-closed: a partial or stale directory must never be
+    indistinguishable from a valid treatment. Returns the expected applied-frame count per clip.
+    """
+    manifest_path = os.path.join(root, "manifest.json")
+    try:
+        with open(manifest_path, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError) as exc:
+        fail(f"invalid depth-override manifest {manifest_path}: {exc}")
+    expected_header = {
+        "schema": 2,
+        "method": "classical-tile-phase-flow",
+        "depth_every": depth_every,
+    }
+    header_mismatch = {key: (value, manifest.get(key)) for key, value in expected_header.items()
+                       if manifest.get(key) != value}
+    if header_mismatch:
+        fail(f"incompatible depth-override manifest: {header_mismatch}")
+    manifest_clips = manifest.get("clips")
+    if not isinstance(manifest_clips, dict):
+        fail("depth-override manifest clips must be an object")
+
+    counts = {}
+    for clip in clips:
+        clip_info = manifest_clips.get(clip)
+        if not isinstance(clip_info, dict):
+            fail(f"depth-override manifest lacks clip {clip}")
+        clip_dir = os.path.join(clips_dir, clip)
+        clip_sha = sha1_dir(clip_dir)
+        if clip_info.get("clip_sha1") != clip_sha:
+            fail(f"{clip}: depth override source hash mismatch: "
+                 f"{clip_info.get('clip_sha1')} != {clip_sha}")
+        source_ids = sorted(sbsbench.indexed_files(
+            os.path.join(clip_dir, "frame_*.*"), "frame_"))
+        expected_ids = [frame_id for position, frame_id in enumerate(source_ids)
+                        if position % depth_every != 0]
+        recorded_ids = clip_info.get("held_frame_ids")
+        if recorded_ids != expected_ids:
+            fail(f"{clip}: manifest held-frame identities differ: "
+                 f"expected={expected_ids}, recorded={recorded_ids}")
+        actual_ids = sorted(sbsbench.indexed_files(
+            os.path.join(root, clip, "depth_*.png"), "depth_"))
+        if actual_ids != expected_ids:
+            fail(f"{clip}: depth-override frame identities differ: "
+                 f"expected={expected_ids}, actual={actual_ids}")
+        if clip_info.get("held_frames") != len(expected_ids):
+            fail(f"{clip}: manifest held-frame count is inconsistent")
+        counts[clip] = len(expected_ids)
+    return counts
 
 
 def score_clip_gates(rows, agg, thresholds, clip_meta):
@@ -247,6 +301,17 @@ def main():
     if args.comparison_only and args.update_baselines:
         fail("--comparison-only and --update-baselines are mutually exclusive")
     literal_bestv2 = "--literal-bestv2" in args.extra
+    depth_override_root = ""
+    if "--depth-override-root" in args.extra:
+        index = len(args.extra) - 1 - args.extra[::-1].index("--depth-override-root")
+        if index + 1 >= len(args.extra):
+            fail("--depth-override-root needs a value")
+        depth_override_root = args.extra[index + 1]
+        depth_override_root = os.path.abspath(depth_override_root)
+        # The harness runs with build_dir as cwd, so make this experimental artifact root
+        # unambiguous before forwarding it.
+        args.extra[index + 1] = depth_override_root
+    depth_compensation = "external-reference" if depth_override_root else "none"
     try:
         depth_reuse_interval = int(extra_value(args.extra, "--depth-every", 1))
     except (TypeError, ValueError):
@@ -257,6 +322,10 @@ def main():
                   f"reuse-{depth_reuse_interval}")
     if literal_bestv2 and not args.comparison_only:
         fail("--literal-bestv2 is reference-only and requires --comparison-only")
+    if depth_override_root and not args.comparison_only:
+        fail("--depth-override-root is reference-only and requires --comparison-only")
+    if depth_override_root and depth_reuse_interval == 1:
+        fail("--depth-override-root requires --depth-every greater than 1")
 
     exe = os.path.join(args.build_dir, "sunshine.exe")
     default_clips, default_baselines = suite_defaults(args.suite)
@@ -268,6 +337,9 @@ def main():
         if os.path.isdir(d) and glob.glob(os.path.join(d, "frame_*.*")))
     if not clips:
         fail("no clips in " + clips_dir)
+    depth_override_counts = (validate_depth_override_manifest(
+        depth_override_root, clips_dir, clips, depth_reuse_interval)
+        if depth_override_root else {clip: 0 for clip in clips})
     if not args.update_baselines and not args.comparison_only:
         missing_baselines = [c for c in clips if not os.path.exists(os.path.join(base_dir, c + ".json"))]
         if missing_baselines:
@@ -309,6 +381,7 @@ def main():
         "conf": os.path.relpath(args.conf, REPO),
         "model": expected_model, "profile": expected_config_profile,
         "warp": expected_warp, "literal_bestv2": literal_bestv2,
+        "depth_compensation": depth_compensation,
         "eval_schema": EVAL_SCHEMA, "depth_step": depth_step,
         "depth_reuse_interval": depth_reuse_interval,
         "conf_sha256": conf_sha, "metric_sha256": metric_sha,
@@ -339,12 +412,14 @@ def main():
             fail(f"{clip}: harness did not write contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
         expected_contract = {
-            "schema": 4,
+            "schema": 5,
             "model": expected_model,
             "profile": expected_config_profile,
             "warp": expected_warp,
             "depth_step": depth_step,
             "depth_reuse_interval": depth_reuse_interval,
+            "depth_compensation": depth_compensation,
+            "depth_override_frames": depth_override_counts[clip],
             "literal_bestv2": literal_bestv2,
         }
         mismatched = {key: (expected, contract.get(key))
@@ -354,6 +429,7 @@ def main():
             fail(f"{clip}: harness contract mismatch: {mismatched}")
         clip_meta = {"model": contract["model"], "profile": contract["profile"],
                      "warp": contract["warp"],
+                     "depth_compensation": contract["depth_compensation"],
                      "literal_bestv2": contract["literal_bestv2"]}
 
         # A valid harness result has one source, raw-model, warp-input depth, and SBS artifact for
@@ -422,6 +498,7 @@ def main():
                 "model": expected_model,
                 "eval_schema": EVAL_SCHEMA,
                 "depth_step": meta["depth_step"],
+                "depth_compensation": meta["depth_compensation"],
                 "conf_sha256": conf_sha,
                 "metric_sha256": metric_sha,
             }

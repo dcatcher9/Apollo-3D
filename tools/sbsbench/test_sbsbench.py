@@ -1,10 +1,12 @@
 import io
+import json
 import os
 import sys
 import tarfile
 import tempfile
 import argparse
 import unittest
+from unittest import mock
 import zipfile
 
 import numpy as np
@@ -14,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import audit_depth_transform  # noqa: E402
 import prepare_public_datasets  # noqa: E402
 import run_eval  # noqa: E402
+import rescore_run  # noqa: E402
 import sbsbench  # noqa: E402
 
 
@@ -219,12 +222,19 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
+        self.assertIn('"  \\"schema\\": 5,\\n"', harness)
+        self.assertIn('\\"depth_override_frames\\"', harness)
 
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
                   encoding="utf-8") as fh:
             evaluator = fh.read()
         self.assertIn('contract_path = os.path.join(out_dir, "contract.json")', evaluator)
         self.assertNotIn("profile ([a-z0-9_-]+)", evaluator)
+
+        with open(os.path.join(repo, "tools", "sbsbench", "vd3d_reference.py"),
+                  encoding="utf-8") as fh:
+            reference = fh.read()
+        self.assertIn('contract.get("depth_compensation") != "none"', reference)
 
         with open(os.path.join(repo, "src", "stream.cpp"), encoding="utf-8") as fh:
             stream = fh.read()
@@ -244,12 +254,66 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn('a == "--depth-every"', harness)
         self.assertIn("est.geometry_updated = false", harness)
+        self.assertIn('a == "--depth-override-root"', harness)
+        self.assertIn("depth_compensation", harness)
+        with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
+                  encoding="utf-8") as fh:
+            evaluator = fh.read()
+        self.assertIn('"depth_compensation": depth_compensation', evaluator)
         self.assertIn("depth_reuse_interval", harness)
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
                   encoding="utf-8") as fh:
             evaluator = fh.read()
         self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
         self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
+        self.assertIn('"schema": 5', evaluator)
+        self.assertIn('depth_override_root and not args.comparison_only', evaluator)
+
+    def test_depth_override_manifest_requires_exact_frames_and_source_hash(self):
+        with tempfile.TemporaryDirectory() as root:
+            clips_root = os.path.join(root, "clips")
+            clip_dir = os.path.join(clips_root, "sample")
+            override_root = os.path.join(root, "override")
+            override_clip = os.path.join(override_root, "sample")
+            os.makedirs(clip_dir)
+            os.makedirs(override_clip)
+            for frame_id in range(3):
+                Image.fromarray(np.full((8, 12, 3), frame_id, np.uint8)).save(
+                    os.path.join(clip_dir, f"frame_{frame_id:05d}.png"))
+            Image.fromarray(np.full((4, 6), 32768, np.uint16)).save(
+                os.path.join(override_clip, "depth_00001.png"))
+            manifest = {
+                "schema": 2,
+                "method": "classical-tile-phase-flow",
+                "depth_every": 2,
+                "clips": {"sample": {
+                    "held_frames": 1,
+                    "held_frame_ids": [1],
+                    "clip_sha1": run_eval.sha1_dir(clip_dir),
+                }},
+            }
+            with open(os.path.join(override_root, "manifest.json"), "w",
+                      encoding="utf-8") as fh:
+                json.dump(manifest, fh)
+            self.assertEqual(run_eval.validate_depth_override_manifest(
+                override_root, clips_root, ["sample"], 2), {"sample": 1})
+            os.remove(os.path.join(override_clip, "depth_00001.png"))
+            original_stderr = sys.stderr
+            try:
+                sys.stderr = io.StringIO()
+                with self.assertRaises(SystemExit):
+                    run_eval.validate_depth_override_manifest(
+                        override_root, clips_root, ["sample"], 2)
+            finally:
+                sys.stderr = original_stderr
+
+    def test_rescore_derives_depth_compensation_for_schema_upgrade(self):
+        self.assertEqual(rescore_run.depth_compensation_from_meta({}), "none")
+        self.assertEqual(rescore_run.depth_compensation_from_meta(
+            {"extra_args": ["--depth-override-root", "reference"]}),
+            "external-reference")
+        self.assertEqual(rescore_run.depth_compensation_from_meta(
+            {"depth_compensation": "nvof-1x1"}), "nvof-1x1")
 
     def test_bestv2_sharpen_scales_taps_from_source_to_output_pixels(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -491,6 +555,28 @@ class EvalContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "requires GT optical flow"):
                 sbsbench.measure_sequence(seq, frames)
 
+    def test_public_clip_rejects_missing_required_depth_lag_metric(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            gt_dir = os.path.join(frames, "gt_depth")
+            os.makedirs(seq)
+            os.makedirs(gt_dir)
+            for frame_id in range(2):
+                Image.fromarray(np.zeros((16, 32, 3), np.uint8)).save(
+                    os.path.join(seq, f"sbs_{frame_id:05d}.png"))
+                Image.fromarray(np.full((8, 16), 32768, np.uint16)).save(
+                    os.path.join(seq, f"depth_{frame_id:05d}.png"))
+                Image.fromarray(np.zeros((16, 16, 3), np.uint8)).save(
+                    os.path.join(frames, f"frame_{frame_id:05d}.png"))
+                Image.fromarray(np.full((8, 16), 32768, np.uint16)).save(
+                    os.path.join(gt_dir, f"frame_{frame_id:05d}.png"))
+            with open(os.path.join(frames, "meta.json"), "w", encoding="utf-8") as fh:
+                json.dump({"required_gt_depth": True, "gt_depth_kind": "disparity"}, fh)
+            with mock.patch.object(sbsbench, "depth_ground_truth_lag", return_value=None):
+                with self.assertRaisesRegex(ValueError, "depth_gt_lag_f1_p95"):
+                    sbsbench.measure_sequence(seq, frames)
+
     def test_duplicate_numeric_identity_is_rejected(self):
         with tempfile.TemporaryDirectory() as root:
             Image.fromarray(np.zeros((2, 2), dtype=np.uint8)).save(os.path.join(root, "frame_1.png"))
@@ -695,6 +781,16 @@ class EvalContractTests(unittest.TestCase):
         self.assertGreater(metrics["depth_gt_si_rmse"], 20.0)
         self.assertLess(metrics["depth_gt_edge_f1"], 1.0)
 
+    def test_ground_truth_depth_lag_detects_previous_frame_geometry(self):
+        previous = np.zeros((32, 48), np.float32)
+        previous[8:24, 8:20] = 1.0
+        current = np.zeros_like(previous)
+        current[8:24, 18:30] = 1.0
+        self.assertGreater(
+            sbsbench.depth_ground_truth_lag(previous, current, previous), 50.0)
+        self.assertEqual(
+            sbsbench.depth_ground_truth_lag(current, current, previous), 0.0)
+
     def test_ground_truth_edge_tolerance_works_in_both_axes(self):
         gt = np.full((96, 160), 0.25, np.float32)
         gt[48:, :] = 0.75
@@ -727,6 +823,16 @@ class EvalContractTests(unittest.TestCase):
         self.assertGreater(support, 0.8)
         self.assertLess(stable, 2.0)
         self.assertGreater(unstable, stable + 100.0)
+
+    def test_nearest_flow_warp_preserves_depth_steps(self):
+        previous = np.zeros((16, 24), np.float32)
+        previous[:, 8:] = 1.0
+        u = np.full_like(previous, 3.0)
+        v = np.zeros_like(previous)
+        warped, valid = sbsbench.warp_previous_nearest_with_flow(previous, u, v)
+        self.assertTrue(valid[:, 3:].all())
+        self.assertEqual(set(np.unique(warped)), {0.0, 1.0})
+        self.assertTrue((warped[:, 11:] == 1.0).all())
 
     def test_exact_forward_flow_temporal_metric_compensates_motion(self):
         rng = np.random.default_rng(71)

@@ -16,6 +16,19 @@ import run_eval  # noqa: E402
 import sbsbench  # noqa: E402
 
 
+def depth_compensation_from_meta(meta):
+    """Preserve or derive the explicit schema-13 depth-compensation contract."""
+    value = meta.get("depth_compensation")
+    if value in ("none", "external-reference", "nvof-1x1"):
+        return value
+    extra_args = meta.get("extra_args") or []
+    if "--depth-override-root" in extra_args:
+        return "external-reference"
+    if "--depth-motion-compensation" in extra_args:
+        return "nvof-1x1"
+    return "none"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("run_dir", help="sbs_eval run containing results.json and per-clip artifacts")
@@ -52,6 +65,10 @@ def main():
         os.path.join(SCRIPT_DIR, "sbsbench.py"), os.path.join(SCRIPT_DIR, "thresholds.json"),
         os.path.join(SCRIPT_DIR, "run_eval.py")])
     data["meta"]["eval_schema"] = run_eval.EVAL_SCHEMA
+    depth_compensation = depth_compensation_from_meta(data.get("meta", {}))
+    data["meta"]["depth_compensation"] = depth_compensation
+    for entry in data["clips"].values():
+        entry.setdefault("meta", {})["depth_compensation"] = depth_compensation
     data["meta"]["clip_set_sha1"] = {
         clip: run_eval.sha1_dir(os.path.join(args.clips_root, clip)) for clip in data["clips"]}
     out = result_path if args.in_place else os.path.join(args.run_dir, "results.rescored.json")

@@ -58,12 +58,12 @@
     "score": 69.7
   },
   "perf_ms": {
-    "depth_infer": 2.15968,
-    "sbs_composite_cpu": 0.0058,
-    "warp_infer": 0.131328
+    "depth_infer": 2.00749,
+    "sbs_composite_cpu": 0.0072,
+    "warp_infer": 0.130944
   },
   "meta": {
-    "git_sha": "23b1673e",
+    "git_sha": "d4ba47b8",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -87,14 +87,15 @@
     "profile": "apollo",
     "warp": "apollo",
     "literal_bestv2": false,
-    "eval_schema": 12,
+    "depth_compensation": "none",
+    "eval_schema": 13,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "f35ae50931cfb1db",
+    "metric_sha256": "84e0167a1f5bca85",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T12:26:43",
-    "run_name": "review-fix-apollo-core-clean",
+    "timestamp": "2026-07-12T16:02:11",
+    "run_name": "evalv13-contract-apollo-core",
     "name": "palace-hall",
     "description": "Robed cultivator bowing in a bright golden palace hall.",
     "clip_sha1": "1ff2aa060c61"

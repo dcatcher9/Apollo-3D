@@ -2,6 +2,7 @@
   "aggregate": {
     "artifact_in_hole_pct": 58.0282044797519,
     "depth_gt_edge_f1": 22.60287633786838,
+    "depth_gt_lag_f1": 0.10960846908835518,
     "depth_gt_si_rmse": 11.53367304801941,
     "depth_spread": 0.7491033722956976,
     "disocc_frac": 0.04275485568576389,
@@ -55,17 +56,19 @@
     "flow_temporal_p95": 13.15589370727539,
     "flow_depth_p50": 19.39475917816162,
     "flow_depth_p95": 41.82639102935791,
+    "depth_gt_lag_f1_p50": 0.0,
+    "depth_gt_lag_f1_p95": 0.0,
     "q_clean": 78.1,
     "q_depth": 48.2,
     "score": 78.1
   },
   "perf_ms": {
-    "depth_infer": 2.06566,
-    "sbs_composite_cpu": 0.0057,
-    "warp_infer": 0.13136
+    "depth_infer": 1.89578,
+    "sbs_composite_cpu": 0.0061,
+    "warp_infer": 0.130976
   },
   "meta": {
-    "git_sha": "23b1673e",
+    "git_sha": "d4ba47b8",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -86,14 +89,15 @@
     "profile": "apollo",
     "warp": "apollo",
     "literal_bestv2": false,
-    "eval_schema": 12,
+    "depth_compensation": "none",
+    "eval_schema": 13,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "f35ae50931cfb1db",
+    "metric_sha256": "84e0167a1f5bca85",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T12:28:26",
-    "run_name": "review-fix-apollo-extended-clean",
+    "timestamp": "2026-07-12T16:04:04",
+    "run_name": "evalv13-contract-apollo-extended",
     "name": "bonn-person-walk",
     "description": "Real registered RGB-D person tracking with body motion and self-occlusion.",
     "dataset": "Bonn RGB-D Dynamic Dataset",

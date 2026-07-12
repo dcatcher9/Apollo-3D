@@ -22,6 +22,8 @@ Metric families:
   image integrity       source; catches missing, black, or collapsed output regions.
   source halo/stretch   Validated silhouette artifacts relative to aligned source structure.
   GT depth accuracy     Scale/shift-invariant RMSE and boundary F1 on clips with gt_depth sidecars.
+  GT depth lag          Whether predicted boundaries match the previous GT frame better than the
+                        current frame, directly detecting held-depth temporal registration.
   flow temporal         Output/depth residual after exact or classical optical-flow compensation.
 
 Usage:
@@ -686,6 +688,20 @@ def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity"):
     return {"depth_gt_si_rmse": si_rmse, "depth_gt_edge_f1": edge_f1}
 
 
+def depth_ground_truth_lag(prediction, ground_truth, previous_ground_truth, kind="disparity"):
+    """Positive boundary-F1 advantage for the previous GT frame over the current GT frame.
+
+    Current depth should match current-frame geometry at least as well as the previous frame.
+    Held depth on moving content instead matches the previous silhouette better. Clamp at zero
+    so unrelated prediction noise cannot cancel real lag in other frames.
+    """
+    current = depth_ground_truth_metrics(prediction, ground_truth, kind)
+    previous = depth_ground_truth_metrics(prediction, previous_ground_truth, kind)
+    if current is None or previous is None:
+        return None
+    return max(0.0, previous["depth_gt_edge_f1"] - current["depth_gt_edge_f1"])
+
+
 def static_region_mask(src, prev_src, ew, eh, motion_threshold=3.0 / 255.0):
     """Source-static eye-resolution mask with disparity-radius exclusion around motion."""
     now = resize_to(src, ew, eh)
@@ -773,6 +789,22 @@ def warp_previous_with_flow(previous, u, v):
                + (1 - wx) * wy * previous[y1, x0]
                + wx * wy * previous[y1, x1])
     return sampled.astype(np.float32), valid
+
+
+def warp_previous_nearest_with_flow(previous, u, v):
+    """Edge-preserving nearest sample of a previous scalar field into current coordinates.
+
+    Color/photometric validation benefits from bilinear filtering, but applying it to depth
+    invents intermediate values at silhouettes and widens warp halos. A live depth-transport
+    shader can implement this exact point-sampled operation cheaply.
+    """
+    h, w = previous.shape
+    yy, xx = np.mgrid[:h, :w].astype(np.float32)
+    sx, sy = xx - u, yy - v
+    valid = (sx >= 0) & (sx <= w - 1) & (sy >= 0) & (sy <= h - 1)
+    xi = np.rint(np.clip(sx, 0, w - 1)).astype(np.int32)
+    yi = np.rint(np.clip(sy, 0, h - 1)).astype(np.int32)
+    return previous[yi, xi].astype(np.float32), valid
 
 
 def resize_forward_flow_to_current(flow, valid, width, height):
@@ -1047,8 +1079,8 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
     if require_gt_flow and not flow_by_id:
         raise ValueError("clip requires GT optical flow, but no gt_flow sidecars were found")
     rows, flicks, bflicks, swims, static_jitters = [], [], [], [], []
-    flow_temporals, flow_depths = [], []
-    prev_sbs = prev_left = prev_right = prev_depth = prev_src = None
+    flow_temporals, flow_depths, depth_gt_lags = [], [], []
+    prev_sbs = prev_left = prev_right = prev_depth = prev_src = prev_gt_depth = None
     for frame_id in frame_ids:
         p = sbs_by_id[frame_id]
         depth = load_depth(depth_by_id[frame_id]) if frame_id in depth_by_id else None
@@ -1099,8 +1131,14 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
                 if flow_depth is not None:
                     row["flow_depth"] = flow_depth
                     flow_depths.append(flow_depth)
+            if depth is not None and gt_depth is not None and prev_gt_depth is not None:
+                depth_gt_lag = depth_ground_truth_lag(depth, gt_depth, prev_gt_depth, gt_kind)
+                if depth_gt_lag is not None:
+                    row["depth_gt_lag_f1"] = depth_gt_lag
+                    depth_gt_lags.append(depth_gt_lag)
         rows.append(row)
-        prev_sbs, prev_left, prev_right, prev_depth, prev_src = sbs, left, right, depth, src
+        prev_sbs, prev_left, prev_right = sbs, left, right
+        prev_depth, prev_src, prev_gt_depth = depth, src, gt_depth
     agg = aggregate(rows)
     for name, vals in [("flicker", flicks), ("flicker_disocc", bflicks), ("swim", swims)]:
         if vals:
@@ -1113,9 +1151,14 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         if vals:
             agg[name + "_p50"] = float(np.percentile(vals, 50))
             agg[name + "_p95"] = float(np.percentile(vals, 95))
+    if depth_gt_lags:
+        agg["depth_gt_lag_f1_p50"] = float(np.percentile(depth_gt_lags, 50))
+        agg["depth_gt_lag_f1_p95"] = float(np.percentile(depth_gt_lags, 95))
     agg.update(sbs_score(agg, expected_flat=expected_flat))
     if require_gt_depth:
         missing = [k for k in ("depth_gt_si_rmse", "depth_gt_edge_f1") if k not in agg]
+        if len(frame_ids) > 1 and "depth_gt_lag_f1_p95" not in agg:
+            missing.append("depth_gt_lag_f1_p95")
         if missing:
             raise ValueError(f"required GT-depth metrics unavailable: {missing}")
     if require_gt_flow and "flow_temporal_p95" not in agg:
@@ -1263,10 +1306,12 @@ def aggregate(rows):
 FMT = ["pop_spread_px", "positive_disparity_pct", "negative_disparity_pct", "vmisalign_px",
        "source_coverage_pct", "image_integrity_pct", "source_halo_p95", "source_stretch_pct"]
 SEQ_FMT = ["pop_spread_px", "source_residual_p95", "source_halo_p95", "source_stretch_pct",
-           "static_jitter_p95", "flow_temporal_p95", "depth_gt_si_rmse", "depth_gt_edge_f1"]
+           "static_jitter_p95", "flow_temporal_p95", "depth_gt_si_rmse", "depth_gt_edge_f1",
+           "depth_gt_lag_f1_p95"]
 TEMPORAL_KEYS = ["flicker_p50", "flicker_p95", "flicker_disocc_p50", "flicker_disocc_p95",
                  "swim_p50", "swim_p95", "static_jitter_p50", "static_jitter_p95",
-                 "flow_temporal_p50", "flow_temporal_p95", "flow_depth_p50", "flow_depth_p95"]
+                 "flow_temporal_p50", "flow_temporal_p95", "flow_depth_p50", "flow_depth_p95",
+                 "depth_gt_lag_f1_p50", "depth_gt_lag_f1_p95"]
 
 
 def print_table(rows, agg, fmt=FMT):

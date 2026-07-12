@@ -111,6 +111,7 @@ COLS = [
     ("flow_temporal_p95", "flow_temporal", True, True, 0),
     ("depth_gt_si_rmse", "gt_depth_rmse", True, True, 0),
     ("depth_gt_edge_f1", "gt_edge_f1", False, True, 0),
+    ("depth_gt_lag_f1_p95", "gt_depth_lag", True, True, 0),
     ("positive_disparity_pct", "disp_positive", True, True, 0),
     ("negative_disparity_pct", "disp_negative", True, True, 0),
     ("source_coverage_pct", "coverage", False, True, 0),
@@ -349,6 +350,53 @@ def ground_truth_depth_evidence(clip, idx):
     return tuple(durl(im, w=380, jpg=True, q=88) for im in images)
 
 
+def ground_truth_lag_evidence(clip, idx):
+    """Previous/current GT beside aligned control/treatment depth for lag validation."""
+    if idx <= 0:
+        return None
+    previous_path, current_path = gt_depth_path(clip, idx - 1), gt_depth_path(clip, idx)
+    control_path = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
+    treatment_path = os.path.join(treat_dir, clip, f"depth_{idx:05d}.png")
+    if not previous_path or not current_path or not all(
+            os.path.exists(p) for p in (control_path, treatment_path)):
+        return None
+    control, treatment = load_depth(control_path), load_depth(treatment_path)
+    kind = CTRL["clips"].get(clip, {}).get("meta", {}).get("gt_depth_kind", "disparity")
+
+    def target_depth(path):
+        ground_truth = load_depth(path)
+        if kind in ("metric", "depth"):
+            ground_truth, valid = sbsbench.resize_metric_depth(
+                ground_truth, control.shape[1], control.shape[0])
+            target = np.zeros_like(ground_truth)
+            target[valid] = 1.0 / ground_truth[valid]
+            return target, valid
+        target = sbsbench.resize_depth(ground_truth, control.shape[1], control.shape[0])
+        valid = np.isfinite(target) & (target >= 0.0)
+        return target, valid
+
+    previous, previous_valid = target_depth(previous_path)
+    current, current_valid = target_depth(current_path)
+    if treatment.shape != control.shape:
+        treatment = sbsbench.resize_depth(treatment, control.shape[1], control.shape[0])
+    control_aligned = sbsbench.align_relative_depth(control, current, current_valid)[0]
+    treatment_aligned = sbsbench.align_relative_depth(treatment, current, current_valid)[0]
+    combined = np.concatenate((previous[previous_valid], current[current_valid]))
+    lo, hi = np.percentile(combined, (1, 99))
+    if hi - lo < 1e-4:
+        lo, hi = 0.0, 1.0
+
+    def image_for(values, valid):
+        shown = np.where(valid, values, lo)
+        gray = np.clip((shown - lo) / (hi - lo), 0, 1)
+        return Image.fromarray((gray * 255).astype(np.uint8))
+
+    images = (image_for(previous, previous_valid), image_for(current, current_valid),
+              image_for(control_aligned, current_valid),
+              image_for(treatment_aligned, current_valid))
+    return tuple(durl(image, w=380, jpg=True, q=88) for image in images)
+
+
 def flow_temporal_evidence(clip, idx):
     """Source-flow-compensated temporal residual for both runs and signed treatment delta."""
     if idx <= 0:
@@ -426,6 +474,8 @@ def visual_evidence_images(clip, idx, metric=None):
         return flow_temporal_evidence(clip, idx)
     if metric in ("depth_gt_si_rmse", "depth_gt_edge_f1"):
         return ground_truth_depth_evidence(clip, idx)
+    if metric == "depth_gt_lag_f1_p95":
+        return ground_truth_lag_evidence(clip, idx)
     if metric == "pop_spread_px":
         cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
         dp = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
@@ -600,6 +650,8 @@ RADAR_GROUPS = [
          "reference": 50.0, "unit": "%"},
         {"key": "depth_gt_edge_f1", "label": "GT boundaries", "better": "higher",
          "reference": 100.0, "unit": "%"},
+        {"key": "depth_gt_lag_f1_p95", "label": "GT depth timing", "better": "lower",
+         "reference": 50.0, "unit": " F1"},
         {"key": "flow_depth_p95", "label": "Flow depth stability", "better": "lower",
          "reference": 75.0, "unit": " /255"},
     ]),
@@ -828,6 +880,10 @@ METRIC_DEFS = [
      "gt_edge_f1",
      "Depth-boundary F1 against committed ground truth with one-pixel tolerance.",
      "higher = more accurate boundaries"),
+    ("depth_gt_lag_f1_p95",
+     "gt_depth_lag",
+     "P95 amount by which predicted depth boundaries match the previous GT frame better than the current frame. Positive values directly indicate held/stale depth on moving geometry.",
+     "lower = less one-frame depth lag"),
     ("flow_depth_p95",
      "flow_depth",
      "Pre-warp depth change after source optical-flow compensation, on photometrically reliable support.",
@@ -1037,6 +1093,7 @@ def _evidence_card(item, kind, axis=None):
            else "evidence-noise")
     badge = kind.replace("_", " ")
     is_gt = metric in ("depth_gt_si_rmse", "depth_gt_edge_f1")
+    is_gt_lag = metric == "depth_gt_lag_f1_p95"
     source_label = ("source · bright = evaluated static region" if metric == "static_jitter_p95"
                     else "source · bright = reliable optical flow" if metric == "flow_temporal_p95"
                     else "ground-truth depth" if is_gt else "source")
@@ -1048,7 +1105,14 @@ def _evidence_card(item, kind, axis=None):
                    f"{TREAT_TAG} · flow residual" if metric == "flow_temporal_p95" else
                    f"{TREAT_TAG} · aligned depth" if is_gt else
                    f"{TREAT_TAG} · left | right" if metric == "pop_spread_px" else TREAT_TAG)
-    panels = (f'<div class="triplet"><figure><span class="tag">{source_label}</span><img src="{imgs[0]}"></figure>'
+    if is_gt_lag and len(imgs) == 4:
+        panels = (f'<div class="quad"><figure><span class="tag">previous ground-truth depth</span>'
+                  f'<img src="{imgs[0]}"></figure><figure><span class="tag">current ground-truth depth</span>'
+                  f'<img src="{imgs[1]}"></figure><figure><span class="tag">{CTRL_TAG} &middot; aligned depth</span>'
+                  f'<img src="{imgs[2]}"></figure><figure><span class="tag t-treat">{TREAT_TAG} &middot; aligned depth</span>'
+                  f'<img src="{imgs[3]}"></figure></div>')
+    else:
+        panels = (f'<div class="quad"><figure><span class="tag">{source_label}</span><img src="{imgs[0]}"></figure>'
               f'<figure><span class="tag">{ctrl_label}</span><img src="{imgs[1]}"></figure>'
               f'<figure><span class="tag t-treat">{treat_label}</span><img src="{imgs[2]}"></figure>'
               f'<figure><span class="tag t-diff">delta: red worse / blue better</span>'
@@ -1092,7 +1156,8 @@ def visual_evidence_section():
     """Show one representative example for every validated primary quality axis."""
     axes = (("Stereo volume", ("pop_spread_px",)),
             ("Warp fidelity", ("source_residual_p95", "source_halo_p95", "source_stretch_pct")),
-            ("Temporal stability", ("static_jitter_p95", "flow_temporal_p95")),
+            ("Temporal stability", ("static_jitter_p95", "flow_temporal_p95",
+                                     "depth_gt_lag_f1_p95")),
             ("Ground-truth depth", ("depth_gt_si_rmse", "depth_gt_edge_f1")))
     cards = []
     for axis, metrics in axes:
@@ -1359,14 +1424,15 @@ td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .source-card img{width:100%;display:block;border-radius:8px;border:1px solid var(--line)}.source-card p{font-size:13.5px;color:var(--muted);margin:6px 0 0}.source-card .ic-head{margin:0}
 .axis-label{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--accent);padding-right:4px}
 .triplet{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
-.triplet figure{margin:0;position:relative}.triplet img{width:100%;border-radius:8px;border:1px solid var(--line);display:block}
+.quad{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.triplet figure,.quad figure{margin:0;position:relative}.triplet img,.quad img{width:100%;border-radius:8px;border:1px solid var(--line);display:block}
 .tag.t-diff{color:var(--accent)}
 .tag{position:absolute;top:8px;left:8px;font-family:var(--mono);font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;background:color-mix(in srgb,var(--bg) 82%,transparent);border:1px solid var(--line);color:var(--ink)}
 .tag.t-treat{color:var(--warn)}
 pre{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:16px;overflow-x:auto;color:var(--ink);line-height:1.7}
 code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);padding:1px 6px;border-radius:5px}
 @media (max-width:900px){.radar-grid{grid-template-columns:1fr 1fr}.radar-card:last-child{grid-column:1/-1;max-width:480px}.chart-grid{grid-template-columns:1fr}}
-@media (max-width:640px){.radar-grid{grid-template-columns:1fr}.radar-card:last-child{grid-column:auto;max-width:none}.hard-card,.source-card{grid-template-columns:1fr}.pair,.triplet{grid-template-columns:1fr}.bar-row{grid-template-columns:88px minmax(110px,1fr) 62px}h1{font-size:28px}}
+@media (max-width:640px){.radar-grid{grid-template-columns:1fr}.radar-card:last-child{grid-column:auto;max-width:none}.hard-card,.source-card{grid-template-columns:1fr}.pair,.triplet,.quad{grid-template-columns:1fr}.bar-row{grid-template-columns:88px minmax(110px,1fr) 62px}h1{font-size:28px}}
 </style>
 
 <div class="wrap">

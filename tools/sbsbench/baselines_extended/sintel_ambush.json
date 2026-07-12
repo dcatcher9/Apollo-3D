@@ -2,6 +2,7 @@
   "aggregate": {
     "artifact_in_hole_pct": 31.876526251526254,
     "depth_gt_edge_f1": 38.342500877570025,
+    "depth_gt_lag_f1": 0.9646869076564867,
     "depth_gt_si_rmse": 18.22226806481679,
     "depth_spread": 0.8455533621211847,
     "disocc_frac": 0.06224102055260894,
@@ -55,17 +56,19 @@
     "flow_temporal_p95": 9.45105686187744,
     "flow_depth_p50": 32.0991325378418,
     "flow_depth_p95": 62.31796798706055,
+    "depth_gt_lag_f1_p50": 0.0,
+    "depth_gt_lag_f1_p95": 5.737704064028062,
     "q_clean": 82.2,
     "q_depth": 52.0,
     "score": 82.2
   },
   "perf_ms": {
-    "depth_infer": 3.1991,
-    "sbs_composite_cpu": 0.0056,
-    "warp_infer": 0.109216
+    "depth_infer": 2.85466,
+    "sbs_composite_cpu": 0.0073,
+    "warp_infer": 0.108704
   },
   "meta": {
-    "git_sha": "23b1673e",
+    "git_sha": "d4ba47b8",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -86,14 +89,15 @@
     "profile": "apollo",
     "warp": "apollo",
     "literal_bestv2": false,
-    "eval_schema": 12,
+    "depth_compensation": "none",
+    "eval_schema": 13,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "f35ae50931cfb1db",
+    "metric_sha256": "84e0167a1f5bca85",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T12:28:26",
-    "run_name": "review-fix-apollo-extended-clean",
+    "timestamp": "2026-07-12T16:04:04",
+    "run_name": "evalv13-contract-apollo-extended",
     "name": "sintel-ambush",
     "description": "Cinematic non-rigid action, layered silhouettes and rapid motion.",
     "dataset": "MPI Sintel Stereo Training Dataset",

@@ -215,6 +215,50 @@ namespace sbs_bench {
       return SUCCEEDED(conv->CopyPixels(nullptr, out.w * 4, (UINT) out.bgra.size(), out.bgra.data()));
     }
 
+    bool load_depth_texture(ID3D11Device *dev, const fs::path &path,
+                            ComPtr<ID3D11Texture2D> &texture,
+                            ComPtr<ID3D11ShaderResourceView> &srv) {
+      ComPtr<IWICBitmapDecoder> dec;
+      if (FAILED(g_wic->CreateDecoderFromFilename(path.wstring().c_str(), nullptr, GENERIC_READ,
+                                                   WICDecodeMetadataCacheOnDemand, &dec))) {
+        return false;
+      }
+      ComPtr<IWICBitmapFrameDecode> frame;
+      ComPtr<IWICFormatConverter> conv;
+      if (FAILED(dec->GetFrame(0, &frame)) || FAILED(g_wic->CreateFormatConverter(&conv)) ||
+          FAILED(conv->Initialize(frame.Get(), GUID_WICPixelFormat16bppGray,
+                                  WICBitmapDitherTypeNone, nullptr, 0.0,
+                                  WICBitmapPaletteTypeCustom))) {
+        return false;
+      }
+      UINT width = 0, height = 0;
+      if (FAILED(conv->GetSize(&width, &height)) || !width || !height) {
+        return false;
+      }
+      std::vector<uint16_t> gray((size_t) width * height);
+      if (FAILED(conv->CopyPixels(nullptr, width * sizeof(uint16_t),
+                                  (UINT) (gray.size() * sizeof(uint16_t)),
+                                  (BYTE *) gray.data()))) {
+        return false;
+      }
+      std::vector<float> depth(gray.size());
+      std::transform(gray.begin(), gray.end(), depth.begin(), [](uint16_t value) {
+        return value / 65535.0f;
+      });
+      D3D11_TEXTURE2D_DESC desc = {};
+      desc.Width = width;
+      desc.Height = height;
+      desc.MipLevels = 1;
+      desc.ArraySize = 1;
+      desc.Format = DXGI_FORMAT_R32_FLOAT;
+      desc.SampleDesc.Count = 1;
+      desc.Usage = D3D11_USAGE_IMMUTABLE;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      D3D11_SUBRESOURCE_DATA data = {depth.data(), (UINT) (width * sizeof(float)), 0};
+      return SUCCEEDED(dev->CreateTexture2D(&desc, &data, &texture)) &&
+             SUCCEEDED(dev->CreateShaderResourceView(texture.Get(), nullptr, &srv));
+    }
+
     bool save_png(const fs::path &path, UINT w, UINT h, const std::vector<uint8_t> &bgra) {
       ComPtr<IWICStream> stream;
       if (FAILED(g_wic->CreateStream(&stream))) {
@@ -439,7 +483,7 @@ namespace sbs_bench {
     // ---- argument parsing ----
 
     struct opts {
-      std::string frames, out, model, warp;
+      std::string frames, out, model, warp, depth_override_root;
       int eye_w = 0;  // 0 -> derive from source aspect; set with eye_h to test letterboxing
       int eye_h = 0;  // 0 -> match/derive from the input frame
       double output_scale = 1.0;  // per-eye linear scale vs source; preserves source aspect
@@ -501,6 +545,8 @@ namespace sbs_bench {
           o.output_every = std::max(1, std::stoi(next("--output-every")));
         } else if (a == "--depth-every") {
           o.depth_every = std::stoi(next("--depth-every"));
+        } else if (a == "--depth-override-root") {
+          o.depth_override_root = next("--depth-override-root");
         } else if (a == "--subject-lock") {
           o.subject_lock = std::stod(next("--subject-lock"));
         } else if (a == "--subject-recenter") {
@@ -547,6 +593,10 @@ namespace sbs_bench {
       }
       if (o.depth_every < 1 || o.depth_every > 8) {
         BOOST_LOG(error) << "sbs-bench: --depth-every must be between 1 and 8";
+        return false;
+      }
+      if (!o.depth_override_root.empty() && !fs::is_directory(o.depth_override_root)) {
+        BOOST_LOG(error) << "sbs-bench: --depth-override-root is not a directory";
         return false;
       }
       return true;
@@ -745,12 +795,41 @@ namespace sbs_bench {
     int written = 0;
     models::estimate_result est;
     bool have_depth_result = false;
+    const fs::path depth_override_dir = o.depth_override_root.empty() ? fs::path() :
+                                          fs::path(o.depth_override_root) / fs::path(o.frames).filename();
+    size_t expected_depth_override_frames = 0;
+    size_t applied_depth_override_frames = 0;
+    if (!depth_override_dir.empty()) {
+      if (!fs::is_directory(depth_override_dir)) {
+        BOOST_LOG(error) << "sbs-bench: depth-override clip directory is missing: "
+                         << depth_override_dir;
+        return 7;
+      }
+      for (size_t fi = 0; fi < frames.size(); ++fi) {
+        expected_depth_override_frames += (fi % (size_t) o.depth_every) != 0;
+      }
+      size_t actual_depth_override_frames = 0;
+      for (const auto &entry : fs::directory_iterator(depth_override_dir)) {
+        const auto filename = entry.path().filename().string();
+        if (entry.is_regular_file() && filename.starts_with("depth_") &&
+            entry.path().extension() == ".png") {
+          ++actual_depth_override_frames;
+        }
+      }
+      if (actual_depth_override_frames != expected_depth_override_frames) {
+        BOOST_LOG(error) << "sbs-bench: expected " << expected_depth_override_frames
+                         << " depth overrides in " << depth_override_dir << ", found "
+                         << actual_depth_override_frames;
+        return 7;
+      }
+    }
     for (size_t fi = 0; fi < frames.size(); fi++) {
       rgba_image img;
       if (!load_png(frames[fi], img)) {
         BOOST_LOG(warning) << "sbs-bench: skip " << frames[fi];
         continue;
       }
+      const std::string output_id = frame_id(frames[fi], fi);
 
       // Input texture + SRV.
       D3D11_TEXTURE2D_DESC id = {};
@@ -883,6 +962,25 @@ namespace sbs_bench {
         est.geometry_updated = false;
       }
 
+      // Offline motion-compensation reference: replace only explicitly supplied held-depth
+      // frames, while retaining the estimator's real subject/convergence state and production
+      // warp. This keeps the experiment on the actual shader path without pretending the Python
+      // flow prototype is production code.
+      ComPtr<ID3D11Texture2D> override_depth_texture;
+      ComPtr<ID3D11ShaderResourceView> override_depth_srv;
+      if (!depth_override_dir.empty() && (fi % (size_t) o.depth_every) != 0) {
+        const fs::path override_path = depth_override_dir / ("depth_" + output_id + ".png");
+        if (!fs::exists(override_path) ||
+            !load_depth_texture(dev.Get(), override_path, override_depth_texture,
+                                override_depth_srv)) {
+          BOOST_LOG(error) << "sbs-bench: missing or invalid depth override " << override_path;
+          return 7;
+        }
+        est.depth = override_depth_srv;
+        est.geometry_updated = true;
+        ++applied_depth_override_frames;
+      }
+
       // Sampling output must never sample the depth/EMA/subject pipeline itself. Every source
       // frame above was inferred and consumed; only expensive composite/readback is skipped.
       if ((fi % (size_t) o.output_every) != 0) {
@@ -990,7 +1088,6 @@ namespace sbs_bench {
       ctx->PSSetShaderResources(0, 5, null_srv);
 
       // Readback -> PNG.
-      const std::string output_id = frame_id(frames[fi], fi);
       char mask_name[64];
       snprintf(mask_name, sizeof(mask_name), "warp_mask_%s.png", output_id.c_str());
       dump_bgra8_texture(dev.Get(), ctx.Get(), warp_mask_tex.Get(),
@@ -1049,6 +1146,12 @@ namespace sbs_bench {
       }
     }
 
+    if (applied_depth_override_frames != expected_depth_override_frames) {
+      BOOST_LOG(error) << "sbs-bench: applied " << applied_depth_override_frames
+                       << " of " << expected_depth_override_frames << " expected depth overrides";
+      return 7;
+    }
+
     sbs_perf::dump_json((fs::path(o.out) / "sbs_perf.json").string());
     {
       // Machine-readable execution contract. Evaluation must not scrape human log prose: custom
@@ -1056,7 +1159,7 @@ namespace sbs_bench {
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
-                 << "  \"schema\": 4,\n"
+                 << "  \"schema\": 5,\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
                  << "  \"warp\": " << json_string(sbs_cfg.warp) << ",\n"
@@ -1065,6 +1168,10 @@ namespace sbs_bench {
                                                      "reuse-" + std::to_string(o.depth_every))
                  << ",\n"
                  << "  \"depth_reuse_interval\": " << o.depth_every << ",\n"
+                 << "  \"depth_compensation\": "
+                 << json_string(!o.depth_override_root.empty() ? "external-reference" : "none")
+                 << ",\n"
+                 << "  \"depth_override_frames\": " << applied_depth_override_frames << ",\n"
                  << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n"
                  << "  \"warp_mask\": {\"red\": \"forward_disocclusion_before_fill\", "
                     "\"green\": \"unresolved_after_fill\"}\n"

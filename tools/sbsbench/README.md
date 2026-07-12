@@ -84,6 +84,12 @@ Harness A/B levers (after `--extra`):
 - `--literal-bestv2` — comparison-only VD3D-reference mode. It bypasses production resolution,
   aspect, and pop scaling and writes the fact to `contract.json`; never use it for quality gates or
   committed baselines.
+- `--depth-override-root DIR` — comparison-only offline reference that replaces explicitly
+  supplied processed-depth frames while retaining the real subject state and production warp.
+  Generate classical-flow reuse-2 references with `prepare_depth_motion_reference.py`; this is
+  an experiment boundary, not a production feature or a permitted committed baseline. The
+  schema-2 manifest binds the treatment to the exact source hash, cadence and held-frame IDs;
+  missing, extra or stale override frames fail the run before scoring.
 - `--vd3d-forward-blend F` — override the VD3D forward weight (`0.65` in Bestv2; `0` isolates
   its classic backward warp and `1` isolates the forward splat).
 - Bestv2 is the only disparity field. It uses the preset's source-pixel FG/MG/BG shifts
@@ -134,7 +140,7 @@ depth-step floor (flat scenes legitimately read 0), and all pixel windows scale 
 width — but absolute values are still not comparable across clip resolutions; baselines are
 per-clip-set. The harness writes 16-bit depth PNGs so `swim` resolves below 1/255.
 
-**Eval schema 12 correctness contract:** `run_eval.py` pins the model explicitly. By default the
+**Eval schema 13 correctness contract:** `run_eval.py` pins the model explicitly. By default the
 harness submits and consumes exactly one inference per source frame, so EMA and normalization
 update once. `--depth-every N` is an explicit comparison-only cadence treatment: color advances
 while the last completed depth/subject geometry is reused, and the contract records `reuse-N`.
@@ -356,6 +362,7 @@ annotations.
 | `source_coverage_pct` | output patches explainable by horizontally displaced source content | ≥90% hard integrity limit |
 | `image_integrity_pct` | retention of real source texture after alignment | ≥80% hard integrity limit |
 | `depth_spread` | p95−p5 of the normalized depth = pop available at the source | separates flat-model from flat-warp |
+| `depth_gt_lag_f1_p95` | P95 previous-frame GT boundary-F1 advantage over current-frame GT; positive means the depth geometry is temporally stale | lower = less depth-lag ghosting |
 | `disocc_frac` | fraction of the eye in a band beside a real depth silhouette | context for smear (how much was invented) |
 | `disocc_smear` | horizontal-detail deficit in the narrow band: 1 − \|dI/dx\|<sub>band</sub>/\|dI/dx\|<sub>clean</sub> | 0 = clean fill · →1 = smeared (small-scale) |
 | `stretch_area` | the LARGE horizontal disocclusion **stretch band** (bg rubber-banded to fill the gap; eye-asymmetric): area of wide low-horizontal-gradient / vertically-streaked runs anchored to silhouettes, per-mille of the eye | higher = more/bigger smeared patches. Ignores smooth (textureless) stretches |

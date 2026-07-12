@@ -2,6 +2,7 @@
   "aggregate": {
     "artifact_in_hole_pct": 22.48687147475953,
     "depth_gt_edge_f1": 51.564066446346324,
+    "depth_gt_lag_f1": 0.0,
     "depth_gt_si_rmse": 11.584640562534332,
     "depth_spread": 0.8384651939074198,
     "disocc_frac": 0.0673592771515477,
@@ -55,17 +56,19 @@
     "flow_temporal_p95": 7.519407081604004,
     "flow_depth_p50": 17.79598617553711,
     "flow_depth_p95": 43.30925559997558,
+    "depth_gt_lag_f1_p50": 0.0,
+    "depth_gt_lag_f1_p95": 0.0,
     "q_clean": 80.7,
     "q_depth": 35.3,
     "score": 80.7
   },
   "perf_ms": {
-    "depth_infer": 2.09498,
-    "sbs_composite_cpu": 0.0061,
-    "warp_infer": 0.084544
+    "depth_infer": 1.89741,
+    "sbs_composite_cpu": 0.0074,
+    "warp_infer": 0.084064
   },
   "meta": {
-    "git_sha": "23b1673e",
+    "git_sha": "d4ba47b8",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -86,14 +89,15 @@
     "profile": "apollo",
     "warp": "apollo",
     "literal_bestv2": false,
-    "eval_schema": 12,
+    "depth_compensation": "none",
+    "eval_schema": 13,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "f35ae50931cfb1db",
+    "metric_sha256": "84e0167a1f5bca85",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T12:28:26",
-    "run_name": "review-fix-apollo-extended-clean",
+    "timestamp": "2026-07-12T16:04:04",
+    "run_name": "evalv13-contract-apollo-extended",
     "name": "vkitti-drive-clone",
     "description": "Outdoor urban driving with cars, vegetation and exact metric depth.",
     "dataset": "Virtual KITTI 2",
