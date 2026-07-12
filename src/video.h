@@ -29,6 +29,7 @@ namespace video {
     SBS_OFF = 0,  ///< No host depth; encoder emits a plain W x H frame.
     SBS_AI = 1,  ///< Enable the profile-selected AI pipeline; encoder emits 2W x H.
   };
+  constexpr int SBS_MODE_MASK = 0xff;
 
   /* Debug: set true by the 0x3004 "SBS Debug Dump" control message (client button). The next
      SBS convert() in display_vram consumes it (exchange->false) and dumps one frame's source,

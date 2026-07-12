@@ -2514,7 +2514,8 @@ namespace video {
       } else {
         session_config.width = base_width;
       }
-      BOOST_LOG(info) << "Encode session: host SBS mode "sv << current_sbs_mode << ", profile '"sv
+      BOOST_LOG(info) << "Encode session: host SBS mode "sv
+                      << (current_sbs_mode & SBS_MODE_MASK) << ", profile '"sv
                       << session_config.sbs_config.profile << "'"sv
                       << ", output "sv << session_config.width << 'x' << session_config.height;
 

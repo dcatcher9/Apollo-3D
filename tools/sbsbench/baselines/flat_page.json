@@ -49,12 +49,12 @@
     "score": 100.0
   },
   "perf_ms": {
-    "depth_infer": 2.23766,
-    "sbs_composite_cpu": 0.0066,
-    "warp_infer": 0.018272
+    "depth_infer": 2.02336,
+    "sbs_composite_cpu": 0.007,
+    "warp_infer": 0.0184
   },
   "meta": {
-    "git_sha": "8a5564a9",
+    "git_sha": "04c4e9a4",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -77,13 +77,14 @@
     "model": "depth_anything_v2_fp16",
     "profile": "vd3d",
     "warp": "vd3d",
+    "literal_bestv2": false,
     "eval_schema": 9,
     "depth_step": "current-once",
-    "conf_sha256": "9d32d1467ef6e8c2",
-    "metric_sha256": "424bb4a8bb87c29f",
+    "conf_sha256": "4469d2029d2cb95b",
+    "metric_sha256": "6fff1afa14e6eabf",
     "gpu_contention": false,
-    "timestamp": "2026-07-11T23:06:35",
-    "run_name": "vd3d-default-baseline-core",
+    "timestamp": "2026-07-12T00:40:14",
+    "run_name": "aspect-geometry-core",
     "name": "flat_page",
     "description": "Synthetic static document/desktop page: flat-content depth hallucination (A3).",
     "expected_flat": true,

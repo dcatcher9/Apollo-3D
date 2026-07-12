@@ -229,6 +229,14 @@ def compare_warp_depth(apollo_dir, vd3d_dir):
 
 def score(args):
     manifest = json.load(open(os.path.join(args.reference, "reference_manifest.json")))
+    contract_path = os.path.join(args.apollo_out, "contract.json")
+    if not os.path.exists(contract_path):
+        fail("Apollo output lacks contract.json; rerun the harness with --literal-bestv2")
+    contract = json.load(open(contract_path, encoding="utf-8"))
+    if contract.get("schema") != 1 or contract.get("depth_step") != "current-once":
+        fail(f"invalid Apollo harness contract: {contract}")
+    if contract.get("literal_bestv2") is not True:
+        fail("Apollo output used production parallax scaling; Phase-A requires --literal-bestv2")
     for key, hash_key in [("source_video", "source_sha256"), ("vd3d_sbs", "vd3d_sbs_sha256")]:
         path = manifest[key]
         if not os.path.exists(path) or file_sha256(path) != manifest[hash_key]:
@@ -265,7 +273,8 @@ def score(args):
         "psnr_mean": float(np.mean([r["psnr"] for r in pixel_rows])),
         "frames": pixel_rows,
     }
-    out = {"manifest": manifest, "final_sbs_reproduction": final}
+    out = {"manifest": manifest, "apollo_contract": contract,
+           "final_sbs_reproduction": final}
     if args.vd3d_raw:
         out["raw_model_checkpoint"] = compare_raw(args.apollo_out, args.vd3d_raw)
     if args.vd3d_warp_depth:

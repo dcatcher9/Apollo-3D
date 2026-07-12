@@ -53,12 +53,12 @@
     "score": 69.7
   },
   "perf_ms": {
-    "depth_infer": 2.16842,
-    "sbs_composite_cpu": 0.0078,
-    "warp_infer": 0.018432
+    "depth_infer": 2.06326,
+    "sbs_composite_cpu": 0.0066,
+    "warp_infer": 0.018272
   },
   "meta": {
-    "git_sha": "8a5564a9",
+    "git_sha": "04c4e9a4",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -81,13 +81,14 @@
     "model": "depth_anything_v2_fp16",
     "profile": "vd3d",
     "warp": "vd3d",
+    "literal_bestv2": false,
     "eval_schema": 9,
     "depth_step": "current-once",
-    "conf_sha256": "9d32d1467ef6e8c2",
-    "metric_sha256": "424bb4a8bb87c29f",
+    "conf_sha256": "4469d2029d2cb95b",
+    "metric_sha256": "6fff1afa14e6eabf",
     "gpu_contention": false,
-    "timestamp": "2026-07-11T23:06:35",
-    "run_name": "vd3d-default-baseline-core",
+    "timestamp": "2026-07-12T00:40:14",
+    "run_name": "aspect-geometry-core",
     "name": "palace-hall",
     "description": "Robed cultivator bowing in a bright golden palace hall.",
     "clip_sha1": "1ff2aa060c61"

@@ -243,7 +243,7 @@ namespace stream {
   struct control_depth_status_t {
     control_header_v2 header;
 
-    std::uint8_t phase;  // 0 = idle (depth off), 1 = loading (build/load/warmup), 2 = ready (live)
+    std::uint8_t phase;  // 0 idle/failure, 1 engine load/build, 2 ready, 3 device-pipeline init
   };
 #pragma pack(pop)
 
@@ -1165,7 +1165,8 @@ namespace stream {
       }
       std::string_view mode_name = mode == ::video::SBS_OFF ? "OFF"sv : "AI (profile)"sv;
       BOOST_LOG(info) << "type [IDX_SET_SBS_MODE]: client requested host SBS "sv << mode_name
-                      << " ("sv << (int) mode << ") for ["sv << session->device_name << ']';
+                      << " ("sv << (int) mode << ") for ["sv
+                      << session->device_name << ']';
 
       // Turning SBS off tears down the depth estimator with no replacement, so mark the depth
       // engine idle here (display_vram only ever sets loading/ready). This clears any "loading"

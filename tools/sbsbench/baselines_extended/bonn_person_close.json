@@ -52,12 +52,12 @@
     "score": 80.6
   },
   "perf_ms": {
-    "depth_infer": 2.0039,
-    "sbs_composite_cpu": 0.0074,
-    "warp_infer": 0.015744
+    "depth_infer": 1.85782,
+    "sbs_composite_cpu": 0.0063,
+    "warp_infer": 0.015552
   },
   "meta": {
-    "git_sha": "8a5564a9",
+    "git_sha": "04c4e9a4",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -77,13 +77,14 @@
     "model": "depth_anything_v2_fp16",
     "profile": "vd3d",
     "warp": "vd3d",
+    "literal_bestv2": false,
     "eval_schema": 9,
     "depth_step": "current-once",
-    "conf_sha256": "9d32d1467ef6e8c2",
-    "metric_sha256": "424bb4a8bb87c29f",
+    "conf_sha256": "4469d2029d2cb95b",
+    "metric_sha256": "6fff1afa14e6eabf",
     "gpu_contention": false,
-    "timestamp": "2026-07-11T23:08:22",
-    "run_name": "vd3d-default-baseline-extended",
+    "timestamp": "2026-07-12T00:41:39",
+    "run_name": "aspect-geometry-extended",
     "name": "bonn-person-close",
     "description": "Real RGB-D close pass beside robots, emphasizing silhouette and object occlusion.",
     "dataset": "Bonn RGB-D Dynamic Dataset",

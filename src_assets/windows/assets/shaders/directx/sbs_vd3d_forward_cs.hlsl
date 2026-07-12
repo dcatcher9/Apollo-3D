@@ -38,7 +38,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         plane_mask = PlaneLockTexture.SampleLevel(LinearSampler, uv, 0);
     }
     float parallax = DepthParallax(
-        d, plane_mask, uv.x, s0, s1, s2, shaped, (float)source_w, (float)source_h);
+        d, plane_mask, s0, s1, s2, shaped, (float)source_w, (float)source_h);
 
     // Apollo is high=near. Store a 16-bit near priority plus the 16-bit source x; max wins.
     uint depth_key = 1u + (uint)round(saturate(WarpDepth(d, s0, s1, shaped)) * 65533.0f);

@@ -55,12 +55,12 @@
     "score": 80.7
   },
   "perf_ms": {
-    "depth_infer": 1.88464,
-    "sbs_composite_cpu": 0.0066,
-    "warp_infer": 0.01968
+    "depth_infer": 1.87414,
+    "sbs_composite_cpu": 0.006,
+    "warp_infer": 0.019936
   },
   "meta": {
-    "git_sha": "8a5564a9",
+    "git_sha": "04c4e9a4",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -80,13 +80,14 @@
     "model": "depth_anything_v2_fp16",
     "profile": "vd3d",
     "warp": "vd3d",
+    "literal_bestv2": false,
     "eval_schema": 9,
     "depth_step": "current-once",
-    "conf_sha256": "9d32d1467ef6e8c2",
-    "metric_sha256": "424bb4a8bb87c29f",
+    "conf_sha256": "4469d2029d2cb95b",
+    "metric_sha256": "6fff1afa14e6eabf",
     "gpu_contention": false,
-    "timestamp": "2026-07-11T23:08:22",
-    "run_name": "vd3d-default-baseline-extended",
+    "timestamp": "2026-07-12T00:41:39",
+    "run_name": "aspect-geometry-extended",
     "name": "vkitti-drive-clone",
     "description": "Outdoor urban driving with cars, vegetation and exact metric depth.",
     "dataset": "Virtual KITTI 2",

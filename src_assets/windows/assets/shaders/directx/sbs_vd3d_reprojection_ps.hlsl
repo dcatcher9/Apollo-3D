@@ -32,7 +32,9 @@ float4 ForwardColor(uint local_x, uint y, bool right_eye, uint eye_w, uint eye_h
     // Bestv2's fill radius is calibrated in source pixels. Scale it into the output-eye grid so
     // a 5120->4096 capped stream uses 96*.8 ~= 77 output pixels rather than filling 25% farther.
     int radius = clamp((int)round(96.0f * source_to_output *
-                                 Bestv2AspectScale((float)source_w, (float)source_h)), 0, 256);
+                                 Bestv2AspectScale(
+                                     (float)source_w, (float)source_h,
+                                     literal_bestv2)), 0, 256);
 
     // Equivalent to VD3D's iterative nearest-valid fill. At equal distance the first lookup is
     // the preferred background side: +x for left eye, -x for right eye.
@@ -85,7 +87,7 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
         plane_mask = PlaneLockTexture.SampleLevel(LinearSampler, uv, 0);
     }
     float parallax = DepthParallax(
-        d, plane_mask, uv.x, s0, s1, s2, shaped, (float)source_w, (float)source_h);
+        d, plane_mask, s0, s1, s2, shaped, (float)source_w, (float)source_h);
 
     // torch grid_sample uses normalized [-1,1] coordinates; DepthParallax is UV [0,1], hence
     // this is the same left:+shift/right:-shift convention after polarity translation.

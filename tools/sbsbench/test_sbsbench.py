@@ -60,15 +60,15 @@ class EvalContractTests(unittest.TestCase):
 
     def test_custom_profile_values_need_no_evaluator_code_change(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
-            fh.write("sbs_3d_profile = cinema\n"
-                     "sbs_3d_profile_cinema_warp = vd3d\n"
-                     "sbs_3d_profile_cinema_depth_model = da3mono_large_fp16\n")
+            fh.write("sbs_3d_profile = Cinema\n"
+                     "sbs_3d_profile_Cinema_warp = vd3d\n"
+                     "sbs_3d_profile_Cinema_depth_model = da3mono_large_fp16\n")
             path = fh.name
         try:
-            self.assertEqual(run_eval.expected_profile(path, []), ("cinema", "vd3d"))
+            self.assertEqual(run_eval.expected_profile(path, []), ("Cinema", "vd3d"))
             self.assertEqual(run_eval.expected_profile(
-                path, ["--warp", "apollo"]), ("cinema", "apollo"))
-            self.assertEqual(run_eval.expected_depth_model(path, "cinema"),
+                path, ["--warp", "apollo"]), ("Cinema", "apollo"))
+            self.assertEqual(run_eval.expected_depth_model(path, "Cinema"),
                              "da3mono_large_fp16")
         finally:
             os.unlink(path)
@@ -142,6 +142,7 @@ class EvalContractTests(unittest.TestCase):
             text = fh.read()
         self.assertIn("BESTV2_REFERENCE_ASPECT = 5120.0f / 2160.0f", text)
         self.assertIn("BESTV2_REFERENCE_ASPECT / aspect", text)
+        self.assertNotIn("fixed_height", text)
         reference_aspect = 5120.0 / 2160.0
         self.assertAlmostEqual(reference_aspect / (5120.0 / 2160.0), 1.0)
         self.assertAlmostEqual(reference_aspect / (3840.0 / 2160.0), 4.0 / 3.0)
@@ -154,8 +155,8 @@ class EvalContractTests(unittest.TestCase):
         with open(common, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("float pop_strength;", text)
-        self.assertIn("clamp(parallax * pop_strength", text)
-        self.assertIn("pop_strength *\n", text)
+        self.assertIn("float strength = literal_bestv2 > 0.5f ? 1.0f : pop_strength", text)
+        self.assertIn("clamp(parallax * strength", text)
 
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
             config = fh.read()
@@ -168,6 +169,29 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             production = fh.read()
         self.assertIn("(float) sbs_config.pop_strength", production)
+
+    def test_literal_bestv2_is_harness_only_and_machine_verified(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
+                               "include", "sbs_warp_common.hlsl"), encoding="utf-8") as fh:
+            shader = fh.read()
+        self.assertIn("float literal_bestv2;", shader)
+        self.assertIn("literal_mode > 0.5f", shader)
+
+        with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"), encoding="utf-8") as fh:
+            harness = fh.read()
+        self.assertIn('a == "--literal-bestv2"', harness)
+        self.assertIn('fs::path(o.out) / "contract.json"', harness)
+
+        with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
+                  encoding="utf-8") as fh:
+            evaluator = fh.read()
+        self.assertIn('contract_path = os.path.join(out_dir, "contract.json")', evaluator)
+        self.assertNotIn("profile ([a-z0-9_-]+)", evaluator)
+
+        with open(os.path.join(repo, "src", "stream.cpp"), encoding="utf-8") as fh:
+            stream = fh.read()
+        self.assertNotIn("SBS_PRESENTATION_FIXED_HEIGHT", stream)
 
     def test_vd3d_fill_radius_scales_from_source_to_output_pixels(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

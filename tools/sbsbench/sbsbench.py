@@ -176,11 +176,11 @@ REFERENCE_STREAM_ASPECT = 5120.0 / 2160.0
 
 
 def perceived_disparity_pct(disparity_px, eye_width, eye_height):
-    """Disparity as reference-equivalent percent at Artemis's fixed physical panel height.
+    """Disparity as a reference-aspect-equivalent percentage of image geometry.
 
-    Artemis sizes the XR quad width from the requested stream aspect while keeping its default
-    physical height constant. Raw percent-of-width therefore changes meaning with aspect. Convert
-    through eye height and express the result at the validated 5120x2160 reference aspect.
+    Raw percent-of-width changes meaning when the requested image shape changes. Convert through
+    eye height and express the result at the validated 5120x2160 reference aspect. No physical
+    display size or placement is assumed.
     """
     width = max(float(eye_width), 1.0)
     height = max(float(eye_height), 1.0)
@@ -189,7 +189,7 @@ def perceived_disparity_pct(disparity_px, eye_width, eye_height):
 
 
 def comfort_disparity(dxs, wts, eye_width, eye_height, tail=0.99):
-    """Signed disparity tails as reference-equivalent perceived percentages.
+    """Signed disparity tails as reference-aspect-equivalent image percentages.
 
     Physical crossed/uncrossed naming requires a calibrated display convention and headset FOV,
     which the host PNG does not carry. Keep the two signed sides explicit and gate both; this

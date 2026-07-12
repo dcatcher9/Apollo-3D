@@ -380,6 +380,7 @@ namespace sbs_bench {
       double vd3d_forward_blend = -1.0;  // VD3D backward/forward blend override; <0 = conf
       double minmax_ema = -1.0;  // range-bounds EMA new-weight (VD3D DepthPercentileEMA a=0.82 -> 0.18); <0 = conf
       int bestv2_sharpen = -1;  // -1 = conf, 0 = off, 1 = on
+      bool literal_bestv2 = false;  // reference-only: disable production resolution/pop scaling
     };
 
     bool parse_opts(int argc, char **argv, opts &o) {
@@ -439,6 +440,8 @@ namespace sbs_bench {
         } else if (a == "--bestv2-sharpen") {
           std::string v = next("--bestv2-sharpen");
           o.bestv2_sharpen = (v == "off" || v == "0" || v == "false") ? 0 : 1;
+        } else if (a == "--literal-bestv2") {
+          o.literal_bestv2 = true;
         } else {
           BOOST_LOG(error) << "sbs-bench: unknown arg '" << a << "'";
           return false;
@@ -567,7 +570,9 @@ namespace sbs_bench {
                     << "', eye " << (o.eye_w > 0 ? std::to_string(o.eye_w) : "auto") << 'x'
                     << (o.eye_h > 0 ? std::to_string(o.eye_h) : "auto")
                     << ", depth_step current-once, profile " << sbs_cfg.profile
-                    << ", warp " << sbs_cfg.warp << " -> " << o.out;
+                    << ", warp " << sbs_cfg.warp
+                    << ", literal_bestv2 " << (o.literal_bestv2 ? "on" : "off")
+                    << " -> " << o.out;
 
     // ---- D3D device + shaders ----
     ComPtr<ID3D11Device> dev;
@@ -707,7 +712,7 @@ namespace sbs_bench {
         const float content_scale_x = eye_aspect > aspect ? aspect / eye_aspect : 1.0f;
         const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
         const float source_to_output = (float) eye_w * content_scale_x / (float) img.w;
-        float repro_params[16] = {0, 0, 0, 0, 0, 1.0f, (float) sbs_cfg.subject_lock,  // slot retained; Bestv2 subject shaping is permanent
+        float repro_params[16] = {0.0f, 0, 0, 0, 0, 1.0f, (float) sbs_cfg.subject_lock,
                                   sbs_cfg.subject_stretch ? 1.0f : 0.0f,
                                   (float) sbs_cfg.subject_plane_lock,
                                   (float) sbs_cfg.subject_plane_width,
@@ -715,7 +720,7 @@ namespace sbs_bench {
                                   content_scale_y,
                                   (float) sbs_cfg.vd3d_forward_blend,
                                   (float) sbs_cfg.pop_strength,
-                                  0,
+                                  o.literal_bestv2 ? 1.0f : 0.0f,
                                   source_to_output};
         repro_cb = const_buffer(dev.Get(), repro_params);
         float pass_params[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, content_scale_x, content_scale_y, (float) sbs_cfg.vd3d_forward_blend, 1.0f, 0, source_to_output};
@@ -901,6 +906,21 @@ namespace sbs_bench {
     }
 
     sbs_perf::dump_json((fs::path(o.out) / "sbs_perf.json").string());
+    {
+      // Machine-readable execution contract. Evaluation must not scrape human log prose: custom
+      // profile names are case-sensitive and fidelity runs must prove literal Bestv2 was active.
+      std::ofstream contract(fs::path(o.out) / "contract.json");
+      if (contract) {
+        contract << "{\n"
+                 << "  \"schema\": 1,\n"
+                 << "  \"model\": \"" << model.name << "\",\n"
+                 << "  \"profile\": \"" << sbs_cfg.profile << "\",\n"
+                 << "  \"warp\": \"" << sbs_cfg.warp << "\",\n"
+                 << "  \"depth_step\": \"current-once\",\n"
+                 << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false")
+                 << "\n}\n";
+      }
+    }
     if (o.simulate_hdr) {
       std::ofstream stats(fs::path(o.out) / "hdr_output_stats.json");
       if (stats) {

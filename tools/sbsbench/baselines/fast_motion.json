@@ -49,12 +49,12 @@
     "score": 89.5
   },
   "perf_ms": {
-    "depth_infer": 2.06771,
-    "sbs_composite_cpu": 0.0073,
-    "warp_infer": 0.018208
+    "depth_infer": 2.41997,
+    "sbs_composite_cpu": 0.0069,
+    "warp_infer": 0.018304
   },
   "meta": {
-    "git_sha": "8a5564a9",
+    "git_sha": "04c4e9a4",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -77,13 +77,14 @@
     "model": "depth_anything_v2_fp16",
     "profile": "vd3d",
     "warp": "vd3d",
+    "literal_bestv2": false,
     "eval_schema": 9,
     "depth_step": "current-once",
-    "conf_sha256": "9d32d1467ef6e8c2",
-    "metric_sha256": "424bb4a8bb87c29f",
+    "conf_sha256": "4469d2029d2cb95b",
+    "metric_sha256": "6fff1afa14e6eabf",
     "gpu_contention": false,
-    "timestamp": "2026-07-11T23:06:35",
-    "run_name": "vd3d-default-baseline-core",
+    "timestamp": "2026-07-12T00:40:14",
+    "run_name": "aspect-geometry-core",
     "name": "fast_motion",
     "description": "Synthetic textured block crossing a textured background at 30 px/frame: async-depth ghost.",
     "gt_depth_kind": "disparity",

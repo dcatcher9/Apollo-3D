@@ -66,7 +66,8 @@ float2 Reproject(float2 uv, float eyeSign) {
     uint sourceWidth, sourceHeight;
     LeftColorTexture.GetDimensions(sourceWidth, sourceHeight);
 
-    float aspectScale = Bestv2AspectScale((float)sourceWidth, (float)sourceHeight);
+    float aspectScale = Bestv2AspectScale(
+        (float)sourceWidth, (float)sourceHeight, literal_bestv2);
     float searchRadius = shaped ? Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight) : 0.0f;
     if (searchRadius <= 1e-6f) {
         return uv;  // subject state is not initialized yet
@@ -104,7 +105,7 @@ float2 Reproject(float2 uv, float eyeSign) {
         planeMask = PlaneLockTexture.SampleLevel(LinearSampler, uv, 0);
     }
     float prevG = (prevX - uv.x) - eyeSign * DepthParallax(
-        prevD, planeMask, prevX, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight);
+        prevD, planeMask, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
@@ -112,7 +113,7 @@ float2 Reproject(float2 uv, float eyeSign) {
         float x = startX + stepX * i;
         float d = SampleDepth(x, uv.y, ofs);
         float g = (x - uv.x) - eyeSign * DepthParallax(
-            d, planeMask, x, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight);
+            d, planeMask, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight);
 
         // Zero crossing between prevX and x => a source in this span reprojects onto uv.
         if ((prevG <= 0.0f && g >= 0.0f) || (prevG >= 0.0f && g <= 0.0f)) {

@@ -236,6 +236,9 @@ def main():
     args = normalize_cli_paths(ap.parse_args())
     if args.comparison_only and args.update_baselines:
         fail("--comparison-only and --update-baselines are mutually exclusive")
+    literal_bestv2 = "--literal-bestv2" in args.extra
+    if literal_bestv2 and not args.comparison_only:
+        fail("--literal-bestv2 is reference-only and requires --comparison-only")
 
     exe = os.path.join(args.build_dir, "sunshine.exe")
     default_clips, default_baselines = suite_defaults(args.suite)
@@ -284,7 +287,7 @@ def main():
         "extra_args": args.extra,
         "conf": os.path.relpath(args.conf, REPO),
         "model": expected_model, "profile": expected_config_profile,
-        "warp": expected_warp,
+        "warp": expected_warp, "literal_bestv2": literal_bestv2,
         "eval_schema": EVAL_SCHEMA, "depth_step": "current-once",
         "conf_sha256": conf_sha, "metric_sha256": metric_sha,
         "gpu_contention": contention,
@@ -309,23 +312,26 @@ def main():
         if r.returncode != 0 or not glob.glob(os.path.join(out_dir, "sbs_*.png")):
             print(stdout[-2000:])
             fail(f"harness failed on {clip} (exit {r.returncode})")
-        m = re.search(r"model '([^']+)'", stdout)
-        actual_model = m.group(1) if m else None
-        if actual_model != expected_model:
-            fail(f"{clip}: expected model {expected_model!r}, harness reported {actual_model!r}")
-        if "depth_step current-once" not in stdout:
-            fail(f"{clip}: harness did not confirm current-once depth stepping")
-        config_profile_match = re.search(
-            r"depth_step current-once, profile ([a-z0-9_-]+)", stdout)
-        actual_config_profile = config_profile_match.group(1) if config_profile_match else None
-        if actual_config_profile != expected_config_profile:
-            fail(f"{clip}: expected config profile {expected_config_profile!r}, "
-                 f"harness reported {actual_config_profile!r}")
-        warp_match = re.search(r", warp ([a-z0-9_-]+)", stdout)
-        actual_warp = warp_match.group(1) if warp_match else None
-        if actual_warp != expected_warp:
-            fail(f"{clip}: expected warp {expected_warp!r}, harness reported {actual_warp!r}")
-        clip_meta = {"model": actual_model, "profile": actual_config_profile, "warp": actual_warp}
+        contract_path = os.path.join(out_dir, "contract.json")
+        if not os.path.exists(contract_path):
+            fail(f"{clip}: harness did not write contract.json")
+        contract = json.load(open(contract_path, encoding="utf-8"))
+        expected_contract = {
+            "schema": 1,
+            "model": expected_model,
+            "profile": expected_config_profile,
+            "warp": expected_warp,
+            "depth_step": "current-once",
+            "literal_bestv2": literal_bestv2,
+        }
+        mismatched = {key: (expected, contract.get(key))
+                      for key, expected in expected_contract.items()
+                      if contract.get(key) != expected}
+        if mismatched:
+            fail(f"{clip}: harness contract mismatch: {mismatched}")
+        clip_meta = {"model": contract["model"], "profile": contract["profile"],
+                     "warp": contract["warp"],
+                     "literal_bestv2": contract["literal_bestv2"]}
 
         # A valid harness result has one source, raw-model, warp-input depth, and SBS artifact for
         # every numeric frame identity. This catches dropped/renumbered outputs before metrics run.

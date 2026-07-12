@@ -25,7 +25,9 @@ Companion to the validated findings in the sbs-vd3d-port memory and the roadmap 
 > conclusions below where they disagree.
 
 > **Cleanup after revalidation:** Bestv2 is now the only shift field; P2/P98, P5/P95 stretch,
-> 24 probes, 96-source-pixel VD3D fill, and range→pixel EMA ordering are permanent constants.
+> a 24-probe calibration density, 96-source-pixel VD3D fill, and range→pixel EMA ordering are
+> permanent constants. Apollo scales the actual probe count with the production aspect correction
+> (32 at 16:9) so horizontal probe spacing stays constant as the search radius grows.
 > Guided upsample, curvature, scene snap, range/depth floor, border fade, the legacy Apollo shift,
 > and their configuration keys were deleted. Later references to those keys document historical
 > experiments only. Exact plane lock and sharpen remain solely for fidelity evaluation.
@@ -70,6 +72,12 @@ source-pixel units for both warp implementations:
 - subject anchor `.95`, zero-parallax trim `.008`;
 - dynamic convergence `.006` with its `.90` EMA;
 - maximum shift cap `.071`.
+
+Phase-A final-warp runs use the harness-only `--literal-bestv2` contract. This bypasses the later
+854-wide production amplification, Artemis aspect normalization, and user pop multiplier while
+leaving the shipping path unchanged. The harness records the mode in `contract.json`, and
+`vd3d_reference.py score` refuses output that did not use it. Historical reproduction numbers in
+this document apply only to that literal contract.
 
 Fresh comparison-only runs used the identical `bestv2-phase-a.conf` and verified every raw-model
 and pre-warp depth artifact byte-identical across control/treatment and Apollo/VD3D geometry. Mean

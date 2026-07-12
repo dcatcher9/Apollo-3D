@@ -174,12 +174,12 @@ namespace config {
     bool ignore_encoder_probe_failure;
 
     // Real-time 2D->3D side-by-side (SBS) depth reprojection tuning.
-    // Apollo profile defaults live HERE. config.cpp changes only values that differ for another
-    // named profile, then parses explicit sbs_3d_* overrides on top.
+    // Shared/Apollo base values live HERE. config.cpp derives each named profile (including the
+    // default VD3D profile), then parses explicit sbs_3d_* overrides on top.
     struct sbs_t {
       std::string profile = "vd3d";  ///< Quality profile applied before explicit overrides. Custom names use sbs_3d_profile_<name>_<parameter> keys.
       std::string warp = "apollo";  ///< Geometry implementation: "apollo" = occlusion-aware backward probe; "vd3d" = Bestv2 backward/forward hybrid.
-      double pop_strength = 1.25;  ///< Final shared stereo-parallax multiplier (0.25-2). Shared by both validated profiles; 1 is the literal Bestv2 field.
+      double pop_strength = 1.25;  ///< Production stereo-parallax multiplier (0.25-2), shared by both profiles. Literal VD3D reference runs bypass production scaling in the offline harness.
       double ema = 0.5;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
       int depth_short_side = 432;  ///< Depth map short-side resolution, clamped to the frame's native short side. At 16:9 this maps to about 768x432, matching the VisionDepth3D reference input.
       double depth_max_aspect = 4.0;  ///< Aspect-ratio cap (long side <= short * this). Bounds worst-case inference cost on ultrawide.

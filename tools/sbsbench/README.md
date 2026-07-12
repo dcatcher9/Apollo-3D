@@ -49,7 +49,8 @@ clients, which can switch the complete profile atomically during a stream. The c
 a model or individual parameter independently. Each encode device receives an immutable profile
 snapshot, so one stream cannot mix parameters or change another stream's selection.
 
-Wire extensions: `0x3005` selects a UTF-8 profile name,
+Wire extensions: `0x3003` byte 0 selects host SBS mode and byte 1 advertises presentation flags
+(`bytes 1..3` reserved and zero); `0x3005` selects a UTF-8 profile name,
 `0x3007` advertises the current/available names, and `0x3006` remains depth-engine status. Apollo
 precompiles the model referenced by every advertised profile at startup.
 
@@ -75,6 +76,9 @@ Harness A/B levers (after `--extra`):
 - `--pop-strength F` — multiply the final shared stereo-parallax field (`0.25`-`2`; default
   `1.25`). This is the user-facing pop control for both warps. It is separate from the internal
   854-pixel Bestv2 calibration that keeps apparent depth stable across source resolutions.
+- `--literal-bestv2` — comparison-only VD3D-reference mode. It bypasses production resolution,
+  aspect, and pop scaling and writes the fact to `contract.json`; never use it for quality gates or
+  committed baselines.
 - `--vd3d-forward-blend F` — override the VD3D forward weight (`0.65` in Bestv2; `0` isolates
   its classic backward warp and `1` isolates the forward splat).
 - Bestv2 is the only disparity field. It uses the preset's source-pixel FG/MG/BG shifts
@@ -245,11 +249,13 @@ with one update per source frame.
 
 ## Local VD3D Bestv2 reference (media stays local)
 
-`bestv2-phase-a.conf` pins the reproduction candidate. `vd3d_reference.py prepare` extracts and
+`bestv2-phase-a.conf` pins the reproduction candidate; invoke the harness with
+`--literal-bestv2` for its final-warp output. `vd3d_reference.py prepare` extracts and
 hashes the source/Bestv2 render, restores original frame identities, verifies alignment, and keeps
 all source frames so sampling cannot change history. The harness exports exact raw model floats and
 the finalized depth texture immediately before reprojection. `export_vd3d_depth_reference.py`
-produces matching VD3D checkpoints; `vd3d_reference.py score` gates the two depth stages separately
+produces matching VD3D checkpoints; `vd3d_reference.py score` verifies the harness contract and
+gates the two depth stages separately
 from final-warp reproduction. Pixel similarity is never treated as a warp-quality verdict.
 
 Phase-B quality tuning uses `bestv2-apollo-warp.conf` and `bestv2-vd3d-warp.conf`. A processor may
@@ -336,7 +342,7 @@ annotations.
 | metric | meaning | direction |
 |--------|---------|-----------|
 | `pop_px_p50` / `p95` | L↔R horizontal disparity (tile phase-correlation), median & p95 of \|dx\|. REPORTED but NOT gated — subject anchoring legitimately lowers median \|dx\| | higher = more 3D pop |
-| `pop_pct_p50` | same disparity in reference-equivalent perceived % (fixed Artemis panel height, 5120×2160 aspect anchor) | higher = more pop |
+| `pop_pct_p50` | same disparity in reference-aspect-equivalent image % (5120×2160 aspect anchor) | higher = more pop |
 | `pop_spread_px` / `pop_spread_pct` | near-to-far disparity RANGE = weighted p95−p5 of **signed** dx (pixels / reference-equivalent perceived %). The percentage is the client-resolution-independent **gate** and `q_depth` driver; pixels are diagnostic | higher = more volume |
 | `vmisalign_px` / `vmisalign_pct` | median vertical L↔R offset in pixels / % eye height. The percentage is the resolution-independent hard gate | must remain ≤0.1% eye height |
 | `positive_disparity_pct` / `negative_disparity_pct` | signed weighted p99 disparity tails in reference-equivalent perceived % | each must remain ≤3% |

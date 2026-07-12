@@ -46,7 +46,11 @@ static Logger gLogger;
 static std::mutex g_engine_build_status_mutex;
 static std::map<std::string, models::engine_build_status> g_engine_build_status;
 static std::mutex g_depth_shader_cache_mutex;
-static std::map<std::filesystem::path, std::vector<std::uint8_t>> g_depth_shader_cache;
+struct depth_shader_cache_entry {
+  std::filesystem::file_time_type modified;
+  std::vector<std::uint8_t> bytecode;
+};
+static std::map<std::filesystem::path, depth_shader_cache_entry> g_depth_shader_cache;
 
 static void set_engine_build_status(const std::string &engine_name, models::engine_build_status status) {
   std::lock_guard<std::mutex> lock(g_engine_build_status_mutex);
@@ -57,13 +61,18 @@ static bool depth_shader_bytecode(
   const std::filesystem::path &path,
   std::vector<std::uint8_t> &bytecode
 ) {
-  // D3D shader bytecode is device-independent. Mode switches recreate the encoder's D3D device,
-  // but recompiling the same twelve source files can intermittently take tens of seconds. Cache
-  // the blobs for the process lifetime and only create the lightweight device-specific shaders.
-  std::lock_guard<std::mutex> lock(g_depth_shader_cache_mutex);
-  if (auto it = g_depth_shader_cache.find(path); it != g_depth_shader_cache.end()) {
-    bytecode = it->second;
-    return true;
+  // D3D shader bytecode is device-independent. Cache blobs across device recreation, but compare
+  // source mtimes so a newly created estimator sees an edit without restarting. Never hold the
+  // global map lock across D3DCompileFromFile: unrelated estimators may initialize concurrently.
+  std::error_code ec;
+  const auto modified = std::filesystem::last_write_time(path, ec);
+  {
+    std::lock_guard<std::mutex> lock(g_depth_shader_cache_mutex);
+    if (auto it = g_depth_shader_cache.find(path);
+        it != g_depth_shader_cache.end() && !ec && it->second.modified == modified) {
+      bytecode = it->second.bytecode;
+      return true;
+    }
   }
 
   Microsoft::WRL::ComPtr<ID3DBlob> blob;
@@ -87,7 +96,10 @@ static bool depth_shader_bytecode(
   }
   auto *begin = static_cast<const std::uint8_t *>(blob->GetBufferPointer());
   bytecode.assign(begin, begin + blob->GetBufferSize());
-  g_depth_shader_cache.emplace(path, bytecode);
+  if (!ec) {
+    std::lock_guard<std::mutex> lock(g_depth_shader_cache_mutex);
+    g_depth_shader_cache.insert_or_assign(path, depth_shader_cache_entry {modified, bytecode});
+  }
   return true;
 }
 

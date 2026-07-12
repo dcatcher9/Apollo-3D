@@ -14,7 +14,8 @@ experiments and their evidence are recorded in `sbs-feature-decision-revisit.md`
 5. Apply per-pixel depth EMA, permanent Bestv2 subject estimation, P5/P95 stretch/recenter, and
    optional exact subject-plane lock.
 6. Render either:
-   - `apollo`: 24-step occlusion-aware backward probe;
+   - `apollo`: occlusion-aware backward probe with 24-step calibration density (32 probes at 16:9
+     after aspect correction, preserving horizontal sample spacing);
    - `vd3d`: depth-ordered forward splat blended with the VD3D backward warp.
 7. Convert the final packed SBS raster directly to the encoder format. When doubled width exceeds
    `sbs_3d_max_encode_width`, the packed raster is downscaled while preserving each eye's aspect.
