@@ -21,6 +21,7 @@
   #include <fstream>
   #include <limits>
   #include <string>
+  #include <string_view>
   #include <thread>
   #include <vector>
 
@@ -54,6 +55,49 @@ namespace sbs_bench {
       UINT w = 0, h = 0;
       std::vector<uint8_t> bgra;  // tightly packed B,G,R,A rows, top-to-bottom
     };
+
+    std::string json_string(std::string_view value) {
+      static constexpr char hex[] = "0123456789abcdef";
+      std::string escaped;
+      escaped.reserve(value.size() + 2);
+      escaped.push_back('"');
+      for (unsigned char c : value) {
+        switch (c) {
+          case '"':
+            escaped += "\\\"";
+            break;
+          case '\\':
+            escaped += "\\\\";
+            break;
+          case '\b':
+            escaped += "\\b";
+            break;
+          case '\f':
+            escaped += "\\f";
+            break;
+          case '\n':
+            escaped += "\\n";
+            break;
+          case '\r':
+            escaped += "\\r";
+            break;
+          case '\t':
+            escaped += "\\t";
+            break;
+          default:
+            if (c < 0x20) {
+              escaped += "\\u00";
+              escaped.push_back(hex[c >> 4]);
+              escaped.push_back(hex[c & 0x0f]);
+            } else {
+              escaped.push_back((char) c);
+            }
+            break;
+        }
+      }
+      escaped.push_back('"');
+      return escaped;
+    }
 
     uint16_t float_to_half(float value) {
       uint32_t bits;
@@ -1013,13 +1057,13 @@ namespace sbs_bench {
       if (contract) {
         contract << "{\n"
                  << "  \"schema\": 4,\n"
-                 << "  \"model\": \"" << model.name << "\",\n"
-                 << "  \"profile\": \"" << sbs_cfg.profile << "\",\n"
-                 << "  \"warp\": \"" << sbs_cfg.warp << "\",\n"
-                 << "  \"depth_step\": \""
-                 << (o.depth_every == 1 ? std::string("current-once") :
-                                          "reuse-" + std::to_string(o.depth_every))
-                 << "\",\n"
+                 << "  \"model\": " << json_string(model.name) << ",\n"
+                 << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
+                 << "  \"warp\": " << json_string(sbs_cfg.warp) << ",\n"
+                 << "  \"depth_step\": "
+                 << json_string(o.depth_every == 1 ? std::string("current-once") :
+                                                     "reuse-" + std::to_string(o.depth_every))
+                 << ",\n"
                  << "  \"depth_reuse_interval\": " << o.depth_every << ",\n"
                  << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n"
                  << "  \"warp_mask\": {\"red\": \"forward_disocclusion_before_fill\", "

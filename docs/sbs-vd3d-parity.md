@@ -136,7 +136,7 @@ where Apollo transforms depth in more places than "min/max EMA."
 |--------|---------------|--------|-----------|
 | model | DA-V2 small fp16 (PyTorch) | DA-V2 small fp16 (TensorRT) | ✅ same weights |
 | resolution | UI request 768×432; adapter snaps to patch-14 **770×434** | short-side 432 resolves to **770×434** at this aspect | ✅ matched. Runtime logs and raw-shape artifacts verify 770×434. |
-| cadence | per-frame | **async** at `depth_fps` (45 game) — depth lags color | ⚠️ **the** depth-half gap |
+| cadence | per-frame | **async** at `depth_fps` (0/default tracks stream cadence) — completed depth can still lag color under GPU load | ⚠️ **the** depth-half gap |
 
 **Live sync is gone.** `sbs_3d_sync_depth` and the forked synchronous `estimate()` were removed
 (commit 5e7530fe). **Both GAME and MOVIE run async today** (MOVIE maps onto GAME's async path;
@@ -172,14 +172,24 @@ Reports:
 - `sbs_eval/cadence-core-every2/report.html`
 - `sbs_eval/cadence-extended-every2/report.html`
 
+**Live stream-rate validation (RTX 5080 + Galaxy XR, 2026-07-12):** after the cadence study,
+`depth_fps=0` was deliberately made the shipping default and tested in a requested 90 Hz stream.
+The five-second throughput windows commonly completed 80–90 depth updates/s with interval 1 and
+reported 0% busy drops; under changing capture/game load some windows completed less frequently
+(occasionally 30–70/s), safely reusing the last depth rather than blocking encode. The headset
+test showed the intended reduction in one-frame depth lag and no stream failure. This validates
+the stream-rate *attempt* default on the RTX 5080, but does not claim every frame receives fresh
+depth or that game-frame pacing is free; the throughput counters remain the evidence for future
+adaptive cadence work and log only when `sbs_3d_perf_stats` is enabled.
+
 The fresh-depth suite remains useful for isolating processor changes, but a production candidate
-that affects temporal behavior must also run the reuse-2 cadence A/B. The direct quality fix to
-test on the RTX 5080 is raising the profile depth target from 45 toward the stream refresh rate;
+that affects temporal behavior must also run the reuse-2 cadence A/B. Raising the default depth
+target from 45 toward the stream refresh rate is now implemented and live-validated above;
 motion compensation is a separate fallback if per-frame inference is too expensive.
 
 **Faithful-baseline decision:** evaluate current-frame depth with exactly one state update per
-source frame. Live async cadence is a later Apollo-specific A/B; mixing it into Phase A caused the
-former duplicate-settle conclusions.
+source frame. Live async cadence is evaluated separately through the reuse-N A/B and live
+throughput telemetry; mixing it into Phase A caused the former duplicate-settle conclusions.
 
 ### A3–A8 · The six depth transforms
 

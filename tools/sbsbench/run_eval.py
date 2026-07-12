@@ -170,7 +170,7 @@ def normalize_cli_paths(args):
 
 def expected_profile(conf, extra):
     """Apply the production contract: profile defaults first, explicit keys/CLI last."""
-    profile = conf_value(conf, "sbs_3d_profile", "vd3d")
+    profile = conf_value(conf, "sbs_3d_profile", "apollo")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", profile):
         fail(f"invalid sbs_3d_profile {profile!r}")
     warp = "vd3d" if profile == "vd3d" else "apollo"
@@ -288,6 +288,9 @@ def main():
     if contention:
         print("run_eval: WARNING another sunshine.exe is running -- perf numbers will be noisy "
               "(tagged gpu_contention in results.json; perf gate skipped).")
+        if args.update_baselines:
+            fail("refusing --update-baselines while another sunshine.exe is running; "
+                 "close the live host so committed performance baselines are trustworthy")
 
     label = args.label or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     out_root = os.path.join(args.build_dir, "sbs_eval", label)

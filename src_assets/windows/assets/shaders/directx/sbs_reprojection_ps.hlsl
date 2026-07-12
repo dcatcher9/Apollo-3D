@@ -50,10 +50,7 @@ float SampleDepth(float sx, float sy, float2 ofs) {
 // Find the source U coordinate that reprojects onto `uv` for one eye, choosing the
 // nearest (frontmost) surface so foreground occludes rather than duplicates.
 // eyeSign = +1 right eye, -1 left eye.
-// xy = selected source coordinate, z = 1 when no source crossed this output pixel and the
-// background fallback was used. The z channel is consumed only by the offline mask entry point;
-// production main_ps retains the exact same color path.
-float3 Reproject(float2 uv, float eyeSign) {
+float2 Reproject(float2 uv, float eyeSign) {
     // Subject anchoring is live this frame only if configured AND the resolve pass has
     // produced state (init != 0 -- it is 0 for the first frames). Mandatory shader/resource
     // initialization is validated before the estimator is published. Decide it ONCE here
@@ -76,7 +73,7 @@ float3 Reproject(float2 uv, float eyeSign) {
         (float)sourceWidth, (float)sourceHeight, literal_bestv2);
     float searchRadius = shaped ? Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight) : 0.0f;
     if (searchRadius <= 1e-6f) {
-        return float3(uv, 0.0f);  // subject state is not initialized yet
+        return uv;  // subject state is not initialized yet
     }
 
     int steps = clamp((int)round(24.0f * aspectScale), 12, 72);
@@ -142,7 +139,7 @@ float3 Reproject(float2 uv, float eyeSign) {
 
     // Valid surface found -> use it; otherwise fill the hole with nearest background.
     float outX = (bestDepth >= 0.0f) ? bestX : bgX;
-    return float3(outX, uv.y, bestDepth < 0.0f ? 1.0f : 0.0f);
+    return float2(outX, uv.y);
 }
 
 float4 main_ps(PS_INPUT input) : SV_TARGET {
@@ -161,7 +158,7 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
-    float2 sample_uv = Reproject(src_uv, eyeSign).xy;
+    float2 sample_uv = Reproject(src_uv, eyeSign);
 
     // Disoccluded regions clamp to the nearest valid column instead of wrapping.
     sample_uv.x = saturate(sample_uv.x);

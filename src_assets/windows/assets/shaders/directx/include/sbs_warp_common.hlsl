@@ -7,6 +7,9 @@
 // preset expresses disparity as literal render pixels, which becomes imperceptible on a 5120px
 // desktop. Preserve exact behavior at and below the calibration raster, but scale wider sources
 // so disparity remains a constant percentage of each eye instead of a constant pixel count.
+// Non-literal production geometry also applies the independent reference-aspect correction below.
+// Consequently, a sub-854 non-16:9 source preserves Bestv2's literal pixel shift and then scales
+// that shift for its aspect; this is deliberate and must be changed only with a dedicated 4:3 A/B.
 static const float BESTV2_CALIBRATION_WIDTH = 854.0f;
 // The approved headset look was tuned with a 5120x2160 stream request. Normalize source-UV
 // disparity by reference/current per-eye aspect so the same scene keeps its calibrated stereo

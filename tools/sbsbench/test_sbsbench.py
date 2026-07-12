@@ -71,13 +71,29 @@ class EvalContractTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_vd3d_is_the_unconfigured_default_profile(self):
+    def test_apollo_is_the_unconfigured_default_profile(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
             path = fh.name
         try:
-            self.assertEqual(run_eval.expected_profile(path, []), ("vd3d", "vd3d"))
+            self.assertEqual(run_eval.expected_profile(path, []), ("apollo", "apollo"))
         finally:
             os.unlink(path)
+
+    def test_committed_gate_tracks_the_production_default_profile(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        bench_conf = os.path.join(repo, "tools", "sbsbench", "bench.conf")
+        self.assertEqual(run_eval.expected_profile(bench_conf, []), ("apollo", "apollo"))
+        with open(os.path.join(repo, "src", "config.h"), encoding="utf-8") as fh:
+            self.assertIn('std::string profile = "apollo"', fh.read())
+
+    def test_baseline_update_refuses_gpu_contention(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
+                  encoding="utf-8") as fh:
+            evaluator = fh.read()
+        self.assertIn("if args.update_baselines:", evaluator)
+        self.assertIn("refusing --update-baselines while another sunshine.exe is running",
+                      evaluator)
 
     def test_custom_profile_values_need_no_evaluator_code_change(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:

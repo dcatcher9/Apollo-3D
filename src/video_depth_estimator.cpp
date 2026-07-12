@@ -1341,16 +1341,18 @@ namespace models {
         float stats_seconds = std::chrono::duration<float>(now - cadence_stats_start).count();
         if (stats_seconds >= 5.0f) {
           float calls = (float) std::max(1u, cadence_stats_calls);
-          BOOST_LOG(info) << "Depth throughput: target "
-                          << (depth_fps > 0.0f ? std::to_string((int) (depth_fps + 0.5f)) + "fps" : "stream")
-                          << ", video ~" << (int) (measured_fps + 0.5f)
-                          << "fps, completed ~" << (int) (cadence_stats_completions / stats_seconds + 0.5f)
-                          << "fps, enqueued ~" << (int) (cadence_stats_enqueues / stats_seconds + 0.5f)
-                          << "fps, busy drops " << (int) (100.0f * cadence_stats_busy_drops / calls + 0.5f)
-                          << "% (" << cadence_stats_busy_drops << '/' << cadence_stats_calls << "), cadence skips "
-                          << (int) (100.0f * cadence_stats_skips / calls + 0.5f)
-                          << "% (" << cadence_stats_skips << '/' << cadence_stats_calls << "), interval "
-                          << effective_interval;
+          if (sbs_perf::enabled()) {
+            BOOST_LOG(info) << "Depth throughput: target "
+                            << (depth_fps > 0.0f ? std::to_string((int) (depth_fps + 0.5f)) + "fps" : "stream")
+                            << ", video ~" << (int) (measured_fps + 0.5f)
+                            << "fps, completed ~" << (int) (cadence_stats_completions / stats_seconds + 0.5f)
+                            << "fps, enqueued ~" << (int) (cadence_stats_enqueues / stats_seconds + 0.5f)
+                            << "fps, busy drops " << (int) (100.0f * cadence_stats_busy_drops / calls + 0.5f)
+                            << "% (" << cadence_stats_busy_drops << '/' << cadence_stats_calls << "), cadence skips "
+                            << (int) (100.0f * cadence_stats_skips / calls + 0.5f)
+                            << "% (" << cadence_stats_skips << '/' << cadence_stats_calls << "), interval "
+                            << effective_interval;
+          }
           cadence_stats_start = now;
           cadence_stats_calls = 0;
           cadence_stats_busy_drops = 0;

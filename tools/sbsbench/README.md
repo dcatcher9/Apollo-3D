@@ -28,7 +28,7 @@ Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 Production configuration uses one profile selector:
 
 ```
-sbs_3d_profile = vd3d   # default; built-in alternate: apollo
+sbs_3d_profile = apollo   # default; built-in alternate: vd3d
 ```
 
 The profile supplies the complete stack. Add a configuration-only profile with
@@ -49,8 +49,8 @@ clients, which can switch the complete profile atomically during a stream. The c
 a model or individual parameter independently. Each encode device receives an immutable profile
 snapshot, so one stream cannot mix parameters or change another stream's selection.
 
-Wire extensions: `0x3003` byte 0 selects host SBS mode and byte 1 advertises presentation flags
-(`bytes 1..3` reserved and zero); `0x3005` selects a UTF-8 profile name,
+Wire extensions: `0x3003` byte 0 selects host SBS mode (`bytes 1..3` are reserved and ignored);
+`0x3005` selects a UTF-8 profile name,
 `0x3007` advertises the current/available names, and `0x3006` remains depth-engine status. Apollo
 precompiles the model referenced by every advertised profile at startup.
 
@@ -77,7 +77,10 @@ Harness A/B levers (after `--extra`):
   profile uses `65%` backward grid sampling + `35%` depth-ordered forward splat and hole fill.
 - `--pop-strength F` — multiply the final shared stereo-parallax field (`0.25`-`2`; default
   `1.25`). This is the user-facing pop control for both warps. It is separate from the internal
-  854-pixel Bestv2 calibration that keeps apparent depth stable across source resolutions.
+  854-pixel Bestv2 calibration that keeps apparent depth stable across source resolutions. Below
+  854 pixels, production preserves Bestv2's literal pixel shift and independently applies the
+  reference-aspect correction; non-16:9 low-resolution inputs therefore receive both effects.
+  This is retained for VD3D fidelity and requires a dedicated 4:3 A/B before changing.
 - `--literal-bestv2` — comparison-only VD3D-reference mode. It bypasses production resolution,
   aspect, and pop scaling and writes the fact to `contract.json`; never use it for quality gates or
   committed baselines.

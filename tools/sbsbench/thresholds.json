@@ -1,6 +1,6 @@
 {
   "_doc": "Shared gate for run_eval.py and the report. A change is a regression when it moves the worse way by more than max(abs_floor, baseline*rel_tol). hard_min/hard_max are absolute non-tradeable bounds; trigger/trigger_min create baseline-independent issues.",
-  "_pop_note": "pop_px_p50/p95 (median/p95 |dx|) remain in results but deliberately do not gate: subject anchoring legitimately lowers median |dx| by recentering the field without losing depth. pop_spread_pct is the fair volume gate and is reference-aspect-equivalent image disparity anchored to the 5120x2160 stream aspect.",
+  "_pop_note": "pop_px_p50/p95 (median/p95 |dx|) remain in results but deliberately do not gate: subject anchoring legitimately lowers median |dx| by recentering the field without losing depth. pop_spread_pct is the fair volume gate and is reference-aspect-equivalent image disparity anchored to the 5120x2160 stream aspect. The +/-3% comfort tails are an image-relative heuristic, not a fixed angular guarantee because the XR panel can be moved and resized: disparity angle is approximately 3% of the panel's apparent horizontal angle (about 1 degree at a 33-degree-wide panel, or 1.8 degrees at 60 degrees). Revisit the threshold if the product fixes presentation FOV or user comfort testing establishes a different bound.",
   "metrics": {
     "pop_spread_pct": {"role": "primary", "axis": "stereo", "better": "higher", "rel_tol": 0.15, "abs_floor": 0.04},
     "pop_spread_px": {"role": "diagnostic", "axis": "stereo", "better": "higher", "rel_tol": 0.15, "abs_floor": 1.0},
