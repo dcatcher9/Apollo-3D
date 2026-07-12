@@ -1,7 +1,6 @@
-// VisionDepth3D hybrid geometry, translated from Bestv2's pixel_shift_cuda:
-//   classic backward grid sample (35%) + depth-ordered forward splat (65%).
-// Forward holes are filled from the nearest valid horizontal pixel, preferring the background
-// side for ties (right for the left eye, left for the right eye), for up to 96 pixels in Bestv2.
+// VisionDepth3D hybrid geometry, translated from Bestv2's pixel_shift_cuda. The blend is profile
+// controlled (shipping VD3D: 65% classic backward + 35% depth-ordered forward). Bestv2's forward
+// holes use a nearest-valid horizontal search of up to 96 source pixels.
 
 Texture2D<float4> LeftColorTexture : register(t0);
 Texture2D<float> DepthTexture : register(t1);
@@ -25,8 +24,10 @@ uint WinnerAt(int local_x, uint y, bool right_eye, uint eye_w) {
     return WinnerTexture.Load(int3(full_x, y, 0));
 }
 
-float4 ForwardColor(uint local_x, uint y, bool right_eye, uint eye_w, uint eye_h, float2 fallback_uv) {
+float4 ForwardColor(uint local_x, uint y, bool right_eye, uint eye_w, uint eye_h,
+                    float2 fallback_uv, out float raw_hole, out float unresolved_hole) {
     uint winner = WinnerAt((int)local_x, y, right_eye, eye_w);
+    raw_hole = winner == 0u ? 1.0f : 0.0f;
     uint source_w, source_h;
     LeftColorTexture.GetDimensions(source_w, source_h);
     // Bestv2's fill radius is calibrated in source pixels. Scale it into the output-eye grid so
@@ -37,7 +38,7 @@ float4 ForwardColor(uint local_x, uint y, bool right_eye, uint eye_w, uint eye_h
                                      literal_bestv2)), 0, 256);
 
     // Equivalent to VD3D's iterative nearest-valid fill. At equal distance the first lookup is
-    // the preferred background side: +x for left eye, -x for right eye.
+    // the preferred side from the reference implementation.
     [loop]
     for (int r = 1; winner == 0u && r <= radius; ++r) {
         int preferred_x = (int)local_x + (right_eye ? -r : r);
@@ -49,8 +50,10 @@ float4 ForwardColor(uint local_x, uint y, bool right_eye, uint eye_w, uint eye_h
     }
 
     if (winner == 0u) {
+        unresolved_hole = 1.0f;
         return LeftColorTexture.Sample(LinearSampler, fallback_uv);
     }
+    unresolved_hole = 0.0f;
     uint source_x = winner & 0xffffu;
     float2 winner_output_uv = float2(((float)source_x + 0.5f) / (float)eye_w,
                                      ((float)y + 0.5f) / (float)eye_h);
@@ -94,6 +97,30 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
     float eye_sign = right_eye ? 1.0f : -1.0f;
     float2 backward_uv = float2(saturate(uv.x + eye_sign * parallax), uv.y);
     float4 backward = LeftColorTexture.Sample(LinearSampler, backward_uv);
-    float4 forward = ForwardColor(local_x, output_px.y, right_eye, eye_w, eye_h, uv);
+    float raw_hole, unresolved_hole;
+    float4 forward = ForwardColor(local_x, output_px.y, right_eye, eye_w, eye_h, uv,
+                                  raw_hole, unresolved_hole);
     return lerp(backward, forward, saturate(vd3d_forward_blend));
+}
+
+// Harness-only diagnostic output. R is the forward-splat hole before the nearest-valid search;
+// G is the subset still unresolved after the resolution-scaled Bestv2 search radius. The normal
+// live entry point does not execute this second pass.
+float4 mask_ps(PS_INPUT input) : SV_TARGET {
+    uint full_w, eye_h;
+    WinnerTexture.GetDimensions(full_w, eye_h);
+    uint eye_w = full_w / 2u;
+    uint2 output_px = (uint2)input.Pos.xy;
+    bool right_eye = output_px.x >= eye_w;
+    uint local_x = right_eye ? output_px.x - eye_w : output_px.x;
+    float2 output_uv = float2(((float)local_x + 0.5f) / (float)eye_w,
+                              ((float)output_px.y + 0.5f) / (float)eye_h);
+    float2 uv;
+    if (!ContentToSourceUV(output_uv, uv)) {
+        return float4(0.0f, 0.0f, 0.0f, 1.0f);
+    }
+    float raw_hole, unresolved_hole;
+    ForwardColor(local_x, output_px.y, right_eye, eye_w, eye_h, uv,
+                 raw_hole, unresolved_hole);
+    return float4(raw_hole, unresolved_hole, 0.0f, 1.0f);
 }

@@ -1,5 +1,6 @@
 {
   "aggregate": {
+    "artifact_in_hole_pct": 16.74064939036023,
     "depth_spread": 0.8572995116313299,
     "disocc_frac": 0.03825248422456414,
     "disocc_smear": 0.0,
@@ -10,6 +11,8 @@
     "flow_depth": 6.947652526523756,
     "flow_support": 0.9639296969353867,
     "flow_temporal": 3.716193437576294,
+    "hole_bad_fill_pct": 2.5021474897247713,
+    "hole_source_residual_p95": 19.777535061041508,
     "image_integrity_pct": 98.67141030629828,
     "negative_disparity_pct": 1.3700781378429383,
     "pop_pct_p50": 0.7577706152904887,
@@ -32,6 +35,8 @@
     "swim": 1.7658595494602038,
     "vmisalign_pct": 0.007006900462632378,
     "vmisalign_px": 0.023739857075270265,
+    "warp_hole_pct": 0.7353970654121863,
+    "warp_unresolved_pct": 0.0,
     "_n": 24,
     "_models": [
       ""
@@ -53,12 +58,12 @@
     "score": 79.8
   },
   "perf_ms": {
-    "depth_infer": 2.11853,
-    "sbs_composite_cpu": 0.0071,
-    "warp_infer": 0.018816
+    "depth_infer": 1.97507,
+    "sbs_composite_cpu": 0.0074,
+    "warp_infer": 0.018656
   },
   "meta": {
-    "git_sha": "04c4e9a4",
+    "git_sha": "1e1ff805",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -82,13 +87,14 @@
     "profile": "vd3d",
     "warp": "vd3d",
     "literal_bestv2": false,
-    "eval_schema": 9,
+    "eval_schema": 12,
     "depth_step": "current-once",
-    "conf_sha256": "4469d2029d2cb95b",
-    "metric_sha256": "6fff1afa14e6eabf",
+    "depth_reuse_interval": 1,
+    "conf_sha256": "da08885f8dd3cd82",
+    "metric_sha256": "a326ddae1c56ee7b",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T00:40:14",
-    "run_name": "aspect-geometry-core",
+    "timestamp": "2026-07-12T10:08:43",
+    "run_name": "evalv12-baseline-core",
     "name": "anime-morevna-closeup",
     "description": "Cel-anime face close-up with blinking eyes, fine ink lines, flat-color regions and a textured rubble background.",
     "content_type": "anime",

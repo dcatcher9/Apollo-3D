@@ -1236,13 +1236,13 @@ namespace config {
     // Apply one complete validated SBS profile first. Every individual key below is parsed
     // afterwards, so an explicitly configured parameter always overrides its profile value.
     // Reinitializing the struct also clears stale values when a config reload removes an override.
-    std::string sbs_profile = "vd3d";
+    std::string sbs_profile = "apollo";
     string_f(vars, "sbs_3d_profile", sbs_profile);
     if (sbs_profile.empty() || sbs_profile.size() > 64 ||
         sbs_profile.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos) {
       BOOST_LOG(warning) << "Invalid sbs_3d_profile name '" << sbs_profile
-                         << "'; use 1-64 letters, digits, '_' or '-'. Using 'vd3d'.";
-      sbs_profile = "vd3d";
+                         << "'; use 1-64 letters, digits, '_' or '-'. Using 'apollo'.";
+      sbs_profile = "apollo";
     }
     static constexpr std::array<std::string_view, 19> sbs_parameter_names {
       "warp", "pop_strength", "ema", "depth_short_side", "depth_max_aspect", "minmax_ema",

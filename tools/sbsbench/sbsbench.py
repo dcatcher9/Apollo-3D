@@ -516,6 +516,74 @@ def source_relative_metrics(eye, src_gray, depth=None, max_shift=None,
     return out
 
 
+def warp_hole_metrics(left, right, mask_rgb, src_gray=None,
+                      coverage_error=24.0 / 255.0):
+    """Measure the warp's exact pre-fill holes and whether visible corruption lands there.
+
+    The harness mask contract is R=disocclusion before the active fill and G=still unresolved
+    afterward. Hole area itself is context, not quality: stronger valid stereo naturally exposes
+    more background. Source-relative residual restricted to that support measures fill fidelity,
+    while artifact_in_hole_pct answers the prerequisite question for any future inpainter: what
+    fraction of detected corruption is actually inside (or immediately beside) a true hole?
+    """
+    mask_rgb = np.asarray(mask_rgb, dtype=np.float32)
+    if mask_rgb.ndim != 3 or mask_rgb.shape[2] < 2:
+        raise ValueError("warp mask must be an RGB image")
+    mask_eyes = np.split(mask_rgb, 2, axis=1)
+    eyes = (left, right)
+    hole_pcts, unresolved_pcts = [], []
+    hole_residuals = []
+    bad_hole = bad_hole_total = 0
+    artifact_in_hole = artifact_total = 0
+
+    for eye, mask in zip(eyes, mask_eyes):
+        scale = min(1.0, 256.0 / eye.shape[1])
+        ew = max(1, round(eye.shape[1] * scale))
+        eh = max(1, round(eye.shape[0] * scale))
+        eye_small = resize_to(eye, ew, eh) if scale < 1.0 else eye
+        mask_small = np.asarray(
+            Image.fromarray((mask[..., :2] * 255.0).astype(np.uint8), mode="LA")
+            .resize((ew, eh), Image.NEAREST), dtype=np.uint8) >= 128
+        hole, unresolved = mask_small[..., 0], mask_small[..., 1]
+        if src_gray is not None:
+            best, _, radius = source_align_map(eye_small, src_gray)
+        else:
+            best, radius = None, max(1, round(40 * eye_scale(ew)))
+        valid = np.ones((eh, ew), dtype=bool)
+        if ew > 2 * radius:
+            valid[:, :radius] = False
+            valid[:, ew - radius:] = False
+        hole_pcts.append(float(np.mean(hole[valid]) * 100.0))
+        unresolved_pcts.append(float(np.mean(unresolved[valid]) * 100.0))
+        if src_gray is None:
+            continue
+        supported_hole = hole & valid
+        if supported_hole.any():
+            values = best[supported_hole] * 255.0
+            hole_residuals.extend(values.tolist())
+            bad_hole += int(np.count_nonzero(values > coverage_error * 255.0))
+            bad_hole_total += int(values.size)
+        artifact = valid & (best > coverage_error)
+        if artifact.any():
+            # One diagnostic pixel of tolerance covers mask/output rasterization boundaries.
+            near_hole = dilate2d(hole | unresolved, 1)
+            artifact_in_hole += int(np.count_nonzero(artifact & near_hole))
+            artifact_total += int(np.count_nonzero(artifact))
+
+    out = {
+        "warp_hole_pct": max(hole_pcts, default=0.0),
+        "warp_unresolved_pct": max(unresolved_pcts, default=0.0),
+    }
+    if src_gray is not None:
+        out["hole_source_residual_p95"] = (
+            float(np.percentile(hole_residuals, 95)) if hole_residuals else 0.0)
+        out["hole_bad_fill_pct"] = (
+            100.0 * bad_hole / bad_hole_total if bad_hole_total else 0.0)
+        out["artifact_in_hole_pct"] = (
+            100.0 * artifact_in_hole / artifact_total if artifact_total else 0.0)
+    return out
+
+
 def resize_depth(depth, w, h):
     """Float depth resize without the 8-bit quantization used by resize_to()."""
     im = Image.fromarray(np.asarray(depth, dtype=np.float32), mode="F")
@@ -856,7 +924,8 @@ def measure(dump_dir):
     return out
 
 
-def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_kind="disparity"):
+def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_kind="disparity",
+                      warp_mask=None):
     """Spatial metrics for one harness SBS frame. depth (0-1 array) adds disocclusion; the source
     frame (src_gray, 0-1) adds depth-silhouette edge accuracy."""
     sbs = load_gray(path)
@@ -904,6 +973,8 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
                     if m.get("source_stretch_support") is not None]
         if supports:
             out["source_stretch_support"] = min(supports)
+    if warp_mask is not None:
+        out.update(warp_hole_metrics(left, right, warp_mask, src_gray))
     return out, sbs, left
 
 
@@ -936,6 +1007,12 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         missing_depth = sorted(set(frame_ids) - set(depth_by_id))
         extra_depth = sorted(set(depth_by_id) - set(frame_ids))
         raise ValueError(f"depth/SBS frame-id mismatch: missing depth={missing_depth}, extra depth={extra_depth}")
+    mask_by_id = indexed_files(os.path.join(seq_dir, "warp_mask_*.png"), "warp_mask_")
+    if mask_by_id and set(mask_by_id) != set(frame_ids):
+        missing_mask = sorted(set(frame_ids) - set(mask_by_id))
+        extra_mask = sorted(set(mask_by_id) - set(frame_ids))
+        raise ValueError(
+            f"warp-mask/SBS frame-id mismatch: missing mask={missing_mask}, extra mask={extra_mask}")
     gt_by_id = indexed_files(
         os.path.join(frames_dir, "gt_depth", "frame_*.*"), "frame_") if frames_dir else {}
     if gt_by_id and set(gt_by_id) != set(frame_ids):
@@ -977,7 +1054,10 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         depth = load_depth(depth_by_id[frame_id]) if frame_id in depth_by_id else None
         src = load_gray(src_by_id[frame_id]) if frame_id in src_by_id else None
         gt_depth = load_depth(gt_by_id[frame_id]) if frame_id in gt_by_id else None
-        row, sbs, left = measure_seq_frame(p, depth, src, gt_depth, gt_kind)
+        warp_mask = (np.asarray(Image.open(mask_by_id[frame_id]).convert("RGB"), np.float32)
+                     / 255.0 if frame_id in mask_by_id else None)
+        row, sbs, left = measure_seq_frame(
+            p, depth, src, gt_depth, gt_kind, warp_mask=warp_mask)
         _, right = split_eyes(sbs)
         row["_frame_id"] = frame_id
         if prev_sbs is not None:

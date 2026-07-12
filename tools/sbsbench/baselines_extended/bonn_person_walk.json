@@ -1,5 +1,6 @@
 {
   "aggregate": {
+    "artifact_in_hole_pct": 72.52910387969193,
     "depth_gt_edge_f1": 22.60287633786838,
     "depth_gt_si_rmse": 11.53367304801941,
     "depth_spread": 0.7491033722956976,
@@ -12,6 +13,8 @@
     "flow_depth": 21.949188232421875,
     "flow_support": 0.5445459338201992,
     "flow_temporal": 9.715420029380105,
+    "hole_bad_fill_pct": 4.513287233667344,
+    "hole_source_residual_p95": 22.747581831614173,
     "image_integrity_pct": 98.49797804737146,
     "negative_disparity_pct": 1.3903590929112397,
     "pop_pct_p50": 0.808021158989087,
@@ -34,6 +37,8 @@
     "swim": 6.812299650648366,
     "vmisalign_pct": 0.004387769343641897,
     "vmisalign_px": 0.010810153452136243,
+    "warp_hole_pct": 1.6679442484318996,
+    "warp_unresolved_pct": 0.0,
     "_n": 24,
     "_models": [
       ""
@@ -55,12 +60,12 @@
     "score": 78.6
   },
   "perf_ms": {
-    "depth_infer": 1.90054,
-    "sbs_composite_cpu": 0.0063,
-    "warp_infer": 0.01568
+    "depth_infer": 1.89254,
+    "sbs_composite_cpu": 0.0073,
+    "warp_infer": 0.015456
   },
   "meta": {
-    "git_sha": "04c4e9a4",
+    "git_sha": "1e1ff805",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -81,13 +86,14 @@
     "profile": "vd3d",
     "warp": "vd3d",
     "literal_bestv2": false,
-    "eval_schema": 9,
+    "eval_schema": 12,
     "depth_step": "current-once",
-    "conf_sha256": "4469d2029d2cb95b",
-    "metric_sha256": "6fff1afa14e6eabf",
+    "depth_reuse_interval": 1,
+    "conf_sha256": "da08885f8dd3cd82",
+    "metric_sha256": "a326ddae1c56ee7b",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T00:41:39",
-    "run_name": "aspect-geometry-extended",
+    "timestamp": "2026-07-12T10:10:33",
+    "run_name": "evalv12-baseline-extended",
     "name": "bonn-person-walk",
     "description": "Real registered RGB-D person tracking with body motion and self-occlusion.",
     "dataset": "Bonn RGB-D Dynamic Dataset",

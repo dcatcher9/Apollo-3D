@@ -1,5 +1,6 @@
 {
   "aggregate": {
+    "artifact_in_hole_pct": 40.14907764907765,
     "depth_gt_edge_f1": 38.342500877570025,
     "depth_gt_si_rmse": 18.22226806481679,
     "depth_spread": 0.8455533621211847,
@@ -12,6 +13,8 @@
     "flow_depth": 34.32476653223453,
     "flow_support": 0.5400706147786198,
     "flow_temporal": 8.370433123215385,
+    "hole_bad_fill_pct": 0.12404860007032457,
+    "hole_source_residual_p95": 14.863210511207578,
     "image_integrity_pct": 98.73627511912161,
     "negative_disparity_pct": 1.3690213183658797,
     "pop_pct_p50": 0.816165222578571,
@@ -34,6 +37,8 @@
     "swim": 5.927761720574421,
     "vmisalign_pct": 0.004604476965417009,
     "vmisalign_px": 0.011357523806509562,
+    "warp_hole_pct": 0.6006769754365197,
+    "warp_unresolved_pct": 0.0,
     "_n": 24,
     "_models": [
       ""
@@ -55,12 +60,12 @@
     "score": 82.4
   },
   "perf_ms": {
-    "depth_infer": 2.91107,
-    "sbs_composite_cpu": 0.0067,
-    "warp_infer": 0.019584
+    "depth_infer": 2.84314,
+    "sbs_composite_cpu": 0.0078,
+    "warp_infer": 0.019328
   },
   "meta": {
-    "git_sha": "04c4e9a4",
+    "git_sha": "1e1ff805",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -81,13 +86,14 @@
     "profile": "vd3d",
     "warp": "vd3d",
     "literal_bestv2": false,
-    "eval_schema": 9,
+    "eval_schema": 12,
     "depth_step": "current-once",
-    "conf_sha256": "4469d2029d2cb95b",
-    "metric_sha256": "6fff1afa14e6eabf",
+    "depth_reuse_interval": 1,
+    "conf_sha256": "da08885f8dd3cd82",
+    "metric_sha256": "a326ddae1c56ee7b",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T00:41:39",
-    "run_name": "aspect-geometry-extended",
+    "timestamp": "2026-07-12T10:10:33",
+    "run_name": "evalv12-baseline-extended",
     "name": "sintel-ambush",
     "description": "Cinematic non-rigid action, layered silhouettes and rapid motion.",
     "dataset": "MPI Sintel Stereo Training Dataset",

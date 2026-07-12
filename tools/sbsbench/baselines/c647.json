@@ -1,5 +1,6 @@
 {
   "aggregate": {
+    "artifact_in_hole_pct": 14.098706013026202,
     "depth_spread": 0.8790705042580763,
     "disocc_frac": 0.05790672570257612,
     "disocc_smear": 0.0,
@@ -10,6 +11,8 @@
     "flow_depth": 8.678033061649488,
     "flow_support": 0.8407412911382849,
     "flow_temporal": 5.22931263498638,
+    "hole_bad_fill_pct": 1.9559803096834942,
+    "hole_source_residual_p95": 19.164231475194292,
     "image_integrity_pct": 99.32614096586462,
     "negative_disparity_pct": 1.4060885019159741,
     "pop_pct_p50": 0.49200831698024977,
@@ -32,6 +35,8 @@
     "swim": 1.5330735393192456,
     "vmisalign_pct": 0.0032540941416906817,
     "vmisalign_px": 0.01088089017624346,
+    "warp_hole_pct": 0.9648950866188769,
+    "warp_unresolved_pct": 0.0,
     "_n": 24,
     "_models": [
       ""
@@ -53,12 +58,12 @@
     "score": 73.6
   },
   "perf_ms": {
-    "depth_infer": 2.02435,
-    "sbs_composite_cpu": 0.0072,
-    "warp_infer": 0.018624
+    "depth_infer": 2.0016,
+    "sbs_composite_cpu": 0.008,
+    "warp_infer": 0.018272
   },
   "meta": {
-    "git_sha": "04c4e9a4",
+    "git_sha": "1e1ff805",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -82,13 +87,14 @@
     "profile": "vd3d",
     "warp": "vd3d",
     "literal_bestv2": false,
-    "eval_schema": 9,
+    "eval_schema": 12,
     "depth_step": "current-once",
-    "conf_sha256": "4469d2029d2cb95b",
-    "metric_sha256": "6fff1afa14e6eabf",
+    "depth_reuse_interval": 1,
+    "conf_sha256": "da08885f8dd3cd82",
+    "metric_sha256": "a326ddae1c56ee7b",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T00:40:14",
-    "run_name": "aspect-geometry-core",
+    "timestamp": "2026-07-12T10:08:43",
+    "run_name": "evalv12-baseline-core",
     "name": "washerwoman-pond",
     "description": "Woman washing laundry by a lantern-lit courtyard pond at night.",
     "content_type": "ai-generated",

@@ -22,6 +22,7 @@ from PIL import Image
 ctrl_dir, treat_dir, out_html = sys.argv[1], sys.argv[2], sys.argv[3]
 allow_config_diff = "--allow-config-diff" in sys.argv[4:]
 allow_model_diff = "--allow-model-diff" in sys.argv[4:]
+allow_depth_step_diff = "--allow-depth-step-diff" in sys.argv[4:]
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (sbs_score, shared with run_eval)
@@ -43,6 +44,8 @@ if not allow_model_diff:
     _SAME_CONTEXT.append("model")
 if not allow_config_diff:
     _SAME_CONTEXT.append("conf_sha256")
+if allow_depth_step_diff:
+    _SAME_CONTEXT.remove("depth_step")
 _mismatched_context = {k: (CTRL.get("meta", {}).get(k), TREAT.get("meta", {}).get(k))
                        for k in _SAME_CONTEXT
                        if CTRL.get("meta", {}).get(k) != TREAT.get("meta", {}).get(k)}
@@ -113,6 +116,11 @@ COLS = [
     ("source_coverage_pct", "coverage", False, True, 0),
     ("image_integrity_pct", "integrity", False, True, 0),
     ("vmisalign_pct", "vmis", True, True, 0),
+    ("warp_hole_pct", "true_hole_area", True, False, 0.01),
+    ("warp_unresolved_pct", "unresolved_holes", True, False, 0.001),
+    ("hole_source_residual_p95", "hole_residual", True, False, 0.01),
+    ("hole_bad_fill_pct", "bad_hole_fill", True, False, 0.01),
+    ("artifact_in_hole_pct", "artifact_in_hole", False, False, 0.01),
 ]
 
 # Quality impact = the max points a metric can move the artifact score, so tables and sections
@@ -136,6 +144,7 @@ def impact(k):
 
 COLS = sorted(COLS, key=lambda c: -impact(c[0]))
 SHORT = {k: h for k, h, *_ in COLS}
+CONTEXT_METRICS = {"warp_hole_pct", "artifact_in_hole_pct"}
 
 
 def durl(im, w=None, jpg=False, q=82):
@@ -745,9 +754,12 @@ def scorecard_charts():
             floor = THR.get(metric, {}).get("abs_floor", 0.0) / 2.0
             flat = abs(delta) < max(floor, abs(a) * 0.05)
             better = (delta < 0) if worse else (delta > 0)
-            move_cls = "bar-flat" if flat else "bar-good" if better else "bar-bad"
+            is_context = metric in CONTEXT_METRICS
+            move_cls = ("bar-flat" if is_context or flat else
+                        "bar-good" if better else "bar-bad")
             pct = delta / a * 100.0 if a else (100.0 if b else 0.0)
-            delta_text = "within noise" if flat else f'{"better" if better else "worse"} {abs(pct):.0f}%'
+            delta_text = (f"change {pct:+.0f}%" if is_context else "within noise" if flat else
+                          f'{"better" if better else "worse"} {abs(pct):.0f}%')
             rows.append(
                 f'<div class="bar-row"><div class="bar-scene" title="{c}">{name(c)}</div>'
                 f'<div class="bar-pair"><div class="bar-line"><span class="bar-tag">{CTRL_TAG}</span>'
@@ -755,7 +767,8 @@ def scorecard_charts():
                 f'<b>{a:.2f}</b></div><div class="bar-line"><span class="bar-tag">{TREAT_TAG}</span>'
                 f'<span class="bar-track"><i class="bar-fill {move_cls}" style="width:{bw:.1f}%"></i></span>'
                 f'<b>{b:.2f}</b></div></div><span class="bar-delta {move_cls}">{delta_text}</span></div>')
-        direction = "lower is better" if worse else "higher is better"
+        direction = ("context only" if metric in CONTEXT_METRICS else
+                     "lower is better" if worse else "higher is better")
         charts.append(f'<article class="metric-chart"><div class="chart-head">'
                       f'<h3>{mtip(metric, label)}</h3><span>{direction}</span></div>{"".join(rows)}</article>')
     return '<div class="chart-grid">' + "".join(charts) + '</div>'
@@ -836,6 +849,26 @@ METRIC_DEFS = [
      "flick_dis",
      "Flicker restricted to the disocclusion bands — inpaint/stretch re-hallucination shimmer.",
      "lower = less boiling along edges"),
+    ("warp_hole_pct",
+     "true_hole_area",
+     "Exact worst-eye interior area not covered by a forward splat of the shared parallax field before the active warp hides or fills it (red harness-mask channel).",
+     "context only; more stereo can expose more background"),
+    ("warp_unresolved_pct",
+     "unresolved_holes",
+     "Exact worst-eye interior area still unresolved after the active fill/search radius (green harness-mask channel).",
+     "lower = fewer unfilled pixels"),
+    ("hole_source_residual_p95",
+     "hole_residual",
+     "Regularized source-relative p95 patch error restricted to pixels in the exact pre-fill hole mask.",
+     "lower = more source-faithful fill"),
+    ("hole_bad_fill_pct",
+     "bad_hole_fill",
+     "Exact-hole pixels whose best source-relative patch still differs by more than 24/255.",
+     "lower = fewer implausible fills"),
+    ("artifact_in_hole_pct",
+     "artifact_in_hole",
+     "All detected >24/255 source-relative artifact pixels that lie inside or one raster pixel beside an exact hole.",
+     "context only; higher means inpainting targets more of the measured problem"),
     ("vmisalign_pct",
      "vmis",
      "Median vertical L↔R offset as a percentage of eye height — resolution-independent geometry correctness.",
@@ -898,6 +931,8 @@ def conclusion_section():
     wins, costs = [], []
     for k, h, worse, _, _ in COLS:
         if k == "score":  # the headline, not a component metric
+            continue
+        if k in CONTEXT_METRICS:
             continue
         a = _mean_aggregate(ctrl_agg, k)
         b = _mean_aggregate(treat_agg, k)
@@ -1103,6 +1138,104 @@ def source_artifact_section():
             f'warp artifact without comparing the original.</p>{"".join(cards)}</section>')
 
 
+def _mask_overlay(image, mask):
+    """Overlay the exact harness mask: red=pre-fill hole, yellow=unresolved fallback."""
+    rgb = np.asarray(image.convert("RGB"), np.float32)
+    channels = np.asarray(mask.convert("RGB"), np.uint8)
+    hole = channels[..., 0] >= 128
+    unresolved = channels[..., 1] >= 128
+    rgb[hole] = rgb[hole] * 0.35 + np.array([166.0, 20.0, 34.0]) * 0.65
+    rgb[unresolved] = rgb[unresolved] * 0.2 + np.array([255.0, 205.0, 40.0]) * 0.8
+    return Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), "RGB")
+
+
+def warp_mask_evidence(clip, frame):
+    source_paths = source_glob(clip, frame)
+    paths = [frame_path(ctrl_dir, clip, frame), frame_path(treat_dir, clip, frame)]
+    masks = [os.path.join(run, clip, f"warp_mask_{frame:05d}.png")
+             for run in (ctrl_dir, treat_dir)]
+    if not (source_paths and all(os.path.exists(path) for path in paths + masks)):
+        return None
+    outputs = normalize_sbs_images([Image.open(path).convert("RGB") for path in paths])
+    packed_masks = [Image.open(path).convert("RGB").resize(outputs[0].size, Image.NEAREST)
+                    for path in masks]
+    ew, eh = outputs[0].width // 2, outputs[0].height
+
+    # Pick the eye and local crop with the densest interior true-hole support. Frame-edge holes
+    # are excluded because an inpainter cannot recover content outside the captured image.
+    eye_masks = []
+    for packed in packed_masks:
+        arr = np.asarray(packed)
+        eye_masks.append((arr[:, :ew, 0] >= 128, arr[:, ew:, 0] >= 128))
+    border = max(1, round(ew * 0.02))
+    eye_index = max(range(2), key=lambda eye: sum(
+        int(np.count_nonzero(run_masks[eye][:, border:ew - border]))
+        for run_masks in eye_masks))
+    union = eye_masks[0][eye_index] | eye_masks[1][eye_index]
+    union[:, :border] = False
+    union[:, ew - border:] = False
+    if union.any():
+        col = int(np.argmax(union.sum(axis=0)))
+        lo, hi = max(0, col - 8), min(ew, col + 9)
+        row = int(np.argmax(union[:, lo:hi].sum(axis=1)))
+    else:
+        col, row = ew // 2, eh // 2
+    cw, ch = min(480, ew), min(360, eh)
+    x0 = max(0, min(ew - cw, col - cw // 2))
+    y0 = max(0, min(eh - ch, row - ch // 2))
+    xoff = eye_index * ew
+
+    source = Image.open(source_paths[0]).convert("RGB").resize((ew, eh), Image.BILINEAR)
+    panels = [source.crop((x0, y0, x0 + cw, y0 + ch))]
+    for output, mask in zip(outputs, packed_masks):
+        eye = output.crop((xoff, 0, xoff + ew, eh))
+        eye_mask = mask.crop((xoff, 0, xoff + ew, eh))
+        panels.append(_mask_overlay(eye, eye_mask).crop((x0, y0, x0 + cw, y0 + ch)))
+    return [durl(panel, w=420, jpg=False) for panel in panels]
+
+
+def warp_mask_validation_section():
+    """Show whether measured artifacts overlap exact holes before proposing another inpainter."""
+    candidates = []
+    for clip in DECISION_CLIPS:
+        ca, ta = ctrl_agg[clip], treat_agg[clip]
+        support = max(ca.get("warp_hole_pct", 0.0), ta.get("warp_hole_pct", 0.0))
+        badness = max(ca.get("hole_source_residual_p95", 0.0),
+                      ta.get("hole_source_residual_p95", 0.0))
+        candidates.append((support * badness, clip))
+    cards = []
+    for _, clip in sorted(candidates, reverse=True)[:3]:
+        source = (CTRL if ctrl_agg[clip].get("hole_source_residual_p95", 0.0) >=
+                  treat_agg[clip].get("hole_source_residual_p95", 0.0) else TREAT)
+        frame = source["clips"][clip].get("worst_frame", {}).get(
+            "hole_source_residual_p95", {}).get("frame", mid_frame(ctrl_dir, clip))
+        panels = warp_mask_evidence(clip, frame)
+        if not panels:
+            continue
+        c = ctrl_agg[clip]
+        t = treat_agg[clip]
+        cards.append(
+            f'<article class="evidence-card"><div class="ic-head"><span class="axis-label">'
+            f'exact warp mask</span><span class="clipname">{html.escape(name(clip))}</span>'
+            f'<span class="metricval">hole {c.get("warp_hole_pct", 0):.2f}% &rarr; '
+            f'{t.get("warp_hole_pct", 0):.2f}% &middot; artifact overlap '
+            f'{c.get("artifact_in_hole_pct", 0):.1f}% &rarr; '
+            f'{t.get("artifact_in_hole_pct", 0):.1f}% &middot; frame {frame}</span></div>'
+            f'<div class="triplet"><figure><span class="tag">source</span><img src="{panels[0]}"></figure>'
+            f'<figure><span class="tag">{html.escape(CTRL_TAG)} &middot; red hole / yellow unresolved</span>'
+            f'<img src="{panels[1]}"></figure><figure><span class="tag t-treat">'
+            f'{html.escape(TREAT_TAG)} &middot; red hole / yellow unresolved</span>'
+            f'<img src="{panels[2]}"></figure></div></article>')
+    if not cards:
+        return ""
+    return (f'<section><h2>Exact disocclusion-mask validation</h2><p class="sub">The masks come '
+            f'directly from each warp decision, not from a depth-gradient proxy. Red pixels needed '
+            f'the active fill; yellow pixels remained unresolved afterward. '
+            f'<code>artifact overlap</code> is the fraction of source-relative corruption that an '
+            f'inpainter could actually target. Hole area is context, not a quality vote.</p>'
+            f'{"".join(cards)}</section>')
+
+
 def diagnostic_evidence_section():
     """Only surface unusually large diagnostic moves after the primary evidence."""
     metrics = ("stretch_area", "rim_over_p95", "edge_acc_p50", "disocc_smear",
@@ -1253,6 +1386,8 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
 
   __GROUP_RADARS__
 
+  __WARP_MASK_EVIDENCE__
+
   __VISUAL_EVIDENCE__
 
   __DIAGNOSTIC_EVIDENCE__
@@ -1303,6 +1438,7 @@ HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
         .replace("__DIAGNOSTIC_EVIDENCE__", diagnostic_evidence_section())
         .replace("__CTRL_TAG__", CTRL_TAG).replace("__TREAT_TAG__", TREAT_TAG)
         .replace("__GROUP_RADARS__", grouped_quality_section())
+        .replace("__WARP_MASK_EVIDENCE__", warp_mask_validation_section())
         .replace("__CHARTS__", scorecard_charts())
         .replace("__METRICS__", metrics_section())
         .replace("__FOOTER__", clean_footer())

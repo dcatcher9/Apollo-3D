@@ -18,6 +18,9 @@ Texture2D<float>  DepthTexture      : register(t1);
 // Subject-tracking state from depth_subject_resolve_cs. [0] = {recenter_delta, reserved,
 // subject_depth_ema, initialized}; [1] = {stretch_lo_val, stretch_inv_range, _, _}.
 StructuredBuffer<float4> SubjectState : register(t2);
+// Bound only by the offline harness mask pass. It is produced by forward-splatting the exact
+// shared parallax field, exposing holes that this backward gather necessarily paints over.
+Texture2D<uint> ForwardCoverageTexture : register(t3);
 Texture2D<float> PlaneLockTexture : register(t4);
 SamplerState      LinearSampler     : register(s0);
 
@@ -47,7 +50,10 @@ float SampleDepth(float sx, float sy, float2 ofs) {
 // Find the source U coordinate that reprojects onto `uv` for one eye, choosing the
 // nearest (frontmost) surface so foreground occludes rather than duplicates.
 // eyeSign = +1 right eye, -1 left eye.
-float2 Reproject(float2 uv, float eyeSign) {
+// xy = selected source coordinate, z = 1 when no source crossed this output pixel and the
+// background fallback was used. The z channel is consumed only by the offline mask entry point;
+// production main_ps retains the exact same color path.
+float3 Reproject(float2 uv, float eyeSign) {
     // Subject anchoring is live this frame only if configured AND the resolve pass has
     // produced state (init != 0 -- it is 0 for the first frames). Mandatory shader/resource
     // initialization is validated before the estimator is published. Decide it ONCE here
@@ -70,7 +76,7 @@ float2 Reproject(float2 uv, float eyeSign) {
         (float)sourceWidth, (float)sourceHeight, literal_bestv2);
     float searchRadius = shaped ? Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight) : 0.0f;
     if (searchRadius <= 1e-6f) {
-        return uv;  // subject state is not initialized yet
+        return float3(uv, 0.0f);  // subject state is not initialized yet
     }
 
     int steps = clamp((int)round(24.0f * aspectScale), 12, 72);
@@ -136,7 +142,7 @@ float2 Reproject(float2 uv, float eyeSign) {
 
     // Valid surface found -> use it; otherwise fill the hole with nearest background.
     float outX = (bestDepth >= 0.0f) ? bestX : bgX;
-    return float2(outX, uv.y);
+    return float3(outX, uv.y, bestDepth < 0.0f ? 1.0f : 0.0f);
 }
 
 float4 main_ps(PS_INPUT input) : SV_TARGET {
@@ -155,7 +161,7 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
-    float2 sample_uv = Reproject(src_uv, eyeSign);
+    float2 sample_uv = Reproject(src_uv, eyeSign).xy;
 
     // Disoccluded regions clamp to the nearest valid column instead of wrapping.
     sample_uv.x = saturate(sample_uv.x);
@@ -163,4 +169,25 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
     float4 col = LeftColorTexture.Sample(LinearSampler, sample_uv);
 
     return col;
+}
+
+// Harness-only diagnostic output. R marks exact forward-coverage disocclusion before this
+// backward gather paints over it. G is zero because Apollo always returns a sampled color rather
+// than leaving an output pixel unresolved. Bars are not content and remain unmarked. Compiling
+// this separate entry point adds no live-stream work.
+float4 mask_ps(PS_INPUT input) : SV_TARGET {
+    float2 uv = input.TexCoord;
+    bool is_right_eye = uv.x > 0.5f;
+    float eyeSign = is_right_eye ? 1.0f : -1.0f;
+    float2 output_uv = uv;
+    output_uv.x = is_right_eye ? (uv.x - 0.5f) * 2.0f : uv.x * 2.0f;
+    float2 src_uv;
+    if (!ContentToSourceUV(output_uv, src_uv)) {
+        return float4(0.0f, 0.0f, 0.0f, 1.0f);
+    }
+    uint full_w, full_h;
+    ForwardCoverageTexture.GetDimensions(full_w, full_h);
+    uint2 output_px = min((uint2)input.Pos.xy, uint2(full_w - 1u, full_h - 1u));
+    float hole = ForwardCoverageTexture.Load(int3(output_px, 0)) == 0u ? 1.0f : 0.0f;
+    return float4(hole, 0.0f, 0.0f, 1.0f);
 }

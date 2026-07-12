@@ -1,5 +1,6 @@
 {
   "aggregate": {
+    "artifact_in_hole_pct": 29.248096021394712,
     "depth_spread": 0.8878196825583776,
     "disocc_frac": 0.04640692086260734,
     "disocc_smear": 0.0,
@@ -10,6 +11,8 @@
     "flow_depth": 11.020712131803686,
     "flow_support": 0.8627634831672705,
     "flow_temporal": 3.5789796872572466,
+    "hole_bad_fill_pct": 6.049050101644975,
+    "hole_source_residual_p95": 23.385701564947762,
     "image_integrity_pct": 99.2111218881345,
     "negative_disparity_pct": 1.402839065376611,
     "pop_pct_p50": 0.36303378805710906,
@@ -32,6 +35,8 @@
     "swim": 2.6405851627173633,
     "vmisalign_pct": 0.005521435523405671,
     "vmisalign_px": 0.014310233818832785,
+    "warp_hole_pct": 0.73668048088411,
+    "warp_unresolved_pct": 0.0,
     "_n": 24,
     "_models": [
       ""
@@ -53,12 +58,12 @@
     "score": 77.3
   },
   "perf_ms": {
-    "depth_infer": 1.9983,
-    "sbs_composite_cpu": 0.0065,
-    "warp_infer": 0.018336
+    "depth_infer": 1.99242,
+    "sbs_composite_cpu": 0.0076,
+    "warp_infer": 0.018272
   },
   "meta": {
-    "git_sha": "04c4e9a4",
+    "git_sha": "1e1ff805",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -82,13 +87,14 @@
     "profile": "vd3d",
     "warp": "vd3d",
     "literal_bestv2": false,
-    "eval_schema": 9,
+    "eval_schema": 12,
     "depth_step": "current-once",
-    "conf_sha256": "4469d2029d2cb95b",
-    "metric_sha256": "6fff1afa14e6eabf",
+    "depth_reuse_interval": 1,
+    "conf_sha256": "da08885f8dd3cd82",
+    "metric_sha256": "a326ddae1c56ee7b",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T00:40:14",
-    "run_name": "aspect-geometry-core",
+    "timestamp": "2026-07-12T10:08:43",
+    "run_name": "evalv12-baseline-core",
     "name": "scene_cut",
     "description": "Hard cut spliced kitchen-vlog -> washerwoman-pond: depth-normalization swim across cuts (A1).",
     "clip_sha1": "c912fa5c33a7"

@@ -1,5 +1,6 @@
 {
   "aggregate": {
+    "artifact_in_hole_pct": 2.7434529122072546,
     "depth_spread": 0.9055779104431471,
     "disocc_frac": 0.03572420567437913,
     "disocc_smear": 0.013894023770843533,
@@ -10,6 +11,8 @@
     "flow_depth": 5.745264474464499,
     "flow_support": 0.98095703125,
     "flow_temporal": 2.6566031160561936,
+    "hole_bad_fill_pct": 0.29071549835008725,
+    "hole_source_residual_p95": 15.358373353878653,
     "image_integrity_pct": 98.71853870933485,
     "negative_disparity_pct": 1.0731351239166196,
     "pop_pct_p50": 0.9814323200911352,
@@ -32,6 +35,8 @@
     "swim": 1.8411443936436072,
     "vmisalign_pct": 0.00310693336148356,
     "vmisalign_px": 0.005545481146934132,
+    "warp_hole_pct": 0.3361381795101553,
+    "warp_unresolved_pct": 0.0,
     "_n": 24,
     "_models": [
       ""
@@ -53,12 +58,12 @@
     "score": 69.7
   },
   "perf_ms": {
-    "depth_infer": 2.06326,
-    "sbs_composite_cpu": 0.0066,
-    "warp_infer": 0.018272
+    "depth_infer": 2.01174,
+    "sbs_composite_cpu": 0.0085,
+    "warp_infer": 0.018304
   },
   "meta": {
-    "git_sha": "04c4e9a4",
+    "git_sha": "1e1ff805",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -82,13 +87,14 @@
     "profile": "vd3d",
     "warp": "vd3d",
     "literal_bestv2": false,
-    "eval_schema": 9,
+    "eval_schema": 12,
     "depth_step": "current-once",
-    "conf_sha256": "4469d2029d2cb95b",
-    "metric_sha256": "6fff1afa14e6eabf",
+    "depth_reuse_interval": 1,
+    "conf_sha256": "da08885f8dd3cd82",
+    "metric_sha256": "a326ddae1c56ee7b",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T00:40:14",
-    "run_name": "aspect-geometry-core",
+    "timestamp": "2026-07-12T10:08:43",
+    "run_name": "evalv12-baseline-core",
     "name": "palace-hall",
     "description": "Robed cultivator bowing in a bright golden palace hall.",
     "clip_sha1": "1ff2aa060c61"

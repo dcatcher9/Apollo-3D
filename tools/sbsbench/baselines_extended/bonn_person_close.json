@@ -1,5 +1,6 @@
 {
   "aggregate": {
+    "artifact_in_hole_pct": 48.77512334657211,
     "depth_gt_edge_f1": 32.63605578437634,
     "depth_gt_si_rmse": 9.6096853017807,
     "depth_spread": 0.7631235520044962,
@@ -12,6 +13,8 @@
     "flow_depth": 14.766980710236922,
     "flow_support": 0.7764759893002716,
     "flow_temporal": 8.7590245163959,
+    "hole_bad_fill_pct": 0.3762394320341833,
+    "hole_source_residual_p95": 13.82661997079849,
     "image_integrity_pct": 99.1838351822504,
     "negative_disparity_pct": 1.4229524586698972,
     "pop_pct_p50": 0.7932244519414476,
@@ -33,6 +36,8 @@
     "swim": 6.020637926848038,
     "vmisalign_pct": 0.00419769649549077,
     "vmisalign_px": 0.012468096868057424,
+    "warp_hole_pct": 1.9304610495071686,
+    "warp_unresolved_pct": 0.0,
     "_n": 24,
     "_models": [
       ""
@@ -52,12 +57,12 @@
     "score": 80.6
   },
   "perf_ms": {
-    "depth_infer": 1.85782,
-    "sbs_composite_cpu": 0.0063,
-    "warp_infer": 0.015552
+    "depth_infer": 1.91123,
+    "sbs_composite_cpu": 0.009,
+    "warp_infer": 0.015328
   },
   "meta": {
-    "git_sha": "04c4e9a4",
+    "git_sha": "1e1ff805",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -78,13 +83,14 @@
     "profile": "vd3d",
     "warp": "vd3d",
     "literal_bestv2": false,
-    "eval_schema": 9,
+    "eval_schema": 12,
     "depth_step": "current-once",
-    "conf_sha256": "4469d2029d2cb95b",
-    "metric_sha256": "6fff1afa14e6eabf",
+    "depth_reuse_interval": 1,
+    "conf_sha256": "da08885f8dd3cd82",
+    "metric_sha256": "a326ddae1c56ee7b",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T00:41:39",
-    "run_name": "aspect-geometry-extended",
+    "timestamp": "2026-07-12T10:10:33",
+    "run_name": "evalv12-baseline-extended",
     "name": "bonn-person-close",
     "description": "Real RGB-D close pass beside robots, emphasizing silhouette and object occlusion.",
     "dataset": "Bonn RGB-D Dynamic Dataset",

@@ -222,6 +222,19 @@ class EvalContractTests(unittest.TestCase):
             text = fh.read()
         self.assertIn("96.0f * source_to_output", text)
 
+    def test_depth_reuse_cadence_is_explicit_and_machine_verified(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"), encoding="utf-8") as fh:
+            harness = fh.read()
+        self.assertIn('a == "--depth-every"', harness)
+        self.assertIn("est.geometry_updated = false", harness)
+        self.assertIn("depth_reuse_interval", harness)
+        with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
+                  encoding="utf-8") as fh:
+            evaluator = fh.read()
+        self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
+        self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
+
     def test_bestv2_sharpen_scales_taps_from_source_to_output_pixels(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader = os.path.join(repo, "src_assets", "windows", "assets",
@@ -475,6 +488,22 @@ class EvalContractTests(unittest.TestCase):
         frac, smear = sbsbench.disocclusion_metrics(eye, depth)
         self.assertLess(frac, sbsbench.MIN_DISOCC_FRAC)
         self.assertIsNone(smear)
+
+    def test_exact_warp_mask_restricts_fill_error_and_artifact_overlap(self):
+        source = np.zeros((64, 64), dtype=np.float32)
+        left = source.copy()
+        right = source.copy()
+        left[20:30, 25:35] = 1.0
+        right[20:30, 25:35] = 1.0
+        mask = np.zeros((64, 128, 3), dtype=np.float32)
+        mask[20:30, 25:35, 0] = 1.0
+        mask[20:30, 64 + 25:64 + 35, 0] = 1.0
+        metrics = sbsbench.warp_hole_metrics(left, right, mask, source)
+        self.assertGreater(metrics["warp_hole_pct"], 1.0)
+        self.assertEqual(metrics["warp_unresolved_pct"], 0.0)
+        self.assertGreater(metrics["hole_source_residual_p95"], 100.0)
+        self.assertGreater(metrics["hole_bad_fill_pct"], 80.0)
+        self.assertGreater(metrics["artifact_in_hole_pct"], 80.0)
 
     def test_depth_is_diagnostic_not_part_of_artifact_score(self):
         clean = {"pop_spread_pct": 0.0}

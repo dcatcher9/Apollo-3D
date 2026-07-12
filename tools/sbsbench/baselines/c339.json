@@ -1,5 +1,6 @@
 {
   "aggregate": {
+    "artifact_in_hole_pct": 28.403741761073537,
     "depth_spread": 0.8865761645138264,
     "disocc_frac": 0.04728752053671459,
     "disocc_smear": 0.0,
@@ -10,6 +11,8 @@
     "flow_depth": 8.97813588121663,
     "flow_support": 0.9004137845849801,
     "flow_temporal": 2.8608579946600874,
+    "hole_bad_fill_pct": 2.685987774077797,
+    "hole_source_residual_p95": 21.097391845782592,
     "image_integrity_pct": 99.59601282220173,
     "negative_disparity_pct": 1.2309326804277125,
     "pop_pct_p50": 0.19449222998762553,
@@ -32,6 +35,8 @@
     "swim": 1.1608020332844362,
     "vmisalign_pct": 0.0014712954637551658,
     "vmisalign_px": 0.004537555282392229,
+    "warp_hole_pct": 0.5960269569140536,
+    "warp_unresolved_pct": 0.0,
     "_n": 24,
     "_models": [
       ""
@@ -53,12 +58,12 @@
     "score": 75.3
   },
   "perf_ms": {
-    "depth_infer": 2.28915,
-    "sbs_composite_cpu": 0.0067,
-    "warp_infer": 0.018432
+    "depth_infer": 2.02838,
+    "sbs_composite_cpu": 0.0081,
+    "warp_infer": 0.018144
   },
   "meta": {
-    "git_sha": "04c4e9a4",
+    "git_sha": "1e1ff805",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -82,13 +87,14 @@
     "profile": "vd3d",
     "warp": "vd3d",
     "literal_bestv2": false,
-    "eval_schema": 9,
+    "eval_schema": 12,
     "depth_step": "current-once",
-    "conf_sha256": "4469d2029d2cb95b",
-    "metric_sha256": "6fff1afa14e6eabf",
+    "depth_reuse_interval": 1,
+    "conf_sha256": "da08885f8dd3cd82",
+    "metric_sha256": "a326ddae1c56ee7b",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T00:40:14",
-    "run_name": "aspect-geometry-core",
+    "timestamp": "2026-07-12T10:08:43",
+    "run_name": "evalv12-baseline-core",
     "name": "soldier-battlefield",
     "description": "Soldier walking a dark night battlefield; profile silhouette against dead trees.",
     "content_type": "ai-generated",

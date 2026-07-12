@@ -1,5 +1,6 @@
 {
   "aggregate": {
+    "artifact_in_hole_pct": 17.035926034653613,
     "depth_gt_edge_f1": 51.564066446346324,
     "depth_gt_si_rmse": 11.584640562534332,
     "depth_spread": 0.8384651939074198,
@@ -12,6 +13,8 @@
     "flow_depth": 18.862186597741168,
     "flow_support": 0.44468167701863354,
     "flow_temporal": 7.12795348789381,
+    "hole_bad_fill_pct": 1.123424793245913,
+    "hole_source_residual_p95": 13.974318249026929,
     "image_integrity_pct": 99.06347554630594,
     "negative_disparity_pct": 1.174067097902298,
     "pop_pct_p50": 1.0505304668152922,
@@ -34,6 +37,8 @@
     "swim": 5.240990527298139,
     "vmisalign_pct": 0.0037804435938596725,
     "vmisalign_px": 0.00820575381415741,
+    "warp_hole_pct": 0.5443984778662198,
+    "warp_unresolved_pct": 0.0,
     "_n": 24,
     "_models": [
       ""
@@ -55,12 +60,12 @@
     "score": 80.7
   },
   "perf_ms": {
-    "depth_infer": 1.87414,
-    "sbs_composite_cpu": 0.006,
-    "warp_infer": 0.019936
+    "depth_infer": 1.87792,
+    "sbs_composite_cpu": 0.0085,
+    "warp_infer": 0.01984
   },
   "meta": {
-    "git_sha": "04c4e9a4",
+    "git_sha": "1e1ff805",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -81,13 +86,14 @@
     "profile": "vd3d",
     "warp": "vd3d",
     "literal_bestv2": false,
-    "eval_schema": 9,
+    "eval_schema": 12,
     "depth_step": "current-once",
-    "conf_sha256": "4469d2029d2cb95b",
-    "metric_sha256": "6fff1afa14e6eabf",
+    "depth_reuse_interval": 1,
+    "conf_sha256": "da08885f8dd3cd82",
+    "metric_sha256": "a326ddae1c56ee7b",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T00:41:39",
-    "run_name": "aspect-geometry-extended",
+    "timestamp": "2026-07-12T10:10:33",
+    "run_name": "evalv12-baseline-extended",
     "name": "vkitti-drive-clone",
     "description": "Outdoor urban driving with cars, vegetation and exact metric depth.",
     "dataset": "Virtual KITTI 2",

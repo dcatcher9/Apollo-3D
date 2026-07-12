@@ -278,6 +278,41 @@ namespace sbs_bench {
       save_gray16_png(path, d.Width, d.Height, gray);
     }
 
+    // Read back a harness-only B8G8R8A8 diagnostic target without coupling it to the stream's
+    // SDR/HDR format. Disocclusion masks use R=pre-fill hole and G=still unresolved after fill.
+    void dump_bgra8_texture(ID3D11Device *dev, ID3D11DeviceContext *ctx,
+                            ID3D11Texture2D *texture, const fs::path &path,
+                            ComPtr<ID3D11Texture2D> &stage_cache) {
+      if (!texture) {
+        return;
+      }
+      D3D11_TEXTURE2D_DESC d = {};
+      texture->GetDesc(&d);
+      if (!stage_cache) {
+        D3D11_TEXTURE2D_DESC sd = d;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.BindFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        sd.MiscFlags = 0;
+        if (FAILED(dev->CreateTexture2D(&sd, nullptr, &stage_cache))) {
+          return;
+        }
+      }
+      ctx->CopyResource(stage_cache.Get(), texture);
+      D3D11_MAPPED_SUBRESOURCE mapped = {};
+      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return;
+      }
+      std::vector<uint8_t> pixels((size_t) d.Width * d.Height * 4);
+      for (UINT y = 0; y < d.Height; ++y) {
+        std::memcpy(pixels.data() + (size_t) y * d.Width * 4,
+                    (const uint8_t *) mapped.pData + (size_t) y * mapped.RowPitch,
+                    (size_t) d.Width * 4);
+      }
+      ctx->Unmap(stage_cache.Get(), 0);
+      save_png(path, d.Width, d.Height, pixels);
+    }
+
     // Preserve the exact raw model output for stage-by-stage parity checks. Unlike the display
     // PNG, this is not clamped or normalized: it is row-major float32, width*height values.
     void dump_raw_model_depth(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv, int width, int height, const fs::path &path, ComPtr<ID3D11Buffer> &stage_cache) {
@@ -370,6 +405,7 @@ namespace sbs_bench {
       int max_width = 0;  // 0 -> use config max_encode_width
       int limit = 0;  // 0 -> all
       int output_every = 1;  // process every input for temporal state; dump only every Nth
+      int depth_every = 1;  // infer every Nth source frame; reuse depth between updates
       // VD3D-pipeline A/B levers; <0 / false -> use the conf's value.
       double subject_lock = -1.0;  // subject anchor strength override (e.g. 0.95)
       double subject_recenter = -1.0;  // global subject recenter override
@@ -419,6 +455,8 @@ namespace sbs_bench {
           o.limit = std::stoi(next("--limit"));
         } else if (a == "--output-every") {
           o.output_every = std::max(1, std::stoi(next("--output-every")));
+        } else if (a == "--depth-every") {
+          o.depth_every = std::stoi(next("--depth-every"));
         } else if (a == "--subject-lock") {
           o.subject_lock = std::stod(next("--subject-lock"));
         } else if (a == "--subject-recenter") {
@@ -461,6 +499,10 @@ namespace sbs_bench {
       }
       if (!(o.hdr_scale > 0.0 && o.hdr_scale <= 64.0)) {
         BOOST_LOG(error) << "sbs-bench: --hdr-scale must be greater than 0 and at most 64";
+        return false;
+      }
+      if (o.depth_every < 1 || o.depth_every > 8) {
+        BOOST_LOG(error) << "sbs-bench: --depth-every must be between 1 and 8";
         return false;
       }
       return true;
@@ -569,9 +611,13 @@ namespace sbs_bench {
     BOOST_LOG(info) << "sbs-bench: " << frames.size() << " frames, model '" << model.name
                     << "', eye " << (o.eye_w > 0 ? std::to_string(o.eye_w) : "auto") << 'x'
                     << (o.eye_h > 0 ? std::to_string(o.eye_h) : "auto")
-                    << ", depth_step current-once, profile " << sbs_cfg.profile
+                    << ", depth_step "
+                    << (o.depth_every == 1 ? std::string("current-once") :
+                                             "reuse-" + std::to_string(o.depth_every))
+                    << ", profile " << sbs_cfg.profile
                     << ", warp " << sbs_cfg.warp
                     << ", literal_bestv2 " << (o.literal_bestv2 ? "on" : "off")
+                    << ", depth_every " << o.depth_every
                     << " -> " << o.out;
 
     // ---- D3D device + shaders ----
@@ -595,20 +641,25 @@ namespace sbs_bench {
 
     auto vs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0");
     auto ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0");
+    auto mask_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "mask_ps", "ps_5_0");
     auto sharpen_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_sharpen_ps.hlsl", "main_ps", "ps_5_0");
     auto vd3d_cs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_vd3d_forward_cs.hlsl", "main", "cs_5_0");
     auto vd3d_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_vd3d_reprojection_ps.hlsl", "main_ps", "ps_5_0");
-    if (!vs_blob || !ps_blob || !sharpen_ps_blob || !vd3d_cs_blob || !vd3d_ps_blob) {
+    auto vd3d_mask_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_vd3d_reprojection_ps.hlsl", "mask_ps", "ps_5_0");
+    if (!vs_blob || !ps_blob || !mask_ps_blob || !sharpen_ps_blob || !vd3d_cs_blob ||
+        !vd3d_ps_blob || !vd3d_mask_ps_blob) {
       return 6;
     }
     ComPtr<ID3D11VertexShader> vs;
-    ComPtr<ID3D11PixelShader> ps, sharpen_ps, vd3d_ps;
+    ComPtr<ID3D11PixelShader> ps, mask_ps, sharpen_ps, vd3d_ps, vd3d_mask_ps;
     ComPtr<ID3D11ComputeShader> vd3d_cs;
     dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &vs);
     dev->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &ps);
+    dev->CreatePixelShader(mask_ps_blob->GetBufferPointer(), mask_ps_blob->GetBufferSize(), nullptr, &mask_ps);
     dev->CreatePixelShader(sharpen_ps_blob->GetBufferPointer(), sharpen_ps_blob->GetBufferSize(), nullptr, &sharpen_ps);
     dev->CreateComputeShader(vd3d_cs_blob->GetBufferPointer(), vd3d_cs_blob->GetBufferSize(), nullptr, &vd3d_cs);
     dev->CreatePixelShader(vd3d_ps_blob->GetBufferPointer(), vd3d_ps_blob->GetBufferSize(), nullptr, &vd3d_ps);
+    dev->CreatePixelShader(vd3d_mask_ps_blob->GetBufferPointer(), vd3d_mask_ps_blob->GetBufferSize(), nullptr, &vd3d_mask_ps);
 
     ComPtr<ID3D11SamplerState> sampler;
     {
@@ -630,6 +681,8 @@ namespace sbs_bench {
     ComPtr<ID3D11Texture2D> sbs_tex, sbs_stage;
     ComPtr<ID3D11RenderTargetView> sbs_rtv;
     ComPtr<ID3D11ShaderResourceView> sbs_srv;
+    ComPtr<ID3D11Texture2D> warp_mask_tex, warp_mask_stage;
+    ComPtr<ID3D11RenderTargetView> warp_mask_rtv;
     ComPtr<ID3D11Texture2D> sharpen_tex;
     ComPtr<ID3D11RenderTargetView> sharpen_rtv;
     ComPtr<ID3D11ShaderResourceView> sharpen_srv;
@@ -646,6 +699,8 @@ namespace sbs_bench {
     uint64_t hdr_nonfinite = 0;
 
     int written = 0;
+    models::estimate_result est;
+    bool have_depth_result = false;
     for (size_t fi = 0; fi < frames.size(); fi++) {
       rgba_image img;
       if (!load_png(frames[fi], img)) {
@@ -737,13 +792,21 @@ namespace sbs_bench {
         dev->CreateTexture2D(&td, nullptr, &sbs_tex);
         dev->CreateRenderTargetView(sbs_tex.Get(), nullptr, &sbs_rtv);
         dev->CreateShaderResourceView(sbs_tex.Get(), nullptr, &sbs_srv);
+        D3D11_TEXTURE2D_DESC mask_desc = td;
+        mask_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        mask_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        if (FAILED(dev->CreateTexture2D(&mask_desc, nullptr, &warp_mask_tex)) ||
+            FAILED(dev->CreateRenderTargetView(warp_mask_tex.Get(), nullptr, &warp_mask_rtv))) {
+          BOOST_LOG(error) << "sbs-bench: warp-mask texture creation failed";
+          return 6;
+        }
         if (!o.simulate_hdr && sbs_cfg.bestv2_sharpen) {
           if (FAILED(dev->CreateTexture2D(&td, nullptr, &sharpen_tex)) || FAILED(dev->CreateRenderTargetView(sharpen_tex.Get(), nullptr, &sharpen_rtv)) || FAILED(dev->CreateShaderResourceView(sharpen_tex.Get(), nullptr, &sharpen_srv))) {
             BOOST_LOG(error) << "sbs-bench: sharpen texture creation failed";
             return 6;
           }
         }
-        if (sbs_cfg.warp == "vd3d") {
+        {
           D3D11_TEXTURE2D_DESC wd = td;
           wd.Format = DXGI_FORMAT_R32_UINT;
           wd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
@@ -765,8 +828,16 @@ namespace sbs_bench {
 
       // Submit and consume exactly one inference for this source frame.
       const auto input_color = o.simulate_hdr ? models::input_color_space::scrgb_hdr : models::input_color_space::srgb;
-      estimator.estimate_depth(in_srv.Get(), input_color);
-      auto est = estimator.finish_pending_depth_for_benchmark(in_srv.Get(), input_color);
+      if (!have_depth_result || (fi % (size_t) o.depth_every) == 0) {
+        estimator.estimate_depth(in_srv.Get(), input_color);
+        est = estimator.finish_pending_depth_for_benchmark(in_srv.Get(), input_color);
+        have_depth_result = true;
+      } else {
+        // Match the live stream between depth ticks: color advances while all depth-derived
+        // geometry remains the last completed result. The views remain owned by the estimator
+        // and are valid until the next inference overwrites their backing resources.
+        est.geometry_updated = false;
+      }
 
       // Sampling output must never sample the depth/EMA/subject pipeline itself. Every source
       // frame above was inferred and consumed; only expensive composite/readback is skipped.
@@ -781,20 +852,24 @@ namespace sbs_bench {
         ctx->Begin(warp_disjoint.Get());
         ctx->End(warp_start.Get());
       }
-      if (sbs_cfg.warp == "vd3d" && est.depth) {
+      auto dispatch_forward = [&](ID3D11ComputeShader *shader,
+                                  ID3D11UnorderedAccessView *winner_uav) {
         const UINT clear_winner[4] = {0, 0, 0, 0};
-        ctx->ClearUnorderedAccessViewUint(vd3d_winner_uav.Get(), clear_winner);
-        ctx->CSSetShader(vd3d_cs.Get(), nullptr, 0);
+        ctx->ClearUnorderedAccessViewUint(winner_uav, clear_winner);
+        ctx->CSSetShader(shader, nullptr, 0);
         ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
         ID3D11ShaderResourceView *cs_srvs[] = {in_srv.Get(), est.depth.Get(), est.subject.Get(), nullptr, est.plane_lock.Get()};
         ctx->CSSetShaderResources(0, 5, cs_srvs);
-        ctx->CSSetUnorderedAccessViews(0, 1, vd3d_winner_uav.GetAddressOf(), nullptr);
+        ctx->CSSetUnorderedAccessViews(0, 1, &winner_uav, nullptr);
         ctx->CSSetConstantBuffers(2, 1, repro_cb.GetAddressOf());
         ctx->Dispatch(((sbs_w / 2u) + 15u) / 16u, (sbs_h + 15u) / 16u, 1u);
         ID3D11UnorderedAccessView *null_uav[] = {nullptr};
         ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
         ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
         ctx->CSSetShaderResources(0, 5, null_cs_srvs);
+      };
+      if (sbs_cfg.warp == "vd3d" && est.depth) {
+        dispatch_forward(vd3d_cs.Get(), vd3d_winner_uav.Get());
       }
       ctx->OMSetRenderTargets(1, sbs_rtv.GetAddressOf(), nullptr);
       ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -849,7 +924,33 @@ namespace sbs_bench {
       }
       sbs_perf::tick();
 
+      // Offline-only mask pass, deliberately outside the production warp timestamp/CPU sample.
+      // It executes the same shader selection logic and exports R=pre-fill disocclusion,
+      // G=unresolved after the active fallback. This evidence must not perturb perf conclusions.
+      if (sbs_cfg.warp == "apollo" && est.depth) {
+        dispatch_forward(vd3d_cs.Get(), vd3d_winner_uav.Get());
+      }
+      ctx->OMSetRenderTargets(1, warp_mask_rtv.GetAddressOf(), nullptr);
+      ctx->VSSetShader(vs.Get(), nullptr, 0);
+      ctx->PSSetShader(sbs_cfg.warp == "vd3d" && est.depth ? vd3d_mask_ps.Get() : mask_ps.Get(), nullptr, 0);
+      ctx->RSSetViewports(1, &vp);
+      ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
+      ID3D11ShaderResourceView *mask_srvs[] = {
+        in_srv.Get(), est.depth.Get(), est.subject.Get(),
+        est.depth ? vd3d_winner_srv.Get() : nullptr, est.plane_lock.Get()
+      };
+      ctx->PSSetShaderResources(0, 5, mask_srvs);
+      ctx->PSSetConstantBuffers(2, 1, &cb);
+      ctx->Draw(3, 0);
+      ctx->OMSetRenderTargets(1, null_rtv, nullptr);
+      ctx->PSSetShaderResources(0, 5, null_srv);
+
       // Readback -> PNG.
+      const std::string output_id = frame_id(frames[fi], fi);
+      char mask_name[64];
+      snprintf(mask_name, sizeof(mask_name), "warp_mask_%s.png", output_id.c_str());
+      dump_bgra8_texture(dev.Get(), ctx.Get(), warp_mask_tex.Get(),
+                         fs::path(o.out) / mask_name, warp_mask_stage);
       ctx->CopyResource(sbs_stage.Get(), final_sbs_tex);
       D3D11_MAPPED_SUBRESOURCE m = {};
       if (SUCCEEDED(ctx->Map(sbs_stage.Get(), 0, D3D11_MAP_READ, 0, &m))) {
@@ -878,17 +979,16 @@ namespace sbs_bench {
           }
         }
         ctx->Unmap(sbs_stage.Get(), 0);
-        const std::string id = frame_id(frames[fi], fi);
         char name[64];
-        snprintf(name, sizeof(name), "sbs_%s.png", id.c_str());
+        snprintf(name, sizeof(name), "sbs_%s.png", output_id.c_str());
         if (save_png(fs::path(o.out) / name, sbs_w, sbs_h, buf)) {
           written++;
         }
         char dname[64];
-        snprintf(dname, sizeof(dname), "depth_%s.png", id.c_str());
+        snprintf(dname, sizeof(dname), "depth_%s.png", output_id.c_str());
         dump_depth(dev.Get(), ctx.Get(), est.depth.Get(), fs::path(o.out) / dname, depth_stage);
         char rname[64];
-        snprintf(rname, sizeof(rname), "raw_%s.f32", id.c_str());
+        snprintf(rname, sizeof(rname), "raw_%s.f32", output_id.c_str());
         dump_raw_model_depth(dev.Get(), ctx.Get(), est.raw_model_depth.Get(), est.raw_width, est.raw_height, fs::path(o.out) / rname, raw_depth_stage);
         if (!raw_shape_written && est.raw_width > 0 && est.raw_height > 0) {
           std::ofstream shape(fs::path(o.out) / "raw_shape.json");
@@ -912,13 +1012,19 @@ namespace sbs_bench {
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
-                 << "  \"schema\": 1,\n"
+                 << "  \"schema\": 4,\n"
                  << "  \"model\": \"" << model.name << "\",\n"
                  << "  \"profile\": \"" << sbs_cfg.profile << "\",\n"
                  << "  \"warp\": \"" << sbs_cfg.warp << "\",\n"
-                 << "  \"depth_step\": \"current-once\",\n"
-                 << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false")
-                 << "\n}\n";
+                 << "  \"depth_step\": \""
+                 << (o.depth_every == 1 ? std::string("current-once") :
+                                          "reuse-" + std::to_string(o.depth_every))
+                 << "\",\n"
+                 << "  \"depth_reuse_interval\": " << o.depth_every << ",\n"
+                 << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n"
+                 << "  \"warp_mask\": {\"red\": \"forward_disocclusion_before_fill\", "
+                    "\"green\": \"unresolved_after_fill\"}\n"
+                 << "}\n";
       }
     }
     if (o.simulate_hdr) {

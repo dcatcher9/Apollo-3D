@@ -161,10 +161,10 @@ namespace config {
     bool ignore_encoder_probe_failure;
 
     // Real-time 2D->3D side-by-side (SBS) depth reprojection tuning.
-    // Shared/Apollo base values live HERE. config.cpp derives each named profile (including the
-    // default VD3D profile), then parses explicit sbs_3d_* overrides on top.
+    // Shared/Apollo base values live HERE. config.cpp derives each named profile, then parses
+    // explicit sbs_3d_* overrides on top.
     struct sbs_t {
-      std::string profile = "vd3d";  ///< Quality profile applied before explicit overrides. Custom names use sbs_3d_profile_<name>_<parameter> keys.
+      std::string profile = "apollo";  ///< Quality profile applied before explicit overrides. Custom names use sbs_3d_profile_<name>_<parameter> keys.
       std::string warp = "apollo";  ///< Geometry implementation: "apollo" = occlusion-aware backward probe; "vd3d" = Bestv2 backward/forward hybrid.
       double pop_strength = 1.25;  ///< Production stereo-parallax multiplier (0.25-2), shared by both profiles. Literal VD3D reference runs bypass production scaling in the offline harness.
       double ema = 0.5;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
@@ -178,7 +178,7 @@ namespace config {
       double subject_plane_width = 0.12;  ///< Half-width (in normalized depth) of the subject band for subject_plane_lock (VD3D subject_plane_lock_width, Bestv2 0.12).
       bool bestv2_sharpen = false;  ///< Apply Bestv2's exact SDR per-eye sharpen 0.2 after the completed warp. Retained for fidelity, disabled in quality-optimized profiles.
       double vd3d_forward_blend = 0.65;  ///< VD3D hybrid weight: 0 = classic backward grid warp, 1 = depth-ordered forward splat. Bestv2 code uses 0.65.
-      double depth_fps = 45.0;  ///< Target depth-update rate. Inference interval is auto-derived from the measured video fps (interval = round(video_fps / depth_fps)). 0 = update every frame.
+      double depth_fps = 0.0;  ///< Target depth-update rate. 0 (default) follows the requested stream cadence; positive values cap depth updates without blocking the encode path.
       std::string depth_model = "depth_anything_v2_fp16";  ///< Local name/stem for the depth model files (<name>.onnx / <name>.engine). Identifies the model so different models coexist, each with its own cached engine.
       std::string depth_model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< URL to download the depth model ONNX from if <depth_model>.onnx is absent. Point this (and depth_model) elsewhere to use a different model.
       std::string prebuild_models = "";  ///< Comma-separated registry model names to build at startup in addition to the active model. Empty = only the active model.

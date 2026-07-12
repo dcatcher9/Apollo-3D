@@ -1,5 +1,6 @@
 {
   "aggregate": {
+    "artifact_in_hole_pct": 5.4524034992785,
     "depth_gt_edge_f1": 52.16842097127386,
     "depth_gt_si_rmse": 9.806756258010864,
     "depth_spread": 0.7815554936726888,
@@ -12,6 +13,8 @@
     "flow_depth": 37.56564534228781,
     "flow_support": 0.759013963782269,
     "flow_temporal": 5.966162349866784,
+    "hole_bad_fill_pct": 0.012646854956992797,
+    "hole_source_residual_p95": 5.021060141548514,
     "image_integrity_pct": 99.20196439533456,
     "negative_disparity_pct": 1.4540272620160977,
     "pop_pct_p50": 1.1599898048539548,
@@ -34,6 +37,8 @@
     "swim": 11.259769831014717,
     "vmisalign_pct": 0.0023164784943219274,
     "vmisalign_px": 0.009419773297850043,
+    "warp_hole_pct": 1.264477801579301,
+    "warp_unresolved_pct": 0.0,
     "_n": 24,
     "_models": [
       ""
@@ -55,12 +60,12 @@
     "score": 85.6
   },
   "perf_ms": {
-    "depth_infer": 1.7464,
-    "sbs_composite_cpu": 0.0067,
-    "warp_infer": 0.018784
+    "depth_infer": 1.71424,
+    "sbs_composite_cpu": 0.0069,
+    "warp_infer": 0.018432
   },
   "meta": {
-    "git_sha": "04c4e9a4",
+    "git_sha": "1e1ff805",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -81,13 +86,14 @@
     "profile": "vd3d",
     "warp": "vd3d",
     "literal_bestv2": false,
-    "eval_schema": 9,
+    "eval_schema": 12,
     "depth_step": "current-once",
-    "conf_sha256": "4469d2029d2cb95b",
-    "metric_sha256": "6fff1afa14e6eabf",
+    "depth_reuse_interval": 1,
+    "conf_sha256": "da08885f8dd3cd82",
+    "metric_sha256": "a326ddae1c56ee7b",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T00:41:39",
-    "run_name": "aspect-geometry-extended",
+    "timestamp": "2026-07-12T10:10:33",
+    "run_name": "evalv12-baseline-extended",
     "name": "tartanair-house-easy",
     "description": "Synthetic attic/bed transition with exact metric depth and optical flow.",
     "dataset": "TartanAir V2",

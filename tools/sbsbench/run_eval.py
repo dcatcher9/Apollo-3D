@@ -36,7 +36,7 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-EVAL_SCHEMA = 9  # profile-owned live/eval model; OFF/AI wire contract
+EVAL_SCHEMA = 12  # exact-mask evidence plus explicit depth/color cadence contract
 
 
 def suite_defaults(name):
@@ -240,11 +240,21 @@ def main():
                          "clips and metrics must still match")
     ap.add_argument("--report-allow-model-diff", action="store_true",
                     help="allow an explicit depth-model A/B report; clips and metrics must match")
+    ap.add_argument("--report-allow-depth-step-diff", action="store_true",
+                    help="allow an explicit current-depth versus reused-depth cadence report")
     ap.add_argument("--allow-build", action="store_true", help="proceed even if engines are missing")
     args = normalize_cli_paths(ap.parse_args())
     if args.comparison_only and args.update_baselines:
         fail("--comparison-only and --update-baselines are mutually exclusive")
     literal_bestv2 = "--literal-bestv2" in args.extra
+    try:
+        depth_reuse_interval = int(extra_value(args.extra, "--depth-every", 1))
+    except (TypeError, ValueError):
+        fail("--depth-every must be an integer")
+    if not 1 <= depth_reuse_interval <= 8:
+        fail("--depth-every must be between 1 and 8")
+    depth_step = ("current-once" if depth_reuse_interval == 1 else
+                  f"reuse-{depth_reuse_interval}")
     if literal_bestv2 and not args.comparison_only:
         fail("--literal-bestv2 is reference-only and requires --comparison-only")
 
@@ -296,7 +306,8 @@ def main():
         "conf": os.path.relpath(args.conf, REPO),
         "model": expected_model, "profile": expected_config_profile,
         "warp": expected_warp, "literal_bestv2": literal_bestv2,
-        "eval_schema": EVAL_SCHEMA, "depth_step": "current-once",
+        "eval_schema": EVAL_SCHEMA, "depth_step": depth_step,
+        "depth_reuse_interval": depth_reuse_interval,
         "conf_sha256": conf_sha, "metric_sha256": metric_sha,
         "gpu_contention": contention,
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"), "run_name": label,
@@ -325,11 +336,12 @@ def main():
             fail(f"{clip}: harness did not write contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
         expected_contract = {
-            "schema": 1,
+            "schema": 4,
             "model": expected_model,
             "profile": expected_config_profile,
             "warp": expected_warp,
-            "depth_step": "current-once",
+            "depth_step": depth_step,
+            "depth_reuse_interval": depth_reuse_interval,
             "literal_bestv2": literal_bestv2,
         }
         mismatched = {key: (expected, contract.get(key))
@@ -347,9 +359,17 @@ def main():
         sbs_ids = set(sbsbench.indexed_files(os.path.join(out_dir, "sbs_*.png"), "sbs_"))
         depth_ids = set(sbsbench.indexed_files(os.path.join(out_dir, "depth_*.png"), "depth_"))
         raw_ids = set(sbsbench.indexed_files(os.path.join(out_dir, "raw_*.f32"), "raw_"))
-        if not source_ids or source_ids != sbs_ids or source_ids != depth_ids or source_ids != raw_ids:
+        mask_ids = set(sbsbench.indexed_files(
+            os.path.join(out_dir, "warp_mask_*.png"), "warp_mask_"))
+        if (contract.get("warp_mask") != {
+                "red": "forward_disocclusion_before_fill",
+                "green": "unresolved_after_fill"}):
+            fail(f"{clip}: missing/unknown warp-mask channel contract")
+        if (not source_ids or source_ids != sbs_ids or source_ids != depth_ids
+                or source_ids != raw_ids or source_ids != mask_ids):
             fail(f"{clip}: artifact frame-id mismatch source={sorted(source_ids)} "
-                 f"sbs={sorted(sbs_ids)} depth={sorted(depth_ids)} raw={sorted(raw_ids)}")
+                 f"sbs={sorted(sbs_ids)} depth={sorted(depth_ids)} raw={sorted(raw_ids)} "
+                 f"warp_mask={sorted(mask_ids)}")
         if not os.path.exists(os.path.join(out_dir, "raw_shape.json")):
             fail(f"{clip}: raw_shape.json missing")
         # Carry the clip's own metadata (scene name/description) into results so the run dir is
@@ -398,7 +418,7 @@ def main():
                 "mode": "profile",
                 "model": expected_model,
                 "eval_schema": EVAL_SCHEMA,
-                "depth_step": "current-once",
+                "depth_step": meta["depth_step"],
                 "conf_sha256": conf_sha,
                 "metric_sha256": metric_sha,
             }
@@ -462,6 +482,8 @@ def main():
             report_cmd.append("--allow-config-diff")
         if args.report_allow_model_diff:
             report_cmd.append("--allow-model-diff")
+        if args.report_allow_depth_step_diff:
+            report_cmd.append("--allow-depth-step-diff")
         report_run = subprocess.run(report_cmd, capture_output=True, text=True)
         if report_run.returncode:
             fail("report generation failed: " + (report_run.stderr or report_run.stdout)[-2000:])

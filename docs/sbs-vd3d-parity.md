@@ -146,6 +146,37 @@ one-synchronize, one-normalize operation without duplicate enqueue. This is an e
 primitive, not a live mode. Real per-frame sync would stall the encode thread and is not a
 production option.
 
+**Cadence root-cause validation (2026-07-12, eval schema 12):** the harness now has an explicit
+`--depth-every N` contract that advances color every frame while reusing the last completed raw,
+normalized, subject, and plane-lock state between depth ticks. `--depth-every 2` models the common
+90 Hz stream / 45 Hz profile case. Machine checks confirm adjacent reuse frames have byte-identical
+raw and processed depth while their source/SBS color advances; cadence A/B reports require the
+explicit `--report-allow-depth-step-diff` permission.
+
+This confirms stale depth/color registration as a major live artifact source, not merely a
+performance tradeoff. Across four public moving GT clips, reuse-2 changed:
+
+- `depth_gt_edge_f1`: **-8.5 to -22.8 points** on every clip;
+- `depth_gt_si_rmse`: **+2.8 to +3.8 points** on every clip;
+- source-edge misalignment: **+1.1 to +8.9 depth pixels**;
+- flow-compensated depth p95: **+6.5 to +25.9 /255**.
+
+The ordinary disocclusion-flicker proxy often *improved* by 9.5-13.0 because holding the wrong
+depth makes it numerically steadier. Visual inspection shows the failure clearly: the previous
+person silhouette remains behind the current Bonn frame. This is why cadence must be validated
+with current-frame GT/flow and image inspection, not raw frame difference alone. Core reuse-2 is
+rejected on primary stability (`c647` static jitter 3.17->5.42; `scene_cut` 4.34->7.05).
+
+Reports:
+
+- `sbs_eval/cadence-core-every2/report.html`
+- `sbs_eval/cadence-extended-every2/report.html`
+
+The fresh-depth suite remains useful for isolating processor changes, but a production candidate
+that affects temporal behavior must also run the reuse-2 cadence A/B. The direct quality fix to
+test on the RTX 5080 is raising the profile depth target from 45 toward the stream refresh rate;
+motion compensation is a separate fallback if per-frame inference is too expensive.
+
 **Faithful-baseline decision:** evaluate current-frame depth with exactly one state update per
 source frame. Live async cadence is a later Apollo-specific A/B; mixing it into Phase A caused the
 former duplicate-settle conclusions.
@@ -323,6 +354,59 @@ by 0.0125 with the same rim/flicker direction. Both paths cost about 0.059 ms mo
 time. Against the aligned 1920×1080 real Bestv2 reference, combined output was byte-identical to
 shift-only output, so MAE/PSNR did not improve. The treatment is rejected and its runtime code and
 switches were removed; local HTML reports remain under `cmake-build-relwithdebinfo/sbs_eval/`.
+
+**Exact-hole audit (2026-07-12, eval schema 11):** the harness now forward-splats the shared
+Bestv2 parallax field and exports its exact coverage mask for both geometries (red = uncovered
+before the active warp hides/fills it, green = still unresolved afterward). This corrects an
+initial invalid Apollo diagnostic: a backward probe almost always finds a mathematical crossing
+and therefore cannot reveal the forward holes that it paints over. Because both profiles use the
+same parallax field, their measured interior hole area is identical: **0.650%** mean on the ten
+non-flat core clips and **1.022%** on the eight public extended clips. Both active paths produced
+**0.000% unresolved** pixels on all 19 clips.
+
+Source-relative validation does not support adding a broad inpainter. On core, only **18.0%**
+(Apollo) / **19.5%** (VD3D) of detected corruption overlapped a true hole, and only **3.0% / 4.2%**
+of hole pixels exceeded the 24/255 bad-fill threshold. On extended, overlap was **23.2% / 26.8%**
+and bad fill only **0.82% / 0.89%**. Most visible halo/stretch error is therefore outside the
+pixels any hole-only inpainter can modify. Two useful stress cases remain: `c525` (Apollo/VD3D
+artifact overlap 47.5%/72.0%) and `bonn_person_walk` (58.0%/72.5%). Any future inpainting work
+must be mask-gated, prove an improvement on those cases without changing non-hole pixels, and
+then pass both complete suites. Reports:
+
+- `sbs_eval/inpaint-mask-core-vd3d/report.html`
+- `sbs_eval/inpaint-mask-extended-vd3d/report.html`
+
+**Rejected background-directed VD3D hole resolve (2026-07-12):** a lossless live host dump
+captured a large triangular copy of a sword below its real edge in only the VD3D left eye. A
+treatment filled every raw hole completely from the geometry-directed background side. It
+removed the sword copy and passed schema-12 core/extended gates (one `c525` halo improvement,
+zero metric regressions), but the Galaxy-XR headset exposed much stronger ghost edges and
+sawtooth contours: the binary winner mask made the 35% hybrid -> 100% background transition
+visible. A follow-up Apollo-feathered VD3D hybrid was rejected before retention because it mixed
+two warp contracts and offered no established advantage over selecting Apollo directly. Both
+treatments were removed; VD3D remains the simple reference hybrid and Apollo is the production
+default. Screening reports remain under `sbs_eval/vd3d-bgfill{,-extended}/`.
+
+**Subpixel dual-tap screening (2026-07-12, rejected):** a harness-only VD3D forward-splat
+treatment wrote each source sample to both integer pixels touched by its fractional destination,
+while retaining the normal frontmost-depth winner. It was screened on the two exact-hole
+hotspots before any full-suite run. `c525` moved artifact cleanliness 73.6→74.7 with small
+source-halo/stretch gains, but true-hole bad fill slightly worsened 19.27%→19.37%.
+`bonn_person_walk` moved 78.6→78.4 with mixed sub-threshold changes. Warp GPU time rose about
+10–12%, and direct full-resolution inspection found no perceptible contour improvement. The
+treatment, harness switch, and alternate shader entry were removed. No Apollo analogue is
+justified: Apollo is a backward gather and would need a different algorithm, while this test did
+not establish that subpixel forward coverage is a useful quality direction.
+
+**Higher DA-V2-small input screening (2026-07-12, rejected as a default):** increasing the
+requested short side 432->518 produced 840x476 rather than 770x434 where source resolution allowed
+it (source-limited Sintel remained byte-identical). `c747` halo/stretch improved strongly, but its
+source-edge alignment worsened 23.13->24.00 depth pixels and the depth interpretation changed over
+the whole overexposed doorway instead of sharpening the same silhouette. `c525` and
+`bonn_person_walk` were neutral/slightly worse; Bonn GT region RMSE improved 11.53->10.61 while GT
+boundary F1 worsened 22.60->20.81. Inference rose about 2.0->2.77 ms on the uncapped core clips.
+The problem is semantic/highlight ambiguity and temporal registration, not a general shortage of
+input pixels, so 432 remains the profile default.
 
 ### B4 · Post *(partial)*
 

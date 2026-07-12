@@ -426,6 +426,12 @@ namespace models {
     int effective_interval = 1;
     int last_logged_interval = 0;
     std::chrono::steady_clock::time_point last_call_time {};
+    std::chrono::steady_clock::time_point cadence_stats_start {};
+    unsigned cadence_stats_calls = 0;
+    unsigned cadence_stats_busy_drops = 0;
+    unsigned cadence_stats_skips = 0;
+    unsigned cadence_stats_enqueues = 0;
+    unsigned cadence_stats_completions = 0;
 
     // GPU-stream timing of the async TensorRT enqueues (perf benchmark; sbs_3d_perf_stats).
     // A small ring of CUDA event pairs per engine lets several inferences be in flight; the
@@ -1325,6 +1331,36 @@ namespace models {
       }
       last_call_time = now;
 
+      // Report achieved throughput rather than only the configured cadence. In particular,
+      // interval=1 means "attempt every frame"; it does not prove TensorRT completed at the
+      // video rate because the non-blocking starvation guard can reuse depth while CUDA is busy.
+      // A five-second window is responsive enough for headset tuning without flooding the log.
+      if (cadence_stats_start.time_since_epoch().count() == 0) {
+        cadence_stats_start = now;
+      } else {
+        float stats_seconds = std::chrono::duration<float>(now - cadence_stats_start).count();
+        if (stats_seconds >= 5.0f) {
+          float calls = (float) std::max(1u, cadence_stats_calls);
+          BOOST_LOG(info) << "Depth throughput: target "
+                          << (depth_fps > 0.0f ? std::to_string((int) (depth_fps + 0.5f)) + "fps" : "stream")
+                          << ", video ~" << (int) (measured_fps + 0.5f)
+                          << "fps, completed ~" << (int) (cadence_stats_completions / stats_seconds + 0.5f)
+                          << "fps, enqueued ~" << (int) (cadence_stats_enqueues / stats_seconds + 0.5f)
+                          << "fps, busy drops " << (int) (100.0f * cadence_stats_busy_drops / calls + 0.5f)
+                          << "% (" << cadence_stats_busy_drops << '/' << cadence_stats_calls << "), cadence skips "
+                          << (int) (100.0f * cadence_stats_skips / calls + 0.5f)
+                          << "% (" << cadence_stats_skips << '/' << cadence_stats_calls << "), interval "
+                          << effective_interval;
+          cadence_stats_start = now;
+          cadence_stats_calls = 0;
+          cadence_stats_busy_drops = 0;
+          cadence_stats_skips = 0;
+          cadence_stats_enqueues = 0;
+          cadence_stats_completions = 0;
+        }
+      }
+      cadence_stats_calls++;
+
       if (depth_fps > 0.0f && measured_fps > 1.0f) {
         // ±0.65 hysteresis (not ±0.5): with a symmetric half-frame band, a video rate
         // sitting exactly on a boundary (e.g. ~67 fps / depth_fps 45 -> ideal ~1.49)
@@ -1377,6 +1413,7 @@ namespace models {
         auto q = cuda.cuStreamQuery(cu_stream);
         if (q == CUDA_ERROR_NOT_READY) {
           // Reuse the last normalized depth and subject state while inference is busy.
+          cadence_stats_busy_drops++;
           return make_result();
         }
         if (q != CUDA_SUCCESS && !stream_error_logged) {
@@ -1554,6 +1591,7 @@ namespace models {
       frame_counter++;
       if (effective_interval > 1 && (frame_counter % (unsigned) effective_interval) != 1u) {
         // Off-cadence frame: reuse the last normalized depth and subject state.
+        cadence_stats_skips++;
         return make_result(geometry_updated);
       }
 
@@ -1571,6 +1609,7 @@ namespace models {
         normalize_depth_output();
         has_previous_frame = false;
         geometry_updated = true;
+        cadence_stats_completions++;
       }
 
       // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
@@ -1648,6 +1687,9 @@ namespace models {
       }
 
       has_previous_frame = enqueued;
+      if (enqueued) {
+        cadence_stats_enqueues++;
+      }
 
       return make_result(geometry_updated);
     }

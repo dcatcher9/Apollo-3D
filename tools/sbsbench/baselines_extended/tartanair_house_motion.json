@@ -1,5 +1,6 @@
 {
   "aggregate": {
+    "artifact_in_hole_pct": 15.337792650418736,
     "depth_gt_edge_f1": 56.70748807890885,
     "depth_gt_si_rmse": 11.894291361172995,
     "depth_spread": 0.762431642661492,
@@ -12,6 +13,8 @@
     "flow_depth": 33.264522801274836,
     "flow_support": 0.47606294051460596,
     "flow_temporal": 14.412590192711871,
+    "hole_bad_fill_pct": 0.9134563222269448,
+    "hole_source_residual_p95": 13.181739207108807,
     "image_integrity_pct": 99.08716774453075,
     "negative_disparity_pct": 1.4469121413276298,
     "pop_pct_p50": 1.1794638598199647,
@@ -34,6 +37,8 @@
     "swim": 9.73896272804426,
     "vmisalign_pct": 0.002858220541384071,
     "vmisalign_px": 0.009384969744132832,
+    "warp_hole_pct": 1.3914703040994623,
+    "warp_unresolved_pct": 0.0,
     "_n": 24,
     "_models": [
       ""
@@ -55,12 +60,12 @@
     "score": 69.1
   },
   "perf_ms": {
-    "depth_infer": 2.10982,
-    "sbs_composite_cpu": 0.0072,
-    "warp_infer": 0.01856
+    "depth_infer": 1.72067,
+    "sbs_composite_cpu": 0.0077,
+    "warp_infer": 0.018304
   },
   "meta": {
-    "git_sha": "04c4e9a4",
+    "git_sha": "1e1ff805",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -81,13 +86,14 @@
     "profile": "vd3d",
     "warp": "vd3d",
     "literal_bestv2": false,
-    "eval_schema": 9,
+    "eval_schema": 12,
     "depth_step": "current-once",
-    "conf_sha256": "4469d2029d2cb95b",
-    "metric_sha256": "6fff1afa14e6eabf",
+    "depth_reuse_interval": 1,
+    "conf_sha256": "da08885f8dd3cd82",
+    "metric_sha256": "a326ddae1c56ee7b",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T00:41:39",
-    "run_name": "aspect-geometry-extended",
+    "timestamp": "2026-07-12T10:10:33",
+    "run_name": "evalv12-baseline-extended",
     "name": "tartanair-house-motion",
     "description": "Synthetic indoor/outdoor camera rotation with exact metric depth and optical flow.",
     "dataset": "TartanAir V2",

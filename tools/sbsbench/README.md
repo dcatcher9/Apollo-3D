@@ -61,6 +61,7 @@ python tools/sbsbench/run_eval.py --extra --subject-lock 0.6   # pass supported 
 python tools/sbsbench/run_eval.py --label treat --report-control cmake-build-relwithdebinfo/sbs_eval/control --extra --warp vd3d
 python tools/sbsbench/run_eval.py --label profile-b --conf profile-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/profile-a --report-allow-config-diff
 python tools/sbsbench/run_eval.py --label model-b --conf model-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/model-a --report-allow-config-diff --report-allow-model-diff
+python tools/sbsbench/run_eval.py --label cadence-b --report-control cmake-build-relwithdebinfo/sbs_eval/cadence-a --report-allow-depth-step-diff --extra --depth-every 2
 python tools/sbsbench/run_eval.py --comparison-only --label ab-control  # fresh A/B; no committed gate
 python tools/sbsbench/run_eval.py --suite extended --label public-control # prepared public suite
 python tools/sbsbench/rescore_run.py cmake-build-relwithdebinfo/sbs_eval/<run> --in-place  # metrics only
@@ -130,10 +131,12 @@ depth-step floor (flat scenes legitimately read 0), and all pixel windows scale 
 width — but absolute values are still not comparable across clip resolutions; baselines are
 per-clip-set. The harness writes 16-bit depth PNGs so `swim` resolves below 1/255.
 
-**Eval schema 4 correctness contract (2026-07-10):** `run_eval.py` pins the model explicitly. The
+**Eval schema 12 correctness contract:** `run_eval.py` pins the model explicitly. By default the
 harness submits and consumes exactly one inference per source frame, so EMA and normalization
-update once.
-Source, raw-model (`raw_*.f32`), pre-warp depth (`depth_*.png`), and SBS artifacts are joined by
+update once. `--depth-every N` is an explicit comparison-only cadence treatment: color advances
+while the last completed depth/subject geometry is reused, and the contract records `reuse-N`.
+Source, raw-model (`raw_*.f32`), pre-warp depth (`depth_*.png`), exact warp mask
+(`warp_mask_*.png`), and SBS artifacts are joined by
 numeric frame identity, never list position. Baselines are rejected with setup exit 2 if mode,
 model, schema, stepping semantics, config hash, metric hash, or clip hash differs. Output folders
 are cleared before reuse. `--output-every N` reduces saved artifacts while still processing every
@@ -354,6 +357,11 @@ annotations.
 | `disocc_smear` | horizontal-detail deficit in the narrow band: 1 − \|dI/dx\|<sub>band</sub>/\|dI/dx\|<sub>clean</sub> | 0 = clean fill · →1 = smeared (small-scale) |
 | `stretch_area` | the LARGE horizontal disocclusion **stretch band** (bg rubber-banded to fill the gap; eye-asymmetric): area of wide low-horizontal-gradient / vertically-streaked runs anchored to silhouettes, per-mille of the eye | higher = more/bigger smeared patches. Ignores smooth (textureless) stretches |
 | `rim_over_p50` / `p95` | silhouette **halo / white line**: a thin bright ridge hugging the silhouette (horizontal white top-hat of the eye, sampled in the silhouette band, ×255) — the residual bright sliver where the fill doesn't reach the fg edge | ~0 = no fringe · higher = brighter white line. Ignores broad bright regions (top-hat is thin-ridge specific) |
+| `warp_hole_pct` | exact worst-eye interior area not covered by a forward splat of the shared parallax field before the active warp hides/fills it (harness mask R) | context only: more valid stereo can expose more background, so lower is not automatically better |
+| `warp_unresolved_pct` | exact worst-eye area still unresolved after the active fallback/search radius (harness mask G) | lower = fewer pixels fell all the way back to the unwarped sample |
+| `hole_source_residual_p95` | p95 regularized source-relative patch error inside the exact hole mask | lower = the active fill remains explainable by real source content |
+| `hole_bad_fill_pct` | fraction of exact-hole pixels whose source-relative patch error exceeds 24/255 | lower = fewer visibly implausible fills inside true holes |
+| `artifact_in_hole_pct` | fraction of all >24/255 source-relative artifact pixels inside or one pixel beside the exact hole mask | context only: high support means an inpainter can target the measured problem; low support means the visible regression is elsewhere |
 | `source_halo_p95` | excess silhouette ridge after subtracting the aligned source ridge | lower = less warp-created halo; **primary warp axis** |
 | `source_stretch_pct` | source-textured silhouette-near pixels with >65% horizontal-detail loss | lower = less warp-created stretch; **primary warp axis** |
 | `edge_acc_p50` / `p95` | depth-px distance from each depth silhouette to the nearest **source** color edge (needs `--frames`) | small = silhouette on the real edge · large = soft/bent/floating |

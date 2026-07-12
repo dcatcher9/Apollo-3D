@@ -1,5 +1,6 @@
 {
   "aggregate": {
+    "artifact_in_hole_pct": 14.758054966635376,
     "depth_gt_edge_f1": 23.2464789147094,
     "depth_gt_si_rmse": 11.507943967978159,
     "depth_spread": 0.8564007716874281,
@@ -12,6 +13,8 @@
     "flow_depth": 17.170736001885455,
     "flow_support": 0.7742882429198247,
     "flow_temporal": 6.222429088924242,
+    "hole_bad_fill_pct": 0.0800816369902124,
+    "hole_source_residual_p95": 10.486170457800226,
     "image_integrity_pct": 98.17909287736634,
     "negative_disparity_pct": 1.1607269106048705,
     "pop_pct_p50": 0.9558995395780974,
@@ -34,6 +37,8 @@
     "swim": 1.504145182993101,
     "vmisalign_pct": 0.004773233683967809,
     "vmisalign_px": 0.010945251395848269,
+    "warp_hole_pct": 0.6137787313800928,
+    "warp_unresolved_pct": 0.0,
     "_n": 24,
     "_models": [
       ""
@@ -55,12 +60,12 @@
     "score": 78.9
   },
   "perf_ms": {
-    "depth_infer": 2.84941,
-    "sbs_composite_cpu": 0.0065,
-    "warp_infer": 0.019488
+    "depth_infer": 2.85498,
+    "sbs_composite_cpu": 0.0077,
+    "warp_infer": 0.019328
   },
   "meta": {
-    "git_sha": "04c4e9a4",
+    "git_sha": "1e1ff805",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -81,13 +86,14 @@
     "profile": "vd3d",
     "warp": "vd3d",
     "literal_bestv2": false,
-    "eval_schema": 9,
+    "eval_schema": 12,
     "depth_step": "current-once",
-    "conf_sha256": "4469d2029d2cb95b",
-    "metric_sha256": "6fff1afa14e6eabf",
+    "depth_reuse_interval": 1,
+    "conf_sha256": "da08885f8dd3cd82",
+    "metric_sha256": "a326ddae1c56ee7b",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T00:41:39",
-    "run_name": "aspect-geometry-extended",
+    "timestamp": "2026-07-12T10:10:33",
+    "run_name": "evalv12-baseline-extended",
     "name": "sintel-market",
     "description": "Cinematic market scene with people, clutter and depth layering.",
     "dataset": "MPI Sintel Stereo Training Dataset",

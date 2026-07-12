@@ -1,5 +1,6 @@
 {
   "aggregate": {
+    "artifact_in_hole_pct": 6.25,
     "depth_gt_edge_f1": 0.0,
     "depth_gt_si_rmse": 26.057803471883137,
     "depth_spread": 0.8241613854964575,
@@ -10,6 +11,8 @@
     "flow_depth": 4.5364746671655904,
     "flow_support": 0.953450520833333,
     "flow_temporal": 0.0,
+    "hole_bad_fill_pct": 0.01750700280112045,
+    "hole_source_residual_p95": 0.5430566247707839,
     "image_integrity_pct": 99.81307206394224,
     "negative_disparity_pct": 0.022686872980557382,
     "pop_pct_p50": 0.00012512397058393686,
@@ -30,6 +33,8 @@
     "swim": 1.9641348823257114,
     "vmisalign_pct": 0.00034892834567775327,
     "vmisalign_px": 0.0007858796949828198,
+    "warp_hole_pct": 0.5026321684587813,
+    "warp_unresolved_pct": 0.0,
     "_n": 24,
     "_models": [
       ""
@@ -49,12 +54,12 @@
     "score": 100.0
   },
   "perf_ms": {
-    "depth_infer": 2.02336,
-    "sbs_composite_cpu": 0.007,
-    "warp_infer": 0.0184
+    "depth_infer": 1.976,
+    "sbs_composite_cpu": 0.0068,
+    "warp_infer": 0.018208
   },
   "meta": {
-    "git_sha": "04c4e9a4",
+    "git_sha": "1e1ff805",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -78,13 +83,14 @@
     "profile": "vd3d",
     "warp": "vd3d",
     "literal_bestv2": false,
-    "eval_schema": 9,
+    "eval_schema": 12,
     "depth_step": "current-once",
-    "conf_sha256": "4469d2029d2cb95b",
-    "metric_sha256": "6fff1afa14e6eabf",
+    "depth_reuse_interval": 1,
+    "conf_sha256": "da08885f8dd3cd82",
+    "metric_sha256": "a326ddae1c56ee7b",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T00:40:14",
-    "run_name": "aspect-geometry-core",
+    "timestamp": "2026-07-12T10:08:43",
+    "run_name": "evalv12-baseline-core",
     "name": "flat_page",
     "description": "Synthetic static document/desktop page: flat-content depth hallucination (A3).",
     "expected_flat": true,
