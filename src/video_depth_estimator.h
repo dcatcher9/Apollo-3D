@@ -54,8 +54,8 @@ namespace models {
      * @param assets_dir Path to the assets directory (for model loading)
      * @param cfg Tuning knobs; see config::video_t::sbs_t (the estimator uses the depth-side
      *            fields: ema, depth_short_side, depth_max_aspect, minmax_ema, depth_fps).
-         * @param model The selected depth model: name/url (which engine to load/build) plus the
-     *            per-model contract (input_rank, output_transform, output/input tensor names).
+     * @param model The selected depth model: name/url (which engine to load/build) plus the
+     *            DA-V2-compatible model contract (pixel_values -> predicted_depth).
      */
     video_depth_estimator(Microsoft::WRL::ComPtr<ID3D11Device> device, Microsoft::WRL::ComPtr<ID3D11DeviceContext> context, const std::filesystem::path &assets_dir, const config::video_t::sbs_t &cfg, const config::depth_model_info &model);
 

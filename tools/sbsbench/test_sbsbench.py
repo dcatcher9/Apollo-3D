@@ -30,6 +30,27 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(run_eval.extra_value(
             ["--warp", "apollo", "--warp", "vd3d"], "--warp", "apollo"), "vd3d")
 
+    def test_metric_hash_is_independent_of_text_line_endings(self):
+        paths = []
+        try:
+            for data in (b"alpha\nbeta\n", b"alpha\r\nbeta\r\n"):
+                with tempfile.NamedTemporaryFile("wb", suffix=".py", delete=False) as fh:
+                    fh.write(data)
+                    paths.append(fh.name)
+            # sha256_files includes the basename, so give both temp files the same logical name.
+            with tempfile.TemporaryDirectory() as left, tempfile.TemporaryDirectory() as right:
+                left_path = os.path.join(left, "metric.py")
+                right_path = os.path.join(right, "metric.py")
+                with open(paths[0], "rb") as src, open(left_path, "wb") as dst:
+                    dst.write(src.read())
+                with open(paths[1], "rb") as src, open(right_path, "wb") as dst:
+                    dst.write(src.read())
+                self.assertEqual(run_eval.sha256_files([left_path]),
+                                 run_eval.sha256_files([right_path]))
+        finally:
+            for path in paths:
+                os.unlink(path)
+
     def test_warp_is_read_from_config(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
             fh.write("# sbs_3d_warp = apollo\nsbs_3d_warp = vd3d # active\n")
@@ -62,14 +83,14 @@ class EvalContractTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
             fh.write("sbs_3d_profile = Cinema\n"
                      "sbs_3d_profile_Cinema_warp = vd3d\n"
-                     "sbs_3d_profile_Cinema_depth_model = da3mono_large_fp16\n")
+                     "sbs_3d_profile_Cinema_depth_model = depth_anything_v2_base_fp16\n")
             path = fh.name
         try:
             self.assertEqual(run_eval.expected_profile(path, []), ("Cinema", "vd3d"))
             self.assertEqual(run_eval.expected_profile(
                 path, ["--warp", "apollo"]), ("Cinema", "apollo"))
             self.assertEqual(run_eval.expected_depth_model(path, "Cinema"),
-                             "da3mono_large_fp16")
+                             "depth_anything_v2_base_fp16")
         finally:
             os.unlink(path)
 

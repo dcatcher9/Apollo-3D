@@ -135,7 +135,7 @@ where Apollo transforms depth in more places than "min/max EMA."
 | aspect | VD3D (Bestv2) | Apollo | faithful? |
 |--------|---------------|--------|-----------|
 | model | DA-V2 small fp16 (PyTorch) | DA-V2 small fp16 (TensorRT) | ✅ same weights |
-| resolution | UI request 768×432; adapter snaps to patch-14 **770×434** | short-side 432 resolves to **770×434** at this aspect | ✅ matched. The old 336 claim confused DA-V2 with DA3MONO's `dynamic_width/fixed_h=336` registry entry. Runtime logs and raw-shape artifacts verify 770×434. |
+| resolution | UI request 768×432; adapter snaps to patch-14 **770×434** | short-side 432 resolves to **770×434** at this aspect | ✅ matched. Runtime logs and raw-shape artifacts verify 770×434. |
 | cadence | per-frame | **async** at `depth_fps` (45 game) — depth lags color | ⚠️ **the** depth-half gap |
 
 **Live sync is gone.** `sbs_3d_sync_depth` and the forked synchronous `estimate()` were removed
@@ -143,8 +143,8 @@ where Apollo transforms depth in more places than "min/max EMA."
 true synchronous MOVIE is roadmap #3, unbuilt). Async is the only behavior; the lag is a permanent
 architectural property, not a toggle. The evaluator now uses a benchmark-only one-submit,
 one-synchronize, one-normalize operation without duplicate enqueue. This is an evaluation
-primitive, not a live mode. Real per-frame sync only pays off for
-MOVIE's heavy DA3MONO, where it stalls the encode thread (a wash).
+primitive, not a live mode. Real per-frame sync would stall the encode thread and is not a
+production option.
 
 **Faithful-baseline decision:** evaluate current-frame depth with exactly one state update per
 source frame. Live async cadence is a later Apollo-specific A/B; mixing it into Phase A caused the
@@ -158,7 +158,7 @@ depth values*, it is not a resize. Group-A transforms, in order:
 
 | # | site | what it does | VD3D counterpart | Apollo-only? |
 |---|------|--------------|------------------|--------------|
-| A3 | per-model transform (`buffer_to_tex_cs:18`, `depth_minmax_cs`) | DA-V2: identity. DA-V3: `1/(raw+depth_shift)` → disparity | `depth_to_tensor(invert_depth=True)` | no |
+| A3 | model output (`buffer_to_tex_cs`) | DA-V2 relative disparity, unchanged before normalization | `depth_to_tensor(invert_depth=True)` | no |
 | A4 | range normalize (`buffer_to_tex_cs:25`) | `saturate((raw−min)/(max−min))`, min/max **EMA-smoothed** (`minmax_ema=0.1`) | **per-frame** `DepthPercentileEMA(p2/p98, α=0.82)` (live-portable analog) — see the two-normalization note below | percentile vs raw min/max |
 | A5 | range floor (`buffer_to_tex_cs:31`) | `0.5+(mapped−0.5)·range_scale`: compress contrast toward 0.5 on near-flat scenes | **none** | ✅ (A3 anti-hallucination guard) |
 | A6 | temporal EMA (`buffer_to_tex_cs:37`) | `lerp(old, mapped, ema_alpha)`, `ema=0.6` | `TemporalDepthFilter(α=0.5)` | no |

@@ -21,6 +21,7 @@ from PIL import Image
 
 ctrl_dir, treat_dir, out_html = sys.argv[1], sys.argv[2], sys.argv[3]
 allow_config_diff = "--allow-config-diff" in sys.argv[4:]
+allow_model_diff = "--allow-model-diff" in sys.argv[4:]
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (sbs_score, shared with run_eval)
@@ -34,10 +35,12 @@ CURRENT_METRIC_SHA = run_eval.sha256_files([
     os.path.join(SCRIPT_DIR, "run_eval.py")])
 REPORT_SHA = run_eval.sha256_files([os.path.abspath(__file__)])
 
-# An A/B report may compare different code, warp, or treatment arguments, but its evidence is
-# invalid if the source set, model, base config, or metric contract changed underneath it.
-_SAME_CONTEXT = ["clip_set_sha1", "mode", "model", "eval_schema", "depth_step", "suite",
+# An A/B report may compare different code, warp, treatment arguments, or (only when explicitly
+# requested) depth models. Its evidence remains invalid if the source set or metric contract changed.
+_SAME_CONTEXT = ["clip_set_sha1", "mode", "eval_schema", "depth_step", "suite",
                  "metric_sha256"]
+if not allow_model_diff:
+    _SAME_CONTEXT.append("model")
 if not allow_config_diff:
     _SAME_CONTEXT.append("conf_sha256")
 _mismatched_context = {k: (CTRL.get("meta", {}).get(k), TREAT.get("meta", {}).get(k))

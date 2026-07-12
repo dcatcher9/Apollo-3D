@@ -37,7 +37,7 @@ The profile supplies the complete stack. Add a configuration-only profile with
 ```
 sbs_3d_profile = cinema
 sbs_3d_profile_cinema_warp = vd3d
-sbs_3d_profile_cinema_depth_model = da3mono_large_fp16
+sbs_3d_profile_cinema_depth_model = depth_anything_v2_base_fp16
 sbs_3d_profile_cinema_depth_fps = 30
 sbs_3d_profile_cinema_pop_strength = 1.35
 ```
@@ -60,6 +60,7 @@ python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change
 python tools/sbsbench/run_eval.py --extra --subject-lock 0.6   # pass supported A/B levers
 python tools/sbsbench/run_eval.py --label treat --report-control cmake-build-relwithdebinfo/sbs_eval/control --extra --warp vd3d
 python tools/sbsbench/run_eval.py --label profile-b --conf profile-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/profile-a --report-allow-config-diff
+python tools/sbsbench/run_eval.py --label model-b --conf model-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/model-a --report-allow-config-diff --report-allow-model-diff
 python tools/sbsbench/run_eval.py --comparison-only --label ab-control  # fresh A/B; no committed gate
 python tools/sbsbench/run_eval.py --suite extended --label public-control # prepared public suite
 python tools/sbsbench/rescore_run.py cmake-build-relwithdebinfo/sbs_eval/<run> --in-place  # metrics only
@@ -278,7 +279,7 @@ The metrics split cleanly by subsystem: **warp**-side changes move pop / disocc 
 **depth**-side changes move edge_acc / swim / depth_spread. So a delta tells you *where* the change
 landed. (Historical validation: doubling the removed legacy divergence moved pop +90% while
 leaving edge_acc/swim flat;
-swapping da3mono→v2 moved edge_acc −96% and swim −100% and left the warp lever untouched.)
+swapping depth-model variants can move edge accuracy and stability while leaving the warp lever untouched.)
 
 ## Artifact score (0–100) and feature decision
 `sbs_score(agg)` reports `score = q_clean` = 100 − weighted artifact penalties (each

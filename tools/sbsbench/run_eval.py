@@ -63,7 +63,13 @@ def sha256_files(paths):
     for path in paths:
         h.update(os.path.basename(path).encode())
         with open(path, "rb") as fh:
-            h.update(fh.read())
+            data = fh.read()
+        # The evaluation contract is source semantics, not Git checkout EOL policy. Without this,
+        # committing on Windows can invalidate freshly written baselines even though the Git blob
+        # and Python behavior are unchanged.
+        if os.path.splitext(path)[1].lower() in {".py", ".json", ".conf", ".md", ".hlsl"}:
+            data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        h.update(data)
     return h.hexdigest()[:16]
 
 
@@ -231,7 +237,9 @@ def main():
                     help="report path (default: <this run>/report.html; requires --report-control)")
     ap.add_argument("--report-allow-config-diff", action="store_true",
                     help="allow an explicit profile-vs-profile report with different config hashes; "
-                         "clips/model/metrics must still match")
+                         "clips and metrics must still match")
+    ap.add_argument("--report-allow-model-diff", action="store_true",
+                    help="allow an explicit depth-model A/B report; clips and metrics must match")
     ap.add_argument("--allow-build", action="store_true", help="proceed even if engines are missing")
     args = normalize_cli_paths(ap.parse_args())
     if args.comparison_only and args.update_baselines:
@@ -452,6 +460,8 @@ def main():
                       control_dir, out_root, report_path]
         if args.report_allow_config_diff:
             report_cmd.append("--allow-config-diff")
+        if args.report_allow_model_diff:
+            report_cmd.append("--allow-model-diff")
         report_run = subprocess.run(report_cmd, capture_output=True, text=True)
         if report_run.returncode:
             fail("report generation failed: " + (report_run.stderr or report_run.stdout)[-2000:])

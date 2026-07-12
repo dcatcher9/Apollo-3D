@@ -14,8 +14,8 @@ cbuffer Constants : register(b0) {
     float ema_alpha;         // per-pixel depth temporal EMA blend (buffer_to_tex)
     float minmax_alpha;      // normalized min/max temporal EMA blend (depth_minmax_ema)
     uint  reduce_threads;    // total threads in the reduction dispatch (grid-stride)
-    uint  output_transform;  // 0 = identity (DA-V2 disparity); 1 = shifted reciprocal (DA-V3)
-    float depth_shift;       // shift in 1/(depth + depth_shift) when output_transform == 1
+    float reserved6;
+    float reserved7;
     float reserved8;
     float reserved9;
     float reserved10;

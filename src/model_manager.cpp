@@ -13,11 +13,7 @@ namespace models {
     }
 
     std::string engine_filename(const config::depth_model_info& model) {
-        std::string tag;
-        if (model.input_rank != 4) tag += ".r" + std::to_string(model.input_rank);
-        if (model.keep_confidence) tag += "c";
-        if (model.dynamic_width) tag += "w";  // height-pinned width-range profile; distinct from a fixed-shape engine
-        return model.name + tag + ".engine";
+        return model.name + ".engine";
     }
 
     std::filesystem::path ensure_model_available(const std::filesystem::path& assets_dir, const std::string& model_name, const std::string& model_url, const std::string& engine_name) {

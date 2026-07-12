@@ -189,25 +189,15 @@ struct TrtDeleter {
 template<typename T>
 using TrtUniquePtr = std::unique_ptr<T, TrtDeleter<T>>;
 
-// Build the model input Dims for a given rank: rank-4 = [1,3,H,W] (DA-V2),
-// rank-5 = [1,1,3,H,W] (DA-V3). Passing Dims INTO TensorRT is ABI-safe (only RETURNING a Dims
-// by value across the MinGW/MSVC boundary faults), so this helper is safe to hand to the API.
-static nvinfer1::Dims make_input_dims(int rank, int h, int w) {
+// Build the DA-V2 input dimensions [1,3,H,W]. Passing Dims INTO TensorRT is ABI-safe (only
+// RETURNING a Dims by value across the MinGW/MSVC boundary faults).
+static nvinfer1::Dims make_input_dims(int h, int w) {
   nvinfer1::Dims d {};
-  if (rank == 5) {
-    d.nbDims = 5;
-    d.d[0] = 1;
-    d.d[1] = 1;
-    d.d[2] = 3;
-    d.d[3] = h;
-    d.d[4] = w;
-  } else {
-    d.nbDims = 4;
-    d.d[0] = 1;
-    d.d[1] = 3;
-    d.d[2] = h;
-    d.d[3] = w;
-  }
+  d.nbDims = 4;
+  d.d[0] = 1;
+  d.d[1] = 3;
+  d.d[2] = h;
+  d.d[3] = w;
   return d;
 }
 
@@ -340,59 +330,44 @@ namespace models {
       set_engine_build_status(engine_name, engine_build_status::failed);
       return;
     }
+    if (network->getNbInputs() != 1 ||
+        std::string_view(network->getInput(0)->getName()) != "pixel_values") {
+      BOOST_LOG(error) << "Unsupported depth model input contract; expected one 'pixel_values' tensor.";
+      set_engine_build_status(engine_name, engine_build_status::failed);
+      return;
+    }
 
-    // Input tensor "pixel_values" (DA-V2: rank-4 [1,3,H,W]; DA-V3: rank-5 [1,1,3,H,W]),
-    // output tensor "predicted_depth". Build the optimization profile at the model's input
-    // rank. Passing Dims INTO TensorRT is ABI-safe (only returning Dims by value faults).
+    // DA-V2 contract: input "pixel_values" [1,3,H,W], output "predicted_depth".
     auto profile = builder->createOptimizationProfile();
-    // Fixed-shape models (static input dims baked into the ONNX) need no optimization profile;
-    // adding one with a different range would violate the static shape (DA3MONO-LARGE's dynamic
-    // export baked resolution-dependent shape math, so it is exported at a fixed resolution).
-    if (!model.fixed_shape && network->getNbInputs() > 0) {
+    if (network->getNbInputs() > 0) {
       auto input = network->getInput(0);
       auto dims_for = [&](int h, int w) {
-        return make_input_dims(model.input_rank, h, w);
+        return make_input_dims(h, w);
       };
-      if (model.dynamic_width) {
-        // Height is baked into the ONNX (fixed_h); only width is a real dynamic axis.
-        // Pin H and range W from 1:1 up to ~4:1 so a single engine serves every landscape
-        // aspect (4:3 -> 16:9 -> ultrawide/32:9). OPT is the common ultrawide (~2.37:1).
-        const int p = std::max(1, model.patch);
-        const int h = model.fixed_h;
-        auto r14 = [&](double x) {
-          return round_to_patch((float) x, p);
-        };
-        profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, dims_for(h, h));
-        profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, dims_for(h, r14(h * 2.37)));
-        profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, dims_for(h, r14(h * 4.0)));
-      } else {
-        profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, dims_for(14, 14));
-        profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, dims_for(518, 518));
-        profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, dims_for(1008, 1008));
-      }
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, dims_for(14, 14));
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, dims_for(518, 518));
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, dims_for(1008, 1008));
       config->addOptimizationProfile(profile);
     }
 
-    // Prune outputs the pipeline doesn't consume (DA-V3 emits confidence/extrinsics/intrinsics
-    // alongside predicted_depth). unmarkOutput drops them from the engine I/O and lets the
-    // builder dead-code-eliminate their exclusive branches, so enqueueV3 only needs the two
-    // tensors the pipeline binds. Names via getName()/getNbOutputs() are ABI-safe (no Dims).
-    // An EMPTY output_tensor means "keep every output" -- for engines whose outputs are all
-    // consumed (e.g. a future multi-output model); depth engines set it to "predicted_depth".
-    if (!model.output_tensor.empty()) {
-      std::vector<nvinfer1::ITensor *> to_unmark;
-      for (int i = 0; i < network->getNbOutputs(); i++) {
-        auto *t = network->getOutput(i);
-        std::string nm = t->getName();
-        bool keep = (nm == model.output_tensor) || (model.keep_confidence && nm == "confidence");
-        if (!keep) {
-          to_unmark.push_back(t);
-        }
+    std::vector<nvinfer1::ITensor *> to_unmark;
+    bool found_depth_output = false;
+    for (int i = 0; i < network->getNbOutputs(); i++) {
+      auto *tensor = network->getOutput(i);
+      if (std::string_view(tensor->getName()) == "predicted_depth") {
+        found_depth_output = true;
+      } else {
+        to_unmark.push_back(tensor);
       }
-      for (auto *t : to_unmark) {
-        BOOST_LOG(info) << "Depth engine: pruning unused output '" << t->getName() << "'.";
-        network->unmarkOutput(*t);
-      }
+    }
+    if (!found_depth_output) {
+      BOOST_LOG(error) << "Unsupported depth model output contract; missing 'predicted_depth'.";
+      set_engine_build_status(engine_name, engine_build_status::failed);
+      return;
+    }
+    for (auto *tensor : to_unmark) {
+      BOOST_LOG(info) << "Depth engine: pruning unsupported output '" << tensor->getName() << "'.";
+      network->unmarkOutput(*tensor);
     }
 
     auto serializedModel = TrtUniquePtr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
@@ -443,13 +418,6 @@ namespace models {
     float depth_fps;  // target depth-update rate (interval auto-derived from measured video fps)
     std::string model_name;  // local file stem; engine cached as <model_name>.engine
     std::string model_url;  // where to download the onnx if absent
-    int input_rank;  // model input rank: 4 = [1,3,H,W] (DA-V2), 5 = [1,1,3,H,W] (DA-V3)
-    uint32_t output_transform;  // applied to raw model output before normalization: 0=identity, 1=shifted reciprocal 1/(depth+depth_shift) (DA-V3 depth->disparity)
-    float depth_shift;  // shift in the DA-V3 disparity transform (bounds the near spike; foreground-scale knob)
-    bool fixed_shape;  // ONNX has static input dims; skip runtime setInputShape (dims are baked)
-    bool dynamic_width;  // ONNX height is baked (fixed_h) but width is dynamic; pin height, set width from aspect
-    int fixed_h;  // baked model input height for dynamic_width (e.g. 336); 0 otherwise
-    std::string output_tensor_name;  // depth output tensor bound for inference
 
     // Cadence: measure the video frame rate from the call period and derive how many
     // frames to skip between depth inferences so depth refreshes near depth_fps.
@@ -473,7 +441,7 @@ namespace models {
       const char *stage = nullptr;
     };
 
-    perf_evt_ring perf_depth;  // "depth_infer": one DA-V2/DA3MONO inference
+    perf_evt_ring perf_depth;  // "depth_infer": one DA-V2 inference
 
     void perf_try_resolve(perf_evt_ring &r, int slot, cuda_driver_api &cuda) {
       if (!r.busy[slot] || !cuda.cuEventQuery) {
@@ -646,14 +614,7 @@ namespace models {
         plane_lock_width((float) cfg.subject_plane_width),
         depth_fps((float) cfg.depth_fps),
         model_name(model.name),
-        model_url(model.url),
-        input_rank(model.input_rank),
-        output_transform((uint32_t) model.output_transform),
-        depth_shift(std::max(0.001f, (float) cfg.depth_shift)),
-        fixed_shape(model.fixed_shape),
-        dynamic_width(model.dynamic_width),
-        fixed_h(model.fixed_h),
-        output_tensor_name(model.output_tensor) {
+        model_url(model.url) {
       const auto init_started = std::chrono::steady_clock::now();
       // Perf benchmark: enable per-stage timing for this run and reset the rolling window
       // so it reflects this model/mode rather than blending across a switch.
@@ -663,11 +624,6 @@ namespace models {
         sbs_perf::reset();
       }
 
-      // Per-model depth-rate override (heavier models that can't hold the global rate);
-      // 0 = use the config depth_fps.
-      if (model.depth_fps_override > 0.0) {
-        depth_fps = (float) model.depth_fps_override;
-      }
       const std::string engine_name = engine_filename(model);
       auto model_path = ensure_model_available(assets_dir, model_name, model_url, engine_name);
       if (model_path.empty()) {
@@ -986,15 +942,8 @@ namespace models {
         cuda.cuCtxSetCurrent(cuda_ctx);
       }
 
-      int h, w;
-      if (dynamic_width) {
-        h = fixed_h;
-        w = round_to_patch(fixed_h * 2.37f);
-      } else if (fixed_shape) {
-        return;  // baked shape; querying engine dims here is ABI-unsafe and none ship today
-      } else {
-        h = w = 518;  // square OPT profile point shared by the DA-V2/V3 dynamic engines
-      }
+      const int h = 518;
+      const int w = 518;
 
       const size_t in_elems = (size_t) 3 * h * w;  // batch/view dims are 1 for rank-4 and rank-5
       const size_t out_elems = (size_t) h * w;
@@ -1007,10 +956,10 @@ namespace models {
         return;
       }
 
-      nvinfer1::Dims in_dims = make_input_dims(input_rank, h, w);
+      nvinfer1::Dims in_dims = make_input_dims(h, w);
       exec_context->setInputShape("pixel_values", in_dims);
       exec_context->setTensorAddress("pixel_values", (void *) d_in);
-      exec_context->setTensorAddress(output_tensor_name.c_str(), (void *) d_out);
+      exec_context->setTensorAddress("predicted_depth", (void *) d_out);
       bool ok;
       {
         std::lock_guard<std::mutex> lock(*trt_mutex);
@@ -1230,8 +1179,6 @@ namespace models {
       cbf[3] = ema_alpha;
       cbf[4] = minmax_alpha;
       cb[5] = reduce_groups * 256u;  // total threads for the reduction grid-stride
-      cb[6] = output_transform;  // 0=identity (DA-V2 disparity), 1=shifted reciprocal (DA-V3 depth)
-      cbf[7] = depth_shift;  // shift in 1/(depth + depth_shift) when output_transform==1
       cbf[15] = subject_recenter;  // subject recenter strength (depth_subject_resolve_cs)
       cbf[18] = subject_stretch ? 1.0f : 0.0f;
       D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
@@ -1458,33 +1405,19 @@ namespace models {
           return {};
         }
         float aspect_ratio = (float) input_desc.Width / (float) input_desc.Height;
-        if (dynamic_width) {
-          // Height is baked into the engine (fixed_h); only the width tracks the source
-          // aspect. The engine's width profile spans [fixed_h .. fixed_h*4] (1:1 .. 4:1),
-          // so this covers every landscape aspect (4:3 -> 16:9 -> ultrawide/32:9) with one
-          // engine. Height must NOT be rescaled (that would break the baked binding), so the
-          // generic short-side/native-downscale path below is deliberately bypassed.
-          // Portrait (aspect < 1) is not a streaming case; it clamps to 1:1 (square).
-          target_h = fixed_h;
-          float a = std::min(std::max(aspect_ratio, 1.0f), std::min(max_aspect, 4.0f));
-          target_w = round_to_patch(fixed_h * a);
-        } else {
-          // Keep the patch-aligned tensor as close as possible to source aspect while
-          // respecting the TensorRT profile, the configured aspect cap, and native size.
-          // Deriving the long side from each candidate short side avoids independent
-          // axis rounding/capping, which visibly distorted ultrawide depth grids.
-          int max_w = std::min(1008, (int) input_desc.Width);
-          int max_h = std::min(1008, (int) input_desc.Height);
-          const float fitted_aspect = aspect_ratio >= 1.0f ? std::min(aspect_ratio, max_aspect) : 1.0f / std::min(1.0f / aspect_ratio, max_aspect);
-          const auto fitted_dims = aspect_aligned_dims(
-            fitted_aspect,
-            depth_short_side,
-            max_w,
-            max_h
-          );
-          target_w = fitted_dims.first;
-          target_h = fitted_dims.second;
-        }
+        // Keep the patch-aligned tensor as close as possible to source aspect while respecting
+        // the TensorRT profile, configured aspect cap, and native size.
+        int max_w = std::min(1008, (int) input_desc.Width);
+        int max_h = std::min(1008, (int) input_desc.Height);
+        const float fitted_aspect = aspect_ratio >= 1.0f ? std::min(aspect_ratio, max_aspect) : 1.0f / std::min(1.0f / aspect_ratio, max_aspect);
+        const auto fitted_dims = aspect_aligned_dims(
+          fitted_aspect,
+          depth_short_side,
+          max_w,
+          max_h
+        );
+        target_w = fitted_dims.first;
+        target_h = fitted_dims.second;
 
         // Threads for the min/max reduction; grid-stride handles any element count.
         int elems = target_w * target_h;
@@ -1684,20 +1617,15 @@ namespace models {
         BOOST_LOG(error) << "Failed to get mapped pointer for TensorRT: "
                          << in_ptr_res << ", " << out_ptr_res;
       } else {
-        // Fixed-shape engines have their input dims baked in; setInputShape is unnecessary
-        // (and target_w/target_h MUST equal the export resolution or the bindings mismatch).
-        bool bindings_ok = true;
-        if (!fixed_shape) {
-          nvinfer1::Dims in_dims = make_input_dims(input_rank, target_h, target_w);
-          if (!exec_context->setInputShape("pixel_values", in_dims)) {
-            BOOST_LOG(error) << "TensorRT setInputShape failed for " << target_w << "x" << target_h
-                             << " (outside the engine's optimization profile?)";
-            bindings_ok = false;
-          }
+        nvinfer1::Dims in_dims = make_input_dims(target_h, target_w);
+        bool bindings_ok = exec_context->setInputShape("pixel_values", in_dims);
+        if (!bindings_ok) {
+          BOOST_LOG(error) << "TensorRT setInputShape failed for " << target_w << "x" << target_h
+                           << " (outside the engine's optimization profile?)";
         }
         bindings_ok = bindings_ok &&
                       exec_context->setTensorAddress("pixel_values", (void *) d_in) &&
-                      exec_context->setTensorAddress(output_tensor_name.c_str(), (void *) d_out);
+                      exec_context->setTensorAddress("predicted_depth", (void *) d_out);
         if (bindings_ok) {
           // Serialize TensorRT async enqueue to avoid driver-level concurrent execution faults
           std::lock_guard<std::mutex> lock(*trt_mutex);

@@ -12,11 +12,6 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     uint idx = DTid.y * target_w + DTid.x;
     float raw = InputBuffer[idx];
 
-    // DA-V3 emits DEPTH (larger = farther); shifted reciprocal -> disparity (larger = closer)
-    // so the normalization below (tuned for DA-V2 disparity) is unchanged. Must match the exact
-    // transform in depth_minmax_cs so min/max and this map agree. The shift bounds the near end.
-    if (output_transform == 1) raw = 1.0f / (raw + depth_shift);
-
     // The validated permanent order is range->pixel: normalize using the current P2/P98 bounds,
     // then temporally smooth the normalized depth.
     float2 mm = MinMaxEma[0].xy;

@@ -606,41 +606,13 @@ namespace config {
   };
 
   const std::vector<depth_model_info> &depth_model_registry() {
-    // Built-in model definitions referenced by profile depth_model names.
-    // DA-V2 entries are drop-in (rank-4, disparity). DA-V3 entries carry their Phase C
-    // params but have no URL: their fp16 ONNX is produced locally (see the model-switching
-    // plan / tools) and must be pre-staged in the assets dir before they can be selected.
+    // Built-in DA-V2 model definitions referenced by profile depth_model names.
     static const std::vector<depth_model_info> registry = {
       {"depth_anything_v2_fp16",
        "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx"},
       {"depth_anything_v2_base_fp16",
        "https://huggingface.co/onnx-community/depth-anything-v2-base/resolve/main/onnx/model_fp16.onnx"},
-      // DA-V3: rank-5 input, shifted-reciprocal depth->disparity (output_transform=1); the shift
-      // (sbs.depth_shift) bounds the near spike so plain min/max normalization is stable.
-      {"depth_anything_v3_small_fp16", "",
-       /*input_rank*/ 5, /*patch*/ 14, /*output_transform*/ 1, /*keep_confidence*/ false},
-      {"depth_anything_v3_base_fp16", "",
-       /*input_rank*/ 5, /*patch*/ 14, /*output_transform*/ 1, /*keep_confidence*/ false},
-      // fp32 variants (single-file, locally converted from the HF two-file export) for bringing up
-      // and validating the DA-V3 pipeline before/against the fp16 conversion. Same rank-5 + reciprocal.
-      {"depth_anything_v3_small_fp32", "",
-       /*input_rank*/ 5, /*patch*/ 14, /*output_transform*/ 1, /*keep_confidence*/ false},
-      {"depth_anything_v3_base_fp32", "",
-       /*input_rank*/ 5, /*patch*/ 14, /*output_transform*/ 1, /*keep_confidence*/ false},
-      // DA3MONO-LARGE (depth-anything/DA3MONO-LARGE): the monocular-specialized DA-V3 (0.35B),
-      // gives V2-level pop (unlike the general onnx-community exports above). Locally exported
-      // torch->ONNX (the export wrapper de-normalizes ImageNet input to the 0-1 the model wants,
-      // so Apollo's rgb_to_nchw feeds it unchanged) then fp16. Same rank-5 + shifted reciprocal.
-      // 0.35B = movie-mode cost. dynamic_width: height is baked at 336 (its DINOv3 pos-embed export
-      // freezes the patch grid), but the width is a true dynamic axis, so ONE engine covers every
-      // landscape aspect from 4:3 through 16:9 to ultrawide/32:9 (16:9 also runs ~25% faster than
-      // ultrawide since fewer width patches). fixed_h=336 pins the runtime depth height.
-      {"da3mono_large_fp16", "",
-       /*input_rank*/ 5, /*patch*/ 14, /*output_transform*/ 1, /*keep_confidence*/ false,
-       /*fixed_shape*/ false, /*dynamic_width*/ true, /*fixed_h*/ 336},
     };
-    // NOTE: keep_confidence is false for now — the first DA-V3 integration is depth-only (rank-5
-    // input + reciprocal). Phase C4 (confidence-guided warp) flips it on and adds the binding.
     return registry;
   }
 
@@ -1272,11 +1244,11 @@ namespace config {
                          << "'; use 1-64 letters, digits, '_' or '-'. Using 'vd3d'.";
       sbs_profile = "vd3d";
     }
-    static constexpr std::array<std::string_view, 20> sbs_parameter_names {
+    static constexpr std::array<std::string_view, 19> sbs_parameter_names {
       "warp", "pop_strength", "ema", "depth_short_side", "depth_max_aspect", "minmax_ema",
       "subject_lock", "subject_recenter", "subject_stretch", "subject_plane_lock",
       "subject_plane_width", "bestv2_sharpen", "vd3d_forward_blend", "depth_fps",
-      "depth_model", "depth_model_url", "prebuild_models", "depth_shift", "max_encode_width",
+      "depth_model", "depth_model_url", "prebuild_models", "max_encode_width",
       "perf_stats"
     };
     std::vector<std::string> profile_names {"apollo", "vd3d"};
@@ -1363,7 +1335,6 @@ namespace config {
       string_f(vars, prefix + "depth_model", target.depth_model);
       string_f(vars, prefix + "depth_model_url", target.depth_model_url);
       string_f(vars, prefix + "prebuild_models", target.prebuild_models);
-      double_between_f(vars, prefix + "depth_shift", target.depth_shift, {0.02, 2.0});
       int_between_f(vars, prefix + "max_encode_width", target.max_encode_width, {256, 16384});
       bool_f(vars, prefix + "perf_stats", target.perf_stats);
     };

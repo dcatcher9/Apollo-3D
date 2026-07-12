@@ -20,7 +20,7 @@ Read first: [sbs-3d-roadmap.md](sbs-3d-roadmap.md) (status + constraints),
 | Brief | Proposal | Apollo-3D status |
 |---|---|---|
 | §3.1 capture | DXGI duplication, HDR tonemap for inference copy only, cursor, register-once interop | **SHIPPED** (ddup/wgc; `rgb_to_nchw_cs.hlsl` Reinhard+sRGB on the inference copy only; interop registered once, lazily on the encode thread — hard-won, see estimator notes) |
-| §3.2 depth | DA-V2-small TRT fp16, 518² static, model-agnostic wrapper | **SHIPPED, BEYOND**: profile-owned model registry (`0x3005` selects an advertised complete profile), aspect-aware 798×336 (≈ same px as 518², no letterbox waste), da3mono-large width-dynamic export |
+| §3.2 depth | DA-V2-small TRT fp16, 518² static, model-agnostic wrapper | **SHIPPED, BEYOND**: profile-owned DA-V2 registry (`0x3005` selects an advertised complete profile), aspect-aware 770×434 at 16:9 (no square-letterbox waste) |
 | §3.3 temporal | P2/P98 percentile range + EMA + scene-cut reset | **PARTIAL**: min/max + EMA exists (`depth_minmax_cs` → `depth_minmax_ema_cs`, α=0.1). Percentiles + scene-cut reset are **new — adopt/experiment below** |
 | §3.4 JBU | joint bilateral upsample | **SHIPPED** (`depth_guided_upsample_cs`, foreground bias + bimodal edge snap) — and **deliberately bypassed under MLBW** (texel-sharp depth is out of the warp's training distribution). Do not re-add under MLBW. |
 | §3.5 disparity | divergence/convergence, ±40 px clamp | **SHIPPED** (`divergence`, `focal_plane`, `depth_floor`, border fade) |
@@ -71,9 +71,8 @@ both eyes):
   percentiles, is what actually fixes the windowed-game amplification; percentiles alone
   still stretch a flat page.
 CAUTION from history: the sigma-clip/`norm_sigma` saga (removed 2026-07-05) was a
-normalization band-aid; anything here must prove itself against the shifted-reciprocal
-baseline offline before shipping. If results are marginal, drop it — the model-side fix
-(da3mono recognizes flat content) already exists via mode/model choice.
+normalization band-aid; anything here must prove itself against the DA-V2 baseline offline
+before shipping. If results are marginal, drop it.
 
 ### A4 — Debug composite views (small, quality-of-life)
 The brief's debug views map cleanly onto the existing dump path rather than live modes:
@@ -110,9 +109,8 @@ is restored.
   Tradeoffs: doubled band width in the synthetic eye, possible binocular rivalry
   (sharp-vs-warped eye). Cheap config experiment once inpaint has landed; offline sheets
   first.
-- **Streaming video-depth hook** (§3.3 note): matches the existing next-arch notes
-  ([sbs-3d-next-arch.md](sbs-3d-next-arch.md)); nothing to do until such a model has a
-  usable streaming export.
+- **Streaming video-depth hook** (§3.3 note): nothing to do until a suitable model has a
+  usable low-latency TensorRT export.
 
 ## Explicitly rejected (with reasons — do not relitigate)
 
@@ -132,8 +130,8 @@ is restored.
    l4).
 4. **JBU under the learned warp**: guided upsample exists and is intentionally bypassed —
    texel-sharp depth is out of MLBW's training distribution (renders as staircase fringe).
-5. **518² static depth input**: aspect-aware short-side sizing is equal-cost and strictly
-   better; da3mono is width-dynamic. No going back to square letterboxing.
+5. **518² static depth input**: aspect-aware DA-V2 short-side sizing is equal-cost and strictly
+   better. No going back to square letterboxing.
 6. **NullInpainter seam**: superseded by the real, implemented inpaint stage.
 7. **The brief's warp itself** (`d(x')≈d(x)` gather): two generations behind master.
 

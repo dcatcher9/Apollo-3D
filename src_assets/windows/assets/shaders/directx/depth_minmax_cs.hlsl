@@ -26,12 +26,6 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
     for (uint idx = dtid.x; idx < count; idx += reduce_threads) {
         float v = InputBuffer[idx];
         if (isnan(v) || v < 0.0f) v = 0.0f;
-        // DA-V3 emits scale-shift-invariant DEPTH (larger = farther); convert to disparity
-        // (larger = closer) with a SHIFTED reciprocal 1/(depth + shift). The shift keeps the
-        // near end finite (depth->0 gives 1/shift, not a ~1e6 spike), so no outlier hijacks the
-        // min/max -- the clean alternative to 1/depth + robust clipping (iw3's approach). Stays
-        // non-negative, so asuint() ordering still holds.
-        if (output_transform == 1) v = 1.0f / (v + depth_shift);
         uint u = asuint(v);
         lmin = min(lmin, u);
         lmax = max(lmax, u);

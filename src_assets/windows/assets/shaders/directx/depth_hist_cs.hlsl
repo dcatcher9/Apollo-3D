@@ -31,8 +31,6 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
     for (uint idx = dtid.x; idx < count; idx += reduce_threads) {
         float v = InputBuffer[idx];
         if (isnan(v) || v < 0.0f) v = 0.0f;
-        // Must match the exact transform in depth_minmax_cs / buffer_to_tex_cs.
-        if (output_transform == 1) v = 1.0f / (v + depth_shift);
         uint bin = min((uint)((v - vmin) * inv_range), NUM_BINS - 1u);
         InterlockedAdd(g_hist[bin], 1u);
     }
