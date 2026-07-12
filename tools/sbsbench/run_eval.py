@@ -36,9 +36,7 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-# Depth models the two modes load (matches the client mode->model binding).
-MODE_MODEL = {"movie": "da3mono_large_fp16", "game": "depth_anything_v2_fp16"}
-EVAL_SCHEMA = 8  # permanent validated processor stack; removed legacy/rejected switches
+EVAL_SCHEMA = 9  # profile-owned live/eval model; OFF/AI wire contract
 
 
 def suite_defaults(name):
@@ -167,14 +165,22 @@ def normalize_cli_paths(args):
 def expected_profile(conf, extra):
     """Apply the production contract: profile defaults first, explicit keys/CLI last."""
     profile = conf_value(conf, "sbs_3d_profile", "apollo")
-    if profile not in {"apollo", "vd3d"}:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", profile):
         fail(f"invalid sbs_3d_profile {profile!r}")
     warp = "vd3d" if profile == "vd3d" else "apollo"
+    warp = conf_value(conf, f"sbs_3d_profile_{profile}_warp", warp)
     warp = conf_value(conf, "sbs_3d_warp", warp)
     warp = extra_value(extra, "--warp", warp)
     if warp not in {"apollo", "vd3d"}:
         fail(f"invalid --warp override {warp!r}")
     return profile, warp
+
+
+def expected_depth_model(conf, profile):
+    """Resolve the model with the same profile-first, explicit-override order as production."""
+    model = "depth_anything_v2_fp16"
+    model = conf_value(conf, f"sbs_3d_profile_{profile}_depth_model", model)
+    return conf_value(conf, "sbs_3d_depth_model", model)
 
 
 def git(args):
@@ -194,11 +200,11 @@ def sunshine_running():
         return False
 
 
-def check_engines(build_dir, mode):
+def check_engines(build_dir, model):
     """Fail fast if a needed TRT engine isn't prebuilt (a first-use build stalls the loop for
     minutes and skews perf). Engines are named <stem>*.engine in the build assets dir."""
     assets = os.path.join(build_dir, "assets")
-    stems = [MODE_MODEL[mode]]
+    stems = [model]
     missing = [s for s in stems if not glob.glob(os.path.join(assets, s + "*.engine"))]
     return missing
 
@@ -212,7 +218,6 @@ def main():
                     help="quick committed suite or prepared public-data suite")
     ap.add_argument("--clips-root", help="override suite source directory")
     ap.add_argument("--baseline-dir", help="override suite baseline directory")
-    ap.add_argument("--mode", choices=["movie", "game"], default="game")
     ap.add_argument("--label", default=None, help="run label (default: timestamp)")
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[],
                     help="extra harness args, e.g. --extra --subject-lock 0.6")
@@ -250,7 +255,9 @@ def main():
     if not os.path.exists(exe):
         fail(f"{exe} not found -- build first (ninja -C cmake-build-relwithdebinfo sunshine)")
 
-    missing = check_engines(args.build_dir, args.mode)
+    expected_config_profile, expected_warp = expected_profile(args.conf, args.extra)
+    expected_model = expected_depth_model(args.conf, expected_config_profile)
+    missing = check_engines(args.build_dir, expected_model)
     if missing and not args.allow_build:
         print(f"run_eval: TRT engine(s) missing in {args.build_dir}/assets: {missing}\n"
               f"Prebuild them (run Apollo once / sbs_3d_prebuild_models) or pass --allow-build.")
@@ -269,14 +276,11 @@ def main():
     metric_sha = sha256_files([os.path.join(SCRIPT_DIR, "sbsbench.py"),
                                os.path.join(SCRIPT_DIR, "thresholds.json"),
                                os.path.abspath(__file__)])
-    expected_model = MODE_MODEL[args.mode]
-    expected_config_profile, expected_warp = expected_profile(
-        args.conf, args.extra)
     meta = {
         "git_sha": git(["rev-parse", "--short", "HEAD"]),
         "git_dirty": bool(git(["status", "--porcelain"])),
         "clip_set_sha1": {c: sha1_dir(os.path.join(clips_dir, c)) for c in clips},
-        "mode": args.mode, "suite": args.suite, "clips_root": clips_dir,
+        "mode": "profile", "suite": args.suite, "clips_root": clips_dir,
         "extra_args": args.extra,
         "conf": os.path.relpath(args.conf, REPO),
         "model": expected_model, "profile": expected_config_profile,
@@ -377,7 +381,7 @@ def main():
             base_meta = base.get("meta", {})
             required = {
                 "clip_sha1": meta["clip_set_sha1"][clip],
-                "mode": args.mode,
+                "mode": "profile",
                 "model": expected_model,
                 "eval_schema": EVAL_SCHEMA,
                 "depth_step": "current-once",

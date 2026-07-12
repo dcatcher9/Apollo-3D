@@ -181,39 +181,50 @@ int main(int argc, char *argv[]) {
   // Log publisher metadata
   log_publisher_data();
 
-  // Precompile TensorRT engine(s) in the background: the configured (active) depth model, plus
-  // any models listed in sbs_3d_prebuild_models, so switching to them mid-stream is instant
+  // Precompile TensorRT engine(s) in the background for every client-selectable profile, plus
+  // any models listed in their prebuild_models values, so switching mid-stream is instant
   // instead of triggering a first-use build (which streams flat for a minute or few). The builds
   // run sequentially (precompile serializes internally); each is a no-op once its engine exists.
-  std::thread([active = video::active_depth_model(), prebuild = config::video.sbs.prebuild_models]() {
+  std::thread([profiles = config::video.sbs_profiles]() {
       BOOST_LOG(info) << "Triggering background TensorRT engine precompilation..."sv;
-      models::precompile_tensorrt_engine(SUNSHINE_ASSETS_DIR, active);
-
       const auto &registry = config::depth_model_registry();
-      std::stringstream ss(prebuild);
-      std::string name;
-      while (std::getline(ss, name, ',')) {
+      std::vector<std::string> built;
+      auto build = [&](const config::depth_model_info &model) {
+        if (std::find(built.begin(), built.end(), model.name) == built.end()) {
+          BOOST_LOG(info) << "Prebuilding depth-model engine for '"sv << model.name << "'..."sv;
+          models::precompile_tensorrt_engine(SUNSHINE_ASSETS_DIR, model);
+          built.emplace_back(model.name);
+        }
+      };
+      for (const auto &[profile_name, profile] : profiles) {
+        build(video::depth_model_for_profile(profile));
+      }
+      for (const auto &[profile_name, profile] : profiles) {
+        std::stringstream ss(profile.prebuild_models);
+        std::string name;
+        while (std::getline(ss, name, ',')) {
           auto b = name.find_first_not_of(" \t");
           auto e = name.find_last_not_of(" \t");
           if (b == std::string::npos) {
-              continue;  // blank entry
+            continue;
           }
           name = name.substr(b, e - b + 1);
-          if (name == active.name) {
-              continue;  // built above
+          if (std::find(built.begin(), built.end(), name) != built.end()) {
+            continue;
           }
           bool found = false;
           for (const auto &m : registry) {
-              if (m.name == name) {
-                  BOOST_LOG(info) << "Prebuilding depth-model engine for '"sv << name << "'..."sv;
-                  models::precompile_tensorrt_engine(SUNSHINE_ASSETS_DIR, m);
-                  found = true;
-                  break;
-              }
+            if (m.name == name) {
+              build(m);
+              found = true;
+              break;
+            }
           }
           if (!found) {
-              BOOST_LOG(warning) << "sbs_3d_prebuild_models: '"sv << name << "' is not a known depth model; skipping."sv;
+            BOOST_LOG(warning) << "Profile '"sv << profile_name << "' prebuild_models entry '"sv
+                               << name << "' is not a known depth model; skipping."sv;
           }
+        }
       }
   }).detach();
 

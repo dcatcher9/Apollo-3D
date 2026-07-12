@@ -56,7 +56,8 @@ namespace mail {
   MAIL(gamepad_feedback);
   MAIL(hdr);
   MAIL(sbs_mode);
-  MAIL(depth_model_reload);  // bool: force an encode-session rebuild so the depth estimator reloads the active model
+  MAIL(sbs_profile);
+  MAIL(sbs_depth_status);
 #undef MAIL
 
 }  // namespace mail

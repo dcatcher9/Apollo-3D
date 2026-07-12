@@ -5,9 +5,8 @@
 
 Working notes from the 2026-07-05 design discussion, written so it can be resumed in a
 new session. This is the **forward-looking design** for how to do the 2D→SBS pipeline
-"correctly", distinct from [sbs-3d-roadmap.md](sbs-3d-roadmap.md) (the prioritized plan)
-and [depth-model-switching-plan.md](depth-model-switching-plan.md) (the shipped switching
-feature). Read the roadmap TL;DR first for the one-paragraph summary.
+"correctly", distinct from [sbs-3d-roadmap.md](sbs-3d-roadmap.md) (the prioritized plan).
+Read the roadmap TL;DR first for the one-paragraph summary.
 
 ## The reframe: it's a 3-stage pipeline, and each stage's problem is separable
 

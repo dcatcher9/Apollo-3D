@@ -53,12 +53,12 @@
     "score": 74.3
   },
   "perf_ms": {
-    "depth_infer": 2.18045,
-    "sbs_composite_cpu": 0.0056,
-    "warp_infer": 0.100736
+    "depth_infer": 2.01258,
+    "sbs_composite_cpu": 0.0067,
+    "warp_infer": 0.101056
   },
   "meta": {
-    "git_sha": "e40bfc88",
+    "git_sha": "97199f2b",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -73,7 +73,7 @@
       "flat_transition": "2f5bde33326b",
       "scene_cut": "c912fa5c33a7"
     },
-    "mode": "game",
+    "mode": "profile",
     "suite": "core",
     "clips_root": "E:\\Git\\Repo\\Apollo-3D\\tools\\sbsbench\\clips",
     "extra_args": [],
@@ -81,13 +81,13 @@
     "model": "depth_anything_v2_fp16",
     "profile": "apollo",
     "warp": "apollo",
-    "eval_schema": 8,
+    "eval_schema": 9,
     "depth_step": "current-once",
-    "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "411da3c4c6fdec56",
+    "conf_sha256": "726e61c492e2375e",
+    "metric_sha256": "029a1b88ce8d8c83",
     "gpu_contention": false,
-    "timestamp": "2026-07-11T17:47:12",
-    "run_name": "default-pop-125-baseline",
+    "timestamp": "2026-07-11T18:28:11",
+    "run_name": "profile-owned-default-baseline",
     "name": "anime-morevna-closeup",
     "description": "Cel-anime face close-up with blinking eyes, fine ink lines, flat-color regions and a textured rubble background.",
     "content_type": "anime",

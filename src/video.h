@@ -27,8 +27,7 @@ namespace video {
      Must match the SBS_MODE_* wire values in the client's moonlight-common-c Limelight.h. */
   enum sbs_mode_e : int {
     SBS_OFF = 0,  ///< No host depth; encoder emits a plain W x H frame.
-    SBS_GAME = 1,  ///< Async low-latency depth pipeline; encoder emits 2W x H.
-    SBS_MOVIE = 2,  ///< Sync high-latency depth pipeline; encoder emits 2W x H (not implemented yet).
+    SBS_AI = 1,  ///< Enable the profile-selected AI pipeline; encoder emits 2W x H.
   };
 
   /* Debug: set true by the 0x3004 "SBS Debug Dump" control message (client button). The next
@@ -70,22 +69,19 @@ namespace video {
     // as part of this struct - it is toggled at runtime via the 0x3003 control message.
     // When != SBS_OFF the encoder output width is doubled to carry the side-by-side frame.
     int sbs_mode = SBS_OFF;
+
+    // APPEND-ONLY. Immutable snapshot selected for this encode device. Keeping the complete
+    // profile here prevents a client switch or config reload from mixing parameters mid-frame.
+    config::video_t::sbs_t sbs_config {};
+
+    // APPEND-ONLY. Session-local depth-engine status channel (0 idle, 1 loading, 2 ready).
+    safe::mail_raw_t::event_t<int> sbs_depth_status_event;
   };
 
-  /* Runtime-selected depth model for the host SBS pipeline. Defaults to the configured
-     model (matched against config::depth_model_registry(), else synthesized from the
-     sbs_3d_depth_model/_url config keys). Switched live via the 0x3005 control message.
-     active_depth_model() returns a COPY because set_active_depth_model() can run
-     concurrently on the control thread. */
+  /* Profile-selected depth model for the host SBS pipeline. The configured name is matched
+     against config::depth_model_registry(), else synthesized from the model/url escape hatch. */
   config::depth_model_info active_depth_model();
-  bool set_active_depth_model(int registry_index);
-  /** Registry index of the active depth model (0xFF if it's a custom/non-registry model). */
-  int active_depth_model_index();
-
-  /** SBS depth-engine phase pushed to the client (0x3006): 0 = idle, 1 = loading, 2 = ready.
-      Set by the depth pipeline (display_vram) + the SBS-off handler; read by the control thread. */
-  extern std::atomic<int> depth_engine_phase;
-
+  config::depth_model_info depth_model_for_profile(const config::video_t::sbs_t &profile);
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
   platf::pix_fmt_e map_pix_fmt(AVPixelFormat fmt);
 

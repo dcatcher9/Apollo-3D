@@ -19,9 +19,8 @@ namespace config {
   // track modified config options
   inline std::unordered_map<std::string, std::string> modified_config_settings;
 
-  // A selectable depth model for the SBS 3D pipeline. The built-in roster
-  // (depth_model_registry()) is indexed by a stable id used as the wire value of the
-  // 0x3005 "Set Depth Model" control message, so the client can switch models mid-stream.
+  // A selectable depth model for the SBS 3D pipeline. The built-in roster is indexed by stable
+  // Profiles own model selection; this registry resolves names into model-specific runtime data.
   // The per-model fields capture how each model differs from the current DA-V2-small
   // default; the ones past name/url are consumed by the depth estimator in Phase C
   // (DA-V3: rank-5 input, inverted depth, confidence output).
@@ -40,7 +39,7 @@ namespace config {
     double depth_fps_override = 0.0;  ///< Per-model target depth fps; 0 = use sbs.depth_fps. For heavier models that can't hold the global rate.
   };
 
-  /// Built-in depth-model roster. Index = the 0x3005 wire id. Stable ordering.
+  /// Built-in depth-model roster.
   const std::vector<depth_model_info> &depth_model_registry();
 
   struct video_t {
@@ -178,7 +177,7 @@ namespace config {
     // Apollo profile defaults live HERE. config.cpp changes only values that differ for another
     // named profile, then parses explicit sbs_3d_* overrides on top.
     struct sbs_t {
-      std::string profile = "apollo";  ///< Complete validated quality profile applied before explicit sbs_3d_* overrides: "apollo" or "vd3d".
+      std::string profile = "apollo";  ///< Quality profile applied before explicit overrides. Custom names use sbs_3d_profile_<name>_<parameter> keys.
       std::string warp = "apollo";  ///< Geometry implementation: "apollo" = occlusion-aware backward probe; "vd3d" = Bestv2 backward/forward hybrid.
       double pop_strength = 1.25;  ///< Final shared stereo-parallax multiplier (0.25-2). Shared by both validated profiles; 1 is the literal Bestv2 field.
       double ema = 0.5;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
@@ -198,9 +197,12 @@ namespace config {
       double depth_shift = 0.2;  ///< Shift in the DA-V3 disparity transform 1/(depth + depth_shift) (models with output_transform=1). Bounds the near spike; also the foreground-scale/pop knob (smaller = more pop). iw3 default 0.2. Ignored by DA-V2 (output_transform=0).
       std::string prebuild_models = "";  ///< Comma-separated depth-model names (registry stems, e.g. "depth_anything_v3_small_fp16,depth_anything_v3_base_fp16") to build TensorRT engines for AT STARTUP, in addition to the active model. Makes a mid-stream switch to them instant instead of a first-use build (which streams flat while building). Empty = only the active model.
       int max_encode_width = 8192;  ///< Max encoder output width for host SBS. SBS doubles the client width to 2W; if 2W exceeds this, the host caps the packed frame to this width (scaling height to keep the per-eye aspect) rather than failing NVENC create. NVENC HEVC/AV1 = 8192, H.264 = 4096.
-      double movie_depth_fps = 30.0;  ///< Validated MOVIE-mode depth-update rate for the heavier DA3MONO model. 0 would use the global depth_fps instead.
       bool perf_stats = false;  ///< Emit per-stage host-SBS timing (depth inference + convert CPU) as a rolling p50/p95/max log line + sbs_perf.json snapshot. Off by default (the perf benchmark; see docs/sbs-benchmark-plan.md).
-    } sbs;
+    };
+
+    sbs_t sbs;
+    ///< All client-selectable profiles, including the built-in apollo/vd3d profiles.
+    std::unordered_map<std::string, sbs_t> sbs_profiles;
   };
 
   struct audio_t {

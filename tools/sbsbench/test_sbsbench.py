@@ -50,6 +50,42 @@ class EvalContractTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_custom_profile_values_need_no_evaluator_code_change(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
+            fh.write("sbs_3d_profile = cinema\n"
+                     "sbs_3d_profile_cinema_warp = vd3d\n"
+                     "sbs_3d_profile_cinema_depth_model = da3mono_large_fp16\n")
+            path = fh.name
+        try:
+            self.assertEqual(run_eval.expected_profile(path, []), ("cinema", "vd3d"))
+            self.assertEqual(run_eval.expected_profile(
+                path, ["--warp", "apollo"]), ("cinema", "apollo"))
+            self.assertEqual(run_eval.expected_depth_model(path, "cinema"),
+                             "da3mono_large_fp16")
+        finally:
+            os.unlink(path)
+
+    def test_live_sbs_contract_is_off_ai_and_profile_owned(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "video.h"), encoding="utf-8") as fh:
+            video_header = fh.read()
+        self.assertIn("SBS_AI = 1", video_header)
+        self.assertNotIn("SBS_GAME", video_header)
+        self.assertNotIn("SBS_MOVIE", video_header)
+
+        with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
+            config = fh.read()
+        self.assertIn('apply_sbs_values(profile, "sbs_3d_profile_" + name + "_")', config)
+        self.assertIn("video.sbs_profiles", config)
+
+        with open(os.path.join(repo, "src", "stream.cpp"), encoding="utf-8") as fh:
+            stream = fh.read()
+        self.assertIn("IDX_SET_SBS_PROFILE", stream)
+        self.assertIn("IDX_SBS_PROFILE_LIST", stream)
+        self.assertIn("mail::sbs_depth_status", stream)
+        self.assertNotIn("depth_engine_phase", stream)
+        self.assertNotIn("set_active_depth_model(id)", stream)
+
     def test_relative_cli_paths_are_resolved_before_subprocess_cwd(self):
         args = argparse.Namespace(build_dir="cmake-build-relwithdebinfo", conf="bench.conf",
                                   clips_root=None, baseline_dir=None,
@@ -101,7 +137,7 @@ class EvalContractTests(unittest.TestCase):
 
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
             config = fh.read()
-        self.assertIn('"sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0}', config)
+        self.assertIn('prefix + "pop_strength", target.pop_strength, {0.25, 2.0}', config)
         with open(os.path.join(repo, "src", "config.h"), encoding="utf-8") as fh:
             config_header = fh.read()
         self.assertIn("double pop_strength = 1.25;", config_header)
@@ -109,7 +145,7 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
                   encoding="utf-8") as fh:
             production = fh.read()
-        self.assertIn("(float) config::video.sbs.pop_strength", production)
+        self.assertIn("(float) sbs_config.pop_strength", production)
 
     def test_vd3d_fill_radius_scales_from_source_to_output_pixels(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -156,7 +192,7 @@ class EvalContractTests(unittest.TestCase):
         with open(display, encoding="utf-8") as fh:
             pipeline = fh.read()
         self.assertIn("tex_desc.Format = sbs_intermediate_linear ? DXGI_FORMAT_R16G16B16A16_FLOAT", pipeline)
-        self.assertIn("if (!sbs_intermediate_linear && config::video.sbs.bestv2_sharpen)", pipeline)
+        self.assertIn("if (!sbs_intermediate_linear && sbs_config.bestv2_sharpen)", pipeline)
         self.assertIn("input_is_linear ? convert_Y_or_YUV_fp16_ps.get()", pipeline)
         self.assertIn("models::input_color_space::linear_sdr", pipeline)
         common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",

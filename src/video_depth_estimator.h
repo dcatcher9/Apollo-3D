@@ -11,6 +11,13 @@
 
 namespace models {
 
+  enum class engine_build_status {
+    unknown,
+    building,
+    ready,
+    failed,
+  };
+
   enum class input_color_space : uint32_t {
     srgb = 0,  ///< gamma-encoded SDR UNORM capture
     linear_sdr = 1,  ///< linear FP16 capture targeting an SDR stream
@@ -18,6 +25,10 @@ namespace models {
   };
 
   void precompile_tensorrt_engine(const std::filesystem::path &assets_dir, const config::depth_model_info &model);
+  engine_build_status tensorrt_engine_build_status(
+    const std::filesystem::path &assets_dir,
+    const config::depth_model_info &model
+  );
 
   /**
    * @brief Result of one estimate call: the depth map for the reprojection (t1), plus the

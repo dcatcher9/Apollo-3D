@@ -5,6 +5,7 @@
 #include "model_manager.h"
 #include "platform/windows/utils.h"
 #include "sbs_perf.h"
+#include "utility.h"
 
 #include <chrono>
 #include <cmath>
@@ -41,6 +42,14 @@ public:
 };
 
 static Logger gLogger;
+
+static std::mutex g_engine_build_status_mutex;
+static std::map<std::string, models::engine_build_status> g_engine_build_status;
+
+static void set_engine_build_status(const std::string &engine_name, models::engine_build_status status) {
+  std::lock_guard<std::mutex> lock(g_engine_build_status_mutex);
+  g_engine_build_status[engine_name] = status;
+}
 
 // Shared TensorRT state. The runtime and engine are created once and shared by every
 // encoder instance. Execution contexts are pooled and reused: creating one allocates
@@ -215,20 +224,41 @@ static nvinfer1::ICudaEngine *acquire_engine_locked(
 
 namespace models {
 
+  engine_build_status tensorrt_engine_build_status(
+    const std::filesystem::path &assets_dir,
+    const config::depth_model_info &model
+  ) {
+    const auto engine_name = engine_filename(model);
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(assets_dir / engine_name, ec)) {
+      return engine_build_status::ready;
+    }
+    std::lock_guard<std::mutex> lock(g_engine_build_status_mutex);
+    auto it = g_engine_build_status.find(engine_name);
+    return it == g_engine_build_status.end() ? engine_build_status::unknown : it->second;
+  }
+
   void precompile_tensorrt_engine(const std::filesystem::path &assets_dir, const config::depth_model_info &model) {
+    const std::string engine_name = engine_filename(model);
+    set_engine_build_status(engine_name, engine_build_status::building);
+    auto failed = util::fail_guard([&]() {
+      set_engine_build_status(engine_name, engine_build_status::failed);
+    });
     static std::mutex compile_mutex;
     std::lock_guard<std::mutex> lock(compile_mutex);
 
     const std::string &model_name = model.name;
     const std::string &model_url = model.url;
-    const std::string engine_name = engine_filename(model);
     auto model_path = ensure_model_available(assets_dir, model_name, model_url, engine_name);
     if (model_path.empty()) {
       BOOST_LOG(warning) << "Model not found. Background precompilation aborted.";
+      set_engine_build_status(engine_name, engine_build_status::failed);
       return;
     }
     if (model_path.extension() == ".engine") {
       BOOST_LOG(info) << "TensorRT engine already compiled and ready.";
+      set_engine_build_status(engine_name, engine_build_status::ready);
+      failed.disable();
       return;
     }
 
@@ -255,6 +285,7 @@ namespace models {
     auto parser = TrtUniquePtr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, gLogger));
     if (!parser->parseFromFile(model_path.string().c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
       BOOST_LOG(error) << "Failed to parse ONNX file.";
+      set_engine_build_status(engine_name, engine_build_status::failed);
       return;
     }
 
@@ -320,11 +351,19 @@ namespace models {
       std::ofstream p(engine_path, std::ios::binary);
       if (p) {
         p.write(static_cast<const char *>(serializedModel->data()), serializedModel->size());
-        BOOST_LOG(info) << "Saved built engine to " << engine_path;
+        p.close();
+        if (p) {
+          BOOST_LOG(info) << "Saved built engine to " << engine_path;
+          set_engine_build_status(engine_name, engine_build_status::ready);
+          failed.disable();
+          return;
+        }
       }
+      BOOST_LOG(error) << "Failed to save built engine to " << engine_path;
     } else {
       BOOST_LOG(error) << "Engine build failed.";
     }
+    set_engine_build_status(engine_name, engine_build_status::failed);
   }
 
   struct video_depth_estimator::impl {

@@ -11,6 +11,7 @@
 
 // standard includes
 #include <filesystem>
+#include <string>
 
 namespace platf::sbs_debug {
 
@@ -35,7 +36,8 @@ namespace platf::sbs_debug {
       ID3D11ShaderResourceView *source,
       ID3D11ShaderResourceView *depth,
       ID3D11ShaderResourceView *sbs,
-      bool hdr);
+      bool hdr,
+      const std::string &depth_model);
 
   private:
     std::filesystem::path dir_;

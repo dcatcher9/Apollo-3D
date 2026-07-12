@@ -1303,7 +1303,7 @@ HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
         .replace("__CHARTS__", scorecard_charts())
         .replace("__METRICS__", metrics_section())
         .replace("__FOOTER__", clean_footer())
-        .replace("__TREAT_ARGS__", " ".join(TREAT["meta"].get("extra_args") or ["--mode game"])))
+        .replace("__TREAT_ARGS__", " ".join(TREAT["meta"].get("extra_args") or ["profile defaults"])))
 os.makedirs(os.path.dirname(os.path.abspath(out_html)), exist_ok=True)
 with open(out_html, "w", encoding="utf-8") as f:
     f.write(HTML)

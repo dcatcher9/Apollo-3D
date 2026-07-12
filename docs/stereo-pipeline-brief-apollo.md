@@ -20,7 +20,7 @@ Read first: [sbs-3d-roadmap.md](sbs-3d-roadmap.md) (status + constraints),
 | Brief | Proposal | Apollo-3D status |
 |---|---|---|
 | §3.1 capture | DXGI duplication, HDR tonemap for inference copy only, cursor, register-once interop | **SHIPPED** (ddup/wgc; `rgb_to_nchw_cs.hlsl` Reinhard+sRGB on the inference copy only; interop registered once, lazily on the encode thread — hard-won, see estimator notes) |
-| §3.2 depth | DA-V2-small TRT fp16, 518² static, model-agnostic wrapper | **SHIPPED, BEYOND**: model registry (`0x3005` runtime switching), aspect-aware 798×336 (≈ same px as 518², no letterbox waste), da3mono-large width-dynamic export for movie |
+| §3.2 depth | DA-V2-small TRT fp16, 518² static, model-agnostic wrapper | **SHIPPED, BEYOND**: profile-owned model registry (`0x3005` selects an advertised complete profile), aspect-aware 798×336 (≈ same px as 518², no letterbox waste), da3mono-large width-dynamic export |
 | §3.3 temporal | P2/P98 percentile range + EMA + scene-cut reset | **PARTIAL**: min/max + EMA exists (`depth_minmax_cs` → `depth_minmax_ema_cs`, α=0.1). Percentiles + scene-cut reset are **new — adopt/experiment below** |
 | §3.4 JBU | joint bilateral upsample | **SHIPPED** (`depth_guided_upsample_cs`, foreground bias + bimodal edge snap) — and **deliberately bypassed under MLBW** (texel-sharp depth is out of the warp's training distribution). Do not re-add under MLBW. |
 | §3.5 disparity | divergence/convergence, ±40 px clamp | **SHIPPED** (`divergence`, `focal_plane`, `depth_floor`, border fade) |

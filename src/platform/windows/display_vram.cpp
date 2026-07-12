@@ -568,7 +568,8 @@ namespace platf::dxgi {
           // Debug frame dump (offline artifact inspection): on the client "Dump 3D" button or a
           // "dump.trigger" file, save this frame's 2D source, depth map and SBS result. See
           // sbs_debug_dump.h. No-op unless APOLLO_SBS_DUMP is set.
-          sbs_dumper.maybe_dump(device.get(), device_ctx.get(), img_ctx.encoder_input_res.get(), est.depth.Get(), final_sbs_srv, display->is_hdr());
+          sbs_dumper.maybe_dump(device.get(), device_ctx.get(), img_ctx.encoder_input_res.get(),
+                                est.depth.Get(), final_sbs_srv, display->is_hdr(), sbs_config.depth_model);
 
           if (perf) {
             auto dt = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - perf_t0).count();
@@ -639,35 +640,44 @@ namespace platf::dxgi {
             // the stream); log it, clear the client's "loading" indicator, and stream flat.
             BOOST_LOG(error) << "Depth estimator build failed: "sv << e.what();
             depth_estimator_failed = true;
-            ::video::depth_engine_phase.store(0, std::memory_order_relaxed);
+            publish_depth_status(0);
             return false;
           }
           if (depth_estimator && depth_estimator->is_valid()) {
             BOOST_LOG(info) << "Depth estimator ready; host SBS depth is now live."sv;
-            ::video::depth_engine_phase.store(2, std::memory_order_relaxed);  // ready -> client hides indicator
+            publish_depth_status(2);  // ready -> client hides indicator
           } else {
             BOOST_LOG(error) << "Depth estimator build returned an invalid pipeline; streaming flat SBS."sv;
             depth_estimator.reset();
             depth_estimator_failed = true;
-            ::video::depth_engine_phase.store(0, std::memory_order_relaxed);
+            publish_depth_status(0);
           }
           return (bool) depth_estimator;
         }
         return false;
       }
 
-      // Non-blocking gate: only build once the TensorRT engine is on disk. Building the engine
-      // takes minutes; main.cpp kicks off a background precompile at startup, and until it exists
-      // we stream flat (zero-parallax) SBS and keep polling. Resolve the runtime-selected model
-      // (switchable mid-stream via 0x3005); a model switch recreates this encode device, so the
-      // next SBS frame lands here and loads the newly active model's engine.
-      auto active = ::video::active_depth_model();
-      std::error_code ec;
-      auto engine_path = std::filesystem::path(SUNSHINE_ASSETS_DIR) / models::engine_filename(active);
-      if (!std::filesystem::exists(engine_path, ec)) {
-        if (engine_poll_counter++ % 1800 == 0) {  // ~every 20 s at 90 fps
-          BOOST_LOG(warning) << "Host SBS requested but the TensorRT engine ("sv << engine_path.string()
-                             << ") is not built yet; streaming flat until the background build finishes."sv;
+      // Engine compilation is process-global and may take minutes. Report that complete wait as
+      // loading, but don't attach the compile to this encode device: its future must remain quick
+      // to join when the user switches mode/profile. Once compilation reaches a terminal failure,
+      // clear the client's indicator and keep this device flat rather than polling forever.
+      auto active = ::video::depth_model_for_profile(sbs_config);
+      auto build_status = models::tensorrt_engine_build_status(
+        std::filesystem::path(SUNSHINE_ASSETS_DIR),
+        active
+      );
+      if (build_status != models::engine_build_status::ready) {
+        if (build_status == models::engine_build_status::failed) {
+          BOOST_LOG(error) << "TensorRT engine compilation failed for '"sv << active.name
+                           << "'; streaming flat SBS."sv;
+          depth_estimator_failed = true;
+          publish_depth_status(0);
+        } else {
+          if (engine_poll_counter++ % 1800 == 0) {  // ~every 20 s at 90 fps
+            BOOST_LOG(warning) << "Waiting for TensorRT engine compilation for '"sv << active.name
+                               << "'; streaming flat until it is ready."sv;
+          }
+          publish_depth_status(1);
         }
         return false;
       }
@@ -676,13 +686,7 @@ namespace platf::dxgi {
       // resource creation the constructor does (it makes no immediate-context calls), and the ComPtr
       // wrap AddRefs them so they outlive this device if needed. The raw pointers are safe because
       // the future joins in this object's destructor before device/device_ctx are torn down.
-      // Movie mode gets a slower depth rate (its DA3MONO model is costly and film is slow
-      // content), since there is no game rendering competing for the GPU. Copy the config and
-      // apply the per-mode override, then hand the copy to the estimator (background thread).
-      auto sbs_cfg = config::video.sbs;
-      if (sbs_mode == ::video::SBS_MOVIE && sbs_cfg.movie_depth_fps > 0.0) {
-        sbs_cfg.depth_fps = sbs_cfg.movie_depth_fps;
-      }
+      auto sbs_cfg = sbs_config;
       BOOST_LOG(info) << "Host SBS enabled; building depth model \""sv << active.name
                       << "\" in the background (streaming flat until ready)..."sv;
       auto *dev = device.get();
@@ -697,8 +701,14 @@ namespace platf::dxgi {
         );
       });
       depth_estimator_building = true;
-      ::video::depth_engine_phase.store(1, std::memory_order_relaxed);  // loading -> client shows indicator
+      publish_depth_status(1);  // loading -> client shows indicator
       return false;
+    }
+
+    void publish_depth_status(int phase) {
+      if (sbs_depth_status_event) {
+        sbs_depth_status_event->raise(phase);
+      }
     }
 
     void update_sbs_constant_buffers(float content_scale_x, float content_scale_y, float source_to_output = 1.0f) {
@@ -709,14 +719,14 @@ namespace platf::dxgi {
         0.0f,
         0.0f,
         1.0f,  // slot 5 retained; Bestv2 subject shaping is permanent
-        (float) config::video.sbs.subject_lock,
-        config::video.sbs.subject_stretch ? 1.0f : 0.0f,
-        (float) config::video.sbs.subject_plane_lock,
-        (float) config::video.sbs.subject_plane_width,
+        (float) sbs_config.subject_lock,
+        sbs_config.subject_stretch ? 1.0f : 0.0f,
+        (float) sbs_config.subject_plane_lock,
+        (float) sbs_config.subject_plane_width,
         content_scale_x,
         content_scale_y,
-        (float) config::video.sbs.vd3d_forward_blend,
-        (float) config::video.sbs.pop_strength,
+        (float) sbs_config.vd3d_forward_blend,
+        (float) sbs_config.pop_strength,
         0.0f,
         source_to_output
       };
@@ -735,7 +745,7 @@ namespace platf::dxgi {
         0.0f,
         content_scale_x,
         content_scale_y,
-        (float) config::video.sbs.vd3d_forward_blend,
+        (float) sbs_config.vd3d_forward_blend,
         1.0f,
         0.0f,
         source_to_output
@@ -743,12 +753,17 @@ namespace platf::dxgi {
       sbs_passthrough_cbuffer = make_buffer(device.get(), passthrough_params);
     }
 
-    int init_output(ID3D11Texture2D *frame_texture, int width, int height, int sbs_mode_param = ::video::SBS_OFF) {
+    int init_output(ID3D11Texture2D *frame_texture, int width, int height,
+                    int sbs_mode_param = ::video::SBS_OFF,
+                    const config::video_t::sbs_t &profile = {},
+                    safe::mail_raw_t::event_t<int> depth_status_event = {}) {
       // The underlying frame pool owns the texture, so we must reference it for ourselves
       frame_texture->AddRef();
       output_texture.reset(frame_texture);
       sbs_mode = sbs_mode_param;
-      sbs_vd3d_warp = sbs_mode != ::video::SBS_OFF && config::video.sbs.warp == "vd3d";
+      sbs_config = profile;
+      sbs_depth_status_event = std::move(depth_status_event);
+      sbs_vd3d_warp = sbs_mode != ::video::SBS_OFF && sbs_config.warp == "vd3d";
       sbs_vd3d_winner_valid = false;
       // WGC uses FP16 for both HDR and 10-bit SDR capture. In either case the texture is linear;
       // HDR only changes the later linear-scRGB -> Rec.2020/PQ conversion.
@@ -930,7 +945,7 @@ namespace platf::dxgi {
           return -1;
         }
 
-        if (!sbs_intermediate_linear && config::video.sbs.bestv2_sharpen) {
+        if (!sbs_intermediate_linear && sbs_config.bestv2_sharpen) {
           status = device->CreateTexture2D(&tex_desc, nullptr, &sbs_sharpen_texture);
           if (FAILED(status) || FAILED(device->CreateRenderTargetView(sbs_sharpen_texture.get(), nullptr, &sbs_sharpen_rtv)) || FAILED(device->CreateShaderResourceView(sbs_sharpen_texture.get(), nullptr, &sbs_sharpen_srv))) {
             BOOST_LOG(error) << "Failed to create SBS sharpen texture/views";
@@ -952,12 +967,12 @@ namespace platf::dxgi {
             return -1;
           }
           BOOST_LOG(info) << "Host SBS warp: VD3D Bestv2 hybrid (backward "
-                          << (1.0 - config::video.sbs.vd3d_forward_blend) * 100.0 << "%, forward "
-                          << config::video.sbs.vd3d_forward_blend * 100.0 << "%), pop strength "
-                          << config::video.sbs.pop_strength << ".";
+                          << (1.0 - sbs_config.vd3d_forward_blend) * 100.0 << "%, forward "
+                          << sbs_config.vd3d_forward_blend * 100.0 << "%), pop strength "
+                          << sbs_config.pop_strength << ".";
         } else {
           BOOST_LOG(info) << "Host SBS warp: Apollo occlusion-aware probe, pop strength "
-                          << config::video.sbs.pop_strength << ".";
+                          << sbs_config.pop_strength << ".";
         }
 
         sbs_viewport = {0.0f, 0.0f, (float) tex_desc.Width, (float) tex_desc.Height, 0.0f, 1.0f};
@@ -1346,8 +1361,10 @@ namespace platf::dxgi {
     bool depth_estimator_building = false;
     bool depth_estimator_failed = false;  ///< Build threw; stream flat, don't retry on this device.
     bool depth_warned = false;
-    unsigned engine_poll_counter = 0;  ///< Rate-limits the "engine not built yet" warning.
+    unsigned engine_poll_counter = 0;  ///< Rate-limits the engine compilation wait warning.
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
+    config::video_t::sbs_t sbs_config {};  ///< Immutable profile snapshot for this device.
+    safe::mail_raw_t::event_t<int> sbs_depth_status_event;
     vs_t sbs_reprojection_vs;
     ps_t sbs_reprojection_ps;
     ps_t sbs_sharpen_ps;
@@ -1496,7 +1513,9 @@ namespace platf::dxgi {
       }
 
       base.apply_colorspace(colorspace);
-      return base.init_output(nvenc_d3d->get_input_texture(), client_config.width, client_config.height, client_config.sbs_mode) == 0;
+      return base.init_output(nvenc_d3d->get_input_texture(), client_config.width, client_config.height,
+                              client_config.sbs_mode, client_config.sbs_config,
+                              client_config.sbs_depth_status_event) == 0;
     }
 
     int convert(platf::img_t &img_base) override {

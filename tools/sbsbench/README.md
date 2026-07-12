@@ -25,15 +25,33 @@ Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 
 ## One-command eval loop (start here)
 
-Production configuration uses one validated profile selector:
+Production configuration uses one profile selector:
 
 ```
-sbs_3d_profile = apollo   # default; or vd3d
+sbs_3d_profile = apollo   # default; built-in alternate: vd3d
 ```
 
-The profile supplies the complete accepted stack. Any individual `sbs_3d_*` key in the same
-configuration is applied afterward and therefore overrides that one profile value. Benchmark
-profile files use the same selector, preventing production and evaluation defaults from drifting.
+The profile supplies the complete stack. Add a configuration-only profile with
+`sbs_3d_profile_<name>_<parameter>` keys; no C++ or client enum is required. For example:
+
+```
+sbs_3d_profile = cinema
+sbs_3d_profile_cinema_warp = vd3d
+sbs_3d_profile_cinema_depth_model = da3mono_large_fp16
+sbs_3d_profile_cinema_depth_fps = 30
+sbs_3d_profile_cinema_pop_strength = 1.35
+```
+
+Unspecified values inherit Apollo defaults. Built-in `vd3d` retains its validated warp/blend
+defaults for compatibility. Ordinary `sbs_3d_*` keys are applied last and explicitly override
+the corresponding parameter in every profile. Apollo advertises every configured profile to compatible Artemis
+clients, which can switch the complete profile atomically during a stream. The client never selects
+a model or individual parameter independently. Each encode device receives an immutable profile
+snapshot, so one stream cannot mix parameters or change another stream's selection.
+
+Wire extensions: `0x3005` selects a UTF-8 profile name,
+`0x3007` advertises the current/available names, and `0x3006` remains depth-engine status. Apollo
+precompiles the model referenced by every advertised profile at startup.
 
 ```
 python tools/sbsbench/run_eval.py                     # all committed clips vs committed baselines
@@ -46,14 +64,10 @@ python tools/sbsbench/run_eval.py --suite extended --label public-control # prep
 python tools/sbsbench/rescore_run.py cmake-build-relwithdebinfo/sbs_eval/<run> --in-place  # metrics only
 ```
 
-**Mode / model (important):** `--mode` defaults to **`game`** (depth model **DA-V2 small**,
-`depth_anything_v2_fp16`) — the committed baselines are game/DA-V2. `--mode movie` swaps in
-**DA3MONO** (`da3mono_large_fp16`, a different, more aggressive model) and would NOT match the
-game baselines. Always eval in game mode unless you deliberately want DA3MONO, and never compare
-numbers across modes (they're different models). Default was `movie` until 2026-07-10; it was
-flipped to `game` because DA-V2 is the model we test against (matches VisionDepth3D's DA-V2 at
-r≈0.996) and implicitly selecting DA3MONO had caused an entire wrong-model
-comparison.
+**Profile / model (important):** the evaluator resolves the depth model from the selected profile
+and then the explicit `sbs_3d_depth_model` override, exactly like production. There is no separate
+`--mode` model selector. Never compare reports using different model/config hashes as if they were
+a controlled feature A/B.
 
 Harness A/B levers (after `--extra`):
 - `--warp apollo|vd3d` — choose Apollo's occlusion-aware probe or VD3D's hybrid. The quality
@@ -86,7 +100,8 @@ Harness A/B levers (after `--extra`):
 - `--bestv2-sharpen on|off` — explicitly ablate the exact SDR Bestv2 post-sharpen.
 
 Production uses the equivalent `sbs_3d_pop_strength = F` key. Like every individual SBS key it
-overrides the selected profile; omit it to retain the shared validated default of `1.25`.
+overrides every profile; omit it to retain each profile's configured/default value (`1.25` for the
+validated Apollo and VD3D profiles).
 
 Exit code is the verdict (0 pass / 1 regression / 2 setup error), so the eval→fix→eval loop is
 scriptable. `results.json` carries provenance (git sha+dirty, models, clip hashes, gpu-contention

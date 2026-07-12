@@ -493,7 +493,7 @@ namespace config {
     },  // vaapi
 
     {},  // capture
-    {},  // encoder
+    "nvenc",  // encoder (Apollo-3D requires NVIDIA CUDA/TensorRT; other backends are opt-in)
     {},  // adapter_name
     {},  // output_name
 
@@ -606,7 +606,7 @@ namespace config {
   };
 
   const std::vector<depth_model_info> &depth_model_registry() {
-    // Index = 0x3005 wire id. Append only; do not reorder (ids are shared with the client).
+    // Built-in model definitions referenced by profile depth_model names.
     // DA-V2 entries are drop-in (rank-4, disparity). DA-V3 entries carry their Phase C
     // params but have no URL: their fp16 ONNX is produced locally (see the model-switching
     // plan / tools) and must be pre-staged in the assets dir before they can be selected.
@@ -1266,47 +1266,126 @@ namespace config {
     // Reinitializing the struct also clears stale values when a config reload removes an override.
     std::string sbs_profile = "apollo";
     string_f(vars, "sbs_3d_profile", sbs_profile);
-    if (sbs_profile != "apollo" && sbs_profile != "vd3d") {
-      BOOST_LOG(warning) << "Invalid sbs_3d_profile '" << sbs_profile
-                         << "'; expected 'apollo' or 'vd3d'. Using 'apollo'.";
+    if (sbs_profile.empty() || sbs_profile.size() > 64 ||
+        sbs_profile.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos) {
+      BOOST_LOG(warning) << "Invalid sbs_3d_profile name '" << sbs_profile
+                         << "'; use 1-64 letters, digits, '_' or '-'. Using 'apollo'.";
       sbs_profile = "apollo";
     }
-    video.sbs = video_t::sbs_t {};
-    video.sbs.profile = sbs_profile;
-    if (sbs_profile == "vd3d") {
-      video.sbs.warp = "vd3d";
-      video.sbs.vd3d_forward_blend = 0.35;
+    static constexpr std::array<std::string_view, 20> sbs_parameter_names {
+      "warp", "pop_strength", "ema", "depth_short_side", "depth_max_aspect", "minmax_ema",
+      "subject_lock", "subject_recenter", "subject_stretch", "subject_plane_lock",
+      "subject_plane_width", "bestv2_sharpen", "vd3d_forward_blend", "depth_fps",
+      "depth_model", "depth_model_url", "prebuild_models", "depth_shift", "max_encode_width",
+      "perf_stats"
+    };
+    std::vector<std::string> profile_names {"apollo", "vd3d"};
+    if (std::find(profile_names.begin(), profile_names.end(), sbs_profile) == profile_names.end()) {
+      profile_names.emplace_back(sbs_profile);
+    }
+    // Discover every configured profile from its parameter suffix. This leaves misspelled
+    // parameters in vars so the normal unknown-option warning catches them.
+    for (const auto &[key, value] : vars) {
+      constexpr std::string_view prefix = "sbs_3d_profile_";
+      if (!key.starts_with(prefix)) {
+        continue;
+      }
+      for (auto parameter : sbs_parameter_names) {
+        const std::string suffix = "_" + std::string(parameter);
+        if (key.size() > prefix.size() + suffix.size() && key.ends_with(suffix)) {
+          auto name = key.substr(prefix.size(), key.size() - prefix.size() - suffix.size());
+          if (name.size() <= 64 &&
+              name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") == std::string::npos &&
+              std::find(profile_names.begin(), profile_names.end(), name) == profile_names.end()) {
+            profile_names.emplace_back(std::move(name));
+          }
+          break;
+        }
+      }
+    }
+    std::sort(profile_names.begin(), profile_names.end());
+    // Keep profile discovery comfortably inside the 4000-byte control payload. With names capped
+    // at 64 bytes, 32 profiles serialize to at most 2144 bytes including the active-name header.
+    // Always retain both built-ins and the configured active profile, then take custom names in
+    // deterministic lexical order. Skipped profile keys remain unconsumed and are reported by the
+    // normal unknown-option diagnostics.
+    constexpr std::size_t max_sbs_profiles = 32;
+    if (profile_names.size() > max_sbs_profiles) {
+      BOOST_LOG(warning) << "Configured " << profile_names.size() << " SBS profiles; only "
+                         << max_sbs_profiles << " can be advertised. Extra profiles will be ignored.";
+      std::vector<std::string> bounded_profiles;
+      bounded_profiles.reserve(max_sbs_profiles);
+      auto retain = [&](const std::string &name) {
+        if (bounded_profiles.size() < max_sbs_profiles &&
+            std::find(bounded_profiles.begin(), bounded_profiles.end(), name) == bounded_profiles.end()) {
+          bounded_profiles.emplace_back(name);
+        }
+      };
+      retain("apollo");
+      retain("vd3d");
+      retain(sbs_profile);
+      for (const auto &name : profile_names) {
+        retain(name);
+      }
+      std::sort(bounded_profiles.begin(), bounded_profiles.end());
+      profile_names = std::move(bounded_profiles);
+    }
+    video.sbs_profiles.clear();
+    std::unordered_map<std::string, std::string> global_sbs_overrides;
+    for (auto parameter : sbs_parameter_names) {
+      const std::string key = "sbs_3d_" + std::string(parameter);
+      if (auto it = vars.find(key); it != vars.end()) {
+        global_sbs_overrides.emplace(it->first, it->second);
+      }
     }
 
-    const std::string profile_warp = video.sbs.warp;
-    string_f(vars, "sbs_3d_warp", video.sbs.warp);
-    if (video.sbs.warp != "apollo" && video.sbs.warp != "vd3d") {
-      BOOST_LOG(warning) << "Invalid sbs_3d_warp '" << video.sbs.warp
-                         << "'; expected 'apollo' or 'vd3d'. Keeping profile value '"
-                         << profile_warp << "'.";
-      video.sbs.warp = profile_warp;
+    auto apply_sbs_values = [&](video_t::sbs_t &target, const std::string &prefix) {
+      const std::string previous_warp = target.warp;
+      string_f(vars, prefix + "warp", target.warp);
+      if (target.warp != "apollo" && target.warp != "vd3d") {
+        BOOST_LOG(warning) << "Invalid " << prefix << "warp '" << target.warp
+                           << "'; expected 'apollo' or 'vd3d'. Keeping '" << previous_warp << "'.";
+        target.warp = previous_warp;
+      }
+      double_between_f(vars, prefix + "pop_strength", target.pop_strength, {0.25, 2.0});
+      double_between_f(vars, prefix + "ema", target.ema, {0.01, 1.0});
+      int_f(vars, prefix + "depth_short_side", target.depth_short_side);
+      double_between_f(vars, prefix + "depth_max_aspect", target.depth_max_aspect, {1.0, 8.0});
+      double_between_f(vars, prefix + "minmax_ema", target.minmax_ema, {0.001, 1.0});
+      double_between_f(vars, prefix + "subject_lock", target.subject_lock, {0.0, 1.0});
+      double_between_f(vars, prefix + "subject_recenter", target.subject_recenter, {0.0, 1.0});
+      bool_f(vars, prefix + "subject_stretch", target.subject_stretch);
+      double_between_f(vars, prefix + "subject_plane_lock", target.subject_plane_lock, {0.0, 1.0});
+      double_between_f(vars, prefix + "subject_plane_width", target.subject_plane_width, {0.01, 0.5});
+      bool_f(vars, prefix + "bestv2_sharpen", target.bestv2_sharpen);
+      double_between_f(vars, prefix + "vd3d_forward_blend", target.vd3d_forward_blend, {0.0, 1.0});
+      double_between_f(vars, prefix + "depth_fps", target.depth_fps, {0.0, 240.0});
+      string_f(vars, prefix + "depth_model", target.depth_model);
+      string_f(vars, prefix + "depth_model_url", target.depth_model_url);
+      string_f(vars, prefix + "prebuild_models", target.prebuild_models);
+      double_between_f(vars, prefix + "depth_shift", target.depth_shift, {0.02, 2.0});
+      int_between_f(vars, prefix + "max_encode_width", target.max_encode_width, {256, 16384});
+      bool_f(vars, prefix + "perf_stats", target.perf_stats);
+    };
+
+    for (const auto &name : profile_names) {
+      video_t::sbs_t profile {};
+      profile.profile = name;
+      if (name == "vd3d") {
+        profile.warp = "vd3d";
+        profile.vd3d_forward_blend = 0.35;
+      }
+      apply_sbs_values(profile, "sbs_3d_profile_" + name + "_");
+      // Top-level SBS settings are global explicit overrides. Replay them for every advertised
+      // profile because the parsing helpers consume keys as they apply them.
+      for (const auto &[key, value] : global_sbs_overrides) {
+        vars.insert_or_assign(key, value);
+      }
+      apply_sbs_values(profile, "sbs_3d_");
+      profile.max_encode_width &= ~1;
+      video.sbs_profiles.emplace(name, std::move(profile));
     }
-    double_between_f(vars, "sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0});
-    double_between_f(vars, "sbs_3d_ema", video.sbs.ema, {0.01, 1.0});
-    int_f(vars, "sbs_3d_depth_short_side", video.sbs.depth_short_side);
-    double_between_f(vars, "sbs_3d_depth_max_aspect", video.sbs.depth_max_aspect, {1.0, 8.0});
-    double_between_f(vars, "sbs_3d_minmax_ema", video.sbs.minmax_ema, {0.001, 1.0});
-    double_between_f(vars, "sbs_3d_subject_lock", video.sbs.subject_lock, {0.0, 1.0});
-    double_between_f(vars, "sbs_3d_subject_recenter", video.sbs.subject_recenter, {0.0, 1.0});
-    bool_f(vars, "sbs_3d_subject_stretch", video.sbs.subject_stretch);
-    double_between_f(vars, "sbs_3d_subject_plane_lock", video.sbs.subject_plane_lock, {0.0, 1.0});
-    double_between_f(vars, "sbs_3d_subject_plane_width", video.sbs.subject_plane_width, {0.01, 0.5});
-    bool_f(vars, "sbs_3d_bestv2_sharpen", video.sbs.bestv2_sharpen);
-    double_between_f(vars, "sbs_3d_vd3d_forward_blend", video.sbs.vd3d_forward_blend, {0.0, 1.0});
-    double_between_f(vars, "sbs_3d_depth_fps", video.sbs.depth_fps, {0.0, 240.0});
-    string_f(vars, "sbs_3d_depth_model", video.sbs.depth_model);
-    string_f(vars, "sbs_3d_depth_model_url", video.sbs.depth_model_url);
-    string_f(vars, "sbs_3d_prebuild_models", video.sbs.prebuild_models);
-    double_between_f(vars, "sbs_3d_depth_shift", video.sbs.depth_shift, {0.02, 2.0});
-    int_between_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width, {256, 16384});
-    video.sbs.max_encode_width &= ~1;
-    double_f(vars, "sbs_3d_movie_depth_fps", video.sbs.movie_depth_fps);
-    bool_f(vars, "sbs_3d_perf_stats", video.sbs.perf_stats);
+    video.sbs = video.sbs_profiles.at(sbs_profile);
 
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);

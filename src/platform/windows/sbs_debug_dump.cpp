@@ -23,16 +23,12 @@
 #include <zlib.h>
 
 // local includes
-#include "src/config.h"
 #include "src/logging.h"
 
 // The debug-dump request flag (set by the 0x3004 control-message handler in stream.cpp). Declared
 // in video.h; forward-declared here to avoid pulling the full video pipeline header into a debug TU.
-// active_depth_model() (also declared in video.h) is used to attribute each dump to the model that
-// produced it, so A/B crops across models are traceable.
 namespace video {
   extern std::atomic<bool> sbs_debug_dump_pending;
-  config::depth_model_info active_depth_model();
 }
 
 namespace platf::sbs_debug {
@@ -266,7 +262,7 @@ namespace platf::sbs_debug {
 
   void dumper::maybe_dump(ID3D11Device *device, ID3D11DeviceContext *ctx,
     ID3D11ShaderResourceView *source, ID3D11ShaderResourceView *depth,
-    ID3D11ShaderResourceView *sbs, bool hdr) {
+    ID3D11ShaderResourceView *sbs, bool hdr, const std::string &model_name) {
     if (dir_.empty()) {
       return;
     }
@@ -308,7 +304,6 @@ namespace platf::sbs_debug {
     dump_srv(device, ctx, sbs, out_dir, "sbs", /*heatmap=*/false, hdr);
 
     // Attribute the dump to the model that produced it (for cross-model A/B).
-    auto model_name = ::video::active_depth_model().name;
     if (std::ofstream meta(out_dir / "meta.txt"); meta) {
       meta << "depth_model=" << model_name << "\n";
       meta << "color_mode=" << (hdr ? "linear-scRGB-HDR" : "SDR") << "\n";

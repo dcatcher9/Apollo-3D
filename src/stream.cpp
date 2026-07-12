@@ -6,6 +6,7 @@
 // standard includes
 #include <fstream>
 #include <future>
+#include <optional>
 #include <queue>
 
 // lib includes
@@ -62,8 +63,9 @@ extern "C" {
 #define IDX_SET_ADAPTIVE_TRIGGERS 18
 #define IDX_SET_SBS_MODE 19
 #define IDX_SBS_DEBUG_DUMP 20
-#define IDX_SET_DEPTH_MODEL 21
+#define IDX_SET_SBS_PROFILE 21
 #define IDX_DEPTH_STATUS 22
+#define IDX_SBS_PROFILE_LIST 23
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -87,8 +89,9 @@ static const short packetTypes[] = {
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
   0x3003,  // Set SBS Mode (Apollo protocol extension)
   0x3004,  // SBS Debug Dump (Apollo protocol extension)
-  0x3005,  // Set Depth Model (Apollo protocol extension)
+  0x3005,  // Set SBS Profile (Apollo protocol extension)
   0x3006,  // Depth Status (Apollo protocol extension, host->client)
+  0x3007,  // SBS Profile List (Apollo protocol extension, host->client)
 };
 
 namespace asio = boost::asio;
@@ -236,12 +239,13 @@ namespace stream {
 
   // Host->client push of the SBS depth-engine state so the client can show a "loading" indicator
   // while a model builds/loads/warms up (Apollo protocol extension 0x3006).
+#pragma pack(push, 1)
   struct control_depth_status_t {
     control_header_v2 header;
 
     std::uint8_t phase;  // 0 = idle (depth off), 1 = loading (build/load/warmup), 2 = ready (live)
-    std::uint8_t model_id;  // depth_model_registry() index of the active model (0xFF = unknown)
   };
+#pragma pack(pop)
 
   typedef struct control_encrypted_t {
     std::uint16_t encryptedHeaderType;  // Always LE 0x0001
@@ -434,6 +438,8 @@ namespace stream {
       platf::feedback_queue_t feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
       int last_depth_phase = -1;  // last depth-engine phase pushed to this client (see IDX_DEPTH_STATUS)
+      std::string sbs_profile = config::video.sbs.profile;
+      bool sbs_profile_list_sent = false;
     } control;
 
     std::uint32_t launch_session_id;
@@ -952,7 +958,7 @@ namespace stream {
     return 0;
   }
 
-  int send_depth_status(session_t *session, int phase, int model_id) {
+  int send_depth_status(session_t *session, int phase) {
     if (!session->control.peer) {
       // Still waiting for PING from Moonlight; the periodic poll will retry on the next change.
       return -1;
@@ -962,7 +968,6 @@ namespace stream {
     plaintext.header.type = packetTypes[IDX_DEPTH_STATUS];
     plaintext.header.payloadLength = sizeof(control_depth_status_t) - sizeof(control_header_v2);
     plaintext.phase = (std::uint8_t) phase;
-    plaintext.model_id = (std::uint8_t) model_id;
 
     std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
       encrypted_payload;
@@ -974,7 +979,48 @@ namespace stream {
       return -1;
     }
 
-    BOOST_LOG(debug) << "Sent depth status: phase="sv << phase << " model="sv << model_id;
+    BOOST_LOG(debug) << "Sent depth status: phase="sv << phase;
+    return 0;
+  }
+
+  int send_sbs_profile_list(session_t *session) {
+    if (!session->control.peer) {
+      return -1;
+    }
+    std::vector<std::string> names;
+    names.reserve(config::video.sbs_profiles.size());
+    for (const auto &[name, profile] : config::video.sbs_profiles) {
+      names.emplace_back(name);
+    }
+    std::sort(names.begin(), names.end());
+    std::string body = session->control.sbs_profile;
+    for (const auto &name : names) {
+      if (body.size() + 1 + name.size() > 4000) {
+        // Configuration parsing normally makes this impossible. Still send the bounded prefix so
+        // a future invariant regression cannot turn a permanent serialization error into a retry
+        // and log storm on every broadcast tick.
+        BOOST_LOG(error) << "SBS profile list exceeded the protocol payload; sending a bounded prefix."sv;
+        break;
+      }
+      body.push_back('\n');
+      body.append(name);
+    }
+    std::array<std::uint8_t, 4096> plaintext {};
+    auto *header = (control_header_v2 *) plaintext.data();
+    header->type = packetTypes[IDX_SBS_PROFILE_LIST];
+    header->payloadLength = (std::uint16_t) body.size();
+    std::memcpy(plaintext.data() + sizeof(*header), body.data(), body.size());
+    const auto plaintext_size = sizeof(*header) + body.size();
+    std::array<std::uint8_t, 4096 + sizeof(control_encrypted_t) + crypto::cipher::tag_size> encrypted_payload {};
+    auto payload = encode_control(
+      session,
+      std::string_view((const char *) plaintext.data(), plaintext_size),
+      encrypted_payload
+    );
+    if (session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+      BOOST_LOG(warning) << "Couldn't send SBS profile list to client."sv;
+      return -1;
+    }
     return 0;
   }
 
@@ -1112,15 +1158,12 @@ namespace stream {
       // Host-side SBS mode requested by the client (Apollo protocol extension).
       // Must match SBS_MODE_* in the client's moonlight-common-c Limelight.h.
       auto mode = *(uint8_t *) payload.data();
-      if (mode > ::video::SBS_MOVIE) {
+      if (mode > ::video::SBS_AI) {
         BOOST_LOG(warning) << "type [IDX_SET_SBS_MODE]: unknown mode "sv << (int) mode
                            << " from ["sv << session->device_name << "]; ignored"sv;
         return;
       }
-      std::string_view mode_name =
-        mode == ::video::SBS_OFF  ? "OFF"sv :
-        mode == ::video::SBS_GAME ? "GAME (async)"sv :
-                                    "MOVIE (sync)"sv;
+      std::string_view mode_name = mode == ::video::SBS_OFF ? "OFF"sv : "AI (profile)"sv;
       BOOST_LOG(info) << "type [IDX_SET_SBS_MODE]: client requested host SBS "sv << mode_name
                       << " ("sv << (int) mode << ") for ["sv << session->device_name << ']';
 
@@ -1128,12 +1171,12 @@ namespace stream {
       // engine idle here (display_vram only ever sets loading/ready). This clears any "loading"
       // indicator on the client if the user switches to Normal mid-spin-up.
       if (mode == ::video::SBS_OFF) {
-        ::video::depth_engine_phase.store(0, std::memory_order_relaxed);
+        session->mail->event<int>(mail::sbs_depth_status)->raise(0);
       }
 
       // Hand the requested mode to this session's video pipeline. capture_async consumes it,
-      // rebuilds the encode device at the new resolution (W x H for OFF, 2W x H for GAME/MOVIE)
-      // and lazy-loads the depth model. MOVIE currently reuses the GAME (async) pipeline.
+      // rebuilds the encode device at the new resolution (W x H for OFF, 2W x H for AI)
+      // and lazy-loads the model selected by the active host profile.
       session->mail->event<int>(mail::sbs_mode)->raise((int) mode);
     });
 
@@ -1145,40 +1188,31 @@ namespace stream {
       ::video::sbs_debug_dump_pending.store(true, std::memory_order_relaxed);
     });
 
-    server->map(packetTypes[IDX_SET_DEPTH_MODEL], [server](session_t *session, const std::string_view &payload) {
-      // Client selected a depth model by registry id (Apollo protocol extension 0x3005).
-      // Payload byte 0 = index into config::depth_model_registry().
-      if (payload.empty()) {
-        BOOST_LOG(warning) << "type [IDX_SET_DEPTH_MODEL]: empty payload"sv;
+    server->map(packetTypes[IDX_SET_SBS_PROFILE], [server](session_t *session, const std::string_view &payload) {
+      std::string profile(payload);
+      if (profile == "?") {
+        session->control.sbs_profile_list_sent = false;
         return;
       }
-      auto id = *(uint8_t *) payload.data();
-      const auto &reg = config::depth_model_registry();
-      if (id >= reg.size()) {
-        BOOST_LOG(warning) << "type [IDX_SET_DEPTH_MODEL]: unknown model id "sv << (int) id
-                           << " from ["sv << session->device_name << "]; ignored"sv;
+      if (profile.empty() || profile.size() > 64 ||
+          profile.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos) {
+        BOOST_LOG(warning) << "type [IDX_SET_SBS_PROFILE]: invalid profile name from ["sv
+                           << session->device_name << "]; ignored"sv;
         return;
       }
-      const auto &model_info = reg[id];
-
-      if (!::video::set_active_depth_model(id)) {
-        BOOST_LOG(warning) << "type [IDX_SET_DEPTH_MODEL]: failed to select model id "sv << (int) id;
+      if (!config::video.sbs_profiles.contains(profile)) {
+        BOOST_LOG(warning) << "type [IDX_SET_SBS_PROFILE]: unknown profile '"sv << profile
+                           << "' from ["sv << session->device_name << "]; ignored"sv;
+        session->control.sbs_profile_list_sent = false;
         return;
       }
-      BOOST_LOG(info) << "type [IDX_SET_DEPTH_MODEL]: client ["sv << session->device_name
-                      << "] selected depth model '"sv << model_info.name << "' (id "sv << (int) id << ')';
-
-#ifdef _WIN32
-      // Kick a background engine build if this model's engine isn't cached yet, so the switch
-      // never stalls the encode thread. precompile_tensorrt_engine serializes internally and
-      // no-ops if the engine already exists; ensure_depth_estimator streams flat until it lands.
-      std::thread([m = model_info]() {
-        models::precompile_tensorrt_engine(SUNSHINE_ASSETS_DIR, m);
-      }).detach();
-#endif
-
-      // Force an encode-session rebuild so the recreated estimator loads the new active model.
-      session->mail->event<bool>(mail::depth_model_reload)->raise(true);
+      if (profile == session->control.sbs_profile) {
+        return;
+      }
+      BOOST_LOG(info) << "Client ["sv << session->device_name << "] selected SBS profile '"sv << profile << "'."sv;
+      session->control.sbs_profile = profile;
+      session->control.sbs_profile_list_sent = false;
+      session->mail->event<std::string>(mail::sbs_profile)->raise(std::move(profile));
     });
 
     server->map(packetTypes[IDX_ENCRYPTED], [server](session_t *session, const std::string_view &payload) {
@@ -1313,13 +1347,22 @@ namespace stream {
               send_hdr_mode(session, std::move(hdr_info));
             }
 
-            // Push the SBS depth-engine phase (loading/ready/idle) when it changes, so the client
-            // can show/hide a "loading depth model" indicator. Global state (one depth engine), so
-            // it's polled here and de-duplicated per session against the last value we sent.
-            int depth_phase = ::video::depth_engine_phase.load(std::memory_order_relaxed);
-            if (depth_phase != session->control.last_depth_phase) {
-              if (send_depth_status(session, depth_phase, ::video::active_depth_model_index()) == 0) {
-                session->control.last_depth_phase = depth_phase;
+            if (!session->control.sbs_profile_list_sent && send_sbs_profile_list(session) == 0) {
+              session->control.sbs_profile_list_sent = true;
+            }
+
+            // Drain this session's depth-engine status to the latest phase. An event intentionally
+            // coalesces a fast loading->ready transition so cached engines don't flash the UI.
+            auto depth_status_event = session->mail->event<int>(mail::sbs_depth_status);
+            std::optional<int> depth_phase;
+            while (depth_status_event->peek()) {
+              if (auto phase = depth_status_event->pop(0ms)) {
+                depth_phase = *phase;
+              }
+            }
+            if (depth_phase && *depth_phase != session->control.last_depth_phase) {
+              if (send_depth_status(session, *depth_phase) == 0) {
+                session->control.last_depth_phase = *depth_phase;
               }
             }
           }
