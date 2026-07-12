@@ -79,6 +79,38 @@ class EvalContractTests(unittest.TestCase):
                 self.assertIn("shaped, (float)source_w)", text)
                 self.assertNotIn("shaped, (float)eye_w)", text)
 
+    def test_bestv2_scales_wide_sources_from_validated_calibration_width(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
+                              "include", "sbs_warp_common.hlsl")
+        with open(common, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("BESTV2_CALIBRATION_WIDTH = 854.0f", text)
+        self.assertIn("return min(max(source_width, 1.0f), BESTV2_CALIBRATION_WIDTH)", text)
+        self.assertGreaterEqual(text.count("/ parallax_width"), 3)
+
+    def test_pop_strength_scales_shared_parallax_and_apollo_probe_radius(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
+                              "include", "sbs_warp_common.hlsl")
+        with open(common, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("float pop_strength;", text)
+        self.assertIn("clamp(parallax * pop_strength", text)
+        self.assertIn("return pop_strength *", text)
+
+        with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
+            config = fh.read()
+        self.assertIn('"sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0}', config)
+        with open(os.path.join(repo, "src", "config.h"), encoding="utf-8") as fh:
+            config_header = fh.read()
+        self.assertIn("double pop_strength = 1.25;", config_header)
+
+        with open(os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
+                  encoding="utf-8") as fh:
+            production = fh.read()
+        self.assertIn("(float) config::video.sbs.pop_strength", production)
+
     def test_vd3d_fill_radius_scales_from_source_to_output_pixels(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",

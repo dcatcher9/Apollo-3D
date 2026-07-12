@@ -18,11 +18,15 @@ invariants are:
 | Raw-depth normalization and EMA | model grid / depth values | Histogram, percentile, min/max and temporal state depend on sample count or depth values, not encoder size. No output-resolution adjustment is needed. |
 | Subject histogram and recenter/stretch | normalized image/depth | Center weighting uses normalized x/y. Depth bands and convergence operate in normalized depth or Bestv2 source-pixel units. |
 | Exact plane lock | model grid | Bestv2's morphology radii now scale from its 336-pixel-short-side reference, keeping the same image-relative support on other inference grids. |
-| Apollo inverse warp | source UV | Bestv2 shifts and search bounds are normalized by mono-source width. Depth tap size comes from the depth texture. Per-eye aspect fitting is applied before reprojection. |
-| VD3D forward warp | output-eye raster + source UV | Parallax uses mono-source width; the output shift includes fitted content width. Hole-fill radius converts source pixels to output-content pixels. Integer splat placement still has unavoidable subpixel quantization on very small rasters. |
+| Apollo inverse warp | source UV | Bestv2 shifts and search bounds use the validated 854px calibration width for wider sources, preserving eye-relative stereo volume on 5120px desktops; smaller sources retain literal preset pixels. Depth tap size comes from the depth texture. |
+| VD3D forward warp | output-eye raster + source UV | Uses the same calibrated parallax field; the output shift includes fitted content width. Hole-fill radius converts source pixels to output-content pixels. Integer splat placement still has unavoidable subpixel quantization on very small rasters. |
 | VD3D backward blend | source UV | Uses the same shared disparity field and per-eye aspect transform as Apollo. |
 | Bestv2 sharpen | source-pixel footprint | Kernel taps now use fractional output sampling at one mono-source-pixel spacing, instead of always one output pixel. Eyes and aspect-fit bars remain isolated. |
 | Encoder conversion/downscale | encoded raster | The SBS intermediate is already the final encoder size. There is no second post-warp rescale; YUV conversion sees the final packed dimensions. |
+
+The 854-pixel calibration is an internal resolution correction, not a user tuning knob.
+`sbs_3d_pop_strength` is the final shared parallax multiplier (`0.25`-`2`, default `1.25`) and
+changes apparent depth consistently in both warps after resolution normalization.
 | Eval metrics/report | eye-relative/common raster | Stereo volume and vertical alignment gates use percentages. A/B evidence normalizes mismatched run sizes to a common per-eye raster before crops or heatmaps. |
 
 ## Validation

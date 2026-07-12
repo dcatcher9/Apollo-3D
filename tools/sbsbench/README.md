@@ -58,6 +58,9 @@ comparison.
 Harness A/B levers (after `--extra`):
 - `--warp apollo|vd3d` — choose Apollo's occlusion-aware probe or VD3D's hybrid. The quality
   profile uses `65%` backward grid sampling + `35%` depth-ordered forward splat and hole fill.
+- `--pop-strength F` — multiply the final shared stereo-parallax field (`0.25`-`2`; default
+  `1.25`). This is the user-facing pop control for both warps. It is separate from the internal
+  854-pixel Bestv2 calibration that keeps apparent depth stable across source resolutions.
 - `--vd3d-forward-blend F` — override the VD3D forward weight (`0.65` in Bestv2; `0` isolates
   its classic backward warp and `1` isolates the forward splat).
 - Bestv2 is the only disparity field. It uses the preset's source-pixel FG/MG/BG shifts
@@ -81,6 +84,9 @@ Harness A/B levers (after `--extra`):
 - `--no-subject-stretch` — disable that stretch for an accepted-feature ablation.
 - `--subject-plane-lock F` — local subject-band flatten (e.g. `0.28`; default off).
 - `--bestv2-sharpen on|off` — explicitly ablate the exact SDR Bestv2 post-sharpen.
+
+Production uses the equivalent `sbs_3d_pop_strength = F` key. Like every individual SBS key it
+overrides the selected profile; omit it to retain the shared validated default of `1.25`.
 
 Exit code is the verdict (0 pass / 1 regression / 2 setup error), so the eval→fix→eval loop is
 scriptable. `results.json` carries provenance (git sha+dirty, models, clip hashes, gpu-contention

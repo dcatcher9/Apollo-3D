@@ -716,7 +716,7 @@ namespace platf::dxgi {
         content_scale_x,
         content_scale_y,
         (float) config::video.sbs.vd3d_forward_blend,
-        0.0f,
+        (float) config::video.sbs.pop_strength,
         0.0f,
         source_to_output
       };
@@ -736,7 +736,7 @@ namespace platf::dxgi {
         content_scale_x,
         content_scale_y,
         (float) config::video.sbs.vd3d_forward_blend,
-        0.0f,
+        1.0f,
         0.0f,
         source_to_output
       };
@@ -953,9 +953,11 @@ namespace platf::dxgi {
           }
           BOOST_LOG(info) << "Host SBS warp: VD3D Bestv2 hybrid (backward "
                           << (1.0 - config::video.sbs.vd3d_forward_blend) * 100.0 << "%, forward "
-                          << config::video.sbs.vd3d_forward_blend * 100.0 << "%).";
+                          << config::video.sbs.vd3d_forward_blend * 100.0 << "%), pop strength "
+                          << config::video.sbs.pop_strength << ".";
         } else {
-          BOOST_LOG(info) << "Host SBS warp: Apollo occlusion-aware probe.";
+          BOOST_LOG(info) << "Host SBS warp: Apollo occlusion-aware probe, pop strength "
+                          << config::video.sbs.pop_strength << ".";
         }
 
         sbs_viewport = {0.0f, 0.0f, (float) tex_desc.Width, (float) tex_desc.Height, 0.0f, 1.0f};

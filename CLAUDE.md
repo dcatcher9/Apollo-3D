@@ -97,7 +97,8 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   worst frame), 2 = setup error.** Results + provenance (git sha, models, clip hashes) land in
   `<build-dir>/sbs_eval/<label>/results.json`. After an INTENDED metric change, re-baseline with
   `--update-baselines` and commit the baselines together with the change. Supported A/B levers
-  pass through, for example `--extra --subject-lock 0.6`. Changing bench.conf or the clip set
+  pass through, for example `--extra --pop-strength 1.25` or `--extra --subject-lock 0.6`.
+  Changing bench.conf or the clip set
   invalidates baselines.
 - **Adding a clip to the eval set**: a clip is just a directory of same-size `frame_%05d.jpg`
   frames under `tools/sbsbench/clips/<name>/` — `run_eval.py` auto-discovers it, no registration.
@@ -122,8 +123,9 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   unlike median-|dx| pop_px which is reported-only), vmisalign (geometry, must stay ~0),
   disocc_frac/disocc_smear (disocclusion severity), flicker (temporal shimmer, which the offline
   sim can't measure). Capture a baseline before the change; `--warp`, `--vd3d-forward-blend`,
-  `--depth-short-side`, `--ema`, `--minmax-ema`, and the subject lock/recenter/stretch/plane-lock
-  controls are the supported A/B levers (see the harness README). Run
+  `--pop-strength`, `--depth-short-side`, `--ema`, `--minmax-ema`, and the subject
+  lock/recenter/stretch/plane-lock controls are the supported A/B levers (see the harness
+  README). Run
   it from `cmake-build-relwithdebinfo` so `assets/` resolves.
 - **Perf** — the in-app `sbs_3d_perf_stats = enabled` config knob ([src/sbs_perf.cpp](src/sbs_perf.cpp))
   logs live `depth_infer` (CUDA events) and `sbs_convert_cpu` every 300 SBS frames and writes

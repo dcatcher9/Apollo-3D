@@ -22,7 +22,11 @@ experiments and their evidence are recorded in `sbs-feature-decision-revisit.md`
 The default `apollo` profile and alternate `vd3d` profile share the same model, normalization,
 subject shaping, aspect mapping, and encoder path. They differ only in warp geometry and the VD3D
 forward/backward blend. Individual `sbs_3d_*` values explicitly present in configuration override
-the selected profile.
+the selected profile. Bestv2 disparity is calibrated at the evaluator's 854px source width and
+scales on wider captures, so a 5120px desktop retains the evaluated eye-relative stereo volume.
+The optional `sbs_3d_pop_strength` control scales the shared final parallax field for both warps
+(`0.25`-`2`, default `1.25`) without altering that resolution correction. The Apollo and VD3D
+profiles deliberately inherit the same strength so their warp comparison remains controlled.
 
 ## Frozen processor decisions
 

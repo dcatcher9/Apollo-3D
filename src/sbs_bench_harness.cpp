@@ -364,6 +364,7 @@ namespace sbs_bench {
       int eye_w = 0;  // 0 -> derive from source aspect; set with eye_h to test letterboxing
       int eye_h = 0;  // 0 -> match/derive from the input frame
       double output_scale = 1.0;  // per-eye linear scale vs source; preserves source aspect
+      double pop_strength = -1.0;  // final shared stereo-parallax multiplier; <0 = conf
       bool simulate_hdr = false;  // decode sRGB frames into linear scRGB FP16 and use HDR paths
       double hdr_scale = 4.0;  // scRGB multiplier after sRGB EOTF (4.0 = 320-nit diffuse white)
       int max_width = 0;  // 0 -> use config max_encode_width
@@ -405,6 +406,8 @@ namespace sbs_bench {
           o.eye_h = std::stoi(next("--eye-h"));
         } else if (a == "--output-scale") {
           o.output_scale = std::stod(next("--output-scale"));
+        } else if (a == "--pop-strength") {
+          o.pop_strength = std::stod(next("--pop-strength"));
         } else if (a == "--simulate-hdr") {
           o.simulate_hdr = true;
         } else if (a == "--hdr-scale") {
@@ -447,6 +450,10 @@ namespace sbs_bench {
       }
       if (!(o.output_scale > 0.0 && o.output_scale <= 4.0)) {
         BOOST_LOG(error) << "sbs-bench: --output-scale must be greater than 0 and at most 4";
+        return false;
+      }
+      if (o.pop_strength >= 0.0 && !(o.pop_strength >= 0.25 && o.pop_strength <= 2.0)) {
+        BOOST_LOG(error) << "sbs-bench: --pop-strength must be between 0.25 and 2";
         return false;
       }
       if (!(o.hdr_scale > 0.0 && o.hdr_scale <= 64.0)) {
@@ -519,6 +526,9 @@ namespace sbs_bench {
         return 2;
       }
       sbs_cfg.warp = o.warp;
+    }
+    if (o.pop_strength >= 0.0) {
+      sbs_cfg.pop_strength = o.pop_strength;
     }
     if (o.subject_lock >= 0.0) {
       sbs_cfg.subject_lock = o.subject_lock;
@@ -704,11 +714,11 @@ namespace sbs_bench {
                                   content_scale_x,
                                   content_scale_y,
                                   (float) sbs_cfg.vd3d_forward_blend,
-                                  0,
+                                  (float) sbs_cfg.pop_strength,
                                   0,
                                   source_to_output};
         repro_cb = const_buffer(dev.Get(), repro_params);
-        float pass_params[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, content_scale_x, content_scale_y, (float) sbs_cfg.vd3d_forward_blend, 0, 0, source_to_output};
+        float pass_params[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, content_scale_x, content_scale_y, (float) sbs_cfg.vd3d_forward_blend, 1.0f, 0, source_to_output};
         pass_cb = const_buffer(dev.Get(), pass_params);
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = sbs_w;

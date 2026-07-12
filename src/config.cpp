@@ -1286,6 +1286,7 @@ namespace config {
                          << profile_warp << "'.";
       video.sbs.warp = profile_warp;
     }
+    double_between_f(vars, "sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0});
     double_between_f(vars, "sbs_3d_ema", video.sbs.ema, {0.01, 1.0});
     int_f(vars, "sbs_3d_depth_short_side", video.sbs.depth_short_side);
     double_between_f(vars, "sbs_3d_depth_max_aspect", video.sbs.depth_max_aspect, {1.0, 8.0});
