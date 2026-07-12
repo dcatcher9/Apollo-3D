@@ -50,6 +50,14 @@ class EvalContractTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_vd3d_is_the_unconfigured_default_profile(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
+            path = fh.name
+        try:
+            self.assertEqual(run_eval.expected_profile(path, []), ("vd3d", "vd3d"))
+        finally:
+            os.unlink(path)
+
     def test_custom_profile_values_need_no_evaluator_code_change(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
             fh.write("sbs_3d_profile = cinema\n"
@@ -94,25 +102,26 @@ class EvalContractTests(unittest.TestCase):
         self.assertTrue(os.path.isabs(args.build_dir))
         self.assertTrue(os.path.isabs(args.conf))
 
-    def test_apollo_bestv2_normalizes_pixel_shifts_by_source_width(self):
+    def test_apollo_bestv2_normalizes_pixel_shifts_by_source_geometry(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
                               "sbs_reprojection_ps.hlsl")
         with open(shader, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("LeftColorTexture.GetDimensions(sourceWidth, sourceHeight)", text)
-        self.assertIn("Bestv2SearchRadius((float)sourceWidth)", text)
-        self.assertGreaterEqual(text.count("shaped, (float)sourceWidth)"), 2)
+        self.assertIn("Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight)", text)
+        self.assertGreaterEqual(
+            text.count("shaped, (float)sourceWidth, (float)sourceHeight)"), 2)
         self.assertNotIn("Bestv2SearchRadius((float)dw)", text)
 
-    def test_vd3d_bestv2_normalizes_pixel_shifts_by_source_width(self):
+    def test_vd3d_bestv2_normalizes_pixel_shifts_by_source_geometry(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
         for name in ("sbs_vd3d_forward_cs.hlsl", "sbs_vd3d_reprojection_ps.hlsl"):
             with self.subTest(shader=name), open(os.path.join(shader_dir, name), encoding="utf-8") as fh:
                 text = fh.read()
                 self.assertIn("LeftColorTexture.GetDimensions(source_w, source_h)", text)
-                self.assertIn("shaped, (float)source_w)", text)
+                self.assertIn("shaped, (float)source_w, (float)source_h)", text)
                 self.assertNotIn("shaped, (float)eye_w)", text)
 
     def test_bestv2_scales_wide_sources_from_validated_calibration_width(self):
@@ -125,6 +134,19 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("return min(max(source_width, 1.0f), BESTV2_CALIBRATION_WIDTH)", text)
         self.assertGreaterEqual(text.count("/ parallax_width"), 3)
 
+    def test_bestv2_preserves_angular_pop_across_source_aspects(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
+                              "include", "sbs_warp_common.hlsl")
+        with open(common, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("BESTV2_REFERENCE_ASPECT = 5120.0f / 2160.0f", text)
+        self.assertIn("BESTV2_REFERENCE_ASPECT / aspect", text)
+        reference_aspect = 5120.0 / 2160.0
+        self.assertAlmostEqual(reference_aspect / (5120.0 / 2160.0), 1.0)
+        self.assertAlmostEqual(reference_aspect / (3840.0 / 2160.0), 4.0 / 3.0)
+        self.assertAlmostEqual(reference_aspect / (3552.0 / 3840.0), 2.562562563, places=6)
+
     def test_pop_strength_scales_shared_parallax_and_apollo_probe_radius(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
@@ -133,7 +155,7 @@ class EvalContractTests(unittest.TestCase):
             text = fh.read()
         self.assertIn("float pop_strength;", text)
         self.assertIn("clamp(parallax * pop_strength", text)
-        self.assertIn("return pop_strength *", text)
+        self.assertIn("pop_strength *\n", text)
 
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
             config = fh.read()
@@ -501,9 +523,20 @@ class EvalContractTests(unittest.TestCase):
     def test_comfort_disparity_reports_both_signed_tails(self):
         dx = np.array([-12.0, -8.0, 0.0, 6.0, 10.0])
         weights = np.ones_like(dx)
-        positive, negative = sbsbench.comfort_disparity(dx, weights, eye_width=400, tail=0.8)
+        positive, negative = sbsbench.comfort_disparity(
+            dx, weights, eye_width=400,
+            eye_height=400 / sbsbench.REFERENCE_STREAM_ASPECT, tail=0.8)
         self.assertAlmostEqual(positive, 1.5)
         self.assertAlmostEqual(negative, 3.0)
+
+    def test_perceived_disparity_is_client_aspect_invariant(self):
+        ref = sbsbench.perceived_disparity_pct(51.2, 5120, 2160)
+        # The aspect correction keeps pixel disparity constant when pixel height is unchanged;
+        # at a taller raster it grows in direct proportion to height.
+        uhd = sbsbench.perceived_disparity_pct(51.2, 3840, 2160)
+        tall = sbsbench.perceived_disparity_pct(51.2 * 3840.0 / 2160.0, 3552, 3840)
+        self.assertAlmostEqual(ref, uhd, places=6)
+        self.assertAlmostEqual(ref, tall, places=6)
 
     def test_hard_integrity_aggregates_worst_frame_not_mean(self):
         agg = sbsbench.aggregate([

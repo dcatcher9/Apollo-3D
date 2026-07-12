@@ -45,10 +45,50 @@ static Logger gLogger;
 
 static std::mutex g_engine_build_status_mutex;
 static std::map<std::string, models::engine_build_status> g_engine_build_status;
+static std::mutex g_depth_shader_cache_mutex;
+static std::map<std::filesystem::path, std::vector<std::uint8_t>> g_depth_shader_cache;
 
 static void set_engine_build_status(const std::string &engine_name, models::engine_build_status status) {
   std::lock_guard<std::mutex> lock(g_engine_build_status_mutex);
   g_engine_build_status[engine_name] = status;
+}
+
+static bool depth_shader_bytecode(
+  const std::filesystem::path &path,
+  std::vector<std::uint8_t> &bytecode
+) {
+  // D3D shader bytecode is device-independent. Mode switches recreate the encoder's D3D device,
+  // but recompiling the same twelve source files can intermittently take tens of seconds. Cache
+  // the blobs for the process lifetime and only create the lightweight device-specific shaders.
+  std::lock_guard<std::mutex> lock(g_depth_shader_cache_mutex);
+  if (auto it = g_depth_shader_cache.find(path); it != g_depth_shader_cache.end()) {
+    bytecode = it->second;
+    return true;
+  }
+
+  Microsoft::WRL::ComPtr<ID3DBlob> blob;
+  Microsoft::WRL::ComPtr<ID3DBlob> err;
+  constexpr DWORD flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
+  if (FAILED(D3DCompileFromFile(
+        path.wstring().c_str(),
+        nullptr,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "main",
+        "cs_5_0",
+        flags,
+        0,
+        &blob,
+        &err
+      ))) {
+    if (err) {
+      BOOST_LOG(error) << "Shader compile error (" << path << "): " << (char *) err->GetBufferPointer();
+    }
+    return false;
+  }
+  auto *begin = static_cast<const std::uint8_t *>(blob->GetBufferPointer());
+  bytecode.assign(begin, begin + blob->GetBufferSize());
+  g_depth_shader_cache.emplace(path, bytecode);
+  return true;
 }
 
 // Shared TensorRT state. The runtime and engine are created once and shared by every
@@ -573,19 +613,11 @@ namespace models {
     bool depth_context_pooled = false;  // context reused from the pool (modules already loaded -> skip warmup)
 
     bool compile_shader(const std::filesystem::path &path, Microsoft::WRL::ComPtr<ID3D11ComputeShader> &out_cs) {
-      Microsoft::WRL::ComPtr<ID3DBlob> blob;
-      Microsoft::WRL::ComPtr<ID3DBlob> err;
-      DWORD flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
-      // D3D_COMPILE_STANDARD_FILE_INCLUDE resolves #include relative to the .hlsl's dir
-      // (matches display_vram.cpp / sbs_bench_harness.cpp), so the depth shaders can share
-      // shared includes instead of hand-synced copies.
-      if (FAILED(D3DCompileFromFile(path.wstring().c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "main", "cs_5_0", flags, 0, &blob, &err))) {
-        if (err) {
-          BOOST_LOG(error) << "Shader compile error (" << path << "): " << (char *) err->GetBufferPointer();
-        }
+      std::vector<std::uint8_t> bytecode;
+      if (!depth_shader_bytecode(path, bytecode)) {
         return false;
       }
-      return SUCCEEDED(device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &out_cs));
+      return SUCCEEDED(device->CreateComputeShader(bytecode.data(), bytecode.size(), nullptr, &out_cs));
     }
 
     impl(Microsoft::WRL::ComPtr<ID3D11Device> d, Microsoft::WRL::ComPtr<ID3D11DeviceContext> c, const std::filesystem::path &assets_dir, const config::video_t::sbs_t &cfg, const config::depth_model_info &model):
@@ -610,6 +642,7 @@ namespace models {
         dynamic_width(model.dynamic_width),
         fixed_h(model.fixed_h),
         output_tensor_name(model.output_tensor) {
+      const auto init_started = std::chrono::steady_clock::now();
       // Perf benchmark: enable per-stage timing for this run and reset the rolling window
       // so it reflects this model/mode rather than blending across a switch.
       perf_depth.stage = "depth_infer";
@@ -913,6 +946,11 @@ namespace models {
       // thread -- rather than stalling the first real convert() on the encode thread and
       // freezing the stream right after a host-SBS / model switch.
       warmup_inference();
+      BOOST_LOG(info) << "Depth estimator pipeline initialized in "
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - init_started
+                         ).count()
+                      << " ms";
     }
 
     // Run one throwaway inference at the engine's optimization shape so TensorRT loads its

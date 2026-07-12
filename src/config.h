@@ -177,7 +177,7 @@ namespace config {
     // Apollo profile defaults live HERE. config.cpp changes only values that differ for another
     // named profile, then parses explicit sbs_3d_* overrides on top.
     struct sbs_t {
-      std::string profile = "apollo";  ///< Quality profile applied before explicit overrides. Custom names use sbs_3d_profile_<name>_<parameter> keys.
+      std::string profile = "vd3d";  ///< Quality profile applied before explicit overrides. Custom names use sbs_3d_profile_<name>_<parameter> keys.
       std::string warp = "apollo";  ///< Geometry implementation: "apollo" = occlusion-aware backward probe; "vd3d" = Bestv2 backward/forward hybrid.
       double pop_strength = 1.25;  ///< Final shared stereo-parallax multiplier (0.25-2). Shared by both validated profiles; 1 is the literal Bestv2 field.
       double ema = 0.5;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.

@@ -1,6 +1,6 @@
 {
   "_doc": "Shared gate for run_eval.py and the report. A change is a regression when it moves the worse way by more than max(abs_floor, baseline*rel_tol). hard_min/hard_max are absolute non-tradeable bounds; trigger/trigger_min create baseline-independent issues.",
-  "_pop_note": "pop_px_p50/p95 (median/p95 |dx|) remain in results but deliberately do not gate: subject anchoring legitimately lowers median |dx| by recentering the field without losing depth. pop_spread_px (near-to-far range) is the fair volume gate.",
+  "_pop_note": "pop_px_p50/p95 (median/p95 |dx|) remain in results but deliberately do not gate: subject anchoring legitimately lowers median |dx| by recentering the field without losing depth. pop_spread_pct is the fair volume gate and is reference-equivalent perceived disparity at Artemis's fixed panel height, anchored to the 5120x2160 stream aspect.",
   "metrics": {
     "pop_spread_pct": {"role": "primary", "axis": "stereo", "better": "higher", "rel_tol": 0.15, "abs_floor": 0.04},
     "pop_spread_px": {"role": "diagnostic", "axis": "stereo", "better": "higher", "rel_tol": 0.15, "abs_floor": 1.0},

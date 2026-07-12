@@ -164,7 +164,7 @@ def normalize_cli_paths(args):
 
 def expected_profile(conf, extra):
     """Apply the production contract: profile defaults first, explicit keys/CLI last."""
-    profile = conf_value(conf, "sbs_3d_profile", "apollo")
+    profile = conf_value(conf, "sbs_3d_profile", "vd3d")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", profile):
         fail(f"invalid sbs_3d_profile {profile!r}")
     warp = "vd3d" if profile == "vd3d" else "apollo"

@@ -701,7 +701,7 @@ namespace platf::dxgi {
         );
       });
       depth_estimator_building = true;
-      publish_depth_status(1);  // loading -> client shows indicator
+      publish_depth_status(3);  // device-specific pipeline initialization (engine is already ready)
       return false;
     }
 

@@ -19,15 +19,16 @@ experiments and their evidence are recorded in `sbs-feature-decision-revisit.md`
 7. Convert the final packed SBS raster directly to the encoder format. When doubled width exceeds
    `sbs_3d_max_encode_width`, the packed raster is downscaled while preserving each eye's aspect.
 
-The default `apollo` profile and alternate `vd3d` profile share the same model, normalization,
+The default `vd3d` profile and alternate `apollo` profile share the same model, normalization,
 subject shaping, aspect mapping, and encoder path. They differ only in warp geometry and the VD3D
 forward/backward blend. Individual `sbs_3d_*` values explicitly present in configuration override
 the corresponding value in every profile. Additional profiles are configuration-only: define their
 fields with `sbs_3d_profile_<name>_<parameter>` keys; `sbs_3d_profile` chooses the default. Apollo
 advertises the complete list and Artemis can switch the whole profile per stream. The client does
 not select Game/Movie behavior, a model, or individual processing parameters.
-Bestv2 disparity is calibrated at the evaluator's 854px source width and
-scales on wider captures, so a 5120px desktop retains the evaluated eye-relative stereo volume.
+Bestv2 disparity is calibrated at the evaluator's 854px source width and normalized to the
+5120x2160 Artemis stream reference, so other client-requested aspects retain the same perceived
+stereo volume.
 The optional `sbs_3d_pop_strength` control scales the shared final parallax field for both warps
 (`0.25`-`2`, default `1.25`) without altering that resolution correction. The Apollo and VD3D
 profiles deliberately inherit the same strength so their warp comparison remains controlled.

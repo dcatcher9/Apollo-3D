@@ -28,7 +28,7 @@ Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 Production configuration uses one profile selector:
 
 ```
-sbs_3d_profile = apollo   # default; built-in alternate: vd3d
+sbs_3d_profile = vd3d   # default; built-in alternate: apollo
 ```
 
 The profile supplies the complete stack. Add a configuration-only profile with
@@ -336,10 +336,10 @@ annotations.
 | metric | meaning | direction |
 |--------|---------|-----------|
 | `pop_px_p50` / `p95` | L↔R horizontal disparity (tile phase-correlation), median & p95 of \|dx\|. REPORTED but NOT gated — subject anchoring legitimately lowers median \|dx\| | higher = more 3D pop |
-| `pop_pct_p50` | same as % of eye width | higher = more pop |
-| `pop_spread_px` / `pop_spread_pct` | near-to-far disparity RANGE = weighted p95−p5 of **signed** dx (px / % of eye width). The percentage is the resolution-independent **gate** and `q_depth` driver; pixels are diagnostic | higher = more volume |
+| `pop_pct_p50` | same disparity in reference-equivalent perceived % (fixed Artemis panel height, 5120×2160 aspect anchor) | higher = more pop |
+| `pop_spread_px` / `pop_spread_pct` | near-to-far disparity RANGE = weighted p95−p5 of **signed** dx (pixels / reference-equivalent perceived %). The percentage is the client-resolution-independent **gate** and `q_depth` driver; pixels are diagnostic | higher = more volume |
 | `vmisalign_px` / `vmisalign_pct` | median vertical L↔R offset in pixels / % eye height. The percentage is the resolution-independent hard gate | must remain ≤0.1% eye height |
-| `positive_disparity_pct` / `negative_disparity_pct` | signed weighted p99 disparity tails as % eye width | each must remain ≤3% |
+| `positive_disparity_pct` / `negative_disparity_pct` | signed weighted p99 disparity tails in reference-equivalent perceived % | each must remain ≤3% |
 | `source_coverage_pct` | output patches explainable by horizontally displaced source content | ≥90% hard integrity limit |
 | `image_integrity_pct` | retention of real source texture after alignment | ≥80% hard integrity limit |
 | `depth_spread` | p95−p5 of the normalized depth = pop available at the source | separates flat-model from flat-warp |

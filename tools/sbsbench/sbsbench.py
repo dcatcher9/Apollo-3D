@@ -172,8 +172,24 @@ def pop_spread(dxs, wts):
     return weighted_pct(dxs, wts, 0.95) - weighted_pct(dxs, wts, 0.05)
 
 
-def comfort_disparity(dxs, wts, eye_width, tail=0.99):
-    """Signed disparity tails as percentages of eye width.
+REFERENCE_STREAM_ASPECT = 5120.0 / 2160.0
+
+
+def perceived_disparity_pct(disparity_px, eye_width, eye_height):
+    """Disparity as reference-equivalent percent at Artemis's fixed physical panel height.
+
+    Artemis sizes the XR quad width from the requested stream aspect while keeping its default
+    physical height constant. Raw percent-of-width therefore changes meaning with aspect. Convert
+    through eye height and express the result at the validated 5120x2160 reference aspect.
+    """
+    width = max(float(eye_width), 1.0)
+    height = max(float(eye_height), 1.0)
+    aspect_scale = (width / height) / REFERENCE_STREAM_ASPECT
+    return float(disparity_px) * 100.0 / width * aspect_scale
+
+
+def comfort_disparity(dxs, wts, eye_width, eye_height, tail=0.99):
+    """Signed disparity tails as reference-equivalent perceived percentages.
 
     Physical crossed/uncrossed naming requires a calibrated display convention and headset FOV,
     which the host PNG does not carry. Keep the two signed sides explicit and gate both; this
@@ -181,8 +197,8 @@ def comfort_disparity(dxs, wts, eye_width, tail=0.99):
     """
     lo = weighted_pct(dxs, wts, 1.0 - tail)
     hi = weighted_pct(dxs, wts, tail)
-    scale = 100.0 / max(float(eye_width), 1.0)
-    return max(0.0, hi) * scale, max(0.0, -lo) * scale
+    return (perceived_disparity_pct(max(0.0, hi), eye_width, eye_height),
+            perceived_disparity_pct(max(0.0, -lo), eye_width, eye_height))
 
 
 # --------------------------------------------------------- disocclusion metrics
@@ -790,6 +806,7 @@ def measure(dump_dir):
     sbs = load_gray(sbs_p)
     left, right = split_eyes(sbs)
     ew = left.shape[1]
+    eh = left.shape[0]
 
     out = {}
     field = disparity_field(left, right)
@@ -798,13 +815,13 @@ def measure(dump_dir):
         adx = np.abs(dxs)
         out["pop_px_p50"] = weighted_pct(adx, wts, 0.50)
         out["pop_px_p95"] = weighted_pct(adx, wts, 0.95)
-        out["pop_pct_p50"] = out["pop_px_p50"] / ew * 100.0
+        out["pop_pct_p50"] = perceived_disparity_pct(out["pop_px_p50"], ew, eh)
         out["pop_spread_px"] = pop_spread(dxs, wts)
-        out["pop_spread_pct"] = out["pop_spread_px"] / ew * 100.0
+        out["pop_spread_pct"] = perceived_disparity_pct(out["pop_spread_px"], ew, eh)
         out["vmisalign_px"] = float(np.median(np.abs(dys)))
         out["vmisalign_pct"] = out["vmisalign_px"] / left.shape[0] * 100.0
         out["positive_disparity_pct"], out["negative_disparity_pct"] = comfort_disparity(
-            dxs, wts, ew)
+            dxs, wts, ew, eh)
         out["tiles"] = int(len(dxs))
 
     if os.path.exists(depth_p):
@@ -845,6 +862,7 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
     sbs = load_gray(path)
     left, right = split_eyes(sbs)
     ew = left.shape[1]
+    eh = left.shape[0]
     out = {"_dump": os.path.basename(path)}
     field = disparity_field(left, right)
     if field is not None:
@@ -852,13 +870,13 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
         adx = np.abs(dxs)
         out["pop_px_p50"] = weighted_pct(adx, wts, 0.50)
         out["pop_px_p95"] = weighted_pct(adx, wts, 0.95)
-        out["pop_pct_p50"] = out["pop_px_p50"] / ew * 100.0
+        out["pop_pct_p50"] = perceived_disparity_pct(out["pop_px_p50"], ew, eh)
         out["pop_spread_px"] = pop_spread(dxs, wts)
-        out["pop_spread_pct"] = out["pop_spread_px"] / ew * 100.0
+        out["pop_spread_pct"] = perceived_disparity_pct(out["pop_spread_px"], ew, eh)
         out["vmisalign_px"] = float(np.median(np.abs(dys)))
         out["vmisalign_pct"] = out["vmisalign_px"] / left.shape[0] * 100.0
         out["positive_disparity_pct"], out["negative_disparity_pct"] = comfort_disparity(
-            dxs, wts, ew)
+            dxs, wts, ew, eh)
     if depth is not None:
         out["depth_spread"] = float(np.percentile(depth, 95) - np.percentile(depth, 5))
         out["disocc_frac"], smear = disocclusion_metrics(left, depth)

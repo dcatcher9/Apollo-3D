@@ -74,7 +74,8 @@ namespace video {
     // profile here prevents a client switch or config reload from mixing parameters mid-frame.
     config::video_t::sbs_t sbs_config {};
 
-    // APPEND-ONLY. Session-local depth-engine status channel (0 idle, 1 loading, 2 ready).
+    // APPEND-ONLY. Session-local depth status channel:
+    // 0 idle/failure, 1 engine loading/building, 2 ready, 3 device-pipeline initialization.
     safe::mail_raw_t::event_t<int> sbs_depth_status_event;
   };
 
