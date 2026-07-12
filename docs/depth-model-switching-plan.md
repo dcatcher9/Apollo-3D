@@ -1,5 +1,9 @@
 # Depth model roster + on-the-fly switching — implementation plan
 
+> **Historical implementation plan.** Model switching shipped, while the warpsim and guided
+> processor workflow referenced below was subsequently removed. Use `sbs-3d-roadmap.md` and
+> `tools/sbsbench/README.md` for current validation.
+>
 > **STATUS (2026-07-05): A + B SHIPPED and headset-verified. C partly done but its
 > conclusions changed the direction — read this first:**
 > - **Model switching (B) is live**: registry, `g_engines` per-name TRT slots, `0x3005`

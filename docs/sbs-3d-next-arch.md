@@ -1,5 +1,8 @@
 # SBS 3D — next-architecture direction (design notes)
 
+> **Archived design exploration (2026-07-05).** References below to warpsim, guided upsample,
+> MLBW, range floors, or legacy divergence controls are not current. See `sbs-3d-roadmap.md`.
+
 Working notes from the 2026-07-05 design discussion, written so it can be resumed in a
 new session. This is the **forward-looking design** for how to do the 2D→SBS pipeline
 "correctly", distinct from [sbs-3d-roadmap.md](sbs-3d-roadmap.md) (the prioritized plan)

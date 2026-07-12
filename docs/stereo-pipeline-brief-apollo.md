@@ -1,5 +1,9 @@
 # Adapting the "CUDA-native 2D→SBS" brief to Apollo-3D
 
+> **Archived design snapshot (2026-07-05).** Claims below about MLBW, guided upsample,
+> legacy disparity, and warpsim describe removed experiments. Use `sbs-3d-roadmap.md` and
+> `tools/sbsbench/README.md` for the current implementation and workflow.
+
 Source: `stereo-pipeline-implementation-brief.md` (external, 2026-07). That brief assumes a
 **greenfield** project (standalone `libsbs` + CLI apps, Apollo integration as a distant
 Milestone 3). Apollo-3D is already at and past its target state: the pipeline lives inside
@@ -38,7 +42,8 @@ new reduction pass: in `depth_minmax_ema_cs.hlsl`, when the fresh raw range disa
 the EMA'd range by a large factor (e.g. raw min/max outside the EMA bounds by
 > 25 % of the EMA range, both ends, or range ratio > ~1.6× either way), **snap** the EMA to
 the raw values instead of blending. This detects exactly the failure (range jumps at cuts)
-without needing a frame-difference pass. Config: `sbs_3d_minmax_snap` threshold, default on.
+without needing a frame-difference pass. This experiment was neutral and the processor/configuration
+were later removed; it is retained here only as historical design context.
 Validate offline on a dump pair straddling a cut before headset (workflow mandate).
 
 ### A2 — Per-stage GPU timing (the brief's best process idea)

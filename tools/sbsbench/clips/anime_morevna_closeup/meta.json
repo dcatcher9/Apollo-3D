@@ -1,0 +1,14 @@
+{
+  "name": "anime-morevna-closeup",
+  "description": "Cel-anime face close-up with blinking eyes, fine ink lines, flat-color regions and a textured rubble background.",
+  "content_type": "anime",
+  "dataset": "Morevna Project Demo",
+  "required_gt_depth": false,
+  "required_gt_flow": false,
+  "homepage": "https://morevnaproject.org/anime/demo/",
+  "source_url": "https://archive.org/download/TheBeautifulQueenMaryaMorevnaDemo/demo-20121110-final-1920x1080.avi",
+  "citation": "Morevna Project Demo, directed by Konstantin Dmitriev",
+  "license_note": "Visual parts are CC BY 3.0; the film's music has separate CC BY-NC-SA 3.0 terms. Evaluation stores silent extracted frames only.",
+  "source_window": "72.000s; 24 contiguous frames at 24 fps; Lanczos downscale from 1920x1080 to 854x480",
+  "source_artifacts": "Visual inspection of frames 1, 12 and 24 found no bright halo or white fringe around the character. Black contour lines, white clothing, hair highlights and antialiased ink edges are intentional source content; mild video compression remains around fine rubble lines."
+}

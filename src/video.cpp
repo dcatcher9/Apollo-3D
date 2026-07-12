@@ -2530,8 +2530,9 @@ namespace video {
         if (packed_w <= cap) {
           session_config.width = packed_w;  // height unchanged (already config.height)
         } else {
-          session_config.width = cap & ~1;
-          session_config.height = (int) std::lround((double) config.height * cap / packed_w) & ~1;
+          session_config.width = std::max(2, cap & ~1);
+          session_config.height = std::max(
+            2, (int) std::lround((double) config.height * session_config.width / packed_w) & ~1);
           BOOST_LOG(info) << "Host SBS: packed width "sv << packed_w << " exceeds max ("sv << cap
                           << "); capping to "sv << session_config.width << 'x' << session_config.height
                           << " (per-eye "sv << (session_config.width / 2) << 'x' << session_config.height << ')';

@@ -14,12 +14,22 @@ Design for two reproducible, host-side benchmarks so every SBS change ships with
 >   `split_video.py`, and the **Tier-1 headless harness** `sunshine --sbs-bench` (src/sbs_bench_harness.cpp:
 >   real estimator + real composite over a frames dir → SBS PNGs). Full chain validated:
 >   video → frames → harness → sbsbench --seq.
-> Remaining: reference PSNR/SSIM (needs GT stereo), ghost metric, optional depth dump in seq mode.
+> - **Eval v4** — hard signed-disparity/coverage/integrity limits, source-relative halo/stretch,
+>   scale/shift-invariant GT-depth accuracy on deterministic synthetic clips, and exact-or-classical
+>   optical-flow-compensated output/depth temporal validation. Native public metric-depth and
+>   exact optical-flow sidecars are supported. The separate `extended-v2` suite adds visually
+>   inspected Bonn RGB-D Dynamic, TartanAir V2, MPI Sintel Stereo, and Virtual KITTI 2 clips; URLs, SHA-256
+>   hashes, frame windows and preparation logic are committed while media remains external.
+>   The first eight-clip run exposed an Apollo bug: Bestv2 source-pixel shifts were normalized by
+>   inference-depth width instead of source-color width, creating resolution-dependent amplification.
+>   After the fix, median VD3D volume delta is −6.0%; seven clips are within noise, including two
+>   where VD3D is slightly higher. Only Bonn walking retains a just-over-one-pixel geometry difference.
+> Remaining: reference warp PSNR/SSIM (needs GT stereo) and a dedicated ghost/double-image metric.
 
-## Why the offline warpsim disagrees with the headset (the problem to design around)
+## Why the offline warpsim was removed
 
-The CPU simulator (`tools/warpsim/`) is invaluable for the reprojection math but structurally
-cannot predict the live result, for five reasons. The benchmark must avoid all five.
+The former CPU simulator (`tools/warpsim/`) could not predict the live result for five reasons.
+Its code was removed after the real-pipeline evaluator became authoritative.
 
 1. **It eats post-normalization depth.** warpsim consumes `depth.png` = the already-upsampled,
    min/max-EMA-normalized *guided* depth. Everything upstream — depth model, shifted-reciprocal
@@ -43,6 +53,11 @@ frame sequences. A Tier-2 in-stream capture removes 4.
 
 Both benchmarks are meaningless without identical input every run. Foundation = a fixed clip
 library fed through the real pipeline.
+
+There are two levels: the committed **core** library for rapid iteration, and the reproducibly
+prepared **extended** public-data suite for feature acceptance and the final warp decision. Run
+`prepare_public_datasets.py` once, then select it with `run_eval.py --suite extended`. Extended
+baselines live separately in `baselines_extended/`, so they cannot be mixed with core clips.
 
 - **Clip library:** `E:\ApolloDev\sbs_bench\clips\<name>\frame_%04d.png` (RGB or HDR PNG/EXR),
   each a short sequence (e.g. 60–120 frames). Chosen to span the catalogued failure modes:
@@ -84,7 +99,12 @@ Computed on the **real host SBS output** per clip. Ship no-reference first; add 
 - **Ghost** — lag-band width / double-image energy on `fast_motion`.
 - **Geometry sanity** — L/R object-width consistency (a known correctness check).
 
-### A.2 Reference metrics (phase 2, needs GT stereo content — DECISION PENDING)
+### A.2 Reference metrics
+Implemented for **depth**: clips may carry identity-matched 16-bit `gt_depth/frame_*.png`; prediction
+is evaluated with scale/shift-invariant RMSE and boundary F1. `flat_page` and `fast_motion` provide
+deterministic references. Missing GT remains absent.
+
+Pending for **warp imagery** (needs GT stereo content):
 For synthetic/known-stereo clips: feed one eye through the pipeline, reconstruct the other,
 compare to the true eye. `PSNR / SSIM / LPIPS`, global and disocclusion-band-restricted. Gold
 standard for warp+inpaint correctness. Requires rendered (Blender second-eye camera) or dataset
@@ -134,6 +154,6 @@ Wire the A2 per-stage timing (`sbs_3d_perf_stats`), p50/p95/max over each clip.
 - **Primary tier:** Tier-1 headless first (default) vs. Tier-2 in-stream first.
 
 ## Key references
-- `tools/warpsim/README.md` — the offline sim this complements (and its limits, above).
+- `tools/warpsim/README.md` — removal notice for the obsolete CPU replica.
 - `docs/sbs-3d-roadmap.md` — the artifacts these metrics quantify (#1 stretch band, #2 pop).
 - `sbs-3d-depth-feature` memory — A2 (perf timing) + A5 (jacobian mask) design context.

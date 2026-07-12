@@ -15,6 +15,10 @@
 
 Texture2D<float4> LeftColorTexture : register(t0);
 Texture2D<float>  DepthTexture      : register(t1);
+// Subject-tracking state from depth_subject_resolve_cs. [0] = {recenter_delta, reserved,
+// subject_depth_ema, initialized}; [1] = {stretch_lo_val, stretch_inv_range, _, _}.
+StructuredBuffer<float4> SubjectState : register(t2);
+Texture2D<float> PlaneLockTexture : register(t4);
 SamplerState      LinearSampler     : register(s0);
 
 struct PS_INPUT {
@@ -22,42 +26,11 @@ struct PS_INPUT {
     float2 TexCoord : TEXCOORD0;
 };
 
-cbuffer Constants : register(b2) {
-    float max_divergence;   // Parallax gain as a fraction of source width: signed parallax =
-                            // (depth - focal_plane) * max_divergence. 0 = flat.
-    float focal_plane;      // Zero-parallax depth in [0,1] (e.g. 0.5).
-    float parallax_steps;   // Horizontal probes per eye; fewer = big GPU saving on this full-res pass.
-    float border_fade;      // Ramp parallax to 0 within this fraction of the L/R edges (0 = off).
-    float depth_floor;      // Far-depth compression: d' = floor + (1-floor)*d. Shrinks the
-                            // foreground-vs-background parallax gap at silhouettes, and with it
-                            // the disocclusion band that gets stretch-filled there. 0 = off.
-    float pad0;
-    float pad1;
-    float pad2;
-};
-
-// Border fade: parallax ramps to zero within border_fade of the LEFT/RIGHT source edges, so
-// an object touching a side edge doesn't pop out of the screen -- a "window violation" that
-// causes binocular rivalry (one eye sees it clipped by the frame, the other doesn't). Only
-// the L/R edges need this: parallax is purely horizontal, so the top/bottom edges clip both
-// eyes identically (ordinary occlusion, no rivalry).
-float BorderFade(float x) {
-    return (border_fade <= 0.0f) ? 1.0f : saturate(min(x, 1.0f - x) / border_fade);
-}
-
-// Signed horizontal parallax for a normalized depth sample at source position x, in
-// source-UV units. Positive => nearer than the focal plane => pops out of the screen.
-// depth_floor first compresses the far range (d' = floor + (1-floor)*d): the visible cost of a
-// depth cliff is the disocclusion band, whose width scales with |d_near - d_far|; lifting the
-// far floor narrows that band without touching foreground pop.
-float DepthParallax(float d, float x) {
-    d = depth_floor + (1.0f - depth_floor) * d;
-    return (d - focal_plane) * max_divergence * BorderFade(x);
-}
+#include "include/sbs_warp_common.hlsl"
 
 // Silhouette-stable depth read: a 2x2 spread of taps so any depth step spans ~2.5 probe
-// steps of the reprojection search, in BOTH axes. The guided-upsampled depth is texel-sharp;
-// read raw, a silhouette transition is only ~1 probe step wide horizontally -- the zero-
+// steps of the reprojection search, in BOTH axes. The normalized model depth is texel-sharp;
+// read directly, a silhouette transition is only ~1 probe step wide horizontally -- the zero-
 // crossing detection then flips with probe phase pixel to pixel -- and a diagonal silhouette
 // is a texel staircase vertically, so adjacent ROWS resolve the contested strip differently
 // (the dotted/mesh fringe along occlusion edges). Widening the transition in x keeps g()
@@ -75,21 +48,34 @@ float SampleDepth(float sx, float sy, float2 ofs) {
 // nearest (frontmost) surface so foreground occludes rather than duplicates.
 // eyeSign = +1 right eye, -1 left eye.
 float2 Reproject(float2 uv, float eyeSign) {
-    // Widest distance any surface can travel (near or far side of the focal plane).
-    // BorderFade only shrinks parallax, so this (fade=1) remains a valid upper bound on
-    // the search span.
-    float searchRadius = max_divergence * max(focal_plane, 1.0f - focal_plane);
+    // Subject anchoring is live this frame only if configured AND the resolve pass has
+    // produced state (init != 0 -- it is 0 for the first frames). Mandatory shader/resource
+    // initialization is validated before the estimator is published. Decide it ONCE here
+    // from the runtime state, and read the frame-uniform SubjectState once, so the probe loop
+    // below issues no per-probe buffer loads (DepthParallax gets s0/s1 as args). `shaped` also
+    // gates searchRadius, so the search span and the parallax mapping can never disagree.
+    float4 s0 = SubjectState[0];
+    float4 s1 = SubjectState[1];
+    float4 s2 = SubjectState[2];
+    bool shaped = s0.w > 0.5f;
+    uint dw, dh;
+    DepthTexture.GetDimensions(dw, dh);
+    // Bestv2's calibrated bands are SOURCE-COLOR pixel shifts. Normalizing by the smaller
+    // inference-depth width amplified Apollo whenever the model texture was downscaled, while
+    // VD3D correctly used the eye/source width. Depth dimensions remain correct for tap offsets.
+    uint sourceWidth, sourceHeight;
+    LeftColorTexture.GetDimensions(sourceWidth, sourceHeight);
+
+    float searchRadius = shaped ? Bestv2SearchRadius((float)sourceWidth) : 0.0f;
     if (searchRadius <= 1e-6f) {
-        return uv;  // divergence 0 -> flat passthrough, both eyes identical
+        return uv;  // subject state is not initialized yet
     }
 
-    int steps = (parallax_steps >= 1.0f) ? (int)parallax_steps : 24;
+    static const int steps = 24;
     float startX = uv.x - searchRadius;
     float stepX  = (2.0f * searchRadius) / (float)steps;
 
     // Depth-read tap spread (see SampleDepth), hoisted out of the probe loop.
-    uint dw, dh;
-    DepthTexture.GetDimensions(dw, dh);
     float2 ofs = float2(0.75f / (float) dw, 0.75f / (float) dh);
 
     // A source at position x forward-warps to out(x) = x - eyeSign * parallax(depth(x)).
@@ -109,14 +95,23 @@ float2 Reproject(float2 uv, float eyeSign) {
 
     float prevX = startX;
     float prevD = SampleDepth(prevX, uv.y, ofs);
-    float prevG = (prevX - uv.x) - eyeSign * DepthParallax(prevD, prevX);
+    float planeMask = 0.0f;
+    if (subject_plane_lock > 0.0f) {
+        // The exact mask is 13x13-smoothed and intentionally low-frequency. Sample it once at
+        // the destination rather than once per probe; the uniform branch removes all fetches
+        // from both shipping profiles where plane lock is disabled.
+        planeMask = PlaneLockTexture.SampleLevel(LinearSampler, uv, 0);
+    }
+    float prevG = (prevX - uv.x) - eyeSign * DepthParallax(
+        prevD, planeMask, prevX, s0, s1, s2, shaped, (float)sourceWidth);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
     for (int i = 1; i <= steps; i++) {
         float x = startX + stepX * i;
         float d = SampleDepth(x, uv.y, ofs);
-        float g = (x - uv.x) - eyeSign * DepthParallax(d, x);
+        float g = (x - uv.x) - eyeSign * DepthParallax(
+            d, planeMask, x, s0, s1, s2, shaped, (float)sourceWidth);
 
         // Zero crossing between prevX and x => a source in this span reprojects onto uv.
         if ((prevG <= 0.0f && g >= 0.0f) || (prevG >= 0.0f && g <= 0.0f)) {
@@ -149,14 +144,21 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
     bool is_right_eye = uv.x > 0.5f;
     float eyeSign = is_right_eye ? 1.0f : -1.0f;
 
-    // Map this eye's half back into the source image's [0,1] horizontal range.
-    float2 src_uv = uv;
-    src_uv.x = is_right_eye ? (uv.x - 0.5f) * 2.0f : uv.x * 2.0f;
+    // Map this eye's half into its own aspect-fitted source rectangle. Bars are identical in both
+    // eyes, so aspect conversion cannot introduce a global stereo offset.
+    float2 output_uv = uv;
+    output_uv.x = is_right_eye ? (uv.x - 0.5f) * 2.0f : uv.x * 2.0f;
+    float2 src_uv;
+    if (!ContentToSourceUV(output_uv, src_uv)) {
+        return float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
 
     float2 sample_uv = Reproject(src_uv, eyeSign);
 
     // Disoccluded regions clamp to the nearest valid column instead of wrapping.
     sample_uv.x = saturate(sample_uv.x);
 
-    return LeftColorTexture.Sample(LinearSampler, sample_uv);
+    float4 col = LeftColorTexture.Sample(LinearSampler, sample_uv);
+
+    return col;
 }

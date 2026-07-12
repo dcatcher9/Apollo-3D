@@ -1,23 +1,8 @@
 StructuredBuffer<float>  InputBuffer : register(t0);
-StructuredBuffer<float4> MinMaxEma   : register(t1);  // [0]={min,max,init,ref_range}, [1]={range_scale,_,_,_}
+StructuredBuffer<float4> MinMaxEma   : register(t1);  // [0]={P2,P98,initialized,_}
 RWTexture2D<float>       OutputTexture : register(u0);
 
-// Shared depth-pass constants; layout must match ensure_cbuffers() in
-// video_depth_estimator.cpp (also declared in depth_minmax_cs / depth_minmax_ema_cs).
-cbuffer Constants : register(b0) {
-    uint target_w;
-    uint target_h;
-    uint is_hdr;
-    float ema_alpha;
-    float minmax_alpha;
-    uint reduce_threads;
-    uint output_transform;  // 0 = identity (DA-V2 disparity); 1 = shifted reciprocal (DA-V3 depth -> disparity)
-    float depth_shift;  // shift in 1/(depth + depth_shift) when output_transform == 1
-    float snap_ratio;       // A1 (used by depth_minmax_ema_cs); layout parity
-    float floor_frac;       // A3 (used by depth_minmax_ema_cs); layout parity
-    float floor_ref_alpha;  // A3; layout parity
-    float pad0;
-};
+#include "include/depth_constants.hlsl"
 
 [numthreads(16, 16, 1)]
 void main(uint3 DTid : SV_DispatchThreadID) {
@@ -32,22 +17,10 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     // transform in depth_minmax_cs so min/max and this map agree. The shift bounds the near end.
     if (output_transform == 1) raw = 1.0f / (raw + depth_shift);
 
-    // Per-frame min/max normalization. Depth Anything V2 relative output is
-    // affine-invariant (scale/shift arbitrary and drifting), so a fixed curve
-    // either collapses or saturates depending on scene content. The min/max is
-    // EMA-smoothed across frames (see depth_minmax_ema_cs) for a stable scale.
+    // The validated permanent order is range->pixel: normalize using the current P2/P98 bounds,
+    // then temporally smooth the normalized depth.
     float2 mm = MinMaxEma[0].xy;
     float mapped = saturate((max(raw, 0.0f) - mm.x) / max(mm.y - mm.x, 1e-6f));
-
-    // A3 range floor: on near-flat content (current range << reference), range_scale < 1;
-    // compress the depth contrast toward the ~0.5 focal plane so the scene's parallax shrinks
-    // instead of min/max stretching a hallucinated flat-page structure to full separation.
-    float range_scale = MinMaxEma[1].x;
-    mapped = 0.5f + (mapped - 0.5f) * range_scale;
-
-    // Light EMA temporal smoothing. Depth Anything is scale/shift-variant frame to
-    // frame, so with no smoothing the depth at object edges shimmers on motion.
-    // ema_alpha (config) blends new vs previous; 1.0 disables smoothing entirely.
     float old_depth = OutputTexture[DTid.xy];
     OutputTexture[DTid.xy] = lerp(old_depth, mapped, ema_alpha);
 }

@@ -71,26 +71,20 @@ Unit tests are in [tests/unit/](tests/unit) (one `test_<module>.cpp` per source 
 `test_video.cpp`, `test_stream.cpp`, `test_http_pairing.cpp`), with integration tests in
 [tests/integration/](tests/integration) and shared HTTP fixtures in [tests/fixtures/](tests/fixtures).
 
-## SBS 3D quality / shader work — use the offline simulator FIRST
+## SBS 3D quality / shader work — use the real pipeline evaluator
 
 The SBS 3D feature's status, known residual artifacts, hard-won constraints, and the
 prioritized roadmap live in [docs/sbs-3d-roadmap.md](docs/sbs-3d-roadmap.md) — read it
 before planning any SBS work.
 
-Before changing the SBS reprojection shader or debugging visual artifacts in the 2D→3D
-pipeline, read [tools/warpsim/README.md](tools/warpsim/README.md) and follow its workflow:
-capture a frame with the client's "Dump 3D" button, reproduce the artifact in the CPU
-simulator (it replicates `sbs_reprojection_ps.hlsl` pixel-exactly), test theories with the
-instrumentation tools and numbers, and validate candidate changes offline — on BOTH eyes and
-MULTIPLE scenes — before deploying anything to the headset. Do NOT iterate guess→deploy→
-headset-check; that loop has repeatedly failed here. When `sbs_reprojection_ps.hlsl` changes,
-update the simulator's replica functions to match.
+The old CPU warpsim was removed because it modeled deleted legacy branches and drifted from the
+real D3D shaders. Validate every change with `tools/sbsbench/run_eval.py`: it runs the production
+estimator and shaders on both eyes over multiple temporal scenes and generates the report.
 
 ### Quantify every SBS change with the two host benchmarks (offline, real pipeline)
 
-The warpsim above is for iterating the reprojection *math*; it is a CPU replica on
-pre-normalized depth and cannot see model/normalization/temporal effects. To evaluate what a
-change actually does to the shipped pipeline, ALWAYS use the two host benchmarks — they run the
+To evaluate what a change actually does to the shipped pipeline, ALWAYS use the two host
+benchmarks — they run the
 real estimator + real shaders and produce numbers to diff against a baseline. Do not judge an
 SBS change by eyeballing the headset; produce the before/after numbers. See
 [docs/sbs-benchmark-plan.md](docs/sbs-benchmark-plan.md) and
@@ -102,8 +96,10 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   (`tools/sbsbench/baselines/` + `thresholds.json`). **Exit 0 = pass, 1 = regression (named, with
   worst frame), 2 = setup error.** Results + provenance (git sha, models, clip hashes) land in
   `<build-dir>/sbs_eval/<label>/results.json`. After an INTENDED metric change, re-baseline with
-  `--update-baselines` and commit the baselines together with the change. A/B levers pass through:
-  `--extra --divergence 0.027`. Changing bench.conf or the clip set invalidates baselines.
+  `--update-baselines` and commit the baselines together with the change. Supported A/B levers
+  pass through, for example `--extra --pop-strength 1.25` or `--extra --subject-lock 0.6`.
+  Changing bench.conf or the clip set
+  invalidates baselines.
 - **Adding a clip to the eval set**: a clip is just a directory of same-size `frame_%05d.jpg`
   frames under `tools/sbsbench/clips/<name>/` — `run_eval.py` auto-discovers it, no registration.
   From a video: `python tools/sbsbench/split_video.py video.mp4 -o tools/sbsbench/clips/<name>
@@ -123,14 +119,18 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   composite shaders over a fixed directory of frames (split a short video with
   `tools/sbsbench/split_video.py`), writing `sbs_%05d.png` + `depth_%05d.png`, deterministically
   and with no game/client. Score with `python tools/sbsbench/sbsbench.py --seq <out> --baseline
-  base.json` → pop (stereo depth), vmisalign (geometry, must stay ~0), disocc_frac/disocc_smear
-  (disocclusion severity), flicker (temporal shimmer, which the offline sim can't measure).
-  Capture a baseline before the change; the `--divergence` and `--model`/`--movie` flags are the
-  A/B levers. Run it from `cmake-build-relwithdebinfo` so `assets/` resolves.
-- **Perf** — the in-app `sbs_3d_perf_stats = enabled` config knob ([src/sbs_perf.cpp](src/sbs_perf.cpp)):
-  logs per-stage p50/p95/max (`depth_infer`, `warp_infer` via CUDA events; `sbs_convert_cpu`)
-  every 300 SBS frames and writes `sbs_perf.json`. The harness enables it automatically, so a
-  `--sbs-bench` run yields both the visual scorecard and the perf snapshot in one pass.
+  base.json` → pop_spread (near-to-far stereo VOLUME, the gated pop metric — subject-anchoring-fair,
+  unlike median-|dx| pop_px which is reported-only), vmisalign (geometry, must stay ~0),
+  disocc_frac/disocc_smear (disocclusion severity), flicker (temporal shimmer, which the offline
+  sim can't measure). Capture a baseline before the change; `--warp`, `--vd3d-forward-blend`,
+  `--pop-strength`, `--depth-short-side`, `--ema`, `--minmax-ema`, and the subject
+  lock/recenter/stretch/plane-lock controls are the supported A/B levers (see the harness
+  README). Run
+  it from `cmake-build-relwithdebinfo` so `assets/` resolves.
+- **Perf** — the in-app `sbs_3d_perf_stats = enabled` config knob ([src/sbs_perf.cpp](src/sbs_perf.cpp))
+  logs live `depth_infer` (CUDA events) and `sbs_convert_cpu` every 300 SBS frames and writes
+  `sbs_perf.json`. The offline harness additionally records `warp_infer` with correctly ordered
+  D3D11 timestamp queries, so a `--sbs-bench` run yields the visual scorecard and warp comparison.
 
 When these tools change (new metric, harness contract, or a shader they replicate), update their
 READMEs and this section so the workflow stays discoverable.

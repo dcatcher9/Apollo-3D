@@ -175,34 +175,31 @@ namespace config {
     bool ignore_encoder_probe_failure;
 
     // Real-time 2D->3D side-by-side (SBS) depth reprojection tuning.
-    // Defaults live HERE (member initializers) -- the single source of truth. config.cpp
-    // only parses the sbs_3d_* overrides; do not re-list defaults there.
+    // Apollo profile defaults live HERE. config.cpp changes only values that differ for another
+    // named profile, then parses explicit sbs_3d_* overrides on top.
     struct sbs_t {
-      double divergence = 0.0135;  ///< Parallax gain: signed parallax = (depth - focal_plane) * divergence, as a fraction of image width. 0 = flat (zero-parallax passthrough).
-      double focal_plane = 0.5;  ///< Zero-parallax plane in normalized depth [0,1]; lower pushes more of the scene forward.
-      double ema = 0.6;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
-      int depth_short_side = 336;  ///< Depth map short-side resolution (iw3-style): guarantees vertical depth detail regardless of aspect. Clamped to the frame's native short side (never upscales).
+      std::string profile = "apollo";  ///< Complete validated quality profile applied before explicit sbs_3d_* overrides: "apollo" or "vd3d".
+      std::string warp = "apollo";  ///< Geometry implementation: "apollo" = occlusion-aware backward probe; "vd3d" = Bestv2 backward/forward hybrid.
+      double pop_strength = 1.25;  ///< Final shared stereo-parallax multiplier (0.25-2). Shared by both validated profiles; 1 is the literal Bestv2 field.
+      double ema = 0.5;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
+      int depth_short_side = 432;  ///< Depth map short-side resolution, clamped to the frame's native short side. At 16:9 this maps to about 768x432, matching the VisionDepth3D reference input.
       double depth_max_aspect = 4.0;  ///< Aspect-ratio cap (long side <= short * this). Bounds worst-case inference cost on ultrawide.
-      double minmax_ema = 0.1;  ///< Temporal EMA blend for the normalized disparity min/max (0-1). Lower = steadier depth scale, higher = adapts faster.
-      double minmax_snap = 1.6;  ///< Scene-cut snap: when a frame's raw depth range (or its center) jumps by more than this factor vs the EMA'd range, snap the normalization scale to the new scene instead of slowly blending (which makes depth "swim" for ~0.2-0.7s after a hard cut). 0 = off (always blend).
-      double range_floor = 0.0;  ///< Range floor (0 = off): when the current depth range drops below this fraction of a slow-max reference range (near-flat content, e.g. a desktop page), compress the depth contrast toward the focal plane so min/max normalization doesn't stretch it to full parallax and amplify the model's hallucinated flat-scene structure. ~0.5 to enable; experimental.
+      double minmax_ema = 0.18;  ///< Temporal EMA blend for the normalized disparity min/max (0-1). Lower = steadier depth scale, higher = adapts faster.
+      double subject_lock = 0.5;  ///< Validated subject anchor compromise. 1 pins the subject exactly; 0 leaves the Bestv2 bands unanchored.
+      double subject_recenter = 0.35;  ///< How strongly the depth field is shifted to put the tracked subject at mid-depth before the band mapping (0-1, VD3D recenter_strength).
+      bool subject_stretch = true;  ///< VD3D shape_depth_for_pop stretch: rescale the permanent P5/P95 band to [0,1].
+      double subject_plane_lock = 0.0;  ///< VD3D apply_subject_plane_lock: additionally flatten residual disparity WITHIN the subject depth band (local), on top of the global subject_lock. 0 = off; VD3D Bestv2 0.28.
+      double subject_plane_width = 0.12;  ///< Half-width (in normalized depth) of the subject band for subject_plane_lock (VD3D subject_plane_lock_width, Bestv2 0.12).
+      bool bestv2_sharpen = false;  ///< Apply Bestv2's exact SDR per-eye sharpen 0.2 after the completed warp. Retained for fidelity, disabled in quality-optimized profiles.
+      double vd3d_forward_blend = 0.65;  ///< VD3D hybrid weight: 0 = classic backward grid warp, 1 = depth-ordered forward splat. Bestv2 code uses 0.65.
       double depth_fps = 45.0;  ///< Target depth-update rate. Inference interval is auto-derived from the measured video fps (interval = round(video_fps / depth_fps)). 0 = update every frame.
-      int parallax_steps = 24;  ///< Horizontal probes per eye in the SBS reprojection (runs full-res every frame). REQUIRED >= 22 with guided depth: probe spacing must stay below the smoothed depth transition (~8px) or the crossing search dithers at silhouettes.
-      double border_fade = 0.02;  ///< Ramp parallax to zero within this fraction of the left/right frame edges to avoid stereo "window violations". 0 = off; ~0.02-0.05 typical.
       std::string depth_model = "depth_anything_v2_fp16";  ///< Local name/stem for the depth model files (<name>.onnx / <name>.engine). Identifies the model so different models coexist, each with its own cached engine.
       std::string depth_model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< URL to download the depth model ONNX from if <depth_model>.onnx is absent. Point this (and depth_model) elsewhere to use a different model.
       double depth_shift = 0.2;  ///< Shift in the DA-V3 disparity transform 1/(depth + depth_shift) (models with output_transform=1). Bounds the near spike; also the foreground-scale/pop knob (smaller = more pop). iw3 default 0.2. Ignored by DA-V2 (output_transform=0).
       std::string prebuild_models = "";  ///< Comma-separated depth-model names (registry stems, e.g. "depth_anything_v3_small_fp16,depth_anything_v3_base_fp16") to build TensorRT engines for AT STARTUP, in addition to the active model. Makes a mid-stream switch to them instant instead of a first-use build (which streams flat while building). Empty = only the active model.
       int max_encode_width = 8192;  ///< Max encoder output width for host SBS. SBS doubles the client width to 2W; if 2W exceeds this, the host caps the packed frame to this width (scaling height to keep the per-eye aspect) rather than failing NVENC create. NVENC HEVC/AV1 = 8192, H.264 = 4096.
-      double depth_floor = 0.25;  ///< Far-depth compression in the reprojection (d' = floor + (1-floor)*d). Narrows the disocclusion band at foreground silhouettes (its width scales with the near-far parallax gap). 0 = off; ~0.2-0.4 typical.
-      bool guided_upsample = true;  ///< Color-guided (joint-bilateral) depth upsample: snaps the depth model's soft silhouettes to the frame's color edges at 2x depth res. Fixes bent/smeared thin-object contours. Ignored when learned_warp is active (the learned warp wants the raw soft depth).
-      double guided_sigma = 0.1;  ///< Color-distance sigma for the guided upsample (tonemapped RGB, 0-1 domain). Lower = stricter edge snapping (risk: speckle on textured surfaces), higher = smoother.
-      bool learned_warp = false;  ///< Use the learned multi-layer backward warp (iw3 MLBW, a 2nd small TensorRT engine) instead of the hand-written probe-search reprojection. Fixes silhouette fringe/staircase and hair fold-over; slightly softer edges. Requires <warp_model>.onnx/.engine in assets.
-      std::string warp_model = "mlbw_l2_798x336_fp16";  ///< Local file stem for the warp model used in GAME mode (and the fallback for movie). Fixed-shape ONNX export of iw3 mlbw (fp16 weights, fp32 I/O); grid dims come from the stem ("..._<W>x<H>..."), depth is resampled onto it. Keep this LIGHT (l2/798x336) for game: it runs on top of the game's own GPU load, and low-res depth can't feed a bigger warp anyway.
-      std::string warp_model_movie = "";  ///< Warp model stem for MOVIE mode (sharper/heavier, e.g. mlbw_l4_1596x672_fp16). Empty = reuse warp_model. Movie has GPU headroom (no game rendering) so it can afford the bigger warp.
-      std::string warp_model_url = "";  ///< Optional URL to download the warp ONNX from if absent. Empty = must be placed in assets manually.
-      double movie_depth_fps = 0.0;  ///< Depth-update rate override for MOVIE mode (its model is the heavy DA3MONO and film is slow content, so a lower rate is cheap and invisible). 0 = use depth_fps. Also throttles the warp, which runs per depth update.
-      bool perf_stats = false;  ///< Emit per-stage host-SBS timing (depth/warp/inpaint inference + convert CPU) as a rolling p50/p95/max log line + sbs_perf.json snapshot. Off by default (the perf benchmark; see docs/sbs-benchmark-plan.md).
+      double movie_depth_fps = 30.0;  ///< Validated MOVIE-mode depth-update rate for the heavier DA3MONO model. 0 would use the global depth_fps instead.
+      bool perf_stats = false;  ///< Emit per-stage host-SBS timing (depth inference + convert CPU) as a rolling p50/p95/max log line + sbs_perf.json snapshot. Off by default (the perf benchmark; see docs/sbs-benchmark-plan.md).
     } sbs;
   };
 

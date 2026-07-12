@@ -12,6 +12,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <mutex>
 #include <system_error>
 #include <vector>
 
@@ -68,12 +69,27 @@ namespace platf::sbs_debug {
       return out;
     }
 
-    // Per-channel Reinhard + sRGB OETF, for previewing scRGB (linear) HDR as 8-bit.
-    inline uint8_t tonemap_srgb(float c) {
-      c = c / (1.0f + c);  // Reinhard
+    inline uint8_t encode_srgb(float c) {
       c = c < 0.0f ? 0.0f : (c > 1.0f ? 1.0f : c);
       float s = c <= 0.0031308f ? 12.92f * c : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
       return (uint8_t) std::lround(s * 255.0f);
+    }
+
+    // Diagnostic scRGB preview. Compress luminance uniformly so hue is retained, then apply a
+    // second uniform scale only when a wide-gamut component remains above the PNG gamut.
+    inline void tonemap_scrgb(float &r, float &g, float &b) {
+      r = std::max(r, 0.0f);
+      g = std::max(g, 0.0f);
+      b = std::max(b, 0.0f);
+      const float luminance = std::max(0.2126f * r + 0.7152f * g + 0.0722f * b, 0.0f);
+      const float tone_scale = 1.0f / (1.0f + luminance);
+      r *= tone_scale;
+      g *= tone_scale;
+      b *= tone_scale;
+      const float gamut_scale = 1.0f / std::max(1.0f, std::max(r, std::max(g, b)));
+      r *= gamut_scale;
+      g *= gamut_scale;
+      b *= gamut_scale;
     }
 
     // Write a tightly-packed 8-bit RGB buffer (w*h*3, top-to-bottom) as a PNG (color type 2)
@@ -150,10 +166,10 @@ namespace platf::sbs_debug {
     }
 
     // Save an SRV's texture to <tag>.png inside dir (grayscale for R32_FLOAT depth, or a jet
-    // heatmap when heatmap=true). HDR scRGB (R16G16B16A16_FLOAT) is Reinhard+sRGB tonemapped;
-    // B8G8R8A8 is passed through.
+    // heatmap when heatmap=true). Linear FP16 SDR receives only the sRGB OETF; HDR scRGB receives
+    // a luminance-preserving diagnostic tone map followed by the OETF. B8G8R8A8 is passed through.
     void dump_srv(ID3D11Device *device, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv,
-      const std::filesystem::path &dir, const char *tag, bool heatmap = false) {
+      const std::filesystem::path &dir, const char *tag, bool heatmap = false, bool hdr = false) {
       if (!srv) {
         return;
       }
@@ -192,9 +208,15 @@ namespace platf::sbs_debug {
           uint8_t r, g, b;
           if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
             const uint16_t *px = (const uint16_t *) (in_row + (size_t) x * 8);
-            r = tonemap_srgb(half_to_float(px[0]));
-            g = tonemap_srgb(half_to_float(px[1]));
-            b = tonemap_srgb(half_to_float(px[2]));
+            float rf = half_to_float(px[0]);
+            float gf = half_to_float(px[1]);
+            float bf = half_to_float(px[2]);
+            if (hdr) {
+              tonemap_scrgb(rf, gf, bf);
+            }
+            r = encode_srgb(rf);
+            g = encode_srgb(gf);
+            b = encode_srgb(bf);
           } else if (desc.Format == DXGI_FORMAT_R32_FLOAT) {
             float v = *(const float *) (in_row + (size_t) x * 4);
             if (heatmap) {
@@ -236,16 +258,15 @@ namespace platf::sbs_debug {
     }
     // Encode devices (and with them this dumper) are recreated on every SBS toggle / HDR /
     // resolution change; log the resolved dir once per process, not once per device.
-    static bool logged = false;
-    if (!logged) {
-      logged = true;
+    static std::once_flag log_once;
+    std::call_once(log_once, [this]() {
       BOOST_LOG(info) << "SBS debug frame dump dir: "sv << dir_.string();
-    }
+    });
   }
 
   void dumper::maybe_dump(ID3D11Device *device, ID3D11DeviceContext *ctx,
     ID3D11ShaderResourceView *source, ID3D11ShaderResourceView *depth,
-    ID3D11ShaderResourceView *sbs) {
+    ID3D11ShaderResourceView *sbs, bool hdr) {
     if (dir_.empty()) {
       return;
     }
@@ -281,15 +302,16 @@ namespace platf::sbs_debug {
     auto out_dir = dir_ / sub;
     std::filesystem::create_directories(out_dir, ec);
 
-    dump_srv(device, ctx, source, out_dir, "source");
+    dump_srv(device, ctx, source, out_dir, "source", /*heatmap=*/false, hdr);
     dump_srv(device, ctx, depth, out_dir, "depth");
     dump_srv(device, ctx, depth, out_dir, "depth_heat", /*heatmap=*/true);  // A4: jet colormap
-    dump_srv(device, ctx, sbs, out_dir, "sbs");
+    dump_srv(device, ctx, sbs, out_dir, "sbs", /*heatmap=*/false, hdr);
 
     // Attribute the dump to the model that produced it (for cross-model A/B).
     auto model_name = ::video::active_depth_model().name;
     if (std::ofstream meta(out_dir / "meta.txt"); meta) {
       meta << "depth_model=" << model_name << "\n";
+      meta << "color_mode=" << (hdr ? "linear-scRGB-HDR" : "SDR") << "\n";
     }
 
     counter_++;

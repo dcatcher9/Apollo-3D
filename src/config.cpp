@@ -1261,29 +1261,50 @@ namespace config {
     bool_f(vars, "isolated_virtual_display_option", video.isolated_virtual_display_option);
     bool_f(vars, "ignore_encoder_probe_failure", video.ignore_encoder_probe_failure);
 
-    double_between_f(vars, "sbs_3d_divergence", video.sbs.divergence, {0.0, 0.2});
-    double_between_f(vars, "sbs_3d_focal_plane", video.sbs.focal_plane, {0.0, 1.0});
+    // Apply one complete validated SBS profile first. Every individual key below is parsed
+    // afterwards, so an explicitly configured parameter always overrides its profile value.
+    // Reinitializing the struct also clears stale values when a config reload removes an override.
+    std::string sbs_profile = "apollo";
+    string_f(vars, "sbs_3d_profile", sbs_profile);
+    if (sbs_profile != "apollo" && sbs_profile != "vd3d") {
+      BOOST_LOG(warning) << "Invalid sbs_3d_profile '" << sbs_profile
+                         << "'; expected 'apollo' or 'vd3d'. Using 'apollo'.";
+      sbs_profile = "apollo";
+    }
+    video.sbs = video_t::sbs_t {};
+    video.sbs.profile = sbs_profile;
+    if (sbs_profile == "vd3d") {
+      video.sbs.warp = "vd3d";
+      video.sbs.vd3d_forward_blend = 0.35;
+    }
+
+    const std::string profile_warp = video.sbs.warp;
+    string_f(vars, "sbs_3d_warp", video.sbs.warp);
+    if (video.sbs.warp != "apollo" && video.sbs.warp != "vd3d") {
+      BOOST_LOG(warning) << "Invalid sbs_3d_warp '" << video.sbs.warp
+                         << "'; expected 'apollo' or 'vd3d'. Keeping profile value '"
+                         << profile_warp << "'.";
+      video.sbs.warp = profile_warp;
+    }
+    double_between_f(vars, "sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0});
     double_between_f(vars, "sbs_3d_ema", video.sbs.ema, {0.01, 1.0});
     int_f(vars, "sbs_3d_depth_short_side", video.sbs.depth_short_side);
     double_between_f(vars, "sbs_3d_depth_max_aspect", video.sbs.depth_max_aspect, {1.0, 8.0});
     double_between_f(vars, "sbs_3d_minmax_ema", video.sbs.minmax_ema, {0.001, 1.0});
-    double_between_f(vars, "sbs_3d_minmax_snap", video.sbs.minmax_snap, {0.0, 100.0});
-    double_between_f(vars, "sbs_3d_range_floor", video.sbs.range_floor, {0.0, 1.0});
+    double_between_f(vars, "sbs_3d_subject_lock", video.sbs.subject_lock, {0.0, 1.0});
+    double_between_f(vars, "sbs_3d_subject_recenter", video.sbs.subject_recenter, {0.0, 1.0});
+    bool_f(vars, "sbs_3d_subject_stretch", video.sbs.subject_stretch);
+    double_between_f(vars, "sbs_3d_subject_plane_lock", video.sbs.subject_plane_lock, {0.0, 1.0});
+    double_between_f(vars, "sbs_3d_subject_plane_width", video.sbs.subject_plane_width, {0.01, 0.5});
+    bool_f(vars, "sbs_3d_bestv2_sharpen", video.sbs.bestv2_sharpen);
+    double_between_f(vars, "sbs_3d_vd3d_forward_blend", video.sbs.vd3d_forward_blend, {0.0, 1.0});
     double_between_f(vars, "sbs_3d_depth_fps", video.sbs.depth_fps, {0.0, 240.0});
-    int_between_f(vars, "sbs_3d_parallax_steps", video.sbs.parallax_steps, {4, 64});
-    double_between_f(vars, "sbs_3d_border_fade", video.sbs.border_fade, {0.0, 0.2});
     string_f(vars, "sbs_3d_depth_model", video.sbs.depth_model);
     string_f(vars, "sbs_3d_depth_model_url", video.sbs.depth_model_url);
     string_f(vars, "sbs_3d_prebuild_models", video.sbs.prebuild_models);
     double_between_f(vars, "sbs_3d_depth_shift", video.sbs.depth_shift, {0.02, 2.0});
-    int_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width);
-    double_between_f(vars, "sbs_3d_depth_floor", video.sbs.depth_floor, {0.0, 0.9});
-    bool_f(vars, "sbs_3d_guided_upsample", video.sbs.guided_upsample);
-    double_between_f(vars, "sbs_3d_guided_sigma", video.sbs.guided_sigma, {0.01, 1.0});
-    bool_f(vars, "sbs_3d_learned_warp", video.sbs.learned_warp);
-    string_f(vars, "sbs_3d_warp_model", video.sbs.warp_model);
-    string_f(vars, "sbs_3d_warp_model_movie", video.sbs.warp_model_movie);
-    string_f(vars, "sbs_3d_warp_model_url", video.sbs.warp_model_url);
+    int_between_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width, {256, 16384});
+    video.sbs.max_encode_width &= ~1;
     double_f(vars, "sbs_3d_movie_depth_fps", video.sbs.movie_depth_fps);
     bool_f(vars, "sbs_3d_perf_stats", video.sbs.perf_stats);
 

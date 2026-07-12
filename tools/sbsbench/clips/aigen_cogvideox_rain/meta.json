@@ -1,0 +1,14 @@
+{
+  "name": "aigen-cogvideox-rain",
+  "description": "AI-generated child running through heavy rain, with a moving human silhouette, translucent rain streaks, splashes, atmospheric blur and low-contrast depth layers.",
+  "content_type": "ai-generated",
+  "dataset": "CogVideoX official gallery",
+  "required_gt_depth": false,
+  "required_gt_flow": false,
+  "homepage": "https://github.com/zai-org/CogVideo",
+  "source_url": "https://github.com/user-attachments/assets/fe0a78e6-b669-4800-8cf0-b5f9b5145b52",
+  "citation": "CogVideoX-5B official gallery, prompt 2 (boy running in rain)",
+  "license_note": "Official CogVideo repository sample. The repository and CogVideoX-2B code/model are Apache-2.0; the gallery does not state a separate generated-media license.",
+  "source_window": "0.500s; 24 contiguous frames at the native 8 fps and 720x480 resolution",
+  "source_artifacts": "Visual inspection of frames 1, 12 and 24 found no stable white outline attached to the child. The source itself contains strong motion/defocus blur, translucent rain streaks, bright splash rims, atmospheric veiling and AI-generated temporal shape changes; these must not be attributed to stereo warping."
+}

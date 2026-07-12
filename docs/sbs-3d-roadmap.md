@@ -1,113 +1,80 @@
-# SBS 3D — status and roadmap
+# SBS 3D — current status and roadmap
 
-The living plan for Apollo's real-time 2D→3D side-by-side feature (host-side depth
-estimation + reprojection for the Galaxy XR / Artemis client). Updated 2026-07-05.
+Apollo converts a captured mono frame into host-rendered SBS using TensorRT depth estimation and
+one of two production warp profiles. This document describes the current stack; historical feature
+experiments and their evidence are recorded in `sbs-feature-decision-revisit.md` and
+`sbs-vd3d-parity.md`.
 
-> **TL;DR of the 2026-07-05 depth investigation (read before more depth work):** the two
-> problems are (1) the **stretch band / jagged edges** at silhouettes and (2) **flat pop**
-> on DA-V3. Both were chased hard:
-> - **Edges are a WARP problem, not a depth problem** — proven both directions: DA-V3 depth
->   through the current probe warp still shows the band (warpsim, ~6–10% only), while DA-V2
->   depth through **MLBW** makes it vanish (eval sheets). The fix is the learned warp
->   (**MLBW, already stashed**) plus a learned **inpaint** for the disocclusion holes —
->   this is exactly iw3's pipeline (depth → warp emits hole mask → light_inpaint fills it).
-> - **DA-V3 flat pop was a MODEL/EXPORT problem, not inherent.** The onnx-community DA-V3
->   exports (small/base/**large**) all output *compressed* monocular depth (pop ~0.55–0.66).
->   The monocular-specialized **DA3MONO-LARGE** (depth-anything/DA3MONO-LARGE, 0.35B) gives
->   V2-level pop (0.74–0.90) — but needs a torch→ONNX export and is movie-mode cost.
-> - **Depth normalization is now iw3's shifted reciprocal** `1/(depth + sbs_3d_depth_shift)`
->   (bounds the near spike) — the whole `1/depth` + sigma-clip / norm_sigma saga was a
->   band-aid and has been **removed**. Config: `sbs_3d_depth_shift` (default 0.2).
+## Shipping pipeline
 
-## Current state (what ships today)
+1. Preserve source aspect while selecting a patch-aligned TensorRT input grid.
+2. Convert SDR or HDR capture into the color domain expected by the depth model.
+3. Transform model output into Apollo's high-is-near disparity convention.
+4. Normalize with permanent P2/P98 bounds and temporal range EMA.
+5. Apply per-pixel depth EMA, permanent Bestv2 subject estimation, P5/P95 stretch/recenter, and
+   optional exact subject-plane lock.
+6. Render either:
+   - `apollo`: 24-step occlusion-aware backward probe;
+   - `vd3d`: depth-ordered forward splat blended with the VD3D backward warp.
+7. Convert the final packed SBS raster directly to the encoder format. When doubled width exceeds
+   `sbs_3d_max_encode_width`, the packed raster is downscaled while preserving each eye's aspect.
 
-Pipeline: selectable depth model (default DA-V2 small fp16, TensorRT) at ~798×336 → per-model
-transform (DA-V2 identity disparity / DA-V3 shifted reciprocal `1/(depth+shift)`) → GPU
-min/max-EMA normalization → **color-guided joint-bilateral upsample to 2× with foreground
-bias and bimodal edge snap** → occlusion-aware backward reprojection (`sbs_reprojection_ps.hlsl`)
-with far-depth floor and smoothed depth reads. Client switches host modes mid-stream via the
-`0x3003` control message (OFF / GAME async / MOVIE reserved) and the depth **model** via
-`0x3005`; `0x3004` triggers a one-frame debug dump (source/depth/SBS PNGs) from the XR bar.
+The default `apollo` profile and alternate `vd3d` profile share the same model, normalization,
+subject shaping, aspect mapping, and encoder path. They differ only in warp geometry and the VD3D
+forward/backward blend. Individual `sbs_3d_*` values explicitly present in configuration override
+the selected profile. Bestv2 disparity is calibrated at the evaluator's 854px source width and
+scales on wider captures, so a 5120px desktop retains the evaluated eye-relative stereo volume.
+The optional `sbs_3d_pop_strength` control scales the shared final parallax field for both warps
+(`0.25`-`2`, default `1.25`) without altering that resolution correction. The Apollo and VD3D
+profiles deliberately inherit the same strength so their warp comparison remains controlled.
 
-Note (2026-07-05): DA-V3's guided upsample is measured to NOT be tunable — its silhouettes
-are inherently softer than V2's and the guided pass can relocate but not manufacture sharpness;
-edge crispness for V3 (as for V2) comes from the learned warp (roadmap #1), not the guided pass.
+## Frozen processor decisions
 
-Verified quality (vs. pre-guided): thin objects straight (no bent sword handles), facial
-silhouettes real (nose/brow/lips exist in depth), per-eye widths consistent, narrower
-disocclusion bands.
+- Bestv2 subject estimation and P2/P98 normalization are mandatory pipeline stages.
+- Range-to-pixel temporal ordering and 24 Apollo probes are permanent.
+- Guided upsample, curvature, scene snap, range/depth floors, border fade, legacy shift, and the
+  CPU warpsim were rejected and removed.
+- Exact subject-plane lock and Bestv2 sharpen remain available fidelity ablations but are disabled
+  in both quality profiles.
+- The old MLBW learned-warp experiment was rejected because it bypassed the shared Bestv2 field.
 
-Known residuals:
-- Faint stretch-band fringe on hard silhouettes over textured backgrounds (the object's
-  contact-shadow columns carry background depth and detach from the object).
-- Fold-over corrugation on wispy hair against bright sky (left eye), content-dependent.
-- No true small-feature relief (e.g. a nose bump reads flat) — model prior/resolution limit.
-- Motion ghost in GAME mode from async depth (depth lags color by the inference cadence).
+Do not reintroduce a removed processor without a new implementation, current core and extended
+reports, visual evidence, and a headset-motivated hypothesis.
 
-## Constraints learned the hard way (do not relearn)
+## Evaluation workflow
 
-- **Use the offline simulator first** for any warp/shader change: `tools/warpsim/`
-  (CLAUDE.md has the mandate). Validate the replica reproduces the artifact, instrument
-  with numbers, test BOTH eyes and MULTIPLE scenes, byte-compare "equivalent" changes.
-- **Hand-tuned shader special-casing does not generalize** (2026-07-03 warp rewrite:
-  made one arm edge perfect, destabilized everything else; fully reverted). Edge and
-  disocclusion quality needs a learned/multi-layer approach, not more branches.
-- `sbs_3d_parallax_steps >= 22` is a **correctness requirement** with the guided
-  (texel-sharp) depth: probe spacing must stay under the ~8px smoothed depth transition.
-  24 is the baked default since 2026-07-03. Note `depth_scale` was folded into
-  `divergence` the same day (default 0.0135 = old 0.015*0.9; sim-verified equivalent),
-  and the legacy `normalize`/`depth_gamma`/`edge_dilation`/`depth_interval` knobs were
-  removed — defaults now live in config.h (`sbs_t` member initializers), not config.cpp.
-- DA-V2 is trained at 518²; pushing inference resolution far past ~1.5× training area
-  degrades global depth coherence. A big "1080p engine" rebuild is NOT the free win it
-  looks like; prefer model-capacity upgrades and modest resolution changes, measured.
-- iw3's temporal tricks (look-ahead EMA, Video-Depth-Anything) need future frames —
-  incompatible with a live stream. Its synchronous mode = the design basis for MOVIE mode.
+Use the real D3D11 harness through `tools/sbsbench/run_eval.py`. Every decision run must:
 
-## Model switching — SHIPPED (2026-07-04)
+- use the same model, clip identities, metric schema, and profile provenance as its baseline;
+- run the 11-clip core suite for the committed gate and the public extended suite for
+  generalization;
+- generate `report.html` together with the machine-readable conclusion;
+- inspect primary-axis examples and any large diagnostic movement;
+- treat comfort and image-integrity limits as hard constraints;
+- use headset evidence to resolve coequal-axis tradeoffs rather than the scalar score.
 
-On-the-fly depth-model switching is done and headset-verified: model registry +
-per-name TRT engine slots (`g_engines`) + `0x3005 Set Depth Model` control message + an
-XR-bar "Model" cycle tile. Startup engine prebuild (`sbs_3d_prebuild_models`), engine-file
-versioning by build recipe, and DA-V3 (rank-5 input, output pruning, shifted-reciprocal
-transform) all landed. Client pushed to the dcatcher9 forks (host **not committed**). Full
-detail + the verified per-model contracts: [depth-model-switching-plan.md](depth-model-switching-plan.md).
-The registry has DA-V2 small/base and DA-V3 small/base (fp16 + fp32); the DA-V3 exports are
-onnx-community's, which turned out to be flat-pop (see TL;DR).
+Ground-truth depth comparison is scale/shift invariant but polarity preserving. Expected-flat clips
+diagnose false stereo and are exempt only from the stereo-volume axis. Source-relative evidence is
+computed on a bounded working raster so full-resolution report generation remains memory safe.
 
-## Roadmap (priority order)
+## Current priorities
 
-1. **Learned warp + inpaint (THE edge fix)** — the current probe reprojection fills
-   disocclusions by *stretching* → the stretch band / jagged edges. iw3's proven pipeline:
-   depth → **MLBW** learned warp (emits a disocclusion hole mask) → a small learned
-   **inpaint** model (`light_inpaint_v1`, ¼-res gMLP) fills the holes. MLBW is **already
-   implemented and stashed** (`git stash`: "MLBW learned warp WIP + SBS reprime fix",
-   0.53 ms/eye, eval sheets show the arm-edge staircase gone); it needs (a) merging onto
-   the current master, (b) emitting the hole mask (iw3 `return_mask`), (c) porting the
-   inpaint model as a third TRT engine. This also unlocks pop: once holes are inpainted,
-   divergence can be cranked without the stretch band. Warpsim-gate every change.
-2. **DA3MONO-LARGE depth (THE pop fix)** — the onnx-community DA-V3 exports give flat
-   monocular pop; the monocular-specialized **DA3MONO-LARGE** (depth-anything/DA3MONO-LARGE,
-   0.35B, DINO ViT-L) gives V2-level pop (0.74–0.90) *and* DA-V3 geometric accuracy.
-   No ONNX exists (iw3 runs it in PyTorch; only the general DA3 is on onnx-community) —
-   needs a torch→ONNX export: wrap `{depth,sky}` → single `predicted_depth`, rank-5 input,
-   fp16 via the ORT converter recipe. Weights + code are local (`E:\Git\Repo\nunif` venv,
-   1.3 GB checkpoint). Drops into the shifted-reciprocal pipeline. Cost: 0.35B = movie-mode;
-   game mode needs a lower depth_fps or stays on v2-small (no smaller monocular variant exists).
-3. **MOVIE mode host implementation** — synchronous depth (enqueue current frame,
-   `cuStreamSynchronize`, warp current-with-current): zero motion ghost, full framerate
-   for ≤30fps video content. Wire (`SBS_MODE_MOVIE`) and client tile already exist;
-   host currently maps MOVIE→GAME. Fold the config surface into presets
-   (`game`/`movie`/`desktop`) instead of 19 individual keys.
-4. **DESKTOP mode** — movie mode on a region-of-interest: depth on a crop (the video
-   window), flat composite outside. Manual/config rect first; ddup dirty-rect
-   auto-detection later.
+1. Validate Apollo versus VD3D on core and extended suites after every correctness or performance
+   change, then select the production warp from both metrics and headset evidence.
+2. Improve disocclusion fill only if a reproducible primary warp-axis failure remains. A learned
+   inpaint may be evaluated on top of the selected warp; it must not replace the shared depth and
+   subject field.
+3. Continue model evaluation for movie content where a larger model or lower depth cadence may be
+   affordable.
+4. Add real-device performance telemetry when a live-only bottleneck cannot be represented by the
+   offline harness. The harness reports `warp_infer`; the live path currently reports
+   `depth_infer` and `sbs_convert_cpu`.
 
-## Key references
+## References
 
-- `tools/warpsim/README.md` — simulator workflow + warp math.
-- `src/video_depth_estimator.cpp` — estimator/guided-upsample pipeline.
-- `src_assets/windows/assets/shaders/directx/` — `sbs_reprojection_ps.hlsl`,
-  `depth_guided_upsample_cs.hlsl` and friends.
-- Client (Artemis, separate repo `moonlight-android`, branch `moonlight-noir`):
-  `XrStreamPresenter.java` (mode tiles, Dump 3D), `moonlight-common-c` `0x3003`/`0x3004`.
+- `tools/sbsbench/README.md` — build, eval, report, and dataset commands.
+- `docs/sbs-vd3d-parity.md` — Apollo/VD3D implementation parity and feature ledger.
+- `docs/sbs-feature-decision-revisit.md` — accepted/rejected processor evidence.
+- `docs/sbs-resolution-robustness.md` — coordinate-space and encoder-resolution audit.
+- `src/video_depth_estimator.cpp` — depth normalization and subject-state implementation.
+- `src_assets/windows/assets/shaders/directx/` — production warp shaders.
