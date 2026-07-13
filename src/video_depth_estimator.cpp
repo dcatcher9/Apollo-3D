@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <d3dcompiler.h>
 #include <fstream>
@@ -111,6 +112,10 @@ static bool depth_shader_bytecode(
 // flips / HDR / resolution changes) therefore leaked ~1.3 GB each time until the GPU ran
 // out of memory and the device was removed. Pooling caps live contexts at peak concurrency.
 static std::mutex g_trt_mutex;
+static std::condition_variable g_trt_context_available;
+// One active stream normally needs one context; four permits multi-client/transition overlap
+// without allowing rapid asynchronous rebuilds to consume VRAM without bound.
+static constexpr std::size_t kMaxContextsPerEngine = 4;
 static nvinfer1::IRuntime *g_runtime = nullptr;
 static std::once_flag g_cuda_init_once;
 static CUresult g_cuda_init_result = CUDA_ERROR_NOT_READY;
@@ -168,7 +173,9 @@ static bool cuda_device_for_d3d(cuda_driver_api &cuda, ID3D11Device *d3d, CUdevi
 struct engine_slot {
   nvinfer1::ICudaEngine *engine = nullptr;
   std::vector<nvinfer1::IExecutionContext *> context_pool;
+  std::size_t context_count = 0;
   bool io_validated = false;
+  bool io_compatible = false;
 };
 
 static std::map<std::string, engine_slot> g_engines;  // guarded by g_trt_mutex
@@ -792,6 +799,7 @@ namespace models {
             }
           };
           bool have_in = false, have_out = false;
+          bool input_fp32 = false, output_fp32 = false;
           for (int i = 0; i < engine->getNbIOTensors(); i++) {
             const char *tname = engine->getIOTensorName(i);
             auto dt = engine->getTensorDataType(tname);
@@ -800,22 +808,34 @@ namespace models {
                             << " dtype=" << dtype_name(dt);
             if (std::string(tname) == "pixel_values") {
               have_in = true;
+              input_fp32 = dt == nvinfer1::DataType::kFLOAT;
               if (dt != nvinfer1::DataType::kFLOAT) {
                 BOOST_LOG(error) << "Depth model input 'pixel_values' is " << dtype_name(dt)
-                                 << ", not FP32 -> the FP32 NCHW buffer will feed garbage. Use a keep_io_types (FP32 I/O) model.";
+                                 << ", not FP32; rejecting the engine. Use a keep_io_types (FP32 I/O) model.";
               }
             } else if (std::string(tname) == "predicted_depth") {
               have_out = true;
+              output_fp32 = dt == nvinfer1::DataType::kFLOAT;
               if (dt != nvinfer1::DataType::kFLOAT) {
                 BOOST_LOG(error) << "Depth model output 'predicted_depth' is " << dtype_name(dt)
-                                 << ", not FP32 -> the FP32 depth/min-max passes will read garbage.";
+                                 << ", not FP32; rejecting the engine.";
               }
             }
           }
           if (!have_in || !have_out) {
             BOOST_LOG(error) << "Depth model is missing the expected tensor name(s) 'pixel_values'/'predicted_depth'; "
-                                "the pipeline binds those by name and will not work with this model.";
+                                "rejecting the engine.";
           }
+          slot.io_compatible = have_in && have_out && input_fp32 && output_fp32;
+        }
+        if (engine && !slot.io_compatible) {
+          BOOST_LOG(error) << "Depth engine I/O contract is incompatible with Apollo; streaming flat SBS.";
+          if (exec_context) {
+            slot.context_pool.push_back(exec_context);
+            exec_context = nullptr;
+            g_trt_context_available.notify_all();
+          }
+          engine = nullptr;
         }
 
         trt_mutex = &g_trt_mutex;
@@ -837,13 +857,49 @@ namespace models {
             BOOST_LOG(info) << "Reusing pooled TensorRT execution context (freed by a racing teardown).";
           }
         }
+        bool create_context = false;
         if (!exec_context) {
+          std::unique_lock<std::mutex> lock(g_trt_mutex);
+          auto &slot = g_engines[engine_key];
+          if (slot.context_pool.empty() && slot.context_count >= kMaxContextsPerEngine) {
+            BOOST_LOG(warning) << "TensorRT context cap reached for this depth model; waiting for "
+                                  "an asynchronous encoder teardown to return one.";
+            const bool available = g_trt_context_available.wait_for(
+              lock,
+              std::chrono::seconds(5),
+              [&slot]() {
+                return !slot.context_pool.empty() || slot.context_count < kMaxContextsPerEngine;
+              }
+            );
+            if (!available) {
+              BOOST_LOG(error) << "TensorRT context cap remained saturated; leaving this encode "
+                                  "session flat instead of allocating unbounded GPU memory.";
+              engine = nullptr;
+            }
+          }
+          if (engine && !slot.context_pool.empty()) {
+            exec_context = slot.context_pool.back();
+            slot.context_pool.pop_back();
+            depth_context_pooled = true;
+            BOOST_LOG(info) << "Reusing pooled TensorRT execution context after bounded wait.";
+          } else if (engine) {
+            ++slot.context_count;  // reserve atomically so concurrent constructors cannot exceed the cap
+            create_context = true;
+          }
+        }
+        if (create_context) {
           // Deliberately OUTSIDE g_trt_mutex: creation allocates device scratch and can
           // take many seconds; holding the lock would block a concurrent estimator
           // destructor from returning its context to the pool (observed 46 s teardown)
           // and any concurrent enqueueV3. ICudaEngine is thread-safe for this call.
           BOOST_LOG(info) << "Creating TensorRT execution context (allocates device scratch; may take several seconds)...";
           exec_context = engine->createExecutionContext();
+          if (!exec_context) {
+            std::lock_guard<std::mutex> lock(g_trt_mutex);
+            auto &slot = g_engines[engine_key];
+            --slot.context_count;
+            g_trt_context_available.notify_all();
+          }
         }
       }
 
@@ -1108,6 +1164,7 @@ namespace models {
       if (exec_context) {
         g_engines[engine_key].context_pool.push_back(exec_context);
         exec_context = nullptr;
+        g_trt_context_available.notify_all();
       }
       // TRT runtime/engines are cached globally, do not destroy them here.
     }

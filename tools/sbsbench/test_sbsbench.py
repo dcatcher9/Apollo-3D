@@ -439,9 +439,34 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('"decision_clips": DECISION_CLIPS', text)
         self.assertIn('"decision_scope": DECISION_SCOPE', text)
         self.assertIn('"source_artifact_clips": SOURCE_ARTIFACT_CLIPS', text)
+        self.assertIn('"schema": 2', text)
+        self.assertIn('"report_sha256": REPORT_SHA', text)
         self.assertIn('AB_DECISION["verdict"]', text)
         self.assertIn("IS_PROFILE_CMP", text)
         self.assertIn("IS_TRADEOFF_CMP = IS_MODE_CMP or IS_PROFILE_CMP", text)
+
+    def test_live_trt_contexts_are_bounded_and_engine_io_fails_closed(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        path = os.path.join(repo, "src", "video_depth_estimator.cpp")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("kMaxContextsPerEngine = 4", text)
+        self.assertIn("slot.context_count >= kMaxContextsPerEngine", text)
+        self.assertIn("g_trt_context_available.wait_for", text)
+        self.assertIn("slot.io_compatible = have_in && have_out && input_fp32 && output_fp32", text)
+        self.assertIn("if (engine && !slot.io_compatible)", text)
+
+    def test_live_gpu_timer_tail_is_bounded_and_generation_safe(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        display_path = os.path.join(repo, "src", "platform", "windows", "display_vram.cpp")
+        with open(display_path, encoding="utf-8") as fh:
+            display = fh.read()
+        with open(os.path.join(repo, "src", "sbs_perf.cpp"), encoding="utf-8") as fh:
+            perf = fh.read()
+        self.assertIn("drain_sbs_gpu_timers();", display)
+        self.assertIn("std::chrono::milliseconds(100)", display)
+        self.assertIn("sbs_perf::add_sample_ms_if_current", display)
+        self.assertIn("g_generation.fetch_add", perf)
 
     def test_depth_transform_audit_preserves_16bit_precision(self):
         with tempfile.TemporaryDirectory() as root:

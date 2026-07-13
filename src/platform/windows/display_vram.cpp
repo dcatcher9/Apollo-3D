@@ -3,12 +3,14 @@
  * @brief Definitions for handling video ram.
  */
 // standard includes
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <thread>
 
 // platform includes
 #include <d3dcompiler.h>
@@ -52,6 +54,8 @@ static void free_frame(AVFrame *frame) {
 using frame_t = util::safe_ptr<AVFrame, free_frame>;
 
 namespace platf::dxgi {
+
+  using d3d_query_t = util::safe_ptr<ID3D11Query, Release<ID3D11Query>>;
 
   template<class T>
   buf_t make_buffer(device_t::pointer device, const T &t) {
@@ -402,6 +406,11 @@ namespace platf::dxgi {
   class d3d_base_encode_device final {
   public:
     ~d3d_base_encode_device() {
+      // The encode session is already leaving the live path, so a short bounded drain cannot
+      // stall capture. It preserves the final GPU timing samples while the generation token
+      // prevents a racing replacement session from receiving this device's late results.
+      drain_sbs_gpu_timers();
+
       // The background estimator build captures raw device/device_ctx pointers, so it MUST be
       // joined before those members are destroyed. Member declaration order (the future is
       // declared after device/device_ctx) already guarantees this via the future's blocking
@@ -537,6 +546,8 @@ namespace platf::dxgi {
           }
 
           const bool repeat_matched_output = !matched_render_slot && matched_output_valid;
+          const bool timing_has_depth_warp = !repeat_matched_output && est.depth;
+          auto *gpu_timer = perf ? begin_sbs_gpu_timer(timing_has_depth_warp) : nullptr;
           ID3D11ShaderResourceView *final_sbs_srv = nullptr;
           if (repeat_matched_output) {
             final_sbs_srv = matched_output_sharpened ? sbs_sharpen_srv.get() :
@@ -595,8 +606,11 @@ namespace platf::dxgi {
             }
           }
 
+          mark_sbs_warp_end(gpu_timer);
+
           // Draw captured frame (now SBS, optionally post-warp sharpened).
           draw(final_sbs_srv, out_Y_or_YUV_viewports, out_UV_viewport, sbs_intermediate_linear);
+          end_sbs_gpu_timer(gpu_timer);
 
           // Debug frame dump (offline artifact inspection): on the client "Dump 3D" button or a
           // "dump.trigger" file, save this frame's 2D source, depth map and SBS result. See
@@ -800,6 +814,158 @@ namespace platf::dxgi {
         source_to_output
       };
       sbs_passthrough_cbuffer = make_buffer(device.get(), passthrough_params);
+    }
+
+    struct sbs_gpu_timer_slot_t {
+      d3d_query_t disjoint;
+      d3d_query_t start;
+      d3d_query_t warp_end;
+      d3d_query_t convert_end;
+      bool pending = false;
+      bool has_depth_warp = false;
+      std::uint64_t perf_generation = 0;
+    };
+
+    void initialize_sbs_gpu_timers() {
+      sbs_gpu_timing_ready = false;
+      sbs_gpu_timer_next = 0;
+      for (auto &slot : sbs_gpu_timers) {
+        slot = {};
+      }
+      if (!sbs_config.perf_stats) {
+        return;
+      }
+
+      for (auto &slot : sbs_gpu_timers) {
+        D3D11_QUERY_DESC desc {D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
+        if (FAILED(device->CreateQuery(&desc, &slot.disjoint))) {
+          BOOST_LOG(warning) << "Host SBS GPU timing unavailable: could not create disjoint query."sv;
+          return;
+        }
+        desc.Query = D3D11_QUERY_TIMESTAMP;
+        if (FAILED(device->CreateQuery(&desc, &slot.start)) ||
+            FAILED(device->CreateQuery(&desc, &slot.warp_end)) ||
+            FAILED(device->CreateQuery(&desc, &slot.convert_end))) {
+          BOOST_LOG(warning) << "Host SBS GPU timing unavailable: could not create timestamp queries."sv;
+          return;
+        }
+      }
+      sbs_gpu_timing_ready = true;
+    }
+
+    void resolve_sbs_gpu_timers() {
+      if (!sbs_gpu_timing_ready) {
+        return;
+      }
+      for (auto &slot : sbs_gpu_timers) {
+        if (!slot.pending) {
+          continue;
+        }
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT timing {};
+        const auto ready = device_ctx->GetData(slot.disjoint.get(), &timing, sizeof(timing),
+                                                D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        if (ready == S_FALSE) {
+          continue;
+        }
+        if (FAILED(ready)) {
+          slot.pending = false;
+          continue;
+        }
+
+        UINT64 start = 0;
+        UINT64 warp_end = 0;
+        UINT64 convert_end = 0;
+        const auto start_status = device_ctx->GetData(slot.start.get(), &start, sizeof(start), 0);
+        const auto warp_status = device_ctx->GetData(slot.warp_end.get(), &warp_end,
+                                                      sizeof(warp_end), 0);
+        const auto convert_status = device_ctx->GetData(slot.convert_end.get(), &convert_end,
+                                                         sizeof(convert_end), 0);
+        if (SUCCEEDED(start_status) && SUCCEEDED(warp_status) && SUCCEEDED(convert_status) &&
+            !timing.Disjoint && timing.Frequency > 0 && warp_end >= start &&
+            convert_end >= warp_end) {
+          const double to_ms = 1000.0 / static_cast<double>(timing.Frequency);
+          if (slot.has_depth_warp) {
+            sbs_perf::add_sample_ms_if_current(
+              "sbs_warp_gpu",
+              static_cast<double>(warp_end - start) * to_ms,
+              slot.perf_generation
+            );
+          }
+          sbs_perf::add_sample_ms_if_current(
+            "sbs_color_convert_gpu",
+            static_cast<double>(convert_end - warp_end) * to_ms,
+            slot.perf_generation
+          );
+          sbs_perf::add_sample_ms_if_current(
+            "sbs_render_gpu",
+            static_cast<double>(convert_end - start) * to_ms,
+            slot.perf_generation
+          );
+        }
+        slot.pending = false;
+      }
+    }
+
+    sbs_gpu_timer_slot_t *begin_sbs_gpu_timer(bool has_depth_warp) {
+      resolve_sbs_gpu_timers();
+      if (!sbs_gpu_timing_ready) {
+        return nullptr;
+      }
+      for (std::size_t i = 0; i < sbs_gpu_timers.size(); ++i) {
+        const std::size_t index = (sbs_gpu_timer_next + i) % sbs_gpu_timers.size();
+        auto &slot = sbs_gpu_timers[index];
+        if (slot.pending) {
+          continue;
+        }
+        sbs_gpu_timer_next = (index + 1) % sbs_gpu_timers.size();
+        slot.has_depth_warp = has_depth_warp;
+        slot.perf_generation = sbs_perf::generation();
+        device_ctx->Begin(slot.disjoint.get());
+        device_ctx->End(slot.start.get());
+        return &slot;
+      }
+      return nullptr;  // GPU is more than one timing-ring behind; never stall the encode thread.
+    }
+
+    void drain_sbs_gpu_timers() {
+      if (!sbs_gpu_timing_ready || !device_ctx) {
+        return;
+      }
+      const auto pending_count = [&]() {
+        return std::count_if(sbs_gpu_timers.begin(), sbs_gpu_timers.end(),
+                             [](const auto &slot) { return slot.pending; });
+      };
+      if (pending_count() == 0) {
+        return;
+      }
+
+      device_ctx->Flush();
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+      do {
+        resolve_sbs_gpu_timers();
+        if (pending_count() == 0) {
+          return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      } while (std::chrono::steady_clock::now() < deadline);
+
+      BOOST_LOG(warning) << "Host SBS GPU timing snapshot is partial; "sv << pending_count()
+                         << " tail sample(s) were still pending after the bounded teardown drain."sv;
+    }
+
+    void mark_sbs_warp_end(sbs_gpu_timer_slot_t *slot) {
+      if (slot) {
+        device_ctx->End(slot->warp_end.get());
+      }
+    }
+
+    void end_sbs_gpu_timer(sbs_gpu_timer_slot_t *slot) {
+      if (!slot) {
+        return;
+      }
+      device_ctx->End(slot->convert_end.get());
+      device_ctx->End(slot->disjoint.get());
+      slot->pending = true;
     }
 
     struct matched_frame_slot_t {
@@ -1056,6 +1222,8 @@ namespace platf::dxgi {
       // Size the intermediate to the full encoded output. The warp renders directly at the
       // (possibly capped) encode resolution and applies identical aspect-fit bars inside each eye.
       if (sbs_on) {
+        initialize_sbs_gpu_timers();
+
         D3D11_TEXTURE2D_DESC tex_desc = {};
         tex_desc.Width = (UINT) std::lround(out_width_f);
         tex_desc.Height = (UINT) std::lround(out_height_f);
@@ -1500,6 +1668,10 @@ namespace platf::dxgi {
     unsigned matched_stats_repeats = 0;
     double matched_stats_age_sum_ms = 0.0;
     double matched_stats_age_max_ms = 0.0;
+    static constexpr std::size_t sbs_gpu_timer_ring_size = 16;
+    std::array<sbs_gpu_timer_slot_t, sbs_gpu_timer_ring_size> sbs_gpu_timers;
+    std::size_t sbs_gpu_timer_next = 0;
+    bool sbs_gpu_timing_ready = false;
 
     platf::sbs_debug::dumper sbs_dumper;  ///< Debug: dumps SBS frames on the client button (see sbs_debug_dump.h).
   };

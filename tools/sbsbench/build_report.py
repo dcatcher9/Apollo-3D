@@ -1517,11 +1517,12 @@ with open(out_html, "w", encoding="utf-8") as f:
 decision_path = os.path.join(os.path.dirname(os.path.abspath(out_html)), "decision.json")
 with open(decision_path, "w", encoding="utf-8") as f:
     json.dump({
-        "schema": 1,
+        "schema": 2,
         "control": CTRL_NAME,
         "treatment": TREAT_NAME,
         "eval_schema": TREAT.get("meta", {}).get("eval_schema"),
         "metric_sha256": TREAT.get("meta", {}).get("metric_sha256"),
+        "report_sha256": REPORT_SHA,
         "clips": CLIPS,
         "decision_clips": DECISION_CLIPS,
         "decision_scope": DECISION_SCOPE,

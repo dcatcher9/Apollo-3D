@@ -85,8 +85,8 @@ namespace models {
          * @brief Finish and consume exactly one inference previously submitted by estimate_depth().
          *
          * It synchronizes the estimator stream, applies normalization/EMA/subject tracking exactly
-         * once, and does not enqueue another inference. The offline evaluator and the experimental
-         * direct-sync live mode use this as the exact current-frame quality path.
+         * once, and does not enqueue another inference. The offline evaluator uses this as its
+         * exact current-frame quality path; production remains bounded matched-frame async.
          */
     estimate_result finish_pending_depth_for_evaluation(input_color_space color_space = input_color_space::srgb);
 

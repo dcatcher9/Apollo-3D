@@ -264,7 +264,9 @@ with one update per source frame.
 
 Every A/B HTML report now writes a sibling `decision.json`. Both are generated from the same
 already-unwrapped per-clip aggregate dictionaries, so automation should consume that sidecar rather
-than reimplementing decision parsing. To check whether a depth processor compresses or clips depth:
+than reimplementing decision parsing. Sidecar schema 2 includes both `metric_sha256` and
+`report_sha256`, allowing automation to reject stale metric or presentation/decision logic. To
+check whether a depth processor compresses or clips depth:
 
 ```
 python tools/sbsbench/audit_depth_transform.py <control-run> <treatment-run>

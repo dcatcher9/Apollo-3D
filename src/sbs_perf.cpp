@@ -83,6 +83,7 @@ namespace sbs_perf {
     }
 
     std::atomic<bool> g_enabled {false};
+    std::atomic<std::uint64_t> g_generation {1};
     std::mutex g_mutex;
     // Insertion-ordered would be nicer for the log, but std::map keyed by the literal keeps it
     // simple and the stage set is tiny; the log prints a stable (alphabetical) order.
@@ -147,6 +148,21 @@ namespace sbs_perf {
     g_stages[stage].push((float) ms);
   }
 
+  std::uint64_t generation() {
+    return g_generation.load(std::memory_order_acquire);
+  }
+
+  void add_sample_ms_if_current(const char *stage, double ms, std::uint64_t expected_generation) {
+    if (!g_enabled.load(std::memory_order_relaxed) || !stage ||
+        expected_generation != g_generation.load(std::memory_order_acquire)) {
+      return;
+    }
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (expected_generation == g_generation.load(std::memory_order_relaxed)) {
+      g_stages[stage].push((float) ms);
+    }
+  }
+
   void tick() {
     if (!g_enabled.load(std::memory_order_relaxed)) {
       return;
@@ -183,6 +199,7 @@ namespace sbs_perf {
     std::lock_guard<std::mutex> lk(g_mutex);
     g_stages.clear();
     g_frame = 0;
+    g_generation.fetch_add(1, std::memory_order_release);
   }
 
   bool dump_json(const std::string &path) {

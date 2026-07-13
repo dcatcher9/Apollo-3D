@@ -16,6 +16,7 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace sbs_perf {
@@ -26,6 +27,13 @@ namespace sbs_perf {
 
   /// Record one timing sample for a named stage. `stage` must be a stable string literal.
   void add_sample_ms(const char *stage, double ms);
+
+  /// Identify the current collection window. A reset advances this value so late GPU-query
+  /// results from an asynchronously destroyed encode device cannot contaminate a new session.
+  std::uint64_t generation();
+
+  /// Record only if `expected_generation` still names the active collection window.
+  void add_sample_ms_if_current(const char *stage, double ms, std::uint64_t expected_generation);
 
   /// Call once per SBS convert(): advances the frame counter and, every summary_interval
   /// frames, logs a rolling p50/p95/max line and writes the JSON snapshot.
