@@ -28,7 +28,7 @@ Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 Production configuration uses one profile selector:
 
 ```
-sbs_3d_profile = apollo   # default; built-in alternate: vd3d
+sbs_3d_profile = apollo   # default
 ```
 
 The profile supplies the complete stack. Add a configuration-only profile with
@@ -36,13 +36,13 @@ The profile supplies the complete stack. Add a configuration-only profile with
 
 ```
 sbs_3d_profile = cinema
-sbs_3d_profile_cinema_warp = vd3d
 sbs_3d_profile_cinema_depth_model = depth_anything_v2_base_fp16
 sbs_3d_profile_cinema_pop_strength = 1.35
 ```
 
-Unspecified values inherit Apollo defaults. Built-in `vd3d` retains its validated warp/blend
-defaults for compatibility. Ordinary `sbs_3d_*` keys are applied last and explicitly override
+Every profile uses Apollo's occlusion-aware warp; profiles select depth-processing, model, pop,
+and performance parameters only. Unspecified values inherit Apollo defaults. Ordinary
+`sbs_3d_*` keys are applied last and explicitly override
 the corresponding parameter in every profile. Apollo advertises every configured profile to compatible Artemis
 clients, which can switch the complete profile atomically during a stream. The client never selects
 a model or individual parameter independently. Each encode device receives an immutable profile
@@ -63,7 +63,6 @@ precompiles the model referenced by every advertised profile at startup.
 python tools/sbsbench/run_eval.py                     # all committed clips vs committed baselines
 python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change: re-baseline + commit
 python tools/sbsbench/run_eval.py --extra --subject-lock 0.6   # pass supported A/B levers
-python tools/sbsbench/run_eval.py --label treat --report-control cmake-build-relwithdebinfo/sbs_eval/control --extra --warp vd3d
 python tools/sbsbench/run_eval.py --label profile-b --conf profile-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/profile-a --report-allow-config-diff
 python tools/sbsbench/run_eval.py --label model-b --conf model-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/model-a --report-allow-config-diff --report-allow-model-diff
 python tools/sbsbench/run_eval.py --label cadence-b --report-control cmake-build-relwithdebinfo/sbs_eval/cadence-a --report-allow-depth-step-diff --extra --depth-every 2
@@ -78,15 +77,13 @@ and then the explicit `sbs_3d_depth_model` override, exactly like production. Th
 a controlled feature A/B.
 
 Harness A/B levers (after `--extra`):
-- `--warp apollo|vd3d` — choose Apollo's occlusion-aware probe or VD3D's hybrid. The quality
-  profile uses `65%` backward grid sampling + `35%` depth-ordered forward splat and hole fill.
 - `--pop-strength F` — multiply the final shared stereo-parallax field (`0.25`-`2`; default
-  `1.25`). This is the user-facing pop control for both warps. It is separate from the internal
+  `1.25`). This is the user-facing pop control. It is separate from the internal
   854-pixel Bestv2 calibration that keeps apparent depth stable across source resolutions. Below
   854 pixels, production preserves Bestv2's literal pixel shift and independently applies the
   reference-aspect correction; non-16:9 low-resolution inputs therefore receive both effects.
-  This is retained for VD3D fidelity and requires a dedicated 4:3 A/B before changing.
-- `--literal-bestv2` — comparison-only VD3D-reference mode. It bypasses production resolution,
+  This behavior requires a dedicated 4:3 A/B before changing.
+- `--literal-bestv2` — comparison-only reference mode. It bypasses production resolution,
   aspect, and pop scaling and writes the fact to `contract.json`; never use it for quality gates or
   committed baselines.
 - `--depth-override-root DIR` — comparison-only offline reference that replaces explicitly
@@ -95,24 +92,22 @@ Harness A/B levers (after `--extra`):
   an experiment boundary, not a production feature or a permitted committed baseline. The
   schema-2 manifest binds the treatment to the exact source hash, cadence and held-frame IDs;
   missing, extra or stale override frames fail the run before scoring.
-- `--vd3d-forward-blend F` — override the VD3D forward weight (`0.65` in Bestv2; `0` isolates
-  its classic backward warp and `1` isolates the forward splat).
 - Bestv2 is the only disparity field. It uses the preset's source-pixel FG/MG/BG shifts
   (`-9/-3/+2.4`), `.35` parallax
   balance, `1.11/1.05` multipliers, `.008` zero-parallax trim, dynamic convergence `.006`,
   `.071` safety cap. Subject-plane lock and the exact per-eye sharpen are independent switches;
   both are disabled in the validated quality profiles. Before subject state initializes, output
   remains flat instead of using the removed legacy divergence/focal-plane fallback.
-- `--depth-short-side N` — depth inference short side (default 432; VD3D parity). 336 to A/B
+- `--depth-short-side N` — depth inference short side (default 432). Use 336 to A/B
   back to the old under-resolved default.
 - `--simulate-hdr --hdr-scale F` — direct-harness color-path smoke: decode the PNG source into
   linear FP16 scRGB, scale its luminance (`4` = 320-nit diffuse white), run the HDR depth and warp
   paths, and write a tone-mapped PNG plus `hdr_output_stats.json`. This checks FP16 preservation,
-  finite values, and both geometry implementations through the pre-encode SBS stage. It is not a
+  finite values through the pre-encode SBS stage. It is not a
   PQ/NVENC/headset colorimetric evaluation; do not compare its PNG metrics to SDR baselines.
 - `--ema F` — per-pixel depth EMA override (`1.0` = off).
 - `--ema-edge-change F --ema-edge-gradient F --ema-edge-dilation N --ema-edge-strength F`
-  — experimental flowless moving-edge EMA. It preserves ordinary EMA outside a deterministic
+  — accepted flowless moving-edge EMA (`0.05`, `0.02`, `0`, `0.25`). It preserves ordinary EMA outside a deterministic
   depth-transition mask and blends masked pixels toward current depth. A 16-bit
   `ema_mask_<frame>.png` locality artifact is required whenever enabled.
 - `--subject-lock F` — subject anchor strength (e.g. `0.95`).
@@ -124,8 +119,7 @@ Harness A/B levers (after `--extra`):
 - `--bestv2-sharpen on|off` — explicitly ablate the exact SDR Bestv2 post-sharpen.
 
 Production uses the equivalent `sbs_3d_pop_strength = F` key. Like every individual SBS key it
-overrides every profile; omit it to retain each profile's configured/default value (`1.25` for the
-validated Apollo and VD3D profiles).
+overrides every profile; omit it to retain each profile's configured/default value (`1.25`).
 
 Exit code is the verdict (0 pass / 1 regression / 2 setup error), so the eval→fix→eval loop is
 scriptable. `results.json` carries provenance (git sha+dirty, models, clip hashes, gpu-contention
@@ -139,8 +133,8 @@ Hard comfort/integrity bounds apply even in comparison-only runs. Baseline updat
 memory and written atomically only after every clip passes those bounds, so a broken render cannot
 become the new normal.
 
-The harness records `warp_infer` with D3D11 GPU timestamps around the selected warp. Use this for
-the dual-warp performance comparison; `sbs_composite_cpu` measures submission overhead only.
+The harness records `warp_infer` with D3D11 GPU timestamps around the Apollo warp;
+`sbs_composite_cpu` measures submission overhead only.
 For A/B runs, pass `--report-control <control-run-dir>` and the evaluator writes `report.html`
 before printing its conclusion, including when the treatment exits with regressions.
 
@@ -149,7 +143,8 @@ depth-step floor (flat scenes legitimately read 0), and all pixel windows scale 
 width — but absolute values are still not comparable across clip resolutions; baselines are
 per-clip-set. The harness writes 16-bit depth PNGs so `swim` resolves below 1/255.
 
-**Eval schema 13 correctness contract:** `run_eval.py` pins the model explicitly. By default the
+**Eval schema 18 / harness contract 10:** `run_eval.py` pins the profile and model explicitly and
+has no alternate warp selector. By default the
 harness submits and consumes exactly one inference per source frame, so EMA and normalization
 update once. `--depth-every N` is an explicit comparison-only cadence treatment: color advances
 while the last completed depth/subject geometry is reused, and the contract records `reuse-N`.
@@ -208,8 +203,6 @@ frame windows, adapters, and baselines:
 ```
 python tools/sbsbench/prepare_public_datasets.py
 python tools/sbsbench/run_eval.py --suite extended --comparison-only --label public-apollo
-python tools/sbsbench/run_eval.py --suite extended --comparison-only --label public-vd3d \
-  --report-control cmake-build-relwithdebinfo/sbs_eval/public-apollo --extra --warp vd3d
 ```
 
 `extended-v2` contains eight visually inspected 24-frame clips. The first four remain:
@@ -230,13 +223,8 @@ The v2 expansion adds independent cinematic and outdoor-driving content:
 | `vkitti_drive_clone` | Virtual KITTI 2 | clear outdoor driving and exact metric depth |
 | `vkitti_drive_rain` | Virtual KITTI 2 | rainy low-contrast driving and exact metric depth |
 
-The first matched-profile run exposed a resolution-normalization bug: Apollo divided Bestv2's
-source-pixel shifts by the smaller inference-depth width, while VD3D divided by the source/eye
-width. That unintentionally amplified Apollo according to model texture resolution and produced a
-false median `-22.3%` VD3D gap. After correcting Apollo to use source width, the fresh eight-clip
-median is `-6.0%`: seven clips are within noise (including two where VD3D is slightly higher), and only
-`bonn_person_walk` remains a just-over-one-pixel stereo regression (`-19.4%`). Artifact cleanliness
-is effectively tied (`82.8` Apollo vs `82.7` VD3D); remaining differences are geometry-specific.
+The suite caught and now guards the former source/depth resolution-normalization bug. Apollo's
+source-pixel shifts are normalized by the source/eye geometry, not the smaller inference texture.
 
 The manifest is [datasets/manifest.json](datasets/manifest.json). Bonn derivatives remain local;
 its official page requests citation but does not provide a redistribution grant. TartanAir V2 is
@@ -268,22 +256,6 @@ python tools/sbsbench/split_video.py clip.mp4 -o tools/sbsbench/clips/mine --wid
 ```
 Drop `--width/--jpg` for a full-resolution PNG clip. The gated runner uses current-frame depth
 with one update per source frame.
-
-## Local VD3D Bestv2 reference (media stays local)
-
-`bestv2-phase-a.conf` pins the reproduction candidate; invoke the harness with
-`--literal-bestv2` for its final-warp output. `vd3d_reference.py prepare` extracts and
-hashes the source/Bestv2 render, restores original frame identities, verifies alignment, and keeps
-all source frames so sampling cannot change history. The harness exports exact raw model floats and
-the finalized depth texture immediately before reprojection. `export_vd3d_depth_reference.py`
-produces matching VD3D checkpoints; `vd3d_reference.py score` verifies the harness contract and
-gates the two depth stages separately
-from final-warp reproduction. Pixel similarity is never treated as a warp-quality verdict.
-
-Phase-B quality tuning uses `bestv2-apollo-warp.conf` and `bestv2-vd3d-warp.conf`. A processor may
-be retained for one geometry and rejected for the other. Use `--report-allow-config-diff` when
-generating their comparison report: it permits the intentional config-hash difference while still
-requiring identical clips, mode, model, eval schema, depth step and metric definition.
 
 Every A/B HTML report now writes a sibling `decision.json`. Both are generated from the same
 already-unwrapped per-clip aggregate dictionaries, so automation should consume that sidecar rather
@@ -377,7 +349,6 @@ annotations.
 | `stretch_area` | the LARGE horizontal disocclusion **stretch band** (bg rubber-banded to fill the gap; eye-asymmetric): area of wide low-horizontal-gradient / vertically-streaked runs anchored to silhouettes, per-mille of the eye | higher = more/bigger smeared patches. Ignores smooth (textureless) stretches |
 | `rim_over_p50` / `p95` | silhouette **halo / white line**: a thin bright ridge hugging the silhouette (horizontal white top-hat of the eye, sampled in the silhouette band, ×255) — the residual bright sliver where the fill doesn't reach the fg edge | ~0 = no fringe · higher = brighter white line. Ignores broad bright regions (top-hat is thin-ridge specific) |
 | `warp_hole_pct` | exact worst-eye interior area not covered by a forward splat of the shared parallax field before the active warp hides/fills it (harness mask R) | context only: more valid stereo can expose more background, so lower is not automatically better |
-| `warp_unresolved_pct` | exact worst-eye area still unresolved after the active fallback/search radius (harness mask G) | lower = fewer pixels fell all the way back to the unwarped sample |
 | `hole_source_residual_p95` | p95 regularized source-relative patch error inside the exact hole mask | lower = the active fill remains explainable by real source content |
 | `hole_bad_fill_pct` | fraction of exact-hole pixels whose source-relative patch error exceeds 24/255 | lower = fewer visibly implausible fills inside true holes |
 | `artifact_in_hole_pct` | fraction of all >24/255 source-relative artifact pixels inside or one pixel beside the exact hole mask | context only: high support means an inpainter can target the measured problem; low support means the visible regression is elsewhere |

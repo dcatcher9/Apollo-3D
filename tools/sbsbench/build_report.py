@@ -36,7 +36,7 @@ CURRENT_METRIC_SHA = run_eval.sha256_files([
     os.path.join(SCRIPT_DIR, "run_eval.py")])
 REPORT_SHA = run_eval.sha256_files([os.path.abspath(__file__)])
 
-# An A/B report may compare different code, warp, treatment arguments, or (only when explicitly
+# An A/B report may compare different code, profile/treatment arguments, or (only when explicitly
 # requested) depth models. Its evidence remains invalid if the source set or metric contract changed.
 _SAME_CONTEXT = ["clip_set_sha1", "mode", "eval_schema", "depth_step", "suite",
                  "metric_sha256"]
@@ -118,7 +118,6 @@ COLS = [
     ("image_integrity_pct", "integrity", False, True, 0),
     ("vmisalign_pct", "vmis", True, True, 0),
     ("warp_hole_pct", "true_hole_area", True, False, 0.01),
-    ("warp_unresolved_pct", "unresolved_holes", True, False, 0.001),
     ("hole_source_residual_p95", "hole_residual", True, False, 0.01),
     ("hole_bad_fill_pct", "bad_hole_fill", True, False, 0.01),
     ("artifact_in_hole_pct", "artifact_in_hole", False, False, 0.01),
@@ -569,16 +568,21 @@ def run_label(run, run_dir, default):
 CTRL_MODE = CTRL["meta"].get("mode")
 TREAT_MODE = TREAT["meta"].get("mode")
 IS_MODE_CMP = bool(CTRL_MODE and TREAT_MODE and CTRL_MODE != TREAT_MODE)
+CTRL_PROFILES = {e.get("meta", {}).get("profile") for e in CTRL["clips"].values()
+                 if e.get("meta", {}).get("profile")}
+TREAT_PROFILES = {e.get("meta", {}).get("profile") for e in TREAT["clips"].values()
+                  if e.get("meta", {}).get("profile")}
+IS_PROFILE_CMP = bool(CTRL_PROFILES and TREAT_PROFILES and CTRL_PROFILES != TREAT_PROFILES)
 IS_COMPARISON_ONLY = TREAT.get("verdict") == "comparison_only"
-CTRL_WARPS = {e.get("meta", {}).get("warp") for e in CTRL["clips"].values()}
-TREAT_WARPS = {e.get("meta", {}).get("warp") for e in TREAT["clips"].values()}
-IS_WARP_CMP = CTRL_WARPS != TREAT_WARPS
-IS_TRADEOFF_CMP = IS_MODE_CMP or IS_WARP_CMP
+IS_TRADEOFF_CMP = IS_MODE_CMP or IS_PROFILE_CMP
 CTRL_NAME = run_label(CTRL, ctrl_dir, "control")
 TREAT_NAME = run_label(TREAT, treat_dir, "treatment")
 # Short tags for inline value labels and image captions (arrow is always CTRL -> TREAT).
-CTRL_TAG = CTRL_MODE if IS_MODE_CMP else "control"
-TREAT_TAG = TREAT_MODE if IS_MODE_CMP else "treatment"
+CTRL_TAG = (CTRL_MODE if IS_MODE_CMP else
+            next(iter(CTRL_PROFILES)) if IS_PROFILE_CMP and len(CTRL_PROFILES) == 1 else "control")
+TREAT_TAG = (TREAT_MODE if IS_MODE_CMP else
+             next(iter(TREAT_PROFILES)) if IS_PROFILE_CMP and len(TREAT_PROFILES) == 1 else
+             "treatment")
 
 
 def treatment_name():
@@ -909,10 +913,6 @@ METRIC_DEFS = [
      "true_hole_area",
      "Exact worst-eye interior area not covered by a forward splat of the shared parallax field before the active warp hides or fills it (red harness-mask channel).",
      "context only; more stereo can expose more background"),
-    ("warp_unresolved_pct",
-     "unresolved_holes",
-     "Exact worst-eye interior area still unresolved after the active fill/search radius (green harness-mask channel).",
-     "lower = fewer unfilled pixels"),
     ("hole_source_residual_p95",
      "hole_residual",
      "Regularized source-relative p95 patch error restricted to pixels in the exact pre-fill hole mask.",
@@ -1002,7 +1002,7 @@ def conclusion_section():
         floor = THR.get(k, {}).get("abs_floor", 0.0) / 2.0
         if abs(pct) < 5 or abs(b - a) < floor:
             continue
-        # In a mode comparison neither direction is "better/worse" globally (it's a tradeoff);
+        # In a coequal comparison neither direction is "better/worse" globally (it's a tradeoff);
         # split by which run each metric favors instead.
         favors_treat = (pct < 0) if worse else (pct > 0)
         txt = f"{mtip(k, '<b>' + h + '</b>')} {CTRL_TAG} {a:.2f} → {TREAT_TAG} {b:.2f} ({pct:+.0f}%)"
@@ -1064,7 +1064,7 @@ def gate_strip():
         return ('<div class="gate gate-info"><b>Gate: COMPARISON ONLY</b> — committed baselines '
                 'were not consulted; conclusions come from this matched control/treatment pair.</div>')
     regs = TREAT.get("regressions", [])
-    noun = "difference(s) vs " + CTRL_MODE + " baseline" if IS_MODE_CMP else "regression(s)"
+    noun = ("difference(s) vs " + CTRL_NAME if IS_TRADEOFF_CMP else "regression(s)")
     if not regs:
         return ('<div class="gate gate-pass"><b>Gate: PASS</b> — no '
                 + noun + ' past threshold (run_eval exit 0).</div>')
@@ -1072,8 +1072,9 @@ def gate_strip():
     items = "".join(f'<li><code>{name(r["clip"])}.{r["metric"]}</code> {r["baseline"]} {arrow} {r["value"]}'
                     + (f' <span class="wf">worst frame {r["frame"]}</span>' if "frame" in r else "")
                     + "</li>" for r in regs)
-    cls = "gate-fail" if not IS_MODE_CMP else "gate-info"
-    label = (f"{len(regs)} {noun}" if IS_MODE_CMP else f"{len(regs)} REGRESSION(S) — run_eval exit 1")
+    cls = "gate-info" if IS_TRADEOFF_CMP else "gate-fail"
+    label = (f"{len(regs)} {noun}" if IS_TRADEOFF_CMP else
+             f"{len(regs)} REGRESSION(S) — run_eval exit 1")
     return f'<div class="gate {cls}"><b>Gate: {label}</b><ul>{items}</ul></div>'
 
 
@@ -1480,9 +1481,10 @@ python tools/sbsbench/build_report.py &lt;build&gt;/sbs_eval/ctrl &lt;build&gt;/
 
 models = ", ".join(sorted({m for r in (CTRL, TREAT)
                            for m in {e["meta"].get("model", "?") for e in r["clips"].values()}}))
-if IS_MODE_CMP:
+if IS_TRADEOFF_CMP:
     h1 = f"{CTRL_NAME} vs. {TREAT_NAME}"
-    lede = (f"Comparing two pipeline modes on identical clips: <b>{CTRL_NAME}</b> against "
+    comparison_kind = "modes" if IS_MODE_CMP else "profiles"
+    lede = (f"Comparing two pipeline {comparison_kind} on identical clips: <b>{CTRL_NAME}</b> against "
             f"<b>{TREAT_NAME}</b>. Neither is a regression of the other — it is a tradeoff, "
             f"read from the per-metric split and the per-clip evidence below.")
 else:

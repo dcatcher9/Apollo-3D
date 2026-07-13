@@ -1,4 +1,4 @@
-// Weighted depth histogram for subject tracking (VD3D estimate_subject_depth, GPU port):
+// Weighted depth histogram for Bestv2-derived subject tracking:
 // every texel of the NORMALIZED depth map votes for its depth bin with weight
 //   center Gaussian (favor the frame center, where the subject usually is)
 //   x smoothness (downweight depth edges, so silhouette ramps don't skew the estimate).
@@ -36,7 +36,7 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
         // smooth_w = 1 - sigmoid(10 * (grad - 0.025)): flat regions vote, edges mostly don't.
         float smooth_w = 1.0f - 1.0f / (1.0f + exp(-10.0f * (grad - 0.025f)));
 
-        // Center Gaussian in [-1,1] frame coords (VD3D sigmas: y 0.55, x 0.70).
+        // Center Gaussian in [-1,1] frame coords (Bestv2 sigmas: y 0.55, x 0.70).
         float nx = (float)dtid.x / (float)max(target_w - 1, 1u) * 2.0f - 1.0f;
         float ny = (float)dtid.y / (float)max(target_h - 1, 1u) * 2.0f - 1.0f;
         float center_w = exp(-0.5f * ((ny / 0.55f) * (ny / 0.55f) + (nx / 0.70f) * (nx / 0.70f)));

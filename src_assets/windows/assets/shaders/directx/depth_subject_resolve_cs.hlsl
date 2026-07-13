@@ -39,13 +39,13 @@ void main() {
             }
         }
 
-        // EMA (VD3D SubjectDepthEMA alpha=0.80 => new-value weight 0.20; verified against a
+        // EMA (Bestv2 SubjectDepthEMA alpha=0.80 => new-value weight 0.20; verified against a
         // real Bestv2 render log 2026-07-09). The anchor moves slowly so the scene doesn't
         // breathe with the subject estimate, but not so slowly it lags cuts/motion.
         bool initialized = s.w > 0.5f;
         float subj = initialized ? lerp(s.z, subj_raw, 0.20f) : subj_raw;
 
-        // Disparity stretch (VD3D shape_depth_for_pop): rescale the [lo,hi] percentile band of
+        // Disparity stretch (Bestv2 shape_depth_for_pop): rescale the [lo,hi] percentile band of
         // the (unweighted) depth distribution to full [0,1] so the mid-range uses the whole
         // parallax budget. lo=0, inv_range=1 when off -> the recenter path below is unchanged.
         float lo_val = 0.0f, inv_range = 1.0f;
@@ -65,11 +65,11 @@ void main() {
             }
         }
 
-        // Recenter is computed in STRETCHED space (VD3D: delta = (0.5 - subj_stretched)*recenter).
+        // Recenter is computed in stretched space: delta = (0.5 - subj_stretched)*recenter.
         float subj_str = saturate((subj - lo_val) * inv_range);
         float delta = (0.5f - subj_str) * subject_recenter;
         s = float4(delta, 0.0f, subj, 1.0f);
-        // VD3D ConvergenceEMA(alpha=.90), driven by its low-near subject convention. Stored even
+        // Bestv2 ConvergenceEMA(alpha=.90), driven by its low-near subject convention. Stored even
         // when the Apollo profile is selected so switching profiles cannot expose stale state.
         float conv_target = (1.0f - subj) * 0.006f;
         float conv_ema = initialized ? lerp(s1.z, conv_target, 0.10f) : conv_target;

@@ -1,5 +1,8 @@
 # SBS host benchmarks — visual + perf
 
+> Historical notes mentioning VD3D describe the completed warp-selection investigation. VD3D is
+> no longer a production or evaluator option; current commands live in `tools/sbsbench/README.md`.
+
 Design for two reproducible, host-side benchmarks so every SBS change ships with numbers:
 **how much did visual quality change** and **how much did perf change**. Written 2026-07-07.
 

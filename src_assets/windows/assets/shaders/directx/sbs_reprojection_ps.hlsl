@@ -65,7 +65,7 @@ float2 Reproject(float2 uv, float eyeSign) {
     DepthTexture.GetDimensions(dw, dh);
     // Bestv2's calibrated bands are SOURCE-COLOR pixel shifts. Normalizing by the smaller
     // inference-depth width amplified Apollo whenever the model texture was downscaled, while
-    // VD3D correctly used the eye/source width. Depth dimensions remain correct for tap offsets.
+    // Parallax uses the eye/source width. Depth dimensions remain correct for tap offsets.
     uint sourceWidth, sourceHeight;
     LeftColorTexture.GetDimensions(sourceWidth, sourceHeight);
 
@@ -169,9 +169,8 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
 }
 
 // Harness-only diagnostic output. R marks exact forward-coverage disocclusion before this
-// backward gather paints over it. G is zero because Apollo always returns a sampled color rather
-// than leaving an output pixel unresolved. Bars are not content and remain unmarked. Compiling
-// this separate entry point adds no live-stream work.
+// backward gather paints over it; remaining channels are reserved. Bars are not content and
+// remain unmarked. Compiling this separate entry point adds no live-stream work.
 float4 mask_ps(PS_INPUT input) : SV_TARGET {
     float2 uv = input.TexCoord;
     bool is_right_eye = uv.x > 0.5f;

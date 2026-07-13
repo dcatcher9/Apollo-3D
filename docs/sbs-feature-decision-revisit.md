@@ -1,4 +1,8 @@
-# SBS feature-decision revisit after evaluator and pipeline fixes
+# SBS feature-decision revisit after evaluator and pipeline fixes (historical)
+
+> Archived experiment ledger. The VD3D production warp/profile and its reproduction tools were
+> removed after the final headset decision. Paths below document old evidence and are not current
+> commands; use `tools/sbsbench/README.md` for the active workflow.
 
 Reviewed 2026-07-11 against eval schema 7 after the stereo-volume correction, source-relative
 warp metrics, comfort/integrity gates, GT/flow validation, resolution normalization, expanded

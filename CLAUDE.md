@@ -122,15 +122,15 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   base.json` → pop_spread (near-to-far stereo VOLUME, the gated pop metric — subject-anchoring-fair,
   unlike median-|dx| pop_px which is reported-only), vmisalign (geometry, must stay ~0),
   disocc_frac/disocc_smear (disocclusion severity), flicker (temporal shimmer, which the offline
-  sim can't measure). Capture a baseline before the change; `--warp`, `--vd3d-forward-blend`,
-  `--pop-strength`, `--depth-short-side`, `--ema`, `--minmax-ema`, and the subject
+  sim can't measure). Capture a baseline before the change; `--pop-strength`,
+  `--depth-short-side`, `--ema`, `--minmax-ema`, and the subject
   lock/recenter/stretch/plane-lock controls are the supported A/B levers (see the harness
   README). Run
   it from `cmake-build-relwithdebinfo` so `assets/` resolves.
 - **Perf** — the in-app `sbs_3d_perf_stats = enabled` config knob ([src/sbs_perf.cpp](src/sbs_perf.cpp))
   logs live `depth_infer` (CUDA events) and `sbs_convert_cpu` every 300 SBS frames and writes
   `sbs_perf.json`. The offline harness additionally records `warp_infer` with correctly ordered
-  D3D11 timestamp queries, so a `--sbs-bench` run yields the visual scorecard and warp comparison.
+  D3D11 timestamp queries, so a `--sbs-bench` run yields the visual scorecard and warp cost.
 
 When these tools change (new metric, harness contract, or a shader they replicate), update their
 READMEs and this section so the workflow stays discoverable.

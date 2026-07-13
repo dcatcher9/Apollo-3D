@@ -42,7 +42,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Raw model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
     int raw_width = 0;
     int raw_height = 0;
-    bool geometry_updated = false;  ///< Depth/subject/plane state changed and cached warp geometry must be rebuilt.
     bool completed_frame_valid = false;  ///< A new processed depth result completed during this call.
     std::uint64_t completed_frame_id = 0;  ///< Caller-provided identity of that completed result.
     bool inference_enqueued = false;  ///< This call submitted inference for the supplied input frame.

@@ -1244,15 +1244,19 @@ namespace config {
                          << "'; use 1-64 letters, digits, '_' or '-'. Using 'apollo'.";
       sbs_profile = "apollo";
     }
-    static constexpr std::array<std::string_view, 22> sbs_parameter_names {
-      "warp", "pop_strength", "ema", "depth_short_side", "depth_max_aspect", "minmax_ema",
+    if (sbs_profile == "vd3d") {
+      BOOST_LOG(warning) << "SBS profile 'vd3d' was retired; using 'apollo'.";
+      sbs_profile = "apollo";
+    }
+    static constexpr std::array<std::string_view, 20> sbs_parameter_names {
+      "pop_strength", "ema", "depth_short_side", "depth_max_aspect", "minmax_ema",
       "ema_edge_change", "ema_edge_gradient", "ema_edge_dilation", "ema_edge_strength",
       "subject_lock", "subject_recenter", "subject_stretch", "subject_plane_lock",
-      "subject_plane_width", "bestv2_sharpen", "vd3d_forward_blend",
+      "subject_plane_width", "bestv2_sharpen",
       "depth_model", "depth_model_url", "prebuild_models", "max_encode_width",
       "perf_stats"
     };
-    std::vector<std::string> profile_names {"apollo", "vd3d"};
+    std::vector<std::string> profile_names {"apollo"};
     if (std::find(profile_names.begin(), profile_names.end(), sbs_profile) == profile_names.end()) {
       profile_names.emplace_back(sbs_profile);
     }
@@ -1267,7 +1271,7 @@ namespace config {
         const std::string suffix = "_" + std::string(parameter);
         if (key.size() > prefix.size() + suffix.size() && key.ends_with(suffix)) {
           auto name = key.substr(prefix.size(), key.size() - prefix.size() - suffix.size());
-          if (name.size() <= 64 &&
+          if (name != "vd3d" && name.size() <= 64 &&
               name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") == std::string::npos &&
               std::find(profile_names.begin(), profile_names.end(), name) == profile_names.end()) {
             profile_names.emplace_back(std::move(name));
@@ -1279,7 +1283,7 @@ namespace config {
     std::sort(profile_names.begin(), profile_names.end());
     // Keep profile discovery comfortably inside the 4000-byte control payload. With names capped
     // at 64 bytes, 32 profiles serialize to at most 2144 bytes including the active-name header.
-    // Always retain both built-ins and the configured active profile, then take custom names in
+    // Always retain the Apollo built-in and configured active profile, then take custom names in
     // deterministic lexical order. Skipped profile keys remain unconsumed and are reported by the
     // normal unknown-option diagnostics.
     constexpr std::size_t max_sbs_profiles = 32;
@@ -1295,7 +1299,6 @@ namespace config {
         }
       };
       retain("apollo");
-      retain("vd3d");
       retain(sbs_profile);
       for (const auto &name : profile_names) {
         retain(name);
@@ -1313,13 +1316,6 @@ namespace config {
     }
 
     auto apply_sbs_values = [&](video_t::sbs_t &target, const std::string &prefix) {
-      const std::string previous_warp = target.warp;
-      string_f(vars, prefix + "warp", target.warp);
-      if (target.warp != "apollo" && target.warp != "vd3d") {
-        BOOST_LOG(warning) << "Invalid " << prefix << "warp '" << target.warp
-                           << "'; expected 'apollo' or 'vd3d'. Keeping '" << previous_warp << "'.";
-        target.warp = previous_warp;
-      }
       double_between_f(vars, prefix + "pop_strength", target.pop_strength, {0.25, 2.0});
       double_between_f(vars, prefix + "ema", target.ema, {0.01, 1.0});
       double_between_f(vars, prefix + "ema_edge_change", target.ema_edge_change, {0.0, 1.0});
@@ -1335,7 +1331,6 @@ namespace config {
       double_between_f(vars, prefix + "subject_plane_lock", target.subject_plane_lock, {0.0, 1.0});
       double_between_f(vars, prefix + "subject_plane_width", target.subject_plane_width, {0.01, 0.5});
       bool_f(vars, prefix + "bestv2_sharpen", target.bestv2_sharpen);
-      double_between_f(vars, prefix + "vd3d_forward_blend", target.vd3d_forward_blend, {0.0, 1.0});
       string_f(vars, prefix + "depth_model", target.depth_model);
       string_f(vars, prefix + "depth_model_url", target.depth_model_url);
       string_f(vars, prefix + "prebuild_models", target.prebuild_models);
@@ -1346,10 +1341,6 @@ namespace config {
     for (const auto &name : profile_names) {
       video_t::sbs_t profile {};
       profile.profile = name;
-      if (name == "vd3d") {
-        profile.warp = "vd3d";
-        profile.vd3d_forward_blend = 0.35;
-      }
       apply_sbs_values(profile, "sbs_3d_profile_" + name + "_");
       // Top-level SBS settings are global explicit overrides. Replay them for every advertised
       // profile because the parsing helpers consume keys as they apply them.

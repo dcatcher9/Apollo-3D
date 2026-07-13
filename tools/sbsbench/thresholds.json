@@ -23,7 +23,6 @@
     "stretch_area": {"role": "diagnostic", "axis": "warp", "better": "lower", "rel_tol": 0.25, "abs_floor": 0.5, "trigger": 4.0},
     "rim_over_p95": {"role": "diagnostic", "axis": "warp", "better": "lower", "rel_tol": 0.25, "abs_floor": 0.5, "trigger": 3.0},
     "warp_hole_pct": {"role": "diagnostic", "axis": "warp-mask context", "better": "lower", "rel_tol": 0.25, "abs_floor": 0.1},
-    "warp_unresolved_pct": {"role": "diagnostic", "axis": "warp-mask context", "better": "lower", "rel_tol": 0.25, "abs_floor": 0.05},
     "hole_source_residual_p95": {"role": "diagnostic", "axis": "warp-mask validation", "better": "lower", "rel_tol": 0.2, "abs_floor": 1.0},
     "hole_bad_fill_pct": {"role": "diagnostic", "axis": "warp-mask validation", "better": "lower", "rel_tol": 0.2, "abs_floor": 1.0},
     "artifact_in_hole_pct": {"role": "diagnostic", "axis": "warp-mask context", "better": "higher", "rel_tol": 0.2, "abs_floor": 1.0},

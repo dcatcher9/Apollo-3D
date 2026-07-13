@@ -524,7 +524,7 @@ namespace sbs_bench {
     // ---- argument parsing ----
 
     struct opts {
-      std::string frames, out, model, warp, depth_override_root;
+      std::string frames, out, model, depth_override_root;
       int eye_w = 0;  // 0 -> derive from source aspect; set with eye_h to test letterboxing
       int eye_h = 0;  // 0 -> match/derive from the input frame
       double output_scale = 1.0;  // per-eye linear scale vs source; preserves source aspect
@@ -535,10 +535,10 @@ namespace sbs_bench {
       int limit = 0;  // 0 -> all
       int output_every = 1;  // process every input for temporal state; dump only every Nth
       int depth_every = 1;  // infer every Nth source frame; reuse depth between updates
-      // VD3D-pipeline A/B levers; <0 / false -> use the conf's value.
+      // Apollo depth-pipeline A/B levers; <0 / false -> use the conf's value.
       double subject_lock = -1.0;  // subject anchor strength override (e.g. 0.95)
       double subject_recenter = -1.0;  // global subject recenter override
-      int depth_short_side = 0;  // depth inference short-side override (0 = conf; VD3D uses 432)
+      int depth_short_side = 0;  // depth inference short-side override (0 = conf)
       double ema = -1.0;  // per-pixel depth EMA override (1.0 = off)
       double ema_edge_change = -1.0;
       double ema_edge_gradient = -1.0;
@@ -546,8 +546,7 @@ namespace sbs_bench {
       double ema_edge_strength = -1.0;
       int subject_stretch = -1;  // -1 = conf, 0 = off, 1 = on
       double subject_plane_lock = -1.0;  // local subject-band flatten (e.g. 0.28); <0 = conf
-      double vd3d_forward_blend = -1.0;  // VD3D backward/forward blend override; <0 = conf
-      double minmax_ema = -1.0;  // range-bounds EMA new-weight (VD3D DepthPercentileEMA a=0.82 -> 0.18); <0 = conf
+      double minmax_ema = -1.0;  // range-bounds EMA new-weight; <0 = conf
       int bestv2_sharpen = -1;  // -1 = conf, 0 = off, 1 = on
       bool literal_bestv2 = false;  // reference-only: disable production resolution/pop scaling
     };
@@ -568,8 +567,6 @@ namespace sbs_bench {
           o.out = next("--out");
         } else if (a == "--model") {
           o.model = next("--model");
-        } else if (a == "--warp") {
-          o.warp = next("--warp");
         } else if (a == "--eye-w") {
           o.eye_w = std::stoi(next("--eye-w"));
         } else if (a == "--eye-h") {
@@ -604,8 +601,6 @@ namespace sbs_bench {
           o.subject_stretch = 0;
         } else if (a == "--subject-plane-lock") {
           o.subject_plane_lock = std::stod(next("--subject-plane-lock"));
-        } else if (a == "--vd3d-forward-blend") {
-          o.vd3d_forward_blend = std::stod(next("--vd3d-forward-blend"));
         } else if (a == "--ema") {
           o.ema = std::stod(next("--ema"));
         } else if (a == "--ema-edge-change") {
@@ -717,13 +712,6 @@ namespace sbs_bench {
     // frame-driven rather than wall-clock-driven, so cadence throttling would make the result
     // depend on machine speed.
     auto sbs_cfg = config::video.sbs;
-    if (!o.warp.empty()) {
-      if (o.warp != "apollo" && o.warp != "vd3d") {
-        BOOST_LOG(error) << "sbs-bench: --warp must be 'apollo' or 'vd3d'";
-        return 2;
-      }
-      sbs_cfg.warp = o.warp;
-    }
     if (o.pop_strength >= 0.0) {
       sbs_cfg.pop_strength = o.pop_strength;
     }
@@ -734,16 +722,13 @@ namespace sbs_bench {
       sbs_cfg.subject_recenter = o.subject_recenter;
     }
     if (o.depth_short_side > 0) {
-      sbs_cfg.depth_short_side = o.depth_short_side;  // VD3D uses 432
+      sbs_cfg.depth_short_side = o.depth_short_side;
     }
     if (o.subject_stretch >= 0) {
       sbs_cfg.subject_stretch = (o.subject_stretch != 0);
     }
     if (o.subject_plane_lock >= 0.0) {
       sbs_cfg.subject_plane_lock = o.subject_plane_lock;
-    }
-    if (o.vd3d_forward_blend >= 0.0) {
-      sbs_cfg.vd3d_forward_blend = o.vd3d_forward_blend;
     }
     if (o.ema > 0.0) {
       sbs_cfg.ema = o.ema;  // A/B lever: depth EMA (1.0 = off)
@@ -761,7 +746,7 @@ namespace sbs_bench {
       sbs_cfg.ema_edge_strength = o.ema_edge_strength;
     }
     if (o.minmax_ema >= 0.0) {
-      sbs_cfg.minmax_ema = o.minmax_ema;  // A/B lever: range-bounds EMA (VD3D 0.18)
+      sbs_cfg.minmax_ema = o.minmax_ema;
     }
     if (o.bestv2_sharpen >= 0) {
       sbs_cfg.bestv2_sharpen = (o.bestv2_sharpen != 0);
@@ -779,7 +764,6 @@ namespace sbs_bench {
                     << (o.depth_every == 1 ? std::string("current-once") :
                                              "reuse-" + std::to_string(o.depth_every))
                     << ", profile " << sbs_cfg.profile
-                    << ", warp " << sbs_cfg.warp
                     << ", literal_bestv2 " << (o.literal_bestv2 ? "on" : "off")
                     << ", depth_every " << o.depth_every
                     << " -> " << o.out;
@@ -794,8 +778,7 @@ namespace sbs_bench {
       return 5;
     }
 
-    // Harness-only GPU timestamps. CPU submission time is not a useful comparison between the
-    // probe draw and VD3D's compute+splat+resolve sequence.
+    // Harness-only GPU timestamps. CPU submission time is not a useful warp-cost measurement.
     ComPtr<ID3D11Query> warp_disjoint, warp_start, warp_end;
     D3D11_QUERY_DESC qd = {D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
     dev->CreateQuery(&qd, &warp_disjoint);
@@ -807,23 +790,18 @@ namespace sbs_bench {
     auto ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0");
     auto mask_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "mask_ps", "ps_5_0");
     auto sharpen_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_sharpen_ps.hlsl", "main_ps", "ps_5_0");
-    auto vd3d_cs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_vd3d_forward_cs.hlsl", "main", "cs_5_0");
-    auto vd3d_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_vd3d_reprojection_ps.hlsl", "main_ps", "ps_5_0");
-    auto vd3d_mask_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_vd3d_reprojection_ps.hlsl", "mask_ps", "ps_5_0");
-    if (!vs_blob || !ps_blob || !mask_ps_blob || !sharpen_ps_blob || !vd3d_cs_blob ||
-        !vd3d_ps_blob || !vd3d_mask_ps_blob) {
+    auto coverage_cs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_forward_coverage_cs.hlsl", "main", "cs_5_0");
+    if (!vs_blob || !ps_blob || !mask_ps_blob || !sharpen_ps_blob || !coverage_cs_blob) {
       return 6;
     }
     ComPtr<ID3D11VertexShader> vs;
-    ComPtr<ID3D11PixelShader> ps, mask_ps, sharpen_ps, vd3d_ps, vd3d_mask_ps;
-    ComPtr<ID3D11ComputeShader> vd3d_cs;
+    ComPtr<ID3D11PixelShader> ps, mask_ps, sharpen_ps;
+    ComPtr<ID3D11ComputeShader> coverage_cs;
     dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &vs);
     dev->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &ps);
     dev->CreatePixelShader(mask_ps_blob->GetBufferPointer(), mask_ps_blob->GetBufferSize(), nullptr, &mask_ps);
     dev->CreatePixelShader(sharpen_ps_blob->GetBufferPointer(), sharpen_ps_blob->GetBufferSize(), nullptr, &sharpen_ps);
-    dev->CreateComputeShader(vd3d_cs_blob->GetBufferPointer(), vd3d_cs_blob->GetBufferSize(), nullptr, &vd3d_cs);
-    dev->CreatePixelShader(vd3d_ps_blob->GetBufferPointer(), vd3d_ps_blob->GetBufferSize(), nullptr, &vd3d_ps);
-    dev->CreatePixelShader(vd3d_mask_ps_blob->GetBufferPointer(), vd3d_mask_ps_blob->GetBufferSize(), nullptr, &vd3d_mask_ps);
+    dev->CreateComputeShader(coverage_cs_blob->GetBufferPointer(), coverage_cs_blob->GetBufferSize(), nullptr, &coverage_cs);
 
     ComPtr<ID3D11SamplerState> sampler;
     {
@@ -850,9 +828,9 @@ namespace sbs_bench {
     ComPtr<ID3D11Texture2D> sharpen_tex;
     ComPtr<ID3D11RenderTargetView> sharpen_rtv;
     ComPtr<ID3D11ShaderResourceView> sharpen_srv;
-    ComPtr<ID3D11Texture2D> vd3d_winner_tex;
-    ComPtr<ID3D11UnorderedAccessView> vd3d_winner_uav;
-    ComPtr<ID3D11ShaderResourceView> vd3d_winner_srv;
+    ComPtr<ID3D11Texture2D> coverage_tex;
+    ComPtr<ID3D11UnorderedAccessView> coverage_uav;
+    ComPtr<ID3D11ShaderResourceView> coverage_srv;
     D3D11_VIEWPORT vp = {};
     UINT sbs_w = 0, sbs_h = 0;
     ComPtr<ID3D11Texture2D> depth_stage;  // dump_depth staging cache (depth size is constant)
@@ -967,12 +945,12 @@ namespace sbs_bench {
                                   (float) sbs_cfg.subject_plane_width,
                                   content_scale_x,
                                   content_scale_y,
-                                  (float) sbs_cfg.vd3d_forward_blend,
+                                  0.0f,
                                   (float) sbs_cfg.pop_strength,
                                   o.literal_bestv2 ? 1.0f : 0.0f,
                                   source_to_output};
         repro_cb = const_buffer(dev.Get(), repro_params);
-        float pass_params[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, content_scale_x, content_scale_y, (float) sbs_cfg.vd3d_forward_blend, 1.0f, 0, source_to_output};
+        float pass_params[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, content_scale_x, content_scale_y, 0, 1.0f, 0, source_to_output};
         pass_cb = const_buffer(dev.Get(), pass_params);
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = sbs_w;
@@ -1004,8 +982,8 @@ namespace sbs_bench {
           D3D11_TEXTURE2D_DESC wd = td;
           wd.Format = DXGI_FORMAT_R32_UINT;
           wd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
-          if (FAILED(dev->CreateTexture2D(&wd, nullptr, &vd3d_winner_tex)) || FAILED(dev->CreateUnorderedAccessView(vd3d_winner_tex.Get(), nullptr, &vd3d_winner_uav)) || FAILED(dev->CreateShaderResourceView(vd3d_winner_tex.Get(), nullptr, &vd3d_winner_srv))) {
-            BOOST_LOG(error) << "sbs-bench: VD3D winner texture creation failed";
+          if (FAILED(dev->CreateTexture2D(&wd, nullptr, &coverage_tex)) || FAILED(dev->CreateUnorderedAccessView(coverage_tex.Get(), nullptr, &coverage_uav)) || FAILED(dev->CreateShaderResourceView(coverage_tex.Get(), nullptr, &coverage_srv))) {
+            BOOST_LOG(error) << "sbs-bench: forward-coverage texture creation failed";
             return 6;
           }
         }
@@ -1030,7 +1008,6 @@ namespace sbs_bench {
         // Match the live stream between depth ticks: color advances while all depth-derived
         // geometry remains the last completed result. The views remain owned by the estimator
         // and are valid until the next inference overwrites their backing resources.
-        est.geometry_updated = false;
       }
 
       // Offline motion-compensation reference: replace only explicitly supplied held-depth
@@ -1048,7 +1025,6 @@ namespace sbs_bench {
           return 7;
         }
         est.depth = override_depth_srv;
-        est.geometry_updated = true;
         ++applied_depth_override_frames;
       }
 
@@ -1065,15 +1041,15 @@ namespace sbs_bench {
         ctx->Begin(warp_disjoint.Get());
         ctx->End(warp_start.Get());
       }
-      auto dispatch_forward = [&](ID3D11ComputeShader *shader,
-                                  ID3D11UnorderedAccessView *winner_uav) {
+      auto dispatch_coverage = [&](ID3D11ComputeShader *shader,
+                                   ID3D11UnorderedAccessView *coverage_view) {
         const UINT clear_winner[4] = {0, 0, 0, 0};
-        ctx->ClearUnorderedAccessViewUint(winner_uav, clear_winner);
+        ctx->ClearUnorderedAccessViewUint(coverage_view, clear_winner);
         ctx->CSSetShader(shader, nullptr, 0);
         ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
         ID3D11ShaderResourceView *cs_srvs[] = {in_srv.Get(), est.depth.Get(), est.subject.Get(), nullptr, est.plane_lock.Get()};
         ctx->CSSetShaderResources(0, 5, cs_srvs);
-        ctx->CSSetUnorderedAccessViews(0, 1, &winner_uav, nullptr);
+        ctx->CSSetUnorderedAccessViews(0, 1, &coverage_view, nullptr);
         ctx->CSSetConstantBuffers(2, 1, repro_cb.GetAddressOf());
         ctx->Dispatch(((sbs_w / 2u) + 15u) / 16u, (sbs_h + 15u) / 16u, 1u);
         ID3D11UnorderedAccessView *null_uav[] = {nullptr};
@@ -1081,17 +1057,14 @@ namespace sbs_bench {
         ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
         ctx->CSSetShaderResources(0, 5, null_cs_srvs);
       };
-      if (sbs_cfg.warp == "vd3d" && est.depth) {
-        dispatch_forward(vd3d_cs.Get(), vd3d_winner_uav.Get());
-      }
       ctx->OMSetRenderTargets(1, sbs_rtv.GetAddressOf(), nullptr);
       ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
       ctx->VSSetShader(vs.Get(), nullptr, 0);
-      ctx->PSSetShader(sbs_cfg.warp == "vd3d" && est.depth ? vd3d_ps.Get() : ps.Get(), nullptr, 0);
+      ctx->PSSetShader(ps.Get(), nullptr, 0);
       ctx->RSSetViewports(1, &vp);
       ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
 
-      ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), est.depth.Get(), est.subject.Get(), sbs_cfg.warp == "vd3d" && est.depth ? vd3d_winner_srv.Get() : nullptr, est.plane_lock.Get()};
+      ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), est.depth.Get(), est.subject.Get(), nullptr, est.plane_lock.Get()};
       ctx->PSSetShaderResources(0, 5, srvs);
       ID3D11Buffer *cb = est.depth ? repro_cb.Get() : pass_cb.Get();
       ctx->PSSetConstantBuffers(2, 1, &cb);
@@ -1140,17 +1113,17 @@ namespace sbs_bench {
       // Offline-only mask pass, deliberately outside the production warp timestamp/CPU sample.
       // It executes the same shader selection logic and exports R=pre-fill disocclusion,
       // G=unresolved after the active fallback. This evidence must not perturb perf conclusions.
-      if (sbs_cfg.warp == "apollo" && est.depth) {
-        dispatch_forward(vd3d_cs.Get(), vd3d_winner_uav.Get());
+      if (est.depth) {
+        dispatch_coverage(coverage_cs.Get(), coverage_uav.Get());
       }
       ctx->OMSetRenderTargets(1, warp_mask_rtv.GetAddressOf(), nullptr);
       ctx->VSSetShader(vs.Get(), nullptr, 0);
-      ctx->PSSetShader(sbs_cfg.warp == "vd3d" && est.depth ? vd3d_mask_ps.Get() : mask_ps.Get(), nullptr, 0);
+      ctx->PSSetShader(mask_ps.Get(), nullptr, 0);
       ctx->RSSetViewports(1, &vp);
       ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
       ID3D11ShaderResourceView *mask_srvs[] = {
         in_srv.Get(), est.depth.Get(), est.subject.Get(),
-        est.depth ? vd3d_winner_srv.Get() : nullptr, est.plane_lock.Get()
+        est.depth ? coverage_srv.Get() : nullptr, est.plane_lock.Get()
       };
       ctx->PSSetShaderResources(0, 5, mask_srvs);
       ctx->PSSetConstantBuffers(2, 1, &cb);
@@ -1236,10 +1209,9 @@ namespace sbs_bench {
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
-                 << "  \"schema\": 8,\n"
+                 << "  \"schema\": 10,\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
-                 << "  \"warp\": " << json_string(sbs_cfg.warp) << ",\n"
                  << "  \"depth_step\": "
                  << json_string(o.depth_every == 1 ? std::string("current-once") :
                                                      "reuse-" + std::to_string(o.depth_every))
@@ -1254,8 +1226,7 @@ namespace sbs_bench {
                  << "  \"ema_edge_dilation\": " << sbs_cfg.ema_edge_dilation << ",\n"
                  << "  \"ema_edge_strength\": " << sbs_cfg.ema_edge_strength << ",\n"
                  << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n"
-                 << "  \"warp_mask\": {\"red\": \"forward_disocclusion_before_fill\", "
-                    "\"green\": \"unresolved_after_fill\"}\n"
+                 << "  \"warp_mask\": {\"red\": \"forward_disocclusion_before_fill\"}\n"
                  << "}\n";
       }
     }

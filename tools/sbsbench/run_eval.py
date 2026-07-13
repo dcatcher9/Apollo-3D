@@ -36,7 +36,7 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-EVAL_SCHEMA = 16  # edge-selective EMA experiment contract and locality mask
+EVAL_SCHEMA = 18  # Apollo-only profile contract; red-only forward-coverage mask
 
 
 def suite_defaults(name):
@@ -245,17 +245,11 @@ def require_current_build(build_dir):
 
 
 def expected_profile(conf, extra):
-    """Apply the production contract: profile defaults first, explicit keys/CLI last."""
+    """Resolve the production profile; every profile uses Apollo geometry."""
     profile = conf_value(conf, "sbs_3d_profile", "apollo")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", profile):
         fail(f"invalid sbs_3d_profile {profile!r}")
-    warp = "vd3d" if profile == "vd3d" else "apollo"
-    warp = conf_value(conf, f"sbs_3d_profile_{profile}_warp", warp)
-    warp = conf_value(conf, "sbs_3d_warp", warp)
-    warp = extra_value(extra, "--warp", warp)
-    if warp not in {"apollo", "vd3d"}:
-        fail(f"invalid --warp override {warp!r}")
-    return profile, warp
+    return profile
 
 
 def expected_profile_number(conf, profile, key, default, extra, cli_key, cast=float):
@@ -381,18 +375,18 @@ def main():
         fail(f"{exe} not found -- build first (ninja -C cmake-build-relwithdebinfo sunshine)")
     require_current_build(args.build_dir)
 
-    expected_config_profile, expected_warp = expected_profile(args.conf, args.extra)
+    expected_config_profile = expected_profile(args.conf, args.extra)
     expected_ema_edge_change = expected_profile_number(
-        args.conf, expected_config_profile, "ema_edge_change", 0.0, args.extra,
+        args.conf, expected_config_profile, "ema_edge_change", 0.05, args.extra,
         "--ema-edge-change")
     expected_ema_edge_gradient = expected_profile_number(
-        args.conf, expected_config_profile, "ema_edge_gradient", 0.04, args.extra,
+        args.conf, expected_config_profile, "ema_edge_gradient", 0.02, args.extra,
         "--ema-edge-gradient")
     expected_ema_edge_dilation = expected_profile_number(
         args.conf, expected_config_profile, "ema_edge_dilation", 0, args.extra,
         "--ema-edge-dilation", int)
     expected_ema_edge_strength = expected_profile_number(
-        args.conf, expected_config_profile, "ema_edge_strength", 1.0, args.extra,
+        args.conf, expected_config_profile, "ema_edge_strength", 0.25, args.extra,
         "--ema-edge-strength")
     expected_model = expected_depth_model(args.conf, expected_config_profile)
     missing = check_engines(args.build_dir, expected_model)
@@ -425,7 +419,7 @@ def main():
         "extra_args": args.extra,
         "conf": os.path.relpath(args.conf, REPO),
         "model": expected_model, "profile": expected_config_profile,
-        "warp": expected_warp, "literal_bestv2": literal_bestv2,
+        "literal_bestv2": literal_bestv2,
         "depth_compensation": depth_compensation,
         "eval_schema": EVAL_SCHEMA, "depth_step": depth_step,
         "depth_reuse_interval": depth_reuse_interval,
@@ -457,10 +451,9 @@ def main():
             fail(f"{clip}: harness did not write contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
         expected_contract = {
-            "schema": 8,
+            "schema": 10,
             "model": expected_model,
             "profile": expected_config_profile,
-            "warp": expected_warp,
             "depth_step": depth_step,
             "depth_reuse_interval": depth_reuse_interval,
             "depth_compensation": depth_compensation,
@@ -477,7 +470,6 @@ def main():
         if mismatched:
             fail(f"{clip}: harness contract mismatch: {mismatched}")
         clip_meta = {"model": contract["model"], "profile": contract["profile"],
-                     "warp": contract["warp"],
                      "depth_compensation": contract["depth_compensation"],
                      "literal_bestv2": contract["literal_bestv2"]}
 
@@ -492,8 +484,7 @@ def main():
         ema_mask_ids = set(sbsbench.indexed_files(
             os.path.join(out_dir, "ema_mask_*.png"), "ema_mask_"))
         if (contract.get("warp_mask") != {
-                "red": "forward_disocclusion_before_fill",
-                "green": "unresolved_after_fill"}):
+                "red": "forward_disocclusion_before_fill"}):
             fail(f"{clip}: missing/unknown warp-mask channel contract")
         if (not source_ids or source_ids != sbs_ids or source_ids != depth_ids
                 or source_ids != raw_ids or source_ids != mask_ids):

@@ -29,10 +29,6 @@ class EvalContractTests(unittest.TestCase):
         Image.fromarray(array, mode=mode).save(stream, "PNG")
         return stream.getvalue()
 
-    def test_warp_override_uses_last_explicit_value(self):
-        self.assertEqual(run_eval.extra_value(
-            ["--warp", "apollo", "--warp", "vd3d"], "--warp", "apollo"), "vd3d")
-
     def test_metric_hash_is_independent_of_text_line_endings(self):
         paths = []
         try:
@@ -54,23 +50,12 @@ class EvalContractTests(unittest.TestCase):
             for path in paths:
                 os.unlink(path)
 
-    def test_warp_is_read_from_config(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
-            fh.write("# sbs_3d_warp = apollo\nsbs_3d_warp = vd3d # active\n")
-            path = fh.name
-        try:
-            self.assertEqual(run_eval.conf_value(path, "sbs_3d_warp", "apollo"), "vd3d")
-        finally:
-            os.unlink(path)
-
     def test_named_profiles_and_explicit_overrides_share_production_precedence(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
-            fh.write("sbs_3d_profile = vd3d\nsbs_3d_warp = apollo\n")
+            fh.write("sbs_3d_profile = cinema\n")
             path = fh.name
         try:
-            self.assertEqual(run_eval.expected_profile(path, []), ("vd3d", "apollo"))
-            self.assertEqual(run_eval.expected_profile(
-                path, ["--warp", "vd3d"]), ("vd3d", "vd3d"))
+            self.assertEqual(run_eval.expected_profile(path, []), "cinema")
         finally:
             os.unlink(path)
 
@@ -78,14 +63,14 @@ class EvalContractTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
             path = fh.name
         try:
-            self.assertEqual(run_eval.expected_profile(path, []), ("apollo", "apollo"))
+            self.assertEqual(run_eval.expected_profile(path, []), "apollo")
         finally:
             os.unlink(path)
 
     def test_committed_gate_tracks_the_production_default_profile(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         bench_conf = os.path.join(repo, "tools", "sbsbench", "bench.conf")
-        self.assertEqual(run_eval.expected_profile(bench_conf, []), ("apollo", "apollo"))
+        self.assertEqual(run_eval.expected_profile(bench_conf, []), "apollo")
         with open(os.path.join(repo, "src", "config.h"), encoding="utf-8") as fh:
             self.assertIn('std::string profile = "apollo"', fh.read())
 
@@ -101,13 +86,10 @@ class EvalContractTests(unittest.TestCase):
     def test_custom_profile_values_need_no_evaluator_code_change(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
             fh.write("sbs_3d_profile = Cinema\n"
-                     "sbs_3d_profile_Cinema_warp = vd3d\n"
                      "sbs_3d_profile_Cinema_depth_model = depth_anything_v2_base_fp16\n")
             path = fh.name
         try:
-            self.assertEqual(run_eval.expected_profile(path, []), ("Cinema", "vd3d"))
-            self.assertEqual(run_eval.expected_profile(
-                path, ["--warp", "apollo"]), ("Cinema", "apollo"))
+            self.assertEqual(run_eval.expected_profile(path, []), "Cinema")
             self.assertEqual(run_eval.expected_depth_model(path, "Cinema"),
                              "depth_anything_v2_base_fp16")
         finally:
@@ -125,6 +107,8 @@ class EvalContractTests(unittest.TestCase):
             config = fh.read()
         self.assertIn('apply_sbs_values(profile, "sbs_3d_profile_" + name + "_")', config)
         self.assertIn("video.sbs_profiles", config)
+        self.assertIn('if (sbs_profile == "vd3d")', config)
+        self.assertIn('name != "vd3d"', config)
 
         with open(os.path.join(repo, "src", "stream.cpp"), encoding="utf-8") as fh:
             stream = fh.read()
@@ -167,15 +151,15 @@ class EvalContractTests(unittest.TestCase):
             text.count("shaped, (float)sourceWidth, (float)sourceHeight)"), 2)
         self.assertNotIn("Bestv2SearchRadius((float)dw)", text)
 
-    def test_vd3d_bestv2_normalizes_pixel_shifts_by_source_geometry(self):
+    def test_forward_coverage_diagnostic_uses_source_geometry(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
-        for name in ("sbs_vd3d_forward_cs.hlsl", "sbs_vd3d_reprojection_ps.hlsl"):
-            with self.subTest(shader=name), open(os.path.join(shader_dir, name), encoding="utf-8") as fh:
-                text = fh.read()
-                self.assertIn("LeftColorTexture.GetDimensions(source_w, source_h)", text)
-                self.assertIn("shaped, (float)source_w, (float)source_h)", text)
-                self.assertNotIn("shaped, (float)eye_w)", text)
+        with open(os.path.join(shader_dir, "sbs_forward_coverage_cs.hlsl"),
+                  encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("LeftColorTexture.GetDimensions(source_w, source_h)", text)
+        self.assertIn("shaped, (float)source_w, (float)source_h)", text)
+        self.assertNotIn("shaped, (float)eye_w)", text)
 
     def test_bestv2_scales_wide_sources_from_validated_calibration_width(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -235,7 +219,7 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
-        self.assertIn('"  \\"schema\\": 8,\\n"', harness)
+        self.assertIn('"  \\"schema\\": 10,\\n"', harness)
         self.assertIn('\\"depth_override_frames\\"', harness)
 
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
@@ -244,29 +228,15 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('contract_path = os.path.join(out_dir, "contract.json")', evaluator)
         self.assertNotIn("profile ([a-z0-9_-]+)", evaluator)
 
-        with open(os.path.join(repo, "tools", "sbsbench", "vd3d_reference.py"),
-                  encoding="utf-8") as fh:
-            reference = fh.read()
-        self.assertIn('contract.get("depth_compensation") != "none"', reference)
-
         with open(os.path.join(repo, "src", "stream.cpp"), encoding="utf-8") as fh:
             stream = fh.read()
         self.assertNotIn("SBS_PRESENTATION_FIXED_HEIGHT", stream)
-
-    def test_vd3d_fill_radius_scales_from_source_to_output_pixels(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
-                              "sbs_vd3d_reprojection_ps.hlsl")
-        with open(shader, encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn("96.0f * source_to_output", text)
 
     def test_depth_reuse_cadence_is_explicit_and_machine_verified(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"), encoding="utf-8") as fh:
             harness = fh.read()
         self.assertIn('a == "--depth-every"', harness)
-        self.assertIn("est.geometry_updated = false", harness)
         self.assertIn('a == "--depth-override-root"', harness)
         self.assertIn("depth_compensation", harness)
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
@@ -279,7 +249,7 @@ class EvalContractTests(unittest.TestCase):
             evaluator = fh.read()
         self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
         self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
-        self.assertIn('"schema": 8', evaluator)
+        self.assertIn('"schema": 10', evaluator)
         self.assertIn('depth_override_root and not args.comparison_only', evaluator)
 
     def test_live_depth_pairing_is_bounded_and_sync_is_evaluation_only(self):
@@ -377,11 +347,11 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("float tap = max(source_to_output", text)
         self.assertIn("EyeSample((float)x - tap", text)
 
-    def test_warps_apply_per_eye_aspect_mapping(self):
+    def test_warp_and_coverage_apply_per_eye_aspect_mapping(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
-        for name in ("sbs_reprojection_ps.hlsl", "sbs_vd3d_forward_cs.hlsl",
-                     "sbs_vd3d_reprojection_ps.hlsl", "sbs_sharpen_ps.hlsl"):
+        for name in ("sbs_reprojection_ps.hlsl", "sbs_forward_coverage_cs.hlsl",
+                     "sbs_sharpen_ps.hlsl"):
             with self.subTest(shader=name), open(os.path.join(shader_dir, name), encoding="utf-8") as fh:
                 self.assertIn("ContentToSourceUV", fh.read())
 
@@ -436,6 +406,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('"decision_scope": DECISION_SCOPE', text)
         self.assertIn('"source_artifact_clips": SOURCE_ARTIFACT_CLIPS', text)
         self.assertIn('AB_DECISION["verdict"]', text)
+        self.assertIn("IS_PROFILE_CMP", text)
+        self.assertIn("IS_TRADEOFF_CMP = IS_MODE_CMP or IS_PROFILE_CMP", text)
 
     def test_depth_transform_audit_preserves_16bit_precision(self):
         with tempfile.TemporaryDirectory() as root:
@@ -514,16 +486,17 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(text.count("PlaneLockTexture.SampleLevel"), 1)
         self.assertIn("if (subject_plane_lock > 0.0f)", text)
 
-    def test_vd3d_live_forward_splat_is_cached_by_geometry_update(self):
+    def test_retired_geometry_is_absent_but_forward_coverage_diagnostic_remains(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         display = os.path.join(repo, "src", "platform", "windows", "display_vram.cpp")
-        estimator = os.path.join(repo, "src", "video_depth_estimator.cpp")
         with open(display, encoding="utf-8") as fh:
             display_text = fh.read()
-        with open(estimator, encoding="utf-8") as fh:
-            estimator_text = fh.read()
-        self.assertIn("est.geometry_updated || !sbs_vd3d_winner_valid", display_text)
-        self.assertIn("geometry_updated = true", estimator_text)
+        self.assertNotIn("sbs_vd3d", display_text)
+        with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
+                  encoding="utf-8") as fh:
+            harness_text = fh.read()
+        self.assertIn("sbs_forward_coverage_cs.hlsl", harness_text)
+        self.assertIn("dispatch_coverage", harness_text)
 
     def test_report_evidence_is_bounded_and_accepts_zero_based_frames(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -655,7 +628,7 @@ class EvalContractTests(unittest.TestCase):
         mask[20:30, 64 + 25:64 + 35, 0] = 1.0
         metrics = sbsbench.warp_hole_metrics(left, right, mask, source)
         self.assertGreater(metrics["warp_hole_pct"], 1.0)
-        self.assertEqual(metrics["warp_unresolved_pct"], 0.0)
+        self.assertNotIn("warp_unresolved_pct", metrics)
         self.assertGreater(metrics["hole_source_residual_p95"], 100.0)
         self.assertGreater(metrics["hole_bad_fill_pct"], 80.0)
         self.assertGreater(metrics["artifact_in_hole_pct"], 80.0)

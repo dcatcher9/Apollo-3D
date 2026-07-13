@@ -1,7 +1,7 @@
 # SBS color and HDR review
 
-Reviewed 2026-07-11. Scope: Windows D3D11 capture, depth preprocessing and guidance, both SBS
-warps, debug/eval output, YUV conversion, and encoder signaling.
+Reviewed 2026-07-11 and updated after the VD3D runtime removal. Scope: Windows D3D11 capture,
+depth preprocessing, Apollo SBS warp, debug/eval output, YUV conversion, and encoder signaling.
 
 ## Result
 
@@ -15,8 +15,7 @@ for HDR. The pipeline therefore carries three explicit depth-input modes:
 | 10-bit SDR | RGBA FP16, linear Rec.709 | sRGB OETF | RGBA FP16 | linear to sRGB, then SDR YUV |
 | HDR | RGBA FP16, linear scRGB/Rec.709 | luminance tone map, then sRGB OETF | RGBA FP16 | Rec.709 to Rec.2020, 80 nits per scRGB unit, ST 2084 PQ, then YUV |
 
-Apollo and VD3D use the same color handling. Their only intended difference is geometry/hole
-resolution; neither warp applies a color transfer function or clamps FP16 HDR samples.
+Apollo's warp does not apply a color transfer function or clamp FP16 HDR samples.
 
 ## Corrections made
 
@@ -42,7 +41,7 @@ resolution; neither warp applies a color transfer function or clamps FP16 HDR sa
   scRGB components are mapped into the model gamut; source pixels used for rendering remain
   untouched.
 - **Warp:** source RGB is sampled and copied without a transfer/gamut conversion. Empty regions are
-  black in the same linear or encoded domain. FP16 remains unclamped through Apollo and VD3D.
+  black in the same linear or encoded domain. FP16 remains unclamped through Apollo.
 - **Post-warp sharpen:** enabled only for BGRA SDR. It remains deliberately absent for linear SDR
   and HDR pending a properly linear-light or display-referred implementation.
 - **HDR conversion:** the existing shader converts linear Rec.709/scRGB to Rec.2020, uses the
@@ -57,11 +56,10 @@ resolution; neither warp applies a color transfer function or clamps FP16 HDR sa
 ## Validation
 
 - RelWithDebInfo production build: pass.
-- Python evaluator/unit suite: 41/41 pass.
+- Python evaluator/unit suite: 71/71 pass.
 - Normal SDR c525 baseline gate: pass.
 - Simulated HDR, Apollo warp: output range 0..4 scRGB, zero NaN/Inf components.
-- Simulated HDR, VD3D warp: output range 0..4 scRGB, zero NaN/Inf components.
-- Visual inspection of both tone-mapped SBS outputs: expected color and highlight structure; no
+- Visual inspection of the tone-mapped Apollo SBS output: expected color and highlight structure; no
   new hue discontinuity or clipping was visible.
 
 ## Remaining limitations and live checks

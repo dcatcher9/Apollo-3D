@@ -1120,8 +1120,7 @@ namespace models {
       context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
     }
 
-    estimate_result make_result(bool geometry_updated = false,
-                                bool completed_frame_valid = false,
+    estimate_result make_result(bool completed_frame_valid = false,
                                 std::uint64_t completed_frame_id = 0,
                                 bool inference_enqueued = false,
                                 std::uint64_t enqueued_frame_id = 0) {
@@ -1135,7 +1134,6 @@ namespace models {
       r.raw_model_depth = tensor_out_srv;
       r.raw_width = target_w;
       r.raw_height = target_h;
-      r.geometry_updated = geometry_updated;
       r.completed_frame_valid = completed_frame_valid;
       r.completed_frame_id = completed_frame_id;
       r.inference_enqueued = inference_enqueued;
@@ -1168,7 +1166,7 @@ namespace models {
       normalize_depth_output();
       const auto completed_frame_id = pending_frame_id;
       has_previous_frame = false;  // the output buffer has been consumed; never fold it twice
-      return make_result(true, true, completed_frame_id);
+      return make_result(true, completed_frame_id);
     }
 
     // (Re)build the two constant buffers. All contents are session-constant once the model
@@ -1338,9 +1336,8 @@ namespace models {
 
         run_exact_plane_lock();
 
-        // Ground-truth log to number-match against VD3D's [3DDBG] subj=. VD3D's render
-        // depth is LOW=near; Apollo is HIGH=near, so print both subj and 1-subj (the
-        // VD3D-convention value to compare directly). Opt-in via APOLLO_SUBJDBG (NOT
+        // Ground-truth log for the original Bestv2 reference's LOW=near convention. Apollo is
+        // HIGH=near, so print both subject values for direct comparison. Opt-in via APOLLO_SUBJDBG (NOT
         // perf-gated: CopyResource+Map is a CPU/GPU sync that would perturb the very
         // perf numbers a benchmark run measures), every 24 updates, off the ship path.
         static const bool subjdbg = std::getenv("APOLLO_SUBJDBG") != nullptr;
@@ -1351,7 +1348,7 @@ namespace models {
             const float *s = (const float *) ms.pData;  // {delta, scurve, subj_ema, init}
             BOOST_LOG(info) << "[SUBJDBG] u=" << subject_log_counter
                             << " subj_hi_near=" << s[2]
-                            << " subj_vd3d=" << (1.0f - s[2])
+                            << " subj_low_near=" << (1.0f - s[2])
                             << " recenter_delta=" << s[0]
                             << " reserved=" << s[1]
                             << " init=" << s[3];
@@ -1404,7 +1401,6 @@ namespace models {
       if (!valid || !input_srv) {
         return {};
       }
-      bool geometry_updated = false;
       bool completed_frame_valid = false;
       std::uint64_t completed_frame_id = 0;
 
@@ -1620,7 +1616,6 @@ namespace models {
           target_w = target_h = 0;
           return {};
         }
-        geometry_updated = true;
       }
 
       // Shared constants for buffer_to_tex_cs, the min/max passes and rgb_to_nchw_cs.
@@ -1638,7 +1633,6 @@ namespace models {
         completed_frame_id = pending_frame_id;
         completed_frame_valid = true;
         has_previous_frame = false;
-        geometry_updated = true;
         throughput_stats_completions++;
       }
 
@@ -1665,7 +1659,7 @@ namespace models {
       auto map_res = cuda.cuGraphicsMapResources(2, resources, cu_stream);
       if (map_res != 0) {
         BOOST_LOG(error) << "cuGraphicsMapResources failed: " << map_res;
-        return make_result(geometry_updated, completed_frame_valid, completed_frame_id);
+        return make_result(completed_frame_valid, completed_frame_id);
       }
 
       void *d_in = nullptr;
@@ -1722,7 +1716,7 @@ namespace models {
         throughput_stats_enqueues++;
       }
 
-      return make_result(geometry_updated, completed_frame_valid, completed_frame_id,
+      return make_result(completed_frame_valid, completed_frame_id,
                          enqueued, enqueued ? frame_id : 0);
     }
   };

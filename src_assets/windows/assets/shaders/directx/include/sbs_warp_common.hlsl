@@ -3,8 +3,8 @@
 
 #include "include/bestv2_curve.hlsl"
 
-// The validated core clips and Bestv2 profile were calibrated at 854 source pixels wide. VD3D's
-// preset expresses disparity as literal render pixels, which becomes imperceptible on a 5120px
+// The validated core clips and Bestv2-derived profile were calibrated at 854 source pixels wide.
+// The reference preset expresses disparity as literal render pixels, which becomes imperceptible on a 5120px
 // desktop. Preserve exact behavior at and below the calibration raster, but scale wider sources
 // so disparity remains a constant percentage of each eye instead of a constant pixel count.
 // Non-literal production geometry also applies the independent reference-aspect correction below.
@@ -33,9 +33,7 @@ float Bestv2ParallaxWidth(float source_width, float literal_mode) {
     return min(max(source_width, 1.0f), BESTV2_CALIBRATION_WIDTH);
 }
 
-// Shared disparity field for both geometry implementations. Keeping this in one include is what
-// makes the warp A/B meaningful: Apollo-probe and VD3D-hybrid see identical depth shaping,
-// subject anchoring, parallax, and border behavior.
+// Apollo's shared depth-shaping and disparity contract.
 cbuffer Constants : register(b2) {
     float reserved0;
     float reserved1;
@@ -49,7 +47,7 @@ cbuffer Constants : register(b2) {
     float subject_plane_width;
     float content_scale_x;       // source content width / output-eye width (per-eye letterbox)
     float content_scale_y;       // source content height / output-eye height
-    float vd3d_forward_blend;
+    float reserved12;
     float pop_strength;          // final production stereo-parallax multiplier
     float literal_bestv2;       // harness-only: bypass production resolution/aspect/pop scaling
     float source_to_output;      // output-content pixels per mono-source pixel
@@ -69,8 +67,7 @@ bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {
     return true;
 }
 
-// Depth after the Bestv2 percentile stretch and subject recenter. Apollo stores high=near, the
-// polarity opposite VD3D's render tensor, so the mirrored operation remains high=near here.
+// Depth after the Bestv2 percentile stretch and subject recenter. Apollo stores high=near.
 float WarpDepth(float d, float4 s0, float4 s1, bool shaped) {
     return Bestv2WarpDepth(d, s0, s1, shaped, subject_stretch > 0.5f);
 }
@@ -101,7 +98,7 @@ float Bestv2Parallax(float d, float plane_mask, float4 s0, float4 s1, float4 s2,
         subject_mean -= 0.008f * 0.5f;
         parallax -= subject_mean * correction_mask;
     }
-    // s1.z is VD3D's ConvergenceEMA(alpha=.90) of (low-near subject depth * .006).
+    // s1.z is Bestv2's ConvergenceEMA(alpha=.90) of (low-near subject depth * .006).
     parallax += s1.z * 4.0f / parallax_width;
     // Scale the safety bound with the same factor: 7.1% was a physical-angle limit at the
     // reference aspect, not a universal percentage of differently sized panel widths.

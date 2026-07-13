@@ -522,18 +522,18 @@ def warp_hole_metrics(left, right, mask_rgb, src_gray=None,
                       coverage_error=24.0 / 255.0):
     """Measure the warp's exact pre-fill holes and whether visible corruption lands there.
 
-    The harness mask contract is R=disocclusion before the active fill and G=still unresolved
-    afterward. Hole area itself is context, not quality: stronger valid stereo naturally exposes
+    The harness mask contract is R=disocclusion before the active fill. Hole area itself is
+    context, not quality: stronger valid stereo naturally exposes
     more background. Source-relative residual restricted to that support measures fill fidelity,
     while artifact_in_hole_pct answers the prerequisite question for any future inpainter: what
     fraction of detected corruption is actually inside (or immediately beside) a true hole?
     """
     mask_rgb = np.asarray(mask_rgb, dtype=np.float32)
-    if mask_rgb.ndim != 3 or mask_rgb.shape[2] < 2:
+    if mask_rgb.ndim != 3 or mask_rgb.shape[2] < 1:
         raise ValueError("warp mask must be an RGB image")
     mask_eyes = np.split(mask_rgb, 2, axis=1)
     eyes = (left, right)
-    hole_pcts, unresolved_pcts = [], []
+    hole_pcts = []
     hole_residuals = []
     bad_hole = bad_hole_total = 0
     artifact_in_hole = artifact_total = 0
@@ -543,10 +543,9 @@ def warp_hole_metrics(left, right, mask_rgb, src_gray=None,
         ew = max(1, round(eye.shape[1] * scale))
         eh = max(1, round(eye.shape[0] * scale))
         eye_small = resize_to(eye, ew, eh) if scale < 1.0 else eye
-        mask_small = np.asarray(
-            Image.fromarray((mask[..., :2] * 255.0).astype(np.uint8), mode="LA")
+        hole = np.asarray(
+            Image.fromarray((mask[..., 0] * 255.0).astype(np.uint8), mode="L")
             .resize((ew, eh), Image.NEAREST), dtype=np.uint8) >= 128
-        hole, unresolved = mask_small[..., 0], mask_small[..., 1]
         if src_gray is not None:
             best, _, radius = source_align_map(eye_small, src_gray)
         else:
@@ -556,7 +555,6 @@ def warp_hole_metrics(left, right, mask_rgb, src_gray=None,
             valid[:, :radius] = False
             valid[:, ew - radius:] = False
         hole_pcts.append(float(np.mean(hole[valid]) * 100.0))
-        unresolved_pcts.append(float(np.mean(unresolved[valid]) * 100.0))
         if src_gray is None:
             continue
         supported_hole = hole & valid
@@ -568,14 +566,11 @@ def warp_hole_metrics(left, right, mask_rgb, src_gray=None,
         artifact = valid & (best > coverage_error)
         if artifact.any():
             # One diagnostic pixel of tolerance covers mask/output rasterization boundaries.
-            near_hole = dilate2d(hole | unresolved, 1)
+            near_hole = dilate2d(hole, 1)
             artifact_in_hole += int(np.count_nonzero(artifact & near_hole))
             artifact_total += int(np.count_nonzero(artifact))
 
-    out = {
-        "warp_hole_pct": max(hole_pcts, default=0.0),
-        "warp_unresolved_pct": max(unresolved_pcts, default=0.0),
-    }
+    out = {"warp_hole_pct": max(hole_pcts, default=0.0)}
     if src_gray is not None:
         out["hole_source_residual_p95"] = (
             float(np.percentile(hole_residuals, 95)) if hole_residuals else 0.0)

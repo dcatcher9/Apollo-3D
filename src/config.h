@@ -165,23 +165,21 @@ namespace config {
     // explicit sbs_3d_* overrides on top.
     struct sbs_t {
       std::string profile = "apollo";  ///< Quality profile applied before explicit overrides. Custom names use sbs_3d_profile_<name>_<parameter> keys.
-      std::string warp = "apollo";  ///< Geometry implementation: "apollo" = occlusion-aware backward probe; "vd3d" = Bestv2 backward/forward hybrid.
-      double pop_strength = 1.25;  ///< Production stereo-parallax multiplier (0.25-2), shared by both profiles. Literal VD3D reference runs bypass production scaling in the offline harness.
+      double pop_strength = 1.25;  ///< Production stereo-parallax multiplier (0.25-2). Literal reference runs bypass production scaling in the offline harness.
       double ema = 0.5;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
-      double ema_edge_change = 0.0;  ///< Experimental edge-selective EMA: minimum current-vs-history depth change. 0 disables it.
-      double ema_edge_gradient = 0.04;  ///< Experimental edge-selective EMA: minimum current depth gradient.
+      double ema_edge_change = 0.05;  ///< Edge-selective EMA: minimum current-vs-history depth change. 0 disables it.
+      double ema_edge_gradient = 0.02;  ///< Edge-selective EMA: minimum current depth gradient.
       int ema_edge_dilation = 0;  ///< Experimental edge-selective EMA mask radius in depth pixels (0-2).
-      double ema_edge_strength = 1.0;  ///< Experimental edge-selective EMA blend toward current depth inside the mask.
+      double ema_edge_strength = 0.25;  ///< Edge-selective EMA blend toward current depth inside the mask.
       int depth_short_side = 432;  ///< Depth map short-side resolution, clamped to the frame's native short side. At 16:9 this maps to about 768x432, matching the VisionDepth3D reference input.
       double depth_max_aspect = 4.0;  ///< Aspect-ratio cap (long side <= short * this). Bounds worst-case inference cost on ultrawide.
       double minmax_ema = 0.18;  ///< Temporal EMA blend for the normalized disparity min/max (0-1). Lower = steadier depth scale, higher = adapts faster.
       double subject_lock = 0.5;  ///< Validated subject anchor compromise. 1 pins the subject exactly; 0 leaves the Bestv2 bands unanchored.
-      double subject_recenter = 0.35;  ///< How strongly the depth field is shifted to put the tracked subject at mid-depth before the band mapping (0-1, VD3D recenter_strength).
-      bool subject_stretch = true;  ///< VD3D shape_depth_for_pop stretch: rescale the permanent P5/P95 band to [0,1].
-      double subject_plane_lock = 0.0;  ///< VD3D apply_subject_plane_lock: additionally flatten residual disparity WITHIN the subject depth band (local), on top of the global subject_lock. 0 = off; VD3D Bestv2 0.28.
-      double subject_plane_width = 0.12;  ///< Half-width (in normalized depth) of the subject band for subject_plane_lock (VD3D subject_plane_lock_width, Bestv2 0.12).
+      double subject_recenter = 0.35;  ///< How strongly the depth field is shifted to put the tracked subject at mid-depth before the band mapping (0-1).
+      bool subject_stretch = true;  ///< Bestv2 shape_depth_for_pop stretch: rescale the permanent P5/P95 band to [0,1].
+      double subject_plane_lock = 0.0;  ///< Additionally flatten residual disparity within the subject depth band. 0 = off; Bestv2 reference 0.28.
+      double subject_plane_width = 0.12;  ///< Half-width (in normalized depth) of the subject band for subject_plane_lock (Bestv2 0.12).
       bool bestv2_sharpen = false;  ///< Apply Bestv2's exact SDR per-eye sharpen 0.2 after the completed warp. Retained for fidelity, disabled in quality-optimized profiles.
-      double vd3d_forward_blend = 0.65;  ///< VD3D hybrid weight: 0 = classic backward grid warp, 1 = depth-ordered forward splat. Bestv2 code uses 0.65.
       std::string depth_model = "depth_anything_v2_fp16";  ///< Local name/stem for the depth model files (<name>.onnx / <name>.engine). Identifies the model so different models coexist, each with its own cached engine.
       std::string depth_model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< URL to download the depth model ONNX from if <depth_model>.onnx is absent. Point this (and depth_model) elsewhere to use a different model.
       std::string prebuild_models = "";  ///< Comma-separated registry model names to build at startup in addition to the active model. Empty = only the active model.
@@ -190,7 +188,7 @@ namespace config {
     };
 
     sbs_t sbs;
-    ///< All client-selectable profiles, including the built-in apollo/vd3d profiles.
+    ///< All client-selectable Apollo-warp profiles, including the built-in apollo profile.
     std::unordered_map<std::string, sbs_t> sbs_profiles;
   };
 
