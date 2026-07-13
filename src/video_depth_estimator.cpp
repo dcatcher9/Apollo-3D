@@ -415,23 +415,17 @@ namespace models {
     bool exact_plane_lock;  // Bestv2's full silhouette morphology + weighted shift mean
     float plane_lock_strength;
     float plane_lock_width;
-    float depth_fps;  // target depth-update rate (interval auto-derived from measured video fps)
     std::string model_name;  // local file stem; engine cached as <model_name>.engine
     std::string model_url;  // where to download the onnx if absent
 
-    // Cadence: measure the video frame rate from the call period and derive how many
-    // frames to skip between depth inferences so depth refreshes near depth_fps.
-    unsigned frame_counter = 0;
+    // Throughput telemetry for the permanent stream-cadence matched-frame pipeline.
     float measured_fps = 0.0f;
-    int effective_interval = 1;
-    int last_logged_interval = 0;
     std::chrono::steady_clock::time_point last_call_time {};
-    std::chrono::steady_clock::time_point cadence_stats_start {};
-    unsigned cadence_stats_calls = 0;
-    unsigned cadence_stats_busy_drops = 0;
-    unsigned cadence_stats_skips = 0;
-    unsigned cadence_stats_enqueues = 0;
-    unsigned cadence_stats_completions = 0;
+    std::chrono::steady_clock::time_point throughput_stats_start {};
+    unsigned throughput_stats_calls = 0;
+    unsigned throughput_stats_busy_drops = 0;
+    unsigned throughput_stats_enqueues = 0;
+    unsigned throughput_stats_completions = 0;
 
     // GPU-stream timing of the async TensorRT enqueues (perf benchmark; sbs_3d_perf_stats).
     // A small ring of CUDA event pairs per engine lets several inferences be in flight; the
@@ -595,6 +589,7 @@ namespace models {
     CUgraphicsResource cuda_in_res = nullptr;
     CUgraphicsResource cuda_out_res = nullptr;
     bool has_previous_frame = false;
+    std::uint64_t pending_frame_id = 0;
     bool stream_error_logged = false;
     bool depth_context_pooled = false;  // context reused from the pool (modules already loaded -> skip warmup)
 
@@ -618,7 +613,6 @@ namespace models {
         exact_plane_lock(cfg.subject_plane_lock > 0.0),
         plane_lock_strength((float) cfg.subject_plane_lock),
         plane_lock_width((float) cfg.subject_plane_width),
-        depth_fps((float) cfg.depth_fps),
         model_name(model.name),
         model_url(model.url) {
       const auto init_started = std::chrono::steady_clock::now();
@@ -1110,7 +1104,11 @@ namespace models {
       context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
     }
 
-    estimate_result make_result(bool geometry_updated = false) {
+    estimate_result make_result(bool geometry_updated = false,
+                                bool completed_frame_valid = false,
+                                std::uint64_t completed_frame_id = 0,
+                                bool inference_enqueued = false,
+                                std::uint64_t enqueued_frame_id = 0) {
       estimate_result r;
       r.depth = output_srv();
       r.subject = subject_srv;
@@ -1121,17 +1119,16 @@ namespace models {
       r.raw_width = target_w;
       r.raw_height = target_h;
       r.geometry_updated = geometry_updated;
+      r.completed_frame_valid = completed_frame_valid;
+      r.completed_frame_id = completed_frame_id;
+      r.inference_enqueued = inference_enqueued;
+      r.enqueued_frame_id = enqueued_frame_id;
       return r;
     }
 
-    // Benchmark-only current-frame path. estimate() has already submitted one inference for
-    // input_srv. Wait for that exact inference, consume it once, and deliberately do NOT
-    // enqueue a duplicate. This preserves the configured EMA coefficients and makes temporal
-    // evaluation comparable to a one-inference-per-source-frame offline pipeline.
-    estimate_result finish_pending_for_benchmark(
-      ID3D11ShaderResourceView *input_srv,
-      input_color_space color_space
-    ) {
+    // estimate() has already submitted one inference. Wait for that exact inference, consume it
+    // once, and deliberately do NOT enqueue a duplicate. This is the synchronous quality oracle.
+    estimate_result finish_pending(input_color_space color_space) {
       auto &cuda = cuda_driver_api::get();
       if (!has_previous_frame || !cu_stream || !cuda.cuStreamSynchronize) {
         return make_result();
@@ -1141,7 +1138,7 @@ namespace models {
       }
       CUresult sync = cuda.cuStreamSynchronize(cu_stream);
       if (sync != CUDA_SUCCESS) {
-        BOOST_LOG(error) << "Benchmark depth synchronization failed: " << sync;
+        BOOST_LOG(error) << "Depth synchronization failed: " << sync;
         return make_result();
       }
       if (sbs_perf::enabled()) {
@@ -1152,8 +1149,9 @@ namespace models {
         return {};
       }
       normalize_depth_output();
+      const auto completed_frame_id = pending_frame_id;
       has_previous_frame = false;  // the output buffer has been consumed; never fold it twice
-      return make_result(true);
+      return make_result(true, true, completed_frame_id);
     }
 
     // (Re)build the two constant buffers. All contents are session-constant once the model
@@ -1316,11 +1314,9 @@ namespace models {
       }
     }
 
-    // Called once per video frame. Measures the video frame rate from the inter-call
-    // period and derives effective_interval so depth refreshes near depth_fps. A
-    // ±0.5-frame deadband keeps the interval from oscillating when the measured fps
-    // sits near an integer boundary.
-    void update_cadence() {
+    // Called once per submitted source frame. Reports achieved inference throughput and busy
+    // drops without altering cadence; production always attempts the newest available frame.
+    void update_throughput_stats() {
       auto now = std::chrono::steady_clock::now();
       if (last_call_time.time_since_epoch().count() != 0) {
         float dt = std::chrono::duration<float>(now - last_call_time).count();
@@ -1331,65 +1327,39 @@ namespace models {
       }
       last_call_time = now;
 
-      // Report achieved throughput rather than only the configured cadence. In particular,
-      // interval=1 means "attempt every frame"; it does not prove TensorRT completed at the
-      // video rate because the non-blocking starvation guard can reuse depth while CUDA is busy.
       // A five-second window is responsive enough for headset tuning without flooding the log.
-      if (cadence_stats_start.time_since_epoch().count() == 0) {
-        cadence_stats_start = now;
+      if (throughput_stats_start.time_since_epoch().count() == 0) {
+        throughput_stats_start = now;
       } else {
-        float stats_seconds = std::chrono::duration<float>(now - cadence_stats_start).count();
+        float stats_seconds = std::chrono::duration<float>(now - throughput_stats_start).count();
         if (stats_seconds >= 5.0f) {
-          float calls = (float) std::max(1u, cadence_stats_calls);
+          float calls = (float) std::max(1u, throughput_stats_calls);
           if (sbs_perf::enabled()) {
-            BOOST_LOG(info) << "Depth throughput: target "
-                            << (depth_fps > 0.0f ? std::to_string((int) (depth_fps + 0.5f)) + "fps" : "stream")
-                            << ", video ~" << (int) (measured_fps + 0.5f)
-                            << "fps, completed ~" << (int) (cadence_stats_completions / stats_seconds + 0.5f)
-                            << "fps, enqueued ~" << (int) (cadence_stats_enqueues / stats_seconds + 0.5f)
-                            << "fps, busy drops " << (int) (100.0f * cadence_stats_busy_drops / calls + 0.5f)
-                            << "% (" << cadence_stats_busy_drops << '/' << cadence_stats_calls << "), cadence skips "
-                            << (int) (100.0f * cadence_stats_skips / calls + 0.5f)
-                            << "% (" << cadence_stats_skips << '/' << cadence_stats_calls << "), interval "
-                            << effective_interval;
+            BOOST_LOG(info) << "Depth throughput: source ~" << (int) (measured_fps + 0.5f)
+                            << "fps, completed ~" << (int) (throughput_stats_completions / stats_seconds + 0.5f)
+                            << "fps, enqueued ~" << (int) (throughput_stats_enqueues / stats_seconds + 0.5f)
+                            << "fps, busy drops " << (int) (100.0f * throughput_stats_busy_drops / calls + 0.5f)
+                            << "% (" << throughput_stats_busy_drops << '/' << throughput_stats_calls << ')';
           }
-          cadence_stats_start = now;
-          cadence_stats_calls = 0;
-          cadence_stats_busy_drops = 0;
-          cadence_stats_skips = 0;
-          cadence_stats_enqueues = 0;
-          cadence_stats_completions = 0;
+          throughput_stats_start = now;
+          throughput_stats_calls = 0;
+          throughput_stats_busy_drops = 0;
+          throughput_stats_enqueues = 0;
+          throughput_stats_completions = 0;
         }
       }
-      cadence_stats_calls++;
-
-      if (depth_fps > 0.0f && measured_fps > 1.0f) {
-        // ±0.65 hysteresis (not ±0.5): with a symmetric half-frame band, a video rate
-        // sitting exactly on a boundary (e.g. ~67 fps / depth_fps 45 -> ideal ~1.49)
-        // flips the interval every few seconds, oscillating the depth rate and GPU
-        // load. The wider band holds the current interval anywhere in (i-0.65, i+0.65).
-        float ideal = measured_fps / depth_fps;
-        if (ideal > effective_interval + 0.65f) {
-          effective_interval += 1;
-        } else if (effective_interval > 1 && ideal < effective_interval - 0.65f) {
-          effective_interval -= 1;
-        }
-      } else {
-        effective_interval = 1;  // auto disabled, or still warming up
-      }
-
-      if (effective_interval != last_logged_interval) {
-        BOOST_LOG(info) << "Depth cadence: video ~" << (int) (measured_fps + 0.5f) << "fps -> inference every "
-                        << effective_interval << " frame(s) (~" << (int) (measured_fps / effective_interval + 0.5f) << "fps depth)";
-        last_logged_interval = effective_interval;
-      }
+      throughput_stats_calls++;
     }
 
-    estimate_result estimate(ID3D11ShaderResourceView *input_srv, input_color_space color_space) {
+    estimate_result estimate(ID3D11ShaderResourceView *input_srv,
+                             input_color_space color_space,
+                             std::uint64_t frame_id) {
       if (!valid || !input_srv) {
         return {};
       }
       bool geometry_updated = false;
+      bool completed_frame_valid = false;
+      std::uint64_t completed_frame_id = 0;
 
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid()) {
@@ -1401,8 +1371,7 @@ namespace models {
         cuda.cuCtxSetCurrent(cuda_ctx);
       }
 
-      // Measure video fps and derive the depth-inference interval (called every frame).
-      update_cadence();
+      update_throughput_stats();
 
       // Perf benchmark: resolve any completed inference-timing events into samples.
       if (sbs_perf::enabled()) {
@@ -1415,7 +1384,7 @@ namespace models {
         auto q = cuda.cuStreamQuery(cu_stream);
         if (q == CUDA_ERROR_NOT_READY) {
           // Reuse the last normalized depth and subject state while inference is busy.
-          cadence_stats_busy_drops++;
+          throughput_stats_busy_drops++;
           return make_result();
         }
         if (q != CUDA_SUCCESS && !stream_error_logged) {
@@ -1585,18 +1554,6 @@ namespace models {
         geometry_updated = true;
       }
 
-      // Depth-update cadence: at high video framerates the depth map does not need to
-      // refresh every frame -- the temporal EMA hides a lower update rate, and skipping
-      // inference frees GPU time for the encoder (and cuts inference/encode contention).
-      // Reuse the last depth on skipped frames. Runs the first frame, then every
-      // effective_interval-th frame thereafter.
-      frame_counter++;
-      if (effective_interval > 1 && (frame_counter % (unsigned) effective_interval) != 1u) {
-        // Off-cadence frame: reuse the last normalized depth and subject state.
-        cadence_stats_skips++;
-        return make_result(geometry_updated);
-      }
-
       // Shared constants for buffer_to_tex_cs, the min/max passes and rgb_to_nchw_cs.
       // Session-constant, so the buffer is built once (immutable), not mapped per frame.
       ensure_cbuffers(color_space);
@@ -1604,14 +1561,16 @@ namespace models {
         return {};
       }
 
-      // tensor_out_buf holds the finished raw disparity from the PREVIOUS inference (fully
-      // unmapped from CUDA), so consuming it here never blocks the encode thread -- at the
-      // cost of depth lagging color by the inference cadence (the temporal EMA hides it).
+      // tensor_out_buf holds the finished raw disparity from the previous asynchronous submit
+      // (fully unmapped from CUDA), so consuming it here never blocks the encode thread. The
+      // caller uses completed_frame_id to select the color slot that produced this exact result.
       if (has_previous_frame) {
         normalize_depth_output();
+        completed_frame_id = pending_frame_id;
+        completed_frame_valid = true;
         has_previous_frame = false;
         geometry_updated = true;
-        cadence_stats_completions++;
+        throughput_stats_completions++;
       }
 
       // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
@@ -1637,7 +1596,7 @@ namespace models {
       auto map_res = cuda.cuGraphicsMapResources(2, resources, cu_stream);
       if (map_res != 0) {
         BOOST_LOG(error) << "cuGraphicsMapResources failed: " << map_res;
-        return make_result(geometry_updated);
+        return make_result(geometry_updated, completed_frame_valid, completed_frame_id);
       }
 
       void *d_in = nullptr;
@@ -1690,10 +1649,12 @@ namespace models {
 
       has_previous_frame = enqueued;
       if (enqueued) {
-        cadence_stats_enqueues++;
+        pending_frame_id = frame_id;
+        throughput_stats_enqueues++;
       }
 
-      return make_result(geometry_updated);
+      return make_result(geometry_updated, completed_frame_valid, completed_frame_id,
+                         enqueued, enqueued ? frame_id : 0);
     }
   };
 
@@ -1708,15 +1669,13 @@ namespace models {
 
   estimate_result video_depth_estimator::estimate_depth(
     ID3D11ShaderResourceView *input_srv,
-    input_color_space color_space
+    input_color_space color_space,
+    std::uint64_t frame_id
   ) {
-    return pimpl->estimate(input_srv, color_space);
+    return pimpl->estimate(input_srv, color_space, frame_id);
   }
 
-  estimate_result video_depth_estimator::finish_pending_depth_for_benchmark(
-    ID3D11ShaderResourceView *input_srv,
-    input_color_space color_space
-  ) {
-    return pimpl->finish_pending_for_benchmark(input_srv, color_space);
+  estimate_result video_depth_estimator::finish_pending_depth_for_evaluation(input_color_space color_space) {
+    return pimpl->finish_pending(color_space);
   }
 }  // namespace models

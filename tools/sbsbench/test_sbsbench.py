@@ -142,6 +142,19 @@ class EvalContractTests(unittest.TestCase):
         self.assertTrue(os.path.isabs(args.build_dir))
         self.assertTrue(os.path.isabs(args.conf))
 
+    def test_eval_builds_production_binary_and_fails_closed_on_build_error(self):
+        current = mock.Mock(returncode=0, stdout="ninja: no work to do.\n", stderr="")
+        with mock.patch.object(run_eval.shutil, "which", return_value="ninja"), \
+                mock.patch.object(run_eval.subprocess, "run", return_value=current) as run:
+            run_eval.require_current_build("build")
+        self.assertEqual(run.call_args.args[0], ["ninja", "-C", "build", "sunshine"])
+        failed = mock.Mock(returncode=1, stdout="compile failed\n", stderr="")
+        with mock.patch.object(run_eval.shutil, "which", return_value="ninja"), \
+                mock.patch.object(run_eval.subprocess, "run", return_value=failed), \
+                mock.patch("sys.stderr", new_callable=io.StringIO):
+            with self.assertRaises(SystemExit):
+                run_eval.require_current_build("build")
+
     def test_apollo_bestv2_normalizes_pixel_shifts_by_source_geometry(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
@@ -222,7 +235,7 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
-        self.assertIn('"  \\"schema\\": 5,\\n"', harness)
+        self.assertIn('"  \\"schema\\": 7,\\n"', harness)
         self.assertIn('\\"depth_override_frames\\"', harness)
 
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
@@ -266,8 +279,28 @@ class EvalContractTests(unittest.TestCase):
             evaluator = fh.read()
         self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
         self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
-        self.assertIn('"schema": 5', evaluator)
+        self.assertIn('"schema": 7', evaluator)
         self.assertIn('depth_override_root and not args.comparison_only', evaluator)
+
+    def test_live_depth_pairing_is_bounded_and_sync_is_evaluation_only(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
+            config = fh.read()
+        self.assertNotIn('"depth_frame_mode"', config)
+        self.assertNotIn('"depth_fps"', config)
+
+        with open(os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
+                  encoding="utf-8") as fh:
+            production = fh.read()
+        self.assertIn("std::array<matched_frame_slot_t, 2>", production)
+        self.assertIn("repeat_matched_output", production)
+        self.assertNotIn("finish_pending_depth", production)
+        self.assertNotIn("depth_frame_mode", production)
+
+        with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
+                  encoding="utf-8") as fh:
+            harness = fh.read()
+        self.assertIn("finish_pending_depth_for_evaluation", harness)
 
     def test_depth_override_manifest_requires_exact_frames_and_source_hash(self):
         with tempfile.TemporaryDirectory() as root:

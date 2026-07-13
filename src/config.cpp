@@ -1244,10 +1244,10 @@ namespace config {
                          << "'; use 1-64 letters, digits, '_' or '-'. Using 'apollo'.";
       sbs_profile = "apollo";
     }
-    static constexpr std::array<std::string_view, 19> sbs_parameter_names {
+    static constexpr std::array<std::string_view, 18> sbs_parameter_names {
       "warp", "pop_strength", "ema", "depth_short_side", "depth_max_aspect", "minmax_ema",
       "subject_lock", "subject_recenter", "subject_stretch", "subject_plane_lock",
-      "subject_plane_width", "bestv2_sharpen", "vd3d_forward_blend", "depth_fps",
+      "subject_plane_width", "bestv2_sharpen", "vd3d_forward_blend",
       "depth_model", "depth_model_url", "prebuild_models", "max_encode_width",
       "perf_stats"
     };
@@ -1331,7 +1331,6 @@ namespace config {
       double_between_f(vars, prefix + "subject_plane_width", target.subject_plane_width, {0.01, 0.5});
       bool_f(vars, prefix + "bestv2_sharpen", target.bestv2_sharpen);
       double_between_f(vars, prefix + "vd3d_forward_blend", target.vd3d_forward_blend, {0.0, 1.0});
-      double_between_f(vars, prefix + "depth_fps", target.depth_fps, {0.0, 240.0});
       string_f(vars, prefix + "depth_model", target.depth_model);
       string_f(vars, prefix + "depth_model_url", target.depth_model_url);
       string_f(vars, prefix + "prebuild_models", target.prebuild_models);

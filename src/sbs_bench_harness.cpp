@@ -658,7 +658,6 @@ namespace sbs_bench {
     // frame-driven rather than wall-clock-driven, so cadence throttling would make the result
     // depend on machine speed.
     auto sbs_cfg = config::video.sbs;
-    sbs_cfg.depth_fps = 0.0;
     if (!o.warp.empty()) {
       if (o.warp != "apollo" && o.warp != "vd3d") {
         BOOST_LOG(error) << "sbs-bench: --warp must be 'apollo' or 'vd3d'";
@@ -952,8 +951,8 @@ namespace sbs_bench {
       // Submit and consume exactly one inference for this source frame.
       const auto input_color = o.simulate_hdr ? models::input_color_space::scrgb_hdr : models::input_color_space::srgb;
       if (!have_depth_result || (fi % (size_t) o.depth_every) == 0) {
-        estimator.estimate_depth(in_srv.Get(), input_color);
-        est = estimator.finish_pending_depth_for_benchmark(in_srv.Get(), input_color);
+        estimator.estimate_depth(in_srv.Get(), input_color, (std::uint64_t) fi);
+        est = estimator.finish_pending_depth_for_evaluation(input_color);
         have_depth_result = true;
       } else {
         // Match the live stream between depth ticks: color advances while all depth-derived
@@ -1159,7 +1158,7 @@ namespace sbs_bench {
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
-                 << "  \"schema\": 5,\n"
+                 << "  \"schema\": 7,\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
                  << "  \"warp\": " << json_string(sbs_cfg.warp) << ",\n"

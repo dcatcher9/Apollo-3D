@@ -178,7 +178,6 @@ namespace config {
       double subject_plane_width = 0.12;  ///< Half-width (in normalized depth) of the subject band for subject_plane_lock (VD3D subject_plane_lock_width, Bestv2 0.12).
       bool bestv2_sharpen = false;  ///< Apply Bestv2's exact SDR per-eye sharpen 0.2 after the completed warp. Retained for fidelity, disabled in quality-optimized profiles.
       double vd3d_forward_blend = 0.65;  ///< VD3D hybrid weight: 0 = classic backward grid warp, 1 = depth-ordered forward splat. Bestv2 code uses 0.65.
-      double depth_fps = 0.0;  ///< Target depth-update rate. 0 (default) follows the requested stream cadence; positive values cap depth updates without blocking the encode path.
       std::string depth_model = "depth_anything_v2_fp16";  ///< Local name/stem for the depth model files (<name>.onnx / <name>.engine). Identifies the model so different models coexist, each with its own cached engine.
       std::string depth_model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< URL to download the depth model ONNX from if <depth_model>.onnx is absent. Point this (and depth_model) elsewhere to use a different model.
       std::string prebuild_models = "";  ///< Comma-separated registry model names to build at startup in addition to the active model. Empty = only the active model.

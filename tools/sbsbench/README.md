@@ -38,7 +38,6 @@ The profile supplies the complete stack. Add a configuration-only profile with
 sbs_3d_profile = cinema
 sbs_3d_profile_cinema_warp = vd3d
 sbs_3d_profile_cinema_depth_model = depth_anything_v2_base_fp16
-sbs_3d_profile_cinema_depth_fps = 30
 sbs_3d_profile_cinema_pop_strength = 1.35
 ```
 
@@ -48,6 +47,12 @@ the corresponding parameter in every profile. Apollo advertises every configured
 clients, which can switch the complete profile atomically during a stream. The client never selects
 a model or individual parameter independently. Each encode device receives an immutable profile
 snapshot, so one stream cannot mix parameters or change another stream's selection.
+
+Production always keeps a bounded two-frame color buffer and presents only exact color/depth pairs,
+repeating the last completed SBS frame while inference is busy. The former wrong-frame async path,
+live synchronous mode, `depth_frame_mode`, and `depth_fps` profile parameters were removed. The
+offline evaluator retains a private synchronous finish primitive so every source frame can be
+scored deterministically; it is not selectable by production configuration.
 
 Wire extensions: `0x3003` byte 0 selects host SBS mode (`bytes 1..3` are reserved and ignored);
 `0x3005` selects a UTF-8 profile name,

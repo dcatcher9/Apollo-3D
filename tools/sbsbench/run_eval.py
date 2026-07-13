@@ -36,7 +36,7 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-EVAL_SCHEMA = 13  # explicit depth compensation contract plus GT boundary-lag evidence
+EVAL_SCHEMA = 15  # matched-only production; synchronous evaluator primitive retained offline
 
 
 def suite_defaults(name):
@@ -222,6 +222,28 @@ def normalize_cli_paths(args):
     return args
 
 
+def require_current_build(build_dir):
+    """Build the production target so evaluation cannot accidentally run a stale executable."""
+    ninja = shutil.which("ninja")
+    cache_path = os.path.join(build_dir, "CMakeCache.txt")
+    if os.path.exists(cache_path):
+        with open(cache_path, encoding="utf-8", errors="replace") as fh:
+            match = re.search(r"^CMAKE_MAKE_PROGRAM:FILEPATH=(.+)$", fh.read(), re.MULTILINE)
+        if match:
+            ninja = match.group(1).strip()
+    if not ninja:
+        fail("cannot verify the Sunshine build is current: Ninja was not found")
+    try:
+        probe = subprocess.run(
+            [ninja, "-C", build_dir, "sunshine"],
+            capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail(f"cannot verify the Sunshine build is current: {exc}")
+    output = (probe.stdout or "") + (probe.stderr or "")
+    if probe.returncode:
+        fail("cannot build the current Sunshine executable: " + output[-2000:])
+
+
 def expected_profile(conf, extra):
     """Apply the production contract: profile defaults first, explicit keys/CLI last."""
     profile = conf_value(conf, "sbs_3d_profile", "apollo")
@@ -347,6 +369,7 @@ def main():
                  "Use --comparison-only for a matched A/B or --update-baselines after validation.")
     if not os.path.exists(exe):
         fail(f"{exe} not found -- build first (ninja -C cmake-build-relwithdebinfo sunshine)")
+    require_current_build(args.build_dir)
 
     expected_config_profile, expected_warp = expected_profile(args.conf, args.extra)
     expected_model = expected_depth_model(args.conf, expected_config_profile)
@@ -412,7 +435,7 @@ def main():
             fail(f"{clip}: harness did not write contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
         expected_contract = {
-            "schema": 5,
+            "schema": 7,
             "model": expected_model,
             "profile": expected_config_profile,
             "warp": expected_warp,

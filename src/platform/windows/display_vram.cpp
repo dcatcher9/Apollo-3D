@@ -3,8 +3,10 @@
  * @brief Definitions for handling video ram.
  */
 // standard includes
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <future>
 #include <memory>
 
@@ -485,81 +487,139 @@ namespace platf::dxgi {
           // Lazy-create the depth estimator on the first SBS frame.
           ensure_depth_estimator();
 
-          // Run depth estimator. On failure it returns null; we fall back to a zero-parallax
-          // (flat) SBS frame rather than a globally-shifted one, and warn only once.
+          // Production always uses bounded matched pairing: infer asynchronously from a private
+          // color slot, then warp only the slot whose frame identity completed.
           const auto input_color_space = img.format == DXGI_FORMAT_R16G16B16A16_FLOAT ?
                                            (display->is_hdr() ? models::input_color_space::scrgb_hdr :
                                                                 models::input_color_space::linear_sdr) :
                                            models::input_color_space::srgb;
-          auto est = depth_estimator ?
-                       depth_estimator->estimate_depth(img_ctx.encoder_input_res.get(), input_color_space) :
-                       models::estimate_result {};
-          if (!est.depth && !depth_warned) {
-            BOOST_LOG(error) << "Depth estimation unavailable; streaming flat (zero-parallax) SBS."sv;
-            depth_warned = true;
+          const auto frame_id = ++sbs_frame_sequence;
+          ID3D11ShaderResourceView *render_input_srv = img_ctx.encoder_input_res.get();
+          matched_frame_slot_t *matched_render_slot = nullptr;
+          matched_frame_slot_t *matched_candidate_slot = nullptr;
+          models::estimate_result est;
+
+          if (depth_estimator) {
+            matched_candidate_slot = available_matched_slot();
+            if (matched_candidate_slot &&
+                copy_matched_frame(img_ctx.encoder_texture.get(), *matched_candidate_slot,
+                                   frame_id)) {
+              est = depth_estimator->estimate_depth(matched_candidate_slot->srv.get(),
+                                                    input_color_space, frame_id);
+              if (est.completed_frame_valid) {
+                matched_render_slot = find_pending_matched_slot(est.completed_frame_id);
+                if (matched_render_slot) {
+                  matched_render_slot->pending = false;
+                  render_input_srv = matched_render_slot->srv.get();
+                  const double age_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - matched_render_slot->captured_at).count();
+                  matched_stats_age_sum_ms += age_ms;
+                  matched_stats_age_max_ms = std::max(matched_stats_age_max_ms, age_ms);
+                  ++matched_stats_completions;
+                  if (perf) {
+                    sbs_perf::add_sample_ms("matched_frame_age", age_ms);
+                  }
+                } else {
+                  BOOST_LOG(error) << "Matched depth completed unknown frame "sv
+                                   << est.completed_frame_id << "; repeating the last output."sv;
+                  // The completed inference is no longer using its source texture. Recover the
+                  // old pending slot so a metadata mismatch cannot permanently exhaust the
+                  // bounded two-slot queue. The current candidate is handled below if enqueued.
+                  for (auto &slot : matched_frame_slots) {
+                    if (&slot != matched_candidate_slot) {
+                      slot.pending = false;
+                    }
+                  }
+                }
+              }
+              if (est.inference_enqueued) {
+                matched_candidate_slot->pending = true;
+              }
+            }
           }
 
-          // VD3D's hybrid starts with a depth-ordered forward splat. The compute pass records the
-          // nearest source x at every destination pixel; the resolve PS performs horizontal hole
-          // fill and blends it with the classic backward warp. Apollo-probe skips this pass.
-          if (est.depth && sbs_vd3d_warp && (est.geometry_updated || !sbs_vd3d_winner_valid)) {
-            const UINT clear_winner[4] = {0, 0, 0, 0};
-            device_ctx->ClearUnorderedAccessViewUint(sbs_vd3d_winner_uav.get(), clear_winner);
-            device_ctx->CSSetShader(sbs_vd3d_forward_cs.get(), nullptr, 0);
-            device_ctx->CSSetSamplers(0, 1, &sampler_linear);
-            ID3D11ShaderResourceView *cs_srvs[] = {img_ctx.encoder_input_res.get(), est.depth.Get(), est.subject.Get(), nullptr, est.plane_lock.Get()};
-            device_ctx->CSSetShaderResources(0, 5, cs_srvs);
-            ID3D11UnorderedAccessView *cs_uavs[] = {sbs_vd3d_winner_uav.get()};
-            device_ctx->CSSetUnorderedAccessViews(0, 1, cs_uavs, nullptr);
-            ID3D11Buffer *cs_cb[] = {sbs_reprojection_cbuffer.get()};
-            device_ctx->CSSetConstantBuffers(2, 1, cs_cb);
-            const UINT eye_w = (UINT) sbs_viewport.Width / 2u;
-            const UINT eye_h = (UINT) sbs_viewport.Height;
-            device_ctx->Dispatch((eye_w + 15u) / 16u, (eye_h + 15u) / 16u, 1u);
+          const bool repeat_matched_output = !matched_render_slot && matched_output_valid;
+          ID3D11ShaderResourceView *final_sbs_srv = nullptr;
+          if (repeat_matched_output) {
+            final_sbs_srv = matched_output_sharpened ? sbs_sharpen_srv.get() :
+                                                      sbs_intermediate_srv.get();
+            ++matched_stats_repeats;
+          } else {
+            // Before the first matched completion, provide a flat current-frame SBS image. Once a
+            // pair has completed, this branch only renders the buffered color that owns est.depth.
+            if (!matched_render_slot) {
+              est = {};
+              render_input_srv = img_ctx.encoder_input_res.get();
+            }
 
-            ID3D11UnorderedAccessView *null_uav[] = {nullptr};
-            ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
-            device_ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
-            device_ctx->CSSetShaderResources(0, 5, null_cs_srvs);
-            sbs_vd3d_winner_valid = true;
-          }
+            // VD3D's hybrid starts with a depth-ordered forward splat. The compute pass records the
+            // nearest source x at every destination pixel; the resolve PS performs horizontal hole
+            // fill and blends it with the classic backward warp. Apollo-probe skips this pass.
+            if (est.depth && sbs_vd3d_warp && (est.geometry_updated || !sbs_vd3d_winner_valid)) {
+              const UINT clear_winner[4] = {0, 0, 0, 0};
+              device_ctx->ClearUnorderedAccessViewUint(sbs_vd3d_winner_uav.get(), clear_winner);
+              device_ctx->CSSetShader(sbs_vd3d_forward_cs.get(), nullptr, 0);
+              device_ctx->CSSetSamplers(0, 1, &sampler_linear);
+              ID3D11ShaderResourceView *cs_srvs[] = {render_input_srv, est.depth.Get(), est.subject.Get(), nullptr, est.plane_lock.Get()};
+              device_ctx->CSSetShaderResources(0, 5, cs_srvs);
+              ID3D11UnorderedAccessView *cs_uavs[] = {sbs_vd3d_winner_uav.get()};
+              device_ctx->CSSetUnorderedAccessViews(0, 1, cs_uavs, nullptr);
+              ID3D11Buffer *cs_cb[] = {sbs_reprojection_cbuffer.get()};
+              device_ctx->CSSetConstantBuffers(2, 1, cs_cb);
+              const UINT eye_w = (UINT) sbs_viewport.Width / 2u;
+              const UINT eye_h = (UINT) sbs_viewport.Height;
+              device_ctx->Dispatch((eye_w + 15u) / 16u, (eye_h + 15u) / 16u, 1u);
 
-          // Draw the selected geometry implementation into the shared SBS intermediate.
-          device_ctx->OMSetRenderTargets(1, &sbs_intermediate_rtv, nullptr);
-          device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
-          device_ctx->PSSetShader(est.depth && sbs_vd3d_warp ? sbs_vd3d_reprojection_ps.get() : sbs_reprojection_ps.get(), nullptr, 0);
-          device_ctx->RSSetViewports(1, &sbs_viewport);
-          // Bind the sampler explicitly rather than relying on it persisting from init().
-          device_ctx->PSSetSamplers(0, 1, &sampler_linear);
+              ID3D11UnorderedAccessView *null_uav[] = {nullptr};
+              ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+              device_ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
+              device_ctx->CSSetShaderResources(0, 5, null_cs_srvs);
+              sbs_vd3d_winner_valid = true;
+            }
 
-          ID3D11ShaderResourceView *srvs[] = {img_ctx.encoder_input_res.get(), est.depth.Get(), est.subject.Get(), est.depth && sbs_vd3d_warp ? sbs_vd3d_winner_srv.get() : nullptr, est.plane_lock.Get()};
-          device_ctx->PSSetShaderResources(0, 5, srvs);
-          ID3D11Buffer *sbs_cb[] = {est.depth ? sbs_reprojection_cbuffer.get() : sbs_passthrough_cbuffer.get()};
-          device_ctx->PSSetConstantBuffers(2, 1, sbs_cb);
-          device_ctx->Draw(3, 0);  // Fullscreen triangle
-
-          // Unbind the Render Target so D3D11 doesn't nullify our SRV in the next pass!
-          ID3D11RenderTargetView *null_rtvs[] = {nullptr};
-          device_ctx->OMSetRenderTargets(1, null_rtvs, nullptr);
-
-          // Clear shader resources
-          ID3D11ShaderResourceView *null_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
-          device_ctx->PSSetShaderResources(0, 5, null_srvs);
-
-          // Bestv2 SDR sharpen is post-warp and per-eye. Both geometry paths feed the same pass.
-          ID3D11ShaderResourceView *final_sbs_srv = sbs_intermediate_srv.get();
-          if (est.depth && sbs_sharpen_rtv && sbs_sharpen_srv) {
-            ID3D11RenderTargetView *sharpen_rtv = sbs_sharpen_rtv.get();
-            device_ctx->OMSetRenderTargets(1, &sharpen_rtv, nullptr);
+            // Draw the selected geometry implementation into the shared SBS intermediate.
+            device_ctx->OMSetRenderTargets(1, &sbs_intermediate_rtv, nullptr);
             device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
-            device_ctx->PSSetShader(sbs_sharpen_ps.get(), nullptr, 0);
+            device_ctx->PSSetShader(est.depth && sbs_vd3d_warp ? sbs_vd3d_reprojection_ps.get() : sbs_reprojection_ps.get(), nullptr, 0);
             device_ctx->RSSetViewports(1, &sbs_viewport);
-            ID3D11ShaderResourceView *sharpen_input = final_sbs_srv;
-            device_ctx->PSSetShaderResources(0, 1, &sharpen_input);
-            device_ctx->Draw(3, 0);
+            // Bind the sampler explicitly rather than relying on it persisting from init().
+            device_ctx->PSSetSamplers(0, 1, &sampler_linear);
+
+            ID3D11ShaderResourceView *srvs[] = {render_input_srv, est.depth.Get(), est.subject.Get(), est.depth && sbs_vd3d_warp ? sbs_vd3d_winner_srv.get() : nullptr, est.plane_lock.Get()};
+            device_ctx->PSSetShaderResources(0, 5, srvs);
+            ID3D11Buffer *sbs_cb[] = {est.depth ? sbs_reprojection_cbuffer.get() : sbs_passthrough_cbuffer.get()};
+            device_ctx->PSSetConstantBuffers(2, 1, sbs_cb);
+            device_ctx->Draw(3, 0);  // Fullscreen triangle
+
+            // Unbind the Render Target so D3D11 doesn't nullify our SRV in the next pass!
+            ID3D11RenderTargetView *null_rtvs[] = {nullptr};
             device_ctx->OMSetRenderTargets(1, null_rtvs, nullptr);
-            device_ctx->PSSetShaderResources(0, 1, null_srvs);
-            final_sbs_srv = sbs_sharpen_srv.get();
+
+            // Clear shader resources
+            ID3D11ShaderResourceView *null_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+            device_ctx->PSSetShaderResources(0, 5, null_srvs);
+
+            // Bestv2 SDR sharpen is post-warp and per-eye. Both geometry paths feed the same pass.
+            final_sbs_srv = sbs_intermediate_srv.get();
+            bool output_sharpened = false;
+            if (est.depth && sbs_sharpen_rtv && sbs_sharpen_srv) {
+              ID3D11RenderTargetView *sharpen_rtv = sbs_sharpen_rtv.get();
+              device_ctx->OMSetRenderTargets(1, &sharpen_rtv, nullptr);
+              device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
+              device_ctx->PSSetShader(sbs_sharpen_ps.get(), nullptr, 0);
+              device_ctx->RSSetViewports(1, &sbs_viewport);
+              ID3D11ShaderResourceView *sharpen_input = final_sbs_srv;
+              device_ctx->PSSetShaderResources(0, 1, &sharpen_input);
+              device_ctx->Draw(3, 0);
+              device_ctx->OMSetRenderTargets(1, null_rtvs, nullptr);
+              device_ctx->PSSetShaderResources(0, 1, null_srvs);
+              final_sbs_srv = sbs_sharpen_srv.get();
+              output_sharpened = true;
+            }
+            if (matched_render_slot && est.depth) {
+              matched_output_valid = true;
+              matched_output_sharpened = output_sharpened;
+            }
           }
 
           // Draw captured frame (now SBS, optionally post-warp sharpened).
@@ -568,8 +628,23 @@ namespace platf::dxgi {
           // Debug frame dump (offline artifact inspection): on the client "Dump 3D" button or a
           // "dump.trigger" file, save this frame's 2D source, depth map and SBS result. See
           // sbs_debug_dump.h. No-op unless APOLLO_SBS_DUMP is set.
-          sbs_dumper.maybe_dump(device.get(), device_ctx.get(), img_ctx.encoder_input_res.get(),
-                                est.depth.Get(), final_sbs_srv, display->is_hdr(), sbs_config.depth_model);
+          if (!repeat_matched_output) {
+            sbs_dumper.maybe_dump(device.get(), device_ctx.get(), render_input_srv,
+                                  est.depth.Get(), final_sbs_srv, display->is_hdr(), sbs_config.depth_model);
+          }
+
+          ++matched_stats_calls;
+          const auto now = std::chrono::steady_clock::now();
+          if (now - matched_stats_started >= std::chrono::seconds(5)) {
+            const double avg_age_ms = matched_stats_completions ?
+                                        matched_stats_age_sum_ms / matched_stats_completions : 0.0;
+            BOOST_LOG(info) << "SBS matched-frame stats: calls="sv << matched_stats_calls
+                            << " completed="sv << matched_stats_completions
+                            << " repeats="sv << matched_stats_repeats
+                            << " age_avg_ms="sv << avg_age_ms
+                            << " age_max_ms="sv << matched_stats_age_max_ms;
+            reset_matched_stats(now);
+          }
 
           if (perf) {
             auto dt = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - perf_t0).count();
@@ -688,7 +763,8 @@ namespace platf::dxgi {
       // the future joins in this object's destructor before device/device_ctx are torn down.
       auto sbs_cfg = sbs_config;
       BOOST_LOG(info) << "Host SBS enabled; building depth model \""sv << active.name
-                      << "\" in the background (streaming flat until ready)..."sv;
+                      << "\" for matched-frame presentation in the background "
+                         "(streaming flat until ready)..."sv;
       auto *dev = device.get();
       auto *ctx = device_ctx.get();
       depth_estimator_build = std::async(std::launch::async, [dev, ctx, active, sbs_cfg]() {
@@ -753,6 +829,96 @@ namespace platf::dxgi {
       sbs_passthrough_cbuffer = make_buffer(device.get(), passthrough_params);
     }
 
+    struct matched_frame_slot_t {
+      texture2d_t texture;
+      shader_res_t srv;
+      std::uint64_t frame_id = 0;
+      std::chrono::steady_clock::time_point captured_at {};
+      bool pending = false;
+    };
+
+    matched_frame_slot_t *available_matched_slot() {
+      for (auto &slot : matched_frame_slots) {
+        if (!slot.pending) {
+          return &slot;
+        }
+      }
+      return nullptr;
+    }
+
+    matched_frame_slot_t *find_pending_matched_slot(std::uint64_t frame_id) {
+      for (auto &slot : matched_frame_slots) {
+        if (slot.pending && slot.frame_id == frame_id) {
+          return &slot;
+        }
+      }
+      return nullptr;
+    }
+
+    bool copy_matched_frame(ID3D11Texture2D *source, matched_frame_slot_t &slot,
+                            std::uint64_t frame_id) {
+      if (!source) {
+        return false;
+      }
+
+      D3D11_TEXTURE2D_DESC source_desc {};
+      source->GetDesc(&source_desc);
+      bool recreate = !slot.texture || !slot.srv;
+      if (!recreate) {
+        D3D11_TEXTURE2D_DESC slot_desc {};
+        slot.texture->GetDesc(&slot_desc);
+        recreate = slot_desc.Width != source_desc.Width ||
+                   slot_desc.Height != source_desc.Height ||
+                   slot_desc.MipLevels != source_desc.MipLevels ||
+                   slot_desc.ArraySize != source_desc.ArraySize ||
+                   slot_desc.Format != source_desc.Format ||
+                   slot_desc.SampleDesc.Count != source_desc.SampleDesc.Count ||
+                   slot_desc.SampleDesc.Quality != source_desc.SampleDesc.Quality;
+      }
+
+      if (recreate) {
+        auto private_desc = source_desc;
+        private_desc.Usage = D3D11_USAGE_DEFAULT;
+        private_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        private_desc.CPUAccessFlags = 0;
+        private_desc.MiscFlags = 0;
+
+        texture2d_t texture;
+        auto status = device->CreateTexture2D(&private_desc, nullptr, &texture);
+        if (FAILED(status)) {
+          BOOST_LOG(error) << "Failed to create matched-frame texture [0x"sv
+                           << util::hex(status).to_string_view() << ']';
+          return false;
+        }
+
+        shader_res_t srv;
+        status = device->CreateShaderResourceView(texture.get(), nullptr, &srv);
+        if (FAILED(status)) {
+          BOOST_LOG(error) << "Failed to create matched-frame resource view [0x"sv
+                           << util::hex(status).to_string_view() << ']';
+          return false;
+        }
+        slot.texture = std::move(texture);
+        slot.srv = std::move(srv);
+      }
+
+      device_ctx->CopyResource(slot.texture.get(), source);
+      slot.frame_id = frame_id;
+      slot.captured_at = std::chrono::steady_clock::now();
+      slot.pending = false;
+      return true;
+    }
+
+    void reset_matched_stats(std::chrono::steady_clock::time_point now =
+                               std::chrono::steady_clock::now()) {
+      matched_stats_started = now;
+      matched_stats_calls = 0;
+      matched_stats_completions = 0;
+      matched_stats_repeats = 0;
+      matched_stats_age_sum_ms = 0.0;
+      matched_stats_age_max_ms = 0.0;
+    }
+
     int init_output(ID3D11Texture2D *frame_texture, int width, int height,
                     int sbs_mode_param = ::video::SBS_OFF,
                     const config::video_t::sbs_t &profile = {},
@@ -765,6 +931,11 @@ namespace platf::dxgi {
       sbs_depth_status_event = std::move(depth_status_event);
       sbs_vd3d_warp = sbs_mode != ::video::SBS_OFF && sbs_config.warp == "vd3d";
       sbs_vd3d_winner_valid = false;
+      matched_frame_slots = {};
+      sbs_frame_sequence = 0;
+      matched_output_valid = false;
+      matched_output_sharpened = false;
+      reset_matched_stats();
       // WGC uses FP16 for both HDR and 10-bit SDR capture. In either case the texture is linear;
       // HDR only changes the later linear-scRGB -> Rec.2020/PQ conversion.
       sbs_intermediate_linear = display->is_hdr() ||
@@ -1360,7 +1531,6 @@ namespace platf::dxgi {
     std::future<std::unique_ptr<models::video_depth_estimator>> depth_estimator_build;
     bool depth_estimator_building = false;
     bool depth_estimator_failed = false;  ///< Build threw; stream flat, don't retry on this device.
-    bool depth_warned = false;
     unsigned engine_poll_counter = 0;  ///< Rate-limits the engine compilation wait warning.
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
     config::video_t::sbs_t sbs_config {};  ///< Immutable profile snapshot for this device.
@@ -1385,6 +1555,17 @@ namespace platf::dxgi {
     unordered_access_t sbs_vd3d_winner_uav;
     shader_res_t sbs_vd3d_winner_srv;
     D3D11_VIEWPORT sbs_viewport;
+    std::array<matched_frame_slot_t, 2> matched_frame_slots;
+    std::uint64_t sbs_frame_sequence = 0;
+    bool matched_output_valid = false;
+    bool matched_output_sharpened = false;
+    std::chrono::steady_clock::time_point matched_stats_started =
+      std::chrono::steady_clock::now();
+    unsigned matched_stats_calls = 0;
+    unsigned matched_stats_completions = 0;
+    unsigned matched_stats_repeats = 0;
+    double matched_stats_age_sum_ms = 0.0;
+    double matched_stats_age_max_ms = 0.0;
 
     platf::sbs_debug::dumper sbs_dumper;  ///< Debug: dumps SBS frames on the client button (see sbs_debug_dump.h).
   };

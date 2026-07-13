@@ -42,6 +42,10 @@ namespace models {
     int raw_width = 0;
     int raw_height = 0;
     bool geometry_updated = false;  ///< Depth/subject/plane state changed and cached warp geometry must be rebuilt.
+    bool completed_frame_valid = false;  ///< A new processed depth result completed during this call.
+    std::uint64_t completed_frame_id = 0;  ///< Caller-provided identity of that completed result.
+    bool inference_enqueued = false;  ///< This call submitted inference for the supplied input frame.
+    std::uint64_t enqueued_frame_id = 0;  ///< Identity attached to the newly submitted inference.
   };
 
   class video_depth_estimator {
@@ -53,7 +57,7 @@ namespace models {
      * @param context D3D11 Device Context
      * @param assets_dir Path to the assets directory (for model loading)
      * @param cfg Tuning knobs; see config::video_t::sbs_t (the estimator uses the depth-side
-     *            fields: ema, depth_short_side, depth_max_aspect, minmax_ema, depth_fps).
+     *            fields: ema, depth_short_side, depth_max_aspect, and minmax_ema).
      * @param model The selected depth model: name/url (which engine to load/build) plus the
      *            DA-V2-compatible model contract (pixel_values -> predicted_depth).
      */
@@ -74,16 +78,16 @@ namespace models {
      * @param input_srv D3D11 ShaderResourceView containing the RGB image (usually B8G8R8A8_UNORM or R8G8B8A8_UNORM).
      * @return estimate_result; all views are owned by the estimator and overwritten by later calls.
      */
-    estimate_result estimate_depth(ID3D11ShaderResourceView *input_srv, input_color_space color_space = input_color_space::srgb);
+    estimate_result estimate_depth(ID3D11ShaderResourceView *input_srv, input_color_space color_space = input_color_space::srgb, std::uint64_t frame_id = 0);
 
     /**
          * @brief Finish and consume exactly one inference previously submitted by estimate_depth().
          *
-         * This is an offline-evaluation operation. It synchronizes the estimator stream, applies
-         * normalization/EMA/subject tracking exactly once, and does not enqueue another inference.
-         * The live capture path must continue to use estimate_depth() alone so it stays asynchronous.
+         * It synchronizes the estimator stream, applies normalization/EMA/subject tracking exactly
+         * once, and does not enqueue another inference. The offline evaluator and the experimental
+         * direct-sync live mode use this as the exact current-frame quality path.
          */
-    estimate_result finish_pending_depth_for_benchmark(ID3D11ShaderResourceView *input_srv, input_color_space color_space = input_color_space::srgb);
+    estimate_result finish_pending_depth_for_evaluation(input_color_space color_space = input_color_space::srgb);
 
   private:
     struct impl;

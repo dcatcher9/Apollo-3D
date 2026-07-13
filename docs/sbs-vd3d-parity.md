@@ -104,7 +104,7 @@ The pipeline is two cadence groups, not a flat list. Steps ordered by execution:
 
 | # | step | cadence | shader / site | Apollo-only? |
 |---|------|---------|---------------|--------------|
-| **A. Depth production** | | *runs when a new async inference lands (`depth_fps`)* | | |
+| **A. Depth production** | | *attempted at source-frame cadence; one inference maximum in flight* | | |
 | A1 | preprocess (rgb→nchw, resize to depth res) | depth-tick | `rgb_to_nchw` | — |
 | A2 | depth inference | depth-tick | TensorRT DA-V2 | — |
 | A3 | per-model output transform | depth-tick | `buffer_to_tex_cs` / `depth_minmax_cs` | no |
@@ -112,16 +112,17 @@ The pipeline is two cadence groups, not a flat list. Steps ordered by execution:
 | A5 | temporal per-pixel EMA | depth-tick | `buffer_to_tex_cs` | no |
 | A6 | permanent subject state (hist → resolve) | depth-tick | `depth_subject_*_cs` | no |
 | A7 | optional exact subject-plane mask | depth-tick | `depth_plane_*_cs` | no |
-| **B. Frame synthesis** | | *runs every output frame* | | |
-| B1 | shared Bestv2 shaping + selected warp | per-frame | Apollo probe or VD3D backward resolve | mechanism differs |
+| **B. Frame synthesis** | | *runs for each completed matched pair; otherwise repeats prior SBS* | | |
+| B1 | shared Bestv2 shaping + selected warp | completed pair | Apollo probe or VD3D backward resolve | mechanism differs |
 | B2 | VD3D forward winner build | depth-tick / geometry change | `sbs_vd3d_forward_cs` | VD3D only |
-| B3 | post sharpen | per-frame when explicitly enabled | `sbs_sharpen_ps` | no |
+| B3 | post sharpen | completed pair when explicitly enabled | `sbs_sharpen_ps` | no |
 
 Two timeline facts that drive everything:
-- **Async ordering.** In async mode A-group consumes the *previous* frame's inference, so both
-  warps render current color against slightly stale depth. There is no color-guided resnap stage.
-- **Cadence split.** A runs at `depth_fps` (approximately every Nth frame); the color resolve runs
-  every frame. VD3D's color-independent forward winner texture is cached between geometry updates.
+- **Matched ordering.** A-group completes asynchronously, but frame identity selects the buffered
+  color that produced that depth; neither warp can consume depth from another source frame.
+- **Bounded cadence.** Only one inference and two color slots exist. When inference or capture is
+  late, production repeats the last completed SBS image instead of building a queue or mismatching
+  geometry. VD3D's color-independent forward winner texture is rebuilt per completed geometry.
 
 Per the user we lock **Group A (the depth half)** first — it feeds everything downstream and is
 where Apollo transforms depth in more places than "min/max EMA."
@@ -136,15 +137,15 @@ where Apollo transforms depth in more places than "min/max EMA."
 |--------|---------------|--------|-----------|
 | model | DA-V2 small fp16 (PyTorch) | DA-V2 small fp16 (TensorRT) | ✅ same weights |
 | resolution | UI request 768×432; adapter snaps to patch-14 **770×434** | short-side 432 resolves to **770×434** at this aspect | ✅ matched. Runtime logs and raw-shape artifacts verify 770×434. |
-| cadence | per-frame | **async** at `depth_fps` (0/default tracks stream cadence) — completed depth can still lag color under GPU load | ⚠️ **the** depth-half gap |
+| cadence | per-frame | stream-cadence asynchronous inference with bounded exact color/depth pairing | ✅ matched presentation; may repeat under load |
 
-**Live sync is gone.** `sbs_3d_sync_depth` and the forked synchronous `estimate()` were removed
-(commit 5e7530fe). **Both GAME and MOVIE run async today** (MOVIE maps onto GAME's async path;
-true synchronous MOVIE is roadmap #3, unbuilt). Async is the only behavior; the lag is a permanent
-architectural property, not a toggle. The evaluator now uses a benchmark-only one-submit,
-one-synchronize, one-normalize operation without duplicate enqueue. This is an evaluation
-primitive, not a live mode. Real per-frame sync would stall the encode thread and is not a
-production option.
+**Matched-only production (2026-07-12):** the host keeps a bounded two-slot source buffer, renders
+only the source frame that owns a completed depth result, and repeats the last completed SBS output
+while inference is busy. The unsafe wrong-frame async presentation, live blocking sync mode,
+`depth_frame_mode`, and `depth_fps` were removed. The offline evaluator alone retains a synchronous
+finish primitive for deterministic current-frame scoring (contract schema 7 / eval schema 15).
+Matched removes wrong-frame geometry without blocking encode, at the measured cost of roughly one
+frame of motion latency; headset timing and repeat counters remain the production evidence.
 
 **Cadence root-cause validation (2026-07-12, eval schema 12):** the harness now has an explicit
 `--depth-every N` contract that advances color every frame while reusing the last completed raw,
@@ -173,7 +174,7 @@ Reports:
 - `sbs_eval/cadence-extended-every2/report.html`
 
 **Live stream-rate validation (RTX 5080 + Galaxy XR, 2026-07-12):** after the cadence study,
-`depth_fps=0` was deliberately made the shipping default and tested in a requested 90 Hz stream.
+stream-cadence inference was tested in a requested 90 Hz stream.
 The five-second throughput windows commonly completed 80–90 depth updates/s with interval 1 and
 reported 0% busy drops; under changing capture/game load some windows completed less frequently
 (occasionally 30–70/s), safely reusing the last depth rather than blocking encode. The headset
