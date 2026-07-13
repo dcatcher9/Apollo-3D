@@ -1441,6 +1441,10 @@ namespace config {
       vars.erase(it);
     }
 
+    // Managed live by the Windows local AR-display controller and preserved here so it does not
+    // appear as an unrecognized user-facing option during normal configuration parsing.
+    vars.erase("ar_glass_devices");
+
     if (sunshine.min_log_level <= 3) {
       for (auto &[var, _] : vars) {
         std::cout << "Warning: Unrecognized configurable option ["sv << var << ']' << std::endl;

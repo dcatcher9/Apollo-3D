@@ -364,6 +364,37 @@ namespace system_tray {
     tray_update(&tray);
   }
 
+  bool update_tray_ar_display_decision(std::string display_name) {
+    if (!tray_initialized) {
+      return false;
+    }
+
+    tray.notification_title = nullptr;
+    tray.notification_text = nullptr;
+    tray.notification_cb = nullptr;
+    tray.notification_icon = nullptr;
+    tray_update(&tray);
+    char msg[256];
+    snprintf(
+      msg,
+      std::size(msg),
+      "Is '%s' an AR display? Click to choose in Apollo.",
+      display_name.c_str()
+    );
+  #ifdef _WIN32
+    strncpy(msg, utf8ToAcp(msg).c_str(), std::size(msg) - 1);
+  #endif
+    tray.notification_title = "New Monitor Detected";
+    tray.notification_text = msg;
+    tray.notification_icon = TRAY_ICON;
+    tray.tooltip = PROJECT_NAME;
+    tray.notification_cb = []() {
+      launch_ui("/config#ar-glasses");
+    };
+    tray_update(&tray);
+    return true;
+  }
+
   void
   update_tray_paired(std::string device_name) {
     if (!tray_initialized) {

@@ -79,6 +79,9 @@ namespace system_tray {
    */
   void update_tray_require_pin();
 
+  /** Notify the user that a newly seen monitor needs an AR-display decision. */
+  bool update_tray_ar_display_decision(std::string display_name);
+
   void update_tray_paired(std::string device_name);
 
   void update_tray_client_connected(std::string client_name);

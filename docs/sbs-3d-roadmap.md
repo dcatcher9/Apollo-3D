@@ -6,6 +6,9 @@ forward/backward hybrid and its selectable profile were removed after headset te
 rim/halo behavior and a serious thin-structure artifact for only about 0.12 ms of warp-time saving.
 Historical experiment evidence remains in Git history and `sbs-feature-decision-revisit.md`.
 
+Approved AR glasses connected as a Windows monitor also use an automatic local presenter; see
+`docs/sbs-local-ar-glasses.md`. That path reuses the production depth and warp without NVENC.
+
 ## Shipping pipeline
 
 1. Preserve source aspect while selecting a patch-aligned TensorRT input grid.

@@ -41,6 +41,7 @@
 #include "uuid.h"
 
 #ifdef _WIN32
+  #include "platform/windows/ar_glasses.h"
   #include "platform/windows/utils.h"
 #endif
 
@@ -989,6 +990,62 @@ namespace confighttp {
     send_response(response, output_tree);
   }
 
+  #ifdef _WIN32
+  void getArGlassDevices(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    nlohmann::json output_tree;
+    output_tree["status"] = true;
+    output_tree["devices"] = nlohmann::json::array();
+    for (const auto &device : ar_glasses::devices()) {
+      const char *decision = "pending";
+      if (device.decision == ar_glasses::device_decision_e::approved) {
+        decision = "approved";
+      } else if (device.decision == ar_glasses::device_decision_e::rejected) {
+        decision = "rejected";
+      }
+      output_tree["devices"].push_back({
+        {"id", device.id},
+        {"name", device.name},
+        {"decision", decision},
+        {"connected", device.connected},
+        {"autoDetected", device.auto_detected},
+      });
+    }
+    send_response(response, output_tree);
+  }
+
+  void setArGlassDevice(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    try {
+      std::stringstream body;
+      body << request->content.rdbuf();
+      const auto input = nlohmann::json::parse(body);
+      const auto id = input.value("id", "");
+      const auto decision_name = input.value("decision", "");
+      const auto decision = decision_name == "approved" ?
+                              ar_glasses::device_decision_e::approved :
+                            decision_name == "rejected" ?
+                              ar_glasses::device_decision_e::rejected :
+                              ar_glasses::device_decision_e::pending;
+      if (id.empty() || decision == ar_glasses::device_decision_e::pending || !ar_glasses::set_device_decision(id, decision)) {
+        bad_request(response, request, "Unknown monitor or invalid AR display decision");
+        return;
+      }
+      send_response(response, nlohmann::json {{"status", true}});
+    } catch (const std::exception &error) {
+      bad_request(response, request, error.what());
+    }
+  }
+  #endif
+
   /**
    * @brief Get the configuration settings.
    * @param response The HTTP response object.
@@ -1060,6 +1117,8 @@ namespace confighttp {
       std::stringstream config_stream;
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(ss);
+      // This option is live-managed by the AR display decision API rather than the general form.
+      input_tree.erase("ar_glass_devices");
       for (const auto &[k, v] : input_tree.items()) {
         if (v.is_null() || (v.is_string() && v.get<std::string>().empty())) {
           continue;
@@ -1069,7 +1128,13 @@ namespace confighttp {
         // we should migrate the config file to straight json and get rid of all this nonsense
         config_stream << k << " = " << (v.is_string() ? v.get<std::string>() : v.dump()) << std::endl;
       }
+  #ifdef _WIN32
+      if (!ar_glasses::write_config_with_devices(config_stream.str())) {
+        throw std::runtime_error("Could not atomically save the configuration file");
+      }
+  #else
       file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str());
+  #endif
       output_tree["status"] = true;
       send_response(response, output_tree);
     } catch (std::exception &e) {
@@ -1542,6 +1607,10 @@ namespace confighttp {
     server.resource["^/api/logs$"]["GET"] = getLogs;
     server.resource["^/api/config$"]["GET"] = getConfig;
     server.resource["^/api/config$"]["POST"] = saveConfig;
+  #ifdef _WIN32
+    server.resource["^/api/ar-glasses$"]["GET"] = getArGlassDevices;
+    server.resource["^/api/ar-glasses$"]["POST"] = setArGlassDevice;
+  #endif
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
     server.resource["^/api/restart$"]["POST"] = restart;
     server.resource["^/api/quit$"]["POST"] = quit;

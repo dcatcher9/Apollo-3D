@@ -59,6 +59,8 @@
       >
       </audio-video>
 
+      <ar-glasses v-if="currentTab === 'ar-glasses'"></ar-glasses>
+
       <!-- Network Tab -->
       <network
         v-if="currentTab === 'network'"
@@ -112,6 +114,7 @@
   import Files from './configs/tabs/Files.vue'
   import Advanced from './configs/tabs/Advanced.vue'
   import AudioVideo from './configs/tabs/AudioVideo.vue'
+  import ArGlasses from './configs/tabs/ArGlasses.vue'
   import ContainerEncoders from './configs/tabs/ContainerEncoders.vue'
   import {$tp, usePlatformI18n} from './platform-i18n'
 
@@ -127,6 +130,7 @@
       Advanced,
       // They will be accessible via audio-video, container-encoders only.
       AudioVideo,
+      ArGlasses,
       ContainerEncoders,
     },
     data() {
@@ -214,6 +218,11 @@
               "minimum_fps_target": 0,
               "isolated_virtual_display_option": "disabled",
             },
+          },
+          {
+            id: "ar-glasses",
+            name: "AR Displays",
+            options: {},
           },
           {
             id: "network",
@@ -344,12 +353,12 @@
           }
           if (this.platform === "linux") {
             this.tabs = this.tabs.filter((el) => {
-              return el.id !== "amd" && el.id !== "qsv" && el.id !== "vt";
+              return el.id !== "amd" && el.id !== "qsv" && el.id !== "vt" && el.id !== "ar-glasses";
             });
           }
           if (this.platform === "macos") {
             this.tabs = this.tabs.filter((el) => {
-              return el.id !== "amd" && el.id !== "nv" && el.id !== "qsv" && el.id !== "vaapi";
+              return el.id !== "amd" && el.id !== "nv" && el.id !== "qsv" && el.id !== "vaapi" && el.id !== "ar-glasses";
             });
           }
 
@@ -357,6 +366,7 @@
           delete this.config.platform;
           delete this.config.status;
           delete this.config.version;
+          delete this.config.ar_glass_devices;
 
           this.vdisplayStatus = this.config.vdisplayStatus;
           delete this.config.vdisplayStatus;
@@ -511,8 +521,11 @@
           let stripped_hash = hash.substring(1);
 
           this.tabs.forEach(tab => {
+            if (tab.id === stripped_hash) {
+              this.currentTab = tab.id;
+            }
             Object.keys(tab.options).forEach(key => {
-              if (tab.id === stripped_hash || key === stripped_hash) {
+              if (key === stripped_hash) {
                 this.currentTab = tab.id;
               }
               if (key === stripped_hash) {

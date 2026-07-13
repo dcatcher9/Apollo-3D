@@ -26,6 +26,7 @@
 #include "video.h"
 #include "video_depth_estimator.h"
 #ifdef _WIN32
+  #include "platform/windows/ar_glasses.h"
   #include "platform/windows/misc.h"
   #include "platform/windows/virtual_display.h"
 #endif
@@ -416,6 +417,12 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(error) << "Video failed to find working encoder: probing failed."sv;
 #endif
   }
+
+#ifdef _WIN32
+  // An approved AR-display hotplug owns a local virtual desktop and local D3D presenter. The guard is
+  // created after platform/shader and encoder initialization, and is destroyed before either.
+  auto ar_glasses_deinit_guard = ar_glasses::init();
+#endif
 
   if (http::init()) {
     BOOST_LOG(fatal) << "HTTP interface failed to initialize"sv;

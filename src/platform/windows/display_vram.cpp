@@ -421,6 +421,14 @@ namespace platf::dxgi {
       }
     }
 
+    int convert_rgb(platf::img_t &img, ID3D11RenderTargetView *target) {
+      rgb_present_target = target;
+      auto clear_target = util::fail_guard([this]() {
+        rgb_present_target = nullptr;
+      });
+      return convert(img);
+    }
+
     int convert(platf::img_t &img_base) {
       auto &img = (img_d3d_t &) img_base;
       if (!img.blank) {
@@ -473,6 +481,21 @@ namespace platf::dxgi {
             device_ctx->RSSetViewports(1, &uv_viewport);
             device_ctx->Draw(3, 0);
           }
+        };
+
+        auto draw_rgb = [&](ID3D11ShaderResourceView *input) {
+          device_ctx->OMSetRenderTargets(1, &rgb_present_target, nullptr);
+          device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
+          device_ctx->PSSetShader(rgb_present_ps.get(), nullptr, 0);
+          device_ctx->RSSetViewports(1, &rgb_present_viewport);
+          device_ctx->PSSetSamplers(0, 1, &sampler_linear);
+          device_ctx->PSSetShaderResources(0, 1, &input);
+          device_ctx->Draw(3, 0);
+
+          ID3D11RenderTargetView *null_rtv = nullptr;
+          ID3D11ShaderResourceView *null_srv = nullptr;
+          device_ctx->OMSetRenderTargets(1, &null_rtv, nullptr);
+          device_ctx->PSSetShaderResources(0, 1, &null_srv);
         };
 
         // Clear render target view(s) once so that the aspect ratio mismatch "bars" appear black
@@ -607,8 +630,14 @@ namespace platf::dxgi {
 
           mark_sbs_warp_end(gpu_timer);
 
-          // Draw captured frame (now SBS, optionally post-warp sharpened).
-          draw(final_sbs_srv, out_Y_or_YUV_viewports, out_UV_viewport, sbs_intermediate_linear);
+          if (rgb_present_target) {
+            // The local AR presenter consumes the production RGB warp directly, avoiding an
+            // encode/decode round trip. Sampling also handles equivalent SDR texture layouts.
+            draw_rgb(final_sbs_srv);
+          } else {
+            // Draw captured frame (now SBS, optionally post-warp sharpened) into encoder YUV.
+            draw(final_sbs_srv, out_Y_or_YUV_viewports, out_UV_viewport, sbs_intermediate_linear);
+          }
           end_sbs_gpu_timer(gpu_timer);
 
           // Debug frame dump (offline artifact inspection): on the client "Dump 3D" button or a
@@ -638,8 +667,12 @@ namespace platf::dxgi {
             sbs_perf::tick();  // once per SBS frame: periodic p50/p95 summary + JSON snapshot
           }
         } else {
-          // Plain 2D: draw the captured frame straight into the output.
-          draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewports, out_UV_viewport, img.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+          if (rgb_present_target) {
+            draw_rgb(img_ctx.encoder_input_res.get());
+          } else {
+            // Plain 2D: draw the captured frame straight into the encoder output.
+            draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewports, out_UV_viewport, img.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+          }
         }
 
         // Release encoder mutex to allow capture code to reuse this image
@@ -1077,6 +1110,7 @@ namespace platf::dxgi {
 
       create_pixel_shader_helper(sbs_reprojection_ps_hlsl, sbs_reprojection_ps);
       create_pixel_shader_helper(sbs_sharpen_ps_hlsl, sbs_sharpen_ps);
+      create_pixel_shader_helper(cursor_ps_hlsl, rgb_present_ps);
       create_vertex_shader_helper(sbs_reprojection_vs_hlsl, sbs_reprojection_vs);
 
       switch (format) {
@@ -1165,6 +1199,7 @@ namespace platf::dxgi {
 
       auto out_width = width;
       auto out_height = height;
+      rgb_present_viewport = {0.0f, 0.0f, (float) out_width, (float) out_height, 0.0f, 1.0f};
 
       // When SBS is on the source content is a double-width side-by-side frame; otherwise it
       // is the plain captured frame. The output (width x height) already carries the doubling
@@ -1614,6 +1649,9 @@ namespace platf::dxgi {
     device_ctx_t device_ctx;
 
     texture2d_t output_texture;
+    ID3D11RenderTargetView *rgb_present_target = nullptr;  ///< Non-owning swapchain RTV during convert_rgb().
+    ps_t rgb_present_ps;
+    D3D11_VIEWPORT rgb_present_viewport {};
 
     std::unique_ptr<models::video_depth_estimator> depth_estimator;
     // The per-device D3D estimator is built on a background thread and borrows the startup-warmed
@@ -1657,6 +1695,370 @@ namespace platf::dxgi {
 
     platf::sbs_debug::dumper sbs_dumper;  ///< Debug: dumps SBS frames on the client button (see sbs_debug_dump.h).
   };
+
+  namespace {
+    constexpr wchar_t local_presenter_window_class[] = L"ApolloLocalArPresenter";
+
+    LRESULT CALLBACK local_presenter_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+      switch (message) {
+        case WM_CLOSE:
+          DestroyWindow(hwnd);
+          return 0;
+        case WM_DESTROY:
+          return 0;
+        case WM_NCHITTEST:
+          return HTTRANSPARENT;
+        case WM_MOUSEACTIVATE:
+          return MA_NOACTIVATE;
+        default:
+          return DefWindowProcW(hwnd, message, wparam, lparam);
+      }
+    }
+
+    bool register_local_presenter_window_class() {
+      WNDCLASSEXW window_class {};
+      window_class.cbSize = sizeof(window_class);
+      window_class.lpfnWndProc = local_presenter_window_proc;
+      window_class.hInstance = GetModuleHandleW(nullptr);
+      window_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+      window_class.lpszClassName = local_presenter_window_class;
+      if (RegisterClassExW(&window_class)) {
+        return true;
+      }
+      return GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    }
+  }  // namespace
+
+  local_presenter_result_e run_local_presenter(const local_presenter_config_t &config, std::stop_token stop_token) {
+    auto read_target_rect = [&]() {
+      if (!config.live_target) {
+        return config.target_rect;
+      }
+      std::lock_guard lock(config.live_target->mutex);
+      return config.live_target->rect;
+    };
+    auto read_target_display_name = [&]() {
+      if (!config.live_target) {
+        return std::string {};
+      }
+      std::lock_guard lock(config.live_target->mutex);
+      return config.live_target->display_name;
+    };
+    auto target_rect = read_target_rect();
+    auto target_display_name = read_target_display_name();
+    const int output_width = target_rect.right - target_rect.left;
+    const int output_height = target_rect.bottom - target_rect.top;
+    if (output_width <= 0 || output_height <= 0 || config.source_display_name.empty()) {
+      BOOST_LOG(error) << "Local AR presenter received invalid source or target geometry."sv;
+      return local_presenter_result_e::error;
+    }
+
+    ::video::config_t capture_config {};
+    capture_config.width = config.sbs_mode == ::video::SBS_AI ? output_width / 2 : output_width;
+    capture_config.height = output_height;
+    capture_config.framerate = std::max(1, (config.target_refresh_millihz + 500) / 1000);
+    capture_config.encodingFramerate = config.target_refresh_millihz;
+
+    auto display = platf::display(platf::mem_type_e::dxgi, config.source_display_name, capture_config);
+    auto dxgi_display = std::dynamic_pointer_cast<display_base_t>(display);
+    if (!dxgi_display) {
+      BOOST_LOG(warning) << "Local AR presenter could not yet open virtual source display "sv
+                         << config.source_display_name << "; refreshing display topology."sv;
+      return local_presenter_result_e::reinit;
+    }
+
+    d3d_base_encode_device converter;
+    if (converter.init(display, dxgi_display->adapter.get(), platf::pix_fmt_e::nv12)) {
+      BOOST_LOG(error) << "Local AR presenter could not initialize the production SBS converter."sv;
+      return local_presenter_result_e::error;
+    }
+
+    // init_output() also initializes the complete production SBS resource graph. The local path
+    // copies its RGB result directly to the swapchain, so this NV12 surface is never encoded.
+    D3D11_TEXTURE2D_DESC dummy_desc {};
+    dummy_desc.Width = output_width;
+    dummy_desc.Height = output_height;
+    dummy_desc.MipLevels = 1;
+    dummy_desc.ArraySize = 1;
+    dummy_desc.Format = DXGI_FORMAT_NV12;
+    dummy_desc.SampleDesc.Count = 1;
+    dummy_desc.Usage = D3D11_USAGE_DEFAULT;
+    dummy_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    texture2d_t dummy_output;
+    auto status = converter.device->CreateTexture2D(&dummy_desc, nullptr, &dummy_output);
+    if (FAILED(status) || converter.init_output(dummy_output.get(), output_width, output_height, config.sbs_mode, config.sbs_config)) {
+      BOOST_LOG(error) << "Local AR presenter could not initialize output resources: "sv
+                       << util::log_hex(status);
+      return local_presenter_result_e::error;
+    }
+
+    if (!register_local_presenter_window_class()) {
+      BOOST_LOG(error) << "Local AR presenter could not register its window class: "sv
+                       << GetLastError();
+      return local_presenter_result_e::error;
+    }
+
+    HWND window = CreateWindowExW(
+      WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+      local_presenter_window_class,
+      L"Apollo Local SBS AI",
+      WS_POPUP,
+      target_rect.left,
+      target_rect.top,
+      output_width,
+      output_height,
+      nullptr,
+      nullptr,
+      GetModuleHandleW(nullptr),
+      nullptr
+    );
+    if (!window) {
+      BOOST_LOG(error) << "Local AR presenter could not create its output window: "sv
+                       << GetLastError();
+      return local_presenter_result_e::error;
+    }
+    auto destroy_window = util::fail_guard([&]() {
+      if (IsWindow(window)) {
+        DestroyWindow(window);
+      }
+      SetThreadExecutionState(ES_CONTINUOUS);
+    });
+
+    SetWindowPos(
+      window,
+      HWND_TOPMOST,
+      target_rect.left,
+      target_rect.top,
+      output_width,
+      output_height,
+      SWP_NOACTIVATE | SWP_SHOWWINDOW
+    );
+    ShowWindow(window, SW_SHOWNOACTIVATE);
+    SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED);
+
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    Microsoft::WRL::ComPtr<IDXGIFactory2> factory;
+    Microsoft::WRL::ComPtr<IDXGISwapChain1> swapchain;
+    status = converter.device->QueryInterface(IID_PPV_ARGS(&dxgi_device));
+    if (SUCCEEDED(status)) {
+      status = dxgi_device->GetAdapter(&adapter);
+    }
+    if (SUCCEEDED(status)) {
+      status = adapter->GetParent(IID_PPV_ARGS(&factory));
+    }
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Local AR presenter could not obtain its DXGI factory: "sv
+                       << util::log_hex(status);
+      return local_presenter_result_e::error;
+    }
+
+    Microsoft::WRL::ComPtr<IDXGIOutput> target_output;
+    DXGI_OUTPUT_DESC target_output_desc {};
+    const auto target_display_name_wide = platf::from_utf8(target_display_name);
+    for (UINT output_index = 0;; ++output_index) {
+      Microsoft::WRL::ComPtr<IDXGIOutput> candidate;
+      const auto enum_status = adapter->EnumOutputs(output_index, &candidate);
+      if (enum_status == DXGI_ERROR_NOT_FOUND) {
+        break;
+      }
+      if (FAILED(enum_status) || FAILED(candidate->GetDesc(&target_output_desc))) {
+        continue;
+      }
+      if (std::wstring_view(target_output_desc.DeviceName) == target_display_name_wide) {
+        target_output = std::move(candidate);
+        break;
+      }
+    }
+    if (!target_output) {
+      BOOST_LOG(warning) << "Local AR physical output "sv << target_display_name
+                         << " is not yet available through DXGI; refreshing topology."sv;
+      return local_presenter_result_e::reinit;
+    }
+
+    const auto actual_target_rect = target_output_desc.DesktopCoordinates;
+    const auto actual_target_width = actual_target_rect.right - actual_target_rect.left;
+    const auto actual_target_height = actual_target_rect.bottom - actual_target_rect.top;
+    if (actual_target_width != output_width || actual_target_height != output_height) {
+      BOOST_LOG(info) << "Local AR physical output mode changed from "sv << output_width << 'x'
+                      << output_height << " to "sv << actual_target_width << 'x'
+                      << actual_target_height << "; reinitializing."sv;
+      return local_presenter_result_e::reinit;
+    }
+    target_rect = actual_target_rect;
+    SetWindowPos(
+      window,
+      HWND_TOPMOST,
+      target_rect.left,
+      target_rect.top,
+      output_width,
+      output_height,
+      SWP_NOACTIVATE | SWP_SHOWWINDOW
+    );
+
+    DXGI_SWAP_CHAIN_DESC1 swapchain_desc {};
+    swapchain_desc.Width = output_width;
+    swapchain_desc.Height = output_height;
+    // Preserve linear scRGB when the private virtual desktop is captured as FP16. Other supported
+    // SDR capture layouts are sampled into the canonical BGRA8 presentation format.
+    swapchain_desc.Format = dxgi_display->capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT ?
+                              DXGI_FORMAT_R16G16B16A16_FLOAT :
+                              DXGI_FORMAT_B8G8R8A8_UNORM;
+    swapchain_desc.SampleDesc.Count = 1;
+    swapchain_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapchain_desc.BufferCount = 2;
+    swapchain_desc.Scaling = DXGI_SCALING_STRETCH;
+    swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    swapchain_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    status = factory->CreateSwapChainForHwnd(
+      converter.device.get(),
+      window,
+      &swapchain_desc,
+      nullptr,
+      target_output.Get(),
+      &swapchain
+    );
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Local AR presenter could not create its swapchain: "sv
+                       << util::log_hex(status);
+      return local_presenter_result_e::error;
+    }
+    factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+
+    Microsoft::WRL::ComPtr<IDXGISwapChain3> swapchain3;
+    status = swapchain.As(&swapchain3);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Local AR presenter could not query IDXGISwapChain3: "sv
+                       << util::log_hex(status);
+      return local_presenter_result_e::error;
+    }
+    if (swapchain_desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+      status = swapchain3->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Local AR presenter could not set its scRGB color space: "sv
+                         << util::log_hex(status);
+        return local_presenter_result_e::error;
+      }
+    }
+
+    // D3D11 flip-model swapchains expose the current writable buffer as buffer 0.
+    // Unlike D3D12, querying every physical buffer by index is not supported.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> backbuffer;
+    status = swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer));
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> backbuffer_rtv;
+    if (SUCCEEDED(status)) {
+      status = converter.device->CreateRenderTargetView(backbuffer.Get(), nullptr, &backbuffer_rtv);
+    }
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Local AR presenter could not create the swapchain render target: "sv
+                       << util::log_hex(status);
+      return local_presenter_result_e::error;
+    }
+
+    BOOST_LOG(info) << "Local AR presentation started: source="sv << config.source_display_name
+                    << " target="sv << target_display_name << " ["sv << target_rect.left << ','
+                    << target_rect.top << "] "sv << output_width << 'x' << output_height << '@'
+                    << capture_config.framerate << " mode="sv
+                    << (config.sbs_mode == ::video::SBS_AI ? "SBS AI"sv : "normal"sv)
+                    << "; physical output is presentation-only."sv;
+
+    std::array<std::shared_ptr<platf::img_t>, 3> image_pool;
+    bool capture_cursor = true;
+    bool window_closed = false;
+    auto pump_messages = [&]() {
+      MSG message {};
+      while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+      }
+      window_closed = !IsWindow(window);
+    };
+
+    auto pull_image = [&](std::shared_ptr<platf::img_t> &image) {
+      if (stop_token.stop_requested() || window_closed) {
+        image.reset();
+        return false;
+      }
+      for (auto &candidate : image_pool) {
+        if (!candidate) {
+          candidate = display->alloc_img();
+        }
+        if (candidate && candidate.use_count() == 1) {
+          image = candidate;
+          image->frame_timestamp.reset();
+          return true;
+        }
+      }
+      image.reset();
+      return false;
+    };
+
+    bool presentation_reinit_requested = false;
+    auto push_image = [&](std::shared_ptr<platf::img_t> &&image, bool frame_captured) {
+      pump_messages();
+      if (stop_token.stop_requested() || window_closed) {
+        return false;
+      }
+      if (!frame_captured) {
+        return true;
+      }
+
+      const auto latest_target_rect = read_target_rect();
+      if (latest_target_rect.left != target_rect.left || latest_target_rect.top != target_rect.top || latest_target_rect.right != target_rect.right || latest_target_rect.bottom != target_rect.bottom) {
+        const auto latest_width = latest_target_rect.right - latest_target_rect.left;
+        const auto latest_height = latest_target_rect.bottom - latest_target_rect.top;
+        if (latest_width != output_width || latest_height != output_height) {
+          BOOST_LOG(info) << "Local AR target size changed; reinitializing presentation resources."sv;
+          presentation_reinit_requested = true;
+          return false;
+        }
+        SetWindowPos(
+          window,
+          HWND_TOPMOST,
+          latest_target_rect.left,
+          latest_target_rect.top,
+          output_width,
+          output_height,
+          SWP_NOACTIVATE | SWP_SHOWWINDOW
+        );
+        target_rect = latest_target_rect;
+      }
+
+      if (converter.convert_rgb(*image, backbuffer_rtv.Get())) {
+        BOOST_LOG(error) << "Local AR presenter failed to convert a captured frame."sv;
+        return false;
+      }
+      DXGI_PRESENT_PARAMETERS present_parameters {};
+      status = swapchain->Present1(1, DXGI_PRESENT_RESTRICT_TO_OUTPUT, &present_parameters);
+      if (status == DXGI_ERROR_RESTRICT_TO_OUTPUT_STALE) {
+        BOOST_LOG(info) << "Local AR restricted output changed; reinitializing presentation resources."sv;
+        presentation_reinit_requested = true;
+        return false;
+      }
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Local AR presenter Present() failed: "sv << util::log_hex(status);
+        return false;
+      }
+      return true;
+    };
+
+    const auto capture_status = display->capture(push_image, pull_image, &capture_cursor);
+    if (presentation_reinit_requested && !stop_token.stop_requested()) {
+      return local_presenter_result_e::reinit;
+    }
+    if (capture_status == capture_e::reinit && !stop_token.stop_requested()) {
+      BOOST_LOG(info) << "Local AR capture topology changed; reinitializing the presenter."sv;
+      return local_presenter_result_e::reinit;
+    }
+    if (!stop_token.stop_requested() && !window_closed) {
+      BOOST_LOG(warning) << "Local AR capture stopped unexpectedly with status "sv
+                         << (int) capture_status << '.';
+      return local_presenter_result_e::error;
+    }
+
+    BOOST_LOG(info) << "Local AR presentation stopped."sv;
+    return local_presenter_result_e::stopped;
+  }
 
   class d3d_avcodec_encode_device_t: public avcodec_encode_device_t {
   public:

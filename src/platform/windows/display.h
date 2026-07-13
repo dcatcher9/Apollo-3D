@@ -4,6 +4,9 @@
  */
 #pragma once
 
+#include <mutex>
+#include <stop_token>
+
 // platform includes
 #include <d3d11.h>
 #include <d3d11_4.h>
@@ -386,4 +389,30 @@ namespace platf::dxgi {
     capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
     capture_e release_snapshot() override;
   };
+
+  struct local_presenter_config_t {
+    std::string source_display_name;
+    RECT target_rect {};
+    int target_refresh_millihz = 60000;
+    int sbs_mode = ::video::SBS_OFF;
+    config::video_t::sbs_t sbs_config {};
+    struct target_t {
+      std::mutex mutex;
+      RECT rect {};
+      std::string display_name;
+    };
+    std::shared_ptr<target_t> live_target;
+  };
+
+  enum class local_presenter_result_e {
+    stopped,
+    reinit,
+    error,
+  };
+
+  /**
+   * Capture a local display and present it to a borderless window on another display.
+   * SBS mode uses the same matched-frame depth and warp implementation as the encoder path.
+   */
+  local_presenter_result_e run_local_presenter(const local_presenter_config_t &config, std::stop_token stop_token);
 }  // namespace platf::dxgi
