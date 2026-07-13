@@ -117,9 +117,14 @@ Harness A/B levers (after `--extra`):
 - `--no-subject-stretch` — disable that stretch for an accepted-feature ablation.
 - `--subject-plane-lock F` — local subject-band flatten (e.g. `0.28`; default off).
 - `--bestv2-sharpen on|off` — explicitly ablate the exact SDR Bestv2 post-sharpen.
+- `--cuda-graph on|off` — capture and replay the TensorRT enqueue when the mapped D3D tensor
+  addresses remain stable. The first enqueue for a new address/shape is an uncaptured warmup.
 
 Production uses the equivalent `sbs_3d_pop_strength = F` key. Like every individual SBS key it
 overrides every profile; omit it to retain each profile's configured/default value (`1.25`).
+CUDA Graph replay is enabled by default for every profile. Use `sbs_3d_cuda_graph = false` only
+for driver diagnosis or a controlled performance A/B; unsupported/capture-failed systems already
+fall back to ordinary TensorRT enqueue automatically.
 
 Exit code is the verdict (0 pass / 1 regression / 2 setup error), so the eval→fix→eval loop is
 scriptable. `results.json` carries provenance (git sha+dirty, models, clip hashes, gpu-contention
@@ -143,7 +148,7 @@ depth-step floor (flat scenes legitimately read 0), and all pixel windows scale 
 width — but absolute values are still not comparable across clip resolutions; baselines are
 per-clip-set. The harness writes 16-bit depth PNGs so `swim` resolves below 1/255.
 
-**Eval schema 18 / harness contract 10:** `run_eval.py` pins the profile and model explicitly and
+**Eval schema 19 / harness contract 11:** `run_eval.py` pins the profile and model explicitly and
 has no alternate warp selector. By default the
 harness submits and consumes exactly one inference per source frame, so EMA and normalization
 update once. `--depth-every N` is an explicit comparison-only cadence treatment: color advances

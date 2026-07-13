@@ -1248,13 +1248,13 @@ namespace config {
       BOOST_LOG(warning) << "SBS profile 'vd3d' was retired; using 'apollo'.";
       sbs_profile = "apollo";
     }
-    static constexpr std::array<std::string_view, 20> sbs_parameter_names {
+    static constexpr std::array<std::string_view, 21> sbs_parameter_names {
       "pop_strength", "ema", "depth_short_side", "depth_max_aspect", "minmax_ema",
       "ema_edge_change", "ema_edge_gradient", "ema_edge_dilation", "ema_edge_strength",
       "subject_lock", "subject_recenter", "subject_stretch", "subject_plane_lock",
       "subject_plane_width", "bestv2_sharpen",
       "depth_model", "depth_model_url", "prebuild_models", "max_encode_width",
-      "perf_stats"
+      "perf_stats", "cuda_graph"
     };
     std::vector<std::string> profile_names {"apollo"};
     if (std::find(profile_names.begin(), profile_names.end(), sbs_profile) == profile_names.end()) {
@@ -1336,6 +1336,7 @@ namespace config {
       string_f(vars, prefix + "prebuild_models", target.prebuild_models);
       int_between_f(vars, prefix + "max_encode_width", target.max_encode_width, {256, 16384});
       bool_f(vars, prefix + "perf_stats", target.perf_stats);
+      bool_f(vars, prefix + "cuda_graph", target.cuda_graph);
     };
 
     for (const auto &name : profile_names) {

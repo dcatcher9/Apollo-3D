@@ -219,7 +219,7 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
-        self.assertIn('"  \\"schema\\": 10,\\n"', harness)
+        self.assertIn('"  \\"schema\\": 11,\\n"', harness)
         self.assertIn('\\"depth_override_frames\\"', harness)
 
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
@@ -249,7 +249,7 @@ class EvalContractTests(unittest.TestCase):
             evaluator = fh.read()
         self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
         self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
-        self.assertIn('"schema": 10', evaluator)
+        self.assertIn('"schema": 11', evaluator)
         self.assertIn('depth_override_root and not args.comparison_only', evaluator)
 
     def test_live_depth_pairing_is_bounded_and_sync_is_evaluation_only(self):
@@ -271,6 +271,40 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             harness = fh.read()
         self.assertIn("finish_pending_depth_for_evaluation", harness)
+
+    def test_cuda_graph_replay_is_signature_safe_and_falls_back(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "config.h"), encoding="utf-8") as fh:
+            config = fh.read()
+        self.assertIn("bool cuda_graph = true;", config)
+        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
+                  encoding="utf-8") as fh:
+            estimator = fh.read()
+        self.assertIn("input != graph_input || output != graph_output", estimator)
+        self.assertIn("target_w != graph_width || target_h != graph_height", estimator)
+        self.assertIn("if (!graph_signature_warmed)", estimator)
+        self.assertIn("destroy_inference_graph(cuda);", estimator)
+        self.assertIn("return exec_context->enqueueV3(cu_stream);", estimator)
+        with open(os.path.join(repo, "src", "cuda_driver_api.h"), encoding="utf-8") as fh:
+            driver = fh.read()
+        for symbol in ("cuStreamBeginCapture", "cuStreamEndCapture",
+                       "cuGraphInstantiateWithFlags", "cuGraphLaunch",
+                       "cuGraphExecDestroy"):
+            self.assertIn(symbol, driver)
+
+    def test_cuda_graph_eval_override_matches_profile_precedence(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
+            fh.write("sbs_3d_profile = cinema\n"
+                     "sbs_3d_profile_cinema_cuda_graph = false\n")
+            path = fh.name
+        try:
+            self.assertFalse(run_eval.expected_profile_bool(
+                path, "cinema", "cuda_graph", True, [], "--cuda-graph"))
+            self.assertTrue(run_eval.expected_profile_bool(
+                path, "cinema", "cuda_graph", True,
+                ["--cuda-graph", "on"], "--cuda-graph"))
+        finally:
+            os.unlink(path)
 
     def test_edge_selective_ema_uses_immutable_history_and_exports_locality_mask(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -36,7 +36,7 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-EVAL_SCHEMA = 18  # Apollo-only profile contract; red-only forward-coverage mask
+EVAL_SCHEMA = 19  # CUDA-graph inference experiment; harness contract 11
 
 
 def suite_defaults(name):
@@ -262,6 +262,18 @@ def expected_profile_number(conf, profile, key, default, extra, cli_key, cast=fl
         fail(f"invalid numeric value for {key}: {value!r}")
 
 
+def expected_profile_bool(conf, profile, key, default, extra, cli_key):
+    value = conf_value(conf, f"sbs_3d_profile_{profile}_{key}", default)
+    value = conf_value(conf, f"sbs_3d_{key}", value)
+    value = extra_value(extra, cli_key, value)
+    normalized = str(value).strip().lower()
+    if normalized in ("true", "yes", "on", "1"):
+        return True
+    if normalized in ("false", "no", "off", "0"):
+        return False
+    fail(f"invalid boolean value for {key}: {value!r}")
+
+
 def expected_depth_model(conf, profile):
     """Resolve the model with the same profile-first, explicit-override order as production."""
     model = "depth_anything_v2_fp16"
@@ -388,6 +400,9 @@ def main():
     expected_ema_edge_strength = expected_profile_number(
         args.conf, expected_config_profile, "ema_edge_strength", 0.25, args.extra,
         "--ema-edge-strength")
+    expected_cuda_graph = expected_profile_bool(
+        args.conf, expected_config_profile, "cuda_graph", True, args.extra,
+        "--cuda-graph")
     expected_model = expected_depth_model(args.conf, expected_config_profile)
     missing = check_engines(args.build_dir, expected_model)
     if missing and not args.allow_build:
@@ -451,7 +466,7 @@ def main():
             fail(f"{clip}: harness did not write contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
         expected_contract = {
-            "schema": 10,
+            "schema": 11,
             "model": expected_model,
             "profile": expected_config_profile,
             "depth_step": depth_step,
@@ -463,6 +478,7 @@ def main():
             "ema_edge_dilation": expected_ema_edge_dilation,
             "ema_edge_strength": expected_ema_edge_strength,
             "literal_bestv2": literal_bestv2,
+            "cuda_graph": expected_cuda_graph,
         }
         mismatched = {key: (expected, contract.get(key))
                       for key, expected in expected_contract.items()
@@ -471,7 +487,9 @@ def main():
             fail(f"{clip}: harness contract mismatch: {mismatched}")
         clip_meta = {"model": contract["model"], "profile": contract["profile"],
                      "depth_compensation": contract["depth_compensation"],
-                     "literal_bestv2": contract["literal_bestv2"]}
+                     "literal_bestv2": contract["literal_bestv2"],
+                     "cuda_graph": contract["cuda_graph"],
+                     "cuda_graph_captured": contract.get("cuda_graph_captured", False)}
 
         # A valid harness result has one source, raw-model, warp-input depth, and SBS artifact for
         # every numeric frame identity. This catches dropped/renumbered outputs before metrics run.

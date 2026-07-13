@@ -33,6 +33,19 @@ typedef CUresult(__stdcall* PFN_cuStreamCreate)(CUstream* phStream, unsigned int
 typedef CUresult(__stdcall* PFN_cuStreamDestroy)(CUstream hStream);
 typedef CUresult(__stdcall* PFN_cuStreamSynchronize)(CUstream hStream);
 typedef CUresult(__stdcall* PFN_cuStreamQuery)(CUstream hStream);
+typedef struct CUgraph_st* CUgraph;
+typedef struct CUgraphExec_st* CUgraphExec;
+typedef enum CUstreamCaptureMode_enum {
+    CU_STREAM_CAPTURE_MODE_GLOBAL = 0,
+    CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 1,
+    CU_STREAM_CAPTURE_MODE_RELAXED = 2
+} CUstreamCaptureMode;
+typedef CUresult(__stdcall* PFN_cuStreamBeginCapture)(CUstream hStream, CUstreamCaptureMode mode);
+typedef CUresult(__stdcall* PFN_cuStreamEndCapture)(CUstream hStream, CUgraph* phGraph);
+typedef CUresult(__stdcall* PFN_cuGraphInstantiateWithFlags)(CUgraphExec* phGraphExec, CUgraph hGraph, unsigned long long flags);
+typedef CUresult(__stdcall* PFN_cuGraphLaunch)(CUgraphExec hGraphExec, CUstream hStream);
+typedef CUresult(__stdcall* PFN_cuGraphDestroy)(CUgraph hGraph);
+typedef CUresult(__stdcall* PFN_cuGraphExecDestroy)(CUgraphExec hGraphExec);
 typedef struct CUgraphicsResource_st* CUgraphicsResource;
 typedef CUresult(__stdcall* PFN_cuGraphicsD3D11RegisterResource)(CUgraphicsResource* pCudaResource, ID3D11Resource* pD3DResource, unsigned int Flags);
 typedef CUresult(__stdcall* PFN_cuD3D11GetDevice)(CUdevice* pCudaDevice, IDXGIAdapter* pAdapter);
@@ -67,6 +80,12 @@ struct cuda_driver_api {
     PFN_cuStreamDestroy cuStreamDestroy = nullptr;
     PFN_cuStreamSynchronize cuStreamSynchronize = nullptr;
     PFN_cuStreamQuery cuStreamQuery = nullptr;
+    PFN_cuStreamBeginCapture cuStreamBeginCapture = nullptr;
+    PFN_cuStreamEndCapture cuStreamEndCapture = nullptr;
+    PFN_cuGraphInstantiateWithFlags cuGraphInstantiateWithFlags = nullptr;
+    PFN_cuGraphLaunch cuGraphLaunch = nullptr;
+    PFN_cuGraphDestroy cuGraphDestroy = nullptr;
+    PFN_cuGraphExecDestroy cuGraphExecDestroy = nullptr;
     
     PFN_cuGraphicsD3D11RegisterResource cuGraphicsD3D11RegisterResource = nullptr;
     PFN_cuD3D11GetDevice cuD3D11GetDevice = nullptr;
@@ -107,6 +126,13 @@ struct cuda_driver_api {
                 if (!api.cuStreamDestroy) api.cuStreamDestroy = (PFN_cuStreamDestroy)GetProcAddress(api.hMod, "cuStreamDestroy");
                 api.cuStreamSynchronize = (PFN_cuStreamSynchronize)GetProcAddress(api.hMod, "cuStreamSynchronize");
                 api.cuStreamQuery = (PFN_cuStreamQuery)GetProcAddress(api.hMod, "cuStreamQuery");
+                api.cuStreamBeginCapture = (PFN_cuStreamBeginCapture)GetProcAddress(api.hMod, "cuStreamBeginCapture_v2");
+                if (!api.cuStreamBeginCapture) api.cuStreamBeginCapture = (PFN_cuStreamBeginCapture)GetProcAddress(api.hMod, "cuStreamBeginCapture");
+                api.cuStreamEndCapture = (PFN_cuStreamEndCapture)GetProcAddress(api.hMod, "cuStreamEndCapture");
+                api.cuGraphInstantiateWithFlags = (PFN_cuGraphInstantiateWithFlags)GetProcAddress(api.hMod, "cuGraphInstantiateWithFlags");
+                api.cuGraphLaunch = (PFN_cuGraphLaunch)GetProcAddress(api.hMod, "cuGraphLaunch");
+                api.cuGraphDestroy = (PFN_cuGraphDestroy)GetProcAddress(api.hMod, "cuGraphDestroy");
+                api.cuGraphExecDestroy = (PFN_cuGraphExecDestroy)GetProcAddress(api.hMod, "cuGraphExecDestroy");
                 
                 api.cuGraphicsD3D11RegisterResource = (PFN_cuGraphicsD3D11RegisterResource)GetProcAddress(api.hMod, "cuGraphicsD3D11RegisterResource");
                 api.cuD3D11GetDevice = (PFN_cuD3D11GetDevice)GetProcAddress(api.hMod, "cuD3D11GetDevice");

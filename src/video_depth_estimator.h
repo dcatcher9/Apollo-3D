@@ -46,6 +46,7 @@ namespace models {
     std::uint64_t completed_frame_id = 0;  ///< Caller-provided identity of that completed result.
     bool inference_enqueued = false;  ///< This call submitted inference for the supplied input frame.
     std::uint64_t enqueued_frame_id = 0;  ///< Identity attached to the newly submitted inference.
+    bool cuda_graph_active = false;  ///< TensorRT enqueue is currently replaying a captured graph.
   };
 
   class video_depth_estimator {

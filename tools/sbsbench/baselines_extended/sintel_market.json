@@ -62,12 +62,12 @@
     "score": 79.2
   },
   "perf_ms": {
-    "depth_infer": 2.844,
-    "sbs_composite_cpu": 0.0073,
-    "warp_infer": 0.108512
+    "depth_infer": 2.55926,
+    "sbs_composite_cpu": 0.0049,
+    "warp_infer": 0.1088
   },
   "meta": {
-    "git_sha": "5c7f3e38",
+    "git_sha": "c3ecd6d9",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -88,14 +88,16 @@
     "profile": "apollo",
     "literal_bestv2": false,
     "depth_compensation": "none",
-    "eval_schema": 18,
+    "eval_schema": 19,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "b5cd2854f4b2144d",
+    "metric_sha256": "0e55e6ee073ec1ac",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T19:31:53",
-    "run_name": "evalv18-apollo-extended",
+    "timestamp": "2026-07-12T21:17:10",
+    "run_name": "cuda-graph-baseline-extended",
+    "cuda_graph": true,
+    "cuda_graph_captured": true,
     "name": "sintel-market",
     "description": "Cinematic market scene with people, clutter and depth layering.",
     "dataset": "MPI Sintel Stereo Training Dataset",

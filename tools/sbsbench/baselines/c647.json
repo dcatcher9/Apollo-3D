@@ -57,12 +57,12 @@
     "score": 73.2
   },
   "perf_ms": {
-    "depth_infer": 2.03507,
-    "sbs_composite_cpu": 0.0062,
-    "warp_infer": 0.129888
+    "depth_infer": 1.54586,
+    "sbs_composite_cpu": 0.005,
+    "warp_infer": 0.130496
   },
   "meta": {
-    "git_sha": "5c7f3e38",
+    "git_sha": "c3ecd6d9",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -86,14 +86,16 @@
     "profile": "apollo",
     "literal_bestv2": false,
     "depth_compensation": "none",
-    "eval_schema": 18,
+    "eval_schema": 19,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "b5cd2854f4b2144d",
+    "metric_sha256": "0e55e6ee073ec1ac",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T19:30:14",
-    "run_name": "evalv18-apollo-core",
+    "timestamp": "2026-07-12T21:15:10",
+    "run_name": "cuda-graph-baseline-core",
+    "cuda_graph": true,
+    "cuda_graph_captured": true,
     "name": "washerwoman-pond",
     "description": "Woman washing laundry by a lantern-lit courtyard pond at night.",
     "content_type": "ai-generated",

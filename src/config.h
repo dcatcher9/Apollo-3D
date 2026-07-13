@@ -185,6 +185,7 @@ namespace config {
       std::string prebuild_models = "";  ///< Comma-separated registry model names to build at startup in addition to the active model. Empty = only the active model.
       int max_encode_width = 8192;  ///< Max encoder output width for host SBS. SBS doubles the client width to 2W; if 2W exceeds this, the host caps the packed frame to this width (scaling height to keep the per-eye aspect) rather than failing NVENC create. NVENC HEVC/AV1 = 8192, H.264 = 4096.
       bool perf_stats = false;  ///< Emit per-stage host-SBS timing (depth inference + convert CPU) as a rolling p50/p95/max log line + sbs_perf.json snapshot. Off by default (the perf benchmark; see docs/sbs-benchmark-plan.md).
+      bool cuda_graph = true;  ///< Capture/replay the TensorRT enqueue when mapped D3D buffer addresses remain stable. Falls back to ordinary enqueue when unsupported.
     };
 
     sbs_t sbs;

@@ -548,6 +548,7 @@ namespace sbs_bench {
       double subject_plane_lock = -1.0;  // local subject-band flatten (e.g. 0.28); <0 = conf
       double minmax_ema = -1.0;  // range-bounds EMA new-weight; <0 = conf
       int bestv2_sharpen = -1;  // -1 = conf, 0 = off, 1 = on
+      int cuda_graph = -1;  // -1 = conf, 0 = ordinary enqueue, 1 = CUDA graph replay
       bool literal_bestv2 = false;  // reference-only: disable production resolution/pop scaling
     };
 
@@ -616,6 +617,16 @@ namespace sbs_bench {
         } else if (a == "--bestv2-sharpen") {
           std::string v = next("--bestv2-sharpen");
           o.bestv2_sharpen = (v == "off" || v == "0" || v == "false") ? 0 : 1;
+        } else if (a == "--cuda-graph") {
+          std::string v = next("--cuda-graph");
+          if (v == "on" || v == "1" || v == "true") {
+            o.cuda_graph = 1;
+          } else if (v == "off" || v == "0" || v == "false") {
+            o.cuda_graph = 0;
+          } else {
+            BOOST_LOG(error) << "sbs-bench: --cuda-graph must be on or off";
+            return false;
+          }
         } else if (a == "--literal-bestv2") {
           o.literal_bestv2 = true;
         } else {
@@ -751,6 +762,9 @@ namespace sbs_bench {
     if (o.bestv2_sharpen >= 0) {
       sbs_cfg.bestv2_sharpen = (o.bestv2_sharpen != 0);
     }
+    if (o.cuda_graph >= 0) {
+      sbs_cfg.cuda_graph = (o.cuda_graph != 0);
+    }
     sbs_cfg.perf_stats = true;  // the harness always measures
     sbs_perf::set_enabled(true);
     sbs_perf::reset();
@@ -843,6 +857,7 @@ namespace sbs_bench {
 
     int written = 0;
     models::estimate_result est;
+    bool cuda_graph_captured = false;
     bool have_depth_result = false;
     const fs::path depth_override_dir = o.depth_override_root.empty() ? fs::path() :
                                           fs::path(o.depth_override_root) / fs::path(o.frames).filename();
@@ -1003,6 +1018,7 @@ namespace sbs_bench {
       if (!have_depth_result || (fi % (size_t) o.depth_every) == 0) {
         estimator.estimate_depth(in_srv.Get(), input_color, (std::uint64_t) fi);
         est = estimator.finish_pending_depth_for_evaluation(input_color);
+        cuda_graph_captured = cuda_graph_captured || est.cuda_graph_active;
         have_depth_result = true;
       } else {
         // Match the live stream between depth ticks: color advances while all depth-derived
@@ -1209,7 +1225,7 @@ namespace sbs_bench {
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
-                 << "  \"schema\": 10,\n"
+                 << "  \"schema\": 11,\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
                  << "  \"depth_step\": "
@@ -1226,6 +1242,8 @@ namespace sbs_bench {
                  << "  \"ema_edge_dilation\": " << sbs_cfg.ema_edge_dilation << ",\n"
                  << "  \"ema_edge_strength\": " << sbs_cfg.ema_edge_strength << ",\n"
                  << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n"
+                 << "  \"cuda_graph\": " << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
+                 << "  \"cuda_graph_captured\": " << (cuda_graph_captured ? "true" : "false") << ",\n"
                  << "  \"warp_mask\": {\"red\": \"forward_disocclusion_before_fill\"}\n"
                  << "}\n";
       }

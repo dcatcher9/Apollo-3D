@@ -413,6 +413,15 @@ namespace models {
     int depth_short_side;  // depth map short-side resolution (clamped to native short side)
     float max_aspect;  // aspect cap for short-side mode
     float minmax_alpha;  // temporal EMA blend for the normalized min/max
+    bool cuda_graph_enabled;
+    CUgraph inference_graph = nullptr;
+    CUgraphExec inference_graph_exec = nullptr;
+    CUdeviceptr graph_input = 0;
+    CUdeviceptr graph_output = 0;
+    int graph_width = 0;
+    int graph_height = 0;
+    bool graph_signature_warmed = false;
+    bool graph_capture_failed = false;
     bool valid = false;  // all mandatory engine, shader, and session resources are ready
     float subject_recenter;  // recenter strength consumed by depth_subject_resolve_cs
     bool subject_stretch;  // apply the shape_depth_for_pop 5/95 disparity stretch
@@ -525,6 +534,86 @@ namespace models {
       }
     }
 
+    void destroy_inference_graph(cuda_driver_api &cuda) {
+      if (inference_graph_exec && cuda.cuGraphExecDestroy) {
+        cuda.cuGraphExecDestroy(inference_graph_exec);
+      }
+      if (inference_graph && cuda.cuGraphDestroy) {
+        cuda.cuGraphDestroy(inference_graph);
+      }
+      inference_graph_exec = nullptr;
+      inference_graph = nullptr;
+      graph_signature_warmed = false;
+    }
+
+    bool enqueue_inference(CUdeviceptr input, CUdeviceptr output, cuda_driver_api &cuda) {
+      const bool graph_api = cuda_graph_enabled && cuda.cuStreamBeginCapture &&
+                             cuda.cuStreamEndCapture && cuda.cuGraphInstantiateWithFlags &&
+                             cuda.cuGraphLaunch && cuda.cuGraphDestroy &&
+                             cuda.cuGraphExecDestroy;
+      if (!graph_api || graph_capture_failed) {
+        return exec_context->enqueueV3(cu_stream);
+      }
+      auto launch_or_fallback = [&]() {
+        const CUresult launch = cuda.cuGraphLaunch(inference_graph_exec, cu_stream);
+        if (launch == CUDA_SUCCESS) {
+          return true;
+        }
+        BOOST_LOG(warning) << "TensorRT CUDA graph launch failed (" << launch
+                           << "); using ordinary enqueue.";
+        destroy_inference_graph(cuda);
+        graph_capture_failed = true;
+        return exec_context->enqueueV3(cu_stream);
+      };
+
+      // CUDA explicitly permits an interop mapping to return a different address on each map.
+      // A graph embeds TensorRT's tensor pointers, so never replay it across a changed mapping or
+      // shape. The first enqueue after each signature change is deliberately ordinary: TensorRT
+      // may perform deferred shape-dependent setup that cannot be captured.
+      if (input != graph_input || output != graph_output ||
+          target_w != graph_width || target_h != graph_height) {
+        destroy_inference_graph(cuda);
+        graph_input = input;
+        graph_output = output;
+        graph_width = target_w;
+        graph_height = target_h;
+      }
+      if (inference_graph_exec) {
+        return launch_or_fallback();
+      }
+      if (!graph_signature_warmed) {
+        graph_signature_warmed = true;
+        return exec_context->enqueueV3(cu_stream);
+      }
+
+      CUgraph captured = nullptr;
+      const CUresult begin = cuda.cuStreamBeginCapture(
+        cu_stream,
+        CU_STREAM_CAPTURE_MODE_RELAXED
+      );
+      const bool captured_enqueue = begin == CUDA_SUCCESS && exec_context->enqueueV3(cu_stream);
+      const CUresult end = begin == CUDA_SUCCESS ?
+                             cuda.cuStreamEndCapture(cu_stream, &captured) : begin;
+      if (captured_enqueue && end == CUDA_SUCCESS && captured &&
+          cuda.cuGraphInstantiateWithFlags(&inference_graph_exec, captured, 0) == CUDA_SUCCESS &&
+          inference_graph_exec) {
+        inference_graph = captured;
+        BOOST_LOG(info) << "TensorRT CUDA graph captured for " << target_w << 'x' << target_h << '.';
+        return launch_or_fallback();
+      }
+
+      if (captured) {
+        cuda.cuGraphDestroy(captured);
+      }
+      inference_graph_exec = nullptr;
+      inference_graph = nullptr;
+      graph_capture_failed = true;
+      BOOST_LOG(warning) << "TensorRT CUDA graph capture failed (begin=" << begin
+                         << ", enqueue=" << captured_enqueue << ", end=" << end
+                         << "); using ordinary enqueue.";
+      return exec_context->enqueueV3(cu_stream);
+    }
+
     // Caching
     int target_w = 0;
     int target_h = 0;
@@ -623,6 +712,7 @@ namespace models {
         depth_short_side(std::max(196, cfg.depth_short_side)),
         max_aspect(std::max(1.0f, (float) cfg.depth_max_aspect)),
         minmax_alpha((float) cfg.minmax_ema),
+        cuda_graph_enabled(cfg.cuda_graph),
         subject_recenter((float) cfg.subject_recenter),
         subject_stretch(cfg.subject_stretch),
         exact_plane_lock(cfg.subject_plane_lock > 0.0),
@@ -998,6 +1088,7 @@ namespace models {
           if (cuda.cuStreamSynchronize) {
             cuda.cuStreamSynchronize(cu_stream);
           }
+          destroy_inference_graph(cuda);
           cuda.cuStreamDestroy(cu_stream);
         }
         if (cuda_in_res) {
@@ -1138,6 +1229,7 @@ namespace models {
       r.completed_frame_id = completed_frame_id;
       r.inference_enqueued = inference_enqueued;
       r.enqueued_frame_id = enqueued_frame_id;
+      r.cuda_graph_active = inference_graph_exec != nullptr && !graph_capture_failed;
       return r;
     }
 
@@ -1693,7 +1785,11 @@ namespace models {
           // Serialize TensorRT async enqueue to avoid driver-level concurrent execution faults
           std::lock_guard<std::mutex> lock(*trt_mutex);
           int perf_slot = perf_begin(perf_depth, cu_stream);
-          enqueued = exec_context->enqueueV3(cu_stream);
+          enqueued = enqueue_inference(
+            (CUdeviceptr) d_in,
+            (CUdeviceptr) d_out,
+            cuda
+          );
           if (!enqueued) {
             if (!stream_error_logged) {
               BOOST_LOG(error) << "TensorRT enqueueV3 failed; retaining the last valid depth.";
