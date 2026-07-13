@@ -19,9 +19,9 @@ Historical experiment evidence remains in Git history and `sbs-feature-decision-
    `sbs_3d_max_encode_width`, preserve each eye's aspect while scaling to the cap.
 
 Profiles remain configuration-only parameter sets over this single geometry. Define fields with
-`sbs_3d_profile_<name>_<parameter>`; `sbs_3d_profile` selects the default. Explicit top-level
-`sbs_3d_*` keys override the corresponding value in every profile. Apollo advertises the complete
-profile list and Artemis can switch profiles atomically during a stream.
+`sbs_3d_profile_<name>_<parameter>`; `sbs_3d_profile` selects the startup preset. Explicit top-level
+`sbs_3d_*` keys override the corresponding selected-profile value. Artemis switches only between
+Normal and Host SBS AI; changing the host profile requires restarting Apollo.
 
 Bestv2 disparity is calibrated at the evaluator's 854-pixel source width and normalized to the
 5120x2160 Artemis reference aspect. `sbs_3d_pop_strength` scales the final parallax (`0.25`–`2`,

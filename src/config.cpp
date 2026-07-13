@@ -26,12 +26,13 @@
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "rtsp.h"
-#include "video.h"
 #include "utility.h"
+#include "video.h"
 
 #ifdef _WIN32
-  #include <shellapi.h>
   #include "platform/windows/utils.h"
+
+  #include <shellapi.h>
 #endif
 
 #if !defined(__ANDROID__) && !defined(__APPLE__)
@@ -437,9 +438,9 @@ namespace config {
   }  // namespace dd
 
   video_t video {
-    false, // headless_mode
-    true, // limit_framerate
-    false, // double_refreshrate
+    false,  // headless_mode
+    true,  // limit_framerate
+    false,  // double_refreshrate
 
     28,  // qp
 
@@ -514,8 +515,8 @@ namespace config {
     0,  // minimum_fps_target (0 = framerate)
 
     "1920x1080x60",  // fallback_mode
-    false, // isolated Display
-    false, // ignore_encoder_probe_failure
+    false,  // isolated Display
+    false,  // ignore_encoder_probe_failure
 
     {},  // sbs (tuned defaults are the sbs_t member initializers in config.h)
   };
@@ -525,8 +526,8 @@ namespace config {
     {},  // virtual_sink
     true,  // stream audio
     true,  // install_steam_drivers
-    true, // keep_sink_default
-    true, // auto_capture
+    true,  // keep_sink_default
+    true,  // auto_capture
   };
 
   stream_t stream {
@@ -576,15 +577,15 @@ namespace config {
     true,  // always send scancodes
     true,  // high resolution scrolling
     true,  // native pen/touch support
-    false, // enable input only mode
-    true, // forward_rumble
+    false,  // enable input only mode
+    true,  // forward_rumble
   };
 
   sunshine_t sunshine {
-    false, // hide_tray_controls
-    true, // enable_pairing
-    true, // enable_discovery
-    false, // envvar_compatibility_mode
+    false,  // hide_tray_controls
+    true,  // enable_pairing
+    true,  // enable_discovery
+    false,  // envvar_compatibility_mode
     "en",  // locale
     2,  // min_log_level
     0,  // flags
@@ -1119,11 +1120,11 @@ namespace config {
 #endif
 
     for (auto &[name, val] : vars) {
-    #ifdef _WIN32
+#ifdef _WIN32
       BOOST_LOG(info) << "config: ["sv << name << "] -- ["sv << utf8ToAcp(val) << ']';
-    #else
+#else
       BOOST_LOG(info) << "config: ["sv << name << "] -- ["sv << val << ']';
-    #endif
+#endif
       modified_config_settings[name] = val;
     }
 
@@ -1233,13 +1234,12 @@ namespace config {
     bool_f(vars, "isolated_virtual_display_option", video.isolated_virtual_display_option);
     bool_f(vars, "ignore_encoder_probe_failure", video.ignore_encoder_probe_failure);
 
-    // Apply one complete validated SBS profile first. Every individual key below is parsed
-    // afterwards, so an explicitly configured parameter always overrides its profile value.
-    // Reinitializing the struct also clears stale values when a config reload removes an override.
+    // Apply one complete startup profile first. Individual sbs_3d_* keys are parsed afterwards,
+    // so an explicitly configured parameter always overrides its profile value. Reinitializing
+    // the struct also clears stale values when a config reload removes an override.
     std::string sbs_profile = "apollo";
     string_f(vars, "sbs_3d_profile", sbs_profile);
-    if (sbs_profile.empty() || sbs_profile.size() > 64 ||
-        sbs_profile.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos) {
+    if (sbs_profile.empty() || sbs_profile.size() > 64 || sbs_profile.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos) {
       BOOST_LOG(warning) << "Invalid sbs_3d_profile name '" << sbs_profile
                          << "'; use 1-64 letters, digits, '_' or '-'. Using 'apollo'.";
       sbs_profile = "apollo";
@@ -1248,73 +1248,6 @@ namespace config {
       BOOST_LOG(warning) << "SBS profile 'vd3d' was retired; using 'apollo'.";
       sbs_profile = "apollo";
     }
-    static constexpr std::array<std::string_view, 21> sbs_parameter_names {
-      "pop_strength", "ema", "depth_short_side", "depth_max_aspect", "minmax_ema",
-      "ema_edge_change", "ema_edge_gradient", "ema_edge_dilation", "ema_edge_strength",
-      "subject_lock", "subject_recenter", "subject_stretch", "subject_plane_lock",
-      "subject_plane_width", "bestv2_sharpen",
-      "depth_model", "depth_model_url", "prebuild_models", "max_encode_width",
-      "perf_stats", "cuda_graph"
-    };
-    std::vector<std::string> profile_names {"apollo"};
-    if (std::find(profile_names.begin(), profile_names.end(), sbs_profile) == profile_names.end()) {
-      profile_names.emplace_back(sbs_profile);
-    }
-    // Discover every configured profile from its parameter suffix. This leaves misspelled
-    // parameters in vars so the normal unknown-option warning catches them.
-    for (const auto &[key, value] : vars) {
-      constexpr std::string_view prefix = "sbs_3d_profile_";
-      if (!key.starts_with(prefix)) {
-        continue;
-      }
-      for (auto parameter : sbs_parameter_names) {
-        const std::string suffix = "_" + std::string(parameter);
-        if (key.size() > prefix.size() + suffix.size() && key.ends_with(suffix)) {
-          auto name = key.substr(prefix.size(), key.size() - prefix.size() - suffix.size());
-          if (name != "vd3d" && name.size() <= 64 &&
-              name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") == std::string::npos &&
-              std::find(profile_names.begin(), profile_names.end(), name) == profile_names.end()) {
-            profile_names.emplace_back(std::move(name));
-          }
-          break;
-        }
-      }
-    }
-    std::sort(profile_names.begin(), profile_names.end());
-    // Keep profile discovery comfortably inside the 4000-byte control payload. With names capped
-    // at 64 bytes, 32 profiles serialize to at most 2144 bytes including the active-name header.
-    // Always retain the Apollo built-in and configured active profile, then take custom names in
-    // deterministic lexical order. Skipped profile keys remain unconsumed and are reported by the
-    // normal unknown-option diagnostics.
-    constexpr std::size_t max_sbs_profiles = 32;
-    if (profile_names.size() > max_sbs_profiles) {
-      BOOST_LOG(warning) << "Configured " << profile_names.size() << " SBS profiles; only "
-                         << max_sbs_profiles << " can be advertised. Extra profiles will be ignored.";
-      std::vector<std::string> bounded_profiles;
-      bounded_profiles.reserve(max_sbs_profiles);
-      auto retain = [&](const std::string &name) {
-        if (bounded_profiles.size() < max_sbs_profiles &&
-            std::find(bounded_profiles.begin(), bounded_profiles.end(), name) == bounded_profiles.end()) {
-          bounded_profiles.emplace_back(name);
-        }
-      };
-      retain("apollo");
-      retain(sbs_profile);
-      for (const auto &name : profile_names) {
-        retain(name);
-      }
-      std::sort(bounded_profiles.begin(), bounded_profiles.end());
-      profile_names = std::move(bounded_profiles);
-    }
-    video.sbs_profiles.clear();
-    std::unordered_map<std::string, std::string> global_sbs_overrides;
-    for (auto parameter : sbs_parameter_names) {
-      const std::string key = "sbs_3d_" + std::string(parameter);
-      if (auto it = vars.find(key); it != vars.end()) {
-        global_sbs_overrides.emplace(it->first, it->second);
-      }
-    }
-
     auto apply_sbs_values = [&](video_t::sbs_t &target, const std::string &prefix) {
       double_between_f(vars, prefix + "pop_strength", target.pop_strength, {0.25, 2.0});
       double_between_f(vars, prefix + "ema", target.ema, {0.01, 1.0});
@@ -1333,26 +1266,16 @@ namespace config {
       bool_f(vars, prefix + "bestv2_sharpen", target.bestv2_sharpen);
       string_f(vars, prefix + "depth_model", target.depth_model);
       string_f(vars, prefix + "depth_model_url", target.depth_model_url);
-      string_f(vars, prefix + "prebuild_models", target.prebuild_models);
       int_between_f(vars, prefix + "max_encode_width", target.max_encode_width, {256, 16384});
       bool_f(vars, prefix + "perf_stats", target.perf_stats);
       bool_f(vars, prefix + "cuda_graph", target.cuda_graph);
     };
 
-    for (const auto &name : profile_names) {
-      video_t::sbs_t profile {};
-      profile.profile = name;
-      apply_sbs_values(profile, "sbs_3d_profile_" + name + "_");
-      // Top-level SBS settings are global explicit overrides. Replay them for every advertised
-      // profile because the parsing helpers consume keys as they apply them.
-      for (const auto &[key, value] : global_sbs_overrides) {
-        vars.insert_or_assign(key, value);
-      }
-      apply_sbs_values(profile, "sbs_3d_");
-      profile.max_encode_width &= ~1;
-      video.sbs_profiles.emplace(name, std::move(profile));
-    }
-    video.sbs = video.sbs_profiles.at(sbs_profile);
+    video.sbs = {};
+    video.sbs.profile = sbs_profile;
+    apply_sbs_values(video.sbs, "sbs_3d_profile_" + sbs_profile + "_");
+    apply_sbs_values(video.sbs, "sbs_3d_");
+    video.sbs.max_encode_width &= ~1;
 
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);
@@ -1594,9 +1517,9 @@ namespace config {
       // Create empty config file if it does not exist
       if (!fs::exists(sunshine.config_file)) {
         auto cfg_file = std::ofstream {sunshine.config_file};
-      #ifdef _WIN32
+#ifdef _WIN32
         cfg_file << "server_cmd = [{\"name\":\"Bubbles\",\"cmd\":\"bubbles.scr\",\"elevated\":false}]\n";
-      #endif
+#endif
       }
 
       // Read config file

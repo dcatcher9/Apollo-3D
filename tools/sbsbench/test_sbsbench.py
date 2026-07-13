@@ -95,7 +95,7 @@ class EvalContractTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_live_sbs_contract_is_off_ai_and_profile_owned(self):
+    def test_live_sbs_contract_is_off_ai_with_startup_profile(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "video.h"), encoding="utf-8") as fh:
             video_header = fh.read()
@@ -105,18 +105,31 @@ class EvalContractTests(unittest.TestCase):
 
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
             config = fh.read()
-        self.assertIn('apply_sbs_values(profile, "sbs_3d_profile_" + name + "_")', config)
-        self.assertIn("video.sbs_profiles", config)
+        self.assertIn('apply_sbs_values(video.sbs, "sbs_3d_profile_" + sbs_profile + "_")', config)
+        self.assertNotIn("video.sbs_profiles", config)
         self.assertIn('if (sbs_profile == "vd3d")', config)
-        self.assertIn('name != "vd3d"', config)
 
         with open(os.path.join(repo, "src", "stream.cpp"), encoding="utf-8") as fh:
             stream = fh.read()
-        self.assertIn("IDX_SET_SBS_PROFILE", stream)
-        self.assertIn("IDX_SBS_PROFILE_LIST", stream)
+        self.assertNotIn("IDX_SET_SBS_PROFILE", stream)
+        self.assertNotIn("IDX_SBS_PROFILE_LIST", stream)
         self.assertIn("mail::sbs_depth_status", stream)
         self.assertNotIn("depth_engine_phase", stream)
         self.assertNotIn("set_active_depth_model(id)", stream)
+
+        with open(os.path.join(repo, "src", "main.cpp"), encoding="utf-8") as fh:
+            main = fh.read()
+        self.assertIn("prepare_tensorrt_model", main)
+        self.assertIn("std::jthread model_prepare_thread", main)
+        self.assertLess(main.index("if (!config::sunshine.cmd.name.empty())"),
+                        main.index("std::jthread model_prepare_thread"))
+
+        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
+                  encoding="utf-8") as fh:
+            estimator = fh.read()
+        self.assertIn("cuda_device_for_configured_adapter", estimator)
+        self.assertIn("if (!warmup_execution_context", estimator)
+        self.assertIn("const bool synchronized = enqueued", estimator)
 
     def test_relative_cli_paths_are_resolved_before_subprocess_cwd(self):
         args = argparse.Namespace(build_dir="cmake-build-relwithdebinfo", conf="bench.conf",
@@ -454,7 +467,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("slot.context_count >= kMaxContextsPerEngine", text)
         self.assertIn("g_trt_context_available.wait_for", text)
         self.assertIn("slot.io_compatible = have_in && have_out && input_fp32 && output_fp32", text)
-        self.assertIn("if (engine && !slot.io_compatible)", text)
+        self.assertIn("validate_engine_io_locked", text)
 
     def test_live_gpu_timer_tail_is_bounded_and_generation_safe(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

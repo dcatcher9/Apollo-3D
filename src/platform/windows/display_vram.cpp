@@ -508,18 +508,17 @@ namespace platf::dxgi {
 
           if (depth_estimator) {
             matched_candidate_slot = available_matched_slot();
-            if (matched_candidate_slot &&
-                copy_matched_frame(img_ctx.encoder_texture.get(), *matched_candidate_slot,
-                                   frame_id)) {
-              est = depth_estimator->estimate_depth(matched_candidate_slot->srv.get(),
-                                                    input_color_space, frame_id);
+            if (matched_candidate_slot && copy_matched_frame(img_ctx.encoder_texture.get(), *matched_candidate_slot, frame_id)) {
+              est = depth_estimator->estimate_depth(matched_candidate_slot->srv.get(), input_color_space, frame_id);
               if (est.completed_frame_valid) {
                 matched_render_slot = find_pending_matched_slot(est.completed_frame_id);
                 if (matched_render_slot) {
                   matched_render_slot->pending = false;
                   render_input_srv = matched_render_slot->srv.get();
                   const double age_ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - matched_render_slot->captured_at).count();
+                                          std::chrono::steady_clock::now() - matched_render_slot->captured_at
+                  )
+                                          .count();
                   matched_stats_age_sum_ms += age_ms;
                   matched_stats_age_max_ms = std::max(matched_stats_age_max_ms, age_ms);
                   ++matched_stats_completions;
@@ -551,7 +550,7 @@ namespace platf::dxgi {
           ID3D11ShaderResourceView *final_sbs_srv = nullptr;
           if (repeat_matched_output) {
             final_sbs_srv = matched_output_sharpened ? sbs_sharpen_srv.get() :
-                                                      sbs_intermediate_srv.get();
+                                                       sbs_intermediate_srv.get();
             ++matched_stats_repeats;
           } else {
             // Before the first matched completion, provide a flat current-frame SBS image. Once a
@@ -616,15 +615,15 @@ namespace platf::dxgi {
           // "dump.trigger" file, save this frame's 2D source, depth map and SBS result. See
           // sbs_debug_dump.h. No-op unless APOLLO_SBS_DUMP is set.
           if (!repeat_matched_output) {
-            sbs_dumper.maybe_dump(device.get(), device_ctx.get(), render_input_srv,
-                                  est.depth.Get(), final_sbs_srv, display->is_hdr(), sbs_config.depth_model);
+            sbs_dumper.maybe_dump(device.get(), device_ctx.get(), render_input_srv, est.depth.Get(), final_sbs_srv, display->is_hdr(), sbs_config.depth_model);
           }
 
           ++matched_stats_calls;
           const auto now = std::chrono::steady_clock::now();
           if (now - matched_stats_started >= std::chrono::seconds(5)) {
             const double avg_age_ms = matched_stats_completions ?
-                                        matched_stats_age_sum_ms / matched_stats_completions : 0.0;
+                                        matched_stats_age_sum_ms / matched_stats_completions :
+                                        0.0;
             BOOST_LOG(info) << "SBS matched-frame stats: calls="sv << matched_stats_calls
                             << " completed="sv << matched_stats_completions
                             << " repeats="sv << matched_stats_repeats
@@ -676,17 +675,16 @@ namespace platf::dxgi {
       this->color_matrix = std::move(color_matrix);
     }
 
-    // Create the depth estimator on demand (first SBS frame). Returns true once it's ready.
-    // Construction (TensorRT context creation + a CUDA warmup inference) takes seconds and runs
-    // on a background thread; this call returns false and the pipeline streams flat SBS until the
-    // build completes, so a host-SBS / model switch never freezes the encode thread.
+    // Create the D3D depth pipeline on demand (first SBS frame). The heavy TensorRT engine,
+    // execution context, and CUDA modules were prepared at host startup; construction now borrows
+    // that warm context and creates only device/session resources on a background thread.
     bool ensure_depth_estimator() {
       if (depth_estimator) {
         return true;
       }
 
       // A failed build streams flat SBS for the rest of this encode device's life instead of
-      // re-kicking a doomed build every frame; a mode/model switch recreates the device and retries.
+      // re-kicking a doomed build every frame; a later mode rebuild creates a fresh device.
       if (depth_estimator_failed) {
         return false;
       }
@@ -719,24 +717,20 @@ namespace platf::dxgi {
         return false;
       }
 
-      // Engine compilation is process-global and may take minutes. Report that complete wait as
-      // loading, but don't attach the compile to this encode device: its future must remain quick
-      // to join when the user switches mode/profile. Once compilation reaches a terminal failure,
-      // clear the client's indicator and keep this device flat rather than polling forever.
+      // Startup model preparation is process-global and may take minutes on first use. It includes
+      // engine compilation, deserialization, execution-context creation, and CUDA warmup. Report
+      // that complete wait as loading, but don't duplicate it on this encode device.
       auto active = ::video::depth_model_for_profile(sbs_config);
-      auto build_status = models::tensorrt_engine_build_status(
-        std::filesystem::path(SUNSHINE_ASSETS_DIR),
-        active
-      );
+      auto build_status = models::tensorrt_model_prepare_status(active);
       if (build_status != models::engine_build_status::ready) {
         if (build_status == models::engine_build_status::failed) {
-          BOOST_LOG(error) << "TensorRT engine compilation failed for '"sv << active.name
+          BOOST_LOG(error) << "Startup TensorRT model preparation failed for '"sv << active.name
                            << "'; streaming flat SBS."sv;
           depth_estimator_failed = true;
           publish_depth_status(0);
         } else {
           if (engine_poll_counter++ % 1800 == 0) {  // ~every 20 s at 90 fps
-            BOOST_LOG(warning) << "Waiting for TensorRT engine compilation for '"sv << active.name
+            BOOST_LOG(warning) << "Waiting for startup TensorRT model preparation for '"sv << active.name
                                << "'; streaming flat until it is ready."sv;
           }
           publish_depth_status(1);
@@ -843,9 +837,7 @@ namespace platf::dxgi {
           return;
         }
         desc.Query = D3D11_QUERY_TIMESTAMP;
-        if (FAILED(device->CreateQuery(&desc, &slot.start)) ||
-            FAILED(device->CreateQuery(&desc, &slot.warp_end)) ||
-            FAILED(device->CreateQuery(&desc, &slot.convert_end))) {
+        if (FAILED(device->CreateQuery(&desc, &slot.start)) || FAILED(device->CreateQuery(&desc, &slot.warp_end)) || FAILED(device->CreateQuery(&desc, &slot.convert_end))) {
           BOOST_LOG(warning) << "Host SBS GPU timing unavailable: could not create timestamp queries."sv;
           return;
         }
@@ -862,8 +854,7 @@ namespace platf::dxgi {
           continue;
         }
         D3D11_QUERY_DATA_TIMESTAMP_DISJOINT timing {};
-        const auto ready = device_ctx->GetData(slot.disjoint.get(), &timing, sizeof(timing),
-                                                D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        const auto ready = device_ctx->GetData(slot.disjoint.get(), &timing, sizeof(timing), D3D11_ASYNC_GETDATA_DONOTFLUSH);
         if (ready == S_FALSE) {
           continue;
         }
@@ -876,13 +867,9 @@ namespace platf::dxgi {
         UINT64 warp_end = 0;
         UINT64 convert_end = 0;
         const auto start_status = device_ctx->GetData(slot.start.get(), &start, sizeof(start), 0);
-        const auto warp_status = device_ctx->GetData(slot.warp_end.get(), &warp_end,
-                                                      sizeof(warp_end), 0);
-        const auto convert_status = device_ctx->GetData(slot.convert_end.get(), &convert_end,
-                                                         sizeof(convert_end), 0);
-        if (SUCCEEDED(start_status) && SUCCEEDED(warp_status) && SUCCEEDED(convert_status) &&
-            !timing.Disjoint && timing.Frequency > 0 && warp_end >= start &&
-            convert_end >= warp_end) {
+        const auto warp_status = device_ctx->GetData(slot.warp_end.get(), &warp_end, sizeof(warp_end), 0);
+        const auto convert_status = device_ctx->GetData(slot.convert_end.get(), &convert_end, sizeof(convert_end), 0);
+        if (SUCCEEDED(start_status) && SUCCEEDED(warp_status) && SUCCEEDED(convert_status) && !timing.Disjoint && timing.Frequency > 0 && warp_end >= start && convert_end >= warp_end) {
           const double to_ms = 1000.0 / static_cast<double>(timing.Frequency);
           if (slot.has_depth_warp) {
             sbs_perf::add_sample_ms_if_current(
@@ -932,8 +919,9 @@ namespace platf::dxgi {
         return;
       }
       const auto pending_count = [&]() {
-        return std::count_if(sbs_gpu_timers.begin(), sbs_gpu_timers.end(),
-                             [](const auto &slot) { return slot.pending; });
+        return std::count_if(sbs_gpu_timers.begin(), sbs_gpu_timers.end(), [](const auto &slot) {
+          return slot.pending;
+        });
       };
       if (pending_count() == 0) {
         return;
@@ -994,8 +982,7 @@ namespace platf::dxgi {
       return nullptr;
     }
 
-    bool copy_matched_frame(ID3D11Texture2D *source, matched_frame_slot_t &slot,
-                            std::uint64_t frame_id) {
+    bool copy_matched_frame(ID3D11Texture2D *source, matched_frame_slot_t &slot, std::uint64_t frame_id) {
       if (!source) {
         return false;
       }
@@ -1048,8 +1035,7 @@ namespace platf::dxgi {
       return true;
     }
 
-    void reset_matched_stats(std::chrono::steady_clock::time_point now =
-                               std::chrono::steady_clock::now()) {
+    void reset_matched_stats(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
       matched_stats_started = now;
       matched_stats_calls = 0;
       matched_stats_completions = 0;
@@ -1058,10 +1044,7 @@ namespace platf::dxgi {
       matched_stats_age_max_ms = 0.0;
     }
 
-    int init_output(ID3D11Texture2D *frame_texture, int width, int height,
-                    int sbs_mode_param = ::video::SBS_OFF,
-                    const config::video_t::sbs_t &profile = {},
-                    safe::mail_raw_t::event_t<int> depth_status_event = {}) {
+    int init_output(ID3D11Texture2D *frame_texture, int width, int height, int sbs_mode_param = ::video::SBS_OFF, const config::video_t::sbs_t &profile = {}, safe::mail_raw_t::event_t<int> depth_status_event = {}) {
       // The underlying frame pool owns the texture, so we must reference it for ourselves
       frame_texture->AddRef();
       output_texture.reset(frame_texture);
@@ -1633,14 +1616,13 @@ namespace platf::dxgi {
     texture2d_t output_texture;
 
     std::unique_ptr<models::video_depth_estimator> depth_estimator;
-    // The estimator is built on a background thread (TensorRT context creation + CUDA warmup take
-    // seconds); ensure_depth_estimator() polls this and streams flat until it's ready, so a switch
-    // never blocks the encode thread. The future is declared after device/device_ctx so its
-    // destructor (which joins the build) runs while those are still alive.
+    // The per-device D3D estimator is built on a background thread and borrows the startup-warmed
+    // TensorRT context. The future is declared after device/device_ctx so its destructor (which
+    // joins the build) runs while those are still alive.
     std::future<std::unique_ptr<models::video_depth_estimator>> depth_estimator_build;
     bool depth_estimator_building = false;
     bool depth_estimator_failed = false;  ///< Build threw; stream flat, don't retry on this device.
-    unsigned engine_poll_counter = 0;  ///< Rate-limits the engine compilation wait warning.
+    unsigned engine_poll_counter = 0;  ///< Rate-limits the startup model-preparation wait warning.
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
     config::video_t::sbs_t sbs_config {};  ///< Immutable profile snapshot for this device.
     safe::mail_raw_t::event_t<int> sbs_depth_status_event;
@@ -1800,9 +1782,7 @@ namespace platf::dxgi {
       }
 
       base.apply_colorspace(colorspace);
-      return base.init_output(nvenc_d3d->get_input_texture(), client_config.width, client_config.height,
-                              client_config.sbs_mode, client_config.sbs_config,
-                              client_config.sbs_depth_status_event) == 0;
+      return base.init_output(nvenc_d3d->get_input_texture(), client_config.width, client_config.height, client_config.sbs_mode, client_config.sbs_config, client_config.sbs_depth_status_event) == 0;
     }
 
     int convert(platf::img_t &img_base) override {

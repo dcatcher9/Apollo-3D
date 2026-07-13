@@ -3,6 +3,7 @@
 #include "cuda_driver_api.h"
 #include "logging.h"
 #include "model_manager.h"
+#include "platform/windows/misc.h"
 #include "platform/windows/utils.h"
 #include "sbs_perf.h"
 #include "utility.h"
@@ -46,16 +47,25 @@ static Logger gLogger;
 
 static std::mutex g_engine_build_status_mutex;
 static std::map<std::string, models::engine_build_status> g_engine_build_status;
+static std::mutex g_model_prepare_status_mutex;
+static std::map<std::string, models::engine_build_status> g_model_prepare_status;
 static std::mutex g_depth_shader_cache_mutex;
+
 struct depth_shader_cache_entry {
   std::filesystem::file_time_type modified;
   std::vector<std::uint8_t> bytecode;
 };
+
 static std::map<std::filesystem::path, depth_shader_cache_entry> g_depth_shader_cache;
 
 static void set_engine_build_status(const std::string &engine_name, models::engine_build_status status) {
   std::lock_guard<std::mutex> lock(g_engine_build_status_mutex);
   g_engine_build_status[engine_name] = status;
+}
+
+static void set_model_prepare_status(const std::string &engine_name, models::engine_build_status status) {
+  std::lock_guard<std::mutex> lock(g_model_prepare_status_mutex);
+  g_model_prepare_status[engine_name] = status;
 }
 
 static bool depth_shader_bytecode(
@@ -69,8 +79,7 @@ static bool depth_shader_bytecode(
   const auto modified = std::filesystem::last_write_time(path, ec);
   {
     std::lock_guard<std::mutex> lock(g_depth_shader_cache_mutex);
-    if (auto it = g_depth_shader_cache.find(path);
-        it != g_depth_shader_cache.end() && !ec && it->second.modified == modified) {
+    if (auto it = g_depth_shader_cache.find(path); it != g_depth_shader_cache.end() && !ec && it->second.modified == modified) {
       bytecode = it->second.bytecode;
       return true;
     }
@@ -79,17 +88,7 @@ static bool depth_shader_bytecode(
   Microsoft::WRL::ComPtr<ID3DBlob> blob;
   Microsoft::WRL::ComPtr<ID3DBlob> err;
   constexpr DWORD flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
-  if (FAILED(D3DCompileFromFile(
-        path.wstring().c_str(),
-        nullptr,
-        D3D_COMPILE_STANDARD_FILE_INCLUDE,
-        "main",
-        "cs_5_0",
-        flags,
-        0,
-        &blob,
-        &err
-      ))) {
+  if (FAILED(D3DCompileFromFile(path.wstring().c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "main", "cs_5_0", flags, 0, &blob, &err))) {
     if (err) {
       BOOST_LOG(error) << "Shader compile error (" << path << "): " << (char *) err->GetBufferPointer();
     }
@@ -163,13 +162,67 @@ static bool cuda_device_for_d3d(cuda_driver_api &cuda, ID3D11Device *d3d, CUdevi
   return cuda.cuDeviceGet && cuda.cuDeviceGet(&out, 0) == CUDA_SUCCESS;
 }
 
+// Resolve the same explicitly configured DXGI adapter that the capture pipeline will use. When
+// adapter_name is empty, CUDA device 0 remains Apollo's default. This keeps startup preparation
+// from allocating a large TensorRT context on the wrong NVIDIA GPU in multi-adapter systems.
+static bool cuda_device_for_configured_adapter(
+  cuda_driver_api &cuda,
+  const std::string &adapter_name,
+  CUdevice &out
+) {
+  if (adapter_name.empty()) {
+    return cuda.cuDeviceGet && cuda.cuDeviceGet(&out, 0) == CUDA_SUCCESS;
+  }
+  if (!cuda.cuD3D11GetDevice) {
+    BOOST_LOG(error) << "Startup depth-model preparation cannot map configured adapter '"
+                     << adapter_name << "' because CUDA/D3D11 interop is unavailable.";
+    return false;
+  }
+
+  Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+  if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+    BOOST_LOG(error) << "Startup depth-model preparation failed to create a DXGI factory.";
+    return false;
+  }
+
+  const auto wanted = platf::from_utf8(adapter_name);
+  for (UINT index = 0;; ++index) {
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+    const HRESULT enumerated = factory->EnumAdapters1(index, &adapter);
+    if (enumerated == DXGI_ERROR_NOT_FOUND) {
+      break;
+    }
+    if (FAILED(enumerated)) {
+      BOOST_LOG(error) << "Startup depth-model preparation failed while enumerating DXGI adapters.";
+      return false;
+    }
+    DXGI_ADAPTER_DESC1 desc {};
+    if (FAILED(adapter->GetDesc1(&desc)) || wanted != desc.Description) {
+      continue;
+    }
+    const CUresult mapped = cuda.cuD3D11GetDevice(&out, adapter.Get());
+    if (mapped == CUDA_SUCCESS) {
+      BOOST_LOG(info) << "Startup depth model mapped configured adapter '" << adapter_name
+                      << "' to CUDA device " << out << '.';
+      return true;
+    }
+    BOOST_LOG(error) << "Configured adapter '" << adapter_name
+                     << "' is not available to CUDA/TensorRT.";
+    return false;
+  }
+
+  BOOST_LOG(error) << "Configured adapter '" << adapter_name
+                   << "' was not found during startup depth-model preparation.";
+  return false;
+}
+
 // One resident engine per CUDA-device/model pair, so multi-adapter sessions never reuse a
-// TensorRT engine or execution context deserialized under another CUDA primary context. Switching
-// models mid-stream loads/keeps a distinct engine instead of being pinned to the first model
-// (the old single-g_engine design required a restart). Engines are never evicted: an
+// TensorRT engine or execution context deserialized under another CUDA primary context. Distinct
+// startup model configurations remain isolated instead of being pinned to the first model.
+// Engines are never evicted: an
 // IExecutionContext holds ~1.3 GB scratch and cannot be safely destroyed across the MinGW/MSVC
 // ABI boundary, so contexts are pooled per engine and reused (see the ctor/dtor). With
-// sequential model testing this leaves 2-3 engines resident, which is acceptable.
+// sequential evaluator model testing this can leave 2-3 engines resident, which is acceptable.
 struct engine_slot {
   nvinfer1::ICudaEngine *engine = nullptr;
   std::vector<nvinfer1::IExecutionContext *> context_pool;
@@ -271,6 +324,121 @@ static nvinfer1::ICudaEngine *acquire_engine_locked(
   return slot.engine;
 }
 
+static const char *tensor_dtype_name(nvinfer1::DataType type) {
+  switch (type) {
+    case nvinfer1::DataType::kFLOAT:
+      return "FP32";
+    case nvinfer1::DataType::kHALF:
+      return "FP16";
+    case nvinfer1::DataType::kINT8:
+      return "INT8";
+    case nvinfer1::DataType::kINT32:
+      return "INT32";
+    default:
+      return "other";
+  }
+}
+
+// Validate once per resident engine against Apollo's fixed D3D/CUDA tensor contract.
+// Caller holds g_trt_mutex.
+static bool validate_engine_io_locked(nvinfer1::ICudaEngine *engine, engine_slot &slot) {
+  if (!engine) {
+    return false;
+  }
+  if (slot.io_validated) {
+    return slot.io_compatible;
+  }
+
+  slot.io_validated = true;
+  bool have_in = false;
+  bool have_out = false;
+  bool input_fp32 = false;
+  bool output_fp32 = false;
+  for (int i = 0; i < engine->getNbIOTensors(); i++) {
+    const char *name = engine->getIOTensorName(i);
+    const auto type = engine->getTensorDataType(name);
+    const bool is_input = engine->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT;
+    BOOST_LOG(info) << "Depth engine tensor '" << name << "' " << (is_input ? "(input)" : "(output)")
+                    << " dtype=" << tensor_dtype_name(type);
+    if (std::string_view(name) == "pixel_values") {
+      have_in = true;
+      input_fp32 = type == nvinfer1::DataType::kFLOAT;
+      if (!input_fp32) {
+        BOOST_LOG(error) << "Depth model input 'pixel_values' is " << tensor_dtype_name(type)
+                         << ", not FP32; rejecting the engine. Use a keep_io_types (FP32 I/O) model.";
+      }
+    } else if (std::string_view(name) == "predicted_depth") {
+      have_out = true;
+      output_fp32 = type == nvinfer1::DataType::kFLOAT;
+      if (!output_fp32) {
+        BOOST_LOG(error) << "Depth model output 'predicted_depth' is " << tensor_dtype_name(type)
+                         << ", not FP32; rejecting the engine.";
+      }
+    }
+  }
+  if (!have_in || !have_out) {
+    BOOST_LOG(error) << "Depth model is missing the expected tensor name(s) 'pixel_values'/'predicted_depth'; "
+                        "rejecting the engine.";
+  }
+  slot.io_compatible = have_in && have_out && input_fp32 && output_fp32;
+  return slot.io_compatible;
+}
+
+static bool warmup_execution_context(
+  cuda_driver_api &cuda,
+  CUcontext cuda_ctx,
+  nvinfer1::IExecutionContext *exec_context
+) {
+  if (!exec_context || !cuda.is_valid()) {
+    return false;
+  }
+  if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
+    return false;
+  }
+
+  CUstream stream = nullptr;
+  if (cuda.cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS || !stream) {
+    return false;
+  }
+  auto destroy_stream = util::fail_guard([&]() {
+    cuda.cuStreamDestroy(stream);
+  });
+
+  constexpr int h = 518;
+  constexpr int w = 518;
+  const size_t in_elems = (size_t) 3 * h * w;
+  const size_t out_elems = (size_t) h * w;
+  CUdeviceptr d_in = 0;
+  CUdeviceptr d_out = 0;
+  if (cuda.cuMemAlloc(&d_in, in_elems * sizeof(float)) != CUDA_SUCCESS) {
+    return false;
+  }
+  auto free_input = util::fail_guard([&]() {
+    cuda.cuMemFree(d_in);
+  });
+  if (cuda.cuMemAlloc(&d_out, out_elems * sizeof(float)) != CUDA_SUCCESS) {
+    return false;
+  }
+  auto free_output = util::fail_guard([&]() {
+    cuda.cuMemFree(d_out);
+  });
+
+  const auto input_dims = make_input_dims(h, w);
+  const bool bound = exec_context->setInputShape("pixel_values", input_dims) &&
+                     exec_context->setTensorAddress("pixel_values", (void *) d_in) &&
+                     exec_context->setTensorAddress("predicted_depth", (void *) d_out);
+  bool enqueued = false;
+  if (bound) {
+    std::lock_guard<std::mutex> lock(g_trt_mutex);
+    enqueued = exec_context->enqueueV3(stream);
+  }
+  const bool synchronized = enqueued && cuda.cuStreamSynchronize &&
+                            cuda.cuStreamSynchronize(stream) == CUDA_SUCCESS;
+  BOOST_LOG(info) << "Depth model startup warmup complete (" << w << 'x' << h
+                  << (synchronized ? ")." : "); execution failed.");
+  return synchronized;
+}
+
 namespace models {
 
   engine_build_status tensorrt_engine_build_status(
@@ -337,8 +505,7 @@ namespace models {
       set_engine_build_status(engine_name, engine_build_status::failed);
       return;
     }
-    if (network->getNbInputs() != 1 ||
-        std::string_view(network->getInput(0)->getName()) != "pixel_values") {
+    if (network->getNbInputs() != 1 || std::string_view(network->getInput(0)->getName()) != "pixel_values") {
       BOOST_LOG(error) << "Unsupported depth model input contract; expected one 'pixel_values' tensor.";
       set_engine_build_status(engine_name, engine_build_status::failed);
       return;
@@ -398,6 +565,108 @@ namespace models {
       BOOST_LOG(error) << "Engine build failed.";
     }
     set_engine_build_status(engine_name, engine_build_status::failed);
+  }
+
+  engine_build_status tensorrt_model_prepare_status(const config::depth_model_info &model) {
+    const auto engine_name = engine_filename(model);
+    std::lock_guard<std::mutex> lock(g_model_prepare_status_mutex);
+    auto it = g_model_prepare_status.find(engine_name);
+    return it == g_model_prepare_status.end() ? engine_build_status::unknown : it->second;
+  }
+
+  bool prepare_tensorrt_model(
+    const std::filesystem::path &assets_dir,
+    const config::depth_model_info &model,
+    const std::string &adapter_name
+  ) {
+    const auto engine_name = engine_filename(model);
+    set_model_prepare_status(engine_name, engine_build_status::building);
+    auto failed = util::fail_guard([&]() {
+      set_model_prepare_status(engine_name, engine_build_status::failed);
+    });
+
+    precompile_tensorrt_engine(assets_dir, model);
+    if (tensorrt_engine_build_status(assets_dir, model) != engine_build_status::ready) {
+      return false;
+    }
+
+    auto &cuda = cuda_driver_api::get();
+    if (!cuda.is_valid() || !ensure_cuda_initialized(cuda)) {
+      BOOST_LOG(error) << "Startup depth-model preparation failed: CUDA initialization failed.";
+      return false;
+    }
+    CUdevice cuda_device = -1;
+    if (!cuda_device_for_configured_adapter(cuda, adapter_name, cuda_device)) {
+      BOOST_LOG(error) << "Startup depth-model preparation failed: the configured CUDA device is unavailable.";
+      return false;
+    }
+    CUcontext cuda_ctx = primary_context(cuda, cuda_device);
+    if (!cuda_ctx) {
+      BOOST_LOG(error) << "Startup depth-model preparation failed: CUDA primary context is unavailable.";
+      return false;
+    }
+    cuda.cuCtxSetCurrent(cuda_ctx);
+
+    const auto engine_path = assets_dir / engine_name;
+    const auto engine_key = std::to_string(cuda_device) + ":" + model.name;
+    nvinfer1::ICudaEngine *engine = nullptr;
+    nvinfer1::IExecutionContext *exec_context = nullptr;
+    bool pooled = false;
+    bool create_context = false;
+    {
+      std::lock_guard<std::mutex> lock(g_trt_mutex);
+      engine = acquire_engine_locked(engine_key, engine_path, exec_context, pooled);
+      auto &slot = g_engines[engine_key];
+      if (!validate_engine_io_locked(engine, slot)) {
+        if (exec_context) {
+          slot.context_pool.push_back(exec_context);
+        }
+        return false;
+      }
+      if (!exec_context) {
+        if (slot.context_count >= kMaxContextsPerEngine) {
+          // A live session already populated the engine before startup preparation finished.
+          // The resident contexts are already warmed by their constructors, so no extra VRAM is
+          // needed merely to satisfy the startup-prepared state.
+          set_model_prepare_status(engine_name, engine_build_status::ready);
+          failed.disable();
+          return true;
+        }
+        ++slot.context_count;
+        create_context = true;
+      }
+    }
+
+    if (create_context) {
+      BOOST_LOG(info) << "Creating startup TensorRT execution context...";
+      exec_context = engine->createExecutionContext();
+      if (!exec_context) {
+        std::lock_guard<std::mutex> lock(g_trt_mutex);
+        --g_engines[engine_key].context_count;
+        g_trt_context_available.notify_all();
+        return false;
+      }
+      if (!warmup_execution_context(cuda, cuda_ctx, exec_context)) {
+        // The context cannot be destroyed safely across the MinGW/MSVC ABI boundary, so retain it
+        // in the bounded pool. Do not report preparation ready: a pooled context is otherwise
+        // assumed warm and the first live frame would inherit the failed lazy-load operation.
+        std::lock_guard<std::mutex> lock(g_trt_mutex);
+        g_engines[engine_key].context_pool.push_back(exec_context);
+        g_trt_context_available.notify_all();
+        BOOST_LOG(error) << "Startup depth-model context warmup failed.";
+        return false;
+      }
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(g_trt_mutex);
+      g_engines[engine_key].context_pool.push_back(exec_context);
+      g_trt_context_available.notify_all();
+    }
+    BOOST_LOG(info) << "Startup depth model '" << model.name << "' is resident and ready.";
+    set_model_prepare_status(engine_name, engine_build_status::ready);
+    failed.disable();
+    return true;
   }
 
   struct video_depth_estimator::impl {
@@ -577,8 +846,7 @@ namespace models {
       // A graph embeds TensorRT's tensor pointers, so never replay it across a changed mapping or
       // shape. The first enqueue after each signature change is deliberately ordinary: TensorRT
       // may perform deferred shape-dependent setup that cannot be captured.
-      if (input != graph_input || output != graph_output ||
-          target_w != graph_width || target_h != graph_height) {
+      if (input != graph_input || output != graph_output || target_w != graph_width || target_h != graph_height) {
         destroy_inference_graph(cuda);
         graph_input = input;
         graph_output = output;
@@ -600,10 +868,9 @@ namespace models {
       );
       const bool captured_enqueue = begin == CUDA_SUCCESS && exec_context->enqueueV3(cu_stream);
       const CUresult end = begin == CUDA_SUCCESS ?
-                             cuda.cuStreamEndCapture(cu_stream, &captured) : begin;
-      if (captured_enqueue && end == CUDA_SUCCESS && captured &&
-          cuda.cuGraphInstantiateWithFlags(&inference_graph_exec, captured, 0) == CUDA_SUCCESS &&
-          inference_graph_exec) {
+                             cuda.cuStreamEndCapture(cu_stream, &captured) :
+                             begin;
+      if (captured_enqueue && end == CUDA_SUCCESS && captured && cuda.cuGraphInstantiateWithFlags(&inference_graph_exec, captured, 0) == CUDA_SUCCESS && inference_graph_exec) {
         inference_graph = captured;
         BOOST_LOG(info) << "TensorRT CUDA graph captured for " << target_w << 'x' << target_h << '.';
         return launch_or_fallback();
@@ -729,7 +996,7 @@ namespace models {
         model_url(model.url) {
       const auto init_started = std::chrono::steady_clock::now();
       // Perf benchmark: enable per-stage timing for this run and reset the rolling window
-      // so it reflects this model/mode rather than blending across a switch.
+      // so it reflects this encode session rather than blending across a rebuild.
       perf_depth.stage = "depth_infer";
       sbs_perf::set_enabled(cfg.perf_stats);
       if (cfg.perf_stats) {
@@ -768,67 +1035,15 @@ namespace models {
          // warmup_inference() at the end of the ctor (which re-locks g_trt_mutex) -- a
          // non-recursive std::mutex would otherwise self-deadlock and hang construction.
         std::lock_guard<std::mutex> lock(g_trt_mutex);
-        // Load (once) the engine for THIS model into its own slot and take a pooled execution
-        // context if one is free. Different models coexist; switching models never reuses a
-        // stale engine and never needs a restart.
+        // Load (once) the engine for this configured model into its own slot and take a pooled
+        // execution context if one is free. Different startup configurations remain isolated.
         engine = acquire_engine_locked(engine_key, model_path, exec_context, depth_context_pooled);
         if (depth_context_pooled) {
           BOOST_LOG(info) << "Reusing pooled TensorRT execution context.";
         }
         auto &slot = g_engines[engine_key];
 
-        // Validate the engine's I/O once per model against what the D3D pipeline binds: FP32
-        // tensors named "pixel_values" (input) and "predicted_depth" (output). The model is
-        // user-selectable (sbs_3d_depth_model_url), so a model with FP16/other I/O dtypes or
-        // different tensor names would otherwise bind mismatched buffers and silently produce
-        // garbage depth. We log the actual bindings and warn loudly on any mismatch.
-        if (engine && !slot.io_validated) {
-          slot.io_validated = true;
-          auto dtype_name = [](nvinfer1::DataType t) -> const char * {
-            switch (t) {
-              case nvinfer1::DataType::kFLOAT:
-                return "FP32";
-              case nvinfer1::DataType::kHALF:
-                return "FP16";
-              case nvinfer1::DataType::kINT8:
-                return "INT8";
-              case nvinfer1::DataType::kINT32:
-                return "INT32";
-              default:
-                return "other";
-            }
-          };
-          bool have_in = false, have_out = false;
-          bool input_fp32 = false, output_fp32 = false;
-          for (int i = 0; i < engine->getNbIOTensors(); i++) {
-            const char *tname = engine->getIOTensorName(i);
-            auto dt = engine->getTensorDataType(tname);
-            bool is_input = engine->getTensorIOMode(tname) == nvinfer1::TensorIOMode::kINPUT;
-            BOOST_LOG(info) << "Depth engine tensor '" << tname << "' " << (is_input ? "(input)" : "(output)")
-                            << " dtype=" << dtype_name(dt);
-            if (std::string(tname) == "pixel_values") {
-              have_in = true;
-              input_fp32 = dt == nvinfer1::DataType::kFLOAT;
-              if (dt != nvinfer1::DataType::kFLOAT) {
-                BOOST_LOG(error) << "Depth model input 'pixel_values' is " << dtype_name(dt)
-                                 << ", not FP32; rejecting the engine. Use a keep_io_types (FP32 I/O) model.";
-              }
-            } else if (std::string(tname) == "predicted_depth") {
-              have_out = true;
-              output_fp32 = dt == nvinfer1::DataType::kFLOAT;
-              if (dt != nvinfer1::DataType::kFLOAT) {
-                BOOST_LOG(error) << "Depth model output 'predicted_depth' is " << dtype_name(dt)
-                                 << ", not FP32; rejecting the engine.";
-              }
-            }
-          }
-          if (!have_in || !have_out) {
-            BOOST_LOG(error) << "Depth model is missing the expected tensor name(s) 'pixel_values'/'predicted_depth'; "
-                                "rejecting the engine.";
-          }
-          slot.io_compatible = have_in && have_out && input_fp32 && output_fp32;
-        }
-        if (engine && !slot.io_compatible) {
+        if (!validate_engine_io_locked(engine, slot)) {
           BOOST_LOG(error) << "Depth engine I/O contract is incompatible with Apollo; streaming flat SBS.";
           if (exec_context) {
             slot.context_pool.push_back(exec_context);
@@ -1074,12 +1289,13 @@ namespace models {
       // Warm up here so TensorRT's CUDA lazy kernel load / JIT (~20 s on the big models)
       // happens during construction -- which ensure_depth_estimator() runs on a background
       // thread -- rather than stalling the first real convert() on the encode thread and
-      // freezing the stream right after a host-SBS / model switch.
+      // freezing the stream when Host SBS first becomes active.
       warmup_inference();
       BOOST_LOG(info) << "Depth estimator pipeline initialized in "
                       << std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::steady_clock::now() - init_started
-                         ).count()
+                         )
+                           .count()
                       << " ms";
     }
 
@@ -1268,10 +1484,7 @@ namespace models {
       context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
     }
 
-    estimate_result make_result(bool completed_frame_valid = false,
-                                std::uint64_t completed_frame_id = 0,
-                                bool inference_enqueued = false,
-                                std::uint64_t enqueued_frame_id = 0) {
+    estimate_result make_result(bool completed_frame_valid = false, std::uint64_t completed_frame_id = 0, bool inference_enqueued = false, std::uint64_t enqueued_frame_id = 0) {
       estimate_result r;
       r.depth = output_srv();
       r.subject = subject_srv;
@@ -1429,7 +1642,9 @@ namespace models {
         context->CSSetShader(depth_ema_motion_cs.Get(), nullptr, 0);
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
         ID3D11ShaderResourceView *mask_srvs[3] = {
-          tensor_out_srv.Get(), minmax_ema_srv.Get(), depth_previous_srv.Get()
+          tensor_out_srv.Get(),
+          minmax_ema_srv.Get(),
+          depth_previous_srv.Get()
         };
         context->CSSetShaderResources(0, 3, mask_srvs);
         context->CSSetUnorderedAccessViews(0, 1, ema_motion_mask_uav.GetAddressOf(), nullptr);
@@ -1447,7 +1662,9 @@ namespace models {
       context->CSSetShader(buffer_to_tex_cs.Get(), nullptr, 0);
       context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
       ID3D11ShaderResourceView *bt_srvs[4] = {
-        tensor_out_srv.Get(), minmax_ema_srv.Get(), depth_previous_srv.Get(),
+        tensor_out_srv.Get(),
+        minmax_ema_srv.Get(),
+        depth_previous_srv.Get(),
         ema_motion_mask_srv.Get()
       };
       context->CSSetShaderResources(0, 4, bt_srvs);
@@ -1544,9 +1761,7 @@ namespace models {
       throughput_stats_calls++;
     }
 
-    estimate_result estimate(ID3D11ShaderResourceView *input_srv,
-                             input_color_space color_space,
-                             std::uint64_t frame_id) {
+    estimate_result estimate(ID3D11ShaderResourceView *input_srv, input_color_space color_space, std::uint64_t frame_id) {
       if (!valid || !input_srv) {
         return {};
       }
@@ -1677,18 +1892,15 @@ namespace models {
         previous_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         resources_ok = resources_ok &&
                        SUCCEEDED(device->CreateTexture2D(&previous_desc, nullptr, &depth_previous_tex)) &&
-                       SUCCEEDED(device->CreateShaderResourceView(depth_previous_tex.Get(), nullptr,
-                                                                  &depth_previous_srv));
+                       SUCCEEDED(device->CreateShaderResourceView(depth_previous_tex.Get(), nullptr, &depth_previous_srv));
 
         auto mask_desc = tex_desc;
         mask_desc.Format = DXGI_FORMAT_R32_UINT;
         mask_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
         resources_ok = resources_ok &&
                        SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &ema_motion_mask_tex)) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(ema_motion_mask_tex.Get(), nullptr,
-                                                                  &ema_motion_mask_uav)) &&
-                       SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr,
-                                                                  &ema_motion_mask_srv));
+                       SUCCEEDED(device->CreateUnorderedAccessView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_uav)) &&
+                       SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_srv));
 
         if (exact_plane_lock) {
           auto create_plane_texture = [&](Microsoft::WRL::ComPtr<ID3D11Texture2D> &tex, Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> &uav, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &srv) {
@@ -1869,8 +2081,7 @@ namespace models {
         throughput_stats_enqueues++;
       }
 
-      return make_result(completed_frame_valid, completed_frame_id,
-                         enqueued, enqueued ? frame_id : 0);
+      return make_result(completed_frame_valid, completed_frame_id, enqueued, enqueued ? frame_id : 0);
     }
   };
 

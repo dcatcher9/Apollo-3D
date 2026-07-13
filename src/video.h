@@ -27,7 +27,7 @@ namespace video {
      Must match the SBS_MODE_* wire values in the client's moonlight-common-c Limelight.h. */
   enum sbs_mode_e : int {
     SBS_OFF = 0,  ///< No host depth; encoder emits a plain W x H frame.
-    SBS_AI = 1,  ///< Enable the profile-selected AI pipeline; encoder emits 2W x H.
+    SBS_AI = 1,  ///< Enable the startup-configured AI pipeline; encoder emits 2W x H.
   };
 
   /* Debug: set true by the 0x3004 "SBS Debug Dump" control message (client button). The next
@@ -62,7 +62,7 @@ namespace video {
 
     int enableIntraRefresh;  // 0 - disabled, 1 - enabled
 
-    int encodingFramerate; // Requested display framerate
+    int encodingFramerate;  // Requested display framerate
     bool input_only;
 
     // APPEND-ONLY (see warning above). Host-side SBS mode (sbs_mode_e); not wire-serialized
@@ -71,7 +71,7 @@ namespace video {
     int sbs_mode = SBS_OFF;
 
     // APPEND-ONLY. Immutable snapshot selected for this encode device. Keeping the complete
-    // profile here prevents a client switch or config reload from mixing parameters mid-frame.
+    // startup configuration here prevents a config reload from mixing parameters mid-frame.
     config::video_t::sbs_t sbs_config {};
 
     // APPEND-ONLY. Session-local depth status channel:
@@ -79,7 +79,7 @@ namespace video {
     safe::mail_raw_t::event_t<int> sbs_depth_status_event;
   };
 
-  /* Profile-selected depth model for the host SBS pipeline. The configured name is matched
+  /* Startup-profile-selected depth model for the host SBS pipeline. The configured name is matched
      against config::depth_model_registry(), else synthesized from the model/url escape hatch. */
   config::depth_model_info active_depth_model();
   config::depth_model_info depth_model_for_profile(const config::video_t::sbs_t &profile);

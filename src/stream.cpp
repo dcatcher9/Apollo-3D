@@ -34,14 +34,8 @@ extern "C" {
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
-#include "video.h"
 #include "utility.h"
-
-#ifdef _WIN32
-  // For models::precompile_tensorrt_engine (background engine build on model switch).
-  // Windows-only: the depth pipeline (D3D11 + TensorRT) is Windows-only.
-  #include "video_depth_estimator.h"
-#endif
+#include "video.h"
 
 #define IDX_START_A 0
 #define IDX_START_B 1
@@ -63,9 +57,7 @@ extern "C" {
 #define IDX_SET_ADAPTIVE_TRIGGERS 18
 #define IDX_SET_SBS_MODE 19
 #define IDX_SBS_DEBUG_DUMP 20
-#define IDX_SET_SBS_PROFILE 21
-#define IDX_DEPTH_STATUS 22
-#define IDX_SBS_PROFILE_LIST 23
+#define IDX_DEPTH_STATUS 21
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -89,9 +81,7 @@ static const short packetTypes[] = {
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
   0x3003,  // Set SBS Mode (Apollo protocol extension)
   0x3004,  // SBS Debug Dump (Apollo protocol extension)
-  0x3005,  // Set SBS Profile (Apollo protocol extension)
   0x3006,  // Depth Status (Apollo protocol extension, host->client)
-  0x3007,  // SBS Profile List (Apollo protocol extension, host->client)
 };
 
 namespace asio = boost::asio;
@@ -240,11 +230,13 @@ namespace stream {
   // Host->client push of the SBS depth-engine state so the client can show a "loading" indicator
   // while a model builds/loads/warms up (Apollo protocol extension 0x3006).
 #pragma pack(push, 1)
+
   struct control_depth_status_t {
     control_header_v2 header;
 
     std::uint8_t phase;  // 0 idle/failure, 1 engine load/build, 2 ready, 3 device-pipeline init
   };
+
 #pragma pack(pop)
 
   typedef struct control_encrypted_t {
@@ -438,8 +430,6 @@ namespace stream {
       platf::feedback_queue_t feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
       int last_depth_phase = -1;  // last depth-engine phase pushed to this client (see IDX_DEPTH_STATUS)
-      std::string sbs_profile = config::video.sbs.profile;
-      bool sbs_profile_list_sent = false;
     } control;
 
     std::uint32_t launch_session_id;
@@ -983,47 +973,6 @@ namespace stream {
     return 0;
   }
 
-  int send_sbs_profile_list(session_t *session) {
-    if (!session->control.peer) {
-      return -1;
-    }
-    std::vector<std::string> names;
-    names.reserve(config::video.sbs_profiles.size());
-    for (const auto &[name, profile] : config::video.sbs_profiles) {
-      names.emplace_back(name);
-    }
-    std::sort(names.begin(), names.end());
-    std::string body = session->control.sbs_profile;
-    for (const auto &name : names) {
-      if (body.size() + 1 + name.size() > 4000) {
-        // Configuration parsing normally makes this impossible. Still send the bounded prefix so
-        // a future invariant regression cannot turn a permanent serialization error into a retry
-        // and log storm on every broadcast tick.
-        BOOST_LOG(error) << "SBS profile list exceeded the protocol payload; sending a bounded prefix."sv;
-        break;
-      }
-      body.push_back('\n');
-      body.append(name);
-    }
-    std::array<std::uint8_t, 4096> plaintext {};
-    auto *header = (control_header_v2 *) plaintext.data();
-    header->type = packetTypes[IDX_SBS_PROFILE_LIST];
-    header->payloadLength = (std::uint16_t) body.size();
-    std::memcpy(plaintext.data() + sizeof(*header), body.data(), body.size());
-    const auto plaintext_size = sizeof(*header) + body.size();
-    std::array<std::uint8_t, 4096 + sizeof(control_encrypted_t) + crypto::cipher::tag_size> encrypted_payload {};
-    auto payload = encode_control(
-      session,
-      std::string_view((const char *) plaintext.data(), plaintext_size),
-      encrypted_payload
-    );
-    if (session->broadcast_ref->control_server.send(payload, session->control.peer)) {
-      BOOST_LOG(warning) << "Couldn't send SBS profile list to client."sv;
-      return -1;
-    }
-    return 0;
-  }
-
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -1106,13 +1055,13 @@ namespace stream {
         return;
       }
 
-      uint8_t cmdIndex = *(uint8_t*)payload.data();
+      uint8_t cmdIndex = *(uint8_t *) payload.data();
 
       if (cmdIndex < config::sunshine.server_cmds.size()) {
-        const auto& cmd = config::sunshine.server_cmds[cmdIndex];
+        const auto &cmd = config::sunshine.server_cmds[cmdIndex];
         BOOST_LOG(info) << "Executing server command: " << cmd.cmd_name;
 
-        auto exec_thread = std::thread([&cmd]{
+        auto exec_thread = std::thread([&cmd] {
           std::error_code ec;
           auto env = proc::proc.get_env();
           boost::filesystem::path working_dir = proc::find_working_directory(cmd.cmd_val, env);
@@ -1127,7 +1076,7 @@ namespace stream {
 
         exec_thread.detach();
       } else {
-        BOOST_LOG(error) << "Invalid server command index: " << (int)cmdIndex;
+        BOOST_LOG(error) << "Invalid server command index: " << (int) cmdIndex;
       }
     });
 
@@ -1163,7 +1112,7 @@ namespace stream {
                            << " from ["sv << session->device_name << "]; ignored"sv;
         return;
       }
-      std::string_view mode_name = mode == ::video::SBS_OFF ? "OFF"sv : "AI (profile)"sv;
+      std::string_view mode_name = mode == ::video::SBS_OFF ? "OFF"sv : "AI"sv;
       BOOST_LOG(info) << "type [IDX_SET_SBS_MODE]: client requested host SBS "sv << mode_name
                       << " ("sv << (int) mode << ") for ["sv
                       << session->device_name << ']';
@@ -1175,9 +1124,9 @@ namespace stream {
         session->mail->event<int>(mail::sbs_depth_status)->raise(0);
       }
 
-      // Hand the requested mode to this session's video pipeline. capture_async consumes it,
-      // rebuilds the encode device at the new resolution (W x H for OFF, 2W x H for AI)
-      // and lazy-loads the model selected by the active host profile.
+      // Hand the requested mode to this session's video pipeline. capture_async consumes it and
+      // rebuilds the encode device at the new resolution (W x H for OFF, 2W x H for AI). The
+      // single configured depth model is prepared once during host startup.
       session->mail->event<int>(mail::sbs_mode)->raise((int) mode);
     });
 
@@ -1187,33 +1136,6 @@ namespace stream {
       BOOST_LOG(info) << "type [IDX_SBS_DEBUG_DUMP]: client requested SBS debug frame dump for ["sv
                       << session->device_name << ']';
       ::video::sbs_debug_dump_pending.store(true, std::memory_order_relaxed);
-    });
-
-    server->map(packetTypes[IDX_SET_SBS_PROFILE], [server](session_t *session, const std::string_view &payload) {
-      std::string profile(payload);
-      if (profile == "?") {
-        session->control.sbs_profile_list_sent = false;
-        return;
-      }
-      if (profile.empty() || profile.size() > 64 ||
-          profile.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos) {
-        BOOST_LOG(warning) << "type [IDX_SET_SBS_PROFILE]: invalid profile name from ["sv
-                           << session->device_name << "]; ignored"sv;
-        return;
-      }
-      if (!config::video.sbs_profiles.contains(profile)) {
-        BOOST_LOG(warning) << "type [IDX_SET_SBS_PROFILE]: unknown profile '"sv << profile
-                           << "' from ["sv << session->device_name << "]; ignored"sv;
-        session->control.sbs_profile_list_sent = false;
-        return;
-      }
-      if (profile == session->control.sbs_profile) {
-        return;
-      }
-      BOOST_LOG(info) << "Client ["sv << session->device_name << "] selected SBS profile '"sv << profile << "'."sv;
-      session->control.sbs_profile = profile;
-      session->control.sbs_profile_list_sent = false;
-      session->mail->event<std::string>(mail::sbs_profile)->raise(std::move(profile));
     });
 
     server->map(packetTypes[IDX_ENCRYPTED], [server](session_t *session, const std::string_view &payload) {
@@ -1346,10 +1268,6 @@ namespace stream {
               auto hdr_info = hdr_queue->pop();
 
               send_hdr_mode(session, std::move(hdr_info));
-            }
-
-            if (!session->control.sbs_profile_list_sent && send_sbs_profile_list(session) == 0) {
-              session->control.sbs_profile_list_sent = true;
             }
 
             // Drain this session's depth-engine status to the latest phase. An event intentionally
@@ -1753,13 +1671,11 @@ namespace stream {
               session->video.cipher->encrypt(std::string_view {(char *) inspect, (size_t) blocksize}, prefix->tag, (uint8_t *) inspect, &iv);
             }
 
-            if (x - next_shard_to_send + 1 >= send_batch_size ||
-                x + 1 == shards.size()) {
+            if (x - next_shard_to_send + 1 >= send_batch_size || x + 1 == shards.size()) {
               // Do pacing within the frame.
               // Also trigger pacing before the first send_batch() of the frame
               // to account for the last send_batch() of the previous frame.
-              if (ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms ||
-                  ratecontrol_frame_packets_sent == 0) {
+              if (ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms || ratecontrol_frame_packets_sent == 0) {
                 auto due = ratecontrol_frame_start +
                            std::chrono::duration_cast<std::chrono::nanoseconds>(1ms) *
                              ratecontrol_frame_packets_sent / ratecontrol_packets_in_1ms;
@@ -2131,19 +2047,19 @@ namespace stream {
       return session.state.load(std::memory_order_relaxed);
     }
 
-    inline bool send(session_t& session, const std::string_view &payload) {
+    inline bool send(session_t &session, const std::string_view &payload) {
       return session.broadcast_ref->control_server.send(payload, session.control.peer);
     }
 
-    std::string uuid(const session_t& session) {
+    std::string uuid(const session_t &session) {
       return session.device_uuid;
     }
 
-    bool uuid_match(const session_t &session, const std::string_view& uuid) {
+    bool uuid_match(const session_t &session, const std::string_view &uuid) {
       return session.device_uuid == uuid;
     }
 
-    bool update_device_info(session_t& session, const std::string& name, const crypto::PERM& newPerm) {
+    bool update_device_info(session_t &session, const std::string &name, const crypto::PERM &newPerm) {
       session.permission = newPerm;
       if (!(newPerm & crypto::PERM::_allow_view)) {
         BOOST_LOG(debug) << "Session: View permission revoked for [" << session.device_name << "], disconnecting...";
@@ -2172,7 +2088,7 @@ namespace stream {
       session.shutdown_event->raise(true);
     }
 
-    void graceful_stop(session_t& session) {
+    void graceful_stop(session_t &session) {
       while_starting_do_nothing(session.state);
       auto expected = state_e::RUNNING;
       auto already_stopping = !session.state.compare_exchange_strong(expected, state_e::STOPPING);
@@ -2190,8 +2106,7 @@ namespace stream {
 
       // We may not have gotten far enough to have an ENet connection yet
       if (session.control.peer) {
-        std::array<std::uint8_t,
-          sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
+        std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
           encrypted_payload;
         auto payload = stream::encode_control(&session, util::view(plaintext), encrypted_payload);
 
@@ -2231,7 +2146,7 @@ namespace stream {
       input::reset(session.input);
 
       if (!session.undo_cmds.empty()) {
-        auto exec_thread = std::thread([cmd_list = session.undo_cmds]{
+        auto exec_thread = std::thread([cmd_list = session.undo_cmds] {
           for (auto &cmd : cmd_list) {
             std::error_code ec;
             auto env = proc::proc.get_env();
@@ -2307,7 +2222,7 @@ namespace stream {
       }
 
       if (!session.do_cmds.empty()) {
-        auto exec_thread = std::thread([cmd_list = session.do_cmds]{
+        auto exec_thread = std::thread([cmd_list = session.do_cmds] {
           for (auto &cmd : cmd_list) {
             std::error_code ec;
             auto env = proc::proc.get_env();

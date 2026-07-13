@@ -19,10 +19,10 @@
 #include "main.h"
 #include "nvhttp.h"
 #include "process.h"
+#include "sbs_bench_harness.h"
 #include "system_tray.h"
 #include "upnp.h"
 #include "uuid.h"
-#include "sbs_bench_harness.h"
 #include "video.h"
 #include "video_depth_estimator.h"
 #ifdef _WIN32
@@ -181,53 +181,6 @@ int main(int argc, char *argv[]) {
   // Log publisher metadata
   log_publisher_data();
 
-  // Precompile TensorRT engine(s) in the background for every client-selectable profile, plus
-  // any models listed in their prebuild_models values, so switching mid-stream is instant
-  // instead of triggering a first-use build (which streams flat for a minute or few). The builds
-  // run sequentially (precompile serializes internally); each is a no-op once its engine exists.
-  std::thread([profiles = config::video.sbs_profiles]() {
-      BOOST_LOG(info) << "Triggering background TensorRT engine precompilation..."sv;
-      const auto &registry = config::depth_model_registry();
-      std::vector<std::string> built;
-      auto build = [&](const config::depth_model_info &model) {
-        if (std::find(built.begin(), built.end(), model.name) == built.end()) {
-          BOOST_LOG(info) << "Prebuilding depth-model engine for '"sv << model.name << "'..."sv;
-          models::precompile_tensorrt_engine(SUNSHINE_ASSETS_DIR, model);
-          built.emplace_back(model.name);
-        }
-      };
-      for (const auto &[profile_name, profile] : profiles) {
-        build(video::depth_model_for_profile(profile));
-      }
-      for (const auto &[profile_name, profile] : profiles) {
-        std::stringstream ss(profile.prebuild_models);
-        std::string name;
-        while (std::getline(ss, name, ',')) {
-          auto b = name.find_first_not_of(" \t");
-          auto e = name.find_last_not_of(" \t");
-          if (b == std::string::npos) {
-            continue;
-          }
-          name = name.substr(b, e - b + 1);
-          if (std::find(built.begin(), built.end(), name) != built.end()) {
-            continue;
-          }
-          bool found = false;
-          for (const auto &m : registry) {
-            if (m.name == name) {
-              build(m);
-              found = true;
-              break;
-            }
-          }
-          if (!found) {
-            BOOST_LOG(warning) << "Profile '"sv << profile_name << "' prebuild_models entry '"sv
-                               << name << "' is not a known depth model; skipping."sv;
-          }
-        }
-      }
-  }).detach();
-
   // Log modified_config_settings
   for (auto &[name, val] : config::modified_config_settings) {
     BOOST_LOG(info) << "config: '"sv << name << "' = "sv << val;
@@ -249,6 +202,19 @@ int main(int argc, char *argv[]) {
 
     return fn->second(argv[0], config::sunshine.cmd.argc, config::sunshine.cmd.argv);
   }
+
+  // Prepare the single configured TensorRT model in the background only for the long-lived host.
+  // Command modes such as --sbs-bench own their TensorRT lifecycle and must not race this work.
+  // jthread joins before logging and process globals are torn down, preventing exit-time races.
+  std::jthread model_prepare_thread([
+    model = video::depth_model_for_profile(config::video.sbs),
+    adapter_name = config::video.adapter_name
+  ]() {
+    BOOST_LOG(info) << "Preparing startup depth model '"sv << model.name << "'..."sv;
+    if (!models::prepare_tensorrt_model(SUNSHINE_ASSETS_DIR, model, adapter_name)) {
+      BOOST_LOG(error) << "Startup depth-model preparation failed for '"sv << model.name << "'."sv;
+    }
+  });
 
   // Adding guard here first as it also performs recovery after crash,
   // otherwise people could theoretically end up without display output.
@@ -414,7 +380,7 @@ int main(int argc, char *argv[]) {
     if (proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
       std::string probe_uuid_str = PROBE_DISPLAY_UUID;
       auto probe_uuid = uuid_util::uuid_t::parse(probe_uuid_str);
-      auto* probe_guid = (GUID*)(void*)&probe_uuid;
+      auto *probe_guid = (GUID *) (void *) &probe_uuid;
 
       BOOST_LOG(info) << "Creating a temporary virtual display to probe for encoders..."sv;
 

@@ -245,7 +245,7 @@ def require_current_build(build_dir):
 
 
 def expected_profile(conf, extra):
-    """Resolve the production profile; every profile uses Apollo geometry."""
+    """Resolve the startup production profile; every profile uses Apollo geometry."""
     profile = conf_value(conf, "sbs_3d_profile", "apollo")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", profile):
         fail(f"invalid sbs_3d_profile {profile!r}")
@@ -407,7 +407,7 @@ def main():
     missing = check_engines(args.build_dir, expected_model)
     if missing and not args.allow_build:
         print(f"run_eval: TRT engine(s) missing in {args.build_dir}/assets: {missing}\n"
-              f"Prebuild them (run Apollo once / sbs_3d_prebuild_models) or pass --allow-build.")
+              f"Build it by starting Apollo once, or pass --allow-build.")
         raise SystemExit(2)
 
     contention = sunshine_running()

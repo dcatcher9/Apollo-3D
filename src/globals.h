@@ -56,7 +56,6 @@ namespace mail {
   MAIL(gamepad_feedback);
   MAIL(hdr);
   MAIL(sbs_mode);
-  MAIL(sbs_profile);
   MAIL(sbs_depth_status);
 #undef MAIL
 

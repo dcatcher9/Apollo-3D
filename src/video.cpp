@@ -20,7 +20,6 @@ extern "C" {
 }
 
 // local includes
-#include "process.h"
 #include "cbs.h"
 #include "config.h"
 #include "display_device.h"
@@ -29,6 +28,7 @@ extern "C" {
 #include "logging.h"
 #include "nvenc/nvenc_base.h"
 #include "platform/common.h"
+#include "process.h"
 #include "sync.h"
 #include "video.h"
 
@@ -45,7 +45,7 @@ namespace video {
 
   // Debug frame-dump request flag (declared in video.h); set by the 0x3004 control message
   // handler in stream.cpp, consumed by display_vram's SBS convert().
-  std::atomic<bool> sbs_debug_dump_pending{false};
+  std::atomic<bool> sbs_debug_dump_pending {false};
 
   // Resolve the profile-configured model name against the registry, else synthesize a custom
   // entry from the sbs_3d_depth_model/_url escape hatch.
@@ -79,13 +79,13 @@ namespace video {
     // }
 
     if (devices.empty()) {
-      #ifdef _WIN32
+#ifdef _WIN32
       // We'll create a temporary virtual display for probing anyways.
       if (proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
         return false;
       }
-      #endif
-        return true;
+#endif
+      return true;
     }
 
     // Since Windows 11 24H2, it is possible that there will be no active devices present
@@ -1115,7 +1115,7 @@ namespace video {
    */
   void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index, std::string &preferred_display_name) {
     // It is possible that the output name may be empty even if it wasn't before (device disconnected) or vice-versa
-    const auto output_name { display_device::map_output_name(config::video.output_name) };
+    const auto output_name {display_device::map_output_name(config::video.output_name)};
     std::string current_display_name = preferred_display_name;
 
     // If we have a current display index, let's start with that
@@ -1980,7 +1980,6 @@ namespace video {
     // A pending host SBS mode change means we must rebuild the encode session at the new
     // resolution. We only peek here; capture_async pops it and applies the new mode.
     auto sbs_mode_event = mail->event<int>(mail::sbs_mode);
-    auto sbs_profile_event = mail->event<std::string>(mail::sbs_profile);
 
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
@@ -2003,8 +2002,7 @@ namespace video {
       }
 
       while (true) {
-        if (shutdown_event->peek() || !images->running() || (reinit_event.peek()) ||
-            sbs_mode_event->peek() || sbs_profile_event->peek()) {
+        if (shutdown_event->peek() || !images->running() || (reinit_event.peek()) || sbs_mode_event->peek()) {
           return;
         } else {
           std::this_thread::sleep_for(300ms);
@@ -2030,14 +2028,12 @@ namespace video {
       //
       // If we have to reinit before we have received any captured frames, we will encode
       // the blank dummy frame just to let Moonlight know that we're alive.
-      if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1) ||
-          sbs_mode_event->peek() || sbs_profile_event->peek()) {
+      if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1) || sbs_mode_event->peek()) {
         // Same-display session rebuild: hand the current desktop to the next session. (Not on
         // reinit -- the display is recreated there and old images must not outlive it. Not when
         // a frame is already queued -- raise() overwrites the slot and would replace newer with
         // older.)
-        if (last_img && images->running() && !images->peek() && !shutdown_event->peek() && !reinit_event.peek() &&
-            (sbs_mode_event->peek() || sbs_profile_event->peek())) {
+        if (last_img && images->running() && !images->peek() && !shutdown_event->peek() && !reinit_event.peek() && sbs_mode_event->peek()) {
           images->raise(std::move(last_img));
         }
         break;
@@ -2441,11 +2437,9 @@ namespace video {
     // Host SBS toggle (0x3003 control message). The client-negotiated width is the "base"
     // width; when SBS is on we double it so the encoder emits a 2W x H side-by-side frame.
     auto sbs_mode_event = mail->event<int>(mail::sbs_mode);
-    auto sbs_profile_event = mail->event<std::string>(mail::sbs_profile);
     auto sbs_depth_status_event = mail->event<int>(mail::sbs_depth_status);
     const int base_width = config.width;
     int current_sbs_mode = config.sbs_mode;
-    std::string current_sbs_profile = config::video.sbs.profile;
 
     // Encoding takes place on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
@@ -2475,12 +2469,6 @@ namespace video {
           current_sbs_mode = *m;
         }
       }
-      while (sbs_profile_event->peek()) {
-        if (auto profile = sbs_profile_event->pop(0ms)) {
-          current_sbs_profile = std::move(*profile);
-        }
-      }
-
       // Build the effective config for this encode session. SBS doubles the output width to
       // 2*base. If that exceeds the encoder's max width, cap the packed width and scale the
       // height proportionally to preserve the per-eye aspect. The SBS pipeline then renders
@@ -2489,15 +2477,7 @@ namespace video {
       config_t session_config = config;
       session_config.sbs_mode = current_sbs_mode;
       session_config.sbs_depth_status_event = sbs_depth_status_event;
-      auto profile_it = config::video.sbs_profiles.find(current_sbs_profile);
-      if (profile_it == config::video.sbs_profiles.end()) {
-        BOOST_LOG(warning) << "Host SBS profile '"sv << current_sbs_profile
-                           << "' disappeared after config reload; using '"sv << config::video.sbs.profile << "'."sv;
-        current_sbs_profile = config::video.sbs.profile;
-        session_config.sbs_config = config::video.sbs;
-      } else {
-        session_config.sbs_config = profile_it->second;
-      }
+      session_config.sbs_config = config::video.sbs;
       if (current_sbs_mode != SBS_OFF) {
         const int cap = session_config.sbs_config.max_encode_width;
         const int packed_w = base_width * 2;
@@ -2506,7 +2486,9 @@ namespace video {
         } else {
           session_config.width = std::max(2, cap & ~1);
           session_config.height = std::max(
-            2, (int) std::lround((double) config.height * session_config.width / packed_w) & ~1);
+            2,
+            (int) std::lround((double) config.height * session_config.width / packed_w) & ~1
+          );
           BOOST_LOG(info) << "Host SBS: packed width "sv << packed_w << " exceeds max ("sv << cap
                           << "); capping to "sv << session_config.width << 'x' << session_config.height
                           << " (per-eye "sv << (session_config.width / 2) << 'x' << session_config.height << ')';
@@ -2790,9 +2772,7 @@ namespace video {
 
         // Test 4:4:4 HDR first. If 4:4:4 is supported, 4:2:0 should also be supported.
         config.chromaSamplingType = 1;
-        if ((encoder.flags & YUV444_SUPPORT) &&
-            disp->is_codec_supported(encoder_codec_name, config) &&
-            validate_config(disp, encoder, config) >= 0) {
+        if ((encoder.flags & YUV444_SUPPORT) && disp->is_codec_supported(encoder_codec_name, config) && validate_config(disp, encoder, config) >= 0) {
           flag_map[encoder_t::DYNAMIC_RANGE] = true;
           flag_map[encoder_t::YUV444] = true;
           return;
@@ -2802,8 +2782,7 @@ namespace video {
 
         // Test 4:2:0 HDR
         config.chromaSamplingType = 0;
-        if (disp->is_codec_supported(encoder_codec_name, config) &&
-            validate_config(disp, encoder, config) >= 0) {
+        if (disp->is_codec_supported(encoder_codec_name, config) && validate_config(disp, encoder, config) >= 0) {
           flag_map[encoder_t::DYNAMIC_RANGE] = true;
         } else {
           flag_map[encoder_t::DYNAMIC_RANGE] = false;
@@ -2914,15 +2893,13 @@ namespace video {
         }
 
         // Skip it if it doesn't support the specified codec at all
-        if ((active_hevc_mode >= 2 && !encoder->hevc[encoder_t::PASSED]) ||
-            (active_av1_mode >= 2 && !encoder->av1[encoder_t::PASSED])) {
+        if ((active_hevc_mode >= 2 && !encoder->hevc[encoder_t::PASSED]) || (active_av1_mode >= 2 && !encoder->av1[encoder_t::PASSED])) {
           pos++;
           continue;
         }
 
         // Skip it if it doesn't support HDR on the specified codec
-        if ((active_hevc_mode == 3 && !encoder->hevc[encoder_t::DYNAMIC_RANGE]) ||
-            (active_av1_mode == 3 && !encoder->av1[encoder_t::DYNAMIC_RANGE])) {
+        if ((active_hevc_mode == 3 && !encoder->hevc[encoder_t::DYNAMIC_RANGE]) || (active_av1_mode == 3 && !encoder->av1[encoder_t::DYNAMIC_RANGE])) {
           pos++;
           continue;
         }

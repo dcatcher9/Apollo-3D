@@ -19,7 +19,7 @@ namespace config {
   // track modified config options
   inline std::unordered_map<std::string, std::string> modified_config_settings;
 
-  // A selectable DA-V2 model for the SBS 3D pipeline. Profiles own model selection; this
+  // A configured DA-V2 model for the SBS 3D pipeline. The startup profile owns model selection; this
   // registry resolves names into local file stems and optional download sources.
   struct depth_model_info {
     std::string name;  ///< File stem: <name>.onnx / <name>.engine in the assets dir (also the g_engines key).
@@ -161,10 +161,10 @@ namespace config {
     bool ignore_encoder_probe_failure;
 
     // Real-time 2D->3D side-by-side (SBS) depth reprojection tuning.
-    // Shared/Apollo base values live HERE. config.cpp derives each named profile, then parses
-    // explicit sbs_3d_* overrides on top.
+    // The selected host profile is resolved once at startup, then explicit sbs_3d_* overrides
+    // are applied on top. Profiles are configuration presets only; they are not switched live.
     struct sbs_t {
-      std::string profile = "apollo";  ///< Quality profile applied before explicit overrides. Custom names use sbs_3d_profile_<name>_<parameter> keys.
+      std::string profile = "apollo";  ///< Startup quality preset. Custom names use sbs_3d_profile_<name>_<parameter> keys.
       double pop_strength = 1.25;  ///< Production stereo-parallax multiplier (0.25-2). Literal reference runs bypass production scaling in the offline harness.
       double ema = 0.5;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
       double ema_edge_change = 0.05;  ///< Edge-selective EMA: minimum current-vs-history depth change. 0 disables it.
@@ -182,15 +182,12 @@ namespace config {
       bool bestv2_sharpen = false;  ///< Apply Bestv2's exact SDR per-eye sharpen 0.2 after the completed warp. Retained for fidelity, disabled in quality-optimized profiles.
       std::string depth_model = "depth_anything_v2_fp16";  ///< Local name/stem for the depth model files (<name>.onnx / <name>.engine). Identifies the model so different models coexist, each with its own cached engine.
       std::string depth_model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< URL to download the depth model ONNX from if <depth_model>.onnx is absent. Point this (and depth_model) elsewhere to use a different model.
-      std::string prebuild_models = "";  ///< Comma-separated registry model names to build at startup in addition to the active model. Empty = only the active model.
       int max_encode_width = 8192;  ///< Max encoder output width for host SBS. SBS doubles the client width to 2W; if 2W exceeds this, the host caps the packed frame to this width (scaling height to keep the per-eye aspect) rather than failing NVENC create. NVENC HEVC/AV1 = 8192, H.264 = 4096.
       bool perf_stats = false;  ///< Emit per-stage host-SBS timing (depth inference + convert CPU) as a rolling p50/p95/max log line + sbs_perf.json snapshot. Off by default (the perf benchmark; see docs/sbs-benchmark-plan.md).
       bool cuda_graph = true;  ///< Capture/replay the TensorRT enqueue when mapped D3D buffer addresses remain stable. Falls back to ordinary enqueue when unsupported.
     };
 
     sbs_t sbs;
-    ///< All client-selectable Apollo-warp profiles, including the built-in apollo profile.
-    std::unordered_map<std::string, sbs_t> sbs_profiles;
   };
 
   struct audio_t {
@@ -293,6 +290,7 @@ namespace config {
         cmd_val(std::move(cmd_val)),
         elevated(std::move(elevated)) {
     }
+
     std::string cmd_name;
     std::string cmd_val;
     bool elevated;

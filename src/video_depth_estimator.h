@@ -25,6 +25,13 @@ namespace models {
   };
 
   void precompile_tensorrt_engine(const std::filesystem::path &assets_dir, const config::depth_model_info &model);
+  /** Build, deserialize, create, and warm one reusable execution context for the active model. */
+  bool prepare_tensorrt_model(
+    const std::filesystem::path &assets_dir,
+    const config::depth_model_info &model,
+    const std::string &adapter_name
+  );
+  engine_build_status tensorrt_model_prepare_status(const config::depth_model_info &model);
   engine_build_status tensorrt_engine_build_status(
     const std::filesystem::path &assets_dir,
     const config::depth_model_info &model
@@ -33,7 +40,7 @@ namespace models {
   /**
    * @brief Result of one estimate call: the depth map for the reprojection (t1), plus the
    *        permanent Bestv2 subject state (t2).
-     */
+   */
   struct estimate_result {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject;  ///< permanent Bestv2 subject state (t2 of the reprojection)
@@ -82,9 +89,9 @@ namespace models {
     estimate_result estimate_depth(ID3D11ShaderResourceView *input_srv, input_color_space color_space = input_color_space::srgb, std::uint64_t frame_id = 0);
 
     /**
-         * @brief Finish and consume exactly one inference previously submitted by estimate_depth().
-         *
-         * It synchronizes the estimator stream, applies normalization/EMA/subject tracking exactly
+     * @brief Finish and consume exactly one inference previously submitted by estimate_depth().
+     *
+     * It synchronizes the estimator stream, applies normalization/EMA/subject tracking exactly
          * once, and does not enqueue another inference. The offline evaluator uses this as its
          * exact current-frame quality path; production remains bounded matched-frame async.
          */

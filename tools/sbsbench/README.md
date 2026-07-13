@@ -25,14 +25,15 @@ Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 
 ## One-command eval loop (start here)
 
-Production configuration uses one profile selector:
+Production configuration resolves one profile at host startup:
 
 ```
 sbs_3d_profile = apollo   # default
 ```
 
-The profile supplies the complete stack. Add a configuration-only profile with
-`sbs_3d_profile_<name>_<parameter>` keys; no C++ or client enum is required. For example:
+The profile supplies the complete stack. A configuration-only preset can use
+`sbs_3d_profile_<name>_<parameter>` keys; selecting another preset requires restarting Apollo.
+For example:
 
 ```
 sbs_3d_profile = cinema
@@ -42,11 +43,9 @@ sbs_3d_profile_cinema_pop_strength = 1.35
 
 Every profile uses Apollo's occlusion-aware warp; profiles select depth-processing, model, pop,
 and performance parameters only. Unspecified values inherit Apollo defaults. Ordinary
-`sbs_3d_*` keys are applied last and explicitly override
-the corresponding parameter in every profile. Apollo advertises every configured profile to compatible Artemis
-clients, which can switch the complete profile atomically during a stream. The client never selects
-a model or individual parameter independently. Each encode device receives an immutable profile
-snapshot, so one stream cannot mix parameters or change another stream's selection.
+`sbs_3d_*` keys are applied last and explicitly override the corresponding selected-profile
+parameter. Artemis selects only Normal or Host SBS AI; it does not select a host profile, model,
+or individual parameter. Each encode device receives an immutable startup configuration snapshot.
 
 Production always keeps a bounded two-frame color buffer and presents only exact color/depth pairs,
 repeating the last completed SBS frame while inference is busy. The former wrong-frame async path,
@@ -54,10 +53,9 @@ live synchronous mode, `depth_frame_mode`, and `depth_fps` profile parameters we
 offline evaluator retains a private synchronous finish primitive so every source frame can be
 scored deterministically; it is not selectable by production configuration.
 
-Wire extensions: `0x3003` byte 0 selects host SBS mode (`bytes 1..3` are reserved and ignored);
-`0x3005` selects a UTF-8 profile name,
-`0x3007` advertises the current/available names, and `0x3006` remains depth-engine status. Apollo
-precompiles the model referenced by every advertised profile at startup.
+Wire extensions: `0x3003` byte 0 selects host SBS mode (`bytes 1..3` are reserved and ignored),
+`0x3004` requests a debug dump, and `0x3006` reports depth-engine status. Apollo builds, loads,
+creates a reusable execution context for, and warms the single selected model at startup.
 
 ```
 python tools/sbsbench/run_eval.py                     # all committed clips vs committed baselines
