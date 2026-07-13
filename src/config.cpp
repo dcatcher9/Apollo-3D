@@ -1244,8 +1244,9 @@ namespace config {
                          << "'; use 1-64 letters, digits, '_' or '-'. Using 'apollo'.";
       sbs_profile = "apollo";
     }
-    static constexpr std::array<std::string_view, 18> sbs_parameter_names {
+    static constexpr std::array<std::string_view, 22> sbs_parameter_names {
       "warp", "pop_strength", "ema", "depth_short_side", "depth_max_aspect", "minmax_ema",
+      "ema_edge_change", "ema_edge_gradient", "ema_edge_dilation", "ema_edge_strength",
       "subject_lock", "subject_recenter", "subject_stretch", "subject_plane_lock",
       "subject_plane_width", "bestv2_sharpen", "vd3d_forward_blend",
       "depth_model", "depth_model_url", "prebuild_models", "max_encode_width",
@@ -1321,6 +1322,10 @@ namespace config {
       }
       double_between_f(vars, prefix + "pop_strength", target.pop_strength, {0.25, 2.0});
       double_between_f(vars, prefix + "ema", target.ema, {0.01, 1.0});
+      double_between_f(vars, prefix + "ema_edge_change", target.ema_edge_change, {0.0, 1.0});
+      double_between_f(vars, prefix + "ema_edge_gradient", target.ema_edge_gradient, {0.0, 1.0});
+      int_between_f(vars, prefix + "ema_edge_dilation", target.ema_edge_dilation, {0, 2});
+      double_between_f(vars, prefix + "ema_edge_strength", target.ema_edge_strength, {0.0, 1.0});
       int_f(vars, prefix + "depth_short_side", target.depth_short_side);
       double_between_f(vars, prefix + "depth_max_aspect", target.depth_max_aspect, {1.0, 8.0});
       double_between_f(vars, prefix + "minmax_ema", target.minmax_ema, {0.001, 1.0});

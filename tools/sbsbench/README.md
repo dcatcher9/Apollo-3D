@@ -111,6 +111,10 @@ Harness A/B levers (after `--extra`):
   finite values, and both geometry implementations through the pre-encode SBS stage. It is not a
   PQ/NVENC/headset colorimetric evaluation; do not compare its PNG metrics to SDR baselines.
 - `--ema F` — per-pixel depth EMA override (`1.0` = off).
+- `--ema-edge-change F --ema-edge-gradient F --ema-edge-dilation N --ema-edge-strength F`
+  — experimental flowless moving-edge EMA. It preserves ordinary EMA outside a deterministic
+  depth-transition mask and blends masked pixels toward current depth. A 16-bit
+  `ema_mask_<frame>.png` locality artifact is required whenever enabled.
 - `--subject-lock F` — subject anchor strength (e.g. `0.95`).
 - `--subject-recenter F` — subject depth-field recenter strength.
 - `--subject-stretch` — shape_depth_for_pop 5/95 percentile stretch (default on in the permanent

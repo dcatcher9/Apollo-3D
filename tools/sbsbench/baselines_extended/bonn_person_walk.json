@@ -63,12 +63,12 @@
     "score": 78.1
   },
   "perf_ms": {
-    "depth_infer": 1.90496,
-    "sbs_composite_cpu": 0.0063,
-    "warp_infer": 0.130912
+    "depth_infer": 1.89942,
+    "sbs_composite_cpu": 0.0066,
+    "warp_infer": 0.131424
   },
   "meta": {
-    "git_sha": "3d4bbc78",
+    "git_sha": "1e25968c",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -90,14 +90,14 @@
     "warp": "apollo",
     "literal_bestv2": false,
     "depth_compensation": "none",
-    "eval_schema": 15,
+    "eval_schema": 16,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "dbe6b364336d0f4a",
+    "metric_sha256": "29b003a5cf912acb",
     "gpu_contention": false,
-    "timestamp": "2026-07-12T17:26:42",
-    "run_name": "evalv15-matched-only-extended",
+    "timestamp": "2026-07-12T18:19:50",
+    "run_name": "evalv16-emaedge-defaultoff-extended",
     "name": "bonn-person-walk",
     "description": "Real registered RGB-D person tracking with body motion and self-occlusion.",
     "dataset": "Bonn RGB-D Dynamic Dataset",

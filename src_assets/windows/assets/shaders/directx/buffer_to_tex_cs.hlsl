@@ -1,5 +1,7 @@
 StructuredBuffer<float>  InputBuffer : register(t0);
 StructuredBuffer<float4> MinMaxEma   : register(t1);  // [0]={P2,P98,initialized,_}
+Texture2D<float>          PreviousDepth : register(t2);
+Texture2D<uint>           EmaMotionMask : register(t3);
 RWTexture2D<float>       OutputTexture : register(u0);
 
 #include "include/depth_constants.hlsl"
@@ -16,6 +18,8 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     // then temporally smooth the normalized depth.
     float2 mm = MinMaxEma[0].xy;
     float mapped = saturate((max(raw, 0.0f) - mm.x) / max(mm.y - mm.x, 1e-6f));
-    float old_depth = OutputTexture[DTid.xy];
-    OutputTexture[DTid.xy] = lerp(old_depth, mapped, ema_alpha);
+    float old_depth = PreviousDepth[DTid.xy];
+    float filtered = lerp(old_depth, mapped, ema_alpha);
+    OutputTexture[DTid.xy] = EmaMotionMask[DTid.xy] != 0u ?
+                              lerp(filtered, mapped, ema_edge_strength) : filtered;
 }

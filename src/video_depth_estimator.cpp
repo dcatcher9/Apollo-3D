@@ -406,6 +406,10 @@ namespace models {
     std::string engine_key;
 
     float ema_alpha;
+    float ema_edge_change;
+    float ema_edge_gradient;
+    int ema_edge_dilation;
+    float ema_edge_strength;
     int depth_short_side;  // depth map short-side resolution (clamped to native short side)
     float max_aspect;  // aspect cap for short-side mode
     float minmax_alpha;  // temporal EMA blend for the normalized min/max
@@ -529,6 +533,7 @@ namespace models {
 
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> rgb_to_nchw_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_ema_motion_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_ema_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_hist_cs;
@@ -585,6 +590,12 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_srv;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_previous_tex;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_previous_srv;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> ema_motion_mask_tex;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ema_motion_mask_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask_srv;
+    bool depth_history_valid = false;
 
     CUgraphicsResource cuda_in_res = nullptr;
     CUgraphicsResource cuda_out_res = nullptr;
@@ -605,6 +616,10 @@ namespace models {
         device(d),
         context(c),
         ema_alpha((float) cfg.ema),
+        ema_edge_change((float) cfg.ema_edge_change),
+        ema_edge_gradient((float) cfg.ema_edge_gradient),
+        ema_edge_dilation(cfg.ema_edge_dilation),
+        ema_edge_strength((float) cfg.ema_edge_strength),
         depth_short_side(std::max(196, cfg.depth_short_side)),
         max_aspect(std::max(1.0f, (float) cfg.depth_max_aspect)),
         minmax_alpha((float) cfg.minmax_ema),
@@ -748,6 +763,7 @@ namespace models {
       const bool core_shaders_ok =
         compile_shader(assets_dir / "shaders" / "directx" / "rgb_to_nchw_cs.hlsl", rgb_to_nchw_cs) &&
         compile_shader(assets_dir / "shaders" / "directx" / "buffer_to_tex_cs.hlsl", buffer_to_tex_cs) &&
+        compile_shader(assets_dir / "shaders" / "directx" / "depth_ema_motion_cs.hlsl", depth_ema_motion_cs) &&
         compile_shader(assets_dir / "shaders" / "directx" / "depth_minmax_cs.hlsl", depth_minmax_cs) &&
         compile_shader(assets_dir / "shaders" / "directx" / "depth_minmax_ema_cs.hlsl", depth_minmax_ema_cs) &&
         compile_shader(assets_dir / "shaders" / "directx" / "depth_hist_cs.hlsl", depth_hist_cs) &&
@@ -1115,6 +1131,7 @@ namespace models {
       if (exact_plane_lock) {
         r.plane_lock = plane_work_a_srv;
       }
+      r.ema_motion_mask = ema_motion_mask_srv;
       r.raw_model_depth = tensor_out_srv;
       r.raw_width = target_w;
       r.raw_height = target_h;
@@ -1183,6 +1200,10 @@ namespace models {
       cbf[3] = ema_alpha;
       cbf[4] = minmax_alpha;
       cb[5] = reduce_groups * 256u;  // total threads for the reduction grid-stride
+      cbf[6] = ema_edge_change;
+      cbf[7] = ema_edge_gradient;
+      cbf[8] = (float) ema_edge_dilation;
+      cbf[9] = ema_edge_strength;
       cbf[15] = subject_recenter;  // subject recenter strength (depth_subject_resolve_cs)
       cbf[18] = subject_stretch ? 1.0f : 0.0f;
       D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
@@ -1192,8 +1213,7 @@ namespace models {
 
     // Normalize the finished raw disparity in tensor_out_buf into depth_tex: the scale
     // passes (min/max reduction, permanent percentile histogram, EMA fold) followed by the
-    // mapping/temporal-EMA pass. GPU-resident throughout, no CPU readback. In async mode
-    // this consumes the PREVIOUS frame's inference; in sync mode, the current frame's.
+    // mapping/temporal-EMA pass. GPU-resident throughout, no CPU readback.
     void normalize_depth_output() {
       // 3a. Per-frame scale (GPU-resident; no CPU readback). Depth Anything V2's
       // relative output is affine-invariant, so this is required for a stable parallax scale.
@@ -1253,19 +1273,46 @@ namespace models {
         context->CSSetUnorderedAccessViews(0, 3, null_uav2, nullptr);
       }
 
-      // 3b. Buffer to Texture: map/normalize the disparity into depth_tex + temporal EMA.
+      // Snapshot the complete previous depth before any thread writes the new result. The
+      // experimental mask reads neighborhoods, so an in-place read/write pass would be racy.
+      context->CopyResource(depth_previous_tex.Get(), depth_tex.Get());
+
+      const UINT clear_mask[4] = {0u, 0u, 0u, 0u};
+      if (ema_edge_change > 0.0f && ema_edge_gradient > 0.0f && depth_history_valid) {
+        context->CSSetShader(depth_ema_motion_cs.Get(), nullptr, 0);
+        context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
+        ID3D11ShaderResourceView *mask_srvs[3] = {
+          tensor_out_srv.Get(), minmax_ema_srv.Get(), depth_previous_srv.Get()
+        };
+        context->CSSetShaderResources(0, 3, mask_srvs);
+        context->CSSetUnorderedAccessViews(0, 1, ema_motion_mask_uav.GetAddressOf(), nullptr);
+        context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+        ID3D11UnorderedAccessView *null_mask_uav = nullptr;
+        ID3D11ShaderResourceView *null_mask_srvs[3] = {nullptr, nullptr, nullptr};
+        context->CSSetUnorderedAccessViews(0, 1, &null_mask_uav, nullptr);
+        context->CSSetShaderResources(0, 3, null_mask_srvs);
+      } else {
+        context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_mask);
+      }
+
+      // 3b. Buffer to Texture: normalize disparity and either apply temporal EMA or snap the
+      // pixels selected by the deterministic moving-edge mask.
       context->CSSetShader(buffer_to_tex_cs.Get(), nullptr, 0);
       context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-      ID3D11ShaderResourceView *bt_srvs[2] = {tensor_out_srv.Get(), minmax_ema_srv.Get()};
-      context->CSSetShaderResources(0, 2, bt_srvs);
+      ID3D11ShaderResourceView *bt_srvs[4] = {
+        tensor_out_srv.Get(), minmax_ema_srv.Get(), depth_previous_srv.Get(),
+        ema_motion_mask_srv.Get()
+      };
+      context->CSSetShaderResources(0, 4, bt_srvs);
       context->CSSetUnorderedAccessViews(0, 1, depth_uav.GetAddressOf(), nullptr);
 
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
       ID3D11UnorderedAccessView *null_uav2[2] = {nullptr, nullptr};
-      ID3D11ShaderResourceView *null_srvs[2] = {nullptr, nullptr};
+      ID3D11ShaderResourceView *null_srvs[4] = {nullptr, nullptr, nullptr, nullptr};
       context->CSSetUnorderedAccessViews(0, 1, null_uav2, nullptr);
-      context->CSSetShaderResources(0, 2, null_srvs);
+      context->CSSetShaderResources(0, 4, null_srvs);
+      depth_history_valid = true;
 
       // 3s. Subject tracking: weighted depth histogram over the freshly-normalized
       // depth, then a 1-thread resolve into the subject state the reprojection reads.
@@ -1479,6 +1526,25 @@ namespace models {
                        SUCCEEDED(device->CreateUnorderedAccessView(depth_tex.Get(), nullptr, &depth_uav)) &&
                        SUCCEEDED(device->CreateShaderResourceView(depth_tex.Get(), nullptr, &depth_srv));
 
+        // Immutable previous-depth snapshot for deterministic neighborhood tests. Reading the
+        // in-place EMA output while adjacent threads write it would make dilation race-dependent.
+        auto previous_desc = tex_desc;
+        previous_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        resources_ok = resources_ok &&
+                       SUCCEEDED(device->CreateTexture2D(&previous_desc, nullptr, &depth_previous_tex)) &&
+                       SUCCEEDED(device->CreateShaderResourceView(depth_previous_tex.Get(), nullptr,
+                                                                  &depth_previous_srv));
+
+        auto mask_desc = tex_desc;
+        mask_desc.Format = DXGI_FORMAT_R32_UINT;
+        mask_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+        resources_ok = resources_ok &&
+                       SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &ema_motion_mask_tex)) &&
+                       SUCCEEDED(device->CreateUnorderedAccessView(ema_motion_mask_tex.Get(), nullptr,
+                                                                  &ema_motion_mask_uav)) &&
+                       SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr,
+                                                                  &ema_motion_mask_srv));
+
         if (exact_plane_lock) {
           auto create_plane_texture = [&](Microsoft::WRL::ComPtr<ID3D11Texture2D> &tex, Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> &uav, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &srv) {
             return SUCCEEDED(device->CreateTexture2D(&tex_desc, nullptr, &tex)) &&
@@ -1526,6 +1592,9 @@ namespace models {
         // Clear depth so the range->pixel EMA initializes from a known value.
         const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         context->ClearUnorderedAccessViewFloat(depth_uav.Get(), clear_color);
+        const UINT clear_uint[4] = {0u, 0u, 0u, 0u};
+        context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_uint);
+        depth_history_valid = false;
         if (plane_band_uav) {
           context->ClearUnorderedAccessViewFloat(plane_band_uav.Get(), clear_color);
         }

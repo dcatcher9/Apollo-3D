@@ -14,10 +14,10 @@ cbuffer Constants : register(b0) {
     float ema_alpha;         // per-pixel depth temporal EMA blend (buffer_to_tex)
     float minmax_alpha;      // normalized min/max temporal EMA blend (depth_minmax_ema)
     uint  reduce_threads;    // total threads in the reduction dispatch (grid-stride)
-    float reserved6;
-    float reserved7;
-    float reserved8;
-    float reserved9;
+    float ema_edge_change;   // >0 enables motion-edge snap; normalized depth delta threshold
+    float ema_edge_gradient; // minimum current normalized-depth gradient
+    float ema_edge_dilation; // motion mask radius in depth pixels (0-2)
+    float ema_edge_strength; // extra blend toward current depth inside the motion mask
     float reserved10;
     float reserved11;
     float reserved12;

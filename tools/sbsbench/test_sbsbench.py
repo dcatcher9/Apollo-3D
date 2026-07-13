@@ -235,7 +235,7 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
-        self.assertIn('"  \\"schema\\": 7,\\n"', harness)
+        self.assertIn('"  \\"schema\\": 8,\\n"', harness)
         self.assertIn('\\"depth_override_frames\\"', harness)
 
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
@@ -279,7 +279,7 @@ class EvalContractTests(unittest.TestCase):
             evaluator = fh.read()
         self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
         self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
-        self.assertIn('"schema": 7', evaluator)
+        self.assertIn('"schema": 8', evaluator)
         self.assertIn('depth_override_root and not args.comparison_only', evaluator)
 
     def test_live_depth_pairing_is_bounded_and_sync_is_evaluation_only(self):
@@ -301,6 +301,26 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             harness = fh.read()
         self.assertIn("finish_pending_depth_for_evaluation", harness)
+
+    def test_edge_selective_ema_uses_immutable_history_and_exports_locality_mask(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders",
+                                  "directx")
+        with open(os.path.join(shader_dir, "depth_ema_motion_cs.hlsl"),
+                  encoding="utf-8") as fh:
+            mask_shader = fh.read()
+        self.assertIn("PreviousDepth", mask_shader)
+        self.assertIn("ema_edge_change", mask_shader)
+        self.assertIn("ema_edge_dilation", mask_shader)
+        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
+                  encoding="utf-8") as fh:
+            estimator = fh.read()
+        self.assertIn("CopyResource(depth_previous_tex.Get(), depth_tex.Get())", estimator)
+        self.assertIn("ema_motion_mask_srv", estimator)
+        with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
+                  encoding="utf-8") as fh:
+            harness = fh.read()
+        self.assertIn('"ema_mask_%s.png"', harness)
 
     def test_depth_override_manifest_requires_exact_frames_and_source_hash(self):
         with tempfile.TemporaryDirectory() as root:

@@ -168,6 +168,10 @@ namespace config {
       std::string warp = "apollo";  ///< Geometry implementation: "apollo" = occlusion-aware backward probe; "vd3d" = Bestv2 backward/forward hybrid.
       double pop_strength = 1.25;  ///< Production stereo-parallax multiplier (0.25-2), shared by both profiles. Literal VD3D reference runs bypass production scaling in the offline harness.
       double ema = 0.5;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
+      double ema_edge_change = 0.0;  ///< Experimental edge-selective EMA: minimum current-vs-history depth change. 0 disables it.
+      double ema_edge_gradient = 0.04;  ///< Experimental edge-selective EMA: minimum current depth gradient.
+      int ema_edge_dilation = 0;  ///< Experimental edge-selective EMA mask radius in depth pixels (0-2).
+      double ema_edge_strength = 1.0;  ///< Experimental edge-selective EMA blend toward current depth inside the mask.
       int depth_short_side = 432;  ///< Depth map short-side resolution, clamped to the frame's native short side. At 16:9 this maps to about 768x432, matching the VisionDepth3D reference input.
       double depth_max_aspect = 4.0;  ///< Aspect-ratio cap (long side <= short * this). Bounds worst-case inference cost on ultrawide.
       double minmax_ema = 0.18;  ///< Temporal EMA blend for the normalized disparity min/max (0-1). Lower = steadier depth scale, higher = adapts faster.

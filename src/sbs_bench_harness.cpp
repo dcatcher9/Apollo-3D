@@ -366,6 +366,47 @@ namespace sbs_bench {
       save_gray16_png(path, d.Width, d.Height, gray);
     }
 
+    void dump_uint_mask(ID3D11Device *dev, ID3D11DeviceContext *ctx,
+                        ID3D11ShaderResourceView *srv, const fs::path &path,
+                        ComPtr<ID3D11Texture2D> &stage_cache) {
+      if (!srv) {
+        return;
+      }
+      ComPtr<ID3D11Resource> resource;
+      srv->GetResource(&resource);
+      ComPtr<ID3D11Texture2D> texture;
+      if (FAILED(resource.As(&texture))) {
+        return;
+      }
+      D3D11_TEXTURE2D_DESC desc {};
+      texture->GetDesc(&desc);
+      if (!stage_cache) {
+        auto stage_desc = desc;
+        stage_desc.Usage = D3D11_USAGE_STAGING;
+        stage_desc.BindFlags = 0;
+        stage_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stage_desc.MiscFlags = 0;
+        if (FAILED(dev->CreateTexture2D(&stage_desc, nullptr, &stage_cache))) {
+          return;
+        }
+      }
+      ctx->CopyResource(stage_cache.Get(), texture.Get());
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return;
+      }
+      std::vector<uint16_t> gray((size_t) desc.Width * desc.Height);
+      for (UINT y = 0; y < desc.Height; ++y) {
+        const auto *row = (const uint32_t *) ((const uint8_t *) mapped.pData +
+                                              (size_t) y * mapped.RowPitch);
+        for (UINT x = 0; x < desc.Width; ++x) {
+          gray[(size_t) y * desc.Width + x] = row[x] ? 65535u : 0u;
+        }
+      }
+      ctx->Unmap(stage_cache.Get(), 0);
+      save_gray16_png(path, desc.Width, desc.Height, gray);
+    }
+
     // Read back a harness-only B8G8R8A8 diagnostic target without coupling it to the stream's
     // SDR/HDR format. Disocclusion masks use R=pre-fill hole and G=still unresolved after fill.
     void dump_bgra8_texture(ID3D11Device *dev, ID3D11DeviceContext *ctx,
@@ -499,6 +540,10 @@ namespace sbs_bench {
       double subject_recenter = -1.0;  // global subject recenter override
       int depth_short_side = 0;  // depth inference short-side override (0 = conf; VD3D uses 432)
       double ema = -1.0;  // per-pixel depth EMA override (1.0 = off)
+      double ema_edge_change = -1.0;
+      double ema_edge_gradient = -1.0;
+      int ema_edge_dilation = -1;
+      double ema_edge_strength = -1.0;
       int subject_stretch = -1;  // -1 = conf, 0 = off, 1 = on
       double subject_plane_lock = -1.0;  // local subject-band flatten (e.g. 0.28); <0 = conf
       double vd3d_forward_blend = -1.0;  // VD3D backward/forward blend override; <0 = conf
@@ -563,6 +608,14 @@ namespace sbs_bench {
           o.vd3d_forward_blend = std::stod(next("--vd3d-forward-blend"));
         } else if (a == "--ema") {
           o.ema = std::stod(next("--ema"));
+        } else if (a == "--ema-edge-change") {
+          o.ema_edge_change = std::stod(next("--ema-edge-change"));
+        } else if (a == "--ema-edge-gradient") {
+          o.ema_edge_gradient = std::stod(next("--ema-edge-gradient"));
+        } else if (a == "--ema-edge-dilation") {
+          o.ema_edge_dilation = std::stoi(next("--ema-edge-dilation"));
+        } else if (a == "--ema-edge-strength") {
+          o.ema_edge_strength = std::stod(next("--ema-edge-strength"));
         } else if (a == "--minmax-ema") {
           o.minmax_ema = std::stod(next("--minmax-ema"));
         } else if (a == "--bestv2-sharpen") {
@@ -593,6 +646,12 @@ namespace sbs_bench {
       }
       if (o.depth_every < 1 || o.depth_every > 8) {
         BOOST_LOG(error) << "sbs-bench: --depth-every must be between 1 and 8";
+        return false;
+      }
+      if (o.ema_edge_change > 1.0 || o.ema_edge_gradient > 1.0 ||
+          o.ema_edge_strength > 1.0 ||
+          o.ema_edge_dilation > 2) {
+        BOOST_LOG(error) << "sbs-bench: EMA edge thresholds must be <=1 and dilation <=2";
         return false;
       }
       if (!o.depth_override_root.empty() && !fs::is_directory(o.depth_override_root)) {
@@ -688,6 +747,18 @@ namespace sbs_bench {
     }
     if (o.ema > 0.0) {
       sbs_cfg.ema = o.ema;  // A/B lever: depth EMA (1.0 = off)
+    }
+    if (o.ema_edge_change >= 0.0) {
+      sbs_cfg.ema_edge_change = o.ema_edge_change;
+    }
+    if (o.ema_edge_gradient >= 0.0) {
+      sbs_cfg.ema_edge_gradient = o.ema_edge_gradient;
+    }
+    if (o.ema_edge_dilation >= 0) {
+      sbs_cfg.ema_edge_dilation = o.ema_edge_dilation;
+    }
+    if (o.ema_edge_strength >= 0.0) {
+      sbs_cfg.ema_edge_strength = o.ema_edge_strength;
     }
     if (o.minmax_ema >= 0.0) {
       sbs_cfg.minmax_ema = o.minmax_ema;  // A/B lever: range-bounds EMA (VD3D 0.18)
@@ -785,6 +856,7 @@ namespace sbs_bench {
     D3D11_VIEWPORT vp = {};
     UINT sbs_w = 0, sbs_h = 0;
     ComPtr<ID3D11Texture2D> depth_stage;  // dump_depth staging cache (depth size is constant)
+    ComPtr<ID3D11Texture2D> ema_mask_stage;
     ComPtr<ID3D11Buffer> raw_depth_stage;
     bool raw_shape_written = false;
     float hdr_output_min = std::numeric_limits<float>::infinity();
@@ -1127,6 +1199,12 @@ namespace sbs_bench {
         char dname[64];
         snprintf(dname, sizeof(dname), "depth_%s.png", output_id.c_str());
         dump_depth(dev.Get(), ctx.Get(), est.depth.Get(), fs::path(o.out) / dname, depth_stage);
+        if (sbs_cfg.ema_edge_change > 0.0) {
+          char mname[64];
+          snprintf(mname, sizeof(mname), "ema_mask_%s.png", output_id.c_str());
+          dump_uint_mask(dev.Get(), ctx.Get(), est.ema_motion_mask.Get(),
+                         fs::path(o.out) / mname, ema_mask_stage);
+        }
         char rname[64];
         snprintf(rname, sizeof(rname), "raw_%s.f32", output_id.c_str());
         dump_raw_model_depth(dev.Get(), ctx.Get(), est.raw_model_depth.Get(), est.raw_width, est.raw_height, fs::path(o.out) / rname, raw_depth_stage);
@@ -1158,7 +1236,7 @@ namespace sbs_bench {
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
-                 << "  \"schema\": 7,\n"
+                 << "  \"schema\": 8,\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
                  << "  \"warp\": " << json_string(sbs_cfg.warp) << ",\n"
@@ -1171,6 +1249,10 @@ namespace sbs_bench {
                  << json_string(!o.depth_override_root.empty() ? "external-reference" : "none")
                  << ",\n"
                  << "  \"depth_override_frames\": " << applied_depth_override_frames << ",\n"
+                 << "  \"ema_edge_change\": " << sbs_cfg.ema_edge_change << ",\n"
+                 << "  \"ema_edge_gradient\": " << sbs_cfg.ema_edge_gradient << ",\n"
+                 << "  \"ema_edge_dilation\": " << sbs_cfg.ema_edge_dilation << ",\n"
+                 << "  \"ema_edge_strength\": " << sbs_cfg.ema_edge_strength << ",\n"
                  << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n"
                  << "  \"warp_mask\": {\"red\": \"forward_disocclusion_before_fill\", "
                     "\"green\": \"unresolved_after_fill\"}\n"

@@ -36,7 +36,7 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-EVAL_SCHEMA = 15  # matched-only production; synchronous evaluator primitive retained offline
+EVAL_SCHEMA = 16  # edge-selective EMA experiment contract and locality mask
 
 
 def suite_defaults(name):
@@ -258,6 +258,16 @@ def expected_profile(conf, extra):
     return profile, warp
 
 
+def expected_profile_number(conf, profile, key, default, extra, cli_key, cast=float):
+    value = conf_value(conf, f"sbs_3d_profile_{profile}_{key}", default)
+    value = conf_value(conf, f"sbs_3d_{key}", value)
+    value = extra_value(extra, cli_key, value)
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        fail(f"invalid numeric value for {key}: {value!r}")
+
+
 def expected_depth_model(conf, profile):
     """Resolve the model with the same profile-first, explicit-override order as production."""
     model = "depth_anything_v2_fp16"
@@ -372,6 +382,18 @@ def main():
     require_current_build(args.build_dir)
 
     expected_config_profile, expected_warp = expected_profile(args.conf, args.extra)
+    expected_ema_edge_change = expected_profile_number(
+        args.conf, expected_config_profile, "ema_edge_change", 0.0, args.extra,
+        "--ema-edge-change")
+    expected_ema_edge_gradient = expected_profile_number(
+        args.conf, expected_config_profile, "ema_edge_gradient", 0.04, args.extra,
+        "--ema-edge-gradient")
+    expected_ema_edge_dilation = expected_profile_number(
+        args.conf, expected_config_profile, "ema_edge_dilation", 0, args.extra,
+        "--ema-edge-dilation", int)
+    expected_ema_edge_strength = expected_profile_number(
+        args.conf, expected_config_profile, "ema_edge_strength", 1.0, args.extra,
+        "--ema-edge-strength")
     expected_model = expected_depth_model(args.conf, expected_config_profile)
     missing = check_engines(args.build_dir, expected_model)
     if missing and not args.allow_build:
@@ -435,7 +457,7 @@ def main():
             fail(f"{clip}: harness did not write contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
         expected_contract = {
-            "schema": 7,
+            "schema": 8,
             "model": expected_model,
             "profile": expected_config_profile,
             "warp": expected_warp,
@@ -443,6 +465,10 @@ def main():
             "depth_reuse_interval": depth_reuse_interval,
             "depth_compensation": depth_compensation,
             "depth_override_frames": depth_override_counts[clip],
+            "ema_edge_change": expected_ema_edge_change,
+            "ema_edge_gradient": expected_ema_edge_gradient,
+            "ema_edge_dilation": expected_ema_edge_dilation,
+            "ema_edge_strength": expected_ema_edge_strength,
             "literal_bestv2": literal_bestv2,
         }
         mismatched = {key: (expected, contract.get(key))
@@ -463,6 +489,8 @@ def main():
         raw_ids = set(sbsbench.indexed_files(os.path.join(out_dir, "raw_*.f32"), "raw_"))
         mask_ids = set(sbsbench.indexed_files(
             os.path.join(out_dir, "warp_mask_*.png"), "warp_mask_"))
+        ema_mask_ids = set(sbsbench.indexed_files(
+            os.path.join(out_dir, "ema_mask_*.png"), "ema_mask_"))
         if (contract.get("warp_mask") != {
                 "red": "forward_disocclusion_before_fill",
                 "green": "unresolved_after_fill"}):
@@ -472,6 +500,10 @@ def main():
             fail(f"{clip}: artifact frame-id mismatch source={sorted(source_ids)} "
                  f"sbs={sorted(sbs_ids)} depth={sorted(depth_ids)} raw={sorted(raw_ids)} "
                  f"warp_mask={sorted(mask_ids)}")
+        if expected_ema_edge_change > 0.0 and ema_mask_ids != source_ids:
+            fail(f"{clip}: incomplete EMA motion-mask artifacts: {sorted(ema_mask_ids)}")
+        if expected_ema_edge_change <= 0.0 and ema_mask_ids:
+            fail(f"{clip}: unexpected EMA motion-mask artifacts while feature is disabled")
         if not os.path.exists(os.path.join(out_dir, "raw_shape.json")):
             fail(f"{clip}: raw_shape.json missing")
         # Carry the clip's own metadata (scene name/description) into results so the run dir is
