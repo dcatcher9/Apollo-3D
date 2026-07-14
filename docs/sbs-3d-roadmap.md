@@ -147,6 +147,12 @@ default `1.25`) without changing that resolution correction.
   mean halo from 4.57 to 4.52 and the rim proxy from 4.41 to 4.31, but produced no validated
   primary-axis win, was visually imperceptible at the strongest frame, and increased mean warp
   time from 0.0553 to 0.0679 ms (+22.8%). Evidence: `edge-supersample-core`.
+- Comfort-only adaptive pop was rejected at its required ceiling screen. Raising the shared global
+  strength from 1.25 to 2.0 kept the worst signed disparity tail inside the 3% limit (2.27%) and
+  raised mean volume from 0.88% to 1.39%, but produced 19 validated costs across warp and stability:
+  mean static jitter rose 2.01 to 2.73 and flow residual 5.03 to 6.21. A disparity-only controller
+  would therefore approve visibly riskier frames. Keep the user-selected 1.25 fixed; revisit only
+  with an independently validated artifact-risk controller. Evidence: `adaptive-pop-ceiling-core`.
 
 Do not reintroduce a removed processor without a current core and extended comparison, visual
 evidence, and a headset-motivated hypothesis.
