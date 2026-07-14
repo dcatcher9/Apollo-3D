@@ -18,4 +18,16 @@ float Bestv2RawShiftPx(float d) {
     return (wn * 9.99f + wm * 3.0f - wf * 2.52f) / (wn + wm + wf + 1e-6f);
 }
 
+// Degree-7 polynomial approximation of Bestv2RawShiftPx over normalized depth [0, 1].
+// Its maximum raw-shift error is below 0.01 source pixel (and below 0.014 output pixel at
+// the maximum supported aspect scaling). The live full-resolution probe loop uses this form
+// to replace three transcendental operations per probe; low-resolution subject reductions
+// retain the exact curve above.
+float Bestv2RawShiftPxFast(float d) {
+    d = saturate(d);
+    return -1.39635933f + d * (2.776208766f + d * (21.04503417f + d *
+           (-94.6673759f + d * (376.6610774f + d * (-645.141824f + d *
+           (482.8701123f - 133.5645677f * d))))));
+}
+
 #endif

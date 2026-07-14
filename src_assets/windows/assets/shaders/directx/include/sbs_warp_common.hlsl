@@ -78,8 +78,10 @@ float Bestv2Parallax(float d, float plane_mask, float4 s0, float4 s1, float4 s2,
     float aspect_scale = Bestv2AspectScale(source_width, source_height, literal_bestv2);
     float shaped_depth = WarpDepth(d, s0, s1, true);
     float subject_depth = WarpDepth(s0.z, s0, s1, true);
-    float shift_px = Bestv2RawShiftPx(shaped_depth);
-    float subject_shift_px = Bestv2RawShiftPx(subject_depth);
+    // The live probe loop calls this once per search sample and output pixel. Its bounded
+    // polynomial form avoids three exponentials per probe while remaining deeply subpixel.
+    float shift_px = Bestv2RawShiftPxFast(shaped_depth);
+    float subject_shift_px = Bestv2RawShiftPxFast(subject_depth);
 
     // Fallback used only if exact morphology could not initialize. The normal Bestv2 path below
     // consumes its center-weighted, closed and smoothed silhouette plus weighted mean shift.

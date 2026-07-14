@@ -558,6 +558,31 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("plane_subject_stretch != 0u", reduce_shader)
         self.assertNotIn("Bestv2RawShiftPxPlane", reduce_shader)
 
+    def test_bestv2_fast_curve_is_subpixel_and_live_only(self):
+        depth = np.linspace(0.0, 1.0, 100001, dtype=np.float64)
+        near = np.exp(-0.5 * ((depth - 0.85) / 0.24) ** 2)
+        middle = np.exp(-0.5 * ((depth - 0.50) / 0.28) ** 2)
+        far = np.exp(-0.5 * ((depth - 0.15) / 0.24) ** 2)
+        exact = (near * 9.99 + middle * 3.0 - far * 2.52) / (near + middle + far + 1e-6)
+        coeffs = (-1.39635933, 2.776208766, 21.04503417, -94.6673759,
+                  376.6610774, -645.141824, 482.8701123, -133.5645677)
+        approx = np.full_like(depth, coeffs[-1])
+        for coefficient in reversed(coeffs[:-1]):
+            approx = approx * depth + coefficient
+        self.assertLess(np.max(np.abs(approx - exact)), 0.01)
+
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders",
+                                  "directx")
+        with open(os.path.join(shader_dir, "include", "sbs_warp_common.hlsl"),
+                  encoding="utf-8") as fh:
+            warp_common = fh.read()
+        with open(os.path.join(shader_dir, "depth_plane_reduce_cs.hlsl"),
+                  encoding="utf-8") as fh:
+            plane_reduce = fh.read()
+        self.assertIn("Bestv2RawShiftPxFast(shaped_depth)", warp_common)
+        self.assertIn("Bestv2RawShiftPx(shaped_depth)", plane_reduce)
+
     def test_disabled_plane_lock_has_no_probe_loop_texture_fetch(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
