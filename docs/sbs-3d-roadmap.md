@@ -138,6 +138,11 @@ default `1.25`) without changing that resolution correction.
 - Guided upsample, curvature, scene snap, range/depth floors, border fade, legacy shift, VD3D
   hybrid warp, and CPU warpsim were rejected and removed.
 - Subject-plane lock, Bestv2 sharpen, and EMA-mask dilation were rejected and removed.
+- A nearest/coherent multi-hypothesis replacement for the fallback background sample was a
+  byte-exact no-op across all 275 core frames (`multi-fill-core`). Exact forward coverage still
+  identifies holes, but the backward equation finds a mathematical root there and therefore never
+  reaches its no-root fallback. Future disocclusion work must change root selection or explicitly
+  consume forward coverage rather than elaborate that unreachable fallback.
 
 Do not reintroduce a removed processor without a current core and extended comparison, visual
 evidence, and a headset-motivated hypothesis.
