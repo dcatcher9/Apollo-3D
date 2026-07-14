@@ -611,6 +611,7 @@ namespace platf::dxgi {
 
           // Lazy-create the depth estimator on the first SBS frame.
           ensure_depth_estimator();
+          auto *gpu_timer = perf ? begin_sbs_gpu_timer() : nullptr;
 
           // Production always uses bounded matched pairing: infer asynchronously from a private
           // color slot, then warp only the slot whose frame identity completed.
@@ -626,7 +627,11 @@ namespace platf::dxgi {
 
           if (depth_estimator) {
             matched_candidate_slot = available_matched_slot();
-            if (matched_candidate_slot && copy_matched_frame(img_ctx.encoder_texture.get(), *matched_candidate_slot, frame_id)) {
+            const bool matched_copy_submitted =
+              matched_candidate_slot &&
+              copy_matched_frame(img_ctx.encoder_texture.get(), *matched_candidate_slot, frame_id);
+            mark_sbs_matched_copy_end(gpu_timer, matched_copy_submitted);
+            if (matched_copy_submitted) {
               est = depth_estimator->estimate_depth(matched_candidate_slot->srv.get(), input_color_space, frame_id);
               if (est.completed_frame_valid) {
                 matched_render_slot = find_pending_matched_slot(est.completed_frame_id);
@@ -660,11 +665,13 @@ namespace platf::dxgi {
                 matched_candidate_slot->pending = true;
               }
             }
+          } else {
+            mark_sbs_matched_copy_end(gpu_timer, false);
           }
 
           const bool repeat_matched_output = !matched_render_slot && matched_output_valid;
           const bool timing_has_depth_warp = !repeat_matched_output && est.depth;
-          auto *gpu_timer = perf ? begin_sbs_gpu_timer(timing_has_depth_warp) : nullptr;
+          mark_sbs_warp_start(gpu_timer, timing_has_depth_warp);
           ID3D11ShaderResourceView *final_sbs_srv = nullptr;
           ID3D11Texture2D *final_sbs_texture = nullptr;
           if (repeat_matched_output) {
@@ -959,9 +966,12 @@ namespace platf::dxgi {
     struct sbs_gpu_timer_slot_t {
       d3d_query_t disjoint;
       d3d_query_t start;
+      d3d_query_t matched_copy_end;
+      d3d_query_t warp_start;
       d3d_query_t warp_end;
       d3d_query_t convert_end;
       bool pending = false;
+      bool has_matched_copy = false;
       bool has_depth_warp = false;
       std::uint64_t perf_generation = 0;
     };
@@ -983,7 +993,7 @@ namespace platf::dxgi {
           return;
         }
         desc.Query = D3D11_QUERY_TIMESTAMP;
-        if (FAILED(device->CreateQuery(&desc, &slot.start)) || FAILED(device->CreateQuery(&desc, &slot.warp_end)) || FAILED(device->CreateQuery(&desc, &slot.convert_end))) {
+        if (FAILED(device->CreateQuery(&desc, &slot.start)) || FAILED(device->CreateQuery(&desc, &slot.matched_copy_end)) || FAILED(device->CreateQuery(&desc, &slot.warp_start)) || FAILED(device->CreateQuery(&desc, &slot.warp_end)) || FAILED(device->CreateQuery(&desc, &slot.convert_end))) {
           BOOST_LOG(warning) << "Host SBS GPU timing unavailable: could not create timestamp queries."sv;
           return;
         }
@@ -1010,17 +1020,28 @@ namespace platf::dxgi {
         }
 
         UINT64 start = 0;
+        UINT64 matched_copy_end = 0;
+        UINT64 warp_start = 0;
         UINT64 warp_end = 0;
         UINT64 convert_end = 0;
         const auto start_status = device_ctx->GetData(slot.start.get(), &start, sizeof(start), 0);
+        const auto matched_copy_status = device_ctx->GetData(slot.matched_copy_end.get(), &matched_copy_end, sizeof(matched_copy_end), 0);
+        const auto warp_start_status = device_ctx->GetData(slot.warp_start.get(), &warp_start, sizeof(warp_start), 0);
         const auto warp_status = device_ctx->GetData(slot.warp_end.get(), &warp_end, sizeof(warp_end), 0);
         const auto convert_status = device_ctx->GetData(slot.convert_end.get(), &convert_end, sizeof(convert_end), 0);
-        if (SUCCEEDED(start_status) && SUCCEEDED(warp_status) && SUCCEEDED(convert_status) && !timing.Disjoint && timing.Frequency > 0 && warp_end >= start && convert_end >= warp_end) {
+        if (SUCCEEDED(start_status) && SUCCEEDED(matched_copy_status) && SUCCEEDED(warp_start_status) && SUCCEEDED(warp_status) && SUCCEEDED(convert_status) && !timing.Disjoint && timing.Frequency > 0 && matched_copy_end >= start && warp_start >= matched_copy_end && warp_end >= warp_start && convert_end >= warp_end) {
           const double to_ms = 1000.0 / static_cast<double>(timing.Frequency);
+          if (slot.has_matched_copy) {
+            sbs_perf::add_sample_ms_if_current(
+              "matched_frame_copy_gpu",
+              static_cast<double>(matched_copy_end - start) * to_ms,
+              slot.perf_generation
+            );
+          }
           if (slot.has_depth_warp) {
             sbs_perf::add_sample_ms_if_current(
               "sbs_warp_gpu",
-              static_cast<double>(warp_end - start) * to_ms,
+              static_cast<double>(warp_end - warp_start) * to_ms,
               slot.perf_generation
             );
           }
@@ -1031,7 +1052,7 @@ namespace platf::dxgi {
           );
           sbs_perf::add_sample_ms_if_current(
             "sbs_render_gpu",
-            static_cast<double>(convert_end - start) * to_ms,
+            static_cast<double>(convert_end - warp_start) * to_ms,
             slot.perf_generation
           );
         }
@@ -1039,7 +1060,7 @@ namespace platf::dxgi {
       }
     }
 
-    sbs_gpu_timer_slot_t *begin_sbs_gpu_timer(bool has_depth_warp) {
+    sbs_gpu_timer_slot_t *begin_sbs_gpu_timer() {
       resolve_sbs_gpu_timers();
       if (!sbs_gpu_timing_ready) {
         return nullptr;
@@ -1051,7 +1072,8 @@ namespace platf::dxgi {
           continue;
         }
         sbs_gpu_timer_next = (index + 1) % sbs_gpu_timers.size();
-        slot.has_depth_warp = has_depth_warp;
+        slot.has_matched_copy = false;
+        slot.has_depth_warp = false;
         slot.perf_generation = sbs_perf::generation();
         device_ctx->Begin(slot.disjoint.get());
         device_ctx->End(slot.start.get());
@@ -1179,6 +1201,20 @@ namespace platf::dxgi {
       slot.captured_at = std::chrono::steady_clock::now();
       slot.pending = false;
       return true;
+    }
+
+    void mark_sbs_matched_copy_end(sbs_gpu_timer_slot_t *slot, bool submitted) {
+      if (slot) {
+        slot->has_matched_copy = submitted;
+        device_ctx->End(slot->matched_copy_end.get());
+      }
+    }
+
+    void mark_sbs_warp_start(sbs_gpu_timer_slot_t *slot, bool has_depth_warp) {
+      if (slot) {
+        slot->has_depth_warp = has_depth_warp;
+        device_ctx->End(slot->warp_start.get());
+      }
     }
 
     ID3D11ShaderResourceView *prefilter_warp_depth(ID3D11ShaderResourceView *source_srv) {
@@ -2363,11 +2399,23 @@ namespace platf::dxgi {
         return false;
       }
       DXGI_PRESENT_PARAMETERS present_parameters {};
+      const bool perf = sbs_perf::enabled();
+      const auto present_started = perf ? std::chrono::steady_clock::now() :
+                                          std::chrono::steady_clock::time_point {};
       status = swapchain->Present1(
         0,
         DXGI_PRESENT_RESTRICT_TO_OUTPUT | DXGI_PRESENT_DO_NOT_WAIT,
         &present_parameters
       );
+      if (perf) {
+        sbs_perf::add_sample_ms(
+          "local_present_call_cpu",
+          std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - present_started
+          )
+            .count()
+        );
+      }
       if (status == DXGI_ERROR_WAS_STILL_DRAWING) {
         ++busy_present_drops;
         log_present_stats();

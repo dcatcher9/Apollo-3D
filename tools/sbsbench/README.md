@@ -154,7 +154,9 @@ while the last completed depth/subject geometry is reused, and the contract reco
 Source, raw-model (`raw_*.f32`), pre-warp depth (`depth_*.png`), exact warp mask
 (`warp_mask_*.png`), and SBS artifacts are joined by
 numeric frame identity, never list position. Baselines are rejected with setup exit 2 if mode,
-model, schema, stepping semantics, config hash, metric hash, or clip hash differs. Output folders
+model, schema, stepping semantics, config hash, metric implementation/threshold hash, or clip hash
+differs. Runner/gating semantics are versioned by the schema rather than the runner's comments or
+diagnostic wording. Output folders
 are cleared before reuse. `--output-every N` reduces saved artifacts while still processing every
 input frame, so sampling cannot change temporal state.
 

@@ -73,6 +73,16 @@ def sha256_files(paths):
     return h.hexdigest()[:16]
 
 
+def metric_contract_sha():
+    """Hash automatic metric implementation and thresholds.
+
+    Runner/gating semantics are versioned separately by EVAL_SCHEMA. Hashing this entire file made
+    comments and diagnostic wording invalidate otherwise-identical committed baselines.
+    """
+    return sha256_files([os.path.join(SCRIPT_DIR, "sbsbench.py"),
+                         os.path.join(SCRIPT_DIR, "thresholds.json")])
+
+
 def sha1_dir(path):
     # Hash source pixels plus validation references. Human-readable names/descriptions remain
     # excluded, while semantic metadata that changes scoring is part of the contract.
@@ -423,9 +433,7 @@ def main():
     os.makedirs(out_root, exist_ok=True)
 
     conf_sha = sha256_files([os.path.abspath(args.conf)])
-    metric_sha = sha256_files([os.path.join(SCRIPT_DIR, "sbsbench.py"),
-                               os.path.join(SCRIPT_DIR, "thresholds.json"),
-                               os.path.abspath(__file__)])
+    metric_sha = metric_contract_sha()
     meta = {
         "git_sha": git(["rev-parse", "--short", "HEAD"]),
         "git_dirty": bool(git(["status", "--porcelain"])),

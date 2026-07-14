@@ -89,7 +89,7 @@
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "0e55e6ee073ec1ac",
+    "metric_sha256": "54ad6d792cc70085",
     "gpu_contention": false,
     "timestamp": "2026-07-12T21:15:10",
     "run_name": "cuda-graph-baseline-core",

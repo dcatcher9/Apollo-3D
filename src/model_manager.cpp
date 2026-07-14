@@ -13,7 +13,7 @@ namespace models {
     }
 
     std::string engine_filename(const config::depth_model_info& model) {
-        return model.name + ".engine";
+        return model.name + "." + depth_engine_recipe + ".engine";
     }
 
     std::filesystem::path ensure_model_available(const std::filesystem::path& assets_dir, const std::string& model_name, const std::string& model_url, const std::string& engine_name) {

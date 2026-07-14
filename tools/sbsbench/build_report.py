@@ -31,9 +31,7 @@ import run_eval  # noqa: E402  (evaluation-contract and clip identity helpers)
 CTRL = json.load(open(os.path.join(ctrl_dir, "results.json")))
 TREAT = json.load(open(os.path.join(treat_dir, "results.json")))
 THR = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json")))["metrics"]
-CURRENT_METRIC_SHA = run_eval.sha256_files([
-    os.path.join(SCRIPT_DIR, "sbsbench.py"), os.path.join(SCRIPT_DIR, "thresholds.json"),
-    os.path.join(SCRIPT_DIR, "run_eval.py")])
+CURRENT_METRIC_SHA = run_eval.metric_contract_sha()
 REPORT_SHA = run_eval.sha256_files([os.path.abspath(__file__)])
 
 # An A/B report may compare different code, profile/treatment arguments, or (only when explicitly

@@ -8,6 +8,7 @@
 #include "sbs_perf.h"
 #include "utility.h"
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -404,8 +405,8 @@ static bool warmup_execution_context(
     cuda.cuStreamDestroy(stream);
   });
 
-  constexpr int h = 518;
-  constexpr int w = 518;
+  constexpr int h = models::depth_engine_opt_height;
+  constexpr int w = models::depth_engine_opt_width;
   const size_t in_elems = (size_t) 3 * h * w;
   const size_t out_elems = (size_t) h * w;
   CUdeviceptr d_in = 0;
@@ -519,7 +520,11 @@ namespace models {
         return make_input_dims(h, w);
       };
       profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, dims_for(14, 14));
-      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, dims_for(518, 518));
+      profile->setDimensions(
+        input->getName(),
+        nvinfer1::OptProfileSelector::kOPT,
+        dims_for(depth_engine_opt_height, depth_engine_opt_width)
+      );
       profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, dims_for(1008, 1008));
       config->addOptimizationProfile(profile);
     }
@@ -704,7 +709,7 @@ namespace models {
     bool exact_plane_lock;  // Bestv2's full silhouette morphology + weighted shift mean
     float plane_lock_strength;
     float plane_lock_width;
-    std::string model_name;  // local file stem; engine cached as <model_name>.engine
+    std::string model_name;  // local file stem; engine cache is recipe-specific
     std::string model_url;  // where to download the onnx if absent
 
     // Throughput telemetry for the permanent stream-cadence matched-frame pipeline.
@@ -731,6 +736,141 @@ namespace models {
     };
 
     perf_evt_ring perf_depth;  // "depth_infer": one DA-V2 inference
+
+    // D3D11 timing for the work around TensorRT. CUDA events above deliberately measure only
+    // the inference enqueue; these timestamp queries expose the resize/normalization input pass
+    // and the depth normalization/EMA/subject passes without ever synchronizing the CPU. A ring
+    // is required because query results commonly become available several source frames later.
+    struct d3d_perf_slot {
+      Microsoft::WRL::ComPtr<ID3D11Query> disjoint;
+      Microsoft::WRL::ComPtr<ID3D11Query> post_start;
+      Microsoft::WRL::ComPtr<ID3D11Query> post_end;
+      Microsoft::WRL::ComPtr<ID3D11Query> pre_start;
+      Microsoft::WRL::ComPtr<ID3D11Query> pre_end;
+      bool pending = false;
+      bool has_post = false;
+      bool has_pre = false;
+      std::uint64_t perf_generation = 0;
+    };
+
+    static constexpr std::size_t d3d_perf_ring_size = 16;
+    std::array<d3d_perf_slot, d3d_perf_ring_size> d3d_perf_slots;
+    std::size_t d3d_perf_next = 0;
+    bool d3d_perf_ready = false;
+
+    void initialize_d3d_perf() {
+      if (!sbs_perf::enabled()) {
+        return;
+      }
+      for (auto &slot : d3d_perf_slots) {
+        D3D11_QUERY_DESC desc {D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
+        if (FAILED(device->CreateQuery(&desc, &slot.disjoint))) {
+          BOOST_LOG(warning) << "Depth D3D11 timing unavailable: could not create disjoint query.";
+          return;
+        }
+        desc.Query = D3D11_QUERY_TIMESTAMP;
+        if (FAILED(device->CreateQuery(&desc, &slot.post_start)) || FAILED(device->CreateQuery(&desc, &slot.post_end)) || FAILED(device->CreateQuery(&desc, &slot.pre_start)) || FAILED(device->CreateQuery(&desc, &slot.pre_end))) {
+          BOOST_LOG(warning) << "Depth D3D11 timing unavailable: could not create timestamp queries.";
+          return;
+        }
+      }
+      d3d_perf_ready = true;
+    }
+
+    void resolve_d3d_perf() {
+      if (!d3d_perf_ready) {
+        return;
+      }
+      for (auto &slot : d3d_perf_slots) {
+        if (!slot.pending) {
+          continue;
+        }
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT timing {};
+        const auto ready = context->GetData(
+          slot.disjoint.Get(),
+          &timing,
+          sizeof(timing),
+          D3D11_ASYNC_GETDATA_DONOTFLUSH
+        );
+        if (ready == S_FALSE) {
+          continue;
+        }
+        if (FAILED(ready)) {
+          slot.pending = false;
+          continue;
+        }
+
+        UINT64 post_start = 0;
+        UINT64 post_end = 0;
+        UINT64 pre_start = 0;
+        UINT64 pre_end = 0;
+        const auto post_start_status = context->GetData(slot.post_start.Get(), &post_start, sizeof(post_start), 0);
+        const auto post_end_status = context->GetData(slot.post_end.Get(), &post_end, sizeof(post_end), 0);
+        const auto pre_start_status = context->GetData(slot.pre_start.Get(), &pre_start, sizeof(pre_start), 0);
+        const auto pre_end_status = context->GetData(slot.pre_end.Get(), &pre_end, sizeof(pre_end), 0);
+        if (SUCCEEDED(post_start_status) && SUCCEEDED(post_end_status) && SUCCEEDED(pre_start_status) && SUCCEEDED(pre_end_status) && !timing.Disjoint && timing.Frequency > 0 && post_end >= post_start && pre_start >= post_end && pre_end >= pre_start) {
+          const double to_ms = 1000.0 / static_cast<double>(timing.Frequency);
+          if (slot.has_post) {
+            sbs_perf::add_sample_ms_if_current(
+              "depth_postprocess_gpu",
+              static_cast<double>(post_end - post_start) * to_ms,
+              slot.perf_generation
+            );
+          }
+          if (slot.has_pre) {
+            sbs_perf::add_sample_ms_if_current(
+              "depth_preprocess_gpu",
+              static_cast<double>(pre_end - pre_start) * to_ms,
+              slot.perf_generation
+            );
+          }
+        }
+        slot.pending = false;
+      }
+    }
+
+    d3d_perf_slot *begin_d3d_perf(bool has_post, bool has_pre) {
+      resolve_d3d_perf();
+      if (!d3d_perf_ready) {
+        return nullptr;
+      }
+      for (std::size_t i = 0; i < d3d_perf_slots.size(); ++i) {
+        const std::size_t index = (d3d_perf_next + i) % d3d_perf_slots.size();
+        auto &slot = d3d_perf_slots[index];
+        if (slot.pending) {
+          continue;
+        }
+        d3d_perf_next = (index + 1) % d3d_perf_slots.size();
+        slot.has_post = has_post;
+        slot.has_pre = has_pre;
+        slot.perf_generation = sbs_perf::generation();
+        context->Begin(slot.disjoint.Get());
+        context->End(slot.post_start.Get());
+        return &slot;
+      }
+      return nullptr;  // Never stall the encode thread merely to collect telemetry.
+    }
+
+    void mark_d3d_post_end(d3d_perf_slot *slot) {
+      if (slot) {
+        context->End(slot->post_end.Get());
+      }
+    }
+
+    void mark_d3d_pre_start(d3d_perf_slot *slot) {
+      if (slot) {
+        context->End(slot->pre_start.Get());
+      }
+    }
+
+    void end_d3d_perf(d3d_perf_slot *slot) {
+      if (!slot) {
+        return;
+      }
+      context->End(slot->pre_end.Get());
+      context->End(slot->disjoint.Get());
+      slot->pending = true;
+    }
 
     void perf_try_resolve(perf_evt_ring &r, int slot, cuda_driver_api &cuda) {
       if (!r.busy[slot] || !cuda.cuEventQuery) {
@@ -1002,6 +1142,7 @@ namespace models {
       if (cfg.perf_stats) {
         sbs_perf::reset();
       }
+      initialize_d3d_perf();
 
       const std::string engine_name = engine_filename(model);
       auto model_path = ensure_model_available(assets_dir, model_name, model_url, engine_name);
@@ -1320,8 +1461,8 @@ namespace models {
         cuda.cuCtxSetCurrent(cuda_ctx);
       }
 
-      const int h = 518;
-      const int w = 518;
+      const int h = depth_engine_opt_height;
+      const int w = depth_engine_opt_width;
 
       const size_t in_elems = (size_t) 3 * h * w;  // batch/view dims are 1 for rank-4 and rank-5
       const size_t out_elems = (size_t) h * w;
@@ -1525,7 +1666,11 @@ namespace models {
       if (!cbuffer) {
         return {};
       }
+      auto *d3d_timer = begin_d3d_perf(true, false);
       normalize_depth_output();
+      mark_d3d_post_end(d3d_timer);
+      mark_d3d_pre_start(d3d_timer);
+      end_d3d_perf(d3d_timer);
       const auto completed_frame_id = pending_frame_id;
       has_previous_frame = false;  // the output buffer has been consumed; never fold it twice
       return make_result(true, completed_frame_id);
@@ -1986,6 +2131,8 @@ namespace models {
         return {};
       }
 
+      auto *d3d_timer = begin_d3d_perf(has_previous_frame, true);
+
       // tensor_out_buf holds the finished raw disparity from the previous asynchronous submit
       // (fully unmapped from CUDA), so consuming it here never blocks the encode thread. The
       // caller uses completed_frame_id to select the color slot that produced this exact result.
@@ -1996,8 +2143,10 @@ namespace models {
         has_previous_frame = false;
         throughput_stats_completions++;
       }
+      mark_d3d_post_end(d3d_timer);
 
       // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
+      mark_d3d_pre_start(d3d_timer);
       context->CSSetShader(rgb_to_nchw_cs.Get(), nullptr, 0);
       context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
       context->CSSetShaderResources(0, 1, &input_srv);
@@ -2010,6 +2159,7 @@ namespace models {
       ID3D11ShaderResourceView *null_srv = nullptr;
       context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
       context->CSSetShaderResources(0, 1, &null_srv);
+      end_d3d_perf(d3d_timer);
       // No explicit Flush: cuGraphicsMapResources() below already guarantees the
       // preceding D3D11 compute work completes before the CUDA stream reads the buffer.
       // Force-flushing every frame only prevents the driver from interleaving other GPU

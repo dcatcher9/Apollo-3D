@@ -50,6 +50,15 @@ class EvalContractTests(unittest.TestCase):
             for path in paths:
                 os.unlink(path)
 
+    def test_metric_contract_excludes_runner_diagnostics(self):
+        metric_files = [os.path.join(run_eval.SCRIPT_DIR, "sbsbench.py"),
+                        os.path.join(run_eval.SCRIPT_DIR, "thresholds.json")]
+        self.assertEqual(run_eval.metric_contract_sha(),
+                         run_eval.sha256_files(metric_files))
+        self.assertNotEqual(
+            run_eval.metric_contract_sha(),
+            run_eval.sha256_files(metric_files + [os.path.abspath(run_eval.__file__)]))
+
     def test_named_profiles_and_explicit_overrides_share_production_precedence(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
             fh.write("sbs_3d_profile = cinema\n")

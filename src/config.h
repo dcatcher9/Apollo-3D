@@ -22,7 +22,7 @@ namespace config {
   // A configured DA-V2 model for the SBS 3D pipeline. The startup profile owns model selection; this
   // registry resolves names into local file stems and optional download sources.
   struct depth_model_info {
-    std::string name;  ///< File stem: <name>.onnx / <name>.engine in the assets dir (also the g_engines key).
+    std::string name;  ///< ONNX file stem and logical model key; TensorRT engines add a build-recipe suffix.
     std::string url;  ///< Download source for <name>.onnx if absent. Empty = local-only.
   };
 
@@ -180,7 +180,7 @@ namespace config {
       double subject_plane_lock = 0.0;  ///< Additionally flatten residual disparity within the subject depth band. 0 = off; Bestv2 reference 0.28.
       double subject_plane_width = 0.12;  ///< Half-width (in normalized depth) of the subject band for subject_plane_lock (Bestv2 0.12).
       bool bestv2_sharpen = false;  ///< Apply Bestv2's exact SDR per-eye sharpen 0.2 after the completed warp. Retained for fidelity, disabled in quality-optimized profiles.
-      std::string depth_model = "depth_anything_v2_fp16";  ///< Local name/stem for the depth model files (<name>.onnx / <name>.engine). Identifies the model so different models coexist, each with its own cached engine.
+      std::string depth_model = "depth_anything_v2_fp16";  ///< Local ONNX stem/logical model name. Identifies models so each gets its own recipe-specific engine cache.
       std::string depth_model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< URL to download the depth model ONNX from if <depth_model>.onnx is absent. Point this (and depth_model) elsewhere to use a different model.
       int max_encode_width = 8192;  ///< Max encoder output width for host SBS. SBS doubles the client width to 2W; if 2W exceeds this, the host caps the packed frame to this width (scaling height to keep the per-eye aspect) rather than failing NVENC create. NVENC HEVC/AV1 = 8192, H.264 = 4096.
       bool perf_stats = false;  ///< Emit per-stage host-SBS timing (depth inference + convert CPU) as a rolling p50/p95/max log line + sbs_perf.json snapshot. Off by default (the perf benchmark; see docs/sbs-benchmark-plan.md).
