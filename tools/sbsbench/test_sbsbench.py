@@ -594,6 +594,17 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("trt-opt770x434-level5-v2", manager)
         self.assertIn("setBuilderOptimizationLevel(depth_engine_builder_level)", estimator)
 
+    def test_live_and_eval_shaders_use_level3_optimization(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
+                  encoding="utf-8") as fh:
+            live = fh.read()
+        with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
+                  encoding="utf-8") as fh:
+            harness = fh.read()
+        self.assertIn("flags |= D3DCOMPILE_OPTIMIZATION_LEVEL3", live)
+        self.assertIn("D3DCOMPILE_OPTIMIZATION_LEVEL3", harness)
+
     def test_disabled_plane_lock_has_no_probe_loop_texture_fetch(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
@@ -602,6 +613,14 @@ class EvalContractTests(unittest.TestCase):
             text = fh.read()
         self.assertEqual(text.count("PlaneLockTexture.SampleLevel"), 1)
         self.assertIn("if (subject_plane_lock > 0.0f)", text)
+
+        common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
+                              "include", "sbs_warp_common.hlsl")
+        with open(common, encoding="utf-8") as fh:
+            common_text = fh.read()
+        self.assertGreaterEqual(common_text.count("[branch]"), 2)
+        self.assertIn("[branch]\n    if (subject_plane_lock > 0.0f && s2.y <= 0.5f)",
+                      common_text)
 
     def test_retired_geometry_is_absent_but_forward_coverage_diagnostic_remains(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

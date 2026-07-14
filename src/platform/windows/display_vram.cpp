@@ -374,6 +374,11 @@ namespace platf::dxgi {
 
 #ifndef NDEBUG
     flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#else
+    // Keep production shader compilation aligned with the SBS evaluator and the depth-compute
+    // path. The D3DCompile default is only optimization level 1, which leaves avoidable work in
+    // the full-resolution reprojection loop.
+    flags |= D3DCOMPILE_OPTIMIZATION_LEVEL3;
 #endif
 
     auto wFile = from_utf8(file);
