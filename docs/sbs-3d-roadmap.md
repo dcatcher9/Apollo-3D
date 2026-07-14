@@ -188,7 +188,8 @@ coverage diagnostics, and final SBS artifacts by numeric frame identity. Ground-
 is scale/shift invariant but polarity preserving. MPI Sintel true-right references additionally
 score global-horizontal-registered PSNR/SSIM, local epipolar residual/coverage, and Art3D-inspired
 positive-affine depth-budget/zero-plane alignment plus DDC-IoU structure. All remain diagnostic
-pending broader cinematic-stereo calibration; comfort and integrity remain hard gates.
+pending broader cinematic-stereo calibration. Style summaries require complete evidence on every
+frame so failed fits cannot improve an average; comfort and integrity remain hard gates.
 
 ## Current priorities
 

@@ -547,6 +547,13 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('AB_DECISION["verdict"]', text)
         self.assertIn("IS_PROFILE_CMP", text)
         self.assertIn("IS_TRADEOFF_CMP = IS_MODE_CMP or IS_PROFILE_CMP", text)
+        self.assertIn("def _paired_mean_aggregate", text)
+        self.assertIn("a, b = _paired_mean_aggregate(k)", text)
+        self.assertIn("if not any(value is not None for value in ", text)
+        evidence = text[text.index("def visual_evidence_section"):text.index(
+            "def source_artifact_section")]
+        self.assertNotIn("stereo_art_scale_std_error_pct", evidence)
+        self.assertNotIn("stereo_art_zero_std_error_pct", evidence)
 
     def test_live_trt_contexts_are_bounded_and_engine_io_fails_closed(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1130,6 +1137,27 @@ class EvalContractTests(unittest.TestCase):
         metrics = sbsbench.artistic_stereo_metrics(
             source, inverted_right, reference, depth)
         self.assertEqual(metrics["stereo_art_polarity_ok"], 0.0)
+
+    def test_artistic_aggregate_suppresses_partial_validity(self):
+        complete = {
+            "stereo_art_polarity_ok": 100.0,
+            "stereo_art_scale_pct": 1.0,
+            "stereo_art_zero_pct": 0.2,
+            "stereo_ref_scale_pct": 2.0,
+            "stereo_ref_zero_pct": 0.4,
+            "stereo_art_scale_error_pct": 1.0,
+            "stereo_art_zero_error_pct": 0.2,
+            "stereo_art_support_pct": 80.0,
+            "stereo_art_ddc_iou": 10.0,
+            "stereo_ref_ddc_iou": 20.0,
+        }
+        invalid = {"stereo_art_polarity_ok": 0.0}
+        rows = [complete, invalid]
+        agg = sbsbench.aggregate(rows)
+        sbsbench.finalize_artistic_stereo_aggregate(rows, agg)
+        self.assertEqual(agg["stereo_art_polarity_ok"], 50.0)
+        for key in sbsbench.ARTISTIC_STEREO_FRAME_METRICS:
+            self.assertNotIn(key, agg)
 
     def test_ground_truth_depth_lag_detects_previous_frame_geometry(self):
         previous = np.zeros((32, 48), np.float32)

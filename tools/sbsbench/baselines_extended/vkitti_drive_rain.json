@@ -62,14 +62,14 @@
     "score": 85.8
   },
   "perf_ms": {
-    "depth_infer": 1.38512,
-    "depth_postprocess_gpu": 0.0704,
-    "depth_preprocess_gpu": 0.05104,
-    "sbs_composite_cpu": 0.0042,
-    "warp_infer": 0.03872
+    "depth_infer": 1.38675,
+    "depth_postprocess_gpu": 0.070688,
+    "depth_preprocess_gpu": 0.064224,
+    "sbs_composite_cpu": 0.004,
+    "warp_infer": 0.038624
   },
   "meta": {
-    "git_sha": "d638e752",
+    "git_sha": "b3d7bd33",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
@@ -92,14 +92,14 @@
     "adaptive_pop_max": 1.3,
     "literal_bestv2": false,
     "depth_compensation": "none",
-    "eval_schema": 21,
+    "eval_schema": 22,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "f9d0ac49d0cceb1b",
+    "metric_sha256": "7107823751182d07",
     "gpu_contention": false,
-    "timestamp": "2026-07-14T14:23:20",
-    "run_name": "art-style-extended",
+    "timestamp": "2026-07-14T14:41:19",
+    "run_name": "art-validity-extended",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "name": "vkitti-drive-rain",

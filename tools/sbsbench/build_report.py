@@ -723,6 +723,8 @@ RADAR_GROUPS = [
          "reference": 100.0, "unit": "%"},
     ]),
     ("Artistic stereo style", "Art3D-inspired diagnostics; comfort remains a hard gate", [
+        {"key": "stereo_art_polarity_ok", "label": "Valid positive fits", "better": "higher",
+         "reference": 100.0, "unit": "%"},
         {"key": "stereo_art_scale_error_pct", "label": "Depth-budget match", "better": "lower",
          "reference": 5.0, "unit": "%"},
         {"key": "stereo_art_zero_error_pct", "label": "Zero-plane match", "better": "lower",
@@ -749,6 +751,17 @@ PERF_RADAR_AXES = [
 def _mean_aggregate(aggs, key, clips=DECISION_CLIPS):
     values = [aggs[c].get(key) for c in clips if aggs[c].get(key) is not None]
     return float(np.mean(values)) if values else None
+
+
+def _paired_mean_aggregate(key, clips=DECISION_CLIPS):
+    """Return control/treatment means over the identical clips that contain this metric."""
+    pairs = [(ctrl_agg[c].get(key), treat_agg[c].get(key)) for c in clips]
+    pairs = [(control, treatment) for control, treatment in pairs
+             if control is not None and treatment is not None]
+    if not pairs:
+        return None, None
+    return (float(np.mean([pair[0] for pair in pairs])),
+            float(np.mean([pair[1] for pair in pairs])))
 
 
 def _mean_perf(run, key):
@@ -820,9 +833,12 @@ def _radar_card(title, note, axes, control_values, treatment_values):
 def grouped_quality_section():
     cards = []
     for title, note, axes in RADAR_GROUPS:
-        cards.append(_radar_card(title, note, axes,
-                                 [_mean_aggregate(ctrl_agg, a["key"]) for a in axes],
-                                 [_mean_aggregate(treat_agg, a["key"]) for a in axes]))
+        pairs = [_paired_mean_aggregate(axis["key"]) for axis in axes]
+        control_values = [pair[0] for pair in pairs]
+        treatment_values = [pair[1] for pair in pairs]
+        if not any(value is not None for value in control_values + treatment_values):
+            continue
+        cards.append(_radar_card(title, note, axes, control_values, treatment_values))
     cards.append(_radar_card("Runtime", "Performance context; not a quality vote", PERF_RADAR_AXES,
                              [_mean_perf(CTRL, a["key"]) for a in PERF_RADAR_AXES],
                              [_mean_perf(TREAT, a["key"]) for a in PERF_RADAR_AXES]))
@@ -858,7 +874,7 @@ def grouped_quality_section():
                  f'against a failed limit.</p></div><div class="hard-checks">'
                  f'{"".join(checks)}</div></article>')
     return (f'<section><h2>Metrics by group</h2><p class="sub">Radar axes are normalized quality: '
-            f'<b>farther outward is always better</b>. Means use the non-flat decision clips; '
+            f'<b>farther outward is always better</b>. Means use matched non-flat decision clips; '
             f'runtime uses all clips. The reference scale is the stereo target or the metric\'s '
             f'documented penalty/engineering scale, never the best value in this A/B pair. Raw '
             f'means are printed below every chart. These summaries do not replace the per-clip gate.</p>'
@@ -1109,8 +1125,7 @@ def conclusion_section():
             continue
         if k in CONTEXT_METRICS:
             continue
-        a = _mean_aggregate(ctrl_agg, k)
-        b = _mean_aggregate(treat_agg, k)
+        a, b = _paired_mean_aggregate(k)
         if a is None or b is None:
             continue
         if a < 1e-6 and b < 1e-6:
@@ -1288,9 +1303,7 @@ def visual_evidence_section():
             ("True-stereo reference", ("stereo_gt_psnr", "stereo_gt_ssim",
                                        "stereo_gt_residual_p95", "stereo_gt_coverage_pct")),
             ("Artistic stereo style", ("stereo_art_scale_error_pct",
-                                       "stereo_art_zero_error_pct", "stereo_art_ddc_iou",
-                                       "stereo_art_scale_std_error_pct",
-                                       "stereo_art_zero_std_error_pct")))
+                                       "stereo_art_zero_error_pct", "stereo_art_ddc_iou")))
     cards = []
     for axis, metrics in axes:
         item = max((item for metric in metrics if (item := _strongest_change(metric))),

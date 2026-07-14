@@ -665,6 +665,46 @@ def artistic_stereo_metrics(src_gray, right_eye, ground_truth_right, depth):
     return out
 
 
+ARTISTIC_STEREO_FRAME_METRICS = (
+    "stereo_art_scale_pct", "stereo_art_zero_pct",
+    "stereo_ref_scale_pct", "stereo_ref_zero_pct",
+    "stereo_art_scale_error_pct", "stereo_art_zero_error_pct",
+    "stereo_art_support_pct", "stereo_art_ddc_iou", "stereo_ref_ddc_iou",
+)
+
+
+def finalize_artistic_stereo_aggregate(rows, agg):
+    """Publish style summaries only when all attempted frames provide complete evidence.
+
+    Dropping failed fits from an average creates survivorship bias: a treatment could appear to
+    improve merely by making its hardest frame unmeasurable. Keep polarity validity available for
+    diagnosing unsuitable clips, but suppress every derived style summary unless the same complete
+    per-frame contract holds over the whole clip.
+    """
+    attempted = [row for row in rows if "stereo_art_polarity_ok" in row]
+    if not attempted:
+        return
+    complete = [row for row in attempted
+                if row.get("stereo_art_polarity_ok") == 100.0
+                and all(key in row for key in ARTISTIC_STEREO_FRAME_METRICS)]
+    if len(complete) != len(attempted):
+        for key in ARTISTIC_STEREO_FRAME_METRICS:
+            agg.pop(key, None)
+        return
+
+    for key in ("stereo_art_scale_pct", "stereo_art_zero_pct",
+                "stereo_ref_scale_pct", "stereo_ref_zero_pct"):
+        values = [row[key] for row in complete]
+        if len(values) > 1:
+            agg[key + "_std"] = float(np.std(values))
+    if "stereo_art_scale_pct_std" in agg and "stereo_ref_scale_pct_std" in agg:
+        agg["stereo_art_scale_std_error_pct"] = abs(
+            agg["stereo_art_scale_pct_std"] - agg["stereo_ref_scale_pct_std"])
+    if "stereo_art_zero_pct_std" in agg and "stereo_ref_zero_pct_std" in agg:
+        agg["stereo_art_zero_std_error_pct"] = abs(
+            agg["stereo_art_zero_pct_std"] - agg["stereo_ref_zero_pct_std"])
+
+
 def source_relative_metrics(eye, src_gray, depth=None, max_shift=None,
                             coverage_error=24.0 / 255.0):
     """Validated source-relative warp integrity and silhouette artifacts for one eye.
@@ -1435,17 +1475,7 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
     if depth_gt_ghosts:
         agg["depth_gt_ghost_edge_pct_p50"] = float(np.percentile(depth_gt_ghosts, 50))
         agg["depth_gt_ghost_edge_pct_p95"] = float(np.percentile(depth_gt_ghosts, 95))
-    for key in ("stereo_art_scale_pct", "stereo_art_zero_pct",
-                "stereo_ref_scale_pct", "stereo_ref_zero_pct"):
-        values = [row[key] for row in rows if key in row]
-        if len(values) > 1:
-            agg[key + "_std"] = float(np.std(values))
-    if "stereo_art_scale_pct_std" in agg and "stereo_ref_scale_pct_std" in agg:
-        agg["stereo_art_scale_std_error_pct"] = abs(
-            agg["stereo_art_scale_pct_std"] - agg["stereo_ref_scale_pct_std"])
-    if "stereo_art_zero_pct_std" in agg and "stereo_ref_zero_pct_std" in agg:
-        agg["stereo_art_zero_std_error_pct"] = abs(
-            agg["stereo_art_zero_pct_std"] - agg["stereo_ref_zero_pct_std"])
+    finalize_artistic_stereo_aggregate(rows, agg)
     agg.update(sbs_score(agg, expected_flat=expected_flat))
     if require_gt_depth:
         missing = [k for k in ("depth_gt_si_rmse", "depth_gt_edge_f1") if k not in agg]
@@ -1458,8 +1488,7 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
     if require_gt_stereo:
         missing = [key for key in ("stereo_gt_psnr", "stereo_gt_ssim",
                                    "stereo_gt_residual_p95", "stereo_gt_coverage_pct",
-                                   "stereo_art_scale_error_pct",
-                                   "stereo_art_zero_error_pct", "stereo_art_ddc_iou")
+                                   "stereo_art_polarity_ok")
                    if key not in agg]
         if missing:
             raise ValueError(f"required GT-stereo metrics unavailable: {missing}")

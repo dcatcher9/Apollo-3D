@@ -369,7 +369,9 @@ Art3D-inspired style diagnostics separately fit a polarity-preserving global dis
 budget and `t` the zero-plane offset; Apollo's symmetric source-to-right shift is doubled before
 comparison with the physical left-to-right reference. The fit uses only textured, source-matched
 support and rejects negative scale. These metrics deliberately do not change the artifact score:
-they quantify artistic alignment while comfort and image-integrity limits remain hard gates.
+they quantify artistic alignment while comfort and image-integrity limits remain hard gates. To
+avoid survivorship bias, scale/offset/DDC summaries are emitted only when every frame in the clip
+has complete valid evidence; `stereo_art_polarity_ok` remains visible when a clip is unsuitable.
 
 `rescore_run.py` refreshes a comparison-only run directly from its preserved source/depth/SBS
 artifacts after metric-code changes. It refuses committed-baseline verdicts, updates the metric
