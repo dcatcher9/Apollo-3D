@@ -159,8 +159,9 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
-    // Compile two loop specializations and select once per pixel. The shipping plane-lock-off
-    // path then contains no per-probe plane-lock branches or dormant transcendental operations.
+    // Compile three loop specializations and select once per pixel: plane lock, no-plane with
+    // subject stretch, and no-plane without stretch. The shipping plane-lock-off paths then
+    // contain no per-probe plane-lock branches or dormant transcendental operations.
     float2 sample_uv;
     [branch]
     if (subject_plane_lock > 0.0f) {
