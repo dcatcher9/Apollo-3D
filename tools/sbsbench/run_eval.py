@@ -89,15 +89,18 @@ def sha1_dir(path):
     h = hashlib.sha1()
     files = (glob.glob(os.path.join(path, "frame_*"))
              + glob.glob(os.path.join(path, "gt_depth", "frame_*"))
-             + glob.glob(os.path.join(path, "gt_flow", "frame_*")))
+             + glob.glob(os.path.join(path, "gt_flow", "frame_*"))
+             + glob.glob(os.path.join(path, "gt_right", "frame_*")))
     for f in sorted(files):
         with open(f, "rb") as fh:
             h.update(os.path.relpath(f, path).replace("\\", "/").encode())
             h.update(fh.read())
     try:
-        meta = json.load(open(os.path.join(path, "meta.json"), encoding="utf-8"))
+        with open(os.path.join(path, "meta.json"), encoding="utf-8") as meta_file:
+            meta = json.load(meta_file)
         semantic = {k: meta[k] for k in ("expected_flat", "gt_depth_kind", "dataset",
-                                         "required_gt_depth", "required_gt_flow") if k in meta}
+                                         "required_gt_depth", "required_gt_flow",
+                                         "required_gt_stereo") if k in meta}
         h.update(json.dumps(semantic, sort_keys=True).encode())
     except (OSError, ValueError):
         pass
@@ -540,6 +543,7 @@ def main():
                 clip_meta.update({k: v for k, v in json.load(open(cmp_path)).items()
                                   if k in ("name", "description", "expected_flat", "gt_depth_kind",
                                            "required_gt_depth", "required_gt_flow",
+                                           "required_gt_stereo",
                                            "dataset", "homepage", "citation", "license_note", "suite",
                                            "content_type", "source_url", "source_window",
                                            "source_artifacts")})

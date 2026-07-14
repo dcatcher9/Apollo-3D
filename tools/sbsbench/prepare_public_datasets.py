@@ -432,6 +432,8 @@ def prepare_clip(manifest, clip_id, clip, downloads_dir, prepared_root):
             "required_gt_flow": clip["adapter"] == "tartanair_v2_zip",
             "selection": selection,
         }
+        if clip["adapter"] == "sintel_stereo_zip":
+            meta["required_gt_stereo"] = True
         with open(os.path.join(temp, "meta.json"), "w", encoding="utf-8") as fh:
             json.dump(meta, fh, indent=2)
         if os.path.isdir(final):

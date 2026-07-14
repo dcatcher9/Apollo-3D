@@ -60,14 +60,14 @@
     "score": 100.0
   },
   "perf_ms": {
-    "depth_infer": 1.45514,
-    "depth_postprocess_gpu": 0.070144,
-    "depth_preprocess_gpu": 0.147328,
+    "depth_infer": 1.45658,
+    "depth_postprocess_gpu": 0.070016,
+    "depth_preprocess_gpu": 0.17088,
     "sbs_composite_cpu": 0.0046,
-    "warp_infer": 0.05552
+    "warp_infer": 0.055392
   },
   "meta": {
-    "git_sha": "fd376159",
+    "git_sha": "54fbc592",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -95,10 +95,10 @@
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "feb8f76d5485f999",
+    "metric_sha256": "4611fd0af2195166",
     "gpu_contention": false,
-    "timestamp": "2026-07-14T11:23:52",
-    "run_name": "ghost-metric-core-baseline-final",
+    "timestamp": "2026-07-14T12:24:09",
+    "run_name": "gt-stereo-baseline-core",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "name": "flat_page",

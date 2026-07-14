@@ -52,6 +52,26 @@ class EvalContractTests(unittest.TestCase):
             for path in paths:
                 os.unlink(path)
 
+    def test_clip_hash_covers_stereo_reference_and_requirement(self):
+        with tempfile.TemporaryDirectory() as clip:
+            gt_right = os.path.join(clip, "gt_right")
+            os.makedirs(gt_right)
+            Image.fromarray(np.zeros((8, 12, 3), np.uint8)).save(
+                os.path.join(clip, "frame_00000.png"))
+            reference_path = os.path.join(gt_right, "frame_00000.png")
+            Image.fromarray(np.zeros((8, 12, 3), np.uint8)).save(reference_path)
+            with open(os.path.join(clip, "meta.json"), "w", encoding="utf-8") as fh:
+                json.dump({"required_gt_stereo": True}, fh)
+            original = run_eval.sha1_dir(clip)
+            Image.fromarray(np.full((8, 12, 3), 255, np.uint8)).save(reference_path)
+            self.assertNotEqual(original, run_eval.sha1_dir(clip))
+            with open(os.path.join(clip, "meta.json"), "w", encoding="utf-8") as fh:
+                json.dump({"required_gt_stereo": False}, fh)
+            changed_pixels = run_eval.sha1_dir(clip)
+            with open(os.path.join(clip, "meta.json"), "w", encoding="utf-8") as fh:
+                json.dump({"required_gt_stereo": True}, fh)
+            self.assertNotEqual(changed_pixels, run_eval.sha1_dir(clip))
+
     def test_metric_contract_excludes_runner_diagnostics(self):
         metric_files = [os.path.join(run_eval.SCRIPT_DIR, "sbsbench.py"),
                         os.path.join(run_eval.SCRIPT_DIR, "thresholds.json")]
@@ -767,6 +787,21 @@ class EvalContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "requires GT optical flow"):
                 sbsbench.measure_sequence(seq, frames)
 
+    def test_public_clip_rejects_missing_required_stereo_reference(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            os.makedirs(seq)
+            os.makedirs(frames)
+            Image.fromarray(np.zeros((16, 32, 3), np.uint8)).save(
+                os.path.join(seq, "sbs_00000.png"))
+            Image.fromarray(np.zeros((16, 16, 3), np.uint8)).save(
+                os.path.join(frames, "frame_00000.png"))
+            with open(os.path.join(frames, "meta.json"), "w", encoding="utf-8") as fh:
+                fh.write('{"required_gt_stereo":true}')
+            with self.assertRaisesRegex(ValueError, "requires GT stereo"):
+                sbsbench.measure_sequence(seq, frames)
+
     def test_public_clip_rejects_missing_required_depth_lag_metric(self):
         with tempfile.TemporaryDirectory() as root:
             seq = os.path.join(root, "seq")
@@ -992,6 +1027,35 @@ class EvalContractTests(unittest.TestCase):
         metrics = sbsbench.depth_ground_truth_metrics(inverted, gt)
         self.assertGreater(metrics["depth_gt_si_rmse"], 20.0)
         self.assertLess(metrics["depth_gt_edge_f1"], 1.0)
+
+    def test_ground_truth_stereo_ignores_only_global_horizontal_offset(self):
+        rng = np.random.default_rng(73)
+        reference = rng.random((96, 160), dtype=np.float32)
+        shifted = sbsbench._shift_x_edge(reference, 7)
+        good = sbsbench.stereo_ground_truth_metrics(shifted, reference)
+        vertically_wrong = np.roll(shifted, 4, axis=0)
+        bad = sbsbench.stereo_ground_truth_metrics(vertically_wrong, reference)
+        self.assertGreater(good["stereo_gt_psnr"], 80.0)
+        self.assertGreater(good["stereo_gt_ssim"], 0.999)
+        self.assertLess(good["stereo_gt_residual_p95"], 1.0)
+        self.assertGreater(good["stereo_gt_coverage_pct"], 99.9)
+        self.assertLess(bad["stereo_gt_psnr"], good["stereo_gt_psnr"] - 20.0)
+        self.assertLess(bad["stereo_gt_ssim"], good["stereo_gt_ssim"] - 0.2)
+        self.assertGreater(bad["stereo_gt_residual_p95"],
+                           good["stereo_gt_residual_p95"] + 10.0)
+
+    def test_ground_truth_stereo_detects_local_content_corruption(self):
+        rng = np.random.default_rng(91)
+        reference = rng.random((96, 160), dtype=np.float32)
+        clean = sbsbench._shift_x_edge(reference, -5)
+        corrupted = clean.copy()
+        corrupted[24:72, 60:110] = 0.0
+        good = sbsbench.stereo_ground_truth_metrics(clean, reference)
+        bad = sbsbench.stereo_ground_truth_metrics(corrupted, reference)
+        self.assertLess(bad["stereo_gt_psnr"], good["stereo_gt_psnr"] - 10.0)
+        self.assertLess(bad["stereo_gt_ssim"], good["stereo_gt_ssim"] - 0.05)
+        self.assertLess(bad["stereo_gt_coverage_pct"],
+                        good["stereo_gt_coverage_pct"] - 5.0)
 
     def test_ground_truth_depth_lag_detects_previous_frame_geometry(self):
         previous = np.zeros((32, 48), np.float32)

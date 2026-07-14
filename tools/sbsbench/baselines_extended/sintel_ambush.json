@@ -35,6 +35,11 @@
     "source_stretch_support": 5.322862910932722,
     "static_jitter": 2.3667941774640764,
     "static_support": 0.1377776990052852,
+    "stereo_gt_coverage_pct": 82.90776771635048,
+    "stereo_gt_global_shift_px": 44.166666666666664,
+    "stereo_gt_psnr": 16.675531766459027,
+    "stereo_gt_residual_p95": 77.50522764523824,
+    "stereo_gt_ssim": 0.5942701833943526,
     "stretch_area": 1.21025062117737,
     "swim": 5.904922386874324,
     "vmisalign_pct": 0.006874767986527823,
@@ -65,20 +70,20 @@
     "score": 82.4
   },
   "perf_ms": {
-    "depth_infer": 2.27978,
-    "depth_postprocess_gpu": 0.071648,
-    "depth_preprocess_gpu": 0.137408,
-    "sbs_composite_cpu": 0.0052,
-    "warp_infer": 0.047968
+    "depth_infer": 2.2585,
+    "depth_postprocess_gpu": 0.071072,
+    "depth_preprocess_gpu": 0.15184,
+    "sbs_composite_cpu": 0.0051,
+    "warp_infer": 0.04784
   },
   "meta": {
-    "git_sha": "fd376159",
+    "git_sha": "54fbc592",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
       "bonn_person_walk": "d50a574dc05a",
-      "sintel_ambush": "eb33a2b52c5f",
-      "sintel_market": "eaa7b4a85487",
+      "sintel_ambush": "bb5125caa90f",
+      "sintel_market": "064b8ba8f8b3",
       "tartanair_house_easy": "28eb837aa364",
       "tartanair_house_motion": "d01e8c02d4c8",
       "vkitti_drive_clone": "87ece81615b1",
@@ -97,10 +102,10 @@
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "feb8f76d5485f999",
+    "metric_sha256": "4611fd0af2195166",
     "gpu_contention": false,
-    "timestamp": "2026-07-14T11:25:35",
-    "run_name": "ghost-metric-extended-baseline-final",
+    "timestamp": "2026-07-14T12:22:00",
+    "run_name": "gt-stereo-baseline-extended-2",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "name": "sintel-ambush",
@@ -110,6 +115,9 @@
     "citation": "Butler et al., A Naturalistic Open Source Movie for Optical Flow Evaluation, ECCV 2012",
     "license_note": "Official research dataset derived from the open Sintel film; prepared media remains external to Git.",
     "gt_depth_kind": "disparity",
-    "clip_sha1": "eb33a2b52c5f"
+    "required_gt_depth": true,
+    "required_gt_flow": false,
+    "required_gt_stereo": true,
+    "clip_sha1": "bb5125caa90f"
   }
 }

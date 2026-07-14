@@ -454,6 +454,90 @@ def source_match_residual(eye, src_gray, max_shift=None):
     return float(np.percentile(vals, 50)), float(np.percentile(vals, 95))
 
 
+def _box_mean(a, radius):
+    """Edge-padded square mean with the same shape as the input."""
+    size = radius * 2 + 1
+    padded = np.pad(np.asarray(a, np.float32), radius, mode="edge")
+    integral = np.pad(padded, ((1, 0), (1, 0))).cumsum(0).cumsum(1)
+    return (integral[size:, size:] - integral[:-size, size:]
+            - integral[size:, :-size] + integral[:-size, :-size]) / float(size * size)
+
+
+def _ssim_map(a, b, radius=3):
+    """Local luminance SSIM map for normalized grayscale images."""
+    mu_a, mu_b = _box_mean(a, radius), _box_mean(b, radius)
+    var_a = np.maximum(_box_mean(a * a, radius) - mu_a * mu_a, 0.0)
+    var_b = np.maximum(_box_mean(b * b, radius) - mu_b * mu_b, 0.0)
+    covariance = _box_mean(a * b, radius) - mu_a * mu_b
+    c1, c2 = 0.01 ** 2, 0.03 ** 2
+    return ((2.0 * mu_a * mu_b + c1) * (2.0 * covariance + c2) /
+            ((mu_a * mu_a + mu_b * mu_b + c1) * (var_a + var_b + c2)))
+
+
+def align_stereo_ground_truth(right_eye, ground_truth_right):
+    """Return downscaled eye/reference registration and its one global horizontal shift."""
+    original_h, original_w = right_eye.shape
+    scale = min(1.0, 256.0 / original_w)
+    width = max(8, round(original_w * scale))
+    height = max(8, round(original_h * scale))
+    eye = resize_to(right_eye, width, height) if scale < 1.0 else right_eye
+    reference = (ground_truth_right if ground_truth_right.shape == (height, width)
+                 else resize_to(ground_truth_right, width, height))
+    max_shift = min(width // 3, max(4, round(180 * eye_scale(width))))
+    margin = max(2, round(4 * eye_scale(width)))
+    best_cost, best_shift = float("inf"), 0
+    for shift in range(-max_shift, max_shift + 1):
+        shifted = _shift_x_edge(reference, shift)
+        valid = np.ones_like(eye, dtype=bool)
+        border = abs(shift) + margin
+        if border * 2 >= width:
+            continue
+        valid[:, :border] = False
+        valid[:, width - border:] = False
+        error = np.abs(eye - shifted)[valid]
+        cost = float(np.percentile(error, 75))
+        if cost < best_cost:
+            best_cost, best_shift = cost, shift
+    aligned = _shift_x_edge(reference, best_shift)
+    valid = np.ones_like(eye, dtype=bool)
+    border = abs(best_shift) + margin
+    valid[:, :border] = False
+    valid[:, width - border:] = False
+    return eye, aligned, valid, scale, best_shift
+
+
+def stereo_ground_truth_metrics(right_eye, ground_truth_right):
+    """Reference right-eye fidelity after removing only a global horizontal camera offset.
+
+    Sintel's physical stereo baseline does not equal Apollo's artistic symmetric baseline. A
+    single robust horizontal registration makes the comparison insensitive to that global offset,
+    while local depth errors, vertical displacement, ringing, stretch and wrong revealed content
+    remain measurable. A small subsequent epipolar search is reported separately as a permissive
+    patch-fidelity diagnostic; it is never used for PSNR or SSIM.
+    """
+    eye, aligned, valid, scale, best_shift = align_stereo_ground_truth(
+        right_eye, ground_truth_right)
+    width = eye.shape[1]
+    error = eye[valid] - aligned[valid]
+    mse = float(np.mean(error * error))
+    psnr = float(-10.0 * np.log10(max(mse, 1e-10)))
+    ssim = float(np.mean(_ssim_map(eye, aligned)[valid]))
+
+    local_radius = max(2, round(18 * eye_scale(width)))
+    residual, _, radius = source_align_map(eye, aligned, local_radius)
+    local_valid = valid.copy()
+    local_valid[:, :radius] = False
+    local_valid[:, width - radius:] = False
+    values = residual[local_valid] * 255.0
+    return {
+        "stereo_gt_psnr": psnr,
+        "stereo_gt_ssim": ssim,
+        "stereo_gt_residual_p95": float(np.percentile(values, 95)),
+        "stereo_gt_coverage_pct": float(np.mean(values <= 24.0) * 100.0),
+        "stereo_gt_global_shift_px": float(best_shift / max(scale, 1e-6)),
+    }
+
+
 def source_relative_metrics(eye, src_gray, depth=None, max_shift=None,
                             coverage_error=24.0 / 255.0):
     """Validated source-relative warp integrity and silhouette artifacts for one eye.
@@ -1096,6 +1180,13 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         missing_gt = sorted(set(frame_ids) - set(gt_by_id))
         extra_gt = sorted(set(gt_by_id) - set(frame_ids))
         raise ValueError(f"GT-depth/SBS frame-id mismatch: missing GT={missing_gt}, extra GT={extra_gt}")
+    gt_right_by_id = indexed_files(
+        os.path.join(frames_dir, "gt_right", "frame_*.*"), "frame_") if frames_dir else {}
+    if gt_right_by_id and set(gt_right_by_id) != set(frame_ids):
+        missing_gt = sorted(set(frame_ids) - set(gt_right_by_id))
+        extra_gt = sorted(set(gt_right_by_id) - set(frame_ids))
+        raise ValueError(
+            f"GT-right/SBS frame-id mismatch: missing GT={missing_gt}, extra GT={extra_gt}")
     flow_by_id = indexed_files(
         os.path.join(frames_dir, "gt_flow", "frame_*.npz"), "frame_") if frames_dir else {}
     expected_flow_ids = set(frame_ids[1:])
@@ -1104,7 +1195,7 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         extra_flow = sorted(set(flow_by_id) - expected_flow_ids)
         raise ValueError(f"GT-flow/frame-id mismatch: missing GT={missing_flow}, extra GT={extra_flow}")
     gt_kind = "disparity"
-    require_gt_depth = require_gt_flow = False
+    require_gt_depth = require_gt_flow = require_gt_stereo = False
     if frames_dir:
         meta_path = os.path.join(frames_dir, "meta.json")
         try:
@@ -1117,12 +1208,17 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
             require_gt_depth = bool(clip_meta.get("required_gt_depth", clip_meta.get("dataset")))
             require_gt_flow = bool(clip_meta.get(
                 "required_gt_flow", clip_meta.get("dataset") == "TartanAir V2"))
+            require_gt_stereo = bool(clip_meta.get(
+                "required_gt_stereo", clip_meta.get("dataset") ==
+                "MPI Sintel Stereo Training Dataset"))
         except (OSError, ValueError):
             pass
     if require_gt_depth and not gt_by_id:
         raise ValueError("clip requires GT depth, but no gt_depth sidecars were found")
     if require_gt_flow and not flow_by_id:
         raise ValueError("clip requires GT optical flow, but no gt_flow sidecars were found")
+    if require_gt_stereo and not gt_right_by_id:
+        raise ValueError("clip requires GT stereo, but no gt_right sidecars were found")
     rows, flicks, bflicks, swims, static_jitters = [], [], [], [], []
     flow_temporals, flow_depths, depth_gt_lags, depth_gt_ghosts = [], [], [], []
     prev_sbs = prev_left = prev_right = prev_depth = prev_src = prev_gt_depth = None
@@ -1131,11 +1227,14 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         depth = load_depth(depth_by_id[frame_id]) if frame_id in depth_by_id else None
         src = load_gray(src_by_id[frame_id]) if frame_id in src_by_id else None
         gt_depth = load_depth(gt_by_id[frame_id]) if frame_id in gt_by_id else None
+        gt_right = load_gray(gt_right_by_id[frame_id]) if frame_id in gt_right_by_id else None
         warp_mask = (np.asarray(Image.open(mask_by_id[frame_id]).convert("RGB"), np.float32)
                      / 255.0 if frame_id in mask_by_id else None)
         row, sbs, left = measure_seq_frame(
             p, depth, src, gt_depth, gt_kind, warp_mask=warp_mask)
         _, right = split_eyes(sbs)
+        if gt_right is not None:
+            row.update(stereo_ground_truth_metrics(right, gt_right))
         row["_frame_id"] = frame_id
         if prev_sbs is not None:
             row["flicker"] = float(np.mean(np.abs(sbs - prev_sbs)) * 255.0)
@@ -1216,6 +1315,12 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
             raise ValueError(f"required GT-depth metrics unavailable: {missing}")
     if require_gt_flow and "flow_temporal_p95" not in agg:
         raise ValueError("required GT-flow temporal metric unavailable")
+    if require_gt_stereo:
+        missing = [key for key in ("stereo_gt_psnr", "stereo_gt_ssim",
+                                   "stereo_gt_residual_p95", "stereo_gt_coverage_pct")
+                   if key not in agg]
+        if missing:
+            raise ValueError(f"required GT-stereo metrics unavailable: {missing}")
     return rows, agg
 
 
@@ -1360,7 +1465,8 @@ FMT = ["pop_spread_px", "positive_disparity_pct", "negative_disparity_pct", "vmi
        "source_coverage_pct", "image_integrity_pct", "source_halo_p95", "source_stretch_pct"]
 SEQ_FMT = ["pop_spread_px", "source_residual_p95", "source_halo_p95", "source_stretch_pct",
            "static_jitter_p95", "flow_temporal_p95", "depth_gt_si_rmse", "depth_gt_edge_f1",
-           "depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95"]
+           "depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95", "stereo_gt_psnr",
+           "stereo_gt_ssim", "stereo_gt_residual_p95", "stereo_gt_coverage_pct"]
 TEMPORAL_KEYS = ["flicker_p50", "flicker_p95", "flicker_disocc_p50", "flicker_disocc_p95",
                  "swim_p50", "swim_p95", "static_jitter_p50", "static_jitter_p95",
                  "flow_temporal_p50", "flow_temporal_p95", "flow_depth_p50", "flow_depth_p95",

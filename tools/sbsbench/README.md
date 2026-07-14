@@ -350,6 +350,15 @@ current one. `depth_gt_ghost_edge_pct_p95` complements it by measuring predictio
 previous-only GT boundaries, so a double edge cannot hide by also matching the current boundary.
 The ghost metric remains diagnostic until it has broader headset-correlated validation.
 
+MPI Sintel clips also carry identity-matched `gt_right/frame_*.png` rendered right eyes.
+`stereo_gt_psnr` and `stereo_gt_ssim` compare Apollo's synthesized right eye after removing only
+one whole-image horizontal camera-baseline offset. `stereo_gt_residual_p95` and
+`stereo_gt_coverage_pct` then allow a small local epipolar patch search as a permissive artifact
+diagnostic. This keeps local depth errors, vertical displacement, ringing, stretch, and incorrect
+revealed content visible while not pretending Sintel's physical camera baseline equals Apollo's
+artistic symmetric baseline. The four metrics are diagnostic until more true-stereo scenes and
+headset correlation establish decision thresholds.
+
 `rescore_run.py` refreshes a comparison-only run directly from its preserved source/depth/SBS
 artifacts after metric-code changes. It refuses committed-baseline verdicts, updates the metric
 contract hash and writes atomically; use `run_eval.py` for any committed gate.
@@ -413,5 +422,13 @@ Notes:
 | `depth_gt_lag_f1_p95` | previous-frame boundary-F1 advantage | lower = less stale depth; **primary stability axis** |
 | `depth_gt_ghost_edge_pct_p95` | prediction support on previous-only GT boundaries | lower = fewer stale/double edges; diagnostic |
 
+## Metrics — true stereo (clips with `gt_right/frame_*.png`)
+| metric | meaning | direction |
+|--------|---------|-----------|
+| `stereo_gt_psnr` | synthesized-right PSNR after one global horizontal baseline registration | higher = closer to true stereo; diagnostic |
+| `stereo_gt_ssim` | local SSIM under the same global-only registration | higher = closer structure; diagnostic |
+| `stereo_gt_residual_p95` | p95 luma residual after a small permissive local epipolar patch search | lower = fewer local errors; diagnostic |
+| `stereo_gt_coverage_pct` | true-right pixels within 24/255 of a nearby epipolar patch | higher = more correct content; diagnostic |
+
 ## Not yet (roadmap)
-- **Reference warp PSNR/SSIM** — still needs ground-truth stereo content (rendered second eye).
+- LPIPS and disocclusion-band-restricted true-stereo reference metrics.

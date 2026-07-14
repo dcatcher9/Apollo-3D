@@ -62,20 +62,20 @@
     "score": 85.8
   },
   "perf_ms": {
-    "depth_infer": 1.38534,
-    "depth_postprocess_gpu": 0.069824,
-    "depth_preprocess_gpu": 0.137408,
-    "sbs_composite_cpu": 0.0052,
-    "warp_infer": 0.0384
+    "depth_infer": 1.38454,
+    "depth_postprocess_gpu": 0.069376,
+    "depth_preprocess_gpu": 0.138272,
+    "sbs_composite_cpu": 0.005,
+    "warp_infer": 0.038464
   },
   "meta": {
-    "git_sha": "fd376159",
+    "git_sha": "54fbc592",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "9833f080aed3",
       "bonn_person_walk": "d50a574dc05a",
-      "sintel_ambush": "eb33a2b52c5f",
-      "sintel_market": "eaa7b4a85487",
+      "sintel_ambush": "bb5125caa90f",
+      "sintel_market": "064b8ba8f8b3",
       "tartanair_house_easy": "28eb837aa364",
       "tartanair_house_motion": "d01e8c02d4c8",
       "vkitti_drive_clone": "87ece81615b1",
@@ -94,10 +94,10 @@
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "feb8f76d5485f999",
+    "metric_sha256": "4611fd0af2195166",
     "gpu_contention": false,
-    "timestamp": "2026-07-14T11:25:35",
-    "run_name": "ghost-metric-extended-baseline-final",
+    "timestamp": "2026-07-14T12:22:00",
+    "run_name": "gt-stereo-baseline-extended-2",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "name": "vkitti-drive-rain",

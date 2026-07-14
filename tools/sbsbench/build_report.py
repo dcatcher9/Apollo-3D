@@ -64,6 +64,11 @@ def gt_depth_path(clip, frame_id):
     return paths[0] if paths else None
 
 
+def gt_right_path(clip, frame_id):
+    paths = glob.glob(os.path.join(CLIPS_ROOT, clip, "gt_right", f"frame_{frame_id:05d}.*"))
+    return paths[0] if paths else None
+
+
 def _clip_name(clip):
     # Prefer the name run_eval captured into results.json; else the repo clip's meta.json; else id.
     nm = CTRL["clips"].get(clip, {}).get("meta", {}).get("name")
@@ -111,6 +116,10 @@ COLS = [
     ("depth_gt_edge_f1", "gt_edge_f1", False, True, 0),
     ("depth_gt_lag_f1_p95", "gt_depth_lag", True, True, 0),
     ("depth_gt_ghost_edge_pct_p95", "gt_ghost_edge", True, True, 0),
+    ("stereo_gt_psnr", "gt_stereo_psnr", False, True, 0),
+    ("stereo_gt_ssim", "gt_stereo_ssim", False, True, 0),
+    ("stereo_gt_residual_p95", "gt_stereo_resid", True, True, 0),
+    ("stereo_gt_coverage_pct", "gt_stereo_coverage", False, True, 0),
     ("positive_disparity_pct", "disp_positive", True, True, 0),
     ("negative_disparity_pct", "disp_negative", True, True, 0),
     ("source_coverage_pct", "coverage", False, True, 0),
@@ -348,6 +357,40 @@ def ground_truth_depth_evidence(clip, idx):
     return tuple(durl(im, w=380, jpg=True, q=88) for im in images)
 
 
+def ground_truth_stereo_evidence(clip, idx):
+    """True right eye, synthesized right eyes, and signed reference-error delta."""
+    reference_path = gt_right_path(clip, idx)
+    control_path = frame_path(ctrl_dir, clip, idx)
+    treatment_path = frame_path(treat_dir, clip, idx)
+    if not reference_path or not all(os.path.exists(p) for p in (control_path, treatment_path)):
+        return None
+    reference = sbsbench.load_gray(reference_path)
+    control = sbsbench.split_eyes(sbsbench.load_gray(control_path))[1]
+    treatment = sbsbench.split_eyes(sbsbench.load_gray(treatment_path))[1]
+    width = min(control.shape[1], treatment.shape[1], 256)
+    height = max(8, round(min(control.shape[0] / control.shape[1],
+                              treatment.shape[0] / treatment.shape[1]) * width))
+    control = sbsbench.resize_to(control, width, height)
+    treatment = sbsbench.resize_to(treatment, width, height)
+    reference = sbsbench.resize_to(reference, width, height)
+    control, control_ref, control_valid, _, _ = sbsbench.align_stereo_ground_truth(
+        control, reference)
+    treatment, treatment_ref, treatment_valid, _, _ = sbsbench.align_stereo_ground_truth(
+        treatment, reference)
+    valid = control_valid & treatment_valid
+    control_error = np.abs(control - control_ref) * 255.0
+    treatment_error = np.abs(treatment - treatment_ref) * 255.0
+    signed = np.where(valid, treatment_error - control_error, 0.0)
+    heat = np.zeros((*signed.shape, 3), np.uint8)
+    heat[..., 0] = np.clip(signed * 4.0, 0, 255).astype(np.uint8)
+    heat[..., 2] = np.clip(-signed * 4.0, 0, 255).astype(np.uint8)
+    images = [Image.fromarray((reference * 255.0).astype(np.uint8)),
+              Image.fromarray((control * 255.0).astype(np.uint8)),
+              Image.fromarray((treatment * 255.0).astype(np.uint8)),
+              Image.fromarray(heat)]
+    return tuple(durl(image, w=380, jpg=True, q=88) for image in images)
+
+
 def ground_truth_lag_evidence(clip, idx):
     """Previous/current GT beside aligned control/treatment depth for lag validation."""
     if idx <= 0:
@@ -474,6 +517,9 @@ def visual_evidence_images(clip, idx, metric=None):
         return ground_truth_depth_evidence(clip, idx)
     if metric in ("depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95"):
         return ground_truth_lag_evidence(clip, idx)
+    if metric in ("stereo_gt_psnr", "stereo_gt_ssim", "stereo_gt_residual_p95",
+                  "stereo_gt_coverage_pct"):
+        return ground_truth_stereo_evidence(clip, idx)
     if metric == "pop_spread_px":
         cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
         dp = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
@@ -659,6 +705,16 @@ RADAR_GROUPS = [
          "reference": 50.0, "unit": "%"},
         {"key": "flow_depth_p95", "label": "Flow depth stability", "better": "lower",
          "reference": 75.0, "unit": " /255"},
+    ]),
+    ("True-stereo reference", "Diagnostic until calibrated on more stereo scenes", [
+        {"key": "stereo_gt_psnr", "label": "Right-eye PSNR", "better": "higher",
+         "reference": 40.0, "unit": " dB"},
+        {"key": "stereo_gt_ssim", "label": "Right-eye SSIM", "better": "higher",
+         "reference": 1.0, "unit": ""},
+        {"key": "stereo_gt_residual_p95", "label": "Local residual", "better": "lower",
+         "reference": 80.0, "unit": " luma"},
+        {"key": "stereo_gt_coverage_pct", "label": "Patch coverage", "better": "higher",
+         "reference": 100.0, "unit": "%"},
     ]),
 ]
 
@@ -893,6 +949,22 @@ METRIC_DEFS = [
      "gt_ghost_edge",
      "P95 prediction support on ground-truth boundaries that existed only in the previous frame. Detects stale and double depth edges even when the current edge is also present.",
      "lower = fewer stale/double edges"),
+    ("stereo_gt_psnr",
+     "gt_stereo_psnr",
+     "Synthesized right-eye PSNR against the dataset's true rendered right eye after removing one global horizontal camera-baseline offset. Local geometry and appearance errors remain.",
+     "higher = closer to true stereo"),
+    ("stereo_gt_ssim",
+     "gt_stereo_ssim",
+     "Local structural similarity of the synthesized and true right eyes under the same global-only registration used by GT stereo PSNR.",
+     "higher = closer structure"),
+    ("stereo_gt_residual_p95",
+     "gt_stereo_resid",
+     "P95 right-eye luma error after the global registration plus a small permissive epipolar patch search. Separates local synthesis artifacts from baseline mismatch.",
+     "lower = fewer local stereo errors"),
+    ("stereo_gt_coverage_pct",
+     "gt_stereo_coverage",
+     "True-right pixels whose best nearby epipolar patch differs by no more than 24/255 luma.",
+     "higher = more correct right-eye content"),
     ("flow_depth_p95",
      "flow_depth",
      "Pre-warp depth change after source optical-flow compensation, on photometrically reliable support.",
@@ -1100,16 +1172,21 @@ def _evidence_card(item, kind, axis=None):
     badge = kind.replace("_", " ")
     is_gt = metric in ("depth_gt_si_rmse", "depth_gt_edge_f1")
     is_gt_lag = metric in ("depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95")
+    is_gt_stereo = metric in ("stereo_gt_psnr", "stereo_gt_ssim",
+                              "stereo_gt_residual_p95", "stereo_gt_coverage_pct")
     source_label = ("source · bright = evaluated static region" if metric == "static_jitter_p95"
                     else "source · bright = reliable optical flow" if metric == "flow_temporal_p95"
-                    else "ground-truth depth" if is_gt else "source")
+                    else "ground-truth depth" if is_gt else
+                    "true rendered right eye" if is_gt_stereo else "source")
     ctrl_label = (f"{CTRL_TAG} · temporal change" if metric == "static_jitter_p95" else
                   f"{CTRL_TAG} · flow residual" if metric == "flow_temporal_p95" else
                   f"{CTRL_TAG} · aligned depth" if is_gt else
+                  f"{CTRL_TAG} · synthesized right eye" if is_gt_stereo else
                   f"{CTRL_TAG} · left | right" if metric == "pop_spread_px" else CTRL_TAG)
     treat_label = (f"{TREAT_TAG} · temporal change" if metric == "static_jitter_p95" else
                    f"{TREAT_TAG} · flow residual" if metric == "flow_temporal_p95" else
                    f"{TREAT_TAG} · aligned depth" if is_gt else
+                   f"{TREAT_TAG} · synthesized right eye" if is_gt_stereo else
                    f"{TREAT_TAG} · left | right" if metric == "pop_spread_px" else TREAT_TAG)
     if is_gt_lag and len(imgs) == 4:
         panels = (f'<div class="quad"><figure><span class="tag">previous ground-truth depth</span>'
@@ -1159,12 +1236,14 @@ def _change_kind(item):
 
 
 def visual_evidence_section():
-    """Show one representative example for every validated primary quality axis."""
+    """Show one representative example for every quality and reference axis."""
     axes = (("Stereo volume", ("pop_spread_px",)),
             ("Warp fidelity", ("source_residual_p95", "source_halo_p95", "source_stretch_pct")),
             ("Temporal stability", ("static_jitter_p95", "flow_temporal_p95",
                                      "depth_gt_lag_f1_p95")),
-            ("Ground-truth depth", ("depth_gt_si_rmse", "depth_gt_edge_f1")))
+            ("Ground-truth depth", ("depth_gt_si_rmse", "depth_gt_edge_f1")),
+            ("True-stereo reference", ("stereo_gt_psnr", "stereo_gt_ssim",
+                                       "stereo_gt_residual_p95", "stereo_gt_coverage_pct")))
     cards = []
     for axis, metrics in axes:
         item = max((item for metric in metrics if (item := _strongest_change(metric))),
@@ -1174,10 +1253,11 @@ def visual_evidence_section():
     cards = "".join(cards)
     if not cards:
         return ""
-    return (f'<section><h2>Primary-axis visual evidence</h2>'
-            f'<p class="sub">One strongest matched example for each decision axis. Warp and '
+    return (f'<section><h2>Quality-axis visual evidence</h2>'
+            f'<p class="sub">One strongest matched example for each decision/reference axis. Warp and '
             f'temporal metrics use source-relative heatmaps, stereo shows both eyes, and reference '
-            f'depth shows aligned prediction against ground truth. A within-noise badge means the '
+            f'depth and true stereo show aligned predictions against ground truth. A within-noise '
+            f'badge means the '
             f'example is illustrative, not a decision event.</p>{cards}</section>')
 
 

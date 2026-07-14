@@ -29,7 +29,9 @@ Design for two reproducible, host-side benchmarks so every SBS change ships with
 >   where VD3D is slightly higher. Only Bonn walking retains a just-over-one-pixel geometry difference.
 > A dedicated GT ghost-edge diagnostic now measures prediction support on previous-only
 > boundaries, complementing the existing lag-F1 metric when both current and stale edges exist.
-> Remaining: reference warp PSNR/SSIM (needs GT stereo).
+> MPI Sintel's rendered right eyes now provide reference-warp PSNR, SSIM, local epipolar
+> residual, and coverage diagnostics. One global horizontal camera-baseline offset is free;
+> local geometry, vertical displacement, stretch, ringing, and wrong revealed content are not.
 
 ## Why the offline warpsim was removed
 
@@ -109,11 +111,14 @@ Implemented for **depth**: clips may carry identity-matched 16-bit `gt_depth/fra
 is evaluated with scale/shift-invariant RMSE and boundary F1. `flat_page` and `fast_motion` provide
 deterministic references. Missing GT remains absent.
 
-Pending for **warp imagery** (needs GT stereo content):
-For synthetic/known-stereo clips: feed one eye through the pipeline, reconstruct the other,
-compare to the true eye. `PSNR / SSIM / LPIPS`, global and disocclusion-band-restricted. Gold
-standard for warp+inpaint correctness. Requires rendered (Blender second-eye camera) or dataset
-stereo pairs. Deferred until phase 1 is proven.
+Implemented for **warp imagery** on the MPI Sintel clips: feed the left eye through the pipeline,
+compare Apollo's synthesized right eye to the true rendered right eye, and report global-only-
+registered `stereo_gt_psnr` / `stereo_gt_ssim` plus permissive local-epipolar
+`stereo_gt_residual_p95` / `stereo_gt_coverage_pct`. The global registration removes only the
+physical-camera baseline/convergence offset, which intentionally differs from Apollo's artistic
+symmetric baseline. These metrics remain diagnostic until more true-stereo scenes and headset
+correlation establish decision thresholds. LPIPS and disocclusion-band-restricted reference
+scoring remain future work.
 
 ### Output
 Scorecard: JSON + rendered HTML, one row per clip × metric, diffed vs. a stored baseline

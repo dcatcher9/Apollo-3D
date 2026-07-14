@@ -151,7 +151,9 @@ constraints. Headset evidence resolves coequal-axis tradeoffs.
 
 The harness uses contract 13 and eval schema 19. It exports raw depth, pre-warp depth, exact forward
 coverage diagnostics, and final SBS artifacts by numeric frame identity. Ground-truth depth scoring
-is scale/shift invariant but polarity preserving.
+is scale/shift invariant but polarity preserving. MPI Sintel true-right references additionally
+score global-horizontal-registered PSNR/SSIM and local epipolar residual/coverage; these remain
+diagnostic pending broader calibration.
 
 ## Current priorities
 

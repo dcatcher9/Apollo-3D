@@ -59,14 +59,14 @@
     "score": 90.1
   },
   "perf_ms": {
-    "depth_infer": 1.45491,
-    "depth_postprocess_gpu": 0.069888,
-    "depth_preprocess_gpu": 0.160832,
+    "depth_infer": 1.45584,
+    "depth_postprocess_gpu": 0.0696,
+    "depth_preprocess_gpu": 0.178208,
     "sbs_composite_cpu": 0.0052,
-    "warp_infer": 0.055616
+    "warp_infer": 0.055456
   },
   "meta": {
-    "git_sha": "fd376159",
+    "git_sha": "54fbc592",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -94,10 +94,10 @@
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "feb8f76d5485f999",
+    "metric_sha256": "4611fd0af2195166",
     "gpu_contention": false,
-    "timestamp": "2026-07-14T11:23:52",
-    "run_name": "ghost-metric-core-baseline-final",
+    "timestamp": "2026-07-14T12:24:09",
+    "run_name": "gt-stereo-baseline-core",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "name": "fast_motion",
