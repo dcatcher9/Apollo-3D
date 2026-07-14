@@ -1034,6 +1034,13 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn(os.path.join("prepared", "extended-v2"), extended_clips)
         self.assertTrue(extended_baselines.endswith("baselines_extended"))
 
+    def test_rescore_uses_canonical_metric_contract_hash(self):
+        data = {"meta": {}}
+        with mock.patch.object(run_eval, "metric_contract_sha", return_value="canonical"):
+            rescore_run.refresh_contract_metadata(data)
+        self.assertEqual(data["meta"]["metric_sha256"], "canonical")
+        self.assertEqual(data["meta"]["eval_schema"], run_eval.EVAL_SCHEMA)
+
     def test_sintel_adapter_preserves_left_and_rendered_right_frames(self):
         with tempfile.TemporaryDirectory() as root:
             archive = os.path.join(root, "sintel.zip")

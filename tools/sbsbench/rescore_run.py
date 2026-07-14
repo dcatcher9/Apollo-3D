@@ -29,6 +29,12 @@ def depth_compensation_from_meta(meta):
     return "none"
 
 
+def refresh_contract_metadata(data):
+    """Stamp the same metric contract that fresh run_eval artifacts use."""
+    data["meta"]["metric_sha256"] = run_eval.metric_contract_sha()
+    data["meta"]["eval_schema"] = run_eval.EVAL_SCHEMA
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("run_dir", help="sbs_eval run containing results.json and per-clip artifacts")
@@ -61,10 +67,7 @@ def main():
     data["hard_failures"] = hard_failures
     data["regressions"] = []
     data["verdict"] = "hard_failures" if hard_failures else "comparison_only"
-    data["meta"]["metric_sha256"] = run_eval.sha256_files([
-        os.path.join(SCRIPT_DIR, "sbsbench.py"), os.path.join(SCRIPT_DIR, "thresholds.json"),
-        os.path.join(SCRIPT_DIR, "run_eval.py")])
-    data["meta"]["eval_schema"] = run_eval.EVAL_SCHEMA
+    refresh_contract_metadata(data)
     depth_compensation = depth_compensation_from_meta(data.get("meta", {}))
     data["meta"]["depth_compensation"] = depth_compensation
     for entry in data["clips"].values():
