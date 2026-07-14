@@ -119,6 +119,12 @@ default `1.25`) without changing that resolution correction.
   but regressed hard-motion GT boundary F1 from 60.7% to 49.8% and worsened its flow-depth residual.
   Keep optical flow out of the production depth filter; retain it for validation and diagnostics.
   Evidence: `flow-ema-exact-1f-treatment` under `cmake-build-relwithdebinfo/sbs_eval/`.
+- Warp-depth prefilter reshaping was rejected after core screening. Replacing the legacy separable
+  `[.375, .25, .375]` kernel with Gaussian `[.25, .5, .25]` weights changed no primary axis and
+  worsened mean halo. Removing only the vertical taps was likewise quality-neutral and saved less
+  than 0.001 ms of measured warp time. Keep the validated legacy-equivalent prefilter. Evidence:
+  `prefilter-gaussian-core` and `prefilter-horizontal-core` under
+  `cmake-build-relwithdebinfo/sbs_eval/`.
 - Guided upsample, curvature, scene snap, range/depth floors, border fade, legacy shift, VD3D
   hybrid warp, and CPU warpsim were rejected and removed.
 - Subject-plane lock, Bestv2 sharpen, and EMA-mask dilation were rejected and removed.
