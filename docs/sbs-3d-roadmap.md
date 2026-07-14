@@ -143,6 +143,10 @@ default `1.25`) without changing that resolution correction.
   identifies holes, but the backward equation finds a mathematical root there and therefore never
   reaches its no-root fallback. Future disocclusion work must change root selection or explicitly
   consume forward coverage rather than elaborate that unreachable fallback.
+- Symmetric horizontal edge-band supersampling was rejected after the full core screen. It nudged
+  mean halo from 4.57 to 4.52 and the rim proxy from 4.41 to 4.31, but produced no validated
+  primary-axis win, was visually imperceptible at the strongest frame, and increased mean warp
+  time from 0.0553 to 0.0679 ms (+22.8%). Evidence: `edge-supersample-core`.
 
 Do not reintroduce a removed processor without a current core and extended comparison, visual
 evidence, and a headset-motivated hypothesis.
