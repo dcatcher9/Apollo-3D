@@ -56,6 +56,10 @@ default `1.25`) without changing that resolution correction.
   repeated inside the specialized loop. All rendered, depth and coverage artifacts remained
   byte-identical while warp time fell another 1.43% on core and 1.25% on extended. Evidence:
   `shaped-branch-core` and `shaped-branch-extended`.
+- The default subject-stretch-on and configurable no-stretch paths are selected once per output
+  pixel rather than with a select at every probe. All non-performance artifacts remained
+  byte-identical while warp time fell another 1.07% on core and 1.33% on extended. Evidence:
+  `stretch-specialize-core` and `stretch-specialize-extended`.
 - Horizontal silhouette-band snapping was screened at radii 1/2/4 with threshold and vertical-
   consensus variants, then rejected and removed. It reduced positional error on c747 and improved
   mean extended-suite halo by 0.09 px, but produced no validated primary-axis win, left GT edge F1

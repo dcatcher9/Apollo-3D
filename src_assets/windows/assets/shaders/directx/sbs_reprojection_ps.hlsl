@@ -39,20 +39,20 @@ float SampleDepth(float sx, float sy) {
 
 float ProbeParallax(float d, float planeMask, float4 s0, float4 s1, float4 s2, bool shaped,
                     float sourceWidth, float sourceHeight, bool use_plane_lock,
-                    Bestv2NoPlaneParams no_plane_params) {
+                    Bestv2NoPlaneParams no_plane_params, bool use_subject_stretch) {
     if (use_plane_lock) {
         return DepthParallax(
             d, planeMask, s0, s1, s2, shaped, sourceWidth, sourceHeight, true);
     }
     // Reproject returns before its loop when subject state is uninitialized, so this specialized
     // path is reached only with shaped=true and does not need a redundant branch per probe.
-    return DepthParallaxNoPlane(d, s0, s1, no_plane_params);
+    return DepthParallaxNoPlane(d, s0, s1, no_plane_params, use_subject_stretch);
 }
 
 // Find the source U coordinate that reprojects onto `uv` for one eye, choosing the
 // nearest (frontmost) surface so foreground occludes rather than duplicates.
 // eyeSign = +1 right eye, -1 left eye.
-float2 Reproject(float2 uv, float eyeSign, bool use_plane_lock) {
+float2 Reproject(float2 uv, float eyeSign, bool use_plane_lock, bool use_subject_stretch) {
     // Subject anchoring is live this frame only if configured AND the resolve pass has
     // produced state (init != 0 -- it is 0 for the first frames). Mandatory shader/resource
     // initialization is validated before the estimator is published. Decide it ONCE here
@@ -76,7 +76,7 @@ float2 Reproject(float2 uv, float eyeSign, bool use_plane_lock) {
         return uv;  // subject state is not initialized yet
     }
     Bestv2NoPlaneParams noPlaneParams = MakeBestv2NoPlaneParams(
-        s0, s1, (float)sourceWidth, (float)sourceHeight);
+        s0, s1, (float)sourceWidth, (float)sourceHeight, use_subject_stretch);
 
     int steps = clamp((int)round(24.0f * aspectScale), 12, 72);
     float startX = uv.x - searchRadius;
@@ -108,7 +108,7 @@ float2 Reproject(float2 uv, float eyeSign, bool use_plane_lock) {
     }
     float prevG = (prevX - uv.x) - eyeSign * ProbeParallax(
         prevD, planeMask, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight,
-        use_plane_lock, noPlaneParams);
+        use_plane_lock, noPlaneParams, use_subject_stretch);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
@@ -117,7 +117,7 @@ float2 Reproject(float2 uv, float eyeSign, bool use_plane_lock) {
         float d = SampleDepth(x, uv.y);
         float g = (x - uv.x) - eyeSign * ProbeParallax(
             d, planeMask, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight,
-            use_plane_lock, noPlaneParams);
+            use_plane_lock, noPlaneParams, use_subject_stretch);
 
         // Zero crossing between prevX and x => a source in this span reprojects onto uv.
         if ((prevG <= 0.0f && g >= 0.0f) || (prevG >= 0.0f && g <= 0.0f)) {
@@ -164,9 +164,11 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
     float2 sample_uv;
     [branch]
     if (subject_plane_lock > 0.0f) {
-        sample_uv = Reproject(src_uv, eyeSign, true);
+        sample_uv = Reproject(src_uv, eyeSign, true, true);
+    } else if (subject_stretch > 0.5f) {
+        sample_uv = Reproject(src_uv, eyeSign, false, true);
     } else {
-        sample_uv = Reproject(src_uv, eyeSign, false);
+        sample_uv = Reproject(src_uv, eyeSign, false, false);
     }
 
     // Disoccluded regions clamp to the nearest valid column instead of wrapping.

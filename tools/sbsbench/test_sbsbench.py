@@ -621,9 +621,11 @@ class EvalContractTests(unittest.TestCase):
         self.assertGreaterEqual(common_text.count("[branch]"), 2)
         self.assertIn("[branch]\n    if (use_plane_lock && s2.y <= 0.5f)",
                       common_text)
-        self.assertIn("sample_uv = Reproject(src_uv, eyeSign, false)", text)
+        self.assertIn("sample_uv = Reproject(src_uv, eyeSign, false, true)", text)
+        self.assertIn("sample_uv = Reproject(src_uv, eyeSign, false, false)", text)
         self.assertIn("MakeBestv2NoPlaneParams", text)
-        self.assertIn("DepthParallaxNoPlane(d, s0, s1, no_plane_params)", text)
+        self.assertIn(
+            "DepthParallaxNoPlane(d, s0, s1, no_plane_params, use_subject_stretch)", text)
         self.assertNotIn("DepthParallaxNoPlane(d, s0, s1, shaped", text)
 
     def test_retired_geometry_is_absent_but_forward_coverage_diagnostic_remains(self):

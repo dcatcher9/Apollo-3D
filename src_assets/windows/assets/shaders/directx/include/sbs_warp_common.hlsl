@@ -126,10 +126,11 @@ struct Bestv2NoPlaneParams {
 };
 
 Bestv2NoPlaneParams MakeBestv2NoPlaneParams(float4 s0, float4 s1,
-                                             float source_width, float source_height) {
+                                             float source_width, float source_height,
+                                             bool use_subject_stretch) {
     Bestv2NoPlaneParams p;
     float parallax_width = Bestv2ParallaxWidth(source_width, literal_bestv2);
-    float subject_depth = WarpDepth(s0.z, s0, s1, true);
+    float subject_depth = Bestv2WarpDepth(s0.z, s0, s1, true, use_subject_stretch);
     p.subject_shift_px = Bestv2RawShiftPxFast(subject_depth);
     p.parallax_scale = 0.35f / parallax_width;
     p.convergence_bias = -0.008f * 0.5f + s1.z * 4.0f / parallax_width;
@@ -140,8 +141,9 @@ Bestv2NoPlaneParams MakeBestv2NoPlaneParams(float4 s0, float4 s1,
     return p;
 }
 
-float DepthParallaxNoPlane(float d, float4 s0, float4 s1, Bestv2NoPlaneParams p) {
-    float shaped_depth = WarpDepth(d, s0, s1, true);
+float DepthParallaxNoPlane(float d, float4 s0, float4 s1, Bestv2NoPlaneParams p,
+                           bool use_subject_stretch) {
+    float shaped_depth = Bestv2WarpDepth(d, s0, s1, true, use_subject_stretch);
     float shift_px = Bestv2RawShiftPxFast(shaped_depth);
     float parallax = (shift_px - subject_lock * p.subject_shift_px) * p.parallax_scale;
     parallax += p.convergence_bias;
