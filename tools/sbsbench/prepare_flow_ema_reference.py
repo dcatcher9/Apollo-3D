@@ -109,7 +109,7 @@ def main():
         contract_path = os.path.join(run_dir, "contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
         required_contract = {
-            "schema": 13,
+            "schema": 14,
             "model": meta.get("model"),
             "profile": meta.get("profile"),
             "depth_step": "current-once",

@@ -1250,6 +1250,8 @@ namespace config {
     }
     auto apply_sbs_values = [&](video_t::sbs_t &target, const std::string &prefix) {
       double_between_f(vars, prefix + "pop_strength", target.pop_strength, {0.25, 2.0});
+      bool_f(vars, prefix + "adaptive_pop", target.adaptive_pop);
+      double_between_f(vars, prefix + "adaptive_pop_max", target.adaptive_pop_max, {0.25, 2.0});
       double_between_f(vars, prefix + "ema", target.ema, {0.01, 1.0});
       double_between_f(vars, prefix + "ema_edge_change", target.ema_edge_change, {0.0, 1.0});
       double_between_f(vars, prefix + "ema_edge_gradient", target.ema_edge_gradient, {0.0, 1.0});

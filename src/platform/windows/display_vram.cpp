@@ -913,8 +913,8 @@ namespace platf::dxgi {
         content_scale_y,
         (float) sbs_config.pop_strength,
         0.0f,
-        0.0f,
-        0.0f
+        sbs_config.adaptive_pop ? 1.0f : 0.0f,
+        (float) std::max(sbs_config.adaptive_pop_max, sbs_config.pop_strength)
       };
       sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);
     }
@@ -1435,8 +1435,14 @@ namespace platf::dxgi {
           return -1;
         }
 
-        BOOST_LOG(info) << "Host SBS warp: Apollo occlusion-aware probe, pop strength "
-                        << sbs_config.pop_strength << ".";
+        if (sbs_config.adaptive_pop) {
+          BOOST_LOG(info) << "Host SBS warp: Apollo occlusion-aware probe, scene-latched pop "
+                          << sbs_config.pop_strength << "-"
+                          << std::max(sbs_config.adaptive_pop_max, sbs_config.pop_strength) << ".";
+        } else {
+          BOOST_LOG(info) << "Host SBS warp: Apollo occlusion-aware probe, fixed pop "
+                          << sbs_config.pop_strength << ".";
+        }
 
         sbs_viewport = {0.0f, 0.0f, (float) tex_desc.Width, (float) tex_desc.Height, 0.0f, 1.0f};
       }

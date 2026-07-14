@@ -166,6 +166,8 @@ namespace config {
     struct sbs_t {
       std::string profile = "apollo";  ///< Startup quality preset. Custom names use sbs_3d_profile_<name>_<parameter> keys.
       double pop_strength = 1.25;  ///< Production stereo-parallax multiplier (0.25-2). Literal reference runs bypass production scaling in the offline harness.
+      bool adaptive_pop = true;  ///< Select pop once per scene from depth-edge risk, then hold it constant until a hard cut.
+      double adaptive_pop_max = 1.30;  ///< Validated absolute ceiling for adaptive pop (pop_strength-2). Values below pop_strength clamp to the floor.
       double ema = 0.5;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
       double ema_edge_change = 0.05;  ///< Edge-selective EMA: minimum current-vs-history depth change. 0 disables it.
       double ema_edge_gradient = 0.02;  ///< Edge-selective EMA: minimum current depth gradient.

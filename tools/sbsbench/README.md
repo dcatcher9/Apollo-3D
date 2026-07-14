@@ -38,7 +38,7 @@ For example:
 ```
 sbs_3d_profile = cinema
 sbs_3d_profile_cinema_depth_model = depth_anything_v2_base_fp16
-sbs_3d_profile_cinema_pop_strength = 1.35
+sbs_3d_profile_cinema_pop_strength = 1.25
 ```
 
 Every profile uses Apollo's occlusion-aware warp; profiles select depth-processing, model, pop,
@@ -122,6 +122,11 @@ Harness A/B levers (after `--extra`):
 
 Production uses the equivalent `sbs_3d_pop_strength = F` key. Like every individual SBS key it
 overrides every profile; omit it to retain each profile's configured/default value (`1.25`).
+Scene-adaptive pop is enabled by default. It selects once per scene between the `1.25` floor and
+the validated `sbs_3d_adaptive_pop_max = 1.30` ceiling using normalized-depth edge density, then
+holds the result bit-stable until a hard cut. Set `sbs_3d_adaptive_pop = false` for the fixed floor.
+The former experimental 2.0 ceiling was rejected: comfort remained within 3%, but temporal and
+warp artifacts regressed. Symmetric left/right geometry is unchanged.
 CUDA Graph replay is enabled by default for every profile. Use `sbs_3d_cuda_graph = false` only
 for driver diagnosis or a controlled performance A/B; unsupported/capture-failed systems already
 fall back to ordinary TensorRT enqueue automatically.
@@ -148,7 +153,7 @@ depth-step floor (flat scenes legitimately read 0), and all pixel windows scale 
 width — but absolute values are still not comparable across clip resolutions; baselines are
 per-clip-set. The harness writes 16-bit depth PNGs so `swim` resolves below 1/255.
 
-**Eval schema 19 / harness contract 12:** `run_eval.py` pins the profile and model explicitly and
+**Eval schema 20 / harness contract 14:** `run_eval.py` pins the profile and model explicitly and
 has no alternate warp selector. By default the
 harness submits and consumes exactly one inference per source frame, so EMA and normalization
 update once. `--depth-every N` is an explicit comparison-only cadence treatment: color advances

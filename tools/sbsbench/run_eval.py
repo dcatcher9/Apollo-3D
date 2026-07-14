@@ -36,7 +36,7 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-EVAL_SCHEMA = 19  # CUDA-graph inference experiment; harness contract 13
+EVAL_SCHEMA = 20  # scene-latched adaptive pop; harness contract 14
 
 
 def suite_defaults(name):
@@ -290,6 +290,18 @@ def expected_profile_bool(conf, profile, key, default, extra, cli_key):
     fail(f"invalid boolean value for {key}: {value!r}")
 
 
+def expected_adaptive_pop(conf, profile, extra):
+    """Resolve the flag-style harness override after the production config layers."""
+    value = expected_profile_bool(conf, profile, "adaptive_pop", True, [], "")
+    enabled_at = max((i for i, item in enumerate(extra) if item == "--adaptive-pop"),
+                     default=-1)
+    disabled_at = max((i for i, item in enumerate(extra) if item == "--no-adaptive-pop"),
+                      default=-1)
+    if enabled_at >= 0 or disabled_at >= 0:
+        value = enabled_at > disabled_at
+    return value
+
+
 def expected_depth_model(conf, profile, extra):
     """Resolve the model with the same profile-first, explicit-override order as production."""
     model = "depth_anything_v2_fp16"
@@ -425,6 +437,14 @@ def main():
     expected_cuda_graph = expected_profile_bool(
         args.conf, expected_config_profile, "cuda_graph", True, args.extra,
         "--cuda-graph")
+    expected_adaptive = expected_adaptive_pop(args.conf, expected_config_profile, args.extra)
+    expected_adaptive_max = expected_profile_number(
+        args.conf, expected_config_profile, "adaptive_pop_max", 1.30, args.extra,
+        "--adaptive-pop-max")
+    expected_pop = expected_profile_number(
+        args.conf, expected_config_profile, "pop_strength", 1.25, args.extra,
+        "--pop-strength")
+    expected_adaptive_max = max(expected_adaptive_max, expected_pop)
     expected_model = expected_depth_model(args.conf, expected_config_profile, args.extra)
     missing = check_engines(args.build_dir, expected_model)
     if missing and not args.allow_build:
@@ -454,6 +474,8 @@ def main():
         "extra_args": args.extra,
         "conf": os.path.relpath(args.conf, REPO),
         "model": expected_model, "profile": expected_config_profile,
+        "adaptive_pop": expected_adaptive,
+        "adaptive_pop_max": expected_adaptive_max,
         "literal_bestv2": literal_bestv2,
         "depth_compensation": depth_compensation,
         "eval_schema": EVAL_SCHEMA, "depth_step": depth_step,
@@ -486,7 +508,7 @@ def main():
             fail(f"{clip}: harness did not write contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
         expected_contract = {
-            "schema": 13,
+            "schema": 14,
             "model": expected_model,
             "profile": expected_config_profile,
             "depth_step": depth_step,
@@ -497,6 +519,8 @@ def main():
             "ema_edge_change": expected_ema_edge_change,
             "ema_edge_gradient": expected_ema_edge_gradient,
             "ema_edge_strength": expected_ema_edge_strength,
+            "adaptive_pop": expected_adaptive,
+            "adaptive_pop_max": expected_adaptive_max,
             "literal_bestv2": literal_bestv2,
             "cuda_graph": expected_cuda_graph,
         }
@@ -509,6 +533,8 @@ def main():
                      "depth_compensation": contract["depth_compensation"],
                      "literal_bestv2": contract["literal_bestv2"],
                      "cuda_graph": contract["cuda_graph"],
+                     "adaptive_pop": contract["adaptive_pop"],
+                     "adaptive_pop_max": contract["adaptive_pop_max"],
                      "cuda_graph_captured": contract.get("cuda_graph_captured", False)}
 
         # A valid harness result has one source, raw-model, warp-input depth, and SBS artifact for

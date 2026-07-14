@@ -24,13 +24,15 @@ invariants are:
 
 The 854-pixel calibration is an internal resolution correction, not a user tuning knob.
 `sbs_3d_pop_strength` is the final shared parallax multiplier (`0.25`-`2`, default `1.25`) and
-changes apparent depth consistently after resolution normalization.
+changes apparent depth consistently after resolution normalization. The default scene latch may
+select up to `sbs_3d_adaptive_pop_max = 1.30`; the selected value is held until a hard cut, so
+resolution changes do not alter it and ordinary motion cannot make it breathe.
 | Eval metrics/report | eye-relative/common raster | Stereo volume and vertical alignment gates use percentages. A/B evidence normalizes mismatched run sizes to a common per-eye raster before crops or heatmaps. |
 
 ## Validation
 
 - Production `sunshine` RelWithDebInfo build succeeds.
-- All 71 SBS eval tests pass.
+- All 94 SBS eval tests pass.
 - Real D3D11 harness compilation/execution succeeds for Apollo at 80% output scale.
 - Letterbox smoke: both eyes had identical 30-row top/bottom bars.
 - Pillarbox smoke: both eyes had identical 49-column left/right bars.

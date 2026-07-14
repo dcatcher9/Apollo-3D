@@ -529,6 +529,7 @@ namespace sbs_bench {
       int eye_h = 0;  // 0 -> match/derive from the input frame
       double output_scale = 1.0;  // per-eye linear scale vs source; preserves source aspect
       double pop_strength = -1.0;  // final shared stereo-parallax multiplier; <0 = conf
+      double adaptive_pop_max = -1.0;  // absolute ceiling; <0 = conf
       bool simulate_hdr = false;  // decode sRGB frames into linear scRGB FP16 and use HDR paths
       double hdr_scale = 4.0;  // scRGB multiplier after sRGB EOTF (4.0 = 320-nit diffuse white)
       int max_width = 0;  // 0 -> use config max_encode_width
@@ -546,6 +547,7 @@ namespace sbs_bench {
       int subject_stretch = -1;  // -1 = conf, 0 = off, 1 = on
       double minmax_ema = -1.0;  // range-bounds EMA new-weight; <0 = conf
       int cuda_graph = -1;  // -1 = conf, 0 = ordinary enqueue, 1 = CUDA graph replay
+      int adaptive_pop = -1;  // -1 = conf, 0 = off, 1 = on
       bool literal_bestv2 = false;  // reference-only: disable production resolution/pop scaling
       bool depth_override_all = false;  // reference-only: replace every inferred depth frame
     };
@@ -574,6 +576,12 @@ namespace sbs_bench {
           o.output_scale = std::stod(next("--output-scale"));
         } else if (a == "--pop-strength") {
           o.pop_strength = std::stod(next("--pop-strength"));
+        } else if (a == "--adaptive-pop") {
+          o.adaptive_pop = 1;
+        } else if (a == "--no-adaptive-pop") {
+          o.adaptive_pop = 0;
+        } else if (a == "--adaptive-pop-max") {
+          o.adaptive_pop_max = std::stod(next("--adaptive-pop-max"));
         } else if (a == "--simulate-hdr") {
           o.simulate_hdr = true;
         } else if (a == "--hdr-scale") {
@@ -637,6 +645,11 @@ namespace sbs_bench {
       }
       if (o.pop_strength >= 0.0 && !(o.pop_strength >= 0.25 && o.pop_strength <= 2.0)) {
         BOOST_LOG(error) << "sbs-bench: --pop-strength must be between 0.25 and 2";
+        return false;
+      }
+      if (o.adaptive_pop_max >= 0.0 &&
+          !(o.adaptive_pop_max >= 0.25 && o.adaptive_pop_max <= 2.0)) {
+        BOOST_LOG(error) << "sbs-bench: --adaptive-pop-max must be between 0.25 and 2";
         return false;
       }
       if (!(o.hdr_scale > 0.0 && o.hdr_scale <= 64.0)) {
@@ -725,6 +738,13 @@ namespace sbs_bench {
     if (o.pop_strength >= 0.0) {
       sbs_cfg.pop_strength = o.pop_strength;
     }
+    if (o.adaptive_pop >= 0) {
+      sbs_cfg.adaptive_pop = (o.adaptive_pop != 0);
+    }
+    if (o.adaptive_pop_max >= 0.0) {
+      sbs_cfg.adaptive_pop_max = o.adaptive_pop_max;
+    }
+    sbs_cfg.adaptive_pop_max = std::max(sbs_cfg.adaptive_pop_max, sbs_cfg.pop_strength);
     if (o.subject_lock >= 0.0) {
       sbs_cfg.subject_lock = o.subject_lock;
     }
@@ -944,7 +964,16 @@ namespace sbs_bench {
         const float eye_aspect = (float) eye_w / (float) eye_h;
         const float content_scale_x = eye_aspect > aspect ? aspect / eye_aspect : 1.0f;
         const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
-        float repro_params[8] = {(float) sbs_cfg.subject_lock, sbs_cfg.subject_stretch ? 1.0f : 0.0f, content_scale_x, content_scale_y, (float) sbs_cfg.pop_strength, o.literal_bestv2 ? 1.0f : 0.0f, 0.0f, 0.0f};
+        float repro_params[8] = {
+          (float) sbs_cfg.subject_lock,
+          sbs_cfg.subject_stretch ? 1.0f : 0.0f,
+          content_scale_x,
+          content_scale_y,
+          (float) sbs_cfg.pop_strength,
+          o.literal_bestv2 ? 1.0f : 0.0f,
+          sbs_cfg.adaptive_pop ? 1.0f : 0.0f,
+          (float) sbs_cfg.adaptive_pop_max
+        };
         repro_cb = const_buffer(dev.Get(), repro_params);
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = sbs_w;
@@ -1230,7 +1259,7 @@ namespace sbs_bench {
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
-                 << "  \"schema\": 13,\n"
+                 << "  \"schema\": 14,\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
                  << "  \"depth_step\": "
@@ -1247,6 +1276,8 @@ namespace sbs_bench {
                  << "  \"ema_edge_change\": " << sbs_cfg.ema_edge_change << ",\n"
                  << "  \"ema_edge_gradient\": " << sbs_cfg.ema_edge_gradient << ",\n"
                  << "  \"ema_edge_strength\": " << sbs_cfg.ema_edge_strength << ",\n"
+                 << "  \"adaptive_pop\": " << (sbs_cfg.adaptive_pop ? "true" : "false") << ",\n"
+                 << "  \"adaptive_pop_max\": " << sbs_cfg.adaptive_pop_max << ",\n"
                  << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n"
                  << "  \"cuda_graph\": " << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
                  << "  \"cuda_graph_captured\": " << (cuda_graph_captured ? "true" : "false") << ",\n"

@@ -28,7 +28,8 @@ Normal and Host SBS AI; changing the host profile requires restarting Apollo.
 
 Bestv2 disparity is calibrated at the evaluator's 854-pixel source width and normalized to the
 5120x2160 Artemis reference aspect. `sbs_3d_pop_strength` scales the final parallax (`0.25`–`2`,
-default `1.25`) without changing that resolution correction.
+default floor `1.25`) without changing that resolution correction. The accepted scene latch may
+select up to `1.30` from depth-edge risk and holds the selection until a hard cut.
 
 ## Frozen processor decisions
 
@@ -147,12 +148,15 @@ default `1.25`) without changing that resolution correction.
   mean halo from 4.57 to 4.52 and the rim proxy from 4.41 to 4.31, but produced no validated
   primary-axis win, was visually imperceptible at the strongest frame, and increased mean warp
   time from 0.0553 to 0.0679 ms (+22.8%). Evidence: `edge-supersample-core`.
-- Comfort-only adaptive pop was rejected at its required ceiling screen. Raising the shared global
-  strength from 1.25 to 2.0 kept the worst signed disparity tail inside the 3% limit (2.27%) and
-  raised mean volume from 0.88% to 1.39%, but produced 19 validated costs across warp and stability:
-  mean static jitter rose 2.01 to 2.73 and flow residual 5.03 to 6.21. A disparity-only controller
-  would therefore approve visibly riskier frames. Keep the user-selected 1.25 fixed; revisit only
-  with an independently validated artifact-risk controller. Evidence: `adaptive-pop-ceiling-core`.
+- The original comfort-only adaptive-pop proposal was rejected at a 2.0 ceiling: the worst signed
+  disparity tail remained inside 3% (2.27%), but warp and stability accumulated 19 regressions.
+  The accepted replacement is scene-latched and risk-aware. It chooses once from normalized-depth
+  edge density, holds the multiplier bit-stable until a hard cut, and uses the independently gated
+  1.25-1.30 band. Core gained c747 halo (11.41 to 8.31) with no primary regression; extended was
+  neutral with no regression, and both suites passed hard limits. A 1.35 endpoint was separately
+  rejected as an anime halo/stretch tradeoff. Evidence: `adaptive-pop-ceiling-core`,
+  `pop-grid-130-core`, `pop-grid-130-extended`, `adaptive-pop-latched-core`, and
+  `adaptive-pop-latched-extended`.
 
 Do not reintroduce a removed processor without a current core and extended comparison, visual
 evidence, and a headset-motivated hypothesis.
@@ -164,7 +168,7 @@ and profile provenance; cover the 11-clip core and public extended suites; gener
 and `decision.json`; inspect primary-axis examples; and treat comfort/image-integrity limits as hard
 constraints. Headset evidence resolves coequal-axis tradeoffs.
 
-The harness uses contract 13 and eval schema 19. It exports raw depth, pre-warp depth, exact forward
+The harness uses contract 14 and eval schema 20. It exports raw depth, pre-warp depth, exact forward
 coverage diagnostics, and final SBS artifacts by numeric frame identity. Ground-truth depth scoring
 is scale/shift invariant but polarity preserving. MPI Sintel true-right references additionally
 score global-horizontal-registered PSNR/SSIM and local epipolar residual/coverage; these remain

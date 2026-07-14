@@ -710,6 +710,8 @@ namespace models {
     bool valid = false;  // all mandatory engine, shader, and session resources are ready
     float subject_recenter;  // recenter strength consumed by depth_subject_resolve_cs
     bool subject_stretch;  // apply the shape_depth_for_pop 5/95 disparity stretch
+    bool adaptive_pop;
+    float adaptive_pop_max_ratio;
     std::string model_name;  // local file stem; engine cache is recipe-specific
     std::string model_url;  // where to download the onnx if absent
 
@@ -1110,6 +1112,9 @@ namespace models {
         cuda_graph_enabled(cfg.cuda_graph),
         subject_recenter((float) cfg.subject_recenter),
         subject_stretch(cfg.subject_stretch),
+        adaptive_pop(cfg.adaptive_pop),
+        adaptive_pop_max_ratio((float) (std::max(cfg.adaptive_pop_max, cfg.pop_strength) /
+                                        std::max(cfg.pop_strength, 0.25))),
         model_name(model.name),
         model_url(model.url) {
       const auto init_started = std::chrono::steady_clock::now();
@@ -1316,7 +1321,8 @@ namespace models {
         }
       }
 
-      // Subject tracking: weighted histogram (256 uint bins) + two-float4 per-frame state.
+      // Subject tracking: weighted histogram (256 uint bins), plain histogram plus two scene-risk
+      // counters (258 uints), and two-float4 per-frame state.
       {
         uint32_t init_hist[256] = {};
         D3D11_BUFFER_DESC bd = {};
@@ -1330,7 +1336,10 @@ namespace models {
         if (subject_hist_buf) {
           device->CreateUnorderedAccessView(subject_hist_buf.Get(), nullptr, &subject_hist_uav);
         }
-        device->CreateBuffer(&bd, &sd, &subject_plain_buf);  // same 256-uint layout
+        uint32_t init_plain[258] = {};
+        bd.ByteWidth = sizeof(init_plain);
+        D3D11_SUBRESOURCE_DATA plain_sd = {init_plain, 0, 0};
+        device->CreateBuffer(&bd, &plain_sd, &subject_plain_buf);
         if (subject_plain_buf) {
           device->CreateUnorderedAccessView(subject_plain_buf.Get(), nullptr, &subject_plain_uav);
         }
@@ -1541,15 +1550,15 @@ namespace models {
 
       D3D11_BUFFER_DESC cb_desc = {};
       cb_desc.Usage = D3D11_USAGE_IMMUTABLE;
-      cb_desc.ByteWidth = 48;  // shared depth-pass cbuffer (12 floats/uints; see below)
+      cb_desc.ByteWidth = 64;  // shared depth-pass cbuffer (16 floats/uints; see below)
       cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
-      // Shared depth-pass constants, 12 scalars = 3 float4 registers. THIS fill is the
+      // Shared depth-pass constants, 16 scalars = 4 float4 registers. THIS fill is the
       // single source of truth for the canonical layout in
       // shaders/directx/include/depth_constants.hlsl -- every cbf[N] below must stay
       // slot-for-slot with the include (which every depth shader #includes). To add a
       // field: append it here AND to the include.
-      uint32_t cb[12] = {};
+      uint32_t cb[16] = {};
       float *cbf = (float *) cb;
       cb[0] = (uint32_t) target_w;
       cb[1] = (uint32_t) target_h;
@@ -1562,6 +1571,8 @@ namespace models {
       cbf[8] = ema_edge_strength;
       cbf[9] = subject_recenter;  // subject recenter strength (depth_subject_resolve_cs)
       cbf[10] = subject_stretch ? 1.0f : 0.0f;
+      cbf[11] = adaptive_pop ? 1.0f : 0.0f;
+      cbf[12] = adaptive_pop_max_ratio;
       D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
       cbuffer.Reset();
       device->CreateBuffer(&cb_desc, &sd, &cbuffer);
@@ -1678,14 +1689,16 @@ namespace models {
       {
         context->CSSetShader(depth_subject_hist_cs.Get(), nullptr, 0);
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        context->CSSetShaderResources(0, 1, depth_srv.GetAddressOf());
+        ID3D11ShaderResourceView *subject_srvs[2] = {depth_srv.Get(), depth_previous_srv.Get()};
+        context->CSSetShaderResources(0, 2, subject_srvs);
         ID3D11UnorderedAccessView *hist_uavs[2] = {subject_hist_uav.Get(), subject_plain_uav.Get()};
         context->CSSetUnorderedAccessViews(0, 2, hist_uavs, nullptr);
         context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
         ID3D11UnorderedAccessView *null_uavs_h2[2] = {nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 2, null_uavs_h2, nullptr);
-        context->CSSetShaderResources(0, 1, null_srvs);
+        ID3D11ShaderResourceView *null_subject_srvs[2] = {nullptr, nullptr};
+        context->CSSetShaderResources(0, 2, null_subject_srvs);
 
         context->CSSetShader(depth_subject_resolve_cs.Get(), nullptr, 0);
         ID3D11UnorderedAccessView *subj_uavs[3] = {subject_hist_uav.Get(), subject_uav.Get(), subject_plain_uav.Get()};
@@ -1709,7 +1722,7 @@ namespace models {
                             << " subj_hi_near=" << s[2]
                             << " subj_low_near=" << (1.0f - s[2])
                             << " recenter_delta=" << s[0]
-                            << " reserved=" << s[1]
+                            << " scene_age=" << s[1]
                             << " init=" << s[3];
             context->Unmap(subject_stage.Get(), 0);
           }

@@ -7,7 +7,8 @@
 
 Texture2D<float>         DepthTexture : register(t0);  // normalized depth, high = near
 RWStructuredBuffer<uint> SubjectHist  : register(u0);  // 256 bins, weight in 1/1024 units
-RWStructuredBuffer<uint> PlainHist    : register(u1);  // 256 bins, UNWEIGHTED count (for stretch 5/95 pct)
+RWStructuredBuffer<uint> PlainHist    : register(u1);  // 256 bins + edge/change counts at 256/257
+Texture2D<float>         PreviousDepth : register(t1);
 
 // Shared depth-pass cbuffer (only target_w/target_h are used here).
 #include "include/depth_constants.hlsl"
@@ -15,12 +16,18 @@ RWStructuredBuffer<uint> PlainHist    : register(u1);  // 256 bins, UNWEIGHTED c
 #define NUM_BINS 256
 groupshared uint g_hist[NUM_BINS];
 groupshared uint g_plain[NUM_BINS];
+groupshared uint g_edge_count;
+groupshared uint g_change_count;
 
 [numthreads(16, 16, 1)]
 void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
     uint lin = tid.y * 16 + tid.x;  // 256 threads/group: one shared bin each
     g_hist[lin] = 0u;
     g_plain[lin] = 0u;
+    if (lin == 0u) {
+        g_edge_count = 0u;
+        g_change_count = 0u;
+    }
     GroupMemoryBarrierWithGroupSync();
 
     if (dtid.x < target_w && dtid.y < target_h) {
@@ -32,6 +39,14 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
         float gx = DepthTexture[uint2(xn, dtid.y)] - d;
         float gy = DepthTexture[uint2(dtid.x, yn)] - d;
         float grad = sqrt(gx * gx + gy * gy);
+        // Fixed controller thresholds: changing the independent EMA ablation knobs must not
+        // silently alter scene classification.
+        if (grad >= 0.02f) {
+            InterlockedAdd(g_edge_count, 1u);
+        }
+        if (abs(d - PreviousDepth[dtid.xy]) >= 0.05f) {
+            InterlockedAdd(g_change_count, 1u);
+        }
 
         // smooth_w = 1 - sigmoid(10 * (grad - 0.025)): flat regions vote, edges mostly don't.
         float smooth_w = 1.0f - 1.0f / (1.0f + exp(-10.0f * (grad - 0.025f)));
@@ -53,5 +68,9 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
     }
     if (g_plain[lin] > 0u) {
         InterlockedAdd(PlainHist[lin], g_plain[lin]);
+    }
+    if (lin == 0u) {
+        InterlockedAdd(PlainHist[NUM_BINS], g_edge_count);
+        InterlockedAdd(PlainHist[NUM_BINS + 1], g_change_count);
     }
 }

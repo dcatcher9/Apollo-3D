@@ -240,7 +240,7 @@ class EvalContractTests(unittest.TestCase):
         with open(common, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("float pop_strength;", text)
-        self.assertIn("float strength = literal_bestv2 > 0.5f ? 1.0f : pop_strength", text)
+        self.assertIn("pop_strength * adaptive_ratio", text)
         self.assertIn("clamp(parallax * p.output_scale", text)
 
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
@@ -249,11 +249,30 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "config.h"), encoding="utf-8") as fh:
             config_header = fh.read()
         self.assertIn("double pop_strength = 1.25;", config_header)
+        self.assertIn("bool adaptive_pop = true;", config_header)
+        self.assertIn("double adaptive_pop_max = 1.30;", config_header)
 
         with open(os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
                   encoding="utf-8") as fh:
             production = fh.read()
         self.assertIn("(float) sbs_config.pop_strength", production)
+        self.assertIn("sbs_config.adaptive_pop ? 1.0f : 0.0f", production)
+
+        with open(os.path.join(repo, "src_assets", "windows", "assets", "shaders",
+                               "directx", "depth_subject_resolve_cs.hlsl"),
+                  encoding="utf-8") as fh:
+            adaptive = fh.read()
+        self.assertIn("change_fraction >= 0.65f", adaptive)
+        self.assertIn("scene_age >= 8.0f", adaptive)
+        self.assertIn("smoothstep(0.007f, 0.016f, edge_fraction)", adaptive)
+        self.assertNotIn("lerp(pop_ratio, target_ratio", adaptive)
+
+    def test_adaptive_pop_last_flag_wins(self):
+        conf = os.path.join(os.path.dirname(__file__), "bench.conf")
+        self.assertFalse(run_eval.expected_adaptive_pop(
+            conf, "apollo", ["--adaptive-pop", "--no-adaptive-pop"]))
+        self.assertTrue(run_eval.expected_adaptive_pop(
+            conf, "apollo", ["--no-adaptive-pop", "--adaptive-pop"]))
 
     def test_literal_bestv2_is_harness_only_and_machine_verified(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -267,7 +286,7 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
-        self.assertIn('"  \\"schema\\": 13,\\n"', harness)
+        self.assertIn('"  \\"schema\\": 14,\\n"', harness)
         self.assertIn('\\"depth_override_frames\\"', harness)
 
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
@@ -297,7 +316,7 @@ class EvalContractTests(unittest.TestCase):
             evaluator = fh.read()
         self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
         self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
-        self.assertIn('"schema": 13', evaluator)
+        self.assertIn('"schema": 14', evaluator)
         self.assertIn('depth_override_root and not args.comparison_only', evaluator)
 
     def test_live_depth_pairing_is_bounded_and_sync_is_evaluation_only(self):

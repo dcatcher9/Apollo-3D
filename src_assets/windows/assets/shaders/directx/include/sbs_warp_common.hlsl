@@ -41,8 +41,8 @@ cbuffer Constants : register(b2) {
     float content_scale_y;       // source content height / output-eye height
     float pop_strength;          // final production stereo-parallax multiplier
     float literal_bestv2;        // harness-only: bypass production resolution/aspect/pop scaling
-    float padding0;
-    float padding1;
+    float adaptive_pop;          // use SubjectState[1].w scene-risk multiplier
+    float adaptive_pop_max;      // absolute ceiling used to conservatively size the probe search
 };
 
 // Map one eye's output UV into the mono source. Letterbox/pillarbox is applied independently in
@@ -80,7 +80,8 @@ Bestv2Params MakeBestv2Params(float4 s0, float4 s1,
     p.parallax_scale = 0.35f / parallax_width;
     p.convergence_bias = -0.008f * 0.5f + s1.z * 4.0f / parallax_width;
     float aspect_scale = Bestv2AspectScale(source_width, source_height, literal_bestv2);
-    float strength = literal_bestv2 > 0.5f ? 1.0f : pop_strength;
+    float adaptive_ratio = adaptive_pop > 0.5f ? max(s1.w, 1.0f) : 1.0f;
+    float strength = literal_bestv2 > 0.5f ? 1.0f : pop_strength * adaptive_ratio;
     p.output_scale = strength * aspect_scale;
     p.clamp_abs = 0.071f * aspect_scale;
     return p;
@@ -101,7 +102,10 @@ float Bestv2SearchRadius(float source_width, float source_height) {
     // fixed probe count too coarse at high resolution.
     // Worst case is one extreme band minus an oppositely signed subject band: approximately
     // 9.99 - .95*(-2.52) = 12.384 px, not merely the 9.99 px foreground amplitude.
-    float strength = literal_bestv2 > 0.5f ? 1.0f : pop_strength;
+    // Search radius must cover the configured adaptive ceiling. The actual per-frame ratio is
+    // GPU-resident in SubjectState and unavailable to this loop-bound helper.
+    float strength = literal_bestv2 > 0.5f ? 1.0f :
+                     (adaptive_pop > 0.5f ? adaptive_pop_max : pop_strength);
     return Bestv2AspectScale(source_width, source_height, literal_bestv2) * strength *
            (0.004f + (12.51f * 0.35f + 0.006f * 4.0f) /
                        Bestv2ParallaxWidth(source_width, literal_bestv2));
