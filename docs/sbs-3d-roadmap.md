@@ -133,7 +133,7 @@ and profile provenance; cover the 11-clip core and public extended suites; gener
 and `decision.json`; inspect primary-axis examples; and treat comfort/image-integrity limits as hard
 constraints. Headset evidence resolves coequal-axis tradeoffs.
 
-The harness uses contract 12 and eval schema 19. It exports raw depth, pre-warp depth, exact forward
+The harness uses contract 13 and eval schema 19. It exports raw depth, pre-warp depth, exact forward
 coverage diagnostics, and final SBS artifacts by numeric frame identity. Ground-truth depth scoring
 is scale/shift invariant but polarity preserving.
 
