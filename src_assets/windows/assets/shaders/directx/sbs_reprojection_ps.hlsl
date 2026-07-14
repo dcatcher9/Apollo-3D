@@ -44,7 +44,9 @@ float ProbeParallax(float d, float planeMask, float4 s0, float4 s1, float4 s2, b
         return DepthParallax(
             d, planeMask, s0, s1, s2, shaped, sourceWidth, sourceHeight, true);
     }
-    return DepthParallaxNoPlane(d, s0, s1, shaped, no_plane_params);
+    // Reproject returns before its loop when subject state is uninitialized, so this specialized
+    // path is reached only with shaped=true and does not need a redundant branch per probe.
+    return DepthParallaxNoPlane(d, s0, s1, no_plane_params);
 }
 
 // Find the source U coordinate that reprojects onto `uv` for one eye, choosing the
@@ -69,12 +71,12 @@ float2 Reproject(float2 uv, float eyeSign, bool use_plane_lock) {
 
     float aspectScale = Bestv2AspectScale(
         (float)sourceWidth, (float)sourceHeight, literal_bestv2);
-    Bestv2NoPlaneParams noPlaneParams = MakeBestv2NoPlaneParams(
-        s0, s1, (float)sourceWidth, (float)sourceHeight);
     float searchRadius = shaped ? Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight) : 0.0f;
     if (searchRadius <= 1e-6f) {
         return uv;  // subject state is not initialized yet
     }
+    Bestv2NoPlaneParams noPlaneParams = MakeBestv2NoPlaneParams(
+        s0, s1, (float)sourceWidth, (float)sourceHeight);
 
     int steps = clamp((int)round(24.0f * aspectScale), 12, 72);
     float startX = uv.x - searchRadius;

@@ -140,11 +140,7 @@ Bestv2NoPlaneParams MakeBestv2NoPlaneParams(float4 s0, float4 s1,
     return p;
 }
 
-float DepthParallaxNoPlane(float d, float4 s0, float4 s1, bool shaped,
-                           Bestv2NoPlaneParams p) {
-    if (!shaped) {
-        return 0.0f;
-    }
+float DepthParallaxNoPlane(float d, float4 s0, float4 s1, Bestv2NoPlaneParams p) {
     float shaped_depth = WarpDepth(d, s0, s1, true);
     float shift_px = Bestv2RawShiftPxFast(shaped_depth);
     float parallax = (shift_px - subject_lock * p.subject_shift_px) * p.parallax_scale;
