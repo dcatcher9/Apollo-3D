@@ -112,6 +112,13 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
   came with a different doorway/person interpretation and more rim. Keep the registry entry only
   for explicit future quantized/performance experiments. Evidence: `dav2-rescreen-core-base` and
   `dav2-rescreen-extended-base` under `cmake-build-relwithdebinfo/sbs_eval/`.
+- A causal dual-rate Small+Base correction was rejected before extended promotion. Base ran every
+  fourth frame; each positive-affine-aligned residual was bounded and held over current Small
+  depth. A 25% blend was primary-axis neutral despite improving c747 edge distance (22.2 to 18.2
+  px) and halo (8.31 to 7.80). At 50%, edge distance improved further to 16.4 px, but c747 halo and
+  stretch worsened and fast-motion static jitter rose 26.9%. The marginal boundary signal does not
+  justify a second TensorRT context/model, extra VRAM, scheduling complexity, and roughly 1 ms
+  average inference cost. Evidence: `dualrate-i4-b25-core` and `dualrate-i4-b50-target`.
 - Calibrated DA-V2 Small FP8 was screened with explicit TensorRT 11 Q/DQ models generated from 64
   representative core and extended frames, then rejected before extended promotion. Broad W8A8
   quantization increased mean core inference from 1.45 to 2.61 ms and produced five primary-axis
