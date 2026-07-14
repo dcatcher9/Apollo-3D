@@ -114,6 +114,44 @@ float Bestv2Parallax(float d, float plane_mask, float4 s0, float4 s1, float4 s2,
                  -0.071f * aspect_scale, 0.071f * aspect_scale);
 }
 
+// Loop-invariant values for the shipping plane-lock-off specialization. Keeping the original
+// operation groups here avoids recomputing source geometry, subject shift and convergence for
+// every search probe while retaining the same Bestv2 field and safety bound.
+struct Bestv2NoPlaneParams {
+    float subject_shift_px;
+    float parallax_scale;
+    float convergence_bias;
+    float output_scale;
+    float clamp_abs;
+};
+
+Bestv2NoPlaneParams MakeBestv2NoPlaneParams(float4 s0, float4 s1,
+                                             float source_width, float source_height) {
+    Bestv2NoPlaneParams p;
+    float parallax_width = Bestv2ParallaxWidth(source_width, literal_bestv2);
+    float subject_depth = WarpDepth(s0.z, s0, s1, true);
+    p.subject_shift_px = Bestv2RawShiftPxFast(subject_depth);
+    p.parallax_scale = 0.35f / parallax_width;
+    p.convergence_bias = -0.008f * 0.5f + s1.z * 4.0f / parallax_width;
+    float aspect_scale = Bestv2AspectScale(source_width, source_height, literal_bestv2);
+    float strength = literal_bestv2 > 0.5f ? 1.0f : pop_strength;
+    p.output_scale = strength * aspect_scale;
+    p.clamp_abs = 0.071f * aspect_scale;
+    return p;
+}
+
+float DepthParallaxNoPlane(float d, float4 s0, float4 s1, bool shaped,
+                           Bestv2NoPlaneParams p) {
+    if (!shaped) {
+        return 0.0f;
+    }
+    float shaped_depth = WarpDepth(d, s0, s1, true);
+    float shift_px = Bestv2RawShiftPxFast(shaped_depth);
+    float parallax = (shift_px - subject_lock * p.subject_shift_px) * p.parallax_scale;
+    parallax += p.convergence_bias;
+    return clamp(parallax * p.output_scale, -p.clamp_abs, p.clamp_abs);
+}
+
 float Bestv2SearchRadius(float source_width, float source_height) {
     // Conservative bound for the pixel bands + zero-parallax trim + convergence. The preset's
     // 7.1% clamp is a safety limit, not the normal search span; using it directly would make the

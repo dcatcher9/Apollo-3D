@@ -37,6 +37,16 @@ float SampleDepth(float sx, float sy) {
     return DepthTexture.SampleLevel(LinearSampler, float2(sx, sy), 0);
 }
 
+float ProbeParallax(float d, float planeMask, float4 s0, float4 s1, float4 s2, bool shaped,
+                    float sourceWidth, float sourceHeight, bool use_plane_lock,
+                    Bestv2NoPlaneParams no_plane_params) {
+    if (use_plane_lock) {
+        return DepthParallax(
+            d, planeMask, s0, s1, s2, shaped, sourceWidth, sourceHeight, true);
+    }
+    return DepthParallaxNoPlane(d, s0, s1, shaped, no_plane_params);
+}
+
 // Find the source U coordinate that reprojects onto `uv` for one eye, choosing the
 // nearest (frontmost) surface so foreground occludes rather than duplicates.
 // eyeSign = +1 right eye, -1 left eye.
@@ -59,6 +69,8 @@ float2 Reproject(float2 uv, float eyeSign, bool use_plane_lock) {
 
     float aspectScale = Bestv2AspectScale(
         (float)sourceWidth, (float)sourceHeight, literal_bestv2);
+    Bestv2NoPlaneParams noPlaneParams = MakeBestv2NoPlaneParams(
+        s0, s1, (float)sourceWidth, (float)sourceHeight);
     float searchRadius = shaped ? Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight) : 0.0f;
     if (searchRadius <= 1e-6f) {
         return uv;  // subject state is not initialized yet
@@ -92,18 +104,18 @@ float2 Reproject(float2 uv, float eyeSign, bool use_plane_lock) {
         // from both shipping profiles where plane lock is disabled.
         planeMask = PlaneLockTexture.SampleLevel(LinearSampler, uv, 0);
     }
-    float prevG = (prevX - uv.x) - eyeSign * DepthParallax(
+    float prevG = (prevX - uv.x) - eyeSign * ProbeParallax(
         prevD, planeMask, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight,
-        use_plane_lock);
+        use_plane_lock, noPlaneParams);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
     for (int i = 1; i <= steps; i++) {
         float x = startX + stepX * i;
         float d = SampleDepth(x, uv.y);
-        float g = (x - uv.x) - eyeSign * DepthParallax(
+        float g = (x - uv.x) - eyeSign * ProbeParallax(
             d, planeMask, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight,
-            use_plane_lock);
+            use_plane_lock, noPlaneParams);
 
         // Zero crossing between prevX and x => a source in this span reprojects onto uv.
         if ((prevG <= 0.0f && g >= 0.0f) || (prevG >= 0.0f && g <= 0.0f)) {
