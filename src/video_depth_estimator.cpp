@@ -499,6 +499,11 @@ namespace models {
 
     // Set memory limit to 4GB
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 4ULL << 30);
+    // Level 5 makes TensorRT compare generated kernels against its static tactics. Keep this in
+    // the recipe-specific engine contract: changing the level must never silently reuse a plan
+    // selected under the default level 3 search.
+    config->setBuilderOptimizationLevel(depth_engine_builder_level);
+    BOOST_LOG(info) << "TensorRT builder optimization level " << depth_engine_builder_level << '.';
 
     auto parser = TrtUniquePtr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, gLogger));
     if (!parser->parseFromFile(model_path.string().c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {

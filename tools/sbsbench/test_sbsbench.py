@@ -583,6 +583,17 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("Bestv2RawShiftPxFast(shaped_depth)", warp_common)
         self.assertIn("Bestv2RawShiftPx(shaped_depth)", plane_reduce)
 
+    def test_tensorrt_level_is_part_of_engine_recipe(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "model_manager.h"), encoding="utf-8") as fh:
+            manager = fh.read()
+        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
+                  encoding="utf-8") as fh:
+            estimator = fh.read()
+        self.assertIn("depth_engine_builder_level = 5", manager)
+        self.assertIn("trt-opt770x434-level5-v2", manager)
+        self.assertIn("setBuilderOptimizationLevel(depth_engine_builder_level)", estimator)
+
     def test_disabled_plane_lock_has_no_probe_loop_texture_fetch(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",

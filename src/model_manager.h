@@ -10,7 +10,8 @@ namespace models {
     // short side. The recipe tag must change whenever the serialized-engine build contract does.
     inline constexpr int depth_engine_opt_width = 770;
     inline constexpr int depth_engine_opt_height = 434;
-    inline constexpr char depth_engine_recipe[] = "trt-opt770x434-v1";
+    inline constexpr int depth_engine_builder_level = 5;
+    inline constexpr char depth_engine_recipe[] = "trt-opt770x434-level5-v2";
 
     /**
      * @brief Recipe-specific cached TensorRT engine filename.
