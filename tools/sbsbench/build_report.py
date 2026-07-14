@@ -110,6 +110,7 @@ COLS = [
     ("depth_gt_si_rmse", "gt_depth_rmse", True, True, 0),
     ("depth_gt_edge_f1", "gt_edge_f1", False, True, 0),
     ("depth_gt_lag_f1_p95", "gt_depth_lag", True, True, 0),
+    ("depth_gt_ghost_edge_pct_p95", "gt_ghost_edge", True, True, 0),
     ("positive_disparity_pct", "disp_positive", True, True, 0),
     ("negative_disparity_pct", "disp_negative", True, True, 0),
     ("source_coverage_pct", "coverage", False, True, 0),
@@ -471,7 +472,7 @@ def visual_evidence_images(clip, idx, metric=None):
         return flow_temporal_evidence(clip, idx)
     if metric in ("depth_gt_si_rmse", "depth_gt_edge_f1"):
         return ground_truth_depth_evidence(clip, idx)
-    if metric == "depth_gt_lag_f1_p95":
+    if metric in ("depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95"):
         return ground_truth_lag_evidence(clip, idx)
     if metric == "pop_spread_px":
         cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
@@ -654,6 +655,8 @@ RADAR_GROUPS = [
          "reference": 100.0, "unit": "%"},
         {"key": "depth_gt_lag_f1_p95", "label": "GT depth timing", "better": "lower",
          "reference": 50.0, "unit": " F1"},
+        {"key": "depth_gt_ghost_edge_pct_p95", "label": "GT ghost edges", "better": "lower",
+         "reference": 50.0, "unit": "%"},
         {"key": "flow_depth_p95", "label": "Flow depth stability", "better": "lower",
          "reference": 75.0, "unit": " /255"},
     ]),
@@ -886,6 +889,10 @@ METRIC_DEFS = [
      "gt_depth_lag",
      "P95 amount by which predicted depth boundaries match the previous GT frame better than the current frame. Positive values directly indicate held/stale depth on moving geometry.",
      "lower = less one-frame depth lag"),
+    ("depth_gt_ghost_edge_pct_p95",
+     "gt_ghost_edge",
+     "P95 prediction support on ground-truth boundaries that existed only in the previous frame. Detects stale and double depth edges even when the current edge is also present.",
+     "lower = fewer stale/double edges"),
     ("flow_depth_p95",
      "flow_depth",
      "Pre-warp depth change after source optical-flow compensation, on photometrically reliable support.",
@@ -1092,7 +1099,7 @@ def _evidence_card(item, kind, axis=None):
            else "evidence-noise")
     badge = kind.replace("_", " ")
     is_gt = metric in ("depth_gt_si_rmse", "depth_gt_edge_f1")
-    is_gt_lag = metric == "depth_gt_lag_f1_p95"
+    is_gt_lag = metric in ("depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95")
     source_label = ("source · bright = evaluated static region" if metric == "static_jitter_p95"
                     else "source · bright = reliable optical flow" if metric == "flow_temporal_p95"
                     else "ground-truth depth" if is_gt else "source")

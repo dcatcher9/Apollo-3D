@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import audit_depth_transform  # noqa: E402
 import audit_depth_confidence  # noqa: E402
 import prepare_public_datasets  # noqa: E402
+import prepare_flow_ema_reference  # noqa: E402
 import run_eval  # noqa: E402
 import rescore_run  # noqa: E402
 import sbsbench  # noqa: E402
@@ -246,7 +247,7 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
-        self.assertIn('"  \\"schema\\": 12,\\n"', harness)
+        self.assertIn('"  \\"schema\\": 13,\\n"', harness)
         self.assertIn('\\"depth_override_frames\\"', harness)
 
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
@@ -276,7 +277,7 @@ class EvalContractTests(unittest.TestCase):
             evaluator = fh.read()
         self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
         self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
-        self.assertIn('"schema": 12', evaluator)
+        self.assertIn('"schema": 13', evaluator)
         self.assertIn('depth_override_root and not args.comparison_only', evaluator)
 
     def test_live_depth_pairing_is_bounded_and_sync_is_evaluation_only(self):
@@ -368,12 +369,13 @@ class EvalContractTests(unittest.TestCase):
             Image.fromarray(np.full((4, 6), 32768, np.uint16)).save(
                 os.path.join(override_clip, "depth_00001.png"))
             manifest = {
-                "schema": 2,
+                "schema": 3,
                 "method": "classical-tile-phase-flow",
+                "frame_policy": "held",
                 "depth_every": 2,
                 "clips": {"sample": {
-                    "held_frames": 1,
-                    "held_frame_ids": [1],
+                    "override_frames": 1,
+                    "override_frame_ids": [1],
                     "clip_sha1": run_eval.sha1_dir(clip_dir),
                 }},
             }
@@ -392,6 +394,46 @@ class EvalContractTests(unittest.TestCase):
             finally:
                 sys.stderr = original_stderr
 
+    def test_all_frame_depth_treatment_manifest_is_fail_closed(self):
+        with tempfile.TemporaryDirectory() as root:
+            clips_root = os.path.join(root, "clips")
+            clip_dir = os.path.join(clips_root, "sample")
+            override_root = os.path.join(root, "override")
+            override_clip = os.path.join(override_root, "sample")
+            os.makedirs(clip_dir)
+            os.makedirs(override_clip)
+            frame_ids = list(range(3))
+            for frame_id in frame_ids:
+                Image.fromarray(np.full((8, 12, 3), frame_id, np.uint8)).save(
+                    os.path.join(clip_dir, f"frame_{frame_id:05d}.png"))
+                Image.fromarray(np.full((4, 6), 32768, np.uint16)).save(
+                    os.path.join(override_clip, f"depth_{frame_id:05d}.png"))
+            manifest = {
+                "schema": 3,
+                "method": "flow-aware-ema-oracle",
+                "frame_policy": "all",
+                "depth_every": 1,
+                "clips": {"sample": {
+                    "override_frames": 3,
+                    "override_frame_ids": frame_ids,
+                    "clip_sha1": run_eval.sha1_dir(clip_dir),
+                }},
+            }
+            with open(os.path.join(override_root, "manifest.json"), "w",
+                      encoding="utf-8") as fh:
+                json.dump(manifest, fh)
+            self.assertEqual(run_eval.validate_depth_override_manifest(
+                override_root, clips_root, ["sample"], 1, True), {"sample": 3})
+            os.remove(os.path.join(override_clip, "depth_00002.png"))
+            original_stderr = sys.stderr
+            try:
+                sys.stderr = io.StringIO()
+                with self.assertRaises(SystemExit):
+                    run_eval.validate_depth_override_manifest(
+                        override_root, clips_root, ["sample"], 1, True)
+            finally:
+                sys.stderr = original_stderr
+
     def test_rescore_derives_depth_compensation_for_schema_upgrade(self):
         self.assertEqual(rescore_run.depth_compensation_from_meta({}), "none")
         self.assertEqual(rescore_run.depth_compensation_from_meta(
@@ -399,6 +441,10 @@ class EvalContractTests(unittest.TestCase):
             "external-reference")
         self.assertEqual(rescore_run.depth_compensation_from_meta(
             {"depth_compensation": "nvof-1x1"}), "nvof-1x1")
+        self.assertEqual(rescore_run.depth_compensation_from_meta(
+            {"extra_args": ["--depth-override-root", "reference",
+                            "--depth-override-all"]}),
+            "external-treatment")
 
     def test_warp_and_coverage_apply_per_eye_aspect_mapping(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -957,6 +1003,16 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(
             sbsbench.depth_ground_truth_lag(current, current, previous), 0.0)
 
+    def test_ground_truth_ghost_detects_previous_only_boundary(self):
+        previous = np.zeros((32, 48), np.float32)
+        previous[8:24, 8:20] = 1.0
+        current = np.zeros_like(previous)
+        current[8:24, 18:30] = 1.0
+        self.assertEqual(
+            sbsbench.depth_ground_truth_ghost(current, current, previous), 0.0)
+        self.assertGreater(
+            sbsbench.depth_ground_truth_ghost(previous, current, previous), 40.0)
+
     def test_ground_truth_edge_tolerance_works_in_both_axes(self):
         gt = np.full((96, 160), 0.25, np.float32)
         gt[48:, :] = 0.75
@@ -999,6 +1055,21 @@ class EvalContractTests(unittest.TestCase):
         self.assertTrue(valid[:, 3:].all())
         self.assertEqual(set(np.unique(warped)), {0.0, 1.0})
         self.assertTrue((warped[:, 11:] == 1.0).all())
+
+    def test_flow_aware_ema_tracks_translated_depth_edge(self):
+        height, width = 24, 40
+        previous = np.zeros((height, width), np.float32)
+        previous[:, 12:] = 1.0
+        current = np.zeros_like(previous)
+        current[:, 15:] = 1.0
+        flow = np.zeros((height, width, 2), np.float32)
+        flow[..., 0] = 3.0
+        valid = np.ones((height, width), bool)
+        filtered, reliable, _ = prepare_flow_ema_reference.flow_aware_ema(
+            current, previous, previous, current, flow, valid,
+            0.5, 0.05, 0.02, 0.25)
+        self.assertGreater(float(reliable.mean()), 0.85)
+        self.assertTrue(np.array_equal(filtered, current))
 
     def test_depth_confidence_ignores_flat_depth(self):
         source = np.tile(np.linspace(0.0, 1.0, 96, dtype=np.float32), (48, 1))

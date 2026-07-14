@@ -547,6 +547,7 @@ namespace sbs_bench {
       double minmax_ema = -1.0;  // range-bounds EMA new-weight; <0 = conf
       int cuda_graph = -1;  // -1 = conf, 0 = ordinary enqueue, 1 = CUDA graph replay
       bool literal_bestv2 = false;  // reference-only: disable production resolution/pop scaling
+      bool depth_override_all = false;  // reference-only: replace every inferred depth frame
     };
 
     bool parse_opts(int argc, char **argv, opts &o) {
@@ -587,6 +588,8 @@ namespace sbs_bench {
           o.depth_every = std::stoi(next("--depth-every"));
         } else if (a == "--depth-override-root") {
           o.depth_override_root = next("--depth-override-root");
+        } else if (a == "--depth-override-all") {
+          o.depth_override_all = true;
         } else if (a == "--subject-lock") {
           o.subject_lock = std::stod(next("--subject-lock"));
         } else if (a == "--subject-recenter") {
@@ -650,6 +653,14 @@ namespace sbs_bench {
       }
       if (!o.depth_override_root.empty() && !fs::is_directory(o.depth_override_root)) {
         BOOST_LOG(error) << "sbs-bench: --depth-override-root is not a directory";
+        return false;
+      }
+      if (o.depth_override_all && o.depth_override_root.empty()) {
+        BOOST_LOG(error) << "sbs-bench: --depth-override-all requires --depth-override-root";
+        return false;
+      }
+      if (o.depth_override_all && o.depth_every != 1) {
+        BOOST_LOG(error) << "sbs-bench: --depth-override-all requires --depth-every 1";
         return false;
       }
       return true;
@@ -849,7 +860,8 @@ namespace sbs_bench {
         return 7;
       }
       for (size_t fi = 0; fi < frames.size(); ++fi) {
-        expected_depth_override_frames += (fi % (size_t) o.depth_every) != 0;
+        expected_depth_override_frames += o.depth_override_all ||
+                                          (fi % (size_t) o.depth_every) != 0;
       }
       size_t actual_depth_override_frames = 0;
       for (const auto &entry : fs::directory_iterator(depth_override_dir)) {
@@ -993,7 +1005,8 @@ namespace sbs_bench {
       // flow prototype is production code.
       ComPtr<ID3D11Texture2D> override_depth_texture;
       ComPtr<ID3D11ShaderResourceView> override_depth_srv;
-      if (!depth_override_dir.empty() && (fi % (size_t) o.depth_every) != 0) {
+      if (!depth_override_dir.empty() &&
+          (o.depth_override_all || (fi % (size_t) o.depth_every) != 0)) {
         const fs::path override_path = depth_override_dir / ("depth_" + output_id + ".png");
         if (!fs::exists(override_path) ||
             !load_depth_texture(dev.Get(), override_path, override_depth_texture,
@@ -1217,7 +1230,7 @@ namespace sbs_bench {
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
-                 << "  \"schema\": 12,\n"
+                 << "  \"schema\": 13,\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
                  << "  \"depth_step\": "
@@ -1225,9 +1238,12 @@ namespace sbs_bench {
                  << ",\n"
                  << "  \"depth_reuse_interval\": " << o.depth_every << ",\n"
                  << "  \"depth_compensation\": "
-                 << json_string(!o.depth_override_root.empty() ? "external-reference" : "none")
+                 << json_string(o.depth_override_root.empty() ? "none" :
+                                (o.depth_override_all ? "external-treatment" :
+                                                        "external-reference"))
                  << ",\n"
                  << "  \"depth_override_frames\": " << applied_depth_override_frames << ",\n"
+                 << "  \"ema\": " << sbs_cfg.ema << ",\n"
                  << "  \"ema_edge_change\": " << sbs_cfg.ema_edge_change << ",\n"
                  << "  \"ema_edge_gradient\": " << sbs_cfg.ema_edge_gradient << ",\n"
                  << "  \"ema_edge_strength\": " << sbs_cfg.ema_edge_strength << ",\n"

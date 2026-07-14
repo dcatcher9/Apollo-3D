@@ -622,14 +622,8 @@ def align_relative_depth(prediction, target, valid):
     return pred * float(scale) + float(shift), float(scale)
 
 
-def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity"):
-    """Scale/shift-invariant relative-depth accuracy plus boundary accuracy.
-
-    Monocular models predict relative disparity, so comparing raw values to metric depth is not
-    meaningful. Metric depth is converted to inverse depth, then prediction is affine-aligned on
-    valid pixels. Constant-GT scenes use shift-only alignment so hallucinated structure cannot be
-    fitted away. The RMSE is normalized by GT robust range (or full normalized range for flat GT).
-    """
+def prepare_depth_ground_truth(prediction, ground_truth, kind="disparity"):
+    """Return polarity-preserving aligned prediction, target, validity, and robust GT range."""
     pred = np.asarray(prediction, np.float32)
     if kind in ("metric", "depth"):
         gt, valid = resize_metric_depth(ground_truth, pred.shape[1], pred.shape[0])
@@ -654,9 +648,11 @@ def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity"):
     else:
         aligned, _ = align_relative_depth(pred, target, valid)
         norm = trange
-    error = aligned[valid] - tv
-    si_rmse = float(np.sqrt(np.mean(error * error)) / max(norm, 1e-6) * 100.0)
+    return aligned, target, valid, trange, norm
 
+
+def depth_ground_truth_edges(aligned, target, valid, trange):
+    """Return prediction and GT boundary masks under the shared one-pixel edge contract."""
     gx_t = np.abs(np.diff(target, axis=1, prepend=target[:, :1]))
     gy_t = np.abs(np.diff(target, axis=0, prepend=target[:1, :]))
     gx_p = np.abs(np.diff(aligned, axis=1, prepend=aligned[:, :1]))
@@ -670,6 +666,25 @@ def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity"):
                (valid_y & (gy_t >= edge_threshold)))
     pred_edge = ((valid_x & (gx_p >= edge_threshold)) |
                  (valid_y & (gy_p >= edge_threshold)))
+    return pred_edge, gt_edge
+
+
+def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity"):
+    """Scale/shift-invariant relative-depth accuracy plus boundary accuracy.
+
+    Monocular models predict relative disparity, so comparing raw values to metric depth is not
+    meaningful. Metric depth is converted to inverse depth, then prediction is affine-aligned on
+    valid pixels. Constant-GT scenes use shift-only alignment so hallucinated structure cannot be
+    fitted away. The RMSE is normalized by GT robust range (or full normalized range for flat GT).
+    """
+    prepared = prepare_depth_ground_truth(prediction, ground_truth, kind)
+    if prepared is None:
+        return None
+    aligned, target, valid, trange, norm = prepared
+    tv = target[valid]
+    error = aligned[valid] - tv
+    si_rmse = float(np.sqrt(np.mean(error * error)) / max(norm, 1e-6) * 100.0)
+    pred_edge, gt_edge = depth_ground_truth_edges(aligned, target, valid, trange)
     if not gt_edge.any():
         edge_f1 = 100.0 if not pred_edge.any() else 0.0
     elif not pred_edge.any():
@@ -681,6 +696,41 @@ def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity"):
         recall = float(np.mean(pred_near[gt_edge]))
         edge_f1 = 200.0 * precision * recall / max(precision + recall, 1e-9)
     return {"depth_gt_si_rmse": si_rmse, "depth_gt_edge_f1": edge_f1}
+
+
+def depth_ground_truth_ghost(prediction, ground_truth, previous_ground_truth,
+                             kind="disparity"):
+    """Prediction support on previous-only GT edges, a direct stale/double-edge diagnostic.
+
+    A double image can match the current boundary well enough that the lag-F1 advantage remains
+    zero. This metric instead isolates GT edges that moved away since the previous frame and asks
+    how often the prediction still contains a boundary there. Static/shared edges are excluded.
+    """
+    current = prepare_depth_ground_truth(prediction, ground_truth, kind)
+    previous = prepare_depth_ground_truth(prediction, previous_ground_truth, kind)
+    if current is None or previous is None:
+        return None
+    _, target, valid, trange, _ = current
+    _, current_edge = depth_ground_truth_edges(target, target, valid, trange)
+    _, prev_target, prev_valid, prev_range, _ = previous
+    _, previous_edge = depth_ground_truth_edges(
+        prev_target, prev_target, prev_valid, prev_range)
+    pred = np.asarray(prediction, np.float32)
+    edge_valid = valid & prev_valid & np.isfinite(pred)
+    pred_values = pred[edge_valid]
+    if pred_values.size < 64:
+        return None
+    pred_range = float(np.percentile(pred_values, 95) - np.percentile(pred_values, 5))
+    gx = np.abs(np.diff(pred, axis=1, prepend=pred[:, :1]))
+    gy = np.abs(np.diff(pred, axis=0, prepend=pred[:1, :]))
+    valid_x = edge_valid & np.concatenate((edge_valid[:, :1], edge_valid[:, :-1]), axis=1)
+    valid_y = edge_valid & np.concatenate((edge_valid[:1, :], edge_valid[:-1, :]), axis=0)
+    threshold = max(0.02, pred_range * 0.08)
+    pred_edge = ((valid_x & (gx >= threshold)) | (valid_y & (gy >= threshold)))
+    previous_only = previous_edge & ~hdilate(current_edge, 2)
+    if np.count_nonzero(previous_only) < 8:
+        return None
+    return float(np.mean(hdilate(pred_edge, 1)[previous_only]) * 100.0)
 
 
 def depth_ground_truth_lag(prediction, ground_truth, previous_ground_truth, kind="disparity"):
@@ -1074,7 +1124,7 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
     if require_gt_flow and not flow_by_id:
         raise ValueError("clip requires GT optical flow, but no gt_flow sidecars were found")
     rows, flicks, bflicks, swims, static_jitters = [], [], [], [], []
-    flow_temporals, flow_depths, depth_gt_lags = [], [], []
+    flow_temporals, flow_depths, depth_gt_lags, depth_gt_ghosts = [], [], [], []
     prev_sbs = prev_left = prev_right = prev_depth = prev_src = prev_gt_depth = None
     for frame_id in frame_ids:
         p = sbs_by_id[frame_id]
@@ -1131,6 +1181,11 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
                 if depth_gt_lag is not None:
                     row["depth_gt_lag_f1"] = depth_gt_lag
                     depth_gt_lags.append(depth_gt_lag)
+                depth_gt_ghost = depth_ground_truth_ghost(
+                    depth, gt_depth, prev_gt_depth, gt_kind)
+                if depth_gt_ghost is not None:
+                    row["depth_gt_ghost_edge_pct"] = depth_gt_ghost
+                    depth_gt_ghosts.append(depth_gt_ghost)
         rows.append(row)
         prev_sbs, prev_left, prev_right = sbs, left, right
         prev_depth, prev_src, prev_gt_depth = depth, src, gt_depth
@@ -1149,6 +1204,9 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
     if depth_gt_lags:
         agg["depth_gt_lag_f1_p50"] = float(np.percentile(depth_gt_lags, 50))
         agg["depth_gt_lag_f1_p95"] = float(np.percentile(depth_gt_lags, 95))
+    if depth_gt_ghosts:
+        agg["depth_gt_ghost_edge_pct_p50"] = float(np.percentile(depth_gt_ghosts, 50))
+        agg["depth_gt_ghost_edge_pct_p95"] = float(np.percentile(depth_gt_ghosts, 95))
     agg.update(sbs_score(agg, expected_flat=expected_flat))
     if require_gt_depth:
         missing = [k for k in ("depth_gt_si_rmse", "depth_gt_edge_f1") if k not in agg]
@@ -1302,11 +1360,12 @@ FMT = ["pop_spread_px", "positive_disparity_pct", "negative_disparity_pct", "vmi
        "source_coverage_pct", "image_integrity_pct", "source_halo_p95", "source_stretch_pct"]
 SEQ_FMT = ["pop_spread_px", "source_residual_p95", "source_halo_p95", "source_stretch_pct",
            "static_jitter_p95", "flow_temporal_p95", "depth_gt_si_rmse", "depth_gt_edge_f1",
-           "depth_gt_lag_f1_p95"]
+           "depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95"]
 TEMPORAL_KEYS = ["flicker_p50", "flicker_p95", "flicker_disocc_p50", "flicker_disocc_p95",
                  "swim_p50", "swim_p95", "static_jitter_p50", "static_jitter_p95",
                  "flow_temporal_p50", "flow_temporal_p95", "flow_depth_p50", "flow_depth_p95",
-                 "depth_gt_lag_f1_p50", "depth_gt_lag_f1_p95"]
+                 "depth_gt_lag_f1_p50", "depth_gt_lag_f1_p95",
+                 "depth_gt_ghost_edge_pct_p50", "depth_gt_ghost_edge_pct_p95"]
 
 
 def print_table(rows, agg, fmt=FMT):

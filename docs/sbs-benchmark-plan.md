@@ -27,7 +27,9 @@ Design for two reproducible, host-side benchmarks so every SBS change ships with
 >   inference-depth width instead of source-color width, creating resolution-dependent amplification.
 >   After the fix, median VD3D volume delta is −6.0%; seven clips are within noise, including two
 >   where VD3D is slightly higher. Only Bonn walking retains a just-over-one-pixel geometry difference.
-> Remaining: reference warp PSNR/SSIM (needs GT stereo) and a dedicated ghost/double-image metric.
+> A dedicated GT ghost-edge diagnostic now measures prediction support on previous-only
+> boundaries, complementing the existing lag-F1 metric when both current and stale edges exist.
+> Remaining: reference warp PSNR/SSIM (needs GT stereo).
 
 ## Why the offline warpsim was removed
 

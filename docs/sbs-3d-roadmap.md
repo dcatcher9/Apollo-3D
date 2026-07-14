@@ -113,6 +113,12 @@ default `1.25`) without changing that resolution correction.
   this already-small model pays more Q/DQ and scale-conversion overhead than Blackwell's FP8
   kernels save. Keep the production FP16 contract. Evidence: `fp8-calibrated-core-treatment` and
   `fp8-matmul-core-treatment` under `cmake-build-relwithdebinfo/sbs_eval/`.
+- Exact-flow depth EMA was rejected on the two TartanAir sequences. Recursive history accumulated
+  visible salt-and-pepper depth fragments. A constrained one-frame/full-edge-snap variant removed
+  accumulation and reduced the ghost-edge diagnostic (easy 75.6% to 2.0%, motion 50.7% to 25.6%),
+  but regressed hard-motion GT boundary F1 from 60.7% to 49.8% and worsened its flow-depth residual.
+  Keep optical flow out of the production depth filter; retain it for validation and diagnostics.
+  Evidence: `flow-ema-exact-1f-treatment` under `cmake-build-relwithdebinfo/sbs_eval/`.
 - Guided upsample, curvature, scene snap, range/depth floors, border fade, legacy shift, VD3D
   hybrid warp, and CPU warpsim were rejected and removed.
 - Subject-plane lock, Bestv2 sharpen, and EMA-mask dilation were rejected and removed.
@@ -133,7 +139,8 @@ is scale/shift invariant but polarity preserving.
 
 ## Current priorities
 
-1. Use optical flow only for EMA gating, cut detection, history validation, and ghost diagnostics.
+1. Correlate the new previous-only GT ghost-edge diagnostic with additional known-motion scenes
+   and headset evidence before allowing it to become a primary gate.
 
 ## References
 

@@ -134,7 +134,7 @@ def metric_exempt_for_clip(spec, clip_meta):
     return bool(clip_meta.get("expected_flat")) and spec.get("axis") == "stereo"
 
 
-def validate_depth_override_manifest(root, clips_dir, clips, depth_every):
+def validate_depth_override_manifest(root, clips_dir, clips, depth_every, override_all=False):
     """Validate an offline depth treatment before the harness can consume any of it.
 
     The override is deliberately fail-closed: a partial or stale directory must never be
@@ -147,9 +147,11 @@ def validate_depth_override_manifest(root, clips_dir, clips, depth_every):
     except (OSError, ValueError) as exc:
         fail(f"invalid depth-override manifest {manifest_path}: {exc}")
     expected_header = {
-        "schema": 2,
-        "method": "classical-tile-phase-flow",
+        "schema": 3,
+        "method": ("flow-aware-ema-oracle" if override_all else
+                   "classical-tile-phase-flow"),
         "depth_every": depth_every,
+        "frame_policy": "all" if override_all else "held",
     }
     header_mismatch = {key: (value, manifest.get(key)) for key, value in expected_header.items()
                        if manifest.get(key) != value}
@@ -171,19 +173,20 @@ def validate_depth_override_manifest(root, clips_dir, clips, depth_every):
                  f"{clip_info.get('clip_sha1')} != {clip_sha}")
         source_ids = sorted(sbsbench.indexed_files(
             os.path.join(clip_dir, "frame_*.*"), "frame_"))
-        expected_ids = [frame_id for position, frame_id in enumerate(source_ids)
-                        if position % depth_every != 0]
-        recorded_ids = clip_info.get("held_frame_ids")
+        expected_ids = (source_ids if override_all else
+                        [frame_id for position, frame_id in enumerate(source_ids)
+                         if position % depth_every != 0])
+        recorded_ids = clip_info.get("override_frame_ids")
         if recorded_ids != expected_ids:
-            fail(f"{clip}: manifest held-frame identities differ: "
+            fail(f"{clip}: manifest override-frame identities differ: "
                  f"expected={expected_ids}, recorded={recorded_ids}")
         actual_ids = sorted(sbsbench.indexed_files(
             os.path.join(root, clip, "depth_*.png"), "depth_"))
         if actual_ids != expected_ids:
             fail(f"{clip}: depth-override frame identities differ: "
                  f"expected={expected_ids}, actual={actual_ids}")
-        if clip_info.get("held_frames") != len(expected_ids):
-            fail(f"{clip}: manifest held-frame count is inconsistent")
+        if clip_info.get("override_frames") != len(expected_ids):
+            fail(f"{clip}: manifest override-frame count is inconsistent")
         counts[clip] = len(expected_ids)
     return counts
 
@@ -360,7 +363,9 @@ def main():
         # The harness runs with build_dir as cwd, so make this experimental artifact root
         # unambiguous before forwarding it.
         args.extra[index + 1] = depth_override_root
-    depth_compensation = "external-reference" if depth_override_root else "none"
+    depth_override_all = "--depth-override-all" in args.extra
+    depth_compensation = ("external-treatment" if depth_override_all else
+                          "external-reference" if depth_override_root else "none")
     try:
         depth_reuse_interval = int(extra_value(args.extra, "--depth-every", 1))
     except (TypeError, ValueError):
@@ -373,7 +378,11 @@ def main():
         fail("--literal-bestv2 is reference-only and requires --comparison-only")
     if depth_override_root and not args.comparison_only:
         fail("--depth-override-root is reference-only and requires --comparison-only")
-    if depth_override_root and depth_reuse_interval == 1:
+    if depth_override_all and not depth_override_root:
+        fail("--depth-override-all requires --depth-override-root")
+    if depth_override_all and depth_reuse_interval != 1:
+        fail("--depth-override-all requires --depth-every 1")
+    if depth_override_root and depth_reuse_interval == 1 and not depth_override_all:
         fail("--depth-override-root requires --depth-every greater than 1")
 
     exe = os.path.join(args.build_dir, "sunshine.exe")
@@ -387,7 +396,7 @@ def main():
     if not clips:
         fail("no clips in " + clips_dir)
     depth_override_counts = (validate_depth_override_manifest(
-        depth_override_root, clips_dir, clips, depth_reuse_interval)
+        depth_override_root, clips_dir, clips, depth_reuse_interval, depth_override_all)
         if depth_override_root else {clip: 0 for clip in clips})
     if not args.update_baselines and not args.comparison_only:
         missing_baselines = [c for c in clips if not os.path.exists(os.path.join(base_dir, c + ".json"))]
@@ -399,6 +408,8 @@ def main():
     require_current_build(args.build_dir)
 
     expected_config_profile = expected_profile(args.conf, args.extra)
+    expected_ema = expected_profile_number(
+        args.conf, expected_config_profile, "ema", 0.5, args.extra, "--ema")
     expected_ema_edge_change = expected_profile_number(
         args.conf, expected_config_profile, "ema_edge_change", 0.05, args.extra,
         "--ema-edge-change")
@@ -472,13 +483,14 @@ def main():
             fail(f"{clip}: harness did not write contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
         expected_contract = {
-            "schema": 12,
+            "schema": 13,
             "model": expected_model,
             "profile": expected_config_profile,
             "depth_step": depth_step,
             "depth_reuse_interval": depth_reuse_interval,
             "depth_compensation": depth_compensation,
             "depth_override_frames": depth_override_counts[clip],
+            "ema": expected_ema,
             "ema_edge_change": expected_ema_edge_change,
             "ema_edge_gradient": expected_ema_edge_gradient,
             "ema_edge_strength": expected_ema_edge_strength,

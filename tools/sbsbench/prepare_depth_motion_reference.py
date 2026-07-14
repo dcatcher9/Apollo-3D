@@ -44,7 +44,7 @@ def main():
     if results.get("meta", {}).get("depth_compensation", "none") != "none":
         fail("source run must have depth_compensation=none")
 
-    manifest = {"schema": 2, "method": "classical-tile-phase-flow",
+    manifest = {"schema": 3, "method": "classical-tile-phase-flow", "frame_policy": "held",
                 "depth_every": args.depth_every,
                 "fresh_run": fresh_run, "clips": {}}
     for clip in sorted(results.get("clips", {})):
@@ -69,7 +69,7 @@ def main():
             os.remove(stale)
         coverages = []
         written = 0
-        held_frame_ids = []
+        override_frame_ids = []
         for position, frame_id in enumerate(ids):
             if position % args.depth_every == 0:
                 continue
@@ -96,10 +96,10 @@ def main():
                 os.path.join(clip_out, f"depth_{source_id}.png"))
             coverages.append(float(reliable.mean()))
             written += 1
-            held_frame_ids.append(frame_id)
+            override_frame_ids.append(frame_id)
         manifest["clips"][clip] = {
-            "held_frames": written,
-            "held_frame_ids": held_frame_ids,
+            "override_frames": written,
+            "override_frame_ids": override_frame_ids,
             "clip_sha1": current_sha,
             "mean_reliable_coverage": float(np.mean(coverages)) if coverages else 0.0,
         }

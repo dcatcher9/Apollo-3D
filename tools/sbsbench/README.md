@@ -88,8 +88,12 @@ Harness A/B levers (after `--extra`):
   supplied processed-depth frames while retaining the real subject state and production warp.
   Generate classical-flow reuse-2 references with `prepare_depth_motion_reference.py`; this is
   an experiment boundary, not a production feature or a permitted committed baseline. The
-  schema-2 manifest binds the treatment to the exact source hash, cadence and held-frame IDs;
+  schema-3 manifest binds the treatment to the exact source hash, policy and override-frame IDs;
   missing, extra or stale override frames fail the run before scoring.
+- `--depth-override-all` requires `--depth-override-root` and `--depth-every 1`; it replaces every
+  inferred depth frame for a spatial/temporal processor oracle. `prepare_flow_ema_reference.py`
+  builds the exact-flow EMA oracle used to reject recursive and one-frame flow history. It requires
+  exact `gt_flow` sidecars and a source run made with `--ema 1 --ema-edge-change 0`.
 - Bestv2 is the only disparity field. It uses the preset's source-pixel FG/MG/BG shifts
   (`-9/-3/+2.4`), `.35` parallax
   balance, `1.11/1.05` multipliers, `.008` zero-parallax trim, dynamic convergence `.006`,
@@ -192,7 +196,7 @@ and three generated failure-mode clips from [make_synth_clips.py](make_synth_cli
 |------|---------|----------------------|
 | `anime_morevna_closeup` | cel outlines, flat colors, face-depth hallucination | visually clean source silhouette; intentional ink/white clothing annotated separately from warp-created halo |
 | `aigen_cogvideox_rain` | AI-video human motion, rain, splash, blur and low contrast | source already contains rain/splash rims and generative temporal inconsistency; tests whether the warp adds to them |
-| `scene_cut` | depth-normalization response across a hard cut | schema-2 baseline flags the cut's stretch/rim behavior without duplicate EMA updates |
+| `scene_cut` | depth-normalization response across a hard cut | committed baseline flags the cut's stretch/rim behavior without duplicate EMA updates |
 | `flat_page` | flat-content depth hallucination + amplification | static-input noise floor; disocc_smear flags hallucinated text-edge silhouettes |
 | `fast_motion` | known 30 px/frame motion | current-frame depth separates warp/edge behavior from live async lag |
 
@@ -341,6 +345,11 @@ inverse depth (negative scale is rejected as a polarity inversion; flat GT is sh
 `depth_gt_edge_f1` validates boundaries with one-pixel
 tolerance. Both are primary depth-axis metrics. Non-GT clips are reported as `n/a`.
 
+`depth_gt_lag_f1_p95` detects a prediction that matches the previous GT boundary better than the
+current one. `depth_gt_ghost_edge_pct_p95` complements it by measuring prediction support on
+previous-only GT boundaries, so a double edge cannot hide by also matching the current boundary.
+The ghost metric remains diagnostic until it has broader headset-correlated validation.
+
 `rescore_run.py` refreshes a comparison-only run directly from its preserved source/depth/SBS
 artifacts after metric-code changes. It refuses committed-baseline verdicts, updates the metric
 contract hash and writes atomically; use `run_eval.py` for any committed gate.
@@ -382,6 +391,7 @@ annotations.
 | `static_jitter_p50` / `p95` | worse-eye output change over source-static support after disparity-radius motion exclusion | lower = steadier; **primary stability axis** |
 | `flow_temporal_p50` / `p95` | source-flow-compensated output residual on photometrically reliable support | lower = steadier moving content; **primary stability axis** |
 | `flow_depth_p50` / `p95` | source-flow-compensated pre-warp depth residual | lower = steadier depth; diagnostic |
+| `depth_gt_ghost_edge_pct_p50` / `p95` | prediction support on GT boundaries present only in the previous frame | lower = fewer stale/double depth edges; diagnostic |
 | `flicker` | frame-to-frame mean\|Δ\| of the SBS luma (×255) | diagnostic only; includes normal motion |
 | `flicker_disocc` | unregistered frame difference restricted to the current depth-silhouette band | diagnostic only; motion-confounded |
 | `swim` | frame-to-frame \|depth change\| where the **source** is static (needs `--frames`) | diagnostic until support/locality handling is upgraded |
@@ -400,7 +410,8 @@ Notes:
 |--------|---------|-----------|
 | `depth_gt_si_rmse` | relative-disparity RMSE after polarity-preserving positive scale/shift alignment; shift-only on flat GT | lower = more accurate; **primary depth axis** |
 | `depth_gt_edge_f1` | boundary F1 with one-pixel tolerance | higher = better boundaries; **primary depth axis** |
+| `depth_gt_lag_f1_p95` | previous-frame boundary-F1 advantage | lower = less stale depth; **primary stability axis** |
+| `depth_gt_ghost_edge_pct_p95` | prediction support on previous-only GT boundaries | lower = fewer stale/double edges; diagnostic |
 
 ## Not yet (roadmap)
-- **Ghost** — a lag-band metric on a known-motion clip (double-image energy).
 - **Reference warp PSNR/SSIM** — still needs ground-truth stereo content (rendered second eye).

@@ -19,11 +19,12 @@ import sbsbench  # noqa: E402
 def depth_compensation_from_meta(meta):
     """Preserve or derive the explicit schema-13 depth-compensation contract."""
     value = meta.get("depth_compensation")
-    if value in ("none", "external-reference", "nvof-1x1"):
+    if value in ("none", "external-reference", "external-treatment", "nvof-1x1"):
         return value
     extra_args = meta.get("extra_args") or []
     if "--depth-override-root" in extra_args:
-        return "external-reference"
+        return ("external-treatment" if "--depth-override-all" in extra_args else
+                "external-reference")
     if "--depth-motion-compensation" in extra_args:
         return "nvof-1x1"
     return "none"
