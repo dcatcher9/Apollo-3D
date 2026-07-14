@@ -183,11 +183,12 @@ and profile provenance; cover the 11-clip core and public extended suites; gener
 and `decision.json`; inspect primary-axis examples; and treat comfort/image-integrity limits as hard
 constraints. Headset evidence resolves coequal-axis tradeoffs.
 
-The harness uses contract 14 and eval schema 20. It exports raw depth, pre-warp depth, exact forward
+The harness uses contract 14 and eval schema 21. It exports raw depth, pre-warp depth, exact forward
 coverage diagnostics, and final SBS artifacts by numeric frame identity. Ground-truth depth scoring
 is scale/shift invariant but polarity preserving. MPI Sintel true-right references additionally
-score global-horizontal-registered PSNR/SSIM and local epipolar residual/coverage; these remain
-diagnostic pending broader calibration.
+score global-horizontal-registered PSNR/SSIM, local epipolar residual/coverage, and Art3D-inspired
+positive-affine depth-budget/zero-plane alignment plus DDC-IoU structure. All remain diagnostic
+pending broader cinematic-stereo calibration; comfort and integrity remain hard gates.
 
 ## Current priorities
 

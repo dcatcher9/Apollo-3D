@@ -904,6 +904,17 @@ class EvalContractTests(unittest.TestCase):
         self.assertFalse(sbsbench.metric_gate_failed(95.0, 91.0, hard_min))
         self.assertTrue(sbsbench.metric_gate_failed(95.0, 89.0, hard_min))
 
+    def test_artistic_stereo_metrics_cannot_drive_committed_gate(self):
+        with open(os.path.join(run_eval.SCRIPT_DIR, "thresholds.json"),
+                  encoding="utf-8") as fh:
+            specs = json.load(fh)["metrics"]
+        artistic = {key: spec for key, spec in specs.items()
+                    if key.startswith("stereo_art_")}
+        self.assertTrue(artistic)
+        self.assertTrue(all(spec["role"] == "diagnostic"
+                            and spec["axis"] == "artistic-style"
+                            for spec in artistic.values()))
+
     def test_ab_decision_preserves_primary_axis_tradeoff(self):
         specs = {
             "pop": {"role": "primary", "axis": "stereo", "better": "higher",
@@ -1075,6 +1086,50 @@ class EvalContractTests(unittest.TestCase):
         self.assertLess(bad["stereo_gt_ssim"], good["stereo_gt_ssim"] - 0.05)
         self.assertLess(bad["stereo_gt_coverage_pct"],
                         good["stereo_gt_coverage_pct"] - 5.0)
+
+    def test_artistic_stereo_metrics_recover_positive_global_style(self):
+        rng = np.random.default_rng(119)
+        source = rng.random((96, 160), dtype=np.float32)
+        depth_row = np.repeat(np.array([0.1, 0.5, 0.9], np.float32), [54, 53, 53])
+        depth = np.broadcast_to(depth_row, source.shape)
+
+        def render(scale, offset, eye_fraction):
+            disparity = scale * depth + offset
+            shift = np.rint(-disparity * eye_fraction).astype(np.int32)
+            x = np.arange(source.shape[1])[None, :] - shift
+            x = np.clip(x, 0, source.shape[1] - 1)
+            return np.take_along_axis(source, np.broadcast_to(x, source.shape), axis=1)
+
+        reference = render(12.0, -3.0, 1.0)
+        matching_right = render(12.0, -3.0, 0.5)
+        weak_right = render(5.0, 1.0, 0.5)
+        good = sbsbench.artistic_stereo_metrics(
+            source, matching_right, reference, depth)
+        bad = sbsbench.artistic_stereo_metrics(source, weak_right, reference, depth)
+        self.assertEqual(good["stereo_art_polarity_ok"], 100.0)
+        self.assertLess(good["stereo_art_scale_error_pct"],
+                        bad["stereo_art_scale_error_pct"])
+        self.assertLess(good["stereo_art_zero_error_pct"],
+                        bad["stereo_art_zero_error_pct"])
+        self.assertGreater(good["stereo_art_ddc_iou"], 0.0)
+
+    def test_artistic_stereo_metrics_reject_inverted_polarity(self):
+        rng = np.random.default_rng(127)
+        source = rng.random((96, 160), dtype=np.float32)
+        depth_row = np.repeat(np.array([0.1, 0.5, 0.9], np.float32), [54, 53, 53])
+        depth = np.broadcast_to(depth_row, source.shape)
+
+        def render(disparity):
+            shift = np.rint(-disparity).astype(np.int32)
+            x = np.arange(source.shape[1])[None, :] - shift
+            x = np.clip(x, 0, source.shape[1] - 1)
+            return np.take_along_axis(source, np.broadcast_to(x, source.shape), axis=1)
+
+        reference = render(10.0 * depth - 2.0)
+        inverted_right = render(-(5.0 * depth - 1.0))
+        metrics = sbsbench.artistic_stereo_metrics(
+            source, inverted_right, reference, depth)
+        self.assertEqual(metrics["stereo_art_polarity_ok"], 0.0)
 
     def test_ground_truth_depth_lag_detects_previous_frame_geometry(self):
         previous = np.zeros((32, 48), np.float32)

@@ -36,7 +36,7 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-EVAL_SCHEMA = 20  # scene-latched adaptive pop; harness contract 14
+EVAL_SCHEMA = 21  # artistic stereo style diagnostics; harness contract 14
 
 
 def suite_defaults(name):

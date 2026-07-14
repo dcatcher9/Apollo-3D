@@ -120,6 +120,12 @@ COLS = [
     ("stereo_gt_ssim", "gt_stereo_ssim", False, True, 0),
     ("stereo_gt_residual_p95", "gt_stereo_resid", True, True, 0),
     ("stereo_gt_coverage_pct", "gt_stereo_coverage", False, True, 0),
+    ("stereo_art_scale_error_pct", "art_scale_error", True, True, 0),
+    ("stereo_art_zero_error_pct", "art_zero_error", True, True, 0),
+    ("stereo_art_ddc_iou", "art_ddc_iou", False, True, 0),
+    ("stereo_art_scale_std_error_pct", "art_scale_stability", True, True, 0),
+    ("stereo_art_zero_std_error_pct", "art_zero_stability", True, True, 0),
+    ("stereo_art_polarity_ok", "art_fit_valid", False, True, 0),
     ("positive_disparity_pct", "disp_positive", True, True, 0),
     ("negative_disparity_pct", "disp_negative", True, True, 0),
     ("source_coverage_pct", "coverage", False, True, 0),
@@ -517,8 +523,8 @@ def visual_evidence_images(clip, idx, metric=None):
         return ground_truth_depth_evidence(clip, idx)
     if metric in ("depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95"):
         return ground_truth_lag_evidence(clip, idx)
-    if metric in ("stereo_gt_psnr", "stereo_gt_ssim", "stereo_gt_residual_p95",
-                  "stereo_gt_coverage_pct"):
+    if (metric in ("stereo_gt_psnr", "stereo_gt_ssim", "stereo_gt_residual_p95",
+                   "stereo_gt_coverage_pct") or metric.startswith("stereo_art_")):
         return ground_truth_stereo_evidence(clip, idx)
     if metric == "pop_spread_px":
         cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
@@ -715,6 +721,18 @@ RADAR_GROUPS = [
          "reference": 80.0, "unit": " luma"},
         {"key": "stereo_gt_coverage_pct", "label": "Patch coverage", "better": "higher",
          "reference": 100.0, "unit": "%"},
+    ]),
+    ("Artistic stereo style", "Art3D-inspired diagnostics; comfort remains a hard gate", [
+        {"key": "stereo_art_scale_error_pct", "label": "Depth-budget match", "better": "lower",
+         "reference": 5.0, "unit": "%"},
+        {"key": "stereo_art_zero_error_pct", "label": "Zero-plane match", "better": "lower",
+         "reference": 5.0, "unit": "%"},
+        {"key": "stereo_art_ddc_iou", "label": "Depth/disparity structure", "better": "higher",
+         "reference": 100.0, "unit": "%"},
+        {"key": "stereo_art_scale_std_error_pct", "label": "Depth-budget stability", "better": "lower",
+         "reference": 1.0, "unit": "%"},
+        {"key": "stereo_art_zero_std_error_pct", "label": "Zero-plane stability", "better": "lower",
+         "reference": 1.0, "unit": "%"},
     ]),
 ]
 
@@ -965,6 +983,30 @@ METRIC_DEFS = [
      "gt_stereo_coverage",
      "True-right pixels whose best nearby epipolar patch differs by no more than 24/255 luma.",
      "higher = more correct right-eye content"),
+    ("stereo_art_scale_error_pct",
+     "art_scale_error",
+     "Absolute difference between synthesized and true-stereo positive-affine depth-budget scales, in percentage points of eye width.",
+     "lower = closer cinematic depth budget"),
+    ("stereo_art_zero_error_pct",
+     "art_zero_error",
+     "Absolute difference between synthesized and true-stereo affine offsets, measuring zero-plane placement in percentage points of eye width.",
+     "lower = closer zero-plane placement"),
+    ("stereo_art_ddc_iou",
+     "art_ddc_iou",
+     "Art3D-inspired IoU between significant horizontal edges in the fitted depth blueprint and synthesized disparity. The affine fit must preserve depth polarity.",
+     "higher = better geometric structure preservation"),
+    ("stereo_art_scale_std_error_pct",
+     "art_scale_stability",
+     "Difference between synthesized and reference within-clip standard deviation of the global depth-budget scale.",
+     "lower = closer shot-level style stability"),
+    ("stereo_art_zero_std_error_pct",
+     "art_zero_stability",
+     "Difference between synthesized and reference within-clip standard deviation of zero-plane offset.",
+     "lower = closer shot-level zero-plane stability"),
+    ("stereo_art_polarity_ok",
+     "art_fit_valid",
+     "Percentage of frames admitting a supported positive-polarity artistic disparity fit. Low values mean the reference or correspondence field is unsuitable for style conclusions.",
+     "higher = more valid style evidence"),
     ("flow_depth_p95",
      "flow_depth",
      "Pre-warp depth change after source optical-flow compensation, on photometrically reliable support.",
@@ -1172,8 +1214,9 @@ def _evidence_card(item, kind, axis=None):
     badge = kind.replace("_", " ")
     is_gt = metric in ("depth_gt_si_rmse", "depth_gt_edge_f1")
     is_gt_lag = metric in ("depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95")
-    is_gt_stereo = metric in ("stereo_gt_psnr", "stereo_gt_ssim",
-                              "stereo_gt_residual_p95", "stereo_gt_coverage_pct")
+    is_gt_stereo = (metric in ("stereo_gt_psnr", "stereo_gt_ssim",
+                               "stereo_gt_residual_p95", "stereo_gt_coverage_pct")
+                    or metric.startswith("stereo_art_"))
     source_label = ("source · bright = evaluated static region" if metric == "static_jitter_p95"
                     else "source · bright = reliable optical flow" if metric == "flow_temporal_p95"
                     else "ground-truth depth" if is_gt else
@@ -1243,7 +1286,11 @@ def visual_evidence_section():
                                      "depth_gt_lag_f1_p95")),
             ("Ground-truth depth", ("depth_gt_si_rmse", "depth_gt_edge_f1")),
             ("True-stereo reference", ("stereo_gt_psnr", "stereo_gt_ssim",
-                                       "stereo_gt_residual_p95", "stereo_gt_coverage_pct")))
+                                       "stereo_gt_residual_p95", "stereo_gt_coverage_pct")),
+            ("Artistic stereo style", ("stereo_art_scale_error_pct",
+                                       "stereo_art_zero_error_pct", "stereo_art_ddc_iou",
+                                       "stereo_art_scale_std_error_pct",
+                                       "stereo_art_zero_std_error_pct")))
     cards = []
     for axis, metrics in axes:
         item = max((item for metric in metrics if (item := _strongest_change(metric))),

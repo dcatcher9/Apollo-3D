@@ -402,7 +402,7 @@ def _box3(a):
     return total / 9.0
 
 
-def source_align_map(eye, src_gray, max_shift=None):
+def source_align_map(eye, src_gray, max_shift=None, return_shift=False):
     """Regularized source patch error and selected source sample for every output pixel.
 
     A completely independent winner at every pixel can assemble an impossible output from
@@ -430,6 +430,8 @@ def source_align_map(eye, src_gray, max_shift=None):
     selected = np.argmin(regularized, axis=0)
     best = np.take_along_axis(costs, selected[None, :, :], axis=0)[0]
     aligned = np.take_along_axis(candidates, selected[None, :, :], axis=0)[0]
+    if return_shift:
+        return best, aligned, shifts[selected].astype(np.float32), radius
     return best, aligned, radius
 
 
@@ -536,6 +538,131 @@ def stereo_ground_truth_metrics(right_eye, ground_truth_right):
         "stereo_gt_coverage_pct": float(np.mean(values <= 24.0) * 100.0),
         "stereo_gt_global_shift_px": float(best_shift / max(scale, 1e-6)),
     }
+
+
+def _positive_affine_style(depth, disparity, valid, weights):
+    """Robust polarity-preserving disparity = scale * depth + offset fit.
+
+    Artistic zero-plane shifts are intentionally free through the offset, but an inverted depth
+    polarity is never allowed to masquerade as a valid style. A second fit discards the largest
+    correspondence residuals so genuine local sculpting does not dominate the global camera fit.
+    """
+    mask = valid & np.isfinite(depth) & np.isfinite(disparity) & (weights > 0.0)
+    if int(mask.sum()) < 256:
+        return None
+
+    def fit(use):
+        z = depth[use].astype(np.float64)
+        d = disparity[use].astype(np.float64)
+        w = weights[use].astype(np.float64)
+        wsum = float(w.sum())
+        if wsum <= 1e-9:
+            return None
+        zm = float(np.sum(w * z) / wsum)
+        dm = float(np.sum(w * d) / wsum)
+        variance = float(np.sum(w * (z - zm) ** 2))
+        if variance <= 1e-9:
+            return None
+        scale = float(np.sum(w * (z - zm) * (d - dm)) / variance)
+        if scale <= 1e-6:
+            return None
+        return scale, dm - scale * zm
+
+    model = fit(mask)
+    if model is None:
+        return None
+    scale, offset = model
+    residual = np.abs(disparity - (scale * depth + offset))
+    cutoff = max(0.5, float(np.percentile(residual[mask], 90)))
+    refined = fit(mask & (residual <= cutoff))
+    return refined if refined is not None else model
+
+
+def _median3(a):
+    """Edge-padded 3x3 median without a scipy dependency."""
+    padded = np.pad(a, 1, mode="edge")
+    h, w = a.shape
+    return np.median(np.stack([
+        padded[1 + dy:1 + dy + h, 1 + dx:1 + dx + w]
+        for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+    ]), axis=0)
+
+
+def _ddc_iou(depth, disparity, valid, scale, offset):
+    """Depth-disparity consistency IoU adapted from Art3D at a fixed 256px analysis width."""
+    fitted = scale * depth + offset
+    disparity = _median3(disparity)
+    fit_edge = np.abs(np.diff(fitted, axis=1, prepend=fitted[:, :1])) >= 0.25
+    disp_edge = np.abs(np.diff(disparity, axis=1, prepend=disparity[:, :1])) >= 0.25
+    edge_valid = valid.copy()
+    edge_valid[:, 1:] &= valid[:, :-1]
+    fit_edge &= edge_valid
+    disp_edge &= edge_valid
+    union = fit_edge | disp_edge
+    if int(union.sum()) < 16:
+        return None
+    return float(np.sum(fit_edge & disp_edge) / np.sum(union) * 100.0)
+
+
+def artistic_stereo_metrics(src_gray, right_eye, ground_truth_right, depth):
+    """Art3D-inspired global style and structural-consistency diagnostics.
+
+    Both the synthesized and true right eyes are matched back to the mono source on the same
+    scanlines. Apollo moves each eye by half the binocular disparity, so its right-eye shift is
+    doubled before comparison with the physical left-to-right reference. Depth is high-near;
+    negating the selected source shift makes the expected fitted scale positive.
+    """
+    original_h, original_w = right_eye.shape
+    resize_scale = min(1.0, 256.0 / original_w)
+    width = max(32, round(original_w * resize_scale))
+    height = max(32, round(original_h * resize_scale))
+    src = resize_to(src_gray, width, height)
+    eye = resize_to(right_eye, width, height)
+    reference = resize_to(ground_truth_right, width, height)
+    z = resize_to(depth, width, height)
+    radius = min(width // 4, max(8, round(180 * eye_scale(width))))
+    eye_cost, _, eye_shift, _ = source_align_map(
+        eye, src, radius, return_shift=True)
+    ref_cost, _, ref_shift, _ = source_align_map(
+        reference, src, radius, return_shift=True)
+
+    mean = _box_mean(src, 2)
+    texture = np.maximum(_box_mean(src * src, 2) - mean * mean, 0.0)
+    weights = np.sqrt(texture)
+    interior = np.ones_like(src, dtype=bool)
+    interior[:, :radius] = False
+    interior[:, width - radius:] = False
+    eye_valid = interior & (eye_cost <= 24.0 / 255.0) & (texture >= 1e-4)
+    ref_valid = interior & (ref_cost <= 24.0 / 255.0) & (texture >= 1e-4)
+
+    # Right-eye motion is opposite the high-near disparity convention. Apollo is symmetric, so
+    # double its source-to-right displacement to compare full binocular disparity blueprints.
+    eye_disparity = -2.0 * eye_shift
+    ref_disparity = -ref_shift
+    eye_style = _positive_affine_style(z, eye_disparity, eye_valid, weights)
+    ref_style = _positive_affine_style(z, ref_disparity, ref_valid, weights)
+    if eye_style is None or ref_style is None:
+        return {"stereo_art_polarity_ok": 0.0}
+
+    eye_scale_fit, eye_offset = eye_style
+    ref_scale_fit, ref_offset = ref_style
+    out = {
+        "stereo_art_polarity_ok": 100.0,
+        "stereo_art_scale_pct": eye_scale_fit / width * 100.0,
+        "stereo_art_zero_pct": eye_offset / width * 100.0,
+        "stereo_ref_scale_pct": ref_scale_fit / width * 100.0,
+        "stereo_ref_zero_pct": ref_offset / width * 100.0,
+        "stereo_art_scale_error_pct": abs(eye_scale_fit - ref_scale_fit) / width * 100.0,
+        "stereo_art_zero_error_pct": abs(eye_offset - ref_offset) / width * 100.0,
+        "stereo_art_support_pct": min(float(eye_valid.mean()), float(ref_valid.mean())) * 100.0,
+    }
+    ddc = _ddc_iou(z, eye_disparity, eye_valid, eye_scale_fit, eye_offset)
+    ref_ddc = _ddc_iou(z, ref_disparity, ref_valid, ref_scale_fit, ref_offset)
+    if ddc is not None:
+        out["stereo_art_ddc_iou"] = ddc
+    if ref_ddc is not None:
+        out["stereo_ref_ddc_iou"] = ref_ddc
+    return out
 
 
 def source_relative_metrics(eye, src_gray, depth=None, max_shift=None,
@@ -1235,6 +1362,8 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         _, right = split_eyes(sbs)
         if gt_right is not None:
             row.update(stereo_ground_truth_metrics(right, gt_right))
+            if src is not None and depth is not None:
+                row.update(artistic_stereo_metrics(src, right, gt_right, depth))
         row["_frame_id"] = frame_id
         if prev_sbs is not None:
             row["flicker"] = float(np.mean(np.abs(sbs - prev_sbs)) * 255.0)
@@ -1306,6 +1435,17 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
     if depth_gt_ghosts:
         agg["depth_gt_ghost_edge_pct_p50"] = float(np.percentile(depth_gt_ghosts, 50))
         agg["depth_gt_ghost_edge_pct_p95"] = float(np.percentile(depth_gt_ghosts, 95))
+    for key in ("stereo_art_scale_pct", "stereo_art_zero_pct",
+                "stereo_ref_scale_pct", "stereo_ref_zero_pct"):
+        values = [row[key] for row in rows if key in row]
+        if len(values) > 1:
+            agg[key + "_std"] = float(np.std(values))
+    if "stereo_art_scale_pct_std" in agg and "stereo_ref_scale_pct_std" in agg:
+        agg["stereo_art_scale_std_error_pct"] = abs(
+            agg["stereo_art_scale_pct_std"] - agg["stereo_ref_scale_pct_std"])
+    if "stereo_art_zero_pct_std" in agg and "stereo_ref_zero_pct_std" in agg:
+        agg["stereo_art_zero_std_error_pct"] = abs(
+            agg["stereo_art_zero_pct_std"] - agg["stereo_ref_zero_pct_std"])
     agg.update(sbs_score(agg, expected_flat=expected_flat))
     if require_gt_depth:
         missing = [k for k in ("depth_gt_si_rmse", "depth_gt_edge_f1") if k not in agg]
@@ -1317,7 +1457,9 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         raise ValueError("required GT-flow temporal metric unavailable")
     if require_gt_stereo:
         missing = [key for key in ("stereo_gt_psnr", "stereo_gt_ssim",
-                                   "stereo_gt_residual_p95", "stereo_gt_coverage_pct")
+                                   "stereo_gt_residual_p95", "stereo_gt_coverage_pct",
+                                   "stereo_art_scale_error_pct",
+                                   "stereo_art_zero_error_pct", "stereo_art_ddc_iou")
                    if key not in agg]
         if missing:
             raise ValueError(f"required GT-stereo metrics unavailable: {missing}")
@@ -1466,7 +1608,9 @@ FMT = ["pop_spread_px", "positive_disparity_pct", "negative_disparity_pct", "vmi
 SEQ_FMT = ["pop_spread_px", "source_residual_p95", "source_halo_p95", "source_stretch_pct",
            "static_jitter_p95", "flow_temporal_p95", "depth_gt_si_rmse", "depth_gt_edge_f1",
            "depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95", "stereo_gt_psnr",
-           "stereo_gt_ssim", "stereo_gt_residual_p95", "stereo_gt_coverage_pct"]
+           "stereo_gt_ssim", "stereo_gt_residual_p95", "stereo_gt_coverage_pct",
+           "stereo_art_scale_error_pct", "stereo_art_zero_error_pct",
+           "stereo_art_ddc_iou", "stereo_art_polarity_ok"]
 TEMPORAL_KEYS = ["flicker_p50", "flicker_p95", "flicker_disocc_p50", "flicker_disocc_p95",
                  "swim_p50", "swim_p95", "static_jitter_p50", "static_jitter_p95",
                  "flow_temporal_p50", "flow_temporal_p95", "flow_depth_p50", "flow_depth_p95",

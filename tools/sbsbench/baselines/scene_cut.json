@@ -57,14 +57,14 @@
     "score": 76.8
   },
   "perf_ms": {
-    "depth_infer": 1.45882,
-    "depth_postprocess_gpu": 0.07136,
-    "depth_preprocess_gpu": 0.064608,
-    "sbs_composite_cpu": 0.0041,
-    "warp_infer": 0.055552
+    "depth_infer": 1.45574,
+    "depth_postprocess_gpu": 0.072384,
+    "depth_preprocess_gpu": 0.121088,
+    "sbs_composite_cpu": 0.0042,
+    "warp_infer": 0.055616
   },
   "meta": {
-    "git_sha": "5e7f964a",
+    "git_sha": "d638e752",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -90,14 +90,14 @@
     "adaptive_pop_max": 1.3,
     "literal_bestv2": false,
     "depth_compensation": "none",
-    "eval_schema": 20,
+    "eval_schema": 21,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "4611fd0af2195166",
+    "metric_sha256": "f9d0ac49d0cceb1b",
     "gpu_contention": false,
-    "timestamp": "2026-07-14T13:21:28",
-    "run_name": "adaptive-pop-default-core",
+    "timestamp": "2026-07-14T14:20:59",
+    "run_name": "art-style-core",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "name": "scene_cut",

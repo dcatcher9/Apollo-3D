@@ -364,6 +364,13 @@ revealed content visible while not pretending Sintel's physical camera baseline 
 artistic symmetric baseline. The four metrics are diagnostic until more true-stereo scenes and
 headset correlation establish decision thresholds.
 
+Art3D-inspired style diagnostics separately fit a polarity-preserving global disparity transform
+`d = s * depth + t` to the synthesized and true right eyes. `s` measures the realized depth
+budget and `t` the zero-plane offset; Apollo's symmetric source-to-right shift is doubled before
+comparison with the physical left-to-right reference. The fit uses only textured, source-matched
+support and rejects negative scale. These metrics deliberately do not change the artifact score:
+they quantify artistic alignment while comfort and image-integrity limits remain hard gates.
+
 `rescore_run.py` refreshes a comparison-only run directly from its preserved source/depth/SBS
 artifacts after metric-code changes. It refuses committed-baseline verdicts, updates the metric
 contract hash and writes atomically; use `run_eval.py` for any committed gate.
@@ -434,6 +441,12 @@ Notes:
 | `stereo_gt_ssim` | local SSIM under the same global-only registration | higher = closer structure; diagnostic |
 | `stereo_gt_residual_p95` | p95 luma residual after a small permissive local epipolar patch search | lower = fewer local errors; diagnostic |
 | `stereo_gt_coverage_pct` | true-right pixels within 24/255 of a nearby epipolar patch | higher = more correct content; diagnostic |
+| `stereo_art_scale_error_pct` | synthesized/reference global depth-budget scale difference in eye-width percentage points | lower = closer artistic depth budget; diagnostic |
+| `stereo_art_zero_error_pct` | synthesized/reference zero-plane offset difference in eye-width percentage points | lower = closer zero-plane placement; diagnostic |
+| `stereo_art_ddc_iou` | Art3D-inspired IoU of significant fitted-depth and synthesized-disparity horizontal edges | higher = better structure preservation; diagnostic |
+| `stereo_art_scale_std_error_pct` | difference in within-clip standard deviation of synthesized/reference depth-budget scale | lower = closer shot-level style stability; diagnostic |
+| `stereo_art_zero_std_error_pct` | difference in within-clip standard deviation of synthesized/reference zero-plane offset | lower = closer shot-level stability; diagnostic |
+| `stereo_art_polarity_ok` | percentage of frames with a supported positive-polarity fit | higher = more usable style evidence; diagnostic |
 
 ## Not yet (roadmap)
 - LPIPS and disocclusion-band-restricted true-stereo reference metrics.
