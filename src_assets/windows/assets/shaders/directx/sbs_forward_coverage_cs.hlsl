@@ -5,7 +5,6 @@
 Texture2D<float4> LeftColorTexture : register(t0);
 Texture2D<float> DepthTexture : register(t1);
 StructuredBuffer<float4> SubjectState : register(t2);
-Texture2D<float> PlaneLockTexture : register(t4);
 RWTexture2D<uint> CoverageTexture : register(u0);
 SamplerState LinearSampler : register(s0);
 
@@ -30,17 +29,17 @@ void main(uint3 id : SV_DispatchThreadID) {
     float d = DepthTexture.SampleLevel(LinearSampler, uv, 0);
     float4 s0 = SubjectState[0];
     float4 s1 = SubjectState[1];
-    float4 s2 = SubjectState[2];
     bool shaped = s0.w > 0.5f;
-    float plane_mask = 0.0f;
-    if (subject_plane_lock > 0.0f) {
-        plane_mask = PlaneLockTexture.SampleLevel(LinearSampler, uv, 0);
+    float parallax = 0.0f;
+    if (shaped) {
+        Bestv2Params params = MakeBestv2Params(
+            s0, s1, (float)source_w, (float)source_h, subject_stretch > 0.5f);
+        parallax = DepthParallax(
+            d, s0, s1, params, subject_stretch > 0.5f);
     }
-    float parallax = DepthParallax(
-        d, plane_mask, s0, s1, s2, shaped, (float)source_w, (float)source_h,
-        subject_plane_lock > 0.0f);
 
-    uint depth_key = 1u + (uint)round(saturate(WarpDepth(d, s0, s1, shaped)) * 65533.0f);
+    float shaped_depth = Bestv2WarpDepth(d, s0, s1, shaped, subject_stretch > 0.5f);
+    uint depth_key = 1u + (uint)round(saturate(shaped_depth) * 65533.0f);
     uint packed = (depth_key << 16u) | (id.x & 0xffffu);
 
     float output_shift = parallax * content_scale_x * (float)eye_w;

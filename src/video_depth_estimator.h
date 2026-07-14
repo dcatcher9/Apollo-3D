@@ -44,8 +44,7 @@ namespace models {
   struct estimate_result {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject;  ///< permanent Bestv2 subject state (t2 of the reprojection)
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> plane_lock;  ///< Bestv2's smoothed subject silhouette mask (t4); null outside the exact Bestv2 path.
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask;  ///< Experimental edge-selective EMA snap mask.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask;  ///< Edge-selective EMA snap mask.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Raw model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
     int raw_width = 0;
     int raw_height = 0;

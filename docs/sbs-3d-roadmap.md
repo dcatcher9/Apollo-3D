@@ -16,7 +16,7 @@ Approved AR glasses connected as a Windows monitor also use an automatic local p
 3. Transform model output into Apollo's high-is-near convention.
 4. Normalize with permanent P2/P98 bounds and temporal range EMA.
 5. Apply per-pixel EMA, accepted edge/change-aware EMA, Bestv2-derived subject estimation,
-   P5/P95 stretch/recenter, and optional exact subject-plane lock.
+   and P5/P95 stretch/recenter.
 6. Render Apollo's occlusion-aware backward probe.
 7. Convert the packed SBS raster directly to the encoder format. If doubled width exceeds
    `sbs_3d_max_encode_width`, preserve each eye's aspect while scaling to the cap.
@@ -42,10 +42,10 @@ default `1.25`) without changing that resolution correction.
   mean inference from 2.11 to 1.53 ms on core (-27.6%) and 2.38 to 1.59 ms on extended (-33.2%).
   Evidence: `cuda-graph-core-treatment` and `cuda-graph-extended-treatment` under
   `cmake-build-relwithdebinfo/sbs_eval/`.
-- The plane-lock-disabled production shader is specialized once per output pixel. This keeps the
-  rejected but retained plane-lock ablation functional without carrying its branches through every
-  search probe. Matched offline A/B reduced warp time by 8.37% on core and 8.24% on extended with
-  no primary-axis regression or hard failure. Live validation remains pending. Evidence:
+- The production shader contains only the validated no-plane-lock warp. Its specialized loop
+  removed the rejected plane-lock work from every search probe. Matched offline A/B reduced warp
+  time by 8.37% on core and 8.24% on extended with no primary-axis regression or hard failure.
+  Evidence:
   `plane-specialize-core` and `plane-specialize-extended`.
 - The specialized loop precomputes its subject shift, parallax scale, convergence bias, output
   scale and safety bound once per output pixel. This removes repeated invariant arithmetic from
@@ -81,7 +81,7 @@ default `1.25`) without changing that resolution correction.
   `dav2-rescreen-extended-base` under `cmake-build-relwithdebinfo/sbs_eval/`.
 - Guided upsample, curvature, scene snap, range/depth floors, border fade, legacy shift, VD3D
   hybrid warp, and CPU warpsim were rejected and removed.
-- Subject-plane lock and Bestv2 sharpen remain fidelity ablations but are disabled by default.
+- Subject-plane lock, Bestv2 sharpen, and EMA-mask dilation were rejected and removed.
 
 Do not reintroduce a removed processor without a current core and extended comparison, visual
 evidence, and a headset-motivated hypothesis.
@@ -93,7 +93,7 @@ and profile provenance; cover the 11-clip core and public extended suites; gener
 and `decision.json`; inspect primary-axis examples; and treat comfort/image-integrity limits as hard
 constraints. Headset evidence resolves coequal-axis tradeoffs.
 
-The harness uses contract 11 and eval schema 19. It exports raw depth, pre-warp depth, exact forward
+The harness uses contract 12 and eval schema 19. It exports raw depth, pre-warp depth, exact forward
 coverage diagnostics, and final SBS artifacts by numeric frame identity. Ground-truth depth scoring
 is scale/shift invariant but polarity preserving.
 

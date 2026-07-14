@@ -36,7 +36,7 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-EVAL_SCHEMA = 19  # CUDA-graph inference experiment; harness contract 11
+EVAL_SCHEMA = 19  # CUDA-graph inference experiment; harness contract 12
 
 
 def suite_defaults(name):
@@ -404,9 +404,6 @@ def main():
     expected_ema_edge_gradient = expected_profile_number(
         args.conf, expected_config_profile, "ema_edge_gradient", 0.02, args.extra,
         "--ema-edge-gradient")
-    expected_ema_edge_dilation = expected_profile_number(
-        args.conf, expected_config_profile, "ema_edge_dilation", 0, args.extra,
-        "--ema-edge-dilation", int)
     expected_ema_edge_strength = expected_profile_number(
         args.conf, expected_config_profile, "ema_edge_strength", 0.25, args.extra,
         "--ema-edge-strength")
@@ -474,7 +471,7 @@ def main():
             fail(f"{clip}: harness did not write contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
         expected_contract = {
-            "schema": 11,
+            "schema": 12,
             "model": expected_model,
             "profile": expected_config_profile,
             "depth_step": depth_step,
@@ -483,7 +480,6 @@ def main():
             "depth_override_frames": depth_override_counts[clip],
             "ema_edge_change": expected_ema_edge_change,
             "ema_edge_gradient": expected_ema_edge_gradient,
-            "ema_edge_dilation": expected_ema_edge_dilation,
             "ema_edge_strength": expected_ema_edge_strength,
             "literal_bestv2": literal_bestv2,
             "cuda_graph": expected_cuda_graph,

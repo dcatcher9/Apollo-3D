@@ -25,8 +25,8 @@ Apollo's warp does not apply a color transfer function or clamp FP16 HDR samples
    consistent display-referred domain across SDR and HDR.
 3. 10-bit SDR FP16 is no longer selected from the gamma-input conversion shaders merely because
    the display itself is SDR. Conversion is selected from the actual capture texture encoding.
-4. The SBS intermediate is FP16 for all linear capture, and Bestv2 sharpen is disabled for linear
-   input because that shader is an SDR display-referred operation and clamps its output.
+4. The SBS intermediate is FP16 for all linear capture. The rejected post-warp Bestv2 sharpen was
+   removed, eliminating its SDR-only clamp and its separate intermediate.
 5. HDR debug PNGs no longer use independent R/G/B Reinhard curves, which could show false hue
    shifts. They use the same luminance-preserving diagnostic map. Linear SDR dumps receive only
    the sRGB OETF.
@@ -42,8 +42,7 @@ Apollo's warp does not apply a color transfer function or clamp FP16 HDR samples
   untouched.
 - **Warp:** source RGB is sampled and copied without a transfer/gamut conversion. Empty regions are
   black in the same linear or encoded domain. FP16 remains unclamped through Apollo.
-- **Post-warp sharpen:** enabled only for BGRA SDR. It remains deliberately absent for linear SDR
-  and HDR pending a properly linear-light or display-referred implementation.
+- **Post-warp:** no additional color operation; the rejected Bestv2 sharpen was removed.
 - **HDR conversion:** the existing shader converts linear Rec.709/scRGB to Rec.2020, uses the
   Windows scRGB definition of 1.0 = 80 nits, applies ST 2084 PQ, then the selected range/matrix.
 - **YUV range:** 8-bit paths use normalized matrix/range constants. 10-bit packed/planar paths use

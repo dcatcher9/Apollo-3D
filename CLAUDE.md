@@ -124,7 +124,7 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   disocc_frac/disocc_smear (disocclusion severity), flicker (temporal shimmer, which the offline
   sim can't measure). Capture a baseline before the change; `--pop-strength`,
   `--depth-short-side`, `--ema`, `--minmax-ema`, and the subject
-  lock/recenter/stretch/plane-lock controls are the supported A/B levers (see the harness
+  lock/recenter/stretch controls are the supported A/B levers (see the harness
   README). Run
   it from `cmake-build-relwithdebinfo` so `assets/` resolves.
 - **Perf** — the in-app `sbs_3d_perf_stats = enabled` config knob ([src/sbs_perf.cpp](src/sbs_perf.cpp))

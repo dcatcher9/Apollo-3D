@@ -3,12 +3,11 @@
 // reprojection needs per pixel:
 //   SubjectState[0] = { recenter_delta, 0, subject_depth_ema, initialized }
 //   SubjectState[1] = { stretch_lo, stretch_inv_range, Bestv2 convergence EMA, 0 }
-//   SubjectState[2] = { exact plane-lock weighted mean raw shift, initialized, 0, 0 }
 // The reprojection then evaluates the permanent Bestv2 pixel-calibrated field.
 // Resets the histogram for the next frame's accumulation.
 
 RWStructuredBuffer<uint>   SubjectHist  : register(u0);  // 256 weighted bins (subject estimate)
-RWStructuredBuffer<float4> SubjectState : register(u1);  // [0..2], see header above
+RWStructuredBuffer<float4> SubjectState : register(u1);  // [0..1], see header above
 RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 unweighted bins (stretch 5/95 pct)
 
 #include "include/depth_constants.hlsl"

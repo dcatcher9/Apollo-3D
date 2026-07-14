@@ -1253,7 +1253,6 @@ namespace config {
       double_between_f(vars, prefix + "ema", target.ema, {0.01, 1.0});
       double_between_f(vars, prefix + "ema_edge_change", target.ema_edge_change, {0.0, 1.0});
       double_between_f(vars, prefix + "ema_edge_gradient", target.ema_edge_gradient, {0.0, 1.0});
-      int_between_f(vars, prefix + "ema_edge_dilation", target.ema_edge_dilation, {0, 2});
       double_between_f(vars, prefix + "ema_edge_strength", target.ema_edge_strength, {0.0, 1.0});
       int_f(vars, prefix + "depth_short_side", target.depth_short_side);
       double_between_f(vars, prefix + "depth_max_aspect", target.depth_max_aspect, {1.0, 8.0});
@@ -1261,9 +1260,6 @@ namespace config {
       double_between_f(vars, prefix + "subject_lock", target.subject_lock, {0.0, 1.0});
       double_between_f(vars, prefix + "subject_recenter", target.subject_recenter, {0.0, 1.0});
       bool_f(vars, prefix + "subject_stretch", target.subject_stretch);
-      double_between_f(vars, prefix + "subject_plane_lock", target.subject_plane_lock, {0.0, 1.0});
-      double_between_f(vars, prefix + "subject_plane_width", target.subject_plane_width, {0.01, 0.5});
-      bool_f(vars, prefix + "bestv2_sharpen", target.bestv2_sharpen);
       string_f(vars, prefix + "depth_model", target.depth_model);
       string_f(vars, prefix + "depth_model_url", target.depth_model_url);
       int_between_f(vars, prefix + "max_encode_width", target.max_encode_width, {256, 16384});

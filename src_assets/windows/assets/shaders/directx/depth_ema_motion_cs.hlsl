@@ -1,6 +1,5 @@
 // Mark moving depth-transition bands where the per-pixel EMA should trust the current frame.
-// Both current mapped depth and previous normalized depth are immutable SRVs, so dilation is
-// deterministic and cannot race neighboring writes in buffer_to_tex_cs.
+// Both current mapped depth and previous normalized depth are immutable SRVs.
 StructuredBuffer<float>  InputBuffer : register(t0);
 StructuredBuffer<float4> MinMaxEma   : register(t1);  // [0]={P2,P98,initialized,_}
 Texture2D<float>          PreviousDepth : register(t2);
@@ -36,15 +35,5 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     if (DTid.x >= target_w || DTid.y >= target_h)
         return;
 
-    uint radius = min((uint)(ema_edge_dilation + 0.5f), 2u);
-    bool moving = false;
-    [unroll]
-    for (int y = -2; y <= 2; ++y) {
-        [unroll]
-        for (int x = -2; x <= 2; ++x) {
-            if (abs(x) <= (int)radius && abs(y) <= (int)radius)
-                moving = moving || IsMovingEdge(int2(DTid.xy) + int2(x, y));
-        }
-    }
-    MotionMask[DTid.xy] = moving ? 1u : 0u;
+    MotionMask[DTid.xy] = IsMovingEdge(int2(DTid.xy)) ? 1u : 0u;
 }

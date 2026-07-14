@@ -542,12 +542,9 @@ namespace sbs_bench {
       double ema = -1.0;  // per-pixel depth EMA override (1.0 = off)
       double ema_edge_change = -1.0;
       double ema_edge_gradient = -1.0;
-      int ema_edge_dilation = -1;
       double ema_edge_strength = -1.0;
       int subject_stretch = -1;  // -1 = conf, 0 = off, 1 = on
-      double subject_plane_lock = -1.0;  // local subject-band flatten (e.g. 0.28); <0 = conf
       double minmax_ema = -1.0;  // range-bounds EMA new-weight; <0 = conf
-      int bestv2_sharpen = -1;  // -1 = conf, 0 = off, 1 = on
       int cuda_graph = -1;  // -1 = conf, 0 = ordinary enqueue, 1 = CUDA graph replay
       bool literal_bestv2 = false;  // reference-only: disable production resolution/pop scaling
     };
@@ -600,23 +597,16 @@ namespace sbs_bench {
           o.subject_stretch = 1;
         } else if (a == "--no-subject-stretch") {
           o.subject_stretch = 0;
-        } else if (a == "--subject-plane-lock") {
-          o.subject_plane_lock = std::stod(next("--subject-plane-lock"));
         } else if (a == "--ema") {
           o.ema = std::stod(next("--ema"));
         } else if (a == "--ema-edge-change") {
           o.ema_edge_change = std::stod(next("--ema-edge-change"));
         } else if (a == "--ema-edge-gradient") {
           o.ema_edge_gradient = std::stod(next("--ema-edge-gradient"));
-        } else if (a == "--ema-edge-dilation") {
-          o.ema_edge_dilation = std::stoi(next("--ema-edge-dilation"));
         } else if (a == "--ema-edge-strength") {
           o.ema_edge_strength = std::stod(next("--ema-edge-strength"));
         } else if (a == "--minmax-ema") {
           o.minmax_ema = std::stod(next("--minmax-ema"));
-        } else if (a == "--bestv2-sharpen") {
-          std::string v = next("--bestv2-sharpen");
-          o.bestv2_sharpen = (v == "off" || v == "0" || v == "false") ? 0 : 1;
         } else if (a == "--cuda-graph") {
           std::string v = next("--cuda-graph");
           if (v == "on" || v == "1" || v == "true") {
@@ -654,10 +644,8 @@ namespace sbs_bench {
         BOOST_LOG(error) << "sbs-bench: --depth-every must be between 1 and 8";
         return false;
       }
-      if (o.ema_edge_change > 1.0 || o.ema_edge_gradient > 1.0 ||
-          o.ema_edge_strength > 1.0 ||
-          o.ema_edge_dilation > 2) {
-        BOOST_LOG(error) << "sbs-bench: EMA edge thresholds must be <=1 and dilation <=2";
+      if (o.ema_edge_change > 1.0 || o.ema_edge_gradient > 1.0 || o.ema_edge_strength > 1.0) {
+        BOOST_LOG(error) << "sbs-bench: EMA edge thresholds and strength must be <=1";
         return false;
       }
       if (!o.depth_override_root.empty() && !fs::is_directory(o.depth_override_root)) {
@@ -738,9 +726,6 @@ namespace sbs_bench {
     if (o.subject_stretch >= 0) {
       sbs_cfg.subject_stretch = (o.subject_stretch != 0);
     }
-    if (o.subject_plane_lock >= 0.0) {
-      sbs_cfg.subject_plane_lock = o.subject_plane_lock;
-    }
     if (o.ema > 0.0) {
       sbs_cfg.ema = o.ema;  // A/B lever: depth EMA (1.0 = off)
     }
@@ -750,17 +735,11 @@ namespace sbs_bench {
     if (o.ema_edge_gradient >= 0.0) {
       sbs_cfg.ema_edge_gradient = o.ema_edge_gradient;
     }
-    if (o.ema_edge_dilation >= 0) {
-      sbs_cfg.ema_edge_dilation = o.ema_edge_dilation;
-    }
     if (o.ema_edge_strength >= 0.0) {
       sbs_cfg.ema_edge_strength = o.ema_edge_strength;
     }
     if (o.minmax_ema >= 0.0) {
       sbs_cfg.minmax_ema = o.minmax_ema;
-    }
-    if (o.bestv2_sharpen >= 0) {
-      sbs_cfg.bestv2_sharpen = (o.bestv2_sharpen != 0);
     }
     if (o.cuda_graph >= 0) {
       sbs_cfg.cuda_graph = (o.cuda_graph != 0);
@@ -803,19 +782,17 @@ namespace sbs_bench {
     auto vs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0");
     auto ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0");
     auto mask_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "mask_ps", "ps_5_0");
-    auto sharpen_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_sharpen_ps.hlsl", "main_ps", "ps_5_0");
     auto coverage_cs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_forward_coverage_cs.hlsl", "main", "cs_5_0");
     auto warp_prefilter_cs_blob = compile(SUNSHINE_SHADERS_DIR "/depth_warp_prefilter_cs.hlsl", "main", "cs_5_0");
-    if (!vs_blob || !ps_blob || !mask_ps_blob || !sharpen_ps_blob || !coverage_cs_blob || !warp_prefilter_cs_blob) {
+    if (!vs_blob || !ps_blob || !mask_ps_blob || !coverage_cs_blob || !warp_prefilter_cs_blob) {
       return 6;
     }
     ComPtr<ID3D11VertexShader> vs;
-    ComPtr<ID3D11PixelShader> ps, mask_ps, sharpen_ps;
+    ComPtr<ID3D11PixelShader> ps, mask_ps;
     ComPtr<ID3D11ComputeShader> coverage_cs, warp_prefilter_cs;
     dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &vs);
     dev->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &ps);
     dev->CreatePixelShader(mask_ps_blob->GetBufferPointer(), mask_ps_blob->GetBufferSize(), nullptr, &mask_ps);
-    dev->CreatePixelShader(sharpen_ps_blob->GetBufferPointer(), sharpen_ps_blob->GetBufferSize(), nullptr, &sharpen_ps);
     dev->CreateComputeShader(coverage_cs_blob->GetBufferPointer(), coverage_cs_blob->GetBufferSize(), nullptr, &coverage_cs);
     dev->CreateComputeShader(warp_prefilter_cs_blob->GetBufferPointer(), warp_prefilter_cs_blob->GetBufferSize(), nullptr, &warp_prefilter_cs);
 
@@ -830,7 +807,7 @@ namespace sbs_bench {
     }
 
     // Built after the first source frame reveals the source/output aspect relationship.
-    ComPtr<ID3D11Buffer> repro_cb, pass_cb;
+    ComPtr<ID3D11Buffer> repro_cb;
 
     // ---- estimator ----
     models::video_depth_estimator estimator(dev, ctx, fs::path(SUNSHINE_ASSETS_DIR), sbs_cfg, model);
@@ -841,9 +818,6 @@ namespace sbs_bench {
     ComPtr<ID3D11ShaderResourceView> sbs_srv;
     ComPtr<ID3D11Texture2D> warp_mask_tex, warp_mask_stage;
     ComPtr<ID3D11RenderTargetView> warp_mask_rtv;
-    ComPtr<ID3D11Texture2D> sharpen_tex;
-    ComPtr<ID3D11RenderTargetView> sharpen_rtv;
-    ComPtr<ID3D11ShaderResourceView> sharpen_srv;
     ComPtr<ID3D11Texture2D> coverage_tex;
     ComPtr<ID3D11UnorderedAccessView> coverage_uav;
     ComPtr<ID3D11ShaderResourceView> coverage_srv;
@@ -958,20 +932,8 @@ namespace sbs_bench {
         const float eye_aspect = (float) eye_w / (float) eye_h;
         const float content_scale_x = eye_aspect > aspect ? aspect / eye_aspect : 1.0f;
         const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
-        const float source_to_output = (float) eye_w * content_scale_x / (float) img.w;
-        float repro_params[16] = {0.0f, 0, 0, 0, 0, 1.0f, (float) sbs_cfg.subject_lock,
-                                  sbs_cfg.subject_stretch ? 1.0f : 0.0f,
-                                  (float) sbs_cfg.subject_plane_lock,
-                                  (float) sbs_cfg.subject_plane_width,
-                                  content_scale_x,
-                                  content_scale_y,
-                                  0.0f,
-                                  (float) sbs_cfg.pop_strength,
-                                  o.literal_bestv2 ? 1.0f : 0.0f,
-                                  source_to_output};
+        float repro_params[8] = {(float) sbs_cfg.subject_lock, sbs_cfg.subject_stretch ? 1.0f : 0.0f, content_scale_x, content_scale_y, (float) sbs_cfg.pop_strength, o.literal_bestv2 ? 1.0f : 0.0f, 0.0f, 0.0f};
         repro_cb = const_buffer(dev.Get(), repro_params);
-        float pass_params[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, content_scale_x, content_scale_y, 0, 1.0f, 0, source_to_output};
-        pass_cb = const_buffer(dev.Get(), pass_params);
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = sbs_w;
         td.Height = sbs_h;
@@ -991,12 +953,6 @@ namespace sbs_bench {
             FAILED(dev->CreateRenderTargetView(warp_mask_tex.Get(), nullptr, &warp_mask_rtv))) {
           BOOST_LOG(error) << "sbs-bench: warp-mask texture creation failed";
           return 6;
-        }
-        if (!o.simulate_hdr && sbs_cfg.bestv2_sharpen) {
-          if (FAILED(dev->CreateTexture2D(&td, nullptr, &sharpen_tex)) || FAILED(dev->CreateRenderTargetView(sharpen_tex.Get(), nullptr, &sharpen_rtv)) || FAILED(dev->CreateShaderResourceView(sharpen_tex.Get(), nullptr, &sharpen_srv))) {
-            BOOST_LOG(error) << "sbs-bench: sharpen texture creation failed";
-            return 6;
-          }
         }
         {
           D3D11_TEXTURE2D_DESC wd = td;
@@ -1110,15 +1066,15 @@ namespace sbs_bench {
         ctx->ClearUnorderedAccessViewUint(coverage_view, clear_winner);
         ctx->CSSetShader(shader, nullptr, 0);
         ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
-        ID3D11ShaderResourceView *cs_srvs[] = {in_srv.Get(), warp_depth, est.subject.Get(), nullptr, est.plane_lock.Get()};
-        ctx->CSSetShaderResources(0, 5, cs_srvs);
+        ID3D11ShaderResourceView *cs_srvs[] = {in_srv.Get(), warp_depth, est.subject.Get()};
+        ctx->CSSetShaderResources(0, 3, cs_srvs);
         ctx->CSSetUnorderedAccessViews(0, 1, &coverage_view, nullptr);
         ctx->CSSetConstantBuffers(2, 1, repro_cb.GetAddressOf());
         ctx->Dispatch(((sbs_w / 2u) + 15u) / 16u, (sbs_h + 15u) / 16u, 1u);
         ID3D11UnorderedAccessView *null_uav[] = {nullptr};
-        ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+        ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr};
         ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
-        ctx->CSSetShaderResources(0, 5, null_cs_srvs);
+        ctx->CSSetShaderResources(0, 3, null_cs_srvs);
       };
       ctx->OMSetRenderTargets(1, sbs_rtv.GetAddressOf(), nullptr);
       ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1127,29 +1083,17 @@ namespace sbs_bench {
       ctx->RSSetViewports(1, &vp);
       ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
 
-      ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), warp_depth, est.subject.Get(), nullptr, est.plane_lock.Get()};
-      ctx->PSSetShaderResources(0, 5, srvs);
-      ID3D11Buffer *cb = est.depth ? repro_cb.Get() : pass_cb.Get();
+      ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), warp_depth, est.subject.Get()};
+      ctx->PSSetShaderResources(0, 3, srvs);
+      ID3D11Buffer *cb = repro_cb.Get();
       ctx->PSSetConstantBuffers(2, 1, &cb);
       ctx->Draw(3, 0);
 
       ID3D11RenderTargetView *null_rtv[] = {nullptr};
       ctx->OMSetRenderTargets(1, null_rtv, nullptr);
-      ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
-      ctx->PSSetShaderResources(0, 5, null_srv);
+      ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr, nullptr};
+      ctx->PSSetShaderResources(0, 3, null_srv);
       ID3D11Texture2D *final_sbs_tex = sbs_tex.Get();
-      ID3D11ShaderResourceView *post_input_srv = sbs_srv.Get();
-      if (est.depth && sharpen_rtv && sharpen_srv) {
-        ctx->OMSetRenderTargets(1, sharpen_rtv.GetAddressOf(), nullptr);
-        ctx->VSSetShader(vs.Get(), nullptr, 0);
-        ctx->PSSetShader(sharpen_ps.Get(), nullptr, 0);
-        ctx->RSSetViewports(1, &vp);
-        ctx->PSSetShaderResources(0, 1, &post_input_srv);
-        ctx->Draw(3, 0);
-        ctx->OMSetRenderTargets(1, null_rtv, nullptr);
-        ctx->PSSetShaderResources(0, 1, null_srv);
-        final_sbs_tex = sharpen_tex.Get();
-      }
       if (time_warp) {
         ctx->End(warp_end.Get());
         ctx->End(warp_disjoint.Get());
@@ -1174,8 +1118,7 @@ namespace sbs_bench {
       sbs_perf::tick();
 
       // Offline-only mask pass, deliberately outside the production warp timestamp/CPU sample.
-      // It executes the same shader selection logic and exports R=pre-fill disocclusion,
-      // G=unresolved after the active fallback. This evidence must not perturb perf conclusions.
+      // It exports R=pre-fill disocclusion. This evidence must not perturb perf conclusions.
       if (est.depth) {
         dispatch_coverage(coverage_cs.Get(), coverage_uav.Get());
       }
@@ -1188,14 +1131,13 @@ namespace sbs_bench {
         in_srv.Get(),
         warp_depth,
         est.subject.Get(),
-        est.depth ? coverage_srv.Get() : nullptr,
-        est.plane_lock.Get()
+        est.depth ? coverage_srv.Get() : nullptr
       };
-      ctx->PSSetShaderResources(0, 5, mask_srvs);
+      ctx->PSSetShaderResources(0, 4, mask_srvs);
       ctx->PSSetConstantBuffers(2, 1, &cb);
       ctx->Draw(3, 0);
       ctx->OMSetRenderTargets(1, null_rtv, nullptr);
-      ctx->PSSetShaderResources(0, 5, null_srv);
+      ctx->PSSetShaderResources(0, 4, null_srv);
 
       // Readback -> PNG.
       char mask_name[64];
@@ -1275,12 +1217,11 @@ namespace sbs_bench {
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
-                 << "  \"schema\": 11,\n"
+                 << "  \"schema\": 12,\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
                  << "  \"depth_step\": "
-                 << json_string(o.depth_every == 1 ? std::string("current-once") :
-                                                     "reuse-" + std::to_string(o.depth_every))
+                 << json_string(o.depth_every == 1 ? std::string("current-once") : "reuse-" + std::to_string(o.depth_every))
                  << ",\n"
                  << "  \"depth_reuse_interval\": " << o.depth_every << ",\n"
                  << "  \"depth_compensation\": "
@@ -1289,7 +1230,6 @@ namespace sbs_bench {
                  << "  \"depth_override_frames\": " << applied_depth_override_frames << ",\n"
                  << "  \"ema_edge_change\": " << sbs_cfg.ema_edge_change << ",\n"
                  << "  \"ema_edge_gradient\": " << sbs_cfg.ema_edge_gradient << ",\n"
-                 << "  \"ema_edge_dilation\": " << sbs_cfg.ema_edge_dilation << ",\n"
                  << "  \"ema_edge_strength\": " << sbs_cfg.ema_edge_strength << ",\n"
                  << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n"
                  << "  \"cuda_graph\": " << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"

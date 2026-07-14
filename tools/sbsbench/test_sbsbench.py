@@ -169,8 +169,8 @@ class EvalContractTests(unittest.TestCase):
             text = fh.read()
         self.assertIn("LeftColorTexture.GetDimensions(sourceWidth, sourceHeight)", text)
         self.assertIn("Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight)", text)
-        self.assertGreaterEqual(
-            text.count("shaped, (float)sourceWidth, (float)sourceHeight,"), 2)
+        self.assertIn("s0, s1, (float)sourceWidth, (float)sourceHeight", text)
+        self.assertEqual(text.count("DepthParallax("), 2)
         self.assertNotIn("Bestv2SearchRadius((float)dw)", text)
 
     def test_forward_coverage_diagnostic_uses_source_geometry(self):
@@ -180,8 +180,8 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("LeftColorTexture.GetDimensions(source_w, source_h)", text)
-        self.assertIn("shaped, (float)source_w, (float)source_h,", text)
-        self.assertNotIn("shaped, (float)eye_w)", text)
+        self.assertIn("s0, s1, (float)source_w, (float)source_h", text)
+        self.assertNotIn("s0, s1, (float)eye_w", text)
 
     def test_bestv2_scales_wide_sources_from_validated_calibration_width(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -191,7 +191,7 @@ class EvalContractTests(unittest.TestCase):
             text = fh.read()
         self.assertIn("BESTV2_CALIBRATION_WIDTH = 854.0f", text)
         self.assertIn("return min(max(source_width, 1.0f), BESTV2_CALIBRATION_WIDTH)", text)
-        self.assertGreaterEqual(text.count("/ parallax_width"), 3)
+        self.assertGreaterEqual(text.count("/ parallax_width"), 2)
 
     def test_bestv2_preserves_angular_pop_across_source_aspects(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -215,7 +215,7 @@ class EvalContractTests(unittest.TestCase):
             text = fh.read()
         self.assertIn("float pop_strength;", text)
         self.assertIn("float strength = literal_bestv2 > 0.5f ? 1.0f : pop_strength", text)
-        self.assertIn("clamp(parallax * strength", text)
+        self.assertIn("clamp(parallax * p.output_scale", text)
 
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
             config = fh.read()
@@ -241,7 +241,7 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
-        self.assertIn('"  \\"schema\\": 11,\\n"', harness)
+        self.assertIn('"  \\"schema\\": 12,\\n"', harness)
         self.assertIn('\\"depth_override_frames\\"', harness)
 
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
@@ -271,7 +271,7 @@ class EvalContractTests(unittest.TestCase):
             evaluator = fh.read()
         self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
         self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
-        self.assertIn('"schema": 11', evaluator)
+        self.assertIn('"schema": 12', evaluator)
         self.assertIn('depth_override_root and not args.comparison_only', evaluator)
 
     def test_live_depth_pairing_is_bounded_and_sync_is_evaluation_only(self):
@@ -337,7 +337,8 @@ class EvalContractTests(unittest.TestCase):
             mask_shader = fh.read()
         self.assertIn("PreviousDepth", mask_shader)
         self.assertIn("ema_edge_change", mask_shader)
-        self.assertIn("ema_edge_dilation", mask_shader)
+        self.assertNotIn("ema_edge_dilation", mask_shader)
+        self.assertIn("MotionMask[DTid.xy] = IsMovingEdge", mask_shader)
         with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
                   encoding="utf-8") as fh:
             estimator = fh.read()
@@ -394,20 +395,10 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(rescore_run.depth_compensation_from_meta(
             {"depth_compensation": "nvof-1x1"}), "nvof-1x1")
 
-    def test_bestv2_sharpen_scales_taps_from_source_to_output_pixels(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        shader = os.path.join(repo, "src_assets", "windows", "assets",
-                              "shaders", "directx", "sbs_sharpen_ps.hlsl")
-        with open(shader, encoding="utf-8") as f:
-            text = f.read()
-        self.assertIn("float tap = max(source_to_output", text)
-        self.assertIn("EyeSample((float)x - tap", text)
-
     def test_warp_and_coverage_apply_per_eye_aspect_mapping(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
-        for name in ("sbs_reprojection_ps.hlsl", "sbs_forward_coverage_cs.hlsl",
-                     "sbs_sharpen_ps.hlsl"):
+        for name in ("sbs_reprojection_ps.hlsl", "sbs_forward_coverage_cs.hlsl"):
             with self.subTest(shader=name), open(os.path.join(shader_dir, name), encoding="utf-8") as fh:
                 self.assertIn("ContentToSourceUV", fh.read())
 
@@ -431,7 +422,7 @@ class EvalContractTests(unittest.TestCase):
         with open(display, encoding="utf-8") as fh:
             pipeline = fh.read()
         self.assertIn("tex_desc.Format = sbs_intermediate_linear ? DXGI_FORMAT_R16G16B16A16_FLOAT", pipeline)
-        self.assertIn("if (!sbs_intermediate_linear && sbs_config.bestv2_sharpen)", pipeline)
+        self.assertNotIn("sbs_sharpen", pipeline)
         self.assertIn("input_is_linear ? convert_Y_or_YUV_fp16_ps.get()", pipeline)
         self.assertIn("models::input_color_space::linear_sdr", pipeline)
         common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
@@ -549,15 +540,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn("--no-subject-track", text["harness"])
         self.assertNotIn("sbs_cfg.subject_track", text["harness"])
 
-    def test_bestv2_plane_reduce_reuses_shared_curve_and_stretch_switch(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
-        with open(os.path.join(shader_dir, "depth_plane_reduce_cs.hlsl"), encoding="utf-8") as fh:
-            reduce_shader = fh.read()
-        self.assertIn('include "include/bestv2_curve.hlsl"', reduce_shader)
-        self.assertIn("plane_subject_stretch != 0u", reduce_shader)
-        self.assertNotIn("Bestv2RawShiftPxPlane", reduce_shader)
-
     def test_bestv2_fast_curve_is_subpixel_and_live_only(self):
         depth = np.linspace(0.0, 1.0, 100001, dtype=np.float64)
         near = np.exp(-0.5 * ((depth - 0.85) / 0.24) ** 2)
@@ -577,11 +559,11 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(shader_dir, "include", "sbs_warp_common.hlsl"),
                   encoding="utf-8") as fh:
             warp_common = fh.read()
-        with open(os.path.join(shader_dir, "depth_plane_reduce_cs.hlsl"),
+        with open(os.path.join(shader_dir, "include", "bestv2_curve.hlsl"),
                   encoding="utf-8") as fh:
-            plane_reduce = fh.read()
+            curve = fh.read()
         self.assertIn("Bestv2RawShiftPxFast(shaped_depth)", warp_common)
-        self.assertIn("Bestv2RawShiftPx(shaped_depth)", plane_reduce)
+        self.assertNotIn("Bestv2RawShiftPx(float", curve)
 
     def test_tensorrt_level_is_part_of_engine_recipe(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -605,28 +587,27 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("flags |= D3DCOMPILE_OPTIMIZATION_LEVEL3", live)
         self.assertIn("D3DCOMPILE_OPTIMIZATION_LEVEL3", harness)
 
-    def test_disabled_plane_lock_has_no_probe_loop_texture_fetch(self):
+    def test_production_warp_has_no_retired_plane_lock_path(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
                               "sbs_reprojection_ps.hlsl")
         with open(shader, encoding="utf-8") as fh:
             text = fh.read()
-        self.assertEqual(text.count("PlaneLockTexture.SampleLevel"), 1)
-        self.assertIn("if (subject_plane_lock > 0.0f)", text)
+        self.assertNotIn("PlaneLockTexture", text)
+        self.assertNotIn("subject_plane_lock", text)
 
         common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
                               "include", "sbs_warp_common.hlsl")
         with open(common, encoding="utf-8") as fh:
             common_text = fh.read()
-        self.assertGreaterEqual(common_text.count("[branch]"), 2)
-        self.assertIn("[branch]\n    if (use_plane_lock && s2.y <= 0.5f)",
-                      common_text)
-        self.assertIn("sample_uv = Reproject(src_uv, eyeSign, false, true)", text)
-        self.assertIn("sample_uv = Reproject(src_uv, eyeSign, false, false)", text)
-        self.assertIn("MakeBestv2NoPlaneParams", text)
+        self.assertNotIn("use_plane_lock", common_text)
+        self.assertIn("sample_uv = Reproject(src_uv, eyeSign, true)", text)
+        self.assertIn("sample_uv = Reproject(src_uv, eyeSign, false)", text)
+        self.assertIn("MakeBestv2Params", text)
         self.assertIn(
-            "DepthParallaxNoPlane(d, s0, s1, no_plane_params, use_subject_stretch)", text)
-        self.assertNotIn("DepthParallaxNoPlane(d, s0, s1, shaped", text)
+            "DepthParallax(\n            d, s0, s1, params, use_subject_stretch)",
+            text)
+        self.assertNotIn("DepthParallax(d, s0, s1, shaped", text)
 
     def test_retired_geometry_is_absent_but_forward_coverage_diagnostic_remains(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -634,11 +615,23 @@ class EvalContractTests(unittest.TestCase):
         with open(display, encoding="utf-8") as fh:
             display_text = fh.read()
         self.assertNotIn("sbs_vd3d", display_text)
+        self.assertNotIn("sbs_sharpen", display_text)
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
                   encoding="utf-8") as fh:
             harness_text = fh.read()
         self.assertIn("sbs_forward_coverage_cs.hlsl", harness_text)
         self.assertIn("dispatch_coverage", harness_text)
+        for retired in ("subject_plane_lock", "subject_plane_width", "bestv2_sharpen",
+                        "ema_edge_dilation"):
+            self.assertNotIn(retired, harness_text)
+        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders",
+                                  "directx")
+        for retired_shader in ("depth_plane_band_cs.hlsl", "depth_plane_combine_cs.hlsl",
+                               "depth_plane_filter_cs.hlsl", "depth_plane_reduce_cs.hlsl",
+                               "depth_plane_resolve_cs.hlsl", "sbs_sharpen_ps.hlsl"):
+            self.assertFalse(os.path.exists(os.path.join(shader_dir, retired_shader)))
+        self.assertFalse(os.path.exists(os.path.join(
+            shader_dir, "include", "depth_plane_constants.hlsl")))
 
     def test_report_evidence_is_bounded_and_accepts_zero_based_frames(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

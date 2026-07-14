@@ -49,9 +49,9 @@ Controls:
 | Subject lock | **0.5** | **0.5** | Old 0.95 is no longer accepted. Zero lock gives large warp wins but one extended Sintel stereo cost. At 0.5, Apollo extended has 3 warp wins/0 costs; VD3D core has 10 wins/0 costs and extended 4/0. |
 | Subject recenter 0.35 | **keep** | **keep** | Apollo removal is favorable on core but only 1 halo win/1 stereo cost on extended. VD3D removal has more costs than wins. |
 | Guided upsample | **removed** | **removed** | Rejected/tradeoff evidence showed no net benefit; implementation and configuration removed. |
-| Exact subject plane lock 0.28 | **off / rejected** | **off / rejected** | Schema-6 tradeoff is cost-dominated: Apollo 4 wins/12 costs; VD3D 2/13, including stereo and warp costs. |
+| Exact subject plane lock 0.28 | **removed / rejected** | **removed / rejected** | Schema-6 tradeoff is cost-dominated: Apollo 4 wins/12 costs; VD3D 2/13, including stereo and warp costs. |
 | Foreground curvature 0.07 | **removed** | **removed** | Apollo was below sensitivity and VD3D regressed stability; implementation removed. |
-| Bestv2 sharpen 0.2 | **off / hard reject** | **off / hard reject** | Fails ≥90% source coverage on seven core clips for both geometries; several fall to about 74–80%. |
+| Bestv2 sharpen 0.2 | **removed / hard reject** | **removed / hard reject** | Fails ≥90% source coverage on seven core clips for both geometries; several fall to about 74–80%. |
 | Scene-cut min/max snap 1.6 | **removed** | **removed** | No validated movement, including the hard-cut sequence. |
 | Range floor 0.5 | **removed** | **removed** | Ineffective because DA-V2 retains a large hallucinated raw range on flat content. |
 | Depth floor 0.25 | **removed** | **removed** | It was unreachable under the permanent Bestv2 field. |

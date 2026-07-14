@@ -93,8 +93,8 @@ Harness A/B levers (after `--extra`):
 - Bestv2 is the only disparity field. It uses the preset's source-pixel FG/MG/BG shifts
   (`-9/-3/+2.4`), `.35` parallax
   balance, `1.11/1.05` multipliers, `.008` zero-parallax trim, dynamic convergence `.006`,
-  `.071` safety cap. Subject-plane lock and the exact per-eye sharpen are independent switches;
-  both are disabled in the validated quality profiles. Before subject state initializes, output
+  `.071` safety cap. Rejected subject-plane lock and per-eye sharpen paths have been removed.
+  Before subject state initializes, output
   remains flat instead of using the removed legacy divergence/focal-plane fallback.
 - `--depth-short-side N` — depth inference short side (default 432). Use 336 to A/B
   back to the old under-resolved default.
@@ -104,8 +104,8 @@ Harness A/B levers (after `--extra`):
   finite values through the pre-encode SBS stage. It is not a
   PQ/NVENC/headset colorimetric evaluation; do not compare its PNG metrics to SDR baselines.
 - `--ema F` — per-pixel depth EMA override (`1.0` = off).
-- `--ema-edge-change F --ema-edge-gradient F --ema-edge-dilation N --ema-edge-strength F`
-  — accepted flowless moving-edge EMA (`0.05`, `0.02`, `0`, `0.25`). It preserves ordinary EMA outside a deterministic
+- `--ema-edge-change F --ema-edge-gradient F --ema-edge-strength F`
+  — accepted flowless moving-edge EMA (`0.05`, `0.02`, `0.25`). It preserves ordinary EMA outside a deterministic
   depth-transition mask and blends masked pixels toward current depth. A 16-bit
   `ema_mask_<frame>.png` locality artifact is required whenever enabled.
 - `--subject-lock F` — subject anchor strength (e.g. `0.95`).
@@ -113,8 +113,6 @@ Harness A/B levers (after `--extra`):
 - `--subject-stretch` — shape_depth_for_pop 5/95 percentile stretch (default on in the permanent
   Bestv2 subject path).
 - `--no-subject-stretch` — disable that stretch for an accepted-feature ablation.
-- `--subject-plane-lock F` — local subject-band flatten (e.g. `0.28`; default off).
-- `--bestv2-sharpen on|off` — explicitly ablate the exact SDR Bestv2 post-sharpen.
 - `--cuda-graph on|off` — capture and replay the TensorRT enqueue when the mapped D3D tensor
   addresses remain stable. The first enqueue for a new address/shape is an uncaptured warmup.
 
@@ -146,7 +144,7 @@ depth-step floor (flat scenes legitimately read 0), and all pixel windows scale 
 width — but absolute values are still not comparable across clip resolutions; baselines are
 per-clip-set. The harness writes 16-bit depth PNGs so `swim` resolves below 1/255.
 
-**Eval schema 19 / harness contract 11:** `run_eval.py` pins the profile and model explicitly and
+**Eval schema 19 / harness contract 12:** `run_eval.py` pins the profile and model explicitly and
 has no alternate warp selector. By default the
 harness submits and consumes exactly one inference per source frame, so EMA and normalization
 update once. `--depth-every N` is an explicit comparison-only cadence treatment: color advances

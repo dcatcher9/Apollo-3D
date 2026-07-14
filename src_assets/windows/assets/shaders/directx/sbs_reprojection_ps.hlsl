@@ -21,7 +21,6 @@ StructuredBuffer<float4> SubjectState : register(t2);
 // Bound only by the offline harness mask pass. It is produced by forward-splatting the exact
 // shared parallax field, exposing holes that this backward gather necessarily paints over.
 Texture2D<uint> ForwardCoverageTexture : register(t3);
-Texture2D<float> PlaneLockTexture : register(t4);
 SamplerState      LinearSampler     : register(s0);
 
 struct PS_INPUT {
@@ -37,22 +36,10 @@ float SampleDepth(float sx, float sy) {
     return DepthTexture.SampleLevel(LinearSampler, float2(sx, sy), 0);
 }
 
-float ProbeParallax(float d, float planeMask, float4 s0, float4 s1, float4 s2, bool shaped,
-                    float sourceWidth, float sourceHeight, bool use_plane_lock,
-                    Bestv2NoPlaneParams no_plane_params, bool use_subject_stretch) {
-    if (use_plane_lock) {
-        return DepthParallax(
-            d, planeMask, s0, s1, s2, shaped, sourceWidth, sourceHeight, true);
-    }
-    // Reproject returns before its loop when subject state is uninitialized, so this specialized
-    // path is reached only with shaped=true and does not need a redundant branch per probe.
-    return DepthParallaxNoPlane(d, s0, s1, no_plane_params, use_subject_stretch);
-}
-
 // Find the source U coordinate that reprojects onto `uv` for one eye, choosing the
 // nearest (frontmost) surface so foreground occludes rather than duplicates.
 // eyeSign = +1 right eye, -1 left eye.
-float2 Reproject(float2 uv, float eyeSign, bool use_plane_lock, bool use_subject_stretch) {
+float2 Reproject(float2 uv, float eyeSign, bool use_subject_stretch) {
     // Subject anchoring is live this frame only if configured AND the resolve pass has
     // produced state (init != 0 -- it is 0 for the first frames). Mandatory shader/resource
     // initialization is validated before the estimator is published. Decide it ONCE here
@@ -61,7 +48,6 @@ float2 Reproject(float2 uv, float eyeSign, bool use_plane_lock, bool use_subject
     // gates searchRadius, so the search span and the parallax mapping can never disagree.
     float4 s0 = SubjectState[0];
     float4 s1 = SubjectState[1];
-    float4 s2 = SubjectState[2];
     bool shaped = s0.w > 0.5f;
     // Bestv2's calibrated bands are SOURCE-COLOR pixel shifts. Normalizing by the smaller
     // inference-depth width amplified Apollo whenever the model texture was downscaled, while
@@ -75,7 +61,7 @@ float2 Reproject(float2 uv, float eyeSign, bool use_plane_lock, bool use_subject
     if (searchRadius <= 1e-6f) {
         return uv;  // subject state is not initialized yet
     }
-    Bestv2NoPlaneParams noPlaneParams = MakeBestv2NoPlaneParams(
+    Bestv2Params params = MakeBestv2Params(
         s0, s1, (float)sourceWidth, (float)sourceHeight, use_subject_stretch);
 
     int steps = clamp((int)round(24.0f * aspectScale), 12, 72);
@@ -99,25 +85,16 @@ float2 Reproject(float2 uv, float eyeSign, bool use_plane_lock, bool use_subject
 
     float prevX = startX;
     float prevD = SampleDepth(prevX, uv.y);
-    float planeMask = 0.0f;
-    if (use_plane_lock) {
-        // The exact mask is 13x13-smoothed and intentionally low-frequency. Sample it once at
-        // the destination rather than once per probe; the uniform branch removes all fetches
-        // from both shipping profiles where plane lock is disabled.
-        planeMask = PlaneLockTexture.SampleLevel(LinearSampler, uv, 0);
-    }
-    float prevG = (prevX - uv.x) - eyeSign * ProbeParallax(
-        prevD, planeMask, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight,
-        use_plane_lock, noPlaneParams, use_subject_stretch);
+    float prevG = (prevX - uv.x) - eyeSign * DepthParallax(
+        prevD, s0, s1, params, use_subject_stretch);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
     for (int i = 1; i <= steps; i++) {
         float x = startX + stepX * i;
         float d = SampleDepth(x, uv.y);
-        float g = (x - uv.x) - eyeSign * ProbeParallax(
-            d, planeMask, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight,
-            use_plane_lock, noPlaneParams, use_subject_stretch);
+        float g = (x - uv.x) - eyeSign * DepthParallax(
+            d, s0, s1, params, use_subject_stretch);
 
         // Zero crossing between prevX and x => a source in this span reprojects onto uv.
         if ((prevG <= 0.0f && g >= 0.0f) || (prevG >= 0.0f && g <= 0.0f)) {
@@ -159,17 +136,14 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
-    // Compile three loop specializations and select once per pixel: plane lock, no-plane with
-    // subject stretch, and no-plane without stretch. The shipping plane-lock-off paths then
-    // contain no per-probe plane-lock branches or dormant transcendental operations.
+    // Compile the stretch-on and stretch-off loops separately and select once per pixel, avoiding
+    // a per-probe runtime select in the production path.
     float2 sample_uv;
     [branch]
-    if (subject_plane_lock > 0.0f) {
-        sample_uv = Reproject(src_uv, eyeSign, true, true);
-    } else if (subject_stretch > 0.5f) {
-        sample_uv = Reproject(src_uv, eyeSign, false, true);
+    if (subject_stretch > 0.5f) {
+        sample_uv = Reproject(src_uv, eyeSign, true);
     } else {
-        sample_uv = Reproject(src_uv, eyeSign, false, false);
+        sample_uv = Reproject(src_uv, eyeSign, false);
     }
 
     // Disoccluded regions clamp to the nearest valid column instead of wrapping.
@@ -186,7 +160,6 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
 float4 mask_ps(PS_INPUT input) : SV_TARGET {
     float2 uv = input.TexCoord;
     bool is_right_eye = uv.x > 0.5f;
-    float eyeSign = is_right_eye ? 1.0f : -1.0f;
     float2 output_uv = uv;
     output_uv.x = is_right_eye ? (uv.x - 0.5f) * 2.0f : uv.x * 2.0f;
     float2 src_uv;

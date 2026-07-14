@@ -694,7 +694,6 @@ namespace models {
     float ema_alpha;
     float ema_edge_change;
     float ema_edge_gradient;
-    int ema_edge_dilation;
     float ema_edge_strength;
     int depth_short_side;  // depth map short-side resolution (clamped to native short side)
     float max_aspect;  // aspect cap for short-side mode
@@ -711,9 +710,6 @@ namespace models {
     bool valid = false;  // all mandatory engine, shader, and session resources are ready
     float subject_recenter;  // recenter strength consumed by depth_subject_resolve_cs
     bool subject_stretch;  // apply the shape_depth_for_pop 5/95 disparity stretch
-    bool exact_plane_lock;  // Bestv2's full silhouette morphology + weighted shift mean
-    float plane_lock_strength;
-    float plane_lock_width;
     std::string model_name;  // local file stem; engine cache is recipe-specific
     std::string model_url;  // where to download the onnx if absent
 
@@ -1047,12 +1043,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_hist_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_subject_hist_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_subject_resolve_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_plane_band_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_plane_filter_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_plane_combine_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_plane_reduce_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_plane_resolve_cs;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> plane_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> linear_sampler;
     Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
 
@@ -1076,24 +1066,11 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_hist_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_plain_buf;  // 256 unweighted bins for the stretch 5/95
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_plain_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;  // float4 {delta, scurve, subj_ema, init}
+    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;  // two float4 elements; see depth_subject_resolve_cs
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_stage;  // CPU-readable copy for the debug log
     unsigned subject_log_counter = 0;  // paces the [SUBJDBG] readback (every 24 depth updates)
-
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> plane_band_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> plane_band_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> plane_band_srv;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> plane_work_a_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> plane_work_a_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> plane_work_a_srv;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> plane_work_b_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> plane_work_b_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> plane_work_b_srv;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> plane_group_buf;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> plane_group_uav;
-    UINT plane_group_count = 0;
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
@@ -1126,7 +1103,6 @@ namespace models {
         ema_alpha((float) cfg.ema),
         ema_edge_change((float) cfg.ema_edge_change),
         ema_edge_gradient((float) cfg.ema_edge_gradient),
-        ema_edge_dilation(cfg.ema_edge_dilation),
         ema_edge_strength((float) cfg.ema_edge_strength),
         depth_short_side(std::max(196, cfg.depth_short_side)),
         max_aspect(std::max(1.0f, (float) cfg.depth_max_aspect)),
@@ -1134,9 +1110,6 @@ namespace models {
         cuda_graph_enabled(cfg.cuda_graph),
         subject_recenter((float) cfg.subject_recenter),
         subject_stretch(cfg.subject_stretch),
-        exact_plane_lock(cfg.subject_plane_lock > 0.0),
-        plane_lock_strength((float) cfg.subject_plane_lock),
-        plane_lock_width((float) cfg.subject_plane_width),
         model_name(model.name),
         model_url(model.url) {
       const auto init_started = std::chrono::steady_clock::now();
@@ -1281,32 +1254,6 @@ namespace models {
         return;
       }
       BOOST_LOG(info) << "Permanent Bestv2 subject shaping enabled (recenter " << subject_recenter << ").";
-      if (exact_plane_lock) {
-        bool ok = compile_shader(assets_dir / "shaders" / "directx" / "depth_plane_band_cs.hlsl", depth_plane_band_cs) &&
-                  compile_shader(assets_dir / "shaders" / "directx" / "depth_plane_filter_cs.hlsl", depth_plane_filter_cs) &&
-                  compile_shader(assets_dir / "shaders" / "directx" / "depth_plane_combine_cs.hlsl", depth_plane_combine_cs) &&
-                  compile_shader(assets_dir / "shaders" / "directx" / "depth_plane_reduce_cs.hlsl", depth_plane_reduce_cs) &&
-                  compile_shader(assets_dir / "shaders" / "directx" / "depth_plane_resolve_cs.hlsl", depth_plane_resolve_cs);
-        if (ok) {
-          D3D11_BUFFER_DESC bd = {};
-          bd.Usage = D3D11_USAGE_DYNAMIC;
-          bd.ByteWidth = 48;
-          bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-          bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-          if (FAILED(device->CreateBuffer(&bd, nullptr, &plane_cbuffer))) {
-            ok = false;
-          }
-        }
-        if (ok) {
-          BOOST_LOG(info) << "Bestv2 exact subject-plane lock enabled (strength "
-                          << plane_lock_strength << ", width " << plane_lock_width << ").";
-        } else {
-          BOOST_LOG(warning) << "Bestv2 subject-plane-lock shaders failed; using the depth-band fallback.";
-          exact_plane_lock = false;
-        }
-      } else {
-        exact_plane_lock = false;
-      }
       // Min/max reduction accumulator (2 uints), pre-seeded to the reduction identity
       // {min = 0xFFFFFFFF, max = 0}. depth_minmax_ema_cs resets it after each frame.
       {
@@ -1369,8 +1316,7 @@ namespace models {
         }
       }
 
-      // Subject tracking: weighted histogram (256 uint bins) + per-frame state. The third
-      // float4 carries the exact Bestv2 plane-lock mean and its initialized flag.
+      // Subject tracking: weighted histogram (256 uint bins) + two-float4 per-frame state.
       {
         uint32_t init_hist[256] = {};
         D3D11_BUFFER_DESC bd = {};
@@ -1389,7 +1335,7 @@ namespace models {
           device->CreateUnorderedAccessView(subject_plain_buf.Get(), nullptr, &subject_plain_uav);
         }
 
-        float init_state[12] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};  // 3 float4
+        float init_state[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};  // 2 float4
         bd.ByteWidth = sizeof(init_state);
         bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
         bd.StructureByteStride = sizeof(float) * 4;
@@ -1535,108 +1481,10 @@ namespace models {
       return depth_srv;
     }
 
-    struct plane_constants_t {
-      uint32_t w, h;
-      float strength, width;
-      uint32_t axis, radius, op, group_count;
-      uint32_t subject_stretch, reserved[3];
-    };
-
-    static_assert(sizeof(plane_constants_t) == 48, "PlaneConstants must match depth_plane_constants.hlsl");
-
-    bool set_plane_constants(uint32_t axis = 0, uint32_t radius = 0, uint32_t op = 0) {
-      if (!plane_cbuffer) {
-        return false;
-      }
-      D3D11_MAPPED_SUBRESOURCE mapped {};
-      if (FAILED(context->Map(plane_cbuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-        return false;
-      }
-      plane_constants_t pc {(uint32_t) target_w, (uint32_t) target_h, plane_lock_strength, plane_lock_width, axis, radius, op, plane_group_count, subject_stretch ? 1u : 0u, {0u, 0u, 0u}};
-      std::memcpy(mapped.pData, &pc, sizeof(pc));
-      context->Unmap(plane_cbuffer.Get(), 0);
-      return true;
-    }
-
-    void run_exact_plane_lock() {
-      if (!exact_plane_lock || !depth_srv || !subject_srv || !subject_uav || !plane_band_uav || !plane_work_a_uav || !plane_work_b_uav || !plane_group_uav || !set_plane_constants()) {
-        return;
-      }
-
-      ID3D11Buffer *cb = plane_cbuffer.Get();
-      context->CSSetConstantBuffers(1, 1, &cb);
-      const UINT gx = ((UINT) target_w + 15u) / 16u;
-      const UINT gy = ((UINT) target_h + 15u) / 16u;
-
-      // Depth band + Bestv2 center weighting.
-      context->CSSetShader(depth_plane_band_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *band_srvs[2] = {depth_srv.Get(), subject_srv.Get()};
-      context->CSSetShaderResources(0, 2, band_srvs);
-      context->CSSetUnorderedAccessViews(0, 1, plane_band_uav.GetAddressOf(), nullptr);
-      context->Dispatch(gx, gy, 1);
-      ID3D11ShaderResourceView *null_srvs3[3] = {nullptr, nullptr, nullptr};
-      ID3D11UnorderedAccessView *null_uavs2[2] = {nullptr, nullptr};
-      context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
-      context->CSSetShaderResources(0, 2, null_srvs3);
-
-      auto filter = [&](ID3D11ShaderResourceView *input, ID3D11UnorderedAccessView *output, uint32_t axis, uint32_t radius, uint32_t op) {
-        set_plane_constants(axis, radius, op);
-        context->CSSetShader(depth_plane_filter_cs.Get(), nullptr, 0);
-        context->CSSetShaderResources(0, 1, &input);
-        context->CSSetUnorderedAccessViews(0, 1, &output, nullptr);
-        context->Dispatch(gx, gy, 1);
-        context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
-        context->CSSetShaderResources(0, 1, null_srvs3);
-      };
-
-      // Bestv2's 21/15/13 kernels were calibrated on a 336px-short-side depth grid. Scale
-      // their radii with this model grid's short side so the silhouette support covers the
-      // same fraction of the source at 336, 420, 434, or any future inference resolution.
-      const float morphology_scale = (float) std::min(target_w, target_h) / 336.0f;
-      const uint32_t dilate_radius = std::max(1u, (uint32_t) std::lround(10.0f * morphology_scale));
-      const uint32_t close_radius = std::max(1u, (uint32_t) std::lround(7.0f * morphology_scale));
-      const uint32_t smooth_radius = std::max(1u, (uint32_t) std::lround(6.0f * morphology_scale));
-      filter(plane_band_srv.Get(), plane_work_a_uav.Get(), 0, dilate_radius, 0);
-      filter(plane_work_a_srv.Get(), plane_work_b_uav.Get(), 1, dilate_radius, 0);
-      filter(plane_work_b_srv.Get(), plane_work_a_uav.Get(), 0, close_radius, 1);
-      filter(plane_work_a_srv.Get(), plane_work_b_uav.Get(), 1, close_radius, 1);
-
-      // max(original, closed*.70), then exact 13x13 average smoothing.
-      set_plane_constants();
-      context->CSSetShader(depth_plane_combine_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *combine_srvs[2] = {plane_band_srv.Get(), plane_work_b_srv.Get()};
-      context->CSSetShaderResources(0, 2, combine_srvs);
-      context->CSSetUnorderedAccessViews(0, 1, plane_work_a_uav.GetAddressOf(), nullptr);
-      context->Dispatch(gx, gy, 1);
-      context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
-      context->CSSetShaderResources(0, 2, null_srvs3);
-      filter(plane_work_a_srv.Get(), plane_work_b_uav.Get(), 0, smooth_radius, 2);
-      filter(plane_work_b_srv.Get(), plane_work_a_uav.Get(), 1, smooth_radius, 2);
-
-      // Weighted mean of the actual Bestv2 raw shift field.
-      set_plane_constants();
-      context->CSSetShader(depth_plane_reduce_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *reduce_srvs[3] = {depth_srv.Get(), plane_work_a_srv.Get(), subject_srv.Get()};
-      context->CSSetShaderResources(0, 3, reduce_srvs);
-      context->CSSetUnorderedAccessViews(0, 1, plane_group_uav.GetAddressOf(), nullptr);
-      context->Dispatch(gx, gy, 1);
-      context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
-      context->CSSetShaderResources(0, 3, null_srvs3);
-
-      context->CSSetShader(depth_plane_resolve_cs.Get(), nullptr, 0);
-      ID3D11UnorderedAccessView *resolve_uavs[2] = {plane_group_uav.Get(), subject_uav.Get()};
-      context->CSSetUnorderedAccessViews(0, 2, resolve_uavs, nullptr);
-      context->Dispatch(1, 1, 1);
-      context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
-    }
-
     estimate_result make_result(bool completed_frame_valid = false, std::uint64_t completed_frame_id = 0, bool inference_enqueued = false, std::uint64_t enqueued_frame_id = 0) {
       estimate_result r;
       r.depth = output_srv();
       r.subject = subject_srv;
-      if (exact_plane_lock) {
-        r.plane_lock = plane_work_a_srv;
-      }
       r.ema_motion_mask = ema_motion_mask_srv;
       r.raw_model_depth = tensor_out_srv;
       r.raw_width = target_w;
@@ -1681,9 +1529,9 @@ namespace models {
       return make_result(true, completed_frame_id);
     }
 
-    // (Re)build the two constant buffers. All contents are session-constant once the model
-    // resolution is fixed, so they are immutable buffers created once -- rebuilt only if
-    // Rebuild if capture color encoding changes during a display/mode transition.
+    // (Re)build the depth constant buffer. Its contents are session-constant once the model
+    // resolution is fixed, so it is immutable and rebuilt only if capture color encoding changes
+    // during a display/mode transition.
     void ensure_cbuffers(input_color_space color_space) {
       const int color_mode = (int) color_space;
       if (cb_color_mode == color_mode && cbuffer) {
@@ -1693,16 +1541,15 @@ namespace models {
 
       D3D11_BUFFER_DESC cb_desc = {};
       cb_desc.Usage = D3D11_USAGE_IMMUTABLE;
-      cb_desc.ByteWidth = 80;  // shared depth-pass cbuffer (20 floats/uints; see below)
+      cb_desc.ByteWidth = 48;  // shared depth-pass cbuffer (12 floats/uints; see below)
       cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
-      // Shared depth-pass constants, 20 scalars = 5 float4 registers. THIS fill is the
+      // Shared depth-pass constants, 12 scalars = 3 float4 registers. THIS fill is the
       // single source of truth for the canonical layout in
       // shaders/directx/include/depth_constants.hlsl -- every cbf[N] below must stay
       // slot-for-slot with the include (which every depth shader #includes). To add a
-      // field: append it here AND to the include. Slots 13-14 are reserved so the subject
-      // fields retain their established offsets.
-      uint32_t cb[20] = {};
+      // field: append it here AND to the include.
+      uint32_t cb[12] = {};
       float *cbf = (float *) cb;
       cb[0] = (uint32_t) target_w;
       cb[1] = (uint32_t) target_h;
@@ -1712,10 +1559,9 @@ namespace models {
       cb[5] = reduce_groups * 256u;  // total threads for the reduction grid-stride
       cbf[6] = ema_edge_change;
       cbf[7] = ema_edge_gradient;
-      cbf[8] = (float) ema_edge_dilation;
-      cbf[9] = ema_edge_strength;
-      cbf[15] = subject_recenter;  // subject recenter strength (depth_subject_resolve_cs)
-      cbf[18] = subject_stretch ? 1.0f : 0.0f;
+      cbf[8] = ema_edge_strength;
+      cbf[9] = subject_recenter;  // subject recenter strength (depth_subject_resolve_cs)
+      cbf[10] = subject_stretch ? 1.0f : 0.0f;
       D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
       cbuffer.Reset();
       device->CreateBuffer(&cb_desc, &sd, &cbuffer);
@@ -1783,8 +1629,7 @@ namespace models {
         context->CSSetUnorderedAccessViews(0, 3, null_uav2, nullptr);
       }
 
-      // Snapshot the complete previous depth before any thread writes the new result. The
-      // experimental mask reads neighborhoods, so an in-place read/write pass would be racy.
+      // Snapshot the complete previous depth before any thread writes the new result.
       context->CopyResource(depth_previous_tex.Get(), depth_tex.Get());
 
       const UINT clear_mask[4] = {0u, 0u, 0u, 0u};
@@ -1849,8 +1694,6 @@ namespace models {
 
         ID3D11UnorderedAccessView *null_uavs2[3] = {nullptr, nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 3, null_uavs2, nullptr);
-
-        run_exact_plane_lock();
 
         // Ground-truth log for the original Bestv2 reference's LOW=near convention. Apollo is
         // HIGH=near, so print both subject values for direct comparison. Opt-in via APOLLO_SUBJDBG (NOT
@@ -2036,8 +1879,8 @@ namespace models {
                        SUCCEEDED(device->CreateUnorderedAccessView(depth_tex.Get(), nullptr, &depth_uav)) &&
                        SUCCEEDED(device->CreateShaderResourceView(depth_tex.Get(), nullptr, &depth_srv));
 
-        // Immutable previous-depth snapshot for deterministic neighborhood tests. Reading the
-        // in-place EMA output while adjacent threads write it would make dilation race-dependent.
+        // Immutable previous-depth snapshot for motion-edge classification and EMA input. Keep
+        // the history SRV separate from the depth UAV that receives the current frame.
         auto previous_desc = tex_desc;
         previous_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         resources_ok = resources_ok &&
@@ -2052,44 +1895,6 @@ namespace models {
                        SUCCEEDED(device->CreateUnorderedAccessView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_uav)) &&
                        SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_srv));
 
-        if (exact_plane_lock) {
-          auto create_plane_texture = [&](Microsoft::WRL::ComPtr<ID3D11Texture2D> &tex, Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> &uav, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &srv) {
-            return SUCCEEDED(device->CreateTexture2D(&tex_desc, nullptr, &tex)) &&
-                   SUCCEEDED(device->CreateUnorderedAccessView(tex.Get(), nullptr, &uav)) &&
-                   SUCCEEDED(device->CreateShaderResourceView(tex.Get(), nullptr, &srv));
-          };
-          bool ok = create_plane_texture(plane_band_tex, plane_band_uav, plane_band_srv) &&
-                    create_plane_texture(plane_work_a_tex, plane_work_a_uav, plane_work_a_srv) &&
-                    create_plane_texture(plane_work_b_tex, plane_work_b_uav, plane_work_b_srv);
-
-          const UINT groups_x = ((UINT) target_w + 15u) / 16u;
-          const UINT groups_y = ((UINT) target_h + 15u) / 16u;
-          plane_group_count = groups_x * groups_y;
-          D3D11_BUFFER_DESC pbd = {};
-          pbd.Usage = D3D11_USAGE_DEFAULT;
-          pbd.ByteWidth = plane_group_count * sizeof(float) * 2u;
-          pbd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-          pbd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-          pbd.StructureByteStride = sizeof(float) * 2u;
-          ok = ok && SUCCEEDED(device->CreateBuffer(&pbd, nullptr, &plane_group_buf)) &&
-               SUCCEEDED(device->CreateUnorderedAccessView(plane_group_buf.Get(), nullptr, &plane_group_uav));
-          if (!ok) {
-            BOOST_LOG(warning) << "Bestv2 subject-plane-lock resource creation failed; using the depth-band fallback.";
-            exact_plane_lock = false;
-            plane_band_tex.Reset();
-            plane_band_uav.Reset();
-            plane_band_srv.Reset();
-            plane_work_a_tex.Reset();
-            plane_work_a_uav.Reset();
-            plane_work_a_srv.Reset();
-            plane_work_b_tex.Reset();
-            plane_work_b_uav.Reset();
-            plane_work_b_srv.Reset();
-            plane_group_buf.Reset();
-            plane_group_uav.Reset();
-          }
-        }
-
         if (!resources_ok) {
           BOOST_LOG(error) << "Depth estimator D3D11 resource creation failed; retrying on a later frame.";
           target_w = target_h = 0;
@@ -2102,15 +1907,6 @@ namespace models {
         const UINT clear_uint[4] = {0u, 0u, 0u, 0u};
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_uint);
         depth_history_valid = false;
-        if (plane_band_uav) {
-          context->ClearUnorderedAccessViewFloat(plane_band_uav.Get(), clear_color);
-        }
-        if (plane_work_a_uav) {
-          context->ClearUnorderedAccessViewFloat(plane_work_a_uav.Get(), clear_color);
-        }
-        if (plane_work_b_uav) {
-          context->ClearUnorderedAccessViewFloat(plane_work_b_uav.Get(), clear_color);
-        }
 
         auto res1 = cuda.cuGraphicsD3D11RegisterResource(&cuda_in_res, tensor_in_buf.Get(), 0);
         auto res2 = cuda.cuGraphicsD3D11RegisterResource(&cuda_out_res, tensor_out_buf.Get(), 0);
