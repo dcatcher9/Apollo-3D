@@ -2,6 +2,7 @@
 
 #include "src/platform/common.h"
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -59,4 +60,16 @@ namespace ar_glasses {
 
   /** Monitor approved AR displays and own the local virtual-desktop presentation lifecycle. */
   std::unique_ptr<platf::deinit_t> init();
+
+  /** Reserve virtual-display ownership for a remote launch and synchronously stop local AR. */
+  bool remote_virtual_display_starting(std::chrono::milliseconds connect_timeout);
+
+  /** Mark the reserved remote virtual display as actively streamed. */
+  void remote_virtual_display_active();
+
+  /** Release remote ownership after pause, termination, or launch failure. */
+  void remote_virtual_display_ended();
+
+  /** Return whether an active or connecting remote virtual display currently owns presentation. */
+  bool remote_virtual_display_blocks_local();
 }  // namespace ar_glasses

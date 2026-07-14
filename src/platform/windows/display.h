@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <stop_token>
 
@@ -394,6 +396,7 @@ namespace platf::dxgi {
     std::string source_display_name;
     RECT target_rect {};
     int target_refresh_millihz = 60000;
+    bool hdr = false;
     int sbs_mode = ::video::SBS_OFF;
     config::video_t::sbs_t sbs_config {};
     struct target_t {
@@ -402,6 +405,7 @@ namespace platf::dxgi {
       std::string display_name;
     };
     std::shared_ptr<target_t> live_target;
+    std::shared_ptr<std::atomic<std::uint64_t>> presented_frames;
   };
 
   enum class local_presenter_result_e {

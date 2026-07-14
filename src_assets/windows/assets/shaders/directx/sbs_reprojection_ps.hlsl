@@ -31,20 +31,10 @@ struct PS_INPUT {
 
 #include "include/sbs_warp_common.hlsl"
 
-// Silhouette-stable depth read: a 2x2 spread of taps so any depth step spans ~2.5 probe
-// steps of the reprojection search, in BOTH axes. The normalized model depth is texel-sharp;
-// read directly, a silhouette transition is only ~1 probe step wide horizontally -- the zero-
-// crossing detection then flips with probe phase pixel to pixel -- and a diagonal silhouette
-// is a texel staircase vertically, so adjacent ROWS resolve the contested strip differently
-// (the dotted/mesh fringe along occlusion edges). Widening the transition in x keeps g()
-// continuous and the lerped crossings stable; widening in y turns the row staircase into a
-// smooth diagonal. Costs ~6px of silhouette softness -- still ~10x sharper than pre-guided.
-// ofs = 0.75 / depth texture dims, computed once per pixel in Reproject.
-float SampleDepth(float sx, float sy, float2 ofs) {
-    return 0.25f * (DepthTexture.SampleLevel(LinearSampler, float2(sx - ofs.x, sy - ofs.y), 0)
-                  + DepthTexture.SampleLevel(LinearSampler, float2(sx + ofs.x, sy - ofs.y), 0)
-                  + DepthTexture.SampleLevel(LinearSampler, float2(sx - ofs.x, sy + ofs.y), 0)
-                  + DepthTexture.SampleLevel(LinearSampler, float2(sx + ofs.x, sy + ofs.y), 0));
+// depth_warp_prefilter_cs folds the former four-tap silhouette-width kernel once per completed
+// model depth. Each full-resolution search probe therefore needs only this single lookup.
+float SampleDepth(float sx, float sy) {
+    return DepthTexture.SampleLevel(LinearSampler, float2(sx, sy), 0);
 }
 
 // Find the source U coordinate that reprojects onto `uv` for one eye, choosing the
@@ -61,8 +51,6 @@ float2 Reproject(float2 uv, float eyeSign) {
     float4 s1 = SubjectState[1];
     float4 s2 = SubjectState[2];
     bool shaped = s0.w > 0.5f;
-    uint dw, dh;
-    DepthTexture.GetDimensions(dw, dh);
     // Bestv2's calibrated bands are SOURCE-COLOR pixel shifts. Normalizing by the smaller
     // inference-depth width amplified Apollo whenever the model texture was downscaled, while
     // Parallax uses the eye/source width. Depth dimensions remain correct for tap offsets.
@@ -80,9 +68,6 @@ float2 Reproject(float2 uv, float eyeSign) {
     float startX = uv.x - searchRadius;
     float stepX  = (2.0f * searchRadius) / (float)steps;
 
-    // Depth-read tap spread (see SampleDepth), hoisted out of the probe loop.
-    float2 ofs = float2(0.75f / (float) dw, 0.75f / (float) dh);
-
     // A source at position x forward-warps to out(x) = x - eyeSign * parallax(depth(x)).
     // We want out(x) == uv.x, i.e. g(x) = (x - uv.x) - eyeSign * parallax(depth(x)) == 0.
     // Marching x and watching g() cross zero locates each reprojecting source; we keep
@@ -99,7 +84,7 @@ float2 Reproject(float2 uv, float eyeSign) {
     float bgDepth = 2.0f;  // above any normalized depth (<= 1)
 
     float prevX = startX;
-    float prevD = SampleDepth(prevX, uv.y, ofs);
+    float prevD = SampleDepth(prevX, uv.y);
     float planeMask = 0.0f;
     if (subject_plane_lock > 0.0f) {
         // The exact mask is 13x13-smoothed and intentionally low-frequency. Sample it once at
@@ -114,7 +99,7 @@ float2 Reproject(float2 uv, float eyeSign) {
     [loop]
     for (int i = 1; i <= steps; i++) {
         float x = startX + stepX * i;
-        float d = SampleDepth(x, uv.y, ofs);
+        float d = SampleDepth(x, uv.y);
         float g = (x - uv.x) - eyeSign * DepthParallax(
             d, planeMask, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight);
 

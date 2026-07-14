@@ -805,17 +805,19 @@ namespace sbs_bench {
     auto mask_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "mask_ps", "ps_5_0");
     auto sharpen_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_sharpen_ps.hlsl", "main_ps", "ps_5_0");
     auto coverage_cs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_forward_coverage_cs.hlsl", "main", "cs_5_0");
-    if (!vs_blob || !ps_blob || !mask_ps_blob || !sharpen_ps_blob || !coverage_cs_blob) {
+    auto warp_prefilter_cs_blob = compile(SUNSHINE_SHADERS_DIR "/depth_warp_prefilter_cs.hlsl", "main", "cs_5_0");
+    if (!vs_blob || !ps_blob || !mask_ps_blob || !sharpen_ps_blob || !coverage_cs_blob || !warp_prefilter_cs_blob) {
       return 6;
     }
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11PixelShader> ps, mask_ps, sharpen_ps;
-    ComPtr<ID3D11ComputeShader> coverage_cs;
+    ComPtr<ID3D11ComputeShader> coverage_cs, warp_prefilter_cs;
     dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &vs);
     dev->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &ps);
     dev->CreatePixelShader(mask_ps_blob->GetBufferPointer(), mask_ps_blob->GetBufferSize(), nullptr, &mask_ps);
     dev->CreatePixelShader(sharpen_ps_blob->GetBufferPointer(), sharpen_ps_blob->GetBufferSize(), nullptr, &sharpen_ps);
     dev->CreateComputeShader(coverage_cs_blob->GetBufferPointer(), coverage_cs_blob->GetBufferSize(), nullptr, &coverage_cs);
+    dev->CreateComputeShader(warp_prefilter_cs_blob->GetBufferPointer(), warp_prefilter_cs_blob->GetBufferSize(), nullptr, &warp_prefilter_cs);
 
     ComPtr<ID3D11SamplerState> sampler;
     {
@@ -848,6 +850,9 @@ namespace sbs_bench {
     D3D11_VIEWPORT vp = {};
     UINT sbs_w = 0, sbs_h = 0;
     ComPtr<ID3D11Texture2D> depth_stage;  // dump_depth staging cache (depth size is constant)
+    ComPtr<ID3D11Texture2D> warp_depth_tex;
+    ComPtr<ID3D11UnorderedAccessView> warp_depth_uav;
+    ComPtr<ID3D11ShaderResourceView> warp_depth_srv;
     ComPtr<ID3D11Texture2D> ema_mask_stage;
     ComPtr<ID3D11Buffer> raw_depth_stage;
     bool raw_shape_written = false;
@@ -1057,13 +1062,55 @@ namespace sbs_bench {
         ctx->Begin(warp_disjoint.Get());
         ctx->End(warp_start.Get());
       }
+      ID3D11ShaderResourceView *warp_depth = est.depth.Get();
+      if (est.depth) {
+        ComPtr<ID3D11Resource> depth_resource;
+        est.depth->GetResource(&depth_resource);
+        ComPtr<ID3D11Texture2D> depth_texture;
+        if (FAILED(depth_resource.As(&depth_texture))) {
+          BOOST_LOG(error) << "sbs-bench: warp prefilter input is not a texture";
+          return 6;
+        }
+        D3D11_TEXTURE2D_DESC depth_desc {};
+        depth_texture->GetDesc(&depth_desc);
+        bool recreate_warp_depth = !warp_depth_tex || !warp_depth_uav || !warp_depth_srv;
+        if (!recreate_warp_depth) {
+          D3D11_TEXTURE2D_DESC current_desc {};
+          warp_depth_tex->GetDesc(&current_desc);
+          recreate_warp_depth = current_desc.Width != depth_desc.Width ||
+                                current_desc.Height != depth_desc.Height ||
+                                current_desc.Format != depth_desc.Format;
+        }
+        if (recreate_warp_depth) {
+          depth_desc.Usage = D3D11_USAGE_DEFAULT;
+          depth_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+          depth_desc.CPUAccessFlags = 0;
+          depth_desc.MiscFlags = 0;
+          warp_depth_tex.Reset();
+          warp_depth_uav.Reset();
+          warp_depth_srv.Reset();
+          if (FAILED(dev->CreateTexture2D(&depth_desc, nullptr, &warp_depth_tex)) || FAILED(dev->CreateUnorderedAccessView(warp_depth_tex.Get(), nullptr, &warp_depth_uav)) || FAILED(dev->CreateShaderResourceView(warp_depth_tex.Get(), nullptr, &warp_depth_srv))) {
+            BOOST_LOG(error) << "sbs-bench: warp prefilter resource creation failed";
+            return 6;
+          }
+        }
+        ctx->CSSetShader(warp_prefilter_cs.Get(), nullptr, 0);
+        ctx->CSSetShaderResources(0, 1, est.depth.GetAddressOf());
+        ctx->CSSetUnorderedAccessViews(0, 1, warp_depth_uav.GetAddressOf(), nullptr);
+        ctx->Dispatch((depth_desc.Width + 15u) / 16u, (depth_desc.Height + 15u) / 16u, 1u);
+        ID3D11UnorderedAccessView *null_prefilter_uav = nullptr;
+        ID3D11ShaderResourceView *null_prefilter_srv = nullptr;
+        ctx->CSSetUnorderedAccessViews(0, 1, &null_prefilter_uav, nullptr);
+        ctx->CSSetShaderResources(0, 1, &null_prefilter_srv);
+        warp_depth = warp_depth_srv.Get();
+      }
       auto dispatch_coverage = [&](ID3D11ComputeShader *shader,
                                    ID3D11UnorderedAccessView *coverage_view) {
         const UINT clear_winner[4] = {0, 0, 0, 0};
         ctx->ClearUnorderedAccessViewUint(coverage_view, clear_winner);
         ctx->CSSetShader(shader, nullptr, 0);
         ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
-        ID3D11ShaderResourceView *cs_srvs[] = {in_srv.Get(), est.depth.Get(), est.subject.Get(), nullptr, est.plane_lock.Get()};
+        ID3D11ShaderResourceView *cs_srvs[] = {in_srv.Get(), warp_depth, est.subject.Get(), nullptr, est.plane_lock.Get()};
         ctx->CSSetShaderResources(0, 5, cs_srvs);
         ctx->CSSetUnorderedAccessViews(0, 1, &coverage_view, nullptr);
         ctx->CSSetConstantBuffers(2, 1, repro_cb.GetAddressOf());
@@ -1080,7 +1127,7 @@ namespace sbs_bench {
       ctx->RSSetViewports(1, &vp);
       ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
 
-      ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), est.depth.Get(), est.subject.Get(), nullptr, est.plane_lock.Get()};
+      ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), warp_depth, est.subject.Get(), nullptr, est.plane_lock.Get()};
       ctx->PSSetShaderResources(0, 5, srvs);
       ID3D11Buffer *cb = est.depth ? repro_cb.Get() : pass_cb.Get();
       ctx->PSSetConstantBuffers(2, 1, &cb);
@@ -1138,8 +1185,11 @@ namespace sbs_bench {
       ctx->RSSetViewports(1, &vp);
       ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
       ID3D11ShaderResourceView *mask_srvs[] = {
-        in_srv.Get(), est.depth.Get(), est.subject.Get(),
-        est.depth ? coverage_srv.Get() : nullptr, est.plane_lock.Get()
+        in_srv.Get(),
+        warp_depth,
+        est.subject.Get(),
+        est.depth ? coverage_srv.Get() : nullptr,
+        est.plane_lock.Get()
       };
       ctx->PSSetShaderResources(0, 5, mask_srvs);
       ctx->PSSetConstantBuffers(2, 1, &cb);

@@ -40,6 +40,7 @@
 #include "zwpad.h"
 
 #ifdef _WIN32
+  #include "platform/windows/ar_glasses.h"
   #include "platform/windows/virtual_display.h"
 #endif
 
@@ -1253,6 +1254,15 @@ namespace nvhttp {
 
     bool no_active_sessions = rtsp_stream::session_count() == 0;
 
+#ifdef _WIN32
+    if (no_active_sessions && proc::proc.virtual_display && (appid == current_appid || (!appuuid_str.empty() && appuuid_str == current_app_uuid)) && !ar_glasses::remote_virtual_display_starting(config::stream.ping_timeout)) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Local AR display ownership could not be released");
+      return;
+    }
+#endif
+
     if (is_input_only) {
       BOOST_LOG(info) << "Launching input only session..."sv;
 
@@ -1293,7 +1303,7 @@ namespace nvhttp {
           }
         }
       } else {
-        const auto& apps = proc::proc.get_apps();
+        const auto apps = proc::proc.get_apps();
         auto app_iter = std::find_if(apps.begin(), apps.end(), [&appid_str, &appuuid_str](const auto _app) {
           return _app.id == appid_str || _app.uuid == appuuid_str;
         });
@@ -1436,6 +1446,15 @@ namespace nvhttp {
 
       return;
     }
+
+#ifdef _WIN32
+    if (no_active_sessions && proc::proc.virtual_display && !ar_glasses::remote_virtual_display_starting(config::stream.ping_timeout)) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Local AR display ownership could not be released");
+      return;
+    }
+#endif
 
     tree.put("root.<xmlattr>.status_code", 200);
     tree.put(

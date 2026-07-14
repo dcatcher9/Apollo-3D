@@ -15,6 +15,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <cwctype>
 #include <filesystem>
@@ -42,6 +43,97 @@ namespace ar_glasses {
     constexpr auto topology_poll_interval = 250ms;
     constexpr auto topology_debounce = 750ms;
     constexpr auto failed_session_retry = 2s;
+    constexpr auto ownership_release_timeout = 10s;
+
+    std::mutex ownership_mutex;
+    std::condition_variable ownership_changed;
+    bool local_session_present = false;
+    bool remote_session_active = false;
+    std::chrono::steady_clock::time_point remote_session_pending_until {};
+    std::optional<std::stop_source> local_session_construction_stop;
+
+    bool remote_blocks_local_locked(std::chrono::steady_clock::time_point now) {
+      return remote_session_active || now < remote_session_pending_until;
+    }
+
+    struct hdr_state_t {
+      bool known = false;
+      bool supported = false;
+      bool user_enabled = false;
+      bool active = false;
+      bool limited_by_policy = false;
+      UINT32 bits_per_color = 0;
+    };
+
+    hdr_state_t query_hdr_state(const LUID &adapter_id, UINT32 target_id) {
+      DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 info2 {};
+      info2.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2;
+      info2.header.size = sizeof(info2);
+      info2.header.adapterId = adapter_id;
+      info2.header.id = target_id;
+      if (DisplayConfigGetDeviceInfo(&info2.header) == ERROR_SUCCESS) {
+        return {
+          true,
+          info2.highDynamicRangeSupported != 0,
+          info2.highDynamicRangeUserEnabled != 0,
+          info2.activeColorMode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR,
+          info2.advancedColorLimitedByPolicy != 0,
+          info2.bitsPerColorChannel,
+        };
+      }
+
+      // Windows 10 exposes only the combined Advanced Color query. On an HDR display its
+      // enabled state is also the active HDR state, so it remains a valid compatibility fallback.
+      DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO info {};
+      info.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+      info.header.size = sizeof(info);
+      info.header.adapterId = adapter_id;
+      info.header.id = target_id;
+      if (DisplayConfigGetDeviceInfo(&info.header) == ERROR_SUCCESS) {
+        return {
+          true,
+          info.advancedColorSupported != 0,
+          info.advancedColorEnabled != 0,
+          info.advancedColorEnabled != 0,
+          info.advancedColorForceDisabled != 0,
+          info.bitsPerColorChannel,
+        };
+      }
+      return {};
+    }
+
+    bool set_hdr_state(const LUID &adapter_id, UINT32 target_id, bool enabled) {
+      DISPLAYCONFIG_SET_HDR_STATE hdr {};
+      hdr.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE;
+      hdr.header.size = sizeof(hdr);
+      hdr.header.adapterId = adapter_id;
+      hdr.header.id = target_id;
+      hdr.enableHdr = enabled;
+      if (DisplayConfigSetDeviceInfo(&hdr.header) == ERROR_SUCCESS) {
+        return true;
+      }
+
+      DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE advanced_color {};
+      advanced_color.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE;
+      advanced_color.header.size = sizeof(advanced_color);
+      advanced_color.header.adapterId = adapter_id;
+      advanced_color.header.id = target_id;
+      advanced_color.enableAdvancedColor = enabled;
+      return DisplayConfigSetDeviceInfo(&advanced_color.header) == ERROR_SUCCESS;
+    }
+
+    std::optional<float> query_sdr_white_nits(const LUID &adapter_id, UINT32 target_id) {
+      DISPLAYCONFIG_SDR_WHITE_LEVEL white_level {};
+      white_level.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+      white_level.header.size = sizeof(white_level);
+      white_level.header.adapterId = adapter_id;
+      white_level.header.id = target_id;
+      if (DisplayConfigGetDeviceInfo(&white_level.header) != ERROR_SUCCESS) {
+        return std::nullopt;
+      }
+      // Windows encodes SDR reference white relative to 80 nits, with 1000 == 80 nits.
+      return (float) white_level.SDRWhiteLevel * 80.0f / 1000.0f;
+    }
 
     struct target_state_t {
       std::string device_id;
@@ -49,6 +141,9 @@ namespace ar_glasses {
       std::string friendly_name;
       std::string gdi_name;
       std::string desktop_topology;
+      LUID adapter_id {};
+      UINT32 target_id = 0;
+      hdr_state_t hdr;
       RECT rect {};
       int refresh_millihz = 60000;
       presentation_mode_e mode = presentation_mode_e::unsupported;
@@ -58,7 +153,11 @@ namespace ar_glasses {
                gdi_name == other.gdi_name && desktop_topology == other.desktop_topology &&
                rect.left == other.rect.left && rect.top == other.rect.top &&
                rect.right == other.rect.right && rect.bottom == other.rect.bottom &&
-               refresh_millihz == other.refresh_millihz && mode == other.mode;
+               refresh_millihz == other.refresh_millihz && mode == other.mode &&
+               hdr.known == other.hdr.known &&
+               hdr.supported == other.hdr.supported &&
+               hdr.active == other.hdr.active &&
+               hdr.limited_by_policy == other.hdr.limited_by_policy;
       }
     };
 
@@ -83,7 +182,11 @@ namespace ar_glasses {
       return left->device_path == right->device_path &&
              left_width == right_width && left_height == right_height &&
              left->refresh_millihz == right->refresh_millihz && left->mode == right->mode &&
-             left->desktop_topology == right->desktop_topology;
+             left->desktop_topology == right->desktop_topology &&
+             left->hdr.known == right->hdr.known &&
+             left->hdr.supported == right->hdr.supported &&
+             left->hdr.active == right->hdr.active &&
+             left->hdr.limited_by_policy == right->hdr.limited_by_policy;
     }
 
     bool contains_case_insensitive(std::wstring_view haystack, std::wstring_view needle) {
@@ -283,28 +386,16 @@ namespace ar_glasses {
       return fallback.str();
     }
 
-    std::vector<target_state_t> enumerate_targets() {
-      UINT32 path_count = 0;
-      UINT32 mode_count = 0;
-      if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count) != ERROR_SUCCESS) {
-        return {};
+    std::optional<std::vector<target_state_t>> enumerate_targets() {
+      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+      if (!VDISPLAY::queryActiveDisplayConfig(paths, modes)) {
+        return std::nullopt;
       }
 
-      std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
-      std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
-      if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(), &mode_count, modes.data(), nullptr) != ERROR_SUCCESS) {
-        return {};
-      }
-
-      paths.resize(path_count);
-      modes.resize(mode_count);
       const auto virtual_sources = VDISPLAY::matchDisplay(virtual_display_driver_name);
       std::vector<target_state_t> targets;
       for (const auto &path : paths) {
-        // IddCx/SudoVDA outputs are virtual sources, never physical AR presentation sinks.
-        if (path.targetInfo.outputTechnology == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_WIRED) {
-          continue;
-        }
         DISPLAYCONFIG_SOURCE_DEVICE_NAME source_name {};
         source_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
         source_name.header.size = sizeof(source_name);
@@ -360,6 +451,9 @@ namespace ar_glasses {
           state.friendly_name = state.device_id;
         }
         state.gdi_name = platf::to_utf8(source_name.viewGdiDeviceName);
+        state.adapter_id = path.targetInfo.adapterId;
+        state.target_id = path.targetInfo.id;
+        state.hdr = query_hdr_state(state.adapter_id, state.target_id);
         state.rect.left = source_mode.position.x;
         state.rect.top = source_mode.position.y;
         state.rect.right = source_mode.position.x + (LONG) source_mode.width;
@@ -419,9 +513,20 @@ namespace ar_glasses {
 
     std::optional<target_state_t> find_target(
       std::wstring_view required_device_path = {},
-      std::wstring_view preferred_device_path = {}
+      std::wstring_view preferred_device_path = {},
+      bool *query_succeeded = nullptr
     ) {
-      auto targets = enumerate_targets();
+      if (query_succeeded) {
+        *query_succeeded = false;
+      }
+      auto targets_result = enumerate_targets();
+      if (!targets_result) {
+        return std::nullopt;
+      }
+      if (query_succeeded) {
+        *query_succeeded = true;
+      }
+      auto &targets = *targets_result;
       if (!required_device_path.empty()) {
         const auto match = std::find_if(targets.begin(), targets.end(), [&](const auto &target) {
           return target.device_path == required_device_path;
@@ -505,24 +610,11 @@ namespace ar_glasses {
       }
     }
 
-    std::optional<std::wstring> refresh_virtual_display_name(std::string_view preferred_name) {
-      const auto matches = VDISPLAY::matchDisplay(virtual_display_driver_name);
-      std::vector<std::wstring> matching_modes;
-      for (const auto &candidate : matches) {
-        DEVMODEW mode {};
-        if (!VDISPLAY::getDeviceSettings(candidate.c_str(), mode) || mode.dmPelsWidth != source_width || mode.dmPelsHeight != source_height) {
-          continue;
-        }
-        if (platf::to_utf8(candidate) == preferred_name) {
-          return candidate;
-        }
-        matching_modes.emplace_back(candidate);
-      }
-
-      if (matching_modes.size() == 1) {
-        return matching_modes.front();
-      }
-      return std::nullopt;
+    std::optional<std::wstring> refresh_virtual_display_name(
+      const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity
+    ) {
+      auto name = VDISPLAY::getDisplayName(identity.AdapterLuid, identity.TargetId);
+      return name.empty() ? std::nullopt : std::optional<std::wstring>(std::move(name));
     }
 
     std::optional<target_state_t> isolate_physical_output(
@@ -546,19 +638,11 @@ namespace ar_glasses {
         return std::nullopt;
       }
 
-      UINT32 path_count = 0;
-      UINT32 mode_count = 0;
-      if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count) != ERROR_SUCCESS) {
+      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+      if (!VDISPLAY::queryActiveDisplayConfig(paths, modes)) {
         return std::nullopt;
       }
-
-      std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
-      std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
-      if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(), &mode_count, modes.data(), nullptr) != ERROR_SUCCESS) {
-        return std::nullopt;
-      }
-      paths.resize(path_count);
-      modes.resize(mode_count);
 
       size_t physical_mode_index = std::numeric_limits<size_t>::max();
       size_t virtual_mode_index = std::numeric_limits<size_t>::max();
@@ -623,23 +707,33 @@ namespace ar_glasses {
       // Put the virtual source directly beside the rightmost interactive monitor so ordinary
       // mouse movement reaches it. The physical sink is moved beyond a large empty gap.
       auto &virtual_mode = modes[virtual_mode_index].sourceMode;
-      virtual_mode.position.x = anchor_right;
-      virtual_mode.position.y = anchor_top;
-
       auto &physical_mode = modes[physical_mode_index].sourceMode;
       const auto &primary_mode = modes[primary_mode_index].sourceMode;
       // Derive the placement from the live primary-monitor rectangle. A zero-length point contact
       // is considered a disconnected display island, so retain a one-pixel-wide segment at the
       // primary monitor's bottom-right corner. This remains correct when the primary resolution or
       // the surrounding monitor layout changes and does not depend on absolute desktop coordinates.
-      physical_mode.position.x = primary_mode.position.x + (LONG) primary_mode.width - 1;
-      physical_mode.position.y = primary_mode.position.y + (LONG) primary_mode.height;
+      const LONG isolated_x = primary_mode.position.x + (LONG) primary_mode.width - 1;
+      const LONG isolated_y = primary_mode.position.y + (LONG) primary_mode.height;
       const RECT isolated_rect {
-        physical_mode.position.x,
-        physical_mode.position.y,
-        physical_mode.position.x + (LONG) physical_mode.width,
-        physical_mode.position.y + (LONG) physical_mode.height,
+        isolated_x,
+        isolated_y,
+        isolated_x + (LONG) physical_mode.width,
+        isolated_y + (LONG) physical_mode.height,
       };
+
+      const bool already_isolated = virtual_mode.position.x == anchor_right &&
+                                    virtual_mode.position.y == anchor_top &&
+                                    physical_mode.position.x == isolated_x &&
+                                    physical_mode.position.y == isolated_y;
+      if (already_isolated) {
+        return find_target(target_device_path);
+      }
+
+      virtual_mode.position.x = anchor_right;
+      virtual_mode.position.y = anchor_top;
+      physical_mode.position.x = isolated_x;
+      physical_mode.position.y = isolated_y;
 
       const auto status = SetDisplayConfig(
         (UINT32) paths.size(),
@@ -681,19 +775,11 @@ namespace ar_glasses {
       const RECT &original_rect,
       const std::wstring &target_device_path
     ) {
-      UINT32 path_count = 0;
-      UINT32 mode_count = 0;
-      if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count) != ERROR_SUCCESS) {
+      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+      if (!VDISPLAY::queryActiveDisplayConfig(paths, modes)) {
         return false;
       }
-
-      std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
-      std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
-      if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(), &mode_count, modes.data(), nullptr) != ERROR_SUCCESS) {
-        return false;
-      }
-      paths.resize(path_count);
-      modes.resize(mode_count);
 
       bool found = false;
       for (const auto &path : paths) {
@@ -727,22 +813,193 @@ namespace ar_glasses {
       );
       if (status != ERROR_SUCCESS) {
         BOOST_LOG(warning) << "Restoring the AR display position failed with status "sv << status << '.';
+        return false;
       }
-      return status == ERROR_SUCCESS;
+      for (int attempt = 0; attempt < 10; ++attempt) {
+        if (const auto actual = find_target(target_device_path)) {
+          if (actual->rect.left == original_rect.left && actual->rect.top == original_rect.top) {
+            return true;
+          }
+        }
+        std::this_thread::sleep_for(50ms);
+      }
+      return false;
+    }
+
+    bool wait_for_virtual_display_mode(
+      std::wstring &display_name,
+      const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
+      std::wstring_view physical_device_path,
+      bool expected_hdr,
+      std::chrono::milliseconds timeout,
+      std::stop_token stop_token
+    ) {
+      const auto deadline = std::chrono::steady_clock::now() + timeout;
+      int stable_observations = 0;
+      while (!stop_token.stop_requested() && std::chrono::steady_clock::now() < deadline) {
+        bool topology_query_succeeded = false;
+        const auto physical_target = find_target(physical_device_path, {}, &topology_query_succeeded);
+        if (!topology_query_succeeded) {
+          stable_observations = 0;
+          std::this_thread::sleep_for(50ms);
+          continue;
+        }
+        if (!physical_target) {
+          BOOST_LOG(info) << "AR display disconnected during virtual-display color setup."sv;
+          return false;
+        }
+
+        const auto refreshed = refresh_virtual_display_name(identity);
+        if (!refreshed) {
+          stable_observations = 0;
+          std::this_thread::sleep_for(50ms);
+          continue;
+        }
+        display_name = *refreshed;
+
+        DEVMODEW mode {};
+        const bool geometry_ready = VDISPLAY::getDeviceSettings(display_name.c_str(), mode) &&
+                                    mode.dmPelsWidth == source_width &&
+                                    mode.dmPelsHeight == source_height;
+        const bool hdr_matches = VDISPLAY::getDisplayHDRByName(display_name.c_str()) == expected_hdr;
+        if (geometry_ready && hdr_matches) {
+          if (++stable_observations >= 3) {
+            return true;
+          }
+        } else {
+          stable_observations = 0;
+        }
+        for (int sleep_step = 0; sleep_step < 4 && !stop_token.stop_requested(); ++sleep_step) {
+          std::this_thread::sleep_for(50ms);
+        }
+      }
+      return false;
+    }
+
+    bool configure_virtual_display_hdr(
+      std::wstring &display_name,
+      const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
+      std::wstring_view physical_device_path,
+      bool enable_hdr,
+      bool &configured_hdr,
+      std::stop_token stop_token
+    ) {
+      configured_hdr = false;
+      // Match the remote-stream workaround: wait for the new mode, force Advanced Color off,
+      // then enable it after the first transition has settled. Windows often ignores a direct
+      // enable immediately after IddCx output creation or a resolution/topology change.
+      if (!wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, stop_token)) {
+        if (stop_token.stop_requested()) {
+          return false;
+        }
+        BOOST_LOG(warning) << "Local AR virtual display did not settle before HDR configuration."sv;
+      }
+      if (!VDISPLAY::setDisplayHDRByName(display_name.c_str(), false) && VDISPLAY::getDisplayHDRByName(display_name.c_str())) {
+        BOOST_LOG(error) << "Could not reset the local AR virtual display to SDR before HDR setup."sv;
+        return false;
+      }
+      if (!wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, stop_token)) {
+        if (stop_token.stop_requested()) {
+          return false;
+        }
+        BOOST_LOG(error) << "Local AR virtual display did not reach a stable SDR state."sv;
+        return false;
+      }
+      if (!enable_hdr) {
+        return true;
+      }
+
+      if (!VDISPLAY::setDisplayHDRByName(display_name.c_str(), true)) {
+        BOOST_LOG(warning) << "Windows rejected HDR for the local AR virtual display; using color-managed SDR presentation."sv;
+        return true;
+      }
+      if (!wait_for_virtual_display_mode(display_name, identity, physical_device_path, true, 15s, stop_token)) {
+        if (stop_token.stop_requested()) {
+          return false;
+        }
+        BOOST_LOG(warning) << "Local AR virtual display did not reach a stable HDR state; using color-managed SDR presentation."sv;
+        if (!VDISPLAY::setDisplayHDRByName(display_name.c_str(), false) || !wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, stop_token)) {
+          BOOST_LOG(error) << "Local AR virtual display could not recover to SDR after HDR setup failed."sv;
+          return false;
+        }
+        return true;
+      }
+      configured_hdr = true;
+      return true;
     }
 
     class local_session_t {
     public:
-      explicit local_session_t(const target_state_t &target):
+      explicit local_session_t(const target_state_t &target, std::stop_token controller_stop_token):
           original_target_rect_(target.rect),
           target_device_path_(target.device_path) {
         if (proc::vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
           BOOST_LOG(error) << "AR glasses detected, but the SudoVDA driver is unavailable."sv;
           return;
         }
+        auto active_target = target;
 
-        if (!config::video.adapter_name.empty()) {
-          VDISPLAY::setRenderAdapterByName(platf::from_utf8(config::video.adapter_name));
+        if (target.hdr.known) {
+          BOOST_LOG(info) << "AR display HDR: supported="sv << target.hdr.supported
+                          << " enabled="sv << target.hdr.user_enabled
+                          << " active="sv << target.hdr.active
+                          << " bits_per_color="sv << target.hdr.bits_per_color << '.';
+        } else {
+          BOOST_LOG(warning) << "Could not query the AR display's HDR capability; keeping SDR."sv;
+        }
+        if (target.hdr.known && !target.hdr.supported) {
+          BOOST_LOG(info) << "The AR display currently advertises SDR only. If the glasses have an "sv
+                          << "internal HDR10 mode, enable it in the glasses menu; Apollo will detect "sv
+                          << "the updated capability."sv;
+        }
+
+        auto physical_hdr = target.hdr;
+        if (physical_hdr.supported && !physical_hdr.limited_by_policy && !physical_hdr.active) {
+          if (set_hdr_state(target.adapter_id, target.target_id, true)) {
+            // HDR activation can renumber the target or change its mode. Wait for the stable PnP
+            // target rather than polling the now-stale source/target IDs from the original path.
+            const auto deadline = std::chrono::steady_clock::now() + 10s;
+            while (!controller_stop_token.stop_requested() &&
+                   std::chrono::steady_clock::now() < deadline && !physical_hdr.active) {
+              for (int sleep_step = 0; sleep_step < 4 && !controller_stop_token.stop_requested(); ++sleep_step) {
+                std::this_thread::sleep_for(50ms);
+              }
+              bool topology_query_succeeded = false;
+              const auto current = find_target(target_device_path_, {}, &topology_query_succeeded);
+              if (!topology_query_succeeded) {
+                continue;
+              }
+              if (!current) {
+                BOOST_LOG(info) << "AR display disconnected while enabling HDR."sv;
+                return;
+              }
+              if (current->mode != active_target.mode || current->rect.right - current->rect.left != active_target.rect.right - active_target.rect.left || current->rect.bottom - current->rect.top != active_target.rect.bottom - active_target.rect.top) {
+                BOOST_LOG(info) << "AR output mode changed while enabling HDR; waiting for the topology controller to rebuild the session."sv;
+                return;
+              }
+              active_target = *current;
+              physical_hdr = active_target.hdr;
+            }
+            if (controller_stop_token.stop_requested()) {
+              return;
+            }
+            if (!physical_hdr.active) {
+              BOOST_LOG(error) << "AR display did not enter HDR after Windows accepted the request."sv;
+              return;
+            }
+          } else {
+            BOOST_LOG(warning) << "The AR display reports HDR support, but Windows rejected HDR activation."sv;
+          }
+        }
+        if (physical_hdr.supported && physical_hdr.limited_by_policy) {
+          BOOST_LOG(warning) << "HDR on the AR display is disabled by Windows policy."sv;
+        }
+        target_hdr_active_ = physical_hdr.active;
+        if (physical_hdr.supported && !target_hdr_active_) {
+          BOOST_LOG(warning) << "The AR display supports HDR, but HDR is not active in its current mode."sv;
+        } else if (target_hdr_active_) {
+          BOOST_LOG(info) << "AR display HDR is active at "sv << physical_hdr.bits_per_color
+                          << " bits per color."sv;
         }
 
         std::string uuid_string = virtual_display_uuid;
@@ -750,13 +1007,15 @@ namespace ar_glasses {
         static_assert(sizeof(display_guid_) == sizeof(uuid));
         std::memcpy(&display_guid_, &uuid, sizeof(display_guid_));
 
-        virtual_display_name_ = VDISPLAY::createVirtualDisplay(
+        virtual_display_name_ = VDISPLAY::createVirtualDisplayOnAdapter(
           virtual_display_uuid,
           virtual_display_name,
           source_width,
           source_height,
-          target.refresh_millihz,
-          display_guid_
+          active_target.refresh_millihz,
+          display_guid_,
+          active_target.adapter_id,
+          &virtual_display_identity_
         );
         virtual_display_created_ = true;
         if (virtual_display_name_.empty()) {
@@ -764,14 +1023,10 @@ namespace ar_glasses {
           return;
         }
 
-        if (VDISPLAY::changeDisplaySettings(virtual_display_name_.c_str(), source_width, source_height, target.refresh_millihz) != DISP_CHANGE_SUCCESSFUL) {
+        if (VDISPLAY::changeDisplaySettings(virtual_display_name_.c_str(), source_width, source_height, active_target.refresh_millihz) != DISP_CHANGE_SUCCESSFUL) {
           BOOST_LOG(warning) << "The local AR virtual desktop rejected its requested mode."sv;
         }
-        if (VDISPLAY::getDisplayHDRByName(virtual_display_name_.c_str()) && !VDISPLAY::setDisplayHDRByName(virtual_display_name_.c_str(), false)) {
-          BOOST_LOG(warning) << "The local AR virtual desktop could not be switched to SDR."sv;
-        }
-
-        auto presentation_target = target;
+        auto presentation_target = active_target;
         if (const auto isolated_target = isolate_physical_output(virtual_display_name_, target_device_path_)) {
           presentation_target = *isolated_target;
           layout_repositioned_ = true;
@@ -780,16 +1035,82 @@ namespace ar_glasses {
         }
 
         // Let DXGI observe the newly attached output before capture initializes.
-        std::this_thread::sleep_for(300ms);
-        if (const auto refreshed = refresh_virtual_display_name(platf::to_utf8(virtual_display_name_))) {
+        for (int sleep_step = 0; sleep_step < 6 && !controller_stop_token.stop_requested(); ++sleep_step) {
+          std::this_thread::sleep_for(50ms);
+        }
+        if (controller_stop_token.stop_requested()) {
+          return;
+        }
+        if (const auto refreshed = refresh_virtual_display_name(virtual_display_identity_)) {
           virtual_display_name_ = *refreshed;
+        } else {
+          BOOST_LOG(error) << "Could not resolve the newly created local AR virtual display by its driver identity."sv;
+          return;
+        }
+        bool virtual_hdr_active = false;
+        if (!configure_virtual_display_hdr(
+              virtual_display_name_,
+              virtual_display_identity_,
+              target_device_path_,
+              target_hdr_active_,
+              virtual_hdr_active,
+              controller_stop_token
+            )) {
+          if (controller_stop_token.stop_requested()) {
+            return;
+          }
+          BOOST_LOG(error) << "Local AR virtual display color-mode configuration failed; rebuilding the session."sv;
+          return;
+        }
+        BOOST_LOG(info) << "Local AR source color mode: "sv
+                        << (virtual_hdr_active ? "HDR linear scRGB"sv : "SDR Rec.709"sv) << '.';
+        if (virtual_hdr_active) {
+          const auto source_white = query_sdr_white_nits(
+            virtual_display_identity_.AdapterLuid,
+            virtual_display_identity_.TargetId
+          );
+          const auto target_white = query_sdr_white_nits(active_target.adapter_id, active_target.target_id);
+          BOOST_LOG(info) << "Local AR HDR SDR-reference white: source="sv
+                          << (source_white ? std::to_string(*source_white) : "unknown"s)
+                          << " nits target="sv
+                          << (target_white ? std::to_string(*target_white) : "unknown"s) << " nits."sv;
+        }
+
+        // Advanced Color can renumber GDI sources. Refresh the stable physical PnP target before
+        // publishing the live rectangle/name consumed by the DXGI presenter.
+        if (const auto refreshed_target = find_target(target_device_path_)) {
+          const int refreshed_width = refreshed_target->rect.right - refreshed_target->rect.left;
+          const int refreshed_height = refreshed_target->rect.bottom - refreshed_target->rect.top;
+          const int expected_width = active_target.rect.right - active_target.rect.left;
+          const int expected_height = active_target.rect.bottom - active_target.rect.top;
+          if (refreshed_width != expected_width || refreshed_height != expected_height || refreshed_target->mode != active_target.mode) {
+            BOOST_LOG(info) << "AR output mode changed during virtual HDR setup; waiting for the topology controller."sv;
+            return;
+          }
+          active_target = *refreshed_target;
+          presentation_target = *refreshed_target;
+        } else {
+          BOOST_LOG(error) << "Could not refresh the physical AR output after virtual HDR setup."sv;
+          return;
+        }
+
+        // Advanced Color frequently lets Windows normalize the physical output back into the
+        // interactive row. Reapply isolation after every HDR transition instead of accepting the
+        // new position as the presentation target.
+        if (const auto isolated_target = isolate_physical_output(virtual_display_name_, target_device_path_)) {
+          presentation_target = *isolated_target;
+          layout_repositioned_ = true;
+        } else {
+          BOOST_LOG(error) << "Could not restore AR-output isolation after color-mode setup."sv;
+          return;
         }
 
         platf::dxgi::local_presenter_config_t presenter_config;
         presenter_config.source_display_name = platf::to_utf8(virtual_display_name_);
         presenter_config.target_rect = presentation_target.rect;
-        presenter_config.target_refresh_millihz = target.refresh_millihz;
-        presenter_config.sbs_mode = target.mode == presentation_mode_e::sbs_ai ?
+        presenter_config.target_refresh_millihz = presentation_target.refresh_millihz;
+        presenter_config.hdr = virtual_hdr_active;
+        presenter_config.sbs_mode = presentation_target.mode == presentation_mode_e::sbs_ai ?
                                       ::video::SBS_AI :
                                       ::video::SBS_OFF;
         presenter_config.sbs_config = config::video.sbs;
@@ -797,12 +1118,31 @@ namespace ar_glasses {
         live_target_->rect = presentation_target.rect;
         live_target_->display_name = presentation_target.gdi_name;
         presenter_config.live_target = live_target_;
+        presenter_config.presented_frames = std::make_shared<std::atomic<std::uint64_t>>(0);
 
         running_.store(true);
-        presenter_ = std::jthread([this, presenter_config](std::stop_token stop_token) mutable {
+        presenter_ = std::jthread([this, presenter_config, identity = virtual_display_identity_](std::stop_token stop_token) mutable {
+          auto reinit_window_started = std::chrono::steady_clock::now();
+          int consecutive_reinits = 0;
           while (!stop_token.stop_requested()) {
+            const auto presented_before = presenter_config.presented_frames->load(std::memory_order_relaxed);
             const auto result = platf::dxgi::run_local_presenter(presenter_config, stop_token);
             if (result != platf::dxgi::local_presenter_result_e::reinit) {
+              break;
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            const auto presented_after = presenter_config.presented_frames->load(std::memory_order_relaxed);
+            if (presented_after - presented_before >= 60) {
+              // Reset only after the attempt demonstrably presented a stable run of frames. Slow
+              // initialization failures no longer evade the retry breaker merely by taking time.
+              reinit_window_started = now;
+              consecutive_reinits = 0;
+            }
+            ++consecutive_reinits;
+            if (consecutive_reinits >= 12 || now - reinit_window_started >= 10s) {
+              BOOST_LOG(error) << "Local AR presenter did not recover after "sv
+                               << consecutive_reinits << " reinitializations; rebuilding the session."sv;
               break;
             }
 
@@ -810,7 +1150,7 @@ namespace ar_glasses {
             // Recreate only the capture/presentation resources; removing the virtual display here
             // would cause another topology change and an endless reinitialization loop.
             std::this_thread::sleep_for(100ms);
-            if (const auto refreshed = refresh_virtual_display_name(presenter_config.source_display_name)) {
+            if (const auto refreshed = refresh_virtual_display_name(identity)) {
               const auto refreshed_utf8 = platf::to_utf8(*refreshed);
               if (refreshed_utf8 != presenter_config.source_display_name) {
                 BOOST_LOG(info) << "Local AR virtual desktop was renumbered ["sv
@@ -818,6 +1158,9 @@ namespace ar_glasses {
                                 << refreshed_utf8 << "]."sv;
                 presenter_config.source_display_name = refreshed_utf8;
               }
+            } else {
+              BOOST_LOG(error) << "Local AR virtual desktop identity disappeared; rebuilding the session."sv;
+              break;
             }
           }
           // Any exit not requested by the topology controller should be retried, including a
@@ -825,6 +1168,7 @@ namespace ar_glasses {
           failed_.store(!stop_token.stop_requested());
           running_.store(false);
         });
+        ready_ = true;
       }
 
       ~local_session_t() {
@@ -838,17 +1182,22 @@ namespace ar_glasses {
           }
         }
         if (layout_repositioned_) {
-          // SudoVDA removal changes the active topology asynchronously; wait until the virtual
-          // source has vacated the interactive position before restoring the physical sink.
-          std::this_thread::sleep_for(300ms);
-          if (!restore_physical_output_position(original_target_rect_, target_device_path_)) {
+          // SudoVDA removal changes the active topology asynchronously. Retry and verify the exact
+          // applied rectangle instead of assuming the source has disappeared after a fixed delay.
+          const auto deadline = std::chrono::steady_clock::now() + 3s;
+          bool restored = false;
+          while (std::chrono::steady_clock::now() < deadline && !restored) {
+            std::this_thread::sleep_for(100ms);
+            restored = restore_physical_output_position(original_target_rect_, target_device_path_);
+          }
+          if (!restored) {
             BOOST_LOG(warning) << "Could not restore the AR display's original desktop position."sv;
           }
         }
       }
 
       bool valid() const {
-        return virtual_display_created_ && !virtual_display_name_.empty();
+        return ready_;
       }
 
       bool running() const {
@@ -859,22 +1208,35 @@ namespace ar_glasses {
         return failed_.load();
       }
 
-      void update_target(const target_state_t &target) {
+      std::optional<target_state_t> re_isolate_target() {
+        const auto refreshed_name = refresh_virtual_display_name(virtual_display_identity_);
+        if (!refreshed_name) {
+          return std::nullopt;
+        }
+        virtual_display_name_ = *refreshed_name;
+        const auto target = isolate_physical_output(virtual_display_name_, target_device_path_);
+        if (!target) {
+          return std::nullopt;
+        }
         if (!live_target_) {
-          return;
+          return target;
         }
         std::lock_guard lock(live_target_->mutex);
-        live_target_->rect = target.rect;
-        live_target_->display_name = target.gdi_name;
+        live_target_->rect = target->rect;
+        live_target_->display_name = target->gdi_name;
+        return target;
       }
 
     private:
       GUID display_guid_ {};
+      SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT virtual_display_identity_ {};
       RECT original_target_rect_ {};
       std::wstring target_device_path_;
       std::wstring virtual_display_name_;
       bool virtual_display_created_ = false;
       bool layout_repositioned_ = false;
+      bool target_hdr_active_ = false;
+      bool ready_ = false;
       std::shared_ptr<platf::dxgi::local_presenter_config_t::target_t> live_target_;
       std::jthread presenter_;
       std::atomic<bool> running_ {false};
@@ -897,18 +1259,122 @@ namespace ar_glasses {
       }
 
     private:
-      void start_session(const target_state_t &target) {
-        session_ = std::make_unique<local_session_t>(target);
-        retry_after_ = std::chrono::steady_clock::now() + failed_session_retry;
-        if (!session_->valid()) {
-          session_.reset();
+      void stop_session() {
+        std::unique_ptr<local_session_t> retiring_session;
+        {
+          std::lock_guard lock(ownership_mutex);
+          if (local_session_construction_stop) {
+            local_session_construction_stop->request_stop();
+          }
+          retiring_session = std::move(session_);
+          if (!retiring_session) {
+            local_session_present = false;
+            local_session_construction_stop.reset();
+            ownership_changed.notify_all();
+            return;
+          }
+        }
+
+        // Presenter shutdown and SudoVDA topology removal can take seconds. Keep ownership marked
+        // local until teardown is complete, but never hold ownership_mutex across those waits so a
+        // remote launch can publish its reservation and wait on the condition variable.
+        retiring_session.reset();
+        {
+          std::lock_guard lock(ownership_mutex);
+          local_session_present = false;
+          local_session_construction_stop.reset();
+          ownership_changed.notify_all();
         }
       }
 
-      void apply(const std::optional<target_state_t> &target) {
-        session_.reset();
+      void suspend_for_remote_if_needed() {
+        bool should_stop = false;
+        {
+          std::lock_guard lock(ownership_mutex);
+          if (!remote_blocks_local_locked(std::chrono::steady_clock::now())) {
+            return;
+          }
+          if (local_session_construction_stop) {
+            local_session_construction_stop->request_stop();
+          }
+          should_stop = session_ != nullptr;
+          deferred_for_remote_ = true;
+          retry_after_ = std::chrono::steady_clock::now() + failed_session_retry;
+        }
+
+        if (should_stop) {
+          BOOST_LOG(info) << "Remote virtual-display session requested ownership; stopping local AR presentation."sv;
+          stop_session();
+        }
+      }
+
+      void start_session(const target_state_t &target, std::stop_token stop_token) {
+        const auto handoff = proc::proc.prepare_local_ar_handoff();
+        if (handoff != proc::local_ar_handoff_e::ready) {
+          if (!deferred_for_remote_) {
+            BOOST_LOG(info) << (handoff == proc::local_ar_handoff_e::remote_busy ? "Local AR presentation is waiting for the active/connecting remote virtual-display session."sv : "Local AR presentation is waiting for inactive remote-display cleanup."sv);
+          }
+          deferred_for_remote_ = true;
+          retry_after_ = std::chrono::steady_clock::now() + failed_session_retry;
+          return;
+        }
+
+        std::stop_source construction_stop;
+        std::stop_callback controller_stop_callback(stop_token, [&construction_stop]() {
+          construction_stop.request_stop();
+        });
+        {
+          std::lock_guard lock(ownership_mutex);
+          if (remote_blocks_local_locked(std::chrono::steady_clock::now())) {
+            deferred_for_remote_ = true;
+            retry_after_ = std::chrono::steady_clock::now() + failed_session_retry;
+            return;
+          }
+
+          // Publish local ownership before construction starts. Remote launches can acquire the
+          // mutex immediately, request this stop source, and then wait for full teardown.
+          local_session_present = true;
+          local_session_construction_stop = construction_stop;
+          ownership_changed.notify_all();
+        }
+
+        auto candidate = std::make_unique<local_session_t>(target, construction_stop.get_token());
+        retry_after_ = std::chrono::steady_clock::now() + failed_session_retry;
+        bool rejected_for_remote = false;
+        {
+          std::lock_guard lock(ownership_mutex);
+          local_session_construction_stop.reset();
+          rejected_for_remote = remote_blocks_local_locked(std::chrono::steady_clock::now());
+          if (candidate->valid() && !construction_stop.stop_requested() && !rejected_for_remote) {
+            session_ = std::move(candidate);
+            local_session_present = true;
+            ownership_changed.notify_all();
+            if (deferred_for_remote_) {
+              BOOST_LOG(info) << "Remote virtual-display ownership ended; starting deferred local AR presentation."sv;
+            }
+            deferred_for_remote_ = false;
+            return;
+          }
+        }
+
+        // Destruction removes any partially created virtual display. Keep local ownership true
+        // until that removal and topology restoration finish, so the remote side cannot overlap.
+        candidate.reset();
+        {
+          std::lock_guard lock(ownership_mutex);
+          local_session_present = false;
+          ownership_changed.notify_all();
+          if (rejected_for_remote) {
+            deferred_for_remote_ = true;
+          }
+        }
+      }
+
+      void apply(const std::optional<target_state_t> &target, std::stop_token stop_token) {
+        stop_session();
         applied_ = target;
         if (!target) {
+          deferred_for_remote_ = false;
           BOOST_LOG(info) << "Approved AR display disconnected; local presentation is off."sv;
           return;
         }
@@ -925,7 +1391,7 @@ namespace ar_glasses {
                         << width << 'x' << height << '@'
                         << (target->refresh_millihz / 1000.0) << "; starting "sv
                         << mode_name(target->mode) << " local presentation."sv;
-        start_session(*target);
+        start_session(*target, stop_token);
       }
 
       void run(std::stop_token stop_token) {
@@ -933,10 +1399,19 @@ namespace ar_glasses {
         auto pending_since = std::chrono::steady_clock::now();
 
         while (!stop_token.stop_requested()) {
+          suspend_for_remote_if_needed();
+
           const std::wstring_view preferred_device_path = applied_ ?
                                                             std::wstring_view(applied_->device_path) :
                                                             std::wstring_view {};
-          auto observed = find_target({}, preferred_device_path);
+          bool topology_query_succeeded = false;
+          auto observed = find_target({}, preferred_device_path, &topology_query_succeeded);
+          if (!topology_query_succeeded) {
+            // A failed query is not a disconnect. Retain the previous observation and live session;
+            // Windows commonly reports an undersized snapshot while applying display topology.
+            std::this_thread::sleep_for(topology_poll_interval);
+            continue;
+          }
           const auto now = std::chrono::steady_clock::now();
           if (observed != pending) {
             pending = observed;
@@ -944,42 +1419,50 @@ namespace ar_glasses {
             // Stop using old-size textures immediately. Recreate only after the new topology has
             // remained stable for the debounce interval.
             if (observed != applied_ && !same_presentation_contract(observed, applied_)) {
-              session_.reset();
+              stop_session();
             }
           }
 
           if (pending != applied_ && now - pending_since >= topology_debounce) {
             if (pending && applied_ && same_presentation_contract(pending, applied_)) {
-              applied_ = pending;
               if (session_) {
-                session_->update_target(*pending);
+                const auto isolated = session_->re_isolate_target();
+                if (!isolated) {
+                  BOOST_LOG(warning) << "AR display position drifted and could not be re-isolated; rebuilding the local session."sv;
+                  apply(pending, stop_token);
+                  continue;
+                }
+                pending = isolated;
+                pending_since = now;
               }
-              BOOST_LOG(info) << "AR display position changed; moved the existing local presentation without recreating its virtual desktop."sv;
+              applied_ = pending;
+              BOOST_LOG(info) << "AR display position changed; restored physical-output isolation without recreating its virtual desktop."sv;
             } else {
-              apply(pending);
+              apply(pending, stop_token);
             }
           } else if (pending == applied_ && session_ && !session_->running() && session_->failed() && now >= retry_after_) {
             BOOST_LOG(warning) << "Restarting failed local AR presentation."sv;
             auto target = applied_;
-            session_.reset();
+            stop_session();
             retry_after_ = now + failed_session_retry;
             if (target) {
-              start_session(*target);
+              start_session(*target, stop_token);
             }
           } else if (pending == applied_ && applied_ && !session_ && applied_->mode != presentation_mode_e::unsupported && now >= retry_after_) {
-            start_session(*applied_);
+            start_session(*applied_, stop_token);
           }
 
           std::this_thread::sleep_for(topology_poll_interval);
         }
 
-        session_.reset();
+        stop_session();
       }
 
       std::jthread worker_;
       std::optional<target_state_t> applied_;
       std::unique_ptr<local_session_t> session_;
       std::chrono::steady_clock::time_point retry_after_ {};
+      bool deferred_for_remote_ = false;
     };
   }  // namespace
 
@@ -1040,6 +1523,57 @@ namespace ar_glasses {
     std::lock_guard lock(device_mutex);
     auto merged = replace_managed_config_value(std::string(contents), serialize_devices_locked());
     return write_config_atomically(merged);
+  }
+
+  bool remote_virtual_display_starting(std::chrono::milliseconds connect_timeout) {
+    std::unique_lock lock(ownership_mutex);
+    const auto now = std::chrono::steady_clock::now();
+    const auto release_deadline = now + ownership_release_timeout;
+    const auto pending_duration = std::clamp(connect_timeout + 2000ms, 2000ms, 60000ms);
+    remote_session_pending_until = std::max(remote_session_pending_until, now + pending_duration);
+    if (local_session_construction_stop) {
+      local_session_construction_stop->request_stop();
+    }
+    ownership_changed.notify_all();
+
+    if (ownership_changed.wait_until(lock, release_deadline, []() {
+          return !local_session_present;
+        })) {
+      // Teardown time must not consume the connection reservation. Give the remote path its full
+      // configured connection window after local ownership has actually been released.
+      remote_session_pending_until = std::max(
+        remote_session_pending_until,
+        std::chrono::steady_clock::now() + pending_duration
+      );
+      return true;
+    }
+
+    if (!remote_session_active) {
+      remote_session_pending_until = {};
+    }
+    ownership_changed.notify_all();
+    BOOST_LOG(error) << "Local AR did not release virtual-display ownership within "sv
+                     << ownership_release_timeout.count() << " seconds."sv;
+    return false;
+  }
+
+  void remote_virtual_display_active() {
+    std::lock_guard lock(ownership_mutex);
+    remote_session_active = true;
+    remote_session_pending_until = {};
+    ownership_changed.notify_all();
+  }
+
+  void remote_virtual_display_ended() {
+    std::lock_guard lock(ownership_mutex);
+    remote_session_active = false;
+    remote_session_pending_until = {};
+    ownership_changed.notify_all();
+  }
+
+  bool remote_virtual_display_blocks_local() {
+    std::lock_guard lock(ownership_mutex);
+    return remote_blocks_local_locked(std::chrono::steady_clock::now());
   }
 
   std::unique_ptr<platf::deinit_t> init() {

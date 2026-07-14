@@ -140,6 +140,7 @@ namespace platf::dxgi {
   blob_t cursor_ps_hlsl;
   blob_t cursor_ps_normalize_white_hlsl;
   blob_t cursor_vs_hlsl;
+  blob_t depth_warp_prefilter_cs_hlsl;
   blob_t sbs_reprojection_ps_hlsl;
   blob_t sbs_sharpen_ps_hlsl;
   blob_t sbs_reprojection_vs_hlsl;
@@ -403,6 +404,56 @@ namespace platf::dxgi {
     return compile_shader(file, "main", "cs_5_0");
   }
 
+  using depth_estimator_build_task_t =
+    std::packaged_task<std::unique_ptr<models::video_depth_estimator>()>;
+
+  // Keep abandoned per-device estimator builds alive without blocking a presentation-session
+  // teardown. The manager joins any remaining workers during process shutdown, before the
+  // function-static object and the TensorRT process globals are destroyed.
+  class depth_estimator_build_manager_t {
+  public:
+    ~depth_estimator_build_manager_t() {
+      for (auto &worker : workers_) {
+        if (worker.thread.joinable()) {
+          worker.thread.join();
+        }
+      }
+    }
+
+    void launch(depth_estimator_build_task_t task) {
+      auto completed = std::make_shared<std::atomic<bool>>(false);
+      std::thread thread([task = std::move(task), completed]() mutable {
+        task();
+        completed->store(true, std::memory_order_release);
+      });
+
+      std::lock_guard lock(mutex_);
+      for (auto worker = workers_.begin(); worker != workers_.end();) {
+        if (!worker->completed->load(std::memory_order_acquire)) {
+          ++worker;
+          continue;
+        }
+        worker->thread.join();
+        worker = workers_.erase(worker);
+      }
+      workers_.push_back({std::move(thread), std::move(completed)});
+    }
+
+  private:
+    struct worker_t {
+      std::thread thread;
+      std::shared_ptr<std::atomic<bool>> completed;
+    };
+
+    std::mutex mutex_;
+    std::vector<worker_t> workers_;
+  };
+
+  depth_estimator_build_manager_t &depth_estimator_build_manager() {
+    static depth_estimator_build_manager_t manager;
+    return manager;
+  }
+
   class d3d_base_encode_device final {
   public:
     ~d3d_base_encode_device() {
@@ -411,19 +462,20 @@ namespace platf::dxgi {
       // prevents a racing replacement session from receiving this device's late results.
       drain_sbs_gpu_timers();
 
-      // The background estimator build captures raw device/device_ctx pointers, so it MUST be
-      // joined before those members are destroyed. Member declaration order (the future is
-      // declared after device/device_ctx) already guarantees this via the future's blocking
-      // destructor; waiting here first makes the dependency explicit so it can't be silently
-      // broken by a member reorder. (This class is never moved, so a user-declared dtor is safe.)
-      if (depth_estimator_build.valid()) {
-        depth_estimator_build.wait();
-      }
+      // The background task owns D3D references and its packaged-task future does not block here.
+      // If this device is torn down while construction is in flight, the process-level build
+      // manager lets it finish independently and destroys the unused result on that worker.
     }
 
-    int convert_rgb(platf::img_t &img, ID3D11RenderTargetView *target) {
+    int convert_rgb(
+      platf::img_t &img,
+      ID3D11Texture2D *target_texture,
+      ID3D11RenderTargetView *target
+    ) {
+      rgb_present_texture = target_texture;
       rgb_present_target = target;
       auto clear_target = util::fail_guard([this]() {
+        rgb_present_texture = nullptr;
         rgb_present_target = nullptr;
       });
       return convert(img);
@@ -496,6 +548,49 @@ namespace platf::dxgi {
           ID3D11ShaderResourceView *null_srv = nullptr;
           device_ctx->OMSetRenderTargets(1, &null_rtv, nullptr);
           device_ctx->PSSetShaderResources(0, 1, &null_srv);
+        };
+
+        auto copy_rgb = [&](ID3D11Texture2D *input) {
+          if (!input || !rgb_present_texture) {
+            return false;
+          }
+
+          D3D11_TEXTURE2D_DESC input_desc {};
+          D3D11_TEXTURE2D_DESC output_desc {};
+          input->GetDesc(&input_desc);
+          rgb_present_texture->GetDesc(&output_desc);
+          const bool compatible = input_desc.Width == output_desc.Width &&
+                                  input_desc.Height == output_desc.Height &&
+                                  input_desc.MipLevels == output_desc.MipLevels &&
+                                  input_desc.ArraySize == output_desc.ArraySize &&
+                                  input_desc.Format == output_desc.Format &&
+                                  input_desc.SampleDesc.Count == output_desc.SampleDesc.Count &&
+                                  input_desc.SampleDesc.Quality == output_desc.SampleDesc.Quality;
+          if (!compatible) {
+            if (!rgb_copy_fallback_logged) {
+              BOOST_LOG(info) << "Local AR exact-copy path unavailable (source "sv
+                              << input_desc.Width << 'x' << input_desc.Height << ' '
+                              << (int) input_desc.Format << ", target "sv
+                              << output_desc.Width << 'x' << output_desc.Height << ' '
+                              << (int) output_desc.Format << "); using the RGB presentation shader."sv;
+              rgb_copy_fallback_logged = true;
+            }
+            return false;
+          }
+
+          // Neither resource may remain bound while CopyResource reads/writes it. The local
+          // swapchain is an exact-size, exact-format sink, so a copy preserves SDR/HDR values
+          // bit-for-bit and avoids another full-screen texture sample and render-target write.
+          ID3D11RenderTargetView *null_rtv = nullptr;
+          std::array<ID3D11ShaderResourceView *, 5> null_srvs {};
+          device_ctx->OMSetRenderTargets(1, &null_rtv, nullptr);
+          device_ctx->PSSetShaderResources(0, (UINT) null_srvs.size(), null_srvs.data());
+          device_ctx->CopyResource(rgb_present_texture, input);
+          if (!rgb_copy_path_logged) {
+            BOOST_LOG(info) << "Local AR exact texture-copy presentation path active."sv;
+            rgb_copy_path_logged = true;
+          }
+          return true;
         };
 
         // Clear render target view(s) once so that the aspect ratio mismatch "bars" appear black
@@ -571,9 +666,12 @@ namespace platf::dxgi {
           const bool timing_has_depth_warp = !repeat_matched_output && est.depth;
           auto *gpu_timer = perf ? begin_sbs_gpu_timer(timing_has_depth_warp) : nullptr;
           ID3D11ShaderResourceView *final_sbs_srv = nullptr;
+          ID3D11Texture2D *final_sbs_texture = nullptr;
           if (repeat_matched_output) {
             final_sbs_srv = matched_output_sharpened ? sbs_sharpen_srv.get() :
                                                        sbs_intermediate_srv.get();
+            final_sbs_texture = matched_output_sharpened ? sbs_sharpen_texture.get() :
+                                                           sbs_intermediate_texture.get();
             ++matched_stats_repeats;
           } else {
             // Before the first matched completion, provide a flat current-frame SBS image. Once a
@@ -581,6 +679,13 @@ namespace platf::dxgi {
             if (!matched_render_slot) {
               est = {};
               render_input_srv = img_ctx.encoder_input_res.get();
+            }
+
+            ID3D11ShaderResourceView *warp_depth = est.depth.Get();
+            if (est.depth) {
+              if (auto *filtered_depth = prefilter_warp_depth(est.depth.Get())) {
+                warp_depth = filtered_depth;
+              }
             }
 
             // Draw Apollo's occlusion-aware geometry into the shared SBS intermediate.
@@ -591,7 +696,7 @@ namespace platf::dxgi {
             // Bind the sampler explicitly rather than relying on it persisting from init().
             device_ctx->PSSetSamplers(0, 1, &sampler_linear);
 
-            ID3D11ShaderResourceView *srvs[] = {render_input_srv, est.depth.Get(), est.subject.Get(), nullptr, est.plane_lock.Get()};
+            ID3D11ShaderResourceView *srvs[] = {render_input_srv, warp_depth, est.subject.Get(), nullptr, est.plane_lock.Get()};
             device_ctx->PSSetShaderResources(0, 5, srvs);
             ID3D11Buffer *sbs_cb[] = {est.depth ? sbs_reprojection_cbuffer.get() : sbs_passthrough_cbuffer.get()};
             device_ctx->PSSetConstantBuffers(2, 1, sbs_cb);
@@ -607,6 +712,7 @@ namespace platf::dxgi {
 
             // Bestv2 SDR sharpen is post-warp and per-eye. Both geometry paths feed the same pass.
             final_sbs_srv = sbs_intermediate_srv.get();
+            final_sbs_texture = sbs_intermediate_texture.get();
             bool output_sharpened = false;
             if (est.depth && sbs_sharpen_rtv && sbs_sharpen_srv) {
               ID3D11RenderTargetView *sharpen_rtv = sbs_sharpen_rtv.get();
@@ -620,6 +726,7 @@ namespace platf::dxgi {
               device_ctx->OMSetRenderTargets(1, null_rtvs, nullptr);
               device_ctx->PSSetShaderResources(0, 1, null_srvs);
               final_sbs_srv = sbs_sharpen_srv.get();
+              final_sbs_texture = sbs_sharpen_texture.get();
               output_sharpened = true;
             }
             if (matched_render_slot && est.depth) {
@@ -632,8 +739,11 @@ namespace platf::dxgi {
 
           if (rgb_present_target) {
             // The local AR presenter consumes the production RGB warp directly, avoiding an
-            // encode/decode round trip. Sampling also handles equivalent SDR texture layouts.
-            draw_rgb(final_sbs_srv);
+            // encode/decode round trip. Exact layouts take the copy fast path; retain the shader
+            // for any future mode whose source and physical target require scaling or conversion.
+            if (!copy_rgb(final_sbs_texture)) {
+              draw_rgb(final_sbs_srv);
+            }
           } else {
             // Draw captured frame (now SBS, optionally post-warp sharpened) into encoder YUV.
             draw(final_sbs_srv, out_Y_or_YUV_viewports, out_UV_viewport, sbs_intermediate_linear);
@@ -668,7 +778,9 @@ namespace platf::dxgi {
           }
         } else {
           if (rgb_present_target) {
-            draw_rgb(img_ctx.encoder_input_res.get());
+            if (!copy_rgb(img_ctx.encoder_texture.get())) {
+              draw_rgb(img_ctx.encoder_input_res.get());
+            }
           } else {
             // Plain 2D: draw the captured frame straight into the encoder output.
             draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewports, out_UV_viewport, img.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -772,24 +884,25 @@ namespace platf::dxgi {
       }
 
       // Kick construction on a background thread. The D3D device/context are free-threaded for the
-      // resource creation the constructor does (it makes no immediate-context calls), and the ComPtr
-      // wrap AddRefs them so they outlive this device if needed. The raw pointers are safe because
-      // the future joins in this object's destructor before device/device_ctx are torn down.
+      // resource creation the constructor does (it makes no immediate-context calls). Capture
+      // owning ComPtrs so a presentation-session teardown never has to wait for construction.
       auto sbs_cfg = sbs_config;
       BOOST_LOG(info) << "Host SBS enabled; building depth model \""sv << active.name
                       << "\" for matched-frame presentation in the background "
                          "(streaming flat until ready)..."sv;
-      auto *dev = device.get();
-      auto *ctx = device_ctx.get();
-      depth_estimator_build = std::async(std::launch::async, [dev, ctx, active, sbs_cfg]() {
+      Microsoft::WRL::ComPtr<ID3D11Device> dev(device.get());
+      Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx(device_ctx.get());
+      depth_estimator_build_task_t build_task([dev = std::move(dev), ctx = std::move(ctx), active, sbs_cfg]() mutable {
         return std::make_unique<models::video_depth_estimator>(
-          Microsoft::WRL::ComPtr<ID3D11Device>(dev),
-          Microsoft::WRL::ComPtr<ID3D11DeviceContext>(ctx),
+          std::move(dev),
+          std::move(ctx),
           std::filesystem::path(SUNSHINE_ASSETS_DIR),
           sbs_cfg,
           active
         );
       });
+      depth_estimator_build = build_task.get_future();
+      depth_estimator_build_manager().launch(std::move(build_task));
       depth_estimator_building = true;
       publish_depth_status(3);  // device-specific pipeline initialization (engine is already ready)
       return false;
@@ -1068,6 +1181,54 @@ namespace platf::dxgi {
       return true;
     }
 
+    ID3D11ShaderResourceView *prefilter_warp_depth(ID3D11ShaderResourceView *source_srv) {
+      if (!source_srv || !sbs_depth_prefilter_cs) {
+        return nullptr;
+      }
+
+      Microsoft::WRL::ComPtr<ID3D11Resource> source_resource;
+      source_srv->GetResource(&source_resource);
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> source_texture;
+      if (FAILED(source_resource.As(&source_texture))) {
+        return nullptr;
+      }
+
+      D3D11_TEXTURE2D_DESC source_desc {};
+      source_texture->GetDesc(&source_desc);
+      bool recreate = !sbs_warp_depth_texture || !sbs_warp_depth_uav || !sbs_warp_depth_srv;
+      if (!recreate) {
+        D3D11_TEXTURE2D_DESC current_desc {};
+        sbs_warp_depth_texture->GetDesc(&current_desc);
+        recreate = current_desc.Width != source_desc.Width ||
+                   current_desc.Height != source_desc.Height ||
+                   current_desc.Format != source_desc.Format;
+      }
+      if (recreate) {
+        auto filtered_desc = source_desc;
+        filtered_desc.Usage = D3D11_USAGE_DEFAULT;
+        filtered_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+        filtered_desc.CPUAccessFlags = 0;
+        filtered_desc.MiscFlags = 0;
+        sbs_warp_depth_texture.reset();
+        sbs_warp_depth_uav.reset();
+        sbs_warp_depth_srv.reset();
+        if (FAILED(device->CreateTexture2D(&filtered_desc, nullptr, &sbs_warp_depth_texture)) || FAILED(device->CreateUnorderedAccessView(sbs_warp_depth_texture.get(), nullptr, &sbs_warp_depth_uav)) || FAILED(device->CreateShaderResourceView(sbs_warp_depth_texture.get(), nullptr, &sbs_warp_depth_srv))) {
+          BOOST_LOG(error) << "Failed to create the SBS warp-depth prefilter resources."sv;
+          return nullptr;
+        }
+      }
+
+      device_ctx->CSSetShader(sbs_depth_prefilter_cs.get(), nullptr, 0);
+      device_ctx->CSSetShaderResources(0, 1, &source_srv);
+      device_ctx->CSSetUnorderedAccessViews(0, 1, &sbs_warp_depth_uav, nullptr);
+      device_ctx->Dispatch((source_desc.Width + 15u) / 16u, (source_desc.Height + 15u) / 16u, 1u);
+      ID3D11UnorderedAccessView *null_uav = nullptr;
+      ID3D11ShaderResourceView *null_srv = nullptr;
+      device_ctx->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+      device_ctx->CSSetShaderResources(0, 1, &null_srv);
+      return sbs_warp_depth_srv.get();
+    }
+
     void reset_matched_stats(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
       matched_stats_started = now;
       matched_stats_calls = 0;
@@ -1077,10 +1238,23 @@ namespace platf::dxgi {
       matched_stats_age_max_ms = 0.0;
     }
 
-    int init_output(ID3D11Texture2D *frame_texture, int width, int height, int sbs_mode_param = ::video::SBS_OFF, const config::video_t::sbs_t &profile = {}, safe::mail_raw_t::event_t<int> depth_status_event = {}) {
-      // The underlying frame pool owns the texture, so we must reference it for ourselves
-      frame_texture->AddRef();
-      output_texture.reset(frame_texture);
+    int init_output(
+      ID3D11Texture2D *frame_texture,
+      int width,
+      int height,
+      int sbs_mode_param = ::video::SBS_OFF,
+      const config::video_t::sbs_t &profile = {},
+      safe::mail_raw_t::event_t<int> depth_status_event = {},
+      bool rgb_only = false
+    ) {
+      if (frame_texture) {
+        // The underlying frame pool owns the texture, so we must reference it for ourselves.
+        frame_texture->AddRef();
+        output_texture.reset(frame_texture);
+      } else if (!rgb_only) {
+        BOOST_LOG(error) << "Missing encoder output texture."sv;
+        return -1;
+      }
       sbs_mode = sbs_mode_param;
       sbs_config = profile;
       sbs_depth_status_event = std::move(depth_status_event);
@@ -1106,96 +1280,106 @@ namespace platf::dxgi {
     BOOST_LOG(error) << "Failed to create pixel shader " << #x << ": " << util::log_hex(status); \
     return -1; \
   }
+#define create_compute_shader_helper(x, y) \
+  if (FAILED(status = device->CreateComputeShader(x->GetBufferPointer(), x->GetBufferSize(), nullptr, &y))) { \
+    BOOST_LOG(error) << "Failed to create compute shader " << #x << ": " << util::log_hex(status); \
+    return -1; \
+  }
+      const bool sbs_on = sbs_mode != ::video::SBS_OFF;
       const bool downscaling = display->width > width || display->height > height;
 
-      create_pixel_shader_helper(sbs_reprojection_ps_hlsl, sbs_reprojection_ps);
-      create_pixel_shader_helper(sbs_sharpen_ps_hlsl, sbs_sharpen_ps);
       create_pixel_shader_helper(cursor_ps_hlsl, rgb_present_ps);
       create_vertex_shader_helper(sbs_reprojection_vs_hlsl, sbs_reprojection_vs);
+      if (sbs_on) {
+        create_compute_shader_helper(depth_warp_prefilter_cs_hlsl, sbs_depth_prefilter_cs);
+        create_pixel_shader_helper(sbs_reprojection_ps_hlsl, sbs_reprojection_ps);
+        create_pixel_shader_helper(sbs_sharpen_ps_hlsl, sbs_sharpen_ps);
+      }
 
-      switch (format) {
-        case DXGI_FORMAT_NV12:
-          // Semi-planar 8-bit YUV 4:2:0
-          create_vertex_shader_helper(convert_yuv420_planar_y_vs_hlsl, convert_Y_or_YUV_vs);
-          create_pixel_shader_helper(convert_yuv420_planar_y_ps_hlsl, convert_Y_or_YUV_ps);
-          create_pixel_shader_helper(convert_yuv420_planar_y_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
-          if (downscaling) {
-            create_vertex_shader_helper(convert_yuv420_packed_uv_type0s_vs_hlsl, convert_UV_vs);
-            create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_hlsl, convert_UV_ps);
-            create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_linear_hlsl, convert_UV_fp16_ps);
-          } else {
-            create_vertex_shader_helper(convert_yuv420_packed_uv_type0_vs_hlsl, convert_UV_vs);
-            create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_hlsl, convert_UV_ps);
-            create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_linear_hlsl, convert_UV_fp16_ps);
-          }
-          break;
-
-        case DXGI_FORMAT_P010:
-          // Semi-planar 16-bit YUV 4:2:0, 10 most significant bits store the value
-          create_vertex_shader_helper(convert_yuv420_planar_y_vs_hlsl, convert_Y_or_YUV_vs);
-          create_pixel_shader_helper(convert_yuv420_planar_y_ps_hlsl, convert_Y_or_YUV_ps);
-          if (display->is_hdr()) {
-            create_pixel_shader_helper(convert_yuv420_planar_y_ps_perceptual_quantizer_hlsl, convert_Y_or_YUV_fp16_ps);
-          } else {
+      if (!rgb_only) {
+        switch (format) {
+          case DXGI_FORMAT_NV12:
+            // Semi-planar 8-bit YUV 4:2:0
+            create_vertex_shader_helper(convert_yuv420_planar_y_vs_hlsl, convert_Y_or_YUV_vs);
+            create_pixel_shader_helper(convert_yuv420_planar_y_ps_hlsl, convert_Y_or_YUV_ps);
             create_pixel_shader_helper(convert_yuv420_planar_y_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
-          }
-          if (downscaling) {
-            create_vertex_shader_helper(convert_yuv420_packed_uv_type0s_vs_hlsl, convert_UV_vs);
-            create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_hlsl, convert_UV_ps);
-            if (display->is_hdr()) {
-              create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_perceptual_quantizer_hlsl, convert_UV_fp16_ps);
-            } else {
+            if (downscaling) {
+              create_vertex_shader_helper(convert_yuv420_packed_uv_type0s_vs_hlsl, convert_UV_vs);
+              create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_hlsl, convert_UV_ps);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_linear_hlsl, convert_UV_fp16_ps);
-            }
-          } else {
-            create_vertex_shader_helper(convert_yuv420_packed_uv_type0_vs_hlsl, convert_UV_vs);
-            create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_hlsl, convert_UV_ps);
-            if (display->is_hdr()) {
-              create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_perceptual_quantizer_hlsl, convert_UV_fp16_ps);
             } else {
+              create_vertex_shader_helper(convert_yuv420_packed_uv_type0_vs_hlsl, convert_UV_vs);
+              create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_hlsl, convert_UV_ps);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_linear_hlsl, convert_UV_fp16_ps);
             }
-          }
-          break;
+            break;
 
-        case DXGI_FORMAT_R16_UINT:
-          // Planar 16-bit YUV 4:4:4, 10 most significant bits store the value
-          create_vertex_shader_helper(convert_yuv444_planar_vs_hlsl, convert_Y_or_YUV_vs);
-          create_pixel_shader_helper(convert_yuv444_planar_ps_hlsl, convert_Y_or_YUV_ps);
-          if (display->is_hdr()) {
-            create_pixel_shader_helper(convert_yuv444_planar_ps_perceptual_quantizer_hlsl, convert_Y_or_YUV_fp16_ps);
-          } else {
-            create_pixel_shader_helper(convert_yuv444_planar_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
-          }
-          break;
+          case DXGI_FORMAT_P010:
+            // Semi-planar 16-bit YUV 4:2:0, 10 most significant bits store the value
+            create_vertex_shader_helper(convert_yuv420_planar_y_vs_hlsl, convert_Y_or_YUV_vs);
+            create_pixel_shader_helper(convert_yuv420_planar_y_ps_hlsl, convert_Y_or_YUV_ps);
+            if (display->is_hdr()) {
+              create_pixel_shader_helper(convert_yuv420_planar_y_ps_perceptual_quantizer_hlsl, convert_Y_or_YUV_fp16_ps);
+            } else {
+              create_pixel_shader_helper(convert_yuv420_planar_y_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
+            }
+            if (downscaling) {
+              create_vertex_shader_helper(convert_yuv420_packed_uv_type0s_vs_hlsl, convert_UV_vs);
+              create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_hlsl, convert_UV_ps);
+              if (display->is_hdr()) {
+                create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_perceptual_quantizer_hlsl, convert_UV_fp16_ps);
+              } else {
+                create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_linear_hlsl, convert_UV_fp16_ps);
+              }
+            } else {
+              create_vertex_shader_helper(convert_yuv420_packed_uv_type0_vs_hlsl, convert_UV_vs);
+              create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_hlsl, convert_UV_ps);
+              if (display->is_hdr()) {
+                create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_perceptual_quantizer_hlsl, convert_UV_fp16_ps);
+              } else {
+                create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_linear_hlsl, convert_UV_fp16_ps);
+              }
+            }
+            break;
 
-        case DXGI_FORMAT_AYUV:
-          // Packed 8-bit YUV 4:4:4
-          create_vertex_shader_helper(convert_yuv444_packed_vs_hlsl, convert_Y_or_YUV_vs);
-          create_pixel_shader_helper(convert_yuv444_packed_ayuv_ps_hlsl, convert_Y_or_YUV_ps);
-          create_pixel_shader_helper(convert_yuv444_packed_ayuv_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
-          break;
+          case DXGI_FORMAT_R16_UINT:
+            // Planar 16-bit YUV 4:4:4, 10 most significant bits store the value
+            create_vertex_shader_helper(convert_yuv444_planar_vs_hlsl, convert_Y_or_YUV_vs);
+            create_pixel_shader_helper(convert_yuv444_planar_ps_hlsl, convert_Y_or_YUV_ps);
+            if (display->is_hdr()) {
+              create_pixel_shader_helper(convert_yuv444_planar_ps_perceptual_quantizer_hlsl, convert_Y_or_YUV_fp16_ps);
+            } else {
+              create_pixel_shader_helper(convert_yuv444_planar_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
+            }
+            break;
 
-        case DXGI_FORMAT_Y410:
-          // Packed 10-bit YUV 4:4:4
-          create_vertex_shader_helper(convert_yuv444_packed_vs_hlsl, convert_Y_or_YUV_vs);
-          create_pixel_shader_helper(convert_yuv444_packed_y410_ps_hlsl, convert_Y_or_YUV_ps);
-          if (display->is_hdr()) {
-            create_pixel_shader_helper(convert_yuv444_packed_y410_ps_perceptual_quantizer_hlsl, convert_Y_or_YUV_fp16_ps);
-          } else {
-            create_pixel_shader_helper(convert_yuv444_packed_y410_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
-          }
-          break;
+          case DXGI_FORMAT_AYUV:
+            // Packed 8-bit YUV 4:4:4
+            create_vertex_shader_helper(convert_yuv444_packed_vs_hlsl, convert_Y_or_YUV_vs);
+            create_pixel_shader_helper(convert_yuv444_packed_ayuv_ps_hlsl, convert_Y_or_YUV_ps);
+            create_pixel_shader_helper(convert_yuv444_packed_ayuv_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
+            break;
 
-        default:
-          BOOST_LOG(error) << "Unable to create shaders because of the unrecognized surface format";
-          return -1;
+          case DXGI_FORMAT_Y410:
+            // Packed 10-bit YUV 4:4:4
+            create_vertex_shader_helper(convert_yuv444_packed_vs_hlsl, convert_Y_or_YUV_vs);
+            create_pixel_shader_helper(convert_yuv444_packed_y410_ps_hlsl, convert_Y_or_YUV_ps);
+            if (display->is_hdr()) {
+              create_pixel_shader_helper(convert_yuv444_packed_y410_ps_perceptual_quantizer_hlsl, convert_Y_or_YUV_fp16_ps);
+            } else {
+              create_pixel_shader_helper(convert_yuv444_packed_y410_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
+            }
+            break;
+
+          default:
+            BOOST_LOG(error) << "Unable to create shaders because of the unrecognized surface format";
+            return -1;
+        }
       }
 
 #undef create_vertex_shader_helper
 #undef create_pixel_shader_helper
-
-      const bool sbs_on = sbs_mode != ::video::SBS_OFF;
+#undef create_compute_shader_helper
 
       auto out_width = width;
       auto out_height = height;
@@ -1274,6 +1458,13 @@ namespace platf::dxgi {
                         << sbs_config.pop_strength << ".";
 
         sbs_viewport = {0.0f, 0.0f, (float) tex_desc.Width, (float) tex_desc.Height, 0.0f, 1.0f};
+      }
+
+      if (rgb_only) {
+        // Local AR presents RGB directly. It needs the common capture/SBS resources above, but
+        // no encoder output texture, chroma shaders, planar RTVs, or YUV conversion constants.
+        rtvs_cleared = true;
+        return 0;
       }
 
       out_Y_or_YUV_viewports[0] = {offsetX, offsetY, out_width_f, out_height_f, 0.0f, 1.0f};  // Y plane
@@ -1384,6 +1575,23 @@ namespace platf::dxgi {
       }
 
       return 0;
+    }
+
+    int init_rgb_output(
+      int width,
+      int height,
+      int sbs_mode_param,
+      const config::video_t::sbs_t &profile
+    ) {
+      return init_output(
+        nullptr,
+        width,
+        height,
+        sbs_mode_param,
+        profile,
+        {},
+        true
+      );
     }
 
     int init(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
@@ -1649,7 +1857,10 @@ namespace platf::dxgi {
     device_ctx_t device_ctx;
 
     texture2d_t output_texture;
+    ID3D11Texture2D *rgb_present_texture = nullptr;  ///< Non-owning swapchain texture during convert_rgb().
     ID3D11RenderTargetView *rgb_present_target = nullptr;  ///< Non-owning swapchain RTV during convert_rgb().
+    bool rgb_copy_path_logged = false;
+    bool rgb_copy_fallback_logged = false;
     ps_t rgb_present_ps;
     D3D11_VIEWPORT rgb_present_viewport {};
 
@@ -1667,11 +1878,15 @@ namespace platf::dxgi {
     vs_t sbs_reprojection_vs;
     ps_t sbs_reprojection_ps;
     ps_t sbs_sharpen_ps;
+    cs_t sbs_depth_prefilter_cs;
     buf_t sbs_reprojection_cbuffer;
     buf_t sbs_passthrough_cbuffer;
     texture2d_t sbs_intermediate_texture;
     render_target_t sbs_intermediate_rtv;
     shader_res_t sbs_intermediate_srv;
+    texture2d_t sbs_warp_depth_texture;
+    unordered_access_t sbs_warp_depth_uav;
+    shader_res_t sbs_warp_depth_srv;
     texture2d_t sbs_sharpen_texture;
     render_target_t sbs_sharpen_rtv;
     shader_res_t sbs_sharpen_srv;
@@ -1757,6 +1972,7 @@ namespace platf::dxgi {
     capture_config.width = config.sbs_mode == ::video::SBS_AI ? output_width / 2 : output_width;
     capture_config.height = output_height;
     capture_config.framerate = std::max(1, (config.target_refresh_millihz + 500) / 1000);
+    capture_config.dynamicRange = config.hdr ? 1 : 0;
     capture_config.encodingFramerate = config.target_refresh_millihz;
 
     auto display = platf::display(platf::mem_type_e::dxgi, config.source_display_name, capture_config);
@@ -1766,6 +1982,11 @@ namespace platf::dxgi {
                          << config.source_display_name << "; refreshing display topology."sv;
       return local_presenter_result_e::reinit;
     }
+    if (dxgi_display->is_hdr() != config.hdr) {
+      BOOST_LOG(info) << "Local AR virtual source has not settled to "sv
+                      << (config.hdr ? "HDR"sv : "SDR"sv) << "; reinitializing."sv;
+      return local_presenter_result_e::reinit;
+    }
 
     d3d_base_encode_device converter;
     if (converter.init(display, dxgi_display->adapter.get(), platf::pix_fmt_e::nv12)) {
@@ -1773,22 +1994,8 @@ namespace platf::dxgi {
       return local_presenter_result_e::error;
     }
 
-    // init_output() also initializes the complete production SBS resource graph. The local path
-    // copies its RGB result directly to the swapchain, so this NV12 surface is never encoded.
-    D3D11_TEXTURE2D_DESC dummy_desc {};
-    dummy_desc.Width = output_width;
-    dummy_desc.Height = output_height;
-    dummy_desc.MipLevels = 1;
-    dummy_desc.ArraySize = 1;
-    dummy_desc.Format = DXGI_FORMAT_NV12;
-    dummy_desc.SampleDesc.Count = 1;
-    dummy_desc.Usage = D3D11_USAGE_DEFAULT;
-    dummy_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
-    texture2d_t dummy_output;
-    auto status = converter.device->CreateTexture2D(&dummy_desc, nullptr, &dummy_output);
-    if (FAILED(status) || converter.init_output(dummy_output.get(), output_width, output_height, config.sbs_mode, config.sbs_config)) {
-      BOOST_LOG(error) << "Local AR presenter could not initialize output resources: "sv
-                       << util::log_hex(status);
+    if (converter.init_rgb_output(output_width, output_height, config.sbs_mode, config.sbs_config)) {
+      BOOST_LOG(error) << "Local AR presenter could not initialize RGB presentation resources."sv;
       return local_presenter_result_e::error;
     }
 
@@ -1840,7 +2047,7 @@ namespace platf::dxgi {
     Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
     Microsoft::WRL::ComPtr<IDXGIFactory2> factory;
     Microsoft::WRL::ComPtr<IDXGISwapChain1> swapchain;
-    status = converter.device->QueryInterface(IID_PPV_ARGS(&dxgi_device));
+    auto status = converter.device->QueryInterface(IID_PPV_ARGS(&dxgi_device));
     if (SUCCEEDED(status)) {
       status = dxgi_device->GetAdapter(&adapter);
     }
@@ -1885,6 +2092,24 @@ namespace platf::dxgi {
                       << actual_target_height << "; reinitializing."sv;
       return local_presenter_result_e::reinit;
     }
+    Microsoft::WRL::ComPtr<IDXGIOutput6> target_output6;
+    DXGI_OUTPUT_DESC1 target_desc1 {};
+    const bool target_color_volume_available =
+      SUCCEEDED(target_output.As(&target_output6)) && SUCCEEDED(target_output6->GetDesc1(&target_desc1));
+    if (target_color_volume_available) {
+      BOOST_LOG(info) << "Local AR physical color volume: colorspace="sv
+                      << dxgi_display->colorspace_to_string(target_desc1.ColorSpace)
+                      << " bits="sv << target_desc1.BitsPerColor
+                      << " luminance="sv << target_desc1.MinLuminance << '-'
+                      << target_desc1.MaxLuminance << " nits full_frame="sv
+                      << target_desc1.MaxFullFrameLuminance << " nits."sv;
+    } else {
+      BOOST_LOG(warning) << "Could not query the local AR physical output color volume."sv;
+    }
+    if (config.hdr && (!target_color_volume_available || target_desc1.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)) {
+      BOOST_LOG(info) << "Local AR physical output has not settled to HDR10/PQ; reinitializing."sv;
+      return local_presenter_result_e::reinit;
+    }
     target_rect = actual_target_rect;
     SetWindowPos(
       window,
@@ -1899,17 +2124,17 @@ namespace platf::dxgi {
     DXGI_SWAP_CHAIN_DESC1 swapchain_desc {};
     swapchain_desc.Width = output_width;
     swapchain_desc.Height = output_height;
-    // Preserve linear scRGB when the private virtual desktop is captured as FP16. Other supported
-    // SDR capture layouts are sampled into the canonical BGRA8 presentation format.
-    swapchain_desc.Format = dxgi_display->capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT ?
-                              DXGI_FORMAT_R16G16B16A16_FLOAT :
-                              DXGI_FORMAT_B8G8R8A8_UNORM;
+    // HDR capture is linear scRGB. Preserve it in an FP16 scRGB swapchain and let DWM perform the
+    // final conversion to the restricted physical output's HDR10/PQ color volume.
+    swapchain_desc.Format = config.hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+                                         DXGI_FORMAT_B8G8R8A8_UNORM;
     swapchain_desc.SampleDesc.Count = 1;
     swapchain_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     swapchain_desc.BufferCount = 2;
     swapchain_desc.Scaling = DXGI_SCALING_STRETCH;
     swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     swapchain_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    swapchain_desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     status = factory->CreateSwapChainForHwnd(
       converter.device.get(),
       window,
@@ -1925,6 +2150,26 @@ namespace platf::dxgi {
     }
     factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
 
+    Microsoft::WRL::ComPtr<IDXGISwapChain2> swapchain2;
+    status = swapchain.As(&swapchain2);
+    if (SUCCEEDED(status)) {
+      status = swapchain2->SetMaximumFrameLatency(1);
+    }
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Local AR presenter could not configure bounded frame latency: "sv
+                       << util::log_hex(status);
+      return local_presenter_result_e::error;
+    }
+    const auto frame_latency_waitable = swapchain2->GetFrameLatencyWaitableObject();
+    if (!frame_latency_waitable) {
+      BOOST_LOG(error) << "Local AR presenter could not obtain its frame-latency waitable object: "sv
+                       << GetLastError();
+      return local_presenter_result_e::error;
+    }
+    auto close_frame_latency_waitable = util::fail_guard([&]() {
+      CloseHandle(frame_latency_waitable);
+    });
+
     Microsoft::WRL::ComPtr<IDXGISwapChain3> swapchain3;
     status = swapchain.As(&swapchain3);
     if (FAILED(status)) {
@@ -1932,13 +2177,21 @@ namespace platf::dxgi {
                        << util::log_hex(status);
       return local_presenter_result_e::error;
     }
-    if (swapchain_desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
-      status = swapchain3->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
-      if (FAILED(status)) {
-        BOOST_LOG(error) << "Local AR presenter could not set its scRGB color space: "sv
-                         << util::log_hex(status);
-        return local_presenter_result_e::error;
-      }
+    const auto presentation_color_space = config.hdr ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 :
+                                                       DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    UINT color_space_support = 0;
+    status = swapchain3->CheckColorSpaceSupport(presentation_color_space, &color_space_support);
+    if (FAILED(status) || !(color_space_support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT)) {
+      BOOST_LOG(error) << "Local AR presenter does not support the required "sv
+                       << (config.hdr ? "linear scRGB"sv : "Rec.709"sv)
+                       << " swapchain color space: "sv << util::log_hex(status);
+      return local_presenter_result_e::error;
+    }
+    status = swapchain3->SetColorSpace1(presentation_color_space);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Local AR presenter could not set its swapchain color space: "sv
+                       << util::log_hex(status);
+      return local_presenter_result_e::error;
     }
 
     // D3D11 flip-model swapchains expose the current writable buffer as buffer 0.
@@ -1960,12 +2213,49 @@ namespace platf::dxgi {
                     << target_rect.top << "] "sv << output_width << 'x' << output_height << '@'
                     << capture_config.framerate << " mode="sv
                     << (config.sbs_mode == ::video::SBS_AI ? "SBS AI"sv : "normal"sv)
+                    << " color="sv << (config.hdr ? "HDR linear scRGB FP16"sv : "SDR Rec.709 BGRA8"sv)
                     << "; physical output is presentation-only."sv;
 
     std::array<std::shared_ptr<platf::img_t>, 3> image_pool;
     bool capture_cursor = true;
     bool window_closed = false;
+    auto redirect_pointer_from_target = [&]() {
+      const auto live_rect = read_target_rect();
+      POINT cursor {};
+      if (!GetCursorPos(&cursor) || !PtInRect(&live_rect, cursor)) {
+        return;
+      }
+
+      DXGI_OUTPUT_DESC source_desc {};
+      if (FAILED(dxgi_display->output->GetDesc(&source_desc))) {
+        return;
+      }
+      const auto source_rect = source_desc.DesktopCoordinates;
+      const LONG source_width = source_rect.right - source_rect.left;
+      const LONG source_height = source_rect.bottom - source_rect.top;
+      const LONG sink_width = live_rect.right - live_rect.left;
+      const LONG sink_height = live_rect.bottom - live_rect.top;
+      if (source_width <= 0 || source_height <= 0 || sink_width <= 0 || sink_height <= 0) {
+        return;
+      }
+
+      // The physical sink must remain active for DP scanout, so Windows requires it to touch the
+      // desktop. If the pointer crosses that one-pixel join, redirect it to the corresponding
+      // location on the private virtual source before it can interact with the sink desktop.
+      const auto relative_x = std::clamp(cursor.x - live_rect.left, 0L, sink_width - 1);
+      const auto relative_y = std::clamp(cursor.y - live_rect.top, 0L, sink_height - 1);
+      const LONG mapped_x = source_rect.left + std::min(
+                                                 source_width - 1,
+                                                 (LONG) ((std::int64_t) relative_x * source_width / sink_width)
+                                               );
+      const LONG mapped_y = source_rect.top + std::min(
+                                                source_height - 1,
+                                                (LONG) ((std::int64_t) relative_y * source_height / sink_height)
+                                              );
+      SetCursorPos(mapped_x, mapped_y);
+    };
     auto pump_messages = [&]() {
+      redirect_pointer_from_target();
       MSG message {};
       while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
         TranslateMessage(&message);
@@ -1994,6 +2284,26 @@ namespace platf::dxgi {
     };
 
     bool presentation_reinit_requested = false;
+    std::uint64_t captured_frames = 0;
+    std::uint64_t presented_frames = 0;
+    std::uint64_t busy_present_drops = 0;
+    auto present_stats_started = std::chrono::steady_clock::now();
+    auto log_present_stats = [&]() {
+      const auto now = std::chrono::steady_clock::now();
+      const auto elapsed = now - present_stats_started;
+      if (elapsed < std::chrono::seconds(5)) {
+        return;
+      }
+      const double elapsed_seconds = std::chrono::duration<double>(elapsed).count();
+      BOOST_LOG(debug) << "Local AR presenter stats: captured="sv << captured_frames
+                       << " presented="sv << presented_frames
+                       << " busy_drops="sv << busy_present_drops
+                       << " output_fps="sv << (presented_frames / elapsed_seconds);
+      captured_frames = 0;
+      presented_frames = 0;
+      busy_present_drops = 0;
+      present_stats_started = now;
+    };
     auto push_image = [&](std::shared_ptr<platf::img_t> &&image, bool frame_captured) {
       pump_messages();
       if (stop_token.stop_requested() || window_closed) {
@@ -2001,6 +2311,16 @@ namespace platf::dxgi {
       }
       if (!frame_captured) {
         return true;
+      }
+      ++captured_frames;
+
+      const auto &d3d_image = static_cast<const img_d3d_t &>(*image);
+      const bool frame_is_hdr = d3d_image.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+      if (frame_is_hdr != config.hdr) {
+        BOOST_LOG(error) << "Local AR capture frame does not match the negotiated "sv
+                         << (config.hdr ? "HDR"sv : "SDR"sv) << " mode: "sv
+                         << dxgi_display->dxgi_format_to_string(d3d_image.format);
+        return false;
       }
 
       const auto latest_target_rect = read_target_rect();
@@ -2024,12 +2344,35 @@ namespace platf::dxgi {
         target_rect = latest_target_rect;
       }
 
-      if (converter.convert_rgb(*image, backbuffer_rtv.Get())) {
+      // Never let a slower physical output back-pressure capture, synchronous depth inference,
+      // or the desktop being interacted with. If DWM has not retired the previous flip yet, keep
+      // the newest source frame in capture and skip this presentation opportunity.
+      const auto frame_latency_status = WaitForSingleObject(frame_latency_waitable, 0);
+      if (frame_latency_status == WAIT_FAILED) {
+        BOOST_LOG(error) << "Local AR presenter frame-latency wait failed: "sv << GetLastError();
+        return false;
+      }
+      if (frame_latency_status != WAIT_OBJECT_0) {
+        ++busy_present_drops;
+        log_present_stats();
+        return true;
+      }
+
+      if (converter.convert_rgb(*image, backbuffer.Get(), backbuffer_rtv.Get())) {
         BOOST_LOG(error) << "Local AR presenter failed to convert a captured frame."sv;
         return false;
       }
       DXGI_PRESENT_PARAMETERS present_parameters {};
-      status = swapchain->Present1(1, DXGI_PRESENT_RESTRICT_TO_OUTPUT, &present_parameters);
+      status = swapchain->Present1(
+        0,
+        DXGI_PRESENT_RESTRICT_TO_OUTPUT | DXGI_PRESENT_DO_NOT_WAIT,
+        &present_parameters
+      );
+      if (status == DXGI_ERROR_WAS_STILL_DRAWING) {
+        ++busy_present_drops;
+        log_present_stats();
+        return true;
+      }
       if (status == DXGI_ERROR_RESTRICT_TO_OUTPUT_STALE) {
         BOOST_LOG(info) << "Local AR restricted output changed; reinitializing presentation resources."sv;
         presentation_reinit_requested = true;
@@ -2039,6 +2382,11 @@ namespace platf::dxgi {
         BOOST_LOG(error) << "Local AR presenter Present() failed: "sv << util::log_hex(status);
         return false;
       }
+      ++presented_frames;
+      if (config.presented_frames) {
+        config.presented_frames->fetch_add(1, std::memory_order_relaxed);
+      }
+      log_present_stats();
       return true;
     };
 
@@ -3037,6 +3385,9 @@ namespace platf::dxgi {
 #define compile_pixel_shader_helper(x) \
   if (!(x##_hlsl = compile_pixel_shader(SUNSHINE_SHADERS_DIR "/" #x ".hlsl"))) \
     return -1;
+#define compile_compute_shader_helper(x) \
+  if (!(x##_hlsl = compile_compute_shader(SUNSHINE_SHADERS_DIR "/" #x ".hlsl"))) \
+    return -1;
     compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps);
     compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_linear);
     compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_perceptual_quantizer);
@@ -3061,6 +3412,7 @@ namespace platf::dxgi {
     compile_vertex_shader_helper(convert_yuv444_planar_vs);
     compile_pixel_shader_helper(cursor_ps);
     compile_pixel_shader_helper(cursor_ps_normalize_white);
+    compile_compute_shader_helper(depth_warp_prefilter_cs);
     compile_pixel_shader_helper(sbs_reprojection_ps);
     compile_pixel_shader_helper(sbs_sharpen_ps);
     compile_vertex_shader_helper(sbs_reprojection_vs);
@@ -3070,6 +3422,7 @@ namespace platf::dxgi {
 
 #undef compile_vertex_shader_helper
 #undef compile_pixel_shader_helper
+#undef compile_compute_shader_helper
 
     return 0;
   }

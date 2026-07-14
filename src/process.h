@@ -44,6 +44,12 @@ namespace proc {
 
 #ifdef _WIN32
   extern VDISPLAY::DRIVER_STATUS vDisplayDriverStatus;
+
+  enum class local_ar_handoff_e {
+    ready,
+    remote_busy,
+    cleanup_timeout,
+  };
 #endif
 
   typedef config::prep_cmd_t cmd_t;
@@ -130,8 +136,7 @@ namespace proc {
 
     ~proc_t();
 
-    const std::vector<ctx_t> &get_apps() const;
-    std::vector<ctx_t> &get_apps();
+    std::vector<ctx_t> get_apps() const;
     std::string get_app_image(int app_id);
     std::string get_last_run_app_name();
     std::string get_running_app_uuid();
@@ -139,6 +144,14 @@ namespace proc {
     void resume();
     void pause();
     void terminate(bool immediate = false, bool needs_refresh = true);
+
+#ifdef _WIN32
+    /**
+     * Release an inactive remote virtual desktop before local AR creates its own source.
+     * Active or connecting remote sessions are never terminated.
+     */
+    local_ar_handoff_e prepare_local_ar_handoff();
+#endif
 
   private:
     int _app_id = 0;
@@ -148,6 +161,11 @@ namespace proc {
 
     std::shared_ptr<rtsp_stream::launch_session_t> _launch_session;
     std::shared_ptr<config::input_t> _saved_input_config;
+
+#ifdef _WIN32
+    std::optional<SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT> _virtual_display_identity;
+    bool wait_for_retired_virtual_display(std::chrono::milliseconds timeout);
+#endif
 
     std::vector<ctx_t> _apps;
     ctx_t _app;

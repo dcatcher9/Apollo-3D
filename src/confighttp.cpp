@@ -1461,7 +1461,7 @@ namespace confighttp {
       std::string uuid = input_tree["uuid"].get<std::string>();
 
       nlohmann::json output_tree;
-      const auto &apps = proc::proc.get_apps();
+      const auto apps = proc::proc.get_apps();
       for (auto &app : apps) {
         if (app.uuid == uuid) {
           crypto::named_cert_t named_cert {

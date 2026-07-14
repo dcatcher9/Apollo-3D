@@ -9,6 +9,7 @@
 #endif
 // standard includes
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,6 +39,7 @@
 #include "uuid.h"
 
 #ifdef _WIN32
+  #include "platform/windows/ar_glasses.h"
   // from_utf8() string conversion function
   #include "platform/windows/misc.h"
   #include "platform/windows/utils.h"
@@ -53,6 +55,18 @@ namespace proc {
   namespace pt = boost::property_tree;
 
   proc_t proc;
+
+  namespace {
+    // Process/app state is shared by NVHTTP launch/resume threads, stream teardown, and the
+    // local-AR topology controller. A recursive mutex is required because execute(), running(),
+    // and pause() intentionally call terminate().
+    std::recursive_mutex process_state_mutex;
+#ifdef _WIN32
+    // Topology removal outlives the proc_t configuration object that initiated it. Keep the
+    // stable driver identity here so refresh() cannot discard it while replacing proc.
+    std::optional<SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT> retired_virtual_display_identity;
+#endif
+  }  // namespace
 
   int input_only_app_id = -1;
   std::string input_only_app_id_str;
@@ -163,6 +177,7 @@ namespace proc {
   }
 
   void proc_t::launch_input_only() {
+    std::lock_guard lock(process_state_mutex);
     _app_id = input_only_app_id;
     _app_name = "Remote Input";
     _app.uuid = REMOTE_INPUT_UUID;
@@ -176,6 +191,7 @@ namespace proc {
   }
 
   int proc_t::execute(const ctx_t& app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+    std::lock_guard lock(process_state_mutex);
     if (_app_id == input_only_app_id) {
       terminate(false, false);
       std::this_thread::sleep_for(1s);
@@ -234,23 +250,29 @@ namespace proc {
     }
 
 #ifdef _WIN32
-    if (
-      config::video.headless_mode        // Headless mode
-      || launch_session->virtual_display // User requested virtual display
-      || _app.virtual_display            // App is configured to use virtual display
-      || !video::allow_encoder_probing() // No active display presents
-    ) {
+    const bool needs_virtual_display =
+      config::video.headless_mode  // Headless mode
+      || launch_session->virtual_display  // User requested virtual display
+      || _app.virtual_display  // App is configured to use virtual display
+      || !video::allow_encoder_probing();  // No active display presents
+    if (needs_virtual_display) {
+      if (!ar_glasses::remote_virtual_display_starting(config::stream.ping_timeout)) {
+        BOOST_LOG(error) << "Timed out waiting for local AR to release virtual-display ownership."sv;
+        launch_session->virtual_display = false;
+        return 503;
+      }
+      if (!wait_for_retired_virtual_display(3s)) {
+        BOOST_LOG(error) << "Timed out waiting for the previous virtual display to leave the Windows topology."sv;
+        launch_session->virtual_display = false;
+        return 503;
+      }
       if (vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
         // Try init driver again
         initVDisplayDriver();
       }
 
       if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
-        // Try set the render adapter matching the capture adapter if user has specified one
-        if (!config::video.adapter_name.empty()) {
-          VDISPLAY::setRenderAdapterByName(platf::from_utf8(config::video.adapter_name));
-        }
-
+        SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT created_display {};
         std::string device_name;
         std::string device_uuid_str;
         uuid_util::uuid_t device_uuid;
@@ -288,18 +310,34 @@ namespace proc {
           target_fps *= 2;
         }
 
-        std::wstring vdisplayName = VDISPLAY::createVirtualDisplay(
-          device_uuid_str.c_str(),
-          device_name.c_str(),
-          render_width,
-          render_height,
-          target_fps,
-          launch_session->display_guid
-        );
+        std::wstring vdisplayName;
+        if (!config::video.adapter_name.empty()) {
+          vdisplayName = VDISPLAY::createVirtualDisplayOnAdapter(
+            device_uuid_str.c_str(),
+            device_name.c_str(),
+            render_width,
+            render_height,
+            target_fps,
+            launch_session->display_guid,
+            platf::from_utf8(config::video.adapter_name),
+            &created_display
+          );
+        } else {
+          vdisplayName = VDISPLAY::createVirtualDisplay(
+            device_uuid_str.c_str(),
+            device_name.c_str(),
+            render_width,
+            render_height,
+            target_fps,
+            launch_session->display_guid,
+            &created_display
+          );
+        }
 
         // No matter we get the display name or not, the virtual display might still be created.
         // We need to track it properly to remove the display when the session terminates.
         launch_session->virtual_display = true;
+        _virtual_display_identity = created_display;
 
         if (!vdisplayName.empty()) {
           BOOST_LOG(info) << "Virtual Display created at " << vdisplayName;
@@ -331,6 +369,9 @@ namespace proc {
       } else {
         // Driver isn't working so we don't need to track virtual display.
         launch_session->virtual_display = false;
+      }
+      if (!this->virtual_display) {
+        ar_glasses::remote_virtual_display_ended();
       }
     }
 
@@ -561,6 +602,7 @@ namespace proc {
   }
 
   int proc_t::running() {
+    std::lock_guard lock(process_state_mutex);
 #ifndef _WIN32
     // On POSIX OSes, we must periodically wait for our children to avoid
     // them becoming zombies. This must be synchronized carefully with
@@ -602,7 +644,14 @@ namespace proc {
   }
 
   void proc_t::resume() {
+    std::lock_guard lock(process_state_mutex);
     BOOST_LOG(info) << "Session resuming for app [" << _app_name << "].";
+
+#ifdef _WIN32
+    if (_launch_session && _launch_session->virtual_display) {
+      ar_glasses::remote_virtual_display_active();
+    }
+#endif
 
     if (!_app.state_cmds.empty()) {
       auto exec_thread = std::thread([cmd_list = _app.state_cmds, app_working_dir = _app.working_dir, _env = _env]() mutable {
@@ -646,6 +695,7 @@ namespace proc {
   }
 
   void proc_t::pause() {
+    std::lock_guard lock(process_state_mutex);
     if (!running()) {
       BOOST_LOG(info) << "Session already stopped, do not run pause commands.";
       return;
@@ -658,6 +708,12 @@ namespace proc {
     }
 
     BOOST_LOG(info) << "Session pausing for app [" << _app_name << "].";
+
+#ifdef _WIN32
+    if (_launch_session && _launch_session->virtual_display) {
+      ar_glasses::remote_virtual_display_ended();
+    }
+#endif
 
     if (!_app.state_cmds.empty()) {
       auto exec_thread = std::thread([cmd_list = _app.state_cmds, app_working_dir = _app.working_dir, _env = _env]() mutable {
@@ -704,6 +760,7 @@ namespace proc {
   }
 
   void proc_t::terminate(bool immediate, bool needs_refresh) {
+    std::lock_guard lock(process_state_mutex);
     std::error_code ec;
     placebo = false;
 
@@ -746,6 +803,8 @@ namespace proc {
     bool has_run = _app_id > 0;
 
 #ifdef _WIN32
+    ar_glasses::remote_virtual_display_ended();
+
     // Revert HDR state
     if (has_run && !mode_changed_display.empty()) {
       auto displayNameW = platf::from_utf8(mode_changed_display);
@@ -758,6 +817,9 @@ namespace proc {
 
     bool used_virtual_display = vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK && _launch_session && _launch_session->virtual_display;
     if (used_virtual_display) {
+      if (_virtual_display_identity) {
+        retired_virtual_display_identity = _virtual_display_identity;
+      }
       if (VDISPLAY::removeVirtualDisplay(_launch_session->display_guid)) {
         BOOST_LOG(info) << "Virtual Display removed successfully";
       } else if (this->virtual_display) {
@@ -801,6 +863,9 @@ namespace proc {
     initial_display.clear();
     mode_changed_display.clear();
     _launch_session.reset();
+#ifdef _WIN32
+    _virtual_display_identity.reset();
+#endif
     virtual_display = false;
     allow_client_commands = false;
 
@@ -814,11 +879,67 @@ namespace proc {
     }
   }
 
-  const std::vector<ctx_t> &proc_t::get_apps() const {
-    return _apps;
+#ifdef _WIN32
+  bool proc_t::wait_for_retired_virtual_display(std::chrono::milliseconds timeout) {
+    if (!retired_virtual_display_identity) {
+      return true;
+    }
+
+    const auto identity = *retired_virtual_display_identity;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (VDISPLAY::getDisplayName(identity.AdapterLuid, identity.TargetId).empty()) {
+        retired_virtual_display_identity.reset();
+        std::this_thread::sleep_for(250ms);
+        return true;
+      }
+      std::this_thread::sleep_for(50ms);
+    }
+    return false;
   }
 
-  std::vector<ctx_t> &proc_t::get_apps() {
+  local_ar_handoff_e proc_t::prepare_local_ar_handoff() {
+    std::lock_guard lock(process_state_mutex);
+
+    // Recheck after acquiring the process lock. A remote launch may have reserved ownership
+    // after the topology controller's first observation but before it reached this method.
+    if (ar_glasses::remote_virtual_display_blocks_local()) {
+      return local_ar_handoff_e::remote_busy;
+    }
+    if (!wait_for_retired_virtual_display(3s)) {
+      BOOST_LOG(warning) << "Timed out waiting for the retired remote virtual display to leave the Windows topology."sv;
+      return local_ar_handoff_e::cleanup_timeout;
+    }
+    if (!_launch_session || !_launch_session->virtual_display) {
+      return local_ar_handoff_e::ready;
+    }
+
+    const auto app_name = _app_name;
+    BOOST_LOG(info) << "Local AR is taking ownership from inactive remote virtual-display session ["sv
+                    << app_name << "]."sv;
+    terminate(false, false);
+
+    // SudoVDA acknowledges removal before Windows necessarily publishes the new topology. Wait
+    // on the stable adapter/target identity, not a transient DISPLAY number, before adding the
+    // local source. This prevents the old removal notification from deleting/renumbering the new
+    // display underneath its presenter. Retain timed-out identities so a retry cannot forget them.
+    if (retired_virtual_display_identity) {
+      if (wait_for_retired_virtual_display(3s)) {
+        return local_ar_handoff_e::ready;
+      }
+      BOOST_LOG(warning) << "Timed out waiting for the inactive remote virtual display to leave the Windows topology."sv;
+      return local_ar_handoff_e::cleanup_timeout;
+    }
+
+    // Older or failed creations may not have a driver identity. Termination is still synchronous
+    // at the driver boundary, so allow one topology-debounce interval before local creation.
+    std::this_thread::sleep_for(750ms);
+    return local_ar_handoff_e::ready;
+  }
+#endif
+
+  std::vector<ctx_t> proc_t::get_apps() const {
+    std::lock_guard lock(process_state_mutex);
     return _apps;
   }
 
@@ -827,6 +948,7 @@ namespace proc {
   // Returns default image if image configuration is not set.
   // Returns http content-type header compatible image type.
   std::string proc_t::get_app_image(int app_id) {
+    std::lock_guard lock(process_state_mutex);
     auto iter = std::find_if(_apps.begin(), _apps.end(), [&app_id](const auto app) {
       return app.id == std::to_string(app_id);
     });
@@ -836,14 +958,17 @@ namespace proc {
   }
 
   std::string proc_t::get_last_run_app_name() {
+    std::lock_guard lock(process_state_mutex);
     return _app_name;
   }
 
   std::string proc_t::get_running_app_uuid() {
+    std::lock_guard lock(process_state_mutex);
     return _app.uuid;
   }
 
   boost::process::environment proc_t::get_env() {
+    std::lock_guard lock(process_state_mutex);
     return _env;
   }
 
@@ -1563,6 +1688,7 @@ namespace proc {
   }
 
   void refresh(const std::string &file_name, bool needs_terminate) {
+    std::lock_guard lock(process_state_mutex);
     if (needs_terminate) {
       proc.terminate(false, false);
     }

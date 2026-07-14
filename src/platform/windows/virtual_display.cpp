@@ -1,36 +1,61 @@
-#include <windows.h>
-#include <iostream>
-#include <vector>
-#include <setupapi.h>
-#include <initguid.h>
-#include <combaseapi.h>
-#include <thread>
-
-#include <wrl/client.h>
-#include <dxgi.h>
-#include <highlevelmonitorconfigurationapi.h>
-#include <physicalmonitorenumerationapi.h>
-#include <dxgi1_6.h>
-
 #include "virtual_display.h"
+
+#include <algorithm>
+#include <combaseapi.h>
+#include <dxgi.h>
+#include <dxgi1_6.h>
+#include <highlevelmonitorconfigurationapi.h>
+#include <initguid.h>
+#include <iostream>
+#include <mutex>
+#include <optional>
+#include <physicalmonitorenumerationapi.h>
+#include <setupapi.h>
+#include <thread>
+#include <vector>
+#include <wrl/client.h>
 
 using namespace SUDOVDA;
 
 namespace VDISPLAY {
-// {dff7fd29-5b75-41d1-9731-b32a17a17104}
-// static const GUID DEFAULT_DISPLAY_GUID = { 0xdff7fd29, 0x5b75, 0x41d1, { 0x97, 0x31, 0xb3, 0x2a, 0x17, 0xa1, 0x71, 0x04 } };
+  // {dff7fd29-5b75-41d1-9731-b32a17a17104}
+  // static const GUID DEFAULT_DISPLAY_GUID = { 0xdff7fd29, 0x5b75, 0x41d1, { 0x97, 0x31, 0xb3, 0x2a, 0x17, 0xa1, 0x71, 0x04 } };
 
-HANDLE SUDOVDA_DRIVER_HANDLE = INVALID_HANDLE_VALUE;
+  HANDLE SUDOVDA_DRIVER_HANDLE = INVALID_HANDLE_VALUE;
 
-// START ISOLATED DISPLAY DECLARATIONS
-struct positionwidthheight;
-struct coordinates;
-struct coordinatesdifferences;
-struct coordinates
-{
-	int x;
-	int y;
-};
+  namespace {
+    std::mutex virtualDisplayMutationMutex;
+
+    std::optional<LUID> adapterLuidByName(const std::wstring &adapterName) {
+      Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+      if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+        return std::nullopt;
+      }
+
+      for (UINT index = 0;; ++index) {
+        Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+        if (factory->EnumAdapters(index, &adapter) == DXGI_ERROR_NOT_FOUND) {
+          break;
+        }
+
+        DXGI_ADAPTER_DESC desc {};
+        if (SUCCEEDED(adapter->GetDesc(&desc)) && std::wstring_view(desc.Description) == adapterName) {
+          return desc.AdapterLuid;
+        }
+      }
+      return std::nullopt;
+    }
+  }  // namespace
+
+  // START ISOLATED DISPLAY DECLARATIONS
+  struct positionwidthheight;
+  struct coordinates;
+  struct coordinatesdifferences;
+
+  struct coordinates {
+    int x;
+    int y;
+  };
 
 struct positionwidthheight
 {
@@ -61,253 +86,233 @@ LONG getDeviceSettings(const wchar_t* deviceName, DEVMODEW& devMode) {
 	return EnumDisplaySettingsW(deviceName, ENUM_CURRENT_SETTINGS, &devMode);
 }
 
-LONG changeDisplaySettings2(const wchar_t* deviceName, int width, int height, int refresh_rate, bool bApplyIsolated) {
-	UINT32 pathCount = 0;
-	UINT32 modeCount = 0;
-	if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount)) {
-		wprintf(L"[SUDOVDA] Failed to query display configuration size.\n");
-		return ERROR_INVALID_PARAMETER;
-	}
+LONG changeDisplaySettings2(const wchar_t *deviceName, int width, int height, int refresh_rate, bool bApplyIsolated) {
+  std::vector<DISPLAYCONFIG_PATH_INFO> pathArray;
+  std::vector<DISPLAYCONFIG_MODE_INFO> modeArray;
+  std::vector<struct positionwidthheight *> displayArray;
+  struct positionwidthheight *pCurrentElement;
 
-	std::vector<DISPLAYCONFIG_PATH_INFO> pathArray(pathCount);
-	std::vector<DISPLAYCONFIG_MODE_INFO> modeArray(modeCount);
-	std::vector<struct positionwidthheight *> displayArray;
-	struct positionwidthheight *pCurrentElement;
+  if (!queryActiveDisplayConfig(pathArray, modeArray)) {
+    wprintf(L"[SUDOVDA] Failed to query display configuration.\n");
+    return ERROR_INVALID_PARAMETER;
+  }
+  const UINT32 pathCount = (UINT32) pathArray.size();
+  const UINT32 modeCount = (UINT32) modeArray.size();
 
-	if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, pathArray.data(), &modeCount, modeArray.data(), nullptr) != ERROR_SUCCESS) {
-		wprintf(L"[SUDOVDA] Failed to query display configuration.\n");
-		return ERROR_INVALID_PARAMETER;
-	}
+  bool bAtVirtualDisplay;
+  bool bVirtualDisplayAlreadyAdded = false;
+  std::string sDisplayOutput;
 
-	bool bAtVirtualDisplay;
-	bool bVirtualDisplayAlreadyAdded = false;
-	std::string sDisplayOutput;
+  if (bApplyIsolated == true) {
+    for (UINT32 i = 0; i < pathCount; i++) {
+      DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
+      sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+      sourceName.header.size = sizeof(sourceName);
+      sourceName.header.adapterId = pathArray[i].sourceInfo.adapterId;
+      sourceName.header.id = pathArray[i].sourceInfo.id;
+      bAtVirtualDisplay = false;
 
-	if (bApplyIsolated == true)
-	{
-		for (UINT32 i = 0; i < pathCount; i++) {
-			DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
-			sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-			sourceName.header.size = sizeof(sourceName);
-			sourceName.header.adapterId = pathArray[i].sourceInfo.adapterId;
-			sourceName.header.id = pathArray[i].sourceInfo.id;
-			bAtVirtualDisplay = false;
+      if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS) {
+        continue;
+      }
 
-			if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS) {
-				continue;
-			}
+      auto *sourceInfo = &pathArray[i].sourceInfo;
+      auto *targetInfo = &pathArray[i].targetInfo;
 
-			auto* sourceInfo = &pathArray[i].sourceInfo;
-			auto* targetInfo = &pathArray[i].targetInfo;
+      if (std::wstring_view(sourceName.viewGdiDeviceName) == std::wstring_view(deviceName)) {
+        bAtVirtualDisplay = true;
+      }
 
-			if (std::wstring_view(sourceName.viewGdiDeviceName) == std::wstring_view(deviceName))
-			{
-				bAtVirtualDisplay = true;
-			}
+      if (true) {
+        for (UINT32 j = 0; j < modeCount; j++) {
+          if (
+            modeArray[j].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE &&
+            modeArray[j].adapterId.HighPart == sourceInfo->adapterId.HighPart &&
+            modeArray[j].adapterId.LowPart == sourceInfo->adapterId.LowPart &&
+            modeArray[j].id == sourceInfo->id
+          ) {
+            auto *sourceMode = &modeArray[j].sourceMode;
 
-			if ( true ) {
-				for (UINT32 j = 0; j < modeCount; j++) {
-					if (
-						modeArray[j].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE &&
-						modeArray[j].adapterId.HighPart == sourceInfo->adapterId.HighPart &&
-						modeArray[j].adapterId.LowPart == sourceInfo->adapterId.LowPart &&
-						modeArray[j].id == sourceInfo->id
-						) {
-						auto* sourceMode = &modeArray[j].sourceMode;
+            wprintf(L"[SUDOVDA] Current mode found: [%dx%dx%d]\n", sourceMode->width, sourceMode->height, targetInfo->refreshRate);
 
-						wprintf(L"[SUDOVDA] Current mode found: [%dx%dx%d]\n", sourceMode->width, sourceMode->height, targetInfo->refreshRate);
+            pCurrentElement = new (struct positionwidthheight);
 
-						pCurrentElement = new (struct positionwidthheight);
+            pCurrentElement->position.x = modeArray[j].sourceMode.position.x;
+            pCurrentElement->position.y = modeArray[j].sourceMode.position.y;
+            pCurrentElement->height = modeArray[j].sourceMode.height;
+            pCurrentElement->width = modeArray[j].sourceMode.width;
+            pCurrentElement->modeindex = j;
 
-						pCurrentElement->position.x = modeArray[j].sourceMode.position.x;
-						pCurrentElement->position.y = modeArray[j].sourceMode.position.y;
-						pCurrentElement->height = modeArray[j].sourceMode.height;
-						pCurrentElement->width = modeArray[j].sourceMode.width;
-						pCurrentElement->modeindex = j;
+            // This is the virtual display - insert at the front of the vector
+            if (bAtVirtualDisplay == true && bVirtualDisplayAlreadyAdded == false) {
+              displayArray.insert(displayArray.begin() + 0, pCurrentElement);
+              bVirtualDisplayAlreadyAdded = true;
+            } else {
+              displayArray.push_back(pCurrentElement);
+            }
+          }
+        }
+      }
+    }
 
-						// This is the virtual display - insert at the front of the vector
-						if (bAtVirtualDisplay == true && bVirtualDisplayAlreadyAdded == false)
-						{
-							displayArray.insert( displayArray.begin()+0, pCurrentElement);
-							bVirtualDisplayAlreadyAdded = true;
-						} else 	{
-							displayArray.push_back(pCurrentElement);
-						}
-					}
-				}
-			}
-		}
+    sDisplayOutput = "";
+    sDisplayOutput += "Before: \n";
+    sDisplayOutput += printAllDisplays(displayArray);
 
-		sDisplayOutput = "";
-		sDisplayOutput += "Before: \n";
-		sDisplayOutput += printAllDisplays(displayArray);
+    displayArray = rearrangeVirtualDisplayForLowerRight(displayArray);
 
-		displayArray = rearrangeVirtualDisplayForLowerRight(displayArray);
+    sDisplayOutput += "";
+    sDisplayOutput += "After: \n";
+    sDisplayOutput += printAllDisplays(displayArray);
 
-		sDisplayOutput += "";
-		sDisplayOutput += "After: \n";
-		sDisplayOutput += printAllDisplays(displayArray);
+    int iIndex;
+    int xdifference, ydifference = 0;
+    for (iIndex = 0; iIndex < displayArray.size(); iIndex += 1) {
+      // Find the primary display and get the offset to apply to all of the displays to keep the same primary
+      if (modeArray[(displayArray[iIndex]->modeindex)].sourceMode.position.x == 0 && modeArray[(displayArray[iIndex]->modeindex)].sourceMode.position.y == 0) {
+        xdifference = (displayArray[iIndex]->position.x) * -1;
+        ydifference = (displayArray[iIndex]->position.y) * -1;
+        break;
+      }
+    }
 
-		int iIndex;
-		int xdifference, ydifference = 0;
-		for (iIndex = 0; iIndex < displayArray.size(); iIndex += 1)
-		{
+    // Set all of the OS Displays to their new locations; Do not change the primary
+    // Update the real vector for the system call
+    for (iIndex = 0; iIndex < displayArray.size(); iIndex += 1) {
+      modeArray[(displayArray[iIndex]->modeindex)].sourceMode.position.x = displayArray[iIndex]->position.x + xdifference;
+      modeArray[(displayArray[iIndex]->modeindex)].sourceMode.position.y = displayArray[iIndex]->position.y + ydifference;
+      modeArray[(displayArray[iIndex]->modeindex)].sourceMode.height = displayArray[iIndex]->height;
+      modeArray[(displayArray[iIndex]->modeindex)].sourceMode.width = displayArray[iIndex]->width;
+    }
 
-			// Find the primary display and get the offset to apply to all of the displays to keep the same primary
-			if( modeArray[(displayArray[iIndex]->modeindex)].sourceMode.position.x == 0 &&
-			    modeArray[(displayArray[iIndex]->modeindex)].sourceMode.position.y == 0 )
-				{
-					xdifference = (displayArray[iIndex]->position.x) * -1;
-					ydifference = (displayArray[iIndex]->position.y) * -1;
-					break;
-				}
-		}
+    // Apply the changes only if the virtual display was found
+    if (bVirtualDisplayAlreadyAdded == true) {
+      LONG status = SetDisplayConfig(
+        pathCount,
+        pathArray.data(),
+        modeCount,
+        modeArray.data(),
+        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_SAVE_TO_DATABASE
+      );
+      if (status != ERROR_SUCCESS) {
+        wprintf(L"[SUDOVDA] Failed to apply display settings.\n");
+      } else {
+        wprintf(L"[SUDOVDA] Display settings updated successfully.\n");
+      }
+    }
+    for (iIndex = 0; iIndex < displayArray.size(); iIndex += 1) {
+      if (displayArray[iIndex] != nullptr) {
+        delete displayArray[iIndex];
+      }
+      displayArray.clear();
+    }
+  }
 
-		// Set all of the OS Displays to their new locations; Do not change the primary
-		// Update the real vector for the system call
-		for (iIndex = 0; iIndex < displayArray.size(); iIndex += 1)
-		{
-			modeArray[(displayArray[iIndex]->modeindex)].sourceMode.position.x = displayArray[iIndex]->position.x + xdifference;
-			modeArray[(displayArray[iIndex]->modeindex)].sourceMode.position.y = displayArray[iIndex]->position.y + ydifference;
-			modeArray[(displayArray[iIndex]->modeindex)].sourceMode.height = displayArray[iIndex]->height;
-			modeArray[(displayArray[iIndex]->modeindex)].sourceMode.width = displayArray[iIndex]->width;
-		}
+  // After performing the isolated display movements, do the regular movements
+  for (UINT32 i = 0; i < pathCount; i++) {
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
+    sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+    sourceName.header.size = sizeof(sourceName);
+    sourceName.header.adapterId = pathArray[i].sourceInfo.adapterId;
+    sourceName.header.id = pathArray[i].sourceInfo.id;
 
-		// Apply the changes only if the virtual display was found
-		if( bVirtualDisplayAlreadyAdded == true ) {
-			LONG status = SetDisplayConfig(
-				pathCount,
-				pathArray.data(),
-				modeCount,
-				modeArray.data(),
-				SDC_APPLY
-				| SDC_USE_SUPPLIED_DISPLAY_CONFIG
-				| SDC_SAVE_TO_DATABASE
-			);
-			if (status != ERROR_SUCCESS) {
-				wprintf(L"[SUDOVDA] Failed to apply display settings.\n");
-			} else {
-				wprintf(L"[SUDOVDA] Display settings updated successfully.\n");
-			}
-		}
-		for (iIndex = 0; iIndex < displayArray.size(); iIndex += 1)
-		{
-			if (displayArray[iIndex] != nullptr)
-			{
-				delete displayArray[iIndex];
-			}
-			displayArray.clear();
-		}
-	}
+    if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS) {
+      continue;
+    }
 
-	// After performing the isolated display movements, do the regular movements
-	for (UINT32 i = 0; i < pathCount; i++) {
-		DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
-		sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-		sourceName.header.size = sizeof(sourceName);
-		sourceName.header.adapterId = pathArray[i].sourceInfo.adapterId;
-		sourceName.header.id = pathArray[i].sourceInfo.id;
+    auto *sourceInfo = &pathArray[i].sourceInfo;
+    auto *targetInfo = &pathArray[i].targetInfo;
 
-		if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS) {
-			continue;
-		}
+    if (std::wstring_view(sourceName.viewGdiDeviceName) == std::wstring_view(deviceName)) {
+      wprintf(L"[SUDOVDA] Display found: %ls\n", deviceName);
+      for (UINT32 j = 0; j < modeCount; j++) {
+        if (
+          modeArray[j].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE &&
+          modeArray[j].adapterId.HighPart == sourceInfo->adapterId.HighPart &&
+          modeArray[j].adapterId.LowPart == sourceInfo->adapterId.LowPart &&
+          modeArray[j].id == sourceInfo->id
+        ) {
+          auto *sourceMode = &modeArray[j].sourceMode;
 
-		auto* sourceInfo = &pathArray[i].sourceInfo;
-		auto* targetInfo = &pathArray[i].targetInfo;
+          wprintf(L"[SUDOVDA] Current mode found: [%dx%dx%d]\n", sourceMode->width, sourceMode->height, targetInfo->refreshRate);
 
-		if (std::wstring_view(sourceName.viewGdiDeviceName) == std::wstring_view(deviceName)) {
-			wprintf(L"[SUDOVDA] Display found: %ls\n", deviceName);
-			for (UINT32 j = 0; j < modeCount; j++) {
-				if (
-					modeArray[j].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE &&
-					modeArray[j].adapterId.HighPart == sourceInfo->adapterId.HighPart &&
-					modeArray[j].adapterId.LowPart == sourceInfo->adapterId.LowPart &&
-					modeArray[j].id == sourceInfo->id
-				) {
-					auto* sourceMode = &modeArray[j].sourceMode;
+          sourceMode->width = width;
+          sourceMode->height = height;
 
-					wprintf(L"[SUDOVDA] Current mode found: [%dx%dx%d]\n", sourceMode->width, sourceMode->height, targetInfo->refreshRate);
+          targetInfo->refreshRate = {(UINT32) refresh_rate, 1000};
 
-					sourceMode->width = width;
-					sourceMode->height = height;
+          // Apply the changes
+          LONG status = SetDisplayConfig(
+            pathCount,
+            pathArray.data(),
+            modeCount,
+            modeArray.data(),
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_SAVE_TO_DATABASE
+          );
+          if (status != ERROR_SUCCESS) {
+            wprintf(L"[SUDOVDA] Failed to apply display settings.\n");
+          } else {
+            wprintf(L"[SUDOVDA] Display settings updated successfully.\n");
+          }
 
-					targetInfo->refreshRate = {(UINT32)refresh_rate, 1000};
+          return status;
+        }
+      }
 
-					// Apply the changes
-					LONG status = SetDisplayConfig(
-						pathCount,
-						pathArray.data(),
-						modeCount,
-						modeArray.data(),
-						SDC_APPLY
-						| SDC_USE_SUPPLIED_DISPLAY_CONFIG
-						| SDC_SAVE_TO_DATABASE
-					);
-					if (status != ERROR_SUCCESS) {
-						wprintf(L"[SUDOVDA] Failed to apply display settings.\n");
-					} else {
-						wprintf(L"[SUDOVDA] Display settings updated successfully.\n");
-					}
+      wprintf(L"[SUDOVDA] Mode [%dx%dx%d] not found for display: %ls\n", width, height, refresh_rate, deviceName);
+      return ERROR_INVALID_PARAMETER;
+    }
+  }
 
-					return status;
-				}
-			}
-
-			wprintf(L"[SUDOVDA] Mode [%dx%dx%d] not found for display: %ls\n", width, height, refresh_rate, deviceName);
-			return ERROR_INVALID_PARAMETER;
-		}
-	}
-
-	wprintf(L"[SUDOVDA] Display not found: %ls\n", deviceName);
-	return ERROR_DEVICE_NOT_CONNECTED;
+  wprintf(L"[SUDOVDA] Display not found: %ls\n", deviceName);
+  return ERROR_DEVICE_NOT_CONNECTED;
 }
 
-LONG changeDisplaySettings(const wchar_t* deviceName, int width, int height, int refresh_rate) {
-	DEVMODEW devMode = {};
-	devMode.dmSize = sizeof(devMode);
+LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate) {
+  DEVMODEW devMode = {};
+  devMode.dmSize = sizeof(devMode);
 
-	// Old method to set at least baseline refresh rate
-	if (EnumDisplaySettingsW(deviceName, ENUM_CURRENT_SETTINGS, &devMode)) {
-		DWORD targetRefreshRate = refresh_rate / 1000;
-		DWORD altRefreshRate = targetRefreshRate;
+  // Old method to set at least baseline refresh rate
+  if (EnumDisplaySettingsW(deviceName, ENUM_CURRENT_SETTINGS, &devMode)) {
+    DWORD targetRefreshRate = refresh_rate / 1000;
+    DWORD altRefreshRate = targetRefreshRate;
 
-		if (refresh_rate % 1000) {
-			if (refresh_rate % 1000 >= 900) {
-				targetRefreshRate += 1;
-			} else {
-				altRefreshRate += 1;
-			}
-		} else {
-			altRefreshRate -= 1;
-		}
+    if (refresh_rate % 1000) {
+      if (refresh_rate % 1000 >= 900) {
+        targetRefreshRate += 1;
+      } else {
+        altRefreshRate += 1;
+      }
+    } else {
+      altRefreshRate -= 1;
+    }
 
-		wprintf(L"[SUDOVDA] Applying baseline display mode [%dx%dx%d] for %ls.\n", width, height, targetRefreshRate, deviceName);
+    wprintf(L"[SUDOVDA] Applying baseline display mode [%dx%dx%d] for %ls.\n", width, height, targetRefreshRate, deviceName);
 
-		devMode.dmPelsWidth = width;
-		devMode.dmPelsHeight = height;
-		devMode.dmDisplayFrequency = targetRefreshRate;
-		devMode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+    devMode.dmPelsWidth = width;
+    devMode.dmPelsHeight = height;
+    devMode.dmDisplayFrequency = targetRefreshRate;
+    devMode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
 
-		auto res = ChangeDisplaySettingsExW(deviceName, &devMode, NULL, CDS_UPDATEREGISTRY, NULL);
+    auto res = ChangeDisplaySettingsExW(deviceName, &devMode, NULL, CDS_UPDATEREGISTRY, NULL);
 
-		if (res != ERROR_SUCCESS) {
-			wprintf(L"[SUDOVDA] Failed to apply baseline display mode, trying alt mode: [%dx%dx%d].\n", width, height, altRefreshRate);
-			devMode.dmDisplayFrequency = altRefreshRate;
-			res = ChangeDisplaySettingsExW(deviceName, &devMode, NULL, CDS_UPDATEREGISTRY, NULL);
-			if (res != ERROR_SUCCESS) {
-				wprintf(L"[SUDOVDA] Failed to apply alt baseline display mode.\n");
-			}
-		}
+    if (res != ERROR_SUCCESS) {
+      wprintf(L"[SUDOVDA] Failed to apply baseline display mode, trying alt mode: [%dx%dx%d].\n", width, height, altRefreshRate);
+      devMode.dmDisplayFrequency = altRefreshRate;
+      res = ChangeDisplaySettingsExW(deviceName, &devMode, NULL, CDS_UPDATEREGISTRY, NULL);
+      if (res != ERROR_SUCCESS) {
+        wprintf(L"[SUDOVDA] Failed to apply alt baseline display mode.\n");
+      }
+    }
 
-		if (res == ERROR_SUCCESS) {
-			wprintf(L"[SUDOVDA] Baseline display mode applied successfully.");
-		}
-	}
+    if (res == ERROR_SUCCESS) {
+      wprintf(L"[SUDOVDA] Baseline display mode applied successfully.");
+    }
+  }
 
-	// Use new method to set refresh rate if fine tuned
-	return changeDisplaySettings2(deviceName, width, height, refresh_rate);
+  // Use new method to set refresh rate if fine tuned
+  return changeDisplaySettings2(deviceName, width, height, refresh_rate);
 }
-
 
 std::wstring getPrimaryDisplay() {
 	DISPLAY_DEVICEW displayDevice;
@@ -383,147 +388,81 @@ bool setPrimaryDisplay(const wchar_t* primaryDeviceName) {
 	return true;
 }
 
-bool findDisplayIds(const wchar_t* displayName, LUID& adapterId, uint32_t& targetId) {
-	UINT32 pathCount;
-	UINT32 modeCount;
-	if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount)) {
-		return false;
-	}
+bool findDisplayIds(const wchar_t *displayName, LUID &adapterId, uint32_t &targetId) {
+  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+  if (!queryActiveDisplayConfig(paths, modes)) {
+    return false;
+  }
 
-	std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
-	std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
-	if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr)) {
-		return false;
-	}
+  auto path = std::find_if(paths.begin(), paths.end(), [&displayName](DISPLAYCONFIG_PATH_INFO _path) {
+    DISPLAYCONFIG_PATH_SOURCE_INFO sourceInfo = _path.sourceInfo;
 
-	auto path = std::find_if(paths.begin(), paths.end(), [&displayName](DISPLAYCONFIG_PATH_INFO _path) {
-		DISPLAYCONFIG_PATH_SOURCE_INFO sourceInfo = _path.sourceInfo;
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
+    sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+    sourceName.header.size = sizeof(sourceName);
+    sourceName.header.adapterId = sourceInfo.adapterId;
+    sourceName.header.id = sourceInfo.id;
 
-		DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
-		sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-		sourceName.header.size = sizeof(sourceName);
-		sourceName.header.adapterId = sourceInfo.adapterId;
-		sourceName.header.id = sourceInfo.id;
+    if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS) {
+      return false;
+    }
 
-		if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS) {
-			return false;
-		}
+    return std::wstring_view(displayName) == sourceName.viewGdiDeviceName;
+  });
 
-		return std::wstring_view(displayName) == sourceName.viewGdiDeviceName;
-	});
+  if (path == paths.end()) {
+    return false;
+  }
 
-	if (path == paths.end()) {
-		return false;
-	}
+  adapterId = path->targetInfo.adapterId;
+  targetId = path->targetInfo.id;
 
-	adapterId = path->sourceInfo.adapterId;
-	targetId = path->targetInfo.id;
-
-	return true;
+  return true;
 }
 
-bool getDisplayHDR(const LUID& adapterLuid, const wchar_t* displayName) {
-	Microsoft::WRL::ComPtr<IDXGIFactory1> dxgiFactory;
-	HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&dxgiFactory));
-	if (FAILED(hr)) {
-		wprintf(L"[SUDOVDA] CreateDXGIFactory1 failed in getDisplayHDR! hr=0x%lx\n", hr);
-		return false;
-	}
+bool getDisplayHDR(const LUID &adapterLuid, uint32_t targetId) {
+  // Query the display configuration state directly. A virtual HDR desktop is represented as
+  // linear scRGB to desktop applications, so its DXGI output color space is not required to be
+  // the physical-output PQ/Rec.2020 space and is not a reliable HDR-enabled test.
+  DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 info2 {};
+  info2.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2;
+  info2.header.size = sizeof(info2);
+  info2.header.adapterId = adapterLuid;
+  info2.header.id = targetId;
+  if (DisplayConfigGetDeviceInfo(&info2.header) == ERROR_SUCCESS) {
+    return info2.activeColorMode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  }
 
-	for (UINT adapterIdx = 0; ; ++adapterIdx) {
-		Microsoft::WRL::ComPtr<IDXGIAdapter1> currentAdapter;
-		hr = dxgiFactory->EnumAdapters1(adapterIdx, currentAdapter.ReleaseAndGetAddressOf());
-
-		if (hr == DXGI_ERROR_NOT_FOUND) {
-			break; // No more adapters
-		}
-		if (FAILED(hr)) {
-			wprintf(L"[SUDOVDA] EnumAdapters1 failed for index %u in getDisplayHDR! hr=0x%lx\n", adapterIdx, hr);
-			break;
-		}
-
-		DXGI_ADAPTER_DESC1 adapterDesc;
-		hr = currentAdapter->GetDesc1(&adapterDesc);
-		if (FAILED(hr)) {
-			wprintf(L"[SUDOVDA] GetDesc1 (Adapter) failed for index %u in getDisplayHDR! hr=0x%lx\n", adapterIdx, hr);
-			continue;
-		}
-
-		if (adapterDesc.AdapterLuid.LowPart == adapterLuid.LowPart &&
-			adapterDesc.AdapterLuid.HighPart == adapterLuid.HighPart) {
-
-			std::wstring_view displayName_view{displayName};
-
-			// Adapter found. Now iterate its outputs and match against targetGdiDeviceName.
-			for (UINT outputIdx = 0; ; ++outputIdx) {
-				Microsoft::WRL::ComPtr<IDXGIOutput> dxgiOutput;
-				hr = currentAdapter->EnumOutputs(outputIdx, dxgiOutput.ReleaseAndGetAddressOf());
-
-				if (hr == DXGI_ERROR_NOT_FOUND) {
-					wprintf(L"[SUDOVDA] No more DXGI outputs on matched adapter for GDI name %ls.\n", displayName);
-					break; // No more outputs on this adapter
-				}
-				if (FAILED(hr) || !dxgiOutput) {
-					continue; // Error, try next output
-				}
-
-				DXGI_OUTPUT_DESC dxgiOutputDesc;
-				hr = dxgiOutput->GetDesc(&dxgiOutputDesc);
-				if (FAILED(hr)) {
-					continue;
-				}
-
-				MONITORINFOEXW monitorInfoEx = {};
-				monitorInfoEx.cbSize = sizeof(MONITORINFOEXW);
-				if (GetMonitorInfoW(dxgiOutputDesc.Monitor, &monitorInfoEx)) {
-					if (displayName_view == monitorInfoEx.szDevice) {
-						// This is the correct output!
-						wprintf(L"[SUDOVDA] Matched DXGI output GDI name: %ls\n", monitorInfoEx.szDevice);
-						Microsoft::WRL::ComPtr<IDXGIOutput6> dxgiOutput6;
-						hr = dxgiOutput.As(&dxgiOutput6);
-
-						if (SUCCEEDED(hr) && dxgiOutput6) {
-							DXGI_OUTPUT_DESC1 outputDesc1;
-							hr = dxgiOutput6->GetDesc1(&outputDesc1);
-							if (SUCCEEDED(hr)) {
-								if (outputDesc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020) {
-									return true; // HDR Active
-								}
-							} else {
-								wprintf(L"[SUDOVDA] GetDesc1 (Output) failed for %ls. hr=0x%lx\n", monitorInfoEx.szDevice, hr);
-							}
-						} else {
-							wprintf(L"[SUDOVDA] QueryInterface for IDXGIOutput6 failed for %ls. hr=0x%lx. HDR check method not available or output not capable.\n", monitorInfoEx.szDevice, hr);
-						}
-						// Matched the output, checked HDR (it was false or error). This is the only output we care about for this adapter.
-						return false; // Return false as HDR not active or error for this specific display
-					}
-				} else {
-					DWORD lastError = GetLastError();
-					wprintf(L"[SUDOVDA] GetMonitorInfoW failed for HMONITOR 0x%p from DXGI output %ls. Error: %lu\n", dxgiOutputDesc.Monitor, dxgiOutputDesc.DeviceName, lastError);
-				}
-			} // end output enumeration loop for the matched adapter
-
-			// If output loop completes, the targetGdiDeviceName was not found among this adapter's DXGI outputs.
-			wprintf(L"[SUDOVDA] Target GDI name %ls not found among DXGI outputs of the matched adapter.\n", displayName);
-			return false;
-		}
-	} // end adapter enumeration loop
-
-	// If adapter loop completes without finding the adapterLuidFromCaller
-	wprintf(L"[SUDOVDA] Target adapter LUID {%lx-%lx} not found via DXGI.\n", adapterLuid.HighPart, adapterLuid.LowPart);
-	return false;
+  DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO info {};
+  info.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+  info.header.size = sizeof(info);
+  info.header.adapterId = adapterLuid;
+  info.header.id = targetId;
+  return DisplayConfigGetDeviceInfo(&info.header) == ERROR_SUCCESS && info.advancedColorEnabled;
 }
 
 bool setDisplayHDR(const LUID& adapterId, const uint32_t& targetId, bool enableAdvancedColor) {
-	DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE setHdrInfo = {};
-	setHdrInfo.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE;
-	setHdrInfo.header.size = sizeof(setHdrInfo);
-	setHdrInfo.header.adapterId = adapterId;
-	setHdrInfo.header.id = targetId;
-	setHdrInfo.enableAdvancedColor = enableAdvancedColor;
+  DISPLAYCONFIG_SET_HDR_STATE setHdrState = {};
+  setHdrState.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE;
+  setHdrState.header.size = sizeof(setHdrState);
+  setHdrState.header.adapterId = adapterId;
+  setHdrState.header.id = targetId;
+  setHdrState.enableHdr = enableAdvancedColor;
 
-	return DisplayConfigSetDeviceInfo(&setHdrInfo.header) == ERROR_SUCCESS;
+  if (DisplayConfigSetDeviceInfo(&setHdrState.header) == ERROR_SUCCESS) {
+    return true;
+  }
+
+  // Windows 10 exposes only the combined Advanced Color setter.
+  DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE setHdrInfo = {};
+  setHdrInfo.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE;
+  setHdrInfo.header.size = sizeof(setHdrInfo);
+  setHdrInfo.header.adapterId = adapterId;
+  setHdrInfo.header.id = targetId;
+  setHdrInfo.enableAdvancedColor = enableAdvancedColor;
+
+  return DisplayConfigSetDeviceInfo(&setHdrInfo.header) == ERROR_SUCCESS;
 }
 
 bool getDisplayHDRByName(const wchar_t* displayName) {
@@ -535,7 +474,7 @@ bool getDisplayHDRByName(const wchar_t* displayName) {
 		return false;
 	}
 
-	return getDisplayHDR(adapterId, displayName);
+  return getDisplayHDR(adapterId, targetId);
 }
 
 bool setDisplayHDRByName(const wchar_t* displayName, bool enableAdvancedColor) {
@@ -621,84 +560,243 @@ bool startPingThread(std::function<void()> failCb) {
 	return true;
 }
 
-bool setRenderAdapterByName(const std::wstring& adapterName) {
-	if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
-		return false;
-	}
+bool queryActiveDisplayConfig(
+  std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
+  std::vector<DISPLAYCONFIG_MODE_INFO> &modes
+) {
+  // The active-path count can change between the size and data calls while Windows is applying a
+  // hotplug, HDR, or IddCx topology transition. Retry that documented race instead of presenting a
+  // transient empty desktop to callers.
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    UINT32 pathCount = 0;
+    UINT32 modeCount = 0;
+    const auto sizeStatus = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount);
+    if (sizeStatus != ERROR_SUCCESS) {
+      if (sizeStatus != ERROR_INSUFFICIENT_BUFFER) {
+        return false;
+      }
+      Sleep(1u << std::min(attempt, 5));
+      continue;
+    }
 
-	Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
-	if (!SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
-		return false;
-	}
+    paths.resize(pathCount);
+    modes.resize(modeCount);
+    const auto queryStatus = QueryDisplayConfig(
+      QDC_ONLY_ACTIVE_PATHS,
+      &pathCount,
+      paths.data(),
+      &modeCount,
+      modes.data(),
+      nullptr
+    );
+    if (queryStatus == ERROR_SUCCESS) {
+      paths.resize(pathCount);
+      modes.resize(modeCount);
+      return true;
+    }
+    if (queryStatus != ERROR_INSUFFICIENT_BUFFER) {
+      return false;
+    }
+    Sleep(1u << std::min(attempt, 5));
+  }
 
-	Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
-	DXGI_ADAPTER_DESC desc;
-	int i = 0;
-	while (SUCCEEDED(factory->EnumAdapters(i, &adapter))) {
-		i += 1;
-
-		if (!SUCCEEDED(adapter->GetDesc(&desc))) {
-			continue;
-		}
-
-		if (std::wstring_view(desc.Description) != adapterName) {
-			continue;
-		}
-
-		if (SetRenderAdapter(SUDOVDA_DRIVER_HANDLE, desc.AdapterLuid)) {
-			return true;
-		}
-	}
-
-	return false;
+  paths.clear();
+  modes.clear();
+  return false;
 }
+
+std::wstring getDisplayName(const LUID &adapterLuid, uint32_t targetId) {
+  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+  if (!queryActiveDisplayConfig(paths, modes)) {
+    return {};
+  }
+
+  for (const auto &path : paths) {
+    if (path.targetInfo.id != targetId || path.targetInfo.adapterId.HighPart != adapterLuid.HighPart || path.targetInfo.adapterId.LowPart != adapterLuid.LowPart) {
+      continue;
+    }
+
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
+    sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+    sourceName.header.size = sizeof(sourceName);
+    sourceName.header.adapterId = path.sourceInfo.adapterId;
+    sourceName.header.id = path.sourceInfo.id;
+    if (DisplayConfigGetDeviceInfo(&sourceName.header) == ERROR_SUCCESS) {
+      return sourceName.viewGdiDeviceName;
+    }
+  }
+
+  return {};
+}
+
+namespace {
+  std::optional<LUID> primaryDisplayAdapterLuid() {
+    std::wstring primaryDisplay;
+    for (DWORD index = 0;; ++index) {
+      DISPLAY_DEVICEW device {};
+      device.cb = sizeof(device);
+      if (!EnumDisplayDevicesW(nullptr, index, &device, 0)) {
+        break;
+      }
+      if ((device.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0) {
+        primaryDisplay = device.DeviceName;
+        break;
+      }
+    }
+    if (primaryDisplay.empty()) {
+      return std::nullopt;
+    }
+
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+    if (!queryActiveDisplayConfig(paths, modes)) {
+      return std::nullopt;
+    }
+    for (const auto &path : paths) {
+      DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName {};
+      sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+      sourceName.header.size = sizeof(sourceName);
+      sourceName.header.adapterId = path.sourceInfo.adapterId;
+      sourceName.header.id = path.sourceInfo.id;
+      if (DisplayConfigGetDeviceInfo(&sourceName.header) == ERROR_SUCCESS && std::wstring_view(sourceName.viewGdiDeviceName) == primaryDisplay) {
+        return path.sourceInfo.adapterId;
+      }
+    }
+    return std::nullopt;
+  }
+
+  std::wstring createVirtualDisplayImpl(
+    const char *s_client_uid,
+    const char *s_client_name,
+    uint32_t width,
+    uint32_t height,
+    uint32_t fps,
+    const GUID &guid,
+    const std::optional<LUID> &adapterLuid,
+    VIRTUAL_DISPLAY_ADD_OUT *createdDisplay
+  ) {
+    VIRTUAL_DISPLAY_ADD_OUT output;
+    {
+      // SudoVDA's render-adapter choice is process-global. Keep adapter selection and AddVirtualDisplay
+      // in one critical section so local AR and remote streaming sessions cannot steal each other's GPU.
+      std::lock_guard lock(virtualDisplayMutationMutex);
+      if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
+        return {};
+      }
+      if (adapterLuid && !SetRenderAdapter(SUDOVDA_DRIVER_HANDLE, *adapterLuid)) {
+        printf("[SUDOVDA] Failed to select render adapter for virtual display.\n");
+        return {};
+      }
+      if (!AddVirtualDisplay(SUDOVDA_DRIVER_HANDLE, width, height, fps, guid, s_client_name, s_client_uid, output)) {
+        printf("[SUDOVDA] Failed to add virtual display.\n");
+        return {};
+      }
+    }
+    if (createdDisplay) {
+      *createdDisplay = output;
+    }
+
+    uint32_t retryInterval = 20;
+    std::wstring deviceName;
+    while ((deviceName = getDisplayName(output.AdapterLuid, output.TargetId)).empty()) {
+      Sleep(retryInterval);
+      if (retryInterval > 320) {
+        printf("[SUDOVDA] Cannot get name for newly added virtual display!\n");
+        return std::wstring();
+      }
+      retryInterval *= 2;
+    }
+
+    wprintf(L"[SUDOVDA] Virtual display added successfully: %ls\n", deviceName.c_str());
+    printf("[SUDOVDA] Configuration: W: %d, H: %d, FPS: %d\n", width, height, fps);
+
+    return deviceName;
+  }
+}  // namespace
 
 std::wstring createVirtualDisplay(
-	const char* s_client_uid,
-	const char* s_client_name,
-	uint32_t width,
-	uint32_t height,
-	uint32_t fps,
-	const GUID& guid
+  const char *s_client_uid,
+  const char *s_client_name,
+  uint32_t width,
+  uint32_t height,
+  uint32_t fps,
+  const GUID &guid,
+  VIRTUAL_DISPLAY_ADD_OUT *createdDisplay
 ) {
-	if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
-		return std::wstring();
-	}
-
-	VIRTUAL_DISPLAY_ADD_OUT output;
-	if (!AddVirtualDisplay(SUDOVDA_DRIVER_HANDLE, width, height, fps, guid, s_client_name, s_client_uid, output)) {
-		printf("[SUDOVDA] Failed to add virtual display.\n");
-		return std::wstring();
-	}
-
-	uint32_t retryInterval = 20;
-	wchar_t deviceName[CCHDEVICENAME]{};
-	while (!GetAddedDisplayName(output, deviceName)) {
-		Sleep(retryInterval);
-		if (retryInterval > 320) {
-			printf("[SUDOVDA] Cannot get name for newly added virtual display!\n");
-			return std::wstring();
-		}
-		retryInterval *= 2;
-	}
-
-	wprintf(L"[SUDOVDA] Virtual display added successfully: %ls\n", deviceName);
-	printf("[SUDOVDA] Configuration: W: %d, H: %d, FPS: %d\n", width, height, fps);
-
-	return std::wstring(deviceName);
+  return createVirtualDisplayImpl(
+    s_client_uid,
+    s_client_name,
+    width,
+    height,
+    fps,
+    guid,
+    primaryDisplayAdapterLuid(),
+    createdDisplay
+  );
 }
 
-bool removeVirtualDisplay(const GUID& guid) {
-	if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
-		return false;
-	}
+std::wstring createVirtualDisplayOnAdapter(
+  const char *s_client_uid,
+  const char *s_client_name,
+  uint32_t width,
+  uint32_t height,
+  uint32_t fps,
+  const GUID &guid,
+  const LUID &adapterLuid,
+  VIRTUAL_DISPLAY_ADD_OUT *createdDisplay
+) {
+  return createVirtualDisplayImpl(
+    s_client_uid,
+    s_client_name,
+    width,
+    height,
+    fps,
+    guid,
+    adapterLuid,
+    createdDisplay
+  );
+}
 
-	if (RemoveVirtualDisplay(SUDOVDA_DRIVER_HANDLE, guid)) {
-		printf("[SUDOVDA] Virtual display removed successfully.\n");
-		return true;
-	} else {
-		return false;
-	}
+std::wstring createVirtualDisplayOnAdapter(
+  const char *s_client_uid,
+  const char *s_client_name,
+  uint32_t width,
+  uint32_t height,
+  uint32_t fps,
+  const GUID &guid,
+  const std::wstring &adapterName,
+  VIRTUAL_DISPLAY_ADD_OUT *createdDisplay
+) {
+  const auto adapterLuid = adapterLuidByName(adapterName);
+  if (!adapterLuid) {
+    printf("[SUDOVDA] Cannot find requested render adapter.\n");
+    return {};
+  }
+  return createVirtualDisplayImpl(
+    s_client_uid,
+    s_client_name,
+    width,
+    height,
+    fps,
+    guid,
+    *adapterLuid,
+    createdDisplay
+  );
+}
+
+bool removeVirtualDisplay(const GUID &guid) {
+  std::lock_guard lock(virtualDisplayMutationMutex);
+  if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+
+  if (RemoveVirtualDisplay(SUDOVDA_DRIVER_HANDLE, guid)) {
+    printf("[SUDOVDA] Virtual display removed successfully.\n");
+    return true;
+  } else {
+    return false;
+  }
 }
 
 // START ISOLATED DISPLAY METHODS
@@ -1195,4 +1293,4 @@ std::vector <std::wstring> matchDisplay(std::wstring sMatch) {
 }
 
 // END ISOLATED DISPLAY METHODS
-}
+}  // namespace VDISPLAY
