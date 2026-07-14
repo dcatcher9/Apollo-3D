@@ -60,6 +60,13 @@ default `1.25`) without changing that resolution correction.
   pixel rather than with a select at every probe. All non-performance artifacts remained
   byte-identical while warp time fell another 1.07% on core and 1.33% on extended. Evidence:
   `stretch-specialize-core` and `stretch-specialize-extended`.
+- The standalone evaluator-only confidence audit separates predicted-boundary model risk from
+  visible warp hazard and changes neither output nor the frozen metric contract. Warp-risk median
+  AUC against independent final-eye artifacts was 0.69 on core and 0.74 on extended. Model-risk
+  AUC against misplaced predicted boundaries was 0.59 on extended; that diagnostic cannot detect
+  a GT boundary omitted by the model, and core lacks sufficient two-class model evidence. Warp
+  risk is accepted for experiment screening only; model risk remains diagnostic, and neither is a
+  renderer input. Evidence: `depth-confidence-core` and `depth-confidence-extended`.
 - Horizontal silhouette-band snapping was screened at radii 1/2/4 with threshold and vertical-
   consensus variants, then rejected and removed. It reduced positional error on c747 and improved
   mean extended-suite halo by 0.09 px, but produced no validated primary-axis win, left GT edge F1
@@ -71,6 +78,25 @@ default `1.25`) without changing that resolution correction.
   bound slightly worsened exact-hole fill and rim diagnostics. The existing 2x2 read remains the
   chosen anti-staircase/sharpness balance. Evidence: `edge-read-target-s05-t08` and
   `edge-read-target-s10-t04` under `cmake-build-relwithdebinfo/sbs_eval/`.
+- NVIDIA RTX Video Super Resolution 1.1 was screened as an isolated same-resolution post-process
+  on each rendered eye at quality levels 1 and 4, then rejected before extended-suite promotion.
+  Still frames looked sharper, especially rain and thin highlights, but the independent enhancement
+  changed corresponding pixels differently between eyes. At Q1 the flat-page disparity tails rose
+  to +7.58%/-8.26% and flat-transition to +4.92%/-7.73%, all beyond the 3% comfort limit; Q4 also
+  failed both flat clips and regressed static jitter in nine decision clips. Serial evaluation plus
+  readback cost about 1.4-1.65 ms per stereo pair at Q1 and 2.5-3.0 ms at Q4 for 720-854 pixel-wide
+  eyes. Do not place an independent learned image enhancer after stereo generation. Evidence:
+  `vsr-per-eye-1x-q1-core` and `vsr-per-eye-1x-core` under
+  `cmake-build-relwithdebinfo/sbs_eval/`.
+- Confidence-weighted local disparity compression was screened at strengths 0.10 and 0.20 on the
+  five artifact-heavy clips plus both flat controls, then rejected and removed before extended
+  promotion. At 0.10, c747 source-relative halo regressed from 11.41 to 14.69 with no primary-axis
+  improvement. At 0.20, c747 worsened further to 16.09 and anime halo regressed from 5.80 to 7.39;
+  pop and broad source residual barely moved. Reducing parallax only inside a silhouette hazard
+  strip creates a new disparity discontinuity at the strip boundary instead of repairing the
+  disocclusion. The evaluator-only confidence audit remains useful for diagnosis, but it must not
+  directly scale local parallax. Evidence: `local-compress-target-s10` and
+  `local-compress-target-s20` under `cmake-build-relwithdebinfo/sbs_eval/`.
 - DA-V2 Base FP16 was re-screened as a model-only replacement for Small and rejected as the
   production default. On the extended suite it improved GT boundary F1 from 45.07% to 50.27%, but
   left GT depth RMSE flat (11.28% to 11.26%), worsened mean source halo from 2.68 to 2.99, and

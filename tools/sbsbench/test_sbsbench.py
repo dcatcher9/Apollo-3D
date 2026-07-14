@@ -14,6 +14,7 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import audit_depth_transform  # noqa: E402
+import audit_depth_confidence  # noqa: E402
 import prepare_public_datasets  # noqa: E402
 import run_eval  # noqa: E402
 import rescore_run  # noqa: E402
@@ -994,6 +995,94 @@ class EvalContractTests(unittest.TestCase):
         self.assertTrue(valid[:, 3:].all())
         self.assertEqual(set(np.unique(warped)), {0.0, 1.0})
         self.assertTrue((warped[:, 11:] == 1.0).all())
+
+    def test_depth_confidence_ignores_flat_depth(self):
+        source = np.tile(np.linspace(0.0, 1.0, 96, dtype=np.float32), (48, 1))
+        depth = np.full((48, 96), 0.5, np.float32)
+        result = audit_depth_confidence.depth_confidence_map(depth, source)
+        self.assertFalse(result["band"].any())
+        self.assertTrue(np.all(result["risk"] == 0.0))
+        self.assertTrue(np.all(result["confidence"] == 1.0))
+
+    def test_depth_confidence_prefers_sharp_aligned_edges(self):
+        source = np.zeros((48, 96), np.float32)
+        source[:, 48:] = 1.0
+        sharp = np.zeros_like(source)
+        sharp[:, 48:] = 1.0
+        shifted = np.zeros_like(source)
+        shifted[:, 56:] = 1.0
+        soft = np.zeros_like(source)
+        soft[:, 44:53] = np.linspace(0.0, 1.0, 9, dtype=np.float32)
+        soft[:, 53:] = 1.0
+        sharp_result = audit_depth_confidence.depth_confidence_map(sharp, source)
+        shifted_result = audit_depth_confidence.depth_confidence_map(shifted, source)
+        soft_result = audit_depth_confidence.depth_confidence_map(soft, source)
+        sharp_risk = sharp_result["model_risk"]
+        shifted_risk = shifted_result["model_risk"]
+        soft_risk = soft_result["model_risk"]
+        self.assertLess(float(sharp_risk.max()), 0.1)
+        self.assertGreater(float(shifted_risk.max()), 0.6)
+        self.assertGreater(float(soft_risk.max()), float(sharp_risk.max()) + 0.2)
+        self.assertGreater(float(sharp_result["warp_risk"].max()), 0.5)
+
+    def test_depth_confidence_detects_flow_compensated_temporal_change(self):
+        rng = np.random.default_rng(91)
+        source = rng.random((64, 128), dtype=np.float32)
+        previous = np.zeros_like(source)
+        previous[:, 48:] = 1.0
+        current = previous.copy()
+        current[16:48, 48:] = 0.25
+        stable = audit_depth_confidence.depth_confidence_map(
+            previous, source, previous_depth=previous, previous_src=source)
+        changed = audit_depth_confidence.depth_confidence_map(
+            current, source, previous_depth=previous, previous_src=source)
+        valid = changed["band"] & changed["temporal_valid"]
+        self.assertTrue(valid.any())
+        self.assertLess(float(stable["temporal"].max()), 0.01)
+        self.assertGreater(float(changed["temporal"][valid].max()), 0.9)
+
+    def test_confidence_audit_auc_is_tie_aware(self):
+        labels = np.array([False, True, False, True])
+        self.assertEqual(
+            audit_depth_confidence.rank_auc(np.array([0.0, 1.0, 0.0, 1.0]), labels), 1.0)
+        self.assertEqual(
+            audit_depth_confidence.rank_auc(np.ones(4), labels), 0.5)
+        self.assertIsNone(
+            audit_depth_confidence.rank_auc(np.arange(4), np.zeros(4, bool)))
+
+    def test_confidence_audit_rejects_tiny_pixel_classes(self):
+        risk = np.zeros((16, 16), np.float32)
+        risk[:, 8:] = 1.0
+        confidence = {"risk": risk, "band": np.ones_like(risk, bool)}
+        severity = np.zeros_like(risk)
+        severity[:2, :8] = 2.0  # only 16 artifact pixels despite perfect ranking
+        row, _, _, _ = audit_depth_confidence.validation_row(
+            confidence, severity, np.ones_like(risk, bool))
+        self.assertEqual(row["artifact_positive_px"], 16)
+        self.assertIsNone(row["artifact_auc"])
+
+    def test_confidence_audit_fails_closed_when_gt_evidence_is_missing(self):
+        rows = [{"artifact_auc": 0.8, "artifact_capture_pct": 90.0} for _ in range(4)]
+        stats = audit_depth_confidence.calibration_decision(rows, 4, 4)
+        self.assertTrue(stats["warp_screening_validated"])
+        self.assertFalse(stats["model_boundary_validated"])
+        self.assertEqual(stats["gt_auc_frames"], 0)
+        rows[0]["gt_bad_edge_auc"] = 0.7
+        rows[1]["gt_bad_edge_auc"] = 0.6
+        stats = audit_depth_confidence.calibration_decision(rows, 4, 4)
+        self.assertTrue(stats["model_boundary_validated"])
+
+    def test_confidence_audit_allows_flat_gt_without_boundary_auc(self):
+        rows = [{"artifact_auc": 0.8, "artifact_capture_pct": 90.0} for _ in range(4)]
+        stats = audit_depth_confidence.calibration_decision(rows, 0, 4)
+        self.assertTrue(stats["warp_screening_validated"])
+        self.assertIsNone(stats["model_boundary_validated"])
+        self.assertEqual(stats["gt_frames_available"], 4)
+        self.assertEqual(stats["gt_frames_eligible"], 0)
+
+    def test_confidence_audit_rejects_frame_identity_drift(self):
+        with self.assertRaisesRegex(ValueError, "missing=\\[2\\], extra=\\[3\\]"):
+            audit_depth_confidence.require_frame_ids("depth", [1, 2], [1, 3])
 
     def test_exact_forward_flow_temporal_metric_compensates_motion(self):
         rng = np.random.default_rng(71)

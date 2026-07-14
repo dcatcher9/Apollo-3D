@@ -273,6 +273,21 @@ python tools/sbsbench/audit_depth_transform.py <control-run> <treatment-run>
 This compares every native 16-bit pre-warp depth frame, endpoint saturation, p95-p5 spread, final
 stereo spread, and available GT depth metrics, writing `depth_transform_audit.json`.
 
+Before letting an edge-confidence heuristic control a processor, calibrate it against an existing
+real-pipeline run without changing the metric/gate contract:
+
+```
+python tools/sbsbench/audit_depth_confidence.py <run> --out <report-dir>
+```
+
+The standalone audit writes `report.html` and `summary.json`. It reports two independent verdicts:
+warp risk is validated against final-eye source-relative artifacts, while model risk is validated
+against the placement of predicted boundaries where exact GT exists. The latter does not measure a
+GT boundary omitted by the model, and the report exposes those missing-prediction frames. A passing
+warp verdict only authorizes a controlled warp-processor A/B; that processor must still pass the
+normal core and extended decision gates. Model-boundary validation remains diagnostic and does not
+authorize depth or EMA changes by itself.
+
 The metrics split cleanly by subsystem: **warp**-side changes move pop / disocc / flicker_disocc;
 **depth**-side changes move edge_acc / swim / depth_spread. So a delta tells you *where* the change
 landed. (Historical validation: doubling the removed legacy divergence moved pop +90% while
