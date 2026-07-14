@@ -73,7 +73,7 @@ float WarpDepth(float d, float4 s0, float4 s1, bool shaped) {
 }
 
 float Bestv2Parallax(float d, float plane_mask, float4 s0, float4 s1, float4 s2,
-                     float source_width, float source_height) {
+                     float source_width, float source_height, bool use_plane_lock) {
     float parallax_width = Bestv2ParallaxWidth(source_width, literal_bestv2);
     float aspect_scale = Bestv2AspectScale(source_width, source_height, literal_bestv2);
     float shaped_depth = WarpDepth(d, s0, s1, true);
@@ -89,7 +89,7 @@ float Bestv2Parallax(float d, float plane_mask, float4 s0, float4 s1, float4 s2,
     // executes the Gaussian exponential for every full-resolution search probe even when the
     // shipping profile has plane lock disabled.
     [branch]
-    if (subject_plane_lock > 0.0f && s2.y <= 0.5f) {
+    if (use_plane_lock && s2.y <= 0.5f) {
         float t = (d - s0.z) / max(subject_plane_width, 1e-4f);
         shift_px = lerp(shift_px, subject_shift_px, subject_plane_lock * exp(-0.5f * t * t));
     }
@@ -99,7 +99,7 @@ float Bestv2Parallax(float d, float plane_mask, float4 s0, float4 s1, float4 s2,
     float parallax = (shift_px - subject_lock * subject_shift_px) * 0.35f / parallax_width;
     parallax -= 0.008f * 0.5f;
     [branch]
-    if (subject_plane_lock > 0.0f && s2.y > 0.5f) {
+    if (use_plane_lock && s2.y > 0.5f) {
         float correction_mask = pow(saturate(plane_mask * subject_plane_lock), 0.75f);
         float subject_mean = (s2.x - subject_lock * subject_shift_px) * 0.35f / parallax_width;
         subject_mean -= 0.008f * 0.5f;
@@ -129,8 +129,9 @@ float Bestv2SearchRadius(float source_width, float source_height) {
 // Signed Bestv2 parallax in source UV units. Before subject state initializes, return zero rather
 // than falling back to the removed legacy divergence/focal-plane field.
 float DepthParallax(float d, float plane_mask, float4 s0, float4 s1, float4 s2,
-                    bool shaped, float source_width, float source_height) {
-    return shaped ? Bestv2Parallax(d, plane_mask, s0, s1, s2, source_width, source_height) : 0.0f;
+                    bool shaped, float source_width, float source_height, bool use_plane_lock) {
+    return shaped ? Bestv2Parallax(
+        d, plane_mask, s0, s1, s2, source_width, source_height, use_plane_lock) : 0.0f;
 }
 
 #endif

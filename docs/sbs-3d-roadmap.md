@@ -42,6 +42,11 @@ default `1.25`) without changing that resolution correction.
   mean inference from 2.11 to 1.53 ms on core (-27.6%) and 2.38 to 1.59 ms on extended (-33.2%).
   Evidence: `cuda-graph-core-treatment` and `cuda-graph-extended-treatment` under
   `cmake-build-relwithdebinfo/sbs_eval/`.
+- The plane-lock-disabled production shader is specialized once per output pixel. This keeps the
+  rejected but retained plane-lock ablation functional without carrying its branches through every
+  search probe. Matched offline A/B reduced warp time by 8.37% on core and 8.24% on extended with
+  no primary-axis regression or hard failure. Live validation remains pending. Evidence:
+  `plane-specialize-core` and `plane-specialize-extended`.
 - Horizontal silhouette-band snapping was screened at radii 1/2/4 with threshold and vertical-
   consensus variants, then rejected and removed. It reduced positional error on c747 and improved
   mean extended-suite halo by 0.09 px, but produced no validated primary-axis win, left GT edge F1

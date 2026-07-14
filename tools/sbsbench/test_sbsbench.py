@@ -170,7 +170,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("LeftColorTexture.GetDimensions(sourceWidth, sourceHeight)", text)
         self.assertIn("Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight)", text)
         self.assertGreaterEqual(
-            text.count("shaped, (float)sourceWidth, (float)sourceHeight)"), 2)
+            text.count("shaped, (float)sourceWidth, (float)sourceHeight,"), 2)
         self.assertNotIn("Bestv2SearchRadius((float)dw)", text)
 
     def test_forward_coverage_diagnostic_uses_source_geometry(self):
@@ -180,7 +180,7 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("LeftColorTexture.GetDimensions(source_w, source_h)", text)
-        self.assertIn("shaped, (float)source_w, (float)source_h)", text)
+        self.assertIn("shaped, (float)source_w, (float)source_h,", text)
         self.assertNotIn("shaped, (float)eye_w)", text)
 
     def test_bestv2_scales_wide_sources_from_validated_calibration_width(self):
@@ -619,8 +619,9 @@ class EvalContractTests(unittest.TestCase):
         with open(common, encoding="utf-8") as fh:
             common_text = fh.read()
         self.assertGreaterEqual(common_text.count("[branch]"), 2)
-        self.assertIn("[branch]\n    if (subject_plane_lock > 0.0f && s2.y <= 0.5f)",
+        self.assertIn("[branch]\n    if (use_plane_lock && s2.y <= 0.5f)",
                       common_text)
+        self.assertIn("sample_uv = Reproject(src_uv, eyeSign, false)", text)
 
     def test_retired_geometry_is_absent_but_forward_coverage_diagnostic_remains(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

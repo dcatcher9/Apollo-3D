@@ -40,7 +40,7 @@ float SampleDepth(float sx, float sy) {
 // Find the source U coordinate that reprojects onto `uv` for one eye, choosing the
 // nearest (frontmost) surface so foreground occludes rather than duplicates.
 // eyeSign = +1 right eye, -1 left eye.
-float2 Reproject(float2 uv, float eyeSign) {
+float2 Reproject(float2 uv, float eyeSign, bool use_plane_lock) {
     // Subject anchoring is live this frame only if configured AND the resolve pass has
     // produced state (init != 0 -- it is 0 for the first frames). Mandatory shader/resource
     // initialization is validated before the estimator is published. Decide it ONCE here
@@ -86,14 +86,15 @@ float2 Reproject(float2 uv, float eyeSign) {
     float prevX = startX;
     float prevD = SampleDepth(prevX, uv.y);
     float planeMask = 0.0f;
-    if (subject_plane_lock > 0.0f) {
+    if (use_plane_lock) {
         // The exact mask is 13x13-smoothed and intentionally low-frequency. Sample it once at
         // the destination rather than once per probe; the uniform branch removes all fetches
         // from both shipping profiles where plane lock is disabled.
         planeMask = PlaneLockTexture.SampleLevel(LinearSampler, uv, 0);
     }
     float prevG = (prevX - uv.x) - eyeSign * DepthParallax(
-        prevD, planeMask, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight);
+        prevD, planeMask, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight,
+        use_plane_lock);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
@@ -101,7 +102,8 @@ float2 Reproject(float2 uv, float eyeSign) {
         float x = startX + stepX * i;
         float d = SampleDepth(x, uv.y);
         float g = (x - uv.x) - eyeSign * DepthParallax(
-            d, planeMask, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight);
+            d, planeMask, s0, s1, s2, shaped, (float)sourceWidth, (float)sourceHeight,
+            use_plane_lock);
 
         // Zero crossing between prevX and x => a source in this span reprojects onto uv.
         if ((prevG <= 0.0f && g >= 0.0f) || (prevG >= 0.0f && g <= 0.0f)) {
@@ -143,7 +145,15 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
-    float2 sample_uv = Reproject(src_uv, eyeSign);
+    // Compile two loop specializations and select once per pixel. The shipping plane-lock-off
+    // path then contains no per-probe plane-lock branches or dormant transcendental operations.
+    float2 sample_uv;
+    [branch]
+    if (subject_plane_lock > 0.0f) {
+        sample_uv = Reproject(src_uv, eyeSign, true);
+    } else {
+        sample_uv = Reproject(src_uv, eyeSign, false);
+    }
 
     // Disoccluded regions clamp to the nearest valid column instead of wrapping.
     sample_uv.x = saturate(sample_uv.x);
