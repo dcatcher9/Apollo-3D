@@ -125,6 +125,10 @@ default `1.25`) without changing that resolution correction.
   than 0.001 ms of measured warp time. Keep the validated legacy-equivalent prefilter. Evidence:
   `prefilter-gaussian-core` and `prefilter-horizontal-core` under
   `cmake-build-relwithdebinfo/sbs_eval/`.
+- A safeguarded subpixel secant refinement of each reprojection crossing was rejected after the
+  artifact-heavy core screen. It changed no primary axis, produced mixed halo deltas below 0.1 px,
+  and increased warp time consistently by about 5-6%. Keep the existing endpoint interpolation.
+  Evidence: `root-refine-target` under `cmake-build-relwithdebinfo/sbs_eval/`.
 - Guided upsample, curvature, scene snap, range/depth floors, border fade, legacy shift, VD3D
   hybrid warp, and CPU warpsim were rejected and removed.
 - Subject-plane lock, Bestv2 sharpen, and EMA-mask dilation were rejected and removed.
