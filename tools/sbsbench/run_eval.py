@@ -284,11 +284,12 @@ def expected_profile_bool(conf, profile, key, default, extra, cli_key):
     fail(f"invalid boolean value for {key}: {value!r}")
 
 
-def expected_depth_model(conf, profile):
+def expected_depth_model(conf, profile, extra):
     """Resolve the model with the same profile-first, explicit-override order as production."""
     model = "depth_anything_v2_fp16"
     model = conf_value(conf, f"sbs_3d_profile_{profile}_depth_model", model)
-    return conf_value(conf, "sbs_3d_depth_model", model)
+    model = conf_value(conf, "sbs_3d_depth_model", model)
+    return extra_value(extra, "--model", model)
 
 
 def git(args):
@@ -410,7 +411,7 @@ def main():
     expected_cuda_graph = expected_profile_bool(
         args.conf, expected_config_profile, "cuda_graph", True, args.extra,
         "--cuda-graph")
-    expected_model = expected_depth_model(args.conf, expected_config_profile)
+    expected_model = expected_depth_model(args.conf, expected_config_profile, args.extra)
     missing = check_engines(args.build_dir, expected_model)
     if missing and not args.allow_build:
         print(f"run_eval: TRT engine(s) missing in {args.build_dir}/assets: {missing}\n"

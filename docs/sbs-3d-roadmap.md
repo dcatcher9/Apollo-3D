@@ -105,6 +105,14 @@ default `1.25`) without changing that resolution correction.
   came with a different doorway/person interpretation and more rim. Keep the registry entry only
   for explicit future quantized/performance experiments. Evidence: `dav2-rescreen-core-base` and
   `dav2-rescreen-extended-base` under `cmake-build-relwithdebinfo/sbs_eval/`.
+- Calibrated DA-V2 Small FP8 was screened with explicit TensorRT 11 Q/DQ models generated from 64
+  representative core and extended frames, then rejected before extended promotion. Broad W8A8
+  quantization increased mean core inference from 1.45 to 2.61 ms and produced five primary-axis
+  regressions for one win. Restricting FP8 to transformer MatMul regions still increased inference
+  from 1.45 to 2.52 ms and added a c747 stability regression with no primary win. At batch one,
+  this already-small model pays more Q/DQ and scale-conversion overhead than Blackwell's FP8
+  kernels save. Keep the production FP16 contract. Evidence: `fp8-calibrated-core-treatment` and
+  `fp8-matmul-core-treatment` under `cmake-build-relwithdebinfo/sbs_eval/`.
 - Guided upsample, curvature, scene snap, range/depth floors, border fade, legacy shift, VD3D
   hybrid warp, and CPU warpsim were rejected and removed.
 - Subject-plane lock, Bestv2 sharpen, and EMA-mask dilation were rejected and removed.
@@ -125,9 +133,7 @@ is scale/shift invariant but polarity preserving.
 
 ## Current priorities
 
-1. Evaluate calibrated FP8 inference as a separate model contract; never replace FP16 artifacts
-   or baselines in place.
-2. Use optical flow only for EMA gating, cut detection, history validation, and ghost diagnostics.
+1. Use optical flow only for EMA gating, cut detection, history validation, and ghost diagnostics.
 
 ## References
 

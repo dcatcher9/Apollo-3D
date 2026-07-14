@@ -100,8 +100,12 @@ class EvalContractTests(unittest.TestCase):
             path = fh.name
         try:
             self.assertEqual(run_eval.expected_profile(path, []), "Cinema")
-            self.assertEqual(run_eval.expected_depth_model(path, "Cinema"),
+            self.assertEqual(run_eval.expected_depth_model(path, "Cinema", []),
                              "depth_anything_v2_base_fp16")
+            self.assertEqual(
+                run_eval.expected_depth_model(
+                    path, "Cinema", ["--model", "depth_anything_v2_fp8"]),
+                "depth_anything_v2_fp8")
         finally:
             os.unlink(path)
 
