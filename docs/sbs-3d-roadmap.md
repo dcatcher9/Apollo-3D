@@ -151,6 +151,14 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
   identifies holes, but the backward equation finds a mathematical root there and therefore never
   reaches its no-root fallback. Future disocclusion work must change root selection or explicitly
   consume forward coverage rather than elaborate that unreachable fallback.
+- Explicitly consuming exact forward coverage was then screened and rejected. Forcing uncovered
+  destinations to the tracked far-background candidate inserted thin black/white background
+  slivers at subject boundaries. Across the six artifact-heavy clips, disocclusion flicker rose
+  17.5-164%, the rim proxy rose 22.7-2795%, c841 and scene_cut acquired 5.59% and 6.14% positive
+  disparity tails, and warp time rose about 17%. Fresh matched control/treatment imagery confirmed
+  the measured slivers. Exact coverage remains diagnostic only; a future learned refiner would
+  need color- and time-coherent synthesis rather than forced far-background substitution. Evidence:
+  `coverage-hole-fill-control` and `coverage-hole-fill-target`.
 - Symmetric horizontal edge-band supersampling was rejected after the full core screen. It nudged
   mean halo from 4.57 to 4.52 and the rim proxy from 4.41 to 4.31, but produced no validated
   primary-axis win, was visually imperceptible at the strongest frame, and increased mean warp
