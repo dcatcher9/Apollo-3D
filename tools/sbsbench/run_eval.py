@@ -36,7 +36,7 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-EVAL_SCHEMA = 19  # CUDA-graph inference experiment; harness contract 12
+EVAL_SCHEMA = 19  # CUDA-graph inference experiment; harness contract 13
 
 
 def suite_defaults(name):

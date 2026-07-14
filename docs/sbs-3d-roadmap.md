@@ -88,6 +88,12 @@ default `1.25`) without changing that resolution correction.
   eyes. Do not place an independent learned image enhancer after stereo generation. Evidence:
   `vsr-per-eye-1x-q1-core` and `vsr-per-eye-1x-core` under
   `cmake-build-relwithdebinfo/sbs_eval/`.
+- Applying Q1 VSR once to the shared mono source before warping was also rejected. Holding original
+  inference depth fixed eliminated the catastrophic per-eye disparity mismatch, but visual
+  inspection found new bright/dark ringing around flat-page lines, c747 rim-over worsened by 1.37,
+  and static jitter increased. The apparent flat-transition stereo-volume win came from changed
+  color correspondence despite byte-identical depth, not better geometry. Evidence:
+  `mono-vsr-q1-target` under `cmake-build-relwithdebinfo/sbs_eval/`.
 - Confidence-weighted local disparity compression was screened at strengths 0.10 and 0.20 on the
   five artifact-heavy clips plus both flat controls, then rejected and removed before extended
   promotion. At 0.10, c747 source-relative halo regressed from 11.41 to 14.69 with no primary-axis
