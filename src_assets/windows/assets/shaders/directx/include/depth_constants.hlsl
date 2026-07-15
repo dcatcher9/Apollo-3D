@@ -21,7 +21,7 @@ cbuffer Constants : register(b0) {
     float subject_stretch;   // > 0.5 = apply the disparity stretch (depth_subject_resolve)
     float adaptive_pop;      // > 0.5 = maintain a scene-risk pop multiplier in SubjectState[1].w
     float adaptive_pop_max_ratio; // absolute configured ceiling / base pop strength
-    float padding0;
+    float zero_plane_mode;   // 0 legacy, 1 subject, 2 median, 3 background (shot-latched)
     float padding1;
     float padding2;
 };

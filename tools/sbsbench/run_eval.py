@@ -36,7 +36,7 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-EVAL_SCHEMA = 22  # complete-frame artistic stereo aggregation; harness contract 14
+EVAL_SCHEMA = 24  # shot-latched zero-plane provenance; harness contract 15
 
 
 def suite_defaults(name):
@@ -290,6 +290,12 @@ def expected_profile_bool(conf, profile, key, default, extra, cli_key):
     fail(f"invalid boolean value for {key}: {value!r}")
 
 
+def expected_profile_string(conf, profile, key, default, extra, cli_key):
+    value = conf_value(conf, f"sbs_3d_profile_{profile}_{key}", default)
+    value = conf_value(conf, f"sbs_3d_{key}", value)
+    return str(extra_value(extra, cli_key, value)).strip()
+
+
 def expected_adaptive_pop(conf, profile, extra):
     """Resolve the flag-style harness override after the production config layers."""
     value = expected_profile_bool(conf, profile, "adaptive_pop", True, [], "")
@@ -445,6 +451,11 @@ def main():
         args.conf, expected_config_profile, "pop_strength", 1.25, args.extra,
         "--pop-strength")
     expected_adaptive_max = max(expected_adaptive_max, expected_pop)
+    expected_zero_plane = expected_profile_string(
+        args.conf, expected_config_profile, "zero_plane", "legacy", args.extra,
+        "--zero-plane")
+    if expected_zero_plane not in ("legacy", "subject", "median", "background"):
+        fail(f"invalid zero_plane value: {expected_zero_plane!r}")
     expected_model = expected_depth_model(args.conf, expected_config_profile, args.extra)
     missing = check_engines(args.build_dir, expected_model)
     if missing and not args.allow_build:
@@ -476,6 +487,7 @@ def main():
         "model": expected_model, "profile": expected_config_profile,
         "adaptive_pop": expected_adaptive,
         "adaptive_pop_max": expected_adaptive_max,
+        "zero_plane": expected_zero_plane,
         "literal_bestv2": literal_bestv2,
         "depth_compensation": depth_compensation,
         "eval_schema": EVAL_SCHEMA, "depth_step": depth_step,
@@ -508,7 +520,7 @@ def main():
             fail(f"{clip}: harness did not write contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
         expected_contract = {
-            "schema": 14,
+            "schema": 15,
             "model": expected_model,
             "profile": expected_config_profile,
             "depth_step": depth_step,
@@ -521,6 +533,7 @@ def main():
             "ema_edge_strength": expected_ema_edge_strength,
             "adaptive_pop": expected_adaptive,
             "adaptive_pop_max": expected_adaptive_max,
+            "zero_plane": expected_zero_plane,
             "literal_bestv2": literal_bestv2,
             "cuda_graph": expected_cuda_graph,
         }
@@ -535,6 +548,7 @@ def main():
                      "cuda_graph": contract["cuda_graph"],
                      "adaptive_pop": contract["adaptive_pop"],
                      "adaptive_pop_max": contract["adaptive_pop_max"],
+                     "zero_plane": contract["zero_plane"],
                      "cuda_graph_captured": contract.get("cuda_graph_captured", False)}
 
         # A valid harness result has one source, raw-model, warp-input depth, and SBS artifact for

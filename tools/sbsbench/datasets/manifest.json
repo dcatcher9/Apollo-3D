@@ -1,6 +1,6 @@
 {
-  "schema": 1,
-  "prepared_suite": "extended-v2",
+  "schema": 2,
+  "prepared_suite": "extended-v3",
   "default_cache": "E:/ApolloDev/sbs_bench/datasets",
   "datasets": {
     "bonn_dynamic": {
@@ -49,6 +49,28 @@
           "url": "https://files.is.tue.mpg.de/jwulff/sintel/MPI-Sintel-stereo-training-20150305.zip",
           "filename": "MPI-Sintel-stereo-training-20150305.zip",
           "sha256": "397506a0ab193189fb367f77ea772ef75435aacbc0a9f950c484df9a0ea3673f"
+        }
+      }
+    },
+    "spring_stereo": {
+      "title": "Spring Stereo Test Dataset",
+      "homepage": "https://spring-benchmark.org/",
+      "citation": "Mehl et al., Spring: A High-Resolution High-Detail Dataset and Benchmark for Scene Flow, Optical Flow and Stereo, CVPR 2023",
+      "license_note": "Dataset and Spring movie assets are CC BY 4.0; prepared media remains external to Git.",
+      "archives": {
+        "test_left": {
+          "url": "https://darus.uni-stuttgart.de/api/access/datafile/199013",
+          "filename": "spring_test_frame_left.zip",
+          "access": "http_range_zip",
+          "size": 2995538894,
+          "md5": "f0c52a7e2d5ba440eb31338b46fbc4b4"
+        },
+        "test_right": {
+          "url": "https://darus.uni-stuttgart.de/api/access/datafile/199014",
+          "filename": "spring_test_frame_right.zip",
+          "access": "http_range_zip",
+          "size": 2996583105,
+          "md5": "914b464af2978a22d8800a94e721712d"
         }
       }
     },
@@ -141,6 +163,58 @@
       "start": 10,
       "stride": 1,
       "count": 24
+    },
+    "spring_skeleton_cave": {
+      "dataset": "spring_stereo",
+      "adapter": "spring_http_range_zip",
+      "archives": ["test_left", "test_right"],
+      "sequence": "0019",
+      "name": "spring-skeleton-cave",
+      "description": "Cinematic cave scene with a moving character, skeletal foreground structure, volumetric light and deep layering.",
+      "start": 44,
+      "stride": 1,
+      "count": 24,
+      "source_artifacts": "The source contains strong volumetric haze, bright skeletal highlights and depth-of-field softness; compare the original before attributing these edges to the stereo warp.",
+      "source_artifact_frame": 11
+    },
+    "spring_character_close": {
+      "dataset": "spring_stereo",
+      "adapter": "spring_http_range_zip",
+      "archives": ["test_left", "test_right"],
+      "sequence": "0035",
+      "name": "spring-character-close",
+      "description": "Bright character close-up with facial features, hair, a thin wooden prop and strong foreground separation.",
+      "start": 49,
+      "stride": 1,
+      "count": 24,
+      "source_artifacts": "The rendered source intentionally uses shallow depth of field around the character and prop; naturally blurred edges must not be counted as warp blur.",
+      "source_artifact_frame": 11
+    },
+    "spring_daylight_path": {
+      "dataset": "spring_stereo",
+      "adapter": "spring_http_range_zip",
+      "archives": ["test_left", "test_right"],
+      "sequence": "0042",
+      "name": "spring-daylight-path",
+      "description": "Bright outdoor ground plane with rocks, vegetation, long depth range and moving camera parallax.",
+      "start": 47,
+      "stride": 1,
+      "count": 24,
+      "source_artifacts": "The source includes baked sun bloom and fine high-contrast gravel texture; the original frame is required when reviewing halo and stretch evidence.",
+      "source_artifact_frame": 11
+    },
+    "spring_forest_seeds": {
+      "dataset": "spring_stereo",
+      "adapter": "spring_http_range_zip",
+      "archives": ["test_left", "test_right"],
+      "sequence": "0046",
+      "name": "spring-forest-seeds",
+      "description": "Cinematic forest shot with thin airborne structures, defocus, transparency-like edges and strong depth layering.",
+      "start": 47,
+      "stride": 1,
+      "count": 24,
+      "source_artifacts": "The source deliberately contains heavy depth-of-field blur and translucent motion-softened seed edges; these are baked into both rendered views.",
+      "source_artifact_frame": 11
     },
     "vkitti_drive_clone": {
       "dataset": "virtual_kitti_2",

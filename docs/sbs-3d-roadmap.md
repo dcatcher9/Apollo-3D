@@ -171,7 +171,24 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
   neutral with no regression, and both suites passed hard limits. A 1.35 endpoint was separately
   rejected as an anime halo/stretch tradeoff. Evidence: `adaptive-pop-ceiling-core`,
   `pop-grid-130-core`, `pop-grid-130-extended`, `adaptive-pop-latched-core`, and
-  `adaptive-pop-latched-extended`.
+  `adaptive-pop-latched-extended`. The later `spring-adaptive-vs-fixed130` comparison added four
+  independent cinematic true-stereo sequences. It was neutral: the controller was effectively at
+  1.30 for the cave/daylight clips and backed off only to approximately 1.27/1.25 for the
+  close-up/forest clips. Fixed 1.30 added at most 0.045 percentage points of pop spread and traded
+  mixed artistic-reference deltas, so there is not yet evidence for a more complex controller.
+- Art3D-style shot-level zero-plane placement was screened as three scene-latched treatments:
+  tracked subject, depth median, and far/mid-background (P25). Each resolves its anchor through
+  the final Bestv2 curve and stores the source-pixel shift, so percentile motion cannot make
+  convergence breathe between cuts. A legacy smoke run was byte-identical. No fixed anchor is a
+  production win: median improved 6 primary Spring metrics with 1 cost, including character
+  volume and daylight halo/stretch, but core lost fast-motion volume and added c747/c841 warp
+  costs. Subject improved Spring artifact/reference fidelity but reduced character volume;
+  background was the least harmful core treatment but weaker than median on Spring. Visual
+  inspection confirmed convergence redistribution rather than universal detail recovery. Keep
+  `sbs_3d_zero_plane = legacy`; retain the explicit modes for controlled headset labels and a
+  future semantic controller. Depth histograms alone are not a safe selector: scenes with similar
+  percentiles and edge density chose different winners. Evidence:
+  `zero-plane-{legacy,subject,median,background}-{core-screen,spring}`.
 
 Do not reintroduce a removed processor without a current core and extended comparison, visual
 evidence, and a headset-motivated hypothesis.
@@ -183,18 +200,27 @@ and profile provenance; cover the 11-clip core and public extended suites; gener
 and `decision.json`; inspect primary-axis examples; and treat comfort/image-integrity limits as hard
 constraints. Headset evidence resolves coequal-axis tradeoffs.
 
-The harness uses contract 14 and eval schema 21. It exports raw depth, pre-warp depth, exact forward
+The harness uses contract 15 and eval schema 24. It exports raw depth, pre-warp depth, exact forward
 coverage diagnostics, and final SBS artifacts by numeric frame identity. Ground-truth depth scoring
 is scale/shift invariant but polarity preserving. MPI Sintel true-right references additionally
 score global-horizontal-registered PSNR/SSIM, local epipolar residual/coverage, and Art3D-inspired
 positive-affine depth-budget/zero-plane alignment plus DDC-IoU structure. All remain diagnostic
-pending broader cinematic-stereo calibration. Style summaries require complete evidence on every
-frame so failed fits cannot improve an average; comfort and integrity remain hard gates.
+pending headset correlation. Spring adds four 1920x1080 cinematic true-stereo sequences and complete
+artistic-style evidence. Repetitive-texture phase-correlation candidates must also improve
+non-wrapping photometric alignment before they may contribute to signed-disparity comfort gates.
+Style summaries require complete evidence on every frame so failed fits cannot improve an average;
+comfort and integrity remain hard gates.
 
 ## Current priorities
 
 1. Correlate the new previous-only GT ghost-edge diagnostic with additional known-motion scenes
    and headset evidence before allowing it to become a primary gate.
+2. Collect headset preference labels for the current scene-latched 1.25-1.30 adaptive-pop band.
+   The Spring true-stereo A/B is neutral and does not support raising the ceiling or replacing the
+   current edge-risk controller without perceptual evidence.
+3. Collect scene-level headset labels for explicit zero-plane placement. A learned/semantic
+   selector may use image content and depth together; do not ship a percentile-only rule from the
+   current small suite.
 
 ## References
 

@@ -117,6 +117,11 @@ Harness A/B levers (after `--extra`):
 - `--subject-stretch` — shape_depth_for_pop 5/95 percentile stretch (default on in the permanent
   Bestv2 subject path).
 - `--no-subject-stretch` — disable that stretch for an accepted-feature ablation.
+- `--zero-plane legacy|subject|median|background` — choose a shot-latched screen-plane anchor.
+  The three explicit modes are experimental Art3D-style camera-offset treatments; they preserve
+  symmetric eye geometry and the disparity scale, and update only at startup or a hard scene cut.
+  `legacy` remains the production default because fixed anchors produced scene-dependent
+  tradeoffs rather than a suite-wide improvement.
 - `--cuda-graph on|off` — capture and replay the TensorRT enqueue when the mapped D3D tensor
   addresses remain stable. The first enqueue for a new address/shape is an uncaptured warmup.
 
@@ -127,6 +132,9 @@ the validated `sbs_3d_adaptive_pop_max = 1.30` ceiling using normalized-depth ed
 holds the result bit-stable until a hard cut. Set `sbs_3d_adaptive_pop = false` for the fixed floor.
 The former experimental 2.0 ceiling was rejected: comfort remained within 3%, but temporal and
 warp artifacts regressed. Symmetric left/right geometry is unchanged.
+The equivalent production key is `sbs_3d_zero_plane`. Keep it at the default `legacy` outside a
+controlled headset or evaluator A/B; `subject`, `median`, and `background` change convergence
+placement without changing the configured pop multiplier.
 CUDA Graph replay is enabled by default for every profile. Use `sbs_3d_cuda_graph = false` only
 for driver diagnosis or a controlled performance A/B; unsupported/capture-failed systems already
 fall back to ordinary TensorRT enqueue automatically.
@@ -153,7 +161,8 @@ depth-step floor (flat scenes legitimately read 0), and all pixel windows scale 
 width — but absolute values are still not comparable across clip resolutions; baselines are
 per-clip-set. The harness writes 16-bit depth PNGs so `swim` resolves below 1/255.
 
-**Eval schema 20 / harness contract 14:** `run_eval.py` pins the profile and model explicitly and
+**Eval schema 24 / harness contract 15:** `run_eval.py` pins the profile, model, and zero-plane
+mode explicitly and
 has no alternate warp selector. By default the
 harness submits and consumes exactly one inference per source frame, so EMA and normalization
 update once. `--depth-every N` is an explicit comparison-only cadence treatment: color advances
@@ -209,7 +218,7 @@ and three generated failure-mode clips from [make_synth_clips.py](make_synth_cli
 
 The quick suite remains useful for iteration, but the final warp/profile decision uses a separate,
 reproducibly prepared public suite. Media is cached outside Git (default
-`E:\ApolloDev\sbs_bench\datasets`); the repository commits the exact URLs, SHA-256 checksums,
+`E:\ApolloDev\sbs_bench\datasets`); the repository commits the exact URLs, source checksums,
 frame windows, adapters, and baselines:
 
 ```
@@ -217,7 +226,7 @@ python tools/sbsbench/prepare_public_datasets.py
 python tools/sbsbench/run_eval.py --suite extended --comparison-only --label public-apollo
 ```
 
-`extended-v2` contains eight visually inspected 24-frame clips. The first four remain:
+`extended-v3` contains twelve visually inspected 24-frame clips. The first four remain:
 
 | clip | source | coverage / reference |
 |------|--------|----------------------|
@@ -235,6 +244,15 @@ The v2 expansion adds independent cinematic and outdoor-driving content:
 | `vkitti_drive_clone` | Virtual KITTI 2 | clear outdoor driving and exact metric depth |
 | `vkitti_drive_rain` | Virtual KITTI 2 | rainy low-contrast driving and exact metric depth |
 
+The v3 expansion adds high-resolution cinematic stereo from the CC BY 4.0 Spring benchmark:
+
+| clip | source | coverage / reference |
+|------|--------|----------------------|
+| `spring_skeleton_cave` | Spring Stereo | deep cave layering, character motion, bones and volumetric light |
+| `spring_character_close` | Spring Stereo | face/hair close-up, thin prop and shallow depth of field |
+| `spring_daylight_path` | Spring Stereo | bright outdoor path, rocks, vegetation and fine ground texture |
+| `spring_forest_seeds` | Spring Stereo | thin airborne structures, defocus and layered forest background |
+
 The suite caught and now guards the former source/depth resolution-normalization bug. Apollo's
 source-pixel shifts are normalized by the source/eye geometry, not the smaller inference texture.
 
@@ -243,10 +261,13 @@ its official page requests citation but does not provide a redistribution grant.
 CC BY 4.0. `prepare_public_datasets.py` associates Bonn RGB/depth by nearest timestamp, preserves
 TartanAir float depth without quantization, decodes its 16-bit flow PNG losslessly without OpenCV,
 and writes source frames only at the clip root so reference images can never be mistaken for input.
+Spring's official left/right archives are approximately 3 GB each; the adapter uses verified HTTP
+byte ranges to extract only the pinned frame windows while retaining the DOI datafile size/digest
+provenance in the manifest.
 Set `APOLLO_SBS_DATASETS` or pass `--cache` to relocate the cache.
 
-The harness sizes the SBS output to the **input** resolution, so these small clips make a full 5-clip A/B take
-seconds (≈8 s harness + 3 s scoring per clip) instead of a minute:
+The harness sizes the SBS output to the **input** resolution, so short clips keep each A/B sample
+bounded (approximately 8 s harness + 3 s scoring per clip on the reference machine):
 
 ```
 cd cmake-build-relwithdebinfo

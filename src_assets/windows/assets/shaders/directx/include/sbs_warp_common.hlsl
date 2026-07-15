@@ -64,21 +64,28 @@ bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {
 // every search probe while retaining the same Bestv2 field and safety bound.
 struct Bestv2Params {
     float subject_shift_px;
+    float zero_anchor_shift_px;
+    float explicit_zero_plane;
     float parallax_scale;
     float convergence_bias;
     float output_scale;
     float clamp_abs;
 };
 
-Bestv2Params MakeBestv2Params(float4 s0, float4 s1,
+Bestv2Params MakeBestv2Params(float4 s0, float4 s1, float4 s2,
                               float source_width, float source_height,
                               bool use_subject_stretch) {
     Bestv2Params p;
     float parallax_width = Bestv2ParallaxWidth(source_width, literal_bestv2);
     float subject_depth = Bestv2WarpDepth(s0.z, s0, s1, true, use_subject_stretch);
     p.subject_shift_px = Bestv2RawShiftPxFast(subject_depth);
+    p.zero_anchor_shift_px = s2.x;
+    p.explicit_zero_plane = s2.y;
     p.parallax_scale = 0.35f / parallax_width;
-    p.convergence_bias = -0.008f * 0.5f + s1.z * 4.0f / parallax_width;
+    // Legacy retains the Bestv2 trim/convergence exactly. Explicit modes instead place their
+    // shot-latched anchor on the screen plane, so adding the legacy offset would defeat t.
+    p.convergence_bias = p.explicit_zero_plane > 0.5f ? 0.0f :
+                         -0.008f * 0.5f + s1.z * 4.0f / parallax_width;
     float aspect_scale = Bestv2AspectScale(source_width, source_height, literal_bestv2);
     float adaptive_ratio = adaptive_pop > 0.5f ? max(s1.w, 1.0f) : 1.0f;
     float strength = literal_bestv2 > 0.5f ? 1.0f : pop_strength * adaptive_ratio;
@@ -91,7 +98,9 @@ float DepthParallax(float d, float4 s0, float4 s1, Bestv2Params p,
                     bool use_subject_stretch) {
     float shaped_depth = Bestv2WarpDepth(d, s0, s1, true, use_subject_stretch);
     float shift_px = Bestv2RawShiftPxFast(shaped_depth);
-    float parallax = (shift_px - subject_lock * p.subject_shift_px) * p.parallax_scale;
+    float anchor_shift_px = p.explicit_zero_plane > 0.5f ? p.zero_anchor_shift_px :
+                            subject_lock * p.subject_shift_px;
+    float parallax = (shift_px - anchor_shift_px) * p.parallax_scale;
     parallax += p.convergence_bias;
     return clamp(parallax * p.output_scale, -p.clamp_abs, p.clamp_abs);
 }

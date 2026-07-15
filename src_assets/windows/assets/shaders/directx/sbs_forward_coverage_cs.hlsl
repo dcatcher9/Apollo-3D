@@ -29,11 +29,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     float d = DepthTexture.SampleLevel(LinearSampler, uv, 0);
     float4 s0 = SubjectState[0];
     float4 s1 = SubjectState[1];
+    float4 s2 = SubjectState[2];
     bool shaped = s0.w > 0.5f;
     float parallax = 0.0f;
     if (shaped) {
         Bestv2Params params = MakeBestv2Params(
-            s0, s1, (float)source_w, (float)source_h, subject_stretch > 0.5f);
+            s0, s1, s2, (float)source_w, (float)source_h, subject_stretch > 0.5f);
         parallax = DepthParallax(
             d, s0, s1, params, subject_stretch > 0.5f);
     }

@@ -3,8 +3,9 @@
 
 Media is intentionally kept outside Git.  The committed manifest fixes source URLs and frame
 windows; this tool turns those archives into the exact ``frame_*``/reference layout consumed by
-run_eval.py.  Downloads are resumable and a completed archive is verified when its manifest has
-a SHA-256 digest.
+run_eval.py. Full downloads are resumable and verified when their manifest has a SHA-256 digest.
+Range-backed ZIP selections validate every HTTP byte range and ZIP-member CRC while retaining the
+upstream whole-archive checksum as provenance.
 """
 import argparse
 import hashlib
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import tarfile
+import urllib.request
 import zipfile
 import struct
 import zlib
@@ -44,7 +46,7 @@ def sha256(path):
 def load_manifest(path):
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
-    if data.get("schema") != 1:
+    if data.get("schema") not in (1, 2):
         fail(f"unsupported dataset manifest schema: {data.get('schema')}")
     return data
 
@@ -74,6 +76,75 @@ def download_archive(spec, downloads_dir):
         if actual != expected.lower():
             fail(f"SHA-256 mismatch for {path}: expected {expected}, got {actual}")
     return path
+
+
+class HTTPRangeReader(io.RawIOBase):
+    """Seekable read-only HTTP file backed by deterministic Range requests.
+
+    Large public ZIPs can be sampled without downloading unrelated multi-gigabyte members. The
+    manifest still pins the immutable datafile URL, byte size, and upstream digest.
+    """
+
+    def __init__(self, url, expected_size=None):
+        self.url = url
+        self.pos = 0
+        _, content_range = self._range(0, 0)
+        match = re.search(r"/(\d+)$", content_range or "")
+        if not match:
+            fail(f"remote archive does not advertise a byte-range size: {url}")
+        self.size = int(match.group(1))
+        if expected_size is not None and self.size != int(expected_size):
+            fail(f"remote archive size mismatch for {url}: {self.size} != {expected_size}")
+
+    def _range(self, start, end):
+        request = urllib.request.Request(
+            self.url,
+            headers={"Range": f"bytes={start}-{end}", "Accept-Encoding": "identity",
+                     "User-Agent": "Apollo-sbsbench/1"},
+        )
+        with urllib.request.urlopen(request, timeout=180) as response:
+            data = response.read()
+            content_range = response.headers.get("Content-Range")
+        expected = end - start + 1
+        if len(data) != expected:
+            fail(f"short HTTP range read for {self.url}: {len(data)} != {expected}")
+        match = re.fullmatch(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", content_range or "")
+        if not match or (int(match.group(1)), int(match.group(2))) != (start, end):
+            fail(f"invalid Content-Range for {self.url}: {content_range!r}")
+        return data, content_range
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.pos
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        if whence == io.SEEK_SET:
+            target = offset
+        elif whence == io.SEEK_CUR:
+            target = self.pos + offset
+        elif whence == io.SEEK_END:
+            target = self.size + offset
+        else:
+            raise ValueError(f"invalid whence: {whence}")
+        if target < 0:
+            raise OSError("negative seek position")
+        self.pos = target
+        return self.pos
+
+    def read(self, size=-1):
+        if size < 0:
+            size = self.size - self.pos
+        if size == 0 or self.pos >= self.size:
+            return b""
+        end = min(self.size - 1, self.pos + size - 1)
+        data, _ = self._range(self.pos, end)
+        self.pos += len(data)
+        return data
 
 
 def _member_ending(zf, suffix):
@@ -356,6 +427,35 @@ def prepare_sintel(clip_id, clip, dataset, archives, out_dir, suite):
         return selection
 
 
+def prepare_spring(clip_id, clip, dataset, archives, out_dir, suite):
+    sequence = clip["sequence"]
+    left_spec, right_spec = archives["test_left"], archives["test_right"]
+    left_reader = HTTPRangeReader(left_spec["url"], left_spec.get("size"))
+    right_reader = HTTPRangeReader(right_spec["url"], right_spec.get("size"))
+    with zipfile.ZipFile(left_reader) as left_zip, zipfile.ZipFile(right_reader) as right_zip:
+        left = _indexed_archive_members(
+            left_zip.namelist(), f"/test/{sequence}/frame_left/", r"frame_left_(\d+)\.png$")
+        right = _indexed_archive_members(
+            right_zip.namelist(), f"/test/{sequence}/frame_right/", r"frame_right_(\d+)\.png$")
+        available = sorted(set(left) & set(right))
+        if not available:
+            fail(f"no Spring stereo frames found for sequence {sequence}")
+        chosen = selected(available, clip)
+        os.makedirs(os.path.join(out_dir, "gt_right"))
+        selection = []
+        for output_id, (source_i, frame_id) in enumerate(chosen):
+            if output_id == 0 or (output_id + 1) % 6 == 0 or output_id + 1 == len(chosen):
+                print(f"extract: {clip_id} {output_id + 1}/{len(chosen)}", flush=True)
+            _write_image_bytes(left_zip.read(left[frame_id]),
+                               os.path.join(out_dir, f"frame_{output_id:05d}.png"), rgb=True)
+            _write_image_bytes(right_zip.read(right[frame_id]),
+                               os.path.join(out_dir, "gt_right", f"frame_{output_id:05d}.png"),
+                               rgb=True)
+            selection.append({"source_index": source_i, "dataset_frame": frame_id,
+                              "sequence": sequence, "split": "test"})
+        return selection
+
+
 def _tar_member_bytes(tf, member_name):
     member = tf.getmember(member_name)
     fh = tf.extractfile(member)
@@ -400,6 +500,9 @@ def prepare_clip(manifest, clip_id, clip, downloads_dir, prepared_root):
     archives = {}
     for name in clip["archives"]:
         spec = archive_spec(manifest, clip, name)
+        if spec.get("access") == "http_range_zip":
+            archives[name] = spec
+            continue
         path = os.path.join(downloads_dir, spec["filename"])
         if not os.path.exists(path):
             fail(f"archive missing; run without --no-download first: {path}")
@@ -417,29 +520,38 @@ def prepare_clip(manifest, clip_id, clip, downloads_dir, prepared_root):
         elif clip["adapter"] == "sintel_stereo_zip":
             selection = prepare_sintel(clip_id, clip, dataset, archives, temp,
                                        manifest["prepared_suite"])
+        elif clip["adapter"] == "spring_http_range_zip":
+            selection = prepare_spring(clip_id, clip, dataset, archives, temp,
+                                       manifest["prepared_suite"])
         elif clip["adapter"] == "vkitti2_tar":
             selection = prepare_vkitti2(clip_id, clip, dataset, archives, temp,
                                         manifest["prepared_suite"])
         else:
             fail(f"unsupported adapter: {clip['adapter']}")
+        has_gt_depth = clip["adapter"] != "spring_http_range_zip"
         meta = {
             "name": clip["name"], "description": clip["description"],
             "dataset": dataset["title"], "homepage": dataset["homepage"],
             "citation": dataset["citation"], "license_note": dataset["license_note"],
             "suite": manifest["prepared_suite"],
-            "gt_depth_kind": "disparity" if clip["adapter"] == "sintel_stereo_zip" else "metric",
-            "required_gt_depth": True,
+            "required_gt_depth": has_gt_depth,
             "required_gt_flow": clip["adapter"] == "tartanair_v2_zip",
             "selection": selection,
         }
-        if clip["adapter"] == "sintel_stereo_zip":
+        if has_gt_depth:
+            meta["gt_depth_kind"] = ("disparity" if clip["adapter"] == "sintel_stereo_zip"
+                                     else "metric")
+        if clip["adapter"] in ("sintel_stereo_zip", "spring_http_range_zip"):
             meta["required_gt_stereo"] = True
+        for key in ("source_artifacts", "source_artifact_frame"):
+            if key in clip:
+                meta[key] = clip[key]
         with open(os.path.join(temp, "meta.json"), "w", encoding="utf-8") as fh:
             json.dump(meta, fh, indent=2)
         if os.path.isdir(final):
             shutil.rmtree(final)
         os.replace(temp, final)
-        print(f"prepared: {clip_id} -> {final}")
+        print(f"prepared: {clip_id} -> {final}", flush=True)
     except Exception:
         shutil.rmtree(temp, ignore_errors=True)
         raise
@@ -468,6 +580,8 @@ def main():
             clip = manifest["clips"][clip_id]
             for archive_name in clip["archives"]:
                 spec = archive_spec(manifest, clip, archive_name)
+                if spec.get("access") == "http_range_zip":
+                    continue
                 if spec["filename"] not in seen:
                     download_archive(spec, downloads)
                     seen.add(spec["filename"])
@@ -477,6 +591,8 @@ def main():
             clip = manifest["clips"][clip_id]
             for archive_name in clip["archives"]:
                 spec = archive_spec(manifest, clip, archive_name)
+                if spec.get("access") == "http_range_zip":
+                    continue
                 if spec["filename"] in seen:
                     continue
                 path = os.path.join(downloads, spec["filename"])

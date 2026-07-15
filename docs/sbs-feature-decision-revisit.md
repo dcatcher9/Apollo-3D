@@ -24,7 +24,7 @@ remains neutral. Reports: `sbs_eval/evalv8-cleanup-vd3d/report.html` and
 - Hard comfort or image-integrity failure rejects a treatment.
 - Warp artifacts and stereo volume have equal priority. Stability and available GT depth evidence
   remain independent primary axes; a scalar score cannot cancel movement between them.
-- Core candidates are checked on `extended-v2`. Mixed results are tuned or retained conservatively.
+- Core candidates are checked on `extended-v3`. Mixed results are tuned or retained conservatively.
 - Phase-A fidelity and Phase-B perceived quality are different decisions. A VD3D-matching feature
   can remain in `bestv2-phase-a.conf` without being enabled in either quality profile.
 

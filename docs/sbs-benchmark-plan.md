@@ -20,9 +20,10 @@ Design for two reproducible, host-side benchmarks so every SBS change ships with
 > - **Eval v4** — hard signed-disparity/coverage/integrity limits, source-relative halo/stretch,
 >   scale/shift-invariant GT-depth accuracy on deterministic synthetic clips, and exact-or-classical
 >   optical-flow-compensated output/depth temporal validation. Native public metric-depth and
->   exact optical-flow sidecars are supported. The separate `extended-v2` suite adds visually
->   inspected Bonn RGB-D Dynamic, TartanAir V2, MPI Sintel Stereo, and Virtual KITTI 2 clips; URLs, SHA-256
->   hashes, frame windows and preparation logic are committed while media remains external.
+>   exact optical-flow sidecars are supported. The separate `extended-v3` suite adds visually
+>   inspected Bonn RGB-D Dynamic, TartanAir V2, MPI Sintel Stereo, Virtual KITTI 2, and Spring
+>   Stereo clips; immutable URLs/dataset IDs, hashes, frame windows and preparation logic are
+>   committed while media remains external.
 >   The first eight-clip run exposed an Apollo bug: Bestv2 source-pixel shifts were normalized by
 >   inference-depth width instead of source-color width, creating resolution-dependent amplification.
 >   After the fix, median VD3D volume delta is −6.0%; seven clips are within noise, including two
@@ -32,6 +33,12 @@ Design for two reproducible, host-side benchmarks so every SBS change ships with
 > MPI Sintel's rendered right eyes now provide reference-warp PSNR, SSIM, local epipolar
 > residual, and coverage diagnostics. One global horizontal camera-baseline offset is free;
 > local geometry, vertical displacement, stretch, ringing, and wrong revealed content are not.
+> Spring Stereo adds four independent 1920x1080 cinematic clips. All four produce complete
+> polarity-preserving artistic-style evidence; their official archives are sampled reproducibly
+> through verified HTTP byte ranges instead of downloading unrelated multi-gigabyte members.
+> A first adaptive-pop calibration (`spring-adaptive-vs-fixed130`) was neutral. Fixed 1.30 changed
+> pop spread by no more than 0.045 percentage points and produced mixed artistic-reference deltas;
+> keep the validated scene-latched 1.25-1.30 controller until headset preference evidence exists.
 
 ## Why the offline warpsim was removed
 

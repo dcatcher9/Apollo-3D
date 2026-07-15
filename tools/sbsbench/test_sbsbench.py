@@ -195,7 +195,7 @@ class EvalContractTests(unittest.TestCase):
             text = fh.read()
         self.assertIn("LeftColorTexture.GetDimensions(sourceWidth, sourceHeight)", text)
         self.assertIn("Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight)", text)
-        self.assertIn("s0, s1, (float)sourceWidth, (float)sourceHeight", text)
+        self.assertIn("s0, s1, s2, (float)sourceWidth, (float)sourceHeight", text)
         self.assertEqual(text.count("DepthParallax("), 2)
         self.assertNotIn("Bestv2SearchRadius((float)dw)", text)
 
@@ -206,7 +206,7 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("LeftColorTexture.GetDimensions(source_w, source_h)", text)
-        self.assertIn("s0, s1, (float)source_w, (float)source_h", text)
+        self.assertIn("s0, s1, s2, (float)source_w, (float)source_h", text)
         self.assertNotIn("s0, s1, (float)eye_w", text)
 
     def test_bestv2_scales_wide_sources_from_validated_calibration_width(self):
@@ -251,6 +251,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("double pop_strength = 1.25;", config_header)
         self.assertIn("bool adaptive_pop = true;", config_header)
         self.assertIn("double adaptive_pop_max = 1.30;", config_header)
+        self.assertIn('std::string zero_plane = "legacy";', config_header)
 
         with open(os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
                   encoding="utf-8") as fh:
@@ -266,6 +267,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("scene_age >= 8.0f", adaptive)
         self.assertIn("smoothstep(0.007f, 0.016f, edge_fraction)", adaptive)
         self.assertNotIn("lerp(pop_ratio, target_ratio", adaptive)
+        self.assertIn("Bestv2RawShiftPxFast(zero_anchor_shaped)", adaptive)
+        self.assertIn("s2 = float4(zero_anchor_shift, zero_valid, zero_plane_mode", adaptive)
 
     def test_adaptive_pop_last_flag_wins(self):
         conf = os.path.join(os.path.dirname(__file__), "bench.conf")
@@ -286,8 +289,9 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
-        self.assertIn('"  \\"schema\\": 14,\\n"', harness)
+        self.assertIn('"  \\"schema\\": 15,\\n"', harness)
         self.assertIn('\\"depth_override_frames\\"', harness)
+        self.assertIn('\\"zero_plane\\"', harness)
 
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
                   encoding="utf-8") as fh:
@@ -316,8 +320,26 @@ class EvalContractTests(unittest.TestCase):
             evaluator = fh.read()
         self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
         self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
-        self.assertIn('"schema": 14', evaluator)
+        self.assertIn('"schema": 15', evaluator)
         self.assertIn('depth_override_root and not args.comparison_only', evaluator)
+
+    def test_zero_plane_modes_are_shot_latched_and_machine_verified(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src_assets", "windows", "assets", "shaders",
+                               "directx", "include", "sbs_warp_common.hlsl"),
+                  encoding="utf-8") as fh:
+            common = fh.read()
+        self.assertIn("p.explicit_zero_plane > 0.5f ? p.zero_anchor_shift_px", common)
+        self.assertIn("p.explicit_zero_plane > 0.5f ? 0.0f", common)
+        with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
+                  encoding="utf-8") as fh:
+            harness = fh.read()
+        self.assertIn('a == "--zero-plane"', harness)
+        self.assertIn('o.zero_plane != "background"', harness)
+        conf = os.path.join(os.path.dirname(__file__), "bench.conf")
+        self.assertEqual(run_eval.expected_profile_string(
+            conf, "apollo", "zero_plane", "legacy", ["--zero-plane", "median"],
+            "--zero-plane"), "median")
 
     def test_live_depth_pairing_is_bounded_and_sync_is_evaluation_only(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -746,6 +768,21 @@ class EvalContractTests(unittest.TestCase):
         dy, dx = sbsbench.phase_shift(a, b)
         self.assertAlmostEqual(dy, -2.0, places=5)
         self.assertAlmostEqual(dx, 5.0, places=5)
+
+    def test_translation_residual_validates_nonwrapping_alignment(self):
+        rng = np.random.default_rng(4321)
+        source = rng.random((48, 64), dtype=np.float32)
+        shifted = np.zeros_like(source)
+        shifted[:, 7:] = source[:, :-7]
+        self.assertLess(sbsbench.translation_residual(source, shifted, 0, -7),
+                        sbsbench.translation_residual(source, shifted, 0, 0) * 0.1)
+
+    def test_disparity_field_rejects_photometrically_invalid_peak(self):
+        rng = np.random.default_rng(987)
+        left = rng.random((64, 64), dtype=np.float32)
+        with mock.patch.object(sbsbench, "phase_shift", return_value=(15.0, -30.0)):
+            field = sbsbench.disparity_field(left, left.copy(), tile=64, stride=64)
+        self.assertIsNone(field)
 
     def test_disparity_field_covers_tile_sized_frame_and_final_borders(self):
         rng = np.random.default_rng(2026)
@@ -1361,7 +1398,7 @@ class EvalContractTests(unittest.TestCase):
         extended_clips, extended_baselines = run_eval.suite_defaults("extended")
         self.assertTrue(core_clips.endswith(os.path.join("sbsbench", "clips")))
         self.assertTrue(core_baselines.endswith(os.path.join("sbsbench", "baselines")))
-        self.assertIn(os.path.join("prepared", "extended-v2"), extended_clips)
+        self.assertIn(os.path.join("prepared", "extended-v3"), extended_clips)
         self.assertTrue(extended_baselines.endswith("baselines_extended"))
 
     def test_rescore_uses_canonical_metric_contract_hash(self):
@@ -1391,6 +1428,33 @@ class EvalContractTests(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(out, "frame_00000.png")))
             self.assertTrue(os.path.exists(os.path.join(out, "gt_right", "frame_00001.png")))
             self.assertTrue(os.path.exists(os.path.join(out, "gt_depth", "frame_00001.npy")))
+
+    def test_spring_adapter_range_selects_matching_stereo_frames(self):
+        with tempfile.TemporaryDirectory() as root:
+            archives = {}
+            for side, value in (("left", 40), ("right", 80)):
+                path = os.path.join(root, side + ".zip")
+                with zipfile.ZipFile(path, "w") as zf:
+                    for i in range(3):
+                        zf.writestr(f"spring/test/0003/frame_{side}/frame_{side}_{i + 1:04d}.png",
+                                    self.png_bytes(value + i))
+                archives["test_" + side] = {"url": path, "size": os.path.getsize(path)}
+            out = os.path.join(root, "out")
+            os.makedirs(out)
+            clip = {"sequence": "0003", "start": 1, "stride": 1, "count": 2}
+
+            def memory_reader(url, expected_size):
+                with open(url, "rb") as archive_file:
+                    return io.BytesIO(archive_file.read())
+
+            with mock.patch.object(
+                    prepare_public_datasets, "HTTPRangeReader",
+                    side_effect=memory_reader):
+                rows = prepare_public_datasets.prepare_spring(
+                    "demo", clip, {}, archives, out, "test")
+            self.assertEqual([row["dataset_frame"] for row in rows], [2, 3])
+            self.assertTrue(os.path.exists(os.path.join(out, "frame_00000.png")))
+            self.assertTrue(os.path.exists(os.path.join(out, "gt_right", "frame_00001.png")))
 
     def test_vkitti_adapter_selects_matching_rgb_and_depth(self):
         with tempfile.TemporaryDirectory() as root:

@@ -530,6 +530,7 @@ namespace sbs_bench {
       double output_scale = 1.0;  // per-eye linear scale vs source; preserves source aspect
       double pop_strength = -1.0;  // final shared stereo-parallax multiplier; <0 = conf
       double adaptive_pop_max = -1.0;  // absolute ceiling; <0 = conf
+      std::string zero_plane;  // empty = conf; legacy, subject, median, or background
       bool simulate_hdr = false;  // decode sRGB frames into linear scRGB FP16 and use HDR paths
       double hdr_scale = 4.0;  // scRGB multiplier after sRGB EOTF (4.0 = 320-nit diffuse white)
       int max_width = 0;  // 0 -> use config max_encode_width
@@ -582,6 +583,8 @@ namespace sbs_bench {
           o.adaptive_pop = 0;
         } else if (a == "--adaptive-pop-max") {
           o.adaptive_pop_max = std::stod(next("--adaptive-pop-max"));
+        } else if (a == "--zero-plane") {
+          o.zero_plane = next("--zero-plane");
         } else if (a == "--simulate-hdr") {
           o.simulate_hdr = true;
         } else if (a == "--hdr-scale") {
@@ -650,6 +653,12 @@ namespace sbs_bench {
       if (o.adaptive_pop_max >= 0.0 &&
           !(o.adaptive_pop_max >= 0.25 && o.adaptive_pop_max <= 2.0)) {
         BOOST_LOG(error) << "sbs-bench: --adaptive-pop-max must be between 0.25 and 2";
+        return false;
+      }
+      if (!o.zero_plane.empty() && o.zero_plane != "legacy" &&
+          o.zero_plane != "subject" && o.zero_plane != "median" &&
+          o.zero_plane != "background") {
+        BOOST_LOG(error) << "sbs-bench: --zero-plane must be legacy, subject, median, or background";
         return false;
       }
       if (!(o.hdr_scale > 0.0 && o.hdr_scale <= 64.0)) {
@@ -743,6 +752,9 @@ namespace sbs_bench {
     }
     if (o.adaptive_pop_max >= 0.0) {
       sbs_cfg.adaptive_pop_max = o.adaptive_pop_max;
+    }
+    if (!o.zero_plane.empty()) {
+      sbs_cfg.zero_plane = o.zero_plane;
     }
     sbs_cfg.adaptive_pop_max = std::max(sbs_cfg.adaptive_pop_max, sbs_cfg.pop_strength);
     if (o.subject_lock >= 0.0) {
@@ -1259,7 +1271,7 @@ namespace sbs_bench {
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
-                 << "  \"schema\": 14,\n"
+                 << "  \"schema\": 15,\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
                  << "  \"depth_step\": "
@@ -1278,6 +1290,7 @@ namespace sbs_bench {
                  << "  \"ema_edge_strength\": " << sbs_cfg.ema_edge_strength << ",\n"
                  << "  \"adaptive_pop\": " << (sbs_cfg.adaptive_pop ? "true" : "false") << ",\n"
                  << "  \"adaptive_pop_max\": " << sbs_cfg.adaptive_pop_max << ",\n"
+                 << "  \"zero_plane\": " << json_string(sbs_cfg.zero_plane) << ",\n"
                  << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n"
                  << "  \"cuda_graph\": " << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
                  << "  \"cuda_graph_captured\": " << (cuda_graph_captured ? "true" : "false") << ",\n"

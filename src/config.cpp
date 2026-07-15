@@ -1262,6 +1262,7 @@ namespace config {
       double_between_f(vars, prefix + "subject_lock", target.subject_lock, {0.0, 1.0});
       double_between_f(vars, prefix + "subject_recenter", target.subject_recenter, {0.0, 1.0});
       bool_f(vars, prefix + "subject_stretch", target.subject_stretch);
+      string_f(vars, prefix + "zero_plane", target.zero_plane);
       string_f(vars, prefix + "depth_model", target.depth_model);
       string_f(vars, prefix + "depth_model_url", target.depth_model_url);
       int_between_f(vars, prefix + "max_encode_width", target.max_encode_width, {256, 16384});
@@ -1273,6 +1274,12 @@ namespace config {
     video.sbs.profile = sbs_profile;
     apply_sbs_values(video.sbs, "sbs_3d_profile_" + sbs_profile + "_");
     apply_sbs_values(video.sbs, "sbs_3d_");
+    if (video.sbs.zero_plane != "legacy" && video.sbs.zero_plane != "subject" &&
+        video.sbs.zero_plane != "median" && video.sbs.zero_plane != "background") {
+      BOOST_LOG(warning) << "Invalid sbs_3d_zero_plane value '" << video.sbs.zero_plane
+                         << "'; use legacy, subject, median, or background. Using legacy.";
+      video.sbs.zero_plane = "legacy";
+    }
     video.sbs.max_encode_width &= ~1;
 
     path_f(vars, "pkey", nvhttp.pkey);

@@ -57,14 +57,14 @@
     "score": 74.7
   },
   "perf_ms": {
-    "depth_infer": 1.4569,
-    "depth_postprocess_gpu": 0.076096,
-    "depth_preprocess_gpu": 0.101216,
-    "sbs_composite_cpu": 0.0039,
-    "warp_infer": 0.055392
+    "depth_infer": 1.45501,
+    "depth_postprocess_gpu": 0.076192,
+    "depth_preprocess_gpu": 0.146336,
+    "sbs_composite_cpu": 0.0047,
+    "warp_infer": 0.055168
   },
   "meta": {
-    "git_sha": "b3d7bd33",
+    "git_sha": "e7c92d9d",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -88,16 +88,17 @@
     "profile": "apollo",
     "adaptive_pop": true,
     "adaptive_pop_max": 1.3,
+    "zero_plane": "legacy",
     "literal_bestv2": false,
     "depth_compensation": "none",
-    "eval_schema": 22,
+    "eval_schema": 24,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "7107823751182d07",
+    "metric_sha256": "de3a107791d5f662",
     "gpu_contention": false,
-    "timestamp": "2026-07-14T14:39:31",
-    "run_name": "art-validity-core",
+    "timestamp": "2026-07-14T16:19:10",
+    "run_name": "evalv24-core",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "name": "warrior-cliff",

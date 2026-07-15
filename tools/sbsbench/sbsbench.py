@@ -126,6 +126,19 @@ def phase_shift(a, b):
     return float(dy), float(dx)
 
 
+def translation_residual(a, b, dy, dx):
+    """Mean absolute error after an integer non-wrapping translation of b onto a."""
+    iy, ix = int(round(dy)), int(round(dx))
+    h, w = a.shape
+    ay0, ay1 = max(0, iy), min(h, h + iy)
+    ax0, ax1 = max(0, ix), min(w, w + ix)
+    by0, by1 = max(0, -iy), min(h, h - iy)
+    bx0, bx1 = max(0, -ix), min(w, w - ix)
+    if ay0 >= ay1 or ax0 >= ax1:
+        return float("inf")
+    return float(np.mean(np.abs(a[ay0:ay1, ax0:ax1] - b[by0:by1, bx0:bx1])))
+
+
 def disparity_field(left, right, tile=192, stride=128, min_var=1e-3):
     """Per-tile horizontal/vertical disparity between the eyes, weighted by tile texture.
     Only textured tiles (variance > min_var) vote, so flat sky/UI doesn't wash out the stats."""
@@ -144,6 +157,14 @@ def disparity_field(left, right, tile=192, stride=128, min_var=1e-3):
             # A shift near the unambiguous range edge is unreliable; drop it.
             if abs(dx) >= tile // 2 - 1 or abs(dy) >= tile // 2 - 1:
                 continue
+            # Repetitive texture can create a strong but false phase-correlation peak. A real
+            # multi-pixel eye displacement must improve non-wrapping photometric alignment; an
+            # alias that is no better than the unshifted eyes must never drive a hard comfort gate.
+            if max(abs(dx), abs(dy)) >= 2.0:
+                aligned = translation_residual(lt, rt, dy, dx)
+                unaligned = float(np.mean(np.abs(lt - rt)))
+                if aligned >= unaligned * 0.9:
+                    continue
             dxs.append(dx)
             dys.append(dy)
             wts.append(v)

@@ -48,6 +48,7 @@ float2 Reproject(float2 uv, float eyeSign, bool use_subject_stretch) {
     // gates searchRadius, so the search span and the parallax mapping can never disagree.
     float4 s0 = SubjectState[0];
     float4 s1 = SubjectState[1];
+    float4 s2 = SubjectState[2];
     bool shaped = s0.w > 0.5f;
     // Bestv2's calibrated bands are SOURCE-COLOR pixel shifts. Normalizing by the smaller
     // inference-depth width amplified Apollo whenever the model texture was downscaled, while
@@ -62,7 +63,7 @@ float2 Reproject(float2 uv, float eyeSign, bool use_subject_stretch) {
         return uv;  // subject state is not initialized yet
     }
     Bestv2Params params = MakeBestv2Params(
-        s0, s1, (float)sourceWidth, (float)sourceHeight, use_subject_stretch);
+        s0, s1, s2, (float)sourceWidth, (float)sourceHeight, use_subject_stretch);
 
     int steps = clamp((int)round(24.0f * aspectScale), 12, 72);
     float startX = uv.x - searchRadius;

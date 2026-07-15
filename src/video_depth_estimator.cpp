@@ -712,6 +712,7 @@ namespace models {
     bool subject_stretch;  // apply the shape_depth_for_pop 5/95 disparity stretch
     bool adaptive_pop;
     float adaptive_pop_max_ratio;
+    float zero_plane_mode;  // 0 legacy, 1 subject, 2 median depth, 3 far/mid-background
     std::string model_name;  // local file stem; engine cache is recipe-specific
     std::string model_url;  // where to download the onnx if absent
 
@@ -1068,7 +1069,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_hist_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_plain_buf;  // 256 unweighted bins for the stretch 5/95
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_plain_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;  // two float4 elements; see depth_subject_resolve_cs
+    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;  // three float4 elements; see depth_subject_resolve_cs
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_stage;  // CPU-readable copy for the debug log
@@ -1115,6 +1116,9 @@ namespace models {
         adaptive_pop(cfg.adaptive_pop),
         adaptive_pop_max_ratio((float) (std::max(cfg.adaptive_pop_max, cfg.pop_strength) /
                                         std::max(cfg.pop_strength, 0.25))),
+        zero_plane_mode(cfg.zero_plane == "subject" ? 1.0f :
+                        cfg.zero_plane == "median" ? 2.0f :
+                        cfg.zero_plane == "background" ? 3.0f : 0.0f),
         model_name(model.name),
         model_url(model.url) {
       const auto init_started = std::chrono::steady_clock::now();
@@ -1259,6 +1263,8 @@ namespace models {
         return;
       }
       BOOST_LOG(info) << "Permanent Bestv2 subject shaping enabled (recenter " << subject_recenter << ").";
+      BOOST_LOG(info) << "SBS zero-plane mode: " << cfg.zero_plane
+                      << (zero_plane_mode > 0.5f ? " (shot-latched experimental anchor)." : ".");
       // Min/max reduction accumulator (2 uints), pre-seeded to the reduction identity
       // {min = 0xFFFFFFFF, max = 0}. depth_minmax_ema_cs resets it after each frame.
       {
@@ -1322,7 +1328,7 @@ namespace models {
       }
 
       // Subject tracking: weighted histogram (256 uint bins), plain histogram plus two scene-risk
-      // counters (258 uints), and two-float4 per-frame state.
+      // counters (258 uints), and three-float4 per-frame state.
       {
         uint32_t init_hist[256] = {};
         D3D11_BUFFER_DESC bd = {};
@@ -1344,7 +1350,10 @@ namespace models {
           device->CreateUnorderedAccessView(subject_plain_buf.Get(), nullptr, &subject_plain_uav);
         }
 
-        float init_state[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};  // 2 float4
+        // [0] subject/recenter, [1] stretch/convergence/pop, [2] explicit zero-plane anchor.
+        float init_state[12] = {0.0f, 0.0f, 0.0f, 0.0f,
+                                0.0f, 1.0f, 0.0f, 0.0f,
+                                0.0f, 0.0f, 0.0f, 0.0f};
         bd.ByteWidth = sizeof(init_state);
         bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
         bd.StructureByteStride = sizeof(float) * 4;
@@ -1573,6 +1582,7 @@ namespace models {
       cbf[10] = subject_stretch ? 1.0f : 0.0f;
       cbf[11] = adaptive_pop ? 1.0f : 0.0f;
       cbf[12] = adaptive_pop_max_ratio;
+      cbf[13] = zero_plane_mode;
       D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
       cbuffer.Reset();
       device->CreateBuffer(&cb_desc, &sd, &cbuffer);
@@ -1717,13 +1727,15 @@ namespace models {
           context->CopyResource(subject_stage.Get(), subject_buf.Get());
           D3D11_MAPPED_SUBRESOURCE ms {};
           if (SUCCEEDED(context->Map(subject_stage.Get(), 0, D3D11_MAP_READ, 0, &ms))) {
-            const float *s = (const float *) ms.pData;  // {delta, scurve, subj_ema, init}
+            const float *s = (const float *) ms.pData;
             BOOST_LOG(info) << "[SUBJDBG] u=" << subject_log_counter
                             << " subj_hi_near=" << s[2]
                             << " subj_low_near=" << (1.0f - s[2])
                             << " recenter_delta=" << s[0]
                             << " scene_age=" << s[1]
-                            << " init=" << s[3];
+                            << " init=" << s[3]
+                            << " zero_anchor_shift_px=" << s[8]
+                            << " zero_anchor_valid=" << s[9];
             context->Unmap(subject_stage.Get(), 0);
           }
         }
