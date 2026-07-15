@@ -9,7 +9,10 @@
 #include <cmath>
 #include <cstdint>
 #include <future>
+#include <iomanip>
+#include <limits>
 #include <memory>
+#include <sstream>
 #include <thread>
 
 // platform includes
@@ -811,6 +814,66 @@ namespace platf::dxgi {
       this->color_matrix = std::move(color_matrix);
     }
 
+    std::string make_depth_estimator_fingerprint(
+      std::uint32_t eye_width,
+      std::uint32_t eye_height,
+      float content_scale_x,
+      float content_scale_y
+    ) const {
+      const auto model = ::video::depth_model_for_profile(sbs_config);
+      std::ostringstream stream;
+      stream << std::setprecision(std::numeric_limits<double>::max_digits10)
+             << model.name << '\n' << model.url << '\n'
+             << display->width << 'x' << display->height << '\n'
+             << eye_width << 'x' << eye_height << '\n'
+             << content_scale_x << ',' << content_scale_y << '\n'
+             << sbs_intermediate_linear << '\n'
+             << sbs_config.profile << '\n'
+             << sbs_config.pop_strength << '\n'
+             << sbs_config.adaptive_pop << '\n'
+             << sbs_config.adaptive_pop_max << '\n'
+             << sbs_config.ema << '\n'
+             << sbs_config.ema_edge_change << '\n'
+             << sbs_config.ema_edge_gradient << '\n'
+             << sbs_config.ema_edge_strength << '\n'
+             << sbs_config.minmax_ema << '\n'
+             << sbs_config.subject_lock << '\n'
+             << sbs_config.subject_recenter << '\n'
+             << sbs_config.subject_stretch << '\n'
+             << sbs_config.depth_short_side << '\n'
+             << sbs_config.depth_max_aspect << '\n'
+             << sbs_config.zero_plane << '\n'
+             << sbs_config.cuda_graph << '\n'
+             << sbs_config.perf_stats << '\n'
+             << sbs_config.artistic_style << '\n'
+             << sbs_config.artistic_live_review;
+      return stream.str();
+    }
+
+    void refresh_depth_estimator_fingerprint(
+      std::uint32_t eye_width,
+      std::uint32_t eye_height,
+      float content_scale_x,
+      float content_scale_y
+    ) {
+      const std::string next = make_depth_estimator_fingerprint(
+        eye_width,
+        eye_height,
+        content_scale_x,
+        content_scale_y
+      );
+      if (!depth_estimator_fingerprint.empty() && depth_estimator_fingerprint != next) {
+        depth_estimator.reset();
+        depth_estimator_failed = false;
+        engine_poll_counter = 0;
+        publish_depth_status(0);
+        BOOST_LOG(info) << "Host SBS estimator configuration/output geometry changed; the old "
+                           "device pipeline will be rebuilt while the process-global model stays "
+                           "resident.";
+      }
+      depth_estimator_fingerprint = next;
+    }
+
     // Create the D3D depth pipeline on demand (first SBS frame). The heavy TensorRT engine,
     // execution context, and CUDA modules were prepared at host startup; construction now borrows
     // that warm context and creates only device/session resources on a background thread.
@@ -829,9 +892,26 @@ namespace platf::dxgi {
       if (depth_estimator_building) {
         if (depth_estimator_build.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
           depth_estimator_building = false;
+          const bool stale_build = depth_estimator_build_fingerprint !=
+                                   depth_estimator_fingerprint;
           try {
-            depth_estimator = depth_estimator_build.get();
+            auto built_estimator = depth_estimator_build.get();
+            if (stale_build) {
+              BOOST_LOG(info) << "Discarding a depth estimator completed for an obsolete SBS "
+                                 "configuration/output geometry.";
+              built_estimator.reset();
+              publish_depth_status(0);
+              return false;
+            }
+            depth_estimator = std::move(built_estimator);
           } catch (const std::exception &e) {
+            if (stale_build) {
+              BOOST_LOG(info) << "Ignoring a failed depth estimator build for an obsolete SBS "
+                                 "configuration/output geometry: "sv
+                              << e.what();
+              publish_depth_status(0);
+              return false;
+            }
             // Don't let a background-build exception propagate on the encode thread (it would end
             // the stream); log it, clear the client's "loading" indicator, and stream flat.
             BOOST_LOG(error) << "Depth estimator build failed: "sv << e.what();
@@ -878,21 +958,41 @@ namespace platf::dxgi {
       // resource creation the constructor does (it makes no immediate-context calls). Capture
       // owning ComPtrs so a presentation-session teardown never has to wait for construction.
       auto sbs_cfg = sbs_config;
+      const auto artistic_eye_width = (std::uint32_t) std::lround(sbs_viewport.Width * 0.5f);
+      const auto artistic_eye_height = (std::uint32_t) std::lround(sbs_viewport.Height);
+      const float artistic_content_scale_x = sbs_content_scale_x;
+      const float artistic_content_scale_y = sbs_content_scale_y;
       BOOST_LOG(info) << "Host SBS enabled; building depth model \""sv << active.name
                       << "\" for matched-frame presentation in the background "
                          "(streaming flat until ready)..."sv;
       Microsoft::WRL::ComPtr<ID3D11Device> dev(device.get());
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx(device_ctx.get());
-      depth_estimator_build_task_t build_task([dev = std::move(dev), ctx = std::move(ctx), active, sbs_cfg]() mutable {
-        return std::make_unique<models::video_depth_estimator>(
+      depth_estimator_build_task_t build_task([dev = std::move(dev), ctx = std::move(ctx), active, sbs_cfg,
+                                                artistic_eye_width, artistic_eye_height,
+                                                artistic_content_scale_x,
+                                                artistic_content_scale_y]() mutable {
+        auto estimator = std::make_unique<models::video_depth_estimator>(
           std::move(dev),
           std::move(ctx),
           std::filesystem::path(SUNSHINE_ASSETS_DIR),
           sbs_cfg,
-          active
+          active,
+          true,
+          0.0f,
+          sbs_cfg.artistic_live_review ?
+            models::artistic_policy_authorization::headset_review :
+            models::artistic_policy_authorization::deployment
         );
+        estimator->set_artistic_output_geometry(
+          artistic_eye_width,
+          artistic_eye_height,
+          artistic_content_scale_x,
+          artistic_content_scale_y
+        );
+        return estimator;
       });
       depth_estimator_build = build_task.get_future();
+      depth_estimator_build_fingerprint = depth_estimator_fingerprint;
       depth_estimator_build_manager().launch(std::move(build_task));
       depth_estimator_building = true;
       publish_depth_status(3);  // device-specific pipeline initialization (engine is already ready)
@@ -1398,6 +1498,8 @@ namespace platf::dxgi {
         } else {
           content_scale_y = eye_aspect / source_aspect;
         }
+        sbs_content_scale_x = content_scale_x;
+        sbs_content_scale_y = content_scale_y;
       }
       update_sbs_constant_buffer(content_scale_x, content_scale_y);
       auto out_width_f = sbs_on ? (float) out_width : fitted_width;
@@ -1445,6 +1547,12 @@ namespace platf::dxgi {
         }
 
         sbs_viewport = {0.0f, 0.0f, (float) tex_desc.Width, (float) tex_desc.Height, 0.0f, 1.0f};
+        refresh_depth_estimator_fingerprint(
+          (std::uint32_t) std::lround(sbs_viewport.Width * 0.5f),
+          (std::uint32_t) std::lround(sbs_viewport.Height),
+          sbs_content_scale_x,
+          sbs_content_scale_y
+        );
       }
 
       if (rgb_only) {
@@ -1858,6 +1966,8 @@ namespace platf::dxgi {
     std::future<std::unique_ptr<models::video_depth_estimator>> depth_estimator_build;
     bool depth_estimator_building = false;
     bool depth_estimator_failed = false;  ///< Build threw; stream flat, don't retry on this device.
+    std::string depth_estimator_fingerprint;
+    std::string depth_estimator_build_fingerprint;
     unsigned engine_poll_counter = 0;  ///< Rate-limits the startup model-preparation wait warning.
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
     config::video_t::sbs_t sbs_config {};  ///< Immutable profile snapshot for this device.
@@ -1874,6 +1984,8 @@ namespace platf::dxgi {
     shader_res_t sbs_warp_depth_srv;
     bool sbs_intermediate_linear = false;
     D3D11_VIEWPORT sbs_viewport;
+    float sbs_content_scale_x = 1.0f;
+    float sbs_content_scale_y = 1.0f;
     std::array<matched_frame_slot_t, 2> matched_frame_slots;
     std::uint64_t sbs_frame_sequence = 0;
     bool matched_output_valid = false;

@@ -31,6 +31,11 @@ Bestv2 disparity is calibrated at the evaluator's 854-pixel source width and nor
 default floor `1.25`) without changing that resolution correction. The accepted scene latch may
 select up to `1.30` from depth-edge risk and holds the selection until a hard cut.
 
+An experimental multi-output DA-V2 model may additionally emit a confidence-gated safe scale
+ceiling. `sbs_3d_artistic_style = clean|balanced|immersive` consumes zero, half, or all of that
+validated headroom and is inert for the shipping depth-only model. No learned checkpoint is
+approved by default; see `docs/sbs-artistic-policy-plan.md` for the frozen promotion gates.
+
 ## Frozen processor decisions
 
 - Bestv2-derived subject estimation and P2/P98 normalization are mandatory.
@@ -200,8 +205,12 @@ and profile provenance; cover the 11-clip core and public extended suites; gener
 and `decision.json`; inspect primary-axis examples; and treat comfort/image-integrity limits as hard
 constraints. Headset evidence resolves coequal-axis tradeoffs.
 
-The harness uses contract 15 and eval schema 24. It exports raw depth, pre-warp depth, exact forward
-coverage diagnostics, and final SBS artifacts by numeric frame identity. Ground-truth depth scoring
+The harness uses contract 24 and eval schema 29. It exports raw depth, pre-warp depth, exact forward
+coverage diagnostics, clamped and unclamped HLSL full-binocular disparity at the rendered
+output-eye raster (with bars excluded by the exact pixel-center validity rule), and final SBS
+artifacts by numeric frame identity. The primary stereo-volume metric,
+`exact_pop_spread_pct`, is p95-p5 of that exact clamped field; the older image
+phase-correlation `pop_spread_pct` estimate is diagnostic only. Ground-truth depth scoring
 is scale/shift invariant but polarity preserving. MPI Sintel true-right references additionally
 score global-horizontal-registered PSNR/SSIM, local epipolar residual/coverage, and Art3D-inspired
 positive-affine depth-budget/zero-plane alignment plus DDC-IoU structure. All remain diagnostic

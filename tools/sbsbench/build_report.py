@@ -37,7 +37,7 @@ REPORT_SHA = run_eval.sha256_files([os.path.abspath(__file__)])
 # An A/B report may compare different code, profile/treatment arguments, or (only when explicitly
 # requested) depth models. Its evidence remains invalid if the source set or metric contract changed.
 _SAME_CONTEXT = ["clip_set_sha1", "mode", "eval_schema", "depth_step", "suite",
-                 "metric_sha256"]
+                 "metric_sha256", "output_interval", "output_gt_right_only"]
 if not allow_model_diff:
     _SAME_CONTEXT.append("model")
 if not allow_config_diff:
@@ -106,7 +106,8 @@ if stale_sources:
 # metric, header, worse-is-higher, always-show, notable-threshold
 COLS = [
     ("score", "score", False, True, 0),
-    ("pop_spread_px", "pop_spread", False, True, 0),
+    ("exact_pop_spread_pct", "exact_pop_spread", False, True, 0),
+    ("pop_spread_px", "image_pop_spread", False, True, 0),
     ("source_residual_p95", "warp_resid", True, True, 0),
     ("source_halo_p95", "source_halo", True, True, 0),
     ("source_stretch_pct", "source_stretch", True, True, 0),
@@ -151,7 +152,7 @@ def impact(k):
         return 1e9
     if k in _PEN:
         return (1.0 - _DW) * _PEN[k]["weight"]
-    if k in ("pop_spread_px", _DEPTH_METRIC):
+    if k in ("exact_pop_spread_pct", "pop_spread_px", _DEPTH_METRIC):
         return _DW * 100.0
     return 0.0
 
@@ -526,7 +527,7 @@ def visual_evidence_images(clip, idx, metric=None):
     if (metric in ("stereo_gt_psnr", "stereo_gt_ssim", "stereo_gt_residual_p95",
                    "stereo_gt_coverage_pct") or metric.startswith("stereo_art_")):
         return ground_truth_stereo_evidence(clip, idx)
-    if metric == "pop_spread_px":
+    if metric in ("exact_pop_spread_pct", "pop_spread_px"):
         cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
         dp = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
         if not (os.path.exists(cp) and os.path.exists(tp) and os.path.exists(dp)):
@@ -624,7 +625,7 @@ CTRL_PROFILES = {e.get("meta", {}).get("profile") for e in CTRL["clips"].values(
 TREAT_PROFILES = {e.get("meta", {}).get("profile") for e in TREAT["clips"].values()
                   if e.get("meta", {}).get("profile")}
 IS_PROFILE_CMP = bool(CTRL_PROFILES and TREAT_PROFILES and CTRL_PROFILES != TREAT_PROFILES)
-IS_COMPARISON_ONLY = TREAT.get("verdict") == "comparison_only"
+IS_COMPARISON_ONLY = TREAT.get("meta", {}).get("run_kind") == "comparison_only"
 IS_TRADEOFF_CMP = IS_MODE_CMP or IS_PROFILE_CMP
 CTRL_NAME = run_label(CTRL, ctrl_dir, "control")
 TREAT_NAME = run_label(TREAT, treat_dir, "treatment")
@@ -677,6 +678,23 @@ for _run, _aggs in ((CTRL, ctrl_agg), (TREAT, treat_agg)):
 # ad-hoc script) from accidentally passing the per-clip wrapper instead of its `aggregate` member.
 AB_DECISION = sbsbench.evaluate_ab_decision(
     ctrl_agg, treat_agg, DECISION_CLIPS, THR, hard_clip_ids=CLIPS)
+# The run gate has frame-level hard evidence that an aggregate-only report decision cannot
+# reconstruct. Preserve it in the single decision object instead of allowing decision.json to
+# claim neutral/candidate beside a red hard-gate strip.
+for _failure in TREAT.get("hard_failures", []):
+    _identity = (_failure.get("clip"), _failure.get("metric"))
+    if not any((item.get("clip"), item.get("metric")) == _identity
+               for item in AB_DECISION["hard_failures"]):
+        AB_DECISION["hard_failures"].append({
+            "clip": _failure.get("clip"),
+            "metric": _failure.get("metric"),
+            "value": _failure.get("value"),
+            "bounds": {key: _failure[key] for key in ("hard_min", "hard_max")
+                       if key in _failure},
+            "reason": _failure.get("reason", "run-gate-hard-failure"),
+        })
+if AB_DECISION["hard_failures"]:
+    AB_DECISION["verdict"] = "reject_hard"
 colmax = {k: max(max(ctrl_agg[c].get(k, 0), treat_agg[c].get(k, 0)) for c in CLIPS) for k, *_ in COLS}
 ACTIVE = [col for col in COLS if col[3] or colmax[col[0]] > col[4]]
 CLEAN = [col for col in COLS if col not in ACTIVE and col[2]]
@@ -687,7 +705,7 @@ CLEAN = [col for col in COLS if col not in ACTIVE and col[2]]
 # means remain printed under each chart; the real decision continues to use per-clip tolerances.
 RADAR_GROUPS = [
     ("Validated primary axes", "Can vote in the feature decision", [
-        {"key": "pop_spread_pct", "label": "Stereo volume", "better": "higher",
+        {"key": "exact_pop_spread_pct", "label": "Stereo volume", "better": "higher",
          "reference": _SC.get("depth", {}).get("target", 2.5), "unit": "%"},
         {"key": "source_residual_p95", "label": "Warp fidelity", "better": "lower",
          "reference": 15.0, "unit": " luma"},
@@ -927,17 +945,21 @@ METRIC_DEFS = [
      "score",
      "Overall 0-100 artifact cleanliness after weighted penalties. Stereo volume is reported and gated separately, so it cannot cancel artifact regressions.",
      "higher = better"),
-    ("pop_spread_px",
-     "pop_spread",
-     "Near-to-far horizontal disparity range in output pixels, shown for intuition. Decisions use pop_spread_pct, normalized to reference-aspect-equivalent image disparity at the 5120x2160 anchor.",
+    ("exact_pop_spread_pct",
+     "exact_pop_spread",
+     "Near-to-far p95-p5 range of the exact signed full-binocular disparity produced by the shipping HLSL at every content-valid output-eye pixel center, normalized to the 5120x2160 reference aspect. This is the primary stereo-volume decision metric.",
      "higher = more stereo volume"),
+    ("pop_spread_px",
+     "image_pop_spread",
+     "Image phase-correlation estimate of near-to-far horizontal disparity range in output pixels. Diagnostic only because repetitive textures can create false matches; decisions use exact_pop_spread_pct.",
+     "higher = more estimated stereo volume"),
     ("positive_disparity_pct",
      "disp_positive",
-     "Weighted p99 of the positive signed L/R disparity tail, expressed as the equivalent image percentage at the 5120x2160 reference aspect. Kept sign-explicit because crossed/uncrossed polarity is not encoded in the host image.",
+     "P99 of the exact positive signed full-binocular HLSL disparity, including the shipping horizontal content scale and expressed at the 5120x2160 reference aspect. Kept sign-explicit because crossed/uncrossed polarity is not encoded in the host image.",
      "must stay below comfort limit"),
     ("negative_disparity_pct",
      "disp_negative",
-     "Magnitude of the weighted p1 negative signed L/R disparity tail in the same reference-equivalent perceived-disparity units.",
+     "Magnitude of the p1 exact negative signed full-binocular HLSL disparity in the same rendered, reference-equivalent units.",
      "must stay below comfort limit"),
     ("source_coverage_pct",
      "coverage",
@@ -1173,6 +1195,10 @@ def conclusion_section():
     elif state == "candidate":
         verdict = (f'<b>Candidate improvement:</b> {decision["improved"]} primary-axis win(s), '
                    f'no primary-axis costs and no hard failure.')
+    elif state == "inconclusive":
+        verdict = (f'<b>Inconclusive:</b> {len(decision["missing_evidence"])} required '
+                   'primary metric value(s) are missing or non-finite; this treatment cannot be '
+                   'accepted until the evidence is regenerated.')
     else:
         verdict = ("<b>No validated decision:</b> hard constraints pass, but all validated "
                    "primary metrics remain within noise. Diagnostic proxies cannot vote.")
@@ -1240,12 +1266,14 @@ def _evidence_card(item, kind, axis=None):
                   f"{CTRL_TAG} · flow residual" if metric == "flow_temporal_p95" else
                   f"{CTRL_TAG} · aligned depth" if is_gt else
                   f"{CTRL_TAG} · synthesized right eye" if is_gt_stereo else
-                  f"{CTRL_TAG} · left | right" if metric == "pop_spread_px" else CTRL_TAG)
+                  f"{CTRL_TAG} · left | right" if metric in
+                  ("exact_pop_spread_pct", "pop_spread_px") else CTRL_TAG)
     treat_label = (f"{TREAT_TAG} · temporal change" if metric == "static_jitter_p95" else
                    f"{TREAT_TAG} · flow residual" if metric == "flow_temporal_p95" else
                    f"{TREAT_TAG} · aligned depth" if is_gt else
                    f"{TREAT_TAG} · synthesized right eye" if is_gt_stereo else
-                   f"{TREAT_TAG} · left | right" if metric == "pop_spread_px" else TREAT_TAG)
+                   f"{TREAT_TAG} · left | right" if metric in
+                   ("exact_pop_spread_pct", "pop_spread_px") else TREAT_TAG)
     if is_gt_lag and len(imgs) == 4:
         panels = (f'<div class="quad"><figure><span class="tag">previous ground-truth depth</span>'
                   f'<img src="{imgs[0]}"></figure><figure><span class="tag">current ground-truth depth</span>'
@@ -1295,7 +1323,7 @@ def _change_kind(item):
 
 def visual_evidence_section():
     """Show one representative example for every quality and reference axis."""
-    axes = (("Stereo volume", ("pop_spread_px",)),
+    axes = (("Stereo volume", ("exact_pop_spread_pct",)),
             ("Warp fidelity", ("source_residual_p95", "source_halo_p95", "source_stretch_pct")),
             ("Temporal stability", ("static_jitter_p95", "flow_temporal_p95",
                                      "depth_gt_lag_f1_p95")),
@@ -1588,7 +1616,8 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
   the real pipeline and gated metrics. __LEDE__</p>
   <div class="meta"><span>__DATE__</span><span>control __CTRL_SHA__</span>
   <span>treatment __TREAT_SHA__</span>
-  <span>__NCLIPS__ clips</span><span>__MODELS__</span><span>report __REPORT_SHA__</span></div>
+  <span>__NCLIPS__ clips</span><span>__MODELS__</span><span>__POLICY_PROVENANCE__</span>
+  <span>report __REPORT_SHA__</span></div>
 
   __CONCLUSION__
 
@@ -1626,6 +1655,43 @@ python tools/sbsbench/build_report.py &lt;build&gt;/sbs_eval/ctrl &lt;build&gt;/
 
 models = ", ".join(sorted({m for r in (CTRL, TREAT)
                            for m in {e["meta"].get("model", "?") for e in r["clips"].values()}}))
+
+
+def policy_provenance(run):
+    run_meta = run.get("meta", {})
+    return {
+        "run_kind": run_meta.get("run_kind"),
+        "fresh": "artifact_metric_sha256" not in run_meta,
+        "artistic_policy_consumed": run_meta.get("artistic_policy_consumed"),
+        "artistic_policy_authorization": run_meta.get("artistic_policy_authorization"),
+        "model_onnx_sha256": run_meta.get("model_onnx_sha256"),
+        "policy_metadata_sha256": run_meta.get("policy_metadata_sha256"),
+        "deployment_geometry_allowlist_sha256": run_meta.get(
+            "deployment_geometry_allowlist_sha256"
+        ),
+        "color_modes": sorted({
+            entry.get("meta", {}).get("color_mode")
+            for entry in run.get("clips", {}).values()
+            if entry.get("meta", {}).get("color_mode")
+        }),
+        "geometries": sorted({
+            (entry.get("meta", {}).get("source_width"),
+             entry.get("meta", {}).get("source_height"),
+             entry.get("meta", {}).get("eye_width"),
+             entry.get("meta", {}).get("eye_height"))
+            for entry in run.get("clips", {}).values()
+        }),
+    }
+
+
+CTRL_PROVENANCE = policy_provenance(CTRL)
+TREAT_PROVENANCE = policy_provenance(TREAT)
+policy_meta_label = (
+    f'policy {"consumed" if TREAT_PROVENANCE["artistic_policy_consumed"] else "inactive"}'
+    f'/{TREAT_PROVENANCE["artistic_policy_authorization"] or "none"}'
+    f' · {TREAT_PROVENANCE["run_kind"] or "legacy-run"}'
+    f' · {"fresh" if TREAT_PROVENANCE["fresh"] else "rescored"}'
+)
 if IS_TRADEOFF_CMP:
     h1 = f"{CTRL_NAME} vs. {TREAT_NAME}"
     comparison_kind = "modes" if IS_MODE_CMP else "profiles"
@@ -1645,6 +1711,7 @@ HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
         .replace("__TREAT_SHA__", treat_sha)
         .replace("__NCLIPS__", str(len(CLIPS)))
         .replace("__REPORT_SHA__", REPORT_SHA)
+        .replace("__POLICY_PROVENANCE__", policy_meta_label)
         .replace("__MODELS__", models).replace("__CONCLUSION__", conclusion_section())
         .replace("__SOURCE_ARTIFACTS__", source_artifact_section())
         .replace("__VISUAL_EVIDENCE__", visual_evidence_section())
@@ -1662,7 +1729,7 @@ with open(out_html, "w", encoding="utf-8") as f:
 decision_path = os.path.join(os.path.dirname(os.path.abspath(out_html)), "decision.json")
 with open(decision_path, "w", encoding="utf-8") as f:
     json.dump({
-        "schema": 2,
+        "schema": 3,
         "control": CTRL_NAME,
         "treatment": TREAT_NAME,
         "eval_schema": TREAT.get("meta", {}).get("eval_schema"),
@@ -1672,6 +1739,9 @@ with open(decision_path, "w", encoding="utf-8") as f:
         "decision_clips": DECISION_CLIPS,
         "decision_scope": DECISION_SCOPE,
         "source_artifact_clips": SOURCE_ARTIFACT_CLIPS,
+        "control_provenance": CTRL_PROVENANCE,
+        "treatment_provenance": TREAT_PROVENANCE,
+        "treatment_run_verdict": TREAT.get("verdict"),
         **AB_DECISION,
     }, f, indent=2, sort_keys=True)
 print("wrote", out_html, f"({len(HTML) // 1024} KB)")

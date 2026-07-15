@@ -22,8 +22,8 @@ cbuffer Constants : register(b0) {
     float adaptive_pop;      // > 0.5 = maintain a scene-risk pop multiplier in SubjectState[1].w
     float adaptive_pop_max_ratio; // absolute configured ceiling / base pop strength
     float zero_plane_mode;   // 0 legacy, 1 subject, 2 median, 3 background (shot-latched)
-    float padding1;
-    float padding2;
+    float artistic_policy;  // 0 off, 1 learned [safe ceiling, confidence], 2 harness override
+    float artistic_style_or_override; // learned: 0 clean/.5 balanced/1 immersive; harness: exact scale
 };
 
 #endif

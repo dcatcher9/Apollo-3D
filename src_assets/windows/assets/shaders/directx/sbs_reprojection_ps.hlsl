@@ -15,8 +15,8 @@
 
 Texture2D<float4> LeftColorTexture : register(t0);
 Texture2D<float>  DepthTexture      : register(t1);
-// Subject-tracking state from depth_subject_resolve_cs. [0] = {recenter_delta, reserved,
-// subject_depth_ema, initialized}; [1] = {stretch_lo_val, stretch_inv_range, _, _}.
+// Shot-latched state from depth_subject_resolve_cs: [0] recenter/age/subject/initialized,
+// [1] stretch/convergence/adaptive ratio, and [2] zero-plane anchor/mode/artistic ratio.
 StructuredBuffer<float4> SubjectState : register(t2);
 // Bound only by the offline harness mask pass. It is produced by forward-splatting the exact
 // shared parallax field, exposing holes that this backward gather necessarily paints over.
@@ -58,7 +58,8 @@ float2 Reproject(float2 uv, float eyeSign, bool use_subject_stretch) {
 
     float aspectScale = Bestv2AspectScale(
         (float)sourceWidth, (float)sourceHeight, literal_bestv2);
-    float searchRadius = shaped ? Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight) : 0.0f;
+    float searchRadius = shaped ?
+        Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight, s2) : 0.0f;
     if (searchRadius <= 1e-6f) {
         return uv;  // subject state is not initialized yet
     }

@@ -8,13 +8,20 @@ import argparse
 import unittest
 from unittest import mock
 import zipfile
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "depth_models"))
 import audit_depth_transform  # noqa: E402
 import audit_depth_confidence  # noqa: E402
+import generate_artistic_depth_run  # noqa: E402
+import prepare_spring_artistic_training  # noqa: E402
+import prepare_static_stereo_training  # noqa: E402
+import prepare_sintel_artistic_training  # noqa: E402
 import prepare_public_datasets  # noqa: E402
 import prepare_flow_ema_reference  # noqa: E402
 import run_eval  # noqa: E402
@@ -72,14 +79,84 @@ class EvalContractTests(unittest.TestCase):
                 json.dump({"required_gt_stereo": True}, fh)
             self.assertNotEqual(changed_pixels, run_eval.sha1_dir(clip))
 
-    def test_metric_contract_excludes_runner_diagnostics(self):
+    def test_metric_contract_includes_runner_gating_semantics(self):
         metric_files = [os.path.join(run_eval.SCRIPT_DIR, "sbsbench.py"),
-                        os.path.join(run_eval.SCRIPT_DIR, "thresholds.json")]
+                        os.path.join(run_eval.SCRIPT_DIR, "thresholds.json"),
+                        os.path.abspath(run_eval.__file__)]
         self.assertEqual(run_eval.metric_contract_sha(),
                          run_eval.sha256_files(metric_files))
-        self.assertNotEqual(
-            run_eval.metric_contract_sha(),
-            run_eval.sha256_files(metric_files + [os.path.abspath(run_eval.__file__)]))
+
+    def test_missing_hard_metric_fails_closed(self):
+        thresholds = {"metrics": {
+            "negative_disparity_pct": {
+                "role": "hard", "axis": "comfort", "better": "lower",
+                "hard_max": 3.0,
+            }
+        }}
+        _worst, _issues, hard = run_eval.score_clip_gates(
+            [], {}, thresholds, {}
+        )
+        self.assertEqual(len(hard), 1)
+        self.assertEqual(hard[0]["metric"], "negative_disparity_pct")
+        self.assertEqual(hard[0]["reason"], "missing")
+
+    def test_baseline_context_covers_sampling_and_artistic_controls(self):
+        self.assertEqual(run_eval.EVAL_SCHEMA, 29)
+        for field in (
+                "output_interval", "output_gt_right_only", "artistic_policy",
+                "artistic_style", "artistic_scale_override", "depth_override_frames",
+                "policy_warp_source_sha256"):
+            self.assertIn(field, run_eval.BASELINE_CONTEXT_FIELDS)
+        for field in ("model", "conf_sha256", "artistic_policy_consumed",
+                      "artistic_policy_authorization", "model_onnx_sha256"):
+            self.assertIn(field, run_eval.POLICY_CANDIDATE_TREATMENT_FIELDS)
+
+    def test_exact_disparity_requires_full_output_eye_raster_shape(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "sbs.png")
+            # Two 8x6 eyes; source has the same aspect, so the exact field must be 8x6.
+            Image.fromarray(np.full((6, 16, 3), 80, np.uint8)).save(path)
+            source = np.full((6, 8), 0.5, np.float32)
+            with self.assertRaisesRegex(ValueError, "raster shape mismatch"):
+                sbsbench.measure_seq_frame(
+                    path, src_gray=source,
+                    warp_disparity=np.zeros((3, 4), np.float32),
+                )
+
+    def test_source_integrity_excludes_letterbox_bars(self):
+        rng = np.random.default_rng(27)
+        source = rng.random((4, 8), dtype=np.float32)
+        eye = np.zeros((8, 8), dtype=np.float32)
+        eye[2:6] = source
+        metrics = sbsbench.source_relative_metrics(eye, source, max_shift=1)
+        self.assertGreater(metrics["source_coverage_pct"], 99.0)
+        self.assertGreater(metrics["image_integrity_pct"], 99.0)
+
+    def test_warp_mask_keeps_full_eye_alignment_with_fractional_bars(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "sbs.png")
+            source = np.linspace(0.0, 1.0, 5 * 9, dtype=np.float32).reshape(5, 9)
+            content = np.asarray(
+                Image.fromarray(source, mode="F").resize((8, 4), Image.BILINEAR),
+                dtype=np.float32,
+            )
+            eye = np.zeros((8, 8), dtype=np.float32)
+            eye[2:6] = content
+            packed = np.concatenate((eye, eye), axis=1)
+            Image.fromarray(np.uint8(np.clip(packed, 0.0, 1.0) * 255.0)).save(path)
+            row, _, _ = sbsbench.measure_seq_frame(
+                path,
+                src_gray=source,
+                warp_mask=np.zeros((8, 16, 3), dtype=np.float32),
+                warp_disparity=np.zeros((8, 8), dtype=np.float32),
+            )
+        self.assertEqual(row["warp_hole_pct"], 0.0)
+
+    def test_content_mask_matches_float32_hlsl_boundary(self):
+        source = np.zeros((192, 100), dtype=np.float32)
+        mask = sbsbench.source_content_pixel_mask(source, 1920, 1200)
+        columns = np.flatnonzero(np.any(mask, axis=0))
+        self.assertEqual((columns[0], columns[-1], columns.size), (647, 1271, 625))
 
     def test_named_profiles_and_explicit_overrides_share_production_precedence(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
@@ -194,7 +271,9 @@ class EvalContractTests(unittest.TestCase):
         with open(shader, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("LeftColorTexture.GetDimensions(sourceWidth, sourceHeight)", text)
-        self.assertIn("Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight)", text)
+        self.assertIn(
+            "Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight, s2)", text
+        )
         self.assertIn("s0, s1, s2, (float)sourceWidth, (float)sourceHeight", text)
         self.assertEqual(text.count("DepthParallax("), 2)
         self.assertNotIn("Bestv2SearchRadius((float)dw)", text)
@@ -241,7 +320,9 @@ class EvalContractTests(unittest.TestCase):
             text = fh.read()
         self.assertIn("float pop_strength;", text)
         self.assertIn("pop_strength * adaptive_ratio", text)
-        self.assertIn("clamp(parallax * p.output_scale", text)
+        self.assertIn("return parallax * p.output_scale;", text)
+        self.assertIn("return clamp(DepthParallaxUnclamped", text)
+        self.assertIn("p.clamp_abs = 0.071f * aspect_scale;", text)
 
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
             config = fh.read()
@@ -252,6 +333,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("bool adaptive_pop = true;", config_header)
         self.assertIn("double adaptive_pop_max = 1.30;", config_header)
         self.assertIn('std::string zero_plane = "legacy";', config_header)
+        self.assertIn('std::string artistic_style = "immersive";', config_header)
 
         with open(os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
                   encoding="utf-8") as fh:
@@ -269,6 +351,16 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn("lerp(pop_ratio, target_ratio", adaptive)
         self.assertIn("Bestv2RawShiftPxFast(zero_anchor_shaped)", adaptive)
         self.assertIn("s2 = float4(zero_anchor_shift, zero_valid, zero_plane_mode", adaptive)
+        self.assertIn("float safe_ceiling = ArtisticGlobal[0]", adaptive)
+        self.assertIn("lerp(1.0f, safe_ceiling, style_mix)", adaptive)
+        self.assertIn("ceiling_confidence >= 0.5f", adaptive)
+        self.assertNotIn(
+            "lerp(1.0f, predicted_scale, predicted_confidence)", adaptive
+        )
+        self.assertIn("artistic_policy > 0.5f", adaptive)
+
+        self.assertNotIn("0.015f", text)
+        self.assertIn("pop_strength * adaptive_ratio * artistic_ratio", text)
 
     def test_adaptive_pop_last_flag_wins(self):
         conf = os.path.join(os.path.dirname(__file__), "bench.conf")
@@ -289,9 +381,18 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
-        self.assertIn('"  \\"schema\\": 15,\\n"', harness)
+        self.assertIn('"  \\"schema\\": 24,\\n"', harness)
+        self.assertIn('a == "--no-artistic-policy"', harness)
+        self.assertIn('a == "--artistic-scale-override"', harness)
+        self.assertIn('a == "--output-every"', harness)
+        self.assertIn('a == "--output-gt-right-only"', harness)
+        self.assertIn("artistic_policy_consumed", harness)
+        self.assertIn("model_onnx_sha256", harness)
+        self.assertIn("policy_metadata_sha256", harness)
+        self.assertIn('\\"artistic_policy\\"', harness)
         self.assertIn('\\"depth_override_frames\\"', harness)
         self.assertIn('\\"zero_plane\\"', harness)
+        self.assertIn('\\"artistic_style\\"', harness)
 
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
                   encoding="utf-8") as fh:
@@ -320,7 +421,10 @@ class EvalContractTests(unittest.TestCase):
             evaluator = fh.read()
         self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
         self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
-        self.assertIn('"schema": 15', evaluator)
+        self.assertIn("HARNESS_SCHEMA = 24", evaluator)
+        self.assertIn('extra_value(args.extra, "--output-every", 1)', evaluator)
+        self.assertIn('ordered_source_ids[::output_interval]', evaluator)
+        self.assertIn('expected_output_ids &= gt_right_ids', evaluator)
         self.assertIn('depth_override_root and not args.comparison_only', evaluator)
 
     def test_zero_plane_modes_are_shot_latched_and_machine_verified(self):
@@ -370,6 +474,7 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             estimator = fh.read()
         self.assertIn("input != graph_input || output != graph_output", estimator)
+        self.assertIn("artistic_output != graph_artistic_output", estimator)
         self.assertIn("target_w != graph_width || target_h != graph_height", estimator)
         self.assertIn("if (!graph_signature_warmed)", estimator)
         self.assertIn("destroy_inference_graph(cuda);", estimator)
@@ -564,7 +669,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('"decision_clips": DECISION_CLIPS', text)
         self.assertIn('"decision_scope": DECISION_SCOPE', text)
         self.assertIn('"source_artifact_clips": SOURCE_ARTIFACT_CLIPS', text)
-        self.assertIn('"schema": 2', text)
+        self.assertIn('"schema": 3', text)
         self.assertIn('"report_sha256": REPORT_SHA', text)
         self.assertIn('AB_DECISION["verdict"]', text)
         self.assertIn("IS_PROFILE_CMP", text)
@@ -577,6 +682,11 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn("stereo_art_scale_std_error_pct", evidence)
         self.assertNotIn("stereo_art_zero_std_error_pct", evidence)
 
+        conclusion = text[text.index("def conclusion_section"):text.index("def gate_strip")]
+        card = text[text.index("def _evidence_card"):text.index("def _strongest_change")]
+        self.assertIn('elif state == "inconclusive":', conclusion)
+        self.assertNotIn('state == "inconclusive"', card)
+
     def test_live_trt_contexts_are_bounded_and_engine_io_fails_closed(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         path = os.path.join(repo, "src", "video_depth_estimator.cpp")
@@ -587,6 +697,53 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("g_trt_context_available.wait_for", text)
         self.assertIn("slot.io_compatible = have_in && have_out && input_fp32 && output_fp32", text)
         self.assertIn("validate_engine_io_locked", text)
+
+    def test_artistic_policy_metadata_and_config_fail_closed_without_losing_depth(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        path = os.path.join(repo, "src", "video_depth_estimator.cpp")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("validate_artistic_policy_metadata", text)
+        self.assertIn('metadata.value("schema", 0) != 4', text)
+        self.assertIn('metadata.value("deployed_model", "") != model.name', text)
+        self.assertIn('metadata.value("base_depth_model", "")', text)
+        self.assertIn('"safe-frontier-multistyle-apollo-v1"', text)
+        self.assertIn('"multiscale-dino-depth-dpt-stats-v1"', text)
+        self.assertIn('"safe_scale_ceiling"', text)
+        self.assertIn('"safe_ceiling_confidence"', text)
+        self.assertGreaterEqual(text.count('"hard actionable probability"'), 2)
+        self.assertNotIn('"soft safe-ceiling action probability"', text)
+        self.assertIn("engine_source_marker_path", text)
+        self.assertIn('marker.value("onnx_sha256", "") != onnx_sha256', text)
+        self.assertIn("std::string engine_sha256;", text)
+        self.assertIn("sha256_bytes(std::string_view(blob.data(), blob.size()))", text)
+        self.assertIn(
+            'marker.value("engine_sha256", "") != resident_engine_sha256', text)
+        self.assertIn("validate_artistic_policy_metadata_impl", text)
+        self.assertIn(") noexcept {", text)
+        self.assertIn("artistic policy metadata validation threw", text)
+        self.assertIn("sha256_file_cached(onnx_path, onnx_sha256)", text)
+        self.assertIn("build_source_onnx_sha256", text)
+        self.assertIn("Source ONNX changed while TensorRT was building", text)
+        self.assertIn('const nlohmann::json expected_baseline', text)
+        self.assertIn('"sealed-test-artistic-policy-v2"', text)
+        self.assertIn('approval->value("evaluation_schema", 0) != 11', text)
+        self.assertIn('approval->value("split", "") != "test"', text)
+        self.assertIn('decision_accepted->is_boolean()', text)
+        self.assertIn('"checkpoint_sha256"', text)
+        self.assertIn('"active_split_sha256"', text)
+        self.assertIn('"label_fitter_identity_sha256"', text)
+        self.assertIn('"test_labels_sha256"', text)
+        self.assertIn('"sealed_test_productions"', text)
+        self.assertIn("artistic_policy_status() const", text)
+        self.assertIn("artistic_model_onnx_sha256", text)
+        self.assertIn("artistic_policy_metadata_sha256", text)
+        self.assertIn("deployment_geometry_allowlist_sha256", text)
+        self.assertIn("apollo-artistic-policy-deployment-v1", text)
+        self.assertIn("validate_artistic_live_geometry", text)
+        self.assertIn("artistic_policy_consumed_once", text)
+        self.assertIn("consume_artistic_policy = false;", text)
+        self.assertIn("normal depth inference remains enabled", text)
 
     def test_live_gpu_timer_tail_is_bounded_and_generation_safe(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -692,8 +849,18 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             estimator = fh.read()
         self.assertIn("depth_engine_builder_level = 5", manager)
-        self.assertIn("trt-opt770x434-level5-v2", manager)
+        self.assertIn("trt-opt770x434-level5-v5", manager)
         self.assertIn("setBuilderOptimizationLevel(depth_engine_builder_level)", estimator)
+        self.assertIn('std::string_view(name) == "artistic_global"', estimator)
+        self.assertNotIn('artistic_local', estimator)
+        self.assertIn("cuda_artistic_res", estimator)
+        self.assertNotIn("CUdeviceptr artistic_global_out", estimator)
+
+        with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
+                  encoding="utf-8") as fh:
+            harness = fh.read()
+        self.assertIn('return config::depth_model_info {want, ""};', harness)
+        self.assertNotIn("not in registry; using active model", harness)
 
     def test_live_and_eval_shaders_use_level3_optimization(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -777,6 +944,64 @@ class EvalContractTests(unittest.TestCase):
         self.assertLess(sbsbench.translation_residual(source, shifted, 0, -7),
                         sbsbench.translation_residual(source, shifted, 0, 0) * 0.1)
 
+    def test_exact_warp_comfort_is_not_fooled_by_repetitive_image_alias(self):
+        # At a square eye, an impossible -8% image alias would report about 3.38% in the
+        # reference-aspect convention. The exact shader field is -2%, so the hard evidence is
+        # only about 0.84% and cannot be replaced by the alias.
+        exact = np.full((8, 8), -0.02, np.float32)
+        positive, negative = sbsbench.exact_warp_comfort(exact, 64, 64)
+        _, alias_negative = sbsbench.comfort_disparity(
+            np.asarray([-5.12]), np.asarray([1.0]), 64, 64)
+        self.assertLess(negative, 1.0)
+        self.assertGreater(alias_negative, 3.0)
+        self.assertEqual(positive, 0.0)
+
+    def test_exact_warp_pop_spread_uses_signed_hlsl_percentiles(self):
+        exact = np.linspace(-0.02, 0.03, 101, dtype=np.float32).reshape(1, -1)
+        lo, hi = np.percentile(exact, (5.0, 95.0))
+        spread = sbsbench.exact_warp_pop_spread(exact, 5120, 2160)
+        self.assertAlmostEqual(spread, (hi - lo) * 100.0, places=6)
+
+    def test_exact_warp_metrics_include_horizontal_letterbox_scale(self):
+        exact = np.linspace(-0.02, 0.03, 101, dtype=np.float32).reshape(1, -1)
+        square_source = np.zeros((100, 100), np.float32)
+        content_scale = sbsbench.source_content_scale_x(square_source, 200, 100)
+        full = sbsbench.exact_warp_pop_spread(exact, 200, 100)
+        letterboxed = sbsbench.exact_warp_pop_spread(
+            exact * content_scale, 200, 100)
+        self.assertEqual(content_scale, 0.5)
+        self.assertAlmostEqual(letterboxed, full * 0.5, places=6)
+
+    def test_exact_pop_is_primary_and_image_pop_is_diagnostic(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "tools", "sbsbench", "thresholds.json"),
+                  encoding="utf-8") as fh:
+            metrics = json.load(fh)["metrics"]
+        self.assertEqual(metrics["exact_pop_spread_pct"]["role"], "primary")
+        self.assertEqual(metrics["exact_pop_spread_pct"]["evidence"],
+                         "exact_hlsl_full_binocular_disparity")
+        self.assertEqual(metrics["pop_spread_pct"]["role"], "diagnostic")
+        with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
+                  encoding="utf-8") as fh:
+            runner = fh.read()
+        self.assertIn("exact_clamped_full_binocular_normalized", runner)
+        self.assertIn("unclamped_full_binocular_normalized_at_artistic_scale_1", runner)
+        self.assertIn("expected_output_ids != unclamped_disparity_ids", runner)
+
+    def test_sequence_frame_uses_exact_field_for_primary_pop(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "sbs_00000.png")
+            Image.fromarray(np.zeros((32, 64, 3), np.uint8)).save(path)
+            source = np.zeros((32, 16), np.float32)  # half-width content in a square eye
+            exact = np.zeros((32, 32), dtype=np.float32)
+            exact[:, 8:24] = np.linspace(
+                -0.02, 0.03, 32 * 16, dtype=np.float32
+            ).reshape(32, 16)
+            row, _, _ = sbsbench.measure_seq_frame(
+                path, src_gray=source, warp_disparity=exact)
+        expected = sbsbench.exact_warp_pop_spread(exact[:, 8:24], 32, 32)
+        self.assertAlmostEqual(row["exact_pop_spread_pct"], expected, places=6)
+
     def test_disparity_field_rejects_photometrically_invalid_peak(self):
         rng = np.random.default_rng(987)
         left = rng.random((64, 64), dtype=np.float32)
@@ -817,6 +1042,56 @@ class EvalContractTests(unittest.TestCase):
             Image.fromarray(blank).save(os.path.join(seq, "sbs_00008.png"))
             Image.fromarray(blank[:, :16]).save(os.path.join(frames, "frame_00007.png"))
             with self.assertRaisesRegex(ValueError, "frame-id mismatch"):
+                sbsbench.measure_sequence(seq, frames)
+
+    def test_sampled_sequence_accepts_source_and_stereo_reference_supersets(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            gt_right = os.path.join(frames, "gt_right")
+            os.makedirs(seq)
+            os.makedirs(gt_right)
+            rng = np.random.default_rng(20260715)
+            for frame_id in range(5):
+                src = rng.integers(0, 256, (32, 32, 3), dtype=np.uint8)
+                Image.fromarray(src).save(os.path.join(frames, f"frame_{frame_id:05d}.png"))
+                Image.fromarray(src).save(os.path.join(
+                    gt_right, f"frame_{frame_id:05d}.png"))
+                if frame_id % 2 == 0:
+                    Image.fromarray(np.concatenate((src, src), axis=1)).save(
+                        os.path.join(seq, f"sbs_{frame_id:05d}.png"))
+                    depth = np.tile(np.linspace(0, 65535, 16, dtype=np.uint16), (16, 1))
+                    Image.fromarray(depth).save(
+                        os.path.join(seq, f"depth_{frame_id:05d}.png"))
+            with open(os.path.join(frames, "meta.json"), "w", encoding="utf-8") as fh:
+                json.dump({"dataset": "Authored Movie", "required_gt_stereo": True}, fh)
+            rows, agg = sbsbench.measure_sequence(seq, frames)
+            self.assertEqual([row["_frame_id"] for row in rows], [0, 2, 4])
+            self.assertEqual(agg["_n"], 3)
+            self.assertIn("stereo_gt_psnr", agg)
+
+    def test_sampled_sequence_rejects_one_frame_flow_as_invalid_for_gaps(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            flow = os.path.join(frames, "gt_flow")
+            os.makedirs(seq)
+            os.makedirs(flow)
+            blank_sbs = np.zeros((16, 32, 3), np.uint8)
+            blank_src = np.zeros((16, 16, 3), np.uint8)
+            for frame_id in range(3):
+                Image.fromarray(blank_src).save(
+                    os.path.join(frames, f"frame_{frame_id:05d}.png"))
+            for frame_id in (0, 2):
+                Image.fromarray(blank_sbs).save(
+                    os.path.join(seq, f"sbs_{frame_id:05d}.png"))
+            np.savez(os.path.join(flow, "frame_00001.npz"),
+                     flow=np.zeros((16, 16, 2), np.float32), valid=np.ones((16, 16), bool))
+            np.savez(os.path.join(flow, "frame_00002.npz"),
+                     flow=np.zeros((16, 16, 2), np.float32), valid=np.ones((16, 16), bool))
+            with open(os.path.join(frames, "meta.json"), "w", encoding="utf-8") as fh:
+                json.dump({"required_gt_flow": True}, fh)
+            with self.assertRaisesRegex(ValueError, "requires GT optical flow"):
                 sbsbench.measure_sequence(seq, frames)
 
     def test_public_clip_rejects_missing_required_ground_truth(self):
@@ -918,8 +1193,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertGreater(metrics["artifact_in_hole_pct"], 80.0)
 
     def test_depth_is_diagnostic_not_part_of_artifact_score(self):
-        clean = {"pop_spread_pct": 0.0}
-        false_stereo = {"pop_spread_pct": 0.2}
+        clean = {"exact_pop_spread_pct": 0.0}
+        false_stereo = {"exact_pop_spread_pct": 0.2}
         self.assertGreater(
             sbsbench.sbs_score(clean, expected_flat=True)["q_depth"],
             sbsbench.sbs_score(false_stereo, expected_flat=True)["q_depth"])
@@ -987,6 +1262,54 @@ class EvalContractTests(unittest.TestCase):
             {"clip": {"vmis": 0.1, "pop": 4.0}},
             {"clip": {"vmis": 0.6, "pop": 8.0}}, ["clip"], specs)
         self.assertEqual(result["verdict"], "reject_hard")
+
+    def test_ab_decision_skips_only_two_sided_optional_absence(self):
+        optional = {
+            "optional_gt": {"role": "primary", "axis": "depth", "better": "lower",
+                            "rel_tol": 0.0, "abs_floor": 0.1},
+        }
+        both_absent = sbsbench.evaluate_ab_decision(
+            {"clip": {"_n": 2}}, {"clip": {"_n": 2}}, ["clip"], optional)
+        self.assertEqual(both_absent["verdict"], "neutral")
+        self.assertEqual(both_absent["missing_evidence"], [])
+
+        one_absent = sbsbench.evaluate_ab_decision(
+            {"clip": {"_n": 2, "optional_gt": 1.0}},
+            {"clip": {"_n": 2}}, ["clip"], optional)
+        self.assertEqual(one_absent["verdict"], "inconclusive")
+        self.assertEqual(len(one_absent["missing_evidence"]), 1)
+
+    def test_ab_decision_fails_closed_for_two_sided_required_absence(self):
+        required = {
+            "exact": {"role": "primary", "axis": "stereo", "better": "higher",
+                      "rel_tol": 0.0, "abs_floor": 0.1, "required_evidence": True},
+        }
+        result = sbsbench.evaluate_ab_decision(
+            {"clip": {"_n": 2}}, {"clip": {"_n": 2}}, ["clip"], required)
+        self.assertEqual(result["verdict"], "inconclusive")
+        self.assertEqual(len(result["missing_evidence"]), 1)
+
+    def test_required_primary_evidence_respects_frame_and_flat_applicability(self):
+        thresholds = {"metrics": {
+            "exact": {"role": "primary", "axis": "stereo",
+                      "required_evidence": True},
+            "temporal": {"role": "primary", "axis": "stability",
+                         "required_evidence": True, "min_frames": 2},
+        }}
+        self.assertEqual(
+            run_eval.missing_required_metric_evidence({"_n": 1}, thresholds, {}),
+            ["exact"],
+        )
+        self.assertEqual(
+            run_eval.missing_required_metric_evidence({"_n": 2}, thresholds, {}),
+            ["exact", "temporal"],
+        )
+        self.assertEqual(
+            run_eval.missing_required_metric_evidence(
+                {"_n": 2, "temporal": 0.0}, thresholds, {"expected_flat": True}
+            ),
+            [],
+        )
 
     def test_source_residual_accepts_horizontal_parallax_and_detects_corruption(self):
         rng = np.random.default_rng(42)
@@ -1402,11 +1725,228 @@ class EvalContractTests(unittest.TestCase):
         self.assertTrue(extended_baselines.endswith("baselines_extended"))
 
     def test_rescore_uses_canonical_metric_contract_hash(self):
-        data = {"meta": {}}
-        with mock.patch.object(run_eval, "metric_contract_sha", return_value="canonical"):
+        artifact_hash = "a" * 16
+        current_hash = "c" * 16
+        data = {"meta": {
+            "eval_schema": run_eval.EVAL_SCHEMA,
+            "clip_set_sha1": {"shot": "original"},
+            "metric_sha256": artifact_hash,
+        }, "clips": {"shot": {"meta": {"metric_sha256": artifact_hash}}}}
+        with mock.patch.object(run_eval, "metric_contract_sha", return_value=current_hash):
             rescore_run.refresh_contract_metadata(data)
-        self.assertEqual(data["meta"]["metric_sha256"], "canonical")
+        self.assertEqual(data["meta"]["metric_sha256"], current_hash)
+        self.assertEqual(data["meta"]["artifact_metric_sha256"], artifact_hash)
+        self.assertEqual(data["clips"]["shot"]["meta"]["metric_sha256"], current_hash)
+        self.assertEqual(
+            data["clips"]["shot"]["meta"]["artifact_metric_sha256"], artifact_hash)
         self.assertEqual(data["meta"]["eval_schema"], run_eval.EVAL_SCHEMA)
+        self.assertEqual(data["meta"]["clip_set_sha1"], {"shot": "original"})
+
+    def _current_rescore_fixture(self, root):
+        clips_root = os.path.join(root, "clips")
+        run_dir = os.path.join(root, "run")
+        source_clip = os.path.join(clips_root, "shot")
+        run_clip = os.path.join(run_dir, "shot")
+        os.makedirs(source_clip)
+        os.makedirs(run_clip)
+        for frame_id in (0, 1):
+            Image.fromarray(np.full((32, 64, 3), 40 + frame_id, np.uint8)).save(
+                os.path.join(source_clip, f"frame_{frame_id:05d}.png")
+            )
+            for name, extension in (
+                    ("sbs", "png"), ("depth", "png"), ("raw", "f32"),
+                    ("warp_mask", "png"), ("warp_disparity", "f32"),
+                    ("warp_unclamped_disparity", "f32")):
+                open(os.path.join(run_clip, f"{name}_{frame_id:05d}.{extension}"),
+                     "wb").close()
+        policy_hash = "a" * 64
+        contract = {
+            "schema": 24,
+            "artifact_mode": "full",
+            "source_width": 64,
+            "source_height": 32,
+            "model_input_width": 64,
+            "model_input_height": 28,
+            "eye_width": 64,
+            "eye_height": 32,
+            "color_mode": "sdr-srgb-8bit",
+            "disparity_raster_width": 64,
+            "disparity_raster_height": 32,
+            "output_interval": 1,
+            "output_gt_right_only": False,
+            "policy_warp_source_sha256": policy_hash,
+            "metric_sha256": "b" * 16,
+            "artistic_policy_consumed": False,
+            "artistic_policy_authorization": "none",
+            "model_onnx_sha256": "",
+            "policy_metadata_sha256": "",
+            "deployment_geometry_allowlist_sha256": "",
+            "content_scale_x": 1.0,
+            "content_scale_y": 1.0,
+            "artistic_full_clamp_abs": 0.142,
+            "warp_mask": {"red": "forward_disocclusion_before_fill"},
+            "warp_disparity": rescore_run.EXACT_DISPARITY_SEMANTICS,
+            "warp_unclamped_disparity": rescore_run.UNCLAMPED_DISPARITY_SEMANTICS,
+            "artistic_disparity_contract": rescore_run.ARTISTIC_DISPARITY_CONTRACT,
+        }
+        with open(os.path.join(run_clip, "contract.json"), "w", encoding="utf-8") as fh:
+            json.dump(contract, fh)
+        clip_hash = run_eval.sha1_dir(source_clip)
+        data = {
+            "meta": {
+                "eval_schema": run_eval.EVAL_SCHEMA,
+                "clip_set_sha1": {"shot": clip_hash},
+                "output_interval": 1,
+                "output_gt_right_only": False,
+                "policy_warp_source_sha256": policy_hash,
+                "metric_sha256": "b" * 16,
+                "artistic_policy_consumed": False,
+                "artistic_policy_authorization": "none",
+                "model_onnx_sha256": "",
+                "policy_metadata_sha256": "",
+                "deployment_geometry_allowlist_sha256": "",
+            },
+            "clips": {"shot": {"meta": {
+                "clip_sha1": clip_hash,
+                "metric_sha256": "b" * 16,
+                "policy_warp_source_sha256": policy_hash,
+                "artistic_policy_consumed": False,
+                "artistic_policy_authorization": "none",
+                "model_onnx_sha256": "",
+                "policy_metadata_sha256": "",
+                "deployment_geometry_allowlist_sha256": "",
+                "source_width": 64,
+                "source_height": 32,
+                "model_input_width": 64,
+                "model_input_height": 28,
+                "eye_width": 64,
+                "eye_height": 32,
+                "disparity_raster_width": 64,
+                "disparity_raster_height": 32,
+                "content_scale_x": 1.0,
+                "content_scale_y": 1.0,
+                "artistic_full_clamp_abs": 0.142,
+                "color_mode": "sdr-srgb-8bit",
+            }}},
+        }
+        return data, run_dir, clips_root
+
+    def test_rescore_refuses_to_upgrade_old_eval_schema(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, run_dir, clips_root = self._current_rescore_fixture(root)
+            data["meta"]["eval_schema"] = run_eval.EVAL_SCHEMA - 1
+            with self.assertRaisesRegex(RuntimeError, "fresh GPU run"):
+                rescore_run.validate_current_artifact_contract(
+                    data, run_dir, clips_root)
+
+    def test_rescore_requires_exact_artifact_identities(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, run_dir, clips_root = self._current_rescore_fixture(root)
+            os.remove(os.path.join(
+                run_dir, "shot", "warp_unclamped_disparity_00001.f32"))
+            with self.assertRaisesRegex(RuntimeError, "exact artifact identities"):
+                rescore_run.validate_current_artifact_contract(
+                    data, run_dir, clips_root)
+
+    def test_rescore_requires_matching_policy_source_hash(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, run_dir, clips_root = self._current_rescore_fixture(root)
+            data["clips"]["shot"]["meta"]["policy_warp_source_sha256"] = "b" * 64
+            with self.assertRaisesRegex(RuntimeError, "clip policy-warp source hash"):
+                rescore_run.validate_current_artifact_contract(
+                    data, run_dir, clips_root)
+
+    def test_rescore_requires_original_clip_source_identity(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, run_dir, clips_root = self._current_rescore_fixture(root)
+            Image.fromarray(np.full((32, 64, 3), 200, np.uint8)).save(
+                os.path.join(clips_root, "shot", "frame_00000.png")
+            )
+            with self.assertRaisesRegex(RuntimeError, "differs from the original GPU run"):
+                rescore_run.validate_current_artifact_contract(
+                    data, run_dir, clips_root)
+
+    def test_rescore_requires_recorded_identity_for_every_clip(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, run_dir, clips_root = self._current_rescore_fixture(root)
+            del data["meta"]["clip_set_sha1"]
+            with self.assertRaisesRegex(RuntimeError, "clip_set_sha1"):
+                rescore_run.validate_current_artifact_contract(
+                    data, run_dir, clips_root)
+
+    def test_rescore_requires_source_dimensions_from_harness_contract(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, run_dir, clips_root = self._current_rescore_fixture(root)
+            contract_path = os.path.join(run_dir, "shot", "contract.json")
+            with open(contract_path, encoding="utf-8") as fh:
+                contract = json.load(fh)
+            contract["source_width"] = 63
+            with open(contract_path, "w", encoding="utf-8") as fh:
+                json.dump(contract, fh)
+            with self.assertRaisesRegex(RuntimeError, "dimensions.*harness contract"):
+                rescore_run.validate_current_artifact_contract(
+                    data, run_dir, clips_root)
+
+    def test_rescore_accepts_current_exact_artifact_contract(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, run_dir, clips_root = self._current_rescore_fixture(root)
+            self.assertEqual(
+                rescore_run.validate_current_artifact_contract(
+                    data, run_dir, clips_root),
+                "b" * 16,
+            )
+
+    def test_rescore_keeps_dual_metric_provenance_across_repeat_validation(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, run_dir, clips_root = self._current_rescore_fixture(root)
+            artifact_hash = rescore_run.validate_current_artifact_contract(
+                data, run_dir, clips_root)
+            current_hash = "c" * 16
+            with mock.patch.object(
+                    run_eval, "metric_contract_sha", return_value=current_hash):
+                rescore_run.refresh_contract_metadata(data, artifact_hash)
+            self.assertEqual(data["meta"]["artifact_metric_sha256"], "b" * 16)
+            self.assertEqual(data["meta"]["metric_sha256"], current_hash)
+            self.assertEqual(
+                data["clips"]["shot"]["meta"]["artifact_metric_sha256"], "b" * 16)
+            self.assertEqual(
+                data["clips"]["shot"]["meta"]["metric_sha256"], current_hash)
+            self.assertEqual(
+                rescore_run.validate_current_artifact_contract(
+                    data, run_dir, clips_root),
+                "b" * 16,
+            )
+
+    def test_rescore_authenticates_contract_against_preserved_artifact_metric_hash(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, run_dir, clips_root = self._current_rescore_fixture(root)
+            artifact_hash = rescore_run.validate_current_artifact_contract(
+                data, run_dir, clips_root)
+            with mock.patch.object(
+                    run_eval, "metric_contract_sha", return_value="c" * 16):
+                rescore_run.refresh_contract_metadata(data, artifact_hash)
+            contract_path = os.path.join(run_dir, "shot", "contract.json")
+            with open(contract_path, encoding="utf-8") as fh:
+                contract = json.load(fh)
+            contract["metric_sha256"] = "d" * 16
+            with open(contract_path, "w", encoding="utf-8") as fh:
+                json.dump(contract, fh)
+            with self.assertRaisesRegex(RuntimeError, "artifact metric hash differs"):
+                rescore_run.validate_current_artifact_contract(
+                    data, run_dir, clips_root)
+
+    def test_rescore_migrates_legacy_half_updated_metric_hash(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, run_dir, clips_root = self._current_rescore_fixture(root)
+            data["meta"]["metric_sha256"] = "c" * 16
+            artifact_hash = rescore_run.validate_current_artifact_contract(
+                data, run_dir, clips_root)
+            self.assertEqual(artifact_hash, "b" * 16)
+            with mock.patch.object(
+                    run_eval, "metric_contract_sha", return_value="d" * 16):
+                rescore_run.refresh_contract_metadata(data, artifact_hash)
+            self.assertEqual(data["meta"]["artifact_metric_sha256"], "b" * 16)
+            self.assertEqual(data["meta"]["metric_sha256"], "d" * 16)
 
     def test_sintel_adapter_preserves_left_and_rendered_right_frames(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1428,6 +1968,156 @@ class EvalContractTests(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(out, "frame_00000.png")))
             self.assertTrue(os.path.exists(os.path.join(out, "gt_right", "frame_00001.png")))
             self.assertTrue(os.path.exists(os.path.join(out, "gt_depth", "frame_00001.npy")))
+
+    def test_artistic_sintel_suite_extracts_complete_sequence_holdouts(self):
+        with tempfile.TemporaryDirectory() as root:
+            archive = os.path.join(root, "sintel.zip")
+            with zipfile.ZipFile(archive, "w") as zf:
+                for sequence in ("alley_1", "ambush_2"):
+                    for frame in (1, 2):
+                        for eye, value in (("left", 40), ("right", 80)):
+                            zf.writestr(
+                                f"training/final_{eye}/{sequence}/frame_{frame:04d}.png",
+                                self.png_bytes(value + frame),
+                            )
+            output = os.path.join(root, "suite")
+            manifest = prepare_sintel_artistic_training.prepare(
+                Path(archive), Path(output),
+                "final",
+            )
+            self.assertEqual(manifest["frame_count"], 4)
+            self.assertEqual(manifest["training_frames"], 2)
+            self.assertEqual(manifest["validation_frames"], 2)
+            self.assertTrue(os.path.exists(
+                os.path.join(output, "sintel_alley_1", "frame_00001.png")
+            ))
+            self.assertTrue(os.path.exists(
+                os.path.join(output, "sintel_ambush_2", "gt_right", "frame_00001.png")
+            ))
+
+    def test_artistic_spring_suite_pairs_archives_and_holds_out_sequences(self):
+        with tempfile.TemporaryDirectory() as root:
+            archives = []
+            for eye, value in (("left", 40), ("right", 80)):
+                archive = os.path.join(root, f"spring-{eye}.zip")
+                with zipfile.ZipFile(archive, "w") as zf:
+                    for sequence in ("0003", "0042"):
+                        for frame in (1, 2):
+                            zf.writestr(
+                                f"spring/test/{sequence}/frame_{eye}/"
+                                f"frame_{eye}_{frame:04d}.png",
+                                self.png_bytes(value + frame),
+                            )
+                archives.append(Path(archive))
+            output = Path(root) / "suite"
+            manifest = prepare_spring_artistic_training.prepare(
+                archives[0], archives[1], output,
+                holdout_sequences=("0042",),
+            )
+            self.assertEqual(manifest["frame_count"], 4)
+            self.assertEqual(manifest["training_frames"], 2)
+            self.assertEqual(manifest["validation_frames"], 2)
+            self.assertTrue((output / "spring_0003" / "frame_00001.png").is_file())
+            self.assertTrue(
+                (output / "spring_0042" / "gt_right" / "frame_00001.png").is_file()
+            )
+
+    def test_artistic_middlebury_suite_uses_official_split(self):
+        with tempfile.TemporaryDirectory() as root:
+            archive = Path(root) / "middlebury.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                for split, scene in (("trainingF", "Train"), ("testF", "Test")):
+                    for image, value in (("im0.png", 40), ("im1.png", 80)):
+                        zf.writestr(
+                            f"MiddEval3/{split}/{scene}/{image}", self.png_bytes(value)
+                        )
+            output = Path(root) / "suite"
+            manifest = prepare_static_stereo_training.prepare_middlebury(
+                archive, output
+            )
+            self.assertEqual(manifest["pair_count"], 2)
+            self.assertEqual(manifest["training_pairs"], 0)
+            self.assertEqual(manifest["validation_pairs"], 2)
+            self.assertTrue(
+                (output / "middlebury_test" / "gt_right" / "frame_00000.png")
+                .is_file()
+            )
+
+    def test_artistic_eth3d_suite_holds_out_complete_scenes(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "eth3d"
+            for scene in ("delivery_area_1s", "forest_1s"):
+                scene_root = source / scene
+                scene_root.mkdir(parents=True)
+                (scene_root / "im0.png").write_bytes(self.png_bytes(40))
+                (scene_root / "im1.png").write_bytes(self.png_bytes(80))
+            output = Path(root) / "suite"
+            manifest = prepare_static_stereo_training.prepare_eth3d(source, output)
+            self.assertEqual(manifest["pair_count"], 2)
+            self.assertEqual(manifest["training_pairs"], 0)
+            self.assertEqual(manifest["validation_pairs"], 2)
+
+    def test_artistic_depth_run_requires_exact_depth_only_contract(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "source"
+            output = Path(root) / "output"
+            source.mkdir()
+            output.mkdir()
+            for frame in range(2):
+                (source / f"frame_{frame:05d}.png").write_bytes(self.png_bytes(frame))
+                (output / f"depth_{frame:05d}.png").write_bytes(self.png_bytes(frame, "L"))
+                (output / f"baseline_disparity_{frame:05d}.f32").write_bytes(
+                    b"\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00"
+                )
+                (output / f"baseline_unclamped_disparity_{frame:05d}.f32").write_bytes(
+                    b"\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00"
+                )
+            (output / "contract.json").write_text(json.dumps({
+                "schema": 24,
+                "model": "depth_anything_v2_fp16",
+                "source_width": 1,
+                "source_height": 1,
+                "model_input_width": 14,
+                "model_input_height": 14,
+                "eye_width": 1,
+                "eye_height": 1,
+                "color_mode": "sdr-srgb-8bit",
+                "content_scale_x": 1.0,
+                "content_scale_y": 1.0,
+                "disparity_raster_width": 1,
+                "disparity_raster_height": 1,
+                "policy_warp_source_sha256": "0" * 64,
+                "metric_sha256": "1" * 16,
+                "artistic_full_clamp_abs": 0.142,
+                "artifact_mode": "depth+baseline-disparity",
+                "depth_step": "current-once",
+                "artistic_policy": False,
+                "artistic_policy_consumed": False,
+                "artistic_policy_authorization": "none",
+                "model_onnx_sha256": "",
+                "policy_metadata_sha256": "",
+                "deployment_geometry_allowlist_sha256": "",
+                "artistic_scale_override": 0.0,
+                "warp_disparity":
+                    "exact_clamped_full_binocular_normalized_at_output_eye_raster_zero_bars",
+                "warp_unclamped_disparity":
+                    "unclamped_full_binocular_normalized_at_artistic_scale_1_"
+                    "output_eye_raster_zero_bars",
+                "artistic_disparity_contract":
+                    "clamp(raw_baseline_times_scale_to_plus_or_minus_0.142_"
+                    "times_aspect_scale_times_content_scale_x)",
+            }), encoding="utf-8")
+            (output / "generation_identity.json").write_text(json.dumps({
+                "schema": 2,
+                "source_sha256": generate_artistic_depth_run.source_fingerprint(source),
+            }), encoding="utf-8")
+            self.assertTrue(generate_artistic_depth_run.valid_completed_clip(
+                source, output, "depth_anything_v2_fp16"
+            ))
+            (output / "depth_00001.png").unlink()
+            self.assertFalse(generate_artistic_depth_run.valid_completed_clip(
+                source, output, "depth_anything_v2_fp16"
+            ))
 
     def test_spring_adapter_range_selects_matching_stereo_frames(self):
         with tempfile.TemporaryDirectory() as root:

@@ -25,6 +25,7 @@ import datetime
 import glob
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -36,7 +37,40 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-EVAL_SCHEMA = 24  # shot-latched zero-plane provenance; harness contract 15
+EVAL_SCHEMA = 29  # explicit policy authorization + output-eye exact gates; harness 24
+HARNESS_SCHEMA = 24
+
+BASELINE_CONTEXT_FIELDS = (
+    "mode", "suite", "extra_args", "model", "profile",
+    "adaptive_pop", "adaptive_pop_max", "pop_strength",
+    "ema", "ema_edge_change", "ema_edge_gradient", "ema_edge_strength",
+    "minmax_ema", "subject_lock", "subject_recenter", "subject_stretch",
+    "depth_short_side", "depth_max_aspect", "zero_plane", "cuda_graph",
+    "artistic_style", "artistic_policy", "artistic_scale_override",
+    "artistic_policy_consumed", "artistic_policy_authorization",
+    "model_onnx_sha256", "policy_metadata_sha256",
+    "deployment_geometry_allowlist_sha256",
+    "output_interval", "output_gt_right_only", "literal_bestv2",
+    "depth_compensation", "depth_override_frames", "depth_step",
+    "depth_reuse_interval", "eval_schema", "conf_sha256", "metric_sha256",
+    "policy_warp_source_sha256", "clip_sha1",
+    "harness_schema", "source_width", "source_height", "model_input_width",
+    "model_input_height", "eye_width", "eye_height", "color_mode",
+    "content_scale_x", "content_scale_y", "disparity_raster_width",
+    "disparity_raster_height", "artifact_mode", "warp_disparity",
+    "warp_unclamped_disparity", "artistic_disparity_contract",
+    "artistic_full_clamp_abs", "warp_mask",
+)
+
+# These fields intentionally identify the learned treatment rather than compatibility with the
+# committed Apollo control. A policy-candidate gate still requires every geometry, cadence,
+# evaluator, warp and resolved profile field above to match its baseline.
+POLICY_CANDIDATE_TREATMENT_FIELDS = {
+    "extra_args", "model", "conf_sha256", "artistic_style", "artistic_policy",
+    "artistic_scale_override", "artistic_policy_consumed",
+    "artistic_policy_authorization", "model_onnx_sha256",
+    "policy_metadata_sha256", "deployment_geometry_allowlist_sha256",
+}
 
 
 def suite_defaults(name):
@@ -73,6 +107,14 @@ def sha256_files(paths):
     return h.hexdigest()[:16]
 
 
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def metric_contract_sha():
     """Hash automatic metric implementation and thresholds.
 
@@ -80,7 +122,8 @@ def metric_contract_sha():
     comments and diagnostic wording invalidate otherwise-identical committed baselines.
     """
     return sha256_files([os.path.join(SCRIPT_DIR, "sbsbench.py"),
-                         os.path.join(SCRIPT_DIR, "thresholds.json")])
+                         os.path.join(SCRIPT_DIR, "thresholds.json"),
+                         os.path.abspath(__file__)])
 
 
 def sha1_dir(path):
@@ -135,6 +178,20 @@ def conf_value(path, name, default=None):
 def metric_exempt_for_clip(spec, clip_meta):
     """Expected-flat clips diagnose false stereo instead of gating the stereo-volume axis."""
     return bool(clip_meta.get("expected_flat")) and spec.get("axis") == "stereo"
+
+
+def missing_required_metric_evidence(aggregate, thresholds, clip_meta):
+    """List always-required primary evidence absent from an otherwise scored clip."""
+    missing = []
+    for metric, spec in thresholds["metrics"].items():
+        if metric_exempt_for_clip(spec, clip_meta):
+            continue
+        if not sbsbench.metric_evidence_required(spec, aggregate):
+            continue
+        value = aggregate.get(metric)
+        if not isinstance(value, (int, float)) or not math.isfinite(value):
+            missing.append(metric)
+    return missing
 
 
 def validate_depth_override_manifest(root, clips_dir, clips, depth_every, override_all=False):
@@ -208,16 +265,26 @@ def score_clip_gates(rows, agg, thresholds, clip_meta):
             choose = min if spec.get("better") == "higher" else max
             value, frame = choose(values)
             worst[metric] = {"frame": frame, "worst_value": round(value, 3)}
-        if "trigger" in spec and agg.get(metric, 0) > spec["trigger"]:
+        aggregate_value = agg.get(metric)
+        finite_aggregate = (isinstance(aggregate_value, (int, float)) and
+                            math.isfinite(aggregate_value))
+        if "trigger" in spec and finite_aggregate and aggregate_value > spec["trigger"]:
             issues.append({"metric": metric, "trigger": spec["trigger"],
-                           **worst.get(metric, {}), "value": round(agg[metric], 3)})
-        if "trigger_min" in spec and metric in agg and agg[metric] < spec["trigger_min"]:
+                           **worst.get(metric, {}), "value": round(aggregate_value, 3)})
+        if ("trigger_min" in spec and finite_aggregate and
+                aggregate_value < spec["trigger_min"]):
             issues.append({"metric": metric, "trigger_min": spec["trigger_min"],
-                           **worst.get(metric, {}), "value": round(agg[metric], 3)})
-        if spec.get("role") == "hard" and metric in agg:
-            if sbsbench.metric_gate_failed(agg[metric], agg[metric], spec):
+                           **worst.get(metric, {}), "value": round(aggregate_value, 3)})
+        if spec.get("role") == "hard":
+            value = aggregate_value
+            if not finite_aggregate:
                 hard_failures.append({"metric": metric, **worst.get(metric, {}),
-                                      "value": round(agg[metric], 3),
+                                      "value": None, "reason": "missing",
+                                      "hard_min": spec.get("hard_min"),
+                                      "hard_max": spec.get("hard_max")})
+            elif sbsbench.metric_gate_failed(value, value, spec):
+                hard_failures.append({"metric": metric, **worst.get(metric, {}),
+                                      "value": round(value, 3),
                                       "hard_min": spec.get("hard_min"),
                                       "hard_max": spec.get("hard_max")})
     return worst, issues, hard_failures
@@ -308,6 +375,18 @@ def expected_adaptive_pop(conf, profile, extra):
     return value
 
 
+def expected_subject_stretch(conf, profile, extra):
+    """Resolve the stretch flag after profile and explicit harness overrides."""
+    value = expected_profile_bool(conf, profile, "subject_stretch", True, [], "")
+    enabled_at = max((i for i, item in enumerate(extra)
+                      if item == "--subject-stretch"), default=-1)
+    disabled_at = max((i for i, item in enumerate(extra)
+                       if item == "--no-subject-stretch"), default=-1)
+    if enabled_at >= 0 or disabled_at >= 0:
+        value = enabled_at > disabled_at
+    return value
+
+
 def expected_depth_model(conf, profile, extra):
     """Resolve the model with the same profile-first, explicit-override order as production."""
     model = "depth_anything_v2_fp16"
@@ -393,6 +472,13 @@ def main():
         fail("--depth-every must be an integer")
     if not 1 <= depth_reuse_interval <= 8:
         fail("--depth-every must be between 1 and 8")
+    try:
+        output_interval = int(extra_value(args.extra, "--output-every", 1))
+    except (TypeError, ValueError):
+        fail("--output-every must be an integer")
+    if output_interval < 1:
+        fail("--output-every must be at least 1")
+    output_gt_right_only = "--output-gt-right-only" in args.extra
     depth_step = ("current-once" if depth_reuse_interval == 1 else
                   f"reuse-{depth_reuse_interval}")
     if literal_bestv2 and not args.comparison_only:
@@ -410,6 +496,13 @@ def main():
     default_clips, default_baselines = suite_defaults(args.suite)
     clips_dir = os.path.abspath(args.clips_root or default_clips)
     base_dir = os.path.abspath(args.baseline_dir or default_baselines)
+    if args.update_baselines:
+        if args.extra:
+            fail("refusing to update committed baselines with experimental harness overrides; "
+                 "put an intended production setting in bench.conf first")
+        if clips_dir != os.path.abspath(default_clips) or \
+                base_dir != os.path.abspath(default_baselines):
+            fail("refusing to update committed baselines from an overridden clip/baseline root")
     thresholds = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json")))
     clips = args.clips or sorted(
         os.path.basename(d) for d in glob.glob(os.path.join(clips_dir, "*"))
@@ -440,6 +533,22 @@ def main():
     expected_ema_edge_strength = expected_profile_number(
         args.conf, expected_config_profile, "ema_edge_strength", 0.25, args.extra,
         "--ema-edge-strength")
+    expected_minmax_ema = expected_profile_number(
+        args.conf, expected_config_profile, "minmax_ema", 0.18, args.extra,
+        "--minmax-ema")
+    expected_subject_lock = expected_profile_number(
+        args.conf, expected_config_profile, "subject_lock", 0.5, args.extra,
+        "--subject-lock")
+    expected_subject_recenter = expected_profile_number(
+        args.conf, expected_config_profile, "subject_recenter", 0.35, args.extra,
+        "--subject-recenter")
+    expected_subject_stretch_value = expected_subject_stretch(
+        args.conf, expected_config_profile, args.extra)
+    expected_depth_short_side = expected_profile_number(
+        args.conf, expected_config_profile, "depth_short_side", 432, args.extra,
+        "--depth-short-side", int)
+    expected_depth_max_aspect = expected_profile_number(
+        args.conf, expected_config_profile, "depth_max_aspect", 4.0, [], "")
     expected_cuda_graph = expected_profile_bool(
         args.conf, expected_config_profile, "cuda_graph", True, args.extra,
         "--cuda-graph")
@@ -454,8 +563,27 @@ def main():
     expected_zero_plane = expected_profile_string(
         args.conf, expected_config_profile, "zero_plane", "legacy", args.extra,
         "--zero-plane")
+    expected_artistic_style = expected_profile_string(
+        args.conf, expected_config_profile, "artistic_style", "immersive", [], "")
+    expected_artistic_policy = True
+    for flag in args.extra:
+        if flag == "--artistic-policy":
+            expected_artistic_policy = True
+        elif flag == "--no-artistic-policy":
+            expected_artistic_policy = False
+    try:
+        expected_artistic_scale_override = float(extra_value(
+            args.extra, "--artistic-scale-override", 0.0
+        ))
+    except (TypeError, ValueError):
+        fail("--artistic-scale-override must be a number")
+    if (expected_artistic_scale_override != 0.0 and not
+            0.5 <= expected_artistic_scale_override <= 1.5):
+        fail("--artistic-scale-override must be between 0.5 and 1.5")
     if expected_zero_plane not in ("legacy", "subject", "median", "background"):
         fail(f"invalid zero_plane value: {expected_zero_plane!r}")
+    if expected_artistic_style not in ("clean", "balanced", "immersive"):
+        fail(f"invalid artistic_style value: {expected_artistic_style!r}")
     expected_model = expected_depth_model(args.conf, expected_config_profile, args.extra)
     missing = check_engines(args.build_dir, expected_model)
     if missing and not args.allow_build:
@@ -480,6 +608,8 @@ def main():
     meta = {
         "git_sha": git(["rev-parse", "--short", "HEAD"]),
         "git_dirty": bool(git(["status", "--porcelain"])),
+        "run_kind": None,
+        "baseline_identities": {},
         "clip_set_sha1": {c: sha1_dir(os.path.join(clips_dir, c)) for c in clips},
         "mode": "profile", "suite": args.suite, "clips_root": clips_dir,
         "extra_args": args.extra,
@@ -487,12 +617,35 @@ def main():
         "model": expected_model, "profile": expected_config_profile,
         "adaptive_pop": expected_adaptive,
         "adaptive_pop_max": expected_adaptive_max,
+        "pop_strength": expected_pop,
+        "ema": expected_ema,
+        "ema_edge_change": expected_ema_edge_change,
+        "ema_edge_gradient": expected_ema_edge_gradient,
+        "ema_edge_strength": expected_ema_edge_strength,
+        "minmax_ema": expected_minmax_ema,
+        "subject_lock": expected_subject_lock,
+        "subject_recenter": expected_subject_recenter,
+        "subject_stretch": expected_subject_stretch_value,
+        "depth_short_side": expected_depth_short_side,
+        "depth_max_aspect": expected_depth_max_aspect,
         "zero_plane": expected_zero_plane,
+        "cuda_graph": expected_cuda_graph,
+        "artistic_style": expected_artistic_style,
+        "artistic_policy": expected_artistic_policy,
+        "artistic_policy_consumed": None,
+        "artistic_policy_authorization": None,
+        "model_onnx_sha256": None,
+        "policy_metadata_sha256": None,
+        "deployment_geometry_allowlist_sha256": None,
+        "artistic_scale_override": expected_artistic_scale_override,
+        "output_interval": output_interval,
+        "output_gt_right_only": output_gt_right_only,
         "literal_bestv2": literal_bestv2,
         "depth_compensation": depth_compensation,
         "eval_schema": EVAL_SCHEMA, "depth_step": depth_step,
         "depth_reuse_interval": depth_reuse_interval,
         "conf_sha256": conf_sha, "metric_sha256": metric_sha,
+        "policy_warp_source_sha256": None,
         "gpu_contention": contention,
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"), "run_name": label,
     }
@@ -520,7 +673,7 @@ def main():
             fail(f"{clip}: harness did not write contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
         expected_contract = {
-            "schema": 15,
+            "schema": HARNESS_SCHEMA,
             "model": expected_model,
             "profile": expected_config_profile,
             "depth_step": depth_step,
@@ -533,7 +686,19 @@ def main():
             "ema_edge_strength": expected_ema_edge_strength,
             "adaptive_pop": expected_adaptive,
             "adaptive_pop_max": expected_adaptive_max,
+            "pop_strength": expected_pop,
+            "minmax_ema": expected_minmax_ema,
+            "subject_lock": expected_subject_lock,
+            "subject_recenter": expected_subject_recenter,
+            "subject_stretch": expected_subject_stretch_value,
+            "depth_short_side": expected_depth_short_side,
+            "depth_max_aspect": expected_depth_max_aspect,
             "zero_plane": expected_zero_plane,
+            "artistic_style": expected_artistic_style,
+            "artistic_policy": expected_artistic_policy,
+            "artistic_scale_override": expected_artistic_scale_override,
+            "output_interval": output_interval,
+            "output_gt_right_only": output_gt_right_only,
             "literal_bestv2": literal_bestv2,
             "cuda_graph": expected_cuda_graph,
         }
@@ -542,34 +707,189 @@ def main():
                       if contract.get(key) != expected}
         if mismatched:
             fail(f"{clip}: harness contract mismatch: {mismatched}")
+        policy_consumed = contract.get("artistic_policy_consumed")
+        policy_authorization = contract.get("artistic_policy_authorization")
+        model_onnx_sha256 = contract.get("model_onnx_sha256")
+        policy_metadata_sha256 = contract.get("policy_metadata_sha256")
+        geometry_allowlist_sha256 = contract.get(
+            "deployment_geometry_allowlist_sha256"
+        )
+        if not isinstance(policy_consumed, bool):
+            fail(f"{clip}: harness omitted artistic-policy consumption state")
+        run_kind = ("comparison_only" if args.comparison_only else
+                    "policy_candidate_gate" if policy_consumed else
+                    "baseline_gate")
+        if meta["run_kind"] is None:
+            meta["run_kind"] = run_kind
+        elif meta["run_kind"] != run_kind:
+            fail(f"{clip}: run kind changed within one run")
+        expected_authorization = "candidate-evaluation" if policy_consumed else "none"
+        if policy_authorization != expected_authorization:
+            fail(f"{clip}: artistic-policy authorization is invalid: "
+                 f"{policy_authorization!r} != {expected_authorization!r}")
+        for name, value in (("model_onnx_sha256", model_onnx_sha256),
+                            ("policy_metadata_sha256", policy_metadata_sha256),
+                            ("deployment_geometry_allowlist_sha256",
+                             geometry_allowlist_sha256)):
+            if not isinstance(value, str):
+                fail(f"{clip}: harness has invalid {name}")
+            if policy_consumed:
+                if (len(value) != 64 or
+                        any(char not in "0123456789abcdef" for char in value)):
+                    fail(f"{clip}: consumed policy has invalid {name}")
+            elif value:
+                fail(f"{clip}: unconsumed policy unexpectedly records {name}")
+        if policy_consumed and (not expected_artistic_policy or
+                                expected_artistic_scale_override > 0.0):
+            fail(f"{clip}: policy was consumed during an ablation/override run")
+        for key, value in (
+                ("artistic_policy_consumed", policy_consumed),
+                ("artistic_policy_authorization", policy_authorization),
+                ("model_onnx_sha256", model_onnx_sha256),
+                ("policy_metadata_sha256", policy_metadata_sha256),
+                ("deployment_geometry_allowlist_sha256",
+                 geometry_allowlist_sha256)):
+            if meta[key] is None:
+                meta[key] = value
+            elif meta[key] != value:
+                fail(f"{clip}: {key} changed within one run")
+        if contract.get("metric_sha256") != metric_sha:
+            fail(f"{clip}: harness binary metric contract is stale: "
+                 f"{contract.get('metric_sha256')} != {metric_sha}")
+        warp_source_hash = contract.get("policy_warp_source_sha256")
+        if (not isinstance(warp_source_hash, str) or len(warp_source_hash) != 64 or
+                any(char not in "0123456789abcdef" for char in warp_source_hash)):
+            fail(f"{clip}: invalid/missing policy warp source hash")
+        if meta["policy_warp_source_sha256"] is None:
+            meta["policy_warp_source_sha256"] = warp_source_hash
+        elif meta["policy_warp_source_sha256"] != warp_source_hash:
+            fail(f"{clip}: policy warp source hash changed within one run")
+        geometry_fields = ("source_width", "source_height", "model_input_width",
+                           "model_input_height", "eye_width", "eye_height",
+                           "disparity_raster_width", "disparity_raster_height")
+        if any(not isinstance(contract.get(key), int) or contract[key] <= 0
+               for key in geometry_fields):
+            fail(f"{clip}: invalid/missing harness raster geometry")
+        for key in ("content_scale_x", "content_scale_y"):
+            value = contract.get(key)
+            if (not isinstance(value, (int, float)) or not math.isfinite(value) or
+                    value <= 0.0 or value > 1.0):
+                fail(f"{clip}: invalid {key}: {value}")
+        if (contract["disparity_raster_width"] != contract["eye_width"] or
+                contract["disparity_raster_height"] != contract["eye_height"]):
+            fail(f"{clip}: exact disparity is not the complete output-eye raster")
+        if contract.get("color_mode") not in {
+                "sdr-srgb-8bit", "linear-sdr-fp16", "hdr-scrgb-fp16"}:
+            fail(f"{clip}: invalid/missing input color mode")
         clip_meta = {"model": contract["model"], "profile": contract["profile"],
+                     "metric_sha256": contract["metric_sha256"],
+                     "depth_step": contract["depth_step"],
+                     "depth_reuse_interval": contract["depth_reuse_interval"],
                      "depth_compensation": contract["depth_compensation"],
                      "literal_bestv2": contract["literal_bestv2"],
                      "cuda_graph": contract["cuda_graph"],
                      "adaptive_pop": contract["adaptive_pop"],
                      "adaptive_pop_max": contract["adaptive_pop_max"],
+                     "pop_strength": contract["pop_strength"],
+                     "ema": contract["ema"],
+                     "ema_edge_change": contract["ema_edge_change"],
+                     "ema_edge_gradient": contract["ema_edge_gradient"],
+                     "ema_edge_strength": contract["ema_edge_strength"],
+                     "minmax_ema": contract["minmax_ema"],
+                     "subject_lock": contract["subject_lock"],
+                     "subject_recenter": contract["subject_recenter"],
+                     "subject_stretch": contract["subject_stretch"],
+                     "depth_short_side": contract["depth_short_side"],
+                     "depth_max_aspect": contract["depth_max_aspect"],
                      "zero_plane": contract["zero_plane"],
+                     "artistic_style": contract["artistic_style"],
+                     "artistic_policy": contract["artistic_policy"],
+                     "artistic_policy_consumed": policy_consumed,
+                     "artistic_policy_authorization": policy_authorization,
+                     "model_onnx_sha256": model_onnx_sha256,
+                     "policy_metadata_sha256": policy_metadata_sha256,
+                     "deployment_geometry_allowlist_sha256":
+                         geometry_allowlist_sha256,
+                     "artistic_scale_override": contract["artistic_scale_override"],
+                     "output_interval": contract["output_interval"],
+                     "output_gt_right_only": contract["output_gt_right_only"],
+                     "depth_override_frames": contract["depth_override_frames"],
+                     "policy_warp_source_sha256": warp_source_hash,
+                     "harness_schema": contract["schema"],
+                     "source_width": contract["source_width"],
+                     "source_height": contract["source_height"],
+                     "model_input_width": contract["model_input_width"],
+                     "model_input_height": contract["model_input_height"],
+                     "eye_width": contract["eye_width"],
+                     "eye_height": contract["eye_height"],
+                     "color_mode": contract["color_mode"],
+                     "content_scale_x": contract["content_scale_x"],
+                     "content_scale_y": contract["content_scale_y"],
+                     "disparity_raster_width": contract["disparity_raster_width"],
+                     "disparity_raster_height": contract["disparity_raster_height"],
+                     "artifact_mode": contract["artifact_mode"],
+                     "warp_disparity": contract["warp_disparity"],
+                     "warp_unclamped_disparity": contract["warp_unclamped_disparity"],
+                     "artistic_disparity_contract": contract["artistic_disparity_contract"],
+                     "artistic_full_clamp_abs": contract["artistic_full_clamp_abs"],
+                     "warp_mask": contract["warp_mask"],
                      "cuda_graph_captured": contract.get("cuda_graph_captured", False)}
 
         # A valid harness result has one source, raw-model, warp-input depth, and SBS artifact for
         # every numeric frame identity. This catches dropped/renumbered outputs before metrics run.
-        source_ids = set(sbsbench.indexed_files(os.path.join(clip_dir, "frame_*.*"), "frame_"))
-        sbs_ids = set(sbsbench.indexed_files(os.path.join(out_dir, "sbs_*.png"), "sbs_"))
+        source_by_id = sbsbench.indexed_files(
+            os.path.join(clip_dir, "frame_*.*"), "frame_")
+        ordered_source_ids = sorted(source_by_id)
+        expected_output_ids = set(ordered_source_ids[::output_interval])
+        if output_gt_right_only:
+            gt_right_ids = set(sbsbench.indexed_files(
+                os.path.join(clip_dir, "gt_right", "frame_*.*"), "frame_"))
+            expected_output_ids &= gt_right_ids
+        sbs_by_id = sbsbench.indexed_files(os.path.join(out_dir, "sbs_*.png"), "sbs_")
+        sbs_ids = set(sbs_by_id)
         depth_ids = set(sbsbench.indexed_files(os.path.join(out_dir, "depth_*.png"), "depth_"))
         raw_ids = set(sbsbench.indexed_files(os.path.join(out_dir, "raw_*.f32"), "raw_"))
         mask_ids = set(sbsbench.indexed_files(
             os.path.join(out_dir, "warp_mask_*.png"), "warp_mask_"))
+        disparity_ids = set(sbsbench.indexed_files(
+            os.path.join(out_dir, "warp_disparity_*.f32"), "warp_disparity_"))
+        unclamped_disparity_ids = set(sbsbench.indexed_files(
+            os.path.join(out_dir, "warp_unclamped_disparity_*.f32"),
+            "warp_unclamped_disparity_"))
         ema_mask_ids = set(sbsbench.indexed_files(
             os.path.join(out_dir, "ema_mask_*.png"), "ema_mask_"))
         if (contract.get("warp_mask") != {
                 "red": "forward_disocclusion_before_fill"}):
             fail(f"{clip}: missing/unknown warp-mask channel contract")
-        if (not source_ids or source_ids != sbs_ids or source_ids != depth_ids
-                or source_ids != raw_ids or source_ids != mask_ids):
-            fail(f"{clip}: artifact frame-id mismatch source={sorted(source_ids)} "
+        if (contract.get("warp_disparity") !=
+                "exact_clamped_full_binocular_normalized_at_output_eye_raster_zero_bars"):
+            fail(f"{clip}: missing/unknown exact warp-disparity contract")
+        if (contract.get("warp_unclamped_disparity") !=
+                "unclamped_full_binocular_normalized_at_artistic_scale_1_"
+                "output_eye_raster_zero_bars"):
+            fail(f"{clip}: missing/unknown unclamped warp-disparity contract")
+        if (contract.get("artistic_disparity_contract") !=
+                "clamp(raw_baseline_times_scale_to_plus_or_minus_0.142_times_"
+                "aspect_scale_times_content_scale_x)"):
+            fail(f"{clip}: missing/unknown artistic disparity contract")
+        if (not expected_output_ids or expected_output_ids != sbs_ids
+                or expected_output_ids != depth_ids or expected_output_ids != raw_ids
+                or expected_output_ids != mask_ids or expected_output_ids != disparity_ids
+                or expected_output_ids != unclamped_disparity_ids):
+            fail(f"{clip}: sampled artifact frame-id mismatch "
+                 f"expected={sorted(expected_output_ids)} "
                  f"sbs={sorted(sbs_ids)} depth={sorted(depth_ids)} raw={sorted(raw_ids)} "
-                 f"warp_mask={sorted(mask_ids)}")
-        if expected_ema_edge_change > 0.0 and ema_mask_ids != source_ids:
+                 f"warp_mask={sorted(mask_ids)} warp_disparity={sorted(disparity_ids)} "
+                 f"warp_unclamped_disparity={sorted(unclamped_disparity_ids)}")
+        first_sbs = sbsbench.load_gray(sbs_by_id[min(sbs_ids)])
+        if (first_sbs.shape[0] != contract["eye_height"] or
+                first_sbs.shape[1] != 2 * contract["eye_width"]):
+            fail(f"{clip}: contract eye geometry does not match rendered SBS artifacts")
+        first_source = sbsbench.load_gray(source_by_id[ordered_source_ids[0]])
+        if (first_source.shape[0] != contract["source_height"] or
+                first_source.shape[1] != contract["source_width"]):
+            fail(f"{clip}: contract source geometry does not match source artifacts")
+        if expected_ema_edge_change > 0.0 and ema_mask_ids != expected_output_ids:
             fail(f"{clip}: incomplete EMA motion-mask artifacts: {sorted(ema_mask_ids)}")
         if expected_ema_edge_change <= 0.0 and ema_mask_ids:
             fail(f"{clip}: unexpected EMA motion-mask artifacts while feature is disabled")
@@ -596,6 +916,9 @@ def main():
                 out_dir, clip_dir, expected_flat=bool(clip_meta.get("expected_flat")))
         except ValueError as exc:
             fail(f"{clip}: {exc}")
+        missing_required = missing_required_metric_evidence(agg, thresholds, clip_meta)
+        if missing_required:
+            fail(f"{clip}: required primary metric evidence is missing: {missing_required}")
         perf = {}
         perf_p = os.path.join(out_dir, "sbs_perf.json")
         if os.path.exists(perf_p):
@@ -607,6 +930,7 @@ def main():
         issues.extend({"clip": clip, **item} for item in clip_issues)
         hard_failures.extend({"clip": clip, **item} for item in clip_hard_failures)
 
+        clip_meta["clip_sha1"] = meta["clip_set_sha1"][clip]
         entry = {"aggregate": agg, "perf_ms": perf, "meta": clip_meta, "worst_frame": worst}
         results[clip] = entry
 
@@ -617,16 +941,18 @@ def main():
         if os.path.exists(bp) and not args.update_baselines and not args.comparison_only:
             base = json.load(open(bp))
             base_meta = base.get("meta", {})
-            required = {
+            current_context = {
+                **meta, **clip_meta,
                 "clip_sha1": meta["clip_set_sha1"][clip],
-                "mode": "profile",
-                "model": expected_model,
-                "eval_schema": EVAL_SCHEMA,
-                "depth_step": meta["depth_step"],
-                "depth_compensation": meta["depth_compensation"],
-                "conf_sha256": conf_sha,
-                "metric_sha256": metric_sha,
             }
+            context_fields = BASELINE_CONTEXT_FIELDS
+            if meta["run_kind"] == "policy_candidate_gate":
+                context_fields = tuple(
+                    key for key in context_fields
+                    if key not in POLICY_CANDIDATE_TREATMENT_FIELDS
+                )
+                meta["baseline_identities"][clip] = sha256_file(bp)
+            required = {key: current_context.get(key) for key in context_fields}
             mismatches = {k: (base_meta.get(k), v) for k, v in required.items()
                           if base_meta.get(k) != v}
             if mismatches:
@@ -638,7 +964,12 @@ def main():
                 if spec.get("role") == "hard":
                     continue  # absolute hard constraints were evaluated above, independent of baseline
                 b, n = base["aggregate"].get(k), agg.get(k)
-                if b is None or n is None:
+                if b is None:
+                    continue
+                if n is None or not isinstance(n, (int, float)) or not math.isfinite(n):
+                    regressions.append({"clip": clip, "metric": k,
+                                        "baseline": round(b, 3), "value": None,
+                                        "reason": "missing-treatment-evidence"})
                     continue
                 if sbsbench.metric_gate_failed(b, n, spec):
                     regressions.append({"clip": clip, "metric": k, "baseline": round(b, 3),
@@ -646,7 +977,15 @@ def main():
             if not contention:
                 for k, spec in thresholds["perf_ms"].items():
                     b, n = base.get("perf_ms", {}).get(k), perf.get(k)
-                    if b and n and (n - b) > max(spec["abs_floor"], b * spec["rel_tol"]):
+                    if (isinstance(b, (int, float)) and math.isfinite(b) and b > 0.0 and
+                            (not isinstance(n, (int, float)) or not math.isfinite(n) or
+                             n <= 0.0)):
+                        regressions.append({"clip": clip, "metric": "perf:" + k,
+                                            "baseline": round(b, 2), "value": None,
+                                            "reason": "missing-treatment-evidence"})
+                    elif (isinstance(b, (int, float)) and math.isfinite(b) and b > 0.0 and
+                          isinstance(n, (int, float)) and math.isfinite(n) and
+                          (n - b) > max(spec["abs_floor"], b * spec["rel_tol"])):
                         regressions.append({"clip": clip, "metric": "perf:" + k,
                                             "baseline": round(b, 2), "value": round(n, 2)})
 

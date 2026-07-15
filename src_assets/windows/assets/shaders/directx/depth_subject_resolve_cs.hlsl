@@ -5,13 +5,14 @@
 //   SubjectState[1] = { stretch_lo, stretch_inv_range, Bestv2 convergence EMA,
 //                       adaptive pop ratio }
 //   SubjectState[2] = { shot-latched zero-plane anchor shift in source pixels, valid, mode,
-//                       reserved }
+//                       confidence-gated artistic camera multiplier (0 = disabled) }
 // The reprojection then evaluates the permanent Bestv2 pixel-calibrated field.
 // Resets the histogram for the next frame's accumulation.
 
 RWStructuredBuffer<uint>   SubjectHist  : register(u0);  // 256 weighted bins (subject estimate)
 RWStructuredBuffer<float4> SubjectState : register(u1);  // [0..2], see header above
-RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 unweighted bins (stretch 5/95 pct)
+RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 bins + edge/change counters
+StructuredBuffer<float>    ArtisticGlobal : register(t0);  // [safe scale ceiling, confidence], optional
 
 #include "include/depth_constants.hlsl"
 #include "include/bestv2_curve.hlsl"
@@ -56,7 +57,8 @@ void main() {
         float lo_val = 0.0f, inv_range = 1.0f;
         float background_val = 0.25f, median_val = 0.5f;
         float ptotal = 0.0f;
-        if (subject_stretch > 0.5f || adaptive_pop > 0.5f || zero_plane_mode > 0.5f) {
+        if (subject_stretch > 0.5f || adaptive_pop > 0.5f || zero_plane_mode > 0.5f ||
+            artistic_policy > 0.5f) {
             for (uint pb = 0; pb < NUM_BINS; pb++) ptotal += (float)PlainHist[pb];
         }
         if (ptotal > 0.5f && (subject_stretch > 0.5f || zero_plane_mode > 0.5f)) {
@@ -88,7 +90,8 @@ void main() {
         // Scene camera parameters are deliberately latched. Continuously responding to depth
         // statistics makes disparity breathe. Choose once at startup and again only on a hard
         // depth cut, where the content itself is already discontinuous.
-        bool scene_control = adaptive_pop > 0.5f || zero_plane_mode > 0.5f;
+        bool scene_control = adaptive_pop > 0.5f || zero_plane_mode > 0.5f ||
+                             artistic_policy > 0.5f;
         float scene_age = initialized ? min(previous_scene_age + 1.0f, 65535.0f) : 0.0f;
         float change_fraction = ptotal > 0.5f ? (float)PlainHist[NUM_BINS + 1] / ptotal : 0.0f;
         // Normalization settling can change 50-60% of depth texels on the first few frames.
@@ -137,8 +140,33 @@ void main() {
         } else {
             zero_valid = 0.0f;
         }
+        // The learned output is the highest render-validated safe multiplier of Apollo's complete
+        // baseline disparity, including its existing adaptive-pop decision. The configured style
+        // consumes none, half, or all of that available gain. Confidence can reject the learned
+        // ceiling but can never raise it. Latch only at scene start/cuts so prediction noise cannot
+        // make the camera breathe within a shot. Mode 2 is the offline harness's exact-scale grid.
+        float artistic_multiplier = artistic_policy > 0.5f ? s2.w : 0.0f;
+        if (artistic_policy > 0.5f && (!initialized || hard_cut || artistic_multiplier <= 0.0f)) {
+            if (artistic_policy > 1.5f) {
+                artistic_multiplier = clamp(artistic_style_or_override, 0.5f, 1.5f);
+            } else {
+                float safe_ceiling = ArtisticGlobal[0];
+                float ceiling_confidence = ArtisticGlobal[1];
+                if (!isfinite(safe_ceiling) || !isfinite(ceiling_confidence)) {
+                    safe_ceiling = 1.0f;
+                    ceiling_confidence = 0.0f;
+                }
+                safe_ceiling = clamp(safe_ceiling, 1.0f, 1.5f);
+                ceiling_confidence = saturate(ceiling_confidence);
+                float style_mix = saturate(artistic_style_or_override);
+                float requested_scale = lerp(1.0f, safe_ceiling, style_mix);
+                artistic_multiplier = ceiling_confidence >= 0.5f ?
+                                      min(requested_scale, safe_ceiling) : 1.0f;
+            }
+        }
+
         s1 = float4(lo_val, inv_range, conv_ema, pop_ratio);
-        s2 = float4(zero_anchor_shift, zero_valid, zero_plane_mode, 0.0f);
+        s2 = float4(zero_anchor_shift, zero_valid, zero_plane_mode, artistic_multiplier);
     }
     // total == 0 (uninitialized depth): keep previous state.
 

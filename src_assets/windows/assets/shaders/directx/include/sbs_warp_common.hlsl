@@ -88,24 +88,36 @@ Bestv2Params MakeBestv2Params(float4 s0, float4 s1, float4 s2,
                          -0.008f * 0.5f + s1.z * 4.0f / parallax_width;
     float aspect_scale = Bestv2AspectScale(source_width, source_height, literal_bestv2);
     float adaptive_ratio = adaptive_pop > 0.5f ? max(s1.w, 1.0f) : 1.0f;
-    float strength = literal_bestv2 > 0.5f ? 1.0f : pop_strength * adaptive_ratio;
+    float artistic_ratio = s2.w > 0.0f ? s2.w : 1.0f;
+    float strength = literal_bestv2 > 0.5f ? 1.0f :
+                     pop_strength * adaptive_ratio * artistic_ratio;
     p.output_scale = strength * aspect_scale;
+    // The artistic value is a multiplier of Apollo's complete baseline camera. Scale 1.0,
+    // including a low-confidence fallback and the clean preset, must therefore be pixel-identical
+    // to the non-policy warp. The evaluator's +/-3% comfort limits select the safe learned ceiling;
+    // they are gates, not a second renderer clamp that silently changes the identity camera.
     p.clamp_abs = 0.071f * aspect_scale;
     return p;
 }
 
-float DepthParallax(float d, float4 s0, float4 s1, Bestv2Params p,
-                    bool use_subject_stretch) {
+float DepthParallaxUnclamped(float d, float4 s0, float4 s1, Bestv2Params p,
+                             bool use_subject_stretch) {
     float shaped_depth = Bestv2WarpDepth(d, s0, s1, true, use_subject_stretch);
     float shift_px = Bestv2RawShiftPxFast(shaped_depth);
     float anchor_shift_px = p.explicit_zero_plane > 0.5f ? p.zero_anchor_shift_px :
                             subject_lock * p.subject_shift_px;
     float parallax = (shift_px - anchor_shift_px) * p.parallax_scale;
     parallax += p.convergence_bias;
-    return clamp(parallax * p.output_scale, -p.clamp_abs, p.clamp_abs);
+    return parallax * p.output_scale;
 }
 
-float Bestv2SearchRadius(float source_width, float source_height) {
+float DepthParallax(float d, float4 s0, float4 s1, Bestv2Params p,
+                    bool use_subject_stretch) {
+    return clamp(DepthParallaxUnclamped(d, s0, s1, p, use_subject_stretch),
+                 -p.clamp_abs, p.clamp_abs);
+}
+
+float Bestv2SearchRadius(float source_width, float source_height, float4 s2) {
     // Conservative bound for the pixel bands + zero-parallax trim + convergence. The preset's
     // 7.1% clamp is a safety limit, not the normal search span; using it directly would make the
     // fixed probe count too coarse at high resolution.
@@ -115,6 +127,9 @@ float Bestv2SearchRadius(float source_width, float source_height) {
     // GPU-resident in SubjectState and unavailable to this loop-bound helper.
     float strength = literal_bestv2 > 0.5f ? 1.0f :
                      (adaptive_pop > 0.5f ? adaptive_pop_max : pop_strength);
+    if (literal_bestv2 <= 0.5f && s2.w > 0.0f) {
+        strength *= s2.w;
+    }
     return Bestv2AspectScale(source_width, source_height, literal_bestv2) * strength *
            (0.004f + (12.51f * 0.35f + 0.006f * 4.0f) /
                        Bestv2ParallaxWidth(source_width, literal_bestv2));

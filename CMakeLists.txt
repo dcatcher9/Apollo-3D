@@ -59,6 +59,11 @@ include(${CMAKE_MODULE_PATH}/dependencies/common.cmake)
 # setup compile definitions
 include(${CMAKE_MODULE_PATH}/compile_definitions/common.cmake)
 
+# Bind learned SBS camera-policy checkpoints to the exact native/shader implementation that
+# produced their safe render frontier. The generated compile definition is emitted into benchmark
+# contracts and checked again by the live runtime.
+include(${CMAKE_MODULE_PATH}/prep/artistic_warp_contract.cmake)
+
 # target definitions
 include(${CMAKE_MODULE_PATH}/targets/common.cmake)
 

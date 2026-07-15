@@ -1,0 +1,254 @@
+{
+  "schema": 1,
+  "sources": [
+    {
+      "id": "big_buck_bunny_3d",
+      "name": "Big Buck Bunny stereoscopic re-render",
+      "production_id": "big_buck_bunny_3d",
+      "source_group": "blender_open_movies",
+      "domain": "cinematic_animation",
+      "split": "training",
+      "admission": "global_policy",
+      "complete_production": true,
+      "policy_role": "cinematic_authored",
+      "global_policy_weight": 1.0,
+      "homepage": "https://bbb3d.renderfarming.net/",
+      "license": "CC BY 3.0",
+      "license_url": "https://creativecommons.org/licenses/by/3.0/",
+      "layout": "above-below",
+      "eye_order": "first-left",
+      "eye_display_aspect_ratio": 1.7777777778,
+      "retrieval": {
+        "kind": "existing-dataset"
+      },
+      "notes": "Existing complete-production training set under E:/ApolloDev. Catalogued here so active split audits include it."
+    },
+    {
+      "id": "elephants_dream_3d",
+      "name": "Elephants Dream stereoscopic re-render",
+      "production_id": "elephants_dream_3d_2010",
+      "source_group": "blender_open_movies",
+      "domain": "cinematic_animation",
+      "split": "test",
+      "admission": "global_policy",
+      "complete_production": true,
+      "policy_role": "authored_stereo_test",
+      "global_policy_weight": 1.0,
+      "homepage": "https://orange.blender.org/blog/elephants-dream-in-stereoscopic-3d/",
+      "license": "CC BY 2.5",
+      "license_url": "https://creativecommons.org/licenses/by/2.5/",
+      "layout": "side-by-side",
+      "eye_order": "first-right",
+      "eye_display_aspect_ratio": 1.8497109827,
+      "retrieval": {
+        "kind": "http",
+        "filename": "elephants_dream_3d_sbs_rl.mkv",
+        "urls": [
+          "https://download.blender.org/ED/ed3d_sidebyside-RL-2x1920x1038_24fps.mkv",
+          "https://web.archive.org/web/20260214141543id_/https://download.blender.org/ED/ed3d_sidebyside-RL-2x1920x1038_24fps.mkv"
+        ]
+      },
+      "notes": "The official filename declares right-left order. Each stored eye is 1920x1038."
+    },
+    {
+      "id": "what_is_etiquette_3d",
+      "name": "What Is Etiquette 3D",
+      "production_id": "what_is_etiquette_3d_2014",
+      "source_group": "morevna_danivision",
+      "domain": "stylized_animation",
+      "split": null,
+      "admission": "excluded_unavailable_media",
+      "complete_production": false,
+      "policy_role": "reference_only",
+      "global_policy_weight": 0.0,
+      "homepage": "https://morevnaproject.org/2017/03/06/new-animation-etiquette-3d/",
+      "license": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "layout": "side-by-side",
+      "eye_order": "unverified",
+      "eye_display_aspect_ratio": 1.7777777778,
+      "retrieval": {
+        "kind": "yt-dlp",
+        "filename_stem": "what_is_etiquette_3d",
+        "url": "https://www.youtube.com/watch?v=prAA3Qddz88"
+      },
+      "notes": "Creator identifies this upload as the stereoscopic pair, but the original YouTube media is no longer available. Do not substitute the surviving 2D upload."
+    },
+    {
+      "id": "side_by_side_shorter_better",
+      "name": "Side by Side - The Shorter the Better",
+      "production_id": "side_by_side_shorter_better",
+      "source_group": "independent_vimeo_artist",
+      "domain": "experimental_animation",
+      "split": null,
+      "admission": "excluded_not_separable_stereo",
+      "complete_production": false,
+      "policy_role": "reference_only",
+      "global_policy_weight": 0.0,
+      "homepage": "https://vimeo.com/666417824",
+      "license": "CC BY-NC 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-nc/4.0/",
+      "layout": "side-by-side",
+      "eye_order": "unverified",
+      "eye_display_aspect_ratio": 0.0,
+      "retrieval": {
+        "kind": "yt-dlp",
+        "filename_stem": "side_by_side_shorter_better",
+        "url": "https://vimeo.com/666417824"
+      },
+      "notes": "The downloadable Vimeo presentation is anaglyph, not a separable left/right pair. Visual audit rejected it."
+    },
+    {
+      "id": "nasa_intro_to_lidar_3d",
+      "name": "Intro to LIDAR 3D",
+      "production_id": "nasa_intro_to_lidar_3d_2011",
+      "source_group": "nasa_svs",
+      "domain": "scientific_documentary_animation",
+      "split": "development",
+      "admission": "global_policy",
+      "complete_production": true,
+      "policy_role": "authored_stereo_development",
+      "global_policy_weight": 1.0,
+      "homepage": "https://svs.gsfc.nasa.gov/10757/",
+      "license": "NASA media usage guidelines",
+      "license_url": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+      "layout": "side-by-side",
+      "eye_order": "first-left",
+      "eye_display_aspect_ratio": 1.7777777778,
+      "retrieval": {
+        "kind": "http",
+        "filename": "nasa_intro_to_lidar_3d_sbs.mov",
+        "urls": [
+          "https://svs.gsfc.nasa.gov/vis/a010000/a010700/a010757/lidar_3D_side_by_side_youtube_1080.mov"
+        ]
+      },
+      "notes": "NASA supplies this complete production explicitly as side-by-side, plus independent left/right masters. Packing and eye order must still pass the local audit."
+    },
+    {
+      "id": "nasa_goddard_3d",
+      "name": "The NASA Goddard Space Flight Center in Stereoscopic 3D",
+      "production_id": "nasa_goddard_3d_2011",
+      "source_group": "nasa_svs",
+      "domain": "live_action_promotional_documentary",
+      "split": "test",
+      "admission": "global_policy",
+      "complete_production": true,
+      "policy_role": "authored_stereo_test",
+      "global_policy_weight": 1.0,
+      "homepage": "https://svs.gsfc.nasa.gov/10744/",
+      "license": "NASA media usage guidelines",
+      "license_url": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+      "layout": "separate-files",
+      "eye_order": "first-left",
+      "eye_display_aspect_ratio": 1.7777777778,
+      "retrieval": {
+        "kind": "http-pair",
+        "filename": "nasa_goddard_3d_sbs.mkv",
+        "first": {
+          "filename": "nasa_goddard_3d_left.mp4",
+          "urls": [
+            "https://svs.gsfc.nasa.gov/vis/a010000/a010700/a010744/GSFC_3D_1920x1080_H264_LEFT.mp4"
+          ]
+        },
+        "second": {
+          "filename": "nasa_goddard_3d_right.mp4",
+          "urls": [
+            "https://svs.gsfc.nasa.gov/vis/a010000/a010700/a010744/GSFC_3D_1920x1080_H264_RIGHT.mp4"
+          ]
+        }
+      },
+      "notes": "NASA publishes independently named full-resolution left and right masters. The importer creates a lossless-audio SBS audit asset without changing eye order."
+    },
+    {
+      "id": "nasa_evolution_of_moon_3d",
+      "name": "Evolution of the Moon stereoscopic version",
+      "production_id": "nasa_evolution_of_moon_3d_2012",
+      "source_group": "nasa_svs",
+      "domain": "cinematic_scientific_animation",
+      "split": "training",
+      "admission": "global_policy",
+      "complete_production": true,
+      "policy_role": "supplementary_authored_stereo",
+      "global_policy_weight": 0.25,
+      "homepage": "https://svs.gsfc.nasa.gov/10930/",
+      "license": "NASA media usage guidelines",
+      "license_url": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+      "layout": "side-by-side",
+      "eye_order": "first-left",
+      "eye_display_aspect_ratio": 1.7777777778,
+      "retrieval": {
+        "kind": "http",
+        "filename": "nasa_evolution_of_moon_3d_sbs.mov",
+        "urls": [
+          "https://svs.gsfc.nasa.gov/vis/a010000/a010900/a010930/evol_moon_sidebyside_youtube_1080.mov"
+        ]
+      },
+      "notes": "Complete authored CGI short. Supplementary weight prevents the NASA domain from dominating cinematic training."
+    },
+    {
+      "id": "nasa_vlbi_3d",
+      "name": "Using Quasars to Measure the Earth in stereoscopic 3D",
+      "production_id": "nasa_vlbi_3d_2012",
+      "source_group": "nasa_svs",
+      "domain": "scientific_documentary_animation",
+      "split": "training",
+      "admission": "global_policy",
+      "complete_production": true,
+      "policy_role": "supplementary_authored_stereo",
+      "global_policy_weight": 0.25,
+      "homepage": "https://svs.gsfc.nasa.gov/10964/",
+      "license": "NASA media usage guidelines",
+      "license_url": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+      "layout": "side-by-side",
+      "eye_order": "first-left",
+      "eye_display_aspect_ratio": 1.7777777778,
+      "retrieval": {
+        "kind": "http",
+        "filename": "nasa_vlbi_3d_sbs.mov",
+        "urls": [
+          "https://svs.gsfc.nasa.gov/vis/a010000/a010900/a010964/vlbi_side_by_side_youtube_1080.mov"
+        ]
+      },
+      "notes": "Complete authored live-action and CGI documentary. Kept at supplementary weight."
+    },
+    {
+      "id": "lfovia3dph2_pristine",
+      "name": "LFOVIAS3DPh2 pristine sources",
+      "production_id": "lfovia3dph2_pristine_collection",
+      "source_group": "rmit_lfovia",
+      "domain": "native_live_action",
+      "split": "training",
+      "admission": "candidate_collection",
+      "complete_production": false,
+      "policy_role": "native_stereo_robustness",
+      "global_policy_weight": 0.0,
+      "homepage": "https://people.iith.ac.in/lfovia/downloads.html",
+      "license": "research dataset; repository grants use, copy, modification, and distribution",
+      "license_url": "https://github.com/lfovia/LFOVIAS3DPh2",
+      "retrieval": {
+        "kind": "manual",
+        "url": "https://drive.google.com/drive/folders/1NrOjN3EHVKv2YdbHPdwnFsSGk0mF9jdy"
+      },
+      "notes": "Admit only the 12 pristine sources. Distorted variants are not authored camera labels."
+    },
+    {
+      "id": "stereoworld_11m",
+      "name": "StereoWorld-11M",
+      "production_id": "stereoworld_11m",
+      "source_group": "stereoworld",
+      "domain": "cinematic_mixed",
+      "split": null,
+      "admission": "excluded_unavailable_media",
+      "complete_production": false,
+      "policy_role": "reference_only",
+      "global_policy_weight": 0.0,
+      "homepage": "https://ke-xing.github.io/StereoWorld/",
+      "license": "source movies not distributed; lawfully obtained media required",
+      "license_url": "https://github.com/ke-xing/StereoWorldCode/blob/main/datasets/data.md",
+      "retrieval": {
+        "kind": "unavailable"
+      },
+      "notes": "Use its processing design as reference only; do not treat the paper's frame count as available data."
+    }
+  ]
+}

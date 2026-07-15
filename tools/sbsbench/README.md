@@ -161,20 +161,40 @@ depth-step floor (flat scenes legitimately read 0), and all pixel windows scale 
 width — but absolute values are still not comparable across clip resolutions; baselines are
 per-clip-set. The harness writes 16-bit depth PNGs so `swim` resolves below 1/255.
 
-**Eval schema 24 / harness contract 15:** `run_eval.py` pins the profile, model, and zero-plane
+**Eval schema 29 / harness contract 24:** `run_eval.py` pins the profile, model, zero-plane,
+artistic style, and optional artistic-policy consumption
 mode explicitly and
 has no alternate warp selector. By default the
 harness submits and consumes exactly one inference per source frame, so EMA and normalization
 update once. `--depth-every N` is an explicit comparison-only cadence treatment: color advances
 while the last completed depth/subject geometry is reused, and the contract records `reuse-N`.
 Source, raw-model (`raw_*.f32`), pre-warp depth (`depth_*.png`), exact warp mask
-(`warp_mask_*.png`), and SBS artifacts are joined by
+(`warp_mask_*.png`), exact clamped full-binocular disparity sampled at every output-eye pixel
+center with deterministic zero bars (`warp_disparity_*.f32`), unclamped scale-1 disparity at the
+same raster
+(`warp_unclamped_disparity_*.f32`), and SBS artifacts are joined by
 numeric frame identity, never list position. Baselines are rejected with setup exit 2 if mode,
-model, schema, stepping semantics, config hash, metric implementation/threshold hash, or clip hash
-differs. Runner/gating semantics are versioned by the schema rather than the runner's comments or
-diagnostic wording. Output folders
-are cleared before reuse. `--output-every N` reduces saved artifacts while still processing every
-input frame, so sampling cannot change temporal state.
+model, every resolved policy/warp/sampling setting, compiled warp-source hash, schema, config hash,
+metric implementation/threshold hash, or clip hash differs. A missing declared hard metric is a
+hard failure, not an implicit pass. Always-required primaries likewise abort a run when applicable;
+support- or GT-dependent primaries are skipped only when absent from both matched sides, while
+one-sided absence makes the A/B decision inconclusive. Runner/gating semantics are versioned by the
+schema rather than the runner's comments or diagnostic wording. Output folders are cleared before reuse. Harness
+contract 24 records `output_interval`; `--output-every N`
+reduces saved artifacts while still processing every
+input frame, so sampling cannot change temporal state. For authored-stereo data,
+`--output-gt-right-only` emits the exact identities present in `gt_right/`; it does not assume
+that every shot's first label has the same modulo-N phase.
+
+`--no-artistic-policy` is a comparison-only ablation: an artistic model still runs and emits its
+depth and optional output, but the subject resolver does not consume the learned multiplier. This
+separates policy effects from any depth drift caused by exporting/building the multi-output model.
+`--artistic-scale-override S` is the render-feasibility primitive: it applies an exact
+post-baseline multiplier through the same shot latch and production warp clamp while retaining the
+official depth model. It is harness-only and accepts `S` in `[0.5, 1.5]`; the independent
+`+/-3%` perceived-disparity comfort limits remain evaluator hard gates.
+Learned models instead emit `[safe_scale_ceiling, ceiling_confidence]`; the `clean`, `balanced`,
+and `immersive` styles consume zero, half, or all of the confidence-gated safe headroom.
 
 Schema 3 added optional `gt_depth/frame_*.png` clip sidecars and includes them plus their semantic
 `gt_depth_kind` metadata in the clip hash. Missing GT means reference metrics are absent—not zero
@@ -292,8 +312,9 @@ with one update per source frame.
 
 Every A/B HTML report now writes a sibling `decision.json`. Both are generated from the same
 already-unwrapped per-clip aggregate dictionaries, so automation should consume that sidecar rather
-than reimplementing decision parsing. Sidecar schema 2 includes both `metric_sha256` and
-`report_sha256`, allowing automation to reject stale metric or presentation/decision logic. To
+than reimplementing decision parsing. Sidecar schema 3 includes both `metric_sha256` and
+`report_sha256` plus control/treatment policy provenance, allowing automation to reject stale
+metric, presentation/decision logic, or rescored/cross-policy evidence. To
 check whether a depth processor compresses or clips depth:
 
 ```
@@ -327,7 +348,7 @@ swapping depth-model variants can move edge accuracy and stability while leaving
 ## Artifact score (0–100) and feature decision
 `sbs_score(agg)` reports `score = q_clean` = 100 − weighted artifact penalties (each
 `weight × min(value/scale, 1)`, saturating). `q_depth` remains a separate diagnostic of delivered
-stereo volume (`pop_spread_pct` versus its target); it is not blended into score, because losing
+stereo volume (`exact_pop_spread_pct` versus its target); it is not blended into score, because losing
 depth must not buy artifact-quality points or cancel an artifact regression. Weights/scales live
 in [thresholds.json](thresholds.json) `"score"`.
 
@@ -395,8 +416,12 @@ avoid survivorship bias, scale/offset/DDC summaries are emitted only when every 
 has complete valid evidence; `stereo_art_polarity_ok` remains visible when a clip is unsuitable.
 
 `rescore_run.py` refreshes a comparison-only run directly from its preserved source/depth/SBS
-artifacts after metric-code changes. It refuses committed-baseline verdicts, updates the metric
-contract hash and writes atomically; use `run_eval.py` for any committed gate.
+artifacts after metric-code changes. It refuses committed-baseline verdicts and authenticates the
+original clip identities plus harness contract before scoring. Rescored JSON keeps two metric
+provenance fields: `artifact_metric_sha256` is the immutable metric contract compiled into the
+harness that generated the artifacts, while `metric_sha256` is the current scoring contract and is
+updated consistently in the run and every clip. Repeated in-place rescoring validates artifacts
+against the preserved hash and writes atomically; use `run_eval.py` for any committed gate.
 
 Each clip directory carries a `meta.json` with a name and description. It may also record
 `content_type`, provenance/license fields, the exact extraction window, and `source_artifacts`
@@ -410,7 +435,8 @@ annotations.
 |--------|---------|-----------|
 | `pop_px_p50` / `p95` | L↔R horizontal disparity (tile phase-correlation), median & p95 of \|dx\|. REPORTED but NOT gated — subject anchoring legitimately lowers median \|dx\| | higher = more 3D pop |
 | `pop_pct_p50` | same disparity in reference-aspect-equivalent image % (5120×2160 aspect anchor) | higher = more pop |
-| `pop_spread_px` / `pop_spread_pct` | near-to-far disparity RANGE = weighted p95−p5 of **signed** dx (pixels / reference-equivalent perceived %). The percentage is the client-resolution-independent **gate** and `q_depth` driver; pixels are diagnostic | higher = more volume |
+| `exact_pop_spread_pct` | p95−p5 of the exact signed, clamped HLSL full-binocular disparity at the rendered output-eye raster, expressed as reference-equivalent perceived %. Bars are excluded by the exact pixel-center validity mask. This is the client-resolution-independent **stereo-volume gate** and `q_depth` driver | higher = more volume |
+| `pop_spread_px` / `pop_spread_pct` | weighted p95−p5 of signed image phase-correlation dx (pixels / reference-equivalent perceived %). Repetitive textures can alias this estimate, so both values are diagnostic only | higher = more estimated volume |
 | `vmisalign_px` / `vmisalign_pct` | median vertical L↔R offset in pixels / % eye height. The percentage is the resolution-independent hard gate | must remain ≤0.1% eye height |
 | `positive_disparity_pct` / `negative_disparity_pct` | signed weighted p99 disparity tails in reference-equivalent perceived % | each must remain ≤3% |
 | `source_coverage_pct` | output patches explainable by horizontally displaced source content | ≥90% hard integrity limit |

@@ -55,6 +55,20 @@ namespace models {
     bool cuda_graph_active = false;  ///< TensorRT enqueue is currently replaying a captured graph.
   };
 
+  struct artistic_policy_provenance {
+    bool consumed = false;
+    std::string authorization = "none";
+    std::string model_onnx_sha256;
+    std::string policy_metadata_sha256;
+    std::string deployment_geometry_allowlist_sha256;
+  };
+
+  enum class artistic_policy_authorization {
+    deployment,
+    candidate_evaluation,
+    headset_review,
+  };
+
   class video_depth_estimator {
   public:
     /**
@@ -63,17 +77,32 @@ namespace models {
      * @param device D3D11 Device used for the capture pipeline
      * @param context D3D11 Device Context
      * @param assets_dir Path to the assets directory (for model loading)
-     * @param cfg Tuning knobs; see config::video_t::sbs_t (the estimator uses the depth-side
-     *            fields: ema, depth_short_side, depth_max_aspect, and minmax_ema).
+     * @param cfg Resolved depth, temporal, subject, camera, and artistic-policy tuning.
      * @param model The selected depth model: name/url (which engine to load/build) plus the
-     *            DA-V2-compatible model contract (pixel_values -> predicted_depth).
+     *            DA-V2-compatible base contract (pixel_values -> predicted_depth) and, when
+     *            present and authorized, artistic_global = [safe scale ceiling, confidence].
+     * @param consume_artistic_policy Whether a trusted optional artistic head may be consumed.
+     * @param artistic_scale_override Offline scale-grid override; zero uses the learned head.
+     * @param authorization Required trust level: final deployment, offline candidate evaluation,
+     *                      or explicitly enabled live headset review of a fully gated stage.
      */
-    video_depth_estimator(Microsoft::WRL::ComPtr<ID3D11Device> device, Microsoft::WRL::ComPtr<ID3D11DeviceContext> context, const std::filesystem::path &assets_dir, const config::video_t::sbs_t &cfg, const config::depth_model_info &model);
+    video_depth_estimator(Microsoft::WRL::ComPtr<ID3D11Device> device, Microsoft::WRL::ComPtr<ID3D11DeviceContext> context, const std::filesystem::path &assets_dir, const config::video_t::sbs_t &cfg, const config::depth_model_info &model, bool consume_artistic_policy = true, float artistic_scale_override = 0.0f, artistic_policy_authorization authorization = artistic_policy_authorization::deployment);
 
     ~video_depth_estimator();
 
     /** True only when every mandatory engine, shader, and session resource initialized. */
     bool is_valid() const;
+
+    /** Exact accepted policy identity; empty and false when the learned head is disabled. */
+    artistic_policy_provenance artistic_policy_status() const;
+
+    /** Set the exact destination-eye raster before first inference; later changes fail closed. */
+    void set_artistic_output_geometry(
+      std::uint32_t eye_width,
+      std::uint32_t eye_height,
+      float content_scale_x,
+      float content_scale_y
+    );
 
     // Non-copyable
     video_depth_estimator(const video_depth_estimator &) = delete;

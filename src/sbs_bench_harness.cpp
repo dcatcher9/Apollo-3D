@@ -19,6 +19,7 @@
   #include <cstring>
   #include <filesystem>
   #include <fstream>
+  #include <iomanip>
   #include <limits>
   #include <string>
   #include <string_view>
@@ -326,15 +327,15 @@ namespace sbs_bench {
     // Read back an R32_FLOAT depth SRV and save it as a 16-bit grayscale PNG (values clamped to
     // [0,1] scaled to 0-65535). 16-bit matters: the swim metric measures frame-to-frame depth
     // deltas that sit below 1/255. The staging texture is cached across frames (constant size).
-    void dump_depth(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv, const fs::path &path, ComPtr<ID3D11Texture2D> &stage_cache) {
+    bool dump_depth(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv, const fs::path &path, ComPtr<ID3D11Texture2D> &stage_cache) {
       if (!srv) {
-        return;
+        return false;
       }
       ComPtr<ID3D11Resource> res;
       srv->GetResource(&res);
       ComPtr<ID3D11Texture2D> tex;
       if (FAILED(res.As(&tex))) {
-        return;
+        return false;
       }
       D3D11_TEXTURE2D_DESC d = {};
       tex->GetDesc(&d);
@@ -345,13 +346,13 @@ namespace sbs_bench {
         sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         sd.MiscFlags = 0;
         if (FAILED(dev->CreateTexture2D(&sd, nullptr, &stage_cache))) {
-          return;
+          return false;
         }
       }
       ctx->CopyResource(stage_cache.Get(), tex.Get());
       D3D11_MAPPED_SUBRESOURCE m = {};
       if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &m))) {
-        return;
+        return false;
       }
       std::vector<uint16_t> gray((size_t) d.Width * d.Height);
       for (UINT y = 0; y < d.Height; y++) {
@@ -363,7 +364,43 @@ namespace sbs_bench {
         }
       }
       ctx->Unmap(stage_cache.Get(), 0);
-      save_gray16_png(path, d.Width, d.Height, gray);
+      return save_gray16_png(path, d.Width, d.Height, gray);
+    }
+
+    // Little-endian uint32 width/height followed by tightly packed row-major float32 values.
+    // Unlike the PNG depth artifact, disparity is signed and must remain lossless for fitting.
+    bool dump_float_texture(ID3D11Device *dev, ID3D11DeviceContext *ctx,
+                            ID3D11Texture2D *texture, const fs::path &path,
+                            ComPtr<ID3D11Texture2D> &stage_cache) {
+      if (!texture) {
+        return false;
+      }
+      D3D11_TEXTURE2D_DESC desc {};
+      texture->GetDesc(&desc);
+      if (!stage_cache) {
+        auto stage_desc = desc;
+        stage_desc.Usage = D3D11_USAGE_STAGING;
+        stage_desc.BindFlags = 0;
+        stage_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stage_desc.MiscFlags = 0;
+        if (FAILED(dev->CreateTexture2D(&stage_desc, nullptr, &stage_cache))) {
+          return false;
+        }
+      }
+      ctx->CopyResource(stage_cache.Get(), texture);
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return false;
+      }
+      std::ofstream stream(path, std::ios::binary);
+      stream.write((const char *) &desc.Width, sizeof(desc.Width));
+      stream.write((const char *) &desc.Height, sizeof(desc.Height));
+      for (UINT y = 0; y < desc.Height && stream; ++y) {
+        stream.write((const char *) mapped.pData + (size_t) y * mapped.RowPitch,
+                     (std::streamsize) desc.Width * sizeof(float));
+      }
+      ctx->Unmap(stage_cache.Get(), 0);
+      return (bool) stream;
     }
 
     void dump_uint_mask(ID3D11Device *dev, ID3D11DeviceContext *ctx,
@@ -517,7 +554,9 @@ namespace sbs_bench {
       bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
       D3D11_SUBRESOURCE_DATA sd = {params, 0, 0};
       ComPtr<ID3D11Buffer> b;
-      dev->CreateBuffer(&bd, &sd, &b);
+      if (FAILED(dev->CreateBuffer(&bd, &sd, &b))) {
+        return nullptr;
+      }
       return b;
     }
 
@@ -536,7 +575,11 @@ namespace sbs_bench {
       int max_width = 0;  // 0 -> use config max_encode_width
       int limit = 0;  // 0 -> all
       int output_every = 1;  // process every input for temporal state; dump only every Nth
+      bool output_gt_right_only = false;  // emit only identities with authored right-eye labels
       int depth_every = 1;  // infer every Nth source frame; reuse depth between updates
+      bool depth_only = false;  // training-data export: skip warp/SBS/raw artifacts
+      bool artistic_policy = true;  // consume optional model control output; false is an ablation
+      double artistic_scale_override = 0.0;  // exact post-baseline multiplier; 0 = model/off
       // Apollo depth-pipeline A/B levers; <0 / false -> use the conf's value.
       double subject_lock = -1.0;  // subject anchor strength override (e.g. 0.95)
       double subject_recenter = -1.0;  // global subject recenter override
@@ -595,8 +638,18 @@ namespace sbs_bench {
           o.limit = std::stoi(next("--limit"));
         } else if (a == "--output-every") {
           o.output_every = std::max(1, std::stoi(next("--output-every")));
+        } else if (a == "--output-gt-right-only") {
+          o.output_gt_right_only = true;
         } else if (a == "--depth-every") {
           o.depth_every = std::stoi(next("--depth-every"));
+        } else if (a == "--depth-only") {
+          o.depth_only = true;
+        } else if (a == "--artistic-policy") {
+          o.artistic_policy = true;
+        } else if (a == "--no-artistic-policy") {
+          o.artistic_policy = false;
+        } else if (a == "--artistic-scale-override") {
+          o.artistic_scale_override = std::stod(next("--artistic-scale-override"));
         } else if (a == "--depth-override-root") {
           o.depth_override_root = next("--depth-override-root");
         } else if (a == "--depth-override-all") {
@@ -673,6 +726,17 @@ namespace sbs_bench {
         BOOST_LOG(error) << "sbs-bench: EMA edge thresholds and strength must be <=1";
         return false;
       }
+      if (o.artistic_scale_override != 0.0 &&
+          !(o.artistic_scale_override >= 0.5 && o.artistic_scale_override <= 1.5)) {
+        BOOST_LOG(error) << "sbs-bench: --artistic-scale-override must be between 0.5 and 1.5";
+        return false;
+      }
+      if (o.literal_bestv2 && o.artistic_scale_override > 0.0) {
+        BOOST_LOG(error) << "sbs-bench: --literal-bestv2 cannot be combined with "
+                            "--artistic-scale-override; literal mode intentionally bypasses "
+                            "production artistic scaling.";
+        return false;
+      }
       if (!o.depth_override_root.empty() && !fs::is_directory(o.depth_override_root)) {
         BOOST_LOG(error) << "sbs-bench: --depth-override-root is not a directory";
         return false;
@@ -697,7 +761,11 @@ namespace sbs_bench {
             return m;
           }
         }
-        BOOST_LOG(warning) << "sbs-bench: model '" << want << "' not in registry; using active model";
+        // Evaluator experiments intentionally use local, unregistered ONNX stems. Returning the
+        // active profile here would silently evaluate the wrong model while contract.json claimed
+        // the requested name. Keep custom harness models local-only; missing artifacts fail in
+        // ensure_model_available() instead of falling back.
+        return config::depth_model_info {want, ""};
       }
       return video::active_depth_model();
     }
@@ -817,27 +885,56 @@ namespace sbs_bench {
     // Harness-only GPU timestamps. CPU submission time is not a useful warp-cost measurement.
     ComPtr<ID3D11Query> warp_disjoint, warp_start, warp_end;
     D3D11_QUERY_DESC qd = {D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
-    dev->CreateQuery(&qd, &warp_disjoint);
+    HRESULT query_hr = dev->CreateQuery(&qd, &warp_disjoint);
     qd.Query = D3D11_QUERY_TIMESTAMP;
-    dev->CreateQuery(&qd, &warp_start);
-    dev->CreateQuery(&qd, &warp_end);
+    query_hr = FAILED(query_hr) ? query_hr : dev->CreateQuery(&qd, &warp_start);
+    query_hr = FAILED(query_hr) ? query_hr : dev->CreateQuery(&qd, &warp_end);
+    if (FAILED(query_hr) || !warp_disjoint || !warp_start || !warp_end) {
+      BOOST_LOG(error) << "sbs-bench: failed to create GPU timestamp queries";
+      return 6;
+    }
 
     auto vs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0");
     auto ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0");
     auto mask_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "mask_ps", "ps_5_0");
     auto coverage_cs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_forward_coverage_cs.hlsl", "main", "cs_5_0");
+    auto parallax_cs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_forward_coverage_cs.hlsl", "parallax_main", "cs_5_0");
+    auto raw_parallax_cs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_forward_coverage_cs.hlsl", "raw_parallax_main", "cs_5_0");
     auto warp_prefilter_cs_blob = compile(SUNSHINE_SHADERS_DIR "/depth_warp_prefilter_cs.hlsl", "main", "cs_5_0");
-    if (!vs_blob || !ps_blob || !mask_ps_blob || !coverage_cs_blob || !warp_prefilter_cs_blob) {
+    if (!vs_blob || !ps_blob || !mask_ps_blob || !coverage_cs_blob || !parallax_cs_blob || !raw_parallax_cs_blob || !warp_prefilter_cs_blob) {
       return 6;
     }
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11PixelShader> ps, mask_ps;
-    ComPtr<ID3D11ComputeShader> coverage_cs, warp_prefilter_cs;
-    dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &vs);
-    dev->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &ps);
-    dev->CreatePixelShader(mask_ps_blob->GetBufferPointer(), mask_ps_blob->GetBufferSize(), nullptr, &mask_ps);
-    dev->CreateComputeShader(coverage_cs_blob->GetBufferPointer(), coverage_cs_blob->GetBufferSize(), nullptr, &coverage_cs);
-    dev->CreateComputeShader(warp_prefilter_cs_blob->GetBufferPointer(), warp_prefilter_cs_blob->GetBufferSize(), nullptr, &warp_prefilter_cs);
+    ComPtr<ID3D11ComputeShader> coverage_cs, parallax_cs, raw_parallax_cs, warp_prefilter_cs;
+    const HRESULT vs_hr = dev->CreateVertexShader(
+      vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &vs
+    );
+    const HRESULT ps_hr = dev->CreatePixelShader(
+      ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &ps
+    );
+    const HRESULT mask_ps_hr = dev->CreatePixelShader(
+      mask_ps_blob->GetBufferPointer(), mask_ps_blob->GetBufferSize(), nullptr, &mask_ps
+    );
+    const HRESULT coverage_hr = dev->CreateComputeShader(
+      coverage_cs_blob->GetBufferPointer(), coverage_cs_blob->GetBufferSize(), nullptr, &coverage_cs
+    );
+    const HRESULT parallax_hr = dev->CreateComputeShader(
+      parallax_cs_blob->GetBufferPointer(), parallax_cs_blob->GetBufferSize(), nullptr, &parallax_cs
+    );
+    const HRESULT raw_parallax_hr = dev->CreateComputeShader(
+      raw_parallax_cs_blob->GetBufferPointer(), raw_parallax_cs_blob->GetBufferSize(), nullptr, &raw_parallax_cs
+    );
+    const HRESULT prefilter_hr = dev->CreateComputeShader(
+      warp_prefilter_cs_blob->GetBufferPointer(), warp_prefilter_cs_blob->GetBufferSize(), nullptr, &warp_prefilter_cs
+    );
+    if (FAILED(vs_hr) || FAILED(ps_hr) || FAILED(mask_ps_hr) || FAILED(coverage_hr) ||
+        FAILED(parallax_hr) || FAILED(raw_parallax_hr) || FAILED(prefilter_hr) ||
+        !vs || !ps || !mask_ps || !coverage_cs || !parallax_cs || !raw_parallax_cs ||
+        !warp_prefilter_cs) {
+      BOOST_LOG(error) << "sbs-bench: failed to create one or more evaluation shaders";
+      return 6;
+    }
 
     ComPtr<ID3D11SamplerState> sampler;
     {
@@ -846,14 +943,23 @@ namespace sbs_bench {
       sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
       sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
       sd.MaxLOD = D3D11_FLOAT32_MAX;
-      dev->CreateSamplerState(&sd, &sampler);
+      if (FAILED(dev->CreateSamplerState(&sd, &sampler)) || !sampler) {
+        BOOST_LOG(error) << "sbs-bench: failed to create warp sampler";
+        return 6;
+      }
     }
 
     // Built after the first source frame reveals the source/output aspect relationship.
     ComPtr<ID3D11Buffer> repro_cb;
 
     // ---- estimator ----
-    models::video_depth_estimator estimator(dev, ctx, fs::path(SUNSHINE_ASSETS_DIR), sbs_cfg, model);
+    models::video_depth_estimator estimator(
+      dev, ctx, fs::path(SUNSHINE_ASSETS_DIR), sbs_cfg, model,
+      o.artistic_policy, (float) o.artistic_scale_override,
+      o.artistic_policy ?
+        models::artistic_policy_authorization::candidate_evaluation :
+        models::artistic_policy_authorization::deployment
+    );
 
     // Per-run state built lazily on the first frame (once we know the input size).
     ComPtr<ID3D11Texture2D> sbs_tex, sbs_stage;
@@ -866,7 +972,16 @@ namespace sbs_bench {
     ComPtr<ID3D11ShaderResourceView> coverage_srv;
     D3D11_VIEWPORT vp = {};
     UINT sbs_w = 0, sbs_h = 0;
+    UINT source_w_contract = 0, source_h_contract = 0;
+    UINT eye_w_contract = 0, eye_h_contract = 0;
+    float content_scale_x_contract = 1.0f;
+    float content_scale_y_contract = 1.0f;
+    UINT disparity_raster_w_contract = 0, disparity_raster_h_contract = 0;
+    UINT model_input_w_contract = 0, model_input_h_contract = 0;
+    bool artistic_output_geometry_set = false;
     ComPtr<ID3D11Texture2D> depth_stage;  // dump_depth staging cache (depth size is constant)
+    ComPtr<ID3D11Texture2D> parallax_tex, parallax_stage;
+    ComPtr<ID3D11UnorderedAccessView> parallax_uav;
     ComPtr<ID3D11Texture2D> warp_depth_tex;
     ComPtr<ID3D11UnorderedAccessView> warp_depth_uav;
     ComPtr<ID3D11ShaderResourceView> warp_depth_srv;
@@ -916,6 +1031,15 @@ namespace sbs_bench {
         BOOST_LOG(warning) << "sbs-bench: skip " << frames[fi];
         continue;
       }
+      if (source_w_contract == 0) {
+        source_w_contract = img.w;
+        source_h_contract = img.h;
+      } else if (source_w_contract != img.w || source_h_contract != img.h) {
+        BOOST_LOG(error) << "sbs-bench: mixed source resolutions are unsupported in one clip: "
+                         << source_w_contract << 'x' << source_h_contract << " then "
+                         << img.w << 'x' << img.h;
+        return 7;
+      }
       const std::string output_id = frame_id(frames[fi], fi);
 
       // Input texture + SRV.
@@ -952,12 +1076,15 @@ namespace sbs_bench {
         continue;
       }
       ComPtr<ID3D11ShaderResourceView> in_srv;
-      dev->CreateShaderResourceView(in_tex.Get(), nullptr, &in_srv);
+      if (FAILED(dev->CreateShaderResourceView(in_tex.Get(), nullptr, &in_srv)) || !in_srv) {
+        BOOST_LOG(error) << "sbs-bench: input SRV creation failed";
+        return 6;
+      }
 
       // First frame: size the SBS target. Per eye = the input resolution by default (so the clip
       // size, not a fixed constant, drives eval cost); --eye-h pins a specific output height.
       // The width is still capped at max_encode_width like the live path.
-      if (!sbs_tex) {
+      if (!o.depth_only && !sbs_tex) {
         int eh_target = o.eye_h > 0 ? o.eye_h :
                                       std::max(2, (int) std::lround((double) img.h * o.output_scale));
         float aspect = (float) img.w / (float) img.h;
@@ -973,9 +1100,13 @@ namespace sbs_bench {
         }
         sbs_w = (UINT) (2 * eye_w);
         sbs_h = (UINT) eye_h;
+        eye_w_contract = (UINT) eye_w;
+        eye_h_contract = (UINT) eye_h;
         const float eye_aspect = (float) eye_w / (float) eye_h;
         const float content_scale_x = eye_aspect > aspect ? aspect / eye_aspect : 1.0f;
         const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
+        content_scale_x_contract = content_scale_x;
+        content_scale_y_contract = content_scale_y;
         float repro_params[8] = {
           (float) sbs_cfg.subject_lock,
           sbs_cfg.subject_stretch ? 1.0f : 0.0f,
@@ -987,6 +1118,10 @@ namespace sbs_bench {
           (float) sbs_cfg.adaptive_pop_max
         };
         repro_cb = const_buffer(dev.Get(), repro_params);
+        if (!repro_cb) {
+          BOOST_LOG(error) << "sbs-bench: reprojection constant-buffer creation failed";
+          return 6;
+        }
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = sbs_w;
         td.Height = sbs_h;
@@ -996,9 +1131,12 @@ namespace sbs_bench {
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT;
         td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        dev->CreateTexture2D(&td, nullptr, &sbs_tex);
-        dev->CreateRenderTargetView(sbs_tex.Get(), nullptr, &sbs_rtv);
-        dev->CreateShaderResourceView(sbs_tex.Get(), nullptr, &sbs_srv);
+        if (FAILED(dev->CreateTexture2D(&td, nullptr, &sbs_tex)) || !sbs_tex ||
+            FAILED(dev->CreateRenderTargetView(sbs_tex.Get(), nullptr, &sbs_rtv)) || !sbs_rtv ||
+            FAILED(dev->CreateShaderResourceView(sbs_tex.Get(), nullptr, &sbs_srv)) || !sbs_srv) {
+          BOOST_LOG(error) << "sbs-bench: SBS render-target creation failed";
+          return 6;
+        }
         D3D11_TEXTURE2D_DESC mask_desc = td;
         mask_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         mask_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
@@ -1020,11 +1158,30 @@ namespace sbs_bench {
         sd2.Usage = D3D11_USAGE_STAGING;
         sd2.BindFlags = 0;
         sd2.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        dev->CreateTexture2D(&sd2, nullptr, &sbs_stage);
+        if (FAILED(dev->CreateTexture2D(&sd2, nullptr, &sbs_stage)) || !sbs_stage) {
+          BOOST_LOG(error) << "sbs-bench: SBS staging-texture creation failed";
+          return 6;
+        }
         vp = {0, 0, (float) sbs_w, (float) sbs_h, 0, 1};
         BOOST_LOG(info) << "sbs-bench: input " << img.w << "x" << img.h << " -> SBS "
                         << sbs_w << "x" << sbs_h
                         << (o.simulate_hdr ? " (linear scRGB FP16 HDR simulation)" : " (sRGB SDR)");
+      }
+
+      if (!artistic_output_geometry_set) {
+        if (o.depth_only) {
+          eye_w_contract = img.w;
+          eye_h_contract = img.h;
+          content_scale_x_contract = 1.0f;
+          content_scale_y_contract = 1.0f;
+        }
+        estimator.set_artistic_output_geometry(
+          eye_w_contract,
+          eye_h_contract,
+          content_scale_x_contract,
+          content_scale_y_contract
+        );
+        artistic_output_geometry_set = true;
       }
 
       // Submit and consume exactly one inference for this source frame.
@@ -1032,12 +1189,167 @@ namespace sbs_bench {
       if (!have_depth_result || (fi % (size_t) o.depth_every) == 0) {
         estimator.estimate_depth(in_srv.Get(), input_color, (std::uint64_t) fi);
         est = estimator.finish_pending_depth_for_evaluation(input_color);
+        if (est.raw_width > 0 && est.raw_height > 0) {
+          if ((model_input_w_contract && model_input_w_contract != (UINT) est.raw_width) ||
+              (model_input_h_contract && model_input_h_contract != (UINT) est.raw_height)) {
+            BOOST_LOG(error) << "sbs-bench: model input geometry changed within one clip";
+            return 7;
+          }
+          model_input_w_contract = (UINT) est.raw_width;
+          model_input_h_contract = (UINT) est.raw_height;
+        }
         cuda_graph_captured = cuda_graph_captured || est.cuda_graph_active;
         have_depth_result = true;
       } else {
         // Match the live stream between depth ticks: color advances while all depth-derived
         // geometry remains the last completed result. The views remain owned by the estimator
         // and are valid until the next inference overwrites their backing resources.
+      }
+
+      // Sampling must never sample the depth/EMA/subject pipeline itself. Every source frame
+      // above was inferred and consumed; only expensive artifact generation/readback is skipped.
+      // Depth-only exports use the same contract so data preparation can retain full-cadence
+      // temporal state while materializing only authored label frames.
+      bool has_gt_right = true;
+      if (o.output_gt_right_only) {
+        const fs::path gt_root = fs::path(o.frames) / "gt_right";
+        has_gt_right = fs::exists(gt_root / ("frame_" + output_id + ".png")) ||
+                       fs::exists(gt_root / ("frame_" + output_id + ".jpg")) ||
+                       fs::exists(gt_root / ("frame_" + output_id + ".jpeg"));
+      }
+      const bool emit_frame = (fi % (size_t) o.output_every) == 0 && has_gt_right;
+      if (o.depth_only && !emit_frame) {
+        continue;
+      }
+
+      if (o.depth_only) {
+        if (!repro_cb) {
+          float repro_params[8] = {
+            (float) sbs_cfg.subject_lock,
+            sbs_cfg.subject_stretch ? 1.0f : 0.0f,
+            1.0f,
+            1.0f,
+            (float) sbs_cfg.pop_strength,
+            o.literal_bestv2 ? 1.0f : 0.0f,
+            sbs_cfg.adaptive_pop ? 1.0f : 0.0f,
+            (float) sbs_cfg.adaptive_pop_max
+          };
+          repro_cb = const_buffer(dev.Get(), repro_params);
+        }
+        if (!est.depth || !est.subject || !repro_cb) {
+          BOOST_LOG(error) << "sbs-bench: depth-only export has no complete warp state";
+          return 6;
+        }
+        // The baseline must use the exact texture fed into the shipping warp, including the
+        // completed-depth silhouette prefilter. Exporting est.depth directly would fit labels
+        // against a different disparity field from the one Apollo actually renders.
+        ComPtr<ID3D11Resource> depth_resource;
+        est.depth->GetResource(&depth_resource);
+        ComPtr<ID3D11Texture2D> depth_texture;
+        if (FAILED(depth_resource.As(&depth_texture))) {
+          return 6;
+        }
+        D3D11_TEXTURE2D_DESC depth_desc {};
+        depth_texture->GetDesc(&depth_desc);
+        if (!warp_depth_tex) {
+          auto warp_desc = depth_desc;
+          warp_desc.Usage = D3D11_USAGE_DEFAULT;
+          warp_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS |
+                                D3D11_BIND_SHADER_RESOURCE;
+          warp_desc.CPUAccessFlags = 0;
+          warp_desc.MiscFlags = 0;
+          if (FAILED(dev->CreateTexture2D(&warp_desc, nullptr, &warp_depth_tex)) ||
+              FAILED(dev->CreateUnorderedAccessView(warp_depth_tex.Get(), nullptr,
+                                                    &warp_depth_uav)) ||
+              FAILED(dev->CreateShaderResourceView(warp_depth_tex.Get(), nullptr,
+                                                   &warp_depth_srv))) {
+            return 6;
+          }
+        }
+        ctx->CSSetShader(warp_prefilter_cs.Get(), nullptr, 0);
+        ctx->CSSetShaderResources(0, 1, est.depth.GetAddressOf());
+        ctx->CSSetUnorderedAccessViews(0, 1, warp_depth_uav.GetAddressOf(), nullptr);
+        ctx->Dispatch((depth_desc.Width + 15u) / 16u,
+                      (depth_desc.Height + 15u) / 16u, 1u);
+        ID3D11UnorderedAccessView *null_prefilter_uav = nullptr;
+        ID3D11ShaderResourceView *null_prefilter_srv = nullptr;
+        ctx->CSSetUnorderedAccessViews(0, 1, &null_prefilter_uav, nullptr);
+        ctx->CSSetShaderResources(0, 1, &null_prefilter_srv);
+        if (!parallax_tex) {
+          D3D11_TEXTURE2D_DESC desc {};
+          depth_texture->GetDesc(&desc);
+          // Depth-only data preparation has no SBS target. Sample the disparity field at the
+          // complete source-content raster, matching the pixel centers a same-resolution eye
+          // would feed into the shipping bilinear depth lookup.
+          desc.Width = img.w;
+          desc.Height = img.h;
+          desc.Format = DXGI_FORMAT_R32_FLOAT;
+          desc.Usage = D3D11_USAGE_DEFAULT;
+          desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+          desc.CPUAccessFlags = 0;
+          desc.MiscFlags = 0;
+          if (FAILED(dev->CreateTexture2D(&desc, nullptr, &parallax_tex)) ||
+              FAILED(dev->CreateUnorderedAccessView(parallax_tex.Get(), nullptr,
+                                                    &parallax_uav))) {
+            BOOST_LOG(error) << "sbs-bench: baseline-disparity texture creation failed";
+            return 6;
+          }
+          disparity_raster_w_contract = desc.Width;
+          disparity_raster_h_contract = desc.Height;
+          eye_w_contract = desc.Width;
+          eye_h_contract = desc.Height;
+        }
+        D3D11_TEXTURE2D_DESC parallax_desc {};
+        parallax_tex->GetDesc(&parallax_desc);
+        ctx->CSSetShader(parallax_cs.Get(), nullptr, 0);
+        ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
+        ID3D11ShaderResourceView *parallax_srvs[] = {
+          in_srv.Get(), warp_depth_srv.Get(), est.subject.Get()
+        };
+        ctx->CSSetShaderResources(0, 3, parallax_srvs);
+        ID3D11UnorderedAccessView *parallax_uavs[] = {nullptr, parallax_uav.Get()};
+        ctx->CSSetUnorderedAccessViews(0, 2, parallax_uavs, nullptr);
+        ctx->CSSetConstantBuffers(2, 1, repro_cb.GetAddressOf());
+        ctx->Dispatch((parallax_desc.Width + 15u) / 16u,
+                      (parallax_desc.Height + 15u) / 16u, 1u);
+        ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr};
+        ID3D11ShaderResourceView *null_srvs[] = {nullptr, nullptr, nullptr};
+        ctx->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
+        ctx->CSSetShaderResources(0, 3, null_srvs);
+        char dname[64];
+        snprintf(dname, sizeof(dname), "depth_%s.png", output_id.c_str());
+        char pname[64];
+        snprintf(pname, sizeof(pname), "baseline_disparity_%s.f32", output_id.c_str());
+        const bool depth_written = dump_depth(
+          dev.Get(), ctx.Get(), est.depth.Get(), fs::path(o.out) / dname, depth_stage
+        );
+        const bool disparity_written = dump_float_texture(
+          dev.Get(), ctx.Get(), parallax_tex.Get(), fs::path(o.out) / pname, parallax_stage
+        );
+
+        ctx->CSSetShader(raw_parallax_cs.Get(), nullptr, 0);
+        ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
+        ctx->CSSetShaderResources(0, 3, parallax_srvs);
+        ctx->CSSetUnorderedAccessViews(0, 2, parallax_uavs, nullptr);
+        ctx->CSSetConstantBuffers(2, 1, repro_cb.GetAddressOf());
+        ctx->Dispatch((parallax_desc.Width + 15u) / 16u,
+                      (parallax_desc.Height + 15u) / 16u, 1u);
+        ctx->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
+        ctx->CSSetShaderResources(0, 3, null_srvs);
+        char raw_pname[80];
+        snprintf(raw_pname, sizeof(raw_pname),
+                 "baseline_unclamped_disparity_%s.f32", output_id.c_str());
+        const bool raw_disparity_written = dump_float_texture(
+          dev.Get(), ctx.Get(), parallax_tex.Get(),
+          fs::path(o.out) / raw_pname, parallax_stage
+        );
+        if (depth_written && disparity_written && raw_disparity_written) {
+          ++written;
+        }
+        if (((fi + 1) % 20) == 0) {
+          BOOST_LOG(info) << "sbs-bench: " << (fi + 1) << "/" << frames.size();
+        }
+        continue;
       }
 
       // Offline motion-compensation reference: replace only explicitly supplied held-depth
@@ -1059,9 +1371,7 @@ namespace sbs_bench {
         ++applied_depth_override_frames;
       }
 
-      // Sampling output must never sample the depth/EMA/subject pipeline itself. Every source
-      // frame above was inferred and consumed; only expensive composite/readback is skipped.
-      if ((fi % (size_t) o.output_every) != 0) {
+      if (!emit_frame) {
         continue;
       }
 
@@ -1113,6 +1423,98 @@ namespace sbs_bench {
         ctx->CSSetUnorderedAccessViews(0, 1, &null_prefilter_uav, nullptr);
         ctx->CSSetShaderResources(0, 1, &null_prefilter_srv);
         warp_depth = warp_depth_srv.Get();
+      }
+      // Export the exact full-binocular disparity consumed by this warp. Image phase correlation
+      // remains useful for perceived volume, but repetitive textures can alias to an impossible
+      // shift and must never drive the hard comfort gate.
+      if (est.depth) {
+        ComPtr<ID3D11Resource> depth_resource;
+        est.depth->GetResource(&depth_resource);
+        ComPtr<ID3D11Texture2D> depth_texture;
+        if (FAILED(depth_resource.As(&depth_texture))) {
+          return 6;
+        }
+        D3D11_TEXTURE2D_DESC depth_desc {};
+        depth_texture->GetDesc(&depth_desc);
+        // Preserve the exact pixel centers visited by the shipping output shader. Compacting to
+        // a rounded content rectangle shifts those centers whenever a bar boundary is fractional.
+        // The diagnostic shader writes zero in bars; scoring excludes them with the same centered
+        // ContentToSourceUV validity rule.
+        const UINT disparity_w = sbs_w / 2u;
+        const UINT disparity_h = sbs_h;
+        bool recreate_parallax = !parallax_tex || !parallax_uav;
+        if (!recreate_parallax) {
+          D3D11_TEXTURE2D_DESC current_desc {};
+          parallax_tex->GetDesc(&current_desc);
+          recreate_parallax = current_desc.Width != disparity_w ||
+                              current_desc.Height != disparity_h;
+        }
+        if (recreate_parallax) {
+          D3D11_TEXTURE2D_DESC parallax_desc = depth_desc;
+          parallax_desc.Width = disparity_w;
+          parallax_desc.Height = disparity_h;
+          parallax_desc.Format = DXGI_FORMAT_R32_FLOAT;
+          parallax_desc.Usage = D3D11_USAGE_DEFAULT;
+          parallax_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+          parallax_desc.CPUAccessFlags = 0;
+          parallax_desc.MiscFlags = 0;
+          parallax_tex.Reset();
+          parallax_uav.Reset();
+          parallax_stage.Reset();
+          if (FAILED(dev->CreateTexture2D(&parallax_desc, nullptr, &parallax_tex)) ||
+              FAILED(dev->CreateUnorderedAccessView(parallax_tex.Get(), nullptr,
+                                                    &parallax_uav))) {
+            BOOST_LOG(error) << "sbs-bench: warp-disparity texture creation failed";
+            return 6;
+          }
+          disparity_raster_w_contract = parallax_desc.Width;
+          disparity_raster_h_contract = parallax_desc.Height;
+        }
+        D3D11_TEXTURE2D_DESC parallax_desc {};
+        parallax_tex->GetDesc(&parallax_desc);
+        ctx->CSSetShader(parallax_cs.Get(), nullptr, 0);
+        ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
+        ID3D11ShaderResourceView *parallax_srvs[] = {
+          in_srv.Get(), warp_depth, est.subject.Get()
+        };
+        ctx->CSSetShaderResources(0, 3, parallax_srvs);
+        ID3D11UnorderedAccessView *parallax_uavs[] = {nullptr, parallax_uav.Get()};
+        ctx->CSSetUnorderedAccessViews(0, 2, parallax_uavs, nullptr);
+        ctx->CSSetConstantBuffers(2, 1, repro_cb.GetAddressOf());
+        ctx->Dispatch((parallax_desc.Width + 15u) / 16u,
+                      (parallax_desc.Height + 15u) / 16u, 1u);
+        ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr};
+        ID3D11ShaderResourceView *null_srvs[] = {nullptr, nullptr, nullptr};
+        ctx->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
+        ctx->CSSetShaderResources(0, 3, null_srvs);
+        char disparity_name[64];
+        snprintf(disparity_name, sizeof(disparity_name),
+                 "warp_disparity_%s.f32", output_id.c_str());
+        if (!dump_float_texture(dev.Get(), ctx.Get(), parallax_tex.Get(),
+                                fs::path(o.out) / disparity_name, parallax_stage)) {
+          BOOST_LOG(error) << "sbs-bench: exact warp-disparity readback failed";
+          return 6;
+        }
+
+        // Also preserve the unclamped, scale-1 baseline. Multiplying an already-clamped identity
+        // field is not equivalent to the shipping clamp(raw * scale) contract at high pop.
+        ctx->CSSetShader(raw_parallax_cs.Get(), nullptr, 0);
+        ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
+        ctx->CSSetShaderResources(0, 3, parallax_srvs);
+        ctx->CSSetUnorderedAccessViews(0, 2, parallax_uavs, nullptr);
+        ctx->CSSetConstantBuffers(2, 1, repro_cb.GetAddressOf());
+        ctx->Dispatch((parallax_desc.Width + 15u) / 16u,
+                      (parallax_desc.Height + 15u) / 16u, 1u);
+        ctx->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
+        ctx->CSSetShaderResources(0, 3, null_srvs);
+        char raw_disparity_name[72];
+        snprintf(raw_disparity_name, sizeof(raw_disparity_name),
+                 "warp_unclamped_disparity_%s.f32", output_id.c_str());
+        if (!dump_float_texture(dev.Get(), ctx.Get(), parallax_tex.Get(),
+                                fs::path(o.out) / raw_disparity_name, parallax_stage)) {
+          BOOST_LOG(error) << "sbs-bench: unclamped warp-disparity readback failed";
+          return 6;
+        }
       }
       auto dispatch_coverage = [&](ID3D11ComputeShader *shader,
                                    ID3D11UnorderedAccessView *coverage_view) {
@@ -1270,31 +1672,91 @@ namespace sbs_bench {
       // profile names are case-sensitive and fidelity runs must prove literal Bestv2 was active.
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
-        contract << "{\n"
-                 << "  \"schema\": 15,\n"
+        const auto artistic_policy_status = estimator.artistic_policy_status();
+        // Preserve the HLSL float32 operation order so the advertised raw->clamped identity is
+        // exact even at a saturated pixel.
+        const float source_aspect = (float) source_w_contract /
+                                    (float) std::max(1u, source_h_contract);
+        const float artistic_aspect_scale = o.literal_bestv2 ? 1.0f :
+          std::clamp((5120.0f / 2160.0f) / source_aspect, 0.5f, 3.0f);
+        const float artistic_full_clamp_abs =
+          2.0f * content_scale_x_contract * 0.071f * artistic_aspect_scale;
+        contract << std::setprecision(std::numeric_limits<float>::max_digits10)
+                 << "{\n"
+                 << "  \"schema\": 24,\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
+                 << "  \"source_width\": " << source_w_contract << ",\n"
+                 << "  \"source_height\": " << source_h_contract << ",\n"
+                 << "  \"model_input_width\": " << model_input_w_contract << ",\n"
+                 << "  \"model_input_height\": " << model_input_h_contract << ",\n"
+                 << "  \"eye_width\": " << eye_w_contract << ",\n"
+                 << "  \"eye_height\": " << eye_h_contract << ",\n"
+                 << "  \"content_scale_x\": " << content_scale_x_contract << ",\n"
+                 << "  \"content_scale_y\": " << content_scale_y_contract << ",\n"
+                 << "  \"disparity_raster_width\": " << disparity_raster_w_contract << ",\n"
+                 << "  \"disparity_raster_height\": " << disparity_raster_h_contract << ",\n"
+                 << "  \"policy_warp_source_sha256\": \""
+                 << APOLLO_ARTISTIC_WARP_CONTRACT_SHA256 << "\",\n"
+                 << "  \"metric_sha256\": \""
+                 << APOLLO_ARTISTIC_METRIC_CONTRACT_SHA256 << "\",\n"
+                 << "  \"artistic_full_clamp_abs\": "
+                  << artistic_full_clamp_abs << ",\n"
                  << "  \"depth_step\": "
                  << json_string(o.depth_every == 1 ? std::string("current-once") : "reuse-" + std::to_string(o.depth_every))
                  << ",\n"
                  << "  \"depth_reuse_interval\": " << o.depth_every << ",\n"
                  << "  \"depth_compensation\": "
-                 << json_string(o.depth_override_root.empty() ? "none" :
-                                (o.depth_override_all ? "external-treatment" :
-                                                        "external-reference"))
+                 << json_string(o.depth_override_root.empty() ? "none" : (o.depth_override_all ? "external-treatment" : "external-reference"))
                  << ",\n"
                  << "  \"depth_override_frames\": " << applied_depth_override_frames << ",\n"
                  << "  \"ema\": " << sbs_cfg.ema << ",\n"
                  << "  \"ema_edge_change\": " << sbs_cfg.ema_edge_change << ",\n"
                  << "  \"ema_edge_gradient\": " << sbs_cfg.ema_edge_gradient << ",\n"
                  << "  \"ema_edge_strength\": " << sbs_cfg.ema_edge_strength << ",\n"
+                 << "  \"minmax_ema\": " << sbs_cfg.minmax_ema << ",\n"
+                 << "  \"subject_lock\": " << sbs_cfg.subject_lock << ",\n"
+                 << "  \"subject_recenter\": " << sbs_cfg.subject_recenter << ",\n"
+                 << "  \"subject_stretch\": "
+                 << (sbs_cfg.subject_stretch ? "true" : "false") << ",\n"
+                 << "  \"depth_short_side\": " << sbs_cfg.depth_short_side << ",\n"
+                 << "  \"depth_max_aspect\": " << sbs_cfg.depth_max_aspect << ",\n"
+                 << "  \"pop_strength\": " << sbs_cfg.pop_strength << ",\n"
                  << "  \"adaptive_pop\": " << (sbs_cfg.adaptive_pop ? "true" : "false") << ",\n"
                  << "  \"adaptive_pop_max\": " << sbs_cfg.adaptive_pop_max << ",\n"
                  << "  \"zero_plane\": " << json_string(sbs_cfg.zero_plane) << ",\n"
+                 << "  \"artistic_style\": " << json_string(sbs_cfg.artistic_style) << ",\n"
+                 << "  \"artistic_policy\": " << (o.artistic_policy ? "true" : "false") << ",\n"
+                 << "  \"artistic_policy_consumed\": "
+                 << (artistic_policy_status.consumed ? "true" : "false") << ",\n"
+                 << "  \"artistic_policy_authorization\": "
+                 << json_string(artistic_policy_status.authorization) << ",\n"
+                 << "  \"model_onnx_sha256\": "
+                 << json_string(artistic_policy_status.model_onnx_sha256) << ",\n"
+                 << "  \"policy_metadata_sha256\": "
+                 << json_string(artistic_policy_status.policy_metadata_sha256) << ",\n"
+                 << "  \"deployment_geometry_allowlist_sha256\": "
+                 << json_string(artistic_policy_status.deployment_geometry_allowlist_sha256)
+                 << ",\n"
+                 << "  \"color_mode\": "
+                 << json_string(o.simulate_hdr ? "hdr-scrgb-fp16" : "sdr-srgb-8bit")
+                 << ",\n"
+                 << "  \"artistic_scale_override\": " << o.artistic_scale_override << ",\n"
+                 << "  \"output_interval\": " << o.output_every << ",\n"
+                 << "  \"output_gt_right_only\": "
+                 << (o.output_gt_right_only ? "true" : "false") << ",\n"
                  << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n"
                  << "  \"cuda_graph\": " << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
                  << "  \"cuda_graph_captured\": " << (cuda_graph_captured ? "true" : "false") << ",\n"
-                 << "  \"warp_mask\": {\"red\": \"forward_disocclusion_before_fill\"}\n"
+                 << "  \"artifact_mode\": "
+                 << json_string(o.depth_only ? "depth+baseline-disparity" : "full") << ",\n"
+                 << "  \"warp_mask\": {\"red\": \"forward_disocclusion_before_fill\"},\n"
+                 << "  \"warp_disparity\": "
+                    "\"exact_clamped_full_binocular_normalized_at_output_eye_raster_zero_bars\",\n"
+                 << "  \"warp_unclamped_disparity\": "
+                    "\"unclamped_full_binocular_normalized_at_artistic_scale_1_output_eye_raster_zero_bars\",\n"
+                 << "  \"artistic_disparity_contract\": "
+                    "\"clamp(raw_baseline_times_scale_to_plus_or_minus_0.142_times_aspect_scale_times_content_scale_x)\"\n"
                  << "}\n";
       }
     }
@@ -1308,7 +1770,9 @@ namespace sbs_bench {
               << "  \"nonfinite_components\": " << hdr_nonfinite << "\n}\n";
       }
     }
-    BOOST_LOG(info) << "sbs-bench: wrote " << written << " SBS frames + sbs_perf.json to " << o.out;
+    BOOST_LOG(info) << "sbs-bench: wrote " << written << ' '
+                    << (o.depth_only ? "depth frames" : "SBS frames")
+                    << " + sbs_perf.json to " << o.out;
     return written > 0 ? 0 : 8;
   }
 

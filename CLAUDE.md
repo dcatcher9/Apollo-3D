@@ -119,8 +119,9 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   composite shaders over a fixed directory of frames (split a short video with
   `tools/sbsbench/split_video.py`), writing `sbs_%05d.png` + `depth_%05d.png`, deterministically
   and with no game/client. Score with `python tools/sbsbench/sbsbench.py --seq <out> --baseline
-  base.json` → pop_spread (near-to-far stereo VOLUME, the gated pop metric — subject-anchoring-fair,
-  unlike median-|dx| pop_px which is reported-only), vmisalign (geometry, must stay ~0),
+  base.json` → `exact_pop_spread_pct` (p95−p5 of the exported signed HLSL full-binocular
+  disparity, the gated stereo-volume metric), `pop_spread_pct` (image phase-correlation estimate,
+  diagnostic only), vmisalign (geometry, must stay ~0),
   disocc_frac/disocc_smear (disocclusion severity), flicker (temporal shimmer, which the offline
   sim can't measure). Capture a baseline before the change; `--pop-strength`,
   `--depth-short-side`, `--ema`, `--minmax-ema`, and the subject

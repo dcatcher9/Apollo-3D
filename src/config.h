@@ -179,6 +179,8 @@ namespace config {
       double subject_recenter = 0.35;  ///< How strongly the depth field is shifted to put the tracked subject at mid-depth before the band mapping (0-1).
       bool subject_stretch = true;  ///< Bestv2 shape_depth_for_pop stretch: rescale the permanent P5/P95 band to [0,1].
       std::string zero_plane = "legacy";  ///< Shot-latched screen-plane anchor: legacy, subject, median, or background. Experimental modes preserve disparity range and eye symmetry.
+      std::string artistic_style = "immersive";  ///< Learned safe-ceiling policy request: clean (identity), balanced (half of available gain), or immersive (full safe gain). Inert for ordinary depth-only models.
+      bool artistic_live_review = false;  ///< Explicitly allow a staged, fully offline-gated learned policy for live headset review. Final production policies do not require this.
       std::string depth_model = "depth_anything_v2_fp16";  ///< Local ONNX stem/logical model name. Identifies models so each gets its own recipe-specific engine cache.
       std::string depth_model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< URL to download the depth model ONNX from if <depth_model>.onnx is absent. Point this (and depth_model) elsewhere to use a different model.
       int max_encode_width = 8192;  ///< Max encoder output width for host SBS. SBS doubles the client width to 2W; if 2W exceeds this, the host caps the packed frame to this width (scaling height to keep the per-eye aspect) rather than failing NVENC create. NVENC HEVC/AV1 = 8192, H.264 = 4096.

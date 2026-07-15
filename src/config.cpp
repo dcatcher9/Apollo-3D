@@ -1263,6 +1263,8 @@ namespace config {
       double_between_f(vars, prefix + "subject_recenter", target.subject_recenter, {0.0, 1.0});
       bool_f(vars, prefix + "subject_stretch", target.subject_stretch);
       string_f(vars, prefix + "zero_plane", target.zero_plane);
+      string_f(vars, prefix + "artistic_style", target.artistic_style);
+      bool_f(vars, prefix + "artistic_live_review", target.artistic_live_review);
       string_f(vars, prefix + "depth_model", target.depth_model);
       string_f(vars, prefix + "depth_model_url", target.depth_model_url);
       int_between_f(vars, prefix + "max_encode_width", target.max_encode_width, {256, 16384});
@@ -1279,6 +1281,14 @@ namespace config {
       BOOST_LOG(warning) << "Invalid sbs_3d_zero_plane value '" << video.sbs.zero_plane
                          << "'; use legacy, subject, median, or background. Using legacy.";
       video.sbs.zero_plane = "legacy";
+    }
+    if (video.sbs.artistic_style != "clean" &&
+        video.sbs.artistic_style != "balanced" &&
+        video.sbs.artistic_style != "immersive") {
+      BOOST_LOG(warning) << "Invalid sbs_3d_artistic_style value '"
+                         << video.sbs.artistic_style
+                         << "'; use clean, balanced, or immersive. Using immersive.";
+      video.sbs.artistic_style = "immersive";
     }
     video.sbs.max_encode_width &= ~1;
 
