@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -19,6 +20,8 @@ import train_artistic_policy as train  # noqa: E402
 import evaluate_artistic_policy as evaluate  # noqa: E402
 import export_artistic_policy as export_policy  # noqa: E402
 import artistic_geometry_contract as geometry_contract  # noqa: E402
+import test_artistic_policy_evaluation_contract as evaluation_contract_test  # noqa: E402
+import test_audit_artistic_dataset_splits as split_contract_test  # noqa: E402
 
 
 class ArtisticLabelLoadingTests(unittest.TestCase):
@@ -28,6 +31,105 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
             "".join(json.dumps(row) + "\n" for row in rows),
             encoding="utf-8",
         )
+
+    @staticmethod
+    def attach_four_condition_targets(row, geometries, disparity_paths,
+                                      scales=(1.2, 1.1, 1.3, 1.15),
+                                      reliabilities=(0.8, 0.7, 0.9, 0.6)):
+        """Attach the exact schema-10 image-condition target/evidence shape."""
+        variants = [
+            value for value in train.label_merge.policy_input_variants()
+            if value["kind"] != train.input_color.INPUT_KIND_NATIVE_PQ
+        ]
+        manifest = train.label_merge.build_input_variant_manifest(
+            train.label_merge.policy_input_variants()
+        )
+        row["condition_target_contract"] = (
+            train.label_merge.CONDITION_TARGET_CONTRACT
+        )
+        row["input_variant_manifest"] = manifest
+        row["input_variant_manifest_sha256"] = (
+            train.label_merge.input_variant_manifest_sha256(manifest)
+        )
+        row["depth_input_color_contract_sha256"] = (
+            train.input_color.color_contract_sha256()
+        )
+        row["input_condition_targets"] = []
+        row["deployment_geometry_variants"] = []
+
+        def render(scale, clamp):
+            return {
+                "scale": scale, "hlsl_full_clamp_abs": clamp,
+                "comfort_clamp_abs_pct": clamp * 100.0,
+                "mean_abs_disparity_pct": scale,
+                "p95_abs_disparity_pct": scale,
+                "exact_pop_spread_pct": scale,
+                "clamped_pixel_pct": 0.0,
+            }
+
+        clamp = float(row.get("artistic_full_clamp_abs", 0.02))
+        for condition_index, input_variant in enumerate(variants):
+            input_hash = train.input_color.input_variant_sha256(input_variant)
+            scale = float(scales[condition_index])
+            actionable = train.is_actionable_scale(scale)
+            reliability = (
+                float(reliabilities[condition_index]) if actionable else 0.0
+            )
+            confidence = 1.0 if actionable else 0.0
+            style_targets = {
+                "clean": 1.0,
+                "balanced": 1.0 + 0.5 * (scale - 1.0),
+                "immersive": scale,
+            }
+            target = {
+                "schema": train.label_merge.CONDITION_TARGET_SCHEMA,
+                "contract": train.label_merge.CONDITION_TARGET_CONTRACT,
+                "input_variant": input_variant,
+                "input_variant_sha256": input_hash,
+                "deployment_geometry_variant_count": 2,
+                "safe_scale_min": 0.9,
+                "safe_scale_max": scale,
+                "safe_scale_ceiling": scale,
+                "baseline_multiplier": scale,
+                "ceiling_confidence": confidence,
+                "confidence": confidence,
+                "safety_margin_reliability": reliability,
+                "render_evidence_confidence": reliability,
+                "identity_feasible": True,
+                "identity_infeasible_variants": [],
+                "style_targets": style_targets,
+                "style_render_targets": {
+                    name: render(value, clamp)
+                    for name, value in style_targets.items()
+                },
+                "safe_ceiling_render_target": render(scale, clamp),
+                "safe_ceiling_exact_pop_spread_pct": scale,
+            }
+            row["input_condition_targets"].append(target)
+            for geometry, path in zip(geometries, disparity_paths):
+                condition_geometry = json.loads(json.dumps(geometry))
+                condition_geometry["color_mode"] = input_variant["color_mode"]
+                row["deployment_geometry_variants"].append({
+                    "geometry": condition_geometry,
+                    "input_variant": input_variant,
+                    "input_variant_sha256": input_hash,
+                    "baseline_unclamped_disparity": str(path),
+                    "baseline_unclamped_disparity_sha256": (
+                        hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                    ),
+                    "artistic_full_clamp_abs": clamp,
+                    "safe_scale_min": 0.9,
+                    "safe_scale_max": scale,
+                    "safety_margin_reliability": reliability,
+                    "identity_feasible": True,
+                    "identity_violations": [],
+                    "safe_ceiling_render_target": render(scale, clamp),
+                    "style_render_targets": {
+                        name: render(value, clamp)
+                        for name, value in style_targets.items()
+                    },
+                })
+        return row
 
     @staticmethod
     def write_bundle(root, name, rows, thresholds_payload=None):
@@ -44,10 +146,31 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
             "disparity_raster_height": 1080,
             "color_mode": geometry_contract.COLOR_MODE_SDR,
         }
-        allowlist = geometry_contract.build_allowlist([geometry])
+        second_geometry = dict(geometry, eye_width=1280, eye_height=720,
+                               disparity_raster_width=1280,
+                               disparity_raster_height=720)
+        geometries = (geometry, second_geometry)
+        allowlist = geometry_contract.build_allowlist([
+            dict(item, color_mode=color_mode)
+            for item in geometries
+            for color_mode in (
+                geometry_contract.COLOR_MODE_SDR,
+                geometry_contract.COLOR_MODE_HDR,
+            )
+        ])
         allowlist_hash = geometry_contract.allowlist_sha256(allowlist)
-        rows = [
-            {
+        input_manifest = train.label_merge.build_input_variant_manifest(
+            train.label_merge.policy_input_variants()
+        )
+        input_manifest_hash = train.label_merge.input_variant_manifest_sha256(
+            input_manifest
+        )
+        disparity_paths = (bundle / "g0.f32", bundle / "g1.f32")
+        for path in disparity_paths:
+            path.write_bytes(b"test-disparity")
+        prepared_rows = []
+        for row in rows:
+            prepared = {
                 **row,
                 "source_sha256": row.get(
                     "source_sha256", hashlib.sha256(
@@ -55,10 +178,12 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
                     ).hexdigest()
                 ),
                 "deployment_geometry_allowlist_sha256": allowlist_hash,
-                "deployment_geometry_variants": [{"geometry": geometry}],
             }
-            for row in rows
-        ]
+            ArtisticLabelLoadingTests.attach_four_condition_targets(
+                prepared, geometries, disparity_paths
+            )
+            prepared_rows.append(prepared)
+        rows = prepared_rows
         ArtisticLabelLoadingTests.write_rows(labels, rows)
         code_path = bundle / "fitter.py"
         code_path.write_text("# frozen\n", encoding="utf-8")
@@ -77,20 +202,20 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
             encoding="utf-8",
         )
         fitter = {
-            "schema": 9,
+            "schema": 10,
             "label_fitter": "test",
             "policy_contract": "safe-frontier-multistyle-apollo-v1",
             "label_fitter_config": {
                 "analysis_width": 512,
-                "objective": (
-                    "multi-geometry-connected-safe-frontier-intersection-multistyle"
-                ),
+                "objective": train.label_merge.OBJECTIVE,
                 "confidence_semantics": (
                     "hard actionable 0/1 probability target"
                 ),
                 "reliability_semantics": (
                     "soft safety-margin reliability from render evidence"
                 ),
+                "condition_target_contract":
+                    train.label_merge.CONDITION_TARGET_CONTRACT,
             },
             "model_limits": {"scale_delta_max": 0.5},
             "rendered_disparity_supervision": {"artifact": "test"},
@@ -109,21 +234,29 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
             },
             "code": {
                 role: {"path": str(code_path), "sha256": code_hash}
-                for role in ("label_fitter", "policy_contract",
-                             "label_preparation", "image_loader",
-                             "geometry_merge", "evaluator_runner")
+                for role in sorted(
+                    train.label_merge.MERGED_LABEL_FITTER_CODE_ROLES
+                )
             },
             "deployment_geometry_allowlist": allowlist,
             "deployment_geometry_allowlist_sha256": allowlist_hash,
+            "input_variant_manifest": input_manifest,
+            "input_variant_manifest_sha256": input_manifest_hash,
+            "depth_input_color_contract_sha256":
+                train.input_color.color_contract_sha256(),
+            "condition_target_contract":
+                train.label_merge.CONDITION_TARGET_CONTRACT,
         }
         fitter_path = bundle / "label_fitter_contract.json"
         fitter_path.write_text(json.dumps(fitter), encoding="utf-8")
         summary = {
-            "schema": 9,
+            "schema": 10,
             "labels_sha256": hashlib.sha256(labels.read_bytes()).hexdigest(),
             "label_fitter_contract_sha256": hashlib.sha256(
                 fitter_path.read_bytes()
             ).hexdigest(),
+            "condition_target_contract":
+                train.label_merge.CONDITION_TARGET_CONTRACT,
         }
         (bundle / "summary.json").write_text(
             json.dumps(summary), encoding="utf-8"
@@ -205,6 +338,31 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "metric implementations"):
                 train.labels_contract([first, second])
 
+    def test_label_bundle_rejects_missing_or_changed_code_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            labels = self.write_bundle(
+                root, "code_identity", [{"clip": "a", "frame": 0}]
+            )
+            fitter_path = labels.parent / "label_fitter_contract.json"
+            summary_path = labels.parent / "summary.json"
+            fitter = json.loads(fitter_path.read_text(encoding="utf-8"))
+            identity = fitter["code"].pop("depth_input_color_contract")
+            fitter_path.write_text(json.dumps(fitter), encoding="utf-8")
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["label_fitter_contract_sha256"] = train.sha256(fitter_path)
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "code roles differ"):
+                train.labels_contract([labels])
+
+            fitter["code"]["depth_input_color_contract"] = identity
+            fitter["code"]["image_loader"]["sha256"] = "0" * 64
+            fitter_path.write_text(json.dumps(fitter), encoding="utf-8")
+            summary["label_fitter_contract_sha256"] = train.sha256(fitter_path)
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "missing or changed.*image_loader"):
+                train.labels_contract([labels])
+
     def test_label_bundle_requires_every_matching_destination_geometry(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -241,7 +399,8 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
 
             with self.assertRaisesRegex(
-                    RuntimeError, "omits a matching deployment geometry variant"):
+                    RuntimeError,
+                    "unapproved deployment geometry|omits a matching deployment"):
                 train.labels_contract([labels])
 
     def test_export_rejects_depth_weight_or_metric_provenance_mismatch(self):
@@ -266,7 +425,24 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
             checkpoint["deployment_geometry_allowlist_sha256"] = (
                 geometry_contract.allowlist_sha256(allowlist)
             )
-            actual, metric, actual_allowlist, geometry_hash = (
+            input_manifest = train.label_merge.build_input_variant_manifest([
+                train.input_color.sdr_input_variant(),
+                *(train.input_color.windows_hdr_input_variant(value)
+                  for value in (1000, 2500, 6000)),
+            ])
+            checkpoint["input_variant_manifest"] = input_manifest
+            checkpoint["input_variant_manifest_sha256"] = (
+                train.label_merge.input_variant_manifest_sha256(input_manifest)
+            )
+            checkpoint["depth_input_color_contract_sha256"] = (
+                train.input_color.color_contract_sha256()
+            )
+            checkpoint["condition_target_contract"] = (
+                train.label_merge.CONDITION_TARGET_CONTRACT
+            )
+            (actual, metric, actual_allowlist, geometry_hash,
+             actual_manifest, actual_manifest_hash, color_hash,
+             condition_target_contract) = (
                 export_policy.validate_export_provenance(
                     checkpoint, weights
                 )
@@ -277,6 +453,17 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
             self.assertEqual(
                 geometry_hash,
                 checkpoint["deployment_geometry_allowlist_sha256"],
+            )
+            self.assertEqual(actual_manifest, input_manifest)
+            self.assertEqual(
+                actual_manifest_hash, checkpoint["input_variant_manifest_sha256"]
+            )
+            self.assertEqual(
+                color_hash, checkpoint["depth_input_color_contract_sha256"]
+            )
+            self.assertEqual(
+                condition_target_contract,
+                train.label_merge.CONDITION_TARGET_CONTRACT,
             )
 
             checkpoint["depth_weights_sha256"] = "0" * 64
@@ -297,8 +484,23 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
                 "active_split_sha256": "1" * 64,
                 "metric_sha256": "2" * 16,
                 "label_fitter_identity_sha256": "3" * 64,
-                "sealed_test_productions": ["film_b", "film_a"],
+                "sealed_test_productions": ["film-b", "film-a"],
             }
+            input_manifest = train.label_merge.build_input_variant_manifest([
+                train.input_color.sdr_input_variant(),
+                *(train.input_color.windows_hdr_input_variant(value)
+                  for value in (1000, 2500, 6000)),
+            ])
+            checkpoint["input_variant_manifest"] = input_manifest
+            checkpoint["input_variant_manifest_sha256"] = (
+                train.label_merge.input_variant_manifest_sha256(input_manifest)
+            )
+            checkpoint["depth_input_color_contract_sha256"] = (
+                train.input_color.color_contract_sha256()
+            )
+            checkpoint["condition_target_contract"] = (
+                train.label_merge.CONDITION_TARGET_CONTRACT
+            )
             allowlist = geometry_contract.build_allowlist([{
                 "source_width": 1920, "source_height": 1080,
                 "model_input_width": 770, "model_input_height": 434,
@@ -326,6 +528,9 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
                 "maximum_pass": True,
                 "film_balanced_mean_pass": True,
             }
+            runtime_payload, runtime_decision = (
+                evaluation_contract_test.accepted_payload()
+            )
             payload = {
                 "schema": export_policy.EVALUATION_SCHEMA,
                 "split": "test",
@@ -339,12 +544,27 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
                 "deployment_geometry_allowlist_sha256": checkpoint[
                     "deployment_geometry_allowlist_sha256"
                 ],
+                "input_variant_manifest": input_manifest,
+                "input_variant_manifest_sha256": checkpoint[
+                    "input_variant_manifest_sha256"
+                ],
+                "depth_input_color_contract_sha256": checkpoint[
+                    "depth_input_color_contract_sha256"
+                ],
+                "condition_target_contract": checkpoint[
+                    "condition_target_contract"
+                ],
                 "test_labels_sha256": "4" * 64,
-                "val_films": ["film_a", "film_b"],
+                "val_films": runtime_payload["val_films"],
                 "unsafe_ceiling_overshoot": unsafe_overshoot,
+                "runtime_regime_evaluation": runtime_payload[
+                    "runtime_regime_evaluation"
+                ],
                 "decision": {
                     "accepted": True,
+                    **runtime_decision,
                     "guards": {
+                        **runtime_decision["guards"],
                         "unsafe_ceiling_maximum": True,
                         "unsafe_ceiling_film_balanced_mean": True,
                     },
@@ -373,7 +593,7 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
                 approval["checkpoint_sha256"], train.sha256(policy)
             )
             self.assertEqual(
-                approval["sealed_test_productions"], ["film_a", "film_b"]
+                approval["sealed_test_productions"], ["film-a", "film-b"]
             )
             self.assertEqual(
                 approval["unsafe_ceiling_overshoot"], unsafe_overshoot
@@ -414,12 +634,12 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
             payload["decision"]["accepted"] = True
             payload["val_films"] = ["film_a"]
             write_evaluation()
-            with self.assertRaisesRegex(RuntimeError, "productions"):
+            with self.assertRaisesRegex(RuntimeError, "productions|film_count"):
                 export_policy.validate_sealed_test_approval(
                     checkpoint, train.sha256(policy), evaluation
                 )
 
-            payload["val_films"] = ["film_a", "film_b"]
+            payload["val_films"] = ["film-a", "film-b"]
             payload["unsafe_ceiling_overshoot"]["maximum_scale"] = 0.051
             payload["unsafe_ceiling_overshoot"]["maximum_pass"] = False
             payload["decision"]["unsafe_ceiling_overshoot"] = (
@@ -432,7 +652,7 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
                     checkpoint, train.sha256(policy), evaluation
                 )
 
-    def test_schema9_row_trains_geometry_intersection_ceiling(self):
+    def test_schema10_row_trains_each_condition_intersection_ceiling(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "frame.png"
@@ -454,7 +674,7 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
                 return hashlib.sha256(path.read_bytes()).hexdigest()
 
             row = {
-                "label_schema": 9,
+                "label_schema": 10,
                 "policy_contract": "safe-frontier-multistyle-apollo-v1",
                 "source": str(source), "source_sha256": digest(source),
                 "baseline_disparity": str(baseline),
@@ -506,28 +726,87 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
             row["deployment_geometry_allowlist_sha256"] = (
                 geometry_contract.allowlist_sha256(allowlist)
             )
-            row["deployment_geometry_variants"] = [
-                {
-                    "geometry": geometry,
-                    "baseline_unclamped_disparity": str(path),
-                    "baseline_unclamped_disparity_sha256": digest(path),
-                    "artistic_full_clamp_abs": 0.02,
-                }
-                for geometry, path in zip(
-                    geometries, (unclamped, unclamped_wide)
-                )
-            ]
+            self.attach_four_condition_targets(
+                row, geometries, (unclamped, unclamped_wide),
+                scales=(1.2, 1.1, 1.3, 1.15),
+            )
             train.validate_row(row)
-            image = np.zeros((10, 10, 3), np.uint8)
+            row["deployment_geometry_variants"][0][
+                "input_variant_sha256"
+            ] = "0" * 64
+            with self.assertRaisesRegex(
+                    RuntimeError, "stale or undeclared input identity"):
+                train.validate_row(row)
+            row["deployment_geometry_variants"][0][
+                "input_variant_sha256"
+            ] = train.input_color.input_variant_sha256(
+                train.input_color.sdr_input_variant()
+            )
+            image = np.full((10, 10, 3), 128, np.uint8)
             cv2.imwrite(str(source), image)
             row["source_sha256"] = digest(source)
-            _image, target, raw, clamp_abs = train.PolicyDataset([row])[0]
-            self.assertAlmostEqual(float(target[0]), 1.2)
-            self.assertEqual(float(target[1]), 1.0)
-            self.assertAlmostEqual(float(target[4]), 0.8)
-            self.assertEqual(tuple(target.shape), (5,))
-            self.assertEqual([tuple(field.shape) for field in raw], [(1, 1), (1, 2)])
-            self.assertEqual(clamp_abs, [0.02, 0.02])
+            dataset = train.PolicyDataset([row])
+            self.assertEqual(len(dataset), 4)
+            observed = {}
+            images = []
+            for index in range(len(dataset)):
+                image, target, raw, clamp_abs = dataset[index]
+                images.append(image)
+                observed[dataset.rows[index]["_input_variant_sha256"]] = float(
+                    target[0]
+                )
+                self.assertEqual(tuple(target.shape), (5,))
+                self.assertEqual(
+                    [tuple(field.shape) for field in raw], [(1, 1), (1, 2)]
+                )
+                self.assertEqual(clamp_abs, [0.02, 0.02])
+                self.assertAlmostEqual(
+                    dataset.rows[index]["safe_scale_ceiling"], float(target[0])
+                )
+            expected = {
+                target["input_variant_sha256"]: target["safe_scale_ceiling"]
+                for target in row["input_condition_targets"]
+            }
+            self.assertEqual(set(observed), set(expected))
+            for key in expected:
+                self.assertAlmostEqual(observed[key], expected[key])
+            self.assertTrue(any(
+                not torch.equal(images[0], image) for image in images[1:]
+            ))
+            native_row = json.loads(json.dumps(row))
+            native_variant = train.input_color.native_pq_input_variant()
+            native_hash = train.input_color.input_variant_sha256(native_variant)
+            hdr_target = next(
+                target for target in native_row["input_condition_targets"]
+                if target["input_variant"]["color_mode"] ==
+                train.input_color.COLOR_MODE_HDR
+            )
+            hdr_hash = hdr_target["input_variant_sha256"]
+            hdr_target["input_variant"] = native_variant
+            hdr_target["input_variant_sha256"] = native_hash
+            native_row["input_condition_targets"] = [hdr_target]
+            native_row["deployment_geometry_variants"] = [
+                variant for variant in native_row["deployment_geometry_variants"]
+                if variant["input_variant_sha256"] == hdr_hash
+            ]
+            for variant in native_row["deployment_geometry_variants"]:
+                variant["input_variant"] = native_variant
+                variant["input_variant_sha256"] = native_hash
+            model_source = root / "frame.scrgb16"
+            np.zeros((10, 10, 4), dtype="<f2").tofile(model_source)
+            native_row.update({
+                "model_source": str(model_source),
+                "model_source_sha256": digest(model_source),
+                "model_source_encoding":
+                    train.native_hdr_capture.CAPTURE_ENCODING,
+            })
+            train.validate_row(native_row)
+            native_dataset = train.PolicyDataset([native_row])
+            self.assertEqual(len(native_dataset), 1)
+            _image, _target, native_raw, _clamp = native_dataset[0]
+            self.assertEqual(
+                [tuple(field.shape) for field in native_raw], [(1, 1), (1, 2)]
+            )
             row["baseline_multiplier"] = 1.15
             with self.assertRaisesRegex(RuntimeError, "safe ceiling"):
                 train.validate_row(row)
@@ -614,11 +893,29 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
                 np.asarray([1, 1], dtype="<u4").tobytes()
                 + np.asarray([0.0], dtype="<f4").tobytes()
             )
+            raw_wide = root / "raw-wide.f32"
+            raw_wide.write_bytes(
+                np.asarray([2, 1], dtype="<u4").tobytes()
+                + np.asarray([0.0, 0.0], dtype="<f4").tobytes()
+            )
 
             for name, source_shape, expected_shape in (
                     ("landscape", (180, 320), (3, 168, 294)),
                     ("portrait", (320, 180), (3, 294, 168))):
                 with self.subTest(name=name):
+                    eye_shapes = (
+                        ((16, 9), (32, 18)) if name == "landscape"
+                        else ((9, 16), (18, 32))
+                    )
+                    local_raw = []
+                    for geometry_index, (eye_width, eye_height) in enumerate(
+                            eye_shapes):
+                        path = root / f"{name}-raw-{geometry_index}.f32"
+                        path.write_bytes(
+                            np.asarray([eye_width, eye_height], dtype="<u4").tobytes()
+                            + np.zeros(eye_width * eye_height, dtype="<f4").tobytes()
+                        )
+                        local_raw.append(path)
                     source = root / f"{name}.png"
                     cv2.imwrite(
                         str(source), np.zeros((*source_shape, 3), np.uint8)
@@ -643,16 +940,31 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
                                     "model_input_height": expected_shape[1],
                                     "depth_short_side": 432,
                                     "depth_max_aspect": 4.0,
-                                    "eye_width": 1,
-                                    "eye_height": 1,
-                                    "disparity_raster_height": 1,
-                                    "disparity_raster_width": 1,
+                                    "color_mode": geometry_contract.COLOR_MODE_SDR,
+                                    "eye_width": eye_shapes[0][0],
+                                    "eye_height": eye_shapes[0][1],
+                                    "disparity_raster_height": eye_shapes[0][1],
+                                    "disparity_raster_width": eye_shapes[0][0],
                                     "content_scale_x": 1.0,
                                     "content_scale_y": 1.0,
                                 },
                             },
                         ],
                     }
+                    first_geometry = row["deployment_geometry_variants"][0][
+                        "geometry"
+                    ]
+                    second_geometry = json.loads(json.dumps(first_geometry))
+                    second_geometry.update({
+                        "eye_width": eye_shapes[1][0],
+                        "eye_height": eye_shapes[1][1],
+                        "disparity_raster_width": eye_shapes[1][0],
+                        "disparity_raster_height": eye_shapes[1][1],
+                    })
+                    self.attach_four_condition_targets(
+                        row, (first_geometry, second_geometry),
+                        tuple(local_raw), scales=(1.0, 1.0, 1.0, 1.0),
+                    )
                     image, _target, _raw, _clamp = train.PolicyDataset([row])[0]
                     self.assertEqual(tuple(image.shape), expected_shape)
 
@@ -670,11 +982,17 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
                 writer.write(image)
             writer.release()
             output = root / "prepared"
-            manifest = prepare_movie.prepare(
-                video, output, "test", "test", layout="side-by-side",
-                sample_fps=2.0, cut_threshold=1.0, output_width=0,
-                split="training", film_id="test",
-            )
+            with mock.patch.object(
+                    prepare_movie.video_color, "probe_sdr_input",
+                    return_value={
+                        "dataset_color_contract": "decoded-sdr-bgr8",
+                        "admission": "probed-no-hdr-signals",
+                    }):
+                manifest = prepare_movie.prepare(
+                    video, output, "test", "test", layout="side-by-side",
+                    sample_fps=2.0, cut_threshold=1.0, output_width=0,
+                    split="training", film_id="test",
+                )
             clip = output / "test_shot_0000"
             self.assertEqual(manifest["context_frame_count"], 6)
             self.assertEqual(manifest["sample_count"], 2)
@@ -691,14 +1009,23 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
             )
             if not writer.isOpened():
                 self.skipTest("OpenCV MJPG writer is unavailable")
+            # Prepared movie shots require at least one adjacent frame so the
+            # temporal evidence contract is meaningful.
             writer.write(np.full((72, 128, 3), 80, np.uint8))
+            writer.write(np.full((72, 128, 3), 81, np.uint8))
             writer.release()
             output = root / "prepared"
-            manifest = prepare_movie.prepare(
-                video, output, "test", "test", layout="side-by-side",
-                sample_fps=2.0, cut_threshold=1.0, output_width=160,
-                split="training", film_id="test", eye_aspect_ratio=16 / 9,
-            )
+            with mock.patch.object(
+                    prepare_movie.video_color, "probe_sdr_input",
+                    return_value={
+                        "dataset_color_contract": "decoded-sdr-bgr8",
+                        "admission": "probed-no-hdr-signals",
+                    }):
+                manifest = prepare_movie.prepare(
+                    video, output, "test", "test", layout="side-by-side",
+                    sample_fps=2.0, cut_threshold=1.0, output_width=160,
+                    split="training", film_id="test", eye_aspect_ratio=16 / 9,
+                )
             image = cv2.imread(str(output / "test_shot_0000" / "frame_00000.png"))
             self.assertEqual(image.shape[1::-1], (160, 90))
             self.assertAlmostEqual(manifest["display_eye_aspect_ratio"], 16 / 9)
@@ -737,6 +1064,119 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
         ]
         weights = train.balanced_sample_weights(rows)
         self.assertAlmostEqual(sum(weights[:2]) / weights[2], 4.0)
+
+    def test_sampler_balances_sdr_against_three_hdr_white_anchors(self):
+        sdr = train.input_color.sdr_input_variant()
+        hdr = [
+            train.input_color.windows_hdr_input_variant(white)
+            for white in (1000, 2500, 6000)
+        ]
+        rows = []
+        for variant in (sdr, *hdr):
+            rows.append({
+                "domain": "cinema", "clip": "shot",
+                "global_policy_weight": 1.0,
+                "_input_variant": variant,
+                "_input_variant_sha256": (
+                    train.input_color.input_variant_sha256(variant)
+                ),
+            })
+        weights = train.balanced_sample_weights(rows)
+        self.assertAlmostEqual(weights[0], sum(weights[1:]))
+        self.assertAlmostEqual(weights[1], weights[2])
+        self.assertAlmostEqual(weights[2], weights[3])
+
+    def test_sampler_balances_actions_inside_each_runtime_regime(self):
+        sdr = train.input_color.sdr_input_variant()
+        hdr = [
+            train.input_color.windows_hdr_input_variant(white)
+            for white in (1000, 2500, 6000)
+        ]
+        rows = []
+        for variant in (sdr, *hdr):
+            for action, ceiling in ((False, 1.0), (True, 1.2)):
+                rows.append({
+                    "domain": "cinema",
+                    "clip": f"shot-{action}",
+                    "global_policy_weight": 1.0,
+                    "safe_scale_ceiling": ceiling,
+                    "_input_variant": variant,
+                    "_input_variant_sha256":
+                        train.input_color.input_variant_sha256(variant),
+                })
+        weights = train.balanced_sample_weights(rows)
+        self.assertAlmostEqual(sum(weights[:2]), sum(weights[2:]))
+        self.assertAlmostEqual(weights[0], weights[1])
+        self.assertAlmostEqual(sum(weights[2::2]), sum(weights[3::2]))
+
+    def test_paired_sdr_hdr_source_targets_may_differ_but_tensor_must_match(self):
+        scales = (1.2, 1.1, 1.3, 1.15)
+        rows = []
+        tensors = []
+        for variant, scale in zip(train.label_merge.policy_input_variants(), scales):
+            variant_hash = train.input_color.input_variant_sha256(variant)
+            condition = {
+                "input_variant_sha256": variant_hash,
+                "safe_scale_ceiling": scale,
+                "ceiling_confidence": 1.0,
+                "safe_scale_min": 0.9,
+                "safe_scale_max": scale,
+                "safety_margin_reliability": 0.8,
+            }
+            rows.append({
+                "source_sha256": "a" * 64,
+                "film_id": "film", "clip": "shot", "frame": 7,
+                "_input_variant_sha256": variant_hash,
+                "_condition_target": condition,
+            })
+            tensors.append([scale, 1.0, 0.9, scale, 0.8])
+        targets = torch.tensor(tensors)
+        train.validate_expanded_variant_targets(rows, targets)
+        stale = targets.clone()
+        stale[3, 0] = 1.1
+        with self.assertRaisesRegex(RuntimeError, "differs from its condition target"):
+            train.validate_expanded_variant_targets(rows, stale)
+
+    def test_equivalent_condition_disparity_rejects_conflicting_frontiers(self):
+        geometries = [{"eye_width": 2, "eye_height": 1, "color_mode": mode}
+                      for mode in ("sdr-srgb-8bit", "sdr-srgb-8bit")]
+
+        def condition(name, ceiling, color_mode):
+            render = []
+            for index, geometry in enumerate(geometries):
+                value = dict(geometry, eye_width=index + 1, color_mode=color_mode)
+                render.append({"geometry": value, "safe_scale_max": ceiling})
+            return {
+                "film_id": "film", "clip": "shot", "frame": 0,
+                "source_sha256": "a" * 64,
+                "_input_variant_sha256": name,
+                "safe_scale_ceiling": ceiling,
+                "_render_variants": render,
+            }
+
+        rows = [
+            condition("sdr", 1.3, "sdr-srgb-8bit"),
+            condition("hdr", 1.2, "hdr-scrgb-fp16"),
+        ]
+        exact = [
+            [torch.tensor([[0.01]]), torch.tensor([[0.02]])],
+            [torch.tensor([[0.01]]), torch.tensor([[0.02]])],
+        ]
+        with self.assertRaisesRegex(RuntimeError, "conflicting condition targets"):
+            train.validate_expanded_variant_frontiers(rows, exact)
+
+        near = [
+            exact[0],
+            [torch.tensor([[0.01005]]), torch.tensor([[0.0201]])],
+        ]
+        with self.assertRaisesRegex(RuntimeError, "conflicting condition targets"):
+            train.validate_expanded_variant_frontiers(rows, near)
+
+        distinct = [
+            exact[0],
+            [torch.tensor([[0.02]]), torch.tensor([[0.04]])],
+        ]
+        train.validate_expanded_variant_frontiers(rows, distinct)
 
     def test_same_shot_pairing_never_crosses_clip_boundaries(self):
         rows = [
@@ -865,6 +1305,70 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "appears in both"):
                 train.load_active_split(active)
 
+    def test_active_split_rejects_boolean_schema_boundaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active, payload, _catalog, datasets = self.write_active_split(root)
+
+            payload["schema"] = True
+            active.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "active split manifest"):
+                train.load_active_split(active)
+
+            active, payload, _catalog, datasets = self.write_active_split(root)
+            dataset = datasets["train_film"]
+            dataset_payload = json.loads(dataset.read_text(encoding="utf-8"))
+            dataset_payload["schema"] = True
+            dataset.write_text(json.dumps(dataset_payload), encoding="utf-8")
+            payload["productions"][0]["dataset_manifest_sha256"] = train.sha256(
+                dataset
+            )
+            active.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "identity disagrees"):
+                train.load_active_split(active)
+
+            active, payload, _catalog, _datasets = self.write_active_split(root)
+            payload["productions"][0]["dataset_manifest_schema"] = True
+            active.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "identity disagrees"):
+                train.load_active_split(active)
+
+    def test_active_split_accepts_schema_2_monocular_dataset_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active, payload, _catalog, datasets = self.write_active_split(root)
+            dataset = datasets["train_film"]
+            dataset_payload = json.loads(dataset.read_text(encoding="utf-8"))
+            dataset_payload.update({
+                "schema": 2,
+                "production_id": dataset_payload.pop("film_id"),
+                "source_kind": "mono-video",
+            })
+            dataset.write_text(json.dumps(dataset_payload), encoding="utf-8")
+            payload["productions"][0].update({
+                "dataset_manifest_schema": 2,
+                "source_kind": "mono-video",
+                "dataset_manifest_sha256": train.sha256(dataset),
+            })
+            active.write_text(json.dumps(payload), encoding="utf-8")
+
+            loaded, _identity = train.load_active_split(active)
+
+            self.assertEqual(
+                loaded["productions"][0]["source_kind"], "mono-video"
+            )
+
+            payload["productions"][0]["source_kind"] = "authored-stereo"
+            active.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "identity disagrees"):
+                train.load_active_split(active)
+
+            payload["productions"][0]["source_kind"] = "mono-video"
+            payload["productions"][0].pop("dataset_manifest_schema")
+            active.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "identity disagrees"):
+                train.load_active_split(active)
+
     def test_active_split_rejects_duplicate_video_across_productions(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -883,6 +1387,82 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
             )
             active.write_text(json.dumps(payload), encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "same source video"):
+                train.load_active_split(active)
+
+    def test_active_split_authenticates_native_hdr_video_collections(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active, payload, _catalog, datasets = self.write_active_split(root)
+            for row in payload["productions"]:
+                production = row["production_id"]
+                if production not in {"train_film", "dev_film"}:
+                    continue
+                split = row["split"]
+                manifest, _, _ = (
+                    split_contract_test.ArtisticDatasetSplitAuditTests.
+                    write_native_manifest(root, production, split)
+                )
+                datasets[production] = manifest
+                dataset = json.loads(manifest.read_text(encoding="utf-8"))
+                identity = train.split_audit.native_hdr_source_identity(
+                    dataset, manifest, production, verify_media=False
+                )
+                row.pop("video_sha256")
+                row.update({
+                    "dataset_manifest": str(manifest),
+                    "dataset_manifest_schema": 2,
+                    "dataset_manifest_sha256": train.sha256(manifest),
+                    "source_kind": "native-hdr-video",
+                    **identity,
+                })
+            active.write_text(json.dumps(payload), encoding="utf-8")
+
+            loaded, _ = train.load_active_split(active)
+
+            native = [
+                row for row in loaded["productions"]
+                if row.get("source_kind") == "native-hdr-video"
+            ]
+            self.assertEqual(len(native), 2)
+            self.assertTrue(all(
+                row["source_identity_kind"] ==
+                train.split_audit.NATIVE_HDR_COLLECTION_IDENTITY_KIND
+                for row in native
+            ))
+
+    def test_active_split_rejects_overlapping_native_capture_groups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active, payload, _catalog, _datasets = self.write_active_split(root)
+            for row in payload["productions"]:
+                production = row["production_id"]
+                if production not in {"train_film", "dev_film"}:
+                    continue
+                split = row["split"]
+                manifest, _, _ = (
+                    split_contract_test.ArtisticDatasetSplitAuditTests.
+                    write_native_manifest(
+                        root, production, split,
+                        video_id="shared_video",
+                        capture_group="shared_capture",
+                        media_bytes=b"shared",
+                    )
+                )
+                dataset = json.loads(manifest.read_text(encoding="utf-8"))
+                identity = train.split_audit.native_hdr_source_identity(
+                    dataset, manifest, production, verify_media=False
+                )
+                row.pop("video_sha256")
+                row.update({
+                    "dataset_manifest": str(manifest),
+                    "dataset_manifest_schema": 2,
+                    "dataset_manifest_sha256": train.sha256(manifest),
+                    "source_kind": "native-hdr-video",
+                    **identity,
+                })
+            active.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "multiple productions"):
                 train.load_active_split(active)
 
     def test_policy_decision_requires_held_out_film_majority(self):
@@ -1040,6 +1620,40 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
         self.assertGreater(unsafe_parts["safe_frontier"],
                            identity_parts["safe_frontier"])
 
+    def test_action_coverage_requires_both_actionable_and_identity_shots(self):
+        sdr = train.input_color.sdr_input_variant()
+        hdr = train.input_color.windows_hdr_input_variant(1000)
+
+        def row(clip, ceiling, variant):
+            return {
+                "film_id": "film",
+                "clip": clip,
+                "frame": 0,
+                "safe_scale_ceiling": ceiling,
+                "_input_variant": variant,
+                "_input_variant_sha256":
+                    train.input_color.input_variant_sha256(variant),
+            }
+
+        with self.assertRaisesRegex(RuntimeError, "no actionable"):
+            train.validate_action_coverage([
+                row("sdr_identity", 1.0, sdr),
+                row("hdr_identity", 1.0, hdr),
+            ], "training")
+        with self.assertRaisesRegex(RuntimeError, "no identity"):
+            train.validate_action_coverage([
+                row("sdr_action", 1.2, sdr),
+                row("hdr_action", 1.2, hdr),
+            ], "training")
+        train.validate_action_coverage(
+            [
+                row("sdr_identity", 1.0, sdr),
+                row("sdr_action", 1.2, sdr),
+                row("hdr_identity", 1.0, hdr),
+                row("hdr_action", 1.2, hdr),
+            ], "training"
+        )
+
     def test_confidence_uses_hard_action_not_margin_reliability(self):
         target = torch.tensor([[1.2, 1.0, 1.0, 1.2, 0.5]])
         _loss, parts = train.losses(
@@ -1069,6 +1683,56 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
             metrics["macro"]["first_frame_action_recall_pct"], 0.0
         )
 
+    def test_acceptance_classifies_input_conditions_independently(self):
+        rows = [
+            {"film_id": "film", "clip": "shot", "frame": frame,
+             "_input_variant_sha256": variant}
+            for frame in (0, 1) for variant in ("bright", "dim")
+        ]
+        target = np.asarray([[1.2, 1.0]] * 4)
+        predicted = np.asarray([
+            [1.2, 0.9], [1.0, 0.1],
+            [1.2, 0.9], [1.0, 0.1],
+        ])
+
+        metrics = train.film_balanced_acceptance(
+            predicted, target, rows
+        )
+
+        self.assertEqual(
+            metrics["macro"]["first_frame_action_recall_pct"], 50.0
+        )
+        self.assertAlmostEqual(
+            metrics["macro"]["first_frame_effective_scale_mae_pct"], 10.0
+        )
+        self.assertAlmostEqual(
+            metrics["macro"]["within_shot_scale_std_pct"], 0.0
+        )
+
+    def test_acceptance_reduces_temporal_risk_within_each_fixed_variant(self):
+        rows = [
+            {"film_id": "film", "clip": "shot", "frame": frame,
+             "_input_variant_sha256": variant}
+            for frame in (0, 1) for variant in ("stable", "unstable")
+        ]
+        target = np.asarray([[1.2, 1.0]] * 4)
+        predicted = np.asarray([
+            [1.2, 0.9], [1.2, 0.9],
+            [1.2, 0.9], [1.0, 0.1],
+        ])
+
+        metrics = train.film_balanced_acceptance(predicted, target, rows)
+
+        self.assertAlmostEqual(
+            metrics["macro"]["within_shot_scale_std_pct"], 5.0
+        )
+        self.assertAlmostEqual(
+            metrics["macro"]["within_shot_action_flip_pct"], 25.0
+        )
+        self.assertEqual(
+            metrics["macro"]["first_frame_action_recall_pct"], 100.0
+        )
+
     def test_evaluator_aggregates_only_the_latched_first_frame(self):
         def measurement(frame, trained_error):
             metrics = {
@@ -1095,6 +1759,123 @@ class ArtisticLabelLoadingTests(unittest.TestCase):
         self.assertEqual(
             overall["trained"]["effective_scale_mae_pct"], 20.0
         )
+
+    def test_runtime_regime_acceptance_is_fail_closed_and_reports_whites(self):
+        def measurement(regime, white, clip, actionable, improved=True):
+            target_scale = 1.2 if actionable else 1.0
+            prediction_scale = target_scale if improved else 1.0
+            prediction_confidence = 0.9 if actionable and improved else 0.02
+            trained = {}
+            neutral = {}
+            for key, _label, _unit in evaluate.ALL_METRICS:
+                if key in ("actionable_scale_mae_pct", "action_miss_pct"):
+                    trained[key] = (0.0 if actionable else None)
+                    neutral[key] = (20.0 if key == "actionable_scale_mae_pct"
+                                    and actionable else
+                                    100.0 if actionable else None)
+                elif key == "rendered_disparity_mae_pct":
+                    trained[key] = 0.0 if improved else (1.0 if actionable else 0.0)
+                    neutral[key] = 1.0 if actionable else 0.0
+                elif key == "identity_false_action_pct":
+                    trained[key] = 0.0 if not actionable else None
+                    neutral[key] = 0.0 if not actionable else None
+                elif key == "action_brier":
+                    trained[key] = ((prediction_confidence - float(actionable)) ** 2)
+                    neutral[key] = ((0.02 - float(actionable)) ** 2)
+                else:
+                    trained[key] = (abs(prediction_scale - target_scale) * 100.0)
+                    neutral[key] = (abs(1.0 - target_scale) * 100.0)
+            return {
+                "film_id": "film", "clip": clip, "domain": "cinema",
+                "frame": 0, "runtime_regime": regime,
+                "hdr_white_level_raw": white,
+                "input_variant_sha256": f"{regime}-{white}",
+                "prediction": {
+                    "scale": prediction_scale,
+                    "confidence": prediction_confidence,
+                    "rendered_disparity_mean_abs_pct": prediction_scale,
+                },
+                "target": {
+                    "scale": target_scale,
+                    "confidence": float(actionable),
+                    "rendered_disparity_mean_abs_pct": target_scale,
+                },
+                "trained": trained, "neutral": neutral,
+            }
+
+        rows = [
+            measurement("sdr", None, "action_a", True),
+            measurement("sdr", None, "action_b", True),
+            measurement("sdr", None, "identity", False),
+        ]
+        for white in (1000, 2500, 6000):
+            rows.extend((
+                measurement("hdr", white, "action_a", True),
+                measurement("hdr", white, "action_b", True),
+                measurement("hdr", white, "identity", False),
+            ))
+        result = evaluate.evaluate_runtime_regimes(
+            rows, (1000, 2500, 6000), minimum_films=1,
+            require_identity_guard=False,
+        )
+        self.assertTrue(result["accepted"], result)
+        self.assertEqual(
+            set(result["hdr_by_white_level_raw"]), {"1000", "2500", "6000"}
+        )
+        self.assertEqual(
+            result["regimes"]["sdr"]["primary"]["variant_sample_count"], 3
+        )
+        self.assertEqual(
+            result["regimes"]["hdr"]["primary"]["variant_sample_count"], 9
+        )
+
+        missing = evaluate.evaluate_runtime_regimes(
+            [row for row in rows if row["hdr_white_level_raw"] != 6000],
+            (1000, 2500, 6000), minimum_films=1,
+            require_identity_guard=False,
+        )
+        self.assertFalse(missing["accepted"])
+        self.assertEqual(missing["missing_hdr_white_levels_raw"], [6000])
+
+        failed_rows = [dict(row) for row in rows]
+        for row in failed_rows:
+            if row["runtime_regime"] == "hdr" and "action" in row["clip"]:
+                row["prediction"] = dict(row["prediction"], scale=1.0,
+                                         confidence=0.02)
+                row["trained"] = dict(row["neutral"])
+        failed = evaluate.evaluate_runtime_regimes(
+            failed_rows, (1000, 2500, 6000), minimum_films=1,
+            require_identity_guard=False,
+        )
+        self.assertTrue(failed["regime_pass"]["sdr"])
+        self.assertFalse(failed["regime_pass"]["hdr"])
+        self.assertFalse(failed["accepted"])
+
+    def test_hdr_worst_variant_reduces_neutral_and_trained_metrics(self):
+        rows = []
+        for trained, neutral in ((9.0, 2.0), (3.0, 8.0)):
+            metrics_trained = {
+                key: trained for key, _label, _unit in evaluate.ALL_METRICS
+            }
+            metrics_neutral = {
+                key: neutral for key, _label, _unit in evaluate.ALL_METRICS
+            }
+            rows.append({
+                "film_id": "film", "clip": "shot", "frame": 0,
+                "input_variant_sha256": str(trained),
+                "prediction": {
+                    "scale": 1.0, "confidence": 0.0,
+                    "rendered_disparity_mean_abs_pct": trained,
+                },
+                "target": {
+                    "scale": 1.0, "confidence": 0.0,
+                    "rendered_disparity_mean_abs_pct": neutral,
+                },
+                "trained": metrics_trained, "neutral": metrics_neutral,
+            })
+        collapsed = evaluate.worst_input_variant_measurements(rows)[0]
+        self.assertEqual(collapsed["trained"]["effective_scale_mae_pct"], 9.0)
+        self.assertEqual(collapsed["neutral"]["effective_scale_mae_pct"], 2.0)
 
 
 if __name__ == "__main__":

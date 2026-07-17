@@ -37,7 +37,7 @@ from artistic_policy_contract import (
 
 POLICY_FEATURE_CONTRACT = "multiscale-dino-depth-dpt-stats-v1"
 POLICY_STAT_SIZE = 8
-POLICY_CHECKPOINT_SCHEMA = 7
+POLICY_CHECKPOINT_SCHEMA = 8
 POLICY_CONTRACT = "safe-frontier-multistyle-apollo-v1"
 POLICY_OUTPUT_SEMANTICS = {
     "artistic_global_0": "safe_scale_ceiling",

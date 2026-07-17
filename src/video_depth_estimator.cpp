@@ -659,6 +659,112 @@ static bool json_number_is(const nlohmann::json &value, double expected) {
   return value.is_number() && std::abs(value.get<double>() - expected) <= 1e-9;
 }
 
+static constexpr std::string_view kArtisticDepthInputColorContractSha256 =
+  "a18f5bd9829ce79aea9e6945fa829b414456ec700e2b7cbef2693e46d081d104";
+static constexpr std::string_view kArtisticInputVariantManifestSha256 =
+  "3fff2fb536bcedb805c59f82712ec8d7a8f59f3e09d2cd1676fba337f588d489";
+
+static nlohmann::json artistic_hdr_input_variant(int raw_white) {
+  return {
+    {"schema", 1},
+    {"contract", "apollo-depth-input-variant-v1"},
+    {"kind", "simulated-sdr-in-windows-hdr"},
+    {"color_mode", "hdr-scrgb-fp16"},
+    {"source_encoding", "srgb-rec709-unorm8"},
+    {"capture_encoding", "linear-scrgb-rec709-float16"},
+    {"windows_sdr_white_level_raw", raw_white},
+    {"windows_sdr_white_nits", (double) raw_white * 80.0 / 1000.0},
+    {"scrgb_white_scale", (double) raw_white / 1000.0},
+    {"color_contract_sha256", kArtisticDepthInputColorContractSha256},
+  };
+}
+
+static bool validate_artistic_input_variant_manifest(
+  const nlohmann::json &metadata,
+  std::set<std::string> &declared_color_modes,
+  std::string &reason
+) {
+  const auto manifest = metadata.find("input_variant_manifest");
+  const auto manifest_hash = metadata.find("input_variant_manifest_sha256");
+  const auto color_hash = metadata.find("depth_input_color_contract_sha256");
+  if (manifest == metadata.end() || !manifest->is_object() ||
+      manifest_hash == metadata.end() || !manifest_hash->is_string() ||
+      color_hash == metadata.end() || !color_hash->is_string()) {
+    reason = "missing artistic-policy input color provenance";
+    return false;
+  }
+
+  const nlohmann::json sdr_variant {
+    {"schema", 1},
+    {"contract", "apollo-depth-input-variant-v1"},
+    {"kind", "sdr-rgb8"},
+    {"color_mode", "sdr-srgb-8bit"},
+    {"source_encoding", "srgb-rec709-unorm8"},
+    {"capture_encoding", "srgb-rec709-unorm8"},
+    {"windows_sdr_white_level_raw", nullptr},
+    {"windows_sdr_white_nits", nullptr},
+    {"scrgb_white_scale", nullptr},
+    {"color_contract_sha256", kArtisticDepthInputColorContractSha256},
+  };
+  // The manifest order is canonical: variants are sorted by their canonical SHA-256 identities,
+  // not by white level. Keep this exact four-condition training domain fail closed.
+  const nlohmann::json expected_manifest {
+    {"schema", 1},
+    {"contract", "exact-artistic-policy-input-variants-v1"},
+    {"depth_input_color_contract_sha256", kArtisticDepthInputColorContractSha256},
+    {"variants", nlohmann::json::array({
+       artistic_hdr_input_variant(1000),
+       artistic_hdr_input_variant(6000),
+       sdr_variant,
+       artistic_hdr_input_variant(2500),
+     })},
+  };
+  if (*color_hash != kArtisticDepthInputColorContractSha256 ||
+      *manifest_hash != kArtisticInputVariantManifestSha256 ||
+      *manifest != expected_manifest || manifest->dump() != expected_manifest.dump() ||
+      sha256_bytes(manifest->dump()) != kArtisticInputVariantManifestSha256) {
+    reason = "artistic-policy input variant manifest is stale, noncanonical, or unsupported";
+    return false;
+  }
+
+  declared_color_modes = {"sdr-srgb-8bit", "hdr-scrgb-fp16"};
+  return true;
+}
+
+static std::string_view artistic_live_color_mode(
+  DXGI_FORMAT format,
+  models::input_color_space color_space
+) {
+  if (color_space == models::input_color_space::srgb &&
+      (format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+       format == DXGI_FORMAT_B8G8R8X8_UNORM ||
+       format == DXGI_FORMAT_R8G8B8A8_UNORM)) {
+    return "sdr-srgb-8bit";
+  }
+  if (color_space == models::input_color_space::scrgb_hdr &&
+      format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+    return "hdr-scrgb-fp16";
+  }
+  // In particular, linear_sdr and every format/enum mismatch remain out of domain.
+  return {};
+}
+
+static bool valid_runtime_regime_acceptance(const nlohmann::json &approval) {
+  const auto evidence = approval.find("runtime_regime_acceptance");
+  if (evidence == approval.end() || !evidence->is_object() || evidence->size() != 6) {
+    return false;
+  }
+  const nlohmann::json expected {
+    {"required_regimes", nlohmann::json::array({"sdr", "hdr"})},
+    {"expected_hdr_white_levels_raw", nlohmann::json::array({1000, 2500, 6000})},
+    {"missing_regimes", nlohmann::json::array()},
+    {"missing_hdr_white_levels_raw", nlohmann::json::array()},
+    {"regime_pass", {{"sdr", true}, {"hdr", true}}},
+    {"accepted", true},
+  };
+  return *evidence == expected;
+}
+
 static std::string artistic_geometry_key(const nlohmann::json &value) {
   // Canonicalize by declared type before serialization. In particular, JSON 4 and 4.0 are the
   // same numeric geometry even though nlohmann preserves their parser types in dump().
@@ -809,7 +915,7 @@ static bool validate_artistic_policy_metadata_impl(
     reason = "cannot hash artistic-policy metadata sidecar";
     return false;
   }
-  if (metadata.value("schema", 0) != 4 ||
+  if (metadata.value("schema", 0) != 5 ||
       metadata.value("onnx_sha256", "") != onnx_sha256 ||
       metadata.value("deployed_model", "") != model.name ||
       metadata.value("policy_contract", "") != "safe-frontier-multistyle-apollo-v1" ||
@@ -831,10 +937,16 @@ static bool validate_artistic_policy_metadata_impl(
     reason = "missing or malformed sealed-test artistic-policy approval";
     return false;
   }
+  std::set<std::string> declared_color_modes;
+  if (!validate_artistic_input_variant_manifest(
+        metadata, declared_color_modes, reason
+      )) {
+    return false;
+  }
   const auto decision_accepted = approval->find("decision_accepted");
   const auto productions = approval->find("sealed_test_productions");
-  if (approval->value("contract", "") != "sealed-test-artistic-policy-v2" ||
-      approval->value("evaluation_schema", 0) != 11 ||
+  if (approval->value("contract", "") != "sealed-test-artistic-policy-v3" ||
+      approval->value("evaluation_schema", 0) != 13 ||
       approval->value("split", "") != "test" ||
       approval->value("evaluation_sha256", "") != evaluation_sha->get<std::string>() ||
       approval->value("metric_sha256", "") != metric_sha->get<std::string>() ||
@@ -860,8 +972,9 @@ static bool validate_artistic_policy_metadata_impl(
     return false;
   }
   if (!json_nonempty_unique_strings(*productions) ||
-      !valid_unsafe_ceiling_overshoot(*approval)) {
-    reason = "sealed-test artistic-policy production identities or unsafe-ceiling evidence are invalid";
+      !valid_unsafe_ceiling_overshoot(*approval) ||
+      !valid_runtime_regime_acceptance(*approval)) {
+    reason = "sealed-test production identities, safety evidence, or SDR/HDR acceptance are invalid";
     return false;
   }
 
@@ -958,8 +1071,8 @@ static bool validate_artistic_policy_metadata_impl(
     {"depth_step", "current-once"},
     {"depth_compensation", "none"},
     {"literal_bestv2", false},
-    {"harness_schema", 24},
-    {"eval_schema", 29},
+    {"harness_schema", 28},
+    {"eval_schema", 31},
     {"warp_contract", "apollo-safe-frontier-v1"},
     {"policy_warp_source_sha256", APOLLO_ARTISTIC_WARP_CONTRACT_SHA256},
     {"metric_sha256", APOLLO_ARTISTIC_METRIC_CONTRACT_SHA256},
@@ -996,6 +1109,7 @@ static bool validate_artistic_policy_metadata_impl(
   }
   std::string previous_geometry_key;
   std::set<std::string> allowed_geometry_keys;
+  std::set<std::string> geometry_color_modes;
   for (const auto &tuple : *geometry_tuples) {
     if (!tuple.is_object() || tuple.size() != 13) {
       reason = "deployment geometry allow-list contains a non-object tuple";
@@ -1037,13 +1151,15 @@ static bool validate_artistic_policy_metadata_impl(
       reason = "deployment geometry depth preprocessing differs from the resolved profile";
       return false;
     }
+    const std::string tuple_color_mode = tuple.value("color_mode", "");
     if (tuple.value("disparity_raster_width", 0) != tuple.value("eye_width", -1) ||
         tuple.value("disparity_raster_height", 0) != tuple.value("eye_height", -1) ||
         tuple.value("eye_width", 0) > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION / 2 ||
-        tuple.value("color_mode", "") != "sdr-srgb-8bit") {
-      reason = "deployment geometry must be a complete SDR output-eye raster";
+        !declared_color_modes.contains(tuple_color_mode)) {
+      reason = "deployment geometry must be a complete, declared input-color output-eye raster";
       return false;
     }
+    geometry_color_modes.insert(tuple_color_mode);
 
     const int source_width = tuple.value("source_width", 0);
     const int source_height = tuple.value("source_height", 0);
@@ -1088,6 +1204,10 @@ static bool validate_artistic_policy_metadata_impl(
     }
     previous_geometry_key = geometry_key;
     allowed_geometry_keys.insert(geometry_key);
+  }
+  if (geometry_color_modes != declared_color_modes) {
+    reason = "deployment geometry allow-list does not cover every authenticated input color mode";
+    return false;
   }
   if (sha256_bytes(geometry_allowlist->dump()) != geometry_hash->get<std::string>()) {
     reason = "deployment geometry allow-list hash does not match its canonical contents";
@@ -1243,7 +1363,7 @@ static bool validate_artistic_policy_metadata_impl(
         gate->value("suite", "") != requirement.suite ||
         gate->value("artistic_style", "") != requirement.style ||
         gate->value("verdict", "") != "pass" ||
-        gate->value("eval_schema", 0) != 29 || gate->value("harness_schema", 0) != 24 ||
+        gate->value("eval_schema", 0) != 31 || gate->value("harness_schema", 0) != 28 ||
         gate->value("metric_sha256", "") != metric_sha->get<std::string>() ||
         gate->value("policy_warp_source_sha256", "") !=
           std::string(APOLLO_ARTISTIC_WARP_CONTRACT_SHA256) ||
@@ -2189,6 +2309,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_stage;  // CPU-readable copy for the debug log
     unsigned subject_log_counter = 0;  // paces the [SUBJDBG] readback (every 24 depth updates)
+    runtime_scene_evidence evaluation_last_scene_evidence;
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
@@ -2532,15 +2653,23 @@ namespace models {
         if (subject_buf) {
           device->CreateUnorderedAccessView(subject_buf.Get(), nullptr, &subject_uav);
           device->CreateShaderResourceView(subject_buf.Get(), nullptr, &subject_srv);
-          // Staging copy so the debug log can read the resolved subject state back
-          // (a GPU->CPU sync; only mapped when perf stats are on, every 24 updates).
+          // Staging copy for explicit evaluator scene evidence. The live
+          // capture path never maps it because GPU->CPU readback synchronizes.
           D3D11_BUFFER_DESC stg = {};
           stg.Usage = D3D11_USAGE_STAGING;
           stg.ByteWidth = sizeof(init_state);
           stg.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-          stg.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-          stg.StructureByteStride = sizeof(float) * 4;
-          device->CreateBuffer(&stg, nullptr, &subject_stage);
+          // CPU-readable staging buffers cannot carry D3D11 misc flags. The
+          // structure description belongs only to the GPU source buffer.
+          const HRESULT stage_hr = device->CreateBuffer(
+            &stg, nullptr, &subject_stage
+          );
+          if (FAILED(stage_hr)) {
+            BOOST_LOG(error) << "Depth estimator failed to create subject-state "
+                                "readback buffer (HRESULT 0x"
+                             << std::hex
+                             << static_cast<unsigned long>(stage_hr) << ").";
+          }
         }
       }
 
@@ -2713,6 +2842,66 @@ namespace models {
       return r;
     }
 
+    runtime_scene_evidence read_runtime_scene_evidence(std::uint64_t completed_frame_id) {
+      if (evaluation_last_scene_evidence.valid) {
+        if (completed_frame_id == evaluation_last_scene_evidence.completed_frame_id) {
+          return evaluation_last_scene_evidence;
+        }
+        if (completed_frame_id !=
+            evaluation_last_scene_evidence.completed_frame_id + 1) {
+          return {};
+        }
+      } else if (completed_frame_id != 0) {
+        return {};
+      }
+      if (!subject_stage || !subject_buf || !context) {
+        return {};
+      }
+
+      // This CopyResource+Map intentionally synchronizes the GPU. It is exposed only through the
+      // explicitly named evaluation API below and is never called by the live capture path.
+      context->CopyResource(subject_stage.Get(), subject_buf.Get());
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(context->Map(subject_stage.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return {};
+      }
+      const float *subject = static_cast<const float *>(mapped.pData);
+      const float scene_age = subject[1];
+      const bool initialized = subject[3] > 0.5f;
+      std::array<float, 12> subject_state {};
+      std::copy_n(subject, subject_state.size(), subject_state.begin());
+      context->Unmap(subject_stage.Get(), 0);
+      if (!std::isfinite(scene_age) || scene_age < 0.0f ||
+          !std::all_of(subject_state.begin(), subject_state.end(), [](float value) {
+            return std::isfinite(value);
+          })) {
+        return {};
+      }
+
+      // The shader computes candidate_age = prior_age + 1 and accepts a hard cut only when that
+      // candidate is >= 8, then writes age zero. Thus prior age >= 7 -> current age zero is the
+      // exact observable reset transition when every completed depth frame is read.
+      const bool hard_cut = evaluation_last_scene_evidence.valid &&
+                            evaluation_last_scene_evidence.subject_initialized && initialized &&
+                            evaluation_last_scene_evidence.scene_age >= 7.0f &&
+                            scene_age < 0.5f;
+      runtime_scene_evidence evidence;
+      evidence.valid = true;
+      evidence.completed_frame_id = completed_frame_id;
+      evidence.runtime_scene_id = evaluation_last_scene_evidence.valid ?
+                                    evaluation_last_scene_evidence.runtime_scene_id : 0;
+      if (hard_cut) {
+        ++evidence.runtime_scene_id;
+      }
+      evidence.scene_age = scene_age;
+      evidence.subject_initialized = initialized;
+      evidence.hard_cut = hard_cut;
+      evidence.scene_start = !evaluation_last_scene_evidence.valid || hard_cut;
+      evidence.subject_state = subject_state;
+      evaluation_last_scene_evidence = evidence;
+      return evidence;
+    }
+
     // estimate() has already submitted one inference. Wait for that exact inference, consume it
     // once, and deliberately do NOT enqueue a duplicate. This is the synchronous quality oracle.
     estimate_result finish_pending(input_color_space color_space) {
@@ -2731,13 +2920,12 @@ namespace models {
       if (sbs_perf::enabled()) {
         perf_drain(perf_depth);
       }
-      const bool pending_exact_sdr_8bit =
-        pending_input_format == DXGI_FORMAT_B8G8R8A8_UNORM ||
-        pending_input_format == DXGI_FORMAT_B8G8R8X8_UNORM ||
-        pending_input_format == DXGI_FORMAT_R8G8B8A8_UNORM;
+      const bool pending_input_contract_exact = !artistic_live_color_mode(
+        pending_input_format, pending_input_color_space
+      ).empty();
       if (consume_artistic_policy &&
           (color_space != pending_input_color_space || !pending_artistic_geometry_matched ||
-           pending_input_color_space != input_color_space::srgb || !pending_exact_sdr_8bit)) {
+           !pending_input_contract_exact)) {
         consume_artistic_policy = false;
         artistic_geometry_validated = true;
         artistic_geometry_matched = false;
@@ -2778,11 +2966,10 @@ namespace models {
       const D3D11_TEXTURE2D_DESC &input_desc,
       input_color_space color_space
     ) const {
-      const bool exact_sdr_8bit = input_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
-                                  input_desc.Format == DXGI_FORMAT_B8G8R8X8_UNORM ||
-                                  input_desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM;
-      if (color_space != input_color_space::srgb || !exact_sdr_8bit ||
-          !artistic_geometry_allowlist.is_object()) {
+      const std::string_view live_color_mode = artistic_live_color_mode(
+        input_desc.Format, color_space
+      );
+      if (live_color_mode.empty() || !artistic_geometry_allowlist.is_object()) {
         return false;
       }
       const auto tuples = artistic_geometry_allowlist.find("tuples");
@@ -2798,7 +2985,7 @@ namespace models {
             tuple.value("eye_height", 0u) != artistic_eye_height ||
             tuple.value("disparity_raster_width", 0u) != artistic_eye_width ||
             tuple.value("disparity_raster_height", 0u) != artistic_eye_height ||
-            tuple.value("color_mode", "") != "sdr-srgb-8bit") {
+            tuple.value("color_mode", "") != live_color_mode) {
           continue;
         }
         const double scale_x = tuple.value("content_scale_x", 0.0);
@@ -3530,5 +3717,12 @@ namespace models {
 
   estimate_result video_depth_estimator::finish_pending_depth_for_evaluation(input_color_space color_space) {
     return pimpl->finish_pending(color_space);
+  }
+
+  runtime_scene_evidence video_depth_estimator::read_runtime_scene_evidence_for_evaluation(
+    std::uint64_t completed_frame_id
+  ) {
+    return pimpl ? pimpl->read_runtime_scene_evidence(completed_frame_id) :
+                   runtime_scene_evidence {};
   }
 }  // namespace models

@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "purpose": "Pinned public image-sequence sources for the DA-V2 artistic-policy experiment. Only sharp left/mono RGB is admitted as model input; stereo, disparity, flow and degraded duplicates remain auxiliary evidence.",
+  "sources": {
+    "reds": {
+      "version": "reds-sharp-v1",
+      "dataset": "REDS Sharp",
+      "domain": "real_dynamic_scenes",
+      "source_group": "reds_gopro_capture",
+      "homepage": "https://seungjunnah.github.io/Datasets/reds.html",
+      "license": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "context_fps": 24.0,
+      "global_policy_weight": 1.0,
+      "development_count": 24,
+      "split_salt": "apollo-reds-sharp-v1",
+      "archives": {
+        "train_rgb": {
+          "relative_path": "reds-v1/train_sharp.zip",
+          "url": "https://huggingface.co/datasets/snah/REDS/resolve/62dc25d16e6f43d2214f1b365023abda86f7a0ae/train_sharp.zip?download=true",
+          "bytes": 34261573976,
+          "hash_algorithm": "sha256",
+          "hash": "620294c1c3f23ed26c5ea228633770469c0b28e57d31eb41dc77deb401c6681b",
+          "member_pattern": "^train/train_sharp/(?P<sequence>[0-9]{3})/(?P<frame>[0-9]{8})[.]png$"
+        },
+        "test_rgb": {
+          "relative_path": "reds-v1/val_sharp.zip",
+          "url": "https://huggingface.co/datasets/snah/REDS/resolve/62dc25d16e6f43d2214f1b365023abda86f7a0ae/val_sharp.zip?download=true",
+          "bytes": 4273865704,
+          "hash_algorithm": "sha256",
+          "hash": "53f6ce4791ed3cfca747ff8982ba29b6e8b7cc1927eed742458f45ed93a1a279",
+          "member_pattern": "^val/val_sharp/(?P<sequence>[0-9]{3})/(?P<frame>[0-9]{8})[.]png$"
+        }
+      }
+    },
+    "spring": {
+      "version": "spring-left-v1",
+      "dataset": "Spring Benchmark left RGB",
+      "domain": "cinematic_animation",
+      "source_group": "spring_blender_movie",
+      "homepage": "https://doi.org/10.18419/DARUS-3376",
+      "license": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "context_fps": 24.0,
+      "global_policy_weight": 0.3333333333333333,
+      "development_count": 5,
+      "split_salt": "apollo-spring-left-v1",
+      "archives": {
+        "train_rgb": {
+          "relative_path": "spring-v1/train_frame_left.zip",
+          "url": "https://darus.uni-stuttgart.de/api/access/datafile/:persistentId/?persistentId=doi:10.18419/DARUS-3376/14",
+          "bytes": 13361546687,
+          "hash_algorithm": "md5",
+          "hash": "3a53483fc920514f72e553d1a11d271a",
+          "member_pattern": "^spring/train/(?P<sequence>[0-9]{4})/frame_left/frame_left_(?P<frame>[0-9]{4})[.]png$"
+        },
+        "train_disparity": {
+          "relative_path": "spring-v1/train_disp1_left.zip",
+          "url": "https://darus.uni-stuttgart.de/api/access/datafile/:persistentId/?persistentId=doi:10.18419/DARUS-3376/2",
+          "bytes": 10608767690,
+          "hash_algorithm": "md5",
+          "hash": "9534f6094be09729aff3a0db31551257",
+          "member_pattern": "^spring/train/(?P<sequence>[0-9]{4})/disp1_left/disp1_left_(?P<frame>[0-9]{4})[.]dsp5$",
+          "admission": "sparse_auxiliary_only"
+        },
+        "test_rgb": {
+          "relative_path": "spring-v1/test_frame_left.zip",
+          "url": "https://darus.uni-stuttgart.de/api/access/datafile/:persistentId/?persistentId=doi:10.18419/DARUS-3376/11",
+          "bytes": 2995538894,
+          "hash_algorithm": "md5",
+          "hash": "f0c52a7e2d5ba440eb31338b46fbc4b4",
+          "member_pattern": "^spring/test/(?P<sequence>[0-9]{4})/frame_left/frame_left_(?P<frame>[0-9]{4})[.]png$"
+        }
+      }
+    }
+  }
+}

@@ -25,6 +25,7 @@ THIS_DIR = Path(__file__).resolve().parent
 SBSBENCH_DIR = THIS_DIR.parent / "sbsbench"
 sys.path.insert(0, str(SBSBENCH_DIR))
 import sbsbench  # noqa: E402
+import sbs_harness_contract as sbs_contract  # noqa: E402
 
 
 def sha256(path: Path):
@@ -67,6 +68,10 @@ def run_contract(run: Path):
             "policy_warp_source_sha256": payload.get(
                 "policy_warp_source_sha256"
             ),
+            "harness_schema": payload.get("harness_schema"),
+            "metric_preview_encoding": payload.get(
+                "metric_preview_encoding"
+            ),
             "frame_count": payload.get("frame_count"),
         }
     if results_path.is_file():
@@ -103,7 +108,8 @@ def prepare_clip(clip_root: Path, run_clip: Path, config: LabelFitterConfig):
     )
     warp_source_hash = harness_contract.get("policy_warp_source_sha256")
     metric_hash = harness_contract.get("metric_sha256")
-    if (int(harness_contract.get("schema", 0)) != 24 or
+    if (int(harness_contract.get("schema", 0)) !=
+            sbs_contract.HARNESS_SCHEMA or
             harness_contract.get("artistic_policy") is not False or
             harness_contract.get("artistic_policy_consumed") is not False or
             harness_contract.get("artistic_policy_authorization") != "none" or
@@ -126,6 +132,8 @@ def prepare_clip(clip_root: Path, run_clip: Path, config: LabelFitterConfig):
             int(harness_contract.get("disparity_raster_height", 0)) !=
             int(harness_contract.get("eye_height", 0)) or
             harness_contract.get("color_mode") != "sdr-srgb-8bit" or
+            harness_contract.get("metric_preview_encoding") !=
+            sbs_contract.METRIC_PREVIEW_SDR or
             harness_contract.get("warp_disparity") !=
             "exact_clamped_full_binocular_normalized_at_output_eye_raster_zero_bars" or
             harness_contract.get("warp_unclamped_disparity") !=
@@ -133,7 +141,12 @@ def prepare_clip(clip_root: Path, run_clip: Path, config: LabelFitterConfig):
             "output_eye_raster_zero_bars" or
             not isinstance(warp_source_hash, str) or len(warp_source_hash) != 64 or
             not isinstance(metric_hash, str) or len(metric_hash) != 16 or
-            float(harness_contract.get("artistic_full_clamp_abs", 0.0)) <= 0.0):
+            float(harness_contract.get("artistic_full_clamp_abs", 0.0)) <= 0.0 or
+            harness_contract.get("output_interval") != 1 or
+            harness_contract.get("output_gt_right_only") is not True or
+            harness_contract.get("output_selection_mode") != "gt-right" or
+            harness_contract.get("label_frame_ids") != [] or
+            harness_contract.get("output_label_frames_sha256") != ""):
         raise RuntimeError(
             f"incompatible baseline-disparity contract: {harness_contract_path}"
         )
@@ -150,6 +163,13 @@ def prepare_clip(clip_root: Path, run_clip: Path, config: LabelFitterConfig):
     analyses = []
     label_frames = [path for path in frame_paths(clip_root)
                     if (clip_root / "gt_right" / path.name).is_file()]
+    expected_output_ids = [
+        int(path.stem.removeprefix("frame_")) for path in label_frames
+    ]
+    if harness_contract.get("output_selected_frame_ids") != expected_output_ids:
+        raise RuntimeError(
+            f"{clip_root.name}: harness output identities differ from authored right eyes"
+        )
     for source_path in label_frames:
         suffix = source_path.stem.removeprefix("frame_")
         right_path = clip_root / "gt_right" / source_path.name
@@ -247,6 +267,9 @@ def prepare_clip(clip_root: Path, run_clip: Path, config: LabelFitterConfig):
             "content_scale_x": float(harness_contract["content_scale_x"]),
             "content_scale_y": float(harness_contract["content_scale_y"]),
             "color_mode": harness_contract["color_mode"],
+            "metric_preview_encoding": harness_contract[
+                "metric_preview_encoding"
+            ],
             "disparity_raster_width": int(
                 harness_contract["disparity_raster_width"]
             ),

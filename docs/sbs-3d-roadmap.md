@@ -205,7 +205,7 @@ and profile provenance; cover the 11-clip core and public extended suites; gener
 and `decision.json`; inspect primary-axis examples; and treat comfort/image-integrity limits as hard
 constraints. Headset evidence resolves coequal-axis tradeoffs.
 
-The harness uses contract 24 and eval schema 29. It exports raw depth, pre-warp depth, exact forward
+The harness uses contract 28 and eval schema 31. It exports raw depth, pre-warp depth, exact forward
 coverage diagnostics, clamped and unclamped HLSL full-binocular disparity at the rendered
 output-eye raster (with bars excluded by the exact pixel-center validity rule), and final SBS
 artifacts by numeric frame identity. The primary stereo-volume metric,

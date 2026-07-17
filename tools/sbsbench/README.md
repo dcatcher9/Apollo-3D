@@ -69,6 +69,14 @@ python tools/sbsbench/run_eval.py --suite extended --label public-control # prep
 python tools/sbsbench/rescore_run.py cmake-build-relwithdebinfo/sbs_eval/<run> --in-place  # metrics only
 ```
 
+The GPU harness remains a single sequential producer. Every measured harness finishes before CPU
+metric workers start, so scoring load cannot contaminate later GPU timing. The validated artifact
+jobs are then scored in a bounded process pool. The default is four workers with at most eight
+outstanding scoring jobs; use
+`--score-workers N` (`N >= 1`, before `--extra`) to tune it. Results, gates, and baseline updates
+are still finalized in the original clip order. Worker OMP, BLAS, NumExpr, and OpenCV thread
+counts are pinned to one so process-level parallelism cannot oversubscribe the machine.
+
 **Profile / model (important):** the evaluator resolves the depth model from the selected profile
 and then the explicit `sbs_3d_depth_model` override, exactly like production. There is no separate
 `--mode` model selector. Never compare reports using different model/config hashes as if they were
@@ -147,6 +155,30 @@ thresholds live in [thresholds.json](thresholds.json); the pinned SBS config in
 bench.conf, the clip set, or a metric definition changes). Guards: fails fast if TRT engines
 aren't prebuilt; warns + skips the perf gate if another sunshine.exe is running.
 
+Large prepared suites can freeze their clip identities once instead of re-reading every source
+and reference frame before every experiment:
+
+```powershell
+python tools\sbsbench\build_clip_hash_manifest.py `
+  --clips-root E:\ApolloDev\sbs_bench\datasets\prepared\extended-v3 `
+  --workers 8 --verify
+```
+
+This atomically writes schema-2 `<clips-root>/clip_hash_manifest.json`. Its stable semantic-content
+digest excludes creation time and filesystem provenance while still covering every consumed path,
+content hash, clip identity, and evaluator metadata field. Rebuilding an unchanged manifest therefore
+preserves downstream cache identity. `run_eval.py` uses it automatically only when every selected
+clip has an exact entry and the semantic file set, logical and resolved paths, sizes, nanosecond
+mtimes, device IDs, and file IDs still match.
+An existing but stale/incomplete manifest is a setup error; it never silently falls back to an
+expensive direct hash. Pass `--verify-clip-hashes` to re-read and authenticate every recorded
+file SHA-256 before evaluation. If no manifest exists, the evaluator retains the original full
+content hashing behavior. Both the logical and resolved physical roots are authenticated so a
+repointed junction cannot inherit a manifest merely because its visible path is unchanged. The
+selected source snapshot and manifest provenance are checked again after all GPU and CPU work and
+before `results.json` or any baseline is written, preventing concurrent regeneration from being
+misattributed to the initial clip identity.
+
 Hard comfort/integrity bounds apply even in comparison-only runs. Baseline updates are staged in
 memory and written atomically only after every clip passes those bounds, so a broken render cannot
 become the new normal.
@@ -161,7 +193,7 @@ depth-step floor (flat scenes legitimately read 0), and all pixel windows scale 
 width — but absolute values are still not comparable across clip resolutions; baselines are
 per-clip-set. The harness writes 16-bit depth PNGs so `swim` resolves below 1/255.
 
-**Eval schema 29 / harness contract 24:** `run_eval.py` pins the profile, model, zero-plane,
+**Eval schema 31 / harness contract 28:** `run_eval.py` pins the profile, model, zero-plane,
 artistic style, and optional artistic-policy consumption
 mode explicitly and
 has no alternate warp selector. By default the
@@ -177,14 +209,35 @@ numeric frame identity, never list position. Baselines are rejected with setup e
 model, every resolved policy/warp/sampling setting, compiled warp-source hash, schema, config hash,
 metric implementation/threshold hash, or clip hash differs. A missing declared hard metric is a
 hard failure, not an implicit pass. Always-required primaries likewise abort a run when applicable;
+each clip must also authenticate `metric_preview_encoding`. SDR/linear-SDR uses
+`native-srgb-v1`; HDR scRGB uses
+`source-relative-srgb-from-scrgb-white-normalized-v1`, which normalizes with the captured Windows
+SDR-white level before producing the sRGB preview consumed by image metrics. Missing, mismatched,
+or legacy preview provenance is rejected rather than silently rescored.
 support- or GT-dependent primaries are skipped only when absent from both matched sides, while
 one-sided absence makes the A/B decision inconclusive. Runner/gating semantics are versioned by the
 schema rather than the runner's comments or diagnostic wording. Output folders are cleared before reuse. Harness
-contract 24 records `output_interval`; `--output-every N`
+contract 28 records `output_interval`; `--output-every N`
 reduces saved artifacts while still processing every
 input frame, so sampling cannot change temporal state. For authored-stereo data,
 `--output-gt-right-only` emits the exact identities present in `gt_right/`; it does not assume
 that every shot's first label has the same modulo-N phase.
+
+Generic mono or stereo policy datasets can instead use `--output-label-frames`. Each selected
+clip must contain `label_frames.json` with the strict schema
+`{"schema": 1, "frame_ids": [0, 12, 24]}`: IDs are nonnegative, unique, strictly increasing,
+and must exist among that clip's numeric `frame_*.png`/JPEG identities. Apollo still runs depth,
+normalization, EMA, and subject state on every source frame, but materializes expensive artifacts
+only for each authenticated target and one consecutive temporal-evidence companion. The preceding
+source frame is preferred; the following frame is used when no predecessor exists (normally target
+0), and a target without either companion is rejected. The harness and `results.json` distinguish
+the manifest's exact `label_frame_ids` from the emitted `output_selected_frame_ids` union and
+authenticate the manifest with its raw-file SHA-256. Temporal scoring resets at numeric ID gaps, so
+widely separated target pairs are never compared to one another. For authored stereo, every target
+must have a `gt_right` sidecar, while companion frames intentionally need not; stereo diagnostics
+run only where sidecars exist. This mode is mutually exclusive with `--output-gt-right-only` and
+requires `--output-every 1`; combining two independent sampling rules is rejected rather than
+interpreted.
 
 `--no-artistic-policy` is a comparison-only ablation: an artistic model still runs and emits its
 depth and optional output, but the subject resolver does not consume the learned multiplier. This

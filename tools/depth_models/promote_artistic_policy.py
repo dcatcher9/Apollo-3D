@@ -15,10 +15,14 @@ import json
 import math
 import os
 import re
+import sys
 from pathlib import Path
 
 import cv2
 
+import artistic_policy_evaluation_contract as evaluation_contract
+import depth_input_color as input_color
+import merge_artistic_geometry_labels as label_merge
 from artistic_geometry_contract import (
     MAX_HEIGHT,
     MAX_WIDTH,
@@ -33,20 +37,29 @@ from artistic_geometry_contract import (
 
 THIS_DIR = Path(__file__).resolve().parent
 SBSBENCH_DIR = THIS_DIR.parent / "sbsbench"
+sys.path.insert(0, str(SBSBENCH_DIR))
+import sbs_harness_contract as sbs_contract  # noqa: E402
+
 REPO_ROOT = THIS_DIR.parents[1]
-DEPLOYMENT_CONTRACT = "apollo-artistic-policy-deployment-v1"
+DEPLOYMENT_CONTRACT = "apollo-artistic-policy-deployment-v2"
+DEPLOYMENT_SCHEMA = 2
 NEUTRALITY_CONTRACT = "apollo-dav2-srgb-native-capped-v1"
-SEALED_APPROVAL_CONTRACT = "sealed-test-artistic-policy-v2"
+SEALED_APPROVAL_CONTRACT = evaluation_contract.SEALED_APPROVAL_CONTRACT
 POLICY_CONTRACT = "safe-frontier-multistyle-apollo-v1"
 POLICY_FEATURE_CONTRACT = "multiscale-dino-depth-dpt-stats-v1"
 POLICY_WARP_CONTRACT = "apollo-safe-frontier-v1"
-HARNESS_SCHEMA = 24
-EVAL_SCHEMA = 29
+HARNESS_SCHEMA = sbs_contract.HARNESS_SCHEMA
+EVAL_SCHEMA = 31
 MAX_NORMALIZED_MEAN_DRIFT = 1.0 / 1024.0
 MAX_NORMALIZED_P99_DRIFT = 2.0 / 1024.0
-SEALED_EVALUATION_SCHEMA = 11
-MAX_UNSAFE_CEILING_OVERSHOOT_SCALE = 0.05
-MAX_FILM_BALANCED_UNSAFE_CEILING_OVERSHOOT_SCALE = 0.01
+SEALED_EVALUATION_SCHEMA = evaluation_contract.EVALUATION_SCHEMA
+EXPORT_METADATA_SCHEMA = evaluation_contract.EXPORT_METADATA_SCHEMA
+MAX_UNSAFE_CEILING_OVERSHOOT_SCALE = (
+    evaluation_contract.MAX_UNSAFE_CEILING_OVERSHOOT_SCALE
+)
+MAX_FILM_BALANCED_UNSAFE_CEILING_OVERSHOOT_SCALE = (
+    evaluation_contract.MAX_FILM_BALANCED_UNSAFE_CEILING_OVERSHOOT_SCALE
+)
 EXACT_DISPARITY_CONTRACT = (
     "exact_clamped_full_binocular_normalized_at_output_eye_raster_zero_bars"
 )
@@ -221,48 +234,6 @@ def _same(left, right, origin):
         raise RuntimeError(f"{origin} differs: {left!r} != {right!r}")
 
 
-def _validate_unsafe_ceiling_overshoot(payload, decision):
-    evidence = payload.get("unsafe_ceiling_overshoot")
-    if not isinstance(evidence, dict):
-        raise RuntimeError("sealed-test evaluation lacks unsafe-ceiling evidence")
-    numeric = {}
-    for key in (
-            "maximum_scale", "maximum_limit_scale",
-            "film_balanced_mean_scale", "film_balanced_mean_limit_scale",
-            "film_balanced_overshoot_rate_pct"):
-        value = evidence.get(key)
-        if (not isinstance(value, (int, float)) or isinstance(value, bool) or
-                not math.isfinite(float(value))):
-            raise RuntimeError(
-                f"sealed-test evaluation has invalid unsafe-ceiling {key}"
-            )
-        numeric[key] = float(value)
-    if (numeric["maximum_scale"] < 0.0 or
-            numeric["film_balanced_mean_scale"] < 0.0 or
-            not 0.0 <= numeric["film_balanced_overshoot_rate_pct"] <= 100.0):
-        raise RuntimeError("sealed-test evaluation has invalid unsafe-ceiling evidence")
-    if (abs(numeric["maximum_limit_scale"] -
-            MAX_UNSAFE_CEILING_OVERSHOOT_SCALE) > 1e-12 or
-            abs(numeric["film_balanced_mean_limit_scale"] -
-                MAX_FILM_BALANCED_UNSAFE_CEILING_OVERSHOOT_SCALE) > 1e-12):
-        raise RuntimeError("sealed-test evaluation uses different unsafe-ceiling limits")
-    if (evidence.get("maximum_pass") is not True or
-            evidence.get("film_balanced_mean_pass") is not True or
-            numeric["maximum_scale"] > MAX_UNSAFE_CEILING_OVERSHOOT_SCALE + 1e-9 or
-            numeric["film_balanced_mean_scale"] >
-            MAX_FILM_BALANCED_UNSAFE_CEILING_OVERSHOOT_SCALE + 1e-9):
-        raise RuntimeError("sealed-test evaluation failed unsafe-ceiling guards")
-    guards = decision.get("guards")
-    if (not isinstance(guards, dict) or
-            decision.get("unsafe_overshoot_guard_required") is not True or
-            guards.get("unsafe_ceiling_maximum") is not True or
-            guards.get("unsafe_ceiling_film_balanced_mean") is not True):
-        raise RuntimeError("sealed-test decision lacks unsafe-ceiling guards")
-    if decision.get("unsafe_ceiling_overshoot") != evidence:
-        raise RuntimeError("sealed-test decision has inconsistent unsafe-ceiling evidence")
-    return evidence
-
-
 def _validate_policy_sidecar_contract(metadata):
     _same(metadata.get("policy_contract"), POLICY_CONTRACT, "policy contract")
     _same(
@@ -343,8 +314,10 @@ def validate_export_chain(onnx, metadata_path, checkpoint, evaluation):
         evaluation, "sealed-test evaluation"
     )
 
-    if metadata.get("schema") != 4:
-        raise RuntimeError("artistic-policy metadata schema is not 4")
+    if metadata.get("schema") != EXPORT_METADATA_SCHEMA:
+        raise RuntimeError(
+            f"artistic-policy metadata schema is not {EXPORT_METADATA_SCHEMA}"
+        )
     _validate_policy_sidecar_contract(metadata)
     deployed_model = _require_nonempty_string(
         metadata.get("deployed_model"), "deployed model"
@@ -396,6 +369,35 @@ def validate_export_chain(onnx, metadata_path, checkpoint, evaluation):
         metadata.get("deployment_geometry_allowlist_sha256"), geometry_hash,
         "metadata deployment geometry identity",
     )
+    input_manifest = metadata.get("input_variant_manifest")
+    label_merge.validate_input_variant_manifest(input_manifest)
+    input_manifest_hash = label_merge.input_variant_manifest_sha256(input_manifest)
+    hdr_whites = tuple(sorted(
+        int(variant["windows_sdr_white_level_raw"])
+        for variant in input_manifest["variants"]
+        if variant["kind"] == input_color.INPUT_KIND_WINDOWS_HDR
+    ))
+    sdr_variants = [
+        variant for variant in input_manifest["variants"]
+        if variant["kind"] == input_color.INPUT_KIND_SDR
+    ]
+    if (hdr_whites != evaluation_contract.EXPECTED_HDR_WHITE_LEVELS_RAW or
+            len(sdr_variants) != 1 or len(input_manifest["variants"]) != 4):
+        raise RuntimeError("metadata lacks the exact production SDR/HDR inputs")
+    color_contract_hash = input_color.color_contract_sha256()
+    _same(
+        metadata.get("input_variant_manifest_sha256"), input_manifest_hash,
+        "metadata input-variant identity",
+    )
+    _same(
+        metadata.get("depth_input_color_contract_sha256"), color_contract_hash,
+        "metadata input color contract",
+    )
+    condition_target_contract = metadata.get("condition_target_contract")
+    _same(
+        condition_target_contract, label_merge.CONDITION_TARGET_CONTRACT,
+        "metadata condition-target contract",
+    )
 
     approval = metadata.get("approval_contract")
     if not isinstance(approval, dict):
@@ -408,6 +410,7 @@ def validate_export_chain(onnx, metadata_path, checkpoint, evaluation):
         "evaluation_sha256": evaluation_hash,
         "checkpoint_sha256": checkpoint_hash,
         "metric_sha256": metric_hash,
+        "condition_target_contract": condition_target_contract,
     }
     for key, expected in required_approval.items():
         _same(approval.get(key), expected, f"sealed approval {key}")
@@ -419,11 +422,21 @@ def validate_export_chain(onnx, metadata_path, checkpoint, evaluation):
             ("active_split_sha256", 64),
             ("label_fitter_identity_sha256", 64),
             ("test_labels_sha256", 64),
-            ("deployment_geometry_allowlist_sha256", 64)):
+            ("deployment_geometry_allowlist_sha256", 64),
+            ("input_variant_manifest_sha256", 64),
+            ("depth_input_color_contract_sha256", 64)):
         _require_hash(approval.get(key), f"sealed approval {key}", length)
     _same(
         approval["deployment_geometry_allowlist_sha256"], geometry_hash,
         "sealed approval deployment geometry identity",
+    )
+    _same(
+        approval["input_variant_manifest_sha256"], input_manifest_hash,
+        "sealed approval input-variant identity",
+    )
+    _same(
+        approval["depth_input_color_contract_sha256"], color_contract_hash,
+        "sealed approval input color identity",
     )
     productions = approval.get("sealed_test_productions")
     if (
@@ -441,13 +454,26 @@ def validate_export_chain(onnx, metadata_path, checkpoint, evaluation):
     decision = evaluation_payload.get("decision")
     if not isinstance(decision, dict) or decision.get("accepted") is not True:
         raise RuntimeError("sealed-test evaluation is not accepted")
-    unsafe_ceiling_overshoot = _validate_unsafe_ceiling_overshoot(
-        evaluation_payload, decision
+    unsafe_ceiling_overshoot = (
+        evaluation_contract.validate_unsafe_ceiling_overshoot(
+            evaluation_payload, decision, "sealed-test evaluation"
+        )
     )
     _same(
         approval.get("unsafe_ceiling_overshoot"),
         unsafe_ceiling_overshoot,
         "sealed approval unsafe-ceiling evidence",
+    )
+    runtime_regime_acceptance = (
+        evaluation_contract.validate_runtime_regime_acceptance(
+            evaluation_payload, decision, condition_target_contract,
+            hdr_whites,
+        )
+    )
+    _same(
+        approval.get("runtime_regime_acceptance"),
+        runtime_regime_acceptance,
+        "sealed approval runtime-regime evidence",
     )
     evaluation_identities = {
         "split": "test",
@@ -460,6 +486,10 @@ def validate_export_chain(onnx, metadata_path, checkpoint, evaluation):
         "test_labels_sha256": approval["test_labels_sha256"],
         "deployment_geometry_allowlist_sha256": geometry_hash,
         "deployment_geometry_allowlist": geometry_allowlist,
+        "input_variant_manifest": input_manifest,
+        "input_variant_manifest_sha256": input_manifest_hash,
+        "depth_input_color_contract_sha256": color_contract_hash,
+        "condition_target_contract": condition_target_contract,
         "val_films": productions,
     }
     for key, expected in evaluation_identities.items():
@@ -481,6 +511,10 @@ def validate_export_chain(onnx, metadata_path, checkpoint, evaluation):
         "test_labels_sha256": approval["test_labels_sha256"],
         "deployment_geometry_allowlist": geometry_allowlist,
         "deployment_geometry_allowlist_sha256": geometry_hash,
+        "input_variant_manifest": input_manifest,
+        "input_variant_manifest_sha256": input_manifest_hash,
+        "depth_input_color_contract_sha256": color_contract_hash,
+        "condition_target_contract": condition_target_contract,
         "sealed_test_productions": productions,
         "policy_baseline": baseline,
     }
@@ -742,6 +776,7 @@ def validate_render_gate(
         for value in model["deployment_geometry_allowlist"]["tuples"]
     }
     observed_geometries = {}
+    preview_encodings = set()
     for clip, entry in clips.items():
         clip_meta = entry.get("meta") if isinstance(entry, dict) else None
         if not isinstance(clip_meta, dict):
@@ -754,6 +789,13 @@ def validate_render_gate(
               f"{suite}/{clip} source identity")
         _validate_gate_baseline(
             clip_meta, model["policy_baseline"], f"{suite}/{clip}"
+        )
+        preview_encodings.add(
+            sbs_contract.validate_metric_preview_encoding(
+                clip_meta.get("color_mode"),
+                clip_meta.get("metric_preview_encoding"),
+                f"{suite}/{clip}",
+            )
         )
         geometry = _render_geometry(clip_meta, f"{suite}/{clip}")
         geometry_identity = tuple_key(geometry)
@@ -769,6 +811,7 @@ def validate_render_gate(
         "verdict": "pass",
         "eval_schema": required["eval_schema"],
         "harness_schema": clip_required["harness_schema"],
+        "metric_preview_encodings": sorted(preview_encodings),
         "metric_sha256": model["metric_sha256"],
         "policy_warp_source_sha256": model["policy_warp_source_sha256"],
         "model_onnx_sha256": model["onnx_sha256"],
@@ -891,7 +934,7 @@ def build_manifest(
         timespec="seconds"
     )
     manifest = {
-        "schema": 1,
+        "schema": DEPLOYMENT_SCHEMA,
         "contract": DEPLOYMENT_CONTRACT,
         "stage": stage,
         "approved": stage == "production",
@@ -911,6 +954,10 @@ def build_manifest(
                 "test_labels_sha256",
                 "deployment_geometry_allowlist",
                 "deployment_geometry_allowlist_sha256",
+                "input_variant_manifest",
+                "input_variant_manifest_sha256",
+                "depth_input_color_contract_sha256",
+                "condition_target_contract",
                 "sealed_test_productions",
             )
         },

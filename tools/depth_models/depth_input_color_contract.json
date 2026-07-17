@@ -1,0 +1,141 @@
+{
+  "color_modes": {
+    "hdr": "hdr-scrgb-fp16",
+    "sdr": "sdr-srgb-8bit"
+  },
+  "contract": "apollo-depth-input-color-v2",
+  "hdr_to_model_srgb": {
+    "negative_rgb": "clamp-to-zero",
+    "peak_normalization": "rgb/max(max(rgb),1)",
+    "reinhard": "rgb/(1+luminance)",
+    "rec709_luminance": [
+      0.2126,
+      0.7152,
+      0.0722
+    ],
+    "srgb_oetf": {
+      "high_add": -0.055,
+      "high_exponent": 0.4166666666666667,
+      "high_scale": 1.055,
+      "knee": 0.0031308,
+      "low_scale": 12.92
+    }
+  },
+  "imagenet_normalization": {
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ]
+  },
+  "resize": {
+    "address_mode": "clamp",
+    "coordinate_transform": "half-pixel",
+    "filter": "bilinear",
+    "post_interpolation_quantization": "none",
+    "uv": "((output_x+0.5)/output_width,(output_y+0.5)/output_height)"
+  },
+  "schema": 2,
+  "sdr_source": {
+    "encoding": "srgb-rec709-unorm8",
+    "pipeline": [
+      "unorm8-to-float32",
+      "bilinear-resize",
+      "saturate",
+      "imagenet-normalize",
+      "nchw"
+    ],
+    "rgb_channel_order": "rgb"
+  },
+  "simulated_sdr_in_windows_hdr": {
+    "capture_encoding": "linear-scrgb-rec709-float16",
+    "pipeline": [
+      "unorm8-to-float32",
+      "srgb-eotf",
+      "multiply-scrgb-white-scale",
+      "float16-store",
+      "float32-bilinear-sample",
+      "clamp-negative-rgb",
+      "luminance-reinhard",
+      "uniform-peak-normalize",
+      "saturate",
+      "srgb-oetf",
+      "imagenet-normalize",
+      "nchw"
+    ],
+    "scrgb_reference_white_nits": 80.0,
+    "srgb_eotf": {
+      "high_add": 0.055,
+      "high_exponent": 2.4,
+      "high_scale": 1.055,
+      "knee": 0.04045,
+      "low_scale": 12.92
+    },
+    "windows_sdr_white_level": {
+      "raw_anchors": [
+        1000,
+        2500,
+        3750,
+        5000,
+        6000
+      ],
+      "raw_units_per_80_nits": 1000,
+      "scrgb_scale_formula": "raw/1000",
+      "white_nits_formula": "raw*80/1000"
+    }
+  },
+  "native_pq_in_windows_hdr": {
+    "source_encoding": "pq-bt2020nc-limited-yuv420p10+",
+    "source_contract": {
+      "color_range": "limited",
+      "color_primaries": "bt2020",
+      "color_matrix": "bt2020-non-constant-luminance",
+      "color_transfer": "smpte-st-2084",
+      "minimum_component_bits": 10
+    },
+    "capture_encoding": "linear-scrgb-rec709-float16",
+    "scrgb_reference_white_nits": 80.0,
+    "pq_eotf": {
+      "m1": 0.1593017578125,
+      "m2": 78.84375,
+      "c1": 0.8359375,
+      "c2": 18.8515625,
+      "c3": 18.6875,
+      "peak_nits": 10000.0,
+      "scale_policy": "absolute-pq-nits-no-mastering-peak-rescale"
+    },
+    "linear_bt2020_to_linear_rec709_d65": [
+      [1.660491, -0.587641, -0.07285],
+      [-0.12455, 1.1329, -0.008349],
+      [-0.018151, -0.100579, 1.11873]
+    ],
+    "source_to_capture_pipeline": [
+      "limited-yuv-to-nonlinear-bt2020-rgb",
+      "smpte-st-2084-eotf-to-absolute-nits",
+      "linear-bt2020-to-linear-rec709-d65",
+      "divide-by-80-nits",
+      "preserve-negative-and-superwhite-rgb",
+      "float16-store"
+    ],
+    "model_input_pipeline": [
+      "validate-finite-float16-scrgb",
+      "float32-bilinear-sample",
+      "clamp-negative-rgb",
+      "luminance-reinhard",
+      "uniform-peak-normalize",
+      "saturate",
+      "srgb-oetf",
+      "imagenet-normalize",
+      "nchw"
+    ],
+    "input_channels": {
+      "accepted": ["rgb", "rgba"],
+      "alpha": "ignored"
+    }
+  }
+}

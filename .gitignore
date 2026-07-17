@@ -68,3 +68,8 @@ sbs_changes.txt
 /build_out.txt
 /run_cmake.sh
 .claude/settings.local.json
+
+# Local Codex test/runtime scratch (never commit)
+/.codex-home/
+/.codex-tmp/
+/_codex_test_logs/

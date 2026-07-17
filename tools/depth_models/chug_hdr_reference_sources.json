@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "id": "chug-hdr-reference-v1",
+  "dataset": "CHUG: Crowdsourced User-Generated HDR Video Quality Dataset",
+  "purpose": "Native-PQ validation and future explicitly tone-mapped augmentation references for the DA-V2 artistic-policy work. Degraded bitrate-ladder renditions are excluded.",
+  "homepage": "https://github.com/shreshthsaini/CHUG",
+  "repository_commit": "6e4cc0631ea7faa731992f1fed3edc3efce53593",
+  "license": "CC BY-NC-SA 4.0",
+  "license_url": "https://raw.githubusercontent.com/shreshthsaini/CHUG/6e4cc0631ea7faa731992f1fed3edc3efce53593/license.txt",
+  "license_note": "The repository README abbreviates the license as CC BY-NC 4.0, but the pinned license.txt is the stricter CC BY-NC-SA 4.0 text. Apollo treats the pinned license file as authoritative and uses CHUG only for non-commercial research.",
+  "metadata": {
+    "csv": {
+      "relative_path": "source_metadata/chug.csv",
+      "url": "https://raw.githubusercontent.com/shreshthsaini/CHUG/6e4cc0631ea7faa731992f1fed3edc3efce53593/chug.csv",
+      "canonical_url": "https://raw.githubusercontent.com/shreshthsaini/CHUG/master/chug.csv",
+      "bytes": 1180930,
+      "sha256": "1cc55489732a64c1a5637e2401a9ff4b8303ce39113569998e179bc4dd9184b8"
+    },
+    "license": {
+      "relative_path": "source_metadata/license.txt",
+      "url": "https://raw.githubusercontent.com/shreshthsaini/CHUG/6e4cc0631ea7faa731992f1fed3edc3efce53593/license.txt",
+      "bytes": 20851,
+      "sha256": "7074fb66818fbbc771e52bb25b0273a586a4ed42bf21c923b7e880cf1a9597e9"
+    }
+  },
+  "catalog_contract": {
+    "total_rows": 5992,
+    "reference_rows": 856,
+    "degraded_rows": 5136,
+    "reference_value": "1",
+    "content_id_column": "content_name"
+  },
+  "videos": {
+    "relative_directory": "videos",
+    "url_template": "https://ugchdrmturk.s3.us-east-2.amazonaws.com/videos/{video_id}.mp4"
+  },
+  "selection": {
+    "default_limit": 96,
+    "hash_salt": "apollo-chug-hdr-reference-selection-v1",
+    "framerate_buckets": [
+      {
+        "name": "24_25",
+        "max_exclusive": 27.5
+      },
+      {
+        "name": "30",
+        "max_exclusive": 45.0
+      },
+      {
+        "name": "60",
+        "max_exclusive": 90.0
+      },
+      {
+        "name": "120_plus"
+      }
+    ]
+  },
+  "split": {
+    "hash_salt": "apollo-chug-content-split-v1",
+    "weights": {
+      "training": 6,
+      "development": 1,
+      "test": 1
+    }
+  },
+  "native_color_contract": {
+    "codec": "hevc",
+    "pixel_format_family": "yuv420p10+",
+    "minimum_bit_depth": 10,
+    "color_range": "tv",
+    "color_primaries": "bt2020",
+    "color_space": "bt2020nc",
+    "color_transfer": "smpte2084",
+    "minimum_duration_seconds": 5.0,
+    "maximum_duration_seconds": 15.0,
+    "frame_decode": "forbidden",
+    "required_derivative": "A future RGB derivative must use an explicit, versioned PQ-to-linear-to-SDR transform and retain the native clip identity in its manifest."
+  }
+}

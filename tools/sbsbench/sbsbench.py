@@ -776,6 +776,105 @@ def artistic_stereo_metrics(src_gray, right_eye, ground_truth_right, depth):
     return out
 
 
+def load_label_frame_ids(frames_dir):
+    """Load the strict, versioned target-frame manifest, or return None when absent."""
+    path = os.path.join(frames_dir, "label_frames.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"invalid label-frame manifest {path}: {exc}") from exc
+    if (not isinstance(payload, dict) or set(payload) != {"schema", "frame_ids"} or
+            payload.get("schema") != 1 or isinstance(payload.get("schema"), bool)):
+        raise ValueError("label_frames.json must contain only schema=1 and frame_ids")
+    frame_ids = payload.get("frame_ids")
+    if (not isinstance(frame_ids, list) or not frame_ids or
+            any(not isinstance(value, int) or isinstance(value, bool) or value < 0
+                for value in frame_ids)):
+        raise ValueError("label_frames.json frame_ids must be nonnegative integers")
+    if any(left >= right for left, right in zip(frame_ids, frame_ids[1:])):
+        raise ValueError(
+            "label_frames.json frame_ids must be unique and strictly increasing"
+        )
+    return frame_ids
+
+
+def load_clip_meta(frames_dir, required=False):
+    """Load clip metadata without turning a broken evidence contract into an optional one."""
+    path = os.path.join(frames_dir, "meta.json")
+    if not os.path.exists(path):
+        if required:
+            raise ValueError(f"missing required clip metadata {path}")
+        return {}
+    try:
+        with open(path, encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"invalid clip metadata {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid clip metadata {path}: root must be an object")
+    evidence_flags = (
+        "required_gt_depth", "required_gt_flow", "required_gt_stereo",
+        "required_temporal_evidence", "expected_flat",
+    )
+    invalid_flags = [key for key in evidence_flags
+                     if key in payload and not isinstance(payload[key], bool)]
+    if invalid_flags:
+        raise ValueError(
+            f"invalid clip metadata {path}: evidence flags must be booleans: "
+            f"{invalid_flags}"
+        )
+    if ("dataset" in payload and
+            (not isinstance(payload["dataset"], str) or not payload["dataset"].strip())):
+        raise ValueError(
+            f"invalid clip metadata {path}: dataset must be a nonempty string"
+        )
+    if ("gt_depth_kind" in payload and
+            payload["gt_depth_kind"] not in ("disparity", "metric", "depth")):
+        raise ValueError(
+            f"invalid clip metadata {path}: gt_depth_kind must be disparity, metric, or depth"
+        )
+    return payload
+
+
+def temporal_evidence_pairs(label_frame_ids, source_frame_ids, output_frame_ids):
+    """Return exact adjacent pairs selected by the sparse-label harness contract."""
+    output_ids = set(output_frame_ids)
+    if label_frame_ids is None:
+        return {
+            (previous, current)
+            for previous, current in zip(output_frame_ids, output_frame_ids[1:])
+            if current == previous + 1
+        }
+
+    source_ids = set(source_frame_ids)
+    pairs = set()
+    missing_source = sorted(set(label_frame_ids) - source_ids)
+    if missing_source:
+        raise ValueError(
+            f"label-frame/source frame-id mismatch: missing source={missing_source}"
+        )
+    for target in label_frame_ids:
+        if target - 1 in source_ids:
+            pair = (target - 1, target)
+        elif target + 1 in source_ids:
+            pair = (target, target + 1)
+        else:
+            raise ValueError(
+                f"label frame {target} has no consecutive source-frame companion"
+            )
+        missing_output = sorted(set(pair) - output_ids)
+        if missing_output:
+            raise ValueError(
+                "label temporal evidence is missing from SBS output: "
+                f"target={target}, missing={missing_output}"
+            )
+        pairs.add(pair)
+    return pairs
+
+
 ARTISTIC_STEREO_FRAME_METRICS = (
     "stereo_art_scale_pct", "stereo_art_zero_pct",
     "stereo_ref_scale_pct", "stereo_ref_zero_pct",
@@ -1444,7 +1543,8 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
     return out, sbs, left
 
 
-def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
+def measure_sequence(seq_dir, frames_dir=None, expected_flat=False,
+                     common_artifact_dir=None):
     """A harness clip: sbs_*.png (+ depth_*.png) in order. Per-frame spatial metrics plus the
     temporal metrics that target the current pipeline's failure modes:
 
@@ -1461,15 +1561,28 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
     if not sbs_by_id:
         return None
     frame_ids = sorted(sbs_by_id)
-    src_by_id = indexed_files(os.path.join(frames_dir, "frame_*.*"), "frame_") if frames_dir else {}
-    src_by_id = {i: p for i, p in src_by_id.items()
-                 if p.lower().endswith((".png", ".jpg", ".jpeg"))}
-    if frames_dir and not set(frame_ids).issubset(src_by_id):
-        missing_src = sorted(set(frame_ids) - set(src_by_id))
+    frame_id_set = set(frame_ids)
+    label_frame_ids = load_label_frame_ids(frames_dir) if frames_dir else None
+    if label_frame_ids is not None:
+        missing_labels = sorted(set(label_frame_ids) - frame_id_set)
+        if missing_labels:
+            raise ValueError(
+                f"label-frame/SBS frame-id mismatch: missing labels={missing_labels}"
+            )
+    all_src_by_id = (indexed_files(os.path.join(frames_dir, "frame_*.*"), "frame_")
+                     if frames_dir else {})
+    all_src_by_id = {i: p for i, p in all_src_by_id.items()
+                     if p.lower().endswith((".png", ".jpg", ".jpeg"))}
+    if frames_dir and not frame_id_set.issubset(all_src_by_id):
+        missing_src = sorted(frame_id_set - set(all_src_by_id))
         raise ValueError(f"source/SBS frame-id mismatch: missing source={missing_src}")
-    src_by_id = {frame_id: src_by_id[frame_id] for frame_id in frame_ids
-                 if frame_id in src_by_id}
-    depth_by_id = indexed_files(os.path.join(seq_dir, "depth_*.png"), "depth_")
+    temporal_pairs = temporal_evidence_pairs(
+        label_frame_ids, sorted(all_src_by_id), frame_ids
+    )
+    src_by_id = {frame_id: all_src_by_id[frame_id] for frame_id in frame_ids
+                 if frame_id in all_src_by_id}
+    depth_root = common_artifact_dir or seq_dir
+    depth_by_id = indexed_files(os.path.join(depth_root, "depth_*.png"), "depth_")
     if depth_by_id and set(depth_by_id) != set(frame_ids):
         missing_depth = sorted(set(frame_ids) - set(depth_by_id))
         extra_depth = sorted(set(depth_by_id) - set(frame_ids))
@@ -1496,58 +1609,70 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
                 if frame_id in gt_by_id}
     gt_right_by_id = indexed_files(
         os.path.join(frames_dir, "gt_right", "frame_*.*"), "frame_") if frames_dir else {}
-    if gt_right_by_id and not set(frame_ids).issubset(gt_right_by_id):
-        missing_gt = sorted(set(frame_ids) - set(gt_right_by_id))
-        raise ValueError(f"GT-right/SBS frame-id mismatch: missing GT={missing_gt}")
     gt_right_by_id = {frame_id: gt_right_by_id[frame_id] for frame_id in frame_ids
                       if frame_id in gt_right_by_id}
     flow_by_id = indexed_files(
         os.path.join(frames_dir, "gt_flow", "frame_*.npz"), "frame_") if frames_dir else {}
-    sampled_gaps = any(current != previous + 1
-                       for previous, current in zip(frame_ids, frame_ids[1:]))
-    if sampled_gaps:
-        # A frame_N flow sidecar describes N-1 -> N, not an arbitrary sampled jump. Silently
-        # applying it across --output-every gaps would fabricate temporal accuracy.
-        flow_by_id = {}
-    expected_flow_ids = set(frame_ids[1:])
-    if flow_by_id and set(flow_by_id) != expected_flow_ids:
-        missing_flow = sorted(expected_flow_ids - set(flow_by_id))
-        extra_flow = sorted(set(flow_by_id) - expected_flow_ids)
-        raise ValueError(f"GT-flow/frame-id mismatch: missing GT={missing_flow}, extra GT={extra_flow}")
+    # A frame_N flow sidecar describes N-1 -> N. In sparse-label mode the output can contain
+    # adjacent frames from two independent target pairs. Score only the exact pair chosen for
+    # each label (previous when available, otherwise next), never the accidental bridge.
+    expected_flow_ids = {current for _previous, current in temporal_pairs}
+    missing_flow_ids = expected_flow_ids - set(flow_by_id)
+    if flow_by_id and missing_flow_ids:
+        raise ValueError(
+            f"GT-flow/frame-id mismatch: missing adjacent-pair GT={sorted(missing_flow_ids)}"
+        )
+    flow_by_id = {frame_id: flow_by_id[frame_id] for frame_id in expected_flow_ids
+                  if frame_id in flow_by_id}
     gt_kind = "disparity"
     require_gt_depth = require_gt_flow = require_gt_stereo = False
     if frames_dir:
-        meta_path = os.path.join(frames_dir, "meta.json")
-        try:
-            with open(meta_path, encoding="utf-8") as meta_file:
-                clip_meta = json.load(meta_file)
-            gt_kind = clip_meta.get("gt_depth_kind", gt_kind)
-            # Prepared public clips created before schema 5 already carry `dataset`; infer their
-            # evidence contract so upgrading the evaluator cannot silently keep the old fail-open
-            # behavior. If any explicit evidence flag exists, however, it is authoritative; an
-            # authored-stereo movie with only required_gt_stereo must not be mistaken for a depth
-            # benchmark merely because it also records its dataset name.
-            explicit_contract = any(key in clip_meta for key in (
-                "required_gt_depth", "required_gt_flow", "required_gt_stereo"))
-            legacy_dataset = clip_meta.get("dataset") if not explicit_contract else False
-            require_gt_depth = bool(clip_meta.get("required_gt_depth", legacy_dataset))
-            require_gt_flow = bool(clip_meta.get(
-                "required_gt_flow", (not explicit_contract and
-                                     clip_meta.get("dataset") == "TartanAir V2")))
-            require_gt_stereo = bool(clip_meta.get(
-                "required_gt_stereo", clip_meta.get("dataset") ==
-                "MPI Sintel Stereo Training Dataset"))
-        except (OSError, ValueError):
-            pass
-    if require_gt_depth and not gt_by_id:
-        raise ValueError("clip requires GT depth, but no gt_depth sidecars were found")
-    if require_gt_flow and not flow_by_id:
-        raise ValueError("clip requires GT optical flow, but no gt_flow sidecars were found")
-    if require_gt_stereo and not gt_right_by_id:
-        raise ValueError("clip requires GT stereo, but no gt_right sidecars were found")
+        clip_meta = load_clip_meta(frames_dir, required=label_frame_ids is not None)
+        gt_kind = clip_meta.get("gt_depth_kind", gt_kind)
+        # Prepared public clips created before schema 5 already carry `dataset`; infer their
+        # evidence contract so upgrading the evaluator cannot silently keep the old fail-open
+        # behavior. If any explicit evidence flag exists, however, it is authoritative; an
+        # authored-stereo movie with only required_gt_stereo must not be mistaken for a depth
+        # benchmark merely because it also records its dataset name.
+        explicit_contract = any(key in clip_meta for key in (
+            "required_gt_depth", "required_gt_flow", "required_gt_stereo"))
+        legacy_dataset = clip_meta.get("dataset") if not explicit_contract else False
+        require_gt_depth = clip_meta.get("required_gt_depth", bool(legacy_dataset))
+        require_gt_flow = clip_meta.get(
+            "required_gt_flow", (not explicit_contract and
+                                 clip_meta.get("dataset") == "TartanAir V2"))
+        require_gt_stereo = clip_meta.get(
+            "required_gt_stereo", clip_meta.get("dataset") ==
+            "MPI Sintel Stereo Training Dataset")
+    required_depth_ids = set(label_frame_ids) if label_frame_ids is not None else frame_id_set
+    if require_gt_depth:
+        # Spatial accuracy belongs to every target. Temporal depth validation also needs both
+        # endpoints of each real adjacent pair; accepting a partial GT subset would silently make
+        # a difficult frame disappear from the aggregate.
+        required_depth_ids.update(expected_flow_ids)
+        required_depth_ids.update(frame_id - 1 for frame_id in expected_flow_ids)
+        missing_depth_ids = required_depth_ids - set(gt_by_id)
+        if missing_depth_ids:
+            raise ValueError(
+                "clip requires GT depth for every target/temporal endpoint, but "
+                f"sidecars are missing: {sorted(missing_depth_ids)}"
+            )
+    if require_gt_flow and (not expected_flow_ids or missing_flow_ids):
+        raise ValueError(
+            "clip requires GT optical flow, but adjacent-pair sidecars are missing: "
+            f"{sorted(missing_flow_ids)}"
+        )
+    required_stereo_ids = set(label_frame_ids) if label_frame_ids is not None else frame_id_set
+    missing_stereo_ids = required_stereo_ids - set(gt_right_by_id)
+    if require_gt_stereo and missing_stereo_ids:
+        raise ValueError(
+            "clip requires GT stereo for every label target, but sidecars are missing: "
+            f"{sorted(missing_stereo_ids)}"
+        )
     rows, flicks, bflicks, swims, static_jitters = [], [], [], [], []
     flow_temporals, flow_depths, depth_gt_lags, depth_gt_ghosts = [], [], [], []
     prev_sbs = prev_left = prev_right = prev_depth = prev_src = prev_gt_depth = None
+    prev_frame_id = None
     for frame_id in frame_ids:
         p = sbs_by_id[frame_id]
         depth = load_depth(depth_by_id[frame_id]) if frame_id in depth_by_id else None
@@ -1567,7 +1692,7 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
             if src is not None and depth is not None:
                 row.update(artistic_stereo_metrics(src, right, gt_right, depth))
         row["_frame_id"] = frame_id
-        if prev_sbs is not None:
+        if prev_sbs is not None and (prev_frame_id, frame_id) in temporal_pairs:
             row["flicker"] = float(np.mean(np.abs(sbs - prev_sbs)) * 255.0)
             flicks.append(row["flicker"])
             if depth is not None:
@@ -1619,6 +1744,7 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         rows.append(row)
         prev_sbs, prev_left, prev_right = sbs, left, right
         prev_depth, prev_src, prev_gt_depth = depth, src, gt_depth
+        prev_frame_id = frame_id
     agg = aggregate(rows)
     for name, vals in [("flicker", flicks), ("flicker_disocc", bflicks), ("swim", swims)]:
         if vals:
@@ -1641,7 +1767,7 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
     agg.update(sbs_score(agg, expected_flat=expected_flat))
     if require_gt_depth:
         missing = [k for k in ("depth_gt_si_rmse", "depth_gt_edge_f1") if k not in agg]
-        if len(frame_ids) > 1 and "depth_gt_lag_f1_p95" not in agg:
+        if expected_flow_ids and "depth_gt_lag_f1_p95" not in agg:
             missing.append("depth_gt_lag_f1_p95")
         if missing:
             raise ValueError(f"required GT-depth metrics unavailable: {missing}")

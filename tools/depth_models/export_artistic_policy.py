@@ -7,13 +7,13 @@ import argparse
 import hashlib
 import io
 import json
-import math
 from pathlib import Path
 
 import onnx
 import torch
 from torch import nn
 
+import artistic_policy_evaluation_contract as evaluation_contract
 from artistic_policy_model import (
     ART_SCALE_DELTA_MAX,
     ArtisticPolicyModel,
@@ -22,12 +22,19 @@ from artistic_policy_model import (
     use_dynamic_onnx_position_encoding,
 )
 from artistic_geometry_contract import allowlist_sha256, validate_allowlist
+import depth_input_color as input_color
+import merge_artistic_geometry_labels as label_merge
 
 
-SEALED_TEST_APPROVAL_CONTRACT = "sealed-test-artistic-policy-v2"
-EVALUATION_SCHEMA = 11
-MAX_UNSAFE_CEILING_OVERSHOOT_SCALE = 0.05
-MAX_FILM_BALANCED_UNSAFE_CEILING_OVERSHOOT_SCALE = 0.01
+SEALED_TEST_APPROVAL_CONTRACT = evaluation_contract.SEALED_APPROVAL_CONTRACT
+EVALUATION_SCHEMA = evaluation_contract.EVALUATION_SCHEMA
+EXPORT_METADATA_SCHEMA = evaluation_contract.EXPORT_METADATA_SCHEMA
+MAX_UNSAFE_CEILING_OVERSHOOT_SCALE = (
+    evaluation_contract.MAX_UNSAFE_CEILING_OVERSHOOT_SCALE
+)
+MAX_FILM_BALANCED_UNSAFE_CEILING_OVERSHOOT_SCALE = (
+    evaluation_contract.MAX_FILM_BALANCED_UNSAFE_CEILING_OVERSHOOT_SCALE
+)
 
 
 class Fp16InternalFp32Io(nn.Module):
@@ -67,7 +74,20 @@ def validate_export_provenance(checkpoint, depth_weights):
     geometry_hash = allowlist_sha256(geometry_allowlist)
     if checkpoint.get("deployment_geometry_allowlist_sha256") != geometry_hash:
         raise RuntimeError("policy checkpoint has stale deployment geometry provenance")
-    return actual_depth_hash, metric_sha256, geometry_allowlist, geometry_hash
+    input_manifest = checkpoint.get("input_variant_manifest")
+    label_merge.validate_input_variant_manifest(input_manifest)
+    input_manifest_hash = label_merge.input_variant_manifest_sha256(input_manifest)
+    color_contract_hash = input_color.color_contract_sha256()
+    if (checkpoint.get("input_variant_manifest_sha256") != input_manifest_hash or
+            checkpoint.get("depth_input_color_contract_sha256") !=
+            color_contract_hash):
+        raise RuntimeError("policy checkpoint has stale input color provenance")
+    condition_target_contract = checkpoint.get("condition_target_contract")
+    if condition_target_contract != label_merge.CONDITION_TARGET_CONTRACT:
+        raise RuntimeError("policy checkpoint has stale shared-target provenance")
+    return (actual_depth_hash, metric_sha256, geometry_allowlist, geometry_hash,
+            input_manifest, input_manifest_hash, color_contract_hash,
+            condition_target_contract)
 
 
 def _require_hash(payload, key, length=64):
@@ -76,48 +96,6 @@ def _require_hash(payload, key, length=64):
             any(character not in "0123456789abcdef" for character in value)):
         raise RuntimeError(f"sealed-test evaluation has invalid {key}")
     return value
-
-
-def _validate_unsafe_ceiling_overshoot(payload, decision):
-    evidence = payload.get("unsafe_ceiling_overshoot")
-    if not isinstance(evidence, dict):
-        raise RuntimeError("sealed-test evaluation lacks unsafe-ceiling evidence")
-    numeric = {}
-    for key in (
-            "maximum_scale", "maximum_limit_scale",
-            "film_balanced_mean_scale", "film_balanced_mean_limit_scale",
-            "film_balanced_overshoot_rate_pct"):
-        value = evidence.get(key)
-        if (not isinstance(value, (int, float)) or isinstance(value, bool) or
-                not math.isfinite(float(value))):
-            raise RuntimeError(
-                f"sealed-test evaluation has invalid unsafe-ceiling {key}"
-            )
-        numeric[key] = float(value)
-    if (numeric["maximum_scale"] < 0.0 or
-            numeric["film_balanced_mean_scale"] < 0.0 or
-            not 0.0 <= numeric["film_balanced_overshoot_rate_pct"] <= 100.0):
-        raise RuntimeError("sealed-test evaluation has invalid unsafe-ceiling evidence")
-    if (abs(numeric["maximum_limit_scale"] -
-            MAX_UNSAFE_CEILING_OVERSHOOT_SCALE) > 1e-12 or
-            abs(numeric["film_balanced_mean_limit_scale"] -
-                MAX_FILM_BALANCED_UNSAFE_CEILING_OVERSHOOT_SCALE) > 1e-12):
-        raise RuntimeError("sealed-test evaluation uses different unsafe-ceiling limits")
-    if (evidence.get("maximum_pass") is not True or
-            evidence.get("film_balanced_mean_pass") is not True or
-            numeric["maximum_scale"] > MAX_UNSAFE_CEILING_OVERSHOOT_SCALE + 1e-9 or
-            numeric["film_balanced_mean_scale"] >
-            MAX_FILM_BALANCED_UNSAFE_CEILING_OVERSHOOT_SCALE + 1e-9):
-        raise RuntimeError("sealed-test evaluation failed unsafe-ceiling guards")
-    guards = decision.get("guards")
-    if (not isinstance(guards, dict) or
-            decision.get("unsafe_overshoot_guard_required") is not True or
-            guards.get("unsafe_ceiling_maximum") is not True or
-            guards.get("unsafe_ceiling_film_balanced_mean") is not True):
-        raise RuntimeError("sealed-test decision lacks unsafe-ceiling guards")
-    if decision.get("unsafe_ceiling_overshoot") != evidence:
-        raise RuntimeError("sealed-test decision has inconsistent unsafe-ceiling evidence")
-    return evidence
 
 
 def validate_sealed_test_approval(checkpoint, checkpoint_sha256, evaluation):
@@ -137,8 +115,32 @@ def validate_sealed_test_approval(checkpoint, checkpoint_sha256, evaluation):
     decision = payload.get("decision")
     if not isinstance(decision, dict) or decision.get("accepted") is not True:
         raise RuntimeError("sealed-test evaluation did not accept this checkpoint")
-    unsafe_ceiling_overshoot = _validate_unsafe_ceiling_overshoot(
-        payload, decision
+    unsafe_ceiling_overshoot = (
+        evaluation_contract.validate_unsafe_ceiling_overshoot(
+            payload, decision, "sealed-test evaluation"
+        )
+    )
+    condition_target_contract = checkpoint.get("condition_target_contract")
+    if (condition_target_contract != label_merge.CONDITION_TARGET_CONTRACT or
+            payload.get("condition_target_contract") !=
+            condition_target_contract):
+        raise RuntimeError(
+            "sealed-test evaluation uses a stale shared-target contract"
+        )
+    input_manifest = checkpoint.get("input_variant_manifest")
+    label_merge.validate_input_variant_manifest(input_manifest)
+    expected_hdr_whites = sorted(
+        int(variant["windows_sdr_white_level_raw"])
+        for variant in input_manifest["variants"]
+        if variant["kind"] == input_color.INPUT_KIND_WINDOWS_HDR
+    )
+    if tuple(expected_hdr_whites) != (
+            evaluation_contract.EXPECTED_HDR_WHITE_LEVELS_RAW):
+        raise RuntimeError("checkpoint lacks the production HDR white anchors")
+    runtime_regime_acceptance = (
+        evaluation_contract.validate_runtime_regime_acceptance(
+            payload, decision, condition_target_contract, expected_hdr_whites
+        )
     )
 
     identities = {
@@ -151,12 +153,20 @@ def validate_sealed_test_approval(checkpoint, checkpoint_sha256, evaluation):
         "deployment_geometry_allowlist_sha256": checkpoint.get(
             "deployment_geometry_allowlist_sha256"
         ),
+        "input_variant_manifest_sha256": checkpoint.get(
+            "input_variant_manifest_sha256"
+        ),
+        "depth_input_color_contract_sha256": checkpoint.get(
+            "depth_input_color_contract_sha256"
+        ),
     }
     _require_hash(identities, "checkpoint_sha256")
     _require_hash(identities, "active_split_sha256")
     _require_hash(identities, "metric_sha256", length=16)
     _require_hash(identities, "label_fitter_identity_sha256")
     _require_hash(identities, "deployment_geometry_allowlist_sha256")
+    _require_hash(identities, "input_variant_manifest_sha256")
+    _require_hash(identities, "depth_input_color_contract_sha256")
     for key, expected in identities.items():
         actual = _require_hash(
             payload, key, length=16 if key == "metric_sha256" else 64
@@ -176,6 +186,14 @@ def validate_sealed_test_approval(checkpoint, checkpoint_sha256, evaluation):
             ]):
         raise RuntimeError(
             "sealed-test evaluation deployment geometry allow-list does not match checkpoint"
+        )
+    if (payload.get("input_variant_manifest") != input_manifest or
+            label_merge.input_variant_manifest_sha256(input_manifest) !=
+            identities["input_variant_manifest_sha256"] or
+            payload.get("depth_input_color_contract_sha256") !=
+            identities["depth_input_color_contract_sha256"]):
+        raise RuntimeError(
+            "sealed-test evaluation input color contract does not match checkpoint"
         )
     expected_films = checkpoint.get("sealed_test_productions")
     if (not isinstance(expected_films, (list, tuple)) or not expected_films or
@@ -197,6 +215,8 @@ def validate_sealed_test_approval(checkpoint, checkpoint_sha256, evaluation):
         "split": "test",
         "decision_accepted": True,
         "unsafe_ceiling_overshoot": unsafe_ceiling_overshoot,
+        "runtime_regime_acceptance": runtime_regime_acceptance,
+        "condition_target_contract": condition_target_contract,
         **identities,
         "test_labels_sha256": test_labels_sha256,
         "sealed_test_productions": expected_films,
@@ -218,7 +238,10 @@ def main():
         io.BytesIO(checkpoint_bytes), map_location="cpu", weights_only=False
     )
     (depth_weights_sha256, metric_sha256, deployment_geometry_allowlist,
-     deployment_geometry_allowlist_sha256) = validate_export_provenance(
+     deployment_geometry_allowlist_sha256, input_variant_manifest,
+     input_variant_manifest_sha256,
+     depth_input_color_contract_sha256,
+     condition_target_contract) = validate_export_provenance(
         checkpoint, args.depth_weights
     )
     evaluation_sha256, approval_contract = validate_sealed_test_approval(
@@ -253,7 +276,7 @@ def main():
     graph = onnx.load(args.output)
     onnx.checker.check_model(graph)
     metadata = {
-        "schema": 4,
+        "schema": EXPORT_METADATA_SCHEMA,
         "deployed_model": args.output.stem,
         "base_depth_model": checkpoint["policy_baseline"]["depth_model"],
         "onnx_sha256": sha256(args.output),
@@ -272,6 +295,10 @@ def main():
         "deployment_geometry_allowlist_sha256": (
             deployment_geometry_allowlist_sha256
         ),
+        "input_variant_manifest": input_variant_manifest,
+        "input_variant_manifest_sha256": input_variant_manifest_sha256,
+        "depth_input_color_contract_sha256": depth_input_color_contract_sha256,
+        "condition_target_contract": condition_target_contract,
         "evaluation_sha256": evaluation_sha256,
         "approval_contract": approval_contract,
         "labels_sha256": checkpoint.get("labels_sha256"),

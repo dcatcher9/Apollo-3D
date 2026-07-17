@@ -52,6 +52,25 @@ class ArtisticGeometryContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "stale model-input"):
             geometry.validate_geometry_tuple(stale)
 
+    def test_geometry_admits_exact_sdr_and_hdr_runtime_color_modes(self):
+        row = {
+            "source_width": 1280, "source_height": 720,
+            "eye_width": 1920, "eye_height": 1080,
+            "content_scale_x": 1.0, "content_scale_y": 1.0,
+            "disparity_raster_width": 1920,
+            "disparity_raster_height": 1080,
+        }
+        for color_mode in (geometry.COLOR_MODE_SDR, geometry.COLOR_MODE_HDR):
+            with self.subTest(color_mode=color_mode):
+                value = geometry.geometry_tuple(row, color_mode=color_mode)
+                self.assertEqual(value["color_mode"], color_mode)
+                geometry.validate_geometry_tuple(value)
+
+        stale = geometry.geometry_tuple(row)
+        stale["color_mode"] = "hdr-pq-encoded"
+        with self.assertRaisesRegex(RuntimeError, "not validated"):
+            geometry.validate_geometry_tuple(stale)
+
 
 if __name__ == "__main__":
     unittest.main()

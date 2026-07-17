@@ -1,0 +1,125 @@
+{
+  "schema": 2,
+  "purpose": "Pinned native-HDR validation fixtures for Apollo color-contract and artistic-policy work. These assets remain in their encoded/master color spaces; they are not model-training RGB until an explicit, versioned production-equivalent conversion is applied.",
+  "sources": {
+    "netflix_sol_levante_hdr10_excerpts": {
+      "role": "stylized_cinematic_pq_validation",
+      "dataset": "Netflix Open Content: Sol Levante",
+      "homepage": "https://opencontent.netflix.com/",
+      "license": "CC BY 4.0",
+      "source_url": "https://s3.amazonaws.com/download.opencontent.netflix.com/SolLevante/hdr10/SolLevante_HDR10_r2020_ST2084_UHD_24fps_1000nit.mov",
+      "source_bytes": 37392798951,
+      "source_sha256": "05799b3953dcb69e4851b152ff5a7f8268ea30d4ed6c9f696cb4efdb50ac9e72",
+      "source_duration_seconds": 263.083333,
+      "derivation_tool": "ffmpeg 8.1.2-essentials_build-www.gyan.dev",
+      "derivation": "ffmpeg -fflags +bitexact -ss <start> -i <source> -t 5 -map 0:v:0 -an -c:v copy -map_metadata -1 -metadata creation_time= -fflags +bitexact <output.mkv>",
+      "derivation_note": "Three scene-diverse, intra-frame video-copy excerpts replace the 37.4 GB complete master. Independent repeat derivations produced byte-identical files. The retained excerpts cover dark cyan detail, extreme cyan/magenta highlights, and saturated red/orange action.",
+      "aggregate_bytes": 2774735211,
+      "clips": [
+        {
+          "source_time_range_seconds": [
+            25,
+            30
+          ],
+          "relative_path": "hdr-v1/SolLevante_HDR10_PQ_0025_0030.mkv",
+          "bytes": 906461977,
+          "sha256": "f35b083f67b33920e2b950a96b5fe2b16babb895c91ab1cc167adfbaba1d0c43"
+        },
+        {
+          "source_time_range_seconds": [
+            75,
+            80
+          ],
+          "relative_path": "hdr-v1/SolLevante_HDR10_PQ_0075_0080.mkv",
+          "bytes": 976094425,
+          "sha256": "abb22b2a3552101798d61cb59b3e9081bc83245d4f96ff0505b5950af5fe9348"
+        },
+        {
+          "source_time_range_seconds": [
+            110,
+            115
+          ],
+          "relative_path": "hdr-v1/SolLevante_HDR10_PQ_0110_0115.mkv",
+          "bytes": 892178809,
+          "sha256": "d87d3dee010a5446a860c0ff60d87ab134f6767c27cf79cc5f47eb10a3a4a106"
+        }
+      ],
+      "media_contract": {
+        "container": "matroska",
+        "codec": "prores",
+        "profile": "XQ",
+        "pixel_format": "yuv444p12le",
+        "color_range": "tv",
+        "color_space": "bt2020nc",
+        "color_transfer": "smpte2084",
+        "color_primaries": "bt2020",
+        "width": 3840,
+        "height": 2160,
+        "frame_rate": "24/1",
+        "duration_seconds_per_clip": 5.0,
+        "frame_count_per_clip": 120
+      }
+    },
+    "netflix_nocturne_live_action_pq_clip": {
+      "role": "live_action_cinematic_pq_validation",
+      "dataset": "Netflix Open Content: Nocturne",
+      "homepage": "https://opencontent.netflix.com/",
+      "license": "CC BY 4.0",
+      "license_url": "https://s3.amazonaws.com/download.opencontent.netflix.com/Nocturne/creative-commons-attribution-4-intl-public-license.txt",
+      "source_url": "https://s3.amazonaws.com/download.opencontent.netflix.com/Nocturne/nocturne_60fps/imf/nocturne_60fps_s01e03_vdm_hdr_p3d65_pq_20180307_02_3840x2160_dovi_4000nit_imf_ml8_3200Mbps.mxf",
+      "source_bytes": 81800570240,
+      "source_time_range_seconds": [
+        236,
+        244
+      ],
+      "derivation_tool": "ffmpeg 8.1.2-essentials_build-www.gyan.dev",
+      "derivation": "ffmpeg -fflags +bitexact -ss 236 -i <source_url> -t 8 -map 0:v:0 -an -c:v copy -map_metadata -1 -metadata creation_time= -fflags +bitexact <output.mkv>",
+      "derivation_note": "Two independent derivations with FFmpeg 8.1.2 produced the same byte count and SHA-256. A direct MXF remux was rejected because regenerated MXF wrapper identifiers made its file hash nondeterministic.",
+      "relative_path": "hdr-v1/Nocturne_60fps_P3PQ_0236_0244.mkv",
+      "bytes": 658117874,
+      "sha256": "68822d2f9d0fc6c110fca783f125d1ab17d35a36558aa7f53f7fe6ced60dabb4",
+      "media_contract": {
+        "codec": "jpeg2000",
+        "profile": "1368",
+        "container": "matroska",
+        "pixel_format": "rgb48le",
+        "bits_per_raw_sample": 12,
+        "color_transfer": "smpte2084",
+        "color_primaries": "smpte432",
+        "width": 3840,
+        "height": 2160,
+        "frame_rate": "60/1",
+        "duration_seconds": 8.0,
+        "frame_count": 480,
+        "mastering_peak_nits": 4000
+      }
+    },
+    "cta_wave_clg1_t53_hlg": {
+      "role": "hlg_metadata_and_decode_validation",
+      "dataset": "CTA WAVE CLG1 Test Vector 53",
+      "homepage": "https://github.com/cta-wave/Test-Content",
+      "license": "CTA WAVE Test Material User Agreement incorporating CC BY 4.0 for WAVE testing",
+      "license_url": "https://github.com/cta-wave/Test-Content/blob/master/index.html",
+      "relative_path": "hdr-v1/cta-wave-clg1-t53-hlg.zip",
+      "url": "https://dash-large-files.akamaized.net/WAVE/vectors/clg1_sets/15_30_60/t53/2025-01-15/t53.zip",
+      "bytes": 37784200,
+      "sha256": "3fae232c0319353f39420fd326dd40f459ecdbcd38fe9b6e11fa0b8c87d94333",
+      "mpd_url": "https://dash-large-files.akamaized.net/WAVE/vectors/clg1_sets/15_30_60/t53/2025-01-15/stream.mpd",
+      "media_contract": {
+        "codec": "hevc",
+        "profile": "Main 10",
+        "pixel_format": "yuv420p10le",
+        "color_range": "tv",
+        "color_space": "bt2020nc",
+        "stream_color_transfer": "bt2020-10",
+        "decoded_frame_color_transfer": "arib-std-b67",
+        "color_primaries": "bt2020",
+        "width": 1920,
+        "height": 1080,
+        "frame_rate": "30/1",
+        "duration_seconds": 60.0,
+        "transfer_note": "The stream VUI uses transfer characteristic 14 while preferred-transfer signaling resolves decoded frames to HLG/ARIB STD-B67. Validation must inspect a decoded frame, not only stream metadata."
+      }
+    }
+  }
+}

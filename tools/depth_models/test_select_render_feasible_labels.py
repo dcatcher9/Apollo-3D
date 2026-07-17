@@ -42,14 +42,29 @@ def aggregate(psnr, pop=1.0, halo=4.0, jitter=2.0, coverage=99.0):
     }
 
 
-def policy_clip_contract(scale=1.0, **changes):
+def policy_clip_contract(scale=1.0, input_variant=None, **changes):
+    input_variant = input_variant or selector.input_color.sdr_input_variant()
+    selector.input_color.validate_input_variant(input_variant)
     contract = {
-        "harness_schema": 24, "model": "model", "profile": "apollo",
+        "harness_schema": selector.EXPECTED_HARNESS_SCHEMA,
+        "model": "model", "profile": "apollo",
         "metric_sha256": "metrics", "policy_warp_source_sha256": "a" * 64,
         "source_width": 16, "source_height": 9,
         "model_input_width": 14, "model_input_height": 14,
         "eye_width": 2, "eye_height": 2,
-        "color_mode": "sdr-srgb-8bit",
+        "color_mode": input_variant["color_mode"],
+        "hdr_source_kind": (
+            selector.sbs_contract.input_variant_hdr_source_kind(input_variant)
+        ),
+        "metric_preview_encoding": (
+            selector.sbs_contract.input_variant_metric_preview_encoding(
+                input_variant
+            )
+        ),
+        "hdr_input_scale": float(input_variant["scrgb_white_scale"] or 0.0),
+        "sdr_white_level_raw": int(
+            input_variant["windows_sdr_white_level_raw"] or 0
+        ),
         "content_scale_x": 1.0, "content_scale_y": 1.0,
         "disparity_raster_width": 2, "disparity_raster_height": 2,
         "artistic_full_clamp_abs": 0.04,
@@ -82,7 +97,7 @@ def policy_clip_contract(scale=1.0, **changes):
 def top_meta_from_clip(contract, **changes):
     meta = {field: contract[field] for field in selector.CLIP_TOP_META_FIELDS}
     meta.update({
-        "clip_set_sha1": "clips", "eval_schema": 29,
+        "clip_set_sha1": "clips", "eval_schema": 30,
         "conf_sha256": "conf", "extra_args": [],
     })
     meta.update(changes)
@@ -111,6 +126,200 @@ def worst_frame_for(aggregate_metrics):
 
 
 class RenderFeasibilityTests(unittest.TestCase):
+    def test_sparse_label_targets_authenticate_adjacent_evidence(self):
+        meta = policy_clip_contract(
+            output_gt_right_only=False,
+            output_selection_mode="label-frames",
+            label_frame_ids=[0, 3],
+            output_selected_frame_ids=[0, 1, 2, 3],
+            output_label_frames_sha256="c" * 64,
+        )
+        selection = selector.output_selection_contract(meta, "fixture")
+        self.assertEqual(selection["label_frame_ids"], (0, 3))
+        self.assertEqual(selection["selected_frame_ids"], (0, 1, 2, 3))
+
+    def test_label_target_without_adjacent_evidence_fails_closed(self):
+        meta = policy_clip_contract(
+            output_gt_right_only=False,
+            output_selection_mode="label-frames",
+            label_frame_ids=[4],
+            output_selected_frame_ids=[4],
+            output_label_frames_sha256="c" * 64,
+        )
+        with self.assertRaisesRegex(RuntimeError, "no adjacent evidence"):
+            selector.output_selection_contract(meta, "fixture")
+
+    def test_label_selection_rejects_unrelated_extra_artifact_frame(self):
+        meta = policy_clip_contract(
+            output_gt_right_only=False,
+            output_selection_mode="label-frames",
+            label_frame_ids=[4],
+            output_selected_frame_ids=[3, 4, 8],
+            output_label_frames_sha256="c" * 64,
+        )
+        with self.assertRaisesRegex(RuntimeError, "unauthenticated evidence"):
+            selector.output_selection_contract(meta, "fixture")
+
+    def test_generic_source_requires_exact_target_and_emitted_identities(self):
+        meta = policy_clip_contract(
+            output_gt_right_only=False,
+            output_selection_mode="label-frames",
+            label_frame_ids=[0, 3],
+            output_selected_frame_ids=[0, 1, 2, 3],
+            output_label_frames_sha256="c" * 64,
+        )
+        source = {
+            "source_contract": selector.GENERIC_SOURCE_CONTRACT,
+            "frame": 3,
+            "label_frame_ids": [0, 3],
+            "output_selected_frame_ids": [0, 1, 2, 3],
+            "label_frames_sha256": "c" * 64,
+        }
+        selector.validate_source_render_selection(source, meta, "fixture")
+        source["output_selected_frame_ids"] = [0, 1, 3]
+        with self.assertRaisesRegex(RuntimeError, "differs"):
+            selector.validate_source_render_selection(source, meta, "fixture")
+
+    def test_explicit_gt_right_selection_keeps_legacy_source_compatible(self):
+        meta = policy_clip_contract(
+            output_gt_right_only=True,
+            output_selection_mode="gt-right",
+            label_frame_ids=[],
+            output_selected_frame_ids=[2, 7],
+            output_label_frames_sha256="",
+        )
+        selector.validate_source_render_selection({"frame": 7}, meta, "fixture")
+        with self.assertRaisesRegex(RuntimeError, "was not rendered"):
+            selector.validate_source_render_selection({"frame": 3}, meta, "fixture")
+
+    def test_generic_source_bundle_contract_is_admitted_without_stereo_fitter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_variant = selector.input_color.sdr_input_variant()
+            labels = root / "labels.jsonl"
+            labels.write_text("{}\n", encoding="utf-8")
+            contract_path = root / "source_contract.json"
+            contract_path.write_text(json.dumps({
+                "schema": selector.GENERIC_SOURCE_SCHEMA,
+                "source_contract": selector.GENERIC_SOURCE_CONTRACT,
+                "run_contract": {"model": "model", "conf_sha256": "conf"},
+                "input_variant": input_variant,
+                "input_variant_sha256":
+                    selector.input_color.input_variant_sha256(input_variant),
+                "depth_input_color_contract_sha256":
+                    selector.input_color.color_contract_sha256(),
+            }), encoding="utf-8")
+            (root / "summary.json").write_text(json.dumps({
+                "schema": selector.GENERIC_SOURCE_SCHEMA,
+                "source_contract": selector.GENERIC_SOURCE_CONTRACT,
+                "labels_sha256": selector.sha256(labels),
+                "source_contract_sha256": selector.sha256(contract_path),
+            }), encoding="utf-8")
+            admitted = selector.source_label_contract(
+                labels, {"model": "model", "conf_sha256": "conf"}
+            )
+            self.assertEqual(admitted["kind"], "generic-source")
+            self.assertNotIn("fitter_contract", admitted)
+            self.assertEqual(admitted["input_variant"], input_variant)
+
+    def test_generic_source_bundle_rejects_stale_input_variant_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            labels = root / "labels.jsonl"
+            labels.write_text("{}\n", encoding="utf-8")
+            input_variant = selector.input_color.windows_hdr_input_variant(2500)
+            contract_path = root / "source_contract.json"
+            contract = {
+                "schema": selector.GENERIC_SOURCE_SCHEMA,
+                "source_contract": selector.GENERIC_SOURCE_CONTRACT,
+                "run_contract": {"model": "model", "conf_sha256": "conf"},
+                "input_variant": input_variant,
+                "input_variant_sha256":
+                    selector.input_color.input_variant_sha256(input_variant),
+                "depth_input_color_contract_sha256":
+                    selector.input_color.color_contract_sha256(),
+            }
+
+            def publish_contract():
+                contract_path.write_text(json.dumps(contract), encoding="utf-8")
+                (root / "summary.json").write_text(json.dumps({
+                    "schema": selector.GENERIC_SOURCE_SCHEMA,
+                    "source_contract": selector.GENERIC_SOURCE_CONTRACT,
+                    "labels_sha256": selector.sha256(labels),
+                    "source_contract_sha256": selector.sha256(contract_path),
+                }), encoding="utf-8")
+
+            publish_contract()
+            admitted = selector.source_label_contract(
+                labels, {"model": "model", "conf_sha256": "conf"}
+            )
+            self.assertEqual(admitted["input_variant"], input_variant)
+            contract["input_variant_sha256"] = "0" * 64
+            publish_contract()
+            with self.assertRaisesRegex(RuntimeError, "variant hash is stale"):
+                selector.source_label_contract(
+                    labels, {"model": "model", "conf_sha256": "conf"}
+                )
+
+    def test_hdr_source_row_is_authenticated_and_color_bound(self):
+        input_variant = selector.input_color.windows_hdr_input_variant(6000)
+        row = {
+            "source_schema": selector.GENERIC_SOURCE_SCHEMA,
+            "source_contract": selector.GENERIC_SOURCE_CONTRACT,
+            "color_mode": selector.input_color.COLOR_MODE_HDR,
+            "hdr_source_kind": selector.sbs_contract.HDR_SOURCE_SIMULATED,
+            "metric_preview_encoding": selector.sbs_contract.METRIC_PREVIEW_HDR,
+            "input_variant": input_variant,
+            "input_variant_sha256":
+                selector.input_color.input_variant_sha256(input_variant),
+        }
+        self.assertEqual(
+            selector.validate_source_input_variant(
+                row, input_variant, "HDR source row"
+            ),
+            input_variant,
+        )
+        hdr_contract = policy_clip_contract(input_variant=input_variant)
+        self.assertEqual(
+            selector.validate_source_raster_contract(
+                hdr_contract, hdr_contract
+            ),
+            (2, 2),
+        )
+
+        wrong_color = dict(row, color_mode=selector.input_color.COLOR_MODE_SDR)
+        with self.assertRaisesRegex(RuntimeError, "color mode differs"):
+            selector.validate_source_input_variant(
+                wrong_color, input_variant, "HDR source row"
+            )
+
+    def test_native_pq_harness_provenance_is_not_simulated_hdr(self):
+        native = selector.input_color.native_pq_input_variant()
+        harness = policy_clip_contract(input_variant=native)
+        self.assertEqual(
+            selector.input_variant_from_harness(harness, "native HDR"),
+            native,
+        )
+        self.assertEqual(harness["hdr_input_scale"], 0.0)
+        self.assertEqual(harness["sdr_white_level_raw"], 0)
+        simulated = dict(
+            harness,
+            hdr_source_kind=selector.sbs_contract.HDR_SOURCE_SIMULATED,
+        )
+        with self.assertRaisesRegex(RuntimeError, "SDR-white"):
+            selector.input_variant_from_harness(simulated, "native HDR")
+
+    def test_missing_variant_fails_closed_except_legacy_sdr_default(self):
+        with self.assertRaisesRegex(RuntimeError, "missing authenticated"):
+            selector.authenticated_input_variant({}, "generic source")
+        variant, variant_hash = selector.authenticated_input_variant(
+            {}, "legacy source", allow_legacy_sdr=True
+        )
+        self.assertEqual(variant, selector.input_color.sdr_input_variant())
+        self.assertEqual(
+            variant_hash, selector.input_color.input_variant_sha256(variant)
+        )
+
     def test_default_immersive_never_follows_low_pop_authored_target(self):
         result = selector.select_clip(
             aggregate(26.0),
@@ -138,6 +347,39 @@ class RenderFeasibilityTests(unittest.TestCase):
         self.assertEqual(result["style_targets"]["immersive"], 1.0)
         self.assertFalse(result["candidate_grid"][1.2]["connected"])
         self.assertTrue(result["candidate_grid"][1.2]["individually_feasible"])
+
+    def test_identity_hard_failure_becomes_explicit_nonactionable_negative(self):
+        candidates = covered_grid({
+            0.9: aggregate(26.0, pop=0.9, coverage=82.0),
+            1.0: aggregate(26.0, pop=1.0, coverage=82.0),
+            1.1: aggregate(26.0, pop=1.1, coverage=95.0),
+        })
+        result = selector.select_clip(
+            aggregate(26.0, coverage=82.0), candidates, SPECS
+        )
+        self.assertFalse(result["identity_feasible"])
+        self.assertEqual(result["identity_violations"], [
+            "source_coverage_pct:hard"
+        ])
+        self.assertEqual(result["safe_scale_ceiling"], 1.0)
+        self.assertEqual(result["ceiling_confidence"], 0.0)
+        self.assertEqual(result["safety_margin_reliability"], 0.0)
+        self.assertEqual(result["connected_safe_scales"], [])
+        self.assertTrue(all(
+            not evidence["connected"]
+            for evidence in result["candidate_grid"].values()
+        ))
+        self.assertEqual(result["style_targets"], {
+            "clean": 1.0, "balanced": 1.0, "immersive": 1.0,
+        })
+
+    def test_identity_missing_hard_evidence_is_not_a_negative_label(self):
+        identity = aggregate(26.0)
+        del identity["source_coverage_pct"]
+        with self.assertRaisesRegex(RuntimeError, "incomplete or inconsistent"):
+            selector.select_clip(
+                aggregate(26.0), covered_grid({1.0: identity}), SPECS
+            )
 
     def test_stability_regression_stops_connected_frontier(self):
         result = selector.select_clip(
@@ -449,6 +691,61 @@ class RenderFeasibilityTests(unittest.TestCase):
                 control, candidate_payload(missing_semantics), 1.1, "candidate"
             )
 
+    def test_hdr_context_requires_exact_white_level_and_scale(self):
+        input_variant = selector.input_color.windows_hdr_input_variant(2500)
+        control_clip = policy_clip_contract(
+            1.0, input_variant=input_variant
+        )
+        candidate_clip = policy_clip_contract(
+            1.1, input_variant=input_variant
+        )
+        control = {
+            "meta": top_meta_from_clip(control_clip),
+            "clips": {"shot": {"meta": control_clip}},
+        }
+
+        def candidate_payload(clip_meta):
+            return {
+                "meta": top_meta_from_clip(
+                    clip_meta,
+                    extra_args=["--artistic-scale-override", "1.1"],
+                ),
+                "clips": {"shot": {"meta": clip_meta}},
+            }
+
+        selector.validate_context(
+            control, candidate_payload(candidate_clip), 1.1, "candidate"
+        )
+
+        wrong_scale = policy_clip_contract(
+            1.1, input_variant=input_variant, hdr_input_scale=3.75
+        )
+        with self.assertRaisesRegex(RuntimeError, "variant provenance differs"):
+            selector.validate_context(
+                control, candidate_payload(wrong_scale), 1.1, "candidate"
+            )
+
+        noncanonical_white = policy_clip_contract(
+            1.1, input_variant=input_variant, sdr_white_level_raw=3000
+        )
+        with self.assertRaisesRegex(RuntimeError, "invalid HDR SDR-white"):
+            selector.validate_context(
+                control, candidate_payload(noncanonical_white), 1.1, "candidate"
+            )
+
+        missing_white = policy_clip_contract(1.1, input_variant=input_variant)
+        del missing_white["sdr_white_level_raw"]
+        with self.assertRaisesRegex(RuntimeError, "color provenance lacks"):
+            selector.validate_context(
+                control, candidate_payload(missing_white), 1.1, "candidate"
+            )
+
+        sdr_candidate = policy_clip_contract(1.1)
+        with self.assertRaisesRegex(RuntimeError, "differs from control"):
+            selector.validate_context(
+                control, candidate_payload(sdr_candidate), 1.1, "candidate"
+            )
+
     def test_control_and_scale_one_candidate_are_exact_identity(self):
         control_clip = policy_clip_contract(1.0)
         control = {
@@ -493,6 +790,9 @@ class RenderFeasibilityTests(unittest.TestCase):
             "model_input_width": 14, "model_input_height": 14,
             "eye_width": 4, "eye_height": 2,
             "color_mode": "sdr-srgb-8bit",
+            "hdr_source_kind": selector.sbs_contract.HDR_SOURCE_SDR,
+            "metric_preview_encoding": selector.sbs_contract.METRIC_PREVIEW_SDR,
+            "hdr_input_scale": 0.0, "sdr_white_level_raw": 0,
             "content_scale_x": 0.5, "content_scale_y": 1.0,
             "disparity_raster_width": 4,
             "disparity_raster_height": 2,
@@ -501,11 +801,6 @@ class RenderFeasibilityTests(unittest.TestCase):
         row = dict(contract)
         expected = selector.validate_source_raster_contract(row, contract)
         self.assertEqual(expected, (2, 4))
-        clamped = np.zeros((2, 4), dtype=np.float32)
-        raw = np.ones((2, 4), dtype=np.float32)
-        selector.validate_loaded_disparity_rasters(
-            row, contract, clamped, raw
-        )
         bad_content_y = dict(row, content_scale_y=0.75)
         with self.assertRaisesRegex(RuntimeError, "content_scale_y"):
             selector.validate_source_raster_contract(bad_content_y, contract)
@@ -513,10 +808,6 @@ class RenderFeasibilityTests(unittest.TestCase):
         bad_row = dict(row, disparity_raster_width=3)
         with self.assertRaisesRegex(RuntimeError, "full output-eye raster"):
             selector.validate_source_raster_contract(bad_row, bad_contract)
-        with self.assertRaisesRegex(RuntimeError, "texture header"):
-            selector.validate_loaded_disparity_rasters(
-                row, contract, clamped[:, :3], raw
-            )
 
     def test_output_eye_zero_bars_are_excluded_by_pixel_center(self):
         raster = np.array([
@@ -556,13 +847,6 @@ class RenderFeasibilityTests(unittest.TestCase):
         self.assertLess(stronger["exact_pop_spread_pct"],
                         identity["exact_pop_spread_pct"] * 1.5)
 
-    def test_unclamped_artifact_is_required(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            baseline = Path(temporary) / "baseline_disparity_00001.f32"
-            baseline.write_bytes(b"placeholder")
-            with self.assertRaisesRegex(RuntimeError, "unclamped"):
-                selector.raw_disparity_path({"baseline_disparity": str(baseline)})
-
     def test_schema8_bundle_retains_complete_grid_and_raw_contract(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -579,8 +863,13 @@ class RenderFeasibilityTests(unittest.TestCase):
                 header + np.array([-.04, -.01, .01, .04], dtype="<f4").tobytes()
             )
             warp_hash = "a" * 64
+            input_variant = selector.input_color.sdr_input_variant()
+            input_variant_hash = selector.input_color.input_variant_sha256(
+                input_variant
+            )
             harness_contract = {
-                "schema": 24, "model": "model", "profile": "apollo",
+                "schema": selector.EXPECTED_HARNESS_SCHEMA,
+                "model": "model", "profile": "apollo",
                 "depth_step": "current-once", "ema": 0.5,
                 "ema_edge_change": 0.05, "ema_edge_gradient": 0.02,
                 "ema_edge_strength": 0.25, "minmax_ema": 0.18,
@@ -598,6 +887,9 @@ class RenderFeasibilityTests(unittest.TestCase):
                 "model_input_width": 14, "model_input_height": 14,
                 "eye_width": 2, "eye_height": 2,
                 "color_mode": "sdr-srgb-8bit",
+                "hdr_source_kind": selector.sbs_contract.HDR_SOURCE_SDR,
+                "metric_preview_encoding": selector.sbs_contract.METRIC_PREVIEW_SDR,
+                "hdr_input_scale": 0.0, "sdr_white_level_raw": 0,
                 "content_scale_x": 1.0, "content_scale_y": 1.0,
                 "disparity_raster_width": 2,
                 "disparity_raster_height": 2,
@@ -635,6 +927,10 @@ class RenderFeasibilityTests(unittest.TestCase):
                 "model_input_width": 14, "model_input_height": 14,
                 "eye_width": 2, "eye_height": 2,
                 "color_mode": "sdr-srgb-8bit",
+                "hdr_source_kind": selector.sbs_contract.HDR_SOURCE_SDR,
+                "metric_preview_encoding": selector.sbs_contract.METRIC_PREVIEW_SDR,
+                "input_variant": input_variant,
+                "input_variant_sha256": input_variant_hash,
                 "content_scale_x": 1.0, "content_scale_y": 1.0,
                 "disparity_raster_width": 2,
                 "disparity_raster_height": 2,
@@ -649,6 +945,10 @@ class RenderFeasibilityTests(unittest.TestCase):
                     "kind": "depth_run_manifest", "model": "model",
                     "conf_sha256": "conf",
                 },
+                "input_variant": input_variant,
+                "input_variant_sha256": input_variant_hash,
+                "depth_input_color_contract_sha256":
+                    selector.input_color.color_contract_sha256(),
             }), encoding="utf-8")
             (root / "summary.json").write_text(json.dumps({
                 "schema": 7,
@@ -658,6 +958,7 @@ class RenderFeasibilityTests(unittest.TestCase):
             control_clip_meta = policy_clip_contract(
                 1.0, metric_sha256=metric_hash,
                 policy_warp_source_sha256=warp_hash,
+                eye_width=4, disparity_raster_width=4,
             )
             common_meta = top_meta_from_clip(
                 control_clip_meta,
@@ -681,6 +982,7 @@ class RenderFeasibilityTests(unittest.TestCase):
                 candidate_clip_meta = policy_clip_contract(
                     scale, metric_sha256=metric_hash,
                     policy_warp_source_sha256=warp_hash,
+                    eye_width=4, disparity_raster_width=4,
                 )
                 meta = top_meta_from_clip(
                     candidate_clip_meta, conf_sha256="conf",
@@ -699,6 +1001,29 @@ class RenderFeasibilityTests(unittest.TestCase):
                     }},
                 }), encoding="utf-8")
                 candidates.append((scale, path))
+                if scale == 1.0:
+                    clip_root = root / "shot-1"
+                    clip_root.mkdir()
+                    disk_contract = dict(candidate_clip_meta)
+                    disk_contract["schema"] = disk_contract.pop("harness_schema")
+                    (clip_root / "contract.json").write_text(
+                        json.dumps(disk_contract), encoding="utf-8"
+                    )
+                    grid_header = np.array([4, 2], dtype="<u4").tobytes()
+                    grid_clamped = np.array(
+                        [-.02, -.02, -.01, -.01, .01, .01, .02, .02],
+                        dtype="<f4",
+                    ).tobytes()
+                    grid_raw = np.array(
+                        [-.04, -.04, -.01, -.01, .01, .01, .04, .04],
+                        dtype="<f4",
+                    ).tobytes()
+                    (clip_root / "warp_disparity_00001.f32").write_bytes(
+                        grid_header + grid_clamped
+                    )
+                    (clip_root / "warp_unclamped_disparity_00001.f32").write_bytes(
+                        grid_header + grid_raw
+                    )
             output = root / "output"
             summary = selector.write_bundle(
                 source_labels, control, candidates, output, thresholds
@@ -719,14 +1044,34 @@ class RenderFeasibilityTests(unittest.TestCase):
                 contract["policy_baseline"]["metric_sha256"],
                 common_meta["metric_sha256"],
             )
+            self.assertEqual(row["input_variant"], input_variant)
+            self.assertEqual(row["input_variant_sha256"], input_variant_hash)
+            self.assertEqual(row["hdr_input_scale"], 0.0)
+            self.assertEqual(row["sdr_white_level_raw"], 0)
+            self.assertEqual(contract["input_variant"], input_variant)
+            self.assertEqual(
+                contract["input_variant_sha256"], input_variant_hash
+            )
+            self.assertEqual(contract["color_mode"], "sdr-srgb-8bit")
+            self.assertEqual(contract["hdr_input_scale"], 0.0)
+            self.assertEqual(contract["sdr_white_level_raw"], 0)
+            self.assertEqual(evidence["input_variant"], input_variant)
+            self.assertEqual(evidence["color_mode"], "sdr-srgb-8bit")
+            self.assertEqual(summary["input_variant_sha256"], input_variant_hash)
             self.assertEqual(row["baseline_multiplier"], 1.1)
             self.assertEqual(row["ceiling_confidence"], 1.0)
             self.assertEqual(row["confidence"], 1.0)
             self.assertGreaterEqual(row["safety_margin_reliability"], 0.5)
             self.assertEqual(row["render_evidence_confidence"],
                              row["safety_margin_reliability"])
-            self.assertEqual(row["baseline_unclamped_disparity_sha256"],
-                             selector.sha256(raw))
+            self.assertEqual(row["eye_width"], 4)
+            self.assertEqual(row["disparity_raster_width"], 4)
+            self.assertEqual(
+                row["baseline_unclamped_disparity_sha256"],
+                selector.sha256(root / "shot-1" /
+                                "warp_unclamped_disparity_00001.f32"),
+            )
+            self.assertEqual(row["source_depth_baseline_disparity"], str(baseline))
             self.assertEqual(set(evidence["clips"]["shot-1"]["candidate_grid"]),
                              {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5"})
             self.assertIn("metrics",

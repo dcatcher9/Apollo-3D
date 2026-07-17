@@ -20,8 +20,10 @@ THIS_DIR = Path(__file__).resolve().parent
 SBSBENCH_DIR = THIS_DIR.parent / "sbsbench"
 sys.path.insert(0, str(SBSBENCH_DIR))
 import sbsbench  # noqa: E402
+import sbs_harness_contract as sbs_contract  # noqa: E402
 
 from artistic_policy_contract import ART_SCALE_DELTA_MAX  # noqa: E402
+import depth_input_color as input_color  # noqa: E402
 
 PROTECTED_PRIMARY_AXES = {"warp", "stability"}
 EXACT_POP_METRIC = "exact_pop_spread_pct"
@@ -29,7 +31,10 @@ STYLE_NAMES = ("immersive", "balanced", "clean")
 DEFAULT_STYLE = "immersive"
 POLICY_CONTRACT = "safe-frontier-multistyle-apollo-v1"
 POLICY_WARP_CONTRACT = "apollo-safe-frontier-v1"
+GENERIC_SOURCE_SCHEMA = 2
+GENERIC_SOURCE_CONTRACT = "full-cadence-artistic-source-v2"
 MAX_CANDIDATE_SCALE_STEP = 0.10
+EXPECTED_HARNESS_SCHEMA = sbs_contract.HARNESS_SCHEMA
 WARP_DISPARITY_CONTRACT = (
     "exact_clamped_full_binocular_normalized_at_output_eye_raster_zero_bars"
 )
@@ -46,7 +51,9 @@ CLIP_POLICY_CONTRACT_FIELDS = (
     "harness_schema", "model", "profile", "metric_sha256",
     "policy_warp_source_sha256",
     "source_width", "source_height", "model_input_width", "model_input_height",
-    "eye_width", "eye_height", "color_mode",
+    "eye_width", "eye_height", "color_mode", "hdr_source_kind",
+    "metric_preview_encoding",
+    "hdr_input_scale", "sdr_white_level_raw",
     "content_scale_x", "content_scale_y",
     "disparity_raster_width", "disparity_raster_height",
     "artistic_full_clamp_abs",
@@ -98,6 +105,10 @@ POLICY_BASELINE_FIELDS = (
     "metric_sha256",
     "policy_warp_source_sha256",
 )
+HARNESS_INPUT_FIELDS = (
+    "color_mode", "hdr_source_kind", "metric_preview_encoding", "hdr_input_scale",
+    "sdr_white_level_raw",
+)
 
 
 def semantic_file_hash(paths):
@@ -143,6 +154,134 @@ def load_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def _input_variant_harness_context(input_variant):
+    input_color.validate_input_variant(input_variant)
+    return {
+        "color_mode": input_variant["color_mode"],
+        "hdr_source_kind": sbs_contract.input_variant_hdr_source_kind(
+            input_variant
+        ),
+        "metric_preview_encoding": (
+            sbs_contract.input_variant_metric_preview_encoding(input_variant)
+        ),
+        "hdr_input_scale": float(input_variant["scrgb_white_scale"] or 0.0),
+        "sdr_white_level_raw": int(
+            input_variant["windows_sdr_white_level_raw"] or 0
+        ),
+    }
+
+
+def authenticated_input_variant(payload, origin, allow_legacy_sdr=False):
+    """Validate the canonical variant object and its semantic SHA-256."""
+    variant = payload.get("input_variant") if isinstance(payload, dict) else None
+    variant_hash = (
+        payload.get("input_variant_sha256") if isinstance(payload, dict) else None
+    )
+    if variant is None and variant_hash is None and allow_legacy_sdr:
+        variant = input_color.sdr_input_variant()
+        variant_hash = input_color.input_variant_sha256(variant)
+    elif variant is None or variant_hash is None:
+        raise RuntimeError(f"{origin}: missing authenticated input variant")
+    try:
+        input_color.validate_input_variant(variant)
+        expected_hash = input_color.input_variant_sha256(variant)
+    except (RuntimeError, TypeError, ValueError) as error:
+        raise RuntimeError(f"{origin}: invalid input variant") from error
+    if variant_hash != expected_hash:
+        raise RuntimeError(f"{origin}: input variant hash is stale")
+    return variant, expected_hash
+
+
+def input_variant_from_harness(meta, origin):
+    """Authenticate the compact color fields emitted by the C++ harness."""
+    if not isinstance(meta, dict):
+        raise RuntimeError(f"{origin}: harness color provenance is missing")
+    missing = [field for field in HARNESS_INPUT_FIELDS if field not in meta]
+    if missing:
+        raise RuntimeError(
+            f"{origin}: harness color provenance lacks: " + ", ".join(missing)
+        )
+    color_mode = meta.get("color_mode")
+    hdr_source_kind = meta.get("hdr_source_kind")
+    white_raw = meta.get("sdr_white_level_raw")
+    if not isinstance(white_raw, int) or isinstance(white_raw, bool):
+        raise RuntimeError(f"{origin}: invalid HDR SDR-white provenance")
+    if (color_mode == input_color.COLOR_MODE_SDR and
+            hdr_source_kind == sbs_contract.HDR_SOURCE_SDR):
+        variant = input_color.sdr_input_variant()
+    elif (color_mode == input_color.COLOR_MODE_HDR and
+          hdr_source_kind == sbs_contract.HDR_SOURCE_SIMULATED):
+        try:
+            variant = input_color.windows_hdr_input_variant(
+                white_raw
+            )
+        except (RuntimeError, TypeError, ValueError) as error:
+            raise RuntimeError(
+                f"{origin}: invalid HDR SDR-white provenance"
+            ) from error
+    elif (color_mode == input_color.COLOR_MODE_HDR and
+          hdr_source_kind == sbs_contract.HDR_SOURCE_NATIVE_PQ):
+        if white_raw != 0:
+            raise RuntimeError(
+                f"{origin}: native PQ input has simulated SDR-white provenance"
+            )
+        variant = input_color.native_pq_input_variant()
+    else:
+        raise RuntimeError(
+            f"{origin}: unsupported harness color/source provenance"
+        )
+    expected = _input_variant_harness_context(variant)
+    scale = meta.get("hdr_input_scale")
+    if (not isinstance(scale, (int, float)) or isinstance(scale, bool) or
+            not np.isfinite(float(scale))):
+        raise RuntimeError(f"{origin}: invalid HDR input scale provenance")
+    actual = {
+        "color_mode": color_mode,
+        "hdr_source_kind": hdr_source_kind,
+        "metric_preview_encoding": meta.get("metric_preview_encoding"),
+        "hdr_input_scale": float(scale),
+        "sdr_white_level_raw": white_raw,
+    }
+    mismatch = {}
+    for field in HARNESS_INPUT_FIELDS:
+        if field == "hdr_input_scale":
+            equal = np.isclose(
+                expected[field], actual[field], rtol=0.0, atol=1e-9
+            )
+        else:
+            equal = expected[field] == actual[field]
+        if not equal:
+            mismatch[field] = (expected[field], actual[field])
+    if mismatch:
+        raise RuntimeError(
+            f"{origin}: harness input variant provenance differs: {mismatch}"
+        )
+    return variant
+
+
+def validate_run_input_variant(payload, origin, expected_variant=None):
+    """Require one exact input variant across every clip in a render run."""
+    clips = payload.get("clips", {}) if isinstance(payload, dict) else {}
+    if not isinstance(clips, dict) or not clips:
+        raise RuntimeError(f"{origin}: render run has no clip color provenance")
+    variants = {}
+    for clip, entry in clips.items():
+        meta = entry.get("meta", {}) if isinstance(entry, dict) else {}
+        variant = input_variant_from_harness(meta, f"{origin}/{clip}")
+        variants[input_color.input_variant_sha256(variant)] = variant
+    if len(variants) != 1:
+        raise RuntimeError(f"{origin}: render clips use different input variants")
+    variant_hash, variant = next(iter(variants.items()))
+    if expected_variant is not None:
+        input_color.validate_input_variant(expected_variant)
+        expected_hash = input_color.input_variant_sha256(expected_variant)
+        if variant_hash != expected_hash:
+            raise RuntimeError(
+                f"{origin}: render input variant differs from source labels"
+            )
+    return variant
+
+
 def parse_candidate(value):
     try:
         scale_text, path_text = value.split("=", 1)
@@ -172,6 +311,134 @@ def grid_context_args(extra_args):
         normalized.append(token)
         index += 1
     return normalized
+
+
+def validate_target_evidence_ids(label_frame_ids, selected_frame_ids, origin):
+    """Validate sparse targets plus one available adjacent evidence frame."""
+    selected = set(selected_frame_ids)
+    required = set(label_frame_ids)
+    for frame_id in label_frame_ids:
+        if frame_id - 1 in selected:
+            required.add(frame_id - 1)
+        elif frame_id + 1 in selected:
+            required.add(frame_id + 1)
+        else:
+            raise RuntimeError(
+                f"{origin}: label frame {frame_id} has no adjacent evidence frame"
+            )
+    if selected != required:
+        raise RuntimeError(
+            f"{origin}: label selection contains unauthenticated evidence frames"
+        )
+
+
+def output_selection_contract(meta, origin):
+    """Normalize the frame-selection provenance of one render-grid clip.
+
+    Explicit modern contracts carry the exact emitted frame identities.  The
+    legacy gt-right form remains readable so existing authored-stereo bundles
+    can still be regenerated, but interval/all-frame renders are never valid
+    temporal safe-ceiling supervision.
+    """
+    mode = meta.get("output_selection_mode")
+    if mode is None:
+        if meta.get("output_gt_right_only") is True:
+            return {
+                "mode": "gt-right",
+                "label_frame_ids": None,
+                "selected_frame_ids": None,
+                "label_frames_sha256": "",
+                "legacy": True,
+            }
+        raise RuntimeError(
+            f"{origin}: policy labels require gt-right or label-frames output selection"
+        )
+    if mode not in {"gt-right", "label-frames"}:
+        raise RuntimeError(f"{origin}: invalid policy output selection mode {mode!r}")
+    if meta.get("output_interval") != 1:
+        raise RuntimeError(f"{origin}: selected policy frames require output_interval=1")
+    expected_gt_right = mode == "gt-right"
+    if meta.get("output_gt_right_only") is not expected_gt_right:
+        raise RuntimeError(
+            f"{origin}: {mode} selection disagrees with output_gt_right_only"
+        )
+    selected_frame_ids = meta.get("output_selected_frame_ids")
+    if (not isinstance(selected_frame_ids, list) or not selected_frame_ids or
+            any(not isinstance(value, int) or isinstance(value, bool) or value < 0
+                for value in selected_frame_ids) or
+            selected_frame_ids != sorted(set(selected_frame_ids))):
+        raise RuntimeError(
+            f"{origin}: explicit output selection lacks exact increasing frame identities"
+        )
+    label_hash = meta.get("output_label_frames_sha256")
+    if mode == "label-frames":
+        if (not isinstance(label_hash, str) or len(label_hash) != 64 or
+                any(char not in "0123456789abcdef" for char in label_hash)):
+            raise RuntimeError(
+                f"{origin}: label-frames selection lacks its raw-file SHA-256"
+            )
+        label_frame_ids = meta.get("label_frame_ids")
+        if (not isinstance(label_frame_ids, list) or not label_frame_ids or
+                any(not isinstance(value, int) or isinstance(value, bool) or value < 0
+                    for value in label_frame_ids) or
+                label_frame_ids != sorted(set(label_frame_ids))):
+            raise RuntimeError(
+                f"{origin}: label selection lacks exact increasing target identities"
+            )
+        validate_target_evidence_ids(
+            label_frame_ids, selected_frame_ids, origin
+        )
+    elif label_hash != "":
+        raise RuntimeError(f"{origin}: gt-right selection has a label-frame hash")
+    else:
+        label_frame_ids = meta.get("label_frame_ids", [])
+        if label_frame_ids not in (None, []):
+            raise RuntimeError(f"{origin}: gt-right selection has label target IDs")
+    return {
+        "mode": mode,
+        "label_frame_ids": tuple(label_frame_ids or ()),
+        "selected_frame_ids": tuple(selected_frame_ids),
+        "label_frames_sha256": label_hash,
+        "legacy": False,
+    }
+
+
+def validate_source_render_selection(source, render_meta, origin):
+    selection = output_selection_contract(render_meta, origin)
+    frame = int(source["frame"])
+    if source.get("source_contract") == GENERIC_SOURCE_CONTRACT:
+        if selection["mode"] != "label-frames" or selection["legacy"]:
+            raise RuntimeError(
+                f"{origin}: generic mono/stereo source rows require label-frames rendering"
+            )
+        try:
+            declared_ids = tuple(int(value) for value in source["label_frame_ids"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError(f"{origin}: source row has invalid label frame IDs") from error
+        try:
+            declared_selected_ids = tuple(
+                int(value) for value in source["output_selected_frame_ids"]
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError(f"{origin}: source row has invalid evidence frame IDs") from error
+        if (declared_ids != selection["label_frame_ids"] or
+                declared_selected_ids != selection["selected_frame_ids"] or
+                source.get("label_frames_sha256") !=
+                selection["label_frames_sha256"]):
+            raise RuntimeError(
+                f"{origin}: render selection differs from the authenticated source targets"
+            )
+    elif selection["mode"] != "gt-right":
+        raise RuntimeError(
+            f"{origin}: legacy authored-stereo rows require gt-right selection"
+        )
+    if selection["mode"] == "label-frames":
+        if frame not in selection["label_frame_ids"]:
+            raise RuntimeError(f"{origin}: source frame {frame} was not a label target")
+    elif (selection["selected_frame_ids"] is not None and
+          frame not in selection["selected_frame_ids"]):
+        raise RuntimeError(f"{origin}: source frame {frame} was not rendered")
+    return selection
 
 
 def validate_candidate_scale_grid(scales):
@@ -233,9 +500,10 @@ def validate_clip_contract_context(control, candidate, scale, clip, origin):
                 f"{label}/{clip}: clip harness contract lacks: " +
                 ", ".join(missing)
             )
+        input_variant_from_harness(meta, f"{label}/{clip}")
         validate_source_raster_contract(meta, meta)
         expected = {
-            "harness_schema": 24,
+            "harness_schema": EXPECTED_HARNESS_SCHEMA,
             "depth_step": "current-once",
             "depth_reuse_interval": 1,
             "depth_compensation": "none",
@@ -246,7 +514,6 @@ def validate_clip_contract_context(control, candidate, scale, clip, origin):
             "model_onnx_sha256": "",
             "policy_metadata_sha256": "",
             "deployment_geometry_allowlist_sha256": "",
-            "output_gt_right_only": True,
             "literal_bestv2": False,
             "artifact_mode": "full",
             "warp_mask": WARP_MASK_CONTRACT,
@@ -273,6 +540,14 @@ def validate_clip_contract_context(control, candidate, scale, clip, origin):
                 f"{label}/{clip}: clip harness differs from run metadata: "
                 f"{top_mismatch}"
             )
+        if ("output_selection_mode" in run_meta or
+                "output_selection_mode" in meta):
+            if run_meta.get("output_selection_mode") != meta.get(
+                    "output_selection_mode"):
+                raise RuntimeError(
+                    f"{label}/{clip}: clip output selection mode differs from run metadata"
+                )
+        output_selection_contract(meta, f"{label}/{clip}")
     mismatches = {
         field: (control_meta[field], candidate_meta[field])
         for field in CLIP_POLICY_CONTRACT_FIELDS
@@ -281,6 +556,16 @@ def validate_clip_contract_context(control, candidate, scale, clip, origin):
     if mismatches:
         raise RuntimeError(
             f"{origin}/{clip}: clip policy/raster contract differs: {mismatches}"
+        )
+    control_selection = output_selection_contract(
+        control_meta, f"control/{clip}"
+    )
+    candidate_selection = output_selection_contract(
+        candidate_meta, f"{origin}/{clip}"
+    )
+    if control_selection != candidate_selection:
+        raise RuntimeError(
+            f"{origin}/{clip}: output frame selection differs from control"
         )
     control_scale = control_meta.get("artistic_scale_override")
     candidate_scale = candidate_meta.get("artistic_scale_override")
@@ -302,6 +587,11 @@ def validate_clip_contract_context(control, candidate, scale, clip, origin):
 def validate_context(control, candidate, scale, origin):
     validate_uncompensated_run(control, "control")
     validate_uncompensated_run(candidate, origin)
+    control_variant = validate_run_input_variant(control, "control")
+    candidate_variant = validate_run_input_variant(candidate, origin)
+    if (input_color.input_variant_sha256(control_variant) !=
+            input_color.input_variant_sha256(candidate_variant)):
+        raise RuntimeError(f"{origin}: render input variant differs from control")
     control_meta = control.get("meta", {})
     candidate_meta = candidate.get("meta", {})
     if control_meta.get("artistic_scale_override") != 1.0:
@@ -329,8 +619,11 @@ def validate_context(control, candidate, scale, origin):
         raise RuntimeError(
             f"{origin}: policy/geometry context differs: {semantic_mismatch}"
         )
-    if not candidate_meta.get("output_gt_right_only"):
-        raise RuntimeError(f"{origin}: render did not select exact authored frame identities")
+    if "output_selection_mode" in control_meta or \
+            "output_selection_mode" in candidate_meta:
+        if control_meta.get("output_selection_mode") != candidate_meta.get(
+                "output_selection_mode"):
+            raise RuntimeError(f"{origin}: run output selection modes differ")
     if control_meta.get("artistic_policy") is not False or \
             candidate_meta.get("artistic_policy") is not False:
         raise RuntimeError(
@@ -384,8 +677,8 @@ def policy_baseline_from_meta(meta):
         raise RuntimeError("control results have an invalid policy warp source hash")
     baseline["depth_model"] = baseline.pop("model")
     baseline.update({
-        "harness_schema": 24,
-        "eval_schema": 29,
+        "harness_schema": EXPECTED_HARNESS_SCHEMA,
+        "eval_schema": 30,
         "warp_contract": POLICY_WARP_CONTRACT,
     })
     if int(meta.get("eval_schema", -1)) != baseline["eval_schema"]:
@@ -560,15 +853,24 @@ def select_clip(control_agg, candidates, metric_specs, clip_meta=None):
     identity = candidates.get(1.0)
     if identity is None:
         raise RuntimeError("scale grid has no identity candidate")
-    control_violations = feasibility_violations(
+    identity_violations = feasibility_violations(
         control_agg, identity, metric_specs, clip_meta
     )
-    if control_violations:
-        raise RuntimeError("identity render violates its own feasibility contract: " +
-                           ", ".join(control_violations))
     identity_pop = identity.get(EXACT_POP_METRIC)
     if identity_pop is None or not np.isfinite(identity_pop):
         raise RuntimeError(f"identity render has no finite {EXACT_POP_METRIC}")
+
+    # A measured hard-bound failure at scale 1 is useful negative supervision:
+    # the optional controller must abstain because no multiplier can make the
+    # already-bad baseline an authenticated safe action.  Missing evidence or a
+    # relative-regression mismatch is not a negative label; those remain broken
+    # evaluations and fail closed.
+    if identity_violations and not all(
+            violation.endswith(":hard") for violation in identity_violations):
+        raise RuntimeError(
+            "identity render has incomplete or inconsistent feasibility evidence: " +
+            ", ".join(identity_violations)
+        )
 
     evidence = {}
     for scale, aggregate in sorted(candidates.items()):
@@ -589,6 +891,26 @@ def select_clip(control_agg, candidates, metric_specs, clip_meta=None):
             ),
             "individually_feasible": not violations,
             "connected": False,
+        }
+
+    if identity_violations:
+        return {
+            "safe_scale_ceiling": 1.0,
+            "ceiling_confidence": 0.0,
+            "safety_margin_reliability": 0.0,
+            "style_targets": {
+                "clean": 1.0, "balanced": 1.0, "immersive": 1.0,
+            },
+            "authored_fit_scale": 1.0,
+            "authored_fit_psnr": None,
+            "connected_safe_scales": [],
+            "safe_scale_min": 1.0,
+            "safe_scale_max": 1.0,
+            "identity_feasible": False,
+            "identity_violations": identity_violations,
+            "selection_reason": "identity-hard-failure-nonactionable",
+            "identity_exact_pop_spread_pct": float(identity_pop),
+            "candidate_grid": evidence,
         }
 
     scales = sorted(candidates)
@@ -646,6 +968,9 @@ def select_clip(control_agg, candidates, metric_specs, clip_meta=None):
         "connected_safe_scales": connected_scales,
         "safe_scale_min": float(min(connected_scales)),
         "safe_scale_max": float(max(connected_scales)),
+        "identity_feasible": True,
+        "identity_violations": [],
+        "selection_reason": "identity-connected-safe-frontier",
         "identity_exact_pop_spread_pct": float(identity_pop),
         "candidate_grid": evidence,
     }
@@ -665,35 +990,94 @@ def load_rows(path):
     return rows
 
 
+def validate_source_input_variant(row, expected_variant, origin):
+    """Bind a source row to its bundle's authenticated input identity."""
+    legacy = (
+        int(row.get("label_schema", 0)) == 7 and
+        row.get("policy_contract") == "stereo-fit-source-v2"
+    )
+    variant, variant_hash = authenticated_input_variant(
+        row, origin, allow_legacy_sdr=legacy
+    )
+    expected_hash = input_color.input_variant_sha256(expected_variant)
+    if variant_hash != expected_hash:
+        raise RuntimeError(f"{origin}: input variant differs from source bundle")
+    if row.get("color_mode") != variant["color_mode"]:
+        raise RuntimeError(f"{origin}: color mode differs from input variant")
+    expected_source_kind = sbs_contract.input_variant_hdr_source_kind(variant)
+    if row.get("hdr_source_kind") != expected_source_kind:
+        raise RuntimeError(
+            f"{origin}: HDR source kind differs from input variant"
+        )
+    sbs_contract.validate_metric_preview_encoding(
+        row["color_mode"], row.get("metric_preview_encoding"), origin,
+        expected_source_kind,
+    )
+    return variant
+
+
 def source_label_contract(source_labels, control_meta):
-    """Verify and retain the schema-7 stereo/source-depth provenance."""
+    """Verify legacy stereo-fit or generic mono/stereo source provenance."""
     source_labels = Path(source_labels).resolve()
     fitter_path = source_labels.parent / "label_fitter_contract.json"
+    generic_path = source_labels.parent / "source_contract.json"
     summary_path = source_labels.parent / "summary.json"
-    if not fitter_path.is_file() or not summary_path.is_file():
+    if not summary_path.is_file() or (fitter_path.is_file() == generic_path.is_file()):
         raise RuntimeError(
-            f"source label bundle is incomplete beside {source_labels}"
+            f"source bundle must have exactly one legacy/generic contract beside {source_labels}"
         )
-    fitter = load_json(fitter_path)
     summary = load_json(summary_path)
-    if int(fitter.get("schema", 0)) != 7 or int(summary.get("schema", 0)) != 7:
-        raise RuntimeError("source labels do not use the required schema-7 fitter")
     if summary.get("labels_sha256") != sha256(source_labels):
         raise RuntimeError("source label summary does not match labels.jsonl")
-    if summary.get("label_fitter_contract_sha256") != sha256(fitter_path):
-        raise RuntimeError("source label fitter contract hash is stale")
-    run = fitter.get("run_contract", {})
+    if generic_path.is_file():
+        contract = load_json(generic_path)
+        if (contract.get("schema") != GENERIC_SOURCE_SCHEMA or
+                summary.get("schema") != GENERIC_SOURCE_SCHEMA or
+                contract.get("source_contract") != GENERIC_SOURCE_CONTRACT or
+                summary.get("source_contract") != GENERIC_SOURCE_CONTRACT):
+            raise RuntimeError("generic source rows use an unsupported contract")
+        if summary.get("source_contract_sha256") != sha256(generic_path):
+            raise RuntimeError("generic source contract hash is stale")
+        run = contract.get("run_contract", {})
+        contract_key = "source_contract"
+        contract_path = generic_path
+        allow_legacy_sdr = False
+    else:
+        contract = load_json(fitter_path)
+        if int(contract.get("schema", 0)) != 7 or int(summary.get("schema", 0)) != 7:
+            raise RuntimeError("source labels do not use the required schema-7 fitter")
+        if summary.get("label_fitter_contract_sha256") != sha256(fitter_path):
+            raise RuntimeError("source label fitter contract hash is stale")
+        run = contract.get("run_contract", {})
+        contract_key = "fitter_contract"
+        contract_path = fitter_path
+        allow_legacy_sdr = True
     if run.get("model") != control_meta.get("model"):
         raise RuntimeError("source label depth model differs from the render grid")
     if run.get("conf_sha256") != control_meta.get("conf_sha256"):
         raise RuntimeError("source label configuration differs from the render grid")
+    input_variant, input_variant_hash = authenticated_input_variant(
+        contract,
+        "source label contract",
+        allow_legacy_sdr=allow_legacy_sdr,
+    )
+    expected_color_hash = input_color.color_contract_sha256()
+    color_hash = contract.get("depth_input_color_contract_sha256")
+    if color_hash is None and allow_legacy_sdr:
+        color_hash = expected_color_hash
+    if color_hash != expected_color_hash:
+        raise RuntimeError("source label input color contract hash is stale")
     return {
         "labels": {"path": str(source_labels), "sha256": sha256(source_labels)},
         "summary": {"path": str(summary_path), "sha256": sha256(summary_path)},
-        "fitter_contract": {
-            "path": str(fitter_path), "sha256": sha256(fitter_path)
+        contract_key: {
+            "path": str(contract_path), "sha256": sha256(contract_path)
         },
+        "kind": "generic-source" if generic_path.is_file() else "legacy-stereo-fit",
         "run_contract": run,
+        "input_variant": input_variant,
+        "input_variant_sha256": input_variant_hash,
+        "depth_input_color_contract_sha256": color_hash,
     }
 
 
@@ -727,9 +1111,18 @@ def validate_source_raster_contract(row, contract):
             raise RuntimeError(
                 f"source row {field} differs from its harness contract"
             )
-    if (contract.get("color_mode") != "sdr-srgb-8bit" or
-            row.get("color_mode") != contract.get("color_mode")):
+    input_variant_from_harness(contract, "source harness")
+    if row.get("color_mode") != contract.get("color_mode"):
         raise RuntimeError("source row/harness has incompatible color mode")
+    if row.get("hdr_source_kind") != contract.get("hdr_source_kind"):
+        raise RuntimeError(
+            "source row/harness has incompatible HDR source kind"
+        )
+    if (row.get("metric_preview_encoding") !=
+            contract.get("metric_preview_encoding")):
+        raise RuntimeError(
+            "source row/harness has incompatible metric preview encoding"
+        )
     if (contract["disparity_raster_width"] != contract["eye_width"] or
             contract["disparity_raster_height"] != contract["eye_height"]):
         raise RuntimeError(
@@ -746,24 +1139,6 @@ def validate_source_raster_contract(row, contract):
             "source row artistic_full_clamp_abs differs from its harness contract"
         )
     return contract["disparity_raster_height"], contract["disparity_raster_width"]
-
-
-def validate_loaded_disparity_rasters(row, contract, clamped, unclamped):
-    """Check shapes decoded from each .f32 header against the harness eye raster."""
-    expected_shape = validate_source_raster_contract(row, contract)
-    if clamped.ndim != 2 or tuple(clamped.shape) != expected_shape:
-        raise RuntimeError(
-            f"clamped disparity texture header differs from contract: "
-            f"{clamped.shape} != {expected_shape}"
-        )
-    if unclamped.ndim != 2 or tuple(unclamped.shape) != expected_shape:
-        raise RuntimeError(
-            f"unclamped disparity texture header differs from contract: "
-            f"{unclamped.shape} != {expected_shape}"
-        )
-    if not np.isfinite(clamped).all() or not np.isfinite(unclamped).all():
-        raise RuntimeError("disparity raster contains non-finite values")
-    return expected_shape
 
 
 def content_raster_values(raster, contract):
@@ -790,7 +1165,7 @@ def content_raster_values(raster, contract):
     return content
 
 
-def validate_source_harness(row, policy_baseline):
+def validate_source_harness(row, policy_baseline, expected_variant=None):
     """Prove that the exact raw field uses the baseline later checked at runtime."""
     baseline_path = Path(row["baseline_disparity"]).resolve()
     contract_path = baseline_path.parent / "contract.json"
@@ -799,9 +1174,47 @@ def validate_source_harness(row, policy_baseline):
     if row.get("harness_contract_sha256") != sha256(contract_path):
         raise RuntimeError(f"source harness contract hash mismatch: {contract_path}")
     contract = load_json(contract_path)
-    if int(row.get("label_schema", 0)) != 7 or \
-            row.get("policy_contract") != "stereo-fit-source-v2":
-        raise RuntimeError("source row does not use the required schema-7 contract")
+    legacy = (int(row.get("label_schema", 0)) == 7 and
+              row.get("policy_contract") == "stereo-fit-source-v2")
+    generic = (row.get("source_schema") == GENERIC_SOURCE_SCHEMA and
+               row.get("source_contract") == GENERIC_SOURCE_CONTRACT)
+    if legacy == generic:
+        raise RuntimeError("source row has an ambiguous or unsupported source contract")
+    expected_variant = expected_variant or input_color.sdr_input_variant()
+    try:
+        input_color.validate_input_variant(expected_variant)
+    except (RuntimeError, TypeError, ValueError) as error:
+        raise RuntimeError("policy baseline has an invalid input variant") from error
+    validate_source_input_variant(row, expected_variant, "source row")
+    harness_variant = input_variant_from_harness(contract, str(contract_path))
+    if (input_color.input_variant_sha256(harness_variant) !=
+            input_color.input_variant_sha256(expected_variant)):
+        raise RuntimeError("source harness input variant differs from policy baseline")
+    if generic:
+        label_frames_path = Path(row.get("label_frames", "")).resolve()
+        frame_ids = row.get("label_frame_ids")
+        selected_frame_ids = row.get("output_selected_frame_ids")
+        invalid = (not label_frames_path.is_file() or
+                   sha256(label_frames_path) != row.get("label_frames_sha256") or
+                   not isinstance(frame_ids, list) or not frame_ids or
+                   frame_ids != sorted(set(frame_ids)) or
+                   any(not isinstance(value, int) or isinstance(value, bool) or value < 0
+                       for value in frame_ids) or
+                   not isinstance(selected_frame_ids, list) or
+                   selected_frame_ids != sorted(set(selected_frame_ids)) or
+                   any(not isinstance(value, int) or isinstance(value, bool) or value < 0
+                       for value in selected_frame_ids) or
+                   int(row.get("frame", -1)) not in frame_ids)
+        if invalid:
+            raise RuntimeError("generic source row has invalid temporal label-frame provenance")
+        try:
+            validate_target_evidence_ids(
+                frame_ids, selected_frame_ids, "generic source row"
+            )
+        except RuntimeError as error:
+            raise RuntimeError(
+                "generic source row has invalid temporal label-frame provenance"
+            ) from error
     if (int(contract.get("schema", 0)) != policy_baseline["harness_schema"] or
             contract.get("artistic_policy") is not False or
             contract.get("artistic_policy_consumed") is not False or
@@ -863,28 +1276,115 @@ def validate_source_harness(row, policy_baseline):
     return contract
 
 
-def raw_disparity_path(source):
-    """Resolve the schema-8 unclamped disparity artifact, failing closed."""
-    explicit = source.get("baseline_unclamped_disparity")
-    if explicit:
-        path = Path(explicit).resolve()
-    else:
-        baseline = Path(source["baseline_disparity"]).resolve()
-        prefix = "baseline_disparity_"
-        if not baseline.name.startswith(prefix):
-            raise RuntimeError(
-                f"cannot derive unclamped disparity path from {baseline}"
-            )
-        path = baseline.with_name(
-            "baseline_unclamped_disparity_" + baseline.name[len(prefix):]
+def identity_grid_artifacts(source, results_path, embedded_contract):
+    """Load scale-1 disparity artifacts from the render grid geometry.
+
+    The schema-7 source bundle is generated by a depth-only run whose output-eye
+    geometry can differ from the render grid.  Schema 8 must describe the grid
+    geometry, not that source-depth artifact, otherwise two output geometries
+    silently collapse into identical training examples.
+    """
+    results_path = Path(results_path).resolve()
+    clip = str(source["clip"])
+    try:
+        frame = int(source["frame"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("source label has an invalid frame identity") from error
+    clip_root = results_path.parent / clip
+    contract_path = clip_root / "contract.json"
+    if not contract_path.is_file():
+        raise RuntimeError(f"identity render grid has no harness contract: {contract_path}")
+    contract = load_json(contract_path)
+    _, source_variant_hash = authenticated_input_variant(
+        source,
+        "source row",
+        allow_legacy_sdr=(
+            int(source.get("label_schema", 0)) == 7 and
+            source.get("policy_contract") == "stereo-fit-source-v2"
+        ),
+    )
+    contract_variant = input_variant_from_harness(contract, str(contract_path))
+    if (source_variant_hash !=
+            input_color.input_variant_sha256(contract_variant)):
+        raise RuntimeError(
+            "identity render-grid input variant differs from source labels"
         )
-    if not path.is_file():
-        raise RuntimeError(f"missing exact unclamped baseline disparity: {path}")
-    expected = source.get("baseline_unclamped_disparity_sha256")
-    actual = sha256(path)
-    if expected is not None and expected != actual:
-        raise RuntimeError(f"unclamped disparity hash mismatch: {path}")
-    return path, actual
+    normalized_contract = dict(contract)
+    normalized_contract["harness_schema"] = normalized_contract.pop("schema", None)
+    mismatches = {
+        field: (embedded_contract.get(field), normalized_contract.get(field))
+        for field in CLIP_POLICY_CONTRACT_FIELDS
+        if embedded_contract.get(field) != normalized_contract.get(field)
+    }
+    if mismatches:
+        raise RuntimeError(
+            f"identity render-grid contract differs from results.json: "
+            f"{contract_path}: {mismatches}"
+        )
+    if output_selection_contract(
+            embedded_contract, f"results/{clip}") != output_selection_contract(
+                normalized_contract, str(contract_path)):
+        raise RuntimeError(
+            f"identity render-grid output selection differs from results.json: {contract_path}"
+        )
+    for field in ("source_width", "source_height", "model_input_width",
+                  "model_input_height"):
+        if int(source.get(field, 0)) != int(contract.get(field, -1)):
+            raise RuntimeError(
+                f"identity render-grid {field} differs from source labels"
+            )
+    if source.get("color_mode") != contract.get("color_mode"):
+        raise RuntimeError("identity render-grid color mode differs from source labels")
+    if source.get("hdr_source_kind") != contract.get("hdr_source_kind"):
+        raise RuntimeError(
+            "identity render-grid HDR source kind differs from source labels"
+        )
+    if (source.get("metric_preview_encoding") !=
+            contract.get("metric_preview_encoding")):
+        raise RuntimeError(
+            "identity render-grid metric preview encoding differs from source labels"
+        )
+    if (int(contract.get("eye_width", 0)) <= 0 or
+            int(contract.get("eye_height", 0)) <= 0 or
+            int(contract.get("disparity_raster_width", 0)) !=
+            int(contract.get("eye_width", -1)) or
+            int(contract.get("disparity_raster_height", 0)) !=
+            int(contract.get("eye_height", -1))):
+        raise RuntimeError("identity render-grid disparity raster is invalid")
+    suffix = f"{frame:05d}.f32"
+    clamped_path = clip_root / f"warp_disparity_{suffix}"
+    unclamped_path = clip_root / f"warp_unclamped_disparity_{suffix}"
+    for path, description in (
+        (clamped_path, "clamped"), (unclamped_path, "unclamped")
+    ):
+        if not path.is_file():
+            raise RuntimeError(
+                f"identity render grid is missing {description} disparity: {path}"
+            )
+    clamped = sbsbench.load_float_texture(clamped_path)
+    unclamped = sbsbench.load_float_texture(unclamped_path)
+    expected_shape = (
+        int(contract["disparity_raster_height"]),
+        int(contract["disparity_raster_width"]),
+    )
+    for raster, description in ((clamped, "clamped"),
+                                (unclamped, "unclamped")):
+        if (raster.ndim != 2 or tuple(raster.shape) != expected_shape or
+                not np.isfinite(raster).all()):
+            raise RuntimeError(
+                f"identity render-grid {description} disparity is invalid: "
+                f"{raster.shape} != {expected_shape}"
+            )
+    return {
+        "contract": contract,
+        "contract_path": contract_path,
+        "clamped_path": clamped_path,
+        "clamped_sha256": sha256(clamped_path),
+        "clamped": clamped,
+        "unclamped_path": unclamped_path,
+        "unclamped_sha256": sha256(unclamped_path),
+        "unclamped": unclamped,
+    }
 
 
 def clamp_aware_summary(raw, scale, clamp_abs, perceived_scale=1.0):
@@ -928,11 +1428,19 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
     control = load_json(control_path)
     thresholds_path = Path(thresholds_path).resolve()
     validate_metric_contract(control.get("meta", {}), thresholds_path)
-    policy_baseline = policy_baseline_from_meta(control.get("meta", {}))
     source_contract = source_label_contract(
         source_labels, control.get("meta", {})
     )
+    input_variant = source_contract["input_variant"]
+    input_variant_hash = source_contract["input_variant_sha256"]
+    for index, row in enumerate(rows, 1):
+        validate_source_input_variant(
+            row, input_variant, f"{source_labels}:{index}"
+        )
+    validate_run_input_variant(control, "control", input_variant)
+    policy_baseline = policy_baseline_from_meta(control.get("meta", {}))
     candidate_runs = {}
+    candidate_paths = {}
     candidate_sources = []
     for scale, path in candidate_specs:
         if scale in candidate_runs:
@@ -940,7 +1448,14 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
         payload = load_json(path)
         validate_context(control, payload, scale, path)
         candidate_runs[scale] = payload
-        candidate_sources.append({"scale": scale, "path": str(path), "sha256": sha256(path)})
+        candidate_paths[scale] = Path(path).resolve()
+        candidate_sources.append({
+            "scale": scale,
+            "path": str(path),
+            "sha256": sha256(path),
+            "input_variant_sha256": input_variant_hash,
+            **_input_variant_harness_context(input_variant),
+        })
     candidate_scales = validate_candidate_scale_grid(candidate_runs)
 
     metric_specs = load_json(thresholds_path)["metrics"]
@@ -985,6 +1500,11 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
         "schema": 8,
         "policy_contract": POLICY_CONTRACT,
         "policy_baseline": policy_baseline,
+        "input_variant": input_variant,
+        "input_variant_sha256": input_variant_hash,
+        "depth_input_color_contract_sha256":
+            input_color.color_contract_sha256(),
+        **_input_variant_harness_context(input_variant),
         "clips": decisions,
     }
     evidence_path = output / "render_grid_evidence.json"
@@ -995,21 +1515,21 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
 
     output_rows = []
     for source in rows:
-        harness_contract = validate_source_harness(source, policy_baseline)
+        validate_source_harness(source, policy_baseline, input_variant)
         decision = decisions[source["clip"]]
         safe_scale_ceiling = decision["safe_scale_ceiling"]
         ceiling_confidence = decision["ceiling_confidence"]
         margin_reliability = decision["safety_margin_reliability"]
-        disparity = sbsbench.load_float_texture(source["baseline_disparity"])
-        if disparity.size == 0 or not np.isfinite(disparity).all():
-            raise RuntimeError(
-                f"invalid exact baseline disparity: {source['baseline_disparity']}"
-            )
-        raw_path, raw_sha256 = raw_disparity_path(source)
-        raw_disparity = sbsbench.load_float_texture(raw_path)
-        validate_loaded_disparity_rasters(
-            source, harness_contract, disparity, raw_disparity
+        identity_contract = candidate_runs[1.0]["clips"][source["clip"]]["meta"]
+        validate_source_render_selection(
+            source, identity_contract, f"identity/{source['clip']}"
         )
+        grid = identity_grid_artifacts(
+            source, candidate_paths[1.0], identity_contract
+        )
+        disparity = grid["clamped"]
+        raw_disparity = grid["unclamped"]
+        harness_contract = grid["contract"]
         content_disparity = content_raster_values(disparity, harness_contract)
         content_raw_disparity = content_raster_values(
             raw_disparity, harness_contract
@@ -1021,9 +1541,9 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
             np.percentile(np.abs(content_disparity), 95) * 100.0
         )
         try:
-            source_width = int(source["source_width"])
-            source_height = int(source["source_height"])
-            clamp_abs = float(source["artistic_full_clamp_abs"])
+            source_width = int(harness_contract["source_width"])
+            source_height = int(harness_contract["source_height"])
+            clamp_abs = float(harness_contract["artistic_full_clamp_abs"])
         except (KeyError, TypeError, ValueError) as error:
             raise RuntimeError(
                 "source label lacks exact source-aspect/clamp provenance"
@@ -1033,7 +1553,8 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
         # The artifact is already output-eye normalized. Match perceived_disparity_pct's
         # reference-aspect conversion without applying content_scale_x a second time.
         perceived_scale = (
-            (float(source["eye_width"]) / float(source["eye_height"])) /
+            (float(harness_contract["eye_width"]) /
+             float(harness_contract["eye_height"])) /
             (5120.0 / 2160.0)
         )
         style_render_targets = {
@@ -1046,15 +1567,21 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
             content_raw_disparity, safe_scale_ceiling, clamp_abs, perceived_scale
         )
         row = dict(source)
+        if source.get("source_contract") == GENERIC_SOURCE_CONTRACT:
+            stereo_fit_multiplier = None
+            stereo_fit_confidence = None
+        else:
+            stereo_fit_multiplier = source.get(
+                "stereo_fit_multiplier", source["baseline_multiplier"]
+            )
+            stereo_fit_confidence = source.get(
+                "stereo_fit_confidence", source["confidence"]
+            )
         row.update({
             "label_schema": 8,
             "policy_contract": POLICY_CONTRACT,
-            "stereo_fit_multiplier": source.get(
-                "stereo_fit_multiplier", source["baseline_multiplier"]
-            ),
-            "stereo_fit_confidence": source.get(
-                "stereo_fit_confidence", source["confidence"]
-            ),
+            "stereo_fit_multiplier": stereo_fit_multiplier,
+            "stereo_fit_confidence": stereo_fit_confidence,
             "style_targets": decision["style_targets"],
             "style_render_targets": style_render_targets,
             "safe_scale_ceiling": safe_scale_ceiling,
@@ -1067,6 +1594,9 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
             "render_evidence_confidence": margin_reliability,
             "safe_scale_min": decision["safe_scale_min"],
             "safe_scale_max": decision["safe_scale_max"],
+            "identity_feasible": decision["identity_feasible"],
+            "identity_violations": decision["identity_violations"],
+            "selection_reason": decision["selection_reason"],
             "authored_fit_scale": decision["authored_fit_scale"],
             "authored_fit_psnr": decision["authored_fit_psnr"],
             "render_grid_key": source["clip"],
@@ -1076,8 +1606,46 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
             ],
             "baseline_disparity_mean_abs_pct": disparity_mean_abs_pct,
             "baseline_disparity_p95_pct": disparity_p95_pct,
-            "baseline_unclamped_disparity": str(raw_path),
-            "baseline_unclamped_disparity_sha256": raw_sha256,
+            "source_depth_baseline_disparity": source["baseline_disparity"],
+            "source_depth_baseline_disparity_sha256": source.get(
+                "baseline_disparity_sha256"
+            ),
+            "source_depth_harness_contract_sha256": source.get(
+                "harness_contract_sha256"
+            ),
+            "baseline_disparity": str(grid["clamped_path"]),
+            "baseline_disparity_sha256": grid["clamped_sha256"],
+            "baseline_unclamped_disparity": str(grid["unclamped_path"]),
+            "baseline_unclamped_disparity_sha256": grid["unclamped_sha256"],
+            "harness_contract_sha256": sha256(grid["contract_path"]),
+            "source_width": int(harness_contract["source_width"]),
+            "source_height": int(harness_contract["source_height"]),
+            "model_input_width": int(harness_contract["model_input_width"]),
+            "model_input_height": int(harness_contract["model_input_height"]),
+            "eye_width": int(harness_contract["eye_width"]),
+            "eye_height": int(harness_contract["eye_height"]),
+            "content_scale_x": float(harness_contract["content_scale_x"]),
+            "content_scale_y": float(harness_contract["content_scale_y"]),
+            "disparity_raster_width": int(
+                harness_contract["disparity_raster_width"]
+            ),
+            "disparity_raster_height": int(
+                harness_contract["disparity_raster_height"]
+            ),
+            "color_mode": harness_contract["color_mode"],
+            "hdr_source_kind": harness_contract["hdr_source_kind"],
+            "metric_preview_encoding": harness_contract[
+                "metric_preview_encoding"
+            ],
+            "hdr_input_scale": float(harness_contract["hdr_input_scale"]),
+            "sdr_white_level_raw": int(
+                harness_contract["sdr_white_level_raw"]
+            ),
+            "input_variant": input_variant,
+            "input_variant_sha256": input_variant_hash,
+            "depth_input_color_contract_sha256":
+                input_color.color_contract_sha256(),
+            "artistic_full_clamp_abs": clamp_abs,
             "baseline_unclamped_disparity_mean_abs_pct": float(
                 np.mean(np.abs(content_raw_disparity)) * 100.0
             ),
@@ -1092,6 +1660,9 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
     code = {
         "label_fitter": THIS_DIR / "artistic_stereo_label_fitter.py",
         "policy_contract": THIS_DIR / "artistic_policy_contract.py",
+        "depth_input_color": THIS_DIR / "depth_input_color.py",
+        "depth_input_color_contract":
+            THIS_DIR / "depth_input_color_contract.json",
         "label_preparation": Path(__file__).resolve(),
         "image_loader": SBSBENCH_DIR / "sbsbench.py",
         "evaluator_runner": SBSBENCH_DIR / "run_eval.py",
@@ -1101,6 +1672,11 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
         "label_fitter": "exact-apollo-connected-safe-frontier",
         "policy_contract": POLICY_CONTRACT,
         "policy_baseline": policy_baseline,
+        "input_variant": input_variant,
+        "input_variant_sha256": input_variant_hash,
+        "depth_input_color_contract_sha256":
+            input_color.color_contract_sha256(),
+        **_input_variant_harness_context(input_variant),
         "label_fitter_config": {
             "candidate_scales": candidate_scales,
             "max_candidate_scale_step": MAX_CANDIDATE_SCALE_STEP,
@@ -1123,6 +1699,11 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
             ),
             "exact_pop_metric": EXACT_POP_METRIC,
             "connected_frontier": "stop at first failed sampled scale in each direction",
+            "identity_hard_failure": (
+                "a fully measured hard-bound failure at scale 1 is retained "
+                "as a confidence-zero no-op negative; every sampled candidate "
+                "remains disconnected and identity is not declared feasible"
+            ),
             "confidence_semantics": (
                 "hard actionable target: identity=0, nonidentity safe ceiling=1"
             ),
@@ -1131,7 +1712,7 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
                 "nonidentity ceiling from protected margins and connected-grid support; "
                 "never derived from authored PSNR"
             ),
-        },
+            },
         "rendered_disparity_supervision": {
             "artifact": "baseline_unclamped_disparity_*.f32",
             "artifact_semantics": (
@@ -1144,7 +1725,7 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
             "clamp_provenance": (
                 "source-label harness contract computed from source-color dimensions"
             ),
-        },
+            },
         "code": {role: {"path": str(path), "sha256": sha256(path)}
                  for role, path in code.items()},
         "model_limits": {"scale_delta_max": ART_SCALE_DELTA_MAX},
@@ -1156,7 +1737,7 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
         "candidates": candidate_sources,
         "render_grid_evidence": {
             "path": str(evidence_path), "sha256": sha256(evidence_path)
-        },
+            },
         "thresholds": {"path": str(Path(thresholds_path).resolve()),
                        "sha256": sha256(thresholds_path)},
     }
@@ -1173,6 +1754,14 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
         "domain_counts": dict(Counter(row.get("domain") for row in output_rows)),
         "policy_role_counts": dict(Counter(row.get("policy_role") for row in output_rows)),
         "selected_scale_counts": {str(key): value for key, value in sorted(scale_counts.items())},
+        "identity_feasible_clips": sum(
+            1 for decision in decisions.values()
+            if decision["identity_feasible"]
+        ),
+        "identity_infeasible_clips": sum(
+            1 for decision in decisions.values()
+            if not decision["identity_feasible"]
+        ),
         "default_style": DEFAULT_STYLE,
         "style_scale_counts": {
             name: {
@@ -1183,6 +1772,8 @@ def write_bundle(source_labels, control_path, candidate_specs, output,
             for name in STYLE_NAMES
         },
         "render_grid_evidence_sha256": sha256(evidence_path),
+        "input_variant_sha256": input_variant_hash,
+        **_input_variant_harness_context(input_variant),
     }
     (output / "summary.json").write_text(
         json.dumps(summary, indent=2) + "\n", encoding="utf-8"

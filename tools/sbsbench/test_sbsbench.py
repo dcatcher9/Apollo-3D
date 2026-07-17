@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 import os
 import sys
@@ -59,6 +60,105 @@ class EvalContractTests(unittest.TestCase):
             for path in paths:
                 os.unlink(path)
 
+    def test_hdr_source_kind_flags_are_mutually_exclusive_and_native_is_unscaled(self):
+        self.assertEqual(
+            run_eval.expected_hdr_source_kind([]),
+            run_eval.harness_contract.HDR_SOURCE_SDR,
+        )
+        self.assertEqual(
+            run_eval.expected_hdr_source_kind(["--simulate-hdr"]),
+            run_eval.harness_contract.HDR_SOURCE_SIMULATED,
+        )
+        self.assertEqual(
+            run_eval.expected_hdr_source_kind(["--native-hdr-scrgb"]),
+            run_eval.harness_contract.HDR_SOURCE_NATIVE_PQ,
+        )
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            run_eval.expected_hdr_source_kind([
+                "--simulate-hdr", "--native-hdr-scrgb",
+            ])
+        with self.assertRaisesRegex(ValueError, "cannot carry"):
+            run_eval.expected_hdr_source_kind([
+                "--native-hdr-scrgb", "--sdr-white-level-raw", "1000",
+            ])
+
+    def test_hdr_contract_provenance_separates_native_pq_simulated_and_sdr(self):
+        cases = (
+            ({
+                "color_mode": "sdr-srgb-8bit",
+                "hdr_source_kind": "native-sdr",
+                "metric_preview_encoding": "native-srgb-v1",
+                "hdr_input_scale": 0.0,
+                "sdr_white_level_raw": 0,
+            }, run_eval.harness_contract.HDR_SOURCE_SDR),
+            ({
+                "color_mode": "hdr-scrgb-fp16",
+                "hdr_source_kind": "sdr-in-windows-hdr",
+                "metric_preview_encoding":
+                    "source-relative-srgb-from-scrgb-white-normalized-v1",
+                "hdr_input_scale": 2.5,
+                "sdr_white_level_raw": 2500,
+            }, run_eval.harness_contract.HDR_SOURCE_SIMULATED),
+            ({
+                "color_mode": "hdr-scrgb-fp16",
+                "hdr_source_kind": "native-pq-in-windows-hdr",
+                "metric_preview_encoding":
+                    "perceptual-srgb-from-native-scrgb-reinhard-v1",
+                "hdr_input_scale": 0.0,
+                "sdr_white_level_raw": 0,
+            }, run_eval.harness_contract.HDR_SOURCE_NATIVE_PQ),
+        )
+        for payload, kind in cases:
+            with self.subTest(kind=kind):
+                encoding, scale, white = run_eval.validate_hdr_contract_provenance(
+                    payload, kind, "clip"
+                )
+                self.assertEqual(encoding, payload["metric_preview_encoding"])
+                self.assertEqual(scale, float(payload["hdr_input_scale"]))
+                self.assertEqual(white, payload["sdr_white_level_raw"])
+
+        stale_native = dict(cases[2][0], hdr_input_scale=1.0)
+        with self.assertRaisesRegex(RuntimeError, "zero SDR-white"):
+            run_eval.validate_hdr_contract_provenance(
+                stale_native, run_eval.harness_contract.HDR_SOURCE_NATIVE_PQ,
+                "clip",
+            )
+        wrong_kind = dict(cases[2][0], hdr_source_kind="sdr-in-windows-hdr")
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            run_eval.validate_hdr_contract_provenance(
+                wrong_kind, run_eval.harness_contract.HDR_SOURCE_NATIVE_PQ,
+                "clip",
+            )
+
+    def test_native_hdr_sidecar_authentication_binds_every_preview(self):
+        with tempfile.TemporaryDirectory() as root:
+            preview = os.path.join(root, "frame_00000.png")
+            Path(preview).write_bytes(self.png_bytes())
+            authentication = {
+                "manifest": os.path.join(root, "frame_model_sources.json"),
+                "manifest_sha256": "a" * 64,
+                "content_sha256": "b" * 64,
+                "width": 12,
+                "height": 8,
+                "frame_count": 1,
+                "frames": {0: {"preview_path": Path(preview).resolve()}},
+            }
+            with mock.patch.object(
+                    run_eval.native_hdr_capture, "validate_clip",
+                    return_value=authentication) as validate:
+                identity = run_eval.authenticate_native_hdr_clip(
+                    root, {0: preview}, full=True
+                )
+            validate.assert_called_once_with(root, full=True)
+            self.assertEqual(identity["content_sha256"], "b" * 64)
+
+            incomplete = dict(authentication, frames={})
+            with mock.patch.object(
+                    run_eval.native_hdr_capture, "validate_clip",
+                    return_value=incomplete):
+                with self.assertRaisesRegex(RuntimeError, "exactly cover"):
+                    run_eval.authenticate_native_hdr_clip(root, {0: preview})
+
     def test_clip_hash_covers_stereo_reference_and_requirement(self):
         with tempfile.TemporaryDirectory() as clip:
             gt_right = os.path.join(clip, "gt_right")
@@ -78,6 +178,259 @@ class EvalContractTests(unittest.TestCase):
             with open(os.path.join(clip, "meta.json"), "w", encoding="utf-8") as fh:
                 json.dump({"required_gt_stereo": True}, fh)
             self.assertNotEqual(changed_pixels, run_eval.sha1_dir(clip))
+
+    def test_clip_hash_manifest_is_used_after_cheap_verification(self):
+        with tempfile.TemporaryDirectory() as root:
+            clip = os.path.join(root, "shot")
+            os.makedirs(clip)
+            with open(os.path.join(clip, "frame_00000.png"), "wb") as stream:
+                stream.write(b"source")
+            manifest, _output = run_eval.clip_hashes.build_and_write(
+                root, workers=1
+            )
+            with mock.patch.object(
+                    run_eval, "sha1_dir", side_effect=AssertionError("direct hash")):
+                identities, provenance = run_eval.resolve_clip_hashes(
+                    root, ["shot"]
+                )
+            self.assertEqual(
+                identities, {"shot": manifest["clips"]["shot"]["clip_sha1"]}
+            )
+            self.assertEqual(provenance["clip_hash_source"], "manifest")
+            self.assertEqual(provenance["clip_hash_verification"], "stat")
+            self.assertEqual(len(provenance["clip_hash_manifest_sha256"]), 64)
+
+    def test_existing_clip_hash_manifest_fails_closed_when_stale(self):
+        with tempfile.TemporaryDirectory() as root:
+            clip = os.path.join(root, "shot")
+            os.makedirs(clip)
+            frame = os.path.join(clip, "frame_00000.png")
+            with open(frame, "wb") as stream:
+                stream.write(b"source")
+            run_eval.clip_hashes.build_and_write(root, workers=1)
+            with open(frame, "ab") as stream:
+                stream.write(b"changed")
+            with self.assertRaisesRegex(
+                    run_eval.clip_hashes.ClipHashManifestError, "size changed"):
+                run_eval.resolve_clip_hashes(root, ["shot"])
+
+    def test_clip_hashes_fall_back_to_direct_content_without_manifest(self):
+        with tempfile.TemporaryDirectory() as root:
+            clip = os.path.join(root, "shot")
+            os.makedirs(clip)
+            with mock.patch.object(
+                    run_eval, "sha1_dir", return_value="123456789abc") as direct:
+                identities, provenance = run_eval.resolve_clip_hashes(
+                    root, ["shot"]
+                )
+            direct.assert_called_once_with(clip)
+            self.assertEqual(identities, {"shot": "123456789abc"})
+            self.assertEqual(provenance["clip_hash_source"], "direct")
+            self.assertEqual(
+                provenance["clip_hash_verification"], "direct-content"
+            )
+
+    def test_direct_clip_hash_selection_rejects_duplicates_and_unsafe_names(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "shot"))
+            with self.assertRaisesRegex(
+                    run_eval.clip_hashes.ClipHashManifestError, "duplicates"):
+                run_eval.resolve_clip_hashes(root, ["shot", "shot"])
+            for name in ("../shot", "nested/shot", "nested\\shot", ".hidden", "NUL"):
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(
+                            run_eval.clip_hashes.ClipHashManifestError, "invalid clip name"):
+                        run_eval.resolve_clip_hashes(root, [name])
+
+    def test_run_label_and_clip_paths_are_single_contained_components(self):
+        with tempfile.TemporaryDirectory() as root:
+            expected = os.path.abspath(os.path.join(root, "eval-safe_1.0"))
+            self.assertEqual(
+                run_eval.contained_component(root, "eval-safe_1.0", "run label"),
+                expected,
+            )
+            for value in ("", ".", "..", "../escape", "sub/escape", "sub\\escape",
+                          "C:escape", "label with spaces", "trailing.", "COM1.log"):
+                with self.subTest(value=value):
+                    with self.assertRaisesRegex(ValueError, "invalid run label"):
+                        run_eval.contained_component(root, value, "run label")
+
+    def test_direct_clip_sources_are_revalidated_after_scoring(self):
+        with tempfile.TemporaryDirectory() as root:
+            clip = os.path.join(root, "shot")
+            os.makedirs(clip)
+            frame = os.path.join(clip, "frame_00000.png")
+            with open(frame, "wb") as stream:
+                stream.write(b"source")
+            identities, provenance = run_eval.resolve_clip_hashes(root, ["shot"])
+            with open(frame, "ab") as stream:
+                stream.write(b"-changed")
+            with self.assertRaisesRegex(
+                    run_eval.clip_hashes.ClipHashManifestError,
+                    "source identities changed"):
+                run_eval.revalidate_clip_hashes(
+                    root, ["shot"], identities, provenance
+                )
+
+    def test_frozen_manifest_identity_is_revalidated_after_scoring(self):
+        with tempfile.TemporaryDirectory() as root:
+            clip = os.path.join(root, "shot")
+            os.makedirs(clip)
+            with open(os.path.join(clip, "frame_00000.png"), "wb") as stream:
+                stream.write(b"source")
+            _manifest, manifest_path = run_eval.clip_hashes.build_and_write(
+                root, workers=1
+            )
+            identities, provenance = run_eval.resolve_clip_hashes(root, ["shot"])
+            with open(manifest_path, "a", encoding="utf-8") as stream:
+                stream.write("\n")
+            with self.assertRaisesRegex(
+                    run_eval.clip_hashes.ClipHashManifestError,
+                    "provenance changed"):
+                run_eval.revalidate_clip_hashes(
+                    root, ["shot"], identities, provenance
+                )
+
+    def test_eval_cleanup_cancels_workers_and_restores_parent_environment(self):
+        original = run_eval.capture_score_worker_environment()
+        first, second = run_eval.SCORE_WORKER_THREAD_ENV[:2]
+        queue = mock.Mock()
+        executor = mock.Mock()
+        try:
+            os.environ[first] = "parent-value"
+            os.environ.pop(second, None)
+
+            def abort(lifecycle):
+                lifecycle["queue"] = queue
+                lifecycle["executor"] = executor
+                run_eval.configure_score_worker_threads()
+                raise RuntimeError("stop")
+
+            with mock.patch.object(run_eval, "_run_main", side_effect=abort):
+                with self.assertRaisesRegex(RuntimeError, "stop"):
+                    run_eval.main()
+            self.assertEqual(os.environ[first], "parent-value")
+            self.assertNotIn(second, os.environ)
+            queue.cancel_pending.assert_called_once_with()
+            executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+        finally:
+            run_eval.restore_score_worker_environment(original)
+
+    def test_verify_clip_hashes_detects_same_stat_content_change(self):
+        with tempfile.TemporaryDirectory() as root:
+            clip = os.path.join(root, "shot")
+            os.makedirs(clip)
+            frame = os.path.join(clip, "frame_00000.png")
+            with open(frame, "wb") as stream:
+                stream.write(b"source")
+            run_eval.clip_hashes.build_and_write(root, workers=1)
+            previous = os.stat(frame)
+            with open(frame, "wb") as stream:
+                stream.write(b"tamper")
+            os.utime(frame, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+
+            run_eval.resolve_clip_hashes(root, ["shot"], False)
+            with self.assertRaisesRegex(
+                    run_eval.clip_hashes.ClipHashManifestError,
+                    "content hash changed"):
+                run_eval.resolve_clip_hashes(root, ["shot"], True)
+
+    def test_label_frame_manifest_is_strict_and_authenticated(self):
+        with tempfile.TemporaryDirectory() as clip:
+            path = os.path.join(clip, "label_frames.json")
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump({"schema": 1, "frame_ids": [0, 3, 9]}, stream)
+            frame_ids, identity = run_eval.load_label_frame_manifest(
+                clip, list(range(10))
+            )
+            self.assertEqual(frame_ids, [0, 3, 9])
+            self.assertEqual(identity, run_eval.sha256_file(path))
+
+            selection = run_eval.resolve_output_selection(
+                clip, list(range(10)), 1, False, True
+            )
+            self.assertEqual(selection, {
+                "mode": "label-frames",
+                "label_frame_ids": [0, 3, 9],
+                "output_frame_ids": [0, 3, 9],
+                "label_frames_sha256": identity,
+            })
+
+    def test_label_frame_manifest_rejects_ambiguous_or_missing_ids(self):
+        invalid = (
+            {"schema": 1, "frame_ids": []},
+            {"schema": 1, "frame_ids": [0, 0]},
+            {"schema": 1, "frame_ids": [2, 1]},
+            {"schema": 1, "frame_ids": [False]},
+            {"schema": 1, "frame_ids": [-1]},
+            {"schema": 1, "frame_ids": [0], "unversioned": True},
+        )
+        with tempfile.TemporaryDirectory() as clip:
+            path = os.path.join(clip, "label_frames.json")
+            for payload in invalid:
+                with self.subTest(payload=payload):
+                    with open(path, "w", encoding="utf-8") as stream:
+                        json.dump(payload, stream)
+                    with self.assertRaises(ValueError):
+                        run_eval.load_label_frame_manifest(clip, [0, 1, 2])
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump({"schema": 1, "frame_ids": [0, 4]}, stream)
+            with self.assertRaisesRegex(ValueError, "missing source frames"):
+                run_eval.load_label_frame_manifest(clip, [0, 1, 2])
+
+    def test_optional_clip_metadata_is_absent_or_strict(self):
+        with tempfile.TemporaryDirectory() as clip:
+            self.assertEqual(run_eval.load_optional_clip_metadata(clip), {})
+            meta_path = os.path.join(clip, "meta.json")
+            with open(meta_path, "w", encoding="utf-8") as stream:
+                json.dump({"name": "shot", "expected_flat": False,
+                           "ignored_future_field": 4}, stream)
+            self.assertEqual(
+                run_eval.load_optional_clip_metadata(clip),
+                {"name": "shot", "expected_flat": False},
+            )
+            for invalid in ([], False, "not-an-object"):
+                with self.subTest(invalid=invalid):
+                    with open(meta_path, "w", encoding="utf-8") as stream:
+                        json.dump(invalid, stream)
+                    with self.assertRaisesRegex(ValueError, "root must be an object"):
+                        run_eval.load_optional_clip_metadata(clip)
+            with open(meta_path, "w", encoding="utf-8") as stream:
+                stream.write("{")
+            with self.assertRaisesRegex(ValueError, "invalid clip metadata"):
+                run_eval.load_optional_clip_metadata(clip)
+            with open(meta_path, "w", encoding="utf-8") as stream:
+                json.dump({"expected_flat": "false"}, stream)
+            with self.assertRaisesRegex(ValueError, "flags must be booleans"):
+                run_eval.load_optional_clip_metadata(clip)
+
+    def test_run_publication_invalidation_never_deletes_directories(self):
+        with tempfile.TemporaryDirectory() as root:
+            published = os.path.join(root, "results.json")
+            with open(published, "w", encoding="utf-8") as stream:
+                stream.write("old")
+            run_eval.invalidate_publication_file(published, "result")
+            self.assertFalse(os.path.lexists(published))
+            os.makedirs(published)
+            with self.assertRaisesRegex(ValueError, "is a directory"):
+                run_eval.invalidate_publication_file(published, "result")
+            self.assertTrue(os.path.isdir(published))
+
+    def test_label_frame_selection_rejects_other_sampling_modes(self):
+        with tempfile.TemporaryDirectory() as clip:
+            with open(os.path.join(clip, "label_frames.json"), "w",
+                      encoding="utf-8") as stream:
+                json.dump({"schema": 1, "frame_ids": [0]}, stream)
+            with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+                run_eval.resolve_output_selection(clip, [0], 1, True, True)
+            with self.assertRaisesRegex(ValueError, "requires --output-every 1"):
+                run_eval.resolve_output_selection(clip, [0], 2, False, True)
+            self.assertEqual(
+                run_eval.resolve_output_selection(clip, [0], 1, False, True)[
+                    "output_frame_ids"
+                ],
+                [0],
+            )
 
     def test_metric_contract_includes_runner_gating_semantics(self):
         metric_files = [os.path.join(run_eval.SCRIPT_DIR, "sbsbench.py"),
@@ -100,8 +453,449 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(hard[0]["metric"], "negative_disparity_pct")
         self.assertEqual(hard[0]["reason"], "missing")
 
+    def test_frame_gate_coverage_rejects_every_sparse_form(self):
+        full = {
+            "mode": "interval", "output_frame_ids": [4, 5, 6],
+            "label_frame_ids": [], "label_frames_sha256": "",
+        }
+        self.assertEqual(
+            run_eval.validate_full_frame_gate_coverage(
+                [4, 5, 6], full,
+                [{"_frame_id": 4}, {"_frame_id": 5}, {"_frame_id": 6}],
+            ),
+            [4, 5, 6],
+        )
+        with self.assertRaisesRegex(ValueError, "consecutive source"):
+            run_eval.validate_full_frame_gate_coverage(
+                [4, 6], {**full, "output_frame_ids": [4, 6]}
+            )
+        with self.assertRaisesRegex(ValueError, "sparse/GT-only"):
+            run_eval.validate_full_frame_gate_coverage(
+                [4, 5, 6], {**full, "mode": "label-frames"}
+            )
+        with self.assertRaisesRegex(ValueError, "every source frame"):
+            run_eval.validate_full_frame_gate_coverage(
+                [4, 5, 6], {**full, "output_frame_ids": [4, 6]}
+            )
+        with self.assertRaisesRegex(ValueError, "one ordered metric row"):
+            run_eval.validate_full_frame_gate_coverage(
+                [4, 5, 6], full,
+                [{"_frame_id": 4}, {"_frame_id": 6}],
+            )
+
+    def test_selected_frame_gate_coverage_requires_exact_targets_only(self):
+        source_ids = list(range(4, 11))
+        selected = {
+            "mode": "label-frames",
+            "label_frame_ids": [5, 9],
+            "output_frame_ids": [5, 9],
+            "label_frames_sha256": "a" * 64,
+        }
+        rows = [{"_frame_id": frame_id} for frame_id in selected["output_frame_ids"]]
+        self.assertEqual(
+            run_eval.validate_selected_frame_gate_coverage(
+                source_ids, selected, rows
+            ),
+            (source_ids, [5, 9], [5, 9]),
+        )
+        with self.assertRaisesRegex(ValueError, "authenticated label manifest"):
+            run_eval.validate_selected_frame_gate_coverage(
+                source_ids, {**selected, "label_frames_sha256": ""}
+            )
+        with self.assertRaisesRegex(ValueError, "targets only"):
+            run_eval.validate_selected_frame_gate_coverage(
+                source_ids, {**selected, "output_frame_ids": [5]}
+            )
+        with self.assertRaisesRegex(ValueError, "targets only"):
+            run_eval.validate_selected_frame_gate_coverage(
+                source_ids, {**selected, "output_frame_ids": [5, 9, 10]}
+            )
+        with self.assertRaisesRegex(ValueError, "one ordered metric row"):
+            run_eval.validate_selected_frame_gate_coverage(
+                source_ids, selected, rows[:-1]
+            )
+        self.assertEqual(
+            run_eval.validate_selected_frame_gate_coverage(
+                [4], {
+                    "mode": "label-frames",
+                    "label_frame_ids": [4],
+                    "output_frame_ids": [4],
+                    "label_frames_sha256": "b" * 64,
+                },
+            ),
+            ([4], [4], [4]),
+        )
+        with self.assertRaisesRegex(ValueError, "sparse/GT-only"):
+            run_eval.validate_full_frame_gate_coverage(source_ids, selected)
+
+    @staticmethod
+    def _frame_gate_thresholds():
+        return {"metrics": {
+            "exact_pop_spread_pct": {
+                "role": "primary", "required_evidence": True,
+            },
+            "source_halo_p95": {
+                "role": "primary", "required_evidence": True, "trigger": 5.0,
+                "ordinal_hard_max": 8.0,
+            },
+            "flow_temporal_p95": {
+                "role": "primary", "required_evidence": True, "min_frames": 2,
+                "temporal_evidence": True,
+            },
+            "positive_disparity_pct": {
+                "role": "hard", "hard_max": 3.0,
+            },
+            "diagnostic_only": {"role": "diagnostic", "trigger": 0.0},
+        }}
+
+    def test_frame_gate_metric_evidence_is_per_frame_and_fails_closed(self):
+        thresholds = self._frame_gate_thresholds()
+        first, violations = run_eval.frame_gate_metric_evidence({
+            "exact_pop_spread_pct": 1.25,
+            "source_halo_p95": 4.0,
+            "positive_disparity_pct": 2.0,
+        }, 0, thresholds)
+        self.assertEqual(first["primary"]["flow_temporal_p95"], None)
+        self.assertEqual(violations, [])
+
+        _bounded, ordinal_violations = run_eval.frame_gate_metric_evidence({
+            "exact_pop_spread_pct": 1.4,
+            "source_halo_p95": 9.0,
+            "flow_temporal": 2.0,
+            "positive_disparity_pct": 2.0,
+        }, 1, thresholds)
+        self.assertEqual(
+            [(item["metric"], item["kind"])
+             for item in ordinal_violations],
+            [("source_halo_p95", "trigger_max"),
+             ("source_halo_p95", "ordinal_hard_max")],
+        )
+
+        second, violations = run_eval.frame_gate_metric_evidence({
+            "exact_pop_spread_pct": 1.4,
+            "source_halo_p95": 7.0,
+            "flow_temporal": 2.0,
+            "positive_disparity_pct": 3.5,
+        }, 1, thresholds)
+        self.assertEqual(second["primary"]["flow_temporal_p95"], 2.0)
+        self.assertEqual(
+            [(item["metric"], item["kind"]) for item in violations],
+            [("source_halo_p95", "trigger_max"),
+             ("positive_disparity_pct", "hard_max")],
+        )
+        with self.assertRaisesRegex(ValueError, "required per-frame hard metric"):
+            run_eval.frame_gate_metric_evidence({
+                "exact_pop_spread_pct": 1.0,
+                "source_halo_p95": 1.0,
+            }, 0, thresholds)
+        missing_temporal, violations = run_eval.frame_gate_metric_evidence({
+            "exact_pop_spread_pct": 1.0,
+            "source_halo_p95": 1.0,
+            "positive_disparity_pct": 1.0,
+        }, 1, thresholds)
+        self.assertIsNone(missing_temporal["primary"]["flow_temporal_p95"])
+        self.assertEqual(violations, [])
+
+    def test_target_only_gates_exclude_only_explicit_temporal_metrics(self):
+        thresholds = self._frame_gate_thresholds()
+        filtered = run_eval.target_only_gate_thresholds(thresholds)
+        self.assertNotIn("flow_temporal_p95", filtered["metrics"])
+        self.assertIn("exact_pop_spread_pct", filtered["metrics"])
+        self.assertIn("source_halo_p95", filtered["metrics"])
+        self.assertIn("positive_disparity_pct", filtered["metrics"])
+        with self.assertRaisesRegex(ValueError, "temporal metric markers"):
+            run_eval.target_only_gate_thresholds({
+                "metrics": {"spatial": {"role": "primary"}}
+            })
+
+    def test_frame_gate_sidecar_binds_artifacts_results_and_detects_tampering(self):
+        thresholds = self._frame_gate_thresholds()
+        with tempfile.TemporaryDirectory() as root:
+            artifacts = {}
+            for frame_id in (4, 5):
+                artifacts[frame_id] = {}
+                for name in ("source", "sbs", "depth", "warp_mask", "warp_disparity"):
+                    path = os.path.join(root, f"{name}_{frame_id}")
+                    Path(path).write_bytes(f"{name}:{frame_id}".encode("ascii"))
+                    artifacts[frame_id][name] = path
+            context = {
+                "source_frame_ids": [4, 5],
+                "output_selection": {
+                    "mode": "interval", "output_frame_ids": [4, 5],
+                    "label_frame_ids": [], "label_frames_sha256": "",
+                },
+                "artifact_paths": artifacts,
+                "clip_sha1": "a" * 12,
+                "harness_contract_sha256": "b" * 64,
+                "expected_flat": False,
+                "geometry": {
+                    "source_width": 32, "source_height": 16,
+                    "model_input_width": 28, "model_input_height": 14,
+                    "depth_short_side": 196, "depth_max_aspect": 4.0,
+                    "eye_width": 32, "eye_height": 16,
+                    "content_scale_x": 1.0, "content_scale_y": 1.0,
+                    "disparity_raster_width": 32, "disparity_raster_height": 16,
+                    "color_mode": "sdr-srgb-8bit",
+                },
+                "color": {"color_mode": "sdr-srgb-8bit"},
+                "pipeline": {"artistic_scale_override": 1.25},
+            }
+            scene_payload = {
+                "schema": 1,
+                "contract": run_eval.runtime_scene_evidence.CONTRACT,
+                "evidence_source": (
+                    "SubjectState[0].y after completed depth postprocess"
+                ),
+                "cut_rule": (
+                    "prior_scene_age_gte_7_and_current_scene_age_eq_0"
+                ),
+                "cadence": "completed-depth-frames-only",
+                "completion_sequence_contract": (
+                    "exact for this synchronous harness sequence; live "
+                    "busy-drop cadence is not replayed"
+                ),
+                "depth_reuse_interval": 1,
+                "source_frame_ids": [4, 5],
+                "completed_source_frame_ids": [4, 5],
+                "completed_depth_frame_count": 2,
+                "frames": [
+                    {
+                        "source_frame_ordinal": 0,
+                        "source_frame_id": 4,
+                        "runtime_scene_id": 0,
+                        "scene_age": 0.0,
+                        "subject_initialized": True,
+                        "hard_cut": False,
+                        "scene_start": True,
+                    },
+                    {
+                        "source_frame_ordinal": 1,
+                        "source_frame_id": 5,
+                        "runtime_scene_id": 0,
+                        "scene_age": 1.0,
+                        "subject_initialized": True,
+                        "hard_cut": False,
+                        "scene_start": False,
+                    },
+                ],
+            }
+            scene_path = os.path.join(root, "runtime_scene_evidence.json")
+            Path(scene_path).write_text(
+                json.dumps(scene_payload, sort_keys=True), encoding="utf-8"
+            )
+            context["runtime_scene_evidence"] = scene_payload
+            context["runtime_scene_evidence_path"] = scene_path
+            rows = [
+                {"_frame_id": 4, "exact_pop_spread_pct": 1.0,
+                 "source_halo_p95": 1.0, "positive_disparity_pct": 1.0},
+                {"_frame_id": 5, "exact_pop_spread_pct": 1.2,
+                 "source_halo_p95": 1.5, "flow_temporal": 0.5,
+                 "positive_disparity_pct": 1.0},
+            ]
+            incomplete_geometry = dict(context)
+            incomplete_geometry["geometry"] = dict(context["geometry"])
+            del incomplete_geometry["geometry"]["model_input_width"]
+            with self.assertRaisesRegex(ValueError, "invalid frame-gate artistic geometry"):
+                run_eval.build_frame_gate_clip_records(
+                    "shot", rows, thresholds, incomplete_geometry
+                )
+            clip_records = run_eval.build_frame_gate_clip_records(
+                "shot", rows, thresholds, context
+            )
+            output = os.path.join(root, run_eval.FRAME_GATE_EVIDENCE_FILENAME)
+            run_meta = {
+                "metric_sha256": "c" * 16,
+                "conf_sha256": "d" * 16,
+                "clip_hash_manifest_sha256": "e" * 64,
+                "clip_set_sha1": {"shot": "a" * 12},
+                "run_name": "test",
+                "suite": "core",
+                "hdr_source_kind": "native-sdr",
+            }
+            identity = run_eval.write_frame_gate_evidence(
+                output, run_meta, thresholds, [clip_records], "f" * 64
+            )
+            records = run_eval.validate_frame_gate_evidence(output)
+            self.assertEqual(identity, run_eval.sha256_file(output))
+            self.assertEqual(
+                records[0]["contract"], run_eval.FRAME_GATE_EVIDENCE_CONTRACT
+            )
+            self.assertEqual(records[0]["results_sha256"], "f" * 64)
+            clip_record = next(record for record in records if record["record"] == "clip")
+            self.assertEqual(
+                set(clip_record["geometry"]),
+                set(run_eval.artistic_geometry_contract.GEOMETRY_KEYS),
+            )
+            self.assertEqual(
+                clip_record["geometry_contract"],
+                run_eval.artistic_geometry_contract.GEOMETRY_CONTRACT,
+            )
+            self.assertEqual(len(clip_record["geometry_sha256"]), 64)
+            self.assertEqual(clip_record["runtime_scene_count"], 1)
+            self.assertEqual(
+                clip_record["runtime_scene_evidence_sha256"],
+                run_eval.sha256_file(scene_path),
+            )
+            frames = [record for record in records if record["record"] == "frame"]
+            self.assertEqual([record["frame_id"] for record in frames], [4, 5])
+            self.assertTrue(frames[0]["runtime_scene"]["scene_start"])
+            self.assertEqual(
+                frames[0]["artifact_sha256"]["source"],
+                run_eval.sha256_file(artifacts[4]["source"]),
+            )
+
+            records[1]["clip_sha1"] = "tampered"
+            with open(output, "wb") as stream:
+                for record in records:
+                    stream.write(run_eval.canonical_json_bytes(record))
+            with self.assertRaisesRegex(ValueError, "payload digest"):
+                run_eval.validate_frame_gate_evidence(output)
+
+    def test_selected_frame_gate_sidecar_preserves_full_source_ordinals(self):
+        thresholds = self._frame_gate_thresholds()
+        source_ids = list(range(4, 11))
+        label_ids = [5, 9]
+        output_ids = [5, 9]
+        with tempfile.TemporaryDirectory() as root:
+            manifest_path = os.path.join(root, "label_frames.json")
+            Path(manifest_path).write_text(
+                json.dumps({"schema": 1, "frame_ids": label_ids}), encoding="utf-8"
+            )
+            artifacts = {}
+            for frame_id in output_ids:
+                artifacts[frame_id] = {}
+                for name in ("source", "sbs", "depth", "warp_mask", "warp_disparity"):
+                    path = os.path.join(root, f"{name}_{frame_id}")
+                    Path(path).write_bytes(f"{name}:{frame_id}".encode("ascii"))
+                    artifacts[frame_id][name] = path
+
+            scene_rows = []
+            for ordinal, frame_id in enumerate(source_ids):
+                scene_rows.append({
+                    "source_frame_ordinal": ordinal,
+                    "source_frame_id": frame_id,
+                    "runtime_scene_id": 0,
+                    "scene_age": float(ordinal),
+                    "subject_initialized": True,
+                    "hard_cut": False,
+                    "scene_start": ordinal == 0,
+                })
+            scene_payload = {
+                "schema": 1,
+                "contract": run_eval.runtime_scene_evidence.CONTRACT,
+                "evidence_source": "SubjectState[0].y after completed depth postprocess",
+                "cut_rule": "prior_scene_age_gte_7_and_current_scene_age_eq_0",
+                "cadence": "completed-depth-frames-only",
+                "completion_sequence_contract": (
+                    "exact for this synchronous harness sequence; live busy-drop cadence "
+                    "is not replayed"
+                ),
+                "depth_reuse_interval": 1,
+                "source_frame_ids": source_ids,
+                "completed_source_frame_ids": source_ids,
+                "completed_depth_frame_count": len(source_ids),
+                "frames": scene_rows,
+            }
+            scene_path = os.path.join(root, "runtime_scene_evidence.json")
+            Path(scene_path).write_text(
+                json.dumps(scene_payload, sort_keys=True), encoding="utf-8"
+            )
+            context = {
+                "source_frame_ids": source_ids,
+                "output_selection": {
+                    "mode": "label-frames",
+                    "label_frame_ids": label_ids,
+                    "output_frame_ids": output_ids,
+                    "label_frames_sha256": run_eval.sha256_file(manifest_path),
+                },
+                "artifact_paths": artifacts,
+                "runtime_scene_evidence": scene_payload,
+                "runtime_scene_evidence_path": scene_path,
+                "clip_sha1": "a" * 12,
+                "harness_contract_sha256": "b" * 64,
+                "expected_flat": False,
+                "geometry": {
+                    "source_width": 32, "source_height": 16,
+                    "model_input_width": 28, "model_input_height": 14,
+                    "depth_short_side": 196, "depth_max_aspect": 4.0,
+                    "eye_width": 32, "eye_height": 16,
+                    "content_scale_x": 1.0, "content_scale_y": 1.0,
+                    "disparity_raster_width": 32, "disparity_raster_height": 16,
+                    "color_mode": "sdr-srgb-8bit",
+                },
+                "color": {"color_mode": "sdr-srgb-8bit"},
+                "pipeline": {"artistic_scale_override": 1.25},
+            }
+            rows = [{
+                "_frame_id": frame_id,
+                "exact_pop_spread_pct": 1.0,
+                "source_halo_p95": 1.0,
+                "positive_disparity_pct": 1.0,
+                **({"flow_temporal": 0.5} if frame_id in label_ids else {}),
+            } for frame_id in output_ids]
+            clip_records = run_eval.build_frame_gate_clip_records(
+                "shot", rows, thresholds, context
+            )
+            frame_records = [
+                record for record in clip_records if record["record"] == "frame"
+            ]
+            self.assertEqual([record["frame_id"] for record in frame_records], output_ids)
+            self.assertEqual([record["ordinal"] for record in frame_records], [1, 5])
+            self.assertEqual(
+                [record["runtime_scene"]["source_frame_ordinal"]
+                 for record in frame_records],
+                [1, 5],
+            )
+
+            output = os.path.join(root, run_eval.FRAME_GATE_EVIDENCE_FILENAME)
+            run_meta = {
+                "metric_sha256": "c" * 16,
+                "conf_sha256": "d" * 16,
+                "clip_hash_manifest_sha256": "e" * 64,
+                "clip_set_sha1": {"shot": "a" * 12},
+                "run_name": "test-selected",
+                "suite": "core",
+                "hdr_source_kind": "native-sdr",
+            }
+            with self.assertRaisesRegex(ValueError, "differs from publication header"):
+                run_eval.write_frame_gate_evidence(
+                    output, run_meta, thresholds, [clip_records], "f" * 64
+                )
+            run_eval.write_frame_gate_evidence(
+                output, run_meta, thresholds, [clip_records], "f" * 64,
+                evidence_contract=run_eval.SELECTED_FRAME_GATE_EVIDENCE_CONTRACT,
+            )
+            records = run_eval.validate_frame_gate_evidence(output)
+            self.assertEqual(
+                records[0]["contract"],
+                run_eval.SELECTED_FRAME_GATE_EVIDENCE_CONTRACT,
+            )
+            clip_record = next(
+                record for record in records if record["record"] == "clip"
+            )
+            self.assertEqual(clip_record["full_source_frame_count"], len(source_ids))
+            self.assertEqual(clip_record["full_source_frame_ids"], source_ids)
+            self.assertEqual(clip_record["label_frame_ids"], label_ids)
+            self.assertEqual(clip_record["output_selected_frame_ids"], output_ids)
+            self.assertEqual(
+                clip_record["output_label_frames_sha256"],
+                run_eval.sha256_file(manifest_path),
+            )
+            clip_record["output_selected_frame_ids"] = output_ids[:-1]
+            payload_bytes = [
+                run_eval.canonical_json_bytes(record) for record in records[:-1]
+            ]
+            records[-1]["payload_sha256"] = hashlib.sha256(
+                b"".join(payload_bytes)
+            ).hexdigest()
+            with open(output, "wb") as stream:
+                for record in records:
+                    stream.write(run_eval.canonical_json_bytes(record))
+            with self.assertRaisesRegex(ValueError, "targets only"):
+                run_eval.validate_frame_gate_evidence(output)
+
     def test_baseline_context_covers_sampling_and_artistic_controls(self):
-        self.assertEqual(run_eval.EVAL_SCHEMA, 29)
+        self.assertEqual(run_eval.EVAL_SCHEMA, 31)
         for field in (
                 "output_interval", "output_gt_right_only", "artistic_policy",
                 "artistic_style", "artistic_scale_override", "depth_override_frames",
@@ -110,6 +904,71 @@ class EvalContractTests(unittest.TestCase):
         for field in ("model", "conf_sha256", "artistic_policy_consumed",
                       "artistic_policy_authorization", "model_onnx_sha256"):
             self.assertIn(field, run_eval.POLICY_CANDIDATE_TREATMENT_FIELDS)
+        self.assertEqual(run_eval.LABEL_SELECTION_CONTEXT_FIELDS, (
+            "output_selection_mode", "label_frame_ids", "output_selected_frame_ids",
+            "output_label_frames_sha256",
+        ))
+
+    def test_bounded_score_queue_preserves_order_and_outstanding_limit(self):
+        executor = mock.Mock()
+
+        def submit(function, seq_dir, frames_dir, expected_flat):
+            self.assertIs(function, run_eval.score_clip_artifacts)
+            future = mock.Mock()
+            future.result.return_value = ([{"seq": seq_dir}], {"seq": seq_dir})
+            return future
+
+        executor.submit.side_effect = submit
+        queue = run_eval.BoundedOrderedScoreQueue(executor, max_outstanding=2)
+
+        self.assertEqual(queue.submit("a", {"ordinal": 0}, "seq-a", "frames", False), [])
+        self.assertEqual(queue.submit("b", {"ordinal": 1}, "seq-b", "frames", False), [])
+        self.assertEqual(queue.outstanding, 2)
+        completed = queue.submit("c", {"ordinal": 2}, "seq-c", "frames", True)
+        self.assertEqual(queue.outstanding, 2)
+        self.assertEqual(completed[0][0], "a")
+        self.assertEqual([item[0] for item in queue.drain()], ["b", "c"])
+
+    def test_bounded_score_queue_surfaces_worker_exception_with_clip(self):
+        executor = mock.Mock()
+        failed = mock.Mock()
+        failed.result.side_effect = ValueError("invalid evidence")
+        executor.submit.return_value = failed
+        queue = run_eval.BoundedOrderedScoreQueue(executor, max_outstanding=1)
+        queue.submit("bad_clip", {}, "seq", "frames", False)
+
+        with self.assertRaisesRegex(
+                run_eval.ScoreWorkerError, "bad_clip.*ValueError.*invalid evidence"):
+            queue.submit("next_clip", {}, "next", "frames", False)
+
+    def test_score_worker_environment_disables_nested_thread_pools(self):
+        overridden = {name: "12" for name in run_eval.SCORE_WORKER_THREAD_ENV}
+        with mock.patch.dict(os.environ, overridden):
+            run_eval.configure_score_worker_threads()
+            self.assertTrue(all(os.environ[name] == "1"
+                                for name in run_eval.SCORE_WORKER_THREAD_ENV))
+
+    def test_score_worker_process_matches_direct_measurement(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            os.makedirs(seq)
+            os.makedirs(frames)
+            source = np.arange(16 * 16 * 3, dtype=np.uint8).reshape(16, 16, 3)
+            Image.fromarray(source).save(os.path.join(frames, "frame_00000.png"))
+            Image.fromarray(np.concatenate((source, source), axis=1)).save(
+                os.path.join(seq, "sbs_00000.png")
+            )
+            expected = sbsbench.measure_sequence(seq, frames)
+            with mock.patch.dict(os.environ, {}):
+                run_eval.configure_score_worker_threads()
+                with run_eval.ProcessPoolExecutor(
+                        max_workers=1,
+                        initializer=run_eval._initialize_score_worker) as executor:
+                    actual = executor.submit(
+                        run_eval.score_clip_artifacts, seq, frames, False
+                    ).result(timeout=30)
+            self.assertEqual(actual, expected)
 
     def test_exact_disparity_requires_full_output_eye_raster_shape(self):
         with tempfile.TemporaryDirectory() as root:
@@ -380,15 +1239,100 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"), encoding="utf-8") as fh:
             harness = fh.read()
         self.assertIn('a == "--literal-bestv2"', harness)
-        self.assertIn('fs::path(o.out) / "contract.json"', harness)
-        self.assertIn('"  \\"schema\\": 24,\\n"', harness)
+        self.assertIn('target_directory / "contract.json"', harness)
+        self.assertIn('"apollo-harness-artistic-multiscale-v5"', harness)
+        self.assertIn('"  \\"schema\\": 28,\\n"', harness)
+        self.assertIn('\\"metric_preview_encoding\\"', harness)
         self.assertIn('a == "--no-artistic-policy"', harness)
         self.assertIn('a == "--artistic-scale-override"', harness)
         self.assertIn('a == "--output-every"', harness)
         self.assertIn('a == "--output-gt-right-only"', harness)
+        self.assertIn('a == "--output-label-frames"', harness)
+        self.assertIn('fs::path(o.frames) / "label_frames.json"', harness)
+        self.assertIn('\\"label_frame_ids\\"', harness)
+        self.assertIn('\\"output_selected_frame_ids\\"', harness)
+        self.assertIn('\\"output_label_frames_sha256\\"', harness)
+        multiscale_start = harness.index("if (!o.artistic_scale_grid.empty())")
+        multiscale_gate = harness[
+            multiscale_start:
+            harness.index("if (o.literal_bestv2", multiscale_start)
+        ]
+        self.assertNotIn(
+            "o.output_label_frames || !o.depth_override_root.empty()",
+            multiscale_gate,
+        )
+        self.assertIn("--output-label-frames may select emitted artifacts", multiscale_gate)
+        self.assertIn('{"schema", 5}', harness)
+        self.assertIn('{"label_frame_ids", label_frame_ids}', harness)
+        self.assertIn(
+            '{"output_label_frames_sha256", output_label_frames_sha256}',
+            harness,
+        )
         self.assertIn("artistic_policy_consumed", harness)
         self.assertIn("model_onnx_sha256", harness)
         self.assertIn("policy_metadata_sha256", harness)
+        self.assertNotIn("std::string frame_id(", harness)
+        self.assertIn(
+            "const std::string &output_id = source_frame_suffixes[fi]", harness
+        )
+        self.assertIn(
+            "if (!emit_frame && (o.depth_only || sparse_output_selection))",
+            harness,
+        )
+        self.assertIn("--depth-override-root cannot be combined with ", harness)
+        hoist = harness.index(
+            "// The completed depth and its silhouette prefilter are invariant"
+        )
+        prefilter = harness.index(
+            "ID3D11ShaderResourceView *warp_depth", hoist
+        )
+        render_loop = harness.index(
+            "const size_t render_scale_count", prefilter
+        )
+        composite = harness.index(
+            "// Composite (mirrors display_vram::convert()", render_loop
+        )
+        diagnostics = harness.index(
+            "// Export the exact full-binocular disparity", composite
+        )
+        self.assertIn("if (est.depth)", harness[prefilter:render_loop])
+        self.assertNotIn(
+            "ctx->CSSetShader(warp_prefilter_cs", harness[render_loop:composite]
+        )
+        self.assertIn("if (emit_frame && est.depth)", harness[diagnostics:])
+        raw_diagnostic = harness.index(
+            "// Also preserve the unclamped, scale-1 baseline", diagnostics
+        )
+        coverage = harness.index("auto dispatch_coverage", raw_diagnostic)
+        self.assertIn(
+            "if (!multiscale || render_scale_index == 0)",
+            harness[raw_diagnostic:coverage],
+        )
+        self.assertIn(
+            "fs::create_hard_link", harness[raw_diagnostic:coverage]
+        )
+        perf_tick = harness.index("sbs_perf::tick();", diagnostics)
+        self.assertIn("if (emit_frame)", harness[perf_tick:])
+        writer_start = harness.index("class bounded_multiscale_artifact_writer")
+        writer_end = harness.index("bool save_gray16_png", writer_start)
+        writer = harness[writer_start:writer_end]
+        self.assertIn("CoInitializeEx(nullptr, COINIT_MULTITHREADED)", writer)
+        self.assertIn("CLSID_WICImagingFactory", writer)
+        self.assertIn("jobs_.size() < queue_capacity_", writer)
+        self.assertIn("native_hdr_metric_bgra", writer)
+        self.assertIn("simulated_hdr_metric_bgra", writer)
+        self.assertNotIn("g_wic", writer)
+        drain = harness.index(
+            "multiscale_artifact_writer_result = multiscale_artifact_writer->finish()"
+        )
+        perf_publication = harness.index("sbs_perf::dump_json", drain)
+        contract_publication = harness.index(
+            "const nlohmann::json batch_contract", drain
+        )
+        self.assertLess(drain, perf_publication)
+        self.assertLess(drain, contract_publication)
+        self.assertIn('"apollo-bounded-multiscale-png-writer-v1"', harness)
+        self.assertIn('{"drained_before_publication", true}', harness)
         self.assertIn('\\"artistic_policy\\"', harness)
         self.assertIn('\\"depth_override_frames\\"', harness)
         self.assertIn('\\"zero_plane\\"', harness)
@@ -398,6 +1342,9 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             evaluator = fh.read()
         self.assertIn('contract_path = os.path.join(out_dir, "contract.json")', evaluator)
+        self.assertIn("authenticate_native_hdr_clip(", evaluator)
+        self.assertIn('"hdr_source_kind": expected_hdr_kind', evaluator)
+        self.assertIn('"hdr_source_kind": contract["hdr_source_kind"]', evaluator)
         self.assertNotIn("profile ([a-z0-9_-]+)", evaluator)
 
         with open(os.path.join(repo, "src", "stream.cpp"), encoding="utf-8") as fh:
@@ -421,11 +1368,15 @@ class EvalContractTests(unittest.TestCase):
             evaluator = fh.read()
         self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
         self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
-        self.assertIn("HARNESS_SCHEMA = 24", evaluator)
+        self.assertIn("HARNESS_SCHEMA = harness_contract.HARNESS_SCHEMA", evaluator)
         self.assertIn('extra_value(args.extra, "--output-every", 1)', evaluator)
-        self.assertIn('ordered_source_ids[::output_interval]', evaluator)
-        self.assertIn('expected_output_ids &= gt_right_ids', evaluator)
+        self.assertIn("resolve_output_selection(", evaluator)
+        self.assertIn('"label-frames" if output_label_frames', evaluator)
         self.assertIn('depth_override_root and not args.comparison_only', evaluator)
+        self.assertIn('"--score-workers"', evaluator)
+        self.assertIn("ProcessPoolExecutor(", evaluator)
+        self.assertIn("2 * args.score_workers", evaluator)
+        self.assertIn("env=harness_environment", evaluator)
 
     def test_zero_plane_modes_are_shot_latched_and_machine_verified(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -704,7 +1655,7 @@ class EvalContractTests(unittest.TestCase):
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("validate_artistic_policy_metadata", text)
-        self.assertIn('metadata.value("schema", 0) != 4', text)
+        self.assertIn('metadata.value("schema", 0) != 5', text)
         self.assertIn('metadata.value("deployed_model", "") != model.name', text)
         self.assertIn('metadata.value("base_depth_model", "")', text)
         self.assertIn('"safe-frontier-multistyle-apollo-v1"', text)
@@ -726,8 +1677,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("build_source_onnx_sha256", text)
         self.assertIn("Source ONNX changed while TensorRT was building", text)
         self.assertIn('const nlohmann::json expected_baseline', text)
-        self.assertIn('"sealed-test-artistic-policy-v2"', text)
-        self.assertIn('approval->value("evaluation_schema", 0) != 11', text)
+        self.assertIn('"sealed-test-artistic-policy-v3"', text)
+        self.assertIn('approval->value("evaluation_schema", 0) != 13', text)
         self.assertIn('approval->value("split", "") != "test"', text)
         self.assertIn('decision_accepted->is_boolean()', text)
         self.assertIn('"checkpoint_sha256"', text)
@@ -741,6 +1692,18 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("deployment_geometry_allowlist_sha256", text)
         self.assertIn("apollo-artistic-policy-deployment-v1", text)
         self.assertIn("validate_artistic_live_geometry", text)
+        self.assertIn("validate_artistic_input_variant_manifest", text)
+        self.assertIn("kArtisticDepthInputColorContractSha256", text)
+        self.assertIn("kArtisticInputVariantManifestSha256", text)
+        self.assertIn("valid_runtime_regime_acceptance", text)
+        live_contract = text[text.index("static std::string_view artistic_live_color_mode"):
+                             text.index("static bool valid_runtime_regime_acceptance")]
+        self.assertIn("input_color_space::srgb", live_contract)
+        self.assertIn("DXGI_FORMAT_B8G8R8A8_UNORM", live_contract)
+        self.assertIn("input_color_space::scrgb_hdr", live_contract)
+        self.assertIn("DXGI_FORMAT_R16G16B16A16_FLOAT", live_contract)
+        self.assertNotIn("input_color_space::linear_sdr &&", live_contract)
+        self.assertIn("pending_input_contract_exact", text)
         self.assertIn("artistic_policy_consumed_once", text)
         self.assertIn("consume_artistic_policy = false;", text)
         self.assertIn("normal depth inference remains enabled", text)
@@ -784,6 +1747,9 @@ class EvalContractTests(unittest.TestCase):
         self.assertTrue(run_eval.metric_exempt_for_clip({"axis": "stereo"}, flat))
         self.assertFalse(run_eval.metric_exempt_for_clip({"axis": "comfort"}, flat))
         self.assertFalse(run_eval.metric_exempt_for_clip({"axis": "stereo"}, {}))
+        self.assertFalse(run_eval.metric_exempt_for_clip(
+            {"axis": "stereo"}, {"expected_flat": "true"}
+        ))
 
     def test_rejected_processors_and_ema_order_are_permanently_removed(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1070,6 +2036,161 @@ class EvalContractTests(unittest.TestCase):
             self.assertEqual(agg["_n"], 3)
             self.assertIn("stereo_gt_psnr", agg)
 
+    def test_sparse_label_segments_reset_temporal_metrics_across_gaps(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            os.makedirs(seq)
+            os.makedirs(frames)
+            for frame_id, value in ((0, 0), (1, 0), (10, 255), (11, 255)):
+                eye = np.full((32, 32, 3), value, np.uint8)
+                Image.fromarray(np.concatenate((eye, eye), axis=1)).save(
+                    os.path.join(seq, f"sbs_{frame_id:05d}.png")
+                )
+                Image.fromarray(eye).save(
+                    os.path.join(frames, f"frame_{frame_id:05d}.png")
+                )
+            with open(os.path.join(frames, "label_frames.json"), "w",
+                      encoding="utf-8") as stream:
+                json.dump({"schema": 1, "frame_ids": [1, 11]}, stream)
+            with open(os.path.join(frames, "meta.json"), "w",
+                      encoding="utf-8") as stream:
+                json.dump({"required_temporal_evidence": True}, stream)
+
+            rows, agg = sbsbench.measure_sequence(seq, frames)
+
+            by_id = {row["_frame_id"]: row for row in rows}
+            self.assertNotIn("flicker", by_id[10])
+            self.assertEqual(agg["flicker_p95"], 0.0)
+
+    def test_sparse_labels_do_not_score_adjacent_bridge_between_selected_pairs(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            os.makedirs(seq)
+            os.makedirs(frames)
+            # Labels 1 and 3 select exact pairs 0->1 and 2->3. The materialized artifact set is
+            # nevertheless contiguous, so a naive consecutive-ID scan would also score 1->2.
+            for frame_id, value in enumerate((0, 0, 255, 255)):
+                eye = np.full((32, 32, 3), value, np.uint8)
+                Image.fromarray(np.concatenate((eye, eye), axis=1)).save(
+                    os.path.join(seq, f"sbs_{frame_id:05d}.png")
+                )
+                Image.fromarray(eye).save(
+                    os.path.join(frames, f"frame_{frame_id:05d}.png")
+                )
+            with open(os.path.join(frames, "label_frames.json"), "w",
+                      encoding="utf-8") as stream:
+                json.dump({"schema": 1, "frame_ids": [1, 3]}, stream)
+            with open(os.path.join(frames, "meta.json"), "w",
+                      encoding="utf-8") as stream:
+                json.dump({"required_temporal_evidence": True}, stream)
+
+            rows, agg = sbsbench.measure_sequence(seq, frames)
+
+            by_id = {row["_frame_id"]: row for row in rows}
+            self.assertIn("flicker", by_id[1])
+            self.assertNotIn("flicker", by_id[2])
+            self.assertIn("flicker", by_id[3])
+            self.assertEqual(agg["flicker_p95"], 0.0)
+
+    def test_sparse_label_manifest_requires_valid_clip_metadata(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            os.makedirs(seq)
+            os.makedirs(frames)
+            for frame_id in range(2):
+                eye = np.zeros((16, 16, 3), np.uint8)
+                Image.fromarray(np.concatenate((eye, eye), axis=1)).save(
+                    os.path.join(seq, f"sbs_{frame_id:05d}.png")
+                )
+                Image.fromarray(eye).save(
+                    os.path.join(frames, f"frame_{frame_id:05d}.png")
+                )
+            with open(os.path.join(frames, "label_frames.json"), "w",
+                      encoding="utf-8") as stream:
+                json.dump({"schema": 1, "frame_ids": [1]}, stream)
+
+            with self.assertRaisesRegex(ValueError, "missing required clip metadata"):
+                sbsbench.measure_sequence(seq, frames)
+
+            meta_path = os.path.join(frames, "meta.json")
+            with open(meta_path, "w", encoding="utf-8") as stream:
+                stream.write("{broken")
+            with self.assertRaisesRegex(ValueError, "invalid clip metadata"):
+                sbsbench.measure_sequence(seq, frames)
+
+            with open(meta_path, "w", encoding="utf-8") as stream:
+                json.dump({"required_gt_flow": "false"}, stream)
+            with self.assertRaisesRegex(ValueError, "evidence flags must be booleans"):
+                sbsbench.measure_sequence(seq, frames)
+
+            with open(meta_path, "w", encoding="utf-8") as stream:
+                json.dump({"dataset": 0}, stream)
+            with self.assertRaisesRegex(ValueError, "dataset must be a nonempty string"):
+                sbsbench.measure_sequence(seq, frames)
+
+    def test_plain_sequence_keeps_metadata_optional_but_rejects_malformed_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            os.makedirs(seq)
+            os.makedirs(frames)
+            eye = np.zeros((16, 16, 3), np.uint8)
+            Image.fromarray(np.concatenate((eye, eye), axis=1)).save(
+                os.path.join(seq, "sbs_00000.png")
+            )
+            Image.fromarray(eye).save(os.path.join(frames, "frame_00000.png"))
+
+            rows, _agg = sbsbench.measure_sequence(seq, frames)
+            self.assertEqual([row["_frame_id"] for row in rows], [0])
+
+            with open(os.path.join(frames, "meta.json"), "w",
+                      encoding="utf-8") as stream:
+                json.dump([], stream)
+            with self.assertRaisesRegex(ValueError, "root must be an object"):
+                sbsbench.measure_sequence(seq, frames)
+
+    def test_sparse_authored_stereo_requires_sidecars_only_for_label_targets(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            gt_right = os.path.join(frames, "gt_right")
+            os.makedirs(seq)
+            os.makedirs(gt_right)
+            rng = np.random.default_rng(20260715)
+            for frame_id in (0, 1, 10, 11):
+                src = rng.integers(0, 256, (32, 32, 3), dtype=np.uint8)
+                Image.fromarray(src).save(
+                    os.path.join(frames, f"frame_{frame_id:05d}.png")
+                )
+                Image.fromarray(np.concatenate((src, src), axis=1)).save(
+                    os.path.join(seq, f"sbs_{frame_id:05d}.png")
+                )
+                depth = np.tile(np.linspace(0, 65535, 16, dtype=np.uint16), (16, 1))
+                Image.fromarray(depth).save(
+                    os.path.join(seq, f"depth_{frame_id:05d}.png")
+                )
+                if frame_id in (1, 11):
+                    Image.fromarray(src).save(
+                        os.path.join(gt_right, f"frame_{frame_id:05d}.png")
+                    )
+            with open(os.path.join(frames, "label_frames.json"), "w",
+                      encoding="utf-8") as stream:
+                json.dump({"schema": 1, "frame_ids": [1, 11]}, stream)
+            with open(os.path.join(frames, "meta.json"), "w", encoding="utf-8") as stream:
+                json.dump({"required_gt_stereo": True}, stream)
+
+            rows, agg = sbsbench.measure_sequence(seq, frames)
+
+            stereo_rows = [row["_frame_id"] for row in rows if "stereo_gt_psnr" in row]
+            self.assertEqual(stereo_rows, [1, 11])
+            self.assertIn("stereo_art_polarity_ok", agg)
+            os.remove(os.path.join(gt_right, "frame_00011.png"))
+            with self.assertRaisesRegex(ValueError, "every label target"):
+                sbsbench.measure_sequence(seq, frames)
+
     def test_sampled_sequence_rejects_one_frame_flow_as_invalid_for_gaps(self):
         with tempfile.TemporaryDirectory() as root:
             seq = os.path.join(root, "seq")
@@ -1107,6 +2228,29 @@ class EvalContractTests(unittest.TestCase):
             with open(os.path.join(frames, "meta.json"), "w", encoding="utf-8") as fh:
                 fh.write('{"dataset":"Example Public Dataset","required_gt_depth":true}')
             with self.assertRaisesRegex(ValueError, "requires GT depth"):
+                sbsbench.measure_sequence(seq, frames)
+
+    def test_required_gt_depth_rejects_partial_target_or_temporal_coverage(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            gt_dir = os.path.join(frames, "gt_depth")
+            os.makedirs(seq)
+            os.makedirs(gt_dir)
+            for frame_id in range(2):
+                Image.fromarray(np.zeros((16, 32, 3), np.uint8)).save(
+                    os.path.join(seq, f"sbs_{frame_id:05d}.png"))
+                Image.fromarray(np.full((8, 16), 32768, np.uint16)).save(
+                    os.path.join(seq, f"depth_{frame_id:05d}.png"))
+                Image.fromarray(np.zeros((16, 16, 3), np.uint8)).save(
+                    os.path.join(frames, f"frame_{frame_id:05d}.png"))
+            Image.fromarray(np.full((8, 16), 32768, np.uint16)).save(
+                os.path.join(gt_dir, "frame_00000.png"))
+            with open(os.path.join(frames, "meta.json"), "w", encoding="utf-8") as fh:
+                json.dump({"required_gt_depth": True, "gt_depth_kind": "disparity"}, fh)
+
+            with self.assertRaisesRegex(
+                    ValueError, "GT-depth/SBS frame-id mismatch|every target/temporal endpoint"):
                 sbsbench.measure_sequence(seq, frames)
 
     def test_public_clip_rejects_missing_required_optical_flow(self):
@@ -1761,7 +2905,7 @@ class EvalContractTests(unittest.TestCase):
                      "wb").close()
         policy_hash = "a" * 64
         contract = {
-            "schema": 24,
+            "schema": run_eval.HARNESS_SCHEMA,
             "artifact_mode": "full",
             "source_width": 64,
             "source_height": 32,
@@ -1770,10 +2914,15 @@ class EvalContractTests(unittest.TestCase):
             "eye_width": 64,
             "eye_height": 32,
             "color_mode": "sdr-srgb-8bit",
+            "metric_preview_encoding": "native-srgb-v1",
             "disparity_raster_width": 64,
             "disparity_raster_height": 32,
             "output_interval": 1,
             "output_gt_right_only": False,
+            "output_selection_mode": "interval",
+            "label_frame_ids": [],
+            "output_selected_frame_ids": [0, 1],
+            "output_label_frames_sha256": "",
             "policy_warp_source_sha256": policy_hash,
             "metric_sha256": "b" * 16,
             "artistic_policy_consumed": False,
@@ -1798,6 +2947,7 @@ class EvalContractTests(unittest.TestCase):
                 "clip_set_sha1": {"shot": clip_hash},
                 "output_interval": 1,
                 "output_gt_right_only": False,
+                "output_selection_mode": "interval",
                 "policy_warp_source_sha256": policy_hash,
                 "metric_sha256": "b" * 16,
                 "artistic_policy_consumed": False,
@@ -1815,6 +2965,10 @@ class EvalContractTests(unittest.TestCase):
                 "model_onnx_sha256": "",
                 "policy_metadata_sha256": "",
                 "deployment_geometry_allowlist_sha256": "",
+                "output_selection_mode": "interval",
+                "label_frame_ids": [],
+                "output_selected_frame_ids": [0, 1],
+                "output_label_frames_sha256": "",
                 "source_width": 64,
                 "source_height": 32,
                 "model_input_width": 64,
@@ -1827,6 +2981,7 @@ class EvalContractTests(unittest.TestCase):
                 "content_scale_y": 1.0,
                 "artistic_full_clamp_abs": 0.142,
                 "color_mode": "sdr-srgb-8bit",
+                "metric_preview_encoding": "native-srgb-v1",
             }}},
         }
         return data, run_dir, clips_root
@@ -1839,12 +2994,35 @@ class EvalContractTests(unittest.TestCase):
                 rescore_run.validate_current_artifact_contract(
                     data, run_dir, clips_root)
 
+    def test_rescore_rejects_schema25_preview_artifacts_as_stale(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, run_dir, clips_root = self._current_rescore_fixture(root)
+            contract_path = os.path.join(run_dir, "shot", "contract.json")
+            with open(contract_path, encoding="utf-8") as stream:
+                contract = json.load(stream)
+            contract["schema"] = 25
+            contract.pop("metric_preview_encoding", None)
+            with open(contract_path, "w", encoding="utf-8") as stream:
+                json.dump(contract, stream)
+            with self.assertRaisesRegex(RuntimeError, "schema.*28.*25"):
+                rescore_run.validate_current_artifact_contract(
+                    data, run_dir, clips_root
+                )
+
     def test_rescore_requires_exact_artifact_identities(self):
         with tempfile.TemporaryDirectory() as root:
             data, run_dir, clips_root = self._current_rescore_fixture(root)
             os.remove(os.path.join(
                 run_dir, "shot", "warp_unclamped_disparity_00001.f32"))
             with self.assertRaisesRegex(RuntimeError, "exact artifact identities"):
+                rescore_run.validate_current_artifact_contract(
+                    data, run_dir, clips_root)
+
+    def test_rescore_requires_authenticated_output_selection(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, run_dir, clips_root = self._current_rescore_fixture(root)
+            del data["clips"]["shot"]["meta"]["output_selected_frame_ids"]
+            with self.assertRaisesRegex(RuntimeError, "authenticated output selection"):
                 rescore_run.validate_current_artifact_contract(
                     data, run_dir, clips_root)
 
@@ -1871,6 +3049,25 @@ class EvalContractTests(unittest.TestCase):
             data, run_dir, clips_root = self._current_rescore_fixture(root)
             del data["meta"]["clip_set_sha1"]
             with self.assertRaisesRegex(RuntimeError, "clip_set_sha1"):
+                rescore_run.validate_current_artifact_contract(
+                    data, run_dir, clips_root)
+
+    def test_rescore_rejects_non_boolean_expected_flat(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, run_dir, clips_root = self._current_rescore_fixture(root)
+            data["clips"]["shot"]["meta"]["expected_flat"] = "false"
+            with self.assertRaisesRegex(RuntimeError, "expected_flat must be a boolean"):
+                rescore_run.validate_current_artifact_contract(
+                    data, run_dir, clips_root)
+
+    def test_rescore_rejects_unsafe_clip_paths(self):
+        with tempfile.TemporaryDirectory() as root:
+            data, run_dir, clips_root = self._current_rescore_fixture(root)
+            data["clips"]["../shot"] = data["clips"].pop("shot")
+            data["meta"]["clip_set_sha1"] = {
+                "../shot": data["meta"]["clip_set_sha1"].pop("shot")
+            }
+            with self.assertRaisesRegex(RuntimeError, "invalid source clip selection"):
                 rescore_run.validate_current_artifact_contract(
                     data, run_dir, clips_root)
 
@@ -2072,8 +3269,9 @@ class EvalContractTests(unittest.TestCase):
                 (output / f"baseline_unclamped_disparity_{frame:05d}.f32").write_bytes(
                     b"\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00"
                 )
+            selection = generate_artistic_depth_run.output_selection(source)
             (output / "contract.json").write_text(json.dumps({
-                "schema": 24,
+                "schema": generate_artistic_depth_run.harness_contract.HARNESS_SCHEMA,
                 "model": "depth_anything_v2_fp16",
                 "source_width": 1,
                 "source_height": 1,
@@ -2082,6 +3280,8 @@ class EvalContractTests(unittest.TestCase):
                 "eye_width": 1,
                 "eye_height": 1,
                 "color_mode": "sdr-srgb-8bit",
+                "hdr_source_kind": "native-sdr",
+                "metric_preview_encoding": "native-srgb-v1",
                 "content_scale_x": 1.0,
                 "content_scale_y": 1.0,
                 "disparity_raster_width": 1,
@@ -2106,11 +3306,24 @@ class EvalContractTests(unittest.TestCase):
                 "artistic_disparity_contract":
                     "clamp(raw_baseline_times_scale_to_plus_or_minus_0.142_"
                     "times_aspect_scale_times_content_scale_x)",
+                "output_selection_mode": selection["mode"],
+                "label_frame_ids": selection["label_frame_ids"],
+                "output_selected_frame_ids": selection["output_frame_ids"],
+                "output_label_frames_sha256": selection["label_frames_sha256"],
             }), encoding="utf-8")
-            (output / "generation_identity.json").write_text(json.dumps({
-                "schema": 2,
-                "source_sha256": generate_artistic_depth_run.source_fingerprint(source),
-            }), encoding="utf-8")
+            source_identity = {
+                "source_identity_method":
+                    generate_artistic_depth_run.SOURCE_IDENTITY_FINGERPRINT,
+                "source_identity_value":
+                    generate_artistic_depth_run.source_fingerprint(source),
+            }
+            identity = generate_artistic_depth_run.generation_identity(
+                source_identity, selection, "e" * 64, "c" * 16,
+                "depth_anything_v2_fp16"
+            )
+            (output / "generation_identity.json").write_text(
+                json.dumps(identity), encoding="utf-8"
+            )
             self.assertTrue(generate_artistic_depth_run.valid_completed_clip(
                 source, output, "depth_anything_v2_fp16"
             ))

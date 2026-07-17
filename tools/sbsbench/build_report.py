@@ -1674,6 +1674,11 @@ def policy_provenance(run):
             for entry in run.get("clips", {}).values()
             if entry.get("meta", {}).get("color_mode")
         }),
+        "metric_preview_encodings": sorted({
+            entry.get("meta", {}).get("metric_preview_encoding")
+            for entry in run.get("clips", {}).values()
+            if entry.get("meta", {}).get("metric_preview_encoding")
+        }),
         "geometries": sorted({
             (entry.get("meta", {}).get("source_width"),
              entry.get("meta", {}).get("source_height"),

@@ -17,9 +17,10 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 import run_eval  # noqa: E402
 import sbsbench  # noqa: E402
+import sbs_harness_contract as harness_contract  # noqa: E402
 
 
-HARNESS_SCHEMA = 24
+HARNESS_SCHEMA = harness_contract.HARNESS_SCHEMA
 EXACT_DISPARITY_SEMANTICS = (
     "exact_clamped_full_binocular_normalized_at_output_eye_raster_zero_bars"
 )
@@ -48,10 +49,12 @@ def _is_metric_contract_hash(value):
 def validate_current_artifact_contract(data, run_dir, clips_root):
     """Refuse to promote old/incomplete artifacts into the current evaluator schema.
 
-    Rescoring may update metric arithmetic, but schema 29 also promises harness-24 output-eye
-    disparity evidence. That promise can only come from the original GPU run; it cannot be created
-    by rewriting results.json.
+    Rescoring may update metric arithmetic, but schema 31 also promises harness-28 authenticated
+    output selection and output-eye disparity evidence. That promise can only come from the
+    original GPU run; it cannot be created by rewriting results.json.
     """
+    run_dir = os.path.abspath(run_dir)
+    clips_root = os.path.abspath(clips_root)
     meta = data.get("meta")
     if not isinstance(meta, dict) or meta.get("eval_schema") != run_eval.EVAL_SCHEMA:
         raise RuntimeError(
@@ -72,15 +75,29 @@ def validate_current_artifact_contract(data, run_dir, clips_root):
     clips = data.get("clips")
     if not isinstance(clips, dict) or not clips:
         raise RuntimeError("run contains no clip results")
+    try:
+        clip_names = run_eval.validate_clip_selection(clips_root, clips)
+    except ValueError as exc:
+        raise RuntimeError(f"invalid source clip selection: {exc}") from exc
     clip_hashes = meta.get("clip_set_sha1")
-    if not isinstance(clip_hashes, dict) or set(clip_hashes) != set(clips):
+    if not isinstance(clip_hashes, dict) or set(clip_hashes) != set(clip_names):
         raise RuntimeError(
             "run has no exact original clip_set_sha1 identity for every result clip"
         )
 
-    for clip, entry in clips.items():
-        run_clip = os.path.join(run_dir, clip)
-        source_clip = os.path.join(clips_root, clip)
+    for clip in clip_names:
+        entry = clips[clip]
+        try:
+            run_clip = run_eval.contained_component(
+                run_dir, clip, "run artifact clip"
+            )
+            source_clip = run_eval.contained_component(
+                clips_root, clip, "source clip"
+            )
+        except ValueError as exc:
+            raise RuntimeError(f"{clip}: unsafe artifact/source path: {exc}") from exc
+        if not os.path.isdir(run_clip):
+            raise RuntimeError(f"{clip}: run artifact directory is missing")
         recorded_clip_hash = clip_hashes[clip]
         if (not isinstance(recorded_clip_hash, str) or
                 not re.fullmatch(r"[0-9a-f]{12}", recorded_clip_hash)):
@@ -97,6 +114,19 @@ def validate_current_artifact_contract(data, run_dir, clips_root):
                 contract = json.load(fh)
         except (OSError, ValueError) as exc:
             raise RuntimeError(f"{clip}: missing/invalid harness contract: {exc}") from exc
+        clip_meta = entry.get("meta", {}) if isinstance(entry, dict) else {}
+        if ("expected_flat" in clip_meta and
+                not isinstance(clip_meta["expected_flat"], bool)):
+            raise RuntimeError(f"{clip}: expected_flat must be a boolean")
+        missing_selection = [
+            field for field in run_eval.LABEL_SELECTION_CONTEXT_FIELDS
+            if field not in clip_meta
+        ]
+        if missing_selection:
+            raise RuntimeError(
+                f"{clip}: clip result lacks authenticated output selection: "
+                f"{missing_selection}"
+            )
         expected_contract = {
             "schema": HARNESS_SCHEMA,
             "artifact_mode": "full",
@@ -107,6 +137,11 @@ def validate_current_artifact_contract(data, run_dir, clips_root):
             "policy_warp_source_sha256": policy_hash,
             "output_interval": meta.get("output_interval"),
             "output_gt_right_only": meta.get("output_gt_right_only"),
+            "output_selection_mode": clip_meta["output_selection_mode"],
+            "label_frame_ids": clip_meta["label_frame_ids"],
+            "output_selected_frame_ids": clip_meta["output_selected_frame_ids"],
+            "output_label_frames_sha256":
+                clip_meta["output_label_frames_sha256"],
         }
         mismatch = {key: (expected, contract.get(key))
                     for key, expected in expected_contract.items()
@@ -123,7 +158,10 @@ def validate_current_artifact_contract(data, run_dir, clips_root):
                 f"{clip}: harness artifact metric hash differs from the run: "
                 f"{contract_metric_hash} != {artifact_metric_hash}"
             )
-        clip_meta = entry.get("meta", {}) if isinstance(entry, dict) else {}
+        if contract["output_selection_mode"] != meta.get("output_selection_mode"):
+            raise RuntimeError(
+                f"{clip}: output selection mode differs across harness/run provenance"
+            )
         for field in (
                 "artistic_policy_consumed", "artistic_policy_authorization",
                 "model_onnx_sha256",
@@ -192,6 +230,11 @@ def validate_current_artifact_contract(data, run_dir, clips_root):
         if contract.get("color_mode") not in {
                 "sdr-srgb-8bit", "linear-sdr-fp16", "hdr-scrgb-fp16"}:
             raise RuntimeError(f"{clip}: invalid color-mode contract")
+        harness_contract.validate_metric_preview_encoding(
+            contract["color_mode"],
+            contract.get("metric_preview_encoding"),
+            clip,
+        )
         for field, expected in (
                 ("source_width", source_width),
                 ("source_height", source_height),
@@ -204,7 +247,9 @@ def validate_current_artifact_contract(data, run_dir, clips_root):
                 ("content_scale_x", content_scale_x),
                 ("content_scale_y", content_scale_y),
                 ("artistic_full_clamp_abs", artistic_full_clamp_abs),
-                ("color_mode", contract.get("color_mode"))):
+                ("color_mode", contract.get("color_mode")),
+                ("metric_preview_encoding",
+                 contract.get("metric_preview_encoding"))):
             if clip_meta.get(field) != expected:
                 raise RuntimeError(
                     f"{clip}: recorded dimensions/color {field} differ from harness contract"
@@ -224,11 +269,35 @@ def validate_current_artifact_contract(data, run_dir, clips_root):
                     f"the harness contract {(source_width, source_height)}"
                 )
         source_ids = sorted(source_files)
-        expected_ids = set(source_ids[::output_interval])
-        if contract["output_gt_right_only"]:
-            gt_ids = set(sbsbench.indexed_files(
-                os.path.join(source_clip, "gt_right", "frame_*.*"), "frame_"))
-            expected_ids &= gt_ids
+        try:
+            selection = run_eval.resolve_output_selection(
+                source_clip,
+                source_ids,
+                output_interval,
+                contract["output_gt_right_only"],
+                contract["output_selection_mode"] == "label-frames",
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                f"{clip}: invalid authenticated output selection: {exc}"
+            ) from exc
+        selection_contract = {
+            "output_selection_mode": selection["mode"],
+            "label_frame_ids": selection["label_frame_ids"],
+            "output_selected_frame_ids": selection["output_frame_ids"],
+            "output_label_frames_sha256": selection["label_frames_sha256"],
+        }
+        stale_selection = {
+            field: (expected, contract.get(field))
+            for field, expected in selection_contract.items()
+            if contract.get(field) != expected
+        }
+        if stale_selection:
+            raise RuntimeError(
+                f"{clip}: harness output selection differs from source: "
+                f"{stale_selection}"
+            )
+        expected_ids = set(selection["output_frame_ids"])
         artifact_ids = {
             "sbs": _artifact_ids(run_clip, "sbs_*.png", "sbs_"),
             "depth": _artifact_ids(run_clip, "depth_*.png", "depth_"),
@@ -307,19 +376,44 @@ def main():
     thresholds = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json"), encoding="utf-8"))
     issues, hard_failures = [], []
     for clip, entry in data["clips"].items():
-        clip_dir = os.path.join(clips_root, clip)
-        expected_flat = bool(entry.get("meta", {}).get("expected_flat"))
+        clip_dir = run_eval.contained_component(clips_root, clip, "source clip")
+        run_clip = run_eval.contained_component(
+            args.run_dir, clip, "run artifact clip"
+        )
+        clip_meta = entry.get("meta", {})
+        expected_flat = clip_meta.get("expected_flat") is True
         measured = sbsbench.measure_sequence(
-            os.path.join(args.run_dir, clip), clip_dir, expected_flat=expected_flat)
+            run_clip, clip_dir, expected_flat=expected_flat)
         if not measured:
             raise SystemExit(f"{clip}: no measurable SBS artifacts")
         rows, agg = measured
+        missing_required = run_eval.missing_required_metric_evidence(
+            agg, thresholds, clip_meta
+        )
+        if missing_required:
+            raise SystemExit(
+                f"{clip}: required primary metric evidence is missing: "
+                f"{missing_required}"
+            )
         worst, clip_issues, clip_hard_failures = run_eval.score_clip_gates(
-            rows, agg, thresholds, entry.get("meta", {}))
+            rows, agg, thresholds, clip_meta)
         issues.extend({"clip": clip, **item} for item in clip_issues)
         hard_failures.extend({"clip": clip, **item} for item in clip_hard_failures)
         entry["aggregate"] = agg
         entry["worst_frame"] = worst
+
+    # Scoring reads source and artifact files for long enough that an interrupted dataset rebuild
+    # can otherwise race the rescore. Re-authenticate the complete original GPU contract before
+    # publishing any derived result, rather than blessing metrics from mixed generations.
+    try:
+        post_score_artifact_hash = validate_current_artifact_contract(
+            data, args.run_dir, clips_root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SystemExit(
+            f"source/artifacts changed while rescoring; refusing output: {exc}"
+        ) from exc
+    if post_score_artifact_hash != artifact_metric_sha256:
+        raise SystemExit("artifact metric identity changed while rescoring")
 
     data["issues"] = issues
     data["hard_failures"] = hard_failures

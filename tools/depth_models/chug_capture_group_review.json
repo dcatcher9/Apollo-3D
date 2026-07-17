@@ -1,0 +1,662 @@
+{
+  "schema": 1,
+  "id": "chug-capture-group-review-v1",
+  "dataset": "chug-hdr-reference-v1",
+  "purpose": "Human-reviewed calibration anchors for capture-session and multiframe perceptual deduplication. Positive groups must remain indivisible across every dataset split.",
+  "visual_identity": {
+    "anchor_fractions": [0.1, 0.3, 0.5, 0.7, 0.9],
+    "fingerprint_transform": "pq-bt2020nc-limited-to-linear-mobius-bt709-full-v1",
+    "feature_contract": "dav2-small-dinov2-vits-four-stage-cls-mean-five-anchor-518-letterbox-q15-v1",
+    "depth_weights_sha256": "715fade13be8f229f8a70cc02066f656f2423a59effd0579197bbf57860e1378"
+  },
+  "capture_session": {
+    "img_max_consecutive_gap": 2,
+    "img_max_group_span": 2,
+    "timestamp_max_consecutive_seconds": 120,
+    "timestamp_max_group_span_seconds": 120,
+    "perceptual_img_max_delta": 150,
+    "perceptual_timestamp_max_seconds": 7200
+  },
+  "perceptual_thresholds": {
+    "bidirectional_nearest_median_min": 0.96,
+    "manual_review_margin": 0.002
+  },
+  "confirmed_positive_groups": [
+    {
+      "name": "lake",
+      "video_ids": [
+        "12185455dd89f5b54b31c39a89aad1ec",
+        "fc0c19714ea49b547d6c45bcc757fb03"
+      ]
+    },
+    {
+      "name": "illuminated_tree_event",
+      "video_ids": [
+        "13b11922c75edade52ad80808e453e1b",
+        "22ec1f9a016ad4c6efd029b19b1f78cd",
+        "7a2700847512a8a41f4f02a8ecaefbd5"
+      ]
+    },
+    {
+      "name": "sunset_field",
+      "video_ids": [
+        "41be1729baaa4762ccaf24f9ecca31fd",
+        "6589b455a1d16576e4294c147c8ea22d"
+      ]
+    },
+    {
+      "name": "waterfall",
+      "video_ids": [
+        "544cd9ca1f02945e848cbb03c260cdbf",
+        "a8c165fc13126336cb018bddb7fa77dc"
+      ]
+    },
+    {
+      "name": "iced_windshield",
+      "video_ids": [
+        "9e4578da4e6a1e1b655d47574d8203a7",
+        "bc72a6876d24cbb698ccdc17990e970f",
+        "d27bf77d1183516b5f06ba65ded745b3"
+      ]
+    },
+    {
+      "name": "mountain_road",
+      "video_ids": [
+        "4fea3226ce83a10604f2f43fda067299",
+        "6dc440c2334328302d4e329fd20d11fb"
+      ]
+    },
+    {
+      "name": "rodeo_arena",
+      "video_ids": [
+        "003e291900589c923f08e839fd0395f9",
+        "4cbd595319754c461e4d7a27aabc79ae",
+        "fa452dae4345027c5ff082d4c7a919b5"
+      ]
+    },
+    {
+      "name": "football_stadium",
+      "video_ids": [
+        "31eebcd1eb732715db4032922c3d355e",
+        "cad7aede659f1ff9d01ca817794d8df7",
+        "e2c3884b4d087d6990360dcf8703585f"
+      ]
+    },
+    {
+      "name": "parking_lot_sunset",
+      "video_ids": [
+        "97e26fbafa88c19c1cfd7198092debeb",
+        "be2c63ce0d2c829872974729a15c9b35"
+      ]
+    },
+    {
+      "name": "hillside_town_viewpoint",
+      "video_ids": [
+        "7d3e33293a3a22613f48934d5491beb8",
+        "9cd0a2ff882af1b280c05deebc4975e0"
+      ]
+    },
+    {
+      "name": "lake_outing_extension",
+      "video_ids": [
+        "12185455dd89f5b54b31c39a89aad1ec",
+        "d72077cafa6b57a46b0063dbc947c2e7",
+        "fc0c19714ea49b547d6c45bcc757fb03"
+      ]
+    }
+  ],
+  "manual_capture_session_groups": [
+    {
+      "name": "dec11_holiday_outing",
+      "video_ids": [
+        "122969aefdb87277c953919eb946daac",
+        "12f85d8da5e4fd2f69a665d1f7154b67",
+        "37085f42ff454b87fd702b74ae408874"
+      ]
+    }
+  ],
+  "perceptual_boundary_overrides": [
+    {
+      "name": "five_anchor_review_001",
+      "video_ids": [
+        "c23cde1b318c0737a615cf935721f71c",
+        "f11fb4612d8ab149bd0be91ec873052c"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.961968,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_002",
+      "video_ids": [
+        "b9d79f52ea974838bed9b93458785690",
+        "f09c26bf0b52469435033117d1843551"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.961863,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_003",
+      "video_ids": [
+        "84db7aa1cb8652b2fd125e868839d1dd",
+        "a4a627d839afef4ad3fae15b78d208ac"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.961832,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_004",
+      "video_ids": [
+        "76f4be354aa43d7c3404fa75b3159faf",
+        "aa7613b5b12b095a0a4c2cbc2537f2df"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.961727,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_005",
+      "video_ids": [
+        "09bf36c18e4269c3e4ce37df39d93616",
+        "a8c165fc13126336cb018bddb7fa77dc"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.961707,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_006",
+      "video_ids": [
+        "61a58fc9f8f6f34cafed0f94b94e9ea3",
+        "cfad0e5e64449fe1c78f5dac1e13a597"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.961685,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_007",
+      "video_ids": [
+        "cf3939c89359a714f36da38145a06148",
+        "f33b9da42eb560f5dfc08633a250e66b"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.961648,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_008",
+      "video_ids": [
+        "2c5d24a90b469f351e345aee86a93c8b",
+        "a4a627d839afef4ad3fae15b78d208ac"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.961481,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_009",
+      "video_ids": [
+        "07f76f7387c51c249686ac384fe22090",
+        "dad124c2d27e9a104de1ddd39ad470f9"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.961425,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_010",
+      "video_ids": [
+        "10890b14f98e9d6570fe41eeb30b4424",
+        "5a598971f2e2508ac687662d07be6ce0"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.961399,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_011",
+      "video_ids": [
+        "13b11922c75edade52ad80808e453e1b",
+        "af439f06acbd89fbdda3b177e396e15d"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.961352,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_012",
+      "video_ids": [
+        "7876870880a18a55415a3d900c9ccb4d",
+        "84db7aa1cb8652b2fd125e868839d1dd"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.961284,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_013",
+      "video_ids": [
+        "b9d79f52ea974838bed9b93458785690",
+        "cddcdb30db44212382fd30238addeb95"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.960974,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_014",
+      "video_ids": [
+        "4fea3226ce83a10604f2f43fda067299",
+        "9202da005b8e66835eedd5c26e1f01c0"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.960868,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_015",
+      "video_ids": [
+        "4bf12db2570a6d9dabe11c5482bd0551",
+        "6e60634aa825419df0cbf2367c42ce0c"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.960858,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_016",
+      "video_ids": [
+        "a609a2765f55e13506d53b9b889f37ef",
+        "f2fbcf3433dd97e0b1985e4925b490fa"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.960819,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_017",
+      "video_ids": [
+        "0fdf6c3ba5c247d50921af134ce7e726",
+        "bcdd74ce72c3d5f4b0794ee2fa1961be"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.960708,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_018",
+      "video_ids": [
+        "8f3af48ae6a4dee557bcc6bdff8e8a73",
+        "af439f06acbd89fbdda3b177e396e15d"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.96067,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_019",
+      "video_ids": [
+        "be2c63ce0d2c829872974729a15c9b35",
+        "fab37f43f04cb71f539c9f1870f1e783"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.960606,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_020",
+      "video_ids": [
+        "09bf36c18e4269c3e4ce37df39d93616",
+        "6933bbbbf17eb57fa32f10cbb520cec8"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.960585,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_021",
+      "video_ids": [
+        "4a9e58d4b45997383f57e4e829566a7d",
+        "6dfd30c6bc6d2522a92de72810e46bdd"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.960507,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_022",
+      "video_ids": [
+        "5205254f874ae6769f4034eda9ef882f",
+        "a4a627d839afef4ad3fae15b78d208ac"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.960411,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_023",
+      "video_ids": [
+        "1cec59dd5be31af77260e081957506de",
+        "a5d2e4c0d04e33e305d27128f7fdc208"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.960335,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_024",
+      "video_ids": [
+        "1fb4f3ad8609c1cf3220b15f507aa6ff",
+        "400d86ad229264b2ec98ca2dc683c6fa"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.960323,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_025",
+      "video_ids": [
+        "aa7613b5b12b095a0a4c2cbc2537f2df",
+        "b17c0c7c3aa6c4ee342ec159d2ef3b12"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.960168,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_026",
+      "video_ids": [
+        "2c5d24a90b469f351e345aee86a93c8b",
+        "87f37e098cc6aca06a896654f464d91c"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.960009,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_027",
+      "video_ids": [
+        "5205254f874ae6769f4034eda9ef882f",
+        "6b7b912317f997c03456fccf791ce7c3"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959955,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_028",
+      "video_ids": [
+        "037dd0d14eb249be71df5aafdf186ed4",
+        "ea22343e06b223680a11203571ad7593"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959724,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_029",
+      "video_ids": [
+        "3e3b28c28a12ccc69bf92eed5d9b7f48",
+        "6dfd30c6bc6d2522a92de72810e46bdd"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959649,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_030",
+      "video_ids": [
+        "3f1d97e0ba00e5c8202222de21a2b3e9",
+        "4641dcf3ee6fa448a8787cc9fdbfca56"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959503,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_031",
+      "video_ids": [
+        "72b596a0d8fa958ef3130ae638875bcf",
+        "9b4311b00199ccfbb5c16662b981728d"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959486,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_032",
+      "video_ids": [
+        "84db7aa1cb8652b2fd125e868839d1dd",
+        "ff744681a37fc0097de221e0852ff29c"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959449,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_033",
+      "video_ids": [
+        "29c536f62fef1f823abcb0545b9704e8",
+        "b188784a9f23e70a9a92c39c05963dc0"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959296,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_034",
+      "video_ids": [
+        "aa7613b5b12b095a0a4c2cbc2537f2df",
+        "dd744bd21ea4d744dcbdb9c5975d2131"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959222,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_035",
+      "video_ids": [
+        "400d86ad229264b2ec98ca2dc683c6fa",
+        "de10c114f7076601998e784c6b114ba6"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959218,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_036",
+      "video_ids": [
+        "710d41dc349a010f634eb3163d32a037",
+        "de10c114f7076601998e784c6b114ba6"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959209,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_037",
+      "video_ids": [
+        "0237e508029a30bf8c7bc26c6d404b0b",
+        "793a87b07bb1e3ed97a70ed82a404ac4"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959193,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_038",
+      "video_ids": [
+        "47b90f8bf59f48d679ce260d1edfb918",
+        "932d4e6a0e464ddbec8aba0b3126a8f9"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959172,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_039",
+      "video_ids": [
+        "2c5d24a90b469f351e345aee86a93c8b",
+        "ff744681a37fc0097de221e0852ff29c"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959167,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_040",
+      "video_ids": [
+        "544cd9ca1f02945e848cbb03c260cdbf",
+        "84db7aa1cb8652b2fd125e868839d1dd"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959062,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_041",
+      "video_ids": [
+        "a082b1b18ecd0a30794d29f235002b70",
+        "b7c6313d944689386a6d7ab049d942af"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959052,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_042",
+      "video_ids": [
+        "6933bbbbf17eb57fa32f10cbb520cec8",
+        "84db7aa1cb8652b2fd125e868839d1dd"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.959028,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_043",
+      "video_ids": [
+        "25febde254e528b37a30e0536150fc81",
+        "3f1f6850040b3b7d3a5a5edbd5589f0e"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.958946,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_044",
+      "video_ids": [
+        "4bf12db2570a6d9dabe11c5482bd0551",
+        "6d1a30d7615d95911033a4b62fdc1657"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.958913,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_045",
+      "video_ids": [
+        "0c610dcafb0d74f59366d0a001a0300f",
+        "efad2abeecedae3f15a19edbb684a56c"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.958897,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_046",
+      "video_ids": [
+        "be2c63ce0d2c829872974729a15c9b35",
+        "cbba2b4e3311758d7e30b1e05dcca516"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.958627,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_047",
+      "video_ids": [
+        "13b11922c75edade52ad80808e453e1b",
+        "29c536f62fef1f823abcb0545b9704e8"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.958378,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_048",
+      "video_ids": [
+        "87f37e098cc6aca06a896654f464d91c",
+        "a8c165fc13126336cb018bddb7fa77dc"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.958214,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_049",
+      "video_ids": [
+        "b52ee9e3c9b9c97590e3926ad01832d8",
+        "b85453131d8e1f9381ebd01a94a960ad"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.958928,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_050",
+      "video_ids": [
+        "3e86ee05b962caa43a466dec9dee1f67",
+        "f53c5f068baf9f6f3504687c3a4c7d11"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.958753,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_051",
+      "video_ids": [
+        "2979ab7ae66e71e5ae5e3006ec730596",
+        "94861a046907cb3435d6ba3df710791c"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.958326,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    },
+    {
+      "name": "five_anchor_review_052",
+      "video_ids": [
+        "19ca82a8c5efdacb37d2775d67ea89cf",
+        "37085f42ff454b87fd702b74ae408874"
+      ],
+      "decision": "accept",
+      "reviewed_bidirectional_nearest_median": 0.958272,
+      "rationale": "Five-anchor thumbnail review confirmed the same capture sequence, outing, or scene installation."
+    }
+  ],
+  "hard_negative_pairs": [
+    {"name": "distinct_water_days", "video_ids": ["10a5e5069eb6a58649105704fa889abd", "2e7f3d1d9be79b19effa97f818e69e18"]},
+    {"name": "different_concert_dates", "video_ids": ["bd1b0dd853f435401b6996e91c3fd83a", "c14c0e67db269aec0629ecedec80aacf"]},
+    {"name": "outdoor_stadium_vs_indoor_rodeo", "video_ids": ["9ab2a37f6badf51ee9a197fb8c3e0f58", "e7a5538301b25fec5945b7d4875a4228"]},
+    {"name": "red_stage_vs_indoor_rodeo", "video_ids": ["107d1e2f3ba225b826f5f73c359c7d98", "10890b14f98e9d6570fe41eeb30b4424"]},
+    {"name": "indoor_rodeo_vs_red_stadium", "video_ids": ["0fdf6c3ba5c247d50921af134ce7e726", "f782687e4cddd9cddd214266819520b8"]},
+    {"name": "indoor_rodeo_vs_football", "video_ids": ["a37bd189ccb8fe9db3f01178b24f6185", "cad7aede659f1ff9d01ca817794d8df7"]},
+    {"name": "alpine_village_vs_scrubland", "video_ids": ["c23cde1b318c0737a615cf935721f71c", "434eb9155fc21836d2cec60a57b1792f"]},
+    {"name": "different_night_installations", "video_ids": ["3580e78fdfeaf3b619a10b32a4e06579", "82ae32cf4ad803a5d86be1ebcd0fcada"]},
+    {"name": "calm_water", "video_ids": ["10a5e5069eb6a58649105704fa889abd", "b8c8c78ac9686288c202e3eca693b31a"]},
+    {"name": "sunset_city_road", "video_ids": ["2705cb4ec555f8bad74a44b744e51ef3", "d61f8eb1d8f8d124cd00c6a78fead392"]},
+    {"name": "different_driving_roads", "video_ids": ["4fea3226ce83a10604f2f43fda067299", "9b2740dd648dd8ebca29501874ce3359"]},
+    {"name": "different_holiday_lights", "video_ids": ["13b11922c75edade52ad80808e453e1b", "37085f42ff454b87fd702b74ae408874"]},
+    {"name": "sparkler_vs_fireworks", "video_ids": ["1bf5be6e2f9ce1534ced5c7cc4a707ba", "65c685b1ba40aff2b8903f24ac74542d"]},
+    {"name": "different_night_events", "video_ids": ["24295adfe29728bf44da4a0822337059", "2bc8932691671639ccfae8538b6f3fbb"]},
+    {"name": "aircraft_ground_vs_clouds", "video_ids": ["4a9e58d4b45997383f57e4e829566a7d", "6cb0d06af82f661eeaf07cd793aab807"]},
+    {"name": "different_mountain_landscapes", "video_ids": ["70c34a7e3021f22e822b98b0db09898e", "7c54b10e0f480e88bfbe160961bcf8c5"]},
+    {"name": "different_foliage", "video_ids": ["09939ea9a5df850728309b5a19088c54", "fd20955326ec4404841f335d149c7b35"]},
+    {"name": "different_bright_interiors", "video_ids": ["ef508a4e5f4dcd30fa7eebdcb4554e67", "ff26d94a926fef6d46ba385b3e6c2fac"]},
+    {"name": "different_water_overlooks", "video_ids": ["612ef96faf43c355886dd28564f206f4", "ab269196970d59e90716822d3891e6ba"]},
+    {"name": "different_night_urban", "video_ids": ["8bbb4748bee2f52d36592238f56031eb", "fe61e2b7ee590b1e59599cca0a4d4cb2"]}
+  ]
+}

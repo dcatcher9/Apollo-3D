@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+import depth_input_color as input_color
 from artistic_geometry_contract import (
     DEFAULT_DEPTH_MAX_ASPECT,
     DEFAULT_DEPTH_SHORT_SIDE,
@@ -20,8 +21,6 @@ from artistic_geometry_contract import (
 from train_artistic_policy import (
     MAX_HEIGHT,
     MAX_WIDTH,
-    MEAN,
-    STD,
 )
 
 
@@ -51,9 +50,9 @@ def prepare_image(
         max_height=min(MAX_HEIGHT, bgr.shape[0]),
     )
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    rgb = cv2.resize(rgb, (width, height), interpolation=cv2.INTER_LINEAR)
-    image = rgb.astype(np.float32) / 255.0
-    image = ((image - MEAN) / STD).transpose(2, 0, 1)
+    image = input_color.preprocess_rgb8_to_nchw(
+        rgb, width, height, input_color.sdr_input_variant()
+    )
     return (
         image[None].astype(np.float32), width, height,
         bgr.shape[1], bgr.shape[0],

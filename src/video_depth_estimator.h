@@ -2,6 +2,7 @@
 
 #include "config.h"
 
+#include <array>
 #include <cstdint>
 #include <d3d11.h>
 #include <filesystem>
@@ -53,6 +54,27 @@ namespace models {
     bool inference_enqueued = false;  ///< This call submitted inference for the supplied input frame.
     std::uint64_t enqueued_frame_id = 0;  ///< Identity attached to the newly submitted inference.
     bool cuda_graph_active = false;  ///< TensorRT enqueue is currently replaying a captured graph.
+  };
+
+  /**
+   * @brief Offline readback of the shipping SubjectState scene latch after one completed depth
+   *        frame. Never populated or read on the live stream path.
+   *
+   * `scene_age` is the authoritative SubjectState[0].y value written by
+   * depth_subject_resolve_cs.hlsl. `hard_cut` is reconstructed from its only post-initialization
+   * reset transition (prior age >= 7, current age == 0) when evidence is read at every completed
+   * depth frame. `runtime_scene_id` starts at zero and increments on those resets.
+   */
+  struct runtime_scene_evidence {
+    bool valid = false;
+    std::uint64_t completed_frame_id = 0;
+    std::uint64_t runtime_scene_id = 0;
+    float scene_age = 0.0f;
+    bool subject_initialized = false;
+    bool hard_cut = false;
+    bool scene_start = false;
+    /** Exact three-float4 SubjectState snapshot; offline harness only. */
+    std::array<float, 12> subject_state {};
   };
 
   struct artistic_policy_provenance {
@@ -124,6 +146,17 @@ namespace models {
          * exact current-frame quality path; production remains bounded matched-frame async.
          */
     estimate_result finish_pending_depth_for_evaluation(input_color_space color_space = input_color_space::srgb);
+
+    /**
+     * @brief Synchronizing SubjectState readback for the offline harness only.
+     *
+     * Call exactly once after each valid finish_pending_depth_for_evaluation() result. Skipping a
+     * completed depth frame makes a later age reset ambiguous, so the returned evidence then must
+     * not be treated as exact live cut parity. Re-reading the same frame returns the cached row.
+     */
+    runtime_scene_evidence read_runtime_scene_evidence_for_evaluation(
+      std::uint64_t completed_frame_id
+    );
 
   private:
     struct impl;

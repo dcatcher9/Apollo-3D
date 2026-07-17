@@ -10,10 +10,35 @@ import cv2
 import numpy as np
 
 import artistic_geometry_contract as geometry
+import artistic_policy_evaluation_contract as evaluation_contract
 import promote_artistic_policy as promote
+from test_artistic_policy_evaluation_contract import accepted_group
 
 
 class ArtisticPolicyPromotionTests(unittest.TestCase):
+    def test_host_runtime_accepts_current_export_and_approval_contracts(self):
+        source = (
+            promote.REPO_ROOT / "src" / "video_depth_estimator.cpp"
+        ).read_text(encoding="utf-8")
+        expected = (
+            f'metadata.value("schema", 0) != '
+            f'{promote.EXPORT_METADATA_SCHEMA}',
+            f'approval->value("contract", "") != '
+            f'"{promote.SEALED_APPROVAL_CONTRACT}"',
+            f'approval->value("evaluation_schema", 0) != '
+            f'{promote.SEALED_EVALUATION_SCHEMA}',
+            f'{{"harness_schema", {promote.HARNESS_SCHEMA}}}',
+            f'gate->value("harness_schema", 0) != '
+            f'{promote.HARNESS_SCHEMA}',
+        )
+        for contract in expected:
+            with self.subTest(contract=contract):
+                self.assertIn(contract, source)
+        evaluator = (
+            promote.SBSBENCH_DIR / "run_eval.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(f"EVAL_SCHEMA = {promote.EVAL_SCHEMA}", evaluator)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -52,6 +77,20 @@ class ArtisticPolicyPromotionTests(unittest.TestCase):
         }])
         self.geometry_hash = geometry.allowlist_sha256(
             self.geometry_allowlist
+        )
+        self.input_manifest = promote.label_merge.build_input_variant_manifest([
+            promote.input_color.sdr_input_variant(),
+            *(promote.input_color.windows_hdr_input_variant(value)
+              for value in (1000, 2500, 6000)),
+        ])
+        self.input_manifest_hash = (
+            promote.label_merge.input_variant_manifest_sha256(
+                self.input_manifest
+            )
+        )
+        self.color_contract_hash = promote.input_color.color_contract_sha256()
+        self.condition_target_contract = (
+            promote.label_merge.CONDITION_TARGET_CONTRACT
         )
         self.baseline = {
             "profile": "apollo",
@@ -94,6 +133,22 @@ class ArtisticPolicyPromotionTests(unittest.TestCase):
             "maximum_pass": True,
             "film_balanced_mean_pass": True,
         }
+        self.runtime_acceptance = {
+            "contract": evaluation_contract.RUNTIME_REGIME_ACCEPTANCE_CONTRACT,
+            "condition_target_contract": self.condition_target_contract,
+            "hdr_aggregation_contract": evaluation_contract.HDR_AGGREGATION_CONTRACT,
+            "required_regimes": ["sdr", "hdr"],
+            "expected_hdr_white_levels_raw": [1000, 2500, 6000],
+            "missing_regimes": [],
+            "missing_hdr_white_levels_raw": [],
+            "unexpected_hdr_white_levels_raw": [],
+            "incomplete_source_frame_count": 0,
+            "source_condition_coverage_complete": True,
+            "hdr_white_pass": {"1000": True, "2500": True, "6000": True},
+            "hdr_aggregate_pass": True,
+            "regime_pass": {"sdr": True, "hdr": True},
+            "accepted": True,
+        }
         self.evaluation = self.root / "evaluation.json"
         self.write_json(self.evaluation, {
             "schema": promote.SEALED_EVALUATION_SCHEMA,
@@ -105,13 +160,42 @@ class ArtisticPolicyPromotionTests(unittest.TestCase):
             "test_labels_sha256": self.test_labels,
             "deployment_geometry_allowlist": self.geometry_allowlist,
             "deployment_geometry_allowlist_sha256": self.geometry_hash,
+            "input_variant_manifest": self.input_manifest,
+            "input_variant_manifest_sha256": self.input_manifest_hash,
+            "depth_input_color_contract_sha256": self.color_contract_hash,
+            "condition_target_contract": self.condition_target_contract,
             "val_films": ["sealed-film-a", "sealed-film-b"],
             "unsafe_ceiling_overshoot": self.unsafe_overshoot,
+            "runtime_regime_evaluation": {
+                **self.runtime_acceptance,
+                "incomplete_source_frames": [],
+                "regimes": {
+                    "sdr": accepted_group(),
+                    "hdr": accepted_group(
+                        samples=6, unique=2, shots=2, shot_conditions=6,
+                        actionable_samples=3, actionable_shots=3,
+                    ),
+                },
+                "hdr_by_white_level_raw": {
+                    "1000": accepted_group(),
+                    "2500": accepted_group(),
+                    "6000": accepted_group(),
+                },
+            },
             "decision": {
                 "accepted": True,
+                "overall_diagnostic_accepted": True,
+                "runtime_regime_acceptance": self.runtime_acceptance,
                 "guards": {
                     "unsafe_ceiling_maximum": True,
                     "unsafe_ceiling_film_balanced_mean": True,
+                    "runtime_regimes_present": True,
+                    "hdr_white_levels_present": True,
+                    "hdr_white_levels_accepted": True,
+                    "no_unexpected_hdr_white_levels": True,
+                    "source_condition_coverage_complete": True,
+                    "condition_target_contract": True,
+                    "sdr_and_hdr_accepted": True,
                 },
                 "unsafe_overshoot_guard_required": True,
                 "unsafe_ceiling_overshoot": self.unsafe_overshoot,
@@ -130,11 +214,15 @@ class ArtisticPolicyPromotionTests(unittest.TestCase):
             "label_fitter_identity_sha256": self.fitter,
             "test_labels_sha256": self.test_labels,
             "deployment_geometry_allowlist_sha256": self.geometry_hash,
+            "input_variant_manifest_sha256": self.input_manifest_hash,
+            "depth_input_color_contract_sha256": self.color_contract_hash,
             "sealed_test_productions": ["sealed-film-a", "sealed-film-b"],
             "unsafe_ceiling_overshoot": self.unsafe_overshoot,
+            "runtime_regime_acceptance": self.runtime_acceptance,
+            "condition_target_contract": self.condition_target_contract,
         }
         self.write_json(self.metadata, {
-            "schema": 4,
+            "schema": promote.EXPORT_METADATA_SCHEMA,
             "deployed_model": self.onnx.stem,
             "base_depth_model": self.reference.stem,
             "onnx_sha256": promote.sha256(self.onnx),
@@ -171,6 +259,10 @@ class ArtisticPolicyPromotionTests(unittest.TestCase):
             "policy_baseline": self.baseline,
             "deployment_geometry_allowlist": self.geometry_allowlist,
             "deployment_geometry_allowlist_sha256": self.geometry_hash,
+            "input_variant_manifest": self.input_manifest,
+            "input_variant_manifest_sha256": self.input_manifest_hash,
+            "depth_input_color_contract_sha256": self.color_contract_hash,
+            "condition_target_contract": self.condition_target_contract,
         })
         self.neutrality = self.root / "neutrality.json"
         self.write_json(self.neutrality, self.neutrality_payload())
@@ -259,6 +351,7 @@ class ArtisticPolicyPromotionTests(unittest.TestCase):
             "disparity_raster_width": 1920,
             "disparity_raster_height": 1080,
             "color_mode": geometry.COLOR_MODE_SDR,
+            "metric_preview_encoding": promote.sbs_contract.METRIC_PREVIEW_SDR,
             "artistic_policy": True,
             "artistic_policy_consumed": True,
             "artistic_policy_authorization": "candidate-evaluation",
@@ -409,7 +502,10 @@ class ArtisticPolicyPromotionTests(unittest.TestCase):
             "metric_sha256", "policy_warp_source_sha256",
             "active_split_sha256", "label_fitter_identity_sha256",
             "test_labels_sha256", "deployment_geometry_allowlist",
-            "deployment_geometry_allowlist_sha256", "sealed_test_productions",
+            "deployment_geometry_allowlist_sha256", "input_variant_manifest",
+            "input_variant_manifest_sha256",
+            "depth_input_color_contract_sha256", "condition_target_contract",
+            "sealed_test_productions",
         })
         self.assertEqual(set(production["neutrality"]), {
             "report_sha256", "reference_model", "reference_onnx_sha256",
@@ -423,7 +519,7 @@ class ArtisticPolicyPromotionTests(unittest.TestCase):
             "policy_metadata_sha256", "deployment_geometry_allowlist_sha256",
             "artistic_policy_consumed", "artistic_policy_authorization",
             "timestamp", "clip_set_sha1", "baseline_identities",
-            "observed_deployment_geometries",
+            "observed_deployment_geometries", "metric_preview_encodings",
         }
         for gate in production["render_gates"].values():
             self.assertEqual(set(gate), gate_fields)
@@ -468,8 +564,8 @@ class ArtisticPolicyPromotionTests(unittest.TestCase):
     def test_rejects_stale_runtime_schema_or_compiled_identity(self):
         original = json.loads(self.metadata.read_text(encoding="utf-8"))
         cases = (
-            ("harness_schema", 23, "harness schema"),
-            ("eval_schema", 28, "evaluation schema"),
+            ("harness_schema", promote.HARNESS_SCHEMA - 1, "harness schema"),
+            ("eval_schema", promote.EVAL_SCHEMA - 1, "evaluation schema"),
             ("policy_warp_source_sha256", "0" * 64,
              "current compiled warp contract"),
             ("metric_sha256", "0" * 16,
@@ -506,6 +602,19 @@ class ArtisticPolicyPromotionTests(unittest.TestCase):
         self.write_json(self.core, payload)
         with self.assertRaisesRegex(RuntimeError, "ISO-8601 render timestamp"):
             self.build()
+
+    def test_rejects_missing_or_wrong_metric_preview_provenance(self):
+        for value in (None, promote.sbs_contract.METRIC_PREVIEW_HDR):
+            payload = self.gate_payload("core")
+            clip_meta = payload["clips"]["shot"]["meta"]
+            if value is None:
+                del clip_meta["metric_preview_encoding"]
+            else:
+                clip_meta["metric_preview_encoding"] = value
+            self.write_json(self.core, payload)
+            with self.assertRaisesRegex(RuntimeError, "metric preview encoding"):
+                self.build()
+        self.write_json(self.core, self.gate_payload("core"))
 
     def test_rejects_render_geometry_outside_the_allowlist(self):
         payload = self.gate_payload("core")
