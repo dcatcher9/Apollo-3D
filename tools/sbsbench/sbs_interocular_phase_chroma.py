@@ -25,6 +25,8 @@ support, texture, span, and cross-eye detail-compatibility requirements pass, ot
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 try:
@@ -34,6 +36,36 @@ except ImportError:  # Direct execution from tools/sbsbench.
 
 
 _LUMA = np.asarray((0.2126, 0.7152, 0.0722), dtype=np.float32)
+
+
+@dataclass(frozen=True)
+class PreparedInterocularEvidence:
+    """Shared exact-map registration consumed by interocular appearance metrics.
+
+    Preparing this evidence is substantially more expensive than either metric's final pooling:
+    each eye must first be sampled at the production coordinates and then inverted onto the same
+    canonical source raster.  Phase/orientation and photometric rivalry require precisely the
+    same arrays, so callers evaluating both should prepare them once and use the two ``*_prepared``
+    entry points below.
+
+    Instances are created only by :func:`prepare_interocular_evidence`.  The arrays are treated as
+    immutable views by consumers; retaining the native eye/source shapes makes evidence counts
+    independent of the analysis raster.
+    """
+
+    reference_rgb: np.ndarray
+    registered_left_rgb: np.ndarray
+    registered_right_rgb: np.ndarray
+    expected_left_rgb: np.ndarray
+    expected_right_rgb: np.ndarray
+    valid_left: np.ndarray
+    valid_right: np.ndarray
+    common_support: np.ndarray
+    source_shape: tuple[int, int, int]
+    eye_shape: tuple[int, int, int]
+    analysis_width: int
+    analysis_height: int
+    evidence_basis: int
 
 
 def _as_rgb(image, name):
@@ -217,6 +249,71 @@ def _erode_support(mask, radius):
     return _registration._box_mean(mask.astype(np.float32), radius) > 1.0 - 1e-6
 
 
+def prepare_interocular_evidence(
+        source_rgb, left_rgb, right_rgb, map_left, map_right, shape, *,
+        warp_mask=None, source_sample_transform=None,
+        max_analysis_width=640, max_analysis_height=360):
+    """Register both rendered eyes and their exact references once.
+
+    The returned evidence is valid for every interocular appearance metric using the same source,
+    eyes, maps, mask, display transform, and analysis limits.  Metric-specific support selection
+    happens later, so preparing once does not fuse the phase and photometric policies.
+    """
+    source = _as_rgb(source_rgb, "source_rgb")
+    left = _as_rgb(left_rgb, "left_rgb")
+    right = _as_rgb(right_rgb, "right_rgb")
+    if left.shape != right.shape:
+        raise ValueError(f"eye geometry differs: {left.shape} != {right.shape}")
+    if np.asarray(map_left).shape != left.shape[:2]:
+        raise ValueError("map_left must match the left eye geometry")
+    if np.asarray(map_right).shape != right.shape[:2]:
+        raise ValueError("map_right must match the right eye geometry")
+    hole_left, hole_right = _split_hole_masks(warp_mask, left.shape[:2])
+
+    analysis_scale = min(
+        float(max_analysis_width) / source.shape[1],
+        float(max_analysis_height) / source.shape[0],
+    )
+    analysis_width = max(16, int(round(source.shape[1] * analysis_scale)))
+    analysis_height = max(12, int(round(source.shape[0] * analysis_scale)))
+    reference = _apply_sample_transform(
+        _sample_source_rgb(source, analysis_width, analysis_height),
+        source_sample_transform, (analysis_height, analysis_width, 3))
+    registered_left, expected_left, valid_left = _registered_evidence(
+        source, left, map_left, shape, analysis_width, analysis_height,
+        source_sample_transform, hole_left)
+    registered_right, expected_right, valid_right = _registered_evidence(
+        source, right, map_right, shape, analysis_width, analysis_height,
+        source_sample_transform, hole_right)
+    common = _erode_support(valid_left & valid_right, 1)
+
+    content_samples = int(round(
+        left.shape[0] * left.shape[1] * float(shape["content_scale_x"])
+        * float(shape["content_scale_y"])))
+    evidence_basis = max(1, min(source.shape[0] * source.shape[1], content_samples))
+    return PreparedInterocularEvidence(
+        reference_rgb=reference,
+        registered_left_rgb=registered_left,
+        registered_right_rgb=registered_right,
+        expected_left_rgb=expected_left,
+        expected_right_rgb=expected_right,
+        valid_left=valid_left,
+        valid_right=valid_right,
+        common_support=common,
+        source_shape=source.shape,
+        eye_shape=left.shape,
+        analysis_width=analysis_width,
+        analysis_height=analysis_height,
+        evidence_basis=evidence_basis,
+    )
+
+
+def _require_prepared_evidence(prepared):
+    if not isinstance(prepared, PreparedInterocularEvidence):
+        raise ValueError("prepared interocular evidence has an invalid type")
+    return prepared
+
+
 def _central_gradients(image):
     xpad = np.pad(image, ((0, 0), (1, 1)), mode="edge")
     ypad = np.pad(image, ((1, 1), (0, 0)), mode="edge")
@@ -334,37 +431,27 @@ def measure_interocular_phase_chroma(
         min_phase_pixels: native-equivalent evidence floor.
         return_maps: return ``(metrics, maps)`` when visual evidence is needed.
     """
-    source = _as_rgb(source_rgb, "source_rgb")
-    left = _as_rgb(left_rgb, "left_rgb")
-    right = _as_rgb(right_rgb, "right_rgb")
-    if left.shape != right.shape:
-        raise ValueError(f"eye geometry differs: {left.shape} != {right.shape}")
-    if np.asarray(map_left).shape != left.shape[:2]:
-        raise ValueError("map_left must match the left eye geometry")
-    if np.asarray(map_right).shape != right.shape[:2]:
-        raise ValueError("map_right must match the right eye geometry")
-    hole_left, hole_right = _split_hole_masks(warp_mask, left.shape[:2])
+    prepared = prepare_interocular_evidence(
+        source_rgb, left_rgb, right_rgb, map_left, map_right, shape,
+        warp_mask=warp_mask, source_sample_transform=source_sample_transform,
+        max_analysis_width=max_analysis_width,
+        max_analysis_height=max_analysis_height)
+    return measure_interocular_phase_chroma_prepared(
+        prepared, min_phase_pixels=min_phase_pixels, return_maps=return_maps)
 
-    analysis_scale = min(
-        float(max_analysis_width) / source.shape[1],
-        float(max_analysis_height) / source.shape[0],
-    )
-    analysis_width = max(16, int(round(source.shape[1] * analysis_scale)))
-    analysis_height = max(12, int(round(source.shape[0] * analysis_scale)))
-    reference = _apply_sample_transform(
-        _sample_source_rgb(source, analysis_width, analysis_height),
-        source_sample_transform, (analysis_height, analysis_width, 3))
-    # Exact fractional sampling (and, when present, its following nonlinear display transform)
-    # has an analytically known reconstruction residual after inverse registration.  Remove only
-    # that known residual.  A perfect production render becomes the canonical reference, while
-    # any actual eye defect remains in registered_actual - registered_expected.
-    registered_left_raw, expected_left_registered, valid_left = _registered_evidence(
-        source, left, map_left, shape, analysis_width, analysis_height,
-        source_sample_transform, hole_left)
-    registered_right_raw, expected_right_registered, valid_right = _registered_evidence(
-        source, right, map_right, shape, analysis_width, analysis_height,
-        source_sample_transform, hole_right)
-    common = _erode_support(valid_left & valid_right, 1)
+
+def measure_interocular_phase_chroma_prepared(
+        prepared, *, min_phase_pixels=128, return_maps=False):
+    """Measure phase/orientation conflict from shared registered evidence."""
+    prepared = _require_prepared_evidence(prepared)
+    reference = prepared.reference_rgb
+    registered_left_raw = prepared.registered_left_rgb
+    registered_right_raw = prepared.registered_right_rgb
+    expected_left_registered = prepared.expected_left_rgb
+    expected_right_registered = prepared.expected_right_rgb
+    common = prepared.common_support
+    evidence_basis = prepared.evidence_basis
+    analysis_width = prepared.analysis_width
 
     # Remove global per-channel photometric changes before subtracting the expected sampling
     # residual.  Reversing that order would turn a harmless gain into
@@ -375,11 +462,6 @@ def measure_interocular_phase_chroma(
         expected_right_registered, registered_right_raw, common)
     registered_left = reference + normalized_left_raw - expected_left_registered
     registered_right = reference + normalized_right_raw - expected_right_registered
-
-    content_samples = int(round(
-        left.shape[0] * left.shape[1] * float(shape["content_scale_x"])
-        * float(shape["content_scale_y"])))
-    evidence_basis = max(1, min(source.shape[0] * source.shape[1], content_samples))
 
     metrics = {
         "interocular_phase_orientation_burden_pct": None,
@@ -534,4 +616,9 @@ def measure_interocular_phase_chroma(
     }
 
 
-__all__ = ["measure_interocular_phase_chroma"]
+__all__ = [
+    "PreparedInterocularEvidence",
+    "prepare_interocular_evidence",
+    "measure_interocular_phase_chroma",
+    "measure_interocular_phase_chroma_prepared",
+]

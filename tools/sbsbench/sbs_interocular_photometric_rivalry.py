@@ -30,10 +30,8 @@ from __future__ import annotations
 import numpy as np
 
 try:
-    from . import sbs_interocular_metrics as _registration
     from . import sbs_interocular_phase_chroma as _exact
 except ImportError:  # Direct execution from tools/sbsbench.
-    import sbs_interocular_metrics as _registration
     import sbs_interocular_phase_chroma as _exact
 
 
@@ -52,36 +50,6 @@ def _linearize_srgb(rgb):
     ).astype(np.float32)
 
 
-def _split_hole_masks(warp_mask, eye_shape):
-    """Return optional left/right float hole maps from a packed or paired mask."""
-    if warp_mask is None:
-        return None, None
-    height, width = eye_shape
-    if isinstance(warp_mask, (tuple, list)) and len(warp_mask) == 2:
-        values = tuple(np.asarray(item) for item in warp_mask)
-    else:
-        packed = np.asarray(warp_mask)
-        if packed.ndim not in (2, 3) or packed.shape[:2] != (height, 2 * width):
-            raise ValueError(
-                f"packed warp_mask must be {height}x{2 * width}[xC], got {packed.shape}")
-        values = packed[:, :width], packed[:, width:]
-
-    result = []
-    for value in values:
-        if value.ndim == 3:
-            if value.shape[2] < 1:
-                raise ValueError("warp_mask has no red channel")
-            value = value[..., 0]
-        if value.shape != (height, width):
-            raise ValueError(
-                f"eye warp_mask must be {height}x{width}, got {value.shape}")
-        value = value.astype(np.float32)
-        if not np.isfinite(value).all():
-            raise ValueError("warp_mask contains non-finite values")
-        result.append(value)
-    return tuple(result)
-
-
 def _opponent_coordinates(rgb, floor):
     """Return log luminance and orthonormal log-chroma in linear-light RGB."""
     linear = _linearize_srgb(rgb)
@@ -92,30 +60,6 @@ def _opponent_coordinates(rgb, floor):
     second = (log_rgb[..., 0] + log_rgb[..., 1]
               - 2.0 * log_rgb[..., 2]) / _SQRT_6
     return log_luminance, np.stack((first, second), axis=2), luminance
-
-
-def _registered_evidence(source, eye, source_u_map, shape, width, height,
-                         source_sample_transform, hole_mask):
-    expected_eye = _exact._apply_sample_transform(
-        _exact._sample_source_eye(source, source_u_map, shape),
-        source_sample_transform, eye.shape)
-    channels = [eye, expected_eye]
-    if hole_mask is not None:
-        channels.append(hole_mask[..., None])
-    registered, valid = _exact._register_rgb(
-        np.concatenate(channels, axis=2), source_u_map, shape, width, height)
-    actual = registered[..., :3]
-    expected = registered[..., 3:6]
-    if hole_mask is not None:
-        # A bilinear footprint touching an unauthenticated forward hole is excluded.  Erosion
-        # below removes one more analysis pixel so mask edges cannot leak into colour evidence.
-        valid &= registered[..., 6] <= 1e-6
-    return actual, expected, valid
-
-
-def _erode(mask, radius=1):
-    return _registration._box_mean(
-        np.asarray(mask, dtype=np.float32), int(radius)) > 1.0 - 1e-6
 
 
 def _native_equivalent_count(mask, evidence_basis):
@@ -178,38 +122,26 @@ def measure_interocular_photometric_rivalry(
     production-order contract as the exact phase/orientation metric: it is applied after fractional
     source sampling to both canonical and expected-eye references.
     """
-    source = _exact._as_rgb(source_rgb, "source_rgb")
-    left = _exact._as_rgb(left_rgb, "left_rgb")
-    right = _exact._as_rgb(right_rgb, "right_rgb")
-    if left.shape != right.shape:
-        raise ValueError(f"eye geometry differs: {left.shape} != {right.shape}")
-    if np.asarray(map_left).shape != left.shape[:2]:
-        raise ValueError("map_left must match the left eye geometry")
-    if np.asarray(map_right).shape != right.shape[:2]:
-        raise ValueError("map_right must match the right eye geometry")
-    hole_left, hole_right = _split_hole_masks(warp_mask, left.shape[:2])
+    prepared = _exact.prepare_interocular_evidence(
+        source_rgb, left_rgb, right_rgb, map_left, map_right, shape,
+        warp_mask=warp_mask, source_sample_transform=source_sample_transform,
+        max_analysis_width=max_analysis_width,
+        max_analysis_height=max_analysis_height)
+    return measure_interocular_photometric_rivalry_prepared(
+        prepared, min_pixels=min_pixels, return_maps=return_maps)
 
-    analysis_scale = min(
-        float(max_analysis_width) / source.shape[1],
-        float(max_analysis_height) / source.shape[0],
-    )
-    analysis_width = max(16, int(round(source.shape[1] * analysis_scale)))
-    analysis_height = max(12, int(round(source.shape[0] * analysis_scale)))
-    reference = _exact._apply_sample_transform(
-        _exact._sample_source_rgb(source, analysis_width, analysis_height),
-        source_sample_transform, (analysis_height, analysis_width, 3))
-    left_actual, left_expected, left_valid = _registered_evidence(
-        source, left, np.asarray(map_left, dtype=np.float32), shape,
-        analysis_width, analysis_height, source_sample_transform, hole_left)
-    right_actual, right_expected, right_valid = _registered_evidence(
-        source, right, np.asarray(map_right, dtype=np.float32), shape,
-        analysis_width, analysis_height, source_sample_transform, hole_right)
-    common = _erode(left_valid & right_valid, 1)
 
-    content_samples = int(round(
-        left.shape[0] * left.shape[1] * float(shape["content_scale_x"])
-        * float(shape["content_scale_y"])))
-    evidence_basis = max(1, min(source.shape[0] * source.shape[1], content_samples))
+def measure_interocular_photometric_rivalry_prepared(
+        prepared, *, min_pixels=256, return_maps=False):
+    """Measure exposure and colour rivalry from shared registered evidence."""
+    prepared = _exact._require_prepared_evidence(prepared)
+    reference = prepared.reference_rgb
+    left_actual = prepared.registered_left_rgb
+    right_actual = prepared.registered_right_rgb
+    left_expected = prepared.expected_left_rgb
+    right_expected = prepared.expected_right_rgb
+    common = prepared.common_support
+    evidence_basis = prepared.evidence_basis
 
     metrics = {
         "interocular_exposure_rivalry_burden_pct": None,
@@ -282,4 +214,7 @@ def measure_interocular_photometric_rivalry(
     }
 
 
-__all__ = ["measure_interocular_photometric_rivalry"]
+__all__ = [
+    "measure_interocular_photometric_rivalry",
+    "measure_interocular_photometric_rivalry_prepared",
+]

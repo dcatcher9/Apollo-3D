@@ -67,16 +67,22 @@ class EvalContractTests(unittest.TestCase):
             for path, value in ((report_path, b"report-v1"), (oracle_path, b"oracle-v1")):
                 with open(path, "wb") as stream:
                     stream.write(value)
-            original = run_eval.scored_artifact_sha256(run)
+            original, numeric_original = run_eval.scored_artifact_digests(run)
 
             for path, value in ((report_path, b"report-v2"), (oracle_path, b"oracle-v2")):
                 with open(path, "wb") as stream:
                     stream.write(value)
             self.assertEqual(original, run_eval.scored_artifact_sha256(run))
+            self.assertEqual(numeric_original, run_eval.scored_artifact_digests(run)[1])
+
+            with open(os.path.join(run, "sbs_perf.json"), "wb") as stream:
+                stream.write(b"changed-performance")
+            self.assertNotEqual(original, run_eval.scored_artifact_sha256(run))
+            self.assertEqual(numeric_original, run_eval.scored_artifact_digests(run)[1])
 
             with open(os.path.join(run, "sbs_00001.png"), "wb") as stream:
                 stream.write(b"changed-sbs")
-            self.assertNotEqual(original, run_eval.scored_artifact_sha256(run))
+            self.assertNotEqual(numeric_original, run_eval.scored_artifact_digests(run)[1])
 
     def test_clip_hash_covers_stereo_reference_and_contract(self):
         with tempfile.TemporaryDirectory() as clip:
@@ -585,8 +591,13 @@ class EvalContractTests(unittest.TestCase):
                 mock.patch.object(run_eval.subprocess, "run", return_value=current) as run:
             run_eval.require_current_build("build")
         self.assertEqual(run.call_args.args[0], [ninja, "-C", "build", "sunshine"])
+        build_env = run.call_args.kwargs["env"]
+        for key, original in run_eval._ORIGINAL_NUMERIC_THREAD_ENV.items():
+            if original is None:
+                self.assertNotIn(key, build_env)
+            else:
+                self.assertEqual(build_env[key], original)
         if os.name == "nt":
-            build_env = run.call_args.kwargs["env"]
             self.assertEqual(build_env["MSYSTEM"], "UCRT64")
             self.assertEqual(build_env["MSYS2_PATH_TYPE"], "inherit")
             self.assertIn(os.path.dirname(ninja).lower(), build_env["PATH"].lower())
@@ -596,6 +607,10 @@ class EvalContractTests(unittest.TestCase):
                 mock.patch("sys.stderr", new_callable=io.StringIO):
             with self.assertRaises(SystemExit):
                 run_eval.require_current_build("build")
+
+        with open(run_eval.__file__, encoding="utf-8") as stream:
+            runner = stream.read()
+        self.assertGreaterEqual(runner.count("env=production_subprocess_env()"), 2)
 
     def test_eval_records_exact_runtime_pipeline_provenance_for_reports(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1124,9 +1139,11 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('"suite", "run_kind",', text)
         self.assertIn("IS_PROFILE_CMP", text)
         self.assertIn("IS_TRADEOFF_CMP = IS_MODE_CMP or IS_PROFILE_CMP", text)
-        self.assertIn("def _metric_value(run, clip, key):", text)
-        self.assertIn('metric_evidence_state(key, spec, observed, metadata) != "applicable"',
+        self.assertIn("def _metric_state_value(run, clip, key):", text)
+        self.assertIn("state = sbsbench.metric_evidence_state(key, spec, observed, metadata)",
                       text)
+        self.assertIn('return "missing", None', text)
+        self.assertIn("def _metric_value(run, clip, key):", text)
         self.assertIn("if not sbsbench.metric_value_valid(observed, key):", text)
         self.assertIn("def _paired_mean_aggregate", text)
         self.assertIn("a, b = _paired_mean_aggregate(k)", text)
@@ -1134,6 +1151,51 @@ class EvalContractTests(unittest.TestCase):
             "def source_artifact_section")]
         self.assertNotIn("stereo_art_scale_std_error_pct", evidence)
         self.assertNotIn("stereo_art_zero_std_error_pct", evidence)
+
+    def test_report_preserves_missing_unsupported_and_support_units(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        path = os.path.join(repo, "tools", "sbsbench", "build_report.py")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        tree = ast.parse(text, filename=path)
+        functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+
+        state_ns = {
+            "THR": {"image_integrity_pct": {
+                "requires": "image_integrity_support", "role": "hard"}},
+            "sbsbench": sbsbench,
+        }
+        exec(compile(ast.Module(
+            body=[functions["_metric_state_value"]], type_ignores=[]), path, "exec"),
+             state_ns)
+        metric_state = state_ns["_metric_state_value"]
+
+        def payload(aggregate):
+            return {"clips": {"clip": {"aggregate": aggregate, "meta": {}}}}
+
+        self.assertEqual(metric_state(payload({}), "clip", "image_integrity_pct"),
+                         ("missing", None))
+        self.assertEqual(metric_state(
+            payload({"image_integrity_support": 0.0}), "clip", "image_integrity_pct"),
+            ("unsupported", None))
+        self.assertEqual(metric_state(payload({
+            "image_integrity_support": 21.4, "image_integrity_pct": 99.0,
+        }), "clip", "image_integrity_pct"), ("applicable", 99.0))
+
+        support_ns = {
+            "HARD_SUPPORT_KEYS": {"image_integrity_pct": "image_integrity_support"},
+            "sbsbench": sbsbench,
+        }
+        exec(compile(ast.Module(
+            body=[functions["_hard_support"]], type_ignores=[]), path, "exec"),
+             support_ns)
+        self.assertEqual(support_ns["_hard_support"](
+            payload({"image_integrity_support": 21.4}), "clip", "image_integrity_pct"),
+            "21.4%")
+
+        self.assertIn('class="heat-clip"', text)
+        self.assertNotIn(".heatmap th:first-child", text)
+        self.assertIn('class="heat-missing"', text)
 
     def test_report_runtime_and_artifact_provenance_fail_closed(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1156,6 +1218,7 @@ class EvalContractTests(unittest.TestCase):
                              "control", expected_runtime)
 
         artifact_runtime = mock.Mock()
+        artifact_runtime.new_remeasurement_session.return_value = object()
         artifact_runtime.verify_results_against_artifacts.return_value = {
             "passed": True, "clips": ["clip"], "frame_count": 1}
         artifact_ns = {"run_eval": artifact_runtime, "THRESHOLD_CFG": {"metrics": {}}}
@@ -1166,45 +1229,46 @@ class EvalContractTests(unittest.TestCase):
         run = {"meta": {}, "clips": {"clip": {}}}
         validate_results(run, "run", "control", "clips")
         artifact_runtime.verify_results_against_artifacts.assert_called_once_with(
-            run, "run", "clips", {"metrics": {}})
+            run, "run", "clips", {"metrics": {}}, remeasurement_session=None)
         artifact_runtime.verify_results_against_artifacts.side_effect = ValueError(
             "clips.clip.aggregate differs")
         with self.assertRaisesRegex(SystemExit, "authoritative remeasurement"):
             validate_results(run, "run", "control", "clips")
 
-    def test_report_radar_groups_separate_decision_roles_and_scopes(self):
+    def test_report_dashboard_covers_decision_hard_and_supporting_metrics(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         report_path = os.path.join(repo, "tools", "sbsbench", "build_report.py")
         with open(report_path, encoding="utf-8") as fh:
             tree = ast.parse(fh.read(), filename=report_path)
-        assignment = next(
-            node for node in tree.body if isinstance(node, ast.Assign)
-            and any(isinstance(target, ast.Name) and target.id == "RADAR_GROUPS"
-                    for target in node.targets))
-        groups = {}
-        for group in assignment.value.elts:
-            title = group.elts[0].value
-            keys = []
-            for axis in group.elts[2].elts:
-                values = {key.value: value for key, value in zip(axis.keys, axis.values)
-                          if isinstance(key, ast.Constant)}
-                keys.append(values["key"].value)
-            groups[title] = keys
+
+        def assignment_keys(name):
+            assignment = next(
+                node for node in tree.body if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == name
+                        for target in node.targets))
+            return [entry.elts[0].value for entry in assignment.value.elts]
+
+        primary_style = assignment_keys("PRIMARY_STYLE_AXES")
+        hard = assignment_keys("HARD_DISPLAY")
+        supporting = assignment_keys("SUPPORTING_HEATMAP_AXES")
 
         with open(os.path.join(repo, "tools", "sbsbench", "thresholds.json"),
                   encoding="utf-8") as fh:
             specs = json.load(fh)["metrics"]
-        self.assertIn("exact_mapping_fold_pct", groups["Perceptual artifact diagnostics"])
-        for title, keys in groups.items():
-            expected_role = "diagnostic" if "diagnostic" in title.lower() else "primary"
-            self.assertTrue(all(specs[key]["role"] == expected_role for key in keys), title)
-        for title, expected_scope in (
-                ("Style diagnostics", "style"),
-                ("Perceptual artifact diagnostics", "perceptual"),
-                ("Renderer conformance diagnostics", "conformance"),
-                ("Temporal diagnostics", "temporal-only")):
-            self.assertTrue(all(specs[key]["scope"] == expected_scope
-                                for key in groups[title]), title)
+        configured_primary = {key for key, spec in specs.items()
+                              if spec.get("role") == "primary"}
+        configured_hard = {key for key, spec in specs.items()
+                           if spec.get("role") == "hard"}
+        configured_diagnostic = {key for key, spec in specs.items()
+                                 if spec.get("role") == "diagnostic"}
+        self.assertEqual(set(primary_style),
+                         configured_primary | {"exact_visible_pop_spread_pct"})
+        self.assertEqual(set(hard), configured_hard)
+        self.assertEqual(len(hard), 11)
+        self.assertEqual(set(supporting),
+                         configured_diagnostic - {"exact_visible_pop_spread_pct"})
+        self.assertIn("exact_local_polarity_component_pct", supporting)
+        self.assertIn("flow_temporal_p95", supporting)
 
     def test_live_trt_contexts_are_bounded_and_engine_io_fails_closed(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1606,13 +1670,18 @@ class EvalContractTests(unittest.TestCase):
             self.assertEqual(sbsbench._sequence_spatial_worker_count(7), 1)
             self.assertEqual(
                 sbsbench._sequence_spatial_worker_count(8),
-                min(4, os.cpu_count() or 1, 8))
-        for configured, frames, expected in (("1", 24, 1), ("4", 2, 2)):
+                min(sbsbench.SEQUENCE_SPATIAL_MAX_WORKERS,
+                    os.cpu_count() or 1, 8))
+            self.assertEqual(
+                sbsbench._sequence_spatial_worker_count(24, 12_000_000),
+                min(sbsbench.SEQUENCE_SPATIAL_MAX_WORKERS,
+                    os.cpu_count() or 1, 24, 2))
+        for configured, frames, expected in (("1", 24, 1), ("24", 2, 2)):
             with self.subTest(configured=configured), mock.patch.dict(
                     os.environ, {sbsbench.SEQUENCE_SPATIAL_WORKERS_ENV: configured}):
                 self.assertEqual(
                     sbsbench._sequence_spatial_worker_count(frames), expected)
-        for invalid in ("0", "5", "many"):
+        for invalid in ("0", "65", "many"):
             with self.subTest(invalid=invalid), mock.patch.dict(
                     os.environ, {sbsbench.SEQUENCE_SPATIAL_WORKERS_ENV: invalid}):
                 with self.assertRaisesRegex(ValueError, "must be"):
@@ -1953,23 +2022,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(
             sbsbench.depth_ground_truth_lag(current, current, previous), 0.0)
 
-    def test_ground_truth_ghost_detects_previous_only_boundary(self):
-        previous = np.zeros((32, 48), np.float32)
-        previous[8:24, 8:20] = 1.0
-        current = np.zeros_like(previous)
-        current[8:24, 18:30] = 1.0
-        self.assertEqual(
-            sbsbench.depth_ground_truth_ghost(current, current, previous), 0.0)
-        self.assertGreater(
-            sbsbench.depth_ground_truth_ghost(previous, current, previous), 40.0)
-
-    def test_ground_truth_ghost_tolerance_works_in_both_axes(self):
-        previous = np.zeros((32, 48), np.float32)
-        previous[:12, :] = 1.0
-        current = np.zeros_like(previous)
-        current[:13, :] = 1.0
-        self.assertIsNone(sbsbench.depth_ground_truth_ghost(previous, current, previous))
-
     def test_ground_truth_edge_tolerance_works_in_both_axes(self):
         gt = np.full((96, 160), 0.25, np.float32)
         gt[48:, :] = 0.75
@@ -2210,6 +2262,29 @@ class EvalContractTests(unittest.TestCase):
         pairs = prepare_public_datasets.associate_timestamps(rgb, depth, 0.03)
         self.assertEqual([(p[1], p[3]) for p in pairs], [("r0", "d0"), ("r1", "d1")])
 
+    def test_range_dataset_manifest_requires_pinned_prepared_evidence(self):
+        manifest = {
+            "schema": 2,
+            "datasets": {"demo": {"archives": {
+                "frames": {"access": "http_range_zip", "url": "https://example.invalid"},
+            }}},
+            "clips": {"clip": {"dataset": "demo", "archives": ["frames"]}},
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as stream:
+            path = stream.name
+            json.dump(manifest, stream)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "prepared_evidence_sha256"):
+                prepare_public_datasets.load_manifest(path)
+            manifest["clips"]["clip"]["prepared_evidence_sha256"] = "a" * 64
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(manifest, stream)
+            self.assertEqual(
+                prepare_public_datasets.load_manifest(path)["clips"]["clip"]
+                ["prepared_evidence_sha256"], "a" * 64)
+        finally:
+            os.unlink(path)
+
     def test_suite_defaults_keep_core_and_extended_baselines_separate(self):
         core_clips, core_baselines = run_eval.suite_defaults("core")
         extended_clips, extended_baselines = run_eval.suite_defaults("extended")
@@ -2273,6 +2348,40 @@ class EvalContractTests(unittest.TestCase):
             self.assertTrue(os.path.exists(
                 os.path.join(out, "gt_outofframe", "frame_00001.png")))
 
+            range_out = os.path.join(root, "range-out")
+            os.makedirs(range_out)
+            clip["prepared_evidence_sha256"] = (
+                prepare_public_datasets.prepared_evidence_sha256(out))
+
+            def memory_reader(url, expected_size):
+                self.assertEqual(url, archive)
+                self.assertEqual(expected_size, os.path.getsize(archive))
+                with open(url, "rb") as archive_file:
+                    return io.BytesIO(archive_file.read())
+
+            remote = {"stereo": {
+                "access": "http_range_zip", "url": archive,
+                "size": os.path.getsize(archive),
+            }}
+            with mock.patch.object(
+                    prepare_public_datasets, "HTTPRangeReader",
+                    side_effect=memory_reader):
+                range_rows = prepare_public_datasets.prepare_sintel(
+                    "demo", clip, {}, remote, range_out, "test")
+            self.assertEqual(rows, range_rows)
+            self.assertTrue(os.path.exists(
+                os.path.join(range_out, "gt_depth_valid", "frame_00001.png")))
+
+            mismatch_out = os.path.join(root, "range-mismatch")
+            os.makedirs(mismatch_out)
+            bad_clip = {**clip, "prepared_evidence_sha256": "0" * 64}
+            with mock.patch.object(
+                    prepare_public_datasets, "HTTPRangeReader",
+                    side_effect=memory_reader), self.assertRaisesRegex(
+                        RuntimeError, "prepared evidence SHA-256 mismatch"):
+                prepare_public_datasets.prepare_sintel(
+                    "demo", bad_clip, {}, remote, mismatch_out, "test")
+
     def test_spring_adapter_range_selects_matching_stereo_frames(self):
         with tempfile.TemporaryDirectory() as root:
             archives = {}
@@ -2290,6 +2399,17 @@ class EvalContractTests(unittest.TestCase):
             def memory_reader(url, expected_size):
                 with open(url, "rb") as archive_file:
                     return io.BytesIO(archive_file.read())
+
+            bootstrap = os.path.join(root, "bootstrap")
+            os.makedirs(bootstrap)
+            with mock.patch.object(
+                    prepare_public_datasets, "HTTPRangeReader",
+                    side_effect=memory_reader), mock.patch.object(
+                        prepare_public_datasets, "authenticate_prepared_range_evidence"):
+                prepare_public_datasets.prepare_spring(
+                    "demo", clip, {}, archives, bootstrap, "test")
+            clip["prepared_evidence_sha256"] = (
+                prepare_public_datasets.prepared_evidence_sha256(bootstrap))
 
             with mock.patch.object(
                     prepare_public_datasets, "HTTPRangeReader",

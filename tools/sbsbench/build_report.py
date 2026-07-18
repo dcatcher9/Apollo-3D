@@ -12,12 +12,16 @@ import functools
 import html
 import io
 import json
-import math
 import os
 import sys
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+# Pin numeric kernels before NumPy initializes. Frame-level workers own parallelism.
+for _thread_env in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                    "NUMEXPR_NUM_THREADS"):
+    os.environ[_thread_env] = "1"
+
+import numpy as np  # noqa: E402  (thread limits must precede numeric-runtime import)
+from PIL import Image, ImageDraw, ImageFilter  # noqa: E402
 
 ctrl_dir, treat_dir, out_html = sys.argv[1], sys.argv[2], sys.argv[3]
 allow_config_diff = "--allow-config-diff" in sys.argv[4:]
@@ -34,10 +38,14 @@ import sbs_warp_shear_metrics  # noqa: E402
 import run_eval  # noqa: E402  (evaluation-contract and clip identity helpers)
 import offline_oracle_report  # noqa: E402  (optional diagnostic appendix only)
 
-# Report verification performs the same authoritative pixel remeasurement as the evaluator.
-# Windows cannot safely spawn process workers from this intentionally top-level CLI module, so use
-# sbsbench's ordered thread backend here. run_eval.py/rescore_run.py keep process isolation.
-os.environ.setdefault(sbsbench.SEQUENCE_SPATIAL_BACKEND_ENV, "thread")
+# Report verification performs the same authoritative pixel remeasurement as the evaluator. A
+# direct top-level invocation cannot safely spawn Windows workers; the documented guarded
+# generate_report.py launcher preselects the faster process backend before importing this module.
+if __name__ == "__main__":
+    os.environ[sbsbench.SEQUENCE_SPATIAL_BACKEND_ENV] = "thread"
+else:
+    os.environ.setdefault(sbsbench.SEQUENCE_SPATIAL_BACKEND_ENV, "thread")
+sbsbench.enable_reusable_spatial_executor()
 
 CTRL = json.load(open(os.path.join(ctrl_dir, "results.json")))
 TREAT = json.load(open(os.path.join(treat_dir, "results.json")))
@@ -159,30 +167,27 @@ if set(CLIPS) != set(TREAT["clips"]):
     raise SystemExit("refusing A/B report with different clip sets")
 
 
-def _validate_authoritative_results(run, run_dir, side, clips_root):
+def _validate_authoritative_results(
+        run, run_dir, side, clips_root, remeasurement_session=None):
     """Remeasure report inputs; JSON aggregate caches never authenticate themselves."""
     try:
         return run_eval.verify_results_against_artifacts(
-            run, run_dir, clips_root, THRESHOLD_CFG)
+            run, run_dir, clips_root, THRESHOLD_CFG,
+            remeasurement_session=remeasurement_session)
     except (OSError, RuntimeError, ValueError) as exc:
         raise SystemExit(
             f"refusing {side} results that fail authoritative remeasurement: {exc}") from exc
 
 
 _validated_run_dirs = {}
+_remeasurement_session = run_eval.new_remeasurement_session()
 for _run, _run_dir, _side in (
         (CTRL, ctrl_dir, "control"), (TREAT, treat_dir, "treatment")):
     _validation_key = os.path.normcase(os.path.abspath(_run_dir))
     if _validation_key not in _validated_run_dirs:
         _validated_run_dirs[_validation_key] = _validate_authoritative_results(
-            _run, _run_dir, _side, CLIPS_ROOT)
-recorded_clip_hashes = CTRL.get("meta", {}).get("clip_set_sha1", {})
-current_clip_hashes = {clip: run_eval.sha1_dir(os.path.join(CLIPS_ROOT, clip)) for clip in CLIPS}
-stale_sources = {clip: (recorded_clip_hashes.get(clip), current_clip_hashes[clip]) for clip in CLIPS
-                 if recorded_clip_hashes.get(clip) != current_clip_hashes[clip]}
-if stale_sources:
-    raise SystemExit(f"refusing report with source/GT data changed since evaluation: {stale_sources}")
-
+            _run, _run_dir, _side, CLIPS_ROOT,
+            remeasurement_session=_remeasurement_session)
 # Compact decision/report vector. Numeric support fields remain in results.json but do not become
 # separate report axes. Metrics omitted here are intentionally not presented as SBS quality.
 # metric, header, worse-is-higher, always-show, notable-threshold
@@ -215,12 +220,10 @@ COLS = [
     ("static_jitter_p95", "static_jitter", True, True, 0),
     ("flow_temporal_p95", "flow_temporal", True, True, 0),
     ("depth_gt_lag_f1_p95", "gt_depth_lag", True, True, 0),
-    ("depth_gt_ghost_edge_pct_p95", "gt_ghost_edge", True, False, 0.01),
 ]
 
 # The scalar artifact score was removed: correlated metrics must not cancel one another. Sorting
 # uses only the explicit decision role, with the compact declaration order breaking ties.
-_REPORT_CFG = THRESHOLD_CFG.get("report", {})
 
 
 def impact(k):
@@ -1054,7 +1057,7 @@ def visual_evidence_images(clip, idx, metric=None):
     if metric in ("depth_gt_affine_nrmse_pct", "depth_gt_edge_f1",
                   "depth_gt_polarity_ok"):
         return ground_truth_depth_evidence(clip, idx)
-    if metric in ("depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95"):
+    if metric == "depth_gt_lag_f1_p95":
         return ground_truth_lag_evidence(clip, idx)
     if metric in EXACT_STEREO_VISUAL_METRICS:
         cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
@@ -1175,17 +1178,28 @@ ctrl_agg = {c: CTRL["clips"][c]["aggregate"] for c in CLIPS}
 treat_agg = {c: TREAT["clips"][c]["aggregate"] for c in CLIPS}
 
 
-def _metric_value(run, clip, key):
-    """Finite aggregate value only when the metric's independent evidence is applicable."""
+def _metric_state_value(run, clip, key):
+    """Return the authenticated evidence state and optional finite aggregate value.
+
+    ``unsupported`` is a legitimate abstention, while ``missing`` is a fail-closed evaluator
+    defect. Presentation code must retain that distinction instead of turning both into ``n/a``.
+    """
     observed = run["clips"][clip].get("aggregate", {})
     spec = THR.get(key)
+    state = "applicable"
     if spec is not None:
         metadata = run["clips"][clip].get("meta", {})
-        if sbsbench.metric_evidence_state(key, spec, observed, metadata) != "applicable":
-            return None
+        state = sbsbench.metric_evidence_state(key, spec, observed, metadata)
+        if state != "applicable":
+            return state, None
     if not sbsbench.metric_value_valid(observed, key):
-        return None
-    return float(observed[key])
+        return "missing", None
+    return state, float(observed[key])
+
+
+def _metric_value(run, clip, key):
+    """Finite aggregate value only when independent evidence is applicable."""
+    return _metric_state_value(run, clip, key)[1]
 
 
 def expected_flat(run, clip):
@@ -1225,72 +1239,81 @@ ACTIVE = [col for col in COLS if col[3] or colmax[col[0]] > col[4]]
 CLEAN = [col for col in COLS if col not in ACTIVE and col[2]]
 
 
-# Radar charts are summaries, not decision logic. Each quality axis uses a documented reference
-# scale and is flipped where necessary so farther from the center always means better. The raw
-# means remain printed under each chart; the real decision continues to use per-clip tolerances.
-RADAR_GROUPS = [
-    ("Style diagnostics", "Visible relief is a style objective, never a standalone quality vote", [
-        {"key": "exact_visible_pop_spread_pct", "label": "Visible stereo relief",
-         "better": "higher",
-         "reference": _REPORT_CFG.get("visible_pop_reference_pct", 2.5), "unit": "%"},
-    ]),
-    ("Perceptual artifact diagnostics", "Independent experimental diagnostics; they cannot vote until qualified", [
-        {"key": "exact_mapping_stretch_pct", "label": "Mapping stretch", "better": "lower",
-         "reference": 25.0, "unit": "%"},
-        {"key": "exact_mapping_fold_pct", "label": "Mapping folds", "better": "lower",
-         "reference": 2.0, "unit": "%"},
-        {"key": "warp_cross_row_shear_severity_pct", "label": "Row shear / tear",
-         "better": "lower", "reference": 6.0, "unit": " burden"},
-        {"key": "exact_over_3pct_area_pct", "label": "Over-limit area", "better": "lower",
-         "reference": 10.0, "unit": "%"},
-        {"key": "experimental_stereo_window_crossed_burden_pct", "label": "Stereo-window conflict", "better": "lower",
-         "reference": 1.0, "unit": "%"},
-        {"key": "interocular_phase_orientation_burden_pct", "label": "Phase conflict", "better": "lower",
-         "reference": 25.0, "unit": "%"},
-    ]),
-    ("Renderer conformance diagnostics", "Exact-map diagnostics; hard renderer checks are listed separately below", [
-        {"key": "exact_local_polarity_component_pct", "label": "Local polarity inversion",
-         "better": "lower", "reference": 10.0, "unit": "%"},
-        {"key": "interocular_exposure_rivalry_burden_pct", "label": "Exposure rivalry",
-         "better": "lower", "reference": 25.0, "unit": "%"},
-        {"key": "interocular_color_gain_rivalry_burden_pct", "label": "Colour-gain rivalry",
-         "better": "lower", "reference": 25.0, "unit": "%"},
-    ]),
-    ("Temporal primary axes", "Sequence-only primary evidence; not single-frame policy labels", [
-        {"key": "static_jitter_p95", "label": "Static stability", "better": "lower",
-         "reference": 10.0, "unit": " luma"},
-        {"key": "depth_gt_lag_f1_p95", "label": "GT depth timing", "better": "lower",
-         "reference": 50.0, "unit": " F1"},
-    ]),
-    ("Temporal diagnostics", "Sequence-only supporting evidence; not a quality vote", [
-        {"key": "flow_temporal_p95", "label": "Motion stability", "better": "lower",
-         "reference": 15.0, "unit": " luma"},
-        {"key": "depth_gt_ghost_edge_pct_p95", "label": "GT ghost edges", "better": "lower",
-         "reference": 50.0, "unit": "%"},
-    ]),
-    ("Ground-truth depth primary axes", "Authenticated depth/disparity clips only", [
-        {"key": "depth_gt_affine_nrmse_pct", "label": "GT depth accuracy", "better": "lower",
-         "reference": 50.0, "unit": "%"},
-        {"key": "depth_gt_edge_f1", "label": "GT boundaries", "better": "higher",
-         "reference": 100.0, "unit": "%"},
-    ]),
-]
+# The dashboard visualizes the exact gate inputs instead of projecting unrelated metrics onto a
+# shared radar scale. Primary/style dumbbells normalize only by configured noise; hard bullets
+# retain raw engineering bounds; the heatmap exposes the per-clip events behind the summary.
+PRIMARY_STYLE_AXES = (
+    ("exact_visible_pop_spread_pct", "Visible stereo relief", "style objective", "%"),
+    ("depth_gt_affine_nrmse_pct", "GT depth accuracy", "primary · depth", "%"),
+    ("depth_gt_edge_f1", "GT depth boundaries", "primary · depth edge", "%"),
+    ("static_jitter_p95", "Static stability", "primary · stability", " luma"),
+    ("depth_gt_lag_f1_p95", "GT depth timing", "primary · depth stability", " F1"),
+)
 
-PERF_RADAR_AXES = [
-    {"key": "depth_infer", "label": "Depth speed", "better": "lower",
-     "reference": 5.0, "unit": " ms"},
-    {"key": "warp_infer", "label": "Warp speed", "better": "lower",
-     "reference": 0.25, "unit": " ms"},
-    {"key": "sbs_composite_cpu", "label": "CPU composite", "better": "lower",
-     "reference": 0.05, "unit": " ms"},
-]
+HARD_DISPLAY = (
+    ("exact_binocular_support_pct", "Exact binocular support", "%"),
+    ("exact_positive_disparity_pct", "Positive disparity tail", "%"),
+    ("exact_negative_disparity_pct", "Negative disparity tail", "%"),
+    ("exact_polarity_ok", "Depth/disparity polarity", "%"),
+    ("exact_symmetry_residual_p95_pct", "Camera symmetry residual", "%"),
+    ("vmisalign_p99_pct", "Vertical alignment P99", "%"),
+    ("source_coverage_pct", "Source coverage", "%"),
+    ("image_integrity_pct", "Image integrity", "%"),
+    ("source_coverage_worst_patch_bad_pct", "Worst localized missing patch", "%"),
+    ("image_integrity_worst_patch_bad_pct", "Worst localized texture damage", "%"),
+    ("depth_gt_polarity_ok", "Authenticated GT depth polarity", "%"),
+)
+
+HARD_SUPPORT_KEYS = {
+    "exact_binocular_support_pct": "exact_binocular_support_count",
+    "exact_positive_disparity_pct": "exact_binocular_support_count",
+    "exact_negative_disparity_pct": "exact_binocular_support_count",
+    "exact_polarity_ok": "exact_polarity_support_pct",
+    "exact_symmetry_residual_p95_pct": "exact_binocular_support_count",
+    "vmisalign_p99_pct": "vmisalign_support_pct",
+    "source_coverage_pct": "source_fidelity_support_pct",
+    "image_integrity_pct": "image_integrity_support",
+    "source_coverage_worst_patch_bad_pct": "source_fidelity_support_pct",
+    "image_integrity_worst_patch_bad_pct": "image_integrity_support",
+}
+
+SUPPORTING_HEATMAP_AXES = (
+    ("exact_mapping_stretch_pct", "stretch"),
+    ("exact_mapping_fold_pct", "fold"),
+    ("exact_local_polarity_component_pct", "local polarity"),
+    ("warp_cross_row_shear_severity_pct", "row shear"),
+    ("exact_over_3pct_area_pct", "over-limit"),
+    ("experimental_stereo_window_crossed_burden_pct", "window"),
+    ("interocular_phase_orientation_burden_pct", "phase"),
+    ("interocular_exposure_rivalry_burden_pct", "exposure"),
+    ("interocular_color_gain_rivalry_burden_pct", "colour"),
+    ("flow_temporal_p95", "flow temporal"),
+)
+
+
+def _paired_aggregate(key, clips=DECISION_CLIPS):
+    """Return matched raw aggregate pairs and keep unsupported evidence out of the mean."""
+    pairs = [(_metric_value(CTRL, clip, key), _metric_value(TREAT, clip, key))
+             for clip in clips]
+    return [(control, treatment) for control, treatment in pairs
+            if control is not None and treatment is not None]
+
+
+def _metric_missing_clips(key, clips=DECISION_CLIPS):
+    """Clips where either side is missing required evidence, not legitimately unsupported."""
+    return [clip for clip in clips
+            if "missing" in (_metric_state_value(CTRL, clip, key)[0],
+                             _metric_state_value(TREAT, clip, key)[0])]
+
+
+def _metric_reportable(key, clips=CLIPS):
+    """Keep axes with a matched sample or a fail-closed missing-evidence event."""
+    return bool(_paired_aggregate(key, clips) or _metric_missing_clips(key, clips))
 
 
 def _paired_mean_aggregate(key, clips=DECISION_CLIPS):
-    """Return control/treatment means over the identical clips that contain this metric."""
-    pairs = [(_metric_value(CTRL, c, key), _metric_value(TREAT, c, key)) for c in clips]
-    pairs = [(control, treatment) for control, treatment in pairs
-             if control is not None and treatment is not None]
+    """Return control/treatment means over identical clips with authenticated evidence."""
+    pairs = _paired_aggregate(key, clips)
     if not pairs:
         return None, None
     return (float(np.mean([pair[0] for pair in pairs])),
@@ -1298,142 +1321,274 @@ def _paired_mean_aggregate(key, clips=DECISION_CLIPS):
 
 
 def _mean_perf(run, key):
-    values = [run["clips"][c].get("perf_ms", {}).get(key) for c in CLIPS]
-    values = [v for v in values if v is not None]
+    values = [run["clips"][clip].get("perf_ms", {}).get(key) for clip in CLIPS]
+    values = [value for value in values if value is not None]
     return float(np.mean(values)) if values else None
 
 
-def _radar_quality(value, axis):
-    """Map a raw metric to 0..1 quality using an explicit bad-end/target reference."""
-    if value is None:
-        return 0.0
-    ref = max(float(axis["reference"]), 1e-9)
-    quality = value / ref if axis["better"] == "higher" else 1.0 - value / ref
-    return max(0.0, min(1.0, quality))
+def _metric_noise(key, control):
+    spec = THR[key]
+    return max(float(spec.get("abs_floor", 0.0)),
+               abs(float(control)) * float(spec.get("rel_tol", 0.0)), 1e-9)
 
 
-def _radar_svg(title, axes, control_values, treatment_values):
-    width, height, cx, cy, radius = 380, 330, 190, 150, 102
-    n = len(axes)
-
-    def point(i, scale):
-        angle = -math.pi / 2 + 2 * math.pi * i / n
-        return cx + radius * scale * math.cos(angle), cy + radius * scale * math.sin(angle)
-
-    def polygon(scales):
-        return " ".join(f"{point(i, scale)[0]:.1f},{point(i, scale)[1]:.1f}"
-                        for i, scale in enumerate(scales))
-
-    rings = "".join(
-        f'<polygon class="radar-ring" points="{polygon([level] * n)}" />'
-        for level in (0.25, 0.5, 0.75, 1.0))
-    spokes = "".join(
-        f'<line class="radar-spoke" x1="{cx}" y1="{cy}" '
-        f'x2="{point(i, 1)[0]:.1f}" y2="{point(i, 1)[1]:.1f}" />'
-        for i in range(n))
-    labels = []
-    for i, axis in enumerate(axes):
-        angle = -math.pi / 2 + 2 * math.pi * i / n
-        x, y = cx + (radius + 22) * math.cos(angle), cy + (radius + 22) * math.sin(angle)
-        anchor = "middle" if abs(math.cos(angle)) < 0.25 else "start" if math.cos(angle) > 0 else "end"
-        labels.append(f'<text class="radar-label" x="{x:.1f}" y="{y + 4:.1f}" '
-                      f'text-anchor="{anchor}">{html.escape(axis["label"])}</text>')
-    ctrl_q = [_radar_quality(value, axis) for value, axis in zip(control_values, axes)]
-    treat_q = [_radar_quality(value, axis) for value, axis in zip(treatment_values, axes)]
-    title_safe = html.escape(title)
-    return (f'<svg class="radar-svg" viewBox="0 0 {width} {height}" role="img" '
-            f'aria-label="{title_safe} radar comparison"><title>{title_safe}: outward is better</title>'
-            f'{rings}{spokes}<polygon class="radar-poly radar-control" points="{polygon(ctrl_q)}" />'
-            f'<polygon class="radar-poly radar-treatment" points="{polygon(treat_q)}" />'
-            f'{"".join(labels)}</svg>')
+def _display_value(value, unit=""):
+    return "n/a" if value is None else f"{value:.2f}{unit}"
 
 
-def _radar_card(title, note, axes, control_values, treatment_values):
+def _dumbbell_rows():
     rows = []
-    for axis, control, treatment in zip(axes, control_values, treatment_values):
-        c = "n/a" if control is None else f'{control:.2f}{axis["unit"]}'
-        t = "n/a" if treatment is None else f'{treatment:.2f}{axis["unit"]}'
-        rows.append(f'<div><span>{html.escape(axis["label"])}</span><code>{c}</code>'
-                    f'<span class="radar-arrow">&rarr;</span><code>{t}</code></div>')
-    return (f'<article class="radar-card"><div class="radar-head"><h3>{html.escape(title)}</h3>'
-            f'<span>{html.escape(note)}</span></div>'
-            f'{_radar_svg(title, axes, control_values, treatment_values)}'
-            f'<div class="radar-legend"><span class="legend-control">{html.escape(CTRL_TAG)}</span>'
-            f'<span class="legend-treatment">{html.escape(TREAT_TAG)}</span></div>'
-            f'<div class="radar-values">{"".join(rows)}</div></article>')
+    for key, label, role, unit in PRIMARY_STYLE_AXES:
+        pairs = _paired_aggregate(key)
+        missing = _metric_missing_clips(key)
+        if missing:
+            rows.append(f'<div class="dumbbell-row is-bad"><div class="dumbbell-copy">'
+                        f'<b>{html.escape(label)}</b><small>{html.escape(role)} · '
+                        f'missing required evidence on {len(missing)} clip(s); partial means are '
+                        f'not shown</small></div><div class="dumbbell-na">missing</div></div>')
+            continue
+        if not pairs:
+            rows.append(f'<div class="dumbbell-row is-unsupported"><div class="dumbbell-copy">'
+                        f'<b>{html.escape(label)}</b><small>{html.escape(role)} · no authenticated '
+                        f'matched evidence</small></div><div class="dumbbell-na">unsupported</div></div>')
+            continue
+        control = float(np.mean([pair[0] for pair in pairs]))
+        treatment = float(np.mean([pair[1] for pair in pairs]))
+        spec = THR[key]
+        noise = _metric_noise(key, control)
+        signed_delta = treatment - control
+        improvement_delta = signed_delta if spec.get("better") == "higher" else -signed_delta
+        effect = improvement_delta / noise
+        treatment_pos = 50.0 + 15.0 * max(-3.0, min(3.0, effect))
+        line_left = min(50.0, treatment_pos)
+        line_width = max(abs(treatment_pos - 50.0), 0.35)
+        movement = sbsbench.metric_delta_class(control, treatment, spec)
+        movement_class = {"improved": "is-good", "regressed": "is-bad"}.get(
+            movement, "is-noise")
+        direction = "higher is better" if spec.get("better") == "higher" else "lower is better"
+        effect_text = ("within noise" if movement == "noise" else
+                       f'{abs(effect):.1f}× noise toward '
+                       f'{"treatment" if movement == "improved" else "control"}')
+        tooltip = html.escape(
+            f'{label}: {CTRL_TAG} {control:.4f} to {TREAT_TAG} {treatment:.4f}; '
+            f'noise tolerance {noise:.4f}; {direction}', quote=True)
+        rows.append(
+            f'<div class="dumbbell-row {movement_class}" title="{tooltip}">'
+            f'<div class="dumbbell-copy"><b>{html.escape(label)}</b>'
+            f'<small>{html.escape(role)} · {direction} · n={len(pairs)}/{len(DECISION_CLIPS)}'
+            f'</small></div>'
+            f'<div class="dumbbell-plot"><div class="dumbbell-scale">'
+            f'<span class="noise-zone"></span><i class="dumbbell-line" '
+            f'style="left:{line_left:.1f}%;width:{line_width:.1f}%"></i>'
+            f'<i class="dumbbell-dot dot-control" style="left:50%"></i>'
+            f'<i class="dumbbell-dot dot-treatment" style="left:{treatment_pos:.1f}%"></i>'
+            f'</div><div class="dumbbell-direction"><span>control-favoured</span>'
+            f'<span>± noise</span><span>treatment-favoured</span></div></div>'
+            f'<div class="dumbbell-values"><code>{_display_value(control, unit)}</code>'
+            f'<span>→</span><code>{_display_value(treatment, unit)}</code>'
+            f'<small class="{movement_class}">{effect_text} · ±{noise:.2f}{unit}</small></div></div>')
+    return "".join(rows)
+
+
+def _runtime_strip():
+    rows = []
+    for key, label in (("depth_infer", "depth"), ("warp_infer", "warp"),
+                       ("sbs_composite_cpu", "CPU composite")):
+        control, treatment = _mean_perf(CTRL, key), _mean_perf(TREAT, key)
+        if control is None and treatment is None:
+            continue
+        rows.append(f'<span><b>{html.escape(label)}</b> '
+                    f'<code>{_display_value(control, " ms")}</code> → '
+                    f'<code>{_display_value(treatment, " ms")}</code></span>')
+    return (f'<div class="runtime-strip"><small>Runtime context · not a quality vote</small>'
+            f'{"".join(rows)}</div>' if rows else "")
+
+
+def _hard_worst(run, key, spec):
+    states = {clip: _metric_state_value(run, clip, key) for clip in CLIPS}
+    missing = [clip for clip, (state, _value) in states.items() if state == "missing"]
+    if missing:
+        return None, missing[0], "missing"
+    applicable = {clip: {key: value} for clip, (state, value) in states.items()
+                  if state == "applicable" and value is not None}
+    value, clip = sbsbench.worst_hard_metric(applicable, key, spec, CLIPS)
+    return value, clip, ("applicable" if value is not None else "unsupported")
+
+
+def _hard_support(run, clip, key):
+    support_key = HARD_SUPPORT_KEYS.get(key)
+    if not clip or not support_key:
+        return None
+    value = run["clips"].get(clip, {}).get("aggregate", {}).get(support_key)
+    if not sbsbench.metric_value_valid({support_key: value}, support_key):
+        return None
+    value = float(value)
+    percent_support = support_key.endswith("_pct") or support_key == "image_integrity_support"
+    return (f'{value:.1f}%' if percent_support else
+            f'n={int(round(value)):,}')
+
+
+def _hard_state(value, spec, evidence_state):
+    if evidence_state == "missing":
+        return "hard-missing"
+    if evidence_state == "unsupported":
+        return "hard-unsupported"
+    failed = (("hard_min" in spec and value < spec["hard_min"])
+              or ("hard_max" in spec and value > spec["hard_max"]))
+    return "hard-fail" if failed else "hard-pass"
+
+
+def _hard_bullet_rows():
+    rows = []
+    configured_hard = {key for key, spec in THR.items() if spec.get("role") == "hard"}
+    displayed = [entry for entry in HARD_DISPLAY if entry[0] in configured_hard]
+    displayed.extend((key, SHORT.get(key, key), "")
+                     for key in sorted(configured_hard - {entry[0] for entry in displayed}))
+    for key, label, unit in displayed:
+        spec = THR[key]
+        control, control_clip, control_state = _hard_worst(CTRL, key, spec)
+        treatment, treatment_clip, treatment_state = _hard_worst(TREAT, key, spec)
+        values = [value for value in (control, treatment) if value is not None]
+        if "hard_max" in spec:
+            bound_value = float(spec["hard_max"])
+            scale_max = max([bound_value * 1.25, 1e-6] + [value * 1.05 for value in values])
+            bound_pos = 100.0 * bound_value / scale_max
+            track_class = "limit-max"
+            bound = f'≤ {bound_value:.2f}{unit}'
+        else:
+            bound_value = float(spec["hard_min"])
+            scale_max = max([100.0, bound_value, 1e-6] + values)
+            bound_pos = 100.0 * bound_value / scale_max
+            track_class = "limit-min"
+            bound = f'≥ {bound_value:.2f}{unit}'
+
+        def position(value):
+            return 0.0 if value is None else max(0.0, min(100.0, 100.0 * value / scale_max))
+
+        markers = ""
+        if control is not None:
+            markers += f'<i class="hard-dot dot-control" style="left:{position(control):.1f}%"></i>'
+        if treatment is not None:
+            markers += f'<i class="hard-dot dot-treatment" style="left:{position(treatment):.1f}%"></i>'
+        control_support = _hard_support(CTRL, control_clip, key)
+        treatment_support = _hard_support(TREAT, treatment_clip, key)
+        support = ""
+        if control_support or treatment_support:
+            support = (f' · support {html.escape(CTRL_TAG)} {control_support or "n/a"}; '
+                       f'{html.escape(TREAT_TAG)} {treatment_support or "n/a"}')
+        def location(side_state, clip):
+            if side_state == "missing":
+                return f'missing evidence at {html.escape(name(clip))}'
+            if side_state == "unsupported":
+                return "unsupported"
+            return html.escape(name(clip))
+
+        locations = (f'worst clip {html.escape(CTRL_TAG)} '
+                     f'{location(control_state, control_clip)}; {html.escape(TREAT_TAG)} '
+                     f'{location(treatment_state, treatment_clip)}')
+        rows.append(
+            f'<div class="hard-bullet-row"><div class="hard-bullet-copy">'
+            f'<b>{html.escape(label)}</b><small>{bound} · {locations}{support}</small></div>'
+            f'<div class="hard-bullet-plot"><div class="hard-track {track_class}" '
+            f'style="--bound:{bound_pos:.1f}%"><i class="hard-bound"></i>{markers}</div></div>'
+            f'<div class="hard-bullet-values">'
+            f'<code class="{_hard_state(control, spec, control_state)}">'
+            f'{"missing" if control_state == "missing" else _display_value(control, unit)}</code>'
+            f'<span>→</span>'
+            f'<code class="{_hard_state(treatment, spec, treatment_state)}">'
+            f'{"missing" if treatment_state == "missing" else _display_value(treatment, unit)}</code>'
+            f'</div></div>')
+    return "".join(rows), len(displayed)
+
+
+def _heatmap_cell(clip, key):
+    control_state, control = _metric_state_value(CTRL, clip, key)
+    treatment_state, treatment = _metric_state_value(TREAT, clip, key)
+    label = SHORT.get(key, key)
+    if "missing" in (control_state, treatment_state):
+        missing_sides = "/".join(
+            tag for tag, state in ((CTRL_TAG, control_state), (TREAT_TAG, treatment_state))
+            if state == "missing")
+        title = html.escape(
+            f'{name(clip)} · {label}: required evidence missing for {missing_sides}',
+            quote=True)
+        return f'<td class="heat-missing" title="{title}">missing</td>'
+    if control is None or treatment is None:
+        title = html.escape(f'{name(clip)} · {label}: unsupported authenticated evidence', quote=True)
+        return f'<td class="heat-unsupported" title="{title}">n/a</td>'
+    spec = THR[key]
+    noise = _metric_noise(key, control)
+    signed_delta = treatment - control
+    improvement_delta = signed_delta if spec.get("better") == "higher" else -signed_delta
+    effect = improvement_delta / noise
+    movement = sbsbench.metric_delta_class(control, treatment, spec)
+    if movement == "noise":
+        cell_class, cell_text = "heat-noise", f'{abs(effect):.1f}×'
+    else:
+        strength = ("heat-strong" if abs(effect) >= 4.0 else
+                    "heat-mid" if abs(effect) >= 2.0 else "heat-soft")
+        cell_class = f'{"heat-good" if movement == "improved" else "heat-bad"} {strength}'
+        cell_text = f'{"+" if movement == "improved" else "−"}{abs(effect):.1f}×'
+    title = html.escape(
+        f'{name(clip)} · {label}: {CTRL_TAG} {control:.4f} to {TREAT_TAG} {treatment:.4f}; '
+        f'{movement}; {abs(effect):.2f} times configured noise', quote=True)
+    return f'<td class="{cell_class}" title="{title}">{cell_text}</td>'
+
+
+def _heatmap():
+    primary = tuple((key, label) for key, label, _, _ in PRIMARY_STYLE_AXES
+                    if _metric_reportable(key, CLIPS))
+    supporting = tuple((key, label) for key, label in SUPPORTING_HEATMAP_AXES
+                       if _metric_reportable(key, CLIPS))
+    axes = primary + supporting
+    if not axes:
+        return '<p class="sub">No matched authenticated metric evidence is available.</p>'
+    headers = "".join(f'<th title="{html.escape(label, quote=True)}">{html.escape(label)}</th>'
+                      for _, label in axes)
+    group_headers = ""
+    if primary:
+        group_headers += f'<th colspan="{len(primary)}">primary / style</th>'
+    if supporting:
+        group_headers += f'<th colspan="{len(supporting)}">supporting diagnostics</th>'
+    rows = []
+    for clip in CLIPS:
+        cells = "".join(_heatmap_cell(clip, key) for key, _ in axes)
+        rows.append(f'<tr><th class="heat-clip" title="{html.escape(clip, quote=True)}">'
+                    f'{html.escape(name(clip))}</th>'
+                    f'{cells}</tr>')
+    return (f'<div class="heatmap-wrap"><table class="heatmap"><thead>'
+            f'<tr class="heat-groups"><th class="heat-clip" rowspan="2">clip</th>'
+            f'{group_headers}</tr>'
+            f'<tr>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+            f'<div class="heat-legend"><span class="heat-good heat-soft">+</span> treatment-favoured '
+            f'<span class="heat-bad heat-soft">−</span> control-favoured '
+            f'<span class="heat-noise">≈</span> within noise '
+            f'<span class="heat-unsupported">n/a</span> unsupported '
+            f'<span class="heat-missing">missing</span> fail-closed evidence · '
+            f'number = multiples of noise</div>')
 
 
 def grouped_quality_section():
-    cards = []
-    for title, note, axes in RADAR_GROUPS:
-        available = [(axis, _paired_mean_aggregate(axis["key"])) for axis in axes]
-        available = [(axis, pair) for axis, pair in available
-                     if pair[0] is not None and pair[1] is not None]
-        if not available:
-            continue
-        axes = [axis for axis, _ in available]
-        pairs = [pair for _, pair in available]
-        control_values = [pair[0] for pair in pairs]
-        treatment_values = [pair[1] for pair in pairs]
-        cards.append(_radar_card(title, note, axes, control_values, treatment_values))
-    cards.append(_radar_card("Runtime", "Performance context; not a quality vote", PERF_RADAR_AXES,
-                             [_mean_perf(CTRL, a["key"]) for a in PERF_RADAR_AXES],
-                             [_mean_perf(TREAT, a["key"]) for a in PERF_RADAR_AXES]))
-
-    hard_defs = (
-        ("exact_binocular_support_pct", "Exact binocular support", "% image area"),
-        ("vmisalign_p99_pct", "Vertical alignment P99", "% eye height"),
-        ("exact_positive_disparity_pct", "Exact positive disparity tail", "%"),
-        ("exact_negative_disparity_pct", "Exact negative disparity tail", "%"),
-        ("exact_polarity_ok", "Depth/disparity polarity", "%"),
-        ("depth_gt_polarity_ok", "Authenticated GT depth polarity", "%"),
-        ("source_coverage_pct", "Source coverage", "%"),
-        ("image_integrity_pct", "Image integrity", "%"),
-    )
-    checks = []
-    for key, label, unit in hard_defs:
-        spec = THR[key]
-        control_applicable = {
-            clip: {key: value} for clip in CLIPS
-            if (value := _metric_value(CTRL, clip, key)) is not None
-        }
-        treatment_applicable = {
-            clip: {key: value} for clip in CLIPS
-            if (value := _metric_value(TREAT, clip, key)) is not None
-        }
-        control, control_clip = sbsbench.worst_hard_metric(
-            control_applicable, key, spec, CLIPS)
-        treatment, treatment_clip = sbsbench.worst_hard_metric(
-            treatment_applicable, key, spec, CLIPS)
-        bound = (f'≥ {spec["hard_min"]:.1f}{unit}' if "hard_min" in spec
-                 else f'≤ {spec["hard_max"]:.1f}{unit}')
-
-        def value(v):
-            if v is None:
-                return "n/a", "hard-missing"
-            failed = (("hard_min" in spec and v < spec["hard_min"])
-                      or ("hard_max" in spec and v > spec["hard_max"]))
-            return f"{v:.2f}{unit}", "hard-fail" if failed else "hard-pass"
-        cv, cc = value(control)
-        tv, tc = value(treatment)
-        locations = (f'{html.escape(CTRL_TAG)}: '
-                     f'{html.escape(name(control_clip)) if control_clip else "missing"}; '
-                     f'{html.escape(TREAT_TAG)}: '
-                     f'{html.escape(name(treatment_clip)) if treatment_clip else "missing"}')
-        checks.append(f'<div class="hard-check"><span>{label}</span><code class="{cc}">{cv}</code>'
-                      f'<span class="radar-arrow">&rarr;</span><code class="{tc}">{tv}</code>'
-                      f'<small>{bound} · worst clip: {locations}</small></div>')
-    hard_card = (f'<article class="hard-card"><div><h3>Hard constraints: comfort and integrity</h3>'
-                 f'<p>Each value is the safety-worst per-clip aggregate. Every row must pass '
-                 f'independently; quality improvements cannot trade against a failed limit.</p>'
-                 f'</div><div class="hard-checks">'
-                 f'{"".join(checks)}</div></article>')
-    return (f'<section><h2>Metrics by group</h2><p class="sub">Radar axes are normalized quality: '
-            f'<b>farther outward is always better</b>. Means use matched non-flat decision clips; '
-            f'runtime uses all clips. The reference scale is the stereo target or the metric\'s '
-            f'documented penalty/engineering scale, never the best value in this A/B pair. Raw '
-            f'means are printed below every chart. These summaries do not replace the per-clip gate.</p>'
-            f'<div class="radar-grid">{"".join(cards)}</div>{hard_card}</section>')
+    hard_rows, hard_count = _hard_bullet_rows()
+    axes_card = (f'<article class="decision-card decision-axes"><div class="decision-head">'
+                 f'<h3>Primary and style movement</h3><span>matched means · tolerance-normalized</span>'
+                 f'</div><p>Control is fixed at the centre. Treatment moves right when favoured and '
+                 f'left when control is favoured; the shaded centre is the configured noise band.</p>'
+                 f'<div class="dumbbell-list">{_dumbbell_rows()}</div>{_runtime_strip()}</article>')
+    hard_card = (f'<article class="decision-card decision-hard"><div class="decision-head">'
+                 f'<h3>Hard gate · all {hard_count} constraints</h3><span>worst raw clip value</span>'
+                 f'</div><p>Each dot is the safety-worst per-clip aggregate. Every row must pass '
+                 f'independently; the vertical tick is the engineering limit.</p>'
+                 f'<div class="hard-bullet-list">{hard_rows}</div></article>')
+    heat_card = (f'<article class="decision-card decision-heat"><div class="decision-head">'
+                 f'<h3>Where the movement occurs</h3><span>clip × metric event map</span></div>'
+                 f'<p>Colour follows each metric\'s configured direction and tolerance. Unsupported '
+                 f'cells are hatched; missing required evidence is red and fail-closed.</p>'
+                 f'{_heatmap()}</article>')
+    return (f'<section><h2>Metrics by group</h2><p class="sub">These three views mirror the '
+            f'evaluator contract: coequal primary/style movement, fail-closed hard limits, and '
+            f'per-clip evidence. They summarize but never replace the canonical per-clip gate.</p>'
+            f'<div class="decision-grid">{axes_card}{hard_card}{heat_card}</div></section>')
 
 
 def scorecard_charts():
@@ -1447,9 +1602,17 @@ def scorecard_charts():
         rows = []
         for c, a, b in values:
             if a is None or b is None:
+                control_state = _metric_state_value(CTRL, c, metric)[0]
+                treatment_state = _metric_state_value(TREAT, c, metric)[0]
+                missing = "missing" in (control_state, treatment_state)
+                state_label = "missing required evidence" if missing else "not applicable"
+                state_class = "bar-missing" if missing else "bar-na"
+                delta_class = "bar-bad" if missing else "bar-flat"
+                delta_label = "missing" if missing else "n/a"
                 rows.append(f'<div class="bar-row"><div class="bar-scene" title="{c}">{name(c)}</div>'
-                            f'<div class="bar-pair"><span class="bar-na">not applicable</span></div>'
-                            f'<span class="bar-delta bar-flat">n/a</span></div>')
+                            f'<div class="bar-pair"><span class="{state_class}">'
+                            f'{state_label}</span></div>'
+                            f'<span class="bar-delta {delta_class}">{delta_label}</span></div>')
                 continue
             aw = max(0.8, abs(a) / scale * 100.0) if a else 0.0
             bw = max(0.8, abs(b) / scale * 100.0) if b else 0.0
@@ -1550,10 +1713,6 @@ METRIC_DEFS = [
          "gt_depth_lag",
          "P95 amount by which predicted depth boundaries match the previous GT frame better than the current frame. Positive values directly indicate held/stale depth on moving geometry.",
          "lower = less one-frame depth lag"),
-    ("depth_gt_ghost_edge_pct_p95",
-         "gt_ghost_edge",
-         "P95 prediction support on ground-truth boundaries that existed only in the previous frame. Detects stale and double depth edges even when the current edge is also present.",
-         "lower = fewer stale/double edges"),
     ("vmisalign_p99_pct",
          "vmis",
          "Texture-weighted P99 vertical L↔R offset as a percentage of eye height. The upper tail catches a localized epipolar fault that a P95 summary can dilute.",
@@ -1562,8 +1721,8 @@ METRIC_DEFS = [
          "Exact source-coordinate steps that reverse direction, indicating a horizontal warp fold.",
          "lower = fewer folds"),
     ("exact_symmetry_residual_p95_pct", "camera_symmetry",
-         "P95 common-camera translation residual after independently inverting both exact eye maps onto the same source samples. It is a conformance diagnostic, not stereo disparity or a perceptual-quality vote.",
-         "lower = closer to symmetric virtual cameras"),
+         "P95 common-camera translation residual after independently inverting both exact eye maps onto the same source samples. It is a hard renderer-conformance constraint, not stereo disparity or a perceptual-quality vote.",
+         "must remain at or below the symmetric-camera limit"),
     ("warp_cross_row_shear_severity_pct", "row_shear",
          "Unsupported change in horizontal warp displacement between adjacent rows, normalized through image coordinates. Source-authored horizontal boundaries, aspect-fit bars, clamps, folds and collapsed topology are excluded before the strongest horizontal tear runs are summarized.",
          "lower = less row-wise tearing"),
@@ -1777,7 +1936,7 @@ def _evidence_card(item, kind, axis=None):
     is_gt = metric in ("depth_gt_affine_nrmse_pct",
                        "depth_gt_edge_f1",
                        "depth_gt_polarity_ok")
-    is_gt_lag = metric in ("depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95")
+    is_gt_lag = metric == "depth_gt_lag_f1_p95"
     is_exact_source = metric in {
         "source_coverage_pct", "image_integrity_pct",
         "source_coverage_worst_patch_bad_pct",
@@ -1990,6 +2149,7 @@ HTML = """<!doctype html>
 :root[data-theme="light"]{--bg:#f5f6f7;--panel:#fff;--ink:#12181d;--muted:#5c6a74;--line:#dbe1e6;--accent:#0e8f9c;--accent-soft:#d7eef0;--good:#1f9d63;--warn:#c98a1a;--crit:#c4483a;}
 :root[data-theme="dark"]{--bg:#0c1013;--panel:#141a1f;--ink:#e8edf0;--muted:#8b9aa4;--line:#252e35;--accent:#38c0cd;--accent-soft:#123037;--good:#3fca86;--warn:#e0a94a;--crit:#e56a5c;}
 *{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--bg)}
 .wrap{max-width:1060px;margin:0 auto;padding:56px 24px 96px;color:var(--ink);font-family:var(--sans);line-height:1.6;background:var(--bg);-webkit-font-smoothing:antialiased}
 h1,h2{text-wrap:balance;line-height:1.15;margin:0}
 .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:14px}
@@ -2028,15 +2188,32 @@ td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .mtab .mwhat{font-family:var(--sans);font-size:13.5px;color:var(--ink);max-width:60ch}
 .mtab .mdir{font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:nowrap;vertical-align:top}
 .mtab .mgroup{font-family:var(--mono);white-space:nowrap;vertical-align:top}.mgroup span{display:block;font-size:11.5px;color:var(--ink);font-weight:650;text-transform:uppercase}.mgroup small{display:block;font-size:10.5px;color:var(--muted)}
-.radar-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;align-items:start}
-.radar-card{border:1px solid var(--line);border-radius:11px;background:var(--panel);padding:15px;min-width:0}
-.radar-head h3,.hard-card h3{font-family:var(--mono);font-size:13px;color:var(--ink);margin:0}.radar-head>span{display:block;font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:3px}
-.radar-svg{width:100%;height:auto;display:block;margin:2px auto -12px;overflow:visible}
-.radar-ring{fill:none;stroke:var(--line);stroke-width:1;stroke-dasharray:3 4}.radar-spoke{stroke:var(--line);stroke-width:1}.radar-label{font-family:var(--mono);font-size:10px;fill:var(--muted)}
-.radar-poly{stroke-width:2;stroke-linejoin:round}.radar-control{fill:color-mix(in srgb,var(--accent) 14%,transparent);stroke:var(--accent)}.radar-treatment{fill:color-mix(in srgb,var(--warn) 14%,transparent);stroke:var(--warn)}
-.radar-legend{display:flex;justify-content:center;gap:20px;font-family:var(--mono);font-size:10.5px;margin-bottom:10px}.radar-legend span:before{content:"";display:inline-block;width:14px;height:3px;border-radius:3px;margin-right:6px;vertical-align:middle}.legend-control:before{background:var(--accent)}.legend-treatment:before{background:var(--warn)}
-.radar-values{border-top:1px solid var(--line);padding-top:8px}.radar-values>div{display:grid;grid-template-columns:minmax(0,1fr) auto 14px auto;align-items:center;gap:4px;font-family:var(--mono);font-size:9.5px;padding:2px 0}.radar-values>div>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}.radar-values code{font-size:9px;padding:0 3px}.radar-arrow{color:var(--muted);text-align:center}
-.hard-card{display:grid;grid-template-columns:minmax(220px,.65fr) minmax(420px,1.35fr);gap:24px;align-items:center;border:1px solid var(--line);border-radius:11px;background:var(--panel);padding:16px;margin-top:16px}.hard-card p{font-size:12px;color:var(--muted);margin:5px 0 0}.hard-checks{display:grid;gap:5px}.hard-check{display:grid;grid-template-columns:minmax(145px,1fr) 74px 14px 74px 66px;gap:5px;align-items:center;font-family:var(--mono);font-size:10px}.hard-check code{font-size:9.5px;text-align:right;padding:1px 4px}.hard-check small{text-align:right;color:var(--muted)}.hard-pass{color:var(--good)}.hard-fail{color:var(--crit)}.hard-missing{color:var(--muted)}
+.decision-grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:16px;align-items:start}
+.decision-card{border:1px solid var(--line);border-radius:11px;background:var(--panel);padding:15px;min-width:0}
+.decision-card>p{font-size:12px;color:var(--muted);margin:5px 0 14px}
+.decision-axes{grid-column:span 5}.decision-hard{grid-column:span 7}.decision-heat{grid-column:1/-1}
+.decision-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.decision-head h3{font-family:var(--mono);font-size:13px;color:var(--ink);margin:0}.decision-head>span{font-family:var(--mono);font-size:10px;color:var(--muted)}
+.dumbbell-list,.hard-bullet-list{display:grid;gap:2px}
+.dumbbell-row{display:grid;grid-template-columns:minmax(135px,.9fr) minmax(150px,1.1fr);gap:6px 10px;align-items:center;padding:8px 0;border-top:1px solid color-mix(in srgb,var(--line) 65%,transparent)}
+.dumbbell-copy b,.hard-bullet-copy b{display:block;font-family:var(--mono);font-size:10.5px;color:var(--ink)}
+.dumbbell-copy small,.hard-bullet-copy small{display:block;font-family:var(--mono);font-size:8.5px;line-height:1.35;color:var(--muted)}
+.dumbbell-scale{height:15px;position:relative;border-radius:8px;background:linear-gradient(to right,color-mix(in srgb,var(--crit) 9%,transparent),color-mix(in srgb,var(--muted) 7%,transparent) 35%,color-mix(in srgb,var(--muted) 7%,transparent) 65%,color-mix(in srgb,var(--good) 9%,transparent))}
+.noise-zone{position:absolute;left:35%;width:30%;top:0;bottom:0;border-left:1px dashed var(--muted);border-right:1px dashed var(--muted);opacity:.55}
+.dumbbell-line{position:absolute;top:6px;height:3px;background:var(--muted);border-radius:3px}
+.dumbbell-dot,.hard-dot{position:absolute;width:7px;height:7px;border-radius:50%;transform:translateX(-50%);box-shadow:0 0 0 1px var(--panel)}
+.dumbbell-dot{top:4px}.dot-control{background:var(--accent)}.dot-treatment{background:var(--warn)}
+.dumbbell-row.is-good .dot-treatment{background:var(--good)}.dumbbell-row.is-bad .dot-treatment{background:var(--crit)}.dumbbell-row.is-noise .dot-treatment{background:var(--muted)}
+.dumbbell-direction{display:flex;justify-content:space-between;font-family:var(--mono);font-size:7.5px;color:var(--muted);margin-top:2px}.dumbbell-direction span:nth-child(2){text-align:center}
+.dumbbell-values{grid-column:1/-1;display:flex;justify-content:flex-end;align-items:center;gap:5px;font-family:var(--mono);font-size:9px}.dumbbell-values code{font-size:9px;padding:0 4px}.dumbbell-values small{margin-left:auto}.dumbbell-values .is-good{color:var(--good)}.dumbbell-values .is-bad{color:var(--crit)}.dumbbell-values .is-noise{color:var(--muted)}
+.dumbbell-row.is-unsupported{grid-template-columns:1fr auto}.dumbbell-na{font-family:var(--mono);font-size:9px;color:var(--muted);padding:3px 7px;border:1px dashed var(--line);border-radius:5px}.dumbbell-row.is-bad .dumbbell-na{color:var(--crit);border-color:color-mix(in srgb,var(--crit) 45%,var(--line))}
+.runtime-strip{display:flex;gap:7px 12px;flex-wrap:wrap;border-top:1px solid var(--line);margin-top:10px;padding-top:10px;font-family:var(--mono);font-size:9px;color:var(--muted)}.runtime-strip>small{flex-basis:100%}.runtime-strip code{font-size:8.5px;padding:0 3px}.runtime-strip b{color:var(--ink)}
+.hard-bullet-row{display:grid;grid-template-columns:minmax(185px,1.15fr) minmax(130px,.85fr) auto;gap:8px;align-items:center;padding:6px 0;border-top:1px solid color-mix(in srgb,var(--line) 65%,transparent)}
+.hard-track{height:16px;position:relative;border-radius:8px}.hard-track.limit-max{background:linear-gradient(to right,color-mix(in srgb,var(--good) 10%,transparent) 0 var(--bound),color-mix(in srgb,var(--crit) 13%,transparent) var(--bound) 100%)}.hard-track.limit-min{background:linear-gradient(to right,color-mix(in srgb,var(--crit) 13%,transparent) 0 var(--bound),color-mix(in srgb,var(--good) 10%,transparent) var(--bound) 100%)}
+.hard-bound{position:absolute;left:var(--bound);top:-2px;bottom:-2px;width:2px;background:var(--ink);opacity:.55}.hard-dot.dot-control{top:2px}.hard-dot.dot-treatment{bottom:1px}
+.hard-bullet-values{display:grid;grid-template-columns:60px 10px 60px;gap:3px;align-items:center;text-align:right;font-family:var(--mono);font-size:9px}.hard-bullet-values code{font-size:8.5px;padding:0 3px}.hard-pass{color:var(--good)}.hard-fail,.hard-missing{color:var(--crit)}.hard-unsupported{color:var(--muted)}
+.heatmap-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:9px}.heatmap{min-width:870px;table-layout:fixed;font-size:9px}.heatmap th,.heatmap td{padding:5px 4px;text-align:center;white-space:normal;border-right:1px solid color-mix(in srgb,var(--line) 55%,transparent)}.heatmap .heat-clip{min-width:128px;width:128px;text-align:left;position:sticky;left:0;z-index:1;background:var(--panel)}.heatmap thead th{font-size:8px;line-height:1.2}.heat-groups th{font-size:8.5px;letter-spacing:.04em}.heatmap tbody th{font-family:var(--mono);font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.heatmap td{font-family:var(--mono);font-variant-numeric:tabular-nums}.heat-good{color:var(--good)}.heat-bad,.heat-missing{color:var(--crit)}.heat-missing{background:color-mix(in srgb,var(--crit) 18%,transparent);font-weight:700}.heat-good.heat-soft{background:color-mix(in srgb,var(--good) 12%,transparent)}.heat-good.heat-mid{background:color-mix(in srgb,var(--good) 22%,transparent)}.heat-good.heat-strong{background:color-mix(in srgb,var(--good) 34%,transparent)}.heat-bad.heat-soft{background:color-mix(in srgb,var(--crit) 12%,transparent)}.heat-bad.heat-mid{background:color-mix(in srgb,var(--crit) 22%,transparent)}.heat-bad.heat-strong{background:color-mix(in srgb,var(--crit) 34%,transparent)}.heat-noise{color:var(--muted);background:color-mix(in srgb,var(--muted) 7%,transparent)}.heat-unsupported{color:var(--muted);background:repeating-linear-gradient(135deg,transparent 0 4px,color-mix(in srgb,var(--muted) 12%,transparent) 4px 7px)}
+.heat-legend{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px;font-family:var(--mono);font-size:8.5px;color:var(--muted)}.heat-legend span{display:inline-block;min-width:24px;padding:1px 4px;text-align:center;border:1px solid var(--line);border-radius:4px}
 .chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .metric-chart{border:1px solid var(--line);border-radius:11px;background:var(--panel);padding:14px 14px 10px;min-width:0}
 .chart-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:9px}
@@ -2050,7 +2227,7 @@ td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .bar-fill{display:block;height:100%;min-width:0;border-radius:5px}.bar-control{background:var(--accent)}
 .bar-good{background:var(--good)}.bar-bad{background:var(--crit)}.bar-flat{background:var(--muted)}
 .bar-delta{font-family:var(--mono);font-size:9.5px;text-align:right;background:none}.bar-delta.bar-good{color:var(--good)}.bar-delta.bar-bad{color:var(--crit)}.bar-delta.bar-flat{color:var(--muted)}
-.bar-na{font-family:var(--mono);font-size:9.5px;color:var(--muted);align-self:center}
+.bar-na,.bar-missing{font-family:var(--mono);font-size:9.5px;align-self:center}.bar-na{color:var(--muted)}.bar-missing{color:var(--crit);font-weight:700}
 .clipname{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--ink)}
 .pill{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:20px;font-weight:600;white-space:nowrap}
 .p-warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 15%,transparent)}
@@ -2078,8 +2255,9 @@ td{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .tag.t-treat{color:var(--warn)}
 pre{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:16px;overflow-x:auto;color:var(--ink);line-height:1.7}
 code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);padding:1px 6px;border-radius:5px}
-@media (max-width:900px){.radar-grid{grid-template-columns:1fr 1fr}.radar-card:last-child{grid-column:1/-1;max-width:480px}.chart-grid{grid-template-columns:1fr}}
-@media (max-width:640px){.radar-grid{grid-template-columns:1fr}.radar-card:last-child{grid-column:auto;max-width:none}.hard-card,.source-card{grid-template-columns:1fr}.pair,.triplet,.quad{grid-template-columns:1fr}.bar-row{grid-template-columns:88px minmax(110px,1fr) 62px}h1{font-size:28px}}
+@media (max-width:900px){.decision-axes,.decision-hard,.decision-heat{grid-column:1/-1}.chart-grid{grid-template-columns:1fr}}
+@media (max-width:640px){.wrap{padding:38px 14px 72px}.source-card{grid-template-columns:1fr}.pair,.triplet{grid-template-columns:1fr}.quad{grid-template-columns:1fr 1fr}.dumbbell-row,.hard-bullet-row{grid-template-columns:1fr}.dumbbell-values,.hard-bullet-values{grid-column:1/-1;justify-self:stretch}.hard-bullet-values{grid-template-columns:1fr 12px 1fr}.hard-bullet-values code:first-child{text-align:right}.hard-bullet-values code:last-child{text-align:left}.bar-row{grid-template-columns:88px minmax(110px,1fr) 62px}h1{font-size:28px}}
+@media (max-width:380px){.quad{grid-template-columns:1fr}.bar-row{grid-template-columns:72px minmax(100px,1fr) 54px}}
 </style></head><body>
 
 <div class="wrap">
@@ -2095,7 +2273,7 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
 
   __METRICS__
 
-  __GROUP_RADARS__
+  __GROUP_DASHBOARD__
 
   __SOURCE_ARTIFACTS__
 
@@ -2167,7 +2345,7 @@ HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
         .replace("__LEARNED_ORACLES__",
                  offline_oracle_report.build_section(treat_dir, CLIPS, name))
         .replace("__CTRL_TAG__", CTRL_TAG).replace("__TREAT_TAG__", TREAT_TAG)
-        .replace("__GROUP_RADARS__", grouped_quality_section())
+        .replace("__GROUP_DASHBOARD__", grouped_quality_section())
         .replace("__CHARTS__", scorecard_charts())
         .replace("__METRICS__", metrics_section())
         .replace("__FOOTER__", clean_footer())

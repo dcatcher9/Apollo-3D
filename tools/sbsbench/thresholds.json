@@ -32,8 +32,7 @@
 
     "static_jitter_p95": {"scope": "temporal-only", "role": "primary", "axis": "stability", "requires": "static_support", "better": "lower", "rel_tol": 0.2, "abs_floor": 0.5},
     "flow_temporal_p95": {"scope": "temporal-only", "role": "diagnostic", "axis": "stability", "requires": "flow_support", "better": "lower", "rel_tol": 0.2, "abs_floor": 1.0},
-    "depth_gt_lag_f1_p95": {"scope": "temporal-only", "role": "primary", "axis": "depth-stability", "requires": "gt_depth_temporal", "better": "lower", "rel_tol": 0.2, "abs_floor": 5.0},
-    "depth_gt_ghost_edge_pct_p95": {"scope": "temporal-only", "role": "diagnostic", "axis": "depth-stability", "requires": "gt_depth_temporal", "better": "lower", "rel_tol": 0.2, "abs_floor": 5.0}
+    "depth_gt_lag_f1_p95": {"scope": "temporal-only", "role": "primary", "axis": "depth-stability", "requires": "gt_depth_temporal", "better": "lower", "rel_tol": 0.2, "abs_floor": 5.0}
   },
   "perf_ms": {
     "depth_infer": {"rel_tol": 0.3, "abs_floor": 1.0},

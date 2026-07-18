@@ -4,10 +4,13 @@
 Media is intentionally kept outside Git.  The committed manifest fixes source URLs and frame
 windows; this tool turns those archives into the exact ``frame_*``/reference layout consumed by
 run_eval.py. Full downloads are resumable and verified when their manifest has a SHA-256 digest.
-Range-backed ZIP selections validate every HTTP byte range and ZIP-member CRC while retaining the
-upstream whole-archive checksum as provenance.
+Range-backed ZIP selections validate every HTTP byte range and ZIP-member CRC, then require a
+manifest-pinned SHA-256 of the exact decoded frame/depth/mask evidence consumed by evaluation.
+This authenticates selective extraction without downloading unrelated multi-gigabyte members.
 """
 import argparse
+import contextlib
+import glob
 import hashlib
 import io
 import json
@@ -48,6 +51,17 @@ def load_manifest(path):
         data = json.load(fh)
     if data.get("schema") not in (1, 2):
         fail(f"unsupported dataset manifest schema: {data.get('schema')}")
+    datasets, clips = data.get("datasets", {}), data.get("clips", {})
+    for clip_id, clip in clips.items():
+        try:
+            archive_specs = [datasets[clip["dataset"]]["archives"][name]
+                             for name in clip["archives"]]
+        except (KeyError, TypeError) as exc:
+            fail(f"invalid archive references for clip {clip_id}: {exc}")
+        if any(spec.get("access") == "http_range_zip" for spec in archive_specs):
+            digest = clip.get("prepared_evidence_sha256")
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                fail(f"{clip_id}: range-backed clip requires prepared_evidence_sha256")
     return data
 
 
@@ -201,6 +215,48 @@ def _write_image_bytes(data, path, rgb=False):
     with Image.open(io.BytesIO(data)) as image:
         image = image.convert("RGB" if rgb else image.mode)
         image.save(path, compress_level=3)
+
+
+def prepared_evidence_sha256(directory):
+    """Hash decoded prepared evidence independently of PNG/NPY container encoding."""
+    paths = sorted(
+        path for path in glob.glob(os.path.join(directory, "**", "frame_*.*"), recursive=True)
+        if os.path.isfile(path))
+    if not paths:
+        fail(f"no prepared frame evidence under {directory}")
+    digest = hashlib.sha256()
+    for path in paths:
+        relative = os.path.relpath(path, directory).replace("\\", "/").encode("utf-8")
+        suffix = os.path.splitext(path)[1].lower()
+        if suffix == ".npy":
+            value = np.load(path, allow_pickle=False)
+        elif suffix in (".png", ".jpg", ".jpeg"):
+            with Image.open(path) as image:
+                value = np.asarray(image).copy()
+        else:
+            fail(f"unsupported prepared evidence format: {path}")
+        value = np.ascontiguousarray(value)
+        shape = json.dumps(value.shape, separators=(",", ":")).encode("ascii")
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(value.dtype.str.encode("ascii"))
+        digest.update(b"\0")
+        digest.update(shape)
+        digest.update(b"\0")
+        digest.update(value.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def authenticate_prepared_range_evidence(clip_id, clip, directory):
+    """Reject range-selected data unless its consumed decoded evidence matches the manifest."""
+    expected = clip.get("prepared_evidence_sha256")
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        fail(f"{clip_id}: range-backed clip requires prepared_evidence_sha256")
+    actual = prepared_evidence_sha256(directory)
+    if actual != expected:
+        fail(
+            f"{clip_id}: prepared evidence SHA-256 mismatch: expected {expected}, got {actual}")
+    return actual
 
 
 def prepare_tum(clip_id, clip, dataset, archives, out_dir, suite):
@@ -392,8 +448,15 @@ def _indexed_archive_members(names, marker, pattern):
 
 def prepare_sintel(clip_id, clip, dataset, archives, out_dir, suite):
     archive = archives[clip["archives"][0]]
+    range_backed = isinstance(archive, dict)
     sequence, render_pass = clip["sequence"], clip["pass"]
-    with zipfile.ZipFile(archive) as zf:
+    with contextlib.ExitStack() as stack:
+        if range_backed:
+            if archive.get("access") != "http_range_zip":
+                fail(f"unsupported remote Sintel archive contract: {archive.get('access')!r}")
+            archive = stack.enter_context(
+                HTTPRangeReader(archive["url"], archive.get("size")))
+        zf = stack.enter_context(zipfile.ZipFile(archive))
         names = zf.namelist()
         left_marker = f"/{render_pass}_left/{sequence}/"
         right_marker = f"/{render_pass}_right/{sequence}/"
@@ -476,6 +539,8 @@ def prepare_sintel(clip_id, clip, dataset, archives, out_dir, suite):
                     os.path.join(out_dir, directory, frame_name), compress_level=3)
             selection.append({"source_index": source_i, "dataset_frame": frame_id,
                               "sequence": sequence, "pass": render_pass})
+        if range_backed:
+            authenticate_prepared_range_evidence(clip_id, clip, out_dir)
         return selection
 
 
@@ -505,6 +570,7 @@ def prepare_spring(clip_id, clip, dataset, archives, out_dir, suite):
                                rgb=True)
             selection.append({"source_index": source_i, "dataset_frame": frame_id,
                               "sequence": sequence, "split": "test"})
+        authenticate_prepared_range_evidence(clip_id, clip, out_dir)
         return selection
 
 
@@ -599,6 +665,8 @@ def prepare_clip(manifest, clip_id, clip, downloads_dir, prepared_root):
         for key in ("source_artifacts", "source_artifact_frame"):
             if key in clip:
                 meta[key] = clip[key]
+        if "prepared_evidence_sha256" in clip:
+            meta["prepared_evidence_sha256"] = clip["prepared_evidence_sha256"]
         with open(os.path.join(temp, "meta.json"), "w", encoding="utf-8") as fh:
             json.dump(meta, fh, indent=2)
         if os.path.isdir(final):

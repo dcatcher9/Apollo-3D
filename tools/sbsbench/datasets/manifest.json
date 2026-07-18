@@ -48,6 +48,8 @@
         "stereo_training": {
           "url": "https://files.is.tue.mpg.de/jwulff/sintel/MPI-Sintel-stereo-training-20150305.zip",
           "filename": "MPI-Sintel-stereo-training-20150305.zip",
+          "access": "http_range_zip",
+          "size": 2612604481,
           "sha256": "397506a0ab193189fb367f77ea772ef75435aacbc0a9f950c484df9a0ea3673f"
         }
       }
@@ -150,7 +152,8 @@
       "description": "Cinematic non-rigid action, layered silhouettes and rapid motion.",
       "start": 5,
       "stride": 1,
-      "count": 24
+      "count": 24,
+      "prepared_evidence_sha256": "0312790e77736f1a9d195405a59c0c20b90b023f3faa8e93fbe8a81adc07d0fd"
     },
     "sintel_market": {
       "dataset": "mpi_sintel_stereo",
@@ -162,7 +165,8 @@
       "description": "Cinematic market scene with people, clutter and depth layering.",
       "start": 10,
       "stride": 1,
-      "count": 24
+      "count": 24,
+      "prepared_evidence_sha256": "4a122843ebebca97f19749e2cf66a5f4a20ed8b9485156a28dd5f22f2be973a1"
     },
     "spring_skeleton_cave": {
       "dataset": "spring_stereo",
@@ -174,6 +178,7 @@
       "start": 44,
       "stride": 1,
       "count": 24,
+      "prepared_evidence_sha256": "82449f7314098335dc89f5ab86c2e1554817415a7243ff02b3cab169061046e9",
       "source_artifacts": "The source contains strong volumetric haze, bright skeletal highlights and depth-of-field softness; compare the original before attributing these edges to the stereo warp.",
       "source_artifact_frame": 11
     },
@@ -187,6 +192,7 @@
       "start": 49,
       "stride": 1,
       "count": 24,
+      "prepared_evidence_sha256": "a3fb1a5691afeb5eb6384b738c5d096690a94dbeddb62f63a840bc167fc1598c",
       "source_artifacts": "The rendered source intentionally uses shallow depth of field around the character and prop; naturally blurred edges must not be counted as warp blur.",
       "source_artifact_frame": 11
     },
@@ -200,6 +206,7 @@
       "start": 47,
       "stride": 1,
       "count": 24,
+      "prepared_evidence_sha256": "0f2a0463557235471fd4c0a539178bdbf957e6f38c7aa5b32f6587e3cb9cad7b",
       "source_artifacts": "The source includes baked sun bloom and fine high-contrast gravel texture; the original frame is required when reviewing halo and stretch evidence.",
       "source_artifact_frame": 11
     },
@@ -213,6 +220,7 @@
       "start": 47,
       "stride": 1,
       "count": 24,
+      "prepared_evidence_sha256": "36b5e914b56a789e90ac349a64354271f63a011e1bbddd6ecd517876ff623866",
       "source_artifacts": "The source deliberately contains heavy depth-of-field blur and translucent motion-softened seed edges; these are baked into both rendered views.",
       "source_artifact_frame": 11
     },

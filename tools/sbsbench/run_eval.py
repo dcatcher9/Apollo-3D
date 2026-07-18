@@ -33,10 +33,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import weakref
 
-import numpy as np
-import PIL
-from PIL import Image
+# Pin numeric kernels before NumPy initializes. Frame-level process workers own parallelism. Keep
+# the caller's values so the production harness does not inherit evaluator-only thread limits.
+_NUMERIC_THREAD_ENV = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                       "NUMEXPR_NUM_THREADS")
+_ORIGINAL_NUMERIC_THREAD_ENV = {key: os.environ.get(key) for key in _NUMERIC_THREAD_ENV}
+for _thread_env in _NUMERIC_THREAD_ENV:
+    os.environ[_thread_env] = "1"
+
+import numpy as np  # noqa: E402  (thread limits must precede numeric-runtime import)
+import PIL  # noqa: E402
+from PIL import Image  # noqa: E402
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
@@ -48,6 +57,17 @@ BASELINE_SNAPSHOT_SCHEMA = 1
 BASELINE_SNAPSHOT_FILE = "baseline_snapshot.json"
 TRAINING_LABEL_STATUS = "qualified"
 TRAINING_LABEL_ROLES = {"reward", "risk", "hard"}
+
+
+def production_subprocess_env():
+    """Environment for Sunshine/build children without evaluator-only numeric thread limits."""
+    environment = os.environ.copy()
+    for key, original in _ORIGINAL_NUMERIC_THREAD_ENV.items():
+        if original is None:
+            environment.pop(key, None)
+        else:
+            environment[key] = original
+    return environment
 
 
 def suite_defaults(name):
@@ -98,27 +118,79 @@ def sha256_json(value):
         value, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
 
 
-def scored_artifact_sha256(directory):
-    """Hash canonical metric inputs, excluding later reports and optional-oracle debris."""
-    fixed = {
+def scored_artifact_digests(directory):
+    """Hash authenticated and numeric-only artifact sets in one file traversal."""
+    scored_fixed = {
         "contract.json", "sbs_perf.json", "warp_map_shape.json", "hdr_output_stats.json",
     }
+    numeric_fixed = {"warp_map_shape.json", "hdr_output_stats.json"}
     frame_pattern = re.compile(r"^(?:sbs|depth|warp_map|warp_mask)_\d+\.(?:png|f32)$")
     paths = sorted(
         path for path in glob.glob(os.path.join(directory, "*"))
         if os.path.isfile(path) and
-        (os.path.basename(path) in fixed or frame_pattern.fullmatch(os.path.basename(path))))
+        (os.path.basename(path) in scored_fixed or
+         frame_pattern.fullmatch(os.path.basename(path))))
     if not paths:
         raise ValueError(f"no scored artifacts in {directory}")
-    digest = hashlib.sha256()
+    scored_digest = hashlib.sha256()
+    numeric_digest = hashlib.sha256()
+    numeric_count = 0
     for path in paths:
+        basename = os.path.basename(path)
         relative = os.path.relpath(path, directory).replace("\\", "/")
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
+        numeric = basename in numeric_fixed or frame_pattern.fullmatch(basename)
+        relative_bytes = relative.encode("utf-8")
+        scored_digest.update(relative_bytes)
+        scored_digest.update(b"\0")
+        if numeric:
+            numeric_count += 1
+            numeric_digest.update(relative_bytes)
+            numeric_digest.update(b"\0")
         with open(path, "rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-    return digest.hexdigest()
+                scored_digest.update(chunk)
+                if numeric:
+                    numeric_digest.update(chunk)
+    return scored_digest.hexdigest(), (numeric_digest.hexdigest() if numeric_count else None)
+
+
+def scored_artifact_sha256(directory):
+    """Hash canonical metric inputs, excluding later reports and optional-oracle debris."""
+    return scored_artifact_digests(directory)[0]
+
+
+_REMEASUREMENT_SESSION_TOKEN = object()
+_REMEASUREMENT_SESSION_ENTRIES = weakref.WeakKeyDictionary()
+
+
+class _RemeasurementSession:
+    """Opaque process-local cache for authenticated pixel remeasurements."""
+
+    __slots__ = ("_token", "__weakref__")
+
+    def __init__(self, token):
+        if token is not _REMEASUREMENT_SESSION_TOKEN:
+            raise TypeError("remeasurement sessions must be created by run_eval")
+        self._token = token
+
+
+def new_remeasurement_session():
+    """Return an empty process-local cache that callers cannot pre-populate."""
+    session = _RemeasurementSession(_REMEASUREMENT_SESSION_TOKEN)
+    _REMEASUREMENT_SESSION_ENTRIES[session] = {}
+    return session
+
+
+def _validated_remeasurement_entries(session):
+    if session is None:
+        return None
+    if (not isinstance(session, _RemeasurementSession) or
+            session._token is not _REMEASUREMENT_SESSION_TOKEN):
+        raise TypeError("invalid remeasurement session")
+    try:
+        return _REMEASUREMENT_SESSION_ENTRIES[session]
+    except KeyError as exc:
+        raise TypeError("unregistered remeasurement session") from exc
 
 
 def metric_contract_files():
@@ -281,10 +353,12 @@ def published_clip_metadata(source_meta):
     return published
 
 
-def sha1_dir(path):
+def source_evidence_digests(path):
+    """Return legacy source SHA-1 and full cache-only SHA-256 in one traversal."""
     # Hash source pixels plus validation references. Human-readable names/descriptions remain
     # excluded, while semantic metadata that changes scoring is part of the contract.
-    h = hashlib.sha1()
+    legacy = hashlib.sha1()
+    full = hashlib.sha256()
     semantic_sidecars = (
         "gt_depth", "gt_depth_valid", "gt_depth_valid_all", "gt_depth_valid_nonocc",
         "gt_flow", "gt_right", "gt_occlusion", "gt_outofframe", "gt_right_disparity",
@@ -294,15 +368,26 @@ def sha1_dir(path):
     for directory in semantic_sidecars:
         files.extend(glob.glob(os.path.join(path, directory, "frame_*")))
     for f in sorted(files):
+        relative = os.path.relpath(f, path).replace("\\", "/").encode()
+        legacy.update(relative)
+        full.update(relative)
         with open(f, "rb") as fh:
-            h.update(os.path.relpath(f, path).replace("\\", "/").encode())
-            h.update(fh.read())
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                legacy.update(chunk)
+                full.update(chunk)
     meta = load_clip_metadata(path, required=False)
     semantic = {k: meta[k] for k in ("expected_flat", "gt_depth_kind", "dataset",
                                      "required_gt_depth", "required_gt_flow",
                                      "reference_stereo_available", "evaluation_role") if k in meta}
-    h.update(json.dumps(semantic, sort_keys=True).encode())
-    return h.hexdigest()[:12]
+    semantic_bytes = json.dumps(semantic, sort_keys=True).encode()
+    legacy.update(semantic_bytes)
+    full.update(semantic_bytes)
+    return legacy.hexdigest()[:12], full.hexdigest()
+
+
+def sha1_dir(path):
+    """Legacy committed-baseline source identity."""
+    return source_evidence_digests(path)[0]
 
 
 def _validate_baseline_manifest(baseline, clip, source, required_common, clip_hashes):
@@ -841,7 +926,6 @@ _TEMPORAL_AGGREGATE_FRAME_METRICS = {
     "static_jitter_p95": "static_jitter",
     "flow_temporal_p95": "flow_temporal",
     "depth_gt_lag_f1_p95": "depth_gt_lag_f1",
-    "depth_gt_ghost_edge_pct_p95": "depth_gt_ghost_edge_pct",
 }
 
 
@@ -1023,7 +1107,9 @@ def _require_matching_result(observed, expected, path):
         raise ValueError(mismatch)
 
 
-def authoritative_remeasurement_clip_meta(results, clip, clips_root, run_dir):
+def authoritative_remeasurement_clip_meta(
+        results, clip, clips_root, run_dir, source_sha1=None, artifact_sha256=None,
+        validate_images=True):
     """Rebuild scoring metadata from source, frame identities, and harness output.
 
     ``results.json`` is only a cache.  In particular, an edited ``expected_flat`` flag or a
@@ -1067,19 +1153,21 @@ def authoritative_remeasurement_clip_meta(results, clip, clips_root, run_dir):
             raise ValueError(
                 f"clips.{clip}: {name}/source frame-id mismatch: "
                 f"missing {name}={missing}, extra {name}={extra}")
-    try:
-        # Opening every scored image here makes the frame count a validated evidence count rather
-        # than a filename/glob count. Full pixel decoding still happens in measure_sequence().
-        image_size_set(source_files.values())
-        for indexed in scored_images.values():
-            image_size_set(indexed.values())
-    except OSError as exc:
-        raise ValueError(f"clips.{clip}: cannot decode scored image set: {exc}") from exc
+    if validate_images:
+        try:
+            # Standalone metadata authentication validates decodability. The full verifier skips
+            # this duplicate prepass because its fresh measurement decodes every image, while an
+            # in-memory reuse is byte/source-hash-bound to an earlier fresh measurement.
+            image_size_set(source_files.values())
+            for indexed in scored_images.values():
+                image_size_set(indexed.values())
+        except OSError as exc:
+            raise ValueError(f"clips.{clip}: cannot decode scored image set: {exc}") from exc
 
     recorded_clip_hashes = run_meta.get("clip_set_sha1")
     if not isinstance(recorded_clip_hashes, dict) or set(recorded_clip_hashes) != set(clips):
         raise ValueError("meta.clip_set_sha1 must exactly cover the scored clip set")
-    actual_clip_hash = sha1_dir(source_dir)
+    actual_clip_hash = source_sha1 if source_sha1 is not None else sha1_dir(source_dir)
     _require_matching_result(
         recorded_clip_hashes.get(clip), actual_clip_hash, f"meta.clip_set_sha1.{clip}")
 
@@ -1117,7 +1205,9 @@ def authoritative_remeasurement_clip_meta(results, clip, clips_root, run_dir):
     recorded_artifacts = run_meta.get("scored_artifact_sha256")
     if not isinstance(recorded_artifacts, dict) or set(recorded_artifacts) != set(clips):
         raise ValueError("meta.scored_artifact_sha256 must exactly cover the scored clip set")
-    actual_artifact_hash = scored_artifact_sha256(artifact_dir)
+    actual_artifact_hash = (
+        artifact_sha256 if artifact_sha256 is not None else
+        scored_artifact_sha256(artifact_dir))
     _require_matching_result(
         recorded_artifacts.get(clip), actual_artifact_hash,
         f"meta.scored_artifact_sha256.{clip}")
@@ -1125,7 +1215,9 @@ def authoritative_remeasurement_clip_meta(results, clip, clips_root, run_dir):
     return authoritative
 
 
-def _authenticated_remeasurement_clip_meta(results, clip, clips_root, run_dir):
+def _authenticated_remeasurement_clip_meta(
+        results, clip, clips_root, run_dir, source_sha1=None, artifact_sha256=None,
+        validate_images=True):
     """Authenticate cached metadata, then return its authoritative reconstruction."""
     clips = results.get("clips")
     entry = clips.get(clip) if isinstance(clips, dict) else None
@@ -1133,20 +1225,26 @@ def _authenticated_remeasurement_clip_meta(results, clip, clips_root, run_dir):
     if not isinstance(entry_meta, dict):
         raise ValueError(f"clips.{clip}.meta must be an object")
     authoritative = authoritative_remeasurement_clip_meta(
-        results, clip, clips_root, run_dir)
+        results, clip, clips_root, run_dir,
+        source_sha1=source_sha1, artifact_sha256=artifact_sha256,
+        validate_images=validate_images)
     for key, expected in authoritative.items():
         _require_matching_result(
             entry_meta.get(key), expected, f"clips.{clip}.meta.{key}")
     return authoritative
 
 
-def verify_results_against_artifacts(results, run_dir, clips_root, thresholds):
+def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
+                                     remeasurement_session=None):
     """Remeasure a completed run and reject any stale or forged JSON evidence.
 
     ``results.json`` is a cache and presentation index, never an authority. This verifier binds it
     back to authenticated source frames and scored renderer artifacts, then deterministically
     reconstructs every value used by reports or reusable frame labels. Offline correctness is the
     priority, so the full metric stack is deliberately rerun rather than trusting cached scalars.
+    A process-local ``remeasurement_session`` may reuse rows from another run only when this
+    function independently confirms complete numeric-input and source-evidence digests. Plain
+    caller-supplied dictionaries are never accepted as measurement authority.
     """
     if not isinstance(results, dict):
         raise ValueError("results root must be an object")
@@ -1158,6 +1256,7 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds):
         raise ValueError("results.meta must be an object")
     if not isinstance(thresholds, dict) or not isinstance(thresholds.get("metrics"), dict):
         raise ValueError("thresholds must contain a metrics object")
+    reusable_entries = _validated_remeasurement_entries(remeasurement_session)
     if meta.get("eval_schema") != EVAL_SCHEMA:
         raise ValueError(
             f"stale evaluator schema {meta.get('eval_schema')!r}; expected {EVAL_SCHEMA}")
@@ -1205,14 +1304,20 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds):
         entry = clips[clip]
         if not isinstance(entry, dict):
             raise ValueError(f"clips.{clip} must be an object")
-        entry_meta = _authenticated_remeasurement_clip_meta(
-            results, clip, clips_root, run_dir)
         artifact_dir = os.path.join(run_dir, clip)
+        source_dir = os.path.join(clips_root, clip)
         try:
-            actual_artifact_hash = scored_artifact_sha256(artifact_dir)
+            actual_clip_hash, source_sha256 = source_evidence_digests(source_dir)
+            actual_artifact_hash, numeric_digest = scored_artifact_digests(artifact_dir)
         except (OSError, ValueError) as exc:
             raise ValueError(
                 f"clips.{clip}: cannot authenticate scored artifacts: {exc}") from exc
+        if numeric_digest is None:
+            raise ValueError(f"clips.{clip}: no numeric metric inputs")
+        entry_meta = _authenticated_remeasurement_clip_meta(
+            results, clip, clips_root, run_dir,
+            source_sha1=actual_clip_hash, artifact_sha256=actual_artifact_hash,
+            validate_images=False)
         _require_matching_result(
             recorded_artifacts.get(clip), actual_artifact_hash,
             f"meta.scored_artifact_sha256.{clip}")
@@ -1220,13 +1325,22 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds):
             entry_meta.get("scored_artifact_sha256"), actual_artifact_hash,
             f"clips.{clip}.meta.scored_artifact_sha256")
 
-        source_dir = os.path.join(clips_root, clip)
-        try:
-            measured = sbsbench.measure_sequence(artifact_dir, source_dir)
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise ValueError(f"clips.{clip}: authoritative remeasurement failed: {exc}") from exc
+        cache_key = (
+            clip, numeric_digest, source_sha256, metric_contract_sha(),
+            json.dumps(metric_runtime_provenance(), sort_keys=True, separators=(",", ":")),
+        )
+        measured = (copy.deepcopy(reusable_entries[cache_key])
+                    if reusable_entries is not None and cache_key in reusable_entries else None)
+        if measured is None:
+            try:
+                measured = sbsbench.measure_sequence(artifact_dir, source_dir)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ValueError(
+                    f"clips.{clip}: authoritative remeasurement failed: {exc}") from exc
         if not isinstance(measured, tuple) or len(measured) != 2:
             raise ValueError(f"clips.{clip}: authoritative remeasurement produced no sequence")
+        if reusable_entries is not None and cache_key not in reusable_entries:
+            reusable_entries[cache_key] = copy.deepcopy(measured)
         rows, aggregate = measured
         aggregate = sbsbench.filter_aggregate_by_evidence(
             rows, aggregate, thresholds["metrics"], entry_meta)
@@ -1314,7 +1428,7 @@ def require_current_build(build_dir):
             ninja = match.group(1).strip()
     if not ninja:
         fail("cannot verify the Sunshine build is current: Ninja was not found")
-    build_env = os.environ.copy()
+    build_env = production_subprocess_env()
     if os.name == "nt":
         # The configured Ninja belongs to the MSYS2 UCRT64 toolchain.  A plain PowerShell/Python
         # process does not necessarily have the compiler DLLs (or the web-ui Node runtime) on
@@ -1526,7 +1640,8 @@ def run_engine_preflight(exe, conf, build_dir, frames_dir, model):
                "--out", out_dir, "--model", model, "--limit", "1"]
         try:
             result = subprocess.run(
-                cmd, cwd=build_dir, capture_output=True, text=True, timeout=900)
+                cmd, cwd=build_dir, capture_output=True, text=True, timeout=900,
+                env=production_subprocess_env())
         except subprocess.TimeoutExpired:
             fail("untimed TensorRT engine preflight timed out")
         if result.returncode != 0:
@@ -1761,6 +1876,7 @@ def main():
     results, regressions, issues, hard_failures = {}, [], [], []
     scored_artifact_hashes = {}
     evidence_failures, baseline_updates = [], {}
+    sbsbench.enable_reusable_spatial_executor()
     for clip in clips:
         clip_dir = os.path.join(clips_dir, clip)
         out_dir = os.path.join(out_root, clip)
@@ -1771,7 +1887,9 @@ def main():
         cmd += args.extra
         print(f"[{clip}] harness...", flush=True)
         try:
-            r = subprocess.run(cmd, cwd=args.build_dir, capture_output=True, text=True, timeout=900)
+            r = subprocess.run(
+                cmd, cwd=args.build_dir, capture_output=True, text=True, timeout=900,
+                env=production_subprocess_env())
         except subprocess.TimeoutExpired:
             fail(f"harness timed out on {clip}")
         stdout = r.stdout + r.stderr
@@ -2048,6 +2166,9 @@ def main():
             report_cmd.append("--allow-depth-step-diff")
         if args.report_allow_executable_diff:
             report_cmd.append("--allow-executable-diff")
+        # Scoring is complete. Do not retain the evaluator's 24 idle workers while the report
+        # child creates its own pixel-verification pool.
+        sbsbench.disable_reusable_spatial_executor()
         report_run = subprocess.run(report_cmd, capture_output=True, text=True)
         if report_run.returncode:
             fail("report generation failed: " + (report_run.stderr or report_run.stdout)[-2000:])

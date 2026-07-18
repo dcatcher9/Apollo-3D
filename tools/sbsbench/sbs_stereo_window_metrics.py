@@ -261,7 +261,7 @@ def _canonical_geometry(mapping, height, eye_width, source_width, source_height,
     }
 
 
-def _perceptual_weight(luma):
+def _perceptual_weight(luma, return_maps=True):
     """Display-agnostic contrast/frequency/orientation approximation in [0, 1]."""
     height, width = luma.shape
     # A one-reference-pixel optical prefilter keeps Nyquist alternation/JPEG grain from receiving
@@ -304,7 +304,10 @@ def _perceptual_weight(luma):
     # horizontal line has predominantly vertical gradient, hence the 0.70 factor on gy.
     orientation_weight = ((gx + 0.70 * gy) / np.maximum(gx + gy, 1e-8))
     orientation_weight[gx + gy < 1e-8] = 0.70
-    return (contrast_weight * orientation_weight).astype(np.float32), {
+    weight = (contrast_weight * orientation_weight).astype(np.float32)
+    if not return_maps:
+        return weight, None
+    return weight, {
         "contrast_weight": contrast_weight.astype(np.float32),
         "orientation_weight": orientation_weight.astype(np.float32),
         "band_limited_contrast": detail.astype(np.float32),
@@ -422,7 +425,7 @@ def measure_stereo_window_violation(
         source_sample_transform=None,
         disparity_threshold_pct=0.10, disparity_full_scale_pct=3.0,
         component_jump_pct=0.35, depth_jump=0.08, analysis_max_width=512,
-        min_support_count=128, return_maps=False):
+        min_support_count=128, return_maps=False, compact=False):
     """Measure exact, border-connected signed stereo-window risk.
 
     Args:
@@ -446,6 +449,8 @@ def measure_stereo_window_violation(
         analysis_max_width: Fixed source-space cap used for resolution robustness.
         min_support_count: Abstain when fewer mutually supported canonical samples remain.
         return_maps: Return ``(metrics, maps)`` for detector-localized visual evidence.
+        compact: Compute only the support and crossed burden consumed by canonical evaluation.
+            Validators and report evidence retain the default full diagnostic result.
 
     Returns:
         Crossed (in-front) burden, area, and largest-component percentages; opposite-sign border
@@ -460,6 +465,8 @@ def measure_stereo_window_violation(
         raise ValueError("component jump limits must be positive")
     if analysis_max_width < 16 or min_support_count < 1:
         raise ValueError("analysis/support limits are too small")
+    if compact and return_maps:
+        raise ValueError("compact stereo-window scoring cannot return diagnostic maps")
 
     (mapping, height, eye_width, source_width, source_height, scale_x, scale_y,
      source_image, depth, coverage_mask) = _validate(
@@ -486,7 +493,8 @@ def measure_stereo_window_violation(
         luma = (transformed @ _LUMA).astype(np.float32)
     depth_grid = (_sample_grid(depth, analysis_width, analysis_height)
                   if depth is not None else None)
-    perceptual_weight, perceptual_maps = _perceptual_weight(luma)
+    perceptual_weight, perceptual_maps = _perceptual_weight(
+        luma, return_maps=not compact)
 
     common = geometry["common"]
     disparity_pct = geometry["disparity_pct"]
@@ -496,13 +504,16 @@ def measure_stereo_window_violation(
     seed_margin_px = max(1.5, 1.5 * output_sample_step)
 
     crossed = common & (disparity_pct <= -disparity_threshold_pct)
-    uncrossed = common & (disparity_pct >= disparity_threshold_pct)
     crossed_risk, crossed_left, crossed_right, crossed_proximity, _ = _border_risk(
         crossed, geometry, crossed=True, component_jump_pct=component_jump_pct,
         depth=depth_grid, depth_jump=depth_jump, seed_margin_px=seed_margin_px)
-    uncrossed_risk, uncrossed_left, uncrossed_right, uncrossed_proximity, _ = _border_risk(
-        uncrossed, geometry, crossed=False, component_jump_pct=component_jump_pct,
-        depth=depth_grid, depth_jump=depth_jump, seed_margin_px=seed_margin_px)
+    uncrossed = common & (disparity_pct >= disparity_threshold_pct)
+    if compact:
+        uncrossed_risk = uncrossed_left = uncrossed_right = uncrossed_proximity = None
+    else:
+        uncrossed_risk, uncrossed_left, uncrossed_right, uncrossed_proximity, _ = _border_risk(
+            uncrossed, geometry, crossed=False, component_jump_pct=component_jump_pct,
+            depth=depth_grid, depth_jump=depth_jump, seed_margin_px=seed_margin_px)
 
     # Invalid inverse locations carry NaN by design.  Zero them before arithmetic: IEEE
     # ``NaN * False`` remains NaN and would otherwise poison the frame aggregate.
@@ -512,7 +523,8 @@ def measure_stereo_window_violation(
         / (disparity_full_scale_pct - disparity_threshold_pct), 0.0, 1.0)
     crossed_contribution = (perceptual_weight * disparity_weight
                             * crossed_proximity * crossed_risk)
-    uncrossed_contribution = (perceptual_weight * disparity_weight
+    uncrossed_contribution = (None if compact else
+                              perceptual_weight * disparity_weight
                               * uncrossed_proximity * uncrossed_risk)
 
     prefix = "experimental_stereo_window_"
@@ -528,7 +540,11 @@ def measure_stereo_window_violation(
         prefix + "uncrossed_area_pct",
         prefix + "uncrossed_largest_component_pct",
     )
-    if support_count < min_support_count:
+    if compact:
+        metrics[scored_keys[0]] = (
+            None if support_count < min_support_count else
+            float(np.sum(crossed_contribution) / support_count * 100.0))
+    elif support_count < min_support_count:
         metrics.update({key: None for key in scored_keys})
     else:
         crossed_values = _metric_triplet(

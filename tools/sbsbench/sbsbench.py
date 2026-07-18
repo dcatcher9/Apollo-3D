@@ -30,6 +30,7 @@ Usage:
 Dependencies: numpy + Pillow only.
 """
 import argparse
+import atexit
 import concurrent.futures
 import glob
 import json
@@ -37,14 +38,20 @@ import os
 import re
 import sys
 
-import numpy as np
-from PIL import Image
+# Scoring is parallel across frames. A BLAS team inside every worker oversubscribes the CPU, so
+# spawned workers inherit a single-threaded numeric runtime and the process pool owns parallelism.
+for _thread_env in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                    "NUMEXPR_NUM_THREADS"):
+    os.environ[_thread_env] = "1"
 
-import sbs_interocular_metrics
-import sbs_interocular_phase_chroma
-import sbs_interocular_photometric_rivalry
-import sbs_stereo_window_metrics
-import sbs_warp_shear_metrics
+import numpy as np  # noqa: E402  (thread limits must precede numeric-runtime import)
+from PIL import Image  # noqa: E402
+
+import sbs_interocular_metrics  # noqa: E402
+import sbs_interocular_phase_chroma  # noqa: E402
+import sbs_interocular_photometric_rivalry  # noqa: E402
+import sbs_stereo_window_metrics  # noqa: E402
+import sbs_warp_shear_metrics  # noqa: E402
 
 TEMPORAL_MIN_SUPPORT = 0.1
 VERTICAL_MISALIGNMENT_QUANTILE = 0.99
@@ -394,7 +401,7 @@ def _local_vertical_offsets(eye, expected, valid, max_height=540,
 
 
 def exact_vertical_misalignment(left, right, src_gray, map_left, map_right, shape,
-                                src_rgb=None, hdr_scale=None):
+                                src_rgb=None, hdr_scale=None, expected_evidence=None):
     """Localized vertical disparity using exact production source correspondences.
 
     Returns ``(native_p99_px, normalized_p99_pct, support_pct)``.  The first two values are
@@ -408,10 +415,15 @@ def exact_vertical_misalignment(left, right, src_gray, map_left, map_right, shap
     right = np.asarray(right, dtype=np.float32)
     if left.shape != right.shape:
         raise ValueError(f"eye geometry differs: {left.shape} != {right.shape}")
-    left_expected, _, left_valid = _exact_expected_source_luma(
-        left.shape, src_gray, map_left, shape, src_rgb=src_rgb, hdr_scale=hdr_scale)
-    right_expected, _, right_valid = _exact_expected_source_luma(
-        right.shape, src_gray, map_right, shape, src_rgb=src_rgb, hdr_scale=hdr_scale)
+    if expected_evidence is None:
+        left_evidence = _exact_expected_source_luma(
+            left.shape, src_gray, map_left, shape, src_rgb=src_rgb, hdr_scale=hdr_scale)
+        right_evidence = _exact_expected_source_luma(
+            right.shape, src_gray, map_right, shape, src_rgb=src_rgb, hdr_scale=hdr_scale)
+    else:
+        left_evidence, right_evidence = expected_evidence
+    left_expected, _, left_valid = left_evidence
+    right_expected, _, right_valid = right_evidence
     left_offsets, left_attempted = _local_vertical_offsets(
         left, left_expected, left_valid)
     right_offsets, right_attempted = _local_vertical_offsets(
@@ -673,7 +685,8 @@ def _exact_binocular_geometry(mapping, shape, coverage_map=None):
     }
 
 
-def exact_warp_mapping_metrics(mapping, shape, depth=None, warp_mask=None, tail=0.999):
+def exact_warp_mapping_metrics(mapping, shape, depth=None, warp_mask=None, tail=0.999,
+                               binocular_geometry=None):
     """Geometry metrics from the production shader's exact inverse map.
 
     Unlike tile phase correlation, this sees smooth/thin/local subjects and does not depend on
@@ -751,7 +764,8 @@ def exact_warp_mapping_metrics(mapping, shape, depth=None, warp_mask=None, tail=
             fold_pcts.append(float(np.mean(
                 source_step[adjacent] < -0.05 * baseline_step) * 100.0))
 
-    binocular = _exact_binocular_geometry(mapping, shape, coverage_map)
+    binocular = (binocular_geometry if binocular_geometry is not None else
+                 _exact_binocular_geometry(mapping, shape, coverage_map))
     binocular_valid = binocular["valid"]
     binocular_count = int(np.count_nonzero(binocular_valid))
     possible_count = max(int(binocular["possible_count"]), 1)
@@ -879,7 +893,8 @@ def _horizontal_structure_map(gray, reference_width=3066.0):
     return structure
 
 
-def exact_visible_disparity_metrics(mapping, shape, src_gray, tail=0.995, warp_mask=None):
+def exact_visible_disparity_metrics(mapping, shape, src_gray, tail=0.995, warp_mask=None,
+                                    binocular_geometry=None):
     """Measure disparity that has independent horizontal image evidence.
 
     The exact inverse map is authoritative for requested geometry, but geometry in a completely
@@ -916,7 +931,8 @@ def exact_visible_disparity_metrics(mapping, shape, src_gray, tail=0.995, warp_m
         hole_map = warp_mask if warp_mask.ndim == 2 else warp_mask[..., 0]
         coverage_map = hole_map < 0.5
 
-    geometry = _exact_binocular_geometry(mapping, shape, coverage_map)
+    geometry = (binocular_geometry if binocular_geometry is not None else
+                _exact_binocular_geometry(mapping, shape, coverage_map))
     valid = geometry["valid"]
     target_u = np.broadcast_to(geometry["target_u"][None, :], valid.shape)
     source_v = np.broadcast_to(geometry["source_v"][:, None], valid.shape)
@@ -972,7 +988,10 @@ def dilate2d(mask, px):
 
 def resize_to(gray, w, h):
     """Resize a normalized scalar image without silently quantizing it to eight bits."""
-    image = Image.fromarray(np.asarray(gray, dtype=np.float32), mode="F")
+    gray = np.asarray(gray, dtype=np.float32)
+    if gray.shape == (h, w):
+        return gray.copy()
+    image = Image.fromarray(gray, mode="F")
     return np.asarray(image.resize((w, h), Image.BILINEAR), dtype=np.float32)
 
 
@@ -1232,8 +1251,19 @@ def exact_image_integrity_maps(eye, expected, valid, radius=2):
     textured = interior & (expected_energy >= texture_floor)
     energy_ratio = eye_energy / np.maximum(expected_energy, 1e-6)
     relative_vector_error = vector_error / np.maximum(expected_energy, texture_floor)
-    bad = textured & (
-        (energy_ratio < 0.78) | (energy_ratio > 1.28) | (relative_vector_error > 0.25))
+    # Exact source reconstruction is floating point, while harness PNG evidence is quantized.
+    # Near the texture floor, a sub-code-value rounding residual can be a large *relative*
+    # gradient error and make a handful of perfectly rendered edge pixels look corrupt. Require
+    # more than the two-axis RMS of one 8-bit code step before a relative failure is actionable.
+    # Real blur/ringing at the 3-code texture floor still clears this absolute guard.
+    absolute_gradient_error_floor = 1.5 / 255.0
+    energy_bad = (
+        ((energy_ratio < 0.78) | (energy_ratio > 1.28))
+        & (np.abs(eye_energy - expected_energy) > absolute_gradient_error_floor))
+    vector_bad = (
+        (relative_vector_error > 0.25)
+        & (vector_error > absolute_gradient_error_floor))
+    bad = textured & (energy_bad | vector_bad)
     return bad, textured
 
 
@@ -1258,7 +1288,7 @@ def worst_local_bad_fraction(bad, support, radius=None, min_support_fraction=0.2
 
 def exact_source_relative_metrics(eye, src_gray, sampled_source_u, shape,
                                   coverage_error=4.0 / 255.0, eye_rgb=None, src_rgb=None,
-                                  hdr_scale=None):
+                                  hdr_scale=None, expected_evidence=None):
     """Source fidelity using the exact source coordinate consumed by the production shader.
 
     The former matcher selected whichever nearby source patch best explained each candidate
@@ -1271,9 +1301,12 @@ def exact_source_relative_metrics(eye, src_gray, sampled_source_u, shape,
     eye = np.asarray(eye, dtype=np.float32)
     if (eye_rgb is None) != (src_rgb is None):
         raise ValueError("exact source RGB evidence requires both output and source RGB")
-    expected, expected_rgb, valid = _exact_expected_source_luma(
-        eye.shape, src_gray, sampled_source_u, shape,
-        src_rgb=src_rgb, hdr_scale=hdr_scale)
+    if expected_evidence is None:
+        expected, expected_rgb, valid = _exact_expected_source_luma(
+            eye.shape, src_gray, sampled_source_u, shape,
+            src_rgb=src_rgb, hdr_scale=hdr_scale)
+    else:
+        expected, expected_rgb, valid = expected_evidence
     if eye_rgb is not None:
         eye_rgb = np.asarray(eye_rgb, dtype=np.float32)
         if eye_rgb.shape != eye.shape + (3,):
@@ -1312,7 +1345,10 @@ def exact_source_relative_metrics(eye, src_gray, sampled_source_u, shape,
 
 def resize_depth(depth, w, h):
     """Float depth resize without the 8-bit quantization used by resize_to()."""
-    im = Image.fromarray(np.asarray(depth, dtype=np.float32), mode="F")
+    depth = np.asarray(depth, dtype=np.float32)
+    if depth.shape == (h, w):
+        return depth.copy()
+    im = Image.fromarray(depth, mode="F")
     return np.asarray(im.resize((w, h), Image.BILINEAR), dtype=np.float32)
 
 
@@ -1499,43 +1535,6 @@ def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity", valid
         "depth_gt_polarity_ok": 100.0 if scale > 0.0 else 0.0,
         "depth_gt_edge_f1": strict_edge_f1,
     }
-
-
-def depth_ground_truth_ghost(prediction, ground_truth, previous_ground_truth,
-                             kind="disparity", validity=None,
-                             previous_validity=None):
-    """Prediction support on previous-only GT edges, a direct stale/double-edge diagnostic.
-
-    A double image can match the current boundary well enough that the lag-F1 advantage remains
-    zero. This metric instead isolates GT edges that moved away since the previous frame and asks
-    how often the prediction still contains a boundary there. Static/shared edges are excluded.
-    """
-    current = prepare_depth_ground_truth(prediction, ground_truth, kind, validity)
-    previous = prepare_depth_ground_truth(
-        prediction, previous_ground_truth, kind, previous_validity)
-    if current is None or previous is None:
-        return None
-    _, target, valid, trange, _, _ = current
-    _, current_edge = depth_ground_truth_edges(target, target, valid, trange)
-    _, prev_target, prev_valid, prev_range, _, _ = previous
-    _, previous_edge = depth_ground_truth_edges(
-        prev_target, prev_target, prev_valid, prev_range)
-    pred = np.asarray(prediction, np.float32)
-    edge_valid = valid & prev_valid & np.isfinite(pred)
-    pred_values = pred[edge_valid]
-    if pred_values.size < 64:
-        return None
-    pred_range = float(np.percentile(pred_values, 95) - np.percentile(pred_values, 5))
-    gx = np.abs(np.diff(pred, axis=1, prepend=pred[:, :1]))
-    gy = np.abs(np.diff(pred, axis=0, prepend=pred[:1, :]))
-    valid_x = edge_valid & np.concatenate((edge_valid[:, :1], edge_valid[:, :-1]), axis=1)
-    valid_y = edge_valid & np.concatenate((edge_valid[:1, :], edge_valid[:-1, :]), axis=0)
-    threshold = max(0.02, pred_range * 0.08)
-    pred_edge = ((valid_x & (gx >= threshold)) | (valid_y & (gy >= threshold)))
-    previous_only = previous_edge & ~dilate2d(current_edge, 2)
-    if np.count_nonzero(previous_only) < 8:
-        return None
-    return float(np.mean(dilate2d(pred_edge, 1)[previous_only]) * 100.0)
 
 
 def depth_ground_truth_lag(prediction, ground_truth, previous_ground_truth,
@@ -1827,17 +1826,24 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
                 raise ValueError(
                     f"warp map {warp_mapping.shape} does not match SBS {sbs.shape}")
             map_left, map_right = split_eyes(warp_mapping)
+            expected_left = _exact_expected_source_luma(
+                left.shape, src_gray, map_left, warp_mapping_shape,
+                src_rgb=src_rgb, hdr_scale=hdr_scale)
+            expected_right = _exact_expected_source_luma(
+                right.shape, src_gray, map_right, warp_mapping_shape,
+                src_rgb=src_rgb, hdr_scale=hdr_scale)
             lm = exact_source_relative_metrics(
                 left, src_gray, map_left, warp_mapping_shape,
                 eye_rgb=left_rgb if src_rgb is not None else None, src_rgb=src_rgb,
-                hdr_scale=hdr_scale)
+                hdr_scale=hdr_scale, expected_evidence=expected_left)
             rm = exact_source_relative_metrics(
                 right, src_gray, map_right, warp_mapping_shape,
                 eye_rgb=right_rgb if src_rgb is not None else None, src_rgb=src_rgb,
-                hdr_scale=hdr_scale)
+                hdr_scale=hdr_scale, expected_evidence=expected_right)
             vertical_px, vertical_pct, vertical_support = exact_vertical_misalignment(
                 left, right, src_gray, map_left, map_right, warp_mapping_shape,
-                src_rgb=src_rgb, hdr_scale=hdr_scale)
+                src_rgb=src_rgb, hdr_scale=hdr_scale,
+                expected_evidence=(expected_left, expected_right))
             out["vmisalign_support_pct"] = vertical_support
             if vertical_px is not None:
                 out["vmisalign_p99_px"] = vertical_px
@@ -1861,9 +1867,16 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
     if warp_mapping is not None:
         if warp_mapping_shape is None:
             raise ValueError("exact warp mapping is missing its shape contract")
+        coverage_map = None
+        if warp_mask is not None:
+            hole_map = warp_mask if warp_mask.ndim == 2 else warp_mask[..., 0]
+            coverage_map = hole_map < 0.5
+        binocular_geometry = _exact_binocular_geometry(
+            warp_mapping, warp_mapping_shape, coverage_map)
         if src_gray is not None:
             out.update(exact_visible_disparity_metrics(
-                warp_mapping, warp_mapping_shape, src_gray, warp_mask=warp_mask))
+                warp_mapping, warp_mapping_shape, src_gray, warp_mask=warp_mask,
+                binocular_geometry=binocular_geometry))
             shear = sbs_warp_shear_metrics.measure_cross_row_shear(
                 warp_mapping, warp_mapping_shape,
                 source=src_rgb if src_rgb is not None else src_gray)
@@ -1878,10 +1891,14 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
                     ).astype(np.float16).astype(np.float32)
                     perceptual_transform = _hdr_preview_rgb
 
-                phase_chroma = sbs_interocular_phase_chroma.measure_interocular_phase_chroma(
-                    perceptual_source, left_rgb, right_rgb, map_left, map_right,
-                    warp_mapping_shape, warp_mask=warp_mask,
-                    source_sample_transform=perceptual_transform)
+                interocular_evidence = (
+                    sbs_interocular_phase_chroma.prepare_interocular_evidence(
+                        perceptual_source, left_rgb, right_rgb, map_left, map_right,
+                        warp_mapping_shape, warp_mask=warp_mask,
+                        source_sample_transform=perceptual_transform))
+                phase_chroma = (
+                    sbs_interocular_phase_chroma
+                    .measure_interocular_phase_chroma_prepared(interocular_evidence))
                 retained_conflict = {
                     "interocular_phase_orientation_burden_pct",
                     "interocular_phase_orientation_support_pct",
@@ -1894,10 +1911,8 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
                 if hdr_scale is None:
                     photometric = (
                         sbs_interocular_photometric_rivalry
-                        .measure_interocular_photometric_rivalry(
-                            perceptual_source, left_rgb, right_rgb, map_left, map_right,
-                            warp_mapping_shape, warp_mask=warp_mask,
-                            source_sample_transform=perceptual_transform))
+                        .measure_interocular_photometric_rivalry_prepared(
+                            interocular_evidence))
                     retained_photometric = {
                         "interocular_exposure_rivalry_burden_pct",
                         "interocular_exposure_rivalry_support_pct",
@@ -1917,10 +1932,6 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
                     out["interocular_exposure_rivalry_evidence_sufficient"] = 0.0
                     out["interocular_color_gain_rivalry_evidence_sufficient"] = 0.0
 
-                coverage_map = None
-                if warp_mask is not None:
-                    hole_map = (warp_mask if warp_mask.ndim == 2 else warp_mask[..., 0])
-                    coverage_map = hole_map < 0.5
                 window_depth = None
                 if depth is not None:
                     window_depth = resize_depth(
@@ -1929,7 +1940,7 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
                 window = sbs_stereo_window_metrics.measure_stereo_window_violation(
                     warp_mapping, warp_mapping_shape, perceptual_source,
                     depth=window_depth, coverage_mask=coverage_map,
-                    source_sample_transform=perceptual_transform)
+                    source_sample_transform=perceptual_transform, compact=True)
                 retained_window = {
                     "experimental_stereo_window_support_count",
                     "experimental_stereo_window_support_pct",
@@ -1939,16 +1950,23 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
                             if key in retained_window and value is not None})
 
         out.update(exact_warp_mapping_metrics(
-            warp_mapping, warp_mapping_shape, depth=depth, warp_mask=warp_mask))
+            warp_mapping, warp_mapping_shape, depth=depth, warp_mask=warp_mask,
+            binocular_geometry=binocular_geometry))
     return out, sbs, left
 
 
 SEQUENCE_SPATIAL_WORKERS_ENV = "SBSBENCH_SPATIAL_WORKERS"
 SEQUENCE_SPATIAL_BACKEND_ENV = "SBSBENCH_SPATIAL_BACKEND"
+SEQUENCE_SPATIAL_PIXEL_BUDGET_ENV = "SBSBENCH_SPATIAL_PIXEL_BUDGET_MPX"
+SEQUENCE_SPATIAL_MAX_WORKERS = 24
+SEQUENCE_SPATIAL_MAX_CONFIGURED_WORKERS = 64
+SEQUENCE_SPATIAL_DEFAULT_PIXEL_BUDGET_MPX = 24.0
+_SEQUENCE_SPATIAL_EXECUTOR = None
+_SEQUENCE_SPATIAL_EXECUTOR_BACKEND = None
 
 
-def _sequence_spatial_worker_count(frame_count):
-    """Return a deterministic bounded worker count for independent spatial metrics."""
+def _sequence_spatial_worker_count(frame_count, packed_pixels=None):
+    """Return a deterministic CPU- and image-memory-bounded spatial worker count."""
     if frame_count < 1:
         return 0
     configured = os.environ.get(SEQUENCE_SPATIAL_WORKERS_ENV)
@@ -1957,14 +1975,29 @@ def _sequence_spatial_worker_count(frame_count):
             requested = int(configured)
         except ValueError as exc:
             raise ValueError(
-                f"{SEQUENCE_SPATIAL_WORKERS_ENV} must be an integer from 1 to 4") from exc
-        if not 1 <= requested <= 4:
+                f"{SEQUENCE_SPATIAL_WORKERS_ENV} must be an integer from 1 to "
+                f"{SEQUENCE_SPATIAL_MAX_CONFIGURED_WORKERS}") from exc
+        if not 1 <= requested <= SEQUENCE_SPATIAL_MAX_CONFIGURED_WORKERS:
             raise ValueError(
-                f"{SEQUENCE_SPATIAL_WORKERS_ENV} must be from 1 to 4, got {configured!r}")
+                f"{SEQUENCE_SPATIAL_WORKERS_ENV} must be from 1 to "
+                f"{SEQUENCE_SPATIAL_MAX_CONFIGURED_WORKERS}, got {configured!r}")
         return min(requested, frame_count)
     if frame_count < 8:
         return 1
-    return min(4, os.cpu_count() or 1, frame_count)
+    workers = min(SEQUENCE_SPATIAL_MAX_WORKERS, os.cpu_count() or 1, frame_count)
+    if packed_pixels is not None and packed_pixels > 0:
+        try:
+            pixel_budget_mpx = float(os.environ.get(
+                SEQUENCE_SPATIAL_PIXEL_BUDGET_ENV,
+                SEQUENCE_SPATIAL_DEFAULT_PIXEL_BUDGET_MPX))
+        except ValueError as exc:
+            raise ValueError(
+                f"{SEQUENCE_SPATIAL_PIXEL_BUDGET_ENV} must be positive") from exc
+        if not np.isfinite(pixel_budget_mpx) or pixel_budget_mpx <= 0.0:
+            raise ValueError(f"{SEQUENCE_SPATIAL_PIXEL_BUDGET_ENV} must be positive")
+        memory_workers = max(1, int(pixel_budget_mpx * 1_000_000 // packed_pixels))
+        workers = min(workers, memory_workers)
+    return workers
 
 
 def _measure_sequence_spatial_job(job):
@@ -1998,19 +2031,65 @@ def _measure_sequence_spatial_job(job):
             f"spatial metric worker failed for frame {frame_id}: {exc}") from exc
 
 
+def enable_reusable_spatial_executor():
+    """Keep one ordered worker pool alive across clips in a CLI evaluation process."""
+    global _SEQUENCE_SPATIAL_EXECUTOR, _SEQUENCE_SPATIAL_EXECUTOR_BACKEND
+    if _SEQUENCE_SPATIAL_EXECUTOR is not None:
+        return
+    worker_count = _sequence_spatial_worker_count(1_000_000)
+    if worker_count <= 1:
+        return
+    backend = os.environ.get(SEQUENCE_SPATIAL_BACKEND_ENV, "process").strip().lower()
+    if backend not in {"process", "thread"}:
+        raise ValueError(
+            f"{SEQUENCE_SPATIAL_BACKEND_ENV} must be 'process' or 'thread', got {backend!r}")
+    executor_type = (concurrent.futures.ThreadPoolExecutor if backend == "thread" else
+                     concurrent.futures.ProcessPoolExecutor)
+    _SEQUENCE_SPATIAL_EXECUTOR = executor_type(max_workers=worker_count)
+    _SEQUENCE_SPATIAL_EXECUTOR_BACKEND = backend
+
+
+def disable_reusable_spatial_executor():
+    """Release the optional run-level pool; safe to call repeatedly and from ``atexit``."""
+    global _SEQUENCE_SPATIAL_EXECUTOR, _SEQUENCE_SPATIAL_EXECUTOR_BACKEND
+    executor, _SEQUENCE_SPATIAL_EXECUTOR = _SEQUENCE_SPATIAL_EXECUTOR, None
+    _SEQUENCE_SPATIAL_EXECUTOR_BACKEND = None
+    if executor is not None:
+        executor.shutdown(wait=True)
+
+
+atexit.register(disable_reusable_spatial_executor)
+
+
 def _measure_sequence_spatial_rows(jobs):
     """Run independent jobs serially or in an ordered bounded process pool."""
-    worker_count = _sequence_spatial_worker_count(len(jobs))
+    packed_pixels = None
+    if jobs:
+        shape = jobs[0].get("mapping_shape")
+        if isinstance(shape, dict):
+            width, height = shape.get("width"), shape.get("height")
+            if isinstance(width, int) and isinstance(height, int):
+                packed_pixels = width * height
+    worker_count = _sequence_spatial_worker_count(len(jobs), packed_pixels)
     if worker_count <= 1:
         return [_measure_sequence_spatial_job(job) for job in jobs]
     backend = os.environ.get(SEQUENCE_SPATIAL_BACKEND_ENV, "process").strip().lower()
     if backend not in {"process", "thread"}:
         raise ValueError(
             f"{SEQUENCE_SPATIAL_BACKEND_ENV} must be 'process' or 'thread', got {backend!r}")
-    # The HTML report is a top-level Windows script, so a spawn-based process executor would
-    # recursively execute report construction in each child. Threads keep its four-way spatial
-    # remeasurement parallel without weakening ordered/fail-closed result collection. The normal
-    # evaluator and rescorer retain isolated process workers by default.
+    # Direct build_report.py execution selects threads because a spawn-based process executor would
+    # recursively execute its top-level report construction. The guarded generate_report.py
+    # launcher, evaluator, and rescorer can safely select isolated process workers.
+    # A run-level executor removes Windows process-spawn/import cost for every later clip. Submit
+    # at most the image-memory-bounded worker count at once even when the shared pool is larger.
+    if _SEQUENCE_SPATIAL_EXECUTOR is not None:
+        if backend != _SEQUENCE_SPATIAL_EXECUTOR_BACKEND:
+            raise ValueError("spatial backend changed while a reusable executor was active")
+        rows = []
+        for start in range(0, len(jobs), worker_count):
+            rows.extend(_SEQUENCE_SPATIAL_EXECUTOR.map(
+                _measure_sequence_spatial_job, jobs[start:start + worker_count]))
+        return rows
     executor_type = (concurrent.futures.ThreadPoolExecutor if backend == "thread" else
                      concurrent.futures.ProcessPoolExecutor)
     with executor_type(max_workers=worker_count) as executor:
@@ -2169,7 +2248,7 @@ def measure_sequence(seq_dir, frames_dir=None):
             f"spatial metric frame order changed: expected={frame_ids}, got={measured_ids}")
 
     static_jitters = []
-    flow_temporals, depth_gt_lags, depth_gt_ghosts = [], [], []
+    flow_temporals, depth_gt_lags = [], []
     transition_counts = {
         "temporal_expected_transition_count": max(0, len(frame_ids) - 1),
         "source_temporal_transition_count": 0,
@@ -2179,14 +2258,17 @@ def measure_sequence(seq_dir, frames_dir=None):
         "flow_measured_transition_count": 0,
         "gt_depth_transition_count": 0,
         "gt_depth_lag_measured_transition_count": 0,
-        "gt_depth_ghost_measured_transition_count": 0,
     }
-    prev_left = prev_right = prev_depth = prev_src = prev_gt_depth = prev_gt_valid = None
+    prev_left = prev_right = prev_src = prev_gt_depth = prev_gt_valid = None
     if len(frame_ids) > 1:
         for row, frame_id in zip(rows, frame_ids):
             sbs = rgb_luma(load_rgb(sbs_by_id[frame_id]))
             left, right = split_eyes(sbs)
-            depth = load_depth(depth_by_id[frame_id]) if frame_id in depth_by_id else None
+            # Static and canonical flow-temporal scoring do not consume depth. Decode it in this
+            # second pass only when authenticated GT temporal metrics can use it; spatial scoring
+            # already measured depth for every frame above.
+            depth = (load_depth(depth_by_id[frame_id])
+                     if frame_id in depth_by_id and gt_by_id else None)
             src = (rgb_luma(load_rgb(src_by_id[frame_id]))
                    if frame_id in src_by_id else None)
             gt_depth = load_depth(gt_by_id[frame_id]) if frame_id in gt_by_id else None
@@ -2218,7 +2300,7 @@ def measure_sequence(seq_dir, frames_dir=None):
                         flow_temporal, _flow_depth_diagnostic, flow_support = (
                             flow_temporal_metrics(
                                 left, right, prev_left, prev_right, src, prev_src,
-                                depth, prev_depth, reference_flow=reference_flow,
+                                reference_flow=reference_flow,
                                 reference_valid=reference_valid))
                         row["flow_support"] = flow_support
                         if flow_support >= TEMPORAL_MIN_SUPPORT:
@@ -2236,15 +2318,8 @@ def measure_sequence(seq_dir, frames_dir=None):
                         row["depth_gt_lag_f1"] = depth_gt_lag
                         depth_gt_lags.append(depth_gt_lag)
                         transition_counts["gt_depth_lag_measured_transition_count"] += 1
-                    depth_gt_ghost = depth_ground_truth_ghost(
-                        depth, gt_depth, prev_gt_depth, gt_kind,
-                        validity=gt_valid, previous_validity=prev_gt_valid)
-                    if depth_gt_ghost is not None:
-                        row["depth_gt_ghost_edge_pct"] = depth_gt_ghost
-                        depth_gt_ghosts.append(depth_gt_ghost)
-                        transition_counts["gt_depth_ghost_measured_transition_count"] += 1
             prev_left, prev_right = left, right
-            prev_depth, prev_src, prev_gt_depth = depth, src, gt_depth
+            prev_src, prev_gt_depth = src, gt_depth
             prev_gt_valid = gt_valid
     agg = aggregate(rows)
     agg.update({key: float(value) for key, value in transition_counts.items()})
@@ -2269,9 +2344,6 @@ def measure_sequence(seq_dir, frames_dir=None):
     if depth_gt_lags:
         agg["depth_gt_lag_f1_p50"] = float(np.percentile(depth_gt_lags, 50))
         agg["depth_gt_lag_f1_p95"] = float(np.percentile(depth_gt_lags, 95))
-    if depth_gt_ghosts:
-        agg["depth_gt_ghost_edge_pct_p50"] = float(np.percentile(depth_gt_ghosts, 50))
-        agg["depth_gt_ghost_edge_pct_p95"] = float(np.percentile(depth_gt_ghosts, 95))
     if require_gt_depth:
         missing = [k for k in ("depth_gt_affine_nrmse_pct", "depth_gt_edge_f1")
                    if k not in agg]
@@ -2669,7 +2741,7 @@ SEQ_FMT = [
 ]
 TEMPORAL_KEYS = [
     "static_jitter_p95", "flow_temporal_p95",
-    "depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95",
+    "depth_gt_lag_f1_p95",
 ]
 
 

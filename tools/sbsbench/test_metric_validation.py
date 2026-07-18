@@ -635,6 +635,22 @@ class EvidenceSemanticsTests(unittest.TestCase):
         metrics = sbsbench.exact_source_relative_metrics(wrong, source, mapping, shape)
         self.assertLess(metrics["image_integrity_pct"], 25.0)
 
+    def test_image_integrity_ignores_sub_code_quantization_residuals(self):
+        shape = mapping_shape(96, 48)
+        x = np.arange(96, dtype=np.float32)[None, :]
+        y = np.arange(48, dtype=np.float32)[:, None]
+        source = 0.5 + 0.08 * np.sin(x * 0.43) + 0.05 * np.sin(y * 0.31)
+        source = np.clip(source, 0.0, 1.0).astype(np.float32)
+        quantized = np.round(source * 255.0) / 255.0
+        mapping = identity_mapping(shape)[:, :shape["eye_width"]]
+
+        metrics = sbsbench.exact_source_relative_metrics(
+            quantized, source, mapping, shape)
+
+        self.assertGreater(metrics["image_integrity_support"], 20.0)
+        self.assertEqual(metrics["image_integrity_pct"], 100.0)
+        self.assertEqual(metrics["image_integrity_worst_patch_bad_pct"], 0.0)
+
     def test_flow_temporal_subtracts_legitimate_source_change(self):
         previous = np.full((48, 80), 0.4, np.float32)
         current = previous + 4.0 / 255.0
@@ -1195,8 +1211,34 @@ class ReportEvidenceContractTests(unittest.TestCase):
 
             control_payload = result("control", control_dir)
             treatment_payload = result("treatment", treatment_dir)
+            treatment_session = run_eval.new_remeasurement_session()
             run_eval.verify_results_against_artifacts(
-                treatment_payload, treatment_dir, clips_root, thresholds)
+                treatment_payload, treatment_dir, clips_root, thresholds,
+                remeasurement_session=treatment_session)
+            with mock.patch.object(
+                    sbsbench, "measure_sequence",
+                    side_effect=AssertionError("identical pixels must reuse remeasurement")):
+                run_eval.verify_results_against_artifacts(
+                    treatment_payload, treatment_dir, clips_root, thresholds,
+                    remeasurement_session=treatment_session)
+            with self.assertRaisesRegex(TypeError, "remeasurement session"):
+                run_eval.verify_results_against_artifacts(
+                    treatment_payload, treatment_dir, clips_root, thresholds,
+                    remeasurement_session={"demo": "forged rows"})
+            self.assertFalse(hasattr(treatment_session, "_entries"))
+            with self.assertRaises(AttributeError):
+                treatment_session._entries = {"forged": "rows"}
+
+            control_session = run_eval.new_remeasurement_session()
+            run_eval.verify_results_against_artifacts(
+                control_payload, control_dir, clips_root, thresholds,
+                remeasurement_session=control_session)
+            with mock.patch.object(
+                    sbsbench, "measure_sequence", wraps=sbsbench.measure_sequence) as measured:
+                run_eval.verify_results_against_artifacts(
+                    treatment_payload, treatment_dir, clips_root, thresholds,
+                    remeasurement_session=control_session)
+                measured.assert_called_once()
             forged_labels = json.loads(json.dumps(treatment_payload))
             forged_labels["clips"]["demo"]["frames"][0]["labels"]["forged"] = True
             with self.assertRaisesRegex(ValueError, "frames"):

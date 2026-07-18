@@ -79,6 +79,27 @@ Generate or regenerate an authenticated HTML report with the Windows-safe parall
 python tools/sbsbench/generate_report.py <control-run> <treatment-run> <report.html>
 ```
 
+Metric scoring parallelizes independent frames with one reusable process pool. The documented
+`generate_report.py` entry point safely provides the same process backend on Windows; only a direct
+`build_report.py` invocation falls back to threads because that HTML module is intentionally
+top-level. Numeric libraries stay single-threaded inside each worker to avoid nested CPU
+oversubscription. The automatic worker cap is 24 and is reduced by a 24-megapixel in-flight image
+budget. Developers can override these bounds with `SBSBENCH_SPATIAL_WORKERS` and
+`SBSBENCH_SPATIAL_PIXEL_BUDGET_MPX`; ordinary gates should use the defaults. Profile preserved
+artifacts without rerunning TensorRT or the harness:
+
+```
+python tools/sbsbench/profile_eval.py <run> --clips-root tools/sbsbench/clips --workers 1
+python tools/sbsbench/profile_eval.py <run> --clips-root tools/sbsbench/clips --workers 24
+```
+
+Profiler JSON records the backend, pixel budget, metric hash/runtime, repository revision,
+platform, and logical processor count. It is local timing evidence, never an evaluator gate.
+
+The authoritative report still hashes and validates control and treatment independently. When a
+performance-only A/B has byte-identical SBS/depth/map inputs, it transiently reuses the first
+in-memory pixel remeasurement; no cached JSON metric authenticates itself.
+
 Committed baselines are canonical production-profile runs. Move an accepted setting into the
 profile/config before `--update-baselines`; the runner rejects harness `--extra` overrides so a
 treatment baseline cannot later masquerade as the default. Missing hard, baseline-supported
@@ -322,9 +343,11 @@ its official page requests citation but does not provide a redistribution grant.
 CC BY 4.0. `prepare_public_datasets.py` associates Bonn RGB/depth by nearest timestamp, preserves
 TartanAir float depth without quantization, decodes its 16-bit flow PNG losslessly without OpenCV,
 and writes source frames only at the clip root so reference images can never be mistaken for input.
-Spring's official left/right archives are approximately 3 GB each; the adapter uses verified HTTP
-byte ranges to extract only the pinned frame windows while retaining the DOI datafile size/digest
-provenance in the manifest.
+Spring's official left/right archives are approximately 3 GB each, and the Sintel stereo archive
+is approximately 2.6 GB. Their adapters use validated HTTP byte ranges to extract only the pinned
+frame windows. Each range-backed clip additionally pins a SHA-256 over the decoded frame,
+depth, and mask evidence that evaluation actually consumes, so a changed remote payload fails
+before the prepared directory is published.
 Set `APOLLO_SBS_DATASETS` or pass `--cache` to relocate the cache.
 
 The harness sizes the SBS output to the **input** resolution, so short clips keep each A/B sample
@@ -404,6 +427,11 @@ are coequal, non-compensating axes: stronger depth cannot buy permission for riv
 failure, or missing content. The evaluator intentionally has no scalar score that could average
 one such failure away.
 
+Schema 32 currently exposes 26 report metrics: 11 fail-closed hard constraints, four primary
+quality axes, and 11 supporting diagnostics. The report must present those roles separately. In
+particular, all 11 hard constraints must appear in its top constraint view, while unavailable GT
+or temporal evidence is shown as not applicable rather than as a zero-valued pass.
+
 The exact source-U sidecar preserves requested coordinates outside [0,1]. Per-eye clamp, fold,
 and Jacobian-stretch diagnostics retain that raw demand. Stereo/comfort instead invert the two
 maps onto common source-U rows and measure actual `x_right - x_left` only on unique, mutually
@@ -444,13 +472,15 @@ floors, not proof of statistical independence; label qualification will addition
 spatial effective-sample counts and confidence intervals. Lower support is `n/a`, not perfect zero
 or a missing-metric failure.
 
-Exact mapped-source coverage, texture integrity, binocular support, and vertical alignment remain
-conformance checks. Coverage uses a strict 4/255 luma residual internally and must retain at least 99% of
-supported interior content. These checks detect a renderer or color-contract failure, but cannot
-prove that the chosen disparity looks good. Hard screening currently covers the actual mutually
-visible, signed `x_right - x_left` p99.9 disparity tails plus conformance failures in high-near
-warp polarity, binocular overlap, P99 vertical mismatch, source coverage, and texture integrity.
-Only the disparity tails are perceptual-risk candidates; the rest prove renderer contracts.
+Exact mapped-source coverage, texture integrity, binocular support, camera symmetry, and vertical
+alignment remain conformance checks. Coverage uses a strict 4/255 luma residual internally and
+must retain at least 99% of supported interior content. These checks detect a renderer or
+color-contract failure, but cannot prove that the chosen disparity looks good. The 11 hard rows
+are the positive and negative signed `x_right - x_left` p99.9 disparity tails; binocular support;
+high-near warp polarity; camera symmetry; P99 vertical mismatch; global and worst-patch source
+coverage; global and worst-patch texture integrity; and, on authenticated GT clips, prediction-to-
+GT polarity. Only the disparity tails are perceptual-risk candidates; the rest prove renderer or
+depth-sign contracts.
 The +/-3% disparity limit is an experimental image-relative heuristic, not an angular comfort
 guarantee; headset FOV and user calibration are required before it can become a qualified label.
 `static_jitter_p95` is the validated stability-axis metric. It excludes every source pixel that
@@ -478,9 +508,9 @@ coarse match cannot hide a thin-edge regression. Both are primary depth-axis met
 clips are reported as `n/a`.
 
 `depth_gt_lag_f1_p95` detects a prediction that matches the previous GT boundary better than the
-current one. `depth_gt_ghost_edge_pct_p95` complements it by measuring prediction support on
-previous-only GT boundaries, so a double edge cannot hide by also matching the current boundary.
-The ghost metric remains diagnostic until it has broader headset-correlated validation.
+current one. The former GT ghost-edge percentage was removed from the compact policy: on clean
+extended clips it was dominated by the monocular model's ordinary edge disagreement and correlated
+poorly with actual one-frame lag. Its standalone helper remains available for research falsifiers.
 
 True-stereo references remain valuable dataset evidence, but global similarity, permissive patch
 matching, SIoU, and camera-style fitting are intentionally absent from the compact policy. Those
@@ -554,7 +584,9 @@ strong but not broad enough to set a universal training-label threshold.
 | `exact_binocular_support_pct` | common rendered area backed by unique source samples in both eyes, limited by the smaller eye Jacobian | >=80% hard evidence floor; prevents comfort-tail bypass by collapsed overlap |
 | `source_coverage_pct` | supported interior pixels within 4/255 luma of the exact shader-selected source sample | >=99% hard contract |
 | `image_integrity_pct` | retention of exact mapped-source texture without collapse or overshoot | >=80% hard contract on supported texture |
-| `exact_symmetry_residual_p95_pct` | P95 common-camera residual `abs((x_left+x_right)/2 - x_unwarped)` on unique mutual support | lower = closer to symmetric cameras; diagnostic |
+| `source_coverage_worst_patch_bad_pct` | worst resolution-scaled local patch fraction that does not reproduce the exact shader-selected source sample | <=20% hard localized-missing-content contract |
+| `image_integrity_worst_patch_bad_pct` | worst resolution-scaled textured patch fraction with collapsed, amplified, or directionally corrupted gradients | <=25% hard localized-texture-damage contract |
+| `exact_symmetry_residual_p95_pct` | P95 common-camera residual `abs((x_left+x_right)/2 - x_unwarped)` on unique mutual support | <=0.1% hard symmetric-camera contract |
 | `exact_polarity_ok` / `exact_local_polarity_component_pct` | warp ordering relative to the processed depth that drove it | hard global sign audit / local diagnostic; conformance only |
 | `vmisalign_p99_pct` | localized texture-supported P99 vertical offset as percent eye height | <=0.1% hard contract |
 
@@ -572,7 +604,6 @@ binocular-support measurements are the stronger non-redundant policy axes.
 | `static_jitter_p95` | worse-eye signed-source-conditioned output change on source-static support after disparity-radius motion exclusion | lower = steadier static content |
 | `flow_temporal_p95` | flow-compensated SBS residual after subtracting the registered signed mono-source change | lower = steadier moving content |
 | `depth_gt_lag_f1_p95` | previous-frame GT boundary advantage over current GT | lower = less stale depth |
-| `depth_gt_ghost_edge_pct_p95` | prediction support on previous-only GT boundaries | lower = fewer stale/double edges |
 
 Temporal metrics require a multi-frame clip and measured support. They remain evaluation-only:
 the DA-V2 augmentation policy consumes one image, so only registered, source-conditioned temporal

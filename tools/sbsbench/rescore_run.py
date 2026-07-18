@@ -78,6 +78,7 @@ def main():
     if stale:
         raise SystemExit(f"refusing changed source/GT evidence: {stale}")
     thresholds = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json"), encoding="utf-8"))
+    sbsbench.enable_reusable_spatial_executor()
     data.setdefault("meta", {})["training_labels"] = run_eval.training_label_manifest(thresholds)
     issues, hard_failures, evidence_failures = [], [], []
     artifact_hashes = {}
