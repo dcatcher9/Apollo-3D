@@ -1,7 +1,7 @@
 // Mark moving depth-transition bands where the per-pixel EMA should trust the current frame.
 // Both current mapped depth and previous normalized depth are immutable SRVs.
 StructuredBuffer<float>  InputBuffer : register(t0);
-StructuredBuffer<float4> MinMaxEma   : register(t1);  // [0]={P2,P98,initialized,_}
+StructuredBuffer<float4> MinMaxEma   : register(t1);  // [0]={P2,P98,initialized,frame_state}
 Texture2D<float>          PreviousDepth : register(t2);
 RWTexture2D<uint>         MotionMask : register(u0);
 
@@ -15,6 +15,12 @@ float CurrentDepth(int2 p) {
     p = ClampPixel(p);
     float2 mm = MinMaxEma[0].xy;
     float raw = InputBuffer[(uint)p.y * target_w + (uint)p.x];
+    if (isnan(raw) || isinf(raw) || raw < 0.0f) {
+        // Match buffer_to_tex_cs: missing current evidence holds history. Treating it as raw zero
+        // would manufacture a far-depth edge and could snap adjacent valid texels through the mask.
+        return PreviousDepth[p];
+    }
+    if (any(isnan(mm)) || any(isinf(mm)) || mm.y < mm.x) mm = float2(0.0f, 1.0f);
     return saturate((max(raw, 0.0f) - mm.x) / max(mm.y - mm.x, 1e-6f));
 }
 
@@ -34,6 +40,12 @@ bool IsMovingEdge(int2 p) {
 void main(uint3 DTid : SV_DispatchThreadID) {
     if (DTid.x >= target_w || DTid.y >= target_h)
         return;
+
+    float frame_state = MinMaxEma[0].w;
+    if (frame_state < 0.5f || frame_state > 1.5f) {
+        MotionMask[DTid.xy] = 0u;
+        return;
+    }
 
     MotionMask[DTid.xy] = IsMovingEdge(int2(DTid.xy)) ? 1u : 0u;
 }

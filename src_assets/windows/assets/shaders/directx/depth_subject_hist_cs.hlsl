@@ -7,8 +7,11 @@
 
 Texture2D<float>         DepthTexture : register(t0);  // normalized depth, high = near
 RWStructuredBuffer<uint> SubjectHist  : register(u0);  // 256 bins, weight in 1/1024 units
-RWStructuredBuffer<uint> PlainHist    : register(u1);  // 256 bins + edge/change counts at 256/257
+RWStructuredBuffer<uint> PlainHist    : register(u1);  // bins + edge/depth-change/color-change counts
 Texture2D<float>         PreviousDepth : register(t1);
+StructuredBuffer<float>  CurrentModelInput : register(t2);  // completed frame, NCHW ImageNet
+StructuredBuffer<float>  PreviousModelInput : register(t3);
+StructuredBuffer<float4> MinMaxEma : register(t4);  // w = current-frame validity
 
 // Shared depth-pass cbuffer (only target_w/target_h are used here).
 #include "include/depth_constants.hlsl"
@@ -18,6 +21,7 @@ groupshared uint g_hist[NUM_BINS];
 groupshared uint g_plain[NUM_BINS];
 groupshared uint g_edge_count;
 groupshared uint g_change_count;
+groupshared uint g_color_change_count;
 
 [numthreads(16, 16, 1)]
 void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
@@ -27,10 +31,11 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
     if (lin == 0u) {
         g_edge_count = 0u;
         g_change_count = 0u;
+        g_color_change_count = 0u;
     }
     GroupMemoryBarrierWithGroupSync();
 
-    if (dtid.x < target_w && dtid.y < target_h) {
+    if (dtid.x < target_w && dtid.y < target_h && MinMaxEma[0].w > 0.5f) {
         float d = DepthTexture[dtid.xy];
 
         // Forward-difference gradient (clamped at the far edges).
@@ -46,6 +51,25 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
         }
         if (abs(d - PreviousDepth[dtid.xy]) >= 0.05f) {
             InterlockedAdd(g_change_count, 1u);
+        }
+
+        // Detect hard cuts whose depth field is coincidentally similar. Compare the exact
+        // production-preprocessed model input that produced this depth against the prior one;
+        // reconstructing sRGB makes the threshold independent of ImageNet channel scales.
+        uint channel_stride = target_w * target_h;
+        uint input_idx = dtid.y * target_w + dtid.x;
+        float3 current_color = float3(
+            CurrentModelInput[input_idx] * 0.229f + 0.485f,
+            CurrentModelInput[input_idx + channel_stride] * 0.224f + 0.456f,
+            CurrentModelInput[input_idx + 2u * channel_stride] * 0.225f + 0.406f);
+        float3 previous_color = float3(
+            PreviousModelInput[input_idx] * 0.229f + 0.485f,
+            PreviousModelInput[input_idx + channel_stride] * 0.224f + 0.456f,
+            PreviousModelInput[input_idx + 2u * channel_stride] * 0.225f + 0.406f);
+        if (max(max(abs(current_color.r - previous_color.r),
+                    abs(current_color.g - previous_color.g)),
+                abs(current_color.b - previous_color.b)) >= 0.20f) {
+            InterlockedAdd(g_color_change_count, 1u);
         }
 
         // smooth_w = 1 - sigmoid(10 * (grad - 0.025)): flat regions vote, edges mostly don't.
@@ -72,5 +96,6 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
     if (lin == 0u) {
         InterlockedAdd(PlainHist[NUM_BINS], g_edge_count);
         InterlockedAdd(PlainHist[NUM_BINS + 1], g_change_count);
+        InterlockedAdd(PlainHist[NUM_BINS + 2], g_color_change_count);
     }
 }

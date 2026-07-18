@@ -24,7 +24,6 @@ namespace models {
     scrgb_hdr = 2,  ///< linear scRGB FP16 HDR capture; tone-map for the SDR-trained model
   };
 
-  void precompile_tensorrt_engine(const std::filesystem::path &assets_dir, const config::depth_model_info &model);
   /** Build, deserialize, create, and warm one reusable execution context for the active model. */
   bool prepare_tensorrt_model(
     const std::filesystem::path &assets_dir,
@@ -32,10 +31,6 @@ namespace models {
     const std::string &adapter_name
   );
   engine_build_status tensorrt_model_prepare_status(const config::depth_model_info &model);
-  engine_build_status tensorrt_engine_build_status(
-    const std::filesystem::path &assets_dir,
-    const config::depth_model_info &model
-  );
 
   /**
    * @brief Result of one estimate call: the depth map for the reprojection (t1), plus the
@@ -51,7 +46,6 @@ namespace models {
     bool completed_frame_valid = false;  ///< A new processed depth result completed during this call.
     std::uint64_t completed_frame_id = 0;  ///< Caller-provided identity of that completed result.
     bool inference_enqueued = false;  ///< This call submitted inference for the supplied input frame.
-    std::uint64_t enqueued_frame_id = 0;  ///< Identity attached to the newly submitted inference.
     bool cuda_graph_active = false;  ///< TensorRT enqueue is currently replaying a captured graph.
   };
 
@@ -74,6 +68,17 @@ namespace models {
 
     /** True only when every mandatory engine, shader, and session resource initialized. */
     bool is_valid() const;
+
+    /**
+     * @brief Nonblocking producer-side readiness check for matched-frame capture.
+     *
+     * Returns true only when the estimator can accept a new input immediately. A false return
+     * accounts for the source opportunity (and, when CUDA is still working, one busy drop) in the
+     * throughput telemetry. It never consumes a completed depth result; the next estimate_depth()
+     * call performs that consumption. The live pipeline uses this before copying a full-resolution
+     * color frame into its private matched slot.
+     */
+    bool can_accept_frame();
 
     // Non-copyable
     video_depth_estimator(const video_depth_estimator &) = delete;

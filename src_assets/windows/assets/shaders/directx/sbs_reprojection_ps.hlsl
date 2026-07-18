@@ -10,13 +10,14 @@
 // nearest edge instead of smearing a duplicate.
 //
 // Inputs (unchanged contract with display_vram.cpp):
-//   t0 = mono color, t1 = normalized depth in [0,1) (1-exp(-raw*0.1), high = near),
+//   t0 = mono color, t1 = robust P2/P98-normalized and temporally filtered depth (high = near),
 //   s0 = linear clamp sampler, b2 = tuning constants below.
 
 Texture2D<float4> LeftColorTexture : register(t0);
 Texture2D<float>  DepthTexture      : register(t1);
-// Subject-tracking state from depth_subject_resolve_cs. [0] = {recenter_delta, reserved,
-// subject_depth_ema, initialized}; [1] = {stretch_lo_val, stretch_inv_range, _, _}.
+// Subject-tracking state from depth_subject_resolve_cs. [0] = {recenter_delta, scene_age,
+// subject_depth_ema, initialized}; [1] = {stretch_lo_val, stretch_inv_range,
+// convergence_ema, adaptive_pop_ratio}.
 StructuredBuffer<float4> SubjectState : register(t2);
 // Bound only by the offline harness mask pass. It is produced by forward-splatting the exact
 // shared parallax field, exposing holes that this backward gather necessarily paints over.
@@ -65,7 +66,7 @@ float2 Reproject(float2 uv, float eyeSign, bool use_subject_stretch) {
     Bestv2Params params = MakeBestv2Params(
         s0, s1, s2, (float)sourceWidth, (float)sourceHeight, use_subject_stretch);
 
-    int steps = clamp((int)round(24.0f * aspectScale), 12, 72);
+    int steps = Bestv2ProbeSteps((float)sourceWidth, (float)sourceHeight, aspectScale);
     float startX = uv.x - searchRadius;
     float stepX  = (2.0f * searchRadius) / (float)steps;
 

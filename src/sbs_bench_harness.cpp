@@ -480,13 +480,44 @@ namespace sbs_bench {
 
     // Keep output identities tied to source identities. Positional renumbering made a dropped
     // source frame silently shift every depth/SBS/source comparison by one.
-    std::string frame_id(const fs::path &path, size_t fallback) {
+    std::string source_frame_id(const fs::path &path) {
       std::string stem = path.stem().string();
       size_t split = stem.find_last_of('_');
       std::string id = split == std::string::npos ? "" : stem.substr(split + 1);
       if (!id.empty() && std::all_of(id.begin(), id.end(), [](unsigned char c) {
             return std::isdigit(c);
           })) {
+        return id;
+      }
+      return {};
+    }
+
+    bool numeric_frame_less(const fs::path &left, const fs::path &right) {
+      auto left_id = source_frame_id(left);
+      auto right_id = source_frame_id(right);
+      if (!left_id.empty() && !right_id.empty()) {
+        auto trim_zeroes = [](const std::string &value) {
+          const auto first = value.find_first_not_of('0');
+          return first == std::string::npos ? std::string_view(value).substr(value.size() - 1) :
+                                             std::string_view(value).substr(first);
+        };
+        const auto left_number = trim_zeroes(left_id);
+        const auto right_number = trim_zeroes(right_id);
+        if (left_number.size() != right_number.size()) {
+          return left_number.size() < right_number.size();
+        }
+        if (left_number != right_number) {
+          return left_number < right_number;
+        }
+      } else if (left_id.empty() != right_id.empty()) {
+        return !left_id.empty();
+      }
+      return left.filename().string() < right.filename().string();
+    }
+
+    std::string frame_id(const fs::path &path, size_t fallback) {
+      auto id = source_frame_id(path);
+      if (!id.empty()) {
         return id;
       }
       char buf[16];
@@ -730,7 +761,7 @@ namespace sbs_bench {
         frames.push_back(e.path());
       }
     }
-    std::sort(frames.begin(), frames.end());
+    std::sort(frames.begin(), frames.end(), numeric_frame_less);
     if (o.limit > 0 && (int) frames.size() > o.limit) {
       frames.resize(o.limit);
     }
@@ -881,6 +912,8 @@ namespace sbs_bench {
     models::estimate_result est;
     bool cuda_graph_captured = false;
     bool have_depth_result = false;
+    UINT source_width = 0;
+    UINT source_height = 0;
     const fs::path depth_override_dir = o.depth_override_root.empty() ? fs::path() :
                                           fs::path(o.depth_override_root) / fs::path(o.frames).filename();
     size_t expected_depth_override_frames = 0;
@@ -915,6 +948,15 @@ namespace sbs_bench {
       if (!load_png(frames[fi], img)) {
         BOOST_LOG(warning) << "sbs-bench: skip " << frames[fi];
         continue;
+      }
+      if (source_width == 0) {
+        source_width = img.w;
+        source_height = img.h;
+      } else if (img.w != source_width || img.h != source_height) {
+        BOOST_LOG(error) << "sbs-bench: mixed source dimensions are not a valid clip: first frame "
+                         << source_width << "x" << source_height << ", " << frames[fi]
+                         << " is " << img.w << "x" << img.h;
+        return 9;
       }
       const std::string output_id = frame_id(frames[fi], fi);
 

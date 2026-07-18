@@ -14,9 +14,15 @@ typedef enum cudaError_enum {
     CUDA_SUCCESS = 0,
     CUDA_ERROR_NOT_READY = 600
 } CUresult;
+typedef enum CUdevice_attribute_enum {
+    CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75,
+    CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76
+} CUdevice_attribute;
 
 typedef CUresult(__stdcall* PFN_cuInit)(unsigned int Flags);
 typedef CUresult(__stdcall* PFN_cuDeviceGet)(CUdevice* device, int ordinal);
+typedef CUresult(__stdcall* PFN_cuDeviceGetAttribute)(int* pi, CUdevice_attribute attrib, CUdevice dev);
+typedef CUresult(__stdcall* PFN_cuDeviceGetName)(char* name, int len, CUdevice dev);
 typedef CUresult(__stdcall* PFN_cuDevicePrimaryCtxRetain)(CUcontext* pctx, CUdevice dev);
 typedef CUresult(__stdcall* PFN_cuCtxCreate)(CUcontext* pctx, unsigned int flags, CUdevice dev);
 typedef CUresult(__stdcall* PFN_cuCtxGetCurrent)(CUcontext* pctx);
@@ -68,6 +74,8 @@ struct cuda_driver_api {
     HMODULE hMod = nullptr;
     PFN_cuInit cuInit = nullptr;
     PFN_cuDeviceGet cuDeviceGet = nullptr;
+    PFN_cuDeviceGetAttribute cuDeviceGetAttribute = nullptr;
+    PFN_cuDeviceGetName cuDeviceGetName = nullptr;
     PFN_cuDevicePrimaryCtxRetain cuDevicePrimaryCtxRetain = nullptr;
     PFN_cuCtxCreate cuCtxCreate = nullptr;
     PFN_cuCtxGetCurrent cuCtxGetCurrent = nullptr;
@@ -113,6 +121,8 @@ struct cuda_driver_api {
             if (api.hMod) {
                 api.cuInit = (PFN_cuInit)GetProcAddress(api.hMod, "cuInit");
                 api.cuDeviceGet = (PFN_cuDeviceGet)GetProcAddress(api.hMod, "cuDeviceGet");
+                api.cuDeviceGetAttribute = (PFN_cuDeviceGetAttribute)GetProcAddress(api.hMod, "cuDeviceGetAttribute");
+                api.cuDeviceGetName = (PFN_cuDeviceGetName)GetProcAddress(api.hMod, "cuDeviceGetName");
                 api.cuDevicePrimaryCtxRetain = (PFN_cuDevicePrimaryCtxRetain)GetProcAddress(api.hMod, "cuDevicePrimaryCtxRetain");
                 api.cuCtxCreate = (PFN_cuCtxCreate)GetProcAddress(api.hMod, "cuCtxCreate_v2");
                 api.cuCtxGetCurrent = (PFN_cuCtxGetCurrent)GetProcAddress(api.hMod, "cuCtxGetCurrent");

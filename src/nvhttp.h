@@ -9,6 +9,7 @@
 #include <string>
 #include <chrono>
 #include <list>
+#include <mutex>
 
 // lib includes
 #include <boost/property_tree/ptree.hpp>
@@ -125,6 +126,11 @@ namespace nvhttp {
      * @brief used as a security measure to prevent out of order calls
      */
     PAIR_PHASE last_phase = PAIR_PHASE::NONE;
+
+    // Pairing phases for one client can arrive on either the HTTP or HTTPS server thread. Keep
+    // each session stable after it is looked up in the global map, and serialize mutations of the
+    // challenge/cipher state without blocking unrelated clients.
+    std::shared_ptr<std::mutex> state_mutex = std::make_shared<std::mutex>();
   };
 
   /**
@@ -222,6 +228,23 @@ namespace nvhttp {
    * @examples_end
    */
   void erase_all_clients();
+
+#ifdef SUNSHINE_TESTS
+  /** Test-only check that exercises the same in-memory certificate chain as HTTPS verification. */
+  bool is_client_certificate_authorized(std::string_view certificate);
+
+  /** Insert through the production authorization transaction for concurrency tests. */
+  void add_authorized_client_for_test(std::string name, std::string certificate);
+
+  /** Look up the current immutable authorization record for a certificate. */
+  crypto::p_named_cert_t get_authorized_client_for_test(std::string certificate);
+
+  /** Refresh a stale keep-alive authorization snapshot through the production lookup path. */
+  crypto::p_named_cert_t refresh_authorized_client_for_test(const crypto::p_named_cert_t &cached);
+
+  /** Exercise OTP validation without constructing a network request. */
+  bool authenticate_otp_for_test(std::string authentication, std::string salt);
+#endif
 
   /**
    * @brief      Stops a session.

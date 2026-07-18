@@ -59,15 +59,23 @@ creates a reusable execution context for, and warms the single selected model at
 
 ```
 python tools/sbsbench/run_eval.py                     # all committed clips vs committed baselines
-python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change: re-baseline + commit
+python tools/sbsbench/run_eval.py --update-baselines  # accepted defaults only; --extra is rejected
 python tools/sbsbench/run_eval.py --extra --subject-lock 0.6   # pass supported A/B levers
 python tools/sbsbench/run_eval.py --label profile-b --conf profile-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/profile-a --report-allow-config-diff
 python tools/sbsbench/run_eval.py --label model-b --conf model-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/model-a --report-allow-config-diff --report-allow-model-diff
 python tools/sbsbench/run_eval.py --label cadence-b --report-control cmake-build-relwithdebinfo/sbs_eval/cadence-a --report-allow-depth-step-diff --extra --depth-every 2
+python tools/sbsbench/run_eval.py --label code-b --report-control cmake-build-relwithdebinfo/sbs_eval/code-a --report-allow-executable-diff
 python tools/sbsbench/run_eval.py --comparison-only --label ab-control  # fresh A/B; no committed gate
 python tools/sbsbench/run_eval.py --suite extended --label public-control # prepared public suite
-python tools/sbsbench/rescore_run.py cmake-build-relwithdebinfo/sbs_eval/<run> --in-place  # metrics only
+python tools/sbsbench/rescore_run.py cmake-build-relwithdebinfo/sbs_eval/<comparison-run> --in-place
 ```
+
+Committed baselines are canonical production-profile runs. Move an accepted setting into the
+profile/config before `--update-baselines`; the runner rejects harness `--extra` overrides so a
+treatment baseline cannot later masquerade as the default. Missing hard, baseline-supported
+primary, or configured performance evidence fails closed. `rescore_run.py` is metric-only: it
+accepts only explicitly comparison-only runs produced by the current evaluator schema, preserves
+that schema, verifies the recorded source hashes, and uses the run's recorded clip root.
 
 **Profile / model (important):** the evaluator resolves the depth model from the selected profile
 and then the explicit `sbs_3d_depth_model` override, exactly like production. There is no separate
@@ -140,12 +148,16 @@ for driver diagnosis or a controlled performance A/B; unsupported/capture-failed
 fall back to ordinary TensorRT enqueue automatically.
 
 Exit code is the verdict (0 pass / 1 regression / 2 setup error), so the eval→fix→eval loop is
-scriptable. `results.json` carries provenance (git sha+dirty, models, clip hashes, gpu-contention
-flag) and, for every triggered/regressed metric, the **worst frame index** to look at. The gate
+scriptable. `results.json` carries provenance (git sha+dirty, executable, runtime-shader tree,
+exact TensorRT engine/ONNX hashes, clip hashes, and gpu-contention flag) and, for every
+triggered/regressed metric, the **worst frame index** to look at. The gate
 thresholds live in [thresholds.json](thresholds.json); the pinned SBS config in
 [bench.conf](bench.conf); baselines in `baselines/` (regenerate in the same commit whenever
-bench.conf, the clip set, or a metric definition changes). Guards: fails fast if TRT engines
-aren't prebuilt; warns + skips the perf gate if another sunshine.exe is running.
+bench.conf, the clip set, or a metric definition changes). Guards: the runtime must publish a
+fresh `<model>.active-engine.json` naming the exact nonempty TensorRT artifact and current ONNX
+SHA-256; an unrelated/stale engine never satisfies preflight. `--allow-build` performs one untimed
+one-frame harness preflight and revalidates that manifest before any measured clip. The runner
+warns and skips the perf gate if another sunshine.exe is running.
 
 Hard comfort/integrity bounds apply even in comparison-only runs. Baseline updates are staged in
 memory and written atomically only after every clip passes those bounds, so a broken render cannot
@@ -161,17 +173,21 @@ depth-step floor (flat scenes legitimately read 0), and all pixel windows scale 
 width — but absolute values are still not comparable across clip resolutions; baselines are
 per-clip-set. The harness writes 16-bit depth PNGs so `swim` resolves below 1/255.
 
-**Eval schema 24 / harness contract 15:** `run_eval.py` pins the profile, model, and zero-plane
-mode explicitly and
-has no alternate warp selector. By default the
+**Eval schema 26 / harness contract 15:** `run_eval.py` pins the profile, model, and zero-plane
+mode explicitly, records the exact Sunshine executable, runtime HLSL tree, engine, and ONNX
+hashes, and has no alternate warp selector. A normal report requires all four to match;
+`--report-allow-executable-diff` explicitly permits a code/shader A/B, while
+`--report-allow-model-diff` permits an engine/ONNX A/B.
+By default the
 harness submits and consumes exactly one inference per source frame, so EMA and normalization
 update once. `--depth-every N` is an explicit comparison-only cadence treatment: color advances
 while the last completed depth/subject geometry is reused, and the contract records `reuse-N`.
 Source, raw-model (`raw_*.f32`), pre-warp depth (`depth_*.png`), exact warp mask
 (`warp_mask_*.png`), and SBS artifacts are joined by
 numeric frame identity, never list position. Baselines are rejected with setup exit 2 if mode,
-model, schema, stepping semantics, config hash, metric implementation/threshold hash, or clip hash
-differs. Runner/gating semantics are versioned by the schema rather than the runner's comments or
+model, baseline-update provenance, schema, stepping semantics, config hash, metric
+implementation/threshold hash, or clip hash differs. Runner/gating semantics are versioned by the
+schema rather than the runner's comments or
 diagnostic wording. Output folders
 are cleared before reuse. `--output-every N` reduces saved artifacts while still processing every
 input frame, so sampling cannot change temporal state.
@@ -292,8 +308,10 @@ with one update per source frame.
 
 Every A/B HTML report now writes a sibling `decision.json`. Both are generated from the same
 already-unwrapped per-clip aggregate dictionaries, so automation should consume that sidecar rather
-than reimplementing decision parsing. Sidecar schema 2 includes both `metric_sha256` and
-`report_sha256`, allowing automation to reject stale metric or presentation/decision logic. To
+than reimplementing decision parsing. Sidecar schema 3 includes `metric_sha256`,
+`report_sha256`, and both inputs' executable/shader/engine/ONNX hashes, plus both canonical run
+gates. Missing evidence and performance or
+baseline failures cannot be relabelled as a candidate by the report's metric-only A/B view. To
 check whether a depth processor compresses or clips depth:
 
 ```

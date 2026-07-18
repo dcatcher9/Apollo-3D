@@ -1201,8 +1201,9 @@ namespace video {
     std::vector<std::string> display_names;
     int display_p = -1;
     std::shared_ptr<platf::display_t> disp;
-    if (!proc::proc.display_name.empty()) {
-      disp = platf::display(encoder.platform_formats->dev_type, proc::proc.display_name, capture_ctxs.front().config);
+    const auto initial_display_name = proc::proc.get_display_name();
+    if (!initial_display_name.empty()) {
+      disp = platf::display(encoder.platform_formats->dev_type, initial_display_name, capture_ctxs.front().config);
     }
     if (!disp) {
       // Get all the monitor names now, rather than at boot, to
@@ -1210,7 +1211,7 @@ namespace video {
       refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
       disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
       if (disp) {
-        proc::proc.display_name = display_names[display_p];
+        proc::proc.set_display_name(display_names[display_p]);
       } else {
         return;
       }
@@ -1400,7 +1401,8 @@ namespace video {
               disp.reset();
 
               // Refresh display names since a display removal might have caused the reinitialization
-              refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, proc::proc.display_name);
+              auto preferred_display_name = proc::proc.get_display_name();
+              refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, preferred_display_name);
 
               // Process any pending display switch with the new list of displays
               if (switch_display_event->peek()) {
@@ -1410,7 +1412,7 @@ namespace video {
               // reset_display() will sleep between retries
               reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
               if (disp) {
-                proc::proc.display_name = display_names[display_p];
+                proc::proc.set_display_name(display_names[display_p]);
                 break;
               }
             }
@@ -2516,7 +2518,10 @@ namespace video {
       }
 
       // absolute mouse coordinates require that the dimensions of the screen are known
-      touch_port_event->raise(make_port(display.get(), session_config));
+      // Host SBS changes only the encoded frame geometry. Absolute input remains addressed in
+      // the client's logical W x H viewport and must map to the captured desktop, not the packed
+      // 2W x H encoder surface (or its capped derivative).
+      touch_port_event->raise(make_port(display.get(), config));
 
       // Update client with our current HDR display state
       hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);

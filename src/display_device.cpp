@@ -12,6 +12,7 @@
 #include <display_device/json.h>
 #include <display_device/retry_scheduler.h>
 #include <display_device/settings_manager_interface.h>
+#include <cstdint>
 #include <mutex>
 #include <regex>
 
@@ -484,6 +485,23 @@ namespace display_device {
     }
 
     /**
+     * @brief Compare refresh rates by value rather than by rational representation.
+     *
+     * Client FPS values are stored as millihertz (for example, 60000/1000), while
+     * remapping entries are parsed as user-facing hertz (for example, 60/1).
+     */
+    bool refresh_rates_equal(const FloatingPoint &lhs, const FloatingPoint &rhs) {
+      const auto *lhs_rational {std::get_if<Rational>(&lhs)};
+      const auto *rhs_rational {std::get_if<Rational>(&rhs)};
+      if (!lhs_rational || !rhs_rational || lhs_rational->m_denominator == 0 || rhs_rational->m_denominator == 0) {
+        return lhs == rhs;
+      }
+
+      return static_cast<std::uint64_t>(lhs_rational->m_numerator) * rhs_rational->m_denominator ==
+             static_cast<std::uint64_t>(rhs_rational->m_numerator) * lhs_rational->m_denominator;
+    }
+
+    /**
      * @brief Parse the remapping entry from the config into an internal structure.
      * @param entry Entry to parse.
      * @param type Specify which entry fields should be parsed.
@@ -586,7 +604,8 @@ namespace display_device {
         }
 
         // Note: at this point config should already have parsed refresh rate set.
-        if (parsed_entry->requested_fps && parsed_entry->requested_fps != config.m_refresh_rate) {
+        if (parsed_entry->requested_fps &&
+            (!config.m_refresh_rate || !refresh_rates_equal(*parsed_entry->requested_fps, *config.m_refresh_rate))) {
           BOOST_LOG(verbose) << "Skipping remapping because requested FPS do not match! Entry:\n"
                              << entry_to_string(entry);
           continue;

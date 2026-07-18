@@ -2,7 +2,11 @@
 
   #include "src/platform/windows/ar_glasses.h"
 
+  #include <chrono>
+
   #include <gtest/gtest.h>
+
+using namespace std::chrono_literals;
 
 TEST(ArGlassesMode, SelectsNormalForNativeTwoDimensionalMode) {
   EXPECT_EQ(
@@ -40,6 +44,19 @@ TEST(ArGlassesDiscovery, DoesNotGuessFromOrdinaryMonitorNames) {
   EXPECT_FALSE(ar_glasses::is_recognized_ar_display("DISPLAY:GSM1234", "LG ULTRAGEAR"));
   EXPECT_FALSE(ar_glasses::is_recognized_ar_display("DISPLAY:AUS4321", "ROG PG32UCDM"));
   EXPECT_FALSE(ar_glasses::is_recognized_ar_display("DISPLAY:ACI9999", "ARZOPA Portable Monitor"));
+}
+
+TEST(ArGlassesOwnership, RenewedRemoteConnectWindowBlocksLocalPresentation) {
+  ar_glasses::remote_virtual_display_ended();
+  ASSERT_TRUE(ar_glasses::remote_virtual_display_starting(0ms));
+
+  // This is called after display creation, encoder probing, and app preparation. Its fresh lease
+  // must remain visible to the local topology controller until RTSP activates or the lease ends.
+  ar_glasses::remote_virtual_display_awaiting_client(0ms);
+  EXPECT_TRUE(ar_glasses::remote_virtual_display_blocks_local());
+
+  ar_glasses::remote_virtual_display_ended();
+  EXPECT_FALSE(ar_glasses::remote_virtual_display_blocks_local());
 }
 
 #endif

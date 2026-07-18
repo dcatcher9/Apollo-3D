@@ -1,7 +1,9 @@
 #include "virtual_display.h"
 
 #include <algorithm>
+#include <chrono>
 #include <combaseapi.h>
+#include <condition_variable>
 #include <dxgi.h>
 #include <dxgi1_6.h>
 #include <highlevelmonitorconfigurationapi.h>
@@ -21,10 +23,34 @@ namespace VDISPLAY {
   // {dff7fd29-5b75-41d1-9731-b32a17a17104}
   // static const GUID DEFAULT_DISPLAY_GUID = { 0xdff7fd29, 0x5b75, 0x41d1, { 0x97, 0x31, 0xb3, 0x2a, 0x17, 0xa1, 0x71, 0x04 } };
 
-  HANDLE SUDOVDA_DRIVER_HANDLE = INVALID_HANDLE_VALUE;
-
   namespace {
+    HANDLE sudovdaDriverHandle = INVALID_HANDLE_VALUE;
     std::mutex virtualDisplayMutationMutex;
+    std::mutex driverLifecycleMutex;
+    std::mutex watchdogOwnerMutex;
+    std::mutex watchdogWaitMutex;
+    std::condition_variable_any watchdogWake;
+    std::jthread watchdogThread;
+
+    void stopWatchdogThread() {
+      std::jthread retiring;
+      {
+        std::lock_guard lock(watchdogOwnerMutex);
+        watchdogThread.request_stop();
+        watchdogWake.notify_all();
+        retiring = std::move(watchdogThread);
+      }
+      if (retiring.joinable()) {
+        retiring.join();
+      }
+    }
+
+    void closeDriverHandleLocked() {
+      if (sudovdaDriverHandle != INVALID_HANDLE_VALUE) {
+        CloseHandle(sudovdaDriverHandle);
+        sudovdaDriverHandle = INVALID_HANDLE_VALUE;
+      }
+    }
 
     std::optional<LUID> adapterLuidByName(const std::wstring &adapterName) {
       Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
@@ -489,75 +515,92 @@ bool setDisplayHDRByName(const wchar_t* displayName, bool enableAdvancedColor) {
 }
 
 void closeVDisplayDevice() {
-	if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
-		return;
-	}
-
-	CloseHandle(SUDOVDA_DRIVER_HANDLE);
-
-	SUDOVDA_DRIVER_HANDLE = INVALID_HANDLE_VALUE;
+  std::lock_guard lifecycle_lock(driverLifecycleMutex);
+  stopWatchdogThread();
+  std::lock_guard device_lock(virtualDisplayMutationMutex);
+  closeDriverHandleLocked();
 }
 
 DRIVER_STATUS openVDisplayDevice() {
-	uint32_t retryInterval = 20;
-	while (true) {
-		SUDOVDA_DRIVER_HANDLE = OpenDevice(&SUVDA_INTERFACE_GUID);
-		if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
-			if (retryInterval > 320) {
-				printf("[SUDOVDA] Open device failed!\n");
-				return DRIVER_STATUS::FAILED;
-			}
-			retryInterval *= 2;
-			Sleep(retryInterval);
-			continue;
-		}
+  std::lock_guard lifecycle_lock(driverLifecycleMutex);
+  stopWatchdogThread();
+  std::lock_guard device_lock(virtualDisplayMutationMutex);
+  closeDriverHandleLocked();
 
-		break;
-	}
+  uint32_t retryInterval = 20;
+  while (true) {
+    sudovdaDriverHandle = OpenDevice(&SUVDA_INTERFACE_GUID);
+    if (sudovdaDriverHandle == INVALID_HANDLE_VALUE) {
+      if (retryInterval > 320) {
+        printf("[SUDOVDA] Open device failed!\n");
+        return DRIVER_STATUS::FAILED;
+      }
+      retryInterval *= 2;
+      Sleep(retryInterval);
+      continue;
+    }
+    break;
+  }
 
-	if (!CheckProtocolCompatible(SUDOVDA_DRIVER_HANDLE)) {
-		printf("[SUDOVDA] SUDOVDA protocol not compatible with driver!\n");
-		closeVDisplayDevice();
-		return DRIVER_STATUS::VERSION_INCOMPATIBLE;
-	}
-
-	return DRIVER_STATUS::OK;
+  if (!CheckProtocolCompatible(sudovdaDriverHandle)) {
+    printf("[SUDOVDA] SUDOVDA protocol not compatible with driver!\n");
+    closeDriverHandleLocked();
+    return DRIVER_STATUS::VERSION_INCOMPATIBLE;
+  }
+  return DRIVER_STATUS::OK;
 }
 
 bool startPingThread(std::function<void()> failCb) {
-	if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
-		return false;
-	}
+  std::lock_guard lifecycle_lock(driverLifecycleMutex);
+  stopWatchdogThread();
 
-	VIRTUAL_DISPLAY_GET_WATCHDOG_OUT watchdogOut;
-	if (GetWatchdogTimeout(SUDOVDA_DRIVER_HANDLE, watchdogOut)) {
-		printf("[SUDOVDA] Watchdog: Timeout %d, Countdown %d\n", watchdogOut.Timeout, watchdogOut.Countdown);
-	} else {
-		printf("[SUDOVDA] Watchdog fetch failed!\n");
-		return false;
-	}
+  VIRTUAL_DISPLAY_GET_WATCHDOG_OUT watchdogOut {};
+  {
+    std::lock_guard device_lock(virtualDisplayMutationMutex);
+    if (sudovdaDriverHandle == INVALID_HANDLE_VALUE) {
+      return false;
+    }
+    if (!GetWatchdogTimeout(sudovdaDriverHandle, watchdogOut)) {
+      printf("[SUDOVDA] Watchdog fetch failed!\n");
+      return false;
+    }
+  }
+  printf("[SUDOVDA] Watchdog: Timeout %d, Countdown %d\n", watchdogOut.Timeout, watchdogOut.Countdown);
+  if (!watchdogOut.Timeout) {
+    return true;
+  }
 
-	if (watchdogOut.Timeout) {
-		auto sleepInterval = watchdogOut.Timeout * 1000 / 3;
-		std::thread ping_thread([sleepInterval, failCb = std::move(failCb)]{
-			uint8_t fail_count = 0;
-			for (;;) {
-				if (!sleepInterval) return;
-				if (!PingDriver(SUDOVDA_DRIVER_HANDLE)) {
-					fail_count += 1;
-					if (fail_count > 3) {
-						failCb();
-						return;
-					}
-				};
-				Sleep(sleepInterval);
-			}
-		});
-
-		ping_thread.detach();
-	}
-
-	return true;
+  const auto sleepInterval = std::chrono::milliseconds(watchdogOut.Timeout * 1000 / 3);
+  std::lock_guard owner_lock(watchdogOwnerMutex);
+  watchdogThread = std::jthread([sleepInterval, failCb = std::move(failCb)](std::stop_token stop_token) {
+    uint8_t fail_count = 0;
+    while (!stop_token.stop_requested()) {
+      bool watchdog_failed = false;
+      {
+        std::lock_guard device_lock(virtualDisplayMutationMutex);
+        if (sudovdaDriverHandle == INVALID_HANDLE_VALUE) {
+          return;
+        }
+        if (PingDriver(sudovdaDriverHandle)) {
+          fail_count = 0;
+        } else if (++fail_count > 3) {
+          // The watchdog owns handle invalidation. The callback only publishes status, avoiding a
+          // self-join when failure is reported from this worker.
+          closeDriverHandleLocked();
+          watchdog_failed = true;
+        }
+      }
+      if (watchdog_failed) {
+        failCb();
+        return;
+      }
+      std::unique_lock wait_lock(watchdogWaitMutex);
+      watchdogWake.wait_for(wait_lock, stop_token, sleepInterval, []() {
+        return false;
+      });
+    }
+  });
+  return true;
 }
 
 bool queryActiveDisplayConfig(
@@ -681,14 +724,14 @@ namespace {
       // SudoVDA's render-adapter choice is process-global. Keep adapter selection and AddVirtualDisplay
       // in one critical section so local AR and remote streaming sessions cannot steal each other's GPU.
       std::lock_guard lock(virtualDisplayMutationMutex);
-      if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
+      if (sudovdaDriverHandle == INVALID_HANDLE_VALUE) {
         return {};
       }
-      if (adapterLuid && !SetRenderAdapter(SUDOVDA_DRIVER_HANDLE, *adapterLuid)) {
+      if (adapterLuid && !SetRenderAdapter(sudovdaDriverHandle, *adapterLuid)) {
         printf("[SUDOVDA] Failed to select render adapter for virtual display.\n");
         return {};
       }
-      if (!AddVirtualDisplay(SUDOVDA_DRIVER_HANDLE, width, height, fps, guid, s_client_name, s_client_uid, output)) {
+      if (!AddVirtualDisplay(sudovdaDriverHandle, width, height, fps, guid, s_client_name, s_client_uid, output)) {
         printf("[SUDOVDA] Failed to add virtual display.\n");
         return {};
       }
@@ -787,11 +830,11 @@ std::wstring createVirtualDisplayOnAdapter(
 
 bool removeVirtualDisplay(const GUID &guid) {
   std::lock_guard lock(virtualDisplayMutationMutex);
-  if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
+  if (sudovdaDriverHandle == INVALID_HANDLE_VALUE) {
     return false;
   }
 
-  if (RemoveVirtualDisplay(SUDOVDA_DRIVER_HANDLE, guid)) {
+  if (RemoveVirtualDisplay(sudovdaDriverHandle, guid)) {
     printf("[SUDOVDA] Virtual display removed successfully.\n");
     return true;
   } else {

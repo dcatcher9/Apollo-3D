@@ -47,27 +47,39 @@ On connect Apollo:
 3. Places the virtual source beside the interactive desktop, identifies the current Windows primary
    monitor, and positions the physical glasses from that monitor's live bottom-right corner. A
    one-pixel-wide boundary segment keeps the topology valid. If the pointer crosses that segment,
-   the presenter redirects it to the corresponding location on the private virtual source; a
-   zero-length point contact is disconnected and Windows otherwise normalizes it back to a full
-   shared edge. No absolute desktop position is assumed.
+   the presenter window intercepts it and redirects it to the corresponding location on the private
+   virtual source before forwarding the input; a polling fallback covers synthetic pointer paths.
+   A zero-length point contact is disconnected and Windows otherwise normalizes it back to a full
+   shared edge. No absolute desktop position is assumed. If Windows cannot isolate the output (for
+   example, because the glasses are primary), presentation stays active without pointer isolation.
 4. Captures the virtual display on the configured GPU.
 5. Re-queries the selected monitor's exact device-instance path after topology changes, matches its actual
    `IDXGIOutput`, and uses the coordinates Windows applied rather than the requested position.
-6. Presents an input-transparent, borderless, topmost swapchain restricted to that physical output.
+6. Presents a non-activating, borderless, topmost swapchain restricted to that physical output.
 7. Uses passthrough in 1920x1080 or the production matched-frame depth and warp in 3840x1080.
 
 Disconnect, resolution change, swapchain loss, or Apollo shutdown stops capture before removing the
-private virtual display. Unexpected presenter failures retry after two seconds while the same stable
-glasses mode remains active.
+private virtual display. Unexpected presenter failures retry after a delay; repeated setup failures
+use bounded exponential backoff while the same stable glasses mode remains active.
 
 On clean shutdown or a mode transition, Apollo removes the private virtual source and restores the
 physical glasses to the desktop position they occupied before the session. The physical output must
 remain active (and therefore visible in Windows Display Settings) because disabling its display path
 would also stop DP scanout.
 
+Before moving a physical output, Apollo atomically updates a small recovery journal beside the
+active `sunshine.conf`. The journal keeps one entry per exact PnP target and clears an entry only
+after that target's original position is observed again. If Apollo, the GPU driver, or Windows exits
+without normal teardown, the next launch restores every connected recorded target. A disconnected
+target's entry remains pending until it reconnects, but it does not block presentation on another
+approved pair of glasses. Starting a session waits only for recovery of that same PnP target. The
+former single-target journal format is migrated atomically without discarding its pending recovery.
+
 If Apollo enables HDR on the physical glasses, it leaves that per-display Windows preference in
 place. Reverting it during an internal 2D/SBS session rebuild would trigger another topology change
 and can make the display oscillate between modes. A policy restriction is logged and stays SDR.
+Displays that advertise HDR but do not actually enter HDR (for example, until an on-device HDR10
+setting is enabled) also continue in SDR instead of entering a create/remove retry loop.
 
 The local path avoids an RGB-to-YUV encode/decode round trip. SDR uses a BGRA8 Rec.709 swapchain.
 When both outputs have stably entered HDR, Apollo captures linear FP16 scRGB and presents it through

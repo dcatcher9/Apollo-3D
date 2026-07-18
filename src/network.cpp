@@ -199,7 +199,7 @@ namespace net {
   /**
    * @brief Returns a string for use as the instance name for mDNS.
    * @param hostname The hostname to use for instance name generation.
-   * @return Hostname-based instance name or "Sunshine" if hostname is invalid.
+   * @return Hostname-based instance name or the configured project name if hostname is invalid.
    */
   std::string mdns_instance_name(const std::string_view &hostname) {
     // Start with the unmodified hostname
@@ -214,13 +214,13 @@ namespace net {
       // Replace any spaces with dashes
       if (instancename[i] == ' ') {
         instancename[i] = '-';
-      } else if (!std::isalnum(instancename[i]) && instancename[i] != '-') {
+      } else if (!std::isalnum(static_cast<unsigned char>(instancename[i])) && instancename[i] != '-') {
         // Stop at the first invalid character
         instancename.resize(i);
         break;
       }
     }
 
-    return !instancename.empty() ? instancename : "Apollo";
+    return !instancename.empty() ? instancename : PROJECT_NAME;
   }
 }  // namespace net

@@ -44,6 +44,8 @@ import sys
 import numpy as np
 from PIL import Image
 
+TEMPORAL_MIN_SUPPORT = 0.1
+
 
 # ---------------------------------------------------------------------------- io
 
@@ -96,6 +98,11 @@ def indexed_files(pattern, prefix):
             raise ValueError(f"duplicate {prefix} frame id {frame_id}: {out[frame_id]} and {path}")
         out[frame_id] = path
     return out
+
+
+def predecessor_frame_id(indexed, frame_id):
+    """Previous available numeric identity, independent of padding or contiguity."""
+    return max((candidate for candidate in indexed if candidate < frame_id), default=None)
 
 
 # ------------------------------------------------------------------- pop / geometry
@@ -768,6 +775,11 @@ def source_relative_metrics(eye, src_gray, depth=None, max_shift=None,
 
     if depth is None:
         return out
+    # Publish support even when this frame has no qualifying source detail.  A measured zero is a
+    # legitimate N/A result; omitting the field entirely is instead an evaluator/metric failure.
+    # Keeping those states distinct lets the gate fail closed without rejecting genuinely smooth
+    # or edge-free scenes.
+    out["source_stretch_support"] = 0.0
     edge = silhouette_edges(depth, ew, eh, 99.0)
     s = eye_scale(ew)
     halo_band = hdilate(edge, max(2, round(6 * s))) & valid
@@ -999,10 +1011,10 @@ def depth_ground_truth_ghost(prediction, ground_truth, previous_ground_truth,
     valid_y = edge_valid & np.concatenate((edge_valid[:1, :], edge_valid[:-1, :]), axis=0)
     threshold = max(0.02, pred_range * 0.08)
     pred_edge = ((valid_x & (gx >= threshold)) | (valid_y & (gy >= threshold)))
-    previous_only = previous_edge & ~hdilate(current_edge, 2)
+    previous_only = previous_edge & ~dilate2d(current_edge, 2)
     if np.count_nonzero(previous_only) < 8:
         return None
-    return float(np.mean(hdilate(pred_edge, 1)[previous_only]) * 100.0)
+    return float(np.mean(dilate2d(pred_edge, 1)[previous_only]) * 100.0)
 
 
 def depth_ground_truth_lag(prediction, ground_truth, previous_ground_truth, kind="disparity"):
@@ -1029,7 +1041,7 @@ def static_region_mask(src, prev_src, ew, eh, motion_threshold=3.0 / 255.0):
 
 
 def static_region_jitter(left, right, prev_left, prev_right, src, prev_src,
-                         motion_threshold=3.0 / 255.0, min_support=0.1):
+                         motion_threshold=3.0 / 255.0, min_support=TEMPORAL_MIN_SUPPORT):
     """Worst-eye temporal change over source regions that did not move.
 
     Source-motion pixels are horizontally dilated by the normal disparity radius before exclusion,
@@ -1165,7 +1177,7 @@ def resize_forward_flow_to_current(flow, valid, width, height):
 
 
 def flow_temporal_metrics(left, right, prev_left, prev_right, src, prev_src,
-                          depth=None, prev_depth=None, min_support=0.1,
+                          depth=None, prev_depth=None, min_support=TEMPORAL_MIN_SUPPORT,
                           reference_flow=None, reference_valid=None):
     """Motion-compensated output/depth temporal error.
 
@@ -1389,6 +1401,8 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         try:
             with open(meta_path, encoding="utf-8") as meta_file:
                 clip_meta = json.load(meta_file)
+            if not isinstance(clip_meta, dict):
+                raise ValueError("metadata root must be an object")
             gt_kind = clip_meta.get("gt_depth_kind", gt_kind)
             # Prepared public clips created before schema 5 already carry `dataset`; infer their
             # evidence contract so upgrading the evaluator cannot silently keep the old fail-open
@@ -1399,8 +1413,10 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
             require_gt_stereo = bool(clip_meta.get(
                 "required_gt_stereo", clip_meta.get("dataset") ==
                 "MPI Sintel Stereo Training Dataset"))
-        except (OSError, ValueError):
-            pass
+        except OSError as exc:
+            raise ValueError(f"cannot read clip metadata {meta_path}: {exc}") from exc
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid clip metadata {meta_path}: {exc}") from exc
     if require_gt_depth and not gt_by_id:
         raise ValueError("clip requires GT depth, but no gt_depth sidecars were found")
     if require_gt_flow and not flow_by_id:
@@ -1572,7 +1588,134 @@ def metric_gate_failed(base, new, spec):
     return metric_delta_class(base, new, spec) == "regressed"
 
 
-def evaluate_ab_decision(control, treatment, clip_ids, metric_specs, hard_clip_ids=None):
+def combined_metric_evidence(*groups):
+    """Merge A/B evidence without letting one low support value hide the other's support."""
+    combined = {}
+    for group in groups:
+        combined.update(group or {})
+    for key in ("static_support", "flow_support", "source_stretch_support"):
+        values = [group.get(key) for group in groups if group and
+                  metric_value_valid(group, key)]
+        if values:
+            combined[key] = max(float(value) for value in values)
+    return combined
+
+
+def metric_evidence_applicable(metric, spec, observed, clip_meta=None):
+    """Whether a conditional metric has enough clip evidence to be required.
+
+    Absence is never itself an exemption: the requirement is declared in thresholds.json and
+    resolved from independent clip metadata or an explicit support metric.
+    """
+    clip_meta = clip_meta or {}
+    if metric_value_valid(observed, metric):
+        return True
+    requirement = spec.get("requires", "always")
+    if requirement == "gt_depth":
+        return bool(clip_meta.get("gt_depth_kind") or clip_meta.get("required_gt_depth"))
+    if requirement == "gt_depth_temporal":
+        has_gt = bool(clip_meta.get("gt_depth_kind") or clip_meta.get("required_gt_depth"))
+        count = clip_meta.get("source_frame_count")
+        return has_gt and (count is None or count > 1)
+    if requirement == "multi_frame":
+        count = clip_meta.get("source_frame_count")
+        return count is None or count > 1
+    if requirement in ("static_support", "flow_support"):
+        count = clip_meta.get("source_frame_count")
+        if count is not None and count <= 1:
+            return False
+        support = observed.get(requirement)
+        # A missing/invalid support measurement on a multi-frame clip is not proof of exemption.
+        # Fail closed; only a measured lack of reliable pixels makes the temporal metric N/A.
+        if (isinstance(support, (bool, np.bool_)) or not np.isscalar(support) or
+                not np.issubdtype(np.asarray(support).dtype, np.number) or
+                not np.isfinite(support)):
+            return True
+        return float(support) >= TEMPORAL_MIN_SUPPORT
+    if requirement == "source_stretch_support":
+        support = observed.get("source_stretch_support")
+        # Missing/invalid support is not proof that the scene has no measurable source detail.
+        # Only an explicit zero emitted by source_relative_metrics is a valid exemption.
+        if (isinstance(support, (bool, np.bool_)) or not np.isscalar(support) or
+                not np.issubdtype(np.asarray(support).dtype, np.number) or
+                not np.isfinite(support) or float(support) < 0.0):
+            return True
+        return float(support) > 0.0
+    if requirement == "always":
+        return True
+    raise ValueError(f"unknown metric evidence requirement {requirement!r} for {metric}")
+
+
+def metric_value_valid(metrics, metric):
+    """True only for finite numeric evidence (booleans are not metric samples)."""
+    value = metrics.get(metric)
+    return (not isinstance(value, (bool, np.bool_)) and np.isscalar(value)
+            and np.issubdtype(np.asarray(value).dtype, np.number)
+            and bool(np.isfinite(value)))
+
+
+def worst_hard_metric(aggregates, metric, spec, clip_ids):
+    """Return the safety-worst finite value and clip; hard constraints are never averaged."""
+    values = [(float(aggregates[clip][metric]), clip) for clip in clip_ids
+              if clip in aggregates and metric_value_valid(aggregates[clip], metric)]
+    if not values:
+        return None, None
+    choose = min if "hard_min" in spec else max
+    return choose(values, key=lambda item: item[0])
+
+
+def canonical_run_gate(results):
+    """Return the authoritative run gate represented by ``results.json``.
+
+    Reports are secondary views over a completed evaluator run.  They must not turn an A/B metric
+    win into an exportable candidate when the runner rejected missing evidence, a performance or
+    quality regression, or a hard constraint.  Validate both the verdict and its supporting lists
+    so a malformed/partially-written result fails closed as well.
+    """
+    meta = results.get("meta")
+    run_kind = meta.get("run_kind") if isinstance(meta, dict) else None
+    expected_verdict = {
+        "baseline-gated": "pass",
+        "baseline-update": "pass",
+        "comparison-only": "comparison_only",
+    }.get(run_kind)
+    blockers = []
+    for key, kind in (("hard_failures", "hard"),
+                      ("evidence_failures", "evidence"),
+                      ("regressions", "baseline_or_perf")):
+        values = results.get(key)
+        if not isinstance(values, list):
+            blockers.append({"kind": "invalid_results", "field": key})
+        else:
+            blockers.extend({"kind": kind, "detail": value} for value in values)
+    verdict = results.get("verdict")
+    if expected_verdict is None:
+        blockers.append({"kind": "invalid_results", "field": "meta.run_kind",
+                         "value": run_kind})
+    elif verdict != expected_verdict:
+        blockers.append({"kind": "verdict", "expected": expected_verdict,
+                         "value": verdict})
+    return {"passed": not blockers, "run_kind": run_kind, "verdict": verdict,
+            "blockers": blockers}
+
+
+def gate_ab_decision(decision, control_results, treatment_results):
+    """Bind an A/B decision to both inputs' canonical evaluator gates."""
+    control_gate = canonical_run_gate(control_results)
+    treatment_gate = canonical_run_gate(treatment_results)
+    gate = {"passed": control_gate["passed"] and treatment_gate["passed"],
+            "control": control_gate, "treatment": treatment_gate}
+    result = dict(decision)
+    result["ab_verdict"] = decision.get("verdict")
+    result["canonical_gate"] = gate
+    result["candidate"] = decision.get("verdict") == "candidate" and gate["passed"]
+    if not gate["passed"]:
+        result["verdict"] = "reject_run_gate"
+    return result
+
+
+def evaluate_ab_decision(control, treatment, clip_ids, metric_specs, hard_clip_ids=None,
+                         clip_meta=None):
     """Evaluate a feature A/B without collapsing perceptual axes into one score.
 
     `control` and `treatment` map clip id -> aggregate metrics. Metric specs declare one of:
@@ -1584,6 +1727,7 @@ def evaluate_ab_decision(control, treatment, clip_ids, metric_specs, hard_clip_i
     priority plus visual or headset evidence rather than cancellation inside a scalar score.
     """
     hard_failures = []
+    missing_evidence = []
     axes = {}
     for clip in hard_clip_ids if hard_clip_ids is not None else clip_ids:
         ca, ta = control.get(clip, {}), treatment.get(clip, {})
@@ -1591,7 +1735,13 @@ def evaluate_ab_decision(control, treatment, clip_ids, metric_specs, hard_clip_i
             if spec.get("role", "diagnostic") != "hard":
                 continue
             before, after = ca.get(metric), ta.get(metric)
-            if before is None or after is None:
+            before_valid = metric_value_valid(ca, metric)
+            after_valid = metric_value_valid(ta, metric)
+            if not before_valid or not after_valid:
+                missing_evidence.append({"clip": clip, "metric": metric,
+                                         "missing": ("both" if not before_valid and not after_valid
+                                                     else "control" if not before_valid else
+                                                     "treatment")})
                 continue
             hard_min = spec.get("hard_min")
             hard_max = spec.get("hard_max")
@@ -1605,7 +1755,16 @@ def evaluate_ab_decision(control, treatment, clip_ids, metric_specs, hard_clip_i
         for metric, spec in metric_specs.items():
             role = spec.get("role", "diagnostic")
             before, after = ca.get(metric), ta.get(metric)
-            if before is None or after is None:
+            if not metric_value_valid(ca, metric) or not metric_value_valid(ta, metric):
+                observed = combined_metric_evidence(ca, ta)
+                if role == "primary" and metric_evidence_applicable(
+                        metric, spec, observed, (clip_meta or {}).get(clip, {})):
+                    missing_evidence.append({"clip": clip, "metric": metric,
+                                             "missing": (
+                                                 "both" if not metric_value_valid(ca, metric)
+                                                 and not metric_value_valid(ta, metric)
+                                                 else "control" if not metric_value_valid(ca, metric)
+                                                 else "treatment")})
                 continue
             if role == "hard":
                 continue
@@ -1621,7 +1780,9 @@ def evaluate_ab_decision(control, treatment, clip_ids, metric_specs, hard_clip_i
 
     improved = sum(len(v["improved"]) for v in axes.values())
     regressed = sum(len(v["regressed"]) for v in axes.values())
-    if hard_failures:
+    if missing_evidence:
+        verdict = "reject_evidence"
+    elif hard_failures:
         verdict = "reject_hard"
     elif improved and regressed:
         verdict = "tradeoff"
@@ -1631,7 +1792,8 @@ def evaluate_ab_decision(control, treatment, clip_ids, metric_specs, hard_clip_i
         verdict = "candidate"
     else:
         verdict = "neutral"
-    return {"verdict": verdict, "hard_failures": hard_failures, "axes": axes,
+    return {"verdict": verdict, "hard_failures": hard_failures,
+            "missing_evidence": missing_evidence, "axes": axes,
             "improved": improved, "regressed": regressed}
 
 

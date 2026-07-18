@@ -139,6 +139,7 @@ namespace platf::dxgi {
   blob_t convert_yuv444_planar_vs_hlsl;
   blob_t cursor_ps_hlsl;
   blob_t cursor_ps_normalize_white_hlsl;
+  blob_t rgb_present_linear_to_srgb_ps_hlsl;
   blob_t cursor_vs_hlsl;
   blob_t depth_warp_prefilter_cs_hlsl;
   blob_t sbs_reprojection_ps_hlsl;
@@ -539,10 +540,15 @@ namespace platf::dxgi {
           }
         };
 
-        auto draw_rgb = [&](ID3D11ShaderResourceView *input) {
+        auto draw_rgb = [&](ID3D11ShaderResourceView *input, bool input_is_linear) {
           device_ctx->OMSetRenderTargets(1, &rgb_present_target, nullptr);
           device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
-          device_ctx->PSSetShader(rgb_present_ps.get(), nullptr, 0);
+          device_ctx->PSSetShader(
+            input_is_linear && !display->is_hdr() ? rgb_present_linear_to_srgb_ps.get() :
+                                                    rgb_present_ps.get(),
+            nullptr,
+            0
+          );
           device_ctx->RSSetViewports(1, &rgb_present_viewport);
           device_ctx->PSSetSamplers(0, 1, &sampler_linear);
           device_ctx->PSSetShaderResources(0, 1, &input);
@@ -631,8 +637,13 @@ namespace platf::dxgi {
 
           if (depth_estimator) {
             matched_candidate_slot = available_matched_slot();
+            // Readiness is checked before the full-resolution private-slot copy. When TensorRT is
+            // still using the previous matched frame, the output is repeated without spending a
+            // D3D11 CopyResource on a source frame that cannot be enqueued.
+            const bool estimator_ready =
+              matched_candidate_slot && depth_estimator->can_accept_frame();
             const bool matched_copy_submitted =
-              matched_candidate_slot &&
+              estimator_ready &&
               copy_matched_frame(img_ctx.encoder_texture.get(), *matched_candidate_slot, frame_id);
             mark_sbs_matched_copy_end(gpu_timer, matched_copy_submitted);
             if (matched_copy_submitted) {
@@ -733,7 +744,7 @@ namespace platf::dxgi {
             // encode/decode round trip. Exact layouts take the copy fast path; retain the shader
             // for any future mode whose source and physical target require scaling or conversion.
             if (!copy_rgb(final_sbs_texture)) {
-              draw_rgb(final_sbs_srv);
+              draw_rgb(final_sbs_srv, sbs_intermediate_linear);
             }
           } else {
             // Draw the SBS intermediate into encoder YUV.
@@ -770,7 +781,10 @@ namespace platf::dxgi {
         } else {
           if (rgb_present_target) {
             if (!copy_rgb(img_ctx.encoder_texture.get())) {
-              draw_rgb(img_ctx.encoder_input_res.get());
+              draw_rgb(
+                img_ctx.encoder_input_res.get(),
+                img.format == DXGI_FORMAT_R16G16B16A16_FLOAT
+              );
             }
           } else {
             // Plain 2D: draw the captured frame straight into the encoder output.
@@ -1279,7 +1293,11 @@ namespace platf::dxgi {
       const bool sbs_on = sbs_mode != ::video::SBS_OFF;
       const bool downscaling = display->width > width || display->height > height;
 
+      // FP16 capture is linear for both HDR and Advanced Color SDR. Runtime shader selection uses
+      // the actual input transfer plus the negotiated display mode; resource format alone is not
+      // an HDR-mode signal.
       create_pixel_shader_helper(cursor_ps_hlsl, rgb_present_ps);
+      create_pixel_shader_helper(rgb_present_linear_to_srgb_ps_hlsl, rgb_present_linear_to_srgb_ps);
       create_vertex_shader_helper(sbs_reprojection_vs_hlsl, sbs_reprojection_vs);
       if (sbs_on) {
         create_compute_shader_helper(depth_warp_prefilter_cs_hlsl, sbs_depth_prefilter_cs);
@@ -1849,6 +1867,7 @@ namespace platf::dxgi {
     bool rgb_copy_path_logged = false;
     bool rgb_copy_fallback_logged = false;
     ps_t rgb_present_ps;
+    ps_t rgb_present_linear_to_srgb_ps;
     D3D11_VIEWPORT rgb_present_viewport {};
 
     std::unique_ptr<models::video_depth_estimator> depth_estimator;
@@ -1894,21 +1913,180 @@ namespace platf::dxgi {
 
   namespace {
     constexpr wchar_t local_presenter_window_class[] = L"ApolloLocalArPresenter";
+    // Mark reinjected button/wheel events so an unexpected topology/window race can never make a
+    // synthetic event delivered back to the presenter recursively generate another SendInput.
+    constexpr ULONG_PTR local_presenter_forwarded_input_tag = 0x41524C50u;  // "ARLP"
+
+    struct local_presenter_pointer_redirect_t {
+      RECT source_rect {};
+      RECT target_rect {};
+      std::shared_ptr<local_presenter_config_t::target_t> live_target;
+
+      RECT current_target_rect() const {
+        if (!live_target) {
+          return target_rect;
+        }
+        std::lock_guard lock(live_target->mutex);
+        return live_target->rect;
+      }
+
+      bool redirect_pointer() const {
+        const auto sink_rect = current_target_rect();
+        POINT cursor {};
+        if (!GetCursorPos(&cursor) || !PtInRect(&sink_rect, cursor)) {
+          return false;
+        }
+
+        const LONG source_width = source_rect.right - source_rect.left;
+        const LONG source_height = source_rect.bottom - source_rect.top;
+        const LONG sink_width = sink_rect.right - sink_rect.left;
+        const LONG sink_height = sink_rect.bottom - sink_rect.top;
+        if (source_width <= 0 || source_height <= 0 || sink_width <= 0 || sink_height <= 0) {
+          return false;
+        }
+
+        const auto relative_x = std::clamp(cursor.x - sink_rect.left, 0L, sink_width - 1);
+        const auto relative_y = std::clamp(cursor.y - sink_rect.top, 0L, sink_height - 1);
+        const LONG mapped_x = source_rect.left + std::min(
+                                                   source_width - 1,
+                                                   static_cast<LONG>(
+                                                     static_cast<std::int64_t>(relative_x) * source_width / sink_width
+                                                   )
+                                                 );
+        const LONG mapped_y = source_rect.top + std::min(
+                                                  source_height - 1,
+                                                  static_cast<LONG>(
+                                                    static_cast<std::int64_t>(relative_y) * source_height / sink_height
+                                                  )
+                                                );
+        return SetCursorPos(mapped_x, mapped_y) != FALSE;
+      }
+    };
+
+    bool cursor_is_over_presenter(HWND presenter) {
+      POINT cursor {};
+      if (!GetCursorPos(&cursor)) {
+        return true;  // fail closed: without a current point, forwarding is not provably safe
+      }
+      const HWND hit = WindowFromPoint(cursor);
+      if (!hit) {
+        return false;
+      }
+      return hit == presenter || GetAncestor(hit, GA_ROOT) == presenter ||
+             GetAncestor(hit, GA_ROOTOWNER) == presenter;
+    }
+
+    bool forward_presenter_mouse_action(HWND presenter, UINT message, WPARAM wparam) {
+      // SetCursorPos and the live target/window rectangle can race. Re-read the global cursor and
+      // hit-test immediately before injection; if the presenter still owns that point, swallow the
+      // original event rather than feeding it back into this window procedure.
+      if (cursor_is_over_presenter(presenter)) {
+        return false;
+      }
+      INPUT input {};
+      input.type = INPUT_MOUSE;
+      input.mi.dwExtraInfo = local_presenter_forwarded_input_tag;
+      switch (message) {
+        case WM_LBUTTONDOWN:
+          input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+          break;
+        case WM_LBUTTONUP:
+          input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+          break;
+        case WM_RBUTTONDOWN:
+          input.mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+          break;
+        case WM_RBUTTONUP:
+          input.mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+          break;
+        case WM_MBUTTONDOWN:
+          input.mi.dwFlags = MOUSEEVENTF_MIDDLEDOWN;
+          break;
+        case WM_MBUTTONUP:
+          input.mi.dwFlags = MOUSEEVENTF_MIDDLEUP;
+          break;
+        case WM_XBUTTONDOWN:
+          input.mi.dwFlags = MOUSEEVENTF_XDOWN;
+          input.mi.mouseData = GET_XBUTTON_WPARAM(wparam);
+          break;
+        case WM_XBUTTONUP:
+          input.mi.dwFlags = MOUSEEVENTF_XUP;
+          input.mi.mouseData = GET_XBUTTON_WPARAM(wparam);
+          break;
+        case WM_MOUSEWHEEL:
+          input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+          input.mi.mouseData = static_cast<DWORD>(GET_WHEEL_DELTA_WPARAM(wparam));
+          break;
+        case WM_MOUSEHWHEEL:
+          input.mi.dwFlags = MOUSEEVENTF_HWHEEL;
+          input.mi.mouseData = static_cast<DWORD>(GET_WHEEL_DELTA_WPARAM(wparam));
+          break;
+        default:
+          return false;
+      }
+      return SendInput(1, &input, sizeof(input)) == 1;
+    }
 
     LRESULT CALLBACK local_presenter_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+      if (message == WM_NCCREATE) {
+        const auto *create = reinterpret_cast<const CREATESTRUCTW *>(lparam);
+        SetWindowLongPtrW(
+          hwnd,
+          GWLP_USERDATA,
+          reinterpret_cast<LONG_PTR>(create->lpCreateParams)
+        );
+      }
+      auto *pointer_redirect = reinterpret_cast<local_presenter_pointer_redirect_t *>(
+        GetWindowLongPtrW(hwnd, GWLP_USERDATA)
+      );
       switch (message) {
         case WM_CLOSE:
           DestroyWindow(hwnd);
           return 0;
         case WM_DESTROY:
+          PostQuitMessage(0);
           return 0;
         case WM_NCHITTEST:
-          return HTTRANSPARENT;
+          // The physical sink is presentation-only. Intercept pointer entry so a click cannot land
+          // on that desktop before the cursor is redirected to the virtual source.
+          return HTCLIENT;
         case WM_MOUSEACTIVATE:
           return MA_NOACTIVATE;
+        case WM_MOUSEMOVE:
+          if (pointer_redirect && pointer_redirect->redirect_pointer()) {
+            return 0;
+          }
+          break;
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONUP:
+        case WM_RBUTTONDOWN:
+        case WM_RBUTTONUP:
+        case WM_MBUTTONDOWN:
+        case WM_MBUTTONUP:
+        case WM_XBUTTONDOWN:
+        case WM_XBUTTONUP:
+        case WM_MOUSEWHEEL:
+        case WM_MOUSEHWHEEL:
+          // A tagged event is one of our own injections that raced back onto the presenter. It is
+          // already the replacement for an earlier physical-sink event, so swallow it permanently.
+          if (static_cast<ULONG_PTR>(GetMessageExtraInfo()) == local_presenter_forwarded_input_tag) {
+            return 0;
+          }
+          // Every untagged button/wheel message delivered to this window originated on the
+          // physical sink.
+          // The capture-thread fallback may already have moved the global cursor before this
+          // queued message is dispatched, so forwarding must not depend on redirect_pointer()
+          // reporting a new move. Re-inject only if a fresh hit-test proves that the cursor is no
+          // longer owned by this presenter, and always swallow the presenter-targeted copy.
+          if (pointer_redirect) {
+            pointer_redirect->redirect_pointer();
+          }
+          forward_presenter_mouse_action(hwnd, message, wparam);
+          return 0;
         default:
-          return DefWindowProcW(hwnd, message, wparam, lparam);
+          break;
       }
+      return DefWindowProcW(hwnd, message, wparam, lparam);
     }
 
     bool register_local_presenter_window_class() {
@@ -1980,34 +2158,80 @@ namespace platf::dxgi {
       return local_presenter_result_e::error;
     }
 
+    DXGI_OUTPUT_DESC source_output_desc {};
+    if (!dxgi_display->output || FAILED(dxgi_display->output->GetDesc(&source_output_desc))) {
+      BOOST_LOG(error) << "Local AR presenter could not query the virtual source geometry."sv;
+      return local_presenter_result_e::error;
+    }
+    local_presenter_pointer_redirect_t pointer_redirect {
+      source_output_desc.DesktopCoordinates,
+      target_rect,
+      config.live_target,
+    };
+
     if (!register_local_presenter_window_class()) {
       BOOST_LOG(error) << "Local AR presenter could not register its window class: "sv
                        << GetLastError();
       return local_presenter_result_e::error;
     }
 
-    HWND window = CreateWindowExW(
-      WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-      local_presenter_window_class,
-      L"Apollo Local SBS AI",
-      WS_POPUP,
-      target_rect.left,
-      target_rect.top,
+    std::promise<std::pair<HWND, DWORD>> window_ready;
+    auto window_future = window_ready.get_future();
+    std::jthread window_thread([
+      &pointer_redirect,
+      target_rect,
       output_width,
       output_height,
-      nullptr,
-      nullptr,
-      GetModuleHandleW(nullptr),
-      nullptr
-    );
+      ready = std::move(window_ready)
+    ](std::stop_token window_stop_token) mutable {
+      HWND created_window = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        local_presenter_window_class,
+        L"Apollo Local SBS AI",
+        WS_POPUP,
+        target_rect.left,
+        target_rect.top,
+        output_width,
+        output_height,
+        nullptr,
+        nullptr,
+        GetModuleHandleW(nullptr),
+        &pointer_redirect
+      );
+      const DWORD create_error = created_window ? ERROR_SUCCESS : GetLastError();
+      ready.set_value({created_window, create_error});
+      if (!created_window) {
+        return;
+      }
+
+      // Capture may block for 200 ms on a static desktop. Keep Win32 input on this dedicated
+      // message loop so pointer entry and clicks are redirected immediately regardless of frame
+      // cadence. Stopping the owner posts WM_CLOSE and wakes GetMessageW().
+      std::stop_callback stop_window(window_stop_token, [created_window]() {
+        PostMessageW(created_window, WM_CLOSE, 0, 0);
+      });
+      MSG message {};
+      while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+      }
+      if (IsWindow(created_window)) {
+        DestroyWindow(created_window);
+      }
+    });
+    const auto [window, window_create_error] = window_future.get();
     if (!window) {
       BOOST_LOG(error) << "Local AR presenter could not create its output window: "sv
-                       << GetLastError();
+                       << window_create_error;
       return local_presenter_result_e::error;
     }
     auto destroy_window = util::fail_guard([&]() {
+      window_thread.request_stop();
       if (IsWindow(window)) {
-        DestroyWindow(window);
+        PostMessageW(window, WM_CLOSE, 0, 0);
+      }
+      if (window_thread.joinable()) {
+        window_thread.join();
       }
       SetThreadExecutionState(ES_CONTINUOUS);
     });
@@ -2200,48 +2424,11 @@ namespace platf::dxgi {
     std::array<std::shared_ptr<platf::img_t>, 3> image_pool;
     bool capture_cursor = true;
     bool window_closed = false;
-    auto redirect_pointer_from_target = [&]() {
-      const auto live_rect = read_target_rect();
-      POINT cursor {};
-      if (!GetCursorPos(&cursor) || !PtInRect(&live_rect, cursor)) {
-        return;
-      }
-
-      DXGI_OUTPUT_DESC source_desc {};
-      if (FAILED(dxgi_display->output->GetDesc(&source_desc))) {
-        return;
-      }
-      const auto source_rect = source_desc.DesktopCoordinates;
-      const LONG source_width = source_rect.right - source_rect.left;
-      const LONG source_height = source_rect.bottom - source_rect.top;
-      const LONG sink_width = live_rect.right - live_rect.left;
-      const LONG sink_height = live_rect.bottom - live_rect.top;
-      if (source_width <= 0 || source_height <= 0 || sink_width <= 0 || sink_height <= 0) {
-        return;
-      }
-
-      // The physical sink must remain active for DP scanout, so Windows requires it to touch the
-      // desktop. If the pointer crosses that one-pixel join, redirect it to the corresponding
-      // location on the private virtual source before it can interact with the sink desktop.
-      const auto relative_x = std::clamp(cursor.x - live_rect.left, 0L, sink_width - 1);
-      const auto relative_y = std::clamp(cursor.y - live_rect.top, 0L, sink_height - 1);
-      const LONG mapped_x = source_rect.left + std::min(
-                                                 source_width - 1,
-                                                 (LONG) ((std::int64_t) relative_x * source_width / sink_width)
-                                               );
-      const LONG mapped_y = source_rect.top + std::min(
-                                                source_height - 1,
-                                                (LONG) ((std::int64_t) relative_y * source_height / sink_height)
-                                              );
-      SetCursorPos(mapped_x, mapped_y);
-    };
-    auto pump_messages = [&]() {
-      redirect_pointer_from_target();
-      MSG message {};
-      while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
-      }
+    auto poll_presenter_state = [&]() {
+      // Keep a polling fallback for synthetic/legacy pointer paths that do not deliver ordinary
+      // mouse messages to the presentation window. Normal input is redirected synchronously by
+      // the window procedure before it can click the physical desktop.
+      pointer_redirect.redirect_pointer();
       window_closed = !IsWindow(window);
     };
 
@@ -2286,7 +2473,7 @@ namespace platf::dxgi {
       present_stats_started = now;
     };
     auto push_image = [&](std::shared_ptr<platf::img_t> &&image, bool frame_captured) {
-      pump_messages();
+      poll_presenter_state();
       if (stop_token.stop_requested() || window_closed) {
         return false;
       }
@@ -2294,15 +2481,6 @@ namespace platf::dxgi {
         return true;
       }
       ++captured_frames;
-
-      const auto &d3d_image = static_cast<const img_d3d_t &>(*image);
-      const bool frame_is_hdr = d3d_image.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
-      if (frame_is_hdr != config.hdr) {
-        BOOST_LOG(error) << "Local AR capture frame does not match the negotiated "sv
-                         << (config.hdr ? "HDR"sv : "SDR"sv) << " mode: "sv
-                         << dxgi_display->dxgi_format_to_string(d3d_image.format);
-        return false;
-      }
 
       const auto latest_target_rect = read_target_rect();
       if (latest_target_rect.left != target_rect.left || latest_target_rect.top != target_rect.top || latest_target_rect.right != target_rect.right || latest_target_rect.bottom != target_rect.bottom) {
@@ -3405,6 +3583,7 @@ namespace platf::dxgi {
     compile_vertex_shader_helper(convert_yuv444_planar_vs);
     compile_pixel_shader_helper(cursor_ps);
     compile_pixel_shader_helper(cursor_ps_normalize_white);
+    compile_pixel_shader_helper(rgb_present_linear_to_srgb_ps);
     compile_compute_shader_helper(depth_warp_prefilter_cs);
     compile_pixel_shader_helper(sbs_reprojection_ps);
     compile_vertex_shader_helper(sbs_reprojection_vs);

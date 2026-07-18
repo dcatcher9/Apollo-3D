@@ -43,6 +43,7 @@ namespace ar_glasses {
     constexpr auto topology_poll_interval = 250ms;
     constexpr auto topology_debounce = 750ms;
     constexpr auto failed_session_retry = 2s;
+    constexpr auto maximum_failed_session_retry = 30s;
     constexpr auto ownership_release_timeout = 10s;
 
     std::mutex ownership_mutex;
@@ -51,6 +52,10 @@ namespace ar_glasses {
     bool remote_session_active = false;
     std::chrono::steady_clock::time_point remote_session_pending_until {};
     std::optional<std::stop_source> local_session_construction_stop;
+
+    std::chrono::milliseconds remote_pending_duration(std::chrono::milliseconds connect_timeout) {
+      return std::clamp(connect_timeout + 2000ms, 2000ms, 60000ms);
+    }
 
     bool remote_blocks_local_locked(std::chrono::steady_clock::time_point now) {
       return remote_session_active || now < remote_session_pending_until;
@@ -167,6 +172,199 @@ namespace ar_glasses {
 
     std::mutex device_mutex;
     std::vector<stored_device_t> known_devices;
+    std::mutex topology_recovery_mutex;
+
+    struct topology_recovery_t {
+      std::wstring device_path;
+      RECT original_rect {};
+      RECT applied_rect {};
+    };
+
+    bool same_rect(const RECT &left, const RECT &right) {
+      return left.left == right.left && left.top == right.top &&
+             left.right == right.right && left.bottom == right.bottom;
+    }
+
+    std::filesystem::path topology_recovery_path() {
+      auto path = std::filesystem::path(platf::from_utf8(config::sunshine.config_file));
+      path += L".apollo-ar-topology.json";
+      return path;
+    }
+
+    topology_recovery_t parse_topology_recovery(const nlohmann::json &value) {
+      topology_recovery_t recovery {};
+      recovery.device_path = platf::from_utf8(value.at("device_path").get<std::string>());
+      recovery.original_rect.left = value.at("original_left").get<LONG>();
+      recovery.original_rect.top = value.at("original_top").get<LONG>();
+      recovery.original_rect.right = value.at("original_right").get<LONG>();
+      recovery.original_rect.bottom = value.at("original_bottom").get<LONG>();
+      recovery.applied_rect.left = value.at("applied_left").get<LONG>();
+      recovery.applied_rect.top = value.at("applied_top").get<LONG>();
+      recovery.applied_rect.right = value.at("applied_right").get<LONG>();
+      recovery.applied_rect.bottom = value.at("applied_bottom").get<LONG>();
+      if (recovery.device_path.empty() ||
+          recovery.original_rect.right <= recovery.original_rect.left ||
+          recovery.original_rect.bottom <= recovery.original_rect.top ||
+          recovery.applied_rect.right <= recovery.applied_rect.left ||
+          recovery.applied_rect.bottom <= recovery.applied_rect.top) {
+        throw std::runtime_error("invalid monitor identity or rectangle");
+      }
+      return recovery;
+    }
+
+    nlohmann::json serialize_topology_recovery(const topology_recovery_t &recovery) {
+      return {
+        {"device_path", platf::to_utf8(recovery.device_path)},
+        {"original_left", recovery.original_rect.left},
+        {"original_top", recovery.original_rect.top},
+        {"original_right", recovery.original_rect.right},
+        {"original_bottom", recovery.original_rect.bottom},
+        {"applied_left", recovery.applied_rect.left},
+        {"applied_top", recovery.applied_rect.top},
+        {"applied_right", recovery.applied_rect.right},
+        {"applied_bottom", recovery.applied_rect.bottom},
+      };
+    }
+
+    std::optional<std::vector<topology_recovery_t>> load_topology_recoveries_locked(
+      bool *legacy_format = nullptr
+    ) {
+      if (legacy_format) {
+        *legacy_format = false;
+      }
+      const auto path = topology_recovery_path();
+      std::ifstream input(path, std::ios::binary);
+      if (!input) {
+        std::error_code error;
+        if (std::filesystem::exists(path, error) || error) {
+          BOOST_LOG(warning) << "Could not read local-AR topology recovery state ["sv
+                             << platf::to_utf8(path.wstring()) << "]."sv;
+          return std::nullopt;
+        }
+        return std::vector<topology_recovery_t> {};
+      }
+      try {
+        const auto value = nlohmann::json::parse(input);
+        const int version {value.at("version").get<int>()};
+        std::vector<topology_recovery_t> recoveries;
+        if (version == 2) {
+          // Version 2 stored one global record. Preserve it as the first per-device entry and
+          // atomically migrate it on the next successful write.
+          recoveries.emplace_back(parse_topology_recovery(value));
+          if (legacy_format) {
+            *legacy_format = true;
+          }
+        } else if (version == 3) {
+          for (const auto &entry : value.at("recoveries")) {
+            auto recovery = parse_topology_recovery(entry);
+            if (std::ranges::any_of(recoveries, [&](const auto &existing) {
+                  return existing.device_path == recovery.device_path;
+                })) {
+              throw std::runtime_error("duplicate monitor identity");
+            }
+            recoveries.emplace_back(std::move(recovery));
+          }
+        } else {
+          throw std::runtime_error("unsupported recovery-record version");
+        }
+        return recoveries;
+      } catch (const std::exception &error) {
+        BOOST_LOG(warning) << "Ignoring invalid local-AR topology recovery record ["sv
+                           << platf::to_utf8(path.wstring()) << "]: "sv << error.what();
+        return std::nullopt;
+      }
+    }
+
+    bool write_topology_recoveries_locked(const std::vector<topology_recovery_t> &recoveries) {
+      const auto path = topology_recovery_path();
+      if (recoveries.empty()) {
+        std::error_code error;
+        const bool removed = std::filesystem::remove(path, error);
+        if (error || removed) {
+          return !error;
+        }
+        const bool still_exists = std::filesystem::exists(path, error);
+        return !error && !still_exists;
+      }
+
+      auto temporary_path = path;
+      temporary_path += L".tmp";
+      nlohmann::json entries {nlohmann::json::array()};
+      for (const auto &recovery : recoveries) {
+        entries.emplace_back(serialize_topology_recovery(recovery));
+      }
+      const nlohmann::json value {
+        {"version", 3},
+        {"recoveries", std::move(entries)},
+      };
+      {
+        std::ofstream output(temporary_path, std::ios::binary | std::ios::trunc);
+        if (!output) {
+          return false;
+        }
+        output << value.dump();
+        output.flush();
+        if (!output) {
+          output.close();
+          std::error_code ignored;
+          std::filesystem::remove(temporary_path, ignored);
+          return false;
+        }
+      }
+      if (!MoveFileExW(
+            temporary_path.c_str(),
+            path.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+          )) {
+        std::error_code ignored;
+        std::filesystem::remove(temporary_path, ignored);
+        return false;
+      }
+      return true;
+    }
+
+    bool clear_topology_recovery(std::wstring_view device_path) {
+      std::lock_guard lock(topology_recovery_mutex);
+      auto recoveries {load_topology_recoveries_locked()};
+      if (!recoveries) {
+        return false;
+      }
+      const auto original_size {recoveries->size()};
+      std::erase_if(*recoveries, [&](const auto &recovery) {
+        return recovery.device_path == device_path;
+      });
+      return recoveries->size() == original_size || write_topology_recoveries_locked(*recoveries);
+    }
+
+    bool persist_topology_recovery(
+      std::wstring_view device_path,
+      const RECT &original_rect,
+      const RECT &applied_rect,
+      bool &created
+    ) {
+      created = false;
+      std::lock_guard lock(topology_recovery_mutex);
+      auto recoveries {load_topology_recoveries_locked()};
+      if (!recoveries) {
+        return false;
+      }
+      auto existing {std::ranges::find_if(*recoveries, [&](const auto &recovery) {
+        return recovery.device_path == device_path;
+      })};
+      if (existing == recoveries->end()) {
+        recoveries->push_back({std::wstring(device_path), original_rect, applied_rect});
+        created = true;
+      } else {
+        // Preserve the first pre-session rectangle. Only the exact rectangle Windows actually
+        // applied may change while this device's isolation session remains active.
+        existing->applied_rect = applied_rect;
+      }
+      if (!write_topology_recoveries_locked(*recoveries)) {
+        created = false;
+        return false;
+      }
+      return true;
+    }
 
     bool same_presentation_contract(
       const std::optional<target_state_t> &left,
@@ -617,9 +815,16 @@ namespace ar_glasses {
       return name.empty() ? std::nullopt : std::optional<std::wstring>(std::move(name));
     }
 
+    bool restore_physical_output_position(
+      const RECT &original_rect,
+      const std::wstring &target_device_path
+    );
+
     std::optional<target_state_t> isolate_physical_output(
       const std::wstring &virtual_gdi_name,
-      const std::wstring &target_device_path
+      const std::wstring &target_device_path,
+      const RECT &original_rect,
+      bool *layout_changed = nullptr
     ) {
       std::wstring primary_gdi_name;
       for (DWORD index = 0;; ++index) {
@@ -730,6 +935,17 @@ namespace ar_glasses {
         return find_target(target_device_path);
       }
 
+      bool recovery_record_created = false;
+      if (!persist_topology_recovery(
+            target_device_path,
+            original_rect,
+            isolated_rect,
+            recovery_record_created
+          )) {
+        BOOST_LOG(error) << "Refusing to move the AR output without a durable topology recovery record."sv;
+        return std::nullopt;
+      }
+
       virtual_mode.position.x = anchor_right;
       virtual_mode.position.y = anchor_top;
       physical_mode.position.x = isolated_x;
@@ -744,13 +960,57 @@ namespace ar_glasses {
       );
       if (status != ERROR_SUCCESS) {
         BOOST_LOG(warning) << "Could not isolate the AR presentation output: "sv << status;
+        if (recovery_record_created) {
+          clear_topology_recovery(target_device_path);
+        } else if (const auto current = find_target(target_device_path)) {
+          // persist_topology_recovery() updated this existing device's applied rectangle before
+          // SetDisplayConfig so a successful move was crash recoverable. The move failed, so put
+          // the ownership evidence back to the rectangle that is actually still active.
+          bool ignored_created = false;
+          if (!persist_topology_recovery(
+                target_device_path,
+                original_rect,
+                current->rect,
+                ignored_created
+              )) {
+            BOOST_LOG(error) << "Could not restore the AR topology journal after the display move failed."sv;
+          }
+        } else {
+          BOOST_LOG(error) << "Could not query the AR output after its display move failed; "sv
+                              "retaining conservative topology recovery state."sv;
+        }
         return std::nullopt;
+      }
+      if (layout_changed) {
+        *layout_changed = true;
       }
 
       // Never trust the requested source position. DisplayConfig may normalize a valid request,
       // so query the exact PnP target again and use the coordinates Windows actually applied.
       for (int attempt = 0; attempt < 10; ++attempt) {
         if (const auto actual = find_target(target_device_path)) {
+          bool ignored_created = false;
+          if (!persist_topology_recovery(
+                target_device_path,
+                original_rect,
+                actual->rect,
+                ignored_created
+              )) {
+            BOOST_LOG(error) << "Could not update the durable AR topology record with Windows' "sv
+                                "actual applied rectangle; refusing to retain the isolated layout."sv;
+            if (restore_physical_output_position(original_rect, std::wstring(target_device_path))) {
+              if (layout_changed) {
+                *layout_changed = false;
+              }
+              if (!clear_topology_recovery(target_device_path)) {
+                BOOST_LOG(warning) << "The AR output was restored, but its topology recovery record could not be cleared."sv;
+              }
+            } else {
+              BOOST_LOG(error) << "Could not restore the AR output after its recovery record update failed; "sv
+                                  "retaining recovery state for the next launch."sv;
+            }
+            return std::nullopt;
+          }
           const bool applied_exactly = actual->rect.left == isolated_rect.left &&
                                        actual->rect.top == isolated_rect.top;
           if (applied_exactly) {
@@ -768,6 +1028,17 @@ namespace ar_glasses {
         std::this_thread::sleep_for(50ms);
       }
       BOOST_LOG(warning) << "AR-output topology applied, but its actual rectangle could not be queried."sv;
+      if (restore_physical_output_position(original_rect, std::wstring(target_device_path))) {
+        if (layout_changed) {
+          *layout_changed = false;
+        }
+        if (!clear_topology_recovery(target_device_path)) {
+          BOOST_LOG(warning) << "The AR output was restored, but its topology recovery record could not be cleared."sv;
+        }
+      } else {
+        BOOST_LOG(error) << "Could not restore the AR output after its applied rectangle became unobservable; "sv
+                            "retaining recovery state for the next launch."sv;
+      }
       return std::nullopt;
     }
 
@@ -817,13 +1088,100 @@ namespace ar_glasses {
       }
       for (int attempt = 0; attempt < 10; ++attempt) {
         if (const auto actual = find_target(target_device_path)) {
-          if (actual->rect.left == original_rect.left && actual->rect.top == original_rect.top) {
+          if (same_rect(actual->rect, original_rect)) {
             return true;
           }
         }
         std::this_thread::sleep_for(50ms);
       }
       return false;
+    }
+
+    bool migrate_legacy_topology_recovery() {
+      std::lock_guard lock(topology_recovery_mutex);
+      bool legacy_format {false};
+      const auto recoveries {load_topology_recoveries_locked(&legacy_format)};
+      if (!recoveries) {
+        return false;
+      }
+      if (!legacy_format) {
+        return true;
+      }
+      if (!write_topology_recoveries_locked(*recoveries)) {
+        BOOST_LOG(warning) << "Could not migrate the legacy local-AR topology recovery record; "sv
+                              "the original record remains intact."sv;
+        return false;
+      }
+      BOOST_LOG(info) << "Migrated the legacy local-AR topology recovery record to per-device state."sv;
+      return true;
+    }
+
+    bool recover_saved_topology(std::wstring_view device_path) {
+      std::optional<topology_recovery_t> recovery;
+      {
+        std::lock_guard lock(topology_recovery_mutex);
+        const auto recoveries = load_topology_recoveries_locked();
+        if (!recoveries) {
+          return false;
+        }
+        const auto match = std::ranges::find_if(*recoveries, [&](const auto &candidate) {
+          return candidate.device_path == device_path;
+        });
+        if (match != recoveries->end()) {
+          recovery = *match;
+        }
+      }
+      if (!recovery) {
+        return true;
+      }
+
+      const auto current = find_target(recovery->device_path);
+      if (!current) {
+        // Preserve the record while the glasses are disconnected. It will be retried before a
+        // future session for this exact PnP target.
+        return false;
+      }
+      if (same_rect(current->rect, recovery->original_rect)) {
+        clear_topology_recovery(recovery->device_path);
+        return true;
+      }
+      if (!same_rect(current->rect, recovery->applied_rect)) {
+        // The target no longer occupies the exact rectangle Apollo recorded after applying its
+        // isolation. A user or Windows topology change now owns the layout; restoring the old
+        // coordinates would overwrite that newer choice.
+        BOOST_LOG(warning) << "Retiring stale local-AR topology recovery state because the current "sv
+                              "display layout no longer matches Apollo's applied rectangle."sv;
+        clear_topology_recovery(recovery->device_path);
+        return true;
+      }
+      if (!restore_physical_output_position(recovery->original_rect, recovery->device_path)) {
+        BOOST_LOG(warning) << "Could not recover the AR display topology left by an interrupted session."sv;
+        return false;
+      }
+
+      clear_topology_recovery(recovery->device_path);
+      BOOST_LOG(info) << "Recovered the AR display's pre-session desktop position from durable state."sv;
+      return true;
+    }
+
+    std::size_t recover_connected_saved_topologies() {
+      std::vector<topology_recovery_t> recoveries;
+      {
+        std::lock_guard lock(topology_recovery_mutex);
+        const auto loaded = load_topology_recoveries_locked();
+        if (!loaded) {
+          return 1;
+        }
+        recoveries = *loaded;
+      }
+
+      std::size_t pending = 0;
+      for (const auto &recovery : recoveries) {
+        if (!find_target(recovery.device_path) || !recover_saved_topology(recovery.device_path)) {
+          ++pending;
+        }
+      }
+      return pending;
     }
 
     bool wait_for_virtual_display_mode(
@@ -984,8 +1342,10 @@ namespace ar_glasses {
               return;
             }
             if (!physical_hdr.active) {
-              BOOST_LOG(error) << "AR display did not enter HDR after Windows accepted the request."sv;
-              return;
+              // Some glasses advertise HDR before their on-device HDR10 mode is active. Treat
+              // that as a stable SDR presentation state rather than tearing down and recreating
+              // the virtual desktop every retry interval.
+              BOOST_LOG(warning) << "AR display did not enter HDR after Windows accepted the request; continuing in SDR."sv;
             }
           } else {
             BOOST_LOG(warning) << "The AR display reports HDR support, but Windows rejected HDR activation."sv;
@@ -1027,9 +1387,15 @@ namespace ar_glasses {
           BOOST_LOG(warning) << "The local AR virtual desktop rejected its requested mode."sv;
         }
         auto presentation_target = active_target;
-        if (const auto isolated_target = isolate_physical_output(virtual_display_name_, target_device_path_)) {
+        if (const auto isolated_target = isolate_physical_output(
+              virtual_display_name_,
+              target_device_path_,
+              original_target_rect_,
+              &layout_repositioned_
+            )) {
           presentation_target = *isolated_target;
-          layout_repositioned_ = true;
+          applied_target_rect_ = isolated_target->rect;
+          pointer_isolated_ = true;
         } else {
           BOOST_LOG(warning) << "The AR display remains in the interactive desktop layout; keep the pointer on the Apollo AR virtual desktop."sv;
         }
@@ -1097,12 +1463,20 @@ namespace ar_glasses {
         // Advanced Color frequently lets Windows normalize the physical output back into the
         // interactive row. Reapply isolation after every HDR transition instead of accepting the
         // new position as the presentation target.
-        if (const auto isolated_target = isolate_physical_output(virtual_display_name_, target_device_path_)) {
+        if (const auto isolated_target = isolate_physical_output(
+              virtual_display_name_,
+              target_device_path_,
+              original_target_rect_,
+              &layout_repositioned_
+            )) {
           presentation_target = *isolated_target;
-          layout_repositioned_ = true;
+          applied_target_rect_ = isolated_target->rect;
+          pointer_isolated_ = true;
         } else {
-          BOOST_LOG(error) << "Could not restore AR-output isolation after color-mode setup."sv;
-          return;
+          // Isolation is a pointer-safety optimization, not a presentation prerequisite. Primary
+          // displays and some clone topologies cannot be moved; keep one stable session alive.
+          pointer_isolated_ = false;
+          BOOST_LOG(warning) << "Could not isolate the AR output after color-mode setup; presenting without pointer isolation."sv;
         }
 
         platf::dxgi::local_presenter_config_t presenter_config;
@@ -1118,7 +1492,8 @@ namespace ar_glasses {
         live_target_->rect = presentation_target.rect;
         live_target_->display_name = presentation_target.gdi_name;
         presenter_config.live_target = live_target_;
-        presenter_config.presented_frames = std::make_shared<std::atomic<std::uint64_t>>(0);
+        presented_frames_ = std::make_shared<std::atomic<std::uint64_t>>(0);
+        presenter_config.presented_frames = presented_frames_;
 
         running_.store(true);
         presenter_ = std::jthread([this, presenter_config, identity = virtual_display_identity_](std::stop_token stop_token) mutable {
@@ -1176,12 +1551,27 @@ namespace ar_glasses {
         if (presenter_.joinable()) {
           presenter_.join();
         }
+        bool restore_layout = layout_repositioned_;
+        if (restore_layout && applied_target_rect_) {
+          const auto current = find_target(target_device_path_);
+          if (!current) {
+            // Keep the durable record for the next time this PnP target appears.
+            restore_layout = false;
+          } else if (!same_rect(current->rect, *applied_target_rect_)) {
+            // A newer user/Windows topology no longer matches the exact rectangle Apollo owned.
+            // Do not overwrite it during teardown, and retire the obsolete recovery contract.
+            BOOST_LOG(warning) << "Skipping AR display-position restore because the current layout "sv
+                                  "no longer matches Apollo's applied rectangle."sv;
+            clear_topology_recovery(target_device_path_);
+            restore_layout = false;
+          }
+        }
         if (virtual_display_created_) {
           if (!VDISPLAY::removeVirtualDisplay(display_guid_)) {
             BOOST_LOG(warning) << "Failed to remove the local AR virtual desktop."sv;
           }
         }
-        if (layout_repositioned_) {
+        if (restore_layout) {
           // SudoVDA removal changes the active topology asynchronously. Retry and verify the exact
           // applied rectangle instead of assuming the source has disappeared after a fixed delay.
           const auto deadline = std::chrono::steady_clock::now() + 3s;
@@ -1192,6 +1582,8 @@ namespace ar_glasses {
           }
           if (!restored) {
             BOOST_LOG(warning) << "Could not restore the AR display's original desktop position."sv;
+          } else {
+            clear_topology_recovery(target_device_path_);
           }
         }
       }
@@ -1208,15 +1600,29 @@ namespace ar_glasses {
         return failed_.load();
       }
 
+      bool stable() const {
+        return presented_frames_ && presented_frames_->load(std::memory_order_relaxed) >= 60;
+      }
+
       std::optional<target_state_t> re_isolate_target() {
         const auto refreshed_name = refresh_virtual_display_name(virtual_display_identity_);
         if (!refreshed_name) {
           return std::nullopt;
         }
         virtual_display_name_ = *refreshed_name;
-        const auto target = isolate_physical_output(virtual_display_name_, target_device_path_);
+        const auto target = pointer_isolated_ ?
+                              isolate_physical_output(
+                                virtual_display_name_,
+                                target_device_path_,
+                                original_target_rect_,
+                                &layout_repositioned_
+                              ) :
+                              find_target(target_device_path_);
         if (!target) {
           return std::nullopt;
+        }
+        if (pointer_isolated_) {
+          applied_target_rect_ = target->rect;
         }
         if (!live_target_) {
           return target;
@@ -1235,9 +1641,12 @@ namespace ar_glasses {
       std::wstring virtual_display_name_;
       bool virtual_display_created_ = false;
       bool layout_repositioned_ = false;
+      bool pointer_isolated_ = false;
       bool target_hdr_active_ = false;
       bool ready_ = false;
+      std::optional<RECT> applied_target_rect_;
       std::shared_ptr<platf::dxgi::local_presenter_config_t::target_t> live_target_;
+      std::shared_ptr<std::atomic<std::uint64_t>> presented_frames_;
       std::jthread presenter_;
       std::atomic<bool> running_ {false};
       std::atomic<bool> failed_ {false};
@@ -1259,6 +1668,18 @@ namespace ar_glasses {
       }
 
     private:
+      void reset_failure_backoff() {
+        failure_retry_delay_ = failed_session_retry;
+      }
+
+      void schedule_failure_retry() {
+        retry_after_ = std::chrono::steady_clock::now() + failure_retry_delay_;
+        BOOST_LOG(warning) << "Local AR session retry deferred for "sv
+                           << std::chrono::duration_cast<std::chrono::seconds>(failure_retry_delay_).count()
+                           << " seconds."sv;
+        failure_retry_delay_ = std::min(failure_retry_delay_ * 2, maximum_failed_session_retry);
+      }
+
       void stop_session() {
         std::unique_ptr<local_session_t> retiring_session;
         {
@@ -1318,6 +1739,11 @@ namespace ar_glasses {
           retry_after_ = std::chrono::steady_clock::now() + failed_session_retry;
           return;
         }
+        if (!recover_saved_topology(target.device_path)) {
+          BOOST_LOG(warning) << "Deferring local AR startup until this display's previous desktop topology can be restored."sv;
+          schedule_failure_retry();
+          return;
+        }
 
         std::stop_source construction_stop;
         std::stop_callback controller_stop_callback(stop_token, [&construction_stop]() {
@@ -1339,7 +1765,6 @@ namespace ar_glasses {
         }
 
         auto candidate = std::make_unique<local_session_t>(target, construction_stop.get_token());
-        retry_after_ = std::chrono::steady_clock::now() + failed_session_retry;
         bool rejected_for_remote = false;
         {
           std::lock_guard lock(ownership_mutex);
@@ -1353,6 +1778,7 @@ namespace ar_glasses {
               BOOST_LOG(info) << "Remote virtual-display ownership ended; starting deferred local AR presentation."sv;
             }
             deferred_for_remote_ = false;
+            session_stability_confirmed_ = false;
             return;
           }
         }
@@ -1368,10 +1794,14 @@ namespace ar_glasses {
             deferred_for_remote_ = true;
           }
         }
+        if (!rejected_for_remote && !construction_stop.stop_requested()) {
+          schedule_failure_retry();
+        }
       }
 
       void apply(const std::optional<target_state_t> &target, std::stop_token stop_token) {
         stop_session();
+        reset_failure_backoff();
         applied_ = target;
         if (!target) {
           deferred_for_remote_ = false;
@@ -1440,14 +1870,17 @@ namespace ar_glasses {
             } else {
               apply(pending, stop_token);
             }
+          } else if (pending == applied_ && session_ && !session_stability_confirmed_ &&
+                     session_->stable()) {
+            // Construction only proves that a presenter thread was spawned. Reset exponential
+            // retry backoff after sustained scanout so permanent DXGI/swapchain failures cannot
+            // recreate the whole topology every two seconds forever.
+            session_stability_confirmed_ = true;
+            reset_failure_backoff();
           } else if (pending == applied_ && session_ && !session_->running() && session_->failed() && now >= retry_after_) {
-            BOOST_LOG(warning) << "Restarting failed local AR presentation."sv;
-            auto target = applied_;
+            BOOST_LOG(warning) << "Local AR presentation failed; scheduling a clean restart."sv;
             stop_session();
-            retry_after_ = now + failed_session_retry;
-            if (target) {
-              start_session(*target, stop_token);
-            }
+            schedule_failure_retry();
           } else if (pending == applied_ && applied_ && !session_ && applied_->mode != presentation_mode_e::unsupported && now >= retry_after_) {
             start_session(*applied_, stop_token);
           }
@@ -1462,7 +1895,9 @@ namespace ar_glasses {
       std::optional<target_state_t> applied_;
       std::unique_ptr<local_session_t> session_;
       std::chrono::steady_clock::time_point retry_after_ {};
+      std::chrono::seconds failure_retry_delay_ {failed_session_retry};
       bool deferred_for_remote_ = false;
+      bool session_stability_confirmed_ = false;
     };
   }  // namespace
 
@@ -1529,7 +1964,7 @@ namespace ar_glasses {
     std::unique_lock lock(ownership_mutex);
     const auto now = std::chrono::steady_clock::now();
     const auto release_deadline = now + ownership_release_timeout;
-    const auto pending_duration = std::clamp(connect_timeout + 2000ms, 2000ms, 60000ms);
+    const auto pending_duration = remote_pending_duration(connect_timeout);
     remote_session_pending_until = std::max(remote_session_pending_until, now + pending_duration);
     if (local_session_construction_stop) {
       local_session_construction_stop->request_stop();
@@ -1557,6 +1992,19 @@ namespace ar_glasses {
     return false;
   }
 
+  void remote_virtual_display_awaiting_client(std::chrono::milliseconds connect_timeout) {
+    std::lock_guard lock(ownership_mutex);
+    // Creating the virtual display, probing encoders, and running application preparation all
+    // happen while proc_t owns its process lock and can legitimately outlive the initial lease.
+    // Start a fresh connection window only after that work succeeds, before the process lock is
+    // released and local AR is allowed to inspect ownership again.
+    remote_session_pending_until = std::max(
+      remote_session_pending_until,
+      std::chrono::steady_clock::now() + remote_pending_duration(connect_timeout)
+    );
+    ownership_changed.notify_all();
+  }
+
   void remote_virtual_display_active() {
     std::lock_guard lock(ownership_mutex);
     remote_session_active = true;
@@ -1578,6 +2026,12 @@ namespace ar_glasses {
 
   std::unique_ptr<platf::deinit_t> init() {
     load_devices();
+    migrate_legacy_topology_recovery();
+    const auto pending_recoveries = recover_connected_saved_topologies();
+    if (pending_recoveries != 0) {
+      BOOST_LOG(info) << pending_recoveries
+                      << " saved AR topology recovery record(s) remain pending until their display reconnects."sv;
+    }
     return std::make_unique<controller_t>();
   }
 }  // namespace ar_glasses

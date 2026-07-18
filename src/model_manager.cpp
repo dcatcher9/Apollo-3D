@@ -1,8 +1,16 @@
 #include "model_manager.h"
 #include "logging.h"
 #include <curl/curl.h>
+#include <openssl/evp.h>
+#include <array>
 #include <cstdio>
+#include <fstream>
+#include <iomanip>
+#include <memory>
+#include <mutex>
+#include <sstream>
 #include <system_error>
+#include <unordered_map>
 
 using namespace std::literals;
 
@@ -12,21 +20,20 @@ namespace models {
         return fwrite(ptr, size, nmemb, stream);
     }
 
-    std::string engine_filename(const config::depth_model_info& model) {
-        return model.name + "." + depth_engine_recipe + ".engine";
+    std::string engine_filename(const config::depth_model_info& model, std::string_view compatibility_tag) {
+        std::string filename = model.name + "." + depth_engine_recipe;
+        if (!compatibility_tag.empty()) {
+            filename += ".";
+            filename += compatibility_tag;
+        }
+        return filename + ".engine";
     }
 
-    std::filesystem::path ensure_model_available(const std::filesystem::path& assets_dir, const std::string& model_name, const std::string& model_url, const std::string& engine_name) {
-        // Files are named after the model (not the URL) so each model gets its own cached
-        // engine: switching sbs_3d_depth_model never reuses a stale engine, and different
-        // models coexist. To use another model, point sbs_3d_depth_model_url at its ONNX.
-        // The engine is looked up under its recipe-specific name (see engine_filename()).
+    std::filesystem::path ensure_onnx_available(const std::filesystem::path& assets_dir, const std::string& model_name, const std::string& model_url) {
+        // The ONNX source is retained even after compilation. Its content hash is part of the
+        // engine filename, so replacing a local model under the same logical name cannot silently
+        // reuse tactics built for different weights or graph structure.
         auto onnx_path = assets_dir / (model_name + ".onnx");
-        auto engine_path = assets_dir / (engine_name.empty() ? (model_name + ".engine") : engine_name);
-
-        if (std::filesystem::exists(engine_path)) {
-            return engine_path;
-        }
         if (std::filesystem::exists(onnx_path)) {
             return onnx_path;
         }
@@ -84,5 +91,66 @@ namespace models {
 
         BOOST_LOG(info) << "Successfully downloaded depth model '" << model_name << "'.";
         return onnx_path;
+    }
+
+    std::string file_sha256_hex(const std::filesystem::path& path) {
+        std::error_code ec;
+        const auto canonical = std::filesystem::weakly_canonical(path, ec);
+        if (ec) {
+            return {};
+        }
+        const auto size = std::filesystem::file_size(canonical, ec);
+        if (ec) {
+            return {};
+        }
+        const auto write_time = std::filesystem::last_write_time(canonical, ec);
+        if (ec) {
+            return {};
+        }
+        const std::string cache_key = canonical.generic_string() + "\n" +
+                                      std::to_string(size) + "\n" +
+                                      std::to_string(write_time.time_since_epoch().count());
+        static std::mutex digest_mutex;
+        static std::unordered_map<std::string, std::string> digest_cache;
+        std::lock_guard<std::mutex> digest_lock(digest_mutex);
+        if (const auto found = digest_cache.find(cache_key); found != digest_cache.end()) {
+            return found->second;
+        }
+
+        using context_ptr = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+        context_ptr context(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
+        if (!context || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1) {
+            return {};
+        }
+
+        std::ifstream stream(path, std::ios::binary);
+        if (!stream) {
+            return {};
+        }
+        std::array<char, 64 * 1024> block {};
+        while (stream) {
+            stream.read(block.data(), block.size());
+            const auto count = stream.gcount();
+            if (count > 0 && EVP_DigestUpdate(context.get(), block.data(), (std::size_t) count) != 1) {
+                return {};
+            }
+        }
+        if (!stream.eof()) {
+            return {};
+        }
+
+        std::array<unsigned char, EVP_MAX_MD_SIZE> digest {};
+        unsigned int digest_size = 0;
+        if (EVP_DigestFinal_ex(context.get(), digest.data(), &digest_size) != 1) {
+            return {};
+        }
+        std::ostringstream hex;
+        hex << std::hex << std::setfill('0');
+        for (unsigned int i = 0; i < digest_size; ++i) {
+            hex << std::setw(2) << (unsigned int) digest[i];
+        }
+        auto result = hex.str();
+        digest_cache.emplace(cache_key, result);
+        return result;
     }
 }

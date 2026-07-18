@@ -120,4 +120,18 @@ float Bestv2SearchRadius(float source_width, float source_height) {
                        Bestv2ParallaxWidth(source_width, literal_bestv2));
 }
 
+// Bound worst-case tall/high-resolution work. The live packed target contains two source-sized
+// eyes; ~0.875G depth samples caps 3552x3840 at 31 loop steps plus the initial sample (32 total),
+// matching the user's retained probe-quality setting instead of allowing ~1.7G samples. Normal
+// landscape modes remain at their calibrated 24 steps. The four-step floor is only reachable far
+// beyond the validated raster envelope and preserves a functional fallback there.
+static const float BESTV2_MAX_DEPTH_PROBES = 8.75e8f;
+
+int Bestv2ProbeSteps(float source_width, float source_height, float aspect_scale) {
+    int desired = clamp((int)round(24.0f * aspect_scale), 12, 72);
+    float packed_pixels = max(2.0f * source_width * source_height, 1.0f);
+    int work_budget = max((int)floor(BESTV2_MAX_DEPTH_PROBES / packed_pixels) - 1, 4);
+    return min(desired, work_budget);
+}
+
 #endif

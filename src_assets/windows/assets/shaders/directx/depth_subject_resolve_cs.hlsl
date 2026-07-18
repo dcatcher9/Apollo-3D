@@ -4,8 +4,8 @@
 //   SubjectState[0] = { recenter_delta, scene_age, subject_depth_ema, initialized }
 //   SubjectState[1] = { stretch_lo, stretch_inv_range, Bestv2 convergence EMA,
 //                       adaptive pop ratio }
-//   SubjectState[2] = { shot-latched zero-plane anchor shift in source pixels, valid, mode,
-//                       reserved }
+//   SubjectState[2] = { shot-latched zero-plane anchor shift in source pixels, valid,
+//                       depth-cut state (-1 cooldown, 0 startup, 1 ready), color history valid }
 // The reprojection then evaluates the permanent Bestv2 pixel-calibrated field.
 // Resets the histogram for the next frame's accumulation.
 
@@ -44,11 +44,7 @@ void main() {
             }
         }
 
-        // EMA (Bestv2 SubjectDepthEMA alpha=0.80 => new-value weight 0.20; verified against a
-        // real Bestv2 render log 2026-07-09). The anchor moves slowly so the scene doesn't
-        // breathe with the subject estimate, but not so slowly it lags cuts/motion.
         bool initialized = s.w > 0.5f;
-        float subj = initialized ? lerp(s.z, subj_raw, 0.20f) : subj_raw;
 
         // Disparity stretch (Bestv2 shape_depth_for_pop): rescale the [lo,hi] percentile band of
         // the (unweighted) depth distribution to full [0,1] so the mid-range uses the whole
@@ -56,9 +52,7 @@ void main() {
         float lo_val = 0.0f, inv_range = 1.0f;
         float background_val = 0.25f, median_val = 0.5f;
         float ptotal = 0.0f;
-        if (subject_stretch > 0.5f || adaptive_pop > 0.5f || zero_plane_mode > 0.5f) {
-            for (uint pb = 0; pb < NUM_BINS; pb++) ptotal += (float)PlainHist[pb];
-        }
+        for (uint pb = 0; pb < NUM_BINS; pb++) ptotal += (float)PlainHist[pb];
         if (ptotal > 0.5f && (subject_stretch > 0.5f || zero_plane_mode > 0.5f)) {
             float lo_c = 0.05f * ptotal, bg_c = 0.25f * ptotal;
             float med_c = 0.50f * ptotal, hi_c = 0.95f * ptotal;
@@ -77,28 +71,55 @@ void main() {
             }
         }
 
-        // Recenter is computed in stretched space: delta = (0.5 - subj_stretched)*recenter.
-        float subj_str = saturate((subj - lo_val) * inv_range);
-        float delta = (0.5f - subj_str) * subject_recenter;
-        s = float4(delta, 0.0f, subj, 1.0f);
-        // Bestv2 ConvergenceEMA(alpha=.90), driven by its low-near subject convention. Stored even
-        // when the Apollo profile is selected so switching profiles cannot expose stale state.
-        float conv_target = (1.0f - subj) * 0.006f;
-        float conv_ema = initialized ? lerp(s1.z, conv_target, 0.10f) : conv_target;
-        // Scene camera parameters are deliberately latched. Continuously responding to depth
-        // statistics makes disparity breathe. Choose once at startup and again only on a hard
-        // depth cut, where the content itself is already discontinuous.
-        bool scene_control = adaptive_pop > 0.5f || zero_plane_mode > 0.5f;
+        // Subject and convergence histories always need cut detection. Adaptive-pop and explicit
+        // zero-plane camera parameters are optionally latched below, but disabling both must not
+        // allow the preceding shot's subject/convergence EMA to bleed into a new scene.
         float scene_age = initialized ? min(previous_scene_age + 1.0f, 65535.0f) : 0.0f;
         float change_fraction = ptotal > 0.5f ? (float)PlainHist[NUM_BINS + 1] / ptotal : 0.0f;
+        float color_change_fraction = ptotal > 0.5f ?
+                                      (float)PlainHist[NUM_BINS + 2] / ptotal : 0.0f;
         // Normalization settling can change 50-60% of depth texels on the first few frames.
         // The committed scene-cut clip reaches 66.8%, so 65% separates that cut from ordinary
-        // startup/motion in the current core suite.
-        bool hard_cut = scene_control && initialized && scene_age >= 8.0f &&
-                        change_fraction >= 0.65f;
+        // startup/motion in the current core suite. Depth-change detection therefore waits for
+        // settling, but color-change detection can safely arm as soon as one real prior NCHW
+        // input exists. This avoids an eight-update blind window for similar-depth shot cuts.
+        float depth_cut_state = s2.z;
+        bool depth_cut_ready = depth_cut_state > 0.5f;
+        bool color_history_valid = s2.w > 0.5f;
+        bool hard_cut = initialized &&
+                        ((depth_cut_ready && change_fraction >= 0.65f) ||
+                         (color_history_valid && color_change_fraction >= 0.70f));
+        if (!depth_cut_ready && initialized && scene_age >= 8.0f) {
+            // Become ready for the *next* update; the last startup-settling frame cannot
+            // retroactively classify itself as a depth cut.
+            depth_cut_state = 1.0f;
+            depth_cut_ready = true;
+        }
         if (!initialized || hard_cut) {
             scene_age = 0.0f;
         }
+        if (hard_cut) {
+            depth_cut_state = -1.0f;
+            depth_cut_ready = false;
+        } else if (depth_cut_state < -0.5f &&
+                   ((change_fraction < 0.35f && color_change_fraction < 0.50f) ||
+                    scene_age >= 2.0f)) {
+            // Prefer a genuinely stable frame, but never stay blind indefinitely during sustained
+            // motion: after two updates the detector is rearmed regardless.
+            depth_cut_state = 1.0f;
+            depth_cut_ready = true;
+        }
+
+        // Reset temporal subject/convergence state on a detected cut. Otherwise the previous
+        // scene bleeds into the first frames of the new shot even though pop/zero-plane relatch.
+        // Between cuts retain the validated Bestv2 SubjectDepthEMA (new-value weight 0.20).
+        float subj = (!initialized || hard_cut) ? subj_raw : lerp(s.z, subj_raw, 0.20f);
+        float subj_str = saturate((subj - lo_val) * inv_range);
+        float delta = (0.5f - subj_str) * subject_recenter;
+        s = float4(delta, 0.0f, subj, 1.0f);
+        float conv_target = (1.0f - subj) * 0.006f;
+        float conv_ema = (!initialized || hard_cut) ? conv_target :
+                         lerp(s1.z, conv_target, 0.10f);
 
         // Depth-edge density predicts warp risk. Between cuts the multiplier remains bit-stable;
         // the base is the floor and the configured ceiling is never exceeded.
@@ -115,7 +136,9 @@ void main() {
         } else {
             pop_ratio = 1.0f;
         }
-        s.y = scene_control && ptotal > 0.5f ? scene_age : 0.0f;
+        // Keep the detector's settling/cooldown clock even when optional scene-camera controls are
+        // disabled; otherwise depth-only cuts can never arm after their eight-update settle time.
+        s.y = scene_age;
 
         // Explicit artistic zero plane. Resolve the chosen raw anchor through this frame's
         // stretch/recenter/Bestv2 curve and latch the resulting source-pixel shift. Storing the
@@ -138,7 +161,9 @@ void main() {
             zero_valid = 0.0f;
         }
         s1 = float4(lo_val, inv_range, conv_ema, pop_ratio);
-        s2 = float4(zero_anchor_shift, zero_valid, zero_plane_mode, 0.0f);
+        s2 = float4(zero_anchor_shift, zero_valid,
+                    depth_cut_state,
+                    1.0f); // current NCHW input is copied to history after this dispatch
     }
     // total == 0 (uninitialized depth): keep previous state.
 
@@ -152,4 +177,5 @@ void main() {
     }
     PlainHist[NUM_BINS] = 0u;
     PlainHist[NUM_BINS + 1] = 0u;
+    PlainHist[NUM_BINS + 2] = 0u;
 }

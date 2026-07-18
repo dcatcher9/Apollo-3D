@@ -8,7 +8,7 @@ Usage: build_report.py <control_run_dir> <treat_run_dir> <out.html>
        (run dirs = <build-dir>/sbs_eval/<label>/ containing results.json + <clip>/sbs_*.png)
 """
 import base64
-import glob
+import functools
 import html
 import io
 import json
@@ -23,6 +23,7 @@ ctrl_dir, treat_dir, out_html = sys.argv[1], sys.argv[2], sys.argv[3]
 allow_config_diff = "--allow-config-diff" in sys.argv[4:]
 allow_model_diff = "--allow-model-diff" in sys.argv[4:]
 allow_depth_step_diff = "--allow-depth-step-diff" in sys.argv[4:]
+allow_executable_diff = "--allow-executable-diff" in sys.argv[4:]
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (sbs_score, shared with run_eval)
@@ -36,37 +37,76 @@ REPORT_SHA = run_eval.sha256_files([os.path.abspath(__file__)])
 
 # An A/B report may compare different code, profile/treatment arguments, or (only when explicitly
 # requested) depth models. Its evidence remains invalid if the source set or metric contract changed.
-_SAME_CONTEXT = ["clip_set_sha1", "mode", "eval_schema", "depth_step", "suite",
-                 "metric_sha256"]
+_SAME_CONTEXT = ["clip_set_sha1", "mode", "eval_schema", "depth_step", "suite", "run_kind",
+                 "metric_sha256", "executable_sha256", "runtime_shader_sha256"]
 if not allow_model_diff:
-    _SAME_CONTEXT.append("model")
+    _SAME_CONTEXT.extend(["model", "engine_sha256", "onnx_sha256"])
 if not allow_config_diff:
     _SAME_CONTEXT.append("conf_sha256")
 if allow_depth_step_diff:
     _SAME_CONTEXT.remove("depth_step")
+if allow_executable_diff:
+    _SAME_CONTEXT.remove("executable_sha256")
+    _SAME_CONTEXT.remove("runtime_shader_sha256")
 _mismatched_context = {k: (CTRL.get("meta", {}).get(k), TREAT.get("meta", {}).get(k))
                        for k in _SAME_CONTEXT
                        if CTRL.get("meta", {}).get(k) != TREAT.get("meta", {}).get(k)}
 if _mismatched_context:
     raise SystemExit(f"refusing incompatible A/B report: {_mismatched_context}")
+if CTRL.get("meta", {}).get("eval_schema") != run_eval.EVAL_SCHEMA:
+    raise SystemExit(
+        f"refusing stale evaluator schema {CTRL.get('meta', {}).get('eval_schema')!r}; "
+        f"rerun with current schema {run_eval.EVAL_SCHEMA}")
 if CTRL.get("meta", {}).get("metric_sha256") != CURRENT_METRIC_SHA:
     raise SystemExit("refusing stale evaluation artifacts: rescore or rerun both inputs with the current eval contract")
 
 CLIPS_ROOT = CTRL.get("meta", {}).get("clips_root") or os.path.join(SCRIPT_DIR, "clips")
 
 
-def source_glob(clip, frame_id):
-    return glob.glob(os.path.join(CLIPS_ROOT, clip, f"frame_{frame_id:05d}.*"))
+@functools.lru_cache(maxsize=None)
+def source_files(clip):
+    return sbsbench.indexed_files(
+        os.path.join(CLIPS_ROOT, clip, "frame_*.*"), "frame_")
+
+
+@functools.lru_cache(maxsize=None)
+def gt_depth_files(clip):
+    return sbsbench.indexed_files(
+        os.path.join(CLIPS_ROOT, clip, "gt_depth", "frame_*.*"), "frame_")
+
+
+@functools.lru_cache(maxsize=None)
+def gt_right_files(clip):
+    return sbsbench.indexed_files(
+        os.path.join(CLIPS_ROOT, clip, "gt_right", "frame_*.*"), "frame_")
+
+
+@functools.lru_cache(maxsize=None)
+def gt_flow_files(clip):
+    return sbsbench.indexed_files(
+        os.path.join(CLIPS_ROOT, clip, "gt_flow", "frame_*.npz"), "frame_")
+
+
+@functools.lru_cache(maxsize=None)
+def run_files(run, clip, prefix):
+    return sbsbench.indexed_files(
+        os.path.join(run, clip, prefix + "*.*"), prefix)
+
+
+def source_path(clip, frame_id):
+    return source_files(clip).get(frame_id)
 
 
 def gt_depth_path(clip, frame_id):
-    paths = glob.glob(os.path.join(CLIPS_ROOT, clip, "gt_depth", f"frame_{frame_id:05d}.*"))
-    return paths[0] if paths else None
+    return gt_depth_files(clip).get(frame_id)
 
 
 def gt_right_path(clip, frame_id):
-    paths = glob.glob(os.path.join(CLIPS_ROOT, clip, "gt_right", f"frame_{frame_id:05d}.*"))
-    return paths[0] if paths else None
+    return gt_right_files(clip).get(frame_id)
+
+
+def artifact_path(run, clip, prefix, frame_id):
+    return run_files(run, clip, prefix).get(frame_id)
 
 
 def _clip_name(clip):
@@ -177,12 +217,12 @@ def load_depth(p):
 
 
 def frame_path(run, clip, i):
-    return os.path.join(run, clip, f"sbs_{i:05d}.png")
+    return artifact_path(run, clip, "sbs_", i)
 
 
 def mid_frame(run, clip):
-    n = len(glob.glob(os.path.join(run, clip, "sbs_*.png")))
-    return max(0, n // 2)
+    frame_ids = sorted(run_files(run, clip, "sbs_"))
+    return frame_ids[len(frame_ids) // 2] if frame_ids else 0
 
 
 def normalize_sbs_images(images):
@@ -194,17 +234,28 @@ def normalize_sbs_images(images):
     """
     eye_w = min(image.width // 2 for image in images)
     height = min(image.height for image in images)
-    size = (eye_w * 2, height)
-    return [image if image.size == size else image.resize(size, Image.LANCZOS)
-            for image in images]
+    normalized = []
+    for image in images:
+        if image.width % 2:
+            raise ValueError(f"packed SBS width must be even, got {image.width}")
+        source_eye_width = image.width // 2
+        eyes = [image.crop((offset, 0, offset + source_eye_width, image.height))
+                for offset in (0, source_eye_width)]
+        eyes = [eye if eye.size == (eye_w, height) else
+                eye.resize((eye_w, height), Image.LANCZOS) for eye in eyes]
+        packed = Image.new(image.mode, (eye_w * 2, height))
+        packed.paste(eyes[0], (0, 0))
+        packed.paste(eyes[1], (eye_w, 0))
+        normalized.append(packed)
+    return normalized
 
 
 def crop_at_silhouette(clip, idx):
     """Control/treatment left-eye crops at the strongest depth silhouette of frame idx (falls
     back to center if the depth is flat). Returns (ctrl_durl, treat_durl) or None."""
     cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
-    dp = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
-    if not (os.path.exists(cp) and os.path.exists(tp) and os.path.exists(dp)):
+    dp = artifact_path(ctrl_dir, clip, "depth_", idx)
+    if not (cp and tp and dp):
         return None
     depth = load_depth(dp)
     sbs_c, sbs_t = normalize_sbs_images([Image.open(cp), Image.open(tp)])
@@ -232,14 +283,14 @@ def crop_at_silhouette(clip, idx):
 def source_residual_evidence(clip, idx):
     """Metric-specific source/control/treatment crops and signed residual-delta heatmap."""
     cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
-    srcs = source_glob(clip, idx)
-    if not (os.path.exists(cp) and os.path.exists(tp) and srcs):
+    src = source_path(clip, idx)
+    if not (cp and tp and src):
         return None
     ctrl, treat = normalize_sbs_images(
         [Image.open(cp).convert("RGB"), Image.open(tp).convert("RGB")])
     ew, eh = ctrl.width // 2, ctrl.height
-    src_rgb = Image.open(srcs[0]).convert("RGB").resize((ew, eh), Image.BILINEAR)
-    src_gray = sbsbench.load_gray(srcs[0])
+    src_rgb = Image.open(src).convert("RGB").resize((ew, eh), Image.BILINEAR)
+    src_gray = sbsbench.load_gray(src)
     match_scale = min(1.0, 256.0 / ew)
     match_w, match_h = max(1, round(ew * match_scale)), max(1, round(eh * match_scale))
     maps = []
@@ -281,19 +332,19 @@ def source_residual_evidence(clip, idx):
 
 def static_jitter_evidence(clip, idx):
     """Source-static mask, per-run temporal delta, and signed treatment movement."""
-    prev_idx = idx - 1
-    if prev_idx < 0:
+    prev_idx = sbsbench.predecessor_frame_id(source_files(clip), idx)
+    if prev_idx is None:
         return None
     paths = [frame_path(run, clip, i) for run in (ctrl_dir, treat_dir)
              for i in (prev_idx, idx)]
-    src_now = source_glob(clip, idx)
-    src_prev = source_glob(clip, prev_idx)
-    if not all(os.path.exists(p) for p in paths) or not src_now or not src_prev:
+    src_now = source_path(clip, idx)
+    src_prev = source_path(clip, prev_idx)
+    if not all(paths) or not src_now or not src_prev:
         return None
     images = normalize_sbs_images([Image.open(p).convert("RGB") for p in paths])
     ew, eh = images[0].width // 2, images[0].height
     stable = sbsbench.static_region_mask(
-        sbsbench.load_gray(src_now[0]), sbsbench.load_gray(src_prev[0]), ew, eh)
+        sbsbench.load_gray(src_now), sbsbench.load_gray(src_prev), ew, eh)
     deltas = []
     for before, now in ((images[0], images[1]), (images[2], images[3])):
         bg = np.asarray(before.convert("L"), np.float32) / 255.0
@@ -308,7 +359,7 @@ def static_jitter_evidence(clip, idx):
     cw, ch = min(480, ew), min(360, eh)
     x0 = max(0, min(ew - cw, int(cx) - cw // 2))
     y0 = max(0, min(eh - ch, int(cy) - ch // 2))
-    source = Image.open(src_now[0]).convert("RGB").resize((ew, eh), Image.BILINEAR)
+    source = Image.open(src_now).convert("RGB").resize((ew, eh), Image.BILINEAR)
     source_a = np.asarray(source).copy()
     source_a[~stable] = (source_a[~stable] * 0.18).astype(np.uint8)
     ctrl_heat = np.zeros((eh, ew, 3), np.uint8)
@@ -326,9 +377,9 @@ def static_jitter_evidence(clip, idx):
 def ground_truth_depth_evidence(clip, idx):
     """Ground truth, aligned control/treatment depth, and signed error-delta map."""
     gp = gt_depth_path(clip, idx)
-    cp = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
-    tp = os.path.join(treat_dir, clip, f"depth_{idx:05d}.png")
-    if not gp or not all(os.path.exists(p) for p in (gp, cp, tp)):
+    cp = artifact_path(ctrl_dir, clip, "depth_", idx)
+    tp = artifact_path(treat_dir, clip, "depth_", idx)
+    if not gp or not cp or not tp:
         return None
     gt, control, treatment = load_depth(gp), load_depth(cp), load_depth(tp)
     kind = CTRL["clips"].get(clip, {}).get("meta", {}).get("gt_depth_kind", "disparity")
@@ -368,7 +419,7 @@ def ground_truth_stereo_evidence(clip, idx):
     reference_path = gt_right_path(clip, idx)
     control_path = frame_path(ctrl_dir, clip, idx)
     treatment_path = frame_path(treat_dir, clip, idx)
-    if not reference_path or not all(os.path.exists(p) for p in (control_path, treatment_path)):
+    if not reference_path or not control_path or not treatment_path:
         return None
     reference = sbsbench.load_gray(reference_path)
     control = sbsbench.split_eyes(sbsbench.load_gray(control_path))[1]
@@ -399,13 +450,13 @@ def ground_truth_stereo_evidence(clip, idx):
 
 def ground_truth_lag_evidence(clip, idx):
     """Previous/current GT beside aligned control/treatment depth for lag validation."""
-    if idx <= 0:
+    previous_id = sbsbench.predecessor_frame_id(gt_depth_files(clip), idx)
+    if previous_id is None:
         return None
-    previous_path, current_path = gt_depth_path(clip, idx - 1), gt_depth_path(clip, idx)
-    control_path = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
-    treatment_path = os.path.join(treat_dir, clip, f"depth_{idx:05d}.png")
-    if not previous_path or not current_path or not all(
-            os.path.exists(p) for p in (control_path, treatment_path)):
+    previous_path, current_path = gt_depth_path(clip, previous_id), gt_depth_path(clip, idx)
+    control_path = artifact_path(ctrl_dir, clip, "depth_", idx)
+    treatment_path = artifact_path(treat_dir, clip, "depth_", idx)
+    if not previous_path or not current_path or not control_path or not treatment_path:
         return None
     control, treatment = load_depth(control_path), load_depth(treatment_path)
     kind = CTRL["clips"].get(clip, {}).get("meta", {}).get("gt_depth_kind", "disparity")
@@ -446,23 +497,24 @@ def ground_truth_lag_evidence(clip, idx):
 
 def flow_temporal_evidence(clip, idx):
     """Source-flow-compensated temporal residual for both runs and signed treatment delta."""
-    if idx <= 0:
+    previous_id = sbsbench.predecessor_frame_id(source_files(clip), idx)
+    if previous_id is None:
         return None
-    src_now = source_glob(clip, idx)
-    src_prev = source_glob(clip, idx - 1)
-    paths = [frame_path(ctrl_dir, clip, idx - 1), frame_path(ctrl_dir, clip, idx),
-             frame_path(treat_dir, clip, idx - 1), frame_path(treat_dir, clip, idx)]
-    if not src_now or not src_prev or not all(os.path.exists(p) for p in paths):
+    src_now = source_path(clip, idx)
+    src_prev = source_path(clip, previous_id)
+    paths = [frame_path(ctrl_dir, clip, previous_id), frame_path(ctrl_dir, clip, idx),
+             frame_path(treat_dir, clip, previous_id), frame_path(treat_dir, clip, idx)]
+    if not src_now or not src_prev or not all(paths):
         return None
     images = [sbsbench.load_gray(p) for p in paths]
     eyes = [sbsbench.split_eyes(a) for a in images]
     eh, ew = eyes[0][0].shape
     scale = min(1.0, 256.0 / ew)
     vw, vh = max(32, round(ew * scale)), max(24, round(eh * scale))
-    now_src = sbsbench.load_gray(src_now[0])
-    prev_src = sbsbench.load_gray(src_prev[0])
-    gt_flow = os.path.join(CLIPS_ROOT, clip, "gt_flow", f"frame_{idx:05d}.npz")
-    if os.path.exists(gt_flow):
+    now_src = sbsbench.load_gray(src_now)
+    prev_src = sbsbench.load_gray(src_prev)
+    gt_flow = gt_flow_files(clip).get(idx)
+    if gt_flow:
         with np.load(gt_flow, allow_pickle=False) as flow_data:
             reference_flow = np.asarray(flow_data["flow"], dtype=np.float32)
             reference_valid = (np.asarray(flow_data["valid"], dtype=bool)
@@ -528,8 +580,8 @@ def visual_evidence_images(clip, idx, metric=None):
         return ground_truth_stereo_evidence(clip, idx)
     if metric == "pop_spread_px":
         cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
-        dp = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
-        if not (os.path.exists(cp) and os.path.exists(tp) and os.path.exists(dp)):
+        dp = artifact_path(ctrl_dir, clip, "depth_", idx)
+        if not (cp and tp and dp):
             return None
         depth = load_depth(dp)
         ctrl, treat = normalize_sbs_images(
@@ -569,7 +621,7 @@ def visual_evidence_images(clip, idx, metric=None):
     if not pair:
         return None
     cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
-    dp = os.path.join(ctrl_dir, clip, f"depth_{idx:05d}.png")
+    dp = artifact_path(ctrl_dir, clip, "depth_", idx)
     depth = load_depth(dp)
     ctrl, treat = normalize_sbs_images(
         [Image.open(cp).convert("RGB"), Image.open(tp).convert("RGB")])
@@ -624,7 +676,8 @@ CTRL_PROFILES = {e.get("meta", {}).get("profile") for e in CTRL["clips"].values(
 TREAT_PROFILES = {e.get("meta", {}).get("profile") for e in TREAT["clips"].values()
                   if e.get("meta", {}).get("profile")}
 IS_PROFILE_CMP = bool(CTRL_PROFILES and TREAT_PROFILES and CTRL_PROFILES != TREAT_PROFILES)
-IS_COMPARISON_ONLY = TREAT.get("verdict") == "comparison_only"
+IS_COMPARISON_ONLY = (TREAT.get("meta", {}).get("run_kind") == "comparison-only" or
+                      TREAT.get("verdict") == "comparison_only")
 IS_TRADEOFF_CMP = IS_MODE_CMP or IS_PROFILE_CMP
 CTRL_NAME = run_label(CTRL, ctrl_dir, "control")
 TREAT_NAME = run_label(TREAT, treat_dir, "treatment")
@@ -675,8 +728,10 @@ for _run, _aggs in ((CTRL, ctrl_agg), (TREAT, treat_agg)):
 # Compute the verdict once from the aggregate dictionaries and reuse the same object for both the
 # HTML conclusion and a machine-readable sidecar. This prevents downstream automation (or a human
 # ad-hoc script) from accidentally passing the per-clip wrapper instead of its `aggregate` member.
-AB_DECISION = sbsbench.evaluate_ab_decision(
-    ctrl_agg, treat_agg, DECISION_CLIPS, THR, hard_clip_ids=CLIPS)
+AB_METRIC_DECISION = sbsbench.evaluate_ab_decision(
+    ctrl_agg, treat_agg, DECISION_CLIPS, THR, hard_clip_ids=CLIPS,
+    clip_meta={clip: TREAT["clips"][clip].get("meta", {}) for clip in CLIPS})
+AB_DECISION = sbsbench.gate_ab_decision(AB_METRIC_DECISION, CTRL, TREAT)
 colmax = {k: max(max(ctrl_agg[c].get(k, 0), treat_agg[c].get(k, 0)) for c in CLIPS) for k, *_ in COLS}
 ACTIVE = [col for col in COLS if col[3] or colmax[col[0]] > col[4]]
 CLEAN = [col for col in COLS if col not in ACTIVE and col[2]]
@@ -853,8 +908,9 @@ def grouped_quality_section():
     checks = []
     for key, label, unit in hard_defs:
         spec = THR[key]
-        control = _mean_aggregate(ctrl_agg, key, CLIPS)
-        treatment = _mean_aggregate(treat_agg, key, CLIPS)
+        control, control_clip = sbsbench.worst_hard_metric(ctrl_agg, key, spec, CLIPS)
+        treatment, treatment_clip = sbsbench.worst_hard_metric(
+            treat_agg, key, spec, CLIPS)
         bound = (f'≥ {spec["hard_min"]:.1f}{unit}' if "hard_min" in spec
                  else f'≤ {spec["hard_max"]:.1f}{unit}')
 
@@ -866,12 +922,17 @@ def grouped_quality_section():
             return f"{v:.2f}{unit}", "hard-fail" if failed else "hard-pass"
         cv, cc = value(control)
         tv, tc = value(treatment)
+        locations = (f'{html.escape(CTRL_TAG)}: '
+                     f'{html.escape(name(control_clip)) if control_clip else "missing"}; '
+                     f'{html.escape(TREAT_TAG)}: '
+                     f'{html.escape(name(treatment_clip)) if treatment_clip else "missing"}')
         checks.append(f'<div class="hard-check"><span>{label}</span><code class="{cc}">{cv}</code>'
                       f'<span class="radar-arrow">&rarr;</span><code class="{tc}">{tv}</code>'
-                      f'<small>{bound}</small></div>')
+                      f'<small>{bound} · worst clip: {locations}</small></div>')
     hard_card = (f'<article class="hard-card"><div><h3>Hard constraints: comfort and integrity</h3>'
-                 f'<p>Every row must pass independently; quality improvements cannot trade '
-                 f'against a failed limit.</p></div><div class="hard-checks">'
+                 f'<p>Each value is the safety-worst per-clip aggregate. Every row must pass '
+                 f'independently; quality improvements cannot trade against a failed limit.</p>'
+                 f'</div><div class="hard-checks">'
                  f'{"".join(checks)}</div></article>')
     return (f'<section><h2>Metrics by group</h2><p class="sub">Radar axes are normalized quality: '
             f'<b>farther outward is always better</b>. Means use matched non-flat decision clips; '
@@ -1160,7 +1221,17 @@ def conclusion_section():
     if axis_parts:
         li += f'<li class="c-score">Primary axes: {" · ".join(axis_parts)}</li>'
     state = decision["verdict"]
-    if state == "reject_hard":
+    if state == "reject_run_gate":
+        blockers = sum(len(run_gate["blockers"]) for run_gate in
+                       decision["canonical_gate"].values() if isinstance(run_gate, dict)
+                       and "blockers" in run_gate)
+        verdict = (f'<b>Reject candidate:</b> the canonical evaluator gate has {blockers} '
+                   f'blocking result(s). The metric-only A/B verdict was '
+                   f'<code>{html.escape(decision["ab_verdict"])}</code>.')
+    elif state == "reject_evidence":
+        verdict = (f'<b>Reject evidence:</b> {len(decision["missing_evidence"])} required '
+                   f'hard/primary comparison value(s) are missing.')
+    elif state == "reject_hard":
         verdict = (f'<b>Reject treatment:</b> {len(decision["hard_failures"])} hard comfort/'
                    f'integrity constraint(s) fail.')
     elif state == "reject_primary":
@@ -1188,11 +1259,27 @@ def conclusion_section():
 
 
 def gate_strip():
+    canonical = AB_DECISION["canonical_gate"]
+    if not canonical["passed"]:
+        items = []
+        for side in ("control", "treatment"):
+            for blocker in canonical[side]["blockers"]:
+                field = blocker.get("field") or blocker.get("kind")
+                items.append(f'<li><code>{side}.{html.escape(str(field))}</code></li>')
+        return (f'<div class="gate gate-fail"><b>Gate: CANONICAL RUN REJECTED</b>'
+                f'<ul>{"".join(items)}</ul></div>')
     hard = TREAT.get("hard_failures", [])
     if hard:
         items = "".join(
             f'<li><code>{name(r["clip"])}.{r["metric"]}</code> = {r["value"]}</li>' for r in hard)
         return (f'<div class="gate gate-fail"><b>Gate: {len(hard)} HARD COMFORT/INTEGRITY '
+                f'FAILURE(S)</b><ul>{items}</ul></div>')
+    evidence = TREAT.get("evidence_failures", [])
+    if evidence:
+        items = "".join(
+            f'<li><code>{name(r["clip"])}.{r["metric"]}</code> missing/invalid evidence</li>'
+            for r in evidence)
+        return (f'<div class="gate gate-fail"><b>Gate: {len(evidence)} EVIDENCE '
                 f'FAILURE(S)</b><ul>{items}</ul></div>')
     if IS_COMPARISON_ONLY:
         return ('<div class="gate gate-info"><b>Gate: COMPARISON ONLY</b> — committed baselines '
@@ -1330,10 +1417,10 @@ def source_artifact_section():
         if not note:
             continue
         frame = mid_frame(ctrl_dir, clip)
-        paths = source_glob(clip, frame)
-        if not paths:
+        path = source_path(clip, frame)
+        if not path:
             continue
-        image_url = durl(Image.open(paths[0]).convert("RGB"), w=420, jpg=True, q=84)
+        image_url = durl(Image.open(path).convert("RGB"), w=420, jpg=True, q=84)
         kind = html.escape(clip_meta.get("content_type", "source"))
         cards.append(
             f'<article class="source-card"><img src="{image_url}"><div>'
@@ -1361,11 +1448,11 @@ def _mask_overlay(image, mask):
 
 
 def warp_mask_evidence(clip, frame):
-    source_paths = source_glob(clip, frame)
+    source = source_path(clip, frame)
     paths = [frame_path(ctrl_dir, clip, frame), frame_path(treat_dir, clip, frame)]
-    masks = [os.path.join(run, clip, f"warp_mask_{frame:05d}.png")
+    masks = [artifact_path(run, clip, "warp_mask_", frame)
              for run in (ctrl_dir, treat_dir)]
-    if not (source_paths and all(os.path.exists(path) for path in paths + masks)):
+    if not (source and all(paths + masks)):
         return None
     outputs = normalize_sbs_images([Image.open(path).convert("RGB") for path in paths])
     packed_masks = [Image.open(path).convert("RGB").resize(outputs[0].size, Image.NEAREST)
@@ -1396,8 +1483,8 @@ def warp_mask_evidence(clip, frame):
     y0 = max(0, min(eh - ch, row - ch // 2))
     xoff = eye_index * ew
 
-    source = Image.open(source_paths[0]).convert("RGB").resize((ew, eh), Image.BILINEAR)
-    panels = [source.crop((x0, y0, x0 + cw, y0 + ch))]
+    source_image = Image.open(source).convert("RGB").resize((ew, eh), Image.BILINEAR)
+    panels = [source_image.crop((x0, y0, x0 + cw, y0 + ch))]
     for output, mask in zip(outputs, packed_masks):
         eye = output.crop((xoff, 0, xoff + ew, eh))
         eye_mask = mask.crop((xoff, 0, xoff + ew, eh))
@@ -1629,16 +1716,30 @@ models = ", ".join(sorted({m for r in (CTRL, TREAT)
 if IS_TRADEOFF_CMP:
     h1 = f"{CTRL_NAME} vs. {TREAT_NAME}"
     comparison_kind = "modes" if IS_MODE_CMP else "profiles"
+    displayed_verdict = AB_DECISION["verdict"].replace("_", " ")
     lede = (f"Comparing two pipeline {comparison_kind} on identical clips: <b>{CTRL_NAME}</b> against "
-            f"<b>{TREAT_NAME}</b>. Neither is a regression of the other — it is a tradeoff, "
-            f"read from the per-metric split and the per-clip evidence below.")
+            f"<b>{TREAT_NAME}</b>. The canonical report verdict is "
+            f"<b>{html.escape(displayed_verdict)}</b>; read the per-axis split, gate, and matched "
+            f"per-clip evidence below.")
 else:
     h1 = "Control vs. treatment, by issue"
     lede = (f"Matched comparison-only run: <b>{CTRL_NAME}</b> against <b>{TREAT_NAME}</b>; "
             "committed baselines were not consulted." if IS_COMPARISON_ONLY else
             f"Treatment under test: <b>{TREAT_NAME}</b>, gated against the committed baselines.")
-ctrl_sha = CTRL["meta"].get("git_sha", "?") + ("+dirty" if CTRL["meta"].get("git_dirty") else "")
-treat_sha = TREAT["meta"].get("git_sha", "?") + ("+dirty" if TREAT["meta"].get("git_dirty") else "")
+ctrl_exe_sha = CTRL["meta"].get("executable_sha256", "?")
+treat_exe_sha = TREAT["meta"].get("executable_sha256", "?")
+ctrl_shader_sha = CTRL["meta"].get("runtime_shader_sha256", "?")
+treat_shader_sha = TREAT["meta"].get("runtime_shader_sha256", "?")
+ctrl_engine_sha = CTRL["meta"].get("engine_sha256", "?")
+treat_engine_sha = TREAT["meta"].get("engine_sha256", "?")
+ctrl_sha = (CTRL["meta"].get("git_sha", "?") +
+            ("+dirty" if CTRL["meta"].get("git_dirty") else "") +
+            f" · exe {ctrl_exe_sha[:12]} · shaders {ctrl_shader_sha[:12]}"
+            f" · engine {ctrl_engine_sha[:12]}")
+treat_sha = (TREAT["meta"].get("git_sha", "?") +
+             ("+dirty" if TREAT["meta"].get("git_dirty") else "") +
+             f" · exe {treat_exe_sha[:12]} · shaders {treat_shader_sha[:12]}"
+             f" · engine {treat_engine_sha[:12]}")
 HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
         .replace("__CTRL_NAME__", CTRL_NAME).replace("__TREAT_NAME__", TREAT_NAME)
         .replace("__DATE__", meta["timestamp"][:10]).replace("__CTRL_SHA__", ctrl_sha)
@@ -1662,11 +1763,19 @@ with open(out_html, "w", encoding="utf-8") as f:
 decision_path = os.path.join(os.path.dirname(os.path.abspath(out_html)), "decision.json")
 with open(decision_path, "w", encoding="utf-8") as f:
     json.dump({
-        "schema": 2,
+        "schema": 3,
         "control": CTRL_NAME,
         "treatment": TREAT_NAME,
         "eval_schema": TREAT.get("meta", {}).get("eval_schema"),
         "metric_sha256": TREAT.get("meta", {}).get("metric_sha256"),
+        "control_executable_sha256": CTRL.get("meta", {}).get("executable_sha256"),
+        "treatment_executable_sha256": TREAT.get("meta", {}).get("executable_sha256"),
+        "control_runtime_shader_sha256": CTRL.get("meta", {}).get("runtime_shader_sha256"),
+        "treatment_runtime_shader_sha256": TREAT.get("meta", {}).get("runtime_shader_sha256"),
+        "control_engine_sha256": CTRL.get("meta", {}).get("engine_sha256"),
+        "treatment_engine_sha256": TREAT.get("meta", {}).get("engine_sha256"),
+        "control_onnx_sha256": CTRL.get("meta", {}).get("onnx_sha256"),
+        "treatment_onnx_sha256": TREAT.get("meta", {}).get("onnx_sha256"),
         "report_sha256": REPORT_SHA,
         "clips": CLIPS,
         "decision_clips": DECISION_CLIPS,

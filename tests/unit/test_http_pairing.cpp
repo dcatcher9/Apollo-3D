@@ -7,6 +7,9 @@
 
 #include <src/nvhttp.h>
 
+#include <thread>
+#include <vector>
+
 using namespace nvhttp;
 
 struct pairing_input {
@@ -76,55 +79,85 @@ X4wnh1bwdiidqpcgyuKossLOPxbS786WmsesaAWPnpoY6M8aija+ALwNNuWWmyMg
 9SVDV76xJzM36Uq7Kg3QJYTlY04WmPIdJHkCtXWf9g==
 -----END CERTIFICATE-----)";
 
+const std::vector<std::string> &distinct_test_certificates() {
+  static const auto certificates = []() {
+    std::vector<std::string> result;
+    result.reserve(8);
+    for (int index = 0; index < 8; ++index) {
+      result.push_back(crypto::gen_creds("pairing-client-" + std::to_string(index), 2048).x509);
+    }
+    return result;
+  }();
+  return certificates;
+}
+
 struct PairingTest: testing::TestWithParam<std::tuple<pairing_input, pairing_output>> {};
 
 TEST_P(PairingTest, Run) {
   auto [input, expected] = GetParam();
 
+  // GoogleTest retains parameter objects across --gtest_repeat runs. Treat the shared object as
+  // an immutable seed and construct a fresh session so moved certificates, cipher state, and
+  // phase progression can never leak from one invocation into the next.
+  pair_session_t session;
+  session.client.uniqueID = input.session->client.uniqueID;
+  session.client.cert = input.session->client.cert;
+  session.client.name = input.session->client.name;
+  session.async_insert_pin.salt = input.session->async_insert_pin.salt;
+
   boost::property_tree::ptree tree;
+
+  // Pairing now writes directly to the authoritative client store. Keep this unit test isolated
+  // from any real/default state-file path while still exercising that production code path.
+  const bool previous_fresh_state = config::sunshine.flags[config::flag::FRESH_STATE];
+  config::sunshine.flags[config::flag::FRESH_STATE] = true;
+  erase_all_clients();
+  auto restore_fresh_state = util::fail_guard([&]() {
+    erase_all_clients();
+    config::sunshine.flags[config::flag::FRESH_STATE] = previous_fresh_state;
+  });
 
   setup(PRIVATE_KEY, PUBLIC_CERT);
 
   // phase 1
-  getservercert(*input.session, tree, input.pin);
+  getservercert(session, tree, input.pin);
   ASSERT_EQ(tree.get<int>("root.paired") == 1, expected.phase_1_success);
   if (!expected.phase_1_success) {
     return;
   }
 
   // phase 2
-  clientchallenge(*input.session, tree, input.client_challenge);
+  clientchallenge(session, tree, input.client_challenge);
   ASSERT_EQ(tree.get<int>("root.paired") == 1, expected.phase_2_success);
   if (!expected.phase_2_success) {
     return;
   }
 
   // phase 3
-  serverchallengeresp(*input.session, tree, input.server_challenge_resp);
+  serverchallengeresp(session, tree, input.server_challenge_resp);
   ASSERT_EQ(tree.get<int>("root.paired") == 1, expected.phase_3_success);
   if (!expected.phase_3_success) {
     return;
   }
-  input.session->serverchallenge = input.override_server_challenge;
+  session.serverchallenge = input.override_server_challenge;
 
   // phase 4
-  auto input_client_cert = input.session->client.cert;  // Will be moved
-  auto add_cert = std::make_shared<safe::queue_t<crypto::x509_t>>(30);
-  clientpairingsecret(*input.session, add_cert, tree, input.client_pairing_secret);
+  const auto clients_before = get_all_clients().size();
+  clientpairingsecret(session, tree, input.client_pairing_secret);
   ASSERT_EQ(tree.get<int>("root.paired") == 1, expected.phase_4_success);
 
-  // Check that we actually added the input client certificate to `add_cert`
+  // Check that the verified client was added to the authoritative paired-device store.
   if (expected.phase_4_success) {
-    ASSERT_EQ(add_cert->peek(), true);
-    auto cert = add_cert->pop();
-    char added_subject_name[256];
-    X509_NAME_oneline(X509_get_subject_name(cert.get()), added_subject_name, sizeof(added_subject_name));
-
-    auto input_cert = crypto::x509(input_client_cert);
-    char original_suject_name[256];
-    X509_NAME_oneline(X509_get_subject_name(input_cert.get()), original_suject_name, sizeof(original_suject_name));
-
-    ASSERT_EQ(std::string(added_subject_name), std::string(original_suject_name));
+    const auto clients = get_all_clients();
+    ASSERT_EQ(clients.size(), clients_before + 1);
+    ASSERT_EQ(clients.back().at("name").get<std::string>(), session.client.name);
+    ASSERT_EQ(
+      clients.back().at("perm").get<std::uint32_t>(),
+      static_cast<std::uint32_t>(crypto::PERM::_all)
+    );
+    // FRESH_STATE suppresses persistence, not live authorization. The certificate must be in the
+    // same in-memory chain used by the HTTPS verifier immediately after phase 4.
+    ASSERT_TRUE(is_client_certificate_authorized(PUBLIC_CERT));
   }
 }
 
@@ -252,8 +285,7 @@ TEST(PairingTest, OutOfOrderCalls) {
   serverchallengeresp(sess, tree, "test");
   ASSERT_FALSE(tree.get<int>("root.paired") == 1);
 
-  auto add_cert = std::make_shared<safe::queue_t<crypto::x509_t>>(30);
-  clientpairingsecret(sess, add_cert, tree, "test");
+  clientpairingsecret(sess, tree, "test");
   ASSERT_FALSE(tree.get<int>("root.paired") == 1);
 
   // This should work, it's the first time we call it
@@ -264,4 +296,109 @@ TEST(PairingTest, OutOfOrderCalls) {
   // Calling it again should fail
   getservercert(sess, tree, "test");
   ASSERT_FALSE(tree.get<int>("root.paired") == 1);
+}
+
+TEST(PairingStateTest, ConcurrentFirstClientGrantIsAtomic) {
+  const bool previous_fresh_state = config::sunshine.flags[config::flag::FRESH_STATE];
+  config::sunshine.flags[config::flag::FRESH_STATE] = true;
+  erase_all_clients();
+  auto cleanup = util::fail_guard([&]() {
+    erase_all_clients();
+    config::sunshine.flags[config::flag::FRESH_STATE] = previous_fresh_state;
+  });
+
+  constexpr int client_count = 8;
+  const auto &certificates = distinct_test_certificates();
+  std::vector<std::jthread> clients;
+  clients.reserve(client_count);
+  for (int index = 0; index < client_count; ++index) {
+    clients.emplace_back([index, &certificates]() {
+      add_authorized_client_for_test("concurrent-" + std::to_string(index), certificates[index]);
+    });
+  }
+  clients.clear();  // jthread destruction joins every insertion.
+
+  const auto authorized = get_all_clients();
+  ASSERT_EQ(authorized.size(), client_count);
+  int full_control_clients = 0;
+  int default_clients = 0;
+  for (const auto &client : authorized) {
+    const auto permission = client.at("perm").get<std::uint32_t>();
+    full_control_clients += permission == static_cast<std::uint32_t>(crypto::PERM::_all);
+    default_clients += permission == static_cast<std::uint32_t>(crypto::PERM::_default);
+  }
+  ASSERT_EQ(full_control_clients, 1);
+  ASSERT_EQ(default_clients, client_count - 1);
+  for (const auto &certificate : certificates) {
+    ASSERT_TRUE(is_client_certificate_authorized(certificate));
+  }
+}
+
+TEST(PairingStateTest, DuplicateCertificatePairingIsIdempotent) {
+  const bool previous_fresh_state = config::sunshine.flags[config::flag::FRESH_STATE];
+  config::sunshine.flags[config::flag::FRESH_STATE] = true;
+  erase_all_clients();
+  auto cleanup = util::fail_guard([&]() {
+    erase_all_clients();
+    config::sunshine.flags[config::flag::FRESH_STATE] = previous_fresh_state;
+  });
+
+  add_authorized_client_for_test("first-name", PUBLIC_CERT);
+  const auto original = get_all_clients();
+  ASSERT_EQ(original.size(), 1);
+
+  // The same X.509 identity with different PEM whitespace is still the same client. Re-pairing
+  // preserves the original UUID, name, permissions, and administrator settings.
+  add_authorized_client_for_test("second-name", PUBLIC_CERT + "\n");
+  const auto after_repair = get_all_clients();
+  ASSERT_EQ(after_repair.size(), 1);
+  EXPECT_EQ(after_repair.front(), original.front());
+}
+
+TEST(PairingStateTest, KeepAliveAuthorizationRefreshesAfterUpdateAndRevoke) {
+  const bool previous_fresh_state = config::sunshine.flags[config::flag::FRESH_STATE];
+  config::sunshine.flags[config::flag::FRESH_STATE] = true;
+  erase_all_clients();
+  auto cleanup = util::fail_guard([&]() {
+    erase_all_clients();
+    config::sunshine.flags[config::flag::FRESH_STATE] = previous_fresh_state;
+  });
+
+  add_authorized_client_for_test("before-update", PUBLIC_CERT);
+  auto stale = get_authorized_client_for_test(PUBLIC_CERT);
+  ASSERT_TRUE(stale);
+  ASSERT_EQ(stale->perm, crypto::PERM::_all);
+
+  ASSERT_TRUE(update_device_info(
+    stale->uuid,
+    "after-update",
+    "",
+    {},
+    {},
+    crypto::PERM::_no,
+    true,
+    false,
+    false
+  ));
+  auto refreshed = refresh_authorized_client_for_test(stale);
+  ASSERT_TRUE(refreshed);
+  EXPECT_NE(refreshed.get(), stale.get());
+  EXPECT_EQ(refreshed->name, "after-update");
+  EXPECT_EQ(refreshed->perm, crypto::PERM::_no);
+
+  ASSERT_TRUE(unpair_client(stale->uuid));
+  EXPECT_FALSE(refresh_authorized_client_for_test(stale));
+}
+
+TEST(PairingStateTest, InvalidOtpAuthenticationDoesNotConsumeOtp) {
+  constexpr std::string_view passphrase = "test-passphrase";
+  constexpr std::string_view salt = "test-salt";
+  const auto pin = request_otp(std::string(passphrase), "otp-client");
+  ASSERT_FALSE(pin.empty());
+
+  EXPECT_FALSE(authenticate_otp_for_test("invalid-authentication", std::string(salt)));
+
+  const auto digest = util::hex(crypto::hash(pin + std::string(salt) + std::string(passphrase)), true);
+  EXPECT_TRUE(authenticate_otp_for_test(std::string(digest.to_string_view()), std::string(salt)));
+  EXPECT_FALSE(authenticate_otp_for_test(std::string(digest.to_string_view()), std::string(salt)));
 }

@@ -7,7 +7,7 @@
 
 StructuredBuffer<float>  InputBuffer : register(t0);
 RWStructuredBuffer<uint> Histogram   : register(u0);  // 256 bins, reset by depth_minmax_ema_cs
-RWByteAddressBuffer      MinMaxRaw   : register(u1);  // read-only here: [0]=min bits, [4]=max bits
+RWByteAddressBuffer      MinMaxRaw   : register(u1);  // read-only: min bits, max bits, valid count
 
 // Shared depth-pass cbuffer (slots 11-12 = the percentile bounds consumed by depth_minmax_ema_cs).
 #include "include/depth_constants.hlsl"
@@ -24,15 +24,19 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
     // Bin over this frame's raw range (from the preceding depth_minmax_cs dispatch).
     float vmin = asfloat(MinMaxRaw.Load(0));
     float vmax = asfloat(MinMaxRaw.Load(4));
-    float inv_range = (float)NUM_BINS / max(vmax - vmin, 1e-12f);
+    uint valid_count = MinMaxRaw.Load(8);
+    bool valid_bounds = valid_count > 0u && !isnan(vmin) && !isinf(vmin) &&
+                        !isnan(vmax) && !isinf(vmax) && vmax >= vmin;
+    float inv_range = valid_bounds ? (float)NUM_BINS / max(vmax - vmin, 1e-12f) : 0.0f;
 
     uint count = target_w * target_h;
     [loop]
     for (uint idx = dtid.x; idx < count; idx += reduce_threads) {
         float v = InputBuffer[idx];
-        if (isnan(v) || v < 0.0f) v = 0.0f;
-        uint bin = min((uint)((v - vmin) * inv_range), NUM_BINS - 1u);
-        InterlockedAdd(g_hist[bin], 1u);
+        if (valid_bounds && !isnan(v) && !isinf(v) && v >= 0.0f) {
+            uint bin = min((uint)((v - vmin) * inv_range), NUM_BINS - 1u);
+            InterlockedAdd(g_hist[bin], 1u);
+        }
     }
 
     GroupMemoryBarrierWithGroupSync();

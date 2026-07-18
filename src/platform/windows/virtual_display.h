@@ -22,8 +22,6 @@ namespace VDISPLAY {
 		WATCHDOG_FAILED      = -3
 	};
 
-	extern HANDLE SUDOVDA_DRIVER_HANDLE;
-
 	LONG getDeviceSettings(const wchar_t* deviceName, DEVMODEW& devMode);
 	LONG changeDisplaySettings(const wchar_t* deviceName, int width, int height, int refresh_rate);
 	LONG changeDisplaySettings2(const wchar_t* deviceName, int width, int height, int refresh_rate, bool bApplyIsolated=false);	

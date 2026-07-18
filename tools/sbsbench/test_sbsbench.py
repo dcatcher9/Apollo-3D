@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -113,6 +114,311 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("if args.update_baselines:", evaluator)
         self.assertIn("refusing --update-baselines while another sunshine.exe is running",
                       evaluator)
+        self.assertIn("--update-baselines requires the canonical profile/config", evaluator)
+        self.assertIn('meta.get("extra_args") != []', evaluator)
+
+    def test_missing_metric_and_perf_evidence_fail_closed(self):
+        thresholds = {
+            "metrics": {
+                "comfort": {"role": "hard", "hard_max": 3.0, "better": "lower"},
+                "quality": {"role": "primary", "better": "higher",
+                            "abs_floor": 0.1, "rel_tol": 0.1},
+            },
+            "perf_ms": {"warp": {"abs_floor": 0.1, "rel_tol": 0.1}},
+        }
+        _, _, hard = run_eval.score_clip_gates([], {}, thresholds, {})
+        self.assertEqual(hard[0]["metric"], "comfort")
+        self.assertTrue(hard[0]["missing"])
+        evidence = run_eval.primary_evidence_failures(
+            {}, thresholds, "clip", {}, baseline={"quality": 10.0})
+        self.assertEqual(evidence[0]["metric"], "quality")
+        perf = run_eval.perf_evidence_failures({"warp": 1.0}, {}, thresholds, "clip")
+        self.assertEqual(perf[0]["metric"], "perf:warp")
+        self.assertEqual(perf[0]["source"], "current")
+
+    def test_engine_preflight_requires_fresh_exact_runtime_manifest(self):
+        with tempfile.TemporaryDirectory() as build:
+            assets = os.path.join(build, "assets")
+            os.makedirs(assets)
+            model = "depth_model"
+            exe = os.path.join(build, "sunshine.exe")
+            onnx = os.path.join(assets, model + ".onnx")
+            engine_name = model + ".exact-compatible.engine"
+            engine = os.path.join(assets, engine_name)
+            manifest = os.path.join(assets, model + ".active-engine.json")
+            for path, payload in ((exe, b"binary"), (onnx, b"onnx"), (engine, b"engine")):
+                with open(path, "wb") as fh:
+                    fh.write(payload)
+            with open(manifest, "w", encoding="utf-8") as fh:
+                json.dump({"schema": 1, "model": model, "engine": engine_name,
+                           "onnx_sha256": run_eval.file_sha256(onnx)}, fh)
+            exe_time = os.path.getmtime(exe)
+            os.utime(manifest, (exe_time + 2, exe_time + 2))
+            self.assertEqual(run_eval.check_engines(build, model), [])
+
+            with open(os.path.join(assets, model + ".unrelated.engine"), "wb") as fh:
+                fh.write(b"unrelated")
+            os.unlink(engine)
+            issues = run_eval.check_engines(build, model)
+            self.assertTrue(any("exact engine missing/empty" in issue for issue in issues))
+
+    def test_engine_preflight_rejects_stale_manifest_and_onnx_mismatch(self):
+        with tempfile.TemporaryDirectory() as build:
+            assets = os.path.join(build, "assets")
+            os.makedirs(assets)
+            model = "depth_model"
+            exe = os.path.join(build, "sunshine.exe")
+            onnx = os.path.join(assets, model + ".onnx")
+            engine_name = model + ".exact.engine"
+            engine = os.path.join(assets, engine_name)
+            manifest = os.path.join(assets, model + ".active-engine.json")
+            for path, payload in ((exe, b"new binary"), (onnx, b"new onnx"),
+                                  (engine, b"engine")):
+                with open(path, "wb") as fh:
+                    fh.write(payload)
+            with open(manifest, "w", encoding="utf-8") as fh:
+                json.dump({"schema": 1, "model": model, "engine": engine_name,
+                           "onnx_sha256": "0" * 64}, fh)
+            now = os.path.getmtime(exe)
+            os.utime(manifest, (now - 2, now - 2))
+            issues = run_eval.check_engines(build, model)
+            self.assertTrue(any("predates sunshine.exe" in issue for issue in issues))
+            self.assertTrue(any("ONNX SHA-256" in issue for issue in issues))
+
+    def test_runtime_pipeline_provenance_covers_shaders_engine_and_onnx(self):
+        with tempfile.TemporaryDirectory() as build:
+            assets = os.path.join(build, "assets")
+            shaders = os.path.join(assets, "shaders", "directx", "include")
+            os.makedirs(shaders)
+            model = "depth_model"
+            shader = os.path.join(shaders, "common.hlsl")
+            onnx = os.path.join(assets, model + ".onnx")
+            engine_name = model + ".exact.engine"
+            engine = os.path.join(assets, engine_name)
+            manifest = os.path.join(assets, model + ".active-engine.json")
+            with open(shader, "wb") as fh:
+                fh.write(b"float x;\r\n")
+            with open(onnx, "wb") as fh:
+                fh.write(b"onnx")
+            with open(engine, "wb") as fh:
+                fh.write(b"engine")
+            with open(manifest, "w", encoding="utf-8") as fh:
+                json.dump({"engine": engine_name,
+                           "onnx_sha256": run_eval.file_sha256(onnx)}, fh)
+
+            shader_sha = run_eval.runtime_shader_sha256(build)
+            with open(shader, "wb") as fh:
+                fh.write(b"float x;\n")
+            self.assertEqual(shader_sha, run_eval.runtime_shader_sha256(build))
+            with open(shader, "ab") as fh:
+                fh.write(b"float y;\n")
+            self.assertNotEqual(shader_sha, run_eval.runtime_shader_sha256(build))
+
+            provenance = run_eval.engine_provenance(build, model)
+            self.assertEqual(provenance["engine_name"], engine_name)
+            self.assertEqual(provenance["engine_sha256"], run_eval.file_sha256(engine))
+            self.assertEqual(provenance["onnx_sha256"], run_eval.file_sha256(onnx))
+
+    def test_allow_build_engine_preflight_is_untimed_and_revalidates_manifest(self):
+        with tempfile.TemporaryDirectory() as build:
+            frames = os.path.join(build, "frames")
+            os.makedirs(frames)
+            exe = os.path.join(build, "sunshine.exe")
+            conf = os.path.join(build, "bench.conf")
+            for path in (exe, conf):
+                with open(path, "wb") as fh:
+                    fh.write(b"x")
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            with mock.patch.object(run_eval.subprocess, "run", return_value=completed) as launch, \
+                    mock.patch.object(run_eval, "check_engines", return_value=[]):
+                run_eval.run_engine_preflight(exe, conf, build, frames, "model")
+            command = launch.call_args.args[0]
+            self.assertIn("--limit", command)
+            self.assertEqual(command[command.index("--limit") + 1], "1")
+            self.assertEqual(launch.call_args.kwargs["timeout"], 900)
+
+    def test_ab_decision_rejects_asymmetric_primary_evidence(self):
+        specs = {"quality": {"role": "primary", "axis": "warp", "better": "higher"},
+                 "comfort": {"role": "hard", "hard_max": 3.0, "better": "lower"}}
+        decision = sbsbench.evaluate_ab_decision(
+            {"clip": {"quality": 1.0, "comfort": 1.0}},
+            {"clip": {"comfort": 1.0}}, ["clip"], specs)
+        self.assertEqual(decision["verdict"], "reject_evidence")
+        self.assertEqual(decision["missing_evidence"][0]["missing"], "treatment")
+
+    def test_report_candidate_is_bound_to_both_canonical_run_gates(self):
+        metric_decision = {"verdict": "candidate", "hard_failures": [],
+                           "missing_evidence": [], "axes": {}, "improved": 1,
+                           "regressed": 0}
+
+        def run(kind="comparison-only", verdict="comparison_only", **overrides):
+            result = {"meta": {"run_kind": kind}, "verdict": verdict,
+                      "hard_failures": [], "evidence_failures": [], "regressions": []}
+            result.update(overrides)
+            return result
+
+        accepted = sbsbench.gate_ab_decision(metric_decision, run(), run())
+        self.assertEqual(accepted["verdict"], "candidate")
+        self.assertTrue(accepted["candidate"])
+
+        for field, value in (
+                ("evidence_failures", [{"metric": "perf:warp"}]),
+                ("regressions", [{"metric": "perf:warp"}]),
+                ("hard_failures", [{"metric": "comfort"}])):
+            with self.subTest(field=field):
+                verdict = ("evidence_failures" if field == "evidence_failures" else
+                           "regressions" if field == "regressions" else "hard_failures")
+                rejected_run = run(verdict=verdict, **{field: value})
+                rejected = sbsbench.gate_ab_decision(metric_decision, run(), rejected_run)
+                self.assertEqual(rejected["verdict"], "reject_run_gate")
+                self.assertFalse(rejected["candidate"])
+                self.assertFalse(rejected["canonical_gate"]["passed"])
+
+        malformed = run()
+        del malformed["regressions"]
+        self.assertFalse(sbsbench.canonical_run_gate(malformed)["passed"])
+
+    def test_primary_evidence_applicability_is_explicit(self):
+        specs = {
+            "always": {"role": "primary"},
+            "depth": {"role": "primary", "requires": "gt_depth"},
+            "temporal": {"role": "primary", "requires": "multi_frame"},
+            "stretch": {"role": "primary", "requires": "source_stretch_support"},
+        }
+        failures = run_eval.primary_evidence_failures(
+            {}, {"metrics": specs}, "clip", {"source_frame_count": 1})
+        self.assertEqual({failure["metric"] for failure in failures}, {"always", "stretch"})
+        explicitly_unsupported = run_eval.primary_evidence_failures(
+            {"source_stretch_support": 0.0}, {"metrics": specs}, "clip",
+            {"source_frame_count": 1})
+        self.assertEqual([failure["metric"] for failure in explicitly_unsupported], ["always"])
+        failures = run_eval.primary_evidence_failures(
+            {"source_stretch_support": 0.2}, {"metrics": specs}, "clip",
+            {"source_frame_count": 2, "gt_depth_kind": "disparity"})
+        self.assertEqual({failure["metric"] for failure in failures},
+                         {"always", "depth", "temporal", "stretch"})
+        failures = run_eval.primary_evidence_failures(
+            {"always": float("nan")}, {"metrics": specs}, "clip",
+            {"source_frame_count": 1})
+        self.assertEqual({failure["metric"] for failure in failures}, {"always", "stretch"})
+        with self.assertRaisesRegex(ValueError, "unknown metric evidence requirement"):
+            sbsbench.metric_evidence_applicable(
+                "metric", {"requires": "typo"}, {}, {})
+
+    def test_temporal_evidence_requires_measured_reliable_support(self):
+        metrics = {
+            "static_jitter_p95": {"role": "primary", "requires": "static_support"},
+            "flow_temporal_p95": {"role": "primary", "requires": "flow_support"},
+        }
+        thresholds = {"metrics": metrics}
+        clip_meta = {"source_frame_count": 8}
+        insufficient = run_eval.primary_evidence_failures(
+            {"static_support": 0.099, "flow_support": 0.0}, thresholds,
+            "moving", clip_meta)
+        self.assertEqual(insufficient, [])
+        sufficient = run_eval.primary_evidence_failures(
+            {"static_support": 0.1, "flow_support": 0.8}, thresholds,
+            "supported", clip_meta)
+        self.assertEqual({failure["metric"] for failure in sufficient}, set(metrics))
+        missing_support = run_eval.primary_evidence_failures(
+            {}, thresholds, "broken", clip_meta)
+        self.assertEqual({failure["metric"] for failure in missing_support}, set(metrics))
+        single_frame = run_eval.primary_evidence_failures(
+            {}, thresholds, "still", {"source_frame_count": 1})
+        self.assertEqual(single_frame, [])
+        asymmetric = run_eval.primary_evidence_failures(
+            {"static_support": 0.01}, thresholds, "asymmetric", clip_meta,
+            baseline={"static_support": 0.7, "flow_support": 0.0})
+        self.assertEqual([failure["metric"] for failure in asymmetric],
+                         ["static_jitter_p95"])
+
+    def test_gt_depth_lag_is_required_only_for_temporal_reference_clips(self):
+        thresholds = {"metrics": {
+            "depth_gt_lag_f1_p95": {
+                "role": "primary", "requires": "gt_depth_temporal"},
+        }}
+        single = run_eval.primary_evidence_failures(
+            {}, thresholds, "single", {"required_gt_depth": True, "source_frame_count": 1})
+        self.assertEqual(single, [])
+        temporal = run_eval.primary_evidence_failures(
+            {}, thresholds, "temporal", {"required_gt_depth": True, "source_frame_count": 2})
+        self.assertEqual([item["metric"] for item in temporal], ["depth_gt_lag_f1_p95"])
+
+    def test_missing_perf_median_remains_missing_evidence(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump({"stages": {"warp": {"samples": 12}}}, fh)
+            path = fh.name
+        try:
+            perf = run_eval.load_perf_metrics(path)
+            self.assertIsNone(perf["warp"])
+            failures = run_eval.perf_evidence_failures(
+                {"warp": 1.0}, perf,
+                {"perf_ms": {"warp": {"abs_floor": 0.1, "rel_tol": 0.1}}}, "clip")
+            self.assertEqual(failures[0]["metric"], "perf:warp")
+            self.assertEqual(failures[0]["source"], "current")
+        finally:
+            os.unlink(path)
+
+    def test_clip_metadata_preflight_is_fail_closed(self):
+        with tempfile.TemporaryDirectory() as clip:
+            with self.assertRaisesRegex(ValueError, "missing clip metadata"):
+                run_eval.load_clip_metadata(clip, suite="extended")
+            meta_path = os.path.join(clip, "meta.json")
+            with open(meta_path, "w", encoding="utf-8") as fh:
+                json.dump([], fh)
+            with self.assertRaisesRegex(ValueError, "root must be an object"):
+                run_eval.load_clip_metadata(clip)
+            with open(meta_path, "w", encoding="utf-8") as fh:
+                json.dump({"dataset": "public"}, fh)
+            with self.assertRaisesRegex(ValueError, "evidence requirement"):
+                run_eval.load_clip_metadata(clip, suite="extended")
+
+            gt_right = os.path.join(clip, "gt_right")
+            os.makedirs(gt_right)
+            Image.fromarray(np.zeros((8, 12, 3), np.uint8)).save(
+                os.path.join(gt_right, "frame_00000.png"))
+            with open(meta_path, "w", encoding="utf-8") as fh:
+                json.dump({"dataset": "public", "required_gt_stereo": True}, fh)
+            self.assertTrue(
+                run_eval.load_clip_metadata(clip, suite="extended")["required_gt_stereo"])
+
+    def test_baseline_context_is_validated_before_harness_use(self):
+        with tempfile.TemporaryDirectory() as baseline_dir:
+            context = {"eval_schema": run_eval.EVAL_SCHEMA, "metric_sha256": "metric",
+                       "run_kind": "baseline-update"}
+            payload = {
+                "meta": {**context, "clip_sha1": "cliphash", "extra_args": []},
+                "aggregate": {"quality": 1.0},
+                "perf_ms": {"warp": 1.0},
+            }
+            path = os.path.join(baseline_dir, "clip.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            loaded = run_eval.preflight_baselines(
+                baseline_dir, ["clip"], context, {"clip": "cliphash"})
+            self.assertEqual(loaded["clip"]["aggregate"]["quality"], 1.0)
+            payload["meta"]["eval_schema"] -= 1
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            with self.assertRaisesRegex(ValueError, "stale/incompatible"):
+                run_eval.preflight_baselines(
+                    baseline_dir, ["clip"], context, {"clip": "cliphash"})
+
+    def test_hard_constraint_summary_uses_worst_clip_not_mean(self):
+        aggregates = {"safe": {"comfort": 1.0}, "unsafe": {"comfort": 5.0}}
+        self.assertEqual(
+            sbsbench.worst_hard_metric(
+                aggregates, "comfort", {"hard_max": 4.0}, ["safe", "unsafe"]),
+            (5.0, "unsafe"))
+        self.assertEqual(
+            sbsbench.worst_hard_metric(
+                aggregates, "comfort", {"hard_min": 2.0}, ["safe", "unsafe"]),
+            (1.0, "safe"))
+        report = os.path.join(os.path.dirname(__file__), "build_report.py")
+        with open(report, encoding="utf-8") as fh:
+            report_text = fh.read()
+        self.assertIn("worst_hard_metric", report_text)
+        self.assertIn("safety-worst per-clip aggregate", report_text)
 
     def test_custom_profile_values_need_no_evaluator_code_change(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
@@ -176,16 +482,39 @@ class EvalContractTests(unittest.TestCase):
 
     def test_eval_builds_production_binary_and_fails_closed_on_build_error(self):
         current = mock.Mock(returncode=0, stdout="ninja: no work to do.\n", stderr="")
-        with mock.patch.object(run_eval.shutil, "which", return_value="ninja"), \
+        ninja = os.path.join("C:\\", "msys64", "ucrt64", "bin", "ninja.exe")
+        with mock.patch.object(run_eval.shutil, "which", return_value=ninja), \
                 mock.patch.object(run_eval.subprocess, "run", return_value=current) as run:
             run_eval.require_current_build("build")
-        self.assertEqual(run.call_args.args[0], ["ninja", "-C", "build", "sunshine"])
+        self.assertEqual(run.call_args.args[0], [ninja, "-C", "build", "sunshine"])
+        if os.name == "nt":
+            build_env = run.call_args.kwargs["env"]
+            self.assertEqual(build_env["MSYSTEM"], "UCRT64")
+            self.assertEqual(build_env["MSYS2_PATH_TYPE"], "inherit")
+            self.assertIn(os.path.dirname(ninja).lower(), build_env["PATH"].lower())
         failed = mock.Mock(returncode=1, stdout="compile failed\n", stderr="")
         with mock.patch.object(run_eval.shutil, "which", return_value="ninja"), \
                 mock.patch.object(run_eval.subprocess, "run", return_value=failed), \
                 mock.patch("sys.stderr", new_callable=io.StringIO):
             with self.assertRaises(SystemExit):
                 run_eval.require_current_build("build")
+
+    def test_eval_records_exact_runtime_pipeline_provenance_for_reports(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
+                  encoding="utf-8") as fh:
+            runner = fh.read()
+        with open(os.path.join(repo, "tools", "sbsbench", "build_report.py"),
+                  encoding="utf-8") as fh:
+            report = fh.read()
+        self.assertIn('"executable_sha256": file_sha256(exe)', runner)
+        self.assertIn('"runtime_shader_sha256": shader_sha', runner)
+        self.assertIn('"engine_sha256": file_sha256(engine_path)', runner)
+        self.assertIn('"executable_sha256"', report)
+        self.assertIn('"runtime_shader_sha256"', report)
+        self.assertIn('"engine_sha256"', report)
+        self.assertIn('"onnx_sha256"', report)
+        self.assertIn('--allow-executable-diff', report)
 
     def test_apollo_bestv2_normalizes_pixel_shifts_by_source_geometry(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -268,7 +597,89 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("smoothstep(0.007f, 0.016f, edge_fraction)", adaptive)
         self.assertNotIn("lerp(pop_ratio, target_ratio", adaptive)
         self.assertIn("Bestv2RawShiftPxFast(zero_anchor_shaped)", adaptive)
-        self.assertIn("s2 = float4(zero_anchor_shift, zero_valid, zero_plane_mode", adaptive)
+        self.assertIn("color_history_valid", adaptive)
+        self.assertIn("color_history_valid && color_change_fraction >= 0.70f", adaptive)
+        self.assertIn("color_change_fraction >= 0.70f", adaptive)
+        self.assertIn("scene_age >= 2.0f", adaptive)
+        self.assertIn("(!initialized || hard_cut) ? subj_raw", adaptive)
+        self.assertIn("(!initialized || hard_cut) ? conv_target", adaptive)
+        self.assertIn("bool hard_cut = initialized &&", adaptive)
+        self.assertNotIn("scene_control && initialized", adaptive)
+        self.assertIn("s.y = scene_age;", adaptive)
+
+    def test_depth_runtime_seeds_history_and_sanitizes_nonfinite_model_output(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
+                  encoding="utf-8") as fh:
+            estimator = fh.read()
+        self.assertNotIn("cbuffer_first_frame", estimator)
+        self.assertNotIn("depth_history_valid", estimator)
+        self.assertIn("depth_valid_history_cs", estimator)
+        self.assertIn("tensor_previous_input_uav", estimator)
+
+        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders",
+                                  "directx")
+        for name in ("depth_minmax_cs.hlsl", "depth_hist_cs.hlsl",
+                     "depth_ema_motion_cs.hlsl", "buffer_to_tex_cs.hlsl"):
+            with self.subTest(shader=name), open(os.path.join(shader_dir, name),
+                                                encoding="utf-8") as fh:
+                self.assertIn("isinf", fh.read())
+
+        with open(os.path.join(shader_dir, "depth_minmax_cs.hlsl"), encoding="utf-8") as fh:
+            reduction = fh.read()
+        self.assertIn("g_valid", reduction)
+        self.assertIn("MinMaxOut.InterlockedAdd(8, g_valid[0])", reduction)
+        with open(os.path.join(shader_dir, "depth_minmax_ema_cs.hlsl"),
+                  encoding="utf-8") as fh:
+            bounds = fh.read()
+        self.assertIn("valid_count > 0u", bounds)
+        self.assertIn("MinMaxRaw.Store(8, 0u)", bounds)
+        self.assertIn("s.w = 0.0f", bounds)
+        self.assertIn("s.w = 2.0f", bounds)
+        with open(os.path.join(shader_dir, "buffer_to_tex_cs.hlsl"),
+                  encoding="utf-8") as fh:
+            mapper = fh.read()
+        self.assertIn("OutputTexture[DTid.xy] = PreviousDepth[DTid.xy]", mapper)
+        self.assertIn("scale.w < 0.5f", mapper)
+        self.assertIn("scale.w > 1.5f ? 1.0f : ema_alpha", mapper)
+        with open(os.path.join(shader_dir, "depth_ema_motion_cs.hlsl"),
+                  encoding="utf-8") as fh:
+            motion = fh.read()
+        self.assertIn("return PreviousDepth[p]", motion)
+        with open(os.path.join(shader_dir, "depth_valid_history_cs.hlsl"),
+                  encoding="utf-8") as fh:
+            history = fh.read()
+        self.assertIn("MinMaxEma[0].w < 0.5f", history)
+        self.assertIn("PreviousModelInput[idx + 2u * plane]", history)
+
+    def test_failed_tensorrt_warmups_are_quarantined_and_not_advertised(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
+                  encoding="utf-8") as fh:
+            estimator = fh.read()
+        self.assertIn("quarantine_execution_context_locked(engine_key, exec_context)", estimator)
+        self.assertIn("quarantined_context_count", estimator)
+        self.assertIn("warmed_context_count", estimator)
+        self.assertIn("if (context_warmed)", estimator)
+        self.assertIn('model.name + ".active-engine.json"', estimator)
+        self.assertIn('{"onnx_sha256", artifact.source_sha256}', estimator)
+
+    def test_warp_probe_work_caps_tall_mode_at_32_total_samples(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
+                              "include", "sbs_warp_common.hlsl")
+        with open(common, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("BESTV2_MAX_DEPTH_PROBES", text)
+        self.assertIn("Bestv2ProbeSteps", text)
+        aspect_scale = (5120.0 / 2160.0) / (3552.0 / 3840.0)
+        desired = min(max(round(24.0 * aspect_scale), 12), 72)
+        budget = max(int(8.75e8 // (2.0 * 3552.0 * 3840.0)) - 1, 4)
+        self.assertEqual(desired, 62)
+        self.assertEqual(budget + 1, 32)
+        landscape_desired = 24
+        landscape_budget = max(int(8.75e8 // (2.0 * 5120.0 * 2160.0)) - 1, 4)
+        self.assertGreaterEqual(landscape_budget, landscape_desired)
 
     def test_adaptive_pop_last_flag_wins(self):
         conf = os.path.join(os.path.dirname(__file__), "bench.conf")
@@ -507,6 +918,19 @@ class EvalContractTests(unittest.TestCase):
                             "--depth-override-all"]}),
             "external-treatment")
 
+    def test_rescore_requires_current_comparison_only_provenance(self):
+        valid = {"meta": {"run_kind": "comparison-only",
+                           "eval_schema": run_eval.EVAL_SCHEMA}}
+        rescore_run.validate_rescore_provenance(valid)
+        with self.assertRaisesRegex(SystemExit, "comparison-only provenance"):
+            rescore_run.validate_rescore_provenance(
+                {"meta": {"run_kind": "baseline-gated",
+                          "eval_schema": run_eval.EVAL_SCHEMA}})
+        with self.assertRaisesRegex(SystemExit, "evaluator schema"):
+            rescore_run.validate_rescore_provenance(
+                {"meta": {"run_kind": "comparison-only",
+                          "eval_schema": run_eval.EVAL_SCHEMA - 1}})
+
     def test_warp_and_coverage_apply_per_eye_aspect_mapping(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
@@ -545,6 +969,21 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("rgb *= 80", color)
         self.assertIn("return NitsToPQ(rgb)", color)
 
+    def test_local_ar_fp16_sdr_presentation_applies_srgb_transfer(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        display_path = os.path.join(repo, "src", "platform", "windows", "display_vram.cpp")
+        shader_path = os.path.join(
+            repo, "src_assets", "windows", "assets", "shaders", "directx",
+            "rgb_present_linear_to_srgb_ps.hlsl")
+        with open(display_path, encoding="utf-8") as fh:
+            display = fh.read()
+        with open(shader_path, encoding="utf-8") as fh:
+            shader = fh.read()
+        self.assertIn("input_is_linear && !display->is_hdr()", display)
+        self.assertIn("rgb_present_linear_to_srgb_ps.get()", display)
+        self.assertNotIn("frame_is_hdr = d3d_image.format", display)
+        self.assertIn("ApplySRGBCurve(saturate(source.rgb))", shader)
+
     def test_hdr_debug_preview_preserves_hue(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         path = os.path.join(repo, "src", "platform", "windows", "sbs_debug_dump.cpp")
@@ -559,14 +998,22 @@ class EvalContractTests(unittest.TestCase):
         path = os.path.join(repo, "tools", "sbsbench", "build_report.py")
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
-        self.assertIn("AB_DECISION = sbsbench.evaluate_ab_decision(\n    ctrl_agg, treat_agg", text)
+        self.assertIn("AB_METRIC_DECISION = sbsbench.evaluate_ab_decision(\n"
+                      "    ctrl_agg, treat_agg", text)
+        self.assertIn("AB_DECISION = sbsbench.gate_ab_decision(AB_METRIC_DECISION, CTRL, TREAT)",
+                      text)
+        self.assertIn("clip_meta={clip: TREAT", text)
         self.assertIn("decision = AB_DECISION", text)
         self.assertIn('"decision_clips": DECISION_CLIPS', text)
         self.assertIn('"decision_scope": DECISION_SCOPE', text)
         self.assertIn('"source_artifact_clips": SOURCE_ARTIFACT_CLIPS', text)
-        self.assertIn('"schema": 2', text)
+        self.assertIn('"schema": 3', text)
         self.assertIn('"report_sha256": REPORT_SHA', text)
         self.assertIn('AB_DECISION["verdict"]', text)
+        self.assertIn('"canonical_gate"', text)
+        self.assertIn('displayed_verdict = AB_DECISION["verdict"]', text)
+        self.assertNotIn("Neither is a regression of the other", text)
+        self.assertIn('"suite", "run_kind",', text)
         self.assertIn("IS_PROFILE_CMP", text)
         self.assertIn("IS_TRADEOFF_CMP = IS_MODE_CMP or IS_PROFILE_CMP", text)
         self.assertIn("def _paired_mean_aggregate", text)
@@ -583,10 +1030,44 @@ class EvalContractTests(unittest.TestCase):
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("kMaxContextsPerEngine = 4", text)
-        self.assertIn("slot.context_count >= kMaxContextsPerEngine", text)
+        self.assertIn("allocated_context_count(slot) >= kMaxContextsPerEngine", text)
         self.assertIn("g_trt_context_available.wait_for", text)
         self.assertIn("slot.io_compatible = have_in && have_out && input_fp32 && output_fp32", text)
         self.assertIn("validate_engine_io_locked", text)
+
+    def test_nvhttp_reads_coherent_locked_process_status(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "process.h"), encoding="utf-8") as fh:
+            header = fh.read()
+        with open(os.path.join(repo, "src", "process.cpp"), encoding="utf-8") as fh:
+            implementation = fh.read()
+        with open(os.path.join(repo, "src", "nvhttp.cpp"), encoding="utf-8") as fh:
+            nvhttp = fh.read()
+        public = header[header.index("class proc_t"):header.index("  private:")]
+        self.assertNotIn("bool virtual_display", public)
+        self.assertNotIn("bool allow_client_commands", public)
+        self.assertIn("struct process_status_t", header)
+        self.assertIn("process_status_t get_status()", header)
+        self.assertIn("std::lock_guard lock(process_state_mutex);\n    const int active_app_id = running_locked();",
+                      implementation)
+        self.assertIn("set_display_name_locked(platf::to_utf8(vdisplayName));", implementation)
+        self.assertNotIn("proc::proc.virtual_display", nvhttp)
+        self.assertNotIn("proc::proc.allow_client_commands", nvhttp)
+        self.assertIn("proc::proc.get_status()", nvhttp)
+
+    def test_remote_virtual_display_lease_is_renewed_after_slow_launch(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "process.cpp"), encoding="utf-8") as fh:
+            process = fh.read()
+        with open(os.path.join(repo, "src", "platform", "windows", "ar_glasses.cpp"),
+                  encoding="utf-8") as fh:
+            ownership = fh.read()
+        launch_tail = process[process.index("start_hdr_worker(launch_session->enable_hdr);"):
+                              process.index("fg.disable();")]
+        self.assertIn("remote_virtual_display_awaiting_client(config::stream.ping_timeout)",
+                      launch_tail)
+        self.assertIn("std::chrono::steady_clock::now() + "
+                      "remote_pending_duration(connect_timeout)", ownership)
 
     def test_live_gpu_timer_tail_is_bounded_and_generation_safe(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -758,8 +1239,44 @@ class EvalContractTests(unittest.TestCase):
         with open(report, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("match_scale = min(1.0, 256.0 / ew)", text)
-        self.assertIn("if prev_idx < 0:", text)
+        self.assertIn("prev_idx = sbsbench.predecessor_frame_id(source_files(clip), idx)", text)
+        self.assertIn("if prev_idx is None:", text)
         self.assertNotIn("if prev_idx < 1:", text)
+        self.assertIn("source_eye_width = image.width // 2", text)
+        self.assertIn("packed.paste(eyes[1], (eye_w, 0))", text)
+        self.assertNotIn("image.resize(size, Image.LANCZOS)", text)
+        self.assertIn("run_eval.EVAL_SCHEMA", text)
+
+    def test_report_resolves_artifacts_by_numeric_index_not_fixed_padding(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        report = os.path.join(repo, "tools", "sbsbench", "build_report.py")
+        with open(report, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertNotIn(":05d", text)
+        self.assertNotIn("glob.glob", text)
+        self.assertIn("def run_files(run, clip, prefix):", text)
+        with tempfile.TemporaryDirectory() as root:
+            expected = os.path.join(root, "sbs_7.preview.png")
+            with open(expected, "wb") as fh:
+                fh.write(b"evidence")
+            Image.fromarray(np.zeros((2, 4), dtype=np.uint8)).save(
+                os.path.join(root, "sbs_00042.png"))
+            indexed = sbsbench.indexed_files(os.path.join(root, "sbs_*.*"), "sbs_")
+            self.assertEqual(indexed[7], expected)
+            self.assertIn(42, indexed)
+            self.assertEqual(sbsbench.predecessor_frame_id(indexed, 42), 7)
+            self.assertIsNone(sbsbench.predecessor_frame_id(indexed, 7))
+        self.assertIn("predecessor_frame_id(gt_depth_files(clip), idx)", text)
+        self.assertIn("predecessor_frame_id(source_files(clip), idx)", text)
+        self.assertNotIn("idx - 1", text)
+
+    def test_harness_orders_numeric_frames_and_rejects_mixed_dimensions(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"), encoding="utf-8") as fh:
+            harness = fh.read()
+        self.assertIn("numeric_frame_less", harness)
+        self.assertIn("std::sort(frames.begin(), frames.end(), numeric_frame_less)", harness)
+        self.assertIn("mixed source dimensions are not a valid clip", harness)
 
     def test_phase_shift_recovers_known_translation(self):
         rng = np.random.default_rng(1234)
@@ -803,6 +1320,8 @@ class EvalContractTests(unittest.TestCase):
             src = np.zeros((16, 16, 3), dtype=np.uint8)
             Image.fromarray(sbs).save(os.path.join(seq, "sbs_00007.png"))
             Image.fromarray(src).save(os.path.join(frames, "frame_00007.png"))
+            with open(os.path.join(frames, "meta.json"), "w", encoding="utf-8") as fh:
+                json.dump({}, fh)
             rows, agg = sbsbench.measure_sequence(seq, frames)
             self.assertEqual(rows[0]["_frame_id"], 7)
             self.assertEqual(agg["_n"], 1)
@@ -1216,6 +1735,13 @@ class EvalContractTests(unittest.TestCase):
         self.assertGreater(
             sbsbench.depth_ground_truth_ghost(previous, current, previous), 40.0)
 
+    def test_ground_truth_ghost_tolerance_works_in_both_axes(self):
+        previous = np.zeros((32, 48), np.float32)
+        previous[:12, :] = 1.0
+        current = np.zeros_like(previous)
+        current[:13, :] = 1.0
+        self.assertIsNone(sbsbench.depth_ground_truth_ghost(previous, current, previous))
+
     def test_ground_truth_edge_tolerance_works_in_both_axes(self):
         gt = np.full((96, 160), 0.25, np.float32)
         gt[48:, :] = 0.75
@@ -1401,12 +1927,20 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn(os.path.join("prepared", "extended-v3"), extended_clips)
         self.assertTrue(extended_baselines.endswith("baselines_extended"))
 
+    def test_dataset_suite_revision_cannot_overwrite_evaluator_suite(self):
+        published = run_eval.published_clip_metadata({
+            "suite": "extended-v3", "dataset": "Example", "name": "clip",
+        })
+        self.assertNotIn("suite", published)
+        self.assertEqual(published["source_suite"], "extended-v3")
+        self.assertEqual({**{"suite": "extended"}, **published}["suite"], "extended")
+
     def test_rescore_uses_canonical_metric_contract_hash(self):
-        data = {"meta": {}}
+        data = {"meta": {"eval_schema": run_eval.EVAL_SCHEMA - 1}}
         with mock.patch.object(run_eval, "metric_contract_sha", return_value="canonical"):
             rescore_run.refresh_contract_metadata(data)
         self.assertEqual(data["meta"]["metric_sha256"], "canonical")
-        self.assertEqual(data["meta"]["eval_schema"], run_eval.EVAL_SCHEMA)
+        self.assertEqual(data["meta"]["eval_schema"], run_eval.EVAL_SCHEMA - 1)
 
     def test_sintel_adapter_preserves_left_and_rendered_right_frames(self):
         with tempfile.TemporaryDirectory() as root:

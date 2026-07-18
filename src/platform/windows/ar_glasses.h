@@ -64,6 +64,9 @@ namespace ar_glasses {
   /** Reserve virtual-display ownership for a remote launch and synchronously stop local AR. */
   bool remote_virtual_display_starting(std::chrono::milliseconds connect_timeout);
 
+  /** Renew the client-connect window after a potentially slow remote launch has completed. */
+  void remote_virtual_display_awaiting_client(std::chrono::milliseconds connect_timeout);
+
   /** Mark the reserved remote virtual display as actively streamed. */
   void remote_virtual_display_active();
 

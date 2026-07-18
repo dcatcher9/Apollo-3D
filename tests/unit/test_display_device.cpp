@@ -4,6 +4,7 @@
  */
 #include "../tests_common.h"
 
+#include <cstdint>
 #include <format>
 #include <src/config.h>
 #include <src/display_device.h>
@@ -41,6 +42,25 @@ namespace {
 
   constexpr unsigned int max_uint {std::numeric_limits<unsigned int>::max()};
   const std::string max_uint_string {std::to_string(std::numeric_limits<unsigned int>::max())};
+
+  void expect_equal_refresh_rate(
+    const std::optional<display_device::FloatingPoint> &actual,
+    const std::optional<rational_t> &expected
+  ) {
+    ASSERT_EQ(actual.has_value(), expected.has_value());
+    if (!expected) {
+      return;
+    }
+
+    ASSERT_TRUE(std::holds_alternative<rational_t>(*actual));
+    const auto &actual_rational {std::get<rational_t>(*actual)};
+    ASSERT_NE(actual_rational.m_denominator, 0u);
+    ASSERT_NE(expected->m_denominator, 0u);
+    EXPECT_EQ(
+      static_cast<std::uint64_t>(actual_rational.m_numerator) * expected->m_denominator,
+      static_cast<std::uint64_t>(expected->m_numerator) * actual_rational.m_denominator
+    );
+  }
 
   template<class T>
   struct DisplayDeviceConfigTest: testing::TestWithParam<T> {};
@@ -213,19 +233,20 @@ INSTANTIATE_TEST_SUITE_P(
   ParseRefreshRateOption,
   testing::Values(
     //---- Disabled cases ----
-    std::make_pair(std::make_tuple(refresh_rate_option_e::disabled, client_fps_t {60}), no_refresh_rate_tag_t {}),
+    std::make_pair(std::make_tuple(refresh_rate_option_e::disabled, client_fps_t {60000}), no_refresh_rate_tag_t {}),
     std::make_pair(std::make_tuple(refresh_rate_option_e::disabled, "60"s), no_refresh_rate_tag_t {}),
     std::make_pair(std::make_tuple(refresh_rate_option_e::disabled, "59.9885"s), no_refresh_rate_tag_t {}),
     std::make_pair(std::make_tuple(refresh_rate_option_e::disabled, client_fps_t {-1}), no_refresh_rate_tag_t {}),
     std::make_pair(std::make_tuple(refresh_rate_option_e::disabled, "invalid_refresh_rate"s), no_refresh_rate_tag_t {}),
     //---- Automatic cases ----
-    std::make_pair(std::make_tuple(refresh_rate_option_e::automatic, client_fps_t {60}), rational_t {60, 1}),
-    std::make_pair(std::make_tuple(refresh_rate_option_e::automatic, "60"s), rational_t {0, 1}),
-    std::make_pair(std::make_tuple(refresh_rate_option_e::automatic, "59.9885"s), rational_t {0, 1}),
+    std::make_pair(std::make_tuple(refresh_rate_option_e::automatic, client_fps_t {60000}), rational_t {60000, 1000}),
+    std::make_pair(std::make_tuple(refresh_rate_option_e::automatic, client_fps_t {59940}), rational_t {59940, 1000}),
+    std::make_pair(std::make_tuple(refresh_rate_option_e::automatic, "60"s), rational_t {0, 1000}),
+    std::make_pair(std::make_tuple(refresh_rate_option_e::automatic, "59.9885"s), rational_t {0, 1000}),
     std::make_pair(std::make_tuple(refresh_rate_option_e::automatic, client_fps_t {-1}), failed_to_parse_refresh_rate_tag_t {}),
-    std::make_pair(std::make_tuple(refresh_rate_option_e::automatic, "invalid_refresh_rate"s), rational_t {0, 1}),
+    std::make_pair(std::make_tuple(refresh_rate_option_e::automatic, "invalid_refresh_rate"s), rational_t {0, 1000}),
     //---- Manual cases ----
-    std::make_pair(std::make_tuple(refresh_rate_option_e::manual, client_fps_t {60}), failed_to_parse_refresh_rate_tag_t {}),
+    std::make_pair(std::make_tuple(refresh_rate_option_e::manual, client_fps_t {60000}), failed_to_parse_refresh_rate_tag_t {}),
     std::make_pair(std::make_tuple(refresh_rate_option_e::manual, "60"s), rational_t {60, 1}),
     std::make_pair(std::make_tuple(refresh_rate_option_e::manual, "59.9885"s), rational_t {599885, 10000}),
     std::make_pair(std::make_tuple(refresh_rate_option_e::manual, client_fps_t {-1}), failed_to_parse_refresh_rate_tag_t {}),
@@ -485,7 +506,8 @@ namespace {
         video_config.dd.refresh_rate_option = disabled;
       } else if (const auto *auto_fps {std::get_if<auto_value_t<fps_t>>(&input_fps)}; auto_fps) {
         video_config.dd.refresh_rate_option = automatic;
-        session.fps = auto_fps->value;
+        // The launch-session contract stores client FPS in millihertz.
+        session.fps = auto_fps->value * 1000;
       } else {
         const auto [manual_fps] = std::get<manual_value_t<fps_t>>(input_fps);
         video_config.dd.refresh_rate_option = manual;
@@ -505,7 +527,7 @@ namespace {
       const auto &parsed_config = std::get<display_device::SingleDisplayConfiguration>(result);
 
       EXPECT_EQ(parsed_config.m_resolution, expected_resolution);
-      EXPECT_EQ(parsed_config.m_refresh_rate, expected_refresh_rate ? std::make_optional(display_device::FloatingPoint {*expected_refresh_rate}) : std::nullopt);
+      expect_equal_refresh_rate(parsed_config.m_refresh_rate, expected_refresh_rate);
     }
   }
 }  // namespace

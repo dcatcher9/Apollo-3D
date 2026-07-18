@@ -13,7 +13,9 @@
 #endif
 
 // standard includes
+#include <atomic>
 #include <optional>
+#include <thread>
 #include <unordered_map>
 
 // lib includes
@@ -43,7 +45,9 @@ namespace proc {
   using file_t = util::safe_ptr_v2<FILE, int, fclose>;
 
 #ifdef _WIN32
-  extern VDISPLAY::DRIVER_STATUS vDisplayDriverStatus;
+  extern std::atomic<VDISPLAY::DRIVER_STATUS> vDisplayDriverStatus;
+
+  struct hdr_worker_state_t;
 
   enum class local_ar_handoff_e {
     ready,
@@ -106,16 +110,19 @@ namespace proc {
     std::chrono::seconds exit_timeout;
   };
 
+  struct process_status_t {
+    int app_id;
+    std::string app_name;
+    std::string app_uuid;
+    bool virtual_display;
+    bool allow_client_commands;
+  };
+
   class proc_t {
   public:
     KITTY_DEFAULT_CONSTR_MOVE_THROW(proc_t)
 
-    std::string display_name;
     std::string initial_display;
-    std::string mode_changed_display;
-    bool initial_hdr = false;
-    bool virtual_display = false;
-    bool allow_client_commands = false;
 
     proc_t(
       boost::process::v1::environment &&env,
@@ -134,6 +141,9 @@ namespace proc {
      */
     int running();
 
+    /** Coherent process/session state after refreshing the tracked child lifetime. */
+    process_status_t get_status();
+
     ~proc_t();
 
     std::vector<ctx_t> get_apps() const;
@@ -145,6 +155,10 @@ namespace proc {
     void pause();
     void terminate(bool immediate = false, bool needs_refresh = true);
 
+    /** Thread-safe snapshot/update of the display selected by the capture pipeline. */
+    std::string get_display_name() const;
+    void set_display_name(std::string name);
+
 #ifdef _WIN32
     /**
      * Release an inactive remote virtual desktop before local AR creates its own source.
@@ -154,8 +168,13 @@ namespace proc {
 #endif
 
   private:
+    int running_locked();
+    void set_display_name_locked(std::string name);
+
     int _app_id = 0;
     std::string _app_name;
+    bool _virtual_display = false;
+    bool _allow_client_commands = false;
 
     boost::process::v1::environment _env;
 
@@ -165,7 +184,14 @@ namespace proc {
 #ifdef _WIN32
     std::optional<SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT> _virtual_display_identity;
     bool wait_for_retired_virtual_display(std::chrono::milliseconds timeout);
+    void start_hdr_worker(bool enable_hdr);
+    void stop_hdr_worker();
+
+    std::shared_ptr<hdr_worker_state_t> _hdr_worker_state;
+    std::jthread _hdr_worker;
 #endif
+
+    std::string display_name;
 
     std::vector<ctx_t> _apps;
     ctx_t _app;
