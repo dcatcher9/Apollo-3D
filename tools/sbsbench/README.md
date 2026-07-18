@@ -1,9 +1,9 @@
 # sbsbench — visual metrics for host SBS 3D output
 
-No-reference visual metrics computed on **real "Dump 3D" output** (the actual `sbs.png` the
-client receives). It runs and measures the real pipeline rather than a hand-maintained CPU
-replica, so its numbers match what you
-see on the headset. This is the visual half of the host benchmark; see
+Offline visual metrics computed on **real "Dump 3D" output** (the actual `sbs.png` the client
+receives), with authenticated depth/stereo/flow references where a dataset supplies them. It runs
+and measures the real pipeline rather than a hand-maintained CPU replica, so its numbers track the
+images shown on the headset. This is the visual half of the host benchmark; see
 [docs/sbs-benchmark-plan.md](../../docs/sbs-benchmark-plan.md). The perf half is the in-app
 `sbs_3d_perf_stats` timing.
 
@@ -19,7 +19,7 @@ see on the headset. This is the visual half of the host benchmark; see
    ```
    python tools/sbsbench/sbsbench.py --glob "E:/ApolloDev/sbs_dump/dump_NEW*" --baseline base.json
    ```
-   → prints per-metric deltas (`pop_px_p50 12.0 -> 15.3  +3.3 (+27%)`).
+   → prints per-metric deltas (`exact_visible_pop_spread_pct 2.4 -> 2.6  +0.2 (+8%)`).
 
 Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 
@@ -68,6 +68,15 @@ python tools/sbsbench/run_eval.py --label code-b --report-control cmake-build-re
 python tools/sbsbench/run_eval.py --comparison-only --label ab-control  # fresh A/B; no committed gate
 python tools/sbsbench/run_eval.py --suite extended --label public-control # prepared public suite
 python tools/sbsbench/rescore_run.py cmake-build-relwithdebinfo/sbs_eval/<comparison-run> --in-place
+```
+
+Optional eval-only FLIP/RAFT-Stereo/SEA-RAFT/iSQoE diagnostics are documented in
+[OFFLINE_LEARNED_ORACLES.md](OFFLINE_LEARNED_ORACLES.md); they never affect gates or labels.
+
+Generate or regenerate an authenticated HTML report with the Windows-safe parallel launcher:
+
+```
+python tools/sbsbench/generate_report.py <control-run> <treatment-run> <report.html>
 ```
 
 Committed baselines are canonical production-profile runs. Move an accepted setting into the
@@ -126,7 +135,7 @@ Harness A/B levers (after `--extra`):
   Bestv2 subject path).
 - `--no-subject-stretch` — disable that stretch for an accepted-feature ablation.
 - `--zero-plane legacy|subject|median|background` — choose a shot-latched screen-plane anchor.
-  The three explicit modes are experimental Art3D-style camera-offset treatments; they preserve
+  The three explicit modes are experimental camera-offset treatments; they preserve
   symmetric eye geometry and the disparity scale, and update only at startup or a hard scene cut.
   `legacy` remains the production default because fixed anchors produced scene-dependent
   tradeoffs rather than a suite-wide improvement.
@@ -159,7 +168,8 @@ SHA-256; an unrelated/stale engine never satisfies preflight. `--allow-build` pe
 one-frame harness preflight and revalidates that manifest before any measured clip. The runner
 warns and skips the perf gate if another sunshine.exe is running.
 
-Hard comfort/integrity bounds apply even in comparison-only runs. Baseline updates are staged in
+Configured disparity/integrity engineering bounds apply even in comparison-only runs. The image-
+relative disparity bounds are not a calibrated retinal-angle comfort guarantee. Baseline updates are staged in
 memory and written atomically only after every clip passes those bounds, so a broken render cannot
 become the new normal.
 
@@ -168,12 +178,12 @@ The harness records `warp_infer` with D3D11 GPU timestamps around the Apollo war
 For A/B runs, pass `--report-control <control-run-dir>` and the evaluator writes `report.html`
 before printing its conclusion, including when the treatment exits with regressions.
 
-Metric notes: silhouette detection runs at the native depth resolution with an absolute
-depth-step floor (flat scenes legitimately read 0), and all pixel windows scale with the eye
-width — but absolute values are still not comparable across clip resolutions; baselines are
-per-clip-set. The harness writes 16-bit depth PNGs so `swim` resolves below 1/255.
+Metric notes: exact-map topology is evaluated in normalized or reference-resolution coordinates.
+Percent/normalized outputs are preferred; raw pixel diagnostics are never compared across clip
+resolutions. Harness depth is 16-bit so
+sub-1/255 changes remain measurable.
 
-**Eval schema 26 / harness contract 15:** `run_eval.py` pins the profile, model, and zero-plane
+**Eval schema 32 / harness contract 16:** `run_eval.py` pins the profile, model, and zero-plane
 mode explicitly, records the exact Sunshine executable, runtime HLSL tree, engine, and ONNX
 hashes, and has no alternate warp selector. A normal report requires all four to match;
 `--report-allow-executable-diff` explicitly permits a code/shader A/B, while
@@ -182,32 +192,67 @@ By default the
 harness submits and consumes exactly one inference per source frame, so EMA and normalization
 update once. `--depth-every N` is an explicit comparison-only cadence treatment: color advances
 while the last completed depth/subject geometry is reused, and the contract records `reuse-N`.
-Source, raw-model (`raw_*.f32`), pre-warp depth (`depth_*.png`), exact warp mask
-(`warp_mask_*.png`), and SBS artifacts are joined by
-numeric frame identity, never list position. Baselines are rejected with setup exit 2 if mode,
+Source, raw-model (`raw_*.f32`), pre-warp depth (`depth_*.png`), exact scalar-R32 **raw**
+`Reproject` source-U coordinates
+(`warp_map_*.f32` plus `warp_map_shape.json`) are joined with SBS artifacts by
+numeric frame identity, never list position. `warp_mask_*.png` remains a raw validity companion
+for internal coverage audits; it is not a decision metric or report section. Baselines are rejected
+with setup exit 2 if mode,
 model, baseline-update provenance, schema, stepping semantics, config hash, metric
 implementation/threshold hash, or clip hash differs. Runner/gating semantics are versioned by the
-schema rather than the runner's comments or
-diagnostic wording. Output folders
+schema rather than the runner's comments or diagnostic wording. Schema 27 introduced the stricter
+`label_contract_sha256`/`label_context_sha256` and full per-frame numeric evidence. Schema 28 makes
+model-label export fail closed: a metric must declare both `label` and the exact
+`label_status: "qualified"`; an omitted, unknown, or experimental status is excluded. Every frame
+still retains its complete numeric metric vector for evaluation and later qualification, while its
+`labels` object contains only qualified metrics plus validity/support and abstention state. Cached
+model labels must match the hashes, `meta.training_labels` and each clip's `label_summary`; aggregate
+scores are not labels. Schema 29 replaced the broad proxy list with explicitly scoped
+perceptual/conformance/GT/temporal evidence. Schema 32 replaces inferred source-profile artifact
+scores with exact-map topology, strict renderer conformance, authenticated GT, and registered
+temporal evidence. Old results and baselines are intentionally stale.
+Output folders
 are cleared before reuse. `--output-every N` reduces saved artifacts while still processing every
 input frame, so sampling cannot change temporal state.
 
+There are deliberately **no qualified model labels in the current threshold contract**. Exact
+comfort, clamp, topology, binocular-conflict, and mapping-stretch candidates are
+marked `experimental` pending controlled-corruption and headset calibration, so schema-32 frames abstain with
+`no_qualified_training_labels`. Exact mapped-source residual, color, coverage and integrity
+remain active report/run-gate evidence but have `scope: "conformance"` and no training `label`:
+they verify that the renderer reproduced the coordinate selected by its own warp, which cannot
+independently prove that the selected correspondence was perceptually correct. Promotion requires
+an explicit review changing `label_status` to `qualified`; merely adding `label` is insufficient.
+
 Schema 3 added optional `gt_depth/frame_*.png` clip sidecars and includes them plus their semantic
-`gt_depth_kind` metadata in the clip hash. Missing GT means reference metrics are absent—not zero
-and not inferred. `flat_page` and `fast_motion` carry deterministic 16-bit disparity ground truth
-generated by `make_synth_clips.py`; recorded movie clips remain no-reference.
+`gt_depth_kind` metadata in the clip hash. A matching `gt_depth_valid/frame_*` sidecar authenticates
+valid/visible pixels; disparity clips that require GT fail closed when it is missing or mismatched.
+Invalid, occluded, non-finite, and resize-unsupported pixels never enter accuracy or boundary
+statistics. Missing GT means reference metrics are absent—not zero and not inferred. `flat_page`
+and `fast_motion` carry deterministic 16-bit disparity ground truth generated by
+`make_synth_clips.py`; recorded movie clips remain no-reference.
 
 Schema 4 also accepts native float32 `gt_depth/frame_*.npy` and exact forward-flow
 `gt_flow/frame_*.npz` sidecars. Each flow sidecar belongs to its current frame and contains
 `flow` (previous→current, H×W×2 pixels) plus an optional `valid` mask. The evaluator forward-splats
 that source-grid flow to current coordinates and still requires photometric agreement; clips
-without exact flow keep the classical phase-correlation fallback. Both reference folders are part
+without exact flow abstain in canonical evaluation and may use the separately versioned SEA-RAFT
+diagnostic. Both reference folders are part
 of the clip identity hash.
 
-Clips may declare `"expected_flat": true` in `meta.json`. Their score rewards near-zero false
-stereo instead of rewarding volume, while still measuring depth hallucination and temporal swim.
-Disocclusion ratios require at least 0.1% eye-area support; below that, smear and disocclusion
-flicker are omitted rather than turning a handful of pixels into a maximum penalty. Reports name
+`gt_right/frame_*` is authenticated **diagnostic stereo reference material**, declared with
+`"reference_stereo_available": true`; it is not a consumed ground-truth metric, training label,
+or gate exemption. Public clips that only provide this pair use
+`"evaluation_role": "reference-only"` and remain useful for source diversity and separately
+versioned stereo oracles. Existing external caches using the retired `required_gt_stereo` spelling
+are migrated in memory to this diagnostic declaration and never published or interpreted as GT;
+new preparation writes only the new contract. Sintel preparation also preserves the
+official occlusion and out-of-frame masks and writes explicit all-pixel and non-occluded validity
+masks. Every semantic scoring sidecar participates in the clip identity hash.
+
+Clips may declare `"expected_flat": true` in `meta.json`. They remain explicit false-stereo and
+depth-hallucination diagnostics but do not vote on the general-content enhanced-pop objective.
+Reports name
 both run directories and show control/treatment provenance separately, even when their CLI args
 are identical because the treatment is a code change.
 
@@ -226,8 +271,8 @@ and three generated failure-mode clips from [make_synth_clips.py](make_synth_cli
 |------|---------|----------------------|
 | `anime_morevna_closeup` | cel outlines, flat colors, face-depth hallucination | visually clean source silhouette; intentional ink/white clothing annotated separately from warp-created halo |
 | `aigen_cogvideox_rain` | AI-video human motion, rain, splash, blur and low contrast | source already contains rain/splash rims and generative temporal inconsistency; tests whether the warp adds to them |
-| `scene_cut` | depth-normalization response across a hard cut | committed baseline flags the cut's stretch/rim behavior without duplicate EMA updates |
-| `flat_page` | flat-content depth hallucination + amplification | static-input noise floor; disocc_smear flags hallucinated text-edge silhouettes |
+| `scene_cut` | depth-normalization response across a hard cut | exact geometry and temporal evidence verify one state update per source frame |
+| `flat_page` | flat-content depth hallucination + amplification | static-input false-stereo and depth-boundary noise floor |
 | `fast_motion` | known 30 px/frame motion | current-frame depth separates warp/edge behavior from live async lag |
 
 ### Public extended suite (decision eval)
@@ -336,81 +381,112 @@ warp verdict only authorizes a controlled warp-processor A/B; that processor mus
 normal core and extended decision gates. Model-boundary validation remains diagnostic and does not
 authorize depth or EMA changes by itself.
 
-The metrics split cleanly by subsystem: **warp**-side changes move pop / disocc / flicker_disocc;
-**depth**-side changes move edge_acc / swim / depth_spread. So a delta tells you *where* the change
-landed. (Historical validation: doubling the removed legacy divergence moved pop +90% while
-leaving edge_acc/swim flat;
-swapping depth-model variants can move edge accuracy and stability while leaving the warp lever untouched.)
+## Compact metric policy and feature decision
+The evaluator deliberately has no scalar quality score. Correlated metrics must not cancel each
+other, and a loss of stereo volume cannot buy an artifact improvement. Legacy `score`, `q_clean`,
+and `q_depth` fields in schema-28-or-older artifacts are ignored; current runs do not emit them.
 
-## Artifact score (0–100) and feature decision
-`sbs_score(agg)` reports `score = q_clean` = 100 − weighted artifact penalties (each
-`weight × min(value/scale, 1)`, saturating). `q_depth` remains a separate diagnostic of delivered
-stereo volume (`pop_spread_pct` versus its target); it is not blended into score, because losing
-depth must not buy artifact-quality points or cancel an artifact regression. Weights/scales live
-in [thresholds.json](thresholds.json) `"score"`.
+Every metric in [thresholds.json](thresholds.json) has one explicit scope:
 
-The score is a summary, never the feature verdict. Each metric declares a decision role in
-`thresholds.json`: `hard` comfort/integrity constraints cannot be traded; validated `primary`
-metrics vote inside named coequal stereo, warp, stability, and depth axes; unvalidated `diagnostic`
-proxies remain visible but cannot accept or reject a feature. Cross-axis movement is reported as a
-tradeoff rather than cancelled inside a scalar. Expected-flat clips remain visible as false-stereo
-diagnostics but do not vote on general-content features.
+- `style`: visible stereo volume used to choose the strongest already-safe result, never an
+  unbounded training reward;
+- `perceptual`: a potential DA-V2 risk/safety target, but still `experimental` until controlled
+  corruptions, benign transforms, diverse clips, and headset inspection qualify it;
+- `conformance`: exact renderer/transport contract evidence, never a perceptual model label;
+- `gt-only`: authenticated depth/disparity-reference validation;
+- `temporal-only`: sequence evaluation, not a label for the single-frame policy head.
 
-`source_residual_p95` is a validated broad warp-axis metric. For each eye it finds the closest
-source patch within the allowed horizontal disparity radius, then reports the worse eye's p95
-residual. Intended stereo displacement is free; holes, blur, ringing, duplication and stretched
-texture rise. Its visual card shows source/control/treatment plus a signed residual-delta mask.
+`hard` metrics can reject an automated screen, `primary` metrics vote on coequal axes, and
+`diagnostic` metrics only support a conclusion. A screen candidate is not a perceptually validated
+candidate. There are currently no qualified training labels, so export
+abstains instead of teaching the model an unvalidated number. Stereo volume and perceptual defects
+are coequal, non-compensating axes: stronger depth cannot buy permission for rivalry, topology
+failure, or missing content. The evaluator intentionally has no scalar score that could average
+one such failure away.
 
-`source_halo_p95` and `source_stretch_pct` specialize that alignment at depth silhouettes. Halo
-subtracts thin-ridge energy already present in the source, so genuine bright outlines are free.
-Stretch counts source-textured silhouette-near pixels whose horizontal detail collapses below 35%
-of the aligned source. They replace the output-only rim/stretch proxies in decisions and score;
-the old detectors remain diagnostics for exceptionally large changes.
+The exact source-U sidecar preserves requested coordinates outside [0,1]. Per-eye clamp, fold,
+and Jacobian-stretch diagnostics retain that raw demand. Stereo/comfort instead invert the two
+maps onto common source-U rows and measure actual `x_right - x_left` only on unique, mutually
+visible, in-range, forward-covered correspondences. Output-Jacobian area weights prevent either
+an expanded or collapsed source interval from voting like an ordinary pixel. Independently,
+image-supported visible-pop checks whether real structure carries that geometry. Experimental
+window and interocular-conflict detectors use exact source registration and explicit validity
+masks; they remain separate rather than being fused into one artifact score. Disocclusion
+bad-fill remains a standalone falsifier because mono input cannot authenticate revealed content.
 
-Hard constraints cover both signed p99 disparity tails (3% of eye width), vertical mismatch,
-source coverage (>=90%), and source-texture integrity (>=80%). Signed tails are deliberately not
-called crossed/uncrossed: converting host pixels to angular vergence requires headset FOV and
-display calibration that the harness does not possess.
+Metric implementation changes must pass controlled-corruption unit tests and each detector's
+authenticated-real/source-content validator before an A/B result is trusted:
 
+```
+python -m unittest discover -s tools/sbsbench -p "test_sbs_*.py"
+python tools/sbsbench/validate_real_stereo_window_metric.py --suite both --strict --output <window.json>
+python tools/sbsbench/validate_disocclusion_topology_real_sources.py --suite both --strict --output <topology.json>
+python tools/sbsbench/validate_interocular_phase_chroma.py --output <phase.json>
+python tools/sbsbench/validate_interocular_photometric_rivalry.py --run <schema32-run> --output <photometric.json>
+python tools/sbsbench/validate_actual_sbs_metric_corruptions.py --run <schema32-run> --max-clips 4 --output <actual-output.json>
+```
+
+The unit tests provide precisely controlled corruption truth. The standalone validators apply
+deterministic ladders and benign controls to real source content, retain every scenario's response
+and abstention, and are permanently unable to auto-promote labels. The stereo-window and topology
+validators additionally enforce the shared authenticated clip-provenance contract across core and
+extended suites. Passing synthetic tests alone is insufficient: real-image content-dependent
+support floors and false positives are exactly what the standalone validators are intended to
+expose. A validator pass remains necessary rather than sufficient; label qualification still
+requires headset-correlated human inspection.
+Evidence minima are part of the metric contract, not report decoration: actual binocular tails
+need 1,024 mutually visible samples, visible volume and local polarity need 256, and cross-row
+shear needs 512 qualified pixels. New experimental detectors enforce their own native-equivalent
+support floors and report the counts beside every value. Texture integrity needs at least 0.1%
+independently textured support and
+vertical alignment at least 2% of overlapping texture tiles. These are conservative screening
+floors, not proof of statistical independence; label qualification will additionally require
+spatial effective-sample counts and confidence intervals. Lower support is `n/a`, not perfect zero
+or a missing-metric failure.
+
+Exact mapped-source coverage, texture integrity, binocular support, and vertical alignment remain
+conformance checks. Coverage uses a strict 4/255 luma residual internally and must retain at least 99% of
+supported interior content. These checks detect a renderer or color-contract failure, but cannot
+prove that the chosen disparity looks good. Hard screening currently covers the actual mutually
+visible, signed `x_right - x_left` p99.9 disparity tails plus conformance failures in high-near
+warp polarity, binocular overlap, P99 vertical mismatch, source coverage, and texture integrity.
+Only the disparity tails are perceptual-risk candidates; the rest prove renderer contracts.
+The +/-3% disparity limit is an experimental image-relative heuristic, not an angular comfort
+guarantee; headset FOV and user calibration are required before it can become a qualified label.
 `static_jitter_p95` is the validated stability-axis metric. It excludes every source pixel that
 moved, expands that exclusion horizontally by the allowed disparity radius, and measures the
-worse eye's p95 output change only on the remaining static support. Scene cuts/camera moves with
-less than 10% support do not vote. Its evidence card shows the evaluated mask, each run's temporal
-change and a signed red/blue treatment delta.
+worse eye's p95 source-conditioned change only on the remaining static support. The signed mono
+source change is subtracted before taking the absolute residual, so a reproduced exposure/noise
+change cancels but an equal-and-opposite eye change is penalized twice. Scene cuts/camera moves
+with less than 10% support do not vote. Its evidence card shows the evaluated mask, each run's
+temporal change and a signed red/blue treatment delta.
 
-`flow_temporal_p95` extends stability validation to moving content. Overlapping source tiles are
-phase-correlated into a dense classical optical-flow field; the previous output is warped into the
-current frame and only photometrically reliable support votes. `flow_depth_p95` applies the same
-compensation to pre-warp depth as a diagnostic. This avoids counting intended motion as flicker
-without requiring an AI flow model.
+`flow_temporal_p95` extends stability inspection to moving content only when authenticated dataset
+flow exists. The previous output is warped into the current frame and the matched mono-source flow
+change is subtracted with its sign intact before the absolute residual is pooled over
+photometrically reliable support. The former classical
+tile-flow fallback is no longer part of the compact evaluator because it is not reliable on
+articulated motion or occlusion; SEA-RAFT remains a separately versioned optional diagnostic.
+Every sequence records expected, source-available, evidence-qualified, and actually measured
+transition counts. An evidence-qualified middle transition that silently loses its metric fails
+closed; the first frame and measured low-support scene cuts remain legitimate `n/a` cases.
 
-On GT clips, `depth_gt_si_rmse` positive-affine-aligns predicted relative disparity to ground-truth
-inverse depth (negative scale is rejected as a polarity inversion; flat GT is shift-only), and
-`depth_gt_edge_f1` validates boundaries with one-pixel
-tolerance. Both are primary depth-axis metrics. Non-GT clips are reported as `n/a`.
+On GT clips, `depth_gt_affine_nrmse_pct` robustly positive-affine-aligns predicted relative disparity to
+ground-truth inverse depth with IRLS (negative scale is rejected; flat GT is shift-only), requires
+at least 5% valid support, and `depth_gt_edge_f1` uses a strict one-pixel boundary tolerance so a
+coarse match cannot hide a thin-edge regression. Both are primary depth-axis metrics. Non-GT
+clips are reported as `n/a`.
 
 `depth_gt_lag_f1_p95` detects a prediction that matches the previous GT boundary better than the
 current one. `depth_gt_ghost_edge_pct_p95` complements it by measuring prediction support on
 previous-only GT boundaries, so a double edge cannot hide by also matching the current boundary.
 The ghost metric remains diagnostic until it has broader headset-correlated validation.
 
-MPI Sintel clips also carry identity-matched `gt_right/frame_*.png` rendered right eyes.
-`stereo_gt_psnr` and `stereo_gt_ssim` compare Apollo's synthesized right eye after removing only
-one whole-image horizontal camera-baseline offset. `stereo_gt_residual_p95` and
-`stereo_gt_coverage_pct` then allow a small local epipolar patch search as a permissive artifact
-diagnostic. This keeps local depth errors, vertical displacement, ringing, stretch, and incorrect
-revealed content visible while not pretending Sintel's physical camera baseline equals Apollo's
-artistic symmetric baseline. The four metrics are diagnostic until more true-stereo scenes and
-headset correlation establish decision thresholds.
-
-Art3D-inspired style diagnostics separately fit a polarity-preserving global disparity transform
-`d = s * depth + t` to the synthesized and true right eyes. `s` measures the realized depth
-budget and `t` the zero-plane offset; Apollo's symmetric source-to-right shift is doubled before
-comparison with the physical left-to-right reference. The fit uses only textured, source-matched
-support and rejects negative scale. These metrics deliberately do not change the artifact score:
-they quantify artistic alignment while comfort and image-integrity limits remain hard gates. To
-avoid survivorship bias, scale/offset/DDC summaries are emitted only when every frame in the clip
-has complete valid evidence; `stereo_art_polarity_ok` remains visible when a clip is unsuitable.
+True-stereo references remain valuable dataset evidence, but global similarity, permissive patch
+matching, SIoU, and camera-style fitting are intentionally absent from the compact policy. Those
+methods can reward a copied input eye, hide wrong correspondence, or optimize another renderer's
+look instead of Apollo's enhanced-pop objective. Reference stereo is retained for separately
+versioned offline correspondence oracles, not as an automatic camera-style target.
 
 `rescore_run.py` refreshes a comparison-only run directly from its preserved source/depth/SBS
 artifacts after metric-code changes. It refuses committed-baseline verdicts, updates the metric
@@ -423,71 +499,118 @@ outlines, rain or generative inconsistency are not misidentified as warp regress
 identity hash covers source and GT pixels plus scoring semantics, but excludes these human-readable
 annotations.
 
-## Metrics — spatial (per frame)
+## Metrics - spatial (per frame)
+
+### Style and perceptual candidates
+
 | metric | meaning | direction |
 |--------|---------|-----------|
-| `pop_px_p50` / `p95` | L↔R horizontal disparity (tile phase-correlation), median & p95 of \|dx\|. REPORTED but NOT gated — subject anchoring legitimately lowers median \|dx\| | higher = more 3D pop |
-| `pop_pct_p50` | same disparity in reference-aspect-equivalent image % (5120×2160 aspect anchor) | higher = more pop |
-| `pop_spread_px` / `pop_spread_pct` | near-to-far disparity RANGE = weighted p95−p5 of **signed** dx (pixels / reference-equivalent perceived %). The percentage is the client-resolution-independent **gate** and `q_depth` driver; pixels are diagnostic | higher = more volume |
-| `vmisalign_px` / `vmisalign_pct` | median vertical L↔R offset in pixels / % eye height. The percentage is the resolution-independent hard gate | must remain ≤0.1% eye height |
-| `positive_disparity_pct` / `negative_disparity_pct` | signed weighted p99 disparity tails in reference-equivalent perceived % | each must remain ≤3% |
-| `source_coverage_pct` | output patches explainable by horizontally displaced source content | ≥90% hard integrity limit |
-| `image_integrity_pct` | retention of real source texture after alignment | ≥80% hard integrity limit |
-| `depth_spread` | p95−p5 of the normalized depth = pop available at the source | separates flat-model from flat-warp |
-| `depth_gt_lag_f1_p95` | P95 previous-frame GT boundary-F1 advantage over current-frame GT; positive means the depth geometry is temporally stale | lower = less depth-lag ghosting |
-| `disocc_frac` | fraction of the eye in a band beside a real depth silhouette | context for smear (how much was invented) |
-| `disocc_smear` | horizontal-detail deficit in the narrow band: 1 − \|dI/dx\|<sub>band</sub>/\|dI/dx\|<sub>clean</sub> | 0 = clean fill · →1 = smeared (small-scale) |
-| `stretch_area` | the LARGE horizontal disocclusion **stretch band** (bg rubber-banded to fill the gap; eye-asymmetric): area of wide low-horizontal-gradient / vertically-streaked runs anchored to silhouettes, per-mille of the eye | higher = more/bigger smeared patches. Ignores smooth (textureless) stretches |
-| `rim_over_p50` / `p95` | silhouette **halo / white line**: a thin bright ridge hugging the silhouette (horizontal white top-hat of the eye, sampled in the silhouette band, ×255) — the residual bright sliver where the fill doesn't reach the fg edge | ~0 = no fringe · higher = brighter white line. Ignores broad bright regions (top-hat is thin-ridge specific) |
-| `warp_hole_pct` | exact worst-eye interior area not covered by a forward splat of the shared parallax field before the active warp hides/fills it (harness mask R) | context only: more valid stereo can expose more background, so lower is not automatically better |
-| `hole_source_residual_p95` | p95 regularized source-relative patch error inside the exact hole mask | lower = the active fill remains explainable by real source content |
-| `hole_bad_fill_pct` | fraction of exact-hole pixels whose source-relative patch error exceeds 24/255 | lower = fewer visibly implausible fills inside true holes |
-| `artifact_in_hole_pct` | fraction of all >24/255 source-relative artifact pixels inside or one pixel beside the exact hole mask | context only: high support means an inpainter can target the measured problem; low support means the visible regression is elsewhere |
-| `source_halo_p95` | excess silhouette ridge after subtracting the aligned source ridge | lower = less warp-created halo; **primary warp axis** |
-| `source_stretch_pct` | source-textured silhouette-near pixels with >65% horizontal-detail loss | lower = less warp-created stretch; **primary warp axis** |
-| `edge_acc_p50` / `p95` | depth-px distance from each depth silhouette to the nearest **source** color edge (needs `--frames`) | small = silhouette on the real edge · large = soft/bent/floating |
+| `exact_visible_pop_spread_pct` | source-structure-supported exact disparity spread; abstains without horizontal evidence | higher = more visible stereo volume |
+| `exact_positive_disparity_pct` / `exact_negative_disparity_pct` | output-Jacobian-weighted p99.9 tails of actual mutually visible `x_right - x_left` disparity | each <=3% under the current experimental hard limit |
+| `exact_over_3pct_area_pct` | mutually visible rendered area outside that current limit | lower = less over-limit burden |
+| `exact_mapping_stretch_pct` / `exact_mapping_fold_pct` | low-Jacobian repeated columns and reversed coordinate steps | lower = less stretch/fold |
+| `warp_cross_row_shear_severity_pct` | unsupported horizontal displacement change between adjacent rows, excluding real source boundaries and other topology failures | lower = less scanline-like tearing; diagnostic pending qualification |
+| `experimental_stereo_window_crossed_burden_pct` | contrast/frequency/orientation-weighted crossed disparity that is actually cut by a lateral stereo window | lower = less perceptible window conflict; experimental |
+| `interocular_phase_orientation_burden_pct` | coherent exact-source-registered equal-detail phase/orientation disagreement | lower = less binocular structural conflict; experimental |
+| `interocular_exposure_rivalry_burden_pct` | coherent source-relative linear-light exposure disagreement between eyes; shared binocular transforms cancel | lower = less binocular exposure rivalry; experimental |
+| `interocular_color_gain_rivalry_burden_pct` | coherent source-relative opponent-colour disagreement from unilateral white balance, RGB gain, or hue changes | lower = less binocular colour rivalry; experimental |
 
-## Metrics — temporal (`--seq` on a harness clip)
+The experimental disocclusion bad-fill detector remains available only in its standalone
+corruption validator. A mono source cannot authenticate the newly revealed background: the score
+can punish plausible inpainting or reward a copied/smeared foreground. It is therefore excluded
+from the compact manifest, decisions, reports, and model labels until right-eye ground truth can
+validate it.
+
+Visible volume is a style descriptor. The perceptual risk entries above remain experimental and
+are excluded from model-label export until their corruption and headset qualification is complete.
+The former p99.5 local-relief score was removed: a single disparity spike could improve it without
+improving a viewer's overall stereo experience.
+The three interocular axes are intentionally separate: phase/orientation, exposure, and colour-gain
+rivalry are perceptually different and must not cancel. Shared binocular photometric transforms
+cancel, while unilateral global or localized changes remain evidence. Folded, clamped, disjoint, flat, or
+unsupported correspondences abstain. They remain diagnostic until real one-eye-fault and headset
+qualification passes. Former blur, ringing, double-edge, jagged, missing-edge, color-fringe,
+median-normalized chroma, low-frequency luma-rivalry, detail-energy-rivalry, and raw
+depth-edge-offset probes were removed
+after expanded real-image ladders found weak sensitivity and/or benign-control false positives.
+They are absent from implementation, the compact manifest, decisions, reports, and training
+labels; rejected detectors are not kept as dormant alternatives that can silently return.
+
+`exact_forward_coverage_pct` is still emitted as internal forward-warp context. Stronger stereo
+legitimately exposes more background, so it is deliberately absent from the decision vector and
+HTML metric axes.
+
+The cross-row shear detector complements, rather than duplicates, stretch/fold: those inspect the
+horizontal Jacobian inside each row, while shear detects a row that jumps sideways even though
+every row remains individually monotonic. It is normalized through image coordinates, excludes
+aspect-fit bars/clamps/folds, and suppresses changes supported by a real horizontal source
+boundary. Its current report role is diagnostic because the first real qualification pair is
+strong but not broad enough to set a universal training-label threshold.
+
+### Exact renderer conformance
+
 | metric | meaning | direction |
 |--------|---------|-----------|
-| `static_jitter_p50` / `p95` | worse-eye output change over source-static support after disparity-radius motion exclusion | lower = steadier; **primary stability axis** |
-| `flow_temporal_p50` / `p95` | source-flow-compensated output residual on photometrically reliable support | lower = steadier moving content; **primary stability axis** |
-| `flow_depth_p50` / `p95` | source-flow-compensated pre-warp depth residual | lower = steadier depth; diagnostic |
-| `depth_gt_ghost_edge_pct_p50` / `p95` | prediction support on GT boundaries present only in the previous frame | lower = fewer stale/double depth edges; diagnostic |
-| `flicker` | frame-to-frame mean\|Δ\| of the SBS luma (×255) | diagnostic only; includes normal motion |
-| `flicker_disocc` | unregistered frame difference restricted to the current depth-silhouette band | diagnostic only; motion-confounded |
-| `swim` | frame-to-frame \|depth change\| where the **source** is static (needs `--frames`) | diagnostic until support/locality handling is upgraded |
+| `exact_binocular_support_pct` | common rendered area backed by unique source samples in both eyes, limited by the smaller eye Jacobian | >=80% hard evidence floor; prevents comfort-tail bypass by collapsed overlap |
+| `source_coverage_pct` | supported interior pixels within 4/255 luma of the exact shader-selected source sample | >=99% hard contract |
+| `image_integrity_pct` | retention of exact mapped-source texture without collapse or overshoot | >=80% hard contract on supported texture |
+| `exact_symmetry_residual_p95_pct` | P95 common-camera residual `abs((x_left+x_right)/2 - x_unwarped)` on unique mutual support | lower = closer to symmetric cameras; diagnostic |
+| `exact_polarity_ok` / `exact_local_polarity_component_pct` | warp ordering relative to the processed depth that drove it | hard global sign audit / local diagnostic; conformance only |
+| `vmisalign_p99_pct` | localized texture-supported P99 vertical offset as percent eye height | <=0.1% hard contract |
 
-Notes:
-- `vmisalign_pct == 0` is the resolution-independent correctness target (parallax must be horizontal-only).
-- Flat/paused frames legitimately score `pop=0` — curate scenes with real depth.
-- A matched clip does not make raw flicker perceptual: a processor can move the sampling mask or
-  disparity and change how legitimate motion is counted. Only motion-excluded `static_jitter` votes.
-- Temporal metrics need a multi-frame clip; the offline sim (single-frame) cannot produce them.
-- `--frames <input dir>` unlocks `edge_acc` and `swim` (they compare against the source frames).
-- Harness depth is dumped as 16-bit grayscale so sub-1/255 temporal changes remain measurable.
+Conformance metrics catch implementation, color, and transport bugs. They are not perceptual
+quality labels because the renderer can reproduce a geometrically poor source coordinate exactly.
+Raw luma residual, clamp amount, and foreground-leak/bad-fill subtype maps remain available inside
+their standalone falsifiers for diagnosis, but are intentionally absent from canonical aggregates,
+reports, gates, and frame-label records. Exact coverage/integrity, mapping stretch/fold, and
+binocular-support measurements are the stronger non-redundant policy axes.
 
-## Metrics — ground-truth depth (clips with `gt_depth/frame_*.png`)
+## Metrics - temporal evaluation (`--seq`)
+
 | metric | meaning | direction |
 |--------|---------|-----------|
-| `depth_gt_si_rmse` | relative-disparity RMSE after polarity-preserving positive scale/shift alignment; shift-only on flat GT | lower = more accurate; **primary depth axis** |
-| `depth_gt_edge_f1` | boundary F1 with one-pixel tolerance | higher = better boundaries; **primary depth axis** |
-| `depth_gt_lag_f1_p95` | previous-frame boundary-F1 advantage | lower = less stale depth; **primary stability axis** |
-| `depth_gt_ghost_edge_pct_p95` | prediction support on previous-only GT boundaries | lower = fewer stale/double edges; diagnostic |
+| `static_jitter_p95` | worse-eye signed-source-conditioned output change on source-static support after disparity-radius motion exclusion | lower = steadier static content |
+| `flow_temporal_p95` | flow-compensated SBS residual after subtracting the registered signed mono-source change | lower = steadier moving content |
+| `depth_gt_lag_f1_p95` | previous-frame GT boundary advantage over current GT | lower = less stale depth |
+| `depth_gt_ghost_edge_pct_p95` | prediction support on previous-only GT boundaries | lower = fewer stale/double edges |
 
-## Metrics — true stereo (clips with `gt_right/frame_*.png`)
+Temporal metrics require a multi-frame clip and measured support. They remain evaluation-only:
+the DA-V2 augmentation policy consumes one image, so only registered, source-conditioned temporal
+evidence is retained and none of it becomes a single-frame model label.
+
+## Metrics - authenticated ground-truth depth
+
 | metric | meaning | direction |
 |--------|---------|-----------|
-| `stereo_gt_psnr` | synthesized-right PSNR after one global horizontal baseline registration | higher = closer to true stereo; diagnostic |
-| `stereo_gt_ssim` | local SSIM under the same global-only registration | higher = closer structure; diagnostic |
-| `stereo_gt_residual_p95` | p95 luma residual after a small permissive local epipolar patch search | lower = fewer local errors; diagnostic |
-| `stereo_gt_coverage_pct` | true-right pixels within 24/255 of a nearby epipolar patch | higher = more correct content; diagnostic |
-| `stereo_art_scale_error_pct` | synthesized/reference global depth-budget scale difference in eye-width percentage points | lower = closer artistic depth budget; diagnostic |
-| `stereo_art_zero_error_pct` | synthesized/reference zero-plane offset difference in eye-width percentage points | lower = closer zero-plane placement; diagnostic |
-| `stereo_art_ddc_iou` | Art3D-inspired IoU of significant fitted-depth and synthesized-disparity horizontal edges | higher = better structure preservation; diagnostic |
-| `stereo_art_scale_std_error_pct` | difference in within-clip standard deviation of synthesized/reference depth-budget scale | lower = closer shot-level style stability; diagnostic |
-| `stereo_art_zero_std_error_pct` | difference in within-clip standard deviation of synthesized/reference zero-plane offset | lower = closer shot-level stability; diagnostic |
-| `stereo_art_polarity_ok` | percentage of frames with a supported positive-polarity fit | higher = more usable style evidence; diagnostic |
+| `depth_gt_affine_nrmse_pct` | robust positive-affine aligned RMSE normalized by robust GT range, in percent | lower = better global relative depth |
+| `depth_gt_edge_f1` | strict boundary F1 with one-pixel positional tolerance | higher = better boundaries |
+| `depth_gt_polarity_ok` | explicit sign of prediction-to-GT affine fit | must remain 100% |
 
-## Not yet (roadmap)
-- LPIPS and disocclusion-band-restricted true-stereo reference metrics.
+Per-pixel bad-disparity rates remain optional raw evidence for dataset inspection, but are absent
+from the compact policy and report: after affine alignment they strongly duplicate affine NRMSE and
+their one-pixel threshold is not comparable across arbitrary depth/disparity resolutions.
+
+## Independent stereo oracles under qualification
+
+Learned image models are optional offline diagnostics. They do not enter the compact manifest,
+gates, or training labels until they pass the same corruption, benign-transform, real-clip, and
+headset checks as deterministic metrics:
+
+- the optional [NVIDIA FLIP appearance oracle](NVIDIA_FLIP_APPEARANCE_ORACLE.md) compares each
+  final eye to its exact regenerated source sample and reports worst-eye perceptual tails; it
+  abstains on HDR previews until raw linear/HDR evidence and display calibration are available;
+- the optional [RAFT-Stereo oracle](RAFT_STEREO_ORACLE.md) estimates dense correspondence with
+  texture and left/right-consistency masks, then reports signed residual and Middlebury-style bad
+  pixels against Apollo's exact intended disparity where that comparison is valid;
+- the optional [SEA-RAFT temporal oracle](SEA_RAFT_TEMPORAL_ORACLE.md), which uses learned
+  uncertainty plus bidirectional flow to localize output-only edge ghosts, flicker, and static
+  jitter while excluding cuts, occlusions, and legitimate source change;
+- Apple's iSQoE can be run as an explicitly rejected, optional headset-preference diagnostic.
+  Apollo's controlled ladders showed that its holistic score can reward repeated columns, blur,
+  and missing content, so it never enters gates, conclusions, or training labels. The report binds
+  every measured result to the official checkpoint ID, URL, SHA-256, and checkout revision; HDR
+  preview PNGs abstain before the model or its dependencies are loaded.
+
+No oracle is promoted merely because it exists or moves on one clip. Controlled double-edge,
+jaggedness, missing-structure, polarity, fold, clamp, disparity, shear, benign transforms, and
+manual image/headset confirmation remain the qualification evidence.

@@ -31,8 +31,10 @@ def depth_compensation_from_meta(meta):
 
 
 def refresh_contract_metadata(data):
-    """Refresh only the Python metric contract; harness/evaluator schema is immutable."""
+    """Refresh Python metric/label semantics; harness/evaluator schema is immutable."""
     data["meta"]["metric_sha256"] = run_eval.metric_contract_sha()
+    data["meta"]["label_contract_sha256"] = run_eval.label_contract_sha()
+    data["meta"]["metric_runtime"] = run_eval.metric_runtime_provenance()
 
 
 def validate_rescore_provenance(data):
@@ -44,6 +46,15 @@ def validate_rescore_provenance(data):
         raise SystemExit(
             f"refusing evaluator schema {meta.get('eval_schema')!r}; rerun with current schema "
             f"{run_eval.EVAL_SCHEMA}")
+
+
+def authoritative_clip_meta(data, clip, clips_root, run_dir):
+    """Return a fresh scoring context, translating authentication errors for the CLI."""
+    try:
+        return run_eval.authoritative_remeasurement_clip_meta(
+            data, clip, clips_root, run_dir)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"{clip}: refusing unauthenticated scoring metadata: {exc}") from exc
 
 
 def main():
@@ -67,27 +78,43 @@ def main():
     if stale:
         raise SystemExit(f"refusing changed source/GT evidence: {stale}")
     thresholds = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json"), encoding="utf-8"))
+    data.setdefault("meta", {})["training_labels"] = run_eval.training_label_manifest(thresholds)
     issues, hard_failures, evidence_failures = [], [], []
+    artifact_hashes = {}
+    recorded_artifact_hashes = data.get("meta", {}).get("scored_artifact_sha256")
+    if (not isinstance(recorded_artifact_hashes, dict) or
+            set(recorded_artifact_hashes) != set(data["clips"])):
+        raise SystemExit(
+            "refusing rescore without a complete recorded scored-artifact hash contract")
     for clip, entry in data["clips"].items():
         clip_dir = os.path.join(clips_root, clip)
-        expected_flat = bool(entry.get("meta", {}).get("expected_flat"))
+        clip_meta = authoritative_clip_meta(
+            data, clip, clips_root, args.run_dir)
+        # Never merge the cache into this object: even a single stale expected_flat/GT flag can
+        # alter applicability, and a forged source count can make incomplete labels look valid.
+        entry["meta"] = clip_meta
+        artifact_hash = clip_meta["scored_artifact_sha256"]
+        artifact_hashes[clip] = artifact_hash
         measured = sbsbench.measure_sequence(
-            os.path.join(args.run_dir, clip), clip_dir, expected_flat=expected_flat)
+            os.path.join(args.run_dir, clip), clip_dir)
         if not measured:
             raise SystemExit(f"{clip}: no measurable SBS artifacts")
         rows, agg = measured
-        entry.setdefault("meta", {})["source_frame_count"] = len(
-            sbsbench.indexed_files(os.path.join(clip_dir, "frame_*.*"), "frame_"))
+        agg = sbsbench.filter_aggregate_by_evidence(
+            rows, agg, thresholds["metrics"], clip_meta)
         worst, clip_issues, clip_hard_failures = run_eval.score_clip_gates(
-            rows, agg, thresholds, entry.get("meta", {}))
+            rows, agg, thresholds, clip_meta)
         issues.extend({"clip": clip, **item} for item in clip_issues)
         hard_failures.extend({"clip": clip, **item} for item in clip_hard_failures)
         evidence_failures.extend(run_eval.primary_evidence_failures(
-            agg, thresholds, clip, entry["meta"], worst=worst))
+            agg, thresholds, clip, clip_meta, worst=worst, rows=rows))
         evidence_failures.extend(run_eval.perf_evidence_failures(
             None, entry.get("perf_ms", {}), thresholds, clip))
         entry["aggregate"] = agg
         entry["worst_frame"] = worst
+        frame_records = run_eval.build_frame_records(rows, thresholds, clip_meta)
+        entry["frames"] = frame_records
+        entry["label_summary"] = run_eval.summarize_frame_labels(frame_records, thresholds)
 
     data["issues"] = issues
     data["hard_failures"] = hard_failures
@@ -95,13 +122,15 @@ def main():
     data["regressions"] = []
     data["verdict"] = ("hard_failures" if hard_failures else
                        "evidence_failures" if evidence_failures else "comparison_only")
-    refresh_contract_metadata(data)
     depth_compensation = depth_compensation_from_meta(data.get("meta", {}))
     data["meta"]["depth_compensation"] = depth_compensation
     for entry in data["clips"].values():
         entry.setdefault("meta", {})["depth_compensation"] = depth_compensation
     data["meta"]["clip_set_sha1"] = current_clip_hashes
     data["meta"]["clips_root"] = clips_root
+    data["meta"]["scored_artifact_sha256"] = artifact_hashes
+    refresh_contract_metadata(data)
+    run_eval.bind_training_labels_to_evidence_gate(data, thresholds)
     out = result_path if args.in_place else os.path.join(args.run_dir, "results.rescored.json")
     tmp = out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:

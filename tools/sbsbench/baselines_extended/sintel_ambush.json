@@ -4,7 +4,7 @@
     "depth_gt_edge_f1": 37.65179537136569,
     "depth_gt_ghost_edge_pct": 31.773947708468402,
     "depth_gt_lag_f1": 0.5569484277269894,
-    "depth_gt_si_rmse": 18.319881518681843,
+    "depth_gt_affine_nrmse_pct": 18.319881518681843,
     "depth_spread": 0.8833219135800997,
     "disocc_frac": 0.05956060660359327,
     "disocc_smear": 0.0,

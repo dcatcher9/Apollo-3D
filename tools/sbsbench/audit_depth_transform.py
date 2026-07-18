@@ -5,7 +5,7 @@ Usage: audit_depth_transform.py CONTROL_RUN TREATMENT_RUN [--out FILE]
 
 The run directories must be compatible `run_eval.py` outputs. Every matched depth PNG is measured
 in its native resolution. The audit reports p95-p5 depth spread, endpoint saturation, treatment /
-control spread ratios, corresponding SBS stereo spread, and available GT depth metrics.
+control spread ratios, corresponding exact visible SBS relief, and available GT depth metrics.
 """
 import argparse
 import glob
@@ -48,7 +48,7 @@ def main():
     if ctrl_result["meta"].get("clip_set_sha1") != treat_result["meta"].get("clip_set_sha1"):
         raise SystemExit("incompatible clip identities")
     clips = sorted(set(ctrl_result["clips"]) & set(treat_result["clips"]))
-    output = {"schema": 1, "control": os.path.abspath(args.control),
+    output = {"schema": 2, "control": os.path.abspath(args.control),
               "treatment": os.path.abspath(args.treatment), "clips": {}}
     all_ratios = []
     for clip in clips:
@@ -72,10 +72,13 @@ def main():
             "spread_ratio_mean": float(np.mean(ratios)) if ratios else None,
             "spread_ratio_min": float(np.min(ratios)) if ratios else None,
             "frames_below_90pct_spread": int(sum(r < 0.9 for r in ratios)),
-            "pop_spread_pct": {"control": ca.get("pop_spread_pct"),
-                               "treatment": ta.get("pop_spread_pct")},
-            "gt_depth_si_rmse": {"control": ca.get("depth_gt_si_rmse"),
-                                 "treatment": ta.get("depth_gt_si_rmse")},
+            "exact_visible_pop_spread_pct": {
+                "control": ca.get("exact_visible_pop_spread_pct"),
+                "treatment": ta.get("exact_visible_pop_spread_pct"),
+            },
+            "gt_depth_affine_nrmse_pct": {
+                "control": ca.get("depth_gt_affine_nrmse_pct"),
+                "treatment": ta.get("depth_gt_affine_nrmse_pct")},
             "gt_depth_edge_f1": {"control": ca.get("depth_gt_edge_f1"),
                                  "treatment": ta.get("depth_gt_edge_f1")},
         }

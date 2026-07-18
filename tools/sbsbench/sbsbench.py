@@ -8,23 +8,18 @@ the whole point vs. warpsim (see docs/sbs-benchmark-plan.md). Each metric is a n
 should move with a real quality change, so improvements can be A/B'd against a baseline.
 
 Metric families:
-  pop_px / pop_pct      Horizontal L<->R disparity (the "3D depth" you get). Tile phase
-                        correlation between the two eyes; p50/p95 of |dx|. Higher = more pop.
-  pop_spread_px/pct     Near-to-far disparity RANGE (weighted p95-p5 of SIGNED dx) = the stereo
-                        VOLUME, invariant to where the zero-parallax plane sits. Use this (not
-                        pop_px) to judge subject-anchored modes: they recenter the field on the
-                        subject, dropping median|dx| without losing depth. Higher = more volume.
-  vmisalign_px          Median |dy| between eyes. Should be ~0; nonzero = a geometry fault
-                        (eyes must differ by horizontal parallax only).
-  depth_spread          p95-p5 of the normalized depth map = pop available at the SOURCE
-                        (model + normalization). Separates "flat model" from "flat warp".
+  exact visible stereo Production inverse-map disparity, weighted by independent horizontal
+                        source structure. This separates requested geometry from visible relief.
+  vmisalign_p99         Localized exact-map |dy| between eyes. Should be ~0; nonzero = a geometry
+                        fault (eyes must differ by horizontal parallax only).
   source coverage /     Hard integrity constraints after horizontally aligning each eye to the
   image integrity       source; catches missing, black, or collapsed output regions.
-  source halo/stretch   Validated silhouette artifacts relative to aligned source structure.
+  warp topology         Exact-map stretch, folds, clamps, cross-row shear, and binocular geometry
+                        defects. These do not infer artifacts from source texture alone.
   GT depth accuracy     Scale/shift-invariant RMSE and boundary F1 on clips with gt_depth sidecars.
   GT depth lag          Whether predicted boundaries match the previous GT frame better than the
                         current frame, directly detecting held-depth temporal registration.
-  flow temporal         Output/depth residual after exact or classical optical-flow compensation.
+  flow temporal         Output residual after authenticated optical-flow compensation.
 
 Usage:
   python sbsbench.py DUMP_DIR [DUMP_DIR ...]        # one or more dump_* folders
@@ -35,6 +30,7 @@ Usage:
 Dependencies: numpy + Pillow only.
 """
 import argparse
+import concurrent.futures
 import glob
 import json
 import os
@@ -44,7 +40,34 @@ import sys
 import numpy as np
 from PIL import Image
 
+import sbs_interocular_metrics
+import sbs_interocular_phase_chroma
+import sbs_interocular_photometric_rivalry
+import sbs_stereo_window_metrics
+import sbs_warp_shear_metrics
+
 TEMPORAL_MIN_SUPPORT = 0.1
+VERTICAL_MISALIGNMENT_QUANTILE = 0.99
+# Minimum independently measured support for a detector to become applicable.  A positive count
+# is not automatically enough. Percentage/fraction supports use a strict positive threshold because
+# their producing metric already enforces its own statistical minimum.
+EVIDENCE_SUPPORT_REQUIREMENTS = {
+    "source_fidelity_support_pct": 1e-12,
+    "image_integrity_support": 0.1,
+    "exact_mapping_support_pct": 1e-12,
+    "exact_binocular_support_count": 1024.0,
+    "exact_polarity_support_pct": 1e-12,
+    "exact_local_polarity_support_pct": 1e-12,
+    "exact_visible_support_pct": 1e-12,
+    "exact_local_polarity_support_count": 256.0,
+    "exact_visible_support_count": 256.0,
+    "vmisalign_support_pct": 2.0,
+    "warp_cross_row_shear_support_count": 512.0,
+    "experimental_stereo_window_support_count": 128.0,
+    "interocular_phase_orientation_evidence_sufficient": 100.0,
+    "interocular_exposure_rivalry_evidence_sufficient": 100.0,
+    "interocular_color_gain_rivalry_evidence_sufficient": 100.0,
+}
 
 
 # ---------------------------------------------------------------------------- io
@@ -53,10 +76,14 @@ def load_rgb(path):
     return np.asarray(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0
 
 
+def rgb_luma(rgb):
+    rgb = np.asarray(rgb, dtype=np.float32)
+    return rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152 + rgb[..., 2] * 0.0722
+
+
 def load_gray(path):
-    a = load_rgb(path)
     # Rec.709 luma; the depth PNG is grayscale so any channel would do, but this is general.
-    return a[..., 0] * 0.2126 + a[..., 1] * 0.7152 + a[..., 2] * 0.0722
+    return rgb_luma(load_rgb(path))
 
 
 def load_depth(path):
@@ -75,8 +102,46 @@ def load_depth(path):
     return load_gray(path)
 
 
+def load_warp_mapping(path, shape):
+    """Load the harness-only exact inverse-warp map under its fail-closed shape contract."""
+    required = {
+        "schema": 1,
+        "dtype": "float32-le",
+        "layout": "row-major",
+        "channels": ["raw_reproject_source_u_normalized"],
+    }
+    mismatched = {key: (expected, shape.get(key)) for key, expected in required.items()
+                  if shape.get(key) != expected}
+    width, height = shape.get("width"), shape.get("height")
+    eye_width, eye_height = shape.get("eye_width"), shape.get("eye_height")
+    source_width, source_height = shape.get("source_width"), shape.get("source_height")
+    scale_x, scale_y = shape.get("content_scale_x"), shape.get("content_scale_y")
+    valid_geometry = (
+        isinstance(width, int) and width > 0 and width % 2 == 0
+        and isinstance(height, int) and height > 0
+        and isinstance(eye_width, int) and eye_width * 2 == width
+        and eye_height == height
+        and isinstance(source_width, int) and source_width > 0
+        and isinstance(source_height, int) and source_height > 0
+        and isinstance(scale_x, (int, float)) and 0.0 < scale_x <= 1.0
+        and isinstance(scale_y, (int, float)) and 0.0 < scale_y <= 1.0)
+    if mismatched or not valid_geometry:
+        raise ValueError(f"invalid warp-map shape contract: fields={mismatched}, shape={shape}")
+    values = np.fromfile(path, dtype="<f4")
+    expected_values = width * height
+    if values.size != expected_values:
+        raise ValueError(
+            f"warp-map size mismatch: {values.size} floats != {expected_values}: {path}")
+    mapping = values.reshape(height, width)
+    if not np.isfinite(mapping).all():
+        raise ValueError(f"warp map contains non-finite values: {path}")
+    return mapping
+
+
 def split_eyes(sbs_gray):
     """SBS is [left | right], each half the width."""
+    if sbs_gray.ndim < 2 or sbs_gray.shape[1] % 2:
+        raise ValueError(f"packed SBS width must be even, got shape {sbs_gray.shape}")
     w = sbs_gray.shape[1] // 2
     return sbs_gray[:, :w], sbs_gray[:, w:2 * w]
 
@@ -105,7 +170,7 @@ def predecessor_frame_id(indexed, frame_id):
     return max((candidate for candidate in indexed if candidate < frame_id), default=None)
 
 
-# ------------------------------------------------------------------- pop / geometry
+# ------------------------------------------------ image registration / exact stereo geometry
 
 def phase_shift(a, b):
     """Sub-tile (dy, dx) that best aligns b onto a, via phase correlation with sub-pixel
@@ -183,6 +248,199 @@ def disparity_field(left, right, tile=192, stride=128, min_var=1e-3):
     return dxs, dys, wts
 
 
+def _exact_expected_source_luma(eye_shape, src_gray, sampled_source_u, shape,
+                                src_rgb=None, hdr_scale=None):
+    """Reconstruct the luma sampled by one production eye and its content mask.
+
+    The warp-map sidecar records the horizontal source coordinate consumed by the shader.  The
+    vertical coordinate is the deterministic content-fit transform.  Keeping this reconstruction
+    in one helper prevents vertical-alignment and source-fidelity metrics from drifting apart.
+    """
+    sampled_source_u = np.asarray(sampled_source_u, dtype=np.float32)
+    if sampled_source_u.shape != tuple(eye_shape):
+        raise ValueError(
+            f"source-coordinate eye {sampled_source_u.shape} != output eye {eye_shape}")
+    if not np.isfinite(sampled_source_u).all():
+        raise ValueError("source-coordinate eye contains non-finite coordinates")
+    height, eye_width = eye_shape
+    scale_x = float(shape.get("content_scale_x", 0.0))
+    scale_y = float(shape.get("content_scale_y", 0.0))
+    if not (0.0 < scale_x <= 1.0 and 0.0 < scale_y <= 1.0):
+        raise ValueError("exact source metric requires valid content scales")
+
+    output_u = (np.arange(eye_width, dtype=np.float32) + 0.5) / float(eye_width)
+    output_v = (np.arange(height, dtype=np.float32) + 0.5) / float(height)
+    lo_x, lo_y = 0.5 * (1.0 - scale_x), 0.5 * (1.0 - scale_y)
+    content = ((output_v[:, None] >= lo_y) & (output_v[:, None] <= lo_y + scale_y)
+               & (output_u[None, :] >= lo_x) & (output_u[None, :] <= lo_x + scale_x))
+    valid = content & np.isfinite(sampled_source_u)
+    if not valid.any():
+        raise ValueError("exact source metric has no valid content pixels")
+    source_v = np.clip((output_v - lo_y) / scale_y, 0.0, 1.0)
+    source_v = np.broadcast_to(source_v[:, None], sampled_source_u.shape)
+    live_sampled_u = np.clip(sampled_source_u, 0.0, 1.0)
+
+    expected_rgb = None
+    if hdr_scale is not None and src_rgb is None:
+        raise ValueError("HDR preview fidelity requires RGB source evidence")
+    if src_rgb is None:
+        expected = _sample_scalar_uv(src_gray, live_sampled_u, source_v)
+    elif hdr_scale is None:
+        expected_rgb = _sample_rgb_uv(src_rgb, live_sampled_u, source_v)
+        expected = rgb_luma(expected_rgb)
+    else:
+        linear_source = (_srgb_to_linear(src_rgb) * float(hdr_scale)).astype(
+            np.float16).astype(np.float32)
+        expected_rgb = _hdr_preview_rgb(
+            _sample_rgb_uv(linear_source, live_sampled_u, source_v))
+        expected = rgb_luma(expected_rgb)
+    return expected, expected_rgb, valid
+
+
+def _local_vertical_offsets(eye, expected, valid, max_height=540,
+                            min_std=3.0 / 255.0):
+    """Estimate vertical source-relative displacement on overlapping normalized tiles.
+
+    Zero-mean normalized correlation makes the estimate insensitive to local exposure/contrast.
+    Candidate reference patches are taken from surrounding *rows*, rather than correlating two
+    cropped tiles with wraparound, so one-pixel defects remain measurable.  Ambiguous/repetitive
+    or low-texture patches abstain instead of voting a random displacement.
+    """
+    eye = np.asarray(eye, dtype=np.float32)
+    expected = np.asarray(expected, dtype=np.float32)
+    valid = np.asarray(valid, dtype=bool)
+    original_height, original_width = eye.shape
+    scale = min(1.0, float(max_height) / max(original_height, 1))
+    height = max(24, int(round(original_height * scale)))
+    width = max(32, int(round(original_width * scale)))
+    if (height, width) != eye.shape:
+        eye = resize_to(eye, width, height)
+        expected = resize_to(expected, width, height)
+        valid = resize_mask_conservative(valid, width, height)
+
+    tile = max(16, min(64, int(round(height * 0.10))))
+    max_shift = max(2, min(12, int(np.ceil(height * 0.03))))
+    if height < tile + 2 * max_shift:
+        tile = max(8, height - 2 * max_shift)
+    stride = max(4, tile // 2)
+    y_positions = [y for y in _tile_positions(height, tile, stride)
+                   if y >= max_shift and y + tile + max_shift <= height]
+    x_positions = _tile_positions(width, tile, stride)
+    if not y_positions:
+        return {}, 0
+
+    offsets = {}
+    attempted = len(y_positions) * len(x_positions)
+    min_pixels = max(32, int(round(tile * tile * 0.90)))
+    candidate_offsets = range(-max_shift, max_shift + 1)
+    for y in y_positions:
+        for x in x_positions:
+            output_valid = valid[y:y + tile, x:x + tile]
+            if int(output_valid.sum()) < min_pixels:
+                continue
+            output = eye[y:y + tile, x:x + tile]
+            output_values = output[output_valid]
+            output_centered = output_values - float(output_values.mean())
+            output_norm = float(np.linalg.norm(output_centered))
+            output_std = output_norm / np.sqrt(max(output_centered.size, 1))
+            if output_std < min_std:
+                continue
+
+            scores = []
+            texture = []
+            for shift in candidate_offsets:
+                ry = y - shift
+                reference_valid = valid[ry:ry + tile, x:x + tile]
+                joint = output_valid & reference_valid
+                if int(joint.sum()) < min_pixels:
+                    scores.append(float("-inf"))
+                    texture.append(0.0)
+                    continue
+                a = output[joint]
+                b = expected[ry:ry + tile, x:x + tile][joint]
+                a = a - float(a.mean())
+                b = b - float(b.mean())
+                na, nb = float(np.linalg.norm(a)), float(np.linalg.norm(b))
+                reference_std = nb / np.sqrt(max(b.size, 1))
+                if min(na, nb) <= 1e-8 or reference_std < min_std:
+                    scores.append(float("-inf"))
+                    texture.append(0.0)
+                    continue
+                scores.append(float(np.dot(a, b) / (na * nb)))
+                texture.append(reference_std)
+
+            best_index = int(np.argmax(scores))
+            best_score = scores[best_index]
+            if not np.isfinite(best_score) or best_score < 0.55:
+                continue
+            # A repeated vertical pattern can have several equally valid peaks.  Do not turn its
+            # arbitrary phase into a hard stereoscopic fault.
+            separated = [score for index, score in enumerate(scores)
+                         if abs(index - best_index) > 1 and np.isfinite(score)]
+            if separated and best_score - max(separated) < 0.004:
+                continue
+
+            shift = float(best_index - max_shift)
+            if 0 < best_index < len(scores) - 1:
+                before, peak, after = scores[best_index - 1:best_index + 2]
+                denominator = before - 2.0 * peak + after
+                if (np.isfinite(before) and np.isfinite(after)
+                        and abs(denominator) > 1e-8):
+                    shift += float(0.5 * (before - after) / denominator)
+            # Texture is capped so one high-contrast logo cannot outweigh the rest of a frame.
+            weight = min(0.10, np.sqrt(max(output_std * texture[best_index], 0.0)))
+            offsets[(y, x)] = (shift, max(weight, 1e-6))
+    return offsets, attempted
+
+
+def exact_vertical_misalignment(left, right, src_gray, map_left, map_right, shape,
+                                src_rgb=None, hdr_scale=None):
+    """Localized vertical disparity using exact production source correspondences.
+
+    Returns ``(native_p99_px, normalized_p99_pct, support_pct)``.  The first two values are
+    ``None`` when too little unambiguous texture exists, while the independently measured support
+    remains available so the policy can distinguish a legitimate N/A from missing evidence.
+    Intended horizontal parallax is already represented by each eye's inverse-warp map, so it
+    cannot masquerade as vertical disparity. Common vertical motion of both eyes also cancels;
+    only the binocular offset is scored.
+    """
+    left = np.asarray(left, dtype=np.float32)
+    right = np.asarray(right, dtype=np.float32)
+    if left.shape != right.shape:
+        raise ValueError(f"eye geometry differs: {left.shape} != {right.shape}")
+    left_expected, _, left_valid = _exact_expected_source_luma(
+        left.shape, src_gray, map_left, shape, src_rgb=src_rgb, hdr_scale=hdr_scale)
+    right_expected, _, right_valid = _exact_expected_source_luma(
+        right.shape, src_gray, map_right, shape, src_rgb=src_rgb, hdr_scale=hdr_scale)
+    left_offsets, left_attempted = _local_vertical_offsets(
+        left, left_expected, left_valid)
+    right_offsets, right_attempted = _local_vertical_offsets(
+        right, right_expected, right_valid)
+    common = sorted(set(left_offsets) & set(right_offsets))
+    attempted = min(left_attempted, right_attempted)
+    support_pct = 100.0 * len(common) / max(attempted, 1)
+    if len(common) < 4 or support_pct < 2.0:
+        return None, None, support_pct
+    disparities = np.asarray(
+        [abs(left_offsets[key][0] - right_offsets[key][0]) for key in common],
+        dtype=np.float32)
+    weights = np.asarray(
+        [np.sqrt(left_offsets[key][1] * right_offsets[key][1]) for key in common],
+        dtype=np.float32)
+    # A one-percent localized fault influences fewer than five percent of the overlapping tiles,
+    # so p95 is structurally blind to exactly the small, salient binocular defect this metric is
+    # meant to catch.  P99 remains well below the hard limit on authenticated clean outputs while
+    # responding to the controlled one-percent fault ladder.
+    p99_analysis_px = weighted_pct(
+        disparities, weights, VERTICAL_MISALIGNMENT_QUANTILE)
+    # _local_vertical_offsets uses a fixed-height analysis raster above 540p.  Normalize there,
+    # then convert back so both the percentage and native-pixel diagnostic are resolution robust.
+    analysis_height = max(24, min(left.shape[0], 540))
+    p99_pct = p99_analysis_px / max(float(analysis_height), 1.0) * 100.0
+    p99_native_px = p99_pct * left.shape[0] / 100.0
+    return p99_native_px, p99_pct, support_pct
+
+
 def weighted_pct(vals, wts, q):
     order = np.argsort(vals)
     vals = vals[order]
@@ -192,17 +450,7 @@ def weighted_pct(vals, wts, q):
     return float(np.interp(q, c, vals))
 
 
-def pop_spread(dxs, wts):
-    """Near-to-far stereo VOLUME: weighted p95 - p5 of the SIGNED horizontal disparity. Unlike
-    pop_px (median |dx|), this measures the disparity RANGE independent of where the zero-parallax
-    plane sits, so subject anchoring -- which recenters the whole field on the subject (shifting
-    the median toward 0) without collapsing the range -- is scored on the depth it actually
-    delivers, not penalized for placing the subject at the screen. Also correctly gives ~0 to a
-    flat scene shifted bodily forward (high |dx|, no structure), which pop_px wrongly rewards."""
-    return weighted_pct(dxs, wts, 0.95) - weighted_pct(dxs, wts, 0.05)
-
-
-REFERENCE_STREAM_ASPECT = 5120.0 / 2160.0
+REFERENCE_STREAM_ASPECT = sbs_interocular_metrics.REFERENCE_STREAM_ASPECT
 
 
 def perceived_disparity_pct(disparity_px, eye_width, eye_height):
@@ -212,26 +460,496 @@ def perceived_disparity_pct(disparity_px, eye_width, eye_height):
     eye height and express the result at the validated 5120x2160 reference aspect. No physical
     display size or placement is assumed.
     """
-    width = max(float(eye_width), 1.0)
-    height = max(float(eye_height), 1.0)
-    aspect_scale = (width / height) / REFERENCE_STREAM_ASPECT
-    return float(disparity_px) * 100.0 / width * aspect_scale
+    return sbs_interocular_metrics.perceived_disparity_pct(
+        disparity_px, eye_width, eye_height)
 
 
-def comfort_disparity(dxs, wts, eye_width, eye_height, tail=0.99):
-    """Signed disparity tails as reference-aspect-equivalent image percentages.
+def _sample_scalar_uv(image, u, v):
+    """D3D-style bilinear/clamped normalized sampling for metric-side depth association."""
+    image = np.asarray(image, dtype=np.float32)
+    h, w = image.shape
+    x = np.clip(np.asarray(u, np.float32) * w - 0.5, 0.0, w - 1.0)
+    y = np.clip(np.asarray(v, np.float32) * h - 0.5, 0.0, h - 1.0)
+    x0, y0 = np.floor(x).astype(np.int32), np.floor(y).astype(np.int32)
+    x1, y1 = np.minimum(x0 + 1, w - 1), np.minimum(y0 + 1, h - 1)
+    wx, wy = x - x0, y - y0
+    return ((1.0 - wx) * (1.0 - wy) * image[y0, x0]
+            + wx * (1.0 - wy) * image[y0, x1]
+            + (1.0 - wx) * wy * image[y1, x0]
+            + wx * wy * image[y1, x1]).astype(np.float32)
 
-    Physical crossed/uncrossed naming requires a calibrated display convention and headset FOV,
-    which the host PNG does not carry. Keep the two signed sides explicit and gate both; this
-    prevents a recentered field from hiding an excessive tail in a single absolute statistic.
+
+def _sample_rgb_uv(image, u, v):
+    """D3D-style bilinear/clamped normalized sampling for an RGB texture."""
+    image = np.asarray(image, dtype=np.float32)
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError(f"RGB sampler requires HxWx3, got {image.shape}")
+    return np.stack([_sample_scalar_uv(image[..., channel], u, v)
+                     for channel in range(3)], axis=-1)
+
+
+def _srgb_to_linear(rgb):
+    rgb = np.asarray(rgb, dtype=np.float32)
+    return np.where(rgb <= 0.04045, rgb / 12.92,
+                    np.power((rgb + 0.055) / 1.055, 2.4)).astype(np.float32)
+
+
+def _linear_to_srgb(rgb):
+    rgb = np.clip(np.asarray(rgb, dtype=np.float32), 0.0, 1.0)
+    return np.where(rgb <= 0.0031308, 12.92 * rgb,
+                    1.055 * np.power(rgb, 1.0 / 2.4) - 0.055).astype(np.float32)
+
+
+def _hdr_preview_rgb(linear_rgb):
+    """Match the harness's deterministic scRGB-to-PNG diagnostic preview."""
+    rgb = np.maximum(np.asarray(linear_rgb, dtype=np.float32), 0.0)
+    luminance = (rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152
+                 + rgb[..., 2] * 0.0722)
+    rgb = rgb / (1.0 + luminance[..., None])
+    peak = np.maximum(1.0, np.max(rgb, axis=-1))
+    return _linear_to_srgb(rgb / peak[..., None])
+
+
+def _largest_component_pct(mask, denominator=None, max_width=256):
+    """Largest 4-connected region as a percentage, bounded for offline metric cost.
+
+    Exact per-pixel area is reported separately.  Component size is evaluated on a conservative
+    validation raster so a thin but long sword/limb is not erased merely because the deployment
+    output is wide.  This is a topology signal, not a replacement for native area.
     """
-    lo = weighted_pct(dxs, wts, 1.0 - tail)
-    hi = weighted_pct(dxs, wts, tail)
-    return (perceived_disparity_pct(max(0.0, hi), eye_width, eye_height),
-            perceived_disparity_pct(max(0.0, -lo), eye_width, eye_height))
+    mask = np.asarray(mask, dtype=bool)
+    denominator = (np.ones(mask.shape, dtype=bool) if denominator is None
+                   else np.asarray(denominator, dtype=bool))
+    if denominator.shape != mask.shape:
+        raise ValueError("component denominator must match its mask")
+    if not mask.any() or not denominator.any():
+        return 0.0
+    scale = min(1.0, max_width / float(mask.shape[1]))
+    if scale < 1.0:
+        width = max(1, round(mask.shape[1] * scale))
+        height = max(1, round(mask.shape[0] * scale))
+        mask = np.asarray(Image.fromarray(mask.astype(np.float32), mode="F").resize(
+            (width, height), Image.BOX), dtype=np.float32) > 0.0
+        denominator = np.asarray(
+            Image.fromarray(denominator.astype(np.uint8) * 255, mode="L").resize(
+                (width, height), Image.NEAREST), dtype=np.uint8) >= 128
+    mask &= denominator
+    height, width = mask.shape
+    visited = np.zeros(mask.shape, dtype=bool)
+    largest = 0
+    for start_y, start_x in zip(*np.nonzero(mask)):
+        if visited[start_y, start_x]:
+            continue
+        visited[start_y, start_x] = True
+        stack = [int(start_y * width + start_x)]
+        size = 0
+        while stack:
+            index = stack.pop()
+            y, x = divmod(index, width)
+            size += 1
+            for ny, nx in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)):
+                if (0 <= ny < height and 0 <= nx < width and mask[ny, nx]
+                        and not visited[ny, nx]):
+                    visited[ny, nx] = True
+                    stack.append(ny * width + nx)
+        largest = max(largest, size)
+    return float(largest / max(np.count_nonzero(denominator), 1) * 100.0)
 
 
-# --------------------------------------------------------- disocclusion metrics
+def _inverse_position_jacobian(position, valid, nominal_step):
+    """Output-pixel area represented by each sample of an inverted source-U row.
+
+    ``_invert_row`` has already rejected folds, clamps, non-monotonic runs, and ambiguous
+    duplicate correspondences.  This second pass refuses to bridge a missing source interval and
+    converts the remaining source-uniform samples into output-area weights.  The latter matters
+    for comfort tails: a one-source-pixel sample stretched over ten output pixels must contribute
+    more rendered area than an ordinary one-pixel sample.
+    """
+    position = np.asarray(position, dtype=np.float32)
+    valid = np.asarray(valid, dtype=bool) & np.isfinite(position)
+    weights = np.zeros(position.shape, dtype=np.float32)
+    if position.size < 2:
+        return weights
+    step = np.diff(position)
+    adjacent = valid[:-1] & valid[1:] & (step > 1e-6)
+    ordinary = step[adjacent]
+    typical_step = float(np.median(ordinary)) if ordinary.size else float(nominal_step)
+    # Match the monotonic-run inversion's conservative gap rule in output space.  A genuine
+    # smooth stretch remains area evidence; an occlusion jump between independent runs does not.
+    maximum_step = max(4.0 * float(nominal_step), 8.0 * typical_step)
+    usable = adjacent & (step <= maximum_step)
+    interval_weight = np.where(usable, step, 0.0).astype(np.float32)
+    weights[:-1] += 0.5 * interval_weight
+    weights[1:] += 0.5 * interval_weight
+    return weights
+
+
+def _exact_binocular_geometry(mapping, shape, coverage_map=None):
+    """Invert both exact eye maps onto common source-U samples.
+
+    The old evaluator doubled each eye's monocular inverse displacement and implicitly assumed a
+    perfectly symmetric warp.  That made a common camera translation look like stereo disparity
+    and doubled a one-eye fault.  Here the existing monotonic-run inversion is applied to the two
+    eyes independently, then actual binocular disparity is measured as ``x_right - x_left`` only
+    where the same source point is uniquely and mutually visible.
+
+    Returned ``weight`` is the mean left/right output Jacobian in output-eye pixels.  Raw U outside
+    [0, 1], bars, folds, map gaps, ambiguous duplicate runs, and (when supplied) invalid forward
+    coverage never receive weight.
+    """
+    mapping = np.asarray(mapping, dtype=np.float32)
+    height = int(shape.get("height", 0))
+    eye_width = int(shape.get("eye_width", 0))
+    scale_x = float(shape.get("content_scale_x", 0.0))
+    scale_y = float(shape.get("content_scale_y", 0.0))
+    if mapping.shape != (height, 2 * eye_width):
+        raise ValueError("binocular geometry map does not match its shape contract")
+    if not np.isfinite(mapping).all():
+        raise ValueError("binocular geometry map contains non-finite coordinates")
+    if min(height, eye_width, scale_x, scale_y) <= 0.0:
+        raise ValueError("binocular geometry contract is missing positive geometry")
+    if coverage_map is not None:
+        coverage_map = np.asarray(coverage_map, dtype=bool)
+        if coverage_map.shape != mapping.shape:
+            raise ValueError("forward coverage does not match binocular geometry")
+
+    lo_x = 0.5 * (1.0 - scale_x)
+    lo_y = 0.5 * (1.0 - scale_y)
+    output_u = (np.arange(eye_width, dtype=np.float32) + 0.5) / float(eye_width)
+    output_v = (np.arange(height, dtype=np.float32) + 0.5) / float(height)
+    content_x = (output_u >= lo_x) & (output_u <= lo_x + scale_x)
+    content_rows = np.flatnonzero((output_v >= lo_y) & (output_v <= lo_y + scale_y))
+    analysis_width = max(2, int(round(scale_x * eye_width)))
+    target_u = (np.arange(analysis_width, dtype=np.float32) + 0.5) / analysis_width
+    source_v = np.clip((output_v[content_rows] - lo_y) / scale_y, 0.0, 1.0)
+    unwarped_x = (lo_x + target_u * scale_x) * eye_width - 0.5
+    output_x = np.arange(eye_width, dtype=np.float32)
+    nominal_step = scale_x * eye_width / analysis_width
+
+    disparity = np.full((content_rows.size, analysis_width), np.nan, dtype=np.float32)
+    symmetry = np.full_like(disparity, np.nan)
+    weight = np.zeros_like(disparity)
+    support_weight = np.zeros_like(disparity)
+    for target_row, output_row in enumerate(content_rows):
+        positions = []
+        jacobians = []
+        for eye_index in range(2):
+            offset = eye_index * eye_width
+            source_u_row = mapping[output_row, offset:offset + eye_width]
+            invertible = content_x.copy()
+            if coverage_map is not None:
+                invertible &= coverage_map[output_row, offset:offset + eye_width]
+            position, unique = sbs_interocular_metrics._invert_row(
+                output_x, source_u_row, invertible, target_u)
+            positions.append(position)
+            jacobians.append(_inverse_position_jacobian(position, unique, nominal_step))
+        common = (np.isfinite(positions[0]) & np.isfinite(positions[1])
+                  & (jacobians[0] > 0.0) & (jacobians[1] > 0.0))
+        if not common.any():
+            continue
+        disparity[target_row, common] = (
+            positions[1][common] - positions[0][common])
+        symmetry[target_row, common] = (
+            0.5 * (positions[0][common] + positions[1][common])
+            - unwarped_x[common])
+        weight[target_row, common] = (
+            0.5 * (jacobians[0][common] + jacobians[1][common]))
+        # Common *rendered area* is limited by the smaller eye footprint. Counting source-grid
+        # samples alone lets a map cover the entire source inside a narrow output strip and hide
+        # the collapse from the disparity-tail denominator. Keep statistical sample count and
+        # output-area support separate.
+        support_weight[target_row, common] = np.minimum(
+            jacobians[0][common], jacobians[1][common])
+
+    return {
+        "target_u": target_u,
+        "source_v": source_v,
+        "disparity": disparity,
+        "symmetry": symmetry,
+        "weight": weight,
+        "support_weight": support_weight,
+        "valid": weight > 0.0,
+        "possible_count": int(content_rows.size * analysis_width),
+    }
+
+
+def exact_warp_mapping_metrics(mapping, shape, depth=None, warp_mask=None, tail=0.999):
+    """Geometry metrics from the production shader's exact inverse map.
+
+    Unlike tile phase correlation, this sees smooth/thin/local subjects and does not depend on
+    output texture. The old image-derived metrics remain an independent rendered-output sanity
+    check; hard comfort and training labels use this exact geometry evidence.
+    """
+    mapping = np.asarray(mapping, dtype=np.float32)
+    if mapping.ndim != 2:
+        raise ValueError(f"warp mapping must be scalar Hx(2W), got {mapping.shape}")
+    if not np.isfinite(mapping).all():
+        raise ValueError("warp mapping contains non-finite coordinates")
+    height, packed_width = mapping.shape
+    if packed_width % 2:
+        raise ValueError(f"warp mapping width must be even, got {mapping.shape}")
+    eye_width = packed_width // 2
+    if shape.get("width") != packed_width or shape.get("height") != height:
+        raise ValueError("warp mapping array does not match its shape contract")
+    if shape.get("eye_width") != eye_width or shape.get("eye_height") != height:
+        raise ValueError("warp mapping eye geometry is inconsistent")
+    source_width = float(shape.get("source_width", 0))
+    source_height = float(shape.get("source_height", 0))
+    scale_x = float(shape.get("content_scale_x", 0))
+    scale_y = float(shape.get("content_scale_y", 0))
+    if min(source_width, source_height, scale_x, scale_y) <= 0.0:
+        raise ValueError("warp mapping is missing positive source/content geometry")
+
+    if warp_mask is not None:
+        warp_mask = np.asarray(warp_mask, dtype=np.float32)
+        if warp_mask.shape[:2] != mapping.shape or warp_mask.ndim not in (2, 3):
+            raise ValueError(
+                f"warp mask {warp_mask.shape} does not match warp mapping {mapping.shape}")
+        hole_map = warp_mask if warp_mask.ndim == 2 else warp_mask[..., 0]
+        coverage_map = hole_map < 0.5
+    else:
+        coverage_map = None
+
+    stretch_pcts = []
+    fold_pcts = []
+    mapping_support_pcts = []
+    output_v = (np.arange(height, dtype=np.float32) + 0.5) / float(height)
+    lo_y = 0.5 * (1.0 - scale_y)
+    content_y = (output_v >= lo_y) & (output_v <= lo_y + scale_y)
+    output_u = (np.arange(eye_width, dtype=np.float32) + 0.5) / float(eye_width)
+    lo_x = 0.5 * (1.0 - scale_x)
+    content_x = (output_u >= lo_x) & (output_u <= lo_x + scale_x)
+    content = content_y[:, None] & content_x[None, :]
+
+    for eye_index in range(2):
+        sampled_u = mapping[:, eye_index * eye_width:(eye_index + 1) * eye_width]
+        valid = content & np.isfinite(sampled_u)
+        if not valid.any():
+            raise ValueError("warp mapping has no valid content pixels")
+        # Topology is measured from the coordinate the live sampler consumes. Off-screen demand
+        # is clipped here and therefore appears as a repeated-column stretch instead of a second,
+        # redundant clamp percentage.
+        live_sampled_u = np.clip(sampled_u, 0.0, 1.0)
+
+        # Exact source-coordinate Jacobian. A healthy unwarped mapping advances by one baseline
+        # source step per output pixel. Near-zero/reversed steps expose repeated columns, folds,
+        # and rubber-band fill without depending on source texture or a candidate-chosen matcher.
+        # Topology measures the coordinate consumed by the texture sampler, not merely requested
+        # geometry. Off-screen raw U collapses onto the boundary after main_ps saturates it and
+        # must therefore appear as repeated columns/stretch.
+        source_x = live_sampled_u * source_width
+        source_step = np.diff(source_x, axis=1)
+        adjacent = valid[:, 1:] & valid[:, :-1]
+        content_adjacent = content[:, 1:] & content[:, :-1]
+        mapping_support_pcts.append(float(
+            np.count_nonzero(adjacent) / max(np.count_nonzero(content_adjacent), 1) * 100.0))
+        baseline_step = source_width / max(scale_x * eye_width, 1.0)
+        ratio_map = np.abs(source_step) / max(baseline_step, 1e-6)
+        ratio = ratio_map[adjacent]
+        if ratio.size:
+            stretch_pcts.append(float(np.mean(ratio < 0.35) * 100.0))
+            fold_pcts.append(float(np.mean(
+                source_step[adjacent] < -0.05 * baseline_step) * 100.0))
+
+    binocular = _exact_binocular_geometry(mapping, shape, coverage_map)
+    binocular_valid = binocular["valid"]
+    binocular_count = int(np.count_nonzero(binocular_valid))
+    possible_count = max(int(binocular["possible_count"]), 1)
+    binocular_output_area = float(np.sum(binocular["support_weight"]))
+    out = {
+        "exact_binocular_support_pct": float(
+            np.clip(binocular_output_area / possible_count * 100.0, 0.0, 100.0)),
+        "exact_binocular_support_count": binocular_count,
+        "exact_mapping_support_pct": min(mapping_support_pcts, default=0.0),
+        "exact_mapping_stretch_pct": max(stretch_pcts, default=0.0),
+        "exact_mapping_fold_pct": max(fold_pcts, default=0.0),
+        "exact_local_polarity_support_pct": 0.0,
+        "exact_local_polarity_support_count": 0,
+    }
+
+    if binocular_count:
+        signed = binocular["disparity"][binocular_valid]
+        area_weight = binocular["weight"][binocular_valid]
+        lo_tail = weighted_pct(signed, area_weight, 1.0 - tail)
+        hi_tail = weighted_pct(signed, area_weight, tail)
+        one_pixel_pct = perceived_disparity_pct(1.0, eye_width, height)
+        disparity_pct = signed * one_pixel_pct
+        out.update({
+            "exact_positive_disparity_pct": perceived_disparity_pct(
+                max(0.0, hi_tail), eye_width, height),
+            "exact_negative_disparity_pct": perceived_disparity_pct(
+                max(0.0, -lo_tail), eye_width, height),
+            "exact_over_3pct_area_pct": float(
+                np.sum(area_weight[np.abs(disparity_pct) > 3.0])
+                / np.sum(area_weight) * 100.0),
+            "exact_symmetry_residual_p95_px": weighted_pct(
+                np.abs(binocular["symmetry"][binocular_valid]), area_weight, 0.95),
+        })
+        out["exact_symmetry_residual_p95_pct"] = perceived_disparity_pct(
+            out["exact_symmetry_residual_p95_px"], eye_width, height)
+
+    # The raw binocular sign above is the standard left-to-right displacement xR-xL. Apollo's
+    # high-is-near forward warp moves the right eye left and the left eye right, so high-near
+    # ordering is positive in -disparity. Keeping that sign conversion explicit prevents the
+    # comfort tails (which are directional xR-xL evidence) from being confused with depth order.
+    if depth is not None:
+        out["exact_polarity_support_pct"] = 0.0
+    if depth is not None and binocular_count >= 64:
+        target_u = np.broadcast_to(
+            binocular["target_u"][None, :], binocular["disparity"].shape)
+        source_v_grid = np.broadcast_to(
+            binocular["source_v"][:, None], binocular["disparity"].shape)
+        sampled_depth = _sample_scalar_uv(depth, target_u, source_v_grid)
+        near_signed = -binocular["disparity"]
+        area_weight_map = binocular["weight"]
+        sampled = sampled_depth[binocular_valid]
+        ordered = near_signed[binocular_valid]
+        sample_weight = area_weight_map[binocular_valid]
+        d20 = weighted_pct(sampled, sample_weight, 0.20)
+        d80 = weighted_pct(sampled, sample_weight, 0.80)
+        far, near = sampled <= d20, sampled >= d80
+        if d80 - d20 >= 0.02 and far.any() and near.any():
+            margin = (weighted_pct(ordered[near], sample_weight[near], 0.50)
+                      - weighted_pct(ordered[far], sample_weight[far], 0.50))
+            out["exact_polarity_ok"] = 100.0 if margin > 0.01 else 0.0
+            out["exact_polarity_support_pct"] = float(
+                (np.sum(sample_weight[far]) + np.sum(sample_weight[near]))
+                / np.sum(sample_weight) * 100.0)
+        else:
+            out["exact_polarity_ok"] = 100.0
+
+        # Local order must agree too: a globally correct median can hide an inverted face,
+        # weapon, or thin subject. Pair tests operate only on mutually visible source samples,
+        # never across a rejected fold/gap or an invalid forward-coverage region.
+        violation = np.zeros(binocular_valid.shape, dtype=bool)
+        local_support = np.zeros(binocular_valid.shape, dtype=bool)
+        comparable_count = 0
+        grid_height, grid_width = binocular_valid.shape
+        for dy, dx in ((0, 1), (0, 4), (1, 0), (4, 0)):
+            if dy >= grid_height or dx >= grid_width:
+                continue
+            a_y = slice(0, grid_height - dy if dy else grid_height)
+            b_y = slice(dy, grid_height)
+            a_x = slice(0, grid_width - dx if dx else grid_width)
+            b_x = slice(dx, grid_width)
+            pair_valid = binocular_valid[a_y, a_x] & binocular_valid[b_y, b_x]
+            depth_delta = sampled_depth[b_y, b_x] - sampled_depth[a_y, a_x]
+            comparable = pair_valid & (np.abs(depth_delta) >= 0.02)
+            ordered_delta = ((near_signed[b_y, b_x] - near_signed[a_y, a_x])
+                             * np.sign(depth_delta))
+            wrong = comparable & (ordered_delta < -0.05)
+            comparable_count += int(np.count_nonzero(comparable))
+            local_support[a_y, a_x] |= comparable
+            local_support[b_y, b_x] |= comparable
+            violation[a_y, a_x] |= wrong
+            violation[b_y, b_x] |= wrong
+        local_support_count = int(np.count_nonzero(local_support))
+        out["exact_local_polarity_support_count"] = local_support_count
+        out["exact_local_polarity_support_pct"] = float(
+            local_support_count / max(binocular_count, 1) * 100.0)
+        if comparable_count:
+            out["exact_local_polarity_component_pct"] = _largest_component_pct(
+                violation, binocular_valid)
+    return out
+
+
+def _horizontal_structure_map(gray, reference_width=3066.0):
+    """Horizontal correspondence evidence at several deployment-normalized scales.
+
+    Stereo disparity is horizontal. A horizontal line can have a strong 2-D gradient while
+    carrying almost no horizontal matching evidence except at its endpoints, so a generic
+    gradient magnitude overstates its visible stereo contribution. This map intentionally uses
+    only left/right contrast and preserves both sides of each transition.
+    """
+    gray = np.asarray(gray, dtype=np.float32)
+    if gray.ndim != 2:
+        raise ValueError(f"visible-disparity source must be scalar HxW, got {gray.shape}")
+    structure = np.zeros(gray.shape, dtype=np.float32)
+    offsets = sorted({
+        1,
+        max(1, round(4.0 * gray.shape[1] / reference_width)),
+        max(1, round(16.0 * gray.shape[1] / reference_width)),
+    })
+    for offset in offsets:
+        if offset >= gray.shape[1]:
+            continue
+        delta = np.abs(gray[:, offset:] - gray[:, :-offset])
+        structure[:, offset:] = np.maximum(structure[:, offset:], delta)
+        structure[:, :-offset] = np.maximum(structure[:, :-offset], delta)
+    return structure
+
+
+def exact_visible_disparity_metrics(mapping, shape, src_gray, tail=0.995, warp_mask=None):
+    """Measure disparity that has independent horizontal image evidence.
+
+    The exact inverse map is authoritative for requested geometry, but geometry in a completely
+    textureless region is not by itself proof of visible stereo volume. Weight its signed
+    disparity by horizontal structure from the original source. Stereo volume is deliberately a
+    style descriptor rather than a reward: a high-tail local-relief score was removed because a
+    single disparity spike could improve it while making the picture worse.
+    """
+    mapping = np.asarray(mapping, dtype=np.float32)
+    source = np.asarray(src_gray, dtype=np.float32)
+    if not np.isfinite(mapping).all():
+        raise ValueError("visible-disparity map contains non-finite coordinates")
+    height = int(shape.get("height", 0))
+    eye_width = int(shape.get("eye_width", 0))
+    source_width = int(shape.get("source_width", 0))
+    source_height = int(shape.get("source_height", 0))
+    scale_x = float(shape.get("content_scale_x", 0.0))
+    scale_y = float(shape.get("content_scale_y", 0.0))
+    if mapping.shape != (height, 2 * eye_width):
+        raise ValueError("visible-disparity map does not match its shape contract")
+    if source.shape != (source_height, source_width):
+        raise ValueError(
+            f"visible-disparity source {source.shape} does not match "
+            f"contract {(source_height, source_width)}")
+    if min(height, eye_width, source_width, source_height, scale_x, scale_y) <= 0:
+        raise ValueError("visible-disparity contract is missing positive geometry")
+
+    coverage_map = None
+    if warp_mask is not None:
+        warp_mask = np.asarray(warp_mask, dtype=np.float32)
+        if warp_mask.shape[:2] != mapping.shape or warp_mask.ndim not in (2, 3):
+            raise ValueError(
+                f"warp mask {warp_mask.shape} does not match warp mapping {mapping.shape}")
+        hole_map = warp_mask if warp_mask.ndim == 2 else warp_mask[..., 0]
+        coverage_map = hole_map < 0.5
+
+    geometry = _exact_binocular_geometry(mapping, shape, coverage_map)
+    valid = geometry["valid"]
+    target_u = np.broadcast_to(geometry["target_u"][None, :], valid.shape)
+    source_v = np.broadcast_to(geometry["source_v"][:, None], valid.shape)
+    sampled_structure = _sample_scalar_uv(
+        _horizontal_structure_map(source), target_u, source_v)
+    # Two code values of source contrast establish evidence. Above eight code values the sample
+    # receives full weight, avoiding domination by compression noise while retaining low-contrast
+    # film edges. Geometry's output-Jacobian weight keeps a stretched rendered area proportional.
+    evidence_weight = np.clip(sampled_structure * 255.0 / 8.0, 0.0, 1.0)
+    supported = valid & (sampled_structure * 255.0 >= 2.0)
+    support_count = int(np.count_nonzero(supported))
+    content_count = max(int(geometry["possible_count"]), 1)
+
+    out = {
+        "exact_visible_support_pct": float(
+            support_count / max(content_count, 1) * 100.0),
+        "exact_visible_support_count": support_count,
+    }
+    # Abstain rather than inventing zero when the image has no usable horizontal evidence.
+    if support_count < 16:
+        return out
+    signed = geometry["disparity"][supported]
+    signed_weights = geometry["weight"][supported] * evidence_weight[supported]
+    lo = weighted_pct(signed, signed_weights, 1.0 - tail)
+    hi = weighted_pct(signed, signed_weights, tail)
+    out.update({
+        "exact_visible_pop_spread_pct": perceived_disparity_pct(
+            hi - lo, eye_width, height),
+    })
+    return out
+
+
+# --------------------------------------------------------- source-relative metrics
 
 def hdilate(mask, px):
     """Dilate a boolean mask horizontally by +/- px columns."""
@@ -253,9 +971,26 @@ def dilate2d(mask, px):
 
 
 def resize_to(gray, w, h):
-    return np.asarray(
-        Image.fromarray((gray * 255).astype(np.uint8)).resize((w, h), Image.BILINEAR),
-        dtype=np.float32) / 255.0
+    """Resize a normalized scalar image without silently quantizing it to eight bits."""
+    image = Image.fromarray(np.asarray(gray, dtype=np.float32), mode="F")
+    return np.asarray(image.resize((w, h), Image.BILINEAR), dtype=np.float32)
+
+
+def resize_mask_conservative(mask, w, h):
+    """Resize boolean evidence without dropping thin support during downscaling.
+
+    Nearest-neighbour downscaling can sample around a one-pixel silhouette and turn a real edge
+    into false-perfect zero support. BOX computes fractional coverage; any covered destination
+    pixel remains evidence. Upscaling stays nearest so the mask is not blurred into new support.
+    """
+    mask = np.asarray(mask, dtype=bool)
+    if mask.shape == (h, w):
+        return mask.copy()
+    shrinking = w <= mask.shape[1] and h <= mask.shape[0]
+    image = Image.fromarray(mask.astype(np.float32), mode="F")
+    resized = np.asarray(image.resize((w, h), Image.BOX if shrinking else Image.NEAREST),
+                         dtype=np.float32)
+    return resized > 0.0
 
 
 # Reference eye width the pixel-unit tuning was done at (full-res movie runs). All band/run/reach
@@ -265,9 +1000,26 @@ REF_EW = 3066.0
 # thresholds alone always find "edges" (even pure noise on flat content); AND-ing this floor makes
 # flat scenes legitimately return zero. Real silhouettes measure ~0.1-0.3/px at depth res.
 MIN_DEPTH_STEP = 0.04
-MIN_DISOCC_FRAC = 0.001  # ratios below 0.1% eye support are statistically meaningless
-HARD_MAX_AGG = {"positive_disparity_pct", "negative_disparity_pct", "vmisalign_pct"}
-HARD_MIN_AGG = {"source_coverage_pct", "image_integrity_pct"}
+HARD_MAX_AGG = {
+    "exact_positive_disparity_pct", "exact_negative_disparity_pct",
+    "vmisalign_p99_pct",
+    "exact_symmetry_residual_p95_pct",
+    "exact_mapping_stretch_pct", "exact_mapping_fold_pct",
+    "warp_cross_row_shear_severity_pct",
+    "experimental_stereo_window_crossed_burden_pct",
+    "interocular_phase_orientation_burden_pct",
+    "interocular_exposure_rivalry_burden_pct",
+    "interocular_color_gain_rivalry_burden_pct",
+    "interocular_phase_orientation_evidence_sufficient",
+    "interocular_exposure_rivalry_evidence_sufficient",
+    "interocular_color_gain_rivalry_evidence_sufficient",
+    "exact_local_polarity_component_pct",
+    "source_coverage_worst_patch_bad_pct", "image_integrity_worst_patch_bad_pct",
+}
+HARD_MIN_AGG = {
+    "exact_binocular_support_pct", "source_coverage_pct", "image_integrity_pct",
+    "exact_polarity_ok", "depth_gt_polarity_ok",
+}
 
 
 def eye_scale(ew):
@@ -283,127 +1035,22 @@ def silhouette_edges(depth, ew, eh, edge_pct=99.3):
     edge_d = gx_d >= thr
     if not edge_d.any():
         return np.zeros((eh, ew), bool)
-    up = Image.fromarray(edge_d.astype(np.uint8) * 255).resize((ew, eh), Image.NEAREST)
-    return np.asarray(up) > 127
-
-
-def silhouette_band(depth, ew, eh, edge_pct=99.3, band_px=28):
-    """Silhouette edge mask plus the narrow disocclusion band beside it and a clean reference
-    region, all at eye res. band_px is in REF_EW pixels and scales with the eye width."""
-    edge = silhouette_edges(depth, ew, eh, edge_pct)
-    s = eye_scale(ew)
-    band_s = max(4, round(band_px * s))
-    excl = max(1, round(2 * s))
-    band = hdilate(edge, band_s) & ~hdilate(edge, excl)  # beside the silhouette, not the edge itself
-    ref = ~hdilate(edge, band_s + max(2, round(8 * s)))  # undisturbed regions away from silhouettes
-    return edge, band, ref
-
-
-def disocclusion_metrics(eye, depth):
-    """From the depth silhouettes, measure the fill quality in the disocclusion band.
-
-    disocc_frac  fraction of eye pixels in a band beside a real silhouette (how much the warp had
-                 to invent). disocc_smear  horizontal-detail deficit there: 1 - |d/dx eye|(band) /
-                 |d/dx eye|(clean). 0 = fill as crisp as clean regions; ->1 = smeared/stretched."""
-    eh, ew = eye.shape
-    _, band, ref = silhouette_band(depth, ew, eh)
-    frac = float(band.mean())
-    if frac < MIN_DISOCC_FRAC:
-        return frac, None
-    gx = np.abs(np.diff(eye, axis=1, prepend=eye[:, :1]))
-    b = float(gx[band].mean())
-    r = float(gx[ref].mean()) if ref.any() else 0.0
-    smear = float(np.clip(1.0 - b / (r + 1e-4), 0.0, 1.0)) if r > 0 else 0.0
-    return frac, smear
-
-
-def hdist_x(src, maxd):
-    """Per-pixel horizontal distance (px) to the nearest True in `src`, capped at maxd."""
-    dist = np.full(src.shape, maxd, np.float32)
-    dist[src] = 0.0
-    acc = src.copy()
-    for s in range(1, maxd + 1):
-        acc = hdilate(acc, 1)
-        hit = acc & (dist == maxd)
-        dist[hit] = s
-    return dist
-
-
-def _herode(a, r):
-    """Horizontal erosion (min over +/-r): a boolean pixel survives iff it is in a True run of
-    length >= 2r+1, so it flags pixels inside a long horizontal run."""
-    return np.stack([np.roll(a, -o, axis=1) for o in range(-r, r + 1)]).min(0)
-
-
-def stretch_band(eye, depth, edge_pct=99.0, gthr=0.02, min_run=20, reach=220):
-    """Large horizontal DISOCCLUSION STRETCH beside silhouettes -- the background rubber-banded to
-    fill the gap the foreground uncovered (eye-asymmetric: left eye smears left, right eye right).
-    Unlike disocc_smear (narrow-band detail deficit) this measures the EXTENT of the big smear.
-
-    Signature: a wide horizontal run of LOW horizontal gradient that still has VERTICAL structure
-    (a horizontally smeared texture = vertical streaks), sitting within `reach` (REF_EW px) of a
-    depth silhouette. A smooth background stretched invisibly (no texture) is correctly not
-    flagged. Window/threshold params scale with the eye width (per-px gradients scale inversely
-    with resolution, so gthr scales by 1/s).
-
-    Returns stretch_area = fraction of the eye that is stretched fill, in per-mille (x1000)."""
-    eh, ew = eye.shape
-    s = eye_scale(ew)
-    gthr_s = min(0.1, gthr / max(s, 1e-3))
-    gx = np.abs(np.diff(eye, axis=1, prepend=eye[:, :1]))
-    gy = np.abs(np.diff(eye, axis=0, prepend=eye[:1, :]))
-    streak = (gx < gthr_s) & (gy > gthr_s)       # smooth in x, structured in y = horizontal smear
-    long = _herode(streak, max(3, round(min_run * s / 2)))  # inside a run >= min_run (scaled)
-    near = hdilate(silhouette_edges(depth, ew, eh, edge_pct), max(20, round(reach * s)))
-    return float((long & near).mean() * 1000.0)
+    return resize_mask_conservative(edge_d, ew, eh)
 
 
 def _hopen(a, r):
     """Horizontal grayscale opening (erode then dilate) with radius r -- removes bright features
     narrower than 2r+1 px, leaving the broad fg/bg. eye - open = a horizontal white top-hat."""
-    def shifts(x): return np.stack([np.roll(x, -o, axis=1) for o in range(-r, r + 1)])
-    return shifts(shifts(a).min(0)).max(0)
+    a = np.asarray(a)
+    if r <= 0:
+        return a.copy()
 
+    def window(x, reducer):
+        h, w = x.shape
+        padded = np.pad(x, ((0, 0), (r, r)), mode="edge")
+        return reducer([padded[:, o:o + w] for o in range(2 * r + 1)])
 
-def silhouette_halo(eye, depth, edge_pct=98.5, ridge_r=2, band_px=6):
-    """Bright thin FRINGE hugging the silhouette -- the 'white line around the nose': the residual
-    bright sliver where the warp/inpaint fill doesn't reach the foreground edge. It is a thin
-    bright RIDGE in the eye (brighter than the fg and bg it separates, only a few px wide), sitting
-    on the depth silhouette. We detect thin bright ridges with a horizontal white top-hat
-    (eye - horizontal-opening, radius ridge_r px) and sample them in the silhouette band. This
-    ignores broad bright regions (top-hat ~0) and clean monotonic edges (no ridge).
-
-    Returns (rim_over_p50, rim_over_p95) in luma/255 -- the white-line severity. ridge_r/band_px
-    are in REF_EW pixels and scale with eye width; a full-res-thin line becomes sub-pixel at low
-    output resolution, where this metric correctly loses sensitivity (use full-res clips for it)."""
-    eh, ew = eye.shape
-    s = eye_scale(ew)
-    edge = silhouette_edges(depth, ew, eh, edge_pct)
-    band = hdilate(edge, max(2, round(band_px * s)))  # the rim sits within a few px of the edge
-    if not band.any():
-        return 0.0, 0.0
-    ridge = np.clip(eye - _hopen(eye, max(1, round(ridge_r * s))), 0.0, None)  # white top-hat
-    vals = ridge[band] * 255.0
-    return float(np.percentile(vals, 50)), float(np.percentile(vals, 95))
-
-
-def edge_accuracy(depth, src_gray, edge_pct=99.3, col_pct=97.0, maxd=24):
-    """Depth-silhouette accuracy vs the true object edge (targets soft/bent/floating silhouettes).
-
-    At depth resolution: distance from each depth silhouette to the nearest strong SOURCE color
-    edge (both horizontal edges, since silhouettes are vertical). Small = the depth model's
-    silhouette sits on the real object boundary; large = it floats off it. Returns p50/p95 in
-    depth-px. Needs the source frame (only computed when --frames is given)."""
-    dh, dw = depth.shape
-    src = resize_to(src_gray, dw, dh)
-    gxd = np.abs(np.diff(depth, axis=1, prepend=depth[:, :1]))
-    de = gxd >= max(float(np.percentile(gxd, edge_pct)), MIN_DEPTH_STEP)
-    if not de.any():
-        return 0.0, 0.0
-    gxs = np.abs(np.diff(src, axis=1, prepend=src[:, :1]))
-    ce = gxs >= np.percentile(gxs, col_pct)
-    dist = hdist_x(ce, maxd)[de]
-    return float(np.percentile(dist, 50)), float(np.percentile(dist, 95))
+    return window(window(a, np.minimum.reduce), np.maximum.reduce)
 
 
 def _shift_x_edge(a, shift):
@@ -463,284 +1110,14 @@ def source_align_map(eye, src_gray, max_shift=None, return_shift=False):
     return best, aligned, radius
 
 
-def source_match_map(eye, src_gray, max_shift=None):
-    """Per-pixel source-relative patch error and horizontal search radius."""
-    best, _, radius = source_align_map(eye, src_gray, max_shift)
-    return best, radius
-
-
-def source_match_residual(eye, src_gray, max_shift=None):
-    """Monocular corruption after allowing intended horizontal stereo displacement.
-
-    For every output patch, find the closest source patch on the same scanline within the normal
-    disparity search radius. A clean shifted eye remains near zero; holes, blur, ringing,
-    duplicated/stretched texture and other content not explained by horizontal parallax rise.
-    Returns p50/p95 in luma/255. Border columns are excluded because no second view exists there.
-    """
-    best, _, radius = source_align_map(eye, src_gray, max_shift)
-    ew = eye.shape[1]
-    valid = best[:, radius:ew - radius] if ew > 2 * radius else best
-    vals = valid * 255.0
-    return float(np.percentile(vals, 50)), float(np.percentile(vals, 95))
-
-
-def _box_mean(a, radius):
-    """Edge-padded square mean with the same shape as the input."""
-    size = radius * 2 + 1
-    padded = np.pad(np.asarray(a, np.float32), radius, mode="edge")
-    integral = np.pad(padded, ((1, 0), (1, 0))).cumsum(0).cumsum(1)
-    return (integral[size:, size:] - integral[:-size, size:]
-            - integral[size:, :-size] + integral[:-size, :-size]) / float(size * size)
-
-
-def _ssim_map(a, b, radius=3):
-    """Local luminance SSIM map for normalized grayscale images."""
-    mu_a, mu_b = _box_mean(a, radius), _box_mean(b, radius)
-    var_a = np.maximum(_box_mean(a * a, radius) - mu_a * mu_a, 0.0)
-    var_b = np.maximum(_box_mean(b * b, radius) - mu_b * mu_b, 0.0)
-    covariance = _box_mean(a * b, radius) - mu_a * mu_b
-    c1, c2 = 0.01 ** 2, 0.03 ** 2
-    return ((2.0 * mu_a * mu_b + c1) * (2.0 * covariance + c2) /
-            ((mu_a * mu_a + mu_b * mu_b + c1) * (var_a + var_b + c2)))
-
-
-def align_stereo_ground_truth(right_eye, ground_truth_right):
-    """Return downscaled eye/reference registration and its one global horizontal shift."""
-    original_h, original_w = right_eye.shape
-    scale = min(1.0, 256.0 / original_w)
-    width = max(8, round(original_w * scale))
-    height = max(8, round(original_h * scale))
-    eye = resize_to(right_eye, width, height) if scale < 1.0 else right_eye
-    reference = (ground_truth_right if ground_truth_right.shape == (height, width)
-                 else resize_to(ground_truth_right, width, height))
-    max_shift = min(width // 3, max(4, round(180 * eye_scale(width))))
-    margin = max(2, round(4 * eye_scale(width)))
-    best_cost, best_shift = float("inf"), 0
-    for shift in range(-max_shift, max_shift + 1):
-        shifted = _shift_x_edge(reference, shift)
-        valid = np.ones_like(eye, dtype=bool)
-        border = abs(shift) + margin
-        if border * 2 >= width:
-            continue
-        valid[:, :border] = False
-        valid[:, width - border:] = False
-        error = np.abs(eye - shifted)[valid]
-        cost = float(np.percentile(error, 75))
-        if cost < best_cost:
-            best_cost, best_shift = cost, shift
-    aligned = _shift_x_edge(reference, best_shift)
-    valid = np.ones_like(eye, dtype=bool)
-    border = abs(best_shift) + margin
-    valid[:, :border] = False
-    valid[:, width - border:] = False
-    return eye, aligned, valid, scale, best_shift
-
-
-def stereo_ground_truth_metrics(right_eye, ground_truth_right):
-    """Reference right-eye fidelity after removing only a global horizontal camera offset.
-
-    Sintel's physical stereo baseline does not equal Apollo's artistic symmetric baseline. A
-    single robust horizontal registration makes the comparison insensitive to that global offset,
-    while local depth errors, vertical displacement, ringing, stretch and wrong revealed content
-    remain measurable. A small subsequent epipolar search is reported separately as a permissive
-    patch-fidelity diagnostic; it is never used for PSNR or SSIM.
-    """
-    eye, aligned, valid, scale, best_shift = align_stereo_ground_truth(
-        right_eye, ground_truth_right)
-    width = eye.shape[1]
-    error = eye[valid] - aligned[valid]
-    mse = float(np.mean(error * error))
-    psnr = float(-10.0 * np.log10(max(mse, 1e-10)))
-    ssim = float(np.mean(_ssim_map(eye, aligned)[valid]))
-
-    local_radius = max(2, round(18 * eye_scale(width)))
-    residual, _, radius = source_align_map(eye, aligned, local_radius)
-    local_valid = valid.copy()
-    local_valid[:, :radius] = False
-    local_valid[:, width - radius:] = False
-    values = residual[local_valid] * 255.0
-    return {
-        "stereo_gt_psnr": psnr,
-        "stereo_gt_ssim": ssim,
-        "stereo_gt_residual_p95": float(np.percentile(values, 95)),
-        "stereo_gt_coverage_pct": float(np.mean(values <= 24.0) * 100.0),
-        "stereo_gt_global_shift_px": float(best_shift / max(scale, 1e-6)),
-    }
-
-
-def _positive_affine_style(depth, disparity, valid, weights):
-    """Robust polarity-preserving disparity = scale * depth + offset fit.
-
-    Artistic zero-plane shifts are intentionally free through the offset, but an inverted depth
-    polarity is never allowed to masquerade as a valid style. A second fit discards the largest
-    correspondence residuals so genuine local sculpting does not dominate the global camera fit.
-    """
-    mask = valid & np.isfinite(depth) & np.isfinite(disparity) & (weights > 0.0)
-    if int(mask.sum()) < 256:
-        return None
-
-    def fit(use):
-        z = depth[use].astype(np.float64)
-        d = disparity[use].astype(np.float64)
-        w = weights[use].astype(np.float64)
-        wsum = float(w.sum())
-        if wsum <= 1e-9:
-            return None
-        zm = float(np.sum(w * z) / wsum)
-        dm = float(np.sum(w * d) / wsum)
-        variance = float(np.sum(w * (z - zm) ** 2))
-        if variance <= 1e-9:
-            return None
-        scale = float(np.sum(w * (z - zm) * (d - dm)) / variance)
-        if scale <= 1e-6:
-            return None
-        return scale, dm - scale * zm
-
-    model = fit(mask)
-    if model is None:
-        return None
-    scale, offset = model
-    residual = np.abs(disparity - (scale * depth + offset))
-    cutoff = max(0.5, float(np.percentile(residual[mask], 90)))
-    refined = fit(mask & (residual <= cutoff))
-    return refined if refined is not None else model
-
-
-def _median3(a):
-    """Edge-padded 3x3 median without a scipy dependency."""
-    padded = np.pad(a, 1, mode="edge")
-    h, w = a.shape
-    return np.median(np.stack([
-        padded[1 + dy:1 + dy + h, 1 + dx:1 + dx + w]
-        for dy in (-1, 0, 1) for dx in (-1, 0, 1)
-    ]), axis=0)
-
-
-def _ddc_iou(depth, disparity, valid, scale, offset):
-    """Depth-disparity consistency IoU adapted from Art3D at a fixed 256px analysis width."""
-    fitted = scale * depth + offset
-    disparity = _median3(disparity)
-    fit_edge = np.abs(np.diff(fitted, axis=1, prepend=fitted[:, :1])) >= 0.25
-    disp_edge = np.abs(np.diff(disparity, axis=1, prepend=disparity[:, :1])) >= 0.25
-    edge_valid = valid.copy()
-    edge_valid[:, 1:] &= valid[:, :-1]
-    fit_edge &= edge_valid
-    disp_edge &= edge_valid
-    union = fit_edge | disp_edge
-    if int(union.sum()) < 16:
-        return None
-    return float(np.sum(fit_edge & disp_edge) / np.sum(union) * 100.0)
-
-
-def artistic_stereo_metrics(src_gray, right_eye, ground_truth_right, depth):
-    """Art3D-inspired global style and structural-consistency diagnostics.
-
-    Both the synthesized and true right eyes are matched back to the mono source on the same
-    scanlines. Apollo moves each eye by half the binocular disparity, so its right-eye shift is
-    doubled before comparison with the physical left-to-right reference. Depth is high-near;
-    negating the selected source shift makes the expected fitted scale positive.
-    """
-    original_h, original_w = right_eye.shape
-    resize_scale = min(1.0, 256.0 / original_w)
-    width = max(32, round(original_w * resize_scale))
-    height = max(32, round(original_h * resize_scale))
-    src = resize_to(src_gray, width, height)
-    eye = resize_to(right_eye, width, height)
-    reference = resize_to(ground_truth_right, width, height)
-    z = resize_to(depth, width, height)
-    radius = min(width // 4, max(8, round(180 * eye_scale(width))))
-    eye_cost, _, eye_shift, _ = source_align_map(
-        eye, src, radius, return_shift=True)
-    ref_cost, _, ref_shift, _ = source_align_map(
-        reference, src, radius, return_shift=True)
-
-    mean = _box_mean(src, 2)
-    texture = np.maximum(_box_mean(src * src, 2) - mean * mean, 0.0)
-    weights = np.sqrt(texture)
-    interior = np.ones_like(src, dtype=bool)
-    interior[:, :radius] = False
-    interior[:, width - radius:] = False
-    eye_valid = interior & (eye_cost <= 24.0 / 255.0) & (texture >= 1e-4)
-    ref_valid = interior & (ref_cost <= 24.0 / 255.0) & (texture >= 1e-4)
-
-    # Right-eye motion is opposite the high-near disparity convention. Apollo is symmetric, so
-    # double its source-to-right displacement to compare full binocular disparity blueprints.
-    eye_disparity = -2.0 * eye_shift
-    ref_disparity = -ref_shift
-    eye_style = _positive_affine_style(z, eye_disparity, eye_valid, weights)
-    ref_style = _positive_affine_style(z, ref_disparity, ref_valid, weights)
-    if eye_style is None or ref_style is None:
-        return {"stereo_art_polarity_ok": 0.0}
-
-    eye_scale_fit, eye_offset = eye_style
-    ref_scale_fit, ref_offset = ref_style
-    out = {
-        "stereo_art_polarity_ok": 100.0,
-        "stereo_art_scale_pct": eye_scale_fit / width * 100.0,
-        "stereo_art_zero_pct": eye_offset / width * 100.0,
-        "stereo_ref_scale_pct": ref_scale_fit / width * 100.0,
-        "stereo_ref_zero_pct": ref_offset / width * 100.0,
-        "stereo_art_scale_error_pct": abs(eye_scale_fit - ref_scale_fit) / width * 100.0,
-        "stereo_art_zero_error_pct": abs(eye_offset - ref_offset) / width * 100.0,
-        "stereo_art_support_pct": min(float(eye_valid.mean()), float(ref_valid.mean())) * 100.0,
-    }
-    ddc = _ddc_iou(z, eye_disparity, eye_valid, eye_scale_fit, eye_offset)
-    ref_ddc = _ddc_iou(z, ref_disparity, ref_valid, ref_scale_fit, ref_offset)
-    if ddc is not None:
-        out["stereo_art_ddc_iou"] = ddc
-    if ref_ddc is not None:
-        out["stereo_ref_ddc_iou"] = ref_ddc
-    return out
-
-
-ARTISTIC_STEREO_FRAME_METRICS = (
-    "stereo_art_scale_pct", "stereo_art_zero_pct",
-    "stereo_ref_scale_pct", "stereo_ref_zero_pct",
-    "stereo_art_scale_error_pct", "stereo_art_zero_error_pct",
-    "stereo_art_support_pct", "stereo_art_ddc_iou", "stereo_ref_ddc_iou",
-)
-
-
-def finalize_artistic_stereo_aggregate(rows, agg):
-    """Publish style summaries only when all attempted frames provide complete evidence.
-
-    Dropping failed fits from an average creates survivorship bias: a treatment could appear to
-    improve merely by making its hardest frame unmeasurable. Keep polarity validity available for
-    diagnosing unsuitable clips, but suppress every derived style summary unless the same complete
-    per-frame contract holds over the whole clip.
-    """
-    attempted = [row for row in rows if "stereo_art_polarity_ok" in row]
-    if not attempted:
-        return
-    complete = [row for row in attempted
-                if row.get("stereo_art_polarity_ok") == 100.0
-                and all(key in row for key in ARTISTIC_STEREO_FRAME_METRICS)]
-    if len(complete) != len(attempted):
-        for key in ARTISTIC_STEREO_FRAME_METRICS:
-            agg.pop(key, None)
-        return
-
-    for key in ("stereo_art_scale_pct", "stereo_art_zero_pct",
-                "stereo_ref_scale_pct", "stereo_ref_zero_pct"):
-        values = [row[key] for row in complete]
-        if len(values) > 1:
-            agg[key + "_std"] = float(np.std(values))
-    if "stereo_art_scale_pct_std" in agg and "stereo_ref_scale_pct_std" in agg:
-        agg["stereo_art_scale_std_error_pct"] = abs(
-            agg["stereo_art_scale_pct_std"] - agg["stereo_ref_scale_pct_std"])
-    if "stereo_art_zero_pct_std" in agg and "stereo_ref_zero_pct_std" in agg:
-        agg["stereo_art_zero_std_error_pct"] = abs(
-            agg["stereo_art_zero_pct_std"] - agg["stereo_ref_zero_pct_std"])
-
-
-def source_relative_metrics(eye, src_gray, depth=None, max_shift=None,
-                            coverage_error=24.0 / 255.0):
-    """Validated source-relative warp integrity and silhouette artifacts for one eye.
+def source_relative_metrics(eye, src_gray, max_shift=None,
+                            coverage_error=4.0 / 255.0):
+    """Fallback source-relative renderer integrity for a dump without an exact map.
 
     Horizontal source search makes intended stereo displacement free. Coverage measures how much
-    of the interior can still be explained by source content. Integrity measures retention of
-    real source texture. Halo and stretch subtract/compare the selected source sample, preventing
-    genuine bright outlines or naturally smooth regions from being labeled warp artifacts.
+    of the interior can still be explained by source content, while integrity measures retention
+    of real source texture. This permissive matcher is diagnostic only; harness evaluation uses
+    ``exact_source_relative_metrics`` and the exact production map.
     """
     original_h, original_w = eye.shape
     scale = min(1.0, 256.0 / original_w)
@@ -770,98 +1147,166 @@ def source_relative_metrics(eye, src_gray, depth=None, max_shift=None,
     texture_src = np.hypot(gx_src, gy_src)
     texture_eye = np.hypot(gx_eye, gy_eye)
     textured = valid & (texture_src >= 4.0 / 255.0)
-    out["image_integrity_pct"] = (float(np.mean(texture_eye[textured] >= 0.25 * texture_src[textured])
-                                        * 100.0) if textured.any() else 100.0)
-
-    if depth is None:
-        return out
-    # Publish support even when this frame has no qualifying source detail.  A measured zero is a
-    # legitimate N/A result; omitting the field entirely is instead an evaluator/metric failure.
-    # Keeping those states distinct lets the gate fail closed without rejecting genuinely smooth
-    # or edge-free scenes.
-    out["source_stretch_support"] = 0.0
-    edge = silhouette_edges(depth, ew, eh, 99.0)
-    s = eye_scale(ew)
-    halo_band = hdilate(edge, max(2, round(6 * s))) & valid
-    if halo_band.any():
-        r = max(1, round(2 * s))
-        eye_ridge = np.clip(eye - _hopen(eye, r), 0.0, None)
-        src_ridge = np.clip(aligned - _hopen(aligned, r), 0.0, None)
-        excess = np.clip(eye_ridge - src_ridge, 0.0, None)[halo_band] * 255.0
-        out["source_halo_p95"] = float(np.percentile(excess, 95))
+    if textured.any():
+        ratio = texture_eye[textured] / np.maximum(texture_src[textured], 1e-6)
+        cosine = ((gx_eye[textured] * gx_src[textured] + gy_eye[textured] * gy_src[textured]) /
+                  np.maximum(texture_eye[textured] * texture_src[textured], 1e-6))
+        out["image_integrity_pct"] = float(
+            np.mean((ratio >= 0.5) & (ratio <= 2.0) & (cosine >= 0.5)) * 100.0)
     else:
-        out["source_halo_p95"] = 0.0
+        out["image_integrity_pct"] = 100.0
 
-    reach = max(12, round(180 * s))
-    near = hdilate(edge, reach) & ~hdilate(edge, max(1, round(2 * s))) & valid
-    source_detail = near & (gx_src >= 4.0 / 255.0)
-    if source_detail.any():
-        collapsed = gx_eye[source_detail] < 0.35 * gx_src[source_detail]
-        out["source_stretch_pct"] = float(np.mean(collapsed) * 100.0)
-        out["source_stretch_support"] = float(np.mean(source_detail) * 100.0)
     return out
 
 
-def warp_hole_metrics(left, right, mask_rgb, src_gray=None,
-                      coverage_error=24.0 / 255.0):
-    """Measure the warp's exact pre-fill holes and whether visible corruption lands there.
+def hdist_x(source, max_distance):
+    """Horizontal distance to the nearest true sample, capped at ``max_distance``."""
+    source = np.asarray(source, dtype=bool)
+    distance = np.full(source.shape, max_distance, np.float32)
+    distance[source] = 0.0
+    grown = source.copy()
+    for radius in range(1, max_distance + 1):
+        grown = hdilate(grown, 1)
+        distance[(distance == max_distance) & grown] = radius
+    return distance
 
-    The harness mask contract is R=disocclusion before the active fill. Hole area itself is
-    context, not quality: stronger valid stereo naturally exposes
-    more background. Source-relative residual restricted to that support measures fill fidelity,
-    while artifact_in_hole_pct answers the prerequisite question for any future inpainter: what
-    fraction of detected corruption is actually inside (or immediately beside) a true hole?
+
+def _local_mean(values, radius):
+    """Edge-padded local mean without an optional image-processing dependency."""
+    values = np.asarray(values, dtype=np.float32)
+    if radius <= 0:
+        return values.copy()
+    size = 2 * radius + 1
+    horizontal = np.zeros(values.shape, dtype=np.float32)
+    padded = np.pad(values, ((0, 0), (radius, radius)), mode="edge")
+    for offset in range(size):
+        horizontal += padded[:, offset:offset + values.shape[1]]
+    vertical = np.zeros(values.shape, dtype=np.float32)
+    padded = np.pad(horizontal, ((radius, radius), (0, 0)), mode="edge")
+    for offset in range(size):
+        vertical += padded[offset:offset + values.shape[0], :]
+    return vertical / float(size * size)
+
+
+def exact_image_integrity_maps(eye, expected, valid, radius=2):
+    """Return localized source-texture support and corruption maps.
+
+    A point-gradient ratio is unstable at anti-aliased edges and sees blur only at the few pixels
+    where a first difference happens to cross the source threshold.  Instead, compare 5x5 local
+    RMS gradient energy and the RMS gradient-vector residual.  The energy ratio catches lost
+    texture and ringing, while the vector residual catches equal-energy phase/orientation errors.
+    Fixed code-value floors keep the meaning independent of unrelated image contrast.
+
+    The helper is the single detector-map contract used by both the scalar evaluator and the
+    actual-output corruption validator.  ``bad`` is meaningful only where ``textured`` is true.
     """
-    mask_rgb = np.asarray(mask_rgb, dtype=np.float32)
-    if mask_rgb.ndim != 3 or mask_rgb.shape[2] < 1:
-        raise ValueError("warp mask must be an RGB image")
-    mask_eyes = np.split(mask_rgb, 2, axis=1)
-    eyes = (left, right)
-    hole_pcts = []
-    hole_residuals = []
-    bad_hole = bad_hole_total = 0
-    artifact_in_hole = artifact_total = 0
+    eye = np.asarray(eye, dtype=np.float32)
+    expected = np.asarray(expected, dtype=np.float32)
+    valid = np.asarray(valid, dtype=bool)
+    if eye.shape != expected.shape or eye.shape != valid.shape:
+        raise ValueError(
+            f"integrity evidence geometry differs: eye={eye.shape}, "
+            f"expected={expected.shape}, valid={valid.shape}")
+    if not (np.isfinite(eye).all() and np.isfinite(expected).all()):
+        raise ValueError("integrity evidence contains non-finite values")
+    if radius < 1:
+        raise ValueError("integrity detector radius must be positive")
 
-    for eye, mask in zip(eyes, mask_eyes):
-        scale = min(1.0, 256.0 / eye.shape[1])
-        ew = max(1, round(eye.shape[1] * scale))
-        eh = max(1, round(eye.shape[0] * scale))
-        eye_small = resize_to(eye, ew, eh) if scale < 1.0 else eye
-        hole = np.asarray(
-            Image.fromarray((mask[..., 0] * 255.0).astype(np.uint8), mode="L")
-            .resize((ew, eh), Image.NEAREST), dtype=np.uint8) >= 128
-        if src_gray is not None:
-            best, _, radius = source_align_map(eye_small, src_gray)
-        else:
-            best, radius = None, max(1, round(40 * eye_scale(ew)))
-        valid = np.ones((eh, ew), dtype=bool)
-        if ew > 2 * radius:
-            valid[:, :radius] = False
-            valid[:, ew - radius:] = False
-        hole_pcts.append(float(np.mean(hole[valid]) * 100.0))
-        if src_gray is None:
-            continue
-        supported_hole = hole & valid
-        if supported_hole.any():
-            values = best[supported_hole] * 255.0
-            hole_residuals.extend(values.tolist())
-            bad_hole += int(np.count_nonzero(values > coverage_error * 255.0))
-            bad_hole_total += int(values.size)
-        artifact = valid & (best > coverage_error)
-        if artifact.any():
-            # One diagnostic pixel of tolerance covers mask/output rasterization boundaries.
-            near_hole = dilate2d(hole, 1)
-            artifact_in_hole += int(np.count_nonzero(artifact & near_hole))
-            artifact_total += int(np.count_nonzero(artifact))
+    gx_eye = np.diff(eye, axis=1, prepend=eye[:, :1])
+    gy_eye = np.diff(eye, axis=0, prepend=eye[:1, :])
+    gx_expected = np.diff(expected, axis=1, prepend=expected[:, :1])
+    gy_expected = np.diff(expected, axis=0, prepend=expected[:1, :])
 
-    out = {"warp_hole_pct": max(hole_pcts, default=0.0)}
-    if src_gray is not None:
-        out["hole_source_residual_p95"] = (
-            float(np.percentile(hole_residuals, 95)) if hole_residuals else 0.0)
-        out["hole_bad_fill_pct"] = (
-            100.0 * bad_hole / bad_hole_total if bad_hole_total else 0.0)
-        out["artifact_in_hole_pct"] = (
-            100.0 * artifact_in_hole / artifact_total if artifact_total else 0.0)
+    expected_energy = np.sqrt(np.maximum(
+        _local_mean(gx_expected * gx_expected + gy_expected * gy_expected, radius), 0.0))
+    eye_energy = np.sqrt(np.maximum(
+        _local_mean(gx_eye * gx_eye + gy_eye * gy_eye, radius), 0.0))
+    vector_error = np.sqrt(np.maximum(_local_mean(
+        (gx_eye - gx_expected) ** 2 + (gy_eye - gy_expected) ** 2, radius), 0.0))
+
+    # A local window crossing a bar/map hole has no exact reference contract. Exclude it instead
+    # of allowing invalid neighbours to create artificial edge energy at the support boundary.
+    interior = _local_mean(valid.astype(np.float32), radius) >= 1.0 - 1e-6
+
+    texture_floor = 3.0 / 255.0
+    textured = interior & (expected_energy >= texture_floor)
+    energy_ratio = eye_energy / np.maximum(expected_energy, 1e-6)
+    relative_vector_error = vector_error / np.maximum(expected_energy, texture_floor)
+    bad = textured & (
+        (energy_ratio < 0.78) | (energy_ratio > 1.28) | (relative_vector_error > 0.25))
+    return bad, textured
+
+
+def worst_local_bad_fraction(bad, support, radius=None, min_support_fraction=0.20):
+    """Worst supported local defect fraction on a resolution-scaled visual patch."""
+    bad = np.asarray(bad, dtype=bool)
+    support = np.asarray(support, dtype=bool)
+    if bad.shape != support.shape or bad.ndim != 2:
+        raise ValueError("localized defect/support maps must be matching HxW arrays")
+    if radius is None:
+        radius = max(3, int(round(min(bad.shape) / 100.0)))
+    support_fraction = _local_mean(support.astype(np.float32), radius)
+    bad_fraction = _local_mean((bad & support).astype(np.float32), radius)
+    eligible = support_fraction >= float(min_support_fraction)
+    if not np.any(eligible):
+        return None
+    local_fraction = np.divide(
+        bad_fraction, support_fraction, out=np.zeros_like(bad_fraction),
+        where=support_fraction > 1e-6)
+    return float(np.max(local_fraction[eligible]) * 100.0)
+
+
+def exact_source_relative_metrics(eye, src_gray, sampled_source_u, shape,
+                                  coverage_error=4.0 / 255.0, eye_rgb=None, src_rgb=None,
+                                  hdr_scale=None):
+    """Source fidelity using the exact source coordinate consumed by the production shader.
+
+    The former matcher selected whichever nearby source patch best explained each candidate
+    output. That was useful as a permissive smoke test, but unsafe as a label: a distorted warp
+    could change the selected correspondence or erase its own support. This path reconstructs the
+    source sample from the harness sidecar, evaluates at native output resolution, and exposes
+    attempted support explicitly. Baked source rims/specular edges cancel because they are present
+    in both the source sample and the output; only new bright/dark residuals remain.
+    """
+    eye = np.asarray(eye, dtype=np.float32)
+    if (eye_rgb is None) != (src_rgb is None):
+        raise ValueError("exact source RGB evidence requires both output and source RGB")
+    expected, expected_rgb, valid = _exact_expected_source_luma(
+        eye.shape, src_gray, sampled_source_u, shape,
+        src_rgb=src_rgb, hdr_scale=hdr_scale)
+    if eye_rgb is not None:
+        eye_rgb = np.asarray(eye_rgb, dtype=np.float32)
+        if eye_rgb.shape != eye.shape + (3,):
+            raise ValueError(f"output RGB {eye_rgb.shape} does not match luma {eye.shape}")
+        eye = rgb_luma(eye_rgb)
+    residual = np.abs(eye - expected)
+    values = residual[valid] * 255.0
+    coverage_bad = valid & (residual > coverage_error)
+    out = {
+        "source_residual_p50": float(np.percentile(values, 50)),
+        "source_residual_p95": float(np.percentile(values, 95)),
+        "source_coverage_pct": float(np.mean(values <= coverage_error * 255.0) * 100.0),
+        "source_fidelity_support_pct": float(np.mean(valid) * 100.0),
+    }
+    local_coverage = worst_local_bad_fraction(
+        coverage_bad, valid, min_support_fraction=0.80)
+    if local_coverage is not None:
+        out["source_coverage_worst_patch_bad_pct"] = local_coverage
+    if expected_rgb is not None:
+        rgb_delta = np.abs(eye_rgb - expected_rgb)
+        color_error = np.max(rgb_delta, axis=-1)[valid] * 255.0
+        out["source_color_residual_p95"] = float(np.percentile(color_error, 95))
+
+    integrity_bad, textured = exact_image_integrity_maps(eye, expected, valid)
+    out["image_integrity_support"] = float(np.mean(textured) * 100.0)
+    if textured.any():
+        out["image_integrity_pct"] = float(
+            np.mean(~integrity_bad[textured]) * 100.0)
+        local_integrity = worst_local_bad_fraction(
+            integrity_bad, textured, min_support_fraction=0.20)
+        if local_integrity is not None:
+            out["image_integrity_worst_patch_bad_pct"] = local_integrity
+
     return out
 
 
@@ -871,7 +1316,7 @@ def resize_depth(depth, w, h):
     return np.asarray(im.resize((w, h), Image.BILINEAR), dtype=np.float32)
 
 
-def resize_metric_depth(depth, w, h):
+def resize_metric_depth(depth, w, h, validity=None):
     """Resize metric depth without bleeding invalid zero/NaN pixels into valid inverse depth.
 
     Bilinear interpolation of a valid depth beside zero creates a tiny positive value. Inverting
@@ -881,7 +1326,29 @@ def resize_metric_depth(depth, w, h):
     """
     depth = np.asarray(depth, dtype=np.float32)
     valid = np.isfinite(depth) & (depth > 1e-6)
+    if validity is not None:
+        validity = np.asarray(validity, dtype=bool)
+        if validity.shape != depth.shape:
+            raise ValueError(
+                f"GT validity {validity.shape} does not match depth {depth.shape}")
+        valid &= validity
     values = resize_depth(np.where(valid, depth, 0.0), w, h)
+    weights = resize_depth(valid.astype(np.float32), w, h)
+    resized = np.divide(values, weights, out=np.zeros_like(values), where=weights > 1e-6)
+    return resized, weights >= 0.999
+
+
+def resize_disparity_ground_truth(disparity, w, h, validity=None):
+    """Resize disparity while keeping invalid/occluded samples out of interpolation."""
+    disparity = np.asarray(disparity, dtype=np.float32)
+    valid = np.isfinite(disparity) & (disparity >= 0.0)
+    if validity is not None:
+        validity = np.asarray(validity, dtype=bool)
+        if validity.shape != disparity.shape:
+            raise ValueError(
+                f"GT validity {validity.shape} does not match disparity {disparity.shape}")
+        valid &= validity
+    values = resize_depth(np.where(valid, disparity, 0.0), w, h)
     weights = resize_depth(valid.astype(np.float32), w, h)
     resized = np.divide(values, weights, out=np.zeros_like(values), where=weights > 1e-6)
     return resized, weights >= 0.999
@@ -899,53 +1366,89 @@ def align_relative_depth(prediction, target, valid):
     t5, t95 = np.percentile(tv, (5, 95))
     if t95 - t5 < 1e-4:
         return pred + float(np.median(tv) - np.median(pv)), 1.0
-    design = np.column_stack((pv, np.ones_like(pv)))
-    scale, shift = np.linalg.lstsq(design, tv, rcond=None)[0]
+
+    def weighted_fit(weights):
+        weights = np.asarray(weights, np.float64)
+        pred64, target64 = pv.astype(np.float64), tv.astype(np.float64)
+        weight_sum = float(weights.sum())
+        if weight_sum <= 1e-9:
+            return None
+        pred_mean = float(np.sum(weights * pred64) / weight_sum)
+        target_mean = float(np.sum(weights * target64) / weight_sum)
+        variance = float(np.sum(weights * (pred64 - pred_mean) ** 2))
+        if variance <= 1e-12:
+            return 0.0, target_mean
+        fitted_scale = float(np.sum(
+            weights * (pred64 - pred_mean) * (target64 - target_mean)) / variance)
+        return fitted_scale, target_mean - fitted_scale * pred_mean
+
+    scale, shift = weighted_fit(np.ones_like(pv, dtype=np.float64))
     if scale <= 0.0:
         return np.full_like(pred, float(np.median(tv))), float(scale)
+    # Robust positive IRLS: isolated invalid/reflective GT values must not rotate the global
+    # affine fit and turn a good relative-depth map into a bad training/evaluation target.
+    for _ in range(4):
+        residual = tv.astype(np.float64) - (scale * pv.astype(np.float64) + shift)
+        center = float(np.median(residual))
+        sigma = 1.4826 * float(np.median(np.abs(residual - center))) + 1e-9
+        cutoff = 1.5 * sigma
+        weights = np.minimum(1.0, cutoff / np.maximum(np.abs(residual - center), 1e-12))
+        fitted = weighted_fit(weights)
+        if fitted is None or fitted[0] <= 0.0:
+            break
+        scale, shift = fitted
     return pred * float(scale) + float(shift), float(scale)
 
 
-def prepare_depth_ground_truth(prediction, ground_truth, kind="disparity"):
-    """Return polarity-preserving aligned prediction, target, validity, and robust GT range."""
+def prepare_depth_ground_truth(prediction, ground_truth, kind="disparity", validity=None):
+    """Return polarity-preserving alignment, validity, range, normalization, and fitted scale."""
     pred = np.asarray(prediction, np.float32)
     if kind in ("metric", "depth"):
-        gt, valid = resize_metric_depth(ground_truth, pred.shape[1], pred.shape[0])
+        gt, valid = resize_metric_depth(
+            ground_truth, pred.shape[1], pred.shape[0], validity)
     else:
-        gt = resize_depth(ground_truth, pred.shape[1], pred.shape[0])
-        valid = np.isfinite(gt)
+        gt, valid = resize_disparity_ground_truth(
+            ground_truth, pred.shape[1], pred.shape[0], validity)
     if kind in ("metric", "depth"):
         target = np.zeros_like(gt)
         target[valid] = 1.0 / gt[valid]
     else:
         valid &= gt >= 0.0
         target = gt
-    if valid.sum() < 64:
+    if valid.sum() < max(64, int(np.ceil(pred.size * 0.05))):
         return None
 
     tv = target[valid]
     t5, t95 = np.percentile(tv, (5, 95))
     trange = float(t95 - t5)
     if trange < 1e-4:
-        aligned, _ = align_relative_depth(pred, target, valid)
+        aligned, scale = align_relative_depth(pred, target, valid)
         norm = 1.0
     else:
-        aligned, _ = align_relative_depth(pred, target, valid)
+        aligned, scale = align_relative_depth(pred, target, valid)
         norm = trange
-    return aligned, target, valid, trange, norm
+    return aligned, target, valid, trange, norm, scale
 
 
-def depth_ground_truth_edges(aligned, target, valid, trange):
-    """Return prediction and GT boundary masks under the shared one-pixel edge contract."""
-    gx_t = np.abs(np.diff(target, axis=1, prepend=target[:, :1]))
-    gy_t = np.abs(np.diff(target, axis=0, prepend=target[:1, :]))
-    gx_p = np.abs(np.diff(aligned, axis=1, prepend=aligned[:, :1]))
-    gy_p = np.abs(np.diff(aligned, axis=0, prepend=aligned[:1, :]))
+def depth_ground_truth_edges(aligned, target, valid, trange, threshold_factor=0.08):
+    """Return range-normalized prediction and GT boundaries.
+
+    Metric-depth inputs are converted to inverse metres, whose absolute scale varies drastically
+    with scene distance. Normalize both fields by the authenticated robust GT range before taking
+    gradients so the edge contract is dimensionless instead of silently erasing distant edges.
+    """
+    edge_scale = max(float(trange), 1e-6)
+    normalized_target = target / edge_scale
+    normalized_aligned = aligned / edge_scale
+    gx_t = np.abs(np.diff(normalized_target, axis=1, prepend=normalized_target[:, :1]))
+    gy_t = np.abs(np.diff(normalized_target, axis=0, prepend=normalized_target[:1, :]))
+    gx_p = np.abs(np.diff(normalized_aligned, axis=1, prepend=normalized_aligned[:, :1]))
+    gy_p = np.abs(np.diff(normalized_aligned, axis=0, prepend=normalized_aligned[:1, :]))
     # A gradient is valid only when both samples used to form it are valid. Otherwise the edge of
     # a missing/zero metric-depth region is incorrectly scored as scene geometry.
     valid_x = valid & np.concatenate((valid[:, :1], valid[:, :-1]), axis=1)
     valid_y = valid & np.concatenate((valid[:1, :], valid[:-1, :]), axis=0)
-    edge_threshold = max(0.02, trange * 0.08)
+    edge_threshold = float(threshold_factor)
     gt_edge = ((valid_x & (gx_t >= edge_threshold)) |
                (valid_y & (gy_t >= edge_threshold)))
     pred_edge = ((valid_x & (gx_p >= edge_threshold)) |
@@ -953,50 +1456,68 @@ def depth_ground_truth_edges(aligned, target, valid, trange):
     return pred_edge, gt_edge
 
 
-def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity"):
-    """Scale/shift-invariant relative-depth accuracy plus boundary accuracy.
+def _boundary_f1(pred_edge, gt_edge, tolerance):
+    if not gt_edge.any():
+        return 100.0 if not pred_edge.any() else 0.0
+    if not pred_edge.any():
+        return 0.0
+    gt_near = dilate2d(gt_edge, tolerance)
+    pred_near = dilate2d(pred_edge, tolerance)
+    precision = float(np.mean(gt_near[pred_edge]))
+    recall = float(np.mean(pred_near[gt_edge]))
+    return 200.0 * precision * recall / max(precision + recall, 1e-9)
+
+
+def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity", validity=None):
+    """Positive-affine-aligned relative-depth accuracy plus boundary accuracy.
 
     Monocular models predict relative disparity, so comparing raw values to metric depth is not
     meaningful. Metric depth is converted to inverse depth, then prediction is affine-aligned on
     valid pixels. Constant-GT scenes use shift-only alignment so hallucinated structure cannot be
     fitted away. The RMSE is normalized by GT robust range (or full normalized range for flat GT).
     """
-    prepared = prepare_depth_ground_truth(prediction, ground_truth, kind)
+    prepared = prepare_depth_ground_truth(prediction, ground_truth, kind, validity)
     if prepared is None:
         return None
-    aligned, target, valid, trange, norm = prepared
+    aligned, target, valid, trange, norm, scale = prepared
     tv = target[valid]
     error = aligned[valid] - tv
-    si_rmse = float(np.sqrt(np.mean(error * error)) / max(norm, 1e-6) * 100.0)
-    pred_edge, gt_edge = depth_ground_truth_edges(aligned, target, valid, trange)
-    if not gt_edge.any():
-        edge_f1 = 100.0 if not pred_edge.any() else 0.0
-    elif not pred_edge.any():
-        edge_f1 = 0.0
-    else:
-        gt_near = dilate2d(gt_edge, 1)
-        pred_near = dilate2d(pred_edge, 1)
-        precision = float(np.mean(gt_near[pred_edge]))
-        recall = float(np.mean(pred_near[gt_edge]))
-        edge_f1 = 200.0 * precision * recall / max(precision + recall, 1e-9)
-    return {"depth_gt_si_rmse": si_rmse, "depth_gt_edge_f1": edge_f1}
+    affine_nrmse_pct = float(
+        np.sqrt(np.mean(error * error)) / max(norm, 1e-6) * 100.0)
+    # Keep the strict one-pixel boundary contract as the sole compact edge score. Averaging it
+    # with two/coarse three-pixel tolerances lets a broad, misplaced boundary buy back a real 1 px
+    # regression—the opposite of the thin-silhouette behavior this evaluator must protect.
+    pred_edge, gt_edge = depth_ground_truth_edges(
+        aligned, target, valid, trange, threshold_factor=0.04)
+    strict_edge_f1 = _boundary_f1(pred_edge, gt_edge, tolerance=1)
+    return {
+        "depth_gt_affine_nrmse_pct": affine_nrmse_pct,
+        "depth_gt_valid_pct": float(np.mean(valid) * 100.0),
+        # A negative affine fit is a polarity inversion, not a monocular scale ambiguity.  The
+        # alignment already collapses it to a constant so accuracy metrics fail too; retain this
+        # explicit, non-cancellable signal for audits and hard qualification.
+        "depth_gt_polarity_ok": 100.0 if scale > 0.0 else 0.0,
+        "depth_gt_edge_f1": strict_edge_f1,
+    }
 
 
 def depth_ground_truth_ghost(prediction, ground_truth, previous_ground_truth,
-                             kind="disparity"):
+                             kind="disparity", validity=None,
+                             previous_validity=None):
     """Prediction support on previous-only GT edges, a direct stale/double-edge diagnostic.
 
     A double image can match the current boundary well enough that the lag-F1 advantage remains
     zero. This metric instead isolates GT edges that moved away since the previous frame and asks
     how often the prediction still contains a boundary there. Static/shared edges are excluded.
     """
-    current = prepare_depth_ground_truth(prediction, ground_truth, kind)
-    previous = prepare_depth_ground_truth(prediction, previous_ground_truth, kind)
+    current = prepare_depth_ground_truth(prediction, ground_truth, kind, validity)
+    previous = prepare_depth_ground_truth(
+        prediction, previous_ground_truth, kind, previous_validity)
     if current is None or previous is None:
         return None
-    _, target, valid, trange, _ = current
+    _, target, valid, trange, _, _ = current
     _, current_edge = depth_ground_truth_edges(target, target, valid, trange)
-    _, prev_target, prev_valid, prev_range, _ = previous
+    _, prev_target, prev_valid, prev_range, _, _ = previous
     _, previous_edge = depth_ground_truth_edges(
         prev_target, prev_target, prev_valid, prev_range)
     pred = np.asarray(prediction, np.float32)
@@ -1017,15 +1538,18 @@ def depth_ground_truth_ghost(prediction, ground_truth, previous_ground_truth,
     return float(np.mean(dilate2d(pred_edge, 1)[previous_only]) * 100.0)
 
 
-def depth_ground_truth_lag(prediction, ground_truth, previous_ground_truth, kind="disparity"):
+def depth_ground_truth_lag(prediction, ground_truth, previous_ground_truth,
+                           kind="disparity", validity=None,
+                           previous_validity=None):
     """Positive boundary-F1 advantage for the previous GT frame over the current GT frame.
 
     Current depth should match current-frame geometry at least as well as the previous frame.
     Held depth on moving content instead matches the previous silhouette better. Clamp at zero
     so unrelated prediction noise cannot cancel real lag in other frames.
     """
-    current = depth_ground_truth_metrics(prediction, ground_truth, kind)
-    previous = depth_ground_truth_metrics(prediction, previous_ground_truth, kind)
+    current = depth_ground_truth_metrics(prediction, ground_truth, kind, validity)
+    previous = depth_ground_truth_metrics(
+        prediction, previous_ground_truth, kind, previous_validity)
     if current is None or previous is None:
         return None
     return max(0.0, previous["depth_gt_edge_f1"] - current["depth_gt_edge_f1"])
@@ -1044,18 +1568,21 @@ def static_region_jitter(left, right, prev_left, prev_right, src, prev_src,
                          motion_threshold=3.0 / 255.0, min_support=TEMPORAL_MIN_SUPPORT):
     """Worst-eye temporal change over source regions that did not move.
 
-    Source-motion pixels are horizontally dilated by the normal disparity radius before exclusion,
-    so an output sample that legitimately originated from nearby moving content cannot be mistaken
-    for warp jitter. Returns (p95 luma/255, stable support fraction), or (None, support) when too
-    little static evidence remains (camera motion / scene cut).
+    Source-motion pixels are horizontally dilated by the normal disparity radius before exclusion.
+    Inside retained regions, subtract the *signed* matched mono-source code-value change before
+    taking the residual magnitude. This removes film grain, codec noise, and tiny exposure drift
+    that the output reproduces, without allowing an equal-and-opposite output change to cancel.
+    Returns (p95 luma/255, stable support fraction), or (None, support) when too little static
+    evidence remains (camera motion / scene cut).
     """
     eh, ew = left.shape
     stable = static_region_mask(src, prev_src, ew, eh, motion_threshold)
     support = float(stable.mean())
     if support < min_support:
         return None, support
-    left_delta = np.abs(left - prev_left)[stable] * 255.0
-    right_delta = np.abs(right - prev_right)[stable] * 255.0
+    source_delta = resize_to(src, ew, eh) - resize_to(prev_src, ew, eh)
+    left_delta = np.abs((left - prev_left) - source_delta)[stable] * 255.0
+    right_delta = np.abs((right - prev_right) - source_delta)[stable] * 255.0
     return max(float(np.percentile(left_delta, 95)),
                float(np.percentile(right_delta, 95))), support
 
@@ -1209,15 +1736,20 @@ def flow_temporal_metrics(left, right, prev_left, prev_right, src, prev_src,
     prev_l_warp, l_valid = warp_previous_with_flow(old_l, u, v)
     prev_r_warp, r_valid = warp_previous_with_flow(old_r, u, v)
     mask = reliable & l_valid & r_valid
-    lerr = np.abs(cur_l - prev_l_warp)[mask] * 255.0
-    rerr = np.abs(cur_r - prev_r_warp)[mask] * 255.0
+    # Flow interpolation/illumination change is already visible in the registered mono source and
+    # must not be labeled as a stereo-pipeline defect. Subtract that change while it is still
+    # signed, then take the residual magnitude. Subtracting magnitudes would incorrectly score an
+    # equal-and-opposite output change as perfect temporal agreement.
+    source_delta = now_src - warped_src
+    lerr = np.abs((cur_l - prev_l_warp) - source_delta)[mask] * 255.0
+    rerr = np.abs((cur_r - prev_r_warp) - source_delta)[mask] * 255.0
     output_p95 = max(float(np.percentile(lerr, 95)), float(np.percentile(rerr, 95)))
 
     depth_p95 = None
     if depth is not None and prev_depth is not None:
         cur_d = resize_depth(depth, vw, vh)
         old_d = resize_depth(prev_depth, vw, vh)
-        prev_d_warp, d_valid = warp_previous_with_flow(old_d, u, v)
+        prev_d_warp, d_valid = warp_previous_nearest_with_flow(old_d, u, v)
         dmask = reliable & d_valid
         if float(dmask.mean()) >= min_support:
             depth_p95 = float(np.percentile(np.abs(cur_d - prev_d_warp)[dmask], 95) * 255.0)
@@ -1228,48 +1760,23 @@ def flow_temporal_metrics(left, right, prev_left, prev_right, src, prev_src,
 
 def measure(dump_dir):
     sbs_p = os.path.join(dump_dir, "sbs.png")
-    depth_p = os.path.join(dump_dir, "depth.png")
     source_p = os.path.join(dump_dir, "source.png")
     if not os.path.exists(sbs_p):
         return None
     sbs = load_gray(sbs_p)
     left, right = split_eyes(sbs)
-    ew = left.shape[1]
-    eh = left.shape[0]
 
     out = {}
     field = disparity_field(left, right)
     if field is not None:
-        dxs, dys, wts = field
-        adx = np.abs(dxs)
-        out["pop_px_p50"] = weighted_pct(adx, wts, 0.50)
-        out["pop_px_p95"] = weighted_pct(adx, wts, 0.95)
-        out["pop_pct_p50"] = perceived_disparity_pct(out["pop_px_p50"], ew, eh)
-        out["pop_spread_px"] = pop_spread(dxs, wts)
-        out["pop_spread_pct"] = perceived_disparity_pct(out["pop_spread_px"], ew, eh)
-        out["vmisalign_px"] = float(np.median(np.abs(dys)))
-        out["vmisalign_pct"] = out["vmisalign_px"] / left.shape[0] * 100.0
-        out["positive_disparity_pct"], out["negative_disparity_pct"] = comfort_disparity(
-            dxs, wts, ew, eh)
-        out["tiles"] = int(len(dxs))
+        _, dys, weights = field
+        out["vmisalign_p99_px"] = weighted_pct(
+            np.abs(dys), weights, VERTICAL_MISALIGNMENT_QUANTILE)
+        out["vmisalign_p99_pct"] = out["vmisalign_p99_px"] / left.shape[0] * 100.0
 
-    if os.path.exists(depth_p):
-        d = load_depth(depth_p)
-        out["depth_spread"] = float(np.percentile(d, 95) - np.percentile(d, 5))
-        out["disocc_frac"], smear = disocclusion_metrics(left, d)
-        if smear is not None:
-            out["disocc_smear"] = smear
-        out["stretch_area"] = stretch_band(left, d)
-        out["rim_over_p50"], out["rim_over_p95"] = silhouette_halo(left, d)
     if os.path.exists(source_p):
         src = load_gray(source_p)
-        d = load_depth(depth_p) if os.path.exists(depth_p) else None
-        lm, rm = source_relative_metrics(left, src, d), source_relative_metrics(right, src, d)
-        for key in ("source_residual_p50", "source_residual_p95", "source_halo_p95",
-                    "source_stretch_pct"):
-            vals = [m[key] for m in (lm, rm) if key in m]
-            if vals:
-                out[key] = max(vals)
+        lm, rm = source_relative_metrics(left, src), source_relative_metrics(right, src)
         for key in ("source_coverage_pct", "image_integrity_pct"):
             out[key] = min(lm[key], rm[key])
 
@@ -1286,72 +1793,241 @@ def measure(dump_dir):
 
 
 def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_kind="disparity",
-                      warp_mask=None):
-    """Spatial metrics for one harness SBS frame. depth (0-1 array) adds disocclusion; the source
-    frame (src_gray, 0-1) adds depth-silhouette edge accuracy."""
-    sbs = load_gray(path)
+                      gt_depth_valid=None,
+                      warp_mask=None, warp_mapping=None, warp_mapping_shape=None,
+                      src_rgb=None, hdr_scale=None):
+    """Spatial metrics for one harness SBS frame and its authenticated sidecars."""
+    sbs_rgb = load_rgb(path)
+    sbs = rgb_luma(sbs_rgb)
     left, right = split_eyes(sbs)
-    ew = left.shape[1]
-    eh = left.shape[0]
+    left_rgb, right_rgb = split_eyes(sbs_rgb)
+    map_left = map_right = None
     out = {"_dump": os.path.basename(path)}
-    field = disparity_field(left, right)
-    if field is not None:
-        dxs, dys, wts = field
-        adx = np.abs(dxs)
-        out["pop_px_p50"] = weighted_pct(adx, wts, 0.50)
-        out["pop_px_p95"] = weighted_pct(adx, wts, 0.95)
-        out["pop_pct_p50"] = perceived_disparity_pct(out["pop_px_p50"], ew, eh)
-        out["pop_spread_px"] = pop_spread(dxs, wts)
-        out["pop_spread_pct"] = perceived_disparity_pct(out["pop_spread_px"], ew, eh)
-        out["vmisalign_px"] = float(np.median(np.abs(dys)))
-        out["vmisalign_pct"] = out["vmisalign_px"] / left.shape[0] * 100.0
-        out["positive_disparity_pct"], out["negative_disparity_pct"] = comfort_disparity(
-            dxs, wts, ew, eh)
+    # Ad-hoc dumps do not have a production inverse-warp sidecar, so retain the permissive
+    # cross-eye matcher there. Harness eval replaces it below with exact localized evidence.
+    if warp_mapping is None:
+        field = disparity_field(left, right)
+        if field is not None:
+            _, dys, weights = field
+            out["vmisalign_p99_px"] = weighted_pct(
+                np.abs(dys), weights, VERTICAL_MISALIGNMENT_QUANTILE)
+            out["vmisalign_p99_pct"] = (
+                out["vmisalign_p99_px"] / left.shape[0] * 100.0)
     if depth is not None:
-        out["depth_spread"] = float(np.percentile(depth, 95) - np.percentile(depth, 5))
-        out["disocc_frac"], smear = disocclusion_metrics(left, depth)
-        if smear is not None:
-            out["disocc_smear"] = smear
-        out["stretch_area"] = stretch_band(left, depth)
-        out["rim_over_p50"], out["rim_over_p95"] = silhouette_halo(left, depth)
-        if src_gray is not None:
-            out["edge_acc_p50"], out["edge_acc_p95"] = edge_accuracy(depth, src_gray)
         if gt_depth is not None:
-            gt_metrics = depth_ground_truth_metrics(depth, gt_depth, gt_depth_kind)
+            gt_metrics = depth_ground_truth_metrics(
+                depth, gt_depth, gt_depth_kind, gt_depth_valid)
             if gt_metrics:
                 out.update(gt_metrics)
     if src_gray is not None:
-        lm = source_relative_metrics(left, src_gray, depth)
-        rm = source_relative_metrics(right, src_gray, depth)
-        for key in ("source_residual_p50", "source_residual_p95", "source_halo_p95",
-                    "source_stretch_pct"):
+        if warp_mapping is not None:
+            if warp_mapping_shape is None:
+                raise ValueError("exact warp mapping is missing its shape contract")
+            if warp_mapping.shape != sbs.shape:
+                raise ValueError(
+                    f"warp map {warp_mapping.shape} does not match SBS {sbs.shape}")
+            map_left, map_right = split_eyes(warp_mapping)
+            lm = exact_source_relative_metrics(
+                left, src_gray, map_left, warp_mapping_shape,
+                eye_rgb=left_rgb if src_rgb is not None else None, src_rgb=src_rgb,
+                hdr_scale=hdr_scale)
+            rm = exact_source_relative_metrics(
+                right, src_gray, map_right, warp_mapping_shape,
+                eye_rgb=right_rgb if src_rgb is not None else None, src_rgb=src_rgb,
+                hdr_scale=hdr_scale)
+            vertical_px, vertical_pct, vertical_support = exact_vertical_misalignment(
+                left, right, src_gray, map_left, map_right, warp_mapping_shape,
+                src_rgb=src_rgb, hdr_scale=hdr_scale)
+            out["vmisalign_support_pct"] = vertical_support
+            if vertical_px is not None:
+                out["vmisalign_p99_px"] = vertical_px
+                out["vmisalign_p99_pct"] = vertical_pct
+        else:
+            lm = source_relative_metrics(left, src_gray)
+            rm = source_relative_metrics(right, src_gray)
+        for key in ("source_coverage_pct", "image_integrity_pct"):
+            vals = [m[key] for m in (lm, rm) if key in m]
+            if vals:
+                out[key] = min(vals)
+        for key in ("source_coverage_worst_patch_bad_pct",
+                    "image_integrity_worst_patch_bad_pct"):
             vals = [m[key] for m in (lm, rm) if key in m]
             if vals:
                 out[key] = max(vals)
-        for key in ("source_coverage_pct", "image_integrity_pct"):
-            out[key] = min(lm[key], rm[key])
-        supports = [m.get("source_stretch_support") for m in (lm, rm)
-                    if m.get("source_stretch_support") is not None]
-        if supports:
-            out["source_stretch_support"] = min(supports)
-    if warp_mask is not None:
-        out.update(warp_hole_metrics(left, right, warp_mask, src_gray))
+        for key in ("source_fidelity_support_pct", "image_integrity_support"):
+            supports = [m[key] for m in (lm, rm) if key in m]
+            if supports:
+                out[key] = min(supports)
+    if warp_mapping is not None:
+        if warp_mapping_shape is None:
+            raise ValueError("exact warp mapping is missing its shape contract")
+        if src_gray is not None:
+            out.update(exact_visible_disparity_metrics(
+                warp_mapping, warp_mapping_shape, src_gray, warp_mask=warp_mask))
+            shear = sbs_warp_shear_metrics.measure_cross_row_shear(
+                warp_mapping, warp_mapping_shape,
+                source=src_rgb if src_rgb is not None else src_gray)
+            out.update({key: float(value) for key, value in shear.items()
+                        if value is not None})
+            if src_rgb is not None:
+                perceptual_source = src_rgb
+                perceptual_transform = None
+                if hdr_scale is not None:
+                    perceptual_source = (
+                        _srgb_to_linear(src_rgb) * float(hdr_scale)
+                    ).astype(np.float16).astype(np.float32)
+                    perceptual_transform = _hdr_preview_rgb
+
+                phase_chroma = sbs_interocular_phase_chroma.measure_interocular_phase_chroma(
+                    perceptual_source, left_rgb, right_rgb, map_left, map_right,
+                    warp_mapping_shape, warp_mask=warp_mask,
+                    source_sample_transform=perceptual_transform)
+                retained_conflict = {
+                    "interocular_phase_orientation_burden_pct",
+                    "interocular_phase_orientation_support_pct",
+                    "interocular_phase_orientation_support_count",
+                    "interocular_phase_orientation_evidence_sufficient",
+                }
+                out.update({key: float(value) for key, value in phase_chroma.items()
+                            if key in retained_conflict and value is not None})
+
+                if hdr_scale is None:
+                    photometric = (
+                        sbs_interocular_photometric_rivalry
+                        .measure_interocular_photometric_rivalry(
+                            perceptual_source, left_rgb, right_rgb, map_left, map_right,
+                            warp_mapping_shape, warp_mask=warp_mask,
+                            source_sample_transform=perceptual_transform))
+                    retained_photometric = {
+                        "interocular_exposure_rivalry_burden_pct",
+                        "interocular_exposure_rivalry_support_pct",
+                        "interocular_exposure_rivalry_support_count",
+                        "interocular_exposure_rivalry_evidence_sufficient",
+                        "interocular_color_gain_rivalry_burden_pct",
+                        "interocular_color_gain_rivalry_support_pct",
+                        "interocular_color_gain_rivalry_support_count",
+                        "interocular_color_gain_rivalry_evidence_sufficient",
+                    }
+                    out.update({key: float(value) for key, value in photometric.items()
+                                if key in retained_photometric and value is not None})
+                else:
+                    # The PNG is a diagnostic tone-mapped preview. It cannot authenticate
+                    # absolute HDR luminance/gamut rivalry; abstain until raw FP16 eyes plus a
+                    # calibrated display transform are saved by the harness.
+                    out["interocular_exposure_rivalry_evidence_sufficient"] = 0.0
+                    out["interocular_color_gain_rivalry_evidence_sufficient"] = 0.0
+
+                coverage_map = None
+                if warp_mask is not None:
+                    hole_map = (warp_mask if warp_mask.ndim == 2 else warp_mask[..., 0])
+                    coverage_map = hole_map < 0.5
+                window_depth = None
+                if depth is not None:
+                    window_depth = resize_depth(
+                        depth, int(warp_mapping_shape["source_width"]),
+                        int(warp_mapping_shape["source_height"]))
+                window = sbs_stereo_window_metrics.measure_stereo_window_violation(
+                    warp_mapping, warp_mapping_shape, perceptual_source,
+                    depth=window_depth, coverage_mask=coverage_map,
+                    source_sample_transform=perceptual_transform)
+                retained_window = {
+                    "experimental_stereo_window_support_count",
+                    "experimental_stereo_window_support_pct",
+                    "experimental_stereo_window_crossed_burden_pct",
+                }
+                out.update({key: float(value) for key, value in window.items()
+                            if key in retained_window and value is not None})
+
+        out.update(exact_warp_mapping_metrics(
+            warp_mapping, warp_mapping_shape, depth=depth, warp_mask=warp_mask))
     return out, sbs, left
 
 
-def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
-    """A harness clip: sbs_*.png (+ depth_*.png) in order. Per-frame spatial metrics plus the
-    temporal metrics that target the current pipeline's failure modes:
+SEQUENCE_SPATIAL_WORKERS_ENV = "SBSBENCH_SPATIAL_WORKERS"
+SEQUENCE_SPATIAL_BACKEND_ENV = "SBSBENCH_SPATIAL_BACKEND"
 
-      flicker         frame-to-frame mean|delta| of the whole SBS luma (x255).
-      flicker_disocc  same, but restricted to the disocclusion bands -- isolates inpaint/stretch
-                      re-hallucination shimmer from ordinary motion (the ~1/4-res inpaint problem).
-      swim            frame-to-frame |depth change| where the SOURCE is static (needs --frames) --
-                      the scene-cut / flat-content depth instability, separated from real motion.
-      static_jitter   worst-eye p95 output change where a disparity-dilated SOURCE neighborhood
-                      stayed static; rejects warp/depth shimmer without counting normal motion.
 
-    On the SAME clip the real motion is identical, so these DELTAS vs baseline are pure changes."""
+def _sequence_spatial_worker_count(frame_count):
+    """Return a deterministic bounded worker count for independent spatial metrics."""
+    if frame_count < 1:
+        return 0
+    configured = os.environ.get(SEQUENCE_SPATIAL_WORKERS_ENV)
+    if configured is not None:
+        try:
+            requested = int(configured)
+        except ValueError as exc:
+            raise ValueError(
+                f"{SEQUENCE_SPATIAL_WORKERS_ENV} must be an integer from 1 to 4") from exc
+        if not 1 <= requested <= 4:
+            raise ValueError(
+                f"{SEQUENCE_SPATIAL_WORKERS_ENV} must be from 1 to 4, got {configured!r}")
+        return min(requested, frame_count)
+    if frame_count < 8:
+        return 1
+    return min(4, os.cpu_count() or 1, frame_count)
+
+
+def _measure_sequence_spatial_job(job):
+    """Load and measure one frame in a worker; return scalars only, never image arrays."""
+    frame_id = job["frame_id"]
+    try:
+        depth = load_depth(job["depth_path"]) if job["depth_path"] else None
+        src_rgb = load_rgb(job["source_path"]) if job["source_path"] else None
+        src = rgb_luma(src_rgb) if src_rgb is not None else None
+        gt_depth = load_depth(job["gt_depth_path"]) if job["gt_depth_path"] else None
+        gt_valid = None
+        if job["gt_valid_path"]:
+            with Image.open(job["gt_valid_path"]) as valid_image:
+                gt_valid = np.asarray(valid_image.convert("L"), dtype=np.uint8) >= 128
+        warp_mask = None
+        if job["warp_mask_path"]:
+            with Image.open(job["warp_mask_path"]) as mask_image:
+                warp_mask = (np.asarray(mask_image.convert("RGB"), np.float32) / 255.0)
+        warp_mapping = (
+            load_warp_mapping(job["warp_mapping_path"], job["mapping_shape"])
+            if job["warp_mapping_path"] else None)
+        row, _, _ = measure_seq_frame(
+            job["sbs_path"], depth, src, gt_depth, job["gt_kind"],
+            gt_depth_valid=gt_valid, warp_mask=warp_mask,
+            warp_mapping=warp_mapping, warp_mapping_shape=job["mapping_shape"],
+            src_rgb=src_rgb, hdr_scale=job["hdr_scale"])
+        row["_frame_id"] = frame_id
+        return row
+    except Exception as exc:
+        raise RuntimeError(
+            f"spatial metric worker failed for frame {frame_id}: {exc}") from exc
+
+
+def _measure_sequence_spatial_rows(jobs):
+    """Run independent jobs serially or in an ordered bounded process pool."""
+    worker_count = _sequence_spatial_worker_count(len(jobs))
+    if worker_count <= 1:
+        return [_measure_sequence_spatial_job(job) for job in jobs]
+    backend = os.environ.get(SEQUENCE_SPATIAL_BACKEND_ENV, "process").strip().lower()
+    if backend not in {"process", "thread"}:
+        raise ValueError(
+            f"{SEQUENCE_SPATIAL_BACKEND_ENV} must be 'process' or 'thread', got {backend!r}")
+    # The HTML report is a top-level Windows script, so a spawn-based process executor would
+    # recursively execute report construction in each child. Threads keep its four-way spatial
+    # remeasurement parallel without weakening ordered/fail-closed result collection. The normal
+    # evaluator and rescorer retain isolated process workers by default.
+    executor_type = (concurrent.futures.ThreadPoolExecutor if backend == "thread" else
+                     concurrent.futures.ProcessPoolExecutor)
+    with executor_type(max_workers=worker_count) as executor:
+        # executor.map preserves input order. Materialize before temporal work so a worker failure
+        # cannot leak a partial sequence result into aggregate/worst-frame selection.
+        return list(executor.map(_measure_sequence_spatial_job, jobs))
+
+
+def measure_sequence(seq_dir, frames_dir=None):
+    """Measure one authenticated harness clip under spatial and motion-aware contracts.
+
+    Temporal image changes are never measured as raw frame differences: ordinary source motion
+    would dominate them. ``static_jitter`` uses independently static source support, while
+    ``flow_temporal`` compensates source motion using authenticated flow before measuring output
+    residuals. Authenticated depth and stereo sidecars add GT-only evidence without becoming
+    enhanced-pop labels.
+    """
     sbs_by_id = indexed_files(os.path.join(seq_dir, "sbs_*.png"), "sbs_")
     if not sbs_by_id:
         return None
@@ -1374,12 +2050,49 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         extra_mask = sorted(set(mask_by_id) - set(frame_ids))
         raise ValueError(
             f"warp-mask/SBS frame-id mismatch: missing mask={missing_mask}, extra mask={extra_mask}")
+    mapping_by_id = indexed_files(os.path.join(seq_dir, "warp_map_*.f32"), "warp_map_")
+    mapping_shape = None
+    if mapping_by_id:
+        missing_mapping = sorted(set(frame_ids) - set(mapping_by_id))
+        extra_mapping = sorted(set(mapping_by_id) - set(frame_ids))
+        if missing_mapping or extra_mapping:
+            raise ValueError(
+                "warp-map/SBS frame-id mismatch: "
+                f"missing map={missing_mapping}, extra map={extra_mapping}")
+        shape_path = os.path.join(seq_dir, "warp_map_shape.json")
+        try:
+            with open(shape_path, encoding="utf-8") as shape_file:
+                mapping_shape = json.load(shape_file)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"invalid warp-map shape contract {shape_path}: {exc}") from exc
+    elif os.path.exists(os.path.join(seq_dir, "warp_map_shape.json")):
+        raise ValueError("warp-map shape contract exists without frame maps")
+    hdr_scale = None
+    hdr_stats_path = os.path.join(seq_dir, "hdr_output_stats.json")
+    if os.path.exists(hdr_stats_path):
+        try:
+            with open(hdr_stats_path, encoding="utf-8") as hdr_file:
+                hdr_stats = json.load(hdr_file)
+            hdr_scale = float(hdr_stats["input_scale"])
+            if not np.isfinite(hdr_scale) or hdr_scale <= 0.0:
+                raise ValueError("input_scale must be positive and finite")
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"invalid HDR preview contract {hdr_stats_path}: {exc}") from exc
     gt_by_id = indexed_files(
         os.path.join(frames_dir, "gt_depth", "frame_*.*"), "frame_") if frames_dir else {}
     if gt_by_id and set(gt_by_id) != set(frame_ids):
         missing_gt = sorted(set(frame_ids) - set(gt_by_id))
         extra_gt = sorted(set(gt_by_id) - set(frame_ids))
         raise ValueError(f"GT-depth/SBS frame-id mismatch: missing GT={missing_gt}, extra GT={extra_gt}")
+    gt_valid_by_id = indexed_files(
+        os.path.join(frames_dir, "gt_depth_valid", "frame_*.*"),
+        "frame_") if frames_dir else {}
+    if gt_valid_by_id and set(gt_valid_by_id) != set(gt_by_id):
+        missing_valid = sorted(set(gt_by_id) - set(gt_valid_by_id))
+        extra_valid = sorted(set(gt_valid_by_id) - set(gt_by_id))
+        raise ValueError(
+            "GT-depth-valid/frame-id mismatch: "
+            f"missing validity={missing_valid}, extra validity={extra_valid}")
     gt_right_by_id = indexed_files(
         os.path.join(frames_dir, "gt_right", "frame_*.*"), "frame_") if frames_dir else {}
     if gt_right_by_id and set(gt_right_by_id) != set(frame_ids):
@@ -1395,7 +2108,7 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
         extra_flow = sorted(set(flow_by_id) - expected_flow_ids)
         raise ValueError(f"GT-flow/frame-id mismatch: missing GT={missing_flow}, extra GT={extra_flow}")
     gt_kind = "disparity"
-    require_gt_depth = require_gt_flow = require_gt_stereo = False
+    require_gt_depth = require_gt_flow = reference_stereo_available = False
     if frames_dir:
         meta_path = os.path.join(frames_dir, "meta.json")
         try:
@@ -1403,6 +2116,14 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
                 clip_meta = json.load(meta_file)
             if not isinstance(clip_meta, dict):
                 raise ValueError("metadata root must be an object")
+            if "required_gt_stereo" in clip_meta:
+                retired = clip_meta.pop("required_gt_stereo")
+                if not isinstance(retired, bool):
+                    raise ValueError("retired required_gt_stereo must be boolean")
+                if ("reference_stereo_available" in clip_meta and
+                        clip_meta["reference_stereo_available"] != retired):
+                    raise ValueError("conflicting retired/current stereo reference declarations")
+                clip_meta["reference_stereo_available"] = retired
             gt_kind = clip_meta.get("gt_depth_kind", gt_kind)
             # Prepared public clips created before schema 5 already carry `dataset`; infer their
             # evidence contract so upgrading the evaluator cannot silently keep the old fail-open
@@ -1410,157 +2131,158 @@ def measure_sequence(seq_dir, frames_dir=None, expected_flat=False):
             require_gt_depth = bool(clip_meta.get("required_gt_depth", clip_meta.get("dataset")))
             require_gt_flow = bool(clip_meta.get(
                 "required_gt_flow", clip_meta.get("dataset") == "TartanAir V2"))
-            require_gt_stereo = bool(clip_meta.get(
-                "required_gt_stereo", clip_meta.get("dataset") ==
-                "MPI Sintel Stereo Training Dataset"))
+            reference_stereo_available = bool(
+                clip_meta.get("reference_stereo_available", False))
         except OSError as exc:
             raise ValueError(f"cannot read clip metadata {meta_path}: {exc}") from exc
         except (TypeError, ValueError) as exc:
             raise ValueError(f"invalid clip metadata {meta_path}: {exc}") from exc
     if require_gt_depth and not gt_by_id:
         raise ValueError("clip requires GT depth, but no gt_depth sidecars were found")
+    if require_gt_depth and gt_kind not in ("metric", "depth") and not gt_valid_by_id:
+        raise ValueError(
+            "clip requires disparity GT, but no authenticated gt_depth_valid sidecars were found")
     if require_gt_flow and not flow_by_id:
         raise ValueError("clip requires GT optical flow, but no gt_flow sidecars were found")
-    if require_gt_stereo and not gt_right_by_id:
-        raise ValueError("clip requires GT stereo, but no gt_right sidecars were found")
-    rows, flicks, bflicks, swims, static_jitters = [], [], [], [], []
-    flow_temporals, flow_depths, depth_gt_lags, depth_gt_ghosts = [], [], [], []
-    prev_sbs = prev_left = prev_right = prev_depth = prev_src = prev_gt_depth = None
-    for frame_id in frame_ids:
-        p = sbs_by_id[frame_id]
-        depth = load_depth(depth_by_id[frame_id]) if frame_id in depth_by_id else None
-        src = load_gray(src_by_id[frame_id]) if frame_id in src_by_id else None
-        gt_depth = load_depth(gt_by_id[frame_id]) if frame_id in gt_by_id else None
-        gt_right = load_gray(gt_right_by_id[frame_id]) if frame_id in gt_right_by_id else None
-        warp_mask = (np.asarray(Image.open(mask_by_id[frame_id]).convert("RGB"), np.float32)
-                     / 255.0 if frame_id in mask_by_id else None)
-        row, sbs, left = measure_seq_frame(
-            p, depth, src, gt_depth, gt_kind, warp_mask=warp_mask)
-        _, right = split_eyes(sbs)
-        if gt_right is not None:
-            row.update(stereo_ground_truth_metrics(right, gt_right))
-            if src is not None and depth is not None:
-                row.update(artistic_stereo_metrics(src, right, gt_right, depth))
-        row["_frame_id"] = frame_id
-        if prev_sbs is not None:
-            row["flicker"] = float(np.mean(np.abs(sbs - prev_sbs)) * 255.0)
-            flicks.append(row["flicker"])
-            if depth is not None:
-                _, band, _ = silhouette_band(depth, left.shape[1], left.shape[0])
-                if float(band.mean()) >= MIN_DISOCC_FRAC:
-                    row["flicker_disocc"] = float(np.mean(np.abs(left - prev_left)[band]) * 255.0)
-                    bflicks.append(row["flicker_disocc"])
-            if depth is not None and prev_depth is not None and src is not None and prev_src is not None:
-                dh, dw = depth.shape
-                a = resize_to(src, dw, dh)
-                b = resize_to(prev_src, dw, dh)
-                static = np.abs(a - b) < (3.0 / 255.0)  # source pixels that didn't move
-                if static.any():
-                    row["swim"] = float(np.median(np.abs(depth - prev_depth)[static]) * 255.0)
-                    swims.append(row["swim"])
-            if src is not None and prev_src is not None:
-                jitter, support = static_region_jitter(
-                    left, right, prev_left, prev_right, src, prev_src)
-                row["static_support"] = support
-                if jitter is not None:
-                    row["static_jitter"] = jitter
-                    static_jitters.append(jitter)
-                reference_flow = reference_valid = None
-                if frame_id in flow_by_id:
-                    with np.load(flow_by_id[frame_id], allow_pickle=False) as flow_data:
-                        reference_flow = np.asarray(flow_data["flow"], dtype=np.float32)
-                        if "valid" in flow_data:
-                            reference_valid = np.asarray(flow_data["valid"], dtype=bool)
-                flow_temporal, flow_depth, flow_support = flow_temporal_metrics(
-                    left, right, prev_left, prev_right, src, prev_src, depth, prev_depth,
-                    reference_flow=reference_flow, reference_valid=reference_valid)
-                row["flow_support"] = flow_support
-                if flow_temporal is not None:
-                    row["flow_temporal"] = flow_temporal
-                    flow_temporals.append(flow_temporal)
-                if flow_depth is not None:
-                    row["flow_depth"] = flow_depth
-                    flow_depths.append(flow_depth)
-            if depth is not None and gt_depth is not None and prev_gt_depth is not None:
-                depth_gt_lag = depth_ground_truth_lag(depth, gt_depth, prev_gt_depth, gt_kind)
-                if depth_gt_lag is not None:
-                    row["depth_gt_lag_f1"] = depth_gt_lag
-                    depth_gt_lags.append(depth_gt_lag)
-                depth_gt_ghost = depth_ground_truth_ghost(
-                    depth, gt_depth, prev_gt_depth, gt_kind)
-                if depth_gt_ghost is not None:
-                    row["depth_gt_ghost_edge_pct"] = depth_gt_ghost
-                    depth_gt_ghosts.append(depth_gt_ghost)
-        rows.append(row)
-        prev_sbs, prev_left, prev_right = sbs, left, right
-        prev_depth, prev_src, prev_gt_depth = depth, src, gt_depth
+    if reference_stereo_available and not gt_right_by_id:
+        raise ValueError(
+            "clip declares diagnostic stereo reference availability, but no gt_right sidecars "
+            "were found")
+
+    spatial_jobs = [{
+        "frame_id": frame_id,
+        "sbs_path": sbs_by_id[frame_id],
+        "depth_path": depth_by_id.get(frame_id),
+        "source_path": src_by_id.get(frame_id),
+        "gt_depth_path": gt_by_id.get(frame_id),
+        "gt_valid_path": gt_valid_by_id.get(frame_id),
+        "warp_mask_path": mask_by_id.get(frame_id),
+        "warp_mapping_path": mapping_by_id.get(frame_id),
+        "mapping_shape": mapping_shape,
+        "gt_kind": gt_kind,
+        "hdr_scale": hdr_scale,
+    } for frame_id in frame_ids]
+    rows = _measure_sequence_spatial_rows(spatial_jobs)
+    measured_ids = [row.get("_frame_id") for row in rows]
+    if measured_ids != frame_ids:
+        raise RuntimeError(
+            f"spatial metric frame order changed: expected={frame_ids}, got={measured_ids}")
+
+    static_jitters = []
+    flow_temporals, depth_gt_lags, depth_gt_ghosts = [], [], []
+    transition_counts = {
+        "temporal_expected_transition_count": max(0, len(frame_ids) - 1),
+        "source_temporal_transition_count": 0,
+        "static_applicable_transition_count": 0,
+        "static_measured_transition_count": 0,
+        "flow_applicable_transition_count": 0,
+        "flow_measured_transition_count": 0,
+        "gt_depth_transition_count": 0,
+        "gt_depth_lag_measured_transition_count": 0,
+        "gt_depth_ghost_measured_transition_count": 0,
+    }
+    prev_left = prev_right = prev_depth = prev_src = prev_gt_depth = prev_gt_valid = None
+    if len(frame_ids) > 1:
+        for row, frame_id in zip(rows, frame_ids):
+            sbs = rgb_luma(load_rgb(sbs_by_id[frame_id]))
+            left, right = split_eyes(sbs)
+            depth = load_depth(depth_by_id[frame_id]) if frame_id in depth_by_id else None
+            src = (rgb_luma(load_rgb(src_by_id[frame_id]))
+                   if frame_id in src_by_id else None)
+            gt_depth = load_depth(gt_by_id[frame_id]) if frame_id in gt_by_id else None
+            gt_valid = None
+            if frame_id in gt_valid_by_id:
+                with Image.open(gt_valid_by_id[frame_id]) as valid_image:
+                    gt_valid = np.asarray(valid_image.convert("L"), dtype=np.uint8) >= 128
+            if prev_left is not None:
+                if src is not None and prev_src is not None:
+                    transition_counts["source_temporal_transition_count"] += 1
+                    jitter, support = static_region_jitter(
+                        left, right, prev_left, prev_right, src, prev_src)
+                    row["static_support"] = support
+                    if support >= TEMPORAL_MIN_SUPPORT:
+                        transition_counts["static_applicable_transition_count"] += 1
+                    if jitter is not None:
+                        row["static_jitter"] = jitter
+                        static_jitters.append(jitter)
+                        transition_counts["static_measured_transition_count"] += 1
+                    reference_flow = reference_valid = None
+                    if frame_id in flow_by_id:
+                        with np.load(flow_by_id[frame_id], allow_pickle=False) as flow_data:
+                            reference_flow = np.asarray(flow_data["flow"], dtype=np.float32)
+                            if "valid" in flow_data:
+                                reference_valid = np.asarray(flow_data["valid"], dtype=bool)
+                    # Canonical temporal metrics use authenticated dataset flow only; ordinary
+                    # clips abstain and may be inspected by the separately versioned oracle.
+                    if reference_flow is not None:
+                        flow_temporal, _flow_depth_diagnostic, flow_support = (
+                            flow_temporal_metrics(
+                                left, right, prev_left, prev_right, src, prev_src,
+                                depth, prev_depth, reference_flow=reference_flow,
+                                reference_valid=reference_valid))
+                        row["flow_support"] = flow_support
+                        if flow_support >= TEMPORAL_MIN_SUPPORT:
+                            transition_counts["flow_applicable_transition_count"] += 1
+                        if flow_temporal is not None:
+                            row["flow_temporal"] = flow_temporal
+                            flow_temporals.append(flow_temporal)
+                            transition_counts["flow_measured_transition_count"] += 1
+                if depth is not None and gt_depth is not None and prev_gt_depth is not None:
+                    transition_counts["gt_depth_transition_count"] += 1
+                    depth_gt_lag = depth_ground_truth_lag(
+                        depth, gt_depth, prev_gt_depth, gt_kind,
+                        validity=gt_valid, previous_validity=prev_gt_valid)
+                    if depth_gt_lag is not None:
+                        row["depth_gt_lag_f1"] = depth_gt_lag
+                        depth_gt_lags.append(depth_gt_lag)
+                        transition_counts["gt_depth_lag_measured_transition_count"] += 1
+                    depth_gt_ghost = depth_ground_truth_ghost(
+                        depth, gt_depth, prev_gt_depth, gt_kind,
+                        validity=gt_valid, previous_validity=prev_gt_valid)
+                    if depth_gt_ghost is not None:
+                        row["depth_gt_ghost_edge_pct"] = depth_gt_ghost
+                        depth_gt_ghosts.append(depth_gt_ghost)
+                        transition_counts["gt_depth_ghost_measured_transition_count"] += 1
+            prev_left, prev_right = left, right
+            prev_depth, prev_src, prev_gt_depth = depth, src, gt_depth
+            prev_gt_valid = gt_valid
     agg = aggregate(rows)
-    for name, vals in [("flicker", flicks), ("flicker_disocc", bflicks), ("swim", swims)]:
-        if vals:
-            agg[name + "_p50"] = float(np.percentile(vals, 50))
-            agg[name + "_p95"] = float(np.percentile(vals, 95))
+    agg.update({key: float(value) for key, value in transition_counts.items()})
+    if (transition_counts["static_measured_transition_count"] !=
+            transition_counts["static_applicable_transition_count"]):
+        raise ValueError(
+            "static temporal metric missing on an evidence-qualified transition: "
+            f"measured={transition_counts['static_measured_transition_count']}, "
+            f"applicable={transition_counts['static_applicable_transition_count']}")
+    if (transition_counts["flow_measured_transition_count"] !=
+            transition_counts["flow_applicable_transition_count"]):
+        raise ValueError(
+            "flow temporal metric missing on an evidence-qualified transition: "
+            f"measured={transition_counts['flow_measured_transition_count']}, "
+            f"applicable={transition_counts['flow_applicable_transition_count']}")
     if static_jitters:
         agg["static_jitter_p50"] = float(np.percentile(static_jitters, 50))
         agg["static_jitter_p95"] = float(np.percentile(static_jitters, 95))
-    for name, vals in (("flow_temporal", flow_temporals), ("flow_depth", flow_depths)):
-        if vals:
-            agg[name + "_p50"] = float(np.percentile(vals, 50))
-            agg[name + "_p95"] = float(np.percentile(vals, 95))
+    if flow_temporals:
+        agg["flow_temporal_p50"] = float(np.percentile(flow_temporals, 50))
+        agg["flow_temporal_p95"] = float(np.percentile(flow_temporals, 95))
     if depth_gt_lags:
         agg["depth_gt_lag_f1_p50"] = float(np.percentile(depth_gt_lags, 50))
         agg["depth_gt_lag_f1_p95"] = float(np.percentile(depth_gt_lags, 95))
     if depth_gt_ghosts:
         agg["depth_gt_ghost_edge_pct_p50"] = float(np.percentile(depth_gt_ghosts, 50))
         agg["depth_gt_ghost_edge_pct_p95"] = float(np.percentile(depth_gt_ghosts, 95))
-    finalize_artistic_stereo_aggregate(rows, agg)
-    agg.update(sbs_score(agg, expected_flat=expected_flat))
     if require_gt_depth:
-        missing = [k for k in ("depth_gt_si_rmse", "depth_gt_edge_f1") if k not in agg]
-        if len(frame_ids) > 1 and "depth_gt_lag_f1_p95" not in agg:
+        missing = [k for k in ("depth_gt_affine_nrmse_pct", "depth_gt_edge_f1")
+                   if k not in agg]
+        if (transition_counts["gt_depth_lag_measured_transition_count"] !=
+                transition_counts["gt_depth_transition_count"]):
             missing.append("depth_gt_lag_f1_p95")
         if missing:
             raise ValueError(f"required GT-depth metrics unavailable: {missing}")
     if require_gt_flow and "flow_temporal_p95" not in agg:
         raise ValueError("required GT-flow temporal metric unavailable")
-    if require_gt_stereo:
-        missing = [key for key in ("stereo_gt_psnr", "stereo_gt_ssim",
-                                   "stereo_gt_residual_p95", "stereo_gt_coverage_pct",
-                                   "stereo_art_polarity_ok")
-                   if key not in agg]
-        if missing:
-            raise ValueError(f"required GT-stereo metrics unavailable: {missing}")
     return rows, agg
-
-
-def _load_score_cfg():
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thresholds.json")
-    try:
-        return json.load(open(p))["score"]
-    except Exception:
-        return {"penalties": {}, "depth": {"metric": "pop_pct_p50", "target": 0.6, "weight": 0.2}}
-
-
-SCORE_CFG = _load_score_cfg()
-
-
-def sbs_score(agg, expected_flat=False):
-    """Overall 0-100 artifact quality from an aggregate metric dict (see thresholds.json 'score').
-    score measures artifact cleanliness only. q_depth is reported separately because stereo
-    volume is a required constraint, not quality points that may cancel an artifact regression."""
-    pen = 0.0
-    for k, spec in SCORE_CFG.get("penalties", {}).items():
-        v = agg.get(k)
-        if v is None:
-            continue
-        pen += spec["weight"] * min(v / spec["scale"], 1.0) if spec["scale"] else 0.0
-    q_clean = max(0.0, 100.0 - pen)
-    d = SCORE_CFG.get("depth", {})
-    pop = agg.get(d.get("metric", "pop_pct_p50"), 0.0)
-    target = d.get("expected_flat_target", 0.1) if expected_flat else d.get("target", 0.6)
-    realized = min(pop / target, 1.0) if target else 0.0
-    q_depth = 100.0 * (1.0 - realized) if expected_flat else 100.0 * realized
-    return {"q_clean": round(q_clean, 1), "q_depth": round(q_depth, 1),
-            "score": round(q_clean, 1)}
 
 
 def metric_delta_class(base, new, spec):
@@ -1588,62 +2310,64 @@ def metric_gate_failed(base, new, spec):
     return metric_delta_class(base, new, spec) == "regressed"
 
 
-def combined_metric_evidence(*groups):
-    """Merge A/B evidence without letting one low support value hide the other's support."""
-    combined = {}
-    for group in groups:
-        combined.update(group or {})
-    for key in ("static_support", "flow_support", "source_stretch_support"):
-        values = [group.get(key) for group in groups if group and
-                  metric_value_valid(group, key)]
-        if values:
-            combined[key] = max(float(value) for value in values)
-    return combined
+def metric_evidence_state(metric, spec, observed, clip_meta=None):
+    """Resolve a metric's independent evidence contract.
 
-
-def metric_evidence_applicable(metric, spec, observed, clip_meta=None):
-    """Whether a conditional metric has enough clip evidence to be required.
-
-    Absence is never itself an exemption: the requirement is declared in thresholds.json and
-    resolved from independent clip metadata or an explicit support metric.
+    Returns ``applicable``, ``unsupported``, or ``missing``.  Crucially, the metric's own numeric
+    value never makes its evidence applicable: doing so would let an unauthenticated GT value opt
+    itself into a gate, or let a detector value bypass its missing support measurement.
     """
     clip_meta = clip_meta or {}
-    if metric_value_valid(observed, metric):
-        return True
     requirement = spec.get("requires", "always")
+    # A synthetic sidecar can be useful for temporal boundary lag without being a fair monocular
+    # depth-accuracy target. Only clips that explicitly authenticate required GT depth may make
+    # global accuracy/polarity metrics applicable. Resolve this from provenance before looking at
+    # an opportunistically emitted numeric value, otherwise the value would opt itself into a
+    # hard gate.
+    if requirement == "gt_depth_accuracy":
+        return "applicable" if clip_meta.get("required_gt_depth") is True else "unsupported"
+    if requirement in EVIDENCE_SUPPORT_REQUIREMENTS:
+        support = observed.get(requirement)
+        # Missing/invalid support is not proof of exemption.  Only a measured value below the
+        # detector's declared evidence minimum is N/A; enough support requires the metric on that
+        # same evidence.
+        if (isinstance(support, (bool, np.bool_)) or not np.isscalar(support) or
+                not np.issubdtype(np.asarray(support).dtype, np.number) or
+                not np.isfinite(support) or float(support) < 0.0):
+            return "missing"
+        return ("applicable" if float(support) >= EVIDENCE_SUPPORT_REQUIREMENTS[requirement]
+                else "unsupported")
     if requirement == "gt_depth":
-        return bool(clip_meta.get("gt_depth_kind") or clip_meta.get("required_gt_depth"))
+        return ("applicable" if
+                bool(clip_meta.get("gt_depth_kind") or clip_meta.get("required_gt_depth"))
+                else "unsupported")
     if requirement == "gt_depth_temporal":
         has_gt = bool(clip_meta.get("gt_depth_kind") or clip_meta.get("required_gt_depth"))
         count = clip_meta.get("source_frame_count")
-        return has_gt and (count is None or count > 1)
+        return ("applicable" if has_gt and (count is None or count > 1) else "unsupported")
     if requirement == "multi_frame":
         count = clip_meta.get("source_frame_count")
-        return count is None or count > 1
+        return "applicable" if count is None or count > 1 else "unsupported"
     if requirement in ("static_support", "flow_support"):
         count = clip_meta.get("source_frame_count")
         if count is not None and count <= 1:
-            return False
+            return "unsupported"
         support = observed.get(requirement)
         # A missing/invalid support measurement on a multi-frame clip is not proof of exemption.
         # Fail closed; only a measured lack of reliable pixels makes the temporal metric N/A.
         if (isinstance(support, (bool, np.bool_)) or not np.isscalar(support) or
                 not np.issubdtype(np.asarray(support).dtype, np.number) or
                 not np.isfinite(support)):
-            return True
-        return float(support) >= TEMPORAL_MIN_SUPPORT
-    if requirement == "source_stretch_support":
-        support = observed.get("source_stretch_support")
-        # Missing/invalid support is not proof that the scene has no measurable source detail.
-        # Only an explicit zero emitted by source_relative_metrics is a valid exemption.
-        if (isinstance(support, (bool, np.bool_)) or not np.isscalar(support) or
-                not np.issubdtype(np.asarray(support).dtype, np.number) or
-                not np.isfinite(support) or float(support) < 0.0):
-            return True
-        return float(support) > 0.0
+            return "missing"
+        return "applicable" if float(support) >= TEMPORAL_MIN_SUPPORT else "unsupported"
     if requirement == "always":
-        return True
+        return "applicable"
     raise ValueError(f"unknown metric evidence requirement {requirement!r} for {metric}")
+
+
+def metric_evidence_applicable(metric, spec, observed, clip_meta=None):
+    """Whether a metric must be present; missing evidence deliberately fails closed."""
+    return metric_evidence_state(metric, spec, observed, clip_meta) != "unsupported"
 
 
 def metric_value_valid(metrics, metric):
@@ -1652,6 +2376,46 @@ def metric_value_valid(metrics, metric):
     return (not isinstance(value, (bool, np.bool_)) and np.isscalar(value)
             and np.issubdtype(np.asarray(value).dtype, np.number)
             and bool(np.isfinite(value)))
+
+
+def frame_label_evidence(row, metric_specs, clip_meta=None):
+    """Return a per-frame label vector with explicit validity/support and abstention.
+
+    A model must never learn an invented zero from a detector that had no evidence. Only metrics
+    explicitly tagged `label` in thresholds.json are exported. Unsupported evidence is a valid
+    N/A state; missing/invalid required evidence makes the frame ineligible for label selection.
+    """
+    evidence = {}
+    missing_required = []
+    for metric, spec in metric_specs.items():
+        label_role = spec.get("label")
+        if label_role is None:
+            continue
+        requirement = spec.get("requires", "always")
+        support = row.get(requirement) if requirement in EVIDENCE_SUPPORT_REQUIREMENTS else None
+        requires_support = requirement in EVIDENCE_SUPPORT_REQUIREMENTS
+        evidence_state = metric_evidence_state(metric, spec, row, clip_meta)
+        support_valid = (not requires_support or
+                         (metric_value_valid(row, requirement) and float(support) >= 0.0))
+        if evidence_state == "missing":
+            state = "missing"
+        elif evidence_state == "unsupported":
+            state = "unsupported"
+        elif metric_value_valid(row, metric):
+            state = "valid"
+        else:
+            state = "missing"
+        item = {"role": label_role, "state": state}
+        if state == "valid":
+            item["value"] = float(row[metric])
+        if requirement in EVIDENCE_SUPPORT_REQUIREMENTS:
+            item["support_metric"] = requirement
+            item["support"] = float(support) if support_valid else None
+        evidence[metric] = item
+        if state == "missing" and label_role in {"reward", "hard", "risk"}:
+            missing_required.append(metric)
+    return {"eligible": not missing_required, "missing_required": missing_required,
+            "metrics": evidence}
 
 
 def worst_hard_metric(aggregates, metric, spec, clip_ids):
@@ -1708,7 +2472,11 @@ def gate_ab_decision(decision, control_results, treatment_results):
     result = dict(decision)
     result["ab_verdict"] = decision.get("verdict")
     result["canonical_gate"] = gate
-    result["candidate"] = decision.get("verdict") == "candidate" and gate["passed"]
+    result["screen_candidate"] = (
+        decision.get("verdict") == "screen_candidate" and gate["passed"])
+    result["perceptual_qualified_candidate"] = (
+        result["screen_candidate"]
+        and decision.get("perceptual_qualification") == "qualified")
     if not gate["passed"]:
         result["verdict"] = "reject_run_gate"
     return result
@@ -1725,6 +2493,9 @@ def evaluate_ab_decision(control, treatment, clip_ids, metric_specs, hard_clip_i
 
     A primary-axis tradeoff is deliberately not auto-resolved. It needs the configured/user
     priority plus visual or headset evidence rather than cancellation inside a scalar score.
+    Passing this function is only an automated screen: perceptual metrics explicitly marked
+    experimental may vote conservatively, but they can never produce a perceptually qualified
+    candidate or a reusable training label.
     """
     hard_failures = []
     missing_evidence = []
@@ -1734,42 +2505,57 @@ def evaluate_ab_decision(control, treatment, clip_ids, metric_specs, hard_clip_i
         for metric, spec in metric_specs.items():
             if spec.get("role", "diagnostic") != "hard":
                 continue
-            before, after = ca.get(metric), ta.get(metric)
-            before_valid = metric_value_valid(ca, metric)
-            after_valid = metric_value_valid(ta, metric)
-            if not before_valid or not after_valid:
-                missing_evidence.append({"clip": clip, "metric": metric,
-                                         "missing": ("both" if not before_valid and not after_valid
-                                                     else "control" if not before_valid else
-                                                     "treatment")})
+            metadata = (clip_meta or {}).get(clip, {})
+            control_state = metric_evidence_state(metric, spec, ca, metadata)
+            treatment_state = metric_evidence_state(metric, spec, ta, metadata)
+            if control_state == treatment_state == "unsupported":
                 continue
+            invalid_sides = []
+            for side, state, values in (("control", control_state, ca),
+                                        ("treatment", treatment_state, ta)):
+                if state != "applicable":
+                    invalid_sides.append(f"{side}_{state}")
+                elif not metric_value_valid(values, metric):
+                    invalid_sides.append(side)
+            if invalid_sides:
+                missing_evidence.append({"clip": clip, "metric": metric,
+                                         "missing": "+".join(invalid_sides)})
+                continue
+            before, after = ca.get(metric), ta.get(metric)
             hard_min = spec.get("hard_min")
             hard_max = spec.get("hard_max")
             if ((hard_min is not None and after < hard_min)
                     or (hard_max is not None and after > hard_max)):
                 bounds = {k: v for k, v in (("min", hard_min), ("max", hard_max)) if v is not None}
                 hard_failures.append({"clip": clip, "metric": metric,
-                                      "value": after, "bounds": bounds})
+                                      "value": after, "bounds": bounds,
+                                      "scope": spec.get("scope", "perceptual")})
     for clip in clip_ids:
         ca, ta = control.get(clip, {}), treatment.get(clip, {})
         for metric, spec in metric_specs.items():
             role = spec.get("role", "diagnostic")
-            before, after = ca.get(metric), ta.get(metric)
-            if not metric_value_valid(ca, metric) or not metric_value_valid(ta, metric):
-                observed = combined_metric_evidence(ca, ta)
-                if role == "primary" and metric_evidence_applicable(
-                        metric, spec, observed, (clip_meta or {}).get(clip, {})):
-                    missing_evidence.append({"clip": clip, "metric": metric,
-                                             "missing": (
-                                                 "both" if not metric_value_valid(ca, metric)
-                                                 and not metric_value_valid(ta, metric)
-                                                 else "control" if not metric_value_valid(ca, metric)
-                                                 else "treatment")})
-                continue
+            scope = spec.get("scope", "perceptual")
             if role == "hard":
                 continue
-            if role != "primary":
+            if role != "primary" or scope == "conformance":
                 continue
+            metadata = (clip_meta or {}).get(clip, {})
+            control_state = metric_evidence_state(metric, spec, ca, metadata)
+            treatment_state = metric_evidence_state(metric, spec, ta, metadata)
+            if control_state == treatment_state == "unsupported":
+                continue
+            invalid_sides = []
+            for side, state, values in (("control", control_state, ca),
+                                        ("treatment", treatment_state, ta)):
+                if state != "applicable":
+                    invalid_sides.append(f"{side}_{state}")
+                elif not metric_value_valid(values, metric):
+                    invalid_sides.append(side)
+            if invalid_sides:
+                missing_evidence.append({"clip": clip, "metric": metric,
+                                         "missing": "+".join(invalid_sides)})
+                continue
+            before, after = ca.get(metric), ta.get(metric)
             movement = metric_delta_class(before, after, spec)
             if movement == "noise":
                 continue
@@ -1789,12 +2575,27 @@ def evaluate_ab_decision(control, treatment, clip_ids, metric_specs, hard_clip_i
     elif regressed:
         verdict = "reject_primary"
     elif improved:
-        verdict = "candidate"
+        verdict = "screen_candidate"
     else:
-        verdict = "neutral"
+        verdict = "screen_neutral"
+    perceptual_specs = {
+        metric: spec for metric, spec in metric_specs.items()
+        if spec.get("scope") == "perceptual" and spec.get("label") is not None
+    }
+    experimental_perceptual = sorted(
+        metric for metric, spec in perceptual_specs.items()
+        if spec.get("label_status") != "qualified")
+    perceptual_qualification = (
+        "qualified" if perceptual_specs and not experimental_perceptual else "experimental")
     return {"verdict": verdict, "hard_failures": hard_failures,
+            "conformance_failures": [item for item in hard_failures
+                                     if item.get("scope") == "conformance"],
+            "perceptual_bound_failures": [item for item in hard_failures
+                                          if item.get("scope") != "conformance"],
             "missing_evidence": missing_evidence, "axes": axes,
-            "improved": improved, "regressed": regressed}
+            "improved": improved, "regressed": regressed,
+            "perceptual_qualification": perceptual_qualification,
+            "experimental_perceptual_metrics": experimental_perceptual}
 
 
 def aggregate(rows):
@@ -1813,21 +2614,63 @@ def aggregate(rows):
     return agg
 
 
+def filter_aggregate_by_evidence(rows, aggregate_metrics, metric_specs, clip_meta=None):
+    """Keep the compact policy/evidence vector and exclude unsupported detector outputs.
+
+    Standalone validators may expose sub-components, raw residuals, or retired aliases for visual
+    debugging. They are deliberately absent from canonical results and cannot leak into model
+    features. A low-support numeric value also must not contaminate a clip mean/max merely because
+    another frame has enough support. Aggregate-only temporal percentiles are left intact because
+    their producers already apply transition support before publishing them.
+    """
+    policy_names = set(metric_specs)
+    evidence_names = {
+        spec.get("requires") for spec in metric_specs.values()
+        if isinstance(spec.get("requires"), str)
+    }
+    retained = policy_names | evidence_names
+    filtered = {
+        key: value for key, value in aggregate_metrics.items()
+        if key in retained or key.startswith("_") or key.endswith("_transition_count")
+    }
+    for metric, spec in metric_specs.items():
+        if not any(metric in row for row in rows):
+            continue
+        values = [float(row[metric]) for row in rows
+                  if metric_evidence_state(metric, spec, row, clip_meta) == "applicable"
+                  and metric_value_valid(row, metric)]
+        if not values:
+            filtered.pop(metric, None)
+            continue
+        filtered[metric] = float(
+            max(values) if metric in HARD_MAX_AGG else
+            min(values) if metric in HARD_MIN_AGG else np.mean(values))
+    return filtered
+
+
 # ---------------------------------------------------------------------------- main
 
-FMT = ["pop_spread_px", "positive_disparity_pct", "negative_disparity_pct", "vmisalign_px",
-       "source_coverage_pct", "image_integrity_pct", "source_halo_p95", "source_stretch_pct"]
-SEQ_FMT = ["pop_spread_px", "source_residual_p95", "source_halo_p95", "source_stretch_pct",
-           "static_jitter_p95", "flow_temporal_p95", "depth_gt_si_rmse", "depth_gt_edge_f1",
-           "depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95", "stereo_gt_psnr",
-           "stereo_gt_ssim", "stereo_gt_residual_p95", "stereo_gt_coverage_pct",
-           "stereo_art_scale_error_pct", "stereo_art_zero_error_pct",
-           "stereo_art_ddc_iou", "stereo_art_polarity_ok"]
-TEMPORAL_KEYS = ["flicker_p50", "flicker_p95", "flicker_disocc_p50", "flicker_disocc_p95",
-                 "swim_p50", "swim_p95", "static_jitter_p50", "static_jitter_p95",
-                 "flow_temporal_p50", "flow_temporal_p95", "flow_depth_p50", "flow_depth_p95",
-                 "depth_gt_lag_f1_p50", "depth_gt_lag_f1_p95",
-                 "depth_gt_ghost_edge_pct_p50", "depth_gt_ghost_edge_pct_p95"]
+FMT = ["vmisalign_p99_pct", "source_coverage_pct", "image_integrity_pct"]
+SEQ_FMT = [
+    "exact_visible_pop_spread_pct",
+    "exact_positive_disparity_pct", "exact_negative_disparity_pct",
+    "exact_symmetry_residual_p95_pct", "exact_polarity_ok",
+    "source_coverage_pct", "source_coverage_worst_patch_bad_pct",
+    "image_integrity_pct", "image_integrity_worst_patch_bad_pct",
+    "vmisalign_p99_pct",
+    "exact_mapping_stretch_pct", "exact_mapping_fold_pct",
+    "warp_cross_row_shear_severity_pct",
+    "experimental_stereo_window_crossed_burden_pct",
+    "interocular_phase_orientation_burden_pct",
+    "interocular_exposure_rivalry_burden_pct",
+    "interocular_color_gain_rivalry_burden_pct",
+    "static_jitter_p95", "flow_temporal_p95",
+    "depth_gt_affine_nrmse_pct", "depth_gt_edge_f1",
+]
+TEMPORAL_KEYS = [
+    "static_jitter_p95", "flow_temporal_p95",
+    "depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95",
+]
 
 
 def print_table(rows, agg, fmt=FMT):
@@ -1842,16 +2685,11 @@ def print_table(rows, agg, fmt=FMT):
     line = f"{'MEAN (n=%d)' % agg['_n']:<48}"
     line += "".join(f"{agg[k]:>13.3f}" if k in agg else f"{'-':>13}" for k in fmt)
     print(line)
-    if "flicker_p50" in agg:
-        def t(name, key):
-            return f"{name} p50={agg[key + '_p50']:.2f} p95={agg[key + '_p95']:.2f}" if key + "_p50" in agg else ""
-        parts = [t("flicker", "flicker"), t("disocc", "flicker_disocc"), t("swim", "swim")]
-        print(f"{'temporal (x255)':<48}" + "   ".join(p for p in parts if p))
 
 
 def print_diff(agg, base, fmt=FMT):
     print("\nvs baseline:")
-    for k in list(fmt) + TEMPORAL_KEYS:
+    for k in dict.fromkeys((*fmt, *TEMPORAL_KEYS)):
         if k in agg and k in base:
             d = agg[k] - base[k]
             pct = (d / base[k] * 100.0) if base[k] else 0.0
@@ -1860,11 +2698,13 @@ def print_diff(agg, base, fmt=FMT):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="No-reference visual metrics for host SBS dumps.")
+    ap = argparse.ArgumentParser(description="Validated visual metrics for host SBS output.")
     ap.add_argument("dumps", nargs="*", help="dump_* folders, or a harness output dir with --seq")
     ap.add_argument("--glob", help="glob pattern for dump folders (quote it)")
     ap.add_argument("--seq", help="harness clip: a directory of sbs_*.png (adds temporal metrics)")
-    ap.add_argument("--frames", help="the harness INPUT frames dir (enables swim + edge accuracy)")
+    ap.add_argument(
+        "--frames",
+        help="harness input frames and optional authenticated GT/temporal sidecars")
     ap.add_argument("--json", help="write the scorecard JSON here")
     ap.add_argument("--baseline", help="print deltas vs this scorecard JSON")
     args = ap.parse_args()

@@ -6,8 +6,8 @@ they add no licensing surface. The generated frames are COMMITTED (clips/); reru
 changing a clip's design, and regenerate baselines in the same commit.
 
   flat_page    a static desktop/document page: the depth model should output near-flat depth --
-               measures hallucinated depth (depth_spread/pop) + normalization amplification (A3)
-               and pipeline shimmer on static input (flicker floor).
+               diagnoses flat-content hallucination outside the SBS quality gate and measures
+               pipeline shimmer on static input (flicker floor).
   fast_motion  a textured block crossing a textured background at a KNOWN 30 px/frame --
                the async-depth ghost scenario (and the anchor for a future ghost metric).
   scene_cut    a hard cut spliced from two committed clips (c841 bright/calm -> c647 dark/crowd)

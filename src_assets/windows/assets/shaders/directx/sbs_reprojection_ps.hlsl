@@ -156,6 +156,34 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
     return col;
 }
 
+// Harness-only exact warp mapping. The diagnostic pass calls the same Reproject function as
+// main_ps and runs outside production timing. Its R32_FLOAT target preserves Reproject's RAW
+// normalized source U before main_ps clamps it to [0, 1]. Geometry/comfort metrics therefore see
+// the requested disparity instead of silently losing off-screen motion; source-fidelity metrics
+// apply the live clamp before reconstructing the sampled color. Aspect-content validity derives
+// from the shared shape contract; forward-coverage validity remains in the existing warp mask,
+// avoiding three redundant float channels per output pixel.
+float mapping_ps(PS_INPUT input) : SV_TARGET {
+    float2 packed_uv = input.TexCoord;
+    bool is_right_eye = packed_uv.x > 0.5f;
+    float eyeSign = is_right_eye ? 1.0f : -1.0f;
+    float2 output_uv = packed_uv;
+    output_uv.x = is_right_eye ? (packed_uv.x - 0.5f) * 2.0f : packed_uv.x * 2.0f;
+    float2 src_uv;
+    if (!ContentToSourceUV(output_uv, src_uv)) {
+        return 0.0f;
+    }
+
+    float2 sample_uv;
+    [branch]
+    if (subject_stretch > 0.5f) {
+        sample_uv = Reproject(src_uv, eyeSign, true);
+    } else {
+        sample_uv = Reproject(src_uv, eyeSign, false);
+    }
+    return sample_uv.x;
+}
+
 // Harness-only diagnostic output. R marks exact forward-coverage disocclusion before this
 // backward gather paints over it; remaining channels are reserved. Bars are not content and
 // remain unmarked. Compiling this separate entry point adds no live-stream work.

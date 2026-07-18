@@ -3,7 +3,7 @@
     "artifact_in_hole_pct": 0.0,
     "depth_gt_edge_f1": 0.0,
     "depth_gt_lag_f1": 0.0,
-    "depth_gt_si_rmse": 27.18307876586914,
+    "depth_gt_affine_nrmse_pct": 27.18307876586914,
     "depth_spread": 0.8595407009124756,
     "disocc_frac": 1.7076502732240437e-05,
     "edge_acc_p50": 0.0,

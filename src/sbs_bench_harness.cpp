@@ -19,7 +19,9 @@
   #include <cstring>
   #include <filesystem>
   #include <fstream>
+  #include <iomanip>
   #include <limits>
+  #include <locale>
   #include <string>
   #include <string_view>
   #include <thread>
@@ -442,6 +444,48 @@ namespace sbs_bench {
       save_png(path, d.Width, d.Height, pixels);
     }
 
+    // Preserve the harness-only R32_FLOAT mapping target without quantization. Rows are
+    // written tightly packed even though D3D11 staging resources may have a padded RowPitch.
+    // Windows/D3D11 targets are little-endian, matching the sidecar's declared float32-le dtype.
+    bool dump_float_texture(ID3D11Device *dev, ID3D11DeviceContext *ctx,
+                            ID3D11Texture2D *texture, const fs::path &path,
+                            ComPtr<ID3D11Texture2D> &stage_cache) {
+      if (!texture) {
+        return false;
+      }
+      D3D11_TEXTURE2D_DESC desc {};
+      texture->GetDesc(&desc);
+      if (desc.Format != DXGI_FORMAT_R32_FLOAT) {
+        return false;
+      }
+      if (!stage_cache) {
+        auto stage_desc = desc;
+        stage_desc.Usage = D3D11_USAGE_STAGING;
+        stage_desc.BindFlags = 0;
+        stage_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stage_desc.MiscFlags = 0;
+        if (FAILED(dev->CreateTexture2D(&stage_desc, nullptr, &stage_cache))) {
+          return false;
+        }
+      }
+      ctx->CopyResource(stage_cache.Get(), texture);
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return false;
+      }
+      std::ofstream out(path, std::ios::binary);
+      const std::streamsize row_bytes = (std::streamsize) desc.Width * sizeof(float);
+      if (out) {
+        for (UINT y = 0; y < desc.Height; ++y) {
+          out.write((const char *) mapped.pData + (size_t) y * mapped.RowPitch, row_bytes);
+        }
+      }
+      out.flush();
+      const bool succeeded = out.good();
+      ctx->Unmap(stage_cache.Get(), 0);
+      return succeeded;
+    }
+
     // Preserve the exact raw model output for stage-by-stage parity checks. Unlike the display
     // PNG, this is not clamped or normalized: it is row-major float32, width*height values.
     void dump_raw_model_depth(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv, int width, int height, const fs::path &path, ComPtr<ID3D11Buffer> &stage_cache) {
@@ -856,19 +900,32 @@ namespace sbs_bench {
     auto vs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0");
     auto ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0");
     auto mask_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "mask_ps", "ps_5_0");
+    auto mapping_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "mapping_ps", "ps_5_0");
     auto coverage_cs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_forward_coverage_cs.hlsl", "main", "cs_5_0");
     auto warp_prefilter_cs_blob = compile(SUNSHINE_SHADERS_DIR "/depth_warp_prefilter_cs.hlsl", "main", "cs_5_0");
-    if (!vs_blob || !ps_blob || !mask_ps_blob || !coverage_cs_blob || !warp_prefilter_cs_blob) {
+    if (!vs_blob || !ps_blob || !mask_ps_blob || !mapping_ps_blob || !coverage_cs_blob ||
+        !warp_prefilter_cs_blob) {
       return 6;
     }
     ComPtr<ID3D11VertexShader> vs;
-    ComPtr<ID3D11PixelShader> ps, mask_ps;
+    ComPtr<ID3D11PixelShader> ps, mask_ps, mapping_ps;
     ComPtr<ID3D11ComputeShader> coverage_cs, warp_prefilter_cs;
-    dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &vs);
-    dev->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &ps);
-    dev->CreatePixelShader(mask_ps_blob->GetBufferPointer(), mask_ps_blob->GetBufferSize(), nullptr, &mask_ps);
-    dev->CreateComputeShader(coverage_cs_blob->GetBufferPointer(), coverage_cs_blob->GetBufferSize(), nullptr, &coverage_cs);
-    dev->CreateComputeShader(warp_prefilter_cs_blob->GetBufferPointer(), warp_prefilter_cs_blob->GetBufferSize(), nullptr, &warp_prefilter_cs);
+    if (FAILED(dev->CreateVertexShader(
+          vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &vs)) ||
+        FAILED(dev->CreatePixelShader(
+          ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &ps)) ||
+        FAILED(dev->CreatePixelShader(
+          mask_ps_blob->GetBufferPointer(), mask_ps_blob->GetBufferSize(), nullptr, &mask_ps)) ||
+        FAILED(dev->CreatePixelShader(mapping_ps_blob->GetBufferPointer(),
+          mapping_ps_blob->GetBufferSize(), nullptr, &mapping_ps)) ||
+        FAILED(dev->CreateComputeShader(coverage_cs_blob->GetBufferPointer(),
+          coverage_cs_blob->GetBufferSize(), nullptr, &coverage_cs)) ||
+        FAILED(dev->CreateComputeShader(warp_prefilter_cs_blob->GetBufferPointer(),
+          warp_prefilter_cs_blob->GetBufferSize(), nullptr, &warp_prefilter_cs)) ||
+        !vs || !ps || !mask_ps || !mapping_ps || !coverage_cs || !warp_prefilter_cs) {
+      BOOST_LOG(error) << "sbs-bench: D3D11 shader creation failed";
+      return 6;
+    }
 
     ComPtr<ID3D11SamplerState> sampler;
     {
@@ -892,6 +949,8 @@ namespace sbs_bench {
     ComPtr<ID3D11ShaderResourceView> sbs_srv;
     ComPtr<ID3D11Texture2D> warp_mask_tex, warp_mask_stage;
     ComPtr<ID3D11RenderTargetView> warp_mask_rtv;
+    ComPtr<ID3D11Texture2D> warp_mapping_tex, warp_mapping_stage;
+    ComPtr<ID3D11RenderTargetView> warp_mapping_rtv;
     ComPtr<ID3D11Texture2D> coverage_tex;
     ComPtr<ID3D11UnorderedAccessView> coverage_uav;
     ComPtr<ID3D11ShaderResourceView> coverage_srv;
@@ -904,6 +963,7 @@ namespace sbs_bench {
     ComPtr<ID3D11Texture2D> ema_mask_stage;
     ComPtr<ID3D11Buffer> raw_depth_stage;
     bool raw_shape_written = false;
+    bool warp_mapping_shape_written = false;
     float hdr_output_min = std::numeric_limits<float>::infinity();
     float hdr_output_max = -std::numeric_limits<float>::infinity();
     uint64_t hdr_nonfinite = 0;
@@ -1049,6 +1109,15 @@ namespace sbs_bench {
           BOOST_LOG(error) << "sbs-bench: warp-mask texture creation failed";
           return 6;
         }
+        D3D11_TEXTURE2D_DESC mapping_desc = td;
+        mapping_desc.Format = DXGI_FORMAT_R32_FLOAT;
+        mapping_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        if (FAILED(dev->CreateTexture2D(&mapping_desc, nullptr, &warp_mapping_tex)) ||
+            FAILED(dev->CreateRenderTargetView(warp_mapping_tex.Get(), nullptr,
+                                               &warp_mapping_rtv))) {
+          BOOST_LOG(error) << "sbs-bench: warp-mapping texture creation failed";
+          return 6;
+        }
         {
           D3D11_TEXTURE2D_DESC wd = td;
           wd.Format = DXGI_FORMAT_R32_UINT;
@@ -1064,6 +1133,40 @@ namespace sbs_bench {
         sd2.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         dev->CreateTexture2D(&sd2, nullptr, &sbs_stage);
         vp = {0, 0, (float) sbs_w, (float) sbs_h, 0, 1};
+        std::ofstream mapping_shape(fs::path(o.out) / "warp_map_shape.json");
+        if (!mapping_shape) {
+          BOOST_LOG(error) << "sbs-bench: cannot write warp_map_shape.json";
+          return 6;
+        }
+        mapping_shape.imbue(std::locale::classic());
+        mapping_shape << std::setprecision(std::numeric_limits<float>::max_digits10);
+        mapping_shape
+          << "{\n"
+          << "  \"schema\": 1,\n"
+          << "  \"width\": " << sbs_w << ",\n"
+          << "  \"height\": " << sbs_h << ",\n"
+          << "  \"eye_width\": " << eye_w << ",\n"
+          << "  \"eye_height\": " << eye_h << ",\n"
+          << "  \"source_width\": " << img.w << ",\n"
+          << "  \"source_height\": " << img.h << ",\n"
+          << "  \"content_scale_x\": " << content_scale_x << ",\n"
+          << "  \"content_scale_y\": " << content_scale_y << ",\n"
+          << "  \"dtype\": \"float32-le\",\n"
+          << "  \"layout\": \"row-major\",\n"
+          << "  \"channels\": [\n"
+          << "    \"raw_reproject_source_u_normalized\"\n"
+          << "  ],\n"
+          << "  \"validity\": {\"content\": \"derive from content_scale_x/content_scale_y and packed output coordinate\", \"forward_coverage\": \"warp_mask_<frame-id>.png red == 0 inside content\"},\n"
+          << "  \"live_sample_source_u_normalized\": \"clamp(raw_reproject_source_u_normalized, 0, 1)\",\n"
+          << "  \"derived_inverse_displacement_output_eye_px\": \"(raw_reproject_source_u_normalized - aspect_fitted_unwarped_source_u) * content_scale_x * eye_width\",\n"
+          << "  \"derived_signed_binocular_disparity_px\": \"invert both eye maps at common source-U samples; x_right - x_left\"\n"
+          << "}\n";
+        mapping_shape.flush();
+        if (!mapping_shape.good()) {
+          BOOST_LOG(error) << "sbs-bench: failed writing warp_map_shape.json";
+          return 6;
+        }
+        warp_mapping_shape_written = true;
         BOOST_LOG(info) << "sbs-bench: input " << img.w << "x" << img.h << " -> SBS "
                         << sbs_w << "x" << sbs_h
                         << (o.simulate_hdr ? " (linear scRGB FP16 HDR simulation)" : " (sRGB SDR)");
@@ -1235,6 +1338,33 @@ namespace sbs_bench {
       ctx->OMSetRenderTargets(1, null_rtv, nullptr);
       ctx->PSSetShaderResources(0, 4, null_srv);
 
+      // Offline-only exact inverse-warp mapping. This deliberately repeats the production
+      // Reproject path after timing has ended: metric labels receive the shader's actual sampled
+      // source coordinate instead of estimating correspondence again from the rendered colors.
+      ctx->OMSetRenderTargets(1, warp_mapping_rtv.GetAddressOf(), nullptr);
+      ctx->VSSetShader(vs.Get(), nullptr, 0);
+      ctx->PSSetShader(mapping_ps.Get(), nullptr, 0);
+      ctx->RSSetViewports(1, &vp);
+      ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
+      ID3D11ShaderResourceView *mapping_srvs[] = {
+        in_srv.Get(),
+        warp_depth,
+        est.subject.Get()
+      };
+      ctx->PSSetShaderResources(0, 3, mapping_srvs);
+      ctx->PSSetConstantBuffers(2, 1, &cb);
+      ctx->Draw(3, 0);
+      ctx->OMSetRenderTargets(1, null_rtv, nullptr);
+      ctx->PSSetShaderResources(0, 3, null_srv);
+
+      char mapping_name[64];
+      snprintf(mapping_name, sizeof(mapping_name), "warp_map_%s.f32", output_id.c_str());
+      if (!dump_float_texture(dev.Get(), ctx.Get(), warp_mapping_tex.Get(),
+                              fs::path(o.out) / mapping_name, warp_mapping_stage)) {
+        BOOST_LOG(error) << "sbs-bench: failed writing " << mapping_name;
+        return 6;
+      }
+
       // Readback -> PNG.
       char mask_name[64];
       snprintf(mask_name, sizeof(mask_name), "warp_mask_%s.png", output_id.c_str());
@@ -1305,6 +1435,10 @@ namespace sbs_bench {
                        << " of " << expected_depth_override_frames << " expected depth overrides";
       return 7;
     }
+    if (!warp_mapping_shape_written) {
+      BOOST_LOG(error) << "sbs-bench: no warp mapping shape contract was written";
+      return 8;
+    }
 
     sbs_perf::dump_json((fs::path(o.out) / "sbs_perf.json").string());
     {
@@ -1313,7 +1447,7 @@ namespace sbs_bench {
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
-                 << "  \"schema\": 15,\n"
+                 << "  \"schema\": 16,\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
                  << "  \"depth_step\": "
@@ -1336,7 +1470,16 @@ namespace sbs_bench {
                  << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n"
                  << "  \"cuda_graph\": " << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
                  << "  \"cuda_graph_captured\": " << (cuda_graph_captured ? "true" : "false") << ",\n"
-                 << "  \"warp_mask\": {\"red\": \"forward_disocclusion_before_fill\"}\n"
+                 << "  \"warp_mask\": {\"red\": \"forward_disocclusion_before_fill\"},\n"
+                 << "  \"warp_mapping\": {\n"
+                 << "    \"file_pattern\": \"warp_map_<frame-id>.f32\",\n"
+                 << "    \"shape_contract\": \"warp_map_shape.json\",\n"
+                 << "    \"dtype\": \"float32-le\",\n"
+                 << "    \"layout\": \"row-major\",\n"
+                 << "    \"channels\": [\"raw_reproject_source_u_normalized\"],\n"
+                 << "    \"live_sample_transform\": \"clamp(raw_reproject_source_u_normalized, 0, 1)\",\n"
+                 << "    \"validity_companion\": \"warp_mask_<frame-id>.png:red=forward_disocclusion_before_fill; content validity derives from warp_map_shape.json\"\n"
+                 << "  }\n"
                  << "}\n";
       }
     }

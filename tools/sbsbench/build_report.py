@@ -4,7 +4,7 @@
 control-vs-treatment bar charts (one pair per clip), the gate's verdict, and one
 section per triggered issue with control/treatment crops at each issue's WORST frame.
 
-Usage: build_report.py <control_run_dir> <treat_run_dir> <out.html>
+Usage: generate_report.py <control_run_dir> <treat_run_dir> <out.html>
        (run dirs = <build-dir>/sbs_eval/<label>/ containing results.json + <clip>/sbs_*.png)
 """
 import base64
@@ -17,7 +17,7 @@ import os
 import sys
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter
 
 ctrl_dir, treat_dir, out_html = sys.argv[1], sys.argv[2], sys.argv[3]
 allow_config_diff = "--allow-config-diff" in sys.argv[4:]
@@ -26,19 +26,47 @@ allow_depth_step_diff = "--allow-depth-step-diff" in sys.argv[4:]
 allow_executable_diff = "--allow-executable-diff" in sys.argv[4:]
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
-import sbsbench  # noqa: E402  (sbs_score, shared with run_eval)
+import sbsbench  # noqa: E402
+import sbs_interocular_phase_chroma  # noqa: E402
+import sbs_interocular_photometric_rivalry  # noqa: E402
+import sbs_stereo_window_metrics  # noqa: E402
+import sbs_warp_shear_metrics  # noqa: E402
 import run_eval  # noqa: E402  (evaluation-contract and clip identity helpers)
+import offline_oracle_report  # noqa: E402  (optional diagnostic appendix only)
+
+# Report verification performs the same authoritative pixel remeasurement as the evaluator.
+# Windows cannot safely spawn process workers from this intentionally top-level CLI module, so use
+# sbsbench's ordered thread backend here. run_eval.py/rescore_run.py keep process isolation.
+os.environ.setdefault(sbsbench.SEQUENCE_SPATIAL_BACKEND_ENV, "thread")
 
 CTRL = json.load(open(os.path.join(ctrl_dir, "results.json")))
 TREAT = json.load(open(os.path.join(treat_dir, "results.json")))
-THR = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json")))["metrics"]
+THRESHOLD_CFG = json.load(open(os.path.join(SCRIPT_DIR, "thresholds.json")))
+THR = THRESHOLD_CFG["metrics"]
 CURRENT_METRIC_SHA = run_eval.metric_contract_sha()
-REPORT_SHA = run_eval.sha256_files([os.path.abspath(__file__)])
+CURRENT_LABEL_SHA = run_eval.label_contract_sha()
+CURRENT_METRIC_RUNTIME = run_eval.metric_runtime_provenance()
+REPORT_SHA = run_eval.sha256_files([
+    os.path.abspath(__file__), os.path.abspath(offline_oracle_report.__file__)])
+
+
+def _validate_metric_runtime(run, side, expected):
+    """Require report inputs to use the numeric runtime active for this report."""
+    observed = run.get("meta", {}).get("metric_runtime")
+    if observed != expected:
+        raise SystemExit(
+            f"refusing {side} metrics produced by a different numeric runtime: "
+            f"recorded={observed!r}, current={expected!r}")
+
+
+_validate_metric_runtime(CTRL, "control", CURRENT_METRIC_RUNTIME)
+_validate_metric_runtime(TREAT, "treatment", CURRENT_METRIC_RUNTIME)
 
 # An A/B report may compare different code, profile/treatment arguments, or (only when explicitly
 # requested) depth models. Its evidence remains invalid if the source set or metric contract changed.
 _SAME_CONTEXT = ["clip_set_sha1", "mode", "eval_schema", "depth_step", "suite", "run_kind",
-                 "metric_sha256", "executable_sha256", "runtime_shader_sha256"]
+                 "metric_sha256", "label_contract_sha256", "metric_runtime", "executable_sha256",
+                 "runtime_shader_sha256"]
 if not allow_model_diff:
     _SAME_CONTEXT.extend(["model", "engine_sha256", "onnx_sha256"])
 if not allow_config_diff:
@@ -59,6 +87,9 @@ if CTRL.get("meta", {}).get("eval_schema") != run_eval.EVAL_SCHEMA:
         f"rerun with current schema {run_eval.EVAL_SCHEMA}")
 if CTRL.get("meta", {}).get("metric_sha256") != CURRENT_METRIC_SHA:
     raise SystemExit("refusing stale evaluation artifacts: rescore or rerun both inputs with the current eval contract")
+if CTRL.get("meta", {}).get("label_contract_sha256") != CURRENT_LABEL_SHA:
+    raise SystemExit(
+        "refusing stale label eligibility/provenance contract: rescore or rerun both inputs")
 
 CLIPS_ROOT = CTRL.get("meta", {}).get("clips_root") or os.path.join(SCRIPT_DIR, "clips")
 
@@ -73,12 +104,6 @@ def source_files(clip):
 def gt_depth_files(clip):
     return sbsbench.indexed_files(
         os.path.join(CLIPS_ROOT, clip, "gt_depth", "frame_*.*"), "frame_")
-
-
-@functools.lru_cache(maxsize=None)
-def gt_right_files(clip):
-    return sbsbench.indexed_files(
-        os.path.join(CLIPS_ROOT, clip, "gt_right", "frame_*.*"), "frame_")
 
 
 @functools.lru_cache(maxsize=None)
@@ -99,10 +124,6 @@ def source_path(clip, frame_id):
 
 def gt_depth_path(clip, frame_id):
     return gt_depth_files(clip).get(frame_id)
-
-
-def gt_right_path(clip, frame_id):
-    return gt_right_files(clip).get(frame_id)
 
 
 def artifact_path(run, clip, prefix, frame_id):
@@ -136,6 +157,25 @@ def name(clip):
 CLIPS = sorted(CTRL["clips"])
 if set(CLIPS) != set(TREAT["clips"]):
     raise SystemExit("refusing A/B report with different clip sets")
+
+
+def _validate_authoritative_results(run, run_dir, side, clips_root):
+    """Remeasure report inputs; JSON aggregate caches never authenticate themselves."""
+    try:
+        return run_eval.verify_results_against_artifacts(
+            run, run_dir, clips_root, THRESHOLD_CFG)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SystemExit(
+            f"refusing {side} results that fail authoritative remeasurement: {exc}") from exc
+
+
+_validated_run_dirs = {}
+for _run, _run_dir, _side in (
+        (CTRL, ctrl_dir, "control"), (TREAT, treat_dir, "treatment")):
+    _validation_key = os.path.normcase(os.path.abspath(_run_dir))
+    if _validation_key not in _validated_run_dirs:
+        _validated_run_dirs[_validation_key] = _validate_authoritative_results(
+            _run, _run_dir, _side, CLIPS_ROOT)
 recorded_clip_hashes = CTRL.get("meta", {}).get("clip_set_sha1", {})
 current_clip_hashes = {clip: run_eval.sha1_dir(os.path.join(CLIPS_ROOT, clip)) for clip in CLIPS}
 stale_sources = {clip: (recorded_clip_hashes.get(clip), current_clip_hashes[clip]) for clip in CLIPS
@@ -143,62 +183,56 @@ stale_sources = {clip: (recorded_clip_hashes.get(clip), current_clip_hashes[clip
 if stale_sources:
     raise SystemExit(f"refusing report with source/GT data changed since evaluation: {stale_sources}")
 
+# Compact decision/report vector. Numeric support fields remain in results.json but do not become
+# separate report axes. Metrics omitted here are intentionally not presented as SBS quality.
 # metric, header, worse-is-higher, always-show, notable-threshold
 COLS = [
-    ("score", "score", False, True, 0),
-    ("pop_spread_px", "pop_spread", False, True, 0),
-    ("source_residual_p95", "warp_resid", True, True, 0),
-    ("source_halo_p95", "source_halo", True, True, 0),
-    ("source_stretch_pct", "source_stretch", True, True, 0),
+    ("exact_visible_pop_spread_pct", "visible_pop", False, True, 0),
+    ("exact_binocular_support_pct", "binocular_support", False, True, 0),
+    ("exact_positive_disparity_pct", "disp_positive", True, True, 0),
+    ("exact_negative_disparity_pct", "disp_negative", True, True, 0),
+    ("exact_over_3pct_area_pct", "over_limit_area", True, False, 0.01),
+    ("exact_polarity_ok", "depth_polarity", False, True, 0),
+    ("exact_local_polarity_component_pct", "local_polarity", True, False, 0.01),
+    ("exact_mapping_stretch_pct", "mapping_stretch", True, True, 0),
+    ("exact_mapping_fold_pct", "mapping_fold", True, False, 0.01),
+    ("exact_symmetry_residual_p95_pct", "camera_symmetry", True, False, 0.01),
+    ("warp_cross_row_shear_severity_pct", "row_shear", True, False, 0.01),
+    ("experimental_stereo_window_crossed_burden_pct", "window_conflict", True, False, 0.001),
+    ("interocular_phase_orientation_burden_pct", "phase_conflict", True, False, 0.01),
+    ("interocular_exposure_rivalry_burden_pct", "exposure_rivalry", True, False, 0.01),
+    ("interocular_color_gain_rivalry_burden_pct", "color_rivalry", True, False, 0.01),
+
+    ("source_coverage_pct", "render_coverage", False, True, 0),
+    ("image_integrity_pct", "render_integrity", False, True, 0),
+    ("source_coverage_worst_patch_bad_pct", "localized_missing", True, True, 0),
+    ("image_integrity_worst_patch_bad_pct", "localized_texture_damage", True, True, 0),
+    ("vmisalign_p99_pct", "vertical_mismatch", True, True, 0),
+
+    ("depth_gt_affine_nrmse_pct", "gt_depth_affine_nrmse", True, True, 0),
+    ("depth_gt_edge_f1", "gt_edge_f1", False, True, 0),
+    ("depth_gt_polarity_ok", "gt_polarity", False, True, 0),
     ("static_jitter_p95", "static_jitter", True, True, 0),
     ("flow_temporal_p95", "flow_temporal", True, True, 0),
-    ("depth_gt_si_rmse", "gt_depth_rmse", True, True, 0),
-    ("depth_gt_edge_f1", "gt_edge_f1", False, True, 0),
     ("depth_gt_lag_f1_p95", "gt_depth_lag", True, True, 0),
-    ("depth_gt_ghost_edge_pct_p95", "gt_ghost_edge", True, True, 0),
-    ("stereo_gt_psnr", "gt_stereo_psnr", False, True, 0),
-    ("stereo_gt_ssim", "gt_stereo_ssim", False, True, 0),
-    ("stereo_gt_residual_p95", "gt_stereo_resid", True, True, 0),
-    ("stereo_gt_coverage_pct", "gt_stereo_coverage", False, True, 0),
-    ("stereo_art_scale_error_pct", "art_scale_error", True, True, 0),
-    ("stereo_art_zero_error_pct", "art_zero_error", True, True, 0),
-    ("stereo_art_ddc_iou", "art_ddc_iou", False, True, 0),
-    ("stereo_art_scale_std_error_pct", "art_scale_stability", True, True, 0),
-    ("stereo_art_zero_std_error_pct", "art_zero_stability", True, True, 0),
-    ("stereo_art_polarity_ok", "art_fit_valid", False, True, 0),
-    ("positive_disparity_pct", "disp_positive", True, True, 0),
-    ("negative_disparity_pct", "disp_negative", True, True, 0),
-    ("source_coverage_pct", "coverage", False, True, 0),
-    ("image_integrity_pct", "integrity", False, True, 0),
-    ("vmisalign_pct", "vmis", True, True, 0),
-    ("warp_hole_pct", "true_hole_area", True, False, 0.01),
-    ("hole_source_residual_p95", "hole_residual", True, False, 0.01),
-    ("hole_bad_fill_pct", "bad_hole_fill", True, False, 0.01),
-    ("artifact_in_hole_pct", "artifact_in_hole", False, False, 0.01),
+    ("depth_gt_ghost_edge_pct_p95", "gt_ghost_edge", True, False, 0.01),
 ]
 
-# Quality impact = the max points a metric can move the artifact score, so tables and sections
-# read high-impact -> low. Score itself leads; artifacts scale by their penalty weight; stereo
-# volume and context metrics remain visible but do not gain artificial score importance.
-_SC = sbsbench.SCORE_CFG
-_DW = _SC.get("depth", {}).get("weight", 0.0)
-_PEN = _SC.get("penalties", {})
-_DEPTH_METRIC = _SC.get("depth", {}).get("metric", "pop_pct_p50")
+# The scalar artifact score was removed: correlated metrics must not cancel one another. Sorting
+# uses only the explicit decision role, with the compact declaration order breaking ties.
+_REPORT_CFG = THRESHOLD_CFG.get("report", {})
 
 
 def impact(k):
-    if k == "score":
-        return 1e9
-    if k in _PEN:
-        return (1.0 - _DW) * _PEN[k]["weight"]
-    if k in ("pop_spread_px", _DEPTH_METRIC):
-        return _DW * 100.0
-    return 0.0
+    return {"hard": 3.0, "primary": 2.0, "diagnostic": 1.0}.get(
+        THR.get(k, {}).get("role"), 0.0)
 
 
 COLS = sorted(COLS, key=lambda c: -impact(c[0]))
 SHORT = {k: h for k, h, *_ in COLS}
-CONTEXT_METRICS = {"warp_hole_pct", "artifact_in_hole_pct"}
+EXACT_STEREO_VISUAL_METRICS = {
+    "exact_visible_pop_spread_pct",
+}
 
 
 def durl(im, w=None, jpg=False, q=82):
@@ -280,58 +314,518 @@ def crop_at_silhouette(clip, idx):
     return out
 
 
-def source_residual_evidence(clip, idx):
-    """Metric-specific source/control/treatment crops and signed residual-delta heatmap."""
-    cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
-    src = source_path(clip, idx)
-    if not (cp and tp and src):
+EVIDENCE_METADATA = {}
+
+
+def _expanded_map(values, size=5):
+    """Visual-only dilation; localization always uses the undilated detector map."""
+    values = np.asarray(values, dtype=np.uint8)
+    return np.asarray(Image.fromarray(values, mode="L").filter(ImageFilter.MaxFilter(size)))
+
+
+def _artifact_analysis_rgb(value_map, support_map):
+    """Black/cyan detector support with red/yellow metric-specific severity."""
+    values = np.asarray(value_map, dtype=np.float32)
+    support = np.asarray(support_map, dtype=bool)
+    if values.shape != support.shape or values.ndim != 2:
+        raise ValueError("artifact value/support maps must be matching HxW arrays")
+    finite = np.isfinite(values)
+    positive = finite & (values > 0.0)
+    scale = float(np.max(values[positive])) if positive.any() else 1.0
+    normalized = np.zeros(values.shape, dtype=np.uint8)
+    normalized[finite] = np.rint(
+        np.clip(values[finite] / max(scale, 1e-12), 0.0, 1.0) * 255.0).astype(np.uint8)
+    support_visible = _expanded_map(support.astype(np.uint8) * 255) > 0
+    severity_visible = _expanded_map(normalized)
+    heat = np.zeros((*values.shape, 3), dtype=np.uint8)
+    heat[support_visible] = (0, 105, 135)
+    heat[..., 0] = np.maximum(heat[..., 0], severity_visible)
+    heat[..., 1] = np.maximum(
+        heat[..., 1], (severity_visible.astype(np.float32) * 0.72).astype(np.uint8))
+    return heat
+
+
+def _support_analysis_rgb(support):
+    """Separate analysis mask: cyan means evaluated support; black means excluded."""
+    support = np.asarray(support, dtype=bool)
+    if support.ndim != 2:
+        raise ValueError("analysis support must be HxW")
+    image = np.zeros((*support.shape, 3), dtype=np.uint8)
+    image[support] = (0, 210, 235)
+    return image
+
+
+def _label_analysis_image(image, lines):
+    """Label non-source visualizations so overlays cannot be mistaken for source artifacts."""
+    image = image.convert("RGB").copy()
+    draw = ImageDraw.Draw(image)
+    labels = [str(line) for line in lines if line]
+    if not labels:
+        return image
+    line_height = 13
+    box_height = 6 + line_height * len(labels)
+    draw.rectangle((0, 0, image.width, min(image.height, box_height)), fill=(5, 12, 16))
+    for index, label in enumerate(labels):
+        draw.text((5, 3 + index * line_height), label, fill=(235, 250, 252))
+    return image
+
+
+def _crop_array_at_normalized(array, center, fractions):
+    """Crop equal normalized source regions from potentially different output rasters."""
+    array = np.asarray(array)
+    height, width = array.shape[:2]
+    nx, ny = center
+    fraction_w, fraction_h = fractions
+    crop_width = max(1, min(width, int(round(width * fraction_w))))
+    crop_height = max(1, min(height, int(round(height * fraction_h))))
+    cx = int(round(nx * width - 0.5))
+    cy = int(round(ny * height - 0.5))
+    x0 = max(0, min(width - crop_width, cx - crop_width // 2))
+    y0 = max(0, min(height - crop_height, cy - crop_height // 2))
+    return array[y0:y0 + crop_height, x0:x0 + crop_width]
+
+
+def _shear_evidence_for_run(run, clip, idx):
+    """Rerun the exact-map row-shear detector independently for both eyes."""
+    exact = _exact_source_evidence_for_run(run, clip, idx)
+    source = source_path(clip, idx)
+    mapping_path = artifact_path(run, clip, "warp_map_", idx)
+    shape_path = os.path.join(run, clip, "warp_map_shape.json")
+    if not exact or not source or not mapping_path or not os.path.exists(shape_path):
         return None
-    ctrl, treat = normalize_sbs_images(
-        [Image.open(cp).convert("RGB"), Image.open(tp).convert("RGB")])
-    ew, eh = ctrl.width // 2, ctrl.height
-    src_rgb = Image.open(src).convert("RGB").resize((ew, eh), Image.BILINEAR)
-    src_gray = sbsbench.load_gray(src)
-    match_scale = min(1.0, 256.0 / ew)
-    match_w, match_h = max(1, round(ew * match_scale)), max(1, round(eh * match_scale))
-    maps = []
-    for img in (ctrl, treat):
-        gray = np.asarray(img.convert("L"), np.float32) / 255.0
-        eyes = sbsbench.split_eyes(gray)
-        maps.append([
-            sbsbench.source_match_map(sbsbench.resize_to(eye, match_w, match_h), src_gray)[0]
-            for eye in eyes
-        ])
-    # Show the eye where treatment changed the residual most; both eyes are always measured.
-    eye_idx = max(range(2), key=lambda i: float(np.percentile(np.abs(maps[1][i] - maps[0][i]), 95)))
+    shape = json.load(open(shape_path, encoding="utf-8"))
+    mapping = sbsbench.load_warp_mapping(mapping_path, shape)
+    source_rgb = sbsbench.load_rgb(source)
+    measured = []
+    for eye_map in sbsbench.split_eyes(mapping):
+        metrics, maps = sbs_warp_shear_metrics.measure_cross_row_shear(
+            eye_map, shape, source=source_rgb, return_maps=True)
+        measured.append({"metrics": metrics, "maps": maps})
+    return {"output": exact["output"], "reference": exact["expected"],
+            "measured": measured}
+
+
+def cross_row_shear_evidence(clip, idx, metric="warp_cross_row_shear_severity_pct"):
+    """Metric-authenticated crop at the strongest unsupported horizontal row tear."""
+    runs = [_shear_evidence_for_run(run, clip, idx) for run in (ctrl_dir, treat_dir)]
+    if not all(runs):
+        return None
+    ranked = []
+    for run_index, data in enumerate(runs):
+        for eye_index, measured in enumerate(data["measured"]):
+            value = measured["metrics"].get(metric)
+            if value is None:
+                continue
+            row_shear = np.asarray(
+                measured["maps"]["row_shear_ref_px_per_row"], dtype=np.float32)
+            bad = np.asarray(measured["maps"]["bad"], dtype=bool)
+            localized = np.where(bad & np.isfinite(row_shear), row_shear, -np.inf)
+            strongest = float(np.max(localized)) if np.isfinite(localized).any() else -np.inf
+            ranked.append((float(value), strongest, -run_index, -eye_index,
+                           run_index, eye_index, measured))
+    if not ranked:
+        return None
+    _, _, _, _, selected_run, eye_index, selected = max(ranked)
+    row_shear = np.asarray(selected["maps"]["row_shear_ref_px_per_row"], dtype=np.float32)
+    support = np.asarray(selected["maps"]["support"], dtype=bool)
+    bad = np.asarray(selected["maps"]["bad"], dtype=bool)
+    localized = np.where(bad & np.isfinite(row_shear), row_shear, -np.inf)
+    if np.isfinite(localized).any():
+        cy, cx = np.unravel_index(int(np.argmax(localized)), localized.shape)
+    else:
+        locations = np.argwhere(support)
+        if not locations.size:
+            return None
+        center = (np.asarray(support.shape, dtype=np.float32) - 1.0) * 0.5
+        cy, cx = locations[np.argmin(np.sum((locations - center) ** 2, axis=1))]
+    height, width = row_shear.shape
+    normalized_center = ((float(cx) + 0.5) / width, (float(cy) + 0.5) / height)
+    crop_fractions = (min(1.0, 480.0 / width), min(1.0, 360.0 / height))
+    reference = _crop_array_at_normalized(
+        runs[selected_run]["reference"][eye_index], normalized_center, crop_fractions)
+    control = _crop_array_at_normalized(
+        runs[0]["output"][eye_index], normalized_center, crop_fractions)
+    treatment = _crop_array_at_normalized(
+        runs[1]["output"][eye_index], normalized_center, crop_fractions)
+    contribution = np.where(bad, row_shear, 0.0)
+    analysis = _crop_array_at_normalized(
+        _artifact_analysis_rgb(contribution, support), normalized_center, crop_fractions)
+    support_count = int(selected["metrics"].get(
+        "warp_cross_row_shear_support_count", 0))
+    selected_tag = CTRL_TAG if selected_run == 0 else TREAT_TAG
+    eye_name = "left" if eye_index == 0 else "right"
+    analysis_image = _label_analysis_image(Image.fromarray(analysis), [
+        "row-shear detector (not source content)",
+        f"cyan=support, red/yellow=unsupported tear; n={support_count}",
+    ])
+    EVIDENCE_METADATA[(clip, idx, metric)] = {
+        "eye": eye_name, "selected_run": selected_tag, "support": support_count,
+    }
+    return (
+        durl(Image.fromarray(np.clip(reference * 255.0, 0, 255).astype(np.uint8)),
+             w=380, jpg=True, q=88),
+        durl(Image.fromarray(np.clip(control * 255.0, 0, 255).astype(np.uint8)),
+             w=380, jpg=True, q=88),
+        durl(Image.fromarray(np.clip(treatment * 255.0, 0, 255).astype(np.uint8)),
+             w=380, jpg=True, q=88),
+        durl(analysis_image, w=380),
+    )
+
+
+def _exact_source_evidence_for_run(run, clip, idx):
+    """Return per-eye output, exact mapped source, residual, and mapping-topology maps."""
+    output_path = frame_path(run, clip, idx)
+    mapping_path = artifact_path(run, clip, "warp_map_", idx)
+    source = source_path(clip, idx)
+    shape_path = os.path.join(run, clip, "warp_map_shape.json")
+    if not output_path or not mapping_path or not source or not os.path.exists(shape_path):
+        return None
+    shape = json.load(open(shape_path, encoding="utf-8"))
+    mapping = sbsbench.load_warp_mapping(mapping_path, shape)
+    output = sbsbench.load_rgb(output_path)
+    if output.shape[:2] != mapping.shape:
+        raise ValueError(f"report warp map {mapping.shape} != output {output.shape[:2]}")
+    source_rgb = sbsbench.load_rgb(source)
+    hdr_scale = None
+    hdr_path = os.path.join(run, clip, "hdr_output_stats.json")
+    if os.path.exists(hdr_path):
+        hdr_scale = float(json.load(open(hdr_path, encoding="utf-8"))["input_scale"])
+    eye_outputs = sbsbench.split_eyes(output)
+    eye_maps = sbsbench.split_eyes(mapping)
+    height, eye_width = eye_outputs[0].shape[:2]
+    scale_x, scale_y = float(shape["content_scale_x"]), float(shape["content_scale_y"])
+    output_v = (np.arange(height, dtype=np.float32) + 0.5) / height
+    lo_y = 0.5 * (1.0 - scale_y)
+    source_v = np.broadcast_to(
+        np.clip((output_v - lo_y) / scale_y, 0.0, 1.0)[:, None], (height, eye_width))
+    if hdr_scale is None:
+        sample_source = source_rgb
+    else:
+        sample_source = (sbsbench._srgb_to_linear(source_rgb) * hdr_scale).astype(
+            np.float16).astype(np.float32)
+    expected, residuals, topology = [], [], []
+    baseline_step = float(shape["source_width"]) / max(scale_x * eye_width, 1.0)
+    for eye, sampled_u in zip(eye_outputs, eye_maps):
+        # The sidecar preserves raw Reproject U for geometry. Displayed color and topology both
+        # consume main_ps's saturated coordinate; raw U remains available to comfort metrics.
+        live_sampled_u = np.clip(sampled_u, 0.0, 1.0)
+        mapped = sbsbench._sample_rgb_uv(sample_source, live_sampled_u, source_v)
+        if hdr_scale is not None:
+            mapped = sbsbench._hdr_preview_rgb(mapped)
+        expected.append(mapped)
+        residuals.append(np.abs(sbsbench.rgb_luma(eye) - sbsbench.rgb_luma(mapped)))
+        source_step = np.diff(live_sampled_u * float(shape["source_width"]), axis=1,
+                              prepend=live_sampled_u[:, :1] * float(shape["source_width"]))
+        topology.append(np.clip(1.0 - np.abs(source_step) / max(baseline_step, 1e-6), 0.0, 1.0))
+    return {"output": eye_outputs, "expected": expected, "residual": residuals,
+            "topology": topology}
+
+
+def _detector_inputs_for_run(run, clip, idx):
+    """Load the exact artifacts used by the retained perceptual detectors."""
+    output_path = frame_path(run, clip, idx)
+    mapping_path = artifact_path(run, clip, "warp_map_", idx)
+    mask_path = artifact_path(run, clip, "warp_mask_", idx)
+    depth_path = artifact_path(run, clip, "depth_", idx)
+    input_path = source_path(clip, idx)
+    shape_path = os.path.join(run, clip, "warp_map_shape.json")
+    if not all((output_path, mapping_path, mask_path, depth_path, input_path)):
+        return None
+    if not os.path.exists(shape_path):
+        return None
+    shape = json.load(open(shape_path, encoding="utf-8"))
+    mapping = sbsbench.load_warp_mapping(mapping_path, shape)
+    output = sbsbench.load_rgb(output_path)
+    source = sbsbench.load_rgb(input_path)
+    depth = sbsbench.load_depth(depth_path)
+    mask = np.asarray(Image.open(mask_path).convert("RGB"), np.float32) / 255.0
+    if output.shape[:2] != mapping.shape or mask.shape[:2] != mapping.shape:
+        raise ValueError("detector output/map/mask geometry mismatch")
+    metric_source = source
+    sample_transform = None
+    hdr_path = os.path.join(run, clip, "hdr_output_stats.json")
+    if os.path.exists(hdr_path):
+        hdr_scale = float(json.load(open(hdr_path, encoding="utf-8"))["input_scale"])
+        metric_source = (
+            sbsbench._srgb_to_linear(source) * hdr_scale
+        ).astype(np.float16).astype(np.float32)
+        sample_transform = sbsbench._hdr_preview_rgb
+    return {
+        "shape": shape,
+        "mapping": mapping,
+        "mask": mask,
+        "depth": depth,
+        "source": metric_source,
+        "source_preview": source,
+        "sample_transform": sample_transform,
+        "eyes": sbsbench.split_eyes(output),
+    }
+
+
+def _stereo_pair_arrays(left, right):
+    left = np.asarray(left)
+    right = np.asarray(right)
+    if left.shape != right.shape:
+        raise ValueError("registered eye evidence must share geometry")
+    separator = np.zeros((left.shape[0], 4, 3), dtype=np.float32)
+    if left.ndim == 2:
+        left = np.repeat(left[..., None], 3, axis=2)
+        right = np.repeat(right[..., None], 3, axis=2)
+    return np.concatenate((left[..., :3], separator, right[..., :3]), axis=1)
+
+
+def _rgb_data_url(array, width=380):
+    array = np.asarray(array, dtype=np.float32)
+    if array.ndim == 2:
+        array = np.repeat(array[..., None], 3, axis=2)
+    # Registered evidence intentionally carries NaN outside exact mutual support. Display those
+    # pixels as black; never rely on NumPy's platform-dependent float-to-uint8 invalid cast.
+    array = np.nan_to_num(array, nan=0.0, posinf=1.0, neginf=0.0)
+    return durl(Image.fromarray(
+        np.clip(array[..., :3] * 255.0, 0, 255).astype(np.uint8)),
+        w=width, jpg=True, q=88)
+
+
+def interocular_conflict_evidence(clip, idx, metric):
+    """Source-registered stereo pairs and the phase/orientation conflict map."""
+    inputs = [_detector_inputs_for_run(run, clip, idx)
+              for run in (ctrl_dir, treat_dir)]
+    if not all(inputs):
+        return None
+    measured = []
+    for data in inputs:
+        left_map, right_map = sbsbench.split_eyes(data["mapping"])
+        metrics, maps = sbs_interocular_phase_chroma.measure_interocular_phase_chroma(
+            data["source"], data["eyes"][0], data["eyes"][1], left_map, right_map,
+            data["shape"], warp_mask=data["mask"],
+            source_sample_transform=data["sample_transform"],
+            return_maps=True)
+        measured.append((metrics, maps))
+    ranked = [(float(item[0][metric]), run_index)
+              for run_index, item in enumerate(measured)
+              if item[0].get(metric) is not None]
+    if not ranked:
+        return None
+    _, selected_run = max(ranked)
+    maps = measured[selected_run][1]
+    support = np.asarray(maps["phase_orientation_support"], dtype=bool)
+    values = np.asarray(maps["phase_orientation_conflict_pct"], dtype=np.float32)
+    localized = np.where(support & np.isfinite(values), values, -np.inf)
+    if not np.isfinite(localized).any():
+        return None
+    cy, cx = np.unravel_index(int(np.argmax(localized)), localized.shape)
+    center = ((float(cx) + 0.5) / values.shape[1],
+              (float(cy) + 0.5) / values.shape[0])
+    fractions = (min(1.0, 480.0 / values.shape[1]),
+                 min(1.0, 360.0 / values.shape[0]))
+    reference = _crop_array_at_normalized(
+        maps["registered_source_rgb"], center, fractions)
+    stereo_pairs = []
+    for _, run_maps in measured:
+        left = _crop_array_at_normalized(
+            run_maps["registered_left_rgb"], center, fractions)
+        right = _crop_array_at_normalized(
+            run_maps["registered_right_rgb"], center, fractions)
+        stereo_pairs.append(_stereo_pair_arrays(left, right))
+    analysis = _crop_array_at_normalized(
+        _artifact_analysis_rgb(np.where(support, values, 0.0), support),
+        center, fractions)
+    support_count = int(measured[selected_run][0].get(
+        "interocular_phase_orientation_support_count", 0))
+    EVIDENCE_METADATA[(clip, idx, metric)] = {
+        "selected_run": CTRL_TAG if selected_run == 0 else TREAT_TAG,
+        "support": support_count,
+        "detector": "phase/orientation",
+        "stereo_pairs": True,
+    }
+    analysis_image = _label_analysis_image(Image.fromarray(analysis), [
+        "registered conflict map (not source content)",
+        f"cyan=support, red/yellow=conflict; n={support_count}",
+    ])
+    return (_rgb_data_url(reference), _rgb_data_url(stereo_pairs[0], 520),
+            _rgb_data_url(stereo_pairs[1], 520), durl(analysis_image, w=380))
+
+
+def interocular_photometric_evidence(clip, idx, metric):
+    """Exact-source-registered exposure or colour-gain rivalry evidence."""
+    inputs = [_detector_inputs_for_run(run, clip, idx)
+              for run in (ctrl_dir, treat_dir)]
+    if not all(inputs):
+        return None
+    measured = []
+    for data in inputs:
+        left_map, right_map = sbsbench.split_eyes(data["mapping"])
+        metrics, maps = (
+            sbs_interocular_photometric_rivalry
+            .measure_interocular_photometric_rivalry(
+                data["source"], data["eyes"][0], data["eyes"][1],
+                left_map, right_map, data["shape"], warp_mask=data["mask"],
+                source_sample_transform=data["sample_transform"], return_maps=True))
+        measured.append((metrics, maps))
+    ranked = [(float(item[0][metric]), run_index)
+              for run_index, item in enumerate(measured)
+              if item[0].get(metric) is not None]
+    if not ranked:
+        return None
+    _, selected_run = max(ranked)
+    maps = measured[selected_run][1]
+    exposure = metric.startswith("interocular_exposure_")
+    value_key = "exposure_rivalry_pct" if exposure else "color_gain_rivalry_pct"
+    support = np.asarray(maps["photometric_support"], dtype=bool)
+    values = np.asarray(maps[value_key], dtype=np.float32)
+    localized = np.where(support & np.isfinite(values), values, -np.inf)
+    if not np.isfinite(localized).any():
+        return None
+    cy, cx = np.unravel_index(int(np.argmax(localized)), localized.shape)
+    center = ((float(cx) + 0.5) / values.shape[1],
+              (float(cy) + 0.5) / values.shape[0])
+    fractions = (min(1.0, 480.0 / values.shape[1]),
+                 min(1.0, 360.0 / values.shape[0]))
+    reference = _crop_array_at_normalized(
+        maps["registered_source_rgb"], center, fractions)
+    stereo_pairs = []
+    for _, run_maps in measured:
+        left = _crop_array_at_normalized(
+            run_maps["registered_left_rgb"], center, fractions)
+        right = _crop_array_at_normalized(
+            run_maps["registered_right_rgb"], center, fractions)
+        stereo_pairs.append(_stereo_pair_arrays(left, right))
+    analysis = _crop_array_at_normalized(
+        _artifact_analysis_rgb(np.where(support, values, 0.0), support),
+        center, fractions)
+    prefix = ("interocular_exposure_rivalry" if exposure else
+              "interocular_color_gain_rivalry")
+    support_count = int(measured[selected_run][0].get(
+        f"{prefix}_support_count", 0))
+    EVIDENCE_METADATA[(clip, idx, metric)] = {
+        "selected_run": CTRL_TAG if selected_run == 0 else TREAT_TAG,
+        "support": support_count,
+        "detector": "exposure rivalry" if exposure else "colour-gain rivalry",
+        "stereo_pairs": True,
+    }
+    analysis_image = _label_analysis_image(Image.fromarray(analysis), [
+        "registered rivalry map (not source content)",
+        f"cyan=support, red/yellow=rivalry; n={support_count}",
+    ])
+    return (_rgb_data_url(reference), _rgb_data_url(stereo_pairs[0], 520),
+            _rgb_data_url(stereo_pairs[1], 520), durl(analysis_image, w=380))
+
+
+def stereo_window_evidence(clip, idx, metric):
+    """Border-localized source, stereo pairs, and crossed window-risk contribution."""
+    inputs = [_detector_inputs_for_run(run, clip, idx)
+              for run in (ctrl_dir, treat_dir)]
+    if not all(inputs):
+        return None
+    measured = []
+    for data in inputs:
+        shape = data["shape"]
+        depth = sbsbench.resize_depth(
+            data["depth"], int(shape["source_width"]), int(shape["source_height"]))
+        coverage = data["mask"][..., 0] < 0.5
+        metrics, maps = sbs_stereo_window_metrics.measure_stereo_window_violation(
+            data["mapping"], shape, data["source"], depth=depth,
+            coverage_mask=coverage, source_sample_transform=data["sample_transform"],
+            return_maps=True)
+        measured.append((metrics, maps))
+    ranked = [(float(item[0][metric]), run_index)
+              for run_index, item in enumerate(measured)
+              if item[0].get(metric) is not None]
+    if not ranked:
+        return None
+    _, selected_run = max(ranked)
+    maps = measured[selected_run][1]
+    support = np.asarray(maps["support"], dtype=bool)
+    risk = np.asarray(maps["crossed_risk"], dtype=bool)
+    contribution = np.asarray(maps["crossed_contribution"], dtype=np.float32)
+    localized = np.where(risk & np.isfinite(contribution), contribution, -np.inf)
+    if np.isfinite(localized).any():
+        cy, cx = np.unravel_index(int(np.argmax(localized)), localized.shape)
+    else:
+        locations = np.argwhere(support)
+        if not locations.size:
+            return None
+        cy, cx = locations[len(locations) // 2]
+    left_cut = bool(np.asarray(maps["crossed_left_cut"], dtype=bool)[cy, cx])
+    right_cut = bool(np.asarray(maps["crossed_right_cut"], dtype=bool)[cy, cx])
+    use_left = left_cut or (not right_cut and cx < contribution.shape[1] // 2)
+    x_center = 0.18 if use_left else 0.82
+    y_center = (float(cy) + 0.5) / contribution.shape[0]
+    fractions = (0.36, min(1.0, 360.0 / contribution.shape[0]))
+    source_crop = _crop_array_at_normalized(
+        maps["source_luma"], (x_center, y_center), fractions)
+    stereo_pairs = []
+    for data in inputs:
+        left = _crop_array_at_normalized(
+            data["eyes"][0], (x_center, y_center), fractions)
+        right = _crop_array_at_normalized(
+            data["eyes"][1], (x_center, y_center), fractions)
+        stereo_pairs.append(_stereo_pair_arrays(left, right))
+    analysis = _crop_array_at_normalized(
+        _artifact_analysis_rgb(np.where(risk, contribution, 0.0), support),
+        (x_center, y_center), fractions)
+    support_count = int(measured[selected_run][0].get(
+        "experimental_stereo_window_support_count", 0))
+    EVIDENCE_METADATA[(clip, idx, metric)] = {
+        "selected_run": CTRL_TAG if selected_run == 0 else TREAT_TAG,
+        "support": support_count,
+        "border": "left" if use_left else "right",
+        "stereo_pairs": True,
+    }
+    analysis_image = _label_analysis_image(Image.fromarray(analysis), [
+        "stereo-window detector (not source content)",
+        f"cyan=support, red/yellow=crossed cut; n={support_count}",
+    ])
+    return (_rgb_data_url(source_crop), _rgb_data_url(stereo_pairs[0], 520),
+            _rgb_data_url(stereo_pairs[1], 520), durl(analysis_image, w=380))
+
+
+def source_residual_evidence(clip, idx, metric=None):
+    """Exact mapped-source or source-coordinate topology evidence for one metric."""
+    runs = [_exact_source_evidence_for_run(run, clip, idx) for run in (ctrl_dir, treat_dir)]
+    if not all(runs):
+        return None
+    eye_w = min(data["output"][0].shape[1] for data in runs)
+    height = min(data["output"][0].shape[0] for data in runs)
+
+    def resized(array):
+        if array.shape[:2] == (height, eye_w):
+            return array
+        if array.ndim == 3:
+            image = Image.fromarray(np.clip(array * 255.0, 0, 255).astype(np.uint8), "RGB")
+            return np.asarray(image.resize((eye_w, height), Image.BILINEAR), np.float32) / 255.0
+        return sbsbench.resize_to(array, eye_w, height)
+
+    kind = "topology" if metric in {
+        "exact_mapping_stretch_pct", "exact_mapping_fold_pct"
+    } else "residual"
+    maps = [[resized(data[kind][eye]) for eye in range(2)] for data in runs]
+    eye_idx = max(range(2), key=lambda eye: float(np.percentile(
+        np.abs(maps[1][eye] - maps[0][eye]), 95)))
     delta = maps[1][eye_idx] - maps[0][eye_idx]
     score = sbsbench._box3(np.abs(delta))
-    match_y, match_x = np.unravel_index(np.argmax(score), score.shape)
-    cx = int((match_x + 0.5) / match_w * ew)
-    cy = int((match_y + 0.5) / match_h * eh)
-    cw, ch = min(480, ew), min(360, eh)
-    x0 = max(0, min(ew - cw, int(cx) - cw // 2))
-    y0 = max(0, min(eh - ch, int(cy) - ch // 2))
-    xoff = eye_idx * ew
-    source_crop = src_rgb.crop((x0, y0, x0 + cw, y0 + ch))
-    ctrl_crop = ctrl.crop((xoff + x0, y0, xoff + x0 + cw, y0 + ch))
-    treat_crop = treat.crop((xoff + x0, y0, xoff + x0 + cw, y0 + ch))
-    # Preserve the signed residual delta; sbsbench.resize_to is intentionally an 8-bit luma path.
-    delta_full = np.asarray(
-        Image.fromarray(delta.astype(np.float32)).resize((ew, eh), Image.BILINEAR),
-        dtype=np.float32,
-    )
-    d = delta_full[y0:y0 + ch, x0:x0 + cw] * 255.0
+    cy, cx = np.unravel_index(np.argmax(score), score.shape)
+    cw, ch = min(480, eye_w), min(360, height)
+    x0 = max(0, min(eye_w - cw, int(cx) - cw // 2))
+    y0 = max(0, min(height - ch, int(cy) - ch // 2))
+    crop = (x0, y0, x0 + cw, y0 + ch)
+    expected = resized(runs[1]["expected"][eye_idx])
+    control = resized(runs[0]["output"][eye_idx])
+    treatment = resized(runs[1]["output"][eye_idx])
+    d = delta[y0:y0 + ch, x0:x0 + cw] * 255.0
     heat = np.zeros((*d.shape, 3), np.uint8)
-    heat[..., 0] = np.clip(d * 12.0, 0, 255).astype(np.uint8)       # red = worse
-    heat[..., 2] = np.clip(-d * 12.0, 0, 255).astype(np.uint8)      # blue = better
-    return (durl(source_crop, w=380, jpg=True, q=82),
-            durl(ctrl_crop, w=380, jpg=True, q=82),
-            durl(treat_crop, w=380, jpg=True, q=82),
-            durl(Image.fromarray(heat), w=380, jpg=True, q=88))
+    heat[..., 0] = np.clip(d * 12.0, 0, 255).astype(np.uint8)
+    heat[..., 2] = np.clip(-d * 12.0, 0, 255).astype(np.uint8)
+    return (
+        durl(Image.fromarray((expected * 255.0).astype(np.uint8)).crop(crop), w=380, jpg=True),
+        durl(Image.fromarray((control * 255.0).astype(np.uint8)).crop(crop), w=380, jpg=True),
+        durl(Image.fromarray((treatment * 255.0).astype(np.uint8)).crop(crop), w=380, jpg=True),
+        durl(Image.fromarray(heat), w=380, jpg=True, q=88),
+    )
 
 
 def static_jitter_evidence(clip, idx):
-    """Source-static mask, per-run temporal delta, and signed treatment movement."""
+    """Unmodified source, per-run temporal delta, and a separate static-support mask."""
     prev_idx = sbsbench.predecessor_frame_id(source_files(clip), idx)
     if prev_idx is None:
         return None
@@ -360,18 +854,27 @@ def static_jitter_evidence(clip, idx):
     x0 = max(0, min(ew - cw, int(cx) - cw // 2))
     y0 = max(0, min(eh - ch, int(cy) - ch // 2))
     source = Image.open(src_now).convert("RGB").resize((ew, eh), Image.BILINEAR)
-    source_a = np.asarray(source).copy()
-    source_a[~stable] = (source_a[~stable] * 0.18).astype(np.uint8)
     ctrl_heat = np.zeros((eh, ew, 3), np.uint8)
     treat_heat = np.zeros((eh, ew, 3), np.uint8)
     ctrl_heat[..., 0] = np.clip(deltas[0][eye_idx] * 255.0 * 8.0, 0, 255).astype(np.uint8)
     treat_heat[..., 0] = np.clip(deltas[1][eye_idx] * 255.0 * 8.0, 0, 255).astype(np.uint8)
-    signed_heat = np.zeros((eh, ew, 3), np.uint8)
-    signed_heat[..., 0] = np.clip(signed * 8.0, 0, 255).astype(np.uint8)
-    signed_heat[..., 2] = np.clip(-signed * 8.0, 0, 255).astype(np.uint8)
+    support_count = int(np.count_nonzero(stable))
+    support_pct = 100.0 * support_count / max(stable.size, 1)
+    support_image = _support_analysis_rgb(stable)
     crop = (x0, y0, x0 + cw, y0 + ch)
-    return tuple(durl(Image.fromarray(a).crop(crop), w=380, jpg=True, q=88) for a in
-                 (source_a, ctrl_heat, treat_heat, signed_heat))
+    support_crop = _label_analysis_image(Image.fromarray(support_image).crop(crop), [
+        "analysis mask (not source content)",
+        f"cyan=static support; n={support_count} ({support_pct:.1f}%)",
+    ])
+    EVIDENCE_METADATA[(clip, idx, "static_jitter_p95")] = {
+        "support": support_count, "support_pct": support_pct,
+    }
+    return (
+        durl(source.crop(crop), w=380, jpg=True, q=88),
+        durl(Image.fromarray(ctrl_heat).crop(crop), w=380, jpg=True, q=88),
+        durl(Image.fromarray(treat_heat).crop(crop), w=380, jpg=True, q=88),
+        durl(support_crop, w=380),
+    )
 
 
 def ground_truth_depth_evidence(clip, idx):
@@ -412,40 +915,6 @@ def ground_truth_depth_evidence(clip, idx):
     images = [Image.fromarray((gray(a) * 255).astype(np.uint8)) for a in (shown_gt, ca, ta)]
     images.append(Image.fromarray(heat))
     return tuple(durl(im, w=380, jpg=True, q=88) for im in images)
-
-
-def ground_truth_stereo_evidence(clip, idx):
-    """True right eye, synthesized right eyes, and signed reference-error delta."""
-    reference_path = gt_right_path(clip, idx)
-    control_path = frame_path(ctrl_dir, clip, idx)
-    treatment_path = frame_path(treat_dir, clip, idx)
-    if not reference_path or not control_path or not treatment_path:
-        return None
-    reference = sbsbench.load_gray(reference_path)
-    control = sbsbench.split_eyes(sbsbench.load_gray(control_path))[1]
-    treatment = sbsbench.split_eyes(sbsbench.load_gray(treatment_path))[1]
-    width = min(control.shape[1], treatment.shape[1], 256)
-    height = max(8, round(min(control.shape[0] / control.shape[1],
-                              treatment.shape[0] / treatment.shape[1]) * width))
-    control = sbsbench.resize_to(control, width, height)
-    treatment = sbsbench.resize_to(treatment, width, height)
-    reference = sbsbench.resize_to(reference, width, height)
-    control, control_ref, control_valid, _, _ = sbsbench.align_stereo_ground_truth(
-        control, reference)
-    treatment, treatment_ref, treatment_valid, _, _ = sbsbench.align_stereo_ground_truth(
-        treatment, reference)
-    valid = control_valid & treatment_valid
-    control_error = np.abs(control - control_ref) * 255.0
-    treatment_error = np.abs(treatment - treatment_ref) * 255.0
-    signed = np.where(valid, treatment_error - control_error, 0.0)
-    heat = np.zeros((*signed.shape, 3), np.uint8)
-    heat[..., 0] = np.clip(signed * 4.0, 0, 255).astype(np.uint8)
-    heat[..., 2] = np.clip(-signed * 4.0, 0, 255).astype(np.uint8)
-    images = [Image.fromarray((reference * 255.0).astype(np.uint8)),
-              Image.fromarray((control * 255.0).astype(np.uint8)),
-              Image.fromarray((treatment * 255.0).astype(np.uint8)),
-              Image.fromarray(heat)]
-    return tuple(durl(image, w=380, jpg=True, q=88) for image in images)
 
 
 def ground_truth_lag_evidence(clip, idx):
@@ -514,15 +983,14 @@ def flow_temporal_evidence(clip, idx):
     now_src = sbsbench.load_gray(src_now)
     prev_src = sbsbench.load_gray(src_prev)
     gt_flow = gt_flow_files(clip).get(idx)
-    if gt_flow:
-        with np.load(gt_flow, allow_pickle=False) as flow_data:
-            reference_flow = np.asarray(flow_data["flow"], dtype=np.float32)
-            reference_valid = (np.asarray(flow_data["valid"], dtype=bool)
-                               if "valid" in flow_data else None)
-        u, v, flow_valid = sbsbench.resize_forward_flow_to_current(
-            reference_flow, reference_valid, vw, vh)
-    else:
-        u, v, flow_valid = sbsbench.dense_source_flow(prev_src, now_src, vw, vh)
+    if not gt_flow:
+        return None
+    with np.load(gt_flow, allow_pickle=False) as flow_data:
+        reference_flow = np.asarray(flow_data["flow"], dtype=np.float32)
+        reference_valid = (np.asarray(flow_data["valid"], dtype=bool)
+                           if "valid" in flow_data else None)
+    u, v, flow_valid = sbsbench.resize_forward_flow_to_current(
+        reference_flow, reference_valid, vw, vh)
     now_small = sbsbench.resize_to(now_src, vw, vh)
     prev_small = sbsbench.resize_to(prev_src, vw, vh)
     src_warp, valid = sbsbench.warp_previous_with_flow(prev_small, u, v)
@@ -565,20 +1033,30 @@ def visual_evidence_images(clip, idx, metric=None):
     source region.  The heatmap is deliberately labelled as amplified: it is evidence of where
     the renderers differ, while the adjacent metric supplies the direction of the change.
     """
-    if metric in ("source_residual_p95", "source_halo_p95", "source_stretch_pct"):
-        return source_residual_evidence(clip, idx)
+    if metric in ("source_coverage_pct", "image_integrity_pct",
+                  "exact_mapping_stretch_pct", "exact_mapping_fold_pct",
+                  ):
+        return source_residual_evidence(clip, idx, metric)
+    if metric == "warp_cross_row_shear_severity_pct":
+        return cross_row_shear_evidence(clip, idx, metric)
+    if metric == "interocular_phase_orientation_burden_pct":
+        return interocular_conflict_evidence(clip, idx, metric)
+    if metric in {
+            "interocular_exposure_rivalry_burden_pct",
+            "interocular_color_gain_rivalry_burden_pct"}:
+        return interocular_photometric_evidence(clip, idx, metric)
+    if metric == "experimental_stereo_window_crossed_burden_pct":
+        return stereo_window_evidence(clip, idx, metric)
     if metric == "static_jitter_p95":
         return static_jitter_evidence(clip, idx)
     if metric == "flow_temporal_p95":
         return flow_temporal_evidence(clip, idx)
-    if metric in ("depth_gt_si_rmse", "depth_gt_edge_f1"):
+    if metric in ("depth_gt_affine_nrmse_pct", "depth_gt_edge_f1",
+                  "depth_gt_polarity_ok"):
         return ground_truth_depth_evidence(clip, idx)
     if metric in ("depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95"):
         return ground_truth_lag_evidence(clip, idx)
-    if (metric in ("stereo_gt_psnr", "stereo_gt_ssim", "stereo_gt_residual_p95",
-                   "stereo_gt_coverage_pct") or metric.startswith("stereo_art_")):
-        return ground_truth_stereo_evidence(clip, idx)
-    if metric == "pop_spread_px":
+    if metric in EXACT_STEREO_VISUAL_METRICS:
         cp, tp = frame_path(ctrl_dir, clip, idx), frame_path(treat_dir, clip, idx)
         dp = artifact_path(ctrl_dir, clip, "depth_", idx)
         if not (cp and tp and dp):
@@ -697,6 +1175,19 @@ ctrl_agg = {c: CTRL["clips"][c]["aggregate"] for c in CLIPS}
 treat_agg = {c: TREAT["clips"][c]["aggregate"] for c in CLIPS}
 
 
+def _metric_value(run, clip, key):
+    """Finite aggregate value only when the metric's independent evidence is applicable."""
+    observed = run["clips"][clip].get("aggregate", {})
+    spec = THR.get(key)
+    if spec is not None:
+        metadata = run["clips"][clip].get("meta", {})
+        if sbsbench.metric_evidence_state(key, spec, observed, metadata) != "applicable":
+            return None
+    if not sbsbench.metric_value_valid(observed, key):
+        return None
+    return float(observed[key])
+
+
 def expected_flat(run, clip):
     value = run["clips"].get(clip, {}).get("meta", {}).get("expected_flat")
     if value is not None:
@@ -711,19 +1202,11 @@ def expected_flat(run, clip):
 # Expected-flat clips remain visible as false-stereo diagnostics but cannot raise or lower the
 # general-content feature verdict. They exercise a different objective from ordinary scenes.
 DECISION_CLIPS = [c for c in CLIPS if not expected_flat(CTRL, c)] or CLIPS
-DECISION_SCOPE = ("final_candidate" if TREAT.get("meta", {}).get("suite") == "extended"
-                  else "screening")
+DECISION_SCOPE = ("extended_screening" if TREAT.get("meta", {}).get("suite") == "extended"
+                  else "core_screening")
 SOURCE_ARTIFACT_CLIPS = [c for c in CLIPS
                          if CTRL["clips"].get(c, {}).get("meta", {}).get("source_artifacts")]
 
-
-# Re-apply eligibility to old run artifacts so a regenerated report uses today's metric contract.
-for _run, _aggs in ((CTRL, ctrl_agg), (TREAT, treat_agg)):
-    for _clip, _agg in _aggs.items():
-        if _agg.get("disocc_frac", 0.0) < sbsbench.MIN_DISOCC_FRAC:
-            for _key in ("disocc_smear", "flicker_disocc", "flicker_disocc_p50", "flicker_disocc_p95"):
-                _agg.pop(_key, None)
-        _agg.update(sbsbench.sbs_score(_agg, expected_flat=expected_flat(_run, _clip)))
 
 # Compute the verdict once from the aggregate dictionaries and reuse the same object for both the
 # HTML conclusion and a machine-readable sidecar. This prevents downstream automation (or a human
@@ -732,7 +1215,12 @@ AB_METRIC_DECISION = sbsbench.evaluate_ab_decision(
     ctrl_agg, treat_agg, DECISION_CLIPS, THR, hard_clip_ids=CLIPS,
     clip_meta={clip: TREAT["clips"][clip].get("meta", {}) for clip in CLIPS})
 AB_DECISION = sbsbench.gate_ab_decision(AB_METRIC_DECISION, CTRL, TREAT)
-colmax = {k: max(max(ctrl_agg[c].get(k, 0), treat_agg[c].get(k, 0)) for c in CLIPS) for k, *_ in COLS}
+colmax = {
+    key: max((abs(value) for clip in CLIPS for value in
+              (_metric_value(CTRL, clip, key), _metric_value(TREAT, clip, key))
+              if value is not None), default=0.0)
+    for key, *_ in COLS
+}
 ACTIVE = [col for col in COLS if col[3] or colmax[col[0]] > col[4]]
 CLEAN = [col for col in COLS if col not in ACTIVE and col[2]]
 
@@ -741,55 +1229,50 @@ CLEAN = [col for col in COLS if col not in ACTIVE and col[2]]
 # scale and is flipped where necessary so farther from the center always means better. The raw
 # means remain printed under each chart; the real decision continues to use per-clip tolerances.
 RADAR_GROUPS = [
-    ("Validated primary axes", "Can vote in the feature decision", [
-        {"key": "pop_spread_pct", "label": "Stereo volume", "better": "higher",
-         "reference": _SC.get("depth", {}).get("target", 2.5), "unit": "%"},
-        {"key": "source_residual_p95", "label": "Warp fidelity", "better": "lower",
-         "reference": 15.0, "unit": " luma"},
-        {"key": "source_halo_p95", "label": "Halo fidelity", "better": "lower",
-         "reference": 15.0, "unit": " luma"},
-        {"key": "source_stretch_pct", "label": "Stretch fidelity", "better": "lower",
+    ("Style diagnostics", "Visible relief is a style objective, never a standalone quality vote", [
+        {"key": "exact_visible_pop_spread_pct", "label": "Visible stereo relief",
+         "better": "higher",
+         "reference": _REPORT_CFG.get("visible_pop_reference_pct", 2.5), "unit": "%"},
+    ]),
+    ("Perceptual artifact diagnostics", "Independent experimental diagnostics; they cannot vote until qualified", [
+        {"key": "exact_mapping_stretch_pct", "label": "Mapping stretch", "better": "lower",
          "reference": 25.0, "unit": "%"},
+        {"key": "exact_mapping_fold_pct", "label": "Mapping folds", "better": "lower",
+         "reference": 2.0, "unit": "%"},
+        {"key": "warp_cross_row_shear_severity_pct", "label": "Row shear / tear",
+         "better": "lower", "reference": 6.0, "unit": " burden"},
+        {"key": "exact_over_3pct_area_pct", "label": "Over-limit area", "better": "lower",
+         "reference": 10.0, "unit": "%"},
+        {"key": "experimental_stereo_window_crossed_burden_pct", "label": "Stereo-window conflict", "better": "lower",
+         "reference": 1.0, "unit": "%"},
+        {"key": "interocular_phase_orientation_burden_pct", "label": "Phase conflict", "better": "lower",
+         "reference": 25.0, "unit": "%"},
+    ]),
+    ("Renderer conformance diagnostics", "Exact-map diagnostics; hard renderer checks are listed separately below", [
+        {"key": "exact_local_polarity_component_pct", "label": "Local polarity inversion",
+         "better": "lower", "reference": 10.0, "unit": "%"},
+        {"key": "interocular_exposure_rivalry_burden_pct", "label": "Exposure rivalry",
+         "better": "lower", "reference": 25.0, "unit": "%"},
+        {"key": "interocular_color_gain_rivalry_burden_pct", "label": "Colour-gain rivalry",
+         "better": "lower", "reference": 25.0, "unit": "%"},
+    ]),
+    ("Temporal primary axes", "Sequence-only primary evidence; not single-frame policy labels", [
         {"key": "static_jitter_p95", "label": "Static stability", "better": "lower",
          "reference": 10.0, "unit": " luma"},
+        {"key": "depth_gt_lag_f1_p95", "label": "GT depth timing", "better": "lower",
+         "reference": 50.0, "unit": " F1"},
+    ]),
+    ("Temporal diagnostics", "Sequence-only supporting evidence; not a quality vote", [
         {"key": "flow_temporal_p95", "label": "Motion stability", "better": "lower",
          "reference": 15.0, "unit": " luma"},
+        {"key": "depth_gt_ghost_edge_pct_p95", "label": "GT ghost edges", "better": "lower",
+         "reference": 50.0, "unit": "%"},
     ]),
-    ("Reference validation", "Only clips with GT/reliable flow vote", [
-        {"key": "depth_gt_si_rmse", "label": "GT depth accuracy", "better": "lower",
+    ("Ground-truth depth primary axes", "Authenticated depth/disparity clips only", [
+        {"key": "depth_gt_affine_nrmse_pct", "label": "GT depth accuracy", "better": "lower",
          "reference": 50.0, "unit": "%"},
         {"key": "depth_gt_edge_f1", "label": "GT boundaries", "better": "higher",
          "reference": 100.0, "unit": "%"},
-        {"key": "depth_gt_lag_f1_p95", "label": "GT depth timing", "better": "lower",
-         "reference": 50.0, "unit": " F1"},
-        {"key": "depth_gt_ghost_edge_pct_p95", "label": "GT ghost edges", "better": "lower",
-         "reference": 50.0, "unit": "%"},
-        {"key": "flow_depth_p95", "label": "Flow depth stability", "better": "lower",
-         "reference": 75.0, "unit": " /255"},
-    ]),
-    ("True-stereo reference", "Diagnostic until calibrated on more stereo scenes", [
-        {"key": "stereo_gt_psnr", "label": "Right-eye PSNR", "better": "higher",
-         "reference": 40.0, "unit": " dB"},
-        {"key": "stereo_gt_ssim", "label": "Right-eye SSIM", "better": "higher",
-         "reference": 1.0, "unit": ""},
-        {"key": "stereo_gt_residual_p95", "label": "Local residual", "better": "lower",
-         "reference": 80.0, "unit": " luma"},
-        {"key": "stereo_gt_coverage_pct", "label": "Patch coverage", "better": "higher",
-         "reference": 100.0, "unit": "%"},
-    ]),
-    ("Artistic stereo style", "Art3D-inspired diagnostics; comfort remains a hard gate", [
-        {"key": "stereo_art_polarity_ok", "label": "Valid positive fits", "better": "higher",
-         "reference": 100.0, "unit": "%"},
-        {"key": "stereo_art_scale_error_pct", "label": "Depth-budget match", "better": "lower",
-         "reference": 5.0, "unit": "%"},
-        {"key": "stereo_art_zero_error_pct", "label": "Zero-plane match", "better": "lower",
-         "reference": 5.0, "unit": "%"},
-        {"key": "stereo_art_ddc_iou", "label": "Depth/disparity structure", "better": "higher",
-         "reference": 100.0, "unit": "%"},
-        {"key": "stereo_art_scale_std_error_pct", "label": "Depth-budget stability", "better": "lower",
-         "reference": 1.0, "unit": "%"},
-        {"key": "stereo_art_zero_std_error_pct", "label": "Zero-plane stability", "better": "lower",
-         "reference": 1.0, "unit": "%"},
     ]),
 ]
 
@@ -803,14 +1286,9 @@ PERF_RADAR_AXES = [
 ]
 
 
-def _mean_aggregate(aggs, key, clips=DECISION_CLIPS):
-    values = [aggs[c].get(key) for c in clips if aggs[c].get(key) is not None]
-    return float(np.mean(values)) if values else None
-
-
 def _paired_mean_aggregate(key, clips=DECISION_CLIPS):
     """Return control/treatment means over the identical clips that contain this metric."""
-    pairs = [(ctrl_agg[c].get(key), treat_agg[c].get(key)) for c in clips]
+    pairs = [(_metric_value(CTRL, c, key), _metric_value(TREAT, c, key)) for c in clips]
     pairs = [(control, treatment) for control, treatment in pairs
              if control is not None and treatment is not None]
     if not pairs:
@@ -888,29 +1366,45 @@ def _radar_card(title, note, axes, control_values, treatment_values):
 def grouped_quality_section():
     cards = []
     for title, note, axes in RADAR_GROUPS:
-        pairs = [_paired_mean_aggregate(axis["key"]) for axis in axes]
+        available = [(axis, _paired_mean_aggregate(axis["key"])) for axis in axes]
+        available = [(axis, pair) for axis, pair in available
+                     if pair[0] is not None and pair[1] is not None]
+        if not available:
+            continue
+        axes = [axis for axis, _ in available]
+        pairs = [pair for _, pair in available]
         control_values = [pair[0] for pair in pairs]
         treatment_values = [pair[1] for pair in pairs]
-        if not any(value is not None for value in control_values + treatment_values):
-            continue
         cards.append(_radar_card(title, note, axes, control_values, treatment_values))
     cards.append(_radar_card("Runtime", "Performance context; not a quality vote", PERF_RADAR_AXES,
                              [_mean_perf(CTRL, a["key"]) for a in PERF_RADAR_AXES],
                              [_mean_perf(TREAT, a["key"]) for a in PERF_RADAR_AXES]))
 
     hard_defs = (
-        ("vmisalign_pct", "Vertical alignment", "% eye height"),
-        ("positive_disparity_pct", "Positive disparity tail", "%"),
-        ("negative_disparity_pct", "Negative disparity tail", "%"),
+        ("exact_binocular_support_pct", "Exact binocular support", "% image area"),
+        ("vmisalign_p99_pct", "Vertical alignment P99", "% eye height"),
+        ("exact_positive_disparity_pct", "Exact positive disparity tail", "%"),
+        ("exact_negative_disparity_pct", "Exact negative disparity tail", "%"),
+        ("exact_polarity_ok", "Depth/disparity polarity", "%"),
+        ("depth_gt_polarity_ok", "Authenticated GT depth polarity", "%"),
         ("source_coverage_pct", "Source coverage", "%"),
         ("image_integrity_pct", "Image integrity", "%"),
     )
     checks = []
     for key, label, unit in hard_defs:
         spec = THR[key]
-        control, control_clip = sbsbench.worst_hard_metric(ctrl_agg, key, spec, CLIPS)
+        control_applicable = {
+            clip: {key: value} for clip in CLIPS
+            if (value := _metric_value(CTRL, clip, key)) is not None
+        }
+        treatment_applicable = {
+            clip: {key: value} for clip in CLIPS
+            if (value := _metric_value(TREAT, clip, key)) is not None
+        }
+        control, control_clip = sbsbench.worst_hard_metric(
+            control_applicable, key, spec, CLIPS)
         treatment, treatment_clip = sbsbench.worst_hard_metric(
-            treat_agg, key, spec, CLIPS)
+            treatment_applicable, key, spec, CLIPS)
         bound = (f'≥ {spec["hard_min"]:.1f}{unit}' if "hard_min" in spec
                  else f'≤ {spec["hard_max"]:.1f}{unit}')
 
@@ -946,7 +1440,8 @@ def scorecard_charts():
     """Grouped horizontal bars retain every table value while making A/B movement scannable."""
     charts = []
     for metric, label, worse, _, _ in ACTIVE:
-        values = [(c, ctrl_agg[c].get(metric), treat_agg[c].get(metric)) for c in CLIPS]
+        values = [(c, _metric_value(CTRL, c, metric),
+                   _metric_value(TREAT, c, metric)) for c in CLIPS]
         numeric = [abs(v) for _, a, b in values for v in (a, b) if v is not None]
         scale = max(numeric, default=1.0) or 1.0
         rows = []
@@ -959,15 +1454,16 @@ def scorecard_charts():
             aw = max(0.8, abs(a) / scale * 100.0) if a else 0.0
             bw = max(0.8, abs(b) / scale * 100.0) if b else 0.0
             delta = b - a
-            floor = THR.get(metric, {}).get("abs_floor", 0.0) / 2.0
-            flat = abs(delta) < max(floor, abs(a) * 0.05)
-            better = (delta < 0) if worse else (delta > 0)
-            is_context = metric in CONTEXT_METRICS
-            move_cls = ("bar-flat" if is_context or flat else
-                        "bar-good" if better else "bar-bad")
+            spec = THR[metric]
+            movement = sbsbench.metric_delta_class(a, b, spec)
+            is_vote = (spec.get("role") == "primary"
+                       and spec.get("scope") != "conformance")
+            move_cls = ("bar-flat" if not is_vote or movement == "noise" else
+                        "bar-good" if movement == "improved" else "bar-bad")
             pct = delta / a * 100.0 if a else (100.0 if b else 0.0)
-            delta_text = (f"change {pct:+.0f}%" if is_context else "within noise" if flat else
-                          f'{"better" if better else "worse"} {abs(pct):.0f}%')
+            delta_text = (f'{spec.get("role", "diagnostic")} {pct:+.0f}%'
+                          if not is_vote else "within noise" if movement == "noise" else
+                          f'{"better" if movement == "improved" else "worse"} {abs(pct):.0f}%')
             rows.append(
                 f'<div class="bar-row"><div class="bar-scene" title="{c}">{name(c)}</div>'
                 f'<div class="bar-pair"><div class="bar-line"><span class="bar-tag">{CTRL_TAG}</span>'
@@ -975,8 +1471,10 @@ def scorecard_charts():
                 f'<b>{a:.2f}</b></div><div class="bar-line"><span class="bar-tag">{TREAT_TAG}</span>'
                 f'<span class="bar-track"><i class="bar-fill {move_cls}" style="width:{bw:.1f}%"></i></span>'
                 f'<b>{b:.2f}</b></div></div><span class="bar-delta {move_cls}">{delta_text}</span></div>')
-        direction = ("context only" if metric in CONTEXT_METRICS else
-                     "lower is better" if worse else "higher is better")
+        spec = THR[metric]
+        role_note = ("diagnostic only · " if spec.get("role") == "diagnostic" else
+                     "hard bound · " if spec.get("role") == "hard" else "")
+        direction = role_note + ("lower is better" if worse else "higher is better")
         charts.append(f'<article class="metric-chart"><div class="chart-head">'
                       f'<h3>{mtip(metric, label)}</h3><span>{direction}</span></div>{"".join(rows)}</article>')
     return '<div class="chart-grid">' + "".join(charts) + '</div>'
@@ -984,147 +1482,106 @@ def scorecard_charts():
 
 # metric -> (short header, what it measures, direction). Only the ones that appear render.
 METRIC_DEFS = [
-    ("score",
-     "score",
-     "Overall 0-100 artifact cleanliness after weighted penalties. Stereo volume is reported and gated separately, so it cannot cancel artifact regressions.",
-     "higher = better"),
-    ("pop_spread_px",
-     "pop_spread",
-     "Near-to-far horizontal disparity range in output pixels, shown for intuition. Decisions use pop_spread_pct, normalized to reference-aspect-equivalent image disparity at the 5120x2160 anchor.",
-     "higher = more stereo volume"),
-    ("positive_disparity_pct",
-     "disp_positive",
-     "Weighted p99 of the positive signed L/R disparity tail, expressed as the equivalent image percentage at the 5120x2160 reference aspect. Kept sign-explicit because crossed/uncrossed polarity is not encoded in the host image.",
-     "must stay below comfort limit"),
-    ("negative_disparity_pct",
-     "disp_negative",
-     "Magnitude of the weighted p1 negative signed L/R disparity tail in the same reference-equivalent perceived-disparity units.",
-     "must stay below comfort limit"),
+    ("exact_visible_pop_spread_pct",
+         "visible_pop",
+         "Source-structure-weighted visible relief from the exact production warp map. Unlike raw requested disparity, this estimates stereo volume carried by image structure a viewer can actually fuse; its support is reported separately.",
+         "higher = more visible stereo relief"),
+    ("exact_binocular_support_pct",
+         "binocular_support",
+         "Common rendered area backed by source samples uniquely visible in both exact production eye maps, limited by the smaller per-eye Jacobian. This independent floor prevents a collapsed or mostly non-overlapping render from hiding unsafe disparity tails.",
+         "must remain above the evidence floor"),
+    ("exact_positive_disparity_pct",
+         "disp_positive",
+         "Output-area-weighted p99.9 positive tail of actual x_right - x_left after independently inverting both exact eye maps onto common, uniquely visible source samples.",
+         "must stay below comfort limit"),
+    ("exact_negative_disparity_pct",
+         "disp_negative",
+         "Magnitude of the output-area-weighted p0.1 negative tail of actual x_right - x_left on the same mutually valid binocular support.",
+         "must stay below comfort limit"),
+    ("exact_polarity_ok",
+         "depth_polarity",
+         "Hard high-near depth-to-disparity polarity contract from exact shader coordinates. Flat depth reports unsupported evidence instead of inventing a fit.",
+         "must remain 100% when supported"),
+    ("exact_local_polarity_component_pct",
+         "local_polarity_component",
+         "Largest connected output region participating in a supported local depth/disparity-order reversal, as a percentage of content. This separates isolated noise from a salient contiguous inversion.",
+         "lower = smaller coherent reversal"),
+    ("exact_over_3pct_area_pct",
+         "comfort_over_3_area",
+         "Exact content area beyond the current 3% heuristic comfort boundary. Area complements the p0.1/p99.9 hard tail by revealing how much of the image carries the violation.",
+         "lower = less over-limit burden"),
     ("source_coverage_pct",
-     "coverage",
-     "Worst-eye interior pixels whose output patch is explained by some same-scanline source patch within the allowed stereo displacement.",
-     "must remain above integrity limit"),
+         "coverage",
+         "Worst-eye pixels matching the exact source sample selected by the production shader. This is a renderer-conformance check with no candidate-chosen correspondence search; it does not judge whether the selected geometry looks perceptually correct.",
+         "renderer conformance; must remain above limit"),
     ("image_integrity_pct",
-     "integrity",
-     "Worst-eye retention of source texture after horizontal source alignment. Detects missing, black, or collapsed image regions.",
-     "must remain above integrity limit"),
-    ("source_residual_p95",
-     "warp_resid",
-     "Worst-eye patch difference from the source after allowing a small horizontal stereo displacement. Detects monocular warp corruption without penalizing intended parallax.",
-     "lower = more source-faithful"),
-    ("source_halo_p95",
-     "source_halo",
-     "Excess thin-ridge brightness at depth silhouettes after subtracting the horizontally aligned source ridge. Genuine source outlines are free.",
-     "lower = less warp-created halo"),
-    ("source_stretch_pct",
-     "source_stretch",
-     "Source-textured silhouette-near pixels whose horizontal detail collapses below 35% of the aligned source detail.",
-     "lower = less warp stretch"),
+         "integrity",
+         "Worst-eye retention of exact mapped-source texture, with lower and upper gradient bounds. It detects renderer-side blur or ringing relative to the requested sample, not geometry-induced perceptual artifacts already present in that sample.",
+         "renderer conformance; must remain above limit"),
+    ("source_coverage_worst_patch_bad_pct",
+         "localized_missing",
+         "Worst resolution-scaled local patch fraction whose rendered samples no longer match the exact production-selected source. Unlike the global coverage percentage, this preserves a small coherent missing sword, limb, face, or subtitle region.",
+         "lower = less localized missing output"),
+    ("image_integrity_worst_patch_bad_pct",
+         "localized_texture_damage",
+         "Worst supported local patch fraction failing exact mapped-source gradient-energy and orientation checks. It complements the global integrity percentage so a small coherent blur/ringing defect is not diluted by the rest of the frame.",
+         "lower = less localized blur/ringing"),
+    ("exact_mapping_stretch_pct",
+         "mapping_stretch",
+         "Pixels where the exact source-coordinate Jacobian advances below 35% of the undistorted rate. This detects repeated/rubber-banded columns independently of image texture.",
+         "lower = less warp stretch"),
     ("static_jitter_p95",
-     "static_jitter",
-     "Worst-eye temporal change over regions whose source neighborhood stayed static after allowing for horizontal disparity. Camera/object motion is excluded.",
-     "lower = steadier static content"),
+         "static_jitter",
+         "Worst-eye signed-source-conditioned temporal residual over regions whose source neighborhood stayed static after allowing for horizontal disparity. Camera/object motion is excluded.",
+         "lower = steadier static content"),
     ("flow_temporal_p95",
-     "flow_temporal",
-     "Worst-eye temporal residual after warping the previous output with exact dataset flow when available, otherwise classical source flow, and rejecting photometrically unreliable samples.",
-     "lower = steadier moving content"),
-    ("depth_gt_si_rmse",
-     "gt_depth_rmse",
-     "Prediction error against committed ground-truth inverse depth after monocular scale/shift alignment; constant-depth GT uses shift-only alignment.",
-     "lower = more accurate depth"),
+         "flow_temporal",
+         "Worst-eye temporal residual after flow compensation, subtracting the registered signed mono-source change before taking magnitude so legitimate motion/interpolation error is not learned as a stereo defect.",
+         "lower = steadier moving content"),
+    ("depth_gt_affine_nrmse_pct",
+         "gt_depth_affine_nrmse",
+         "Prediction error against committed ground-truth inverse depth after robust positive-polarity IRLS scale/shift alignment; sparse GT evidence fails closed.",
+         "lower = more accurate depth"),
     ("depth_gt_edge_f1",
-     "gt_edge_f1",
-     "Depth-boundary F1 against committed ground truth with one-pixel tolerance.",
-     "higher = more accurate boundaries"),
+         "gt_edge_f1",
+         "Strict depth-boundary F1 against committed ground truth with one-pixel positional tolerance.",
+         "higher = better boundary placement"),
     ("depth_gt_lag_f1_p95",
-     "gt_depth_lag",
-     "P95 amount by which predicted depth boundaries match the previous GT frame better than the current frame. Positive values directly indicate held/stale depth on moving geometry.",
-     "lower = less one-frame depth lag"),
+         "gt_depth_lag",
+         "P95 amount by which predicted depth boundaries match the previous GT frame better than the current frame. Positive values directly indicate held/stale depth on moving geometry.",
+         "lower = less one-frame depth lag"),
     ("depth_gt_ghost_edge_pct_p95",
-     "gt_ghost_edge",
-     "P95 prediction support on ground-truth boundaries that existed only in the previous frame. Detects stale and double depth edges even when the current edge is also present.",
-     "lower = fewer stale/double edges"),
-    ("stereo_gt_psnr",
-     "gt_stereo_psnr",
-     "Synthesized right-eye PSNR against the dataset's true rendered right eye after removing one global horizontal camera-baseline offset. Local geometry and appearance errors remain.",
-     "higher = closer to true stereo"),
-    ("stereo_gt_ssim",
-     "gt_stereo_ssim",
-     "Local structural similarity of the synthesized and true right eyes under the same global-only registration used by GT stereo PSNR.",
-     "higher = closer structure"),
-    ("stereo_gt_residual_p95",
-     "gt_stereo_resid",
-     "P95 right-eye luma error after the global registration plus a small permissive epipolar patch search. Separates local synthesis artifacts from baseline mismatch.",
-     "lower = fewer local stereo errors"),
-    ("stereo_gt_coverage_pct",
-     "gt_stereo_coverage",
-     "True-right pixels whose best nearby epipolar patch differs by no more than 24/255 luma.",
-     "higher = more correct right-eye content"),
-    ("stereo_art_scale_error_pct",
-     "art_scale_error",
-     "Absolute difference between synthesized and true-stereo positive-affine depth-budget scales, in percentage points of eye width.",
-     "lower = closer cinematic depth budget"),
-    ("stereo_art_zero_error_pct",
-     "art_zero_error",
-     "Absolute difference between synthesized and true-stereo affine offsets, measuring zero-plane placement in percentage points of eye width.",
-     "lower = closer zero-plane placement"),
-    ("stereo_art_ddc_iou",
-     "art_ddc_iou",
-     "Art3D-inspired IoU between significant horizontal edges in the fitted depth blueprint and synthesized disparity. The affine fit must preserve depth polarity.",
-     "higher = better geometric structure preservation"),
-    ("stereo_art_scale_std_error_pct",
-     "art_scale_stability",
-     "Difference between synthesized and reference within-clip standard deviation of the global depth-budget scale.",
-     "lower = closer shot-level style stability"),
-    ("stereo_art_zero_std_error_pct",
-     "art_zero_stability",
-     "Difference between synthesized and reference within-clip standard deviation of zero-plane offset.",
-     "lower = closer shot-level zero-plane stability"),
-    ("stereo_art_polarity_ok",
-     "art_fit_valid",
-     "Percentage of frames admitting a supported positive-polarity artistic disparity fit. Low values mean the reference or correspondence field is unsuitable for style conclusions.",
-     "higher = more valid style evidence"),
-    ("flow_depth_p95",
-     "flow_depth",
-     "Pre-warp depth change after source optical-flow compensation, on photometrically reliable support.",
-     "lower = steadier depth"),
-    ("depth_spread", "dspread", "p95−p5 of the normalized depth = pop available at the source.", "higher = more depth to work with"),
-    ("edge_acc_p50",
-     "edge_acc",
-     "Distance (depth-px) from each depth silhouette to the nearest true SOURCE color edge.",
-     "lower = silhouette sits on the real edge"),
-    ("swim_p50",
-     "swim",
-     "Frame-to-frame depth change where the SOURCE is static — depth instability, separated from real motion.",
-     "lower = steadier depth"),
-    ("disocc_smear",
-     "smear",
-     "Horizontal-detail deficit in the narrow band beside silhouettes; on flat content also fingerprints hallucinated depth edges.",
-     "lower = crisper fill"),
-    ("flicker_disocc_p50",
-     "flick_dis",
-     "Flicker restricted to the disocclusion bands — inpaint/stretch re-hallucination shimmer.",
-     "lower = less boiling along edges"),
-    ("warp_hole_pct",
-     "true_hole_area",
-     "Exact worst-eye interior area not covered by a forward splat of the shared parallax field before the active warp hides or fills it (red harness-mask channel).",
-     "context only; more stereo can expose more background"),
-    ("hole_source_residual_p95",
-     "hole_residual",
-     "Regularized source-relative p95 patch error restricted to pixels in the exact pre-fill hole mask.",
-     "lower = more source-faithful fill"),
-    ("hole_bad_fill_pct",
-     "bad_hole_fill",
-     "Exact-hole pixels whose best source-relative patch still differs by more than 24/255.",
-     "lower = fewer implausible fills"),
-    ("artifact_in_hole_pct",
-     "artifact_in_hole",
-     "All detected >24/255 source-relative artifact pixels that lie inside or one raster pixel beside an exact hole.",
-     "context only; higher means inpainting targets more of the measured problem"),
-    ("vmisalign_pct",
-     "vmis",
-     "Median vertical L↔R offset as a percentage of eye height — resolution-independent geometry correctness.",
-     "must be ≈ 0"),
+         "gt_ghost_edge",
+         "P95 prediction support on ground-truth boundaries that existed only in the previous frame. Detects stale and double depth edges even when the current edge is also present.",
+         "lower = fewer stale/double edges"),
+    ("vmisalign_p99_pct",
+         "vmis",
+         "Texture-weighted P99 vertical L↔R offset as a percentage of eye height. The upper tail catches a localized epipolar fault that a P95 summary can dilute.",
+         "must be ≈ 0"),
+    ("exact_mapping_fold_pct", "mapping_fold",
+         "Exact source-coordinate steps that reverse direction, indicating a horizontal warp fold.",
+         "lower = fewer folds"),
+    ("exact_symmetry_residual_p95_pct", "camera_symmetry",
+         "P95 common-camera translation residual after independently inverting both exact eye maps onto the same source samples. It is a conformance diagnostic, not stereo disparity or a perceptual-quality vote.",
+         "lower = closer to symmetric virtual cameras"),
+    ("warp_cross_row_shear_severity_pct", "row_shear",
+         "Unsupported change in horizontal warp displacement between adjacent rows, normalized through image coordinates. Source-authored horizontal boundaries, aspect-fit bars, clamps, folds and collapsed topology are excluded before the strongest horizontal tear runs are summarized.",
+         "lower = less row-wise tearing"),
+    ("experimental_stereo_window_crossed_burden_pct", "window_conflict",
+         "Crossed disparity that is physically cut by a lateral image boundary, weighted independently by border proximity, source contrast, spatial frequency, orientation, and disparity. Central pop is excluded.",
+         "lower = less perceptible stereo-window conflict; experimental"),
+    ("interocular_phase_orientation_burden_pct", "phase_conflict",
+         "Localized coherent phase/orientation disagreement after registering both final eyes to unique common source coordinates. Equal-detail support prevents unilateral blur from being counted twice; component-weighted burden remains sensitive below a five-percent footprint.",
+         "lower = less binocular structural conflict; experimental"),
+    ("interocular_exposure_rivalry_burden_pct", "exposure_rivalry",
+         "Coherent source-relative log-luminance disagreement between the registered eyes. A shared binocular transfer cancels, while a unilateral global or localized exposure change remains visible.",
+         "lower = less binocular exposure rivalry; experimental"),
+    ("interocular_color_gain_rivalry_burden_pct", "color_rivalry",
+         "Coherent source-relative linear-light opponent-colour disagreement between the registered eyes. It catches unilateral white-balance, RGB-gain and hue errors while shared binocular colour transforms cancel.",
+         "lower = less binocular colour rivalry; experimental"),
+    ("depth_gt_polarity_ok", "gt_polarity",
+         "Explicit prediction-to-GT sign check; a negative fit is a catastrophic near/far inversion.",
+         "must remain 100%"),
 ]
 _ROLE_ORDER = {"hard": 0, "primary": 1, "diagnostic": 2, "reported": 3}
 
@@ -1159,32 +1616,30 @@ def metrics_section():
     present = ({k for aggs in (ctrl_agg, treat_agg) for agg in aggs.values() for k in agg}
                | {i["metric"] for i in CTRL["issues"]})
     rows = "".join(
-        f'<tr><td class="mgroup"><span>{metric_group(k)[0]}</span><small>{metric_group(k)[1]}</small></td>'
+        f'<tr><td class="mgroup"><span>{THR[k].get("scope", "reported")}</span>'
+        f'<small>{metric_group(k)[0]} &middot; {metric_group(k)[1]}</small></td>'
         f'<td class="mname">{h}</td><td class="mwhat">{what}</td><td class="mdir">{d}</td></tr>'
-        for k, h, what, d in METRIC_DEFS if k in present)
+        for k, h, what, d in METRIC_DEFS if k in present and k in THR)
     return (f'<details class="fold metric-defs"><summary>Metric definitions and decision roles</summary>'
-            f'<div class="fold-body"><p class="sub">Hard '
-            f'constraints can reject; primary metrics can vote; diagnostics provide supporting '
-            f'evidence; reported values are context only. All are computed on the real '
-            f'SBS frames the headset would receive (no CPU replica). Absolute values are '
-            f'resolution-dependent, so compare within a run, not across clip sets.</p>'
-            f'<div class="tablewrap"><table class="mtab"><thead><tr><th>group / axis</th><th>metric</th>'
+            f'<div class="fold-body"><p class="sub"><b>Perceptual</b> metrics are possible '
+            f'model labels but remain experimental until qualified. <b>Conformance</b> metrics '
+            f'catch exact renderer contract failures and are never perceptual labels. '
+            f'<b>GT-only</b> and <b>temporal-only</b> metrics apply only when their authenticated '
+            f'evidence exists. Hard constraints can reject; primary metrics can vote; diagnostics '
+            f'only support a conclusion.</p>'
+            f'<div class="tablewrap"><table class="mtab"><thead><tr><th>scope / role / axis</th><th>metric</th>'
             f'<th>what it measures</th><th>direction</th></tr></thead><tbody>{rows}</tbody></table>'
             f'</div></div></details>')
 
 
 def conclusion_section():
     """Auto-derived verdict using per-clip metric gates; means summarize but never decide."""
-    sc_a = np.mean([ctrl_agg[c].get("score", 0) for c in DECISION_CLIPS])
-    sc_b = np.mean([treat_agg[c].get("score", 0) for c in DECISION_CLIPS])
-    score_line = (f'<li class="c-score">Artifact score (0-100, diagnostic mean): '
-                  f'{CTRL_TAG} <b>{sc_a:.1f}</b> '
-                  f'&rarr; {TREAT_TAG} <b>{sc_b:.1f}</b> ({sc_b - sc_a:+.1f})</li>')
     wins, costs = [], []
     for k, h, worse, _, _ in COLS:
-        if k == "score":  # the headline, not a component metric
-            continue
-        if k in CONTEXT_METRICS:
+        # Headline prose is reserved for independent primary axes. Hard constraints have their
+        # own fail-closed card, while diagnostics stay in the grouped/exception sections and
+        # cannot turn a treatment into a winner by sheer metric count.
+        if THR.get(k, {}).get("role") != "primary":
             continue
         a, b = _paired_mean_aggregate(k)
         if a is None or b is None:
@@ -1192,17 +1647,15 @@ def conclusion_section():
         if a < 1e-6 and b < 1e-6:
             continue
         pct = (b - a) / a * 100 if a else 100.0
-        # Significant = both a relative move AND an absolute one (half the gate's abs_floor),
-        # so sub-pixel noise on near-zero metrics doesn't read as a headline.
-        floor = THR.get(k, {}).get("abs_floor", 0.0) / 2.0
-        if abs(pct) < 5 or abs(b - a) < floor:
+        movement = sbsbench.metric_delta_class(a, b, THR[k])
+        if movement == "noise":
             continue
         # In a coequal comparison neither direction is "better/worse" globally (it's a tradeoff);
         # split by which run each metric favors instead.
-        favors_treat = (pct < 0) if worse else (pct > 0)
+        favors_treat = movement == "improved"
         txt = f"{mtip(k, '<b>' + h + '</b>')} {CTRL_TAG} {a:.2f} → {TREAT_TAG} {b:.2f} ({pct:+.0f}%)"
         (wins if favors_treat else costs).append(txt)
-    li = score_line
+    li = ""
     decision = AB_DECISION
     if IS_TRADEOFF_CMP:
         if wins:
@@ -1211,9 +1664,9 @@ def conclusion_section():
             li += f'<li class="c-cost">{CTRL_NAME} is better on: {" · ".join(costs)}</li>'
     else:
         if wins:
-            li += f'<li class="c-win">Mean diagnostics favor treatment: {" · ".join(wins)}</li>'
+            li += f'<li class="c-win">Primary mean movements favor treatment: {" · ".join(wins)}</li>'
         if costs:
-            li += f'<li class="c-cost">Mean diagnostics favor control: {" · ".join(costs)}</li>'
+            li += f'<li class="c-cost">Primary mean movements favor control: {" · ".join(costs)}</li>'
     axis_parts = []
     for axis, movement in sorted(decision["axes"].items()):
         axis_parts.append(f'<b>{axis}</b>: {len(movement["improved"])} win(s), '
@@ -1225,36 +1678,43 @@ def conclusion_section():
         blockers = sum(len(run_gate["blockers"]) for run_gate in
                        decision["canonical_gate"].values() if isinstance(run_gate, dict)
                        and "blockers" in run_gate)
-        verdict = (f'<b>Reject candidate:</b> the canonical evaluator gate has {blockers} '
+        verdict = (f'<b>Reject automated screen:</b> the canonical evaluator gate has {blockers} '
                    f'blocking result(s). The metric-only A/B verdict was '
                    f'<code>{html.escape(decision["ab_verdict"])}</code>.')
     elif state == "reject_evidence":
         verdict = (f'<b>Reject evidence:</b> {len(decision["missing_evidence"])} required '
                    f'hard/primary comparison value(s) are missing.')
     elif state == "reject_hard":
-        verdict = (f'<b>Reject treatment:</b> {len(decision["hard_failures"])} hard comfort/'
-                   f'integrity constraint(s) fail.')
+        verdict = (f'<b>Reject treatment:</b> {len(decision["hard_failures"])} configured '
+                   f'disparity/integrity engineering bound(s) fail.')
     elif state == "reject_primary":
         verdict = (f'<b>Reject treatment:</b> {decision["regressed"]} primary-axis cost(s) '
                    f'with no compensating primary-axis win.')
     elif state == "tradeoff":
         verdict = ('<b>Primary-quality tradeoff:</b> coequal axes move in different or mixed '
-                   f'directions. Per-clip event counts are evidence, not weights. Do not '
-                   f'resolve this with the scalar score; use visual/headset evidence.')
-    elif state == "candidate":
-        verdict = (f'<b>Candidate improvement:</b> {decision["improved"]} primary-axis win(s), '
-                   f'no primary-axis costs and no hard failure.')
+                   f'directions. Per-clip event counts are evidence, not weights. Use the '
+                   f'per-axis vector plus matched visual/headset evidence.')
+    elif state == "screen_candidate":
+        verdict = (f'<b>Experimental automated-screen candidate:</b> '
+                   f'{decision["improved"]} primary-axis win(s), no primary-axis costs and no '
+                   f'configured engineering-bound failure. Headset/perceptual qualification is '
+                   f'still required.')
     else:
-        verdict = ("<b>No validated decision:</b> hard constraints pass, but all validated "
-                   "primary metrics remain within noise. Diagnostic proxies cannot vote.")
+        verdict = ("<b>No automated regression detected:</b> configured engineering bounds pass, "
+                   "but all enabled primary proxies remain within noise. This is not perceptual "
+                   "or headset validation; diagnostic metrics cannot vote.")
     head = (f"{CTRL_NAME} → {TREAT_NAME}" if IS_TRADEOFF_CMP else f"Treatment: <b>{treatment_name()}</b>")
-    scope_note = ("Public-suite final-candidate evidence."
-                  if DECISION_SCOPE == "final_candidate" else
-                  "Core-suite screening evidence; confirm candidates on the public extended suite.")
+    scope_note = ("Extended-suite automated screening; held-out renderer failures and headset "
+                  "validation remain required."
+                  if DECISION_SCOPE == "extended_screening" else
+                  "Core-suite automated screening; confirm on the public extended suite, held-out "
+                  "renderer failures, and headset evidence.")
+    qualified_labels = len(TREAT.get("meta", {}).get("training_labels", {})
+                           .get("qualified_metrics", []))
     return (f'<section><h2>Conclusion</h2>'
             f'<p class="sub" style="margin-bottom:12px">{head} — decision over '
             f'{len(DECISION_CLIPS)} non-flat clip(s); expected-flat diagnostics remain below. '
-            f'<b>{scope_note}</b></p>'
+            f'<b>{scope_note}</b> Qualified training labels: <b>{qualified_labels}</b>.</p>'
             f'<ul class="concl">{li}<li>{verdict}</li></ul>{gate_strip()}</section>')
 
 
@@ -1314,25 +1774,67 @@ def _evidence_card(item, kind, axis=None):
     cls = ("evidence-cost" if kind == "regression" else "evidence-win" if kind == "improvement"
            else "evidence-noise")
     badge = kind.replace("_", " ")
-    is_gt = metric in ("depth_gt_si_rmse", "depth_gt_edge_f1")
+    is_gt = metric in ("depth_gt_affine_nrmse_pct",
+                       "depth_gt_edge_f1",
+                       "depth_gt_polarity_ok")
     is_gt_lag = metric in ("depth_gt_lag_f1_p95", "depth_gt_ghost_edge_pct_p95")
-    is_gt_stereo = (metric in ("stereo_gt_psnr", "stereo_gt_ssim",
-                               "stereo_gt_residual_p95", "stereo_gt_coverage_pct")
-                    or metric.startswith("stereo_art_"))
-    source_label = ("source · bright = evaluated static region" if metric == "static_jitter_p95"
+    is_exact_source = metric in {
+        "source_coverage_pct", "image_integrity_pct",
+        "source_coverage_worst_patch_bad_pct",
+        "image_integrity_worst_patch_bad_pct",
+    }
+    is_shear = metric == "warp_cross_row_shear_severity_pct"
+    is_window = metric.startswith("experimental_stereo_window_crossed_")
+    is_interocular_conflict = metric in {
+        "interocular_phase_orientation_burden_pct",
+        "interocular_exposure_rivalry_burden_pct",
+        "interocular_color_gain_rivalry_burden_pct",
+    }
+    metadata = EVIDENCE_METADATA.get((c, frame, metric), {})
+    source_label = ("source &middot; unmodified" if metric == "static_jitter_p95"
                     else "source · bright = reliable optical flow" if metric == "flow_temporal_p95"
-                    else "ground-truth depth" if is_gt else
-                    "true rendered right eye" if is_gt_stereo else "source")
+                    else "ground-truth depth" if is_gt else "source")
+    if is_exact_source:
+        source_label = "exact shader-mapped source · conformance reference"
+    if is_shear:
+        source_label = ("exact mapped source &middot; artifact-free "
+                        f'{metadata.get("eye", "selected")} eye reference')
+    if is_window:
+        source_label = (f'source at {metadata.get("border", "selected")} stereo-window border')
+    if is_interocular_conflict:
+        source_label = "registered mono source"
     ctrl_label = (f"{CTRL_TAG} · temporal change" if metric == "static_jitter_p95" else
                   f"{CTRL_TAG} · flow residual" if metric == "flow_temporal_p95" else
                   f"{CTRL_TAG} · aligned depth" if is_gt else
-                  f"{CTRL_TAG} · synthesized right eye" if is_gt_stereo else
-                  f"{CTRL_TAG} · left | right" if metric == "pop_spread_px" else CTRL_TAG)
+                  f"{CTRL_TAG} · left | right" if metric in EXACT_STEREO_VISUAL_METRICS
+                  else CTRL_TAG)
     treat_label = (f"{TREAT_TAG} · temporal change" if metric == "static_jitter_p95" else
                    f"{TREAT_TAG} · flow residual" if metric == "flow_temporal_p95" else
                    f"{TREAT_TAG} · aligned depth" if is_gt else
-                   f"{TREAT_TAG} · synthesized right eye" if is_gt_stereo else
-                   f"{TREAT_TAG} · left | right" if metric == "pop_spread_px" else TREAT_TAG)
+                   f"{TREAT_TAG} · left | right" if metric in EXACT_STEREO_VISUAL_METRICS
+                   else TREAT_TAG)
+    if is_shear:
+        eye_name = metadata.get("eye", "selected")
+        ctrl_label = f"{CTRL_TAG} &middot; {eye_name} eye"
+        treat_label = f"{TREAT_TAG} &middot; {eye_name} eye"
+    if is_window:
+        ctrl_label = f"{CTRL_TAG} &middot; border crop left | right"
+        treat_label = f"{TREAT_TAG} &middot; border crop left | right"
+    if is_interocular_conflict:
+        ctrl_label = f"{CTRL_TAG} &middot; registered left | right"
+        treat_label = f"{TREAT_TAG} &middot; registered left | right"
+    analysis_label = "delta: red worse / blue better"
+    if is_shear:
+        analysis_label = ("row-shear detector &middot; cyan support &middot; "
+                          f'selected {metadata.get("selected_run", "run")}')
+    elif is_window:
+        analysis_label = ("crossed stereo-window map &middot; "
+                          f'selected {metadata.get("selected_run", "run")}')
+    elif is_interocular_conflict:
+        analysis_label = (f'{metadata.get("detector", "binocular")} conflict map &middot; '
+                          f'selected {metadata.get("selected_run", "run")}')
+    elif metric == "static_jitter_p95":
+        analysis_label = "analysis mask (not source content) &middot; cyan = static support"
     if is_gt_lag and len(imgs) == 4:
         panels = (f'<div class="quad"><figure><span class="tag">previous ground-truth depth</span>'
                   f'<img src="{imgs[0]}"></figure><figure><span class="tag">current ground-truth depth</span>'
@@ -1343,7 +1845,7 @@ def _evidence_card(item, kind, axis=None):
         panels = (f'<div class="quad"><figure><span class="tag">{source_label}</span><img src="{imgs[0]}"></figure>'
               f'<figure><span class="tag">{ctrl_label}</span><img src="{imgs[1]}"></figure>'
               f'<figure><span class="tag t-treat">{treat_label}</span><img src="{imgs[2]}"></figure>'
-              f'<figure><span class="tag t-diff">delta: red worse / blue better</span>'
+              f'<figure><span class="tag t-diff">{analysis_label}</span>'
               f'<img src="{imgs[3]}"></figure></div>' if len(imgs) == 4 else
               f'<div class="triplet"><figure><span class="tag">{ctrl_label}</span>'
               f'<img src="{imgs[0]}"></figure><figure><span class="tag t-treat">{treat_label}</span>'
@@ -1361,7 +1863,7 @@ def _strongest_change(metric, clips=DECISION_CLIPS):
     floor = THR.get(metric, {}).get("abs_floor", 0.0)
     candidates = []
     for c in clips:
-        a, b = ctrl_agg[c].get(metric), treat_agg[c].get(metric)
+        a, b = _metric_value(CTRL, c, metric), _metric_value(TREAT, c, metric)
         if a is None or b is None:
             continue
         delta = b - a
@@ -1382,15 +1884,21 @@ def _change_kind(item):
 
 def visual_evidence_section():
     """Show one representative example for every quality and reference axis."""
-    axes = (("Stereo volume", ("pop_spread_px",)),
-            ("Warp fidelity", ("source_residual_p95", "source_halo_p95", "source_stretch_pct")),
+    axes = (("Stereo volume", ("exact_visible_pop_spread_pct",)),
+            ("Warp geometry", ("exact_mapping_stretch_pct", "exact_mapping_fold_pct",
+                               "warp_cross_row_shear_severity_pct")),
+            ("Perceptual artifacts", (
+                "experimental_stereo_window_crossed_burden_pct",
+                "interocular_phase_orientation_burden_pct",
+                "interocular_exposure_rivalry_burden_pct",
+                "interocular_color_gain_rivalry_burden_pct")),
+            ("Renderer conformance", (
+                "source_coverage_pct", "image_integrity_pct",
+                "source_coverage_worst_patch_bad_pct",
+                "image_integrity_worst_patch_bad_pct")),
             ("Temporal stability", ("static_jitter_p95", "flow_temporal_p95",
                                      "depth_gt_lag_f1_p95")),
-            ("Ground-truth depth", ("depth_gt_si_rmse", "depth_gt_edge_f1")),
-            ("True-stereo reference", ("stereo_gt_psnr", "stereo_gt_ssim",
-                                       "stereo_gt_residual_p95", "stereo_gt_coverage_pct")),
-            ("Artistic stereo style", ("stereo_art_scale_error_pct",
-                                       "stereo_art_zero_error_pct", "stereo_art_ddc_iou")))
+            ("Ground-truth depth", ("depth_gt_affine_nrmse_pct", "depth_gt_edge_f1")))
     cards = []
     for axis, metrics in axes:
         item = max((item for metric in metrics if (item := _strongest_change(metric))),
@@ -1401,9 +1909,10 @@ def visual_evidence_section():
     if not cards:
         return ""
     return (f'<section><h2>Quality-axis visual evidence</h2>'
-            f'<p class="sub">One strongest matched example for each decision/reference axis. Warp and '
-            f'temporal metrics use source-relative heatmaps, stereo shows both eyes, and reference '
-            f'depth and true stereo show aligned predictions against ground truth. A within-noise '
+            f'<p class="sub">One strongest matched example for each decision/reference axis. Exact '
+            f'mapped-source heatmaps verify renderer conformance, not perceptual quality; stereo '
+            f'uses visible relief and shows both eyes, while reference depth shows aligned '
+            f'predictions against ground truth. A within-noise '
             f'badge means the '
             f'example is illustrative, not a decision event.</p>{cards}</section>')
 
@@ -1431,113 +1940,17 @@ def source_artifact_section():
         return ""
     return (f'<section><h2>Original-source artifact audit</h2>'
             f'<p class="sub">These effects are already present before depth estimation or stereo '
-            f'warping. Source-relative metrics still measure them, but visual conclusions must not '
-            f'label a baked highlight, bloom edge, rain splash or generative inconsistency as a new '
-            f'warp artifact without comparing the original.</p>{"".join(cards)}</section>')
-
-
-def _mask_overlay(image, mask):
-    """Overlay the exact harness mask: red=pre-fill hole, yellow=unresolved fallback."""
-    rgb = np.asarray(image.convert("RGB"), np.float32)
-    channels = np.asarray(mask.convert("RGB"), np.uint8)
-    hole = channels[..., 0] >= 128
-    unresolved = channels[..., 1] >= 128
-    rgb[hole] = rgb[hole] * 0.35 + np.array([166.0, 20.0, 34.0]) * 0.65
-    rgb[unresolved] = rgb[unresolved] * 0.2 + np.array([255.0, 205.0, 40.0]) * 0.8
-    return Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), "RGB")
-
-
-def warp_mask_evidence(clip, frame):
-    source = source_path(clip, frame)
-    paths = [frame_path(ctrl_dir, clip, frame), frame_path(treat_dir, clip, frame)]
-    masks = [artifact_path(run, clip, "warp_mask_", frame)
-             for run in (ctrl_dir, treat_dir)]
-    if not (source and all(paths + masks)):
-        return None
-    outputs = normalize_sbs_images([Image.open(path).convert("RGB") for path in paths])
-    packed_masks = [Image.open(path).convert("RGB").resize(outputs[0].size, Image.NEAREST)
-                    for path in masks]
-    ew, eh = outputs[0].width // 2, outputs[0].height
-
-    # Pick the eye and local crop with the densest interior true-hole support. Frame-edge holes
-    # are excluded because an inpainter cannot recover content outside the captured image.
-    eye_masks = []
-    for packed in packed_masks:
-        arr = np.asarray(packed)
-        eye_masks.append((arr[:, :ew, 0] >= 128, arr[:, ew:, 0] >= 128))
-    border = max(1, round(ew * 0.02))
-    eye_index = max(range(2), key=lambda eye: sum(
-        int(np.count_nonzero(run_masks[eye][:, border:ew - border]))
-        for run_masks in eye_masks))
-    union = eye_masks[0][eye_index] | eye_masks[1][eye_index]
-    union[:, :border] = False
-    union[:, ew - border:] = False
-    if union.any():
-        col = int(np.argmax(union.sum(axis=0)))
-        lo, hi = max(0, col - 8), min(ew, col + 9)
-        row = int(np.argmax(union[:, lo:hi].sum(axis=1)))
-    else:
-        col, row = ew // 2, eh // 2
-    cw, ch = min(480, ew), min(360, eh)
-    x0 = max(0, min(ew - cw, col - cw // 2))
-    y0 = max(0, min(eh - ch, row - ch // 2))
-    xoff = eye_index * ew
-
-    source_image = Image.open(source).convert("RGB").resize((ew, eh), Image.BILINEAR)
-    panels = [source_image.crop((x0, y0, x0 + cw, y0 + ch))]
-    for output, mask in zip(outputs, packed_masks):
-        eye = output.crop((xoff, 0, xoff + ew, eh))
-        eye_mask = mask.crop((xoff, 0, xoff + ew, eh))
-        panels.append(_mask_overlay(eye, eye_mask).crop((x0, y0, x0 + cw, y0 + ch)))
-    return [durl(panel, w=420, jpg=False) for panel in panels]
-
-
-def warp_mask_validation_section():
-    """Show whether measured artifacts overlap exact holes before proposing another inpainter."""
-    candidates = []
-    for clip in DECISION_CLIPS:
-        ca, ta = ctrl_agg[clip], treat_agg[clip]
-        support = max(ca.get("warp_hole_pct", 0.0), ta.get("warp_hole_pct", 0.0))
-        badness = max(ca.get("hole_source_residual_p95", 0.0),
-                      ta.get("hole_source_residual_p95", 0.0))
-        candidates.append((support * badness, clip))
-    cards = []
-    for _, clip in sorted(candidates, reverse=True)[:3]:
-        source = (CTRL if ctrl_agg[clip].get("hole_source_residual_p95", 0.0) >=
-                  treat_agg[clip].get("hole_source_residual_p95", 0.0) else TREAT)
-        frame = source["clips"][clip].get("worst_frame", {}).get(
-            "hole_source_residual_p95", {}).get("frame", mid_frame(ctrl_dir, clip))
-        panels = warp_mask_evidence(clip, frame)
-        if not panels:
-            continue
-        c = ctrl_agg[clip]
-        t = treat_agg[clip]
-        cards.append(
-            f'<article class="evidence-card"><div class="ic-head"><span class="axis-label">'
-            f'exact warp mask</span><span class="clipname">{html.escape(name(clip))}</span>'
-            f'<span class="metricval">hole {c.get("warp_hole_pct", 0):.2f}% &rarr; '
-            f'{t.get("warp_hole_pct", 0):.2f}% &middot; artifact overlap '
-            f'{c.get("artifact_in_hole_pct", 0):.1f}% &rarr; '
-            f'{t.get("artifact_in_hole_pct", 0):.1f}% &middot; frame {frame}</span></div>'
-            f'<div class="triplet"><figure><span class="tag">source</span><img src="{panels[0]}"></figure>'
-            f'<figure><span class="tag">{html.escape(CTRL_TAG)} &middot; red hole / yellow unresolved</span>'
-            f'<img src="{panels[1]}"></figure><figure><span class="tag t-treat">'
-            f'{html.escape(TREAT_TAG)} &middot; red hole / yellow unresolved</span>'
-            f'<img src="{panels[2]}"></figure></div></article>')
-    if not cards:
-        return ""
-    return (f'<section><h2>Exact disocclusion-mask validation</h2><p class="sub">The masks come '
-            f'directly from each warp decision, not from a depth-gradient proxy. Red pixels needed '
-            f'the active fill; yellow pixels remained unresolved afterward. '
-            f'<code>artifact overlap</code> is the fraction of source-relative corruption that an '
-            f'inpainter could actually target. Hole area is context, not a quality vote.</p>'
+            f'warping. Exact mapped-source coverage/integrity tests verify whether the renderer reproduced its '
+            f'requested source sample; they are renderer-conformance diagnostics, not perceptual '
+            f'artifact labels. Their cancellation of a baked highlight, bloom edge, rain splash or '
+            f'generative inconsistency does not prove that the displaced stereo result looks clean. '
+            f'Perceptual conclusions still require the original and rendered images together.</p>'
             f'{"".join(cards)}</section>')
 
 
 def diagnostic_evidence_section():
     """Only surface unusually large diagnostic moves after the primary evidence."""
-    metrics = ("stretch_area", "rim_over_p95", "edge_acc_p50", "disocc_smear",
-               "flicker_disocc_p50", "swim_p50")
+    metrics = ("exact_mapping_fold_pct", "warp_cross_row_shear_severity_pct")
     candidates = []
     for metric in metrics:
         item = _strongest_change(metric)
@@ -1567,7 +1980,8 @@ def clean_footer():
 
 meta = CTRL["meta"]
 
-HTML = """<style>
+HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Apollo SBS evaluation report</title><style>
 :root{--bg:#f5f6f7;--panel:#fff;--ink:#12181d;--muted:#5c6a74;--line:#dbe1e6;--accent:#0e8f9c;
   --accent-soft:#d7eef0;--good:#1f9d63;--warn:#c98a1a;--crit:#c4483a;
   --mono:ui-monospace,"SF Mono","Cascadia Mono",Consolas,monospace;--sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}
@@ -1666,7 +2080,7 @@ pre{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px so
 code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);padding:1px 6px;border-radius:5px}
 @media (max-width:900px){.radar-grid{grid-template-columns:1fr 1fr}.radar-card:last-child{grid-column:1/-1;max-width:480px}.chart-grid{grid-template-columns:1fr}}
 @media (max-width:640px){.radar-grid{grid-template-columns:1fr}.radar-card:last-child{grid-column:auto;max-width:none}.hard-card,.source-card{grid-template-columns:1fr}.pair,.triplet,.quad{grid-template-columns:1fr}.bar-row{grid-template-columns:88px minmax(110px,1fr) 62px}h1{font-size:28px}}
-</style>
+</style></head><body>
 
 <div class="wrap">
   <div class="eyebrow">Apollo SBS 3D &middot; run_eval A/B report</div>
@@ -1681,21 +2095,21 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
 
   __METRICS__
 
-  __SOURCE_ARTIFACTS__
-
   __GROUP_RADARS__
 
-  __WARP_MASK_EVIDENCE__
+  __SOURCE_ARTIFACTS__
 
   __VISUAL_EVIDENCE__
 
   __DIAGNOSTIC_EVIDENCE__
 
+  __LEARNED_ORACLES__
+
   <section>
     <h2>Reproduce</h2>
     <pre>python tools/sbsbench/run_eval.py --label ctrl                              # control (gates vs baselines)
 python tools/sbsbench/run_eval.py --label treat --extra __TREAT_ARGS__     # treatment
-python tools/sbsbench/build_report.py &lt;build&gt;/sbs_eval/ctrl &lt;build&gt;/sbs_eval/treat report.html</pre>
+python tools/sbsbench/generate_report.py &lt;build&gt;/sbs_eval/ctrl &lt;build&gt;/sbs_eval/treat report.html</pre>
     <p style="color:var(--muted);font-size:13px;margin-top:12px">Metrics: <code>tools/sbsbench/sbsbench.py</code>
     &middot; gate: <code>thresholds.json</code> &middot; plan: <code>docs/sbs-benchmark-plan.md</code></p>
   </section>
@@ -1708,7 +2122,7 @@ python tools/sbsbench/build_report.py &lt;build&gt;/sbs_eval/ctrl &lt;build&gt;/
     __CHARTS__
     __FOOTER__</div>
   </details>
-</div>
+</div></body></html>
 """
 
 models = ", ".join(sorted({m for r in (CTRL, TREAT)
@@ -1750,9 +2164,10 @@ HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
         .replace("__SOURCE_ARTIFACTS__", source_artifact_section())
         .replace("__VISUAL_EVIDENCE__", visual_evidence_section())
         .replace("__DIAGNOSTIC_EVIDENCE__", diagnostic_evidence_section())
+        .replace("__LEARNED_ORACLES__",
+                 offline_oracle_report.build_section(treat_dir, CLIPS, name))
         .replace("__CTRL_TAG__", CTRL_TAG).replace("__TREAT_TAG__", TREAT_TAG)
         .replace("__GROUP_RADARS__", grouped_quality_section())
-        .replace("__WARP_MASK_EVIDENCE__", warp_mask_validation_section())
         .replace("__CHARTS__", scorecard_charts())
         .replace("__METRICS__", metrics_section())
         .replace("__FOOTER__", clean_footer())

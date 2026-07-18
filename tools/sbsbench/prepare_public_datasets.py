@@ -401,27 +401,79 @@ def prepare_sintel(clip_id, clip, dataset, archives, out_dir, suite):
         right = _indexed_archive_members(names, right_marker, r"frame_(\d+)\.png$")
         disparities = _indexed_archive_members(
             names, f"/disparities/{sequence}/", r"frame_(\d+)\.png$")
+        occlusions = _indexed_archive_members(
+            names, f"/occlusions/{sequence}/", r"frame_(\d+)\.png$")
+        outofframe = _indexed_archive_members(
+            names, f"/outofframe/{sequence}/", r"frame_(\d+)\.png$")
         if not left:
             fail(f"no Sintel {render_pass}_left frames found for {sequence}")
         chosen = selected(sorted(left), clip)
         os.makedirs(os.path.join(out_dir, "gt_right"))
         os.makedirs(os.path.join(out_dir, "gt_depth"))
+        for directory in (
+                "gt_depth_valid", "gt_depth_valid_all", "gt_depth_valid_nonocc",
+                "gt_occlusion", "gt_outofframe"):
+            os.makedirs(os.path.join(out_dir, directory))
         selection = []
         for output_id, (source_i, frame_id) in enumerate(chosen):
             if frame_id not in right:
                 fail(f"missing Sintel right-eye frame {sequence}/{frame_id}")
             if frame_id not in disparities:
                 fail(f"missing Sintel disparity frame {sequence}/{frame_id}")
-            _write_image_bytes(zf.read(left[frame_id]),
-                               os.path.join(out_dir, f"frame_{output_id:05d}.png"), rgb=True)
-            _write_image_bytes(zf.read(right[frame_id]),
-                               os.path.join(out_dir, "gt_right", f"frame_{output_id:05d}.png"),
-                               rgb=True)
+            if frame_id not in occlusions:
+                fail(f"missing Sintel occlusion mask {sequence}/{frame_id}")
+            if frame_id not in outofframe:
+                fail(f"missing Sintel out-of-frame mask {sequence}/{frame_id}")
+            left_bytes, right_bytes = zf.read(left[frame_id]), zf.read(right[frame_id])
+            with Image.open(io.BytesIO(left_bytes)) as image:
+                left_image = image.convert("RGB")
+            with Image.open(io.BytesIO(right_bytes)) as image:
+                right_image = image.convert("RGB")
             with Image.open(io.BytesIO(zf.read(disparities[frame_id]))) as disparity_png:
                 encoded = np.asarray(disparity_png.convert("RGB"), dtype=np.float32)
             disparity = encoded[..., 0] * 4.0 + encoded[..., 1] / 64.0 + encoded[..., 2] / 16384.0
+            with Image.open(io.BytesIO(zf.read(occlusions[frame_id]))) as image:
+                occlusion = np.asarray(image.convert("L"), dtype=np.uint8)
+            with Image.open(io.BytesIO(zf.read(outofframe[frame_id]))) as image:
+                outside = np.asarray(image.convert("L"), dtype=np.uint8)
+            expected_size = (left_image.height, left_image.width)
+            shapes = {
+                "right": (right_image.height, right_image.width),
+                "disparity": disparity.shape,
+                "occlusion": occlusion.shape,
+                "outofframe": outside.shape,
+            }
+            mismatched = {name: shape for name, shape in shapes.items()
+                          if tuple(shape) != expected_size}
+            if mismatched:
+                fail(
+                    f"Sintel frame geometry mismatch {sequence}/{frame_id}: "
+                    f"left={expected_size}, sidecars={mismatched}")
+            for name, mask in (("occlusion", occlusion), ("outofframe", outside)):
+                levels = set(np.unique(mask).tolist())
+                if not levels.issubset({0, 255}):
+                    fail(
+                        f"Sintel {name} mask is not binary {sequence}/{frame_id}: "
+                        f"values={sorted(levels)[:8]}")
+            occluded, outside = occlusion != 0, outside != 0
+            finite = np.isfinite(disparity)
+            valid_all = finite & ~outside
+            valid_nonocc = valid_all & ~occluded
+            frame_name = f"frame_{output_id:05d}.png"
+            left_image.save(os.path.join(out_dir, frame_name), compress_level=3)
+            right_image.save(os.path.join(out_dir, "gt_right", frame_name), compress_level=3)
             np.save(os.path.join(out_dir, "gt_depth", f"frame_{output_id:05d}.npy"),
                     disparity.astype(np.float32))
+            masks = {
+                "gt_depth_valid": valid_nonocc,
+                "gt_depth_valid_all": valid_all,
+                "gt_depth_valid_nonocc": valid_nonocc,
+                "gt_occlusion": occluded,
+                "gt_outofframe": outside,
+            }
+            for directory, mask in masks.items():
+                Image.fromarray(mask.astype(np.uint8) * 255).save(
+                    os.path.join(out_dir, directory, frame_name), compress_level=3)
             selection.append({"source_index": source_i, "dataset_frame": frame_id,
                               "sequence": sequence, "pass": render_pass})
         return selection
@@ -536,13 +588,14 @@ def prepare_clip(manifest, clip_id, clip, downloads_dir, prepared_root):
             "suite": manifest["prepared_suite"],
             "required_gt_depth": has_gt_depth,
             "required_gt_flow": clip["adapter"] == "tartanair_v2_zip",
+            "evaluation_role": ("reference-only" if not has_gt_depth else "ground-truth"),
             "selection": selection,
         }
         if has_gt_depth:
             meta["gt_depth_kind"] = ("disparity" if clip["adapter"] == "sintel_stereo_zip"
                                      else "metric")
         if clip["adapter"] in ("sintel_stereo_zip", "spring_http_range_zip"):
-            meta["required_gt_stereo"] = True
+            meta["reference_stereo_available"] = True
         for key in ("source_artifacts", "source_artifact_frame"):
             if key in clip:
                 meta[key] = clip[key]
