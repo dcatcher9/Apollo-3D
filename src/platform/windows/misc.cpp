@@ -953,6 +953,10 @@ namespace platf {
    * @return A `bp::child` object representing the new process, or an empty `bp::child` object if the launch fails.
    */
   bp::child run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const bp::environment &env, FILE *file, std::error_code &ec, bp::group *group) {
+    // This parameter is an output. A stale error from a previous command must not suppress a
+    // later launch while startup structures are being created.
+    ec.clear();
+
     std::wstring start_dir = from_utf8(working_dir.string());
     HANDLE job = group ? group->native_handle() : nullptr;
     STARTUPINFOEXW startup_info = create_startup_info(file, job ? &job : nullptr, ec);
