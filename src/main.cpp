@@ -9,6 +9,9 @@
 #include <iostream>
 #include <sstream>
 
+// lib includes
+#include <rs.h>
+
 // local includes
 #include "confighttp.h"
 #include "display_device.h"
@@ -32,10 +35,6 @@
 #endif
 
 #define PROBE_DISPLAY_UUID "38F72B96-B00C-4F21-8B6C-E1BFF1602B0E"
-
-extern "C" {
-#include "rswrapper.h"
-}
 
 using namespace std::literals;
 
@@ -225,6 +224,19 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(error) << "Display device session failed to initialize"sv;
   }
 
+  // nanors lazily initializes its process-wide GF lookup table when a context
+  // is created. Warm it on the main thread before any broadcast worker can
+  // race through the first initialization.
+  reed_solomon_init();
+  auto *rs_probe = reed_solomon_new(1, 1);
+  if (!rs_probe) {
+    BOOST_LOG(fatal) << "Reed-Solomon FEC failed to initialize"sv;
+    return -1;
+  }
+  const auto rs_alignment = rs_probe->align_size;
+  reed_solomon_release(rs_probe);
+  BOOST_LOG(debug) << "Reed-Solomon FEC initialized with "sv << rs_alignment << "-byte SIMD alignment"sv;
+
 #ifdef _WIN32
   // Modify relevant NVIDIA control panel settings if the system has corresponding gpu
   if (nvprefs_instance.load()) {
@@ -367,7 +379,6 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(error) << "Proc failed to initialize"sv;
   }
 
-  reed_solomon_init();
   auto input_deinit_guard = input::init();
 
   if (input::probe_gamepads()) {

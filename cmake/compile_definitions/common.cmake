@@ -57,6 +57,9 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/Rtsp.h"
         "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/RtspParser.c"
         "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/Video.h"
+        "${CMAKE_SOURCE_DIR}/third-party/nanors/deps/obl/oblas_common.c"
+        "${CMAKE_SOURCE_DIR}/third-party/nanors/deps/obl/oblas_lite.c"
+        "${CMAKE_SOURCE_DIR}/third-party/nanors/rs.c"
         "${CMAKE_SOURCE_DIR}/third-party/tray/src/tray.h"
         "${CMAKE_SOURCE_DIR}/src/upnp.cpp"
         "${CMAKE_SOURCE_DIR}/src/upnp.h"
@@ -120,8 +123,6 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/round_robin.h"
         "${CMAKE_SOURCE_DIR}/src/stat_trackers.h"
         "${CMAKE_SOURCE_DIR}/src/stat_trackers.cpp"
-        "${CMAKE_SOURCE_DIR}/src/rswrapper.h"
-        "${CMAKE_SOURCE_DIR}/src/rswrapper.c"
         ${PLATFORM_TARGET_FILES})
 
 if(NOT SUNSHINE_ASSETS_DIR_DEF)
