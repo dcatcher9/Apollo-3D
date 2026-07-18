@@ -38,6 +38,44 @@ namespace safe {
       _cv.notify_all();
     }
 
+    /**
+     * @brief Raise a value only when the event is running and currently empty.
+     *
+     * @return True when stored, or false when stopped or an existing value was preserved.
+     */
+    template<class... Args>
+    bool try_raise(Args &&...args) {
+      std::lock_guard lg {_lock};
+      if (!_continue || _status) {
+        return false;
+      }
+
+      if constexpr (std::is_same_v<std::optional<T>, status_t>) {
+        _status = std::make_optional<T>(std::forward<Args>(args)...);
+      } else {
+        _status = status_t {std::forward<Args>(args)...};
+      }
+
+      _cv.notify_all();
+      return true;
+    }
+
+    /**
+     * @brief Try to remove and return the current value without waiting.
+     *
+     * @return Removed event value, or an empty result when no value is available.
+     */
+    status_t try_pop() {
+      std::lock_guard lg {_lock};
+      if (!_status) {
+        return util::false_v<status_t>;
+      }
+
+      auto val = std::move(_status);
+      _status = util::false_v<status_t>;
+      return val;
+    }
+
     // pop and view should not be used interchangeably
     status_t pop() {
       std::unique_lock ul {_lock};
@@ -60,18 +98,15 @@ namespace safe {
     }
 
     // pop and view should not be used interchangeably
-    template<class Rep, class Period>
+    template<typename Rep, typename Period>
     status_t pop(std::chrono::duration<Rep, Period> delay) {
       std::unique_lock ul {_lock};
 
-      if (!_continue) {
+      if (bool success = _cv.wait_for(ul, delay, [this] {
+            return (bool) _status || !_continue;
+          });
+          !success || !_continue) {
         return util::false_v<status_t>;
-      }
-
-      while (!_status) {
-        if (!_continue || _cv.wait_for(ul, delay) == std::cv_status::timeout) {
-          return util::false_v<status_t>;
-        }
       }
 
       auto val = std::move(_status);
@@ -117,6 +152,7 @@ namespace safe {
     }
 
     bool peek() {
+      std::lock_guard lg {_lock};
       return _continue && (bool) _status;
     }
 
@@ -137,6 +173,7 @@ namespace safe {
     }
 
     [[nodiscard]] bool running() const {
+      std::lock_guard lg {_lock};
       return _continue;
     }
 
@@ -145,7 +182,7 @@ namespace safe {
     status_t _status {util::false_v<status_t>};
 
     std::condition_variable _cv;
-    std::mutex _lock;
+    mutable std::mutex _lock;
   };
 
   template<class T>
@@ -276,6 +313,7 @@ namespace safe {
     }
 
     bool peek() {
+      std::lock_guard lg {_lock};
       return _continue && !_queue.empty();
     }
 
@@ -333,6 +371,7 @@ namespace safe {
     }
 
     [[nodiscard]] bool running() const {
+      std::lock_guard lg {_lock};
       return _continue;
     }
 
@@ -340,7 +379,7 @@ namespace safe {
     bool _continue {true};
     std::uint32_t _max_elements;
 
-    std::mutex _lock;
+    mutable std::mutex _lock;
     std::condition_variable _cv;
 
     std::vector<T> _queue;

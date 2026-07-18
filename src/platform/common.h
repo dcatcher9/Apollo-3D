@@ -482,10 +482,7 @@ namespace platf {
      */
     using pull_free_image_cb_t = std::function<bool(std::shared_ptr<img_t> &img_out)>;
 
-    display_t() noexcept:
-        offset_x {0},
-        offset_y {0} {
-    }
+    display_t() noexcept = default;
 
     /**
      * @brief Capture a frame.
@@ -535,10 +532,10 @@ namespace platf {
     virtual ~display_t() = default;
 
     // Offsets for when streaming a specific monitor. By default, they are 0.
-    int offset_x, offset_y;
-    int env_width, env_height;
+    int offset_x {0}, offset_y {0};
+    int env_width {0}, env_height {0};
 
-    int width, height;
+    int width {0}, height {0};
 
   protected:
     // collect capture timing data (at loglevel debug)

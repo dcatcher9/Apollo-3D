@@ -1385,8 +1385,7 @@ namespace video {
                   continue;
                 }
 
-                while (capture_ctx->images->peek()) {
-                  capture_ctx->images->pop();
+                while (capture_ctx->images->try_pop()) {
                 }
 
                 ++capture_ctx;
@@ -1972,7 +1971,7 @@ namespace video {
     auto encode_frame_threshold = std::chrono::nanoseconds(1000ms) * 1000 / config.encodingFramerate;
     auto frame_variation_threshold = encode_frame_threshold / 4;
     auto min_frame_diff = encode_frame_threshold - frame_variation_threshold;
-    BOOST_LOG(info) << "Minimum FPS target set to ~"sv << (minimum_fps_target / 2000) << "fps ("sv << max_frametime * 2 << ")"sv;
+    BOOST_LOG(info) << "Minimum FPS target set to ~"sv << (minimum_fps_target / 1000) << "fps ("sv << max_frametime << ")"sv;
     BOOST_LOG(info) << "Encoding Frame threshold: "sv << encode_frame_threshold;
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
@@ -1996,6 +1995,13 @@ namespace video {
 
     if (config.input_only) {
       BOOST_LOG(info) << "Input only session, video will not be captured."sv;
+
+      // Preserve the normal first-frame behavior during an early display reinit, but do not send
+      // the dummy after shutdown or while an SBS dimension change is already pending.
+      if (shutdown_event->peek() || !images->running() ||
+          (reinit_event.peek() && frame_nr > 1) || sbs_mode_event->peek()) {
+        return;
+      }
 
       // Encode the dummy img only once
       if (encode(frame_nr++, *session, packets, channel_data, std::chrono::steady_clock::now())) {
@@ -2022,22 +2028,33 @@ namespace video {
     // current desktop instead.
     std::shared_ptr<platf::img_t> last_img;
 
+    auto lifecycle_change_requested = [&]() {
+      const bool shutting_down = shutdown_event->peek();
+      const bool capture_stopped = !images->running();
+      const bool display_reinit_pending = reinit_event.peek();
+      const bool sbs_mode_change_pending = sbs_mode_event->peek();
+
+      // If capture has to reinitialize before it has produced a frame, encode the dummy once so
+      // Moonlight knows the host is alive. An SBS-only change always rebuilds immediately because
+      // it changes the encode dimensions.
+      if (!shutting_down && !capture_stopped &&
+          !(display_reinit_pending && frame_nr > 1) && !sbs_mode_change_pending) {
+        return false;
+      }
+
+      // Same-display SBS rebuild: hand the current desktop to the next session. Never retain an
+      // image across a real display reinitialization because it may own resources from the old
+      // display. Do not overwrite a newer frame that capture has already queued.
+      if (last_img && !shutting_down && !capture_stopped && !display_reinit_pending &&
+          sbs_mode_change_pending) {
+        images->try_raise(std::move(last_img));
+      }
+
+      return true;
+    };
+
     while (true) {
-      // Break out of the encoding loop if any of the following are true:
-      // a) The stream is ending
-      // b) Sunshine is quitting
-      // c) The capture side is waiting to reinit and we've encoded at least one frame
-      //
-      // If we have to reinit before we have received any captured frames, we will encode
-      // the blank dummy frame just to let Moonlight know that we're alive.
-      if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1) || sbs_mode_event->peek()) {
-        // Same-display session rebuild: hand the current desktop to the next session. (Not on
-        // reinit -- the display is recreated there and old images must not outlive it. Not when
-        // a frame is already queued -- raise() overwrites the slot and would replace newer with
-        // older.)
-        if (last_img && images->running() && !images->peek() && !shutdown_event->peek() && !reinit_event.peek() && sbs_mode_event->peek()) {
-          images->raise(std::move(last_img));
-        }
+      if (lifecycle_change_requested()) {
         break;
       }
 
@@ -2073,6 +2090,13 @@ namespace video {
             frame_timestamp = std::chrono::steady_clock::now();
           }
 
+          // Re-check after the potentially blocking image wait and before conversion. On Windows,
+          // conversion can include the full D3D11/TensorRT SBS pipeline, so avoid starting it after
+          // capture teardown or an encode-dimension change has been requested.
+          if (lifecycle_change_requested()) {
+            break;
+          }
+
           auto current_timestamp = *frame_timestamp;
           auto time_diff = current_timestamp - encode_frame_timestamp;
 
@@ -2096,6 +2120,13 @@ namespace video {
         } else if (!images->running()) {
           break;
         }
+      }
+
+      // Keep this check as close as possible to encode(). A reinit may be requested while the
+      // current frame is being converted, and encoding afterward can leave packets or GPU work in
+      // flight while the session and display resources are torn down.
+      if (lifecycle_change_requested()) {
+        break;
       }
 
       if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
