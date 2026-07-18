@@ -15,6 +15,21 @@
 namespace input {
   struct input_t;
 
+  namespace detail {
+    /**
+     * @brief Determine whether a held, remapped right Alt should be removed from packet modifiers.
+     * @param mapped_right_alt Effective virtual-key mapping for right Alt.
+     * @param left_alt_pressed Whether physical left Alt is currently held.
+     * @param right_alt_pressed Whether physical right Alt is currently held.
+     */
+    constexpr bool suppress_synthetic_alt(uint16_t mapped_right_alt, bool left_alt_pressed, bool right_alt_pressed) noexcept {
+      constexpr uint16_t VKEY_LWIN = 0x5B;
+      constexpr uint16_t VKEY_RWIN = 0x5C;
+      const bool right_alt_maps_to_meta = mapped_right_alt == VKEY_LWIN || mapped_right_alt == VKEY_RWIN;
+      return right_alt_maps_to_meta && right_alt_pressed && !left_alt_pressed;
+    }
+  }  // namespace detail
+
   void print(void *input);
   void reset(std::shared_ptr<input_t> &input);
   void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data, const crypto::PERM& permission);
