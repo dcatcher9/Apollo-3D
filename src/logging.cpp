@@ -16,6 +16,7 @@
 #include <boost/log/expressions.hpp>
 #include <boost/log/sinks.hpp>
 #include <boost/log/sources/severity_logger.hpp>
+#include <boost/log/utility/exception_handler.hpp>
 
 // local includes
 #include "logging.h"
@@ -183,6 +184,10 @@ namespace logging {
     sink->locked_backend()->add_stream(boost::make_shared<std::ofstream>(log_file));
     sink->set_filter(severity >= min_log_level);
     sink->set_formatter(&formatter);
+
+    // Keep the asynchronous sink thread alive if a backend temporarily fails. Otherwise one
+    // file or console I/O exception permanently drops every later log record.
+    sink->set_exception_handler(bl::make_exception_suppressor());
 
     // Flush after each log record to ensure log file contents on disk isn't stale.
     // This is particularly important when running from a Windows service.
