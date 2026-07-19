@@ -40,6 +40,40 @@ using asio::ip::udp;
 using namespace std::literals;
 
 namespace rtsp_stream {
+  namespace detail {
+    std::unordered_map<std::string_view, std::string_view> parse_announce_attributes(std::string_view payload) {
+      std::unordered_map<std::string_view, std::string_view> args;
+
+      std::size_t begin = 0;
+      while (begin < payload.size()) {
+        const auto end = payload.find_first_of("\r\n", begin);
+        const auto line = payload.substr(begin, end == std::string_view::npos ? end : end - begin);
+
+        if (line.starts_with("a="sv)) {
+          const auto separator = line.find(':', 2);
+          if (separator != std::string_view::npos && separator > 2) {
+            const auto name = line.substr(2, separator - 2);
+            auto value = line.substr(separator + 1);
+            while (!value.empty() && value.back() == ' ') {
+              value.remove_suffix(1);
+            }
+            args.emplace(name, value);
+          }
+        }
+
+        if (end == std::string_view::npos) {
+          break;
+        }
+        begin = payload.find_first_not_of("\r\n", end);
+        if (begin == std::string_view::npos) {
+          break;
+        }
+      }
+
+      return args;
+    }
+  }  // namespace detail
+
   void free_msg(PRTSP_MESSAGE msg) {
     freeMessage(msg);
 
@@ -929,46 +963,7 @@ namespace rtsp_stream {
 
     std::string_view payload {req->payload, (size_t) req->payloadLength};
 
-    std::vector<std::string_view> lines;
-
-    auto whitespace = [](char ch) {
-      return ch == '\n' || ch == '\r';
-    };
-
-    {
-      auto pos = std::begin(payload);
-      auto begin = pos;
-      while (pos != std::end(payload)) {
-        if (whitespace(*pos++)) {
-          lines.emplace_back(begin, pos - begin - 1);
-
-          while (pos != std::end(payload) && whitespace(*pos)) {
-            ++pos;
-          }
-          begin = pos;
-        }
-      }
-    }
-
-    std::string_view client;
-    std::unordered_map<std::string_view, std::string_view> args;
-
-    for (auto line : lines) {
-      auto type = line.substr(0, 2);
-      if (type == "s="sv) {
-        client = line.substr(2);
-      } else if (type == "a=") {
-        auto pos = line.find(':');
-
-        auto name = line.substr(2, pos - 2);
-        auto val = line.substr(pos + 1);
-
-        if (val[val.size() - 1] == ' ') {
-          val = val.substr(0, val.size() - 1);
-        }
-        args.emplace(name, val);
-      }
-    }
+    auto args = detail::parse_announce_attributes(payload);
 
     // Initialize any omitted parameters to defaults
     args.try_emplace("x-nv-video[0].encoderCscMode"sv, "0"sv);
