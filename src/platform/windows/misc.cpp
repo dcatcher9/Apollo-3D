@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iterator>
+#include <mutex>
 #include <set>
 #include <sstream>
 
@@ -77,6 +78,9 @@ extern "C" {
 namespace {
 
   std::atomic<bool> used_nt_set_timer_resolution = false;
+  std::mutex mouse_keys_mutex;
+  platf::detail::mouse_keys_controller_t mouse_keys_controller;
+  std::chrono::steady_clock::time_point mouse_keys_retry_after;
 
   bool nt_set_timer_resolution_max() {
     ULONG minimum, maximum, current;
@@ -108,9 +112,6 @@ using namespace std::literals;
 
 namespace platf {
   using adapteraddrs_t = util::c_ptr<IP_ADAPTER_ADDRESSES>;
-
-  bool enabled_mouse_keys = false;
-  MOUSEKEYS previous_mouse_keys_state;
 
   HANDLE qos_handle = nullptr;
 
@@ -1195,31 +1196,48 @@ namespace platf {
       }
     }
 
-    // If there is no mouse connected, enable Mouse Keys to force the cursor to appear
-    if (!GetSystemMetrics(SM_MOUSEPRESENT)) {
-      BOOST_LOG(info) << "A mouse was not detected. Sunshine will enable Mouse Keys while streaming to force the mouse cursor to appear.";
+    {
+      std::lock_guard lock(mouse_keys_mutex);
+      mouse_keys_retry_after = {};
+    }
+    refresh_mouse_keys();
+  }
 
-      // Get the current state of Mouse Keys so we can restore it when streaming is over
-      previous_mouse_keys_state.cbSize = sizeof(previous_mouse_keys_state);
-      if (SystemParametersInfoW(SPI_GETMOUSEKEYS, 0, &previous_mouse_keys_state, 0)) {
-        MOUSEKEYS new_mouse_keys_state = {};
+  void refresh_mouse_keys() {
+    std::lock_guard lock(mouse_keys_mutex);
+    const auto now = std::chrono::steady_clock::now();
+    if (now < mouse_keys_retry_after) {
+      return;
+    }
 
-        // Enable Mouse Keys
-        new_mouse_keys_state.cbSize = sizeof(new_mouse_keys_state);
-        new_mouse_keys_state.dwFlags = MKF_MOUSEKEYSON | MKF_AVAILABLE;
-        new_mouse_keys_state.iMaxSpeed = 10;
-        new_mouse_keys_state.iTimeToMaxSpeed = 1000;
-        if (SystemParametersInfoW(SPI_SETMOUSEKEYS, 0, &new_mouse_keys_state, 0)) {
-          // Remember to restore the previous settings when we stop streaming
-          enabled_mouse_keys = true;
-        } else {
-          auto winerr = GetLastError();
-          BOOST_LOG(warning) << "Unable to enable Mouse Keys: "sv << winerr;
+    bool operation_failed = false;
+
+    const auto enabled = mouse_keys_controller.refresh(
+      GetSystemMetrics(SM_MOUSEPRESENT) != 0,
+      [&](MOUSEKEYS &state) {
+        if (SystemParametersInfoW(SPI_GETMOUSEKEYS, sizeof(MOUSEKEYS), &state, 0)) {
+          return true;
         }
-      } else {
-        auto winerr = GetLastError();
-        BOOST_LOG(warning) << "Unable to get current state of Mouse Keys: "sv << winerr;
+
+        operation_failed = true;
+        BOOST_LOG(warning) << "Unable to get current state of Mouse Keys: "sv << GetLastError();
+        return false;
+      },
+      [&](MOUSEKEYS &state) {
+        if (SystemParametersInfoW(SPI_SETMOUSEKEYS, sizeof(MOUSEKEYS), &state, 0)) {
+          return true;
+        }
+
+        operation_failed = true;
+        BOOST_LOG(warning) << "Unable to enable Mouse Keys: "sv << GetLastError();
+        return false;
       }
+    );
+
+    mouse_keys_retry_after = operation_failed ? now + 30s : std::chrono::steady_clock::time_point {};
+
+    if (enabled) {
+      BOOST_LOG(info) << "A mouse was not detected. Apollo enabled Mouse Keys while streaming to keep the remote cursor visible."sv;
     }
   }
 
@@ -1246,14 +1264,17 @@ namespace platf {
       wlan_handle = nullptr;
     }
 
-    // Restore Mouse Keys back to the previous settings if we turned it on
-    if (enabled_mouse_keys) {
-      enabled_mouse_keys = false;
-      if (!SystemParametersInfoW(SPI_SETMOUSEKEYS, 0, &previous_mouse_keys_state, 0)) {
-        auto winerr = GetLastError();
-        BOOST_LOG(warning) << "Unable to restore original state of Mouse Keys: "sv << winerr;
+    // Restore Mouse Keys back to the previous settings if we turned it on. The controller keeps
+    // ownership after a failure so a later stream stop can retry instead of losing the snapshot.
+    std::lock_guard lock(mouse_keys_mutex);
+    mouse_keys_controller.restore([](MOUSEKEYS &state) {
+      if (SystemParametersInfoW(SPI_SETMOUSEKEYS, sizeof(MOUSEKEYS), &state, 0)) {
+        return true;
       }
-    }
+
+      BOOST_LOG(warning) << "Unable to restore original state of Mouse Keys: "sv << GetLastError();
+      return false;
+    });
   }
 
   void restart_on_exit() {

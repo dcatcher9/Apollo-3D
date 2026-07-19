@@ -1937,6 +1937,16 @@ namespace video {
     return nullptr;
   }
 
+  void refresh_mouse_keys_if_due(std::chrono::steady_clock::time_point &next_refresh) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_refresh) {
+      return;
+    }
+
+    next_refresh = now + 1s;
+    platf::refresh_mouse_keys();
+  }
+
   void encode_run(
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
@@ -2024,6 +2034,7 @@ namespace video {
     }
 
     std::chrono::steady_clock::time_point encode_frame_timestamp;
+    auto next_mouse_keys_refresh = std::chrono::steady_clock::now() + 1s;
     bool missing_frame_timestamp_warning_logged = false;
 
     // Most recent real captured frame. On a host SBS toggle the display and its capture session
@@ -2140,6 +2151,7 @@ namespace video {
       }
 
       session->request_normal_frame();
+      refresh_mouse_keys_if_due(next_mouse_keys_refresh);
     }
   }
 
@@ -2321,6 +2333,7 @@ namespace video {
     }
 
     auto ec = platf::capture_e::ok;
+    auto next_mouse_keys_refresh = std::chrono::steady_clock::now() + 1s;
     while (encode_session_ctx_queue.running()) {
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
         while (encode_session_ctx_queue.peek()) {
@@ -2386,6 +2399,8 @@ namespace video {
 
           ++pos;
         })
+
+        refresh_mouse_keys_if_due(next_mouse_keys_refresh);
 
         if (switch_display_event->peek()) {
           ec = platf::capture_e::reinit;

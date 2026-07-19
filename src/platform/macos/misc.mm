@@ -219,6 +219,10 @@ namespace platf {
     // Unimplemented
   }
 
+  void refresh_mouse_keys() {
+    // Not required on this platform.
+  }
+
   void streaming_will_start() {
     // Nothing to do
   }

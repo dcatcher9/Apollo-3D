@@ -363,6 +363,10 @@ std::string get_local_ip_for_gateway() {
     // Unimplemented
   }
 
+  void refresh_mouse_keys() {
+    // Not required on this platform.
+  }
+
   void streaming_will_start() {
     // Nothing to do
   }
