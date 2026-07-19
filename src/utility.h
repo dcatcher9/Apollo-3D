@@ -6,6 +6,7 @@
 
 // standard includes
 #include <algorithm>
+#include <charconv>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -13,6 +14,7 @@
 #include <ostream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -519,6 +521,21 @@ namespace util {
 
   inline std::int64_t from_view(const std::string_view &number) {
     return from_chars(std::begin(number), std::end(number));
+  }
+
+  template<class T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
+  inline std::optional<T> from_view_checked(const std::string_view number) {
+    if (number.empty()) {
+      return std::nullopt;
+    }
+
+    T result {};
+    const auto [end, ec] = std::from_chars(number.data(), number.data() + number.size(), result);
+    if (ec != std::errc {} || end != number.data() + number.size()) {
+      return std::nullopt;
+    }
+
+    return result;
   }
 
   template<class X, class Y>

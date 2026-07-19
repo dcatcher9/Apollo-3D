@@ -8,6 +8,7 @@
 #include <future>
 #include <optional>
 #include <queue>
+#include <stdexcept>
 
 // lib includes
 #include <boost/endian/arithmetic.hpp>
@@ -668,6 +669,10 @@ namespace stream {
     };
 
     static fec_t encode(const std::string_view &payload, size_t blocksize, size_t fecpercentage, size_t minparityshards, size_t prefixsize) {
+      if (payload.empty() || blocksize == 0 || fecpercentage > 255 || minparityshards > MIN_REQUIRED_FEC_PACKETS_MAX) {
+        throw std::invalid_argument("Invalid Reed-Solomon FEC parameters");
+      }
+
       auto payload_size = payload.size();
 
       auto pad = payload_size % blocksize != 0;
@@ -682,6 +687,11 @@ namespace stream {
         fecpercentage = (100 * parity_shards) / data_shards;
 
         BOOST_LOG(verbose) << "Increasing FEC percentage to "sv << fecpercentage << " to meet parity shard minimum"sv << std::endl;
+      }
+
+      if (fecpercentage != 0 &&
+          (data_shards > DATA_SHARDS_MAX || parity_shards > DATA_SHARDS_MAX || data_shards + parity_shards > DATA_SHARDS_MAX)) {
+        throw std::invalid_argument("Reed-Solomon shard count exceeds protocol limit");
       }
 
       auto nr_shards = data_shards + parity_shards;
@@ -1550,13 +1560,9 @@ namespace stream {
       auto unaligned_size = payload.size() / fec_blocks_needed;
       auto aligned_size = ((unaligned_size + (blocksize - 1)) / blocksize) * blocksize;
 
-      // If we exceed the 10-bit FEC packet index (which means our frame exceeded 4096 packets),
-      // the frame will be unrecoverable. Log an error for this case.
-      if (aligned_size / blocksize >= 1024) {
-        BOOST_LOG(error) << "Encoder produced a frame too large to send! Is the encoder broken? (needed "sv << (aligned_size / blocksize) << " packets)"sv;
-      }
-
       // Split the data into aligned FEC blocks
+      size_t max_packets_per_block = 0;
+      bool fec_block_sizes_valid = true;
       for (int x = 0; x < fec_blocks_needed; ++x) {
         if (x == fec_blocks_needed - 1) {
           // The last block must extend to the end of the payload
@@ -1565,6 +1571,17 @@ namespace stream {
           // Earlier blocks just extend to the next block offset
           fec_blocks[x] = payload.substr(x * aligned_size, aligned_size);
         }
+
+        const auto packets = fec_packet_count(fec_blocks[x].size(), blocksize);
+        max_packets_per_block = std::max(max_packets_per_block, packets);
+        fec_block_sizes_valid = fec_block_sizes_valid && is_valid_fec_block_size(fec_blocks[x].size(), blocksize);
+      }
+
+      // The packet index and data-shard count are 10-bit fields. Inspect each
+      // actual split because the final partial block can be one shard larger.
+      if (!fec_block_sizes_valid) {
+        BOOST_LOG(error) << "Dropping encoded frame that exceeds the 10-bit FEC packet index (needed "sv << max_packets_per_block << " packets per block)"sv;
+        continue;
       }
 
       try {

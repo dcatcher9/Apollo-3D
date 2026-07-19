@@ -999,8 +999,18 @@ namespace rtsp_stream {
         util::from_view(args.at("x-nv-audio.surround.AudioQuality"sv));
 
       config.controlProtocolType = util::from_view(args.at("x-nv-general.useReliableUdp"sv));
-      config.packetsize = util::from_view(args.at("x-nv-video[0].packetSize"sv));
-      config.minRequiredFecPackets = util::from_view(args.at("x-nv-vqos[0].fec.minRequiredFecPackets"sv));
+      const auto packet_size_arg = args.at("x-nv-video[0].packetSize"sv);
+      const auto min_fec_packets_arg = args.at("x-nv-vqos[0].fec.minRequiredFecPackets"sv);
+      const auto packet_size = util::from_view_checked<int>(packet_size_arg);
+      const auto min_fec_packets = util::from_view_checked<int>(min_fec_packets_arg);
+      if (!packet_size || !min_fec_packets || !stream::is_valid_video_transport_config(*packet_size, *min_fec_packets)) {
+        BOOST_LOG(warning) << "Rejecting invalid RTSP video transport parameters: packetSize=["sv << packet_size_arg
+                           << "], minRequiredFecPackets=["sv << min_fec_packets_arg << ']';
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
+      config.packetsize = *packet_size;
+      config.minRequiredFecPackets = *min_fec_packets;
       config.mlFeatureFlags = util::from_view(args.at("x-ml-general.featureFlags"sv));
       config.audioQosType = util::from_view(args.at("x-nv-aqos.qosTrafficType"sv));
       config.videoQosType = util::from_view(args.at("x-nv-vqos[0].qosTrafficType"sv));
