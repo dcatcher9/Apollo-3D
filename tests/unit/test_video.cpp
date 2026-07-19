@@ -7,6 +7,60 @@
 #include <tuple>
 
 #include <src/video.h>
+#include <src/video_colorspace.h>
+
+namespace {
+  float apply_color_vector(const float (&color_vector)[4], float red, float green, float blue) {
+    return color_vector[0] * red + color_vector[1] * green + color_vector[2] * blue + color_vector[3];
+  }
+}  // namespace
+
+TEST(ColorVectorsTest, LimitedRangeUnormUsesTargetBitDepth) {
+  for (const auto bit_depth : {8u, 10u}) {
+    const auto *vectors = video::color_vectors_from_colorspace(
+      {video::colorspace_e::rec709, false, bit_depth},
+      true
+    );
+    ASSERT_NE(vectors, nullptr);
+
+    const auto max_value = static_cast<float>((1u << bit_depth) - 1u);
+    const auto scale = static_cast<float>(1u << (bit_depth - 8u));
+    EXPECT_NEAR(apply_color_vector(vectors->color_vec_y, 0.0f, 0.0f, 0.0f), 16.0f * scale / max_value, 1e-6f);
+    EXPECT_NEAR(apply_color_vector(vectors->color_vec_y, 1.0f, 1.0f, 1.0f), 235.0f * scale / max_value, 1e-6f);
+    EXPECT_NEAR(apply_color_vector(vectors->color_vec_u, 0.0f, 0.0f, 0.0f), 128.0f * scale / max_value, 1e-6f);
+    EXPECT_NEAR(apply_color_vector(vectors->color_vec_v, 1.0f, 1.0f, 1.0f), 128.0f * scale / max_value, 1e-6f);
+  }
+}
+
+TEST(ColorVectorsTest, FullRangeUnormUsesTargetBitDepth) {
+  for (const auto bit_depth : {8u, 10u}) {
+    const auto *vectors = video::color_vectors_from_colorspace(
+      {video::colorspace_e::rec709, true, bit_depth},
+      true
+    );
+    ASSERT_NE(vectors, nullptr);
+
+    const auto max_value = static_cast<float>((1u << bit_depth) - 1u);
+    const auto neutral_chroma = static_cast<float>(1u << (bit_depth - 1u)) / max_value;
+    EXPECT_NEAR(apply_color_vector(vectors->color_vec_y, 0.0f, 0.0f, 0.0f), 0.0f, 1e-6f);
+    EXPECT_NEAR(apply_color_vector(vectors->color_vec_y, 1.0f, 1.0f, 1.0f), 1.0f, 1e-6f);
+    EXPECT_NEAR(apply_color_vector(vectors->color_vec_u, 0.0f, 0.0f, 0.0f), neutral_chroma, 1e-6f);
+    EXPECT_NEAR(apply_color_vector(vectors->color_vec_v, 1.0f, 1.0f, 1.0f), neutral_chroma, 1e-6f);
+  }
+}
+
+TEST(ColorVectorsTest, UintOutputRoundsBt2020LimitedValues) {
+  const auto *vectors = video::color_vectors_from_colorspace(
+    {video::colorspace_e::bt2020, false, 10},
+    false
+  );
+  ASSERT_NE(vectors, nullptr);
+
+  EXPECT_EQ(static_cast<unsigned>(apply_color_vector(vectors->color_vec_y, 0.0f, 0.0f, 0.0f)), 64u);
+  EXPECT_EQ(static_cast<unsigned>(apply_color_vector(vectors->color_vec_y, 1.0f, 1.0f, 1.0f)), 940u);
+  EXPECT_EQ(static_cast<unsigned>(apply_color_vector(vectors->color_vec_u, 0.0f, 0.0f, 0.0f)), 512u);
+  EXPECT_EQ(static_cast<unsigned>(apply_color_vector(vectors->color_vec_v, 1.0f, 0.0f, 0.0f)), 960u);
+}
 
 struct EncoderTest: PlatformTestSuite, testing::WithParamInterface<video::encoder_t *> {
   void SetUp() override {
