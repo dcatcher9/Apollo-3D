@@ -42,7 +42,17 @@ namespace nvhttp {
     bool operator==(const launch_mode_t &) const = default;
   };
 
+  enum class launch_int_field {
+    core_version,
+    binary_option,
+    surround_info,
+    gamepad_mask,
+    scale_factor,
+    app_id,
+  };
+
   std::optional<launch_mode_t> parse_launch_mode(std::string_view mode);
+  std::optional<int> parse_launch_int(launch_int_field field, std::string_view value);
   std::optional<crypto::aes_t> parse_remote_input_key(std::string_view key);
   std::optional<std::uint32_t> parse_remote_input_key_id(std::string_view key_id);
 

@@ -3,6 +3,8 @@
  * @brief Tests for GameStream launch parameter parsing.
  */
 
+#include <limits>
+
 #include <src/nvhttp.h>
 
 #include "../tests_common.h"
@@ -61,4 +63,26 @@ TEST(NvHttpLaunchParsingTest, RejectsMalformedRemoteInputEncryptionValues) {
   EXPECT_FALSE(nvhttp::parse_remote_input_key_id("1x"));
   EXPECT_FALSE(nvhttp::parse_remote_input_key_id("-2147483649"));
   EXPECT_FALSE(nvhttp::parse_remote_input_key_id("4294967296"));
+}
+
+TEST(NvHttpLaunchParsingTest, EnforcesScalarLaunchOptionContracts) {
+  using field = nvhttp::launch_int_field;
+  using nvhttp::parse_launch_int;
+
+  EXPECT_EQ(parse_launch_int(field::binary_option, "0"), 0);
+  EXPECT_EQ(parse_launch_int(field::binary_option, "1"), 1);
+  EXPECT_FALSE(parse_launch_int(field::binary_option, "2"));
+  EXPECT_EQ(parse_launch_int(field::scale_factor, "20"), 20);
+  EXPECT_EQ(parse_launch_int(field::scale_factor, "200"), 200);
+  EXPECT_FALSE(parse_launch_int(field::scale_factor, "19"));
+  EXPECT_FALSE(parse_launch_int(field::scale_factor, "201"));
+  EXPECT_EQ(parse_launch_int(field::gamepad_mask, "-2147483648"), std::numeric_limits<int>::min());
+  EXPECT_EQ(parse_launch_int(field::gamepad_mask, "2147483647"), std::numeric_limits<int>::max());
+  EXPECT_FALSE(parse_launch_int(field::gamepad_mask, "2147483648"));
+  EXPECT_EQ(parse_launch_int(field::app_id, "0"), 0);
+  EXPECT_FALSE(parse_launch_int(field::app_id, "-1"));
+  EXPECT_EQ(parse_launch_int(field::surround_info, "196610"), 196610);
+  EXPECT_FALSE(parse_launch_int(field::surround_info, "0"));
+  EXPECT_FALSE(parse_launch_int(field::core_version, "-1"));
+  EXPECT_FALSE(parse_launch_int(field::core_version, "1x"));
 }

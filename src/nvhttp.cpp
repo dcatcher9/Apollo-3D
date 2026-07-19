@@ -579,6 +579,37 @@ namespace nvhttp {
     return launch_mode_t {*width, *height, static_cast<int>(fps)};
   }
 
+  std::optional<int> parse_launch_int(launch_int_field field, std::string_view value) {
+    const auto parsed = util::from_view_checked<int>(value);
+    if (!parsed) {
+      return std::nullopt;
+    }
+
+    bool valid = false;
+    switch (field) {
+      case launch_int_field::core_version:
+      case launch_int_field::app_id:
+        valid = *parsed >= 0;
+        break;
+      case launch_int_field::surround_info: {
+        const auto channels = *parsed & 0xFFFF;
+        valid = *parsed >= 0 && (channels == 2 || channels == 6 || channels == 8);
+        break;
+      }
+      case launch_int_field::binary_option:
+        valid = *parsed == 0 || *parsed == 1;
+        break;
+      case launch_int_field::gamepad_mask:
+        valid = true;
+        break;
+      case launch_int_field::scale_factor:
+        valid = *parsed >= 20 && *parsed <= 200;
+        break;
+    }
+
+    return valid ? parsed : std::nullopt;
+  }
+
   std::optional<crypto::aes_t> parse_remote_input_key(std::string_view key) {
     if (key.size() != 32) {
       return std::nullopt;
@@ -636,8 +667,12 @@ namespace nvhttp {
       launch_session->host_audio = host_audio;
 
       // Encrypted RTSP is enabled with client reported corever >= 1
-      auto corever = util::from_view(get_arg(args, "corever", "0"));
-      if (corever >= 1) {
+      const auto core_version = parse_launch_int(launch_int_field::core_version, get_arg(args, "corever", "0"));
+      if (!core_version) {
+        BOOST_LOG(warning) << "Rejecting invalid core version for client ["sv << named_cert_p->name << ']';
+        return nullptr;
+      }
+      if (*core_version >= 1) {
         launch_session->rtsp_cipher = crypto::cipher::gcm_t {
           launch_session->gcm_key, false
         };
@@ -678,13 +713,24 @@ namespace nvhttp {
     launch_session->device_name = named_cert_p->name.empty() ? "ApolloDisplay"s : named_cert_p->name;
     launch_session->unique_id = named_cert_p->uuid;
     launch_session->perm = named_cert_p->perm;
-    launch_session->enable_sops = util::from_view(get_arg(args, "sops", "0"));
-    launch_session->surround_info = util::from_view(get_arg(args, "surroundAudioInfo", "196610"));
+    const auto enable_sops = parse_launch_int(launch_int_field::binary_option, get_arg(args, "sops", "0"));
+    const auto surround_info = parse_launch_int(launch_int_field::surround_info, get_arg(args, "surroundAudioInfo", "196610"));
+    const auto gamepad_mask = parse_launch_int(launch_int_field::gamepad_mask, get_arg(args, "gcmap", "0"));
+    const auto enable_hdr = parse_launch_int(launch_int_field::binary_option, get_arg(args, "hdrMode", "0"));
+    const auto virtual_display = parse_launch_int(launch_int_field::binary_option, get_arg(args, "virtualDisplay", "0"));
+    const auto scale_factor = parse_launch_int(launch_int_field::scale_factor, get_arg(args, "scaleFactor", "100"));
+    if (!enable_sops || !surround_info || !gamepad_mask || !enable_hdr || !virtual_display || !scale_factor) {
+      BOOST_LOG(warning) << "Rejecting invalid launch options for client ["sv << named_cert_p->name << ']';
+      return nullptr;
+    }
+
+    launch_session->enable_sops = *enable_sops;
+    launch_session->surround_info = *surround_info;
     launch_session->surround_params = (get_arg(args, "surroundParams", ""));
-    launch_session->gcmap = util::from_view(get_arg(args, "gcmap", "0"));
-    launch_session->enable_hdr = util::from_view(get_arg(args, "hdrMode", "0"));
-    launch_session->virtual_display = util::from_view(get_arg(args, "virtualDisplay", "0")) || named_cert_p->always_use_virtual_display;
-    launch_session->scale_factor = util::from_view(get_arg(args, "scaleFactor", "100"));
+    launch_session->gcmap = *gamepad_mask;
+    launch_session->enable_hdr = *enable_hdr;
+    launch_session->virtual_display = *virtual_display || named_cert_p->always_use_virtual_display;
+    launch_session->scale_factor = static_cast<std::uint32_t>(*scale_factor);
 
     launch_session->client_do_cmds = named_cert_p->do_cmds;
     launch_session->client_undo_cmds = named_cert_p->undo_cmds;
@@ -1431,18 +1477,26 @@ namespace nvhttp {
 
     auto appid_str = get_arg(args, "appid", "0");
     auto appuuid_str = get_arg(args, "appuuid", "");
-    auto appid = util::from_view(appid_str);
-    const auto process_status = proc::proc.get_status();
-    auto current_appid = process_status.app_id;
-    const auto &current_app_uuid = process_status.app_uuid;
-    bool is_input_only = config::input.enable_input_only_mode && (appid == proc::input_only_app_id || (appuuid_str == REMOTE_INPUT_UUID));
-
     auto named_cert_p = get_verified_cert(request);
     if (!named_cert_p) {
       tree.put("root.<xmlattr>.status_code", 401);
       tree.put("root.<xmlattr>.status_message", "The client is no longer authorized");
       return;
     }
+
+    const auto parsed_appid = parse_launch_int(launch_int_field::app_id, appid_str);
+    if (!parsed_appid) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "Invalid application ID");
+      return;
+    }
+    const auto appid = *parsed_appid;
+    const auto process_status = proc::proc.get_status();
+    auto current_appid = process_status.app_id;
+    const auto &current_app_uuid = process_status.app_uuid;
+    bool is_input_only = config::input.enable_input_only_mode && (appid == proc::input_only_app_id || (appuuid_str == REMOTE_INPUT_UUID));
+
     auto perm = PERM::launch;
 
     BOOST_LOG(verbose) << "Launching app [" << appid_str << "] with UUID [" << appuuid_str << "]";
@@ -1510,8 +1564,15 @@ namespace nvhttp {
       }
     }
 
-    host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
-    auto launch_session = make_launch_session(host_audio, is_input_only, args, named_cert_p.get());
+    const auto local_audio = parse_launch_int(launch_int_field::binary_option, get_arg(args, "localAudioPlayMode"));
+    if (!local_audio) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "Invalid local audio mode");
+      return;
+    }
+    const bool requested_host_audio = *local_audio;
+    auto launch_session = make_launch_session(requested_host_audio, is_input_only, args, named_cert_p.get());
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
@@ -1616,6 +1677,7 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_code", 403);
       tree.put("root.<xmlattr>.status_message", "How did you get here?");
       tree.put("root.gamesession", 0);
+      return;
     }
 
     tree.put("root.<xmlattr>.status_code", 200);
@@ -1630,6 +1692,7 @@ namespace nvhttp {
     );
     tree.put("root.gamesession", 1);
 
+    host_audio = requested_host_audio;
     rtsp_stream::launch_session_raise(launch_session);
   }
 
@@ -1691,10 +1754,20 @@ namespace nvhttp {
     // so we should use it if it's present in the args and there are
     // no active sessions we could be interfering with.
     const bool no_active_sessions {rtsp_stream::session_count() == 0};
-    if (no_active_sessions && args.find("localAudioPlayMode"s) != std::end(args)) {
-      host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
+    bool requested_host_audio = host_audio;
+    if (args.find("localAudioPlayMode"s) != std::end(args)) {
+      const auto local_audio = parse_launch_int(launch_int_field::binary_option, get_arg(args, "localAudioPlayMode"));
+      if (!local_audio) {
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 400);
+        tree.put("root.<xmlattr>.status_message", "Invalid local audio mode");
+        return;
+      }
+      if (no_active_sessions) {
+        requested_host_audio = *local_audio;
+      }
     }
-    auto launch_session = make_launch_session(host_audio, false, args, named_cert_p.get());
+    auto launch_session = make_launch_session(requested_host_audio, false, args, named_cert_p.get());
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
@@ -1762,6 +1835,7 @@ namespace nvhttp {
     );
     tree.put("root.resume", 1);
 
+    host_audio = requested_host_audio;
     rtsp_stream::launch_session_raise(launch_session);
 
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
