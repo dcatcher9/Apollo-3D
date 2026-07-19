@@ -10,6 +10,8 @@
 #include <chrono>
 #include <list>
 #include <mutex>
+#include <optional>
+#include <string_view>
 
 // lib includes
 #include <boost/property_tree/ptree.hpp>
@@ -30,6 +32,16 @@ namespace nvhttp {
 
   using args_t = SimpleWeb::CaseInsensitiveMultimap;
   using cmd_list_t = std::list<crypto::command_entry_t>;
+
+  struct launch_mode_t {
+    int width;
+    int height;
+    int fps;
+
+    bool operator==(const launch_mode_t &) const = default;
+  };
+
+  std::optional<launch_mode_t> parse_launch_mode(std::string_view mode);
 
   /**
    * @brief The protocol version.

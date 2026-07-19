@@ -7,6 +7,9 @@
 
 // standard includes
 #include <atomic>
+#include <charconv>
+#include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <format>
 #include <mutex>
@@ -528,6 +531,54 @@ namespace nvhttp {
   }
 #endif
 
+  std::optional<launch_mode_t> parse_launch_mode(std::string_view mode) {
+    const auto first_separator = mode.find('x');
+    if (first_separator == std::string_view::npos) {
+      return std::nullopt;
+    }
+    const auto second_separator = mode.find('x', first_separator + 1);
+    if (second_separator == std::string_view::npos || mode.find('x', second_separator + 1) != std::string_view::npos) {
+      return std::nullopt;
+    }
+
+    const auto width_text = mode.substr(0, first_separator);
+    const auto height_text = mode.substr(first_separator + 1, second_separator - first_separator - 1);
+    const auto fps_text = mode.substr(second_separator + 1);
+    const auto width = util::from_view_checked<int>(width_text);
+    const auto height = util::from_view_checked<int>(height_text);
+    if (!width || !height || *width < 1 || *width > 16384 || *height < 1 || *height > 16384 || fps_text.empty()) {
+      return std::nullopt;
+    }
+
+    bool decimal_point_seen = false;
+    for (const auto ch : fps_text) {
+      if (ch == '.' && !decimal_point_seen) {
+        decimal_point_seen = true;
+      } else if (!std::isdigit(static_cast<unsigned char>(ch))) {
+        return std::nullopt;
+      }
+    }
+
+    double fps_value {};
+    const auto [fps_end, fps_error] = std::from_chars(fps_text.data(), fps_text.data() + fps_text.size(), fps_value);
+    if (fps_error != std::errc {} || fps_end != fps_text.data() + fps_text.size() || !std::isfinite(fps_value) || fps_value < 1.0) {
+      return std::nullopt;
+    }
+    if (fps_value <= 1000.0) {
+      fps_value *= 1000.0;
+    }
+    if (fps_value > 1000000.0) {
+      return std::nullopt;
+    }
+
+    const auto fps = std::lround(fps_value);
+    if (fps < 1000 || fps > 1000000) {
+      return std::nullopt;
+    }
+
+    return launch_mode_t {*width, *height, static_cast<int>(fps)};
+  }
+
   std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p) {
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 
@@ -562,43 +613,23 @@ namespace nvhttp {
       std::copy(prepend_iv_p, prepend_iv_p + sizeof(prepend_iv), std::begin(launch_session->iv));
     }
 
-    std::stringstream mode;
+    std::string mode;
     if (named_cert_p->display_mode.empty()) {
-      auto mode_str = get_arg(args, "mode", config::video.fallback_mode.c_str());
-      mode = std::stringstream(mode_str);
-      BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name <<"] requested to ["sv << mode_str << ']';
+      mode = get_arg(args, "mode", config::video.fallback_mode.c_str());
+      BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name <<"] requested to ["sv << mode << ']';
     } else {
-      mode = std::stringstream(named_cert_p->display_mode);
+      mode = named_cert_p->display_mode;
       BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name <<"] overriden to ["sv << named_cert_p->display_mode << ']';
     }
 
-    // Split mode by the char "x", to populate width/height/fps
-    int x = 0;
-    std::string segment;
-    while (std::getline(mode, segment, 'x')) {
-      if (x == 0) {
-        launch_session->width = atoi(segment.c_str());
-      }
-      if (x == 1) {
-        launch_session->height = atoi(segment.c_str());
-      }
-      if (x == 2) {
-        auto fps = atof(segment.c_str());
-        if (fps < 1000) {
-          fps *= 1000;
-        };
-        launch_session->fps = (int)fps;
-        break;
-      }
-      x++;
+    const auto parsed_mode = parse_launch_mode(mode);
+    if (!parsed_mode) {
+      BOOST_LOG(warning) << "Rejecting invalid display mode for client ["sv << named_cert_p->name << ']';
+      return nullptr;
     }
-
-    // Parsing have failed or missing components
-    if (x != 2) {
-      launch_session->width = 1920;
-      launch_session->height = 1080;
-      launch_session->fps = 60000; // 60fps * 1000 denominator
-    }
+    launch_session->width = parsed_mode->width;
+    launch_session->height = parsed_mode->height;
+    launch_session->fps = parsed_mode->fps;
 
     launch_session->device_name = named_cert_p->name.empty() ? "ApolloDisplay"s : named_cert_p->name;
     launch_session->unique_id = named_cert_p->uuid;
@@ -1437,6 +1468,12 @@ namespace nvhttp {
 
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     auto launch_session = make_launch_session(host_audio, is_input_only, args, named_cert_p.get());
+    if (!launch_session) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "Invalid launch display mode");
+      return;
+    }
 
     auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
     if (!launch_session->rtsp_cipher && encryption_mode == config::ENCRYPTION_MODE_MANDATORY) {
@@ -1614,6 +1651,12 @@ namespace nvhttp {
       host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     }
     auto launch_session = make_launch_session(host_audio, false, args, named_cert_p.get());
+    if (!launch_session) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "Invalid resume display mode");
+      return;
+    }
 
     if (!process_status.allow_client_commands || !named_cert_p->allow_client_commands) {
       launch_session->client_do_cmds.clear();
