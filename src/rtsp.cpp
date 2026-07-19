@@ -559,14 +559,26 @@ namespace rtsp_stream {
     }
 
     int bind(net::af_e af, std::uint16_t port, boost::system::error_code &ec) {
-      acceptor.open(af == net::IPV4 ? tcp::v4() : tcp::v6(), ec);
+      const auto bind_address_string = net::get_bind_address(af);
+      if (!bind_address_string) {
+        BOOST_LOG(error) << "RTSP refused invalid bind_address ["sv << config::sunshine.bind_address << ']';
+        ec = boost::asio::error::invalid_argument;
+        return -1;
+      }
+      const auto bind_address = boost::asio::ip::make_address(*bind_address_string, ec);
+      if (ec) {
+        BOOST_LOG(error) << "Invalid RTSP bind address ["sv << *bind_address_string << "]: "sv << ec.message();
+        return -1;
+      }
+
+      acceptor.open(bind_address.is_v4() ? tcp::v4() : tcp::v6(), ec);
       if (ec) {
         return -1;
       }
 
       acceptor.set_option(boost::asio::socket_base::reuse_address {true});
 
-      acceptor.bind(tcp::endpoint(af == net::IPV4 ? tcp::v4() : tcp::v6(), port), ec);
+      acceptor.bind(tcp::endpoint(bind_address, port), ec);
       if (ec) {
         return -1;
       }

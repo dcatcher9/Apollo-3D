@@ -143,6 +143,8 @@
     "address_family_both": "IPv4+IPv6",
     "address_family_desc": "Set the address family used by Apollo",
     "address_family_ipv4": "IPv4 only",
+    "bind_address": "Bind Address",
+    "bind_address_desc": "Optionally bind Apollo to one local IP address. Leave empty to listen on all interfaces. Use an IPv4 address with IPv4 only, or an IPv6 address with IPv4+IPv6.",
     "always_send_scancodes": "Always Send Scancodes",
     "always_send_scancodes_desc": "Sending scancodes enhances compatibility with games and apps but may result in incorrect keyboard input from certain clients that aren't using a US English keyboard layout. Enable if keyboard input is not working at all in certain applications. Disable if keys on the client are generating the wrong input on the host.",
     "amd_coder": "AMF Coder (H264)",

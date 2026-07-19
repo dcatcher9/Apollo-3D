@@ -23,6 +23,7 @@
 #include "entry_handler.h"
 #include "file_handler.h"
 #include "logging.h"
+#include "network.h"
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "rtsp.h"
@@ -599,6 +600,7 @@ namespace config {
     {},  // cmd args
     47989,  // Base port number
     "ipv4",  // Address family
+    {},  // Bind address (empty = all interfaces)
     platf::appdata().string() + "/sunshine.log",  // log file
     false,  // notify_pre_releases
     false,  // legacy_ordering
@@ -1398,6 +1400,23 @@ namespace config {
     sunshine.port = (std::uint16_t) port;
 
     string_restricted_f(vars, "address_family", sunshine.address_family, {"ipv4"sv, "both"sv});
+    {
+      std::string bind_address;
+      string_f(vars, "bind_address", bind_address);
+      const auto address_family = net::af_from_enum_string(sunshine.address_family);
+      if (net::is_valid_bind_address(bind_address, address_family)) {
+        sunshine.bind_address = std::move(bind_address);
+      } else {
+        BOOST_LOG(error) << "Invalid bind_address ["sv << bind_address
+                         << "]: it is not a valid "sv
+                         << (address_family == net::IPV4 ? "IPv4"sv : "IPv6"sv)
+                         << " address for address_family="sv << sunshine.address_family
+                         << "; network startup will fail closed instead of listening on all interfaces."sv;
+        // Preserve an explicit invalid restriction. Every listener will reject it rather than
+        // translating a typo into the empty/wildcard setting and unexpectedly widening exposure.
+        sunshine.bind_address = std::move(bind_address);
+      }
+    }
 
     bool upnp = false;
     bool_f(vars, "upnp"s, upnp);

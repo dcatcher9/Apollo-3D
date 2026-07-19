@@ -1522,6 +1522,32 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### bind_address
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Optionally bind Apollo's HTTP, RTSP, control, audio, and video services to one local IP
+            address. This can prevent traffic from using an unintended interface on hosts with
+            multiple Ethernet, Wi-Fi, or VPN adapters. Leave empty to listen on all interfaces.
+            The address must be IPv4 when <code>address_family = ipv4</code>, or IPv6 when
+            <code>address_family = both</code>. An invalid explicit address prevents the network
+            services from starting; Apollo never falls back to all interfaces in that case.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">Empty (all interfaces)</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            bind_address = 192.168.1.100
+            @endcode</td>
+    </tr>
+</table>
+
 ### port
 
 <table>

@@ -5,6 +5,9 @@
 #pragma once
 
 // standard includes
+#include <optional>
+#include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -64,6 +67,18 @@ namespace net {
    * @return Normalized address.
    */
   std::string_view af_to_any_address_string(af_e af);
+
+  /**
+   * @brief Validate a configured bind address against the socket address family.
+   * @details An empty address is valid and selects the wildcard address.
+   */
+  bool is_valid_bind_address(std::string_view address, af_e af);
+
+  /**
+   * @brief Resolve the configured bind address for the socket family.
+   * @return The explicit or wildcard address, or nullopt when an explicit restriction is invalid.
+   */
+  std::optional<std::string> get_bind_address(af_e af);
 
   /**
    * @brief Convert an address to a normalized form.

@@ -117,6 +117,31 @@ namespace net {
     return "::"sv;
   }
 
+  bool is_valid_bind_address(const std::string_view address, const af_e af) {
+    if (address.empty()) {
+      return true;
+    }
+
+    boost::system::error_code ec;
+    const auto parsed = ip::make_address(address, ec);
+    if (ec) {
+      return false;
+    }
+
+    return af == IPV4 ? parsed.is_v4() : parsed.is_v6();
+  }
+
+  std::optional<std::string> get_bind_address(const af_e af) {
+    if (!config::sunshine.bind_address.empty()) {
+      if (!is_valid_bind_address(config::sunshine.bind_address, af)) {
+        return std::nullopt;
+      }
+      return config::sunshine.bind_address;
+    }
+
+    return std::string {af_to_any_address_string(af)};
+  }
+
   boost::asio::ip::address normalize_address(boost::asio::ip::address address) {
     // Convert IPv6-mapped IPv4 addresses into regular IPv4 addresses
     if (address.is_v6()) {
@@ -159,12 +184,23 @@ namespace net {
       enet_initialize();
     });
 
-    auto any_addr = net::af_to_any_address_string(af);
-    enet_address_set_host(&addr, any_addr.data());
+    const auto bind_address = net::get_bind_address(af);
+    if (!bind_address) {
+      BOOST_LOG(error) << "Invalid control bind address ["sv << config::sunshine.bind_address << ']';
+      return {};
+    }
+    if (enet_address_set_host(&addr, bind_address->c_str()) < 0) {
+      BOOST_LOG(error) << "Invalid control bind address ["sv << *bind_address << ']';
+      return {};
+    }
     enet_address_set_port(&addr, port);
 
     // Maximum of 128 clients, which should be enough for anyone
     auto host = host_t {enet_host_create(af == IPV4 ? AF_INET : AF_INET6, &addr, 128, 0, 0, 0)};
+    if (!host) {
+      BOOST_LOG(error) << "Couldn't bind Control server to address ["sv << *bind_address << ']';
+      return {};
+    }
 
     // Enable opportunistic QoS tagging (automatically disables if the network appears to drop tagged packets)
     enet_socket_set_option(host->socket, ENET_SOCKOPT_QOS, 1);

@@ -1630,13 +1630,28 @@ namespace confighttp {
     server.resource["^/images/logo-apollo-45.png$"]["GET"] = getApolloLogoImage;
     server.resource["^/assets\\/.+$"]["GET"] = getNodeModules;
     server.config.reuse_address = true;
-    server.config.address = net::af_to_any_address_string(address_family);
+    const auto bind_address = net::get_bind_address(address_family);
+    if (!bind_address) {
+      BOOST_LOG(fatal) << "Configuration UI refused invalid bind_address ["sv << config::sunshine.bind_address << ']';
+      shutdown_event->raise(true);
+      return;
+    }
+    server.config.address = *bind_address;
     server.config.port = port_https;
 
-    auto accept_and_run = [&](auto *server) {
+    std::string display_address = "localhost";
+    if (!config::sunshine.bind_address.empty()) {
+      boost::system::error_code ec;
+      const auto address = boost::asio::ip::make_address(server.config.address, ec);
+      if (!ec) {
+        display_address = net::addr_to_url_escaped_string(address);
+      }
+    }
+
+    auto accept_and_run = [&, display_address = std::move(display_address)](auto *server) {
       try {
-        server->start([port_https](unsigned short port) {
-          BOOST_LOG(info) << "Configuration UI available at [https://localhost:"sv << port << "]";
+        server->start([display_address](unsigned short port) {
+          BOOST_LOG(info) << "Configuration UI available at [https://"sv << display_address << ':' << port << ']';
         });
       } catch (boost::system::system_error &err) {
         // It's possible the exception gets thrown after calling server->stop() from a different thread
