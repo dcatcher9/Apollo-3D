@@ -90,6 +90,9 @@ namespace rtsp_stream {
         case announce_int_field::max_fps:
           valid = in_range(1, 1000000);
           break;
+        case announce_int_field::client_refresh_x100:
+          valid = in_range(0, 100000);
+          break;
         case announce_int_field::bitrate_kbps:
           valid = in_range(1, 1000000);
           break;
@@ -111,6 +114,29 @@ namespace rtsp_stream {
       }
 
       return valid ? parsed : std::nullopt;
+    }
+
+    int validated_client_refresh_x100(int announced_fps, int client_refresh_x100) {
+      if (client_refresh_x100 <= 0 || client_refresh_x100 > 100000) {
+        return 0;
+      }
+
+      double announced_hz {};
+      if (announced_fps >= 1 && announced_fps <= 1000) {
+        announced_hz = static_cast<double>(announced_fps);
+      } else if (announced_fps > 4000 && announced_fps <= 1000000) {
+        announced_hz = static_cast<double>(announced_fps) / 1000.0;
+      } else {
+        // Values in this gap are ambiguous: they could mean an implausibly high integral rate or
+        // a low fractional rate encoded in millihertz. Do not let optional metadata reinterpret it.
+        return 0;
+      }
+
+      const auto exact_hz = static_cast<double>(client_refresh_x100) / 100.0;
+      const auto ratio = exact_hz / announced_hz;
+      // Exact display metadata may refine a rounded request downward (60 -> 59.94), but must not
+      // undo a deliberate client-side under-refresh cap such as 119 fps on a 120 Hz display.
+      return ratio >= 0.99 && ratio <= 1.0 ? client_refresh_x100 : 0;
     }
 
     int calculate_warp_bitrate_factor(int announced_fps, int session_fps) {
@@ -1066,6 +1092,7 @@ namespace rtsp_stream {
     args.try_emplace("x-ss-general.encryptionEnabled"sv, "0"sv);
     args.try_emplace("x-ss-video[0].chromaSamplingType"sv, "0"sv);
     args.try_emplace("x-ss-video[0].intraRefresh"sv, "0"sv);
+    args.try_emplace("x-nv-video[0].clientRefreshRateX100"sv, "0"sv);
 
     stream::config_t config;
 
@@ -1114,6 +1141,18 @@ namespace rtsp_stream {
       config.monitor.height = required_int(detail::announce_int_field::viewport_dimension, "x-nv-video[0].clientViewportHt"sv);
       config.monitor.width = required_int(detail::announce_int_field::viewport_dimension, "x-nv-video[0].clientViewportWd"sv);
       config.monitor.framerate = required_int(detail::announce_int_field::max_fps, "x-nv-video[0].maxFPS"sv);
+      const auto client_refresh_x100 = required_int(
+        detail::announce_int_field::client_refresh_x100,
+        "x-nv-video[0].clientRefreshRateX100"sv
+      );
+      config.monitor.framerateX100 = detail::validated_client_refresh_x100(
+        config.monitor.framerate,
+        client_refresh_x100
+      );
+      if (client_refresh_x100 > 0 && config.monitor.framerateX100 == 0) {
+        BOOST_LOG(debug) << "Ignoring client display refresh ["sv << (client_refresh_x100 / 100.0)
+                         << "Hz] because it does not match the requested stream rate."sv;
+      }
       config.monitor.bitrate = required_int(detail::announce_int_field::bitrate_kbps, "x-nv-vqos[0].bw.maximumBitrateKbps"sv);
       config.monitor.slicesPerFrame = required_int(detail::announce_int_field::slices_per_frame, "x-nv-video[0].videoEncoderSlicesPerFrame"sv);
       config.monitor.numRefFrames = required_int(detail::announce_int_field::reference_frames, "x-nv-video[0].maxNumReferenceFrames"sv);
@@ -1127,7 +1166,9 @@ namespace rtsp_stream {
         throw std::invalid_argument("launch session frame rate");
       }
 
-      if (config::video.limit_framerate) {
+      if (config.monitor.framerateX100 > 0) {
+        config.monitor.encodingFramerate = config.monitor.framerateX100 * 10;
+      } else if (config::video.limit_framerate) {
         config.monitor.encodingFramerate = session.fps;
       } else {
         if (config.monitor.framerate > 1000) {

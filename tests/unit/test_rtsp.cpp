@@ -56,10 +56,28 @@ TEST(RtspAnnounceParsingTest, EnforcesNumericSyntaxAndProtocolBounds) {
   EXPECT_FALSE(parse_announce_int(field::max_fps, "0"));
   EXPECT_EQ(parse_announce_int(field::max_fps, "1000000"), 1000000);
   EXPECT_FALSE(parse_announce_int(field::max_fps, "1000001"));
+  EXPECT_EQ(parse_announce_int(field::client_refresh_x100, "0"), 0);
+  EXPECT_EQ(parse_announce_int(field::client_refresh_x100, "100000"), 100000);
+  EXPECT_FALSE(parse_announce_int(field::client_refresh_x100, "100001"));
   EXPECT_FALSE(parse_announce_int(field::bitrate_kbps, "12kbps"));
   EXPECT_FALSE(parse_announce_int(field::feature_flags, "-1"));
   EXPECT_FALSE(parse_announce_int(field::viewport_dimension, "16385"));
   EXPECT_FALSE(parse_announce_int(field::configured_bitrate_kbps, "2147483648"));
+}
+
+TEST(RtspAnnounceParsingTest, UsesClientRefreshOnlyWhenItMatchesStreamCadence) {
+  using rtsp_stream::detail::validated_client_refresh_x100;
+
+  EXPECT_EQ(validated_client_refresh_x100(60, 5994), 5994);
+  EXPECT_EQ(validated_client_refresh_x100(59940, 5994), 5994);
+  EXPECT_EQ(validated_client_refresh_x100(120, 11988), 11988);
+  EXPECT_EQ(validated_client_refresh_x100(119, 12000), 0);
+  EXPECT_EQ(validated_client_refresh_x100(60, 9000), 0);
+  EXPECT_EQ(validated_client_refresh_x100(240, 6000), 0);
+  EXPECT_EQ(validated_client_refresh_x100(239760, 5994), 0);
+  EXPECT_EQ(validated_client_refresh_x100(1001, 100), 0);
+  EXPECT_EQ(validated_client_refresh_x100(4000, 400), 0);
+  EXPECT_EQ(validated_client_refresh_x100(60, 0), 0);
 }
 
 TEST(RtspAnnounceParsingTest, EnforcesWarpAndEncoderArithmeticBounds) {

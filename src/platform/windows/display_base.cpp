@@ -119,7 +119,14 @@ namespace platf::dxgi {
     display->display_refresh_rate = dup_desc.ModeDesc.RefreshRate;
     double display_refresh_rate_decimal = (double) display->display_refresh_rate.Numerator / display->display_refresh_rate.Denominator;
     BOOST_LOG(info) << "Display refresh rate [" << display_refresh_rate_decimal << "Hz]";
-    BOOST_LOG(info) << "Requested frame rate [" << display->client_frame_rate << "fps]";
+    if (display->client_frame_rate_strict.Numerator > 0) {
+      const auto numerator = display->client_frame_rate_strict.Numerator;
+      const auto denominator = display->client_frame_rate_strict.Denominator;
+      BOOST_LOG(info) << "Requested frame rate [" << numerator << '/' << denominator << " exactly "
+                      << (static_cast<double>(numerator) / denominator) << "fps]";
+    } else {
+      BOOST_LOG(info) << "Requested frame rate [" << display->client_frame_rate << "fps]";
+    }
     display->display_refresh_rate_rounded = lround(display_refresh_rate_decimal);
     return 0;
   }
@@ -194,6 +201,10 @@ namespace platf::dxgi {
 
   capture_e display_base_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
     auto adjust_client_frame_rate = [&]() -> DXGI_RATIONAL {
+      if (client_frame_rate_strict.Numerator > 0) {
+        return client_frame_rate_strict;
+      }
+
       // Adjust capture frame interval when display refresh rate is not integral but very close to requested fps.
       if (display_refresh_rate.Denominator > 1) {
         DXGI_RATIONAL candidate = display_refresh_rate;
@@ -713,6 +724,14 @@ namespace platf::dxgi {
     }
 
     client_frame_rate = config.framerate;
+    client_frame_rate_strict = {};
+    if (config.framerateX100 > 0) {
+      const auto framerate = ::video::framerate_x100_to_rational(config.framerateX100);
+      client_frame_rate_strict = {
+        static_cast<UINT>(framerate.num),
+        static_cast<UINT>(framerate.den),
+      };
+    }
     dxgi::output6_t output6 {};
     status = output->QueryInterface(IID_IDXGIOutput6, (void **) &output6);
     if (SUCCEEDED(status)) {

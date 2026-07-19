@@ -1597,6 +1597,11 @@ namespace video {
       ctx->height = config.height;
       ctx->time_base = AVRational {1, config.framerate};
       ctx->framerate = AVRational {config.framerate, 1};
+      if (config.framerateX100 > 0) {
+        const auto framerate = framerate_x100_to_rational(config.framerateX100);
+        ctx->framerate = framerate;
+        ctx->time_base = AVRational {framerate.den, framerate.num};
+      }
 
       switch (config.videoFormat) {
         case 0:

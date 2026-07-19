@@ -41,6 +41,7 @@ namespace rtsp_stream {
       encryption_flags,
       viewport_dimension,
       max_fps,
+      client_refresh_x100,
       bitrate_kbps,
       configured_bitrate_kbps,
       slices_per_frame,
@@ -51,6 +52,7 @@ namespace rtsp_stream {
     };
 
     std::optional<int> parse_announce_int(announce_int_field field, std::string_view value);
+    int validated_client_refresh_x100(int announced_fps, int client_refresh_x100);
     int calculate_warp_bitrate_factor(int announced_fps, int session_fps);
     bool is_safe_encoder_bitrate(std::int64_t bitrate_kbps);
   }  // namespace detail

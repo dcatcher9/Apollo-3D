@@ -4,6 +4,8 @@
  */
 #include "../tests_common.h"
 
+#include <tuple>
+
 #include <src/video.h>
 
 struct EncoderTest: PlatformTestSuite, testing::WithParamInterface<video::encoder_t *> {
@@ -48,3 +50,30 @@ INSTANTIATE_TEST_SUITE_P(
 TEST_P(EncoderTest, ValidateEncoder) {
   // todo:: test something besides fixture setup
 }
+
+struct FramerateX100Test: testing::TestWithParam<std::tuple<std::int32_t, AVRational>> {};
+
+TEST_P(FramerateX100Test, ConvertsToExpectedRational) {
+  const auto &[x100, expected] = GetParam();
+  const auto actual = video::framerate_x100_to_rational(x100);
+  EXPECT_EQ(av_cmp_q(actual, expected), 0)
+    << "expected " << expected.num << '/' << expected.den
+    << ", got " << actual.num << '/' << actual.den;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  FramerateX100Tests,
+  FramerateX100Test,
+  testing::Values(
+    std::make_tuple(2397, AVRational {24000, 1001}),
+    std::make_tuple(2398, AVRational {24000, 1001}),
+    std::make_tuple(2500, AVRational {25, 1}),
+    std::make_tuple(2997, AVRational {30000, 1001}),
+    std::make_tuple(3000, AVRational {30, 1}),
+    std::make_tuple(5994, AVRational {60000, 1001}),
+    std::make_tuple(6000, AVRational {60, 1}),
+    std::make_tuple(11988, AVRational {120000, 1001}),
+    std::make_tuple(23976, AVRational {240000, 1001}),
+    std::make_tuple(9498, AVRational {4749, 50})
+  )
+);

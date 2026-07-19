@@ -77,7 +77,25 @@ namespace video {
     // APPEND-ONLY. Session-local depth status channel:
     // 0 idle/failure, 1 engine loading/building, 2 ready, 3 device-pipeline initialization.
     safe::mail_raw_t::event_t<int> sbs_depth_status_event;
+
+    // APPEND-ONLY. Optional exact client refresh rate in hundredths of a hertz. This is accepted
+    // only when it agrees with the requested stream rate, so a device's unrelated panel refresh
+    // cannot silently override the stream cadence.
+    int framerateX100 = 0;
   };
+
+  // Preserve standard NTSC rates instead of approximating them as finite decimal fractions.
+  inline AVRational framerate_x100_to_rational(int framerate_x100) {
+    if (framerate_x100 % 2997 == 0) {
+      return AVRational {(framerate_x100 / 2997) * 30000, 1001};
+    }
+
+    if (framerate_x100 == 2397 || framerate_x100 == 2398) {
+      return AVRational {24000, 1001};
+    }
+
+    return av_d2q(static_cast<double>(framerate_x100) / 100.0, 1 << 26);
+  }
 
   /* Startup-profile-selected depth model for the host SBS pipeline. The configured name is matched
      against config::depth_model_registry(), else synthesized from the model/url escape hatch. */
