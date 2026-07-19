@@ -98,9 +98,10 @@ namespace nvenc {
   }
 
   bool nvenc_base::create_encoder(const nvenc_config &config, const video::config_t &client_config, const nvenc_colorspace_t &colorspace, NV_ENC_BUFFER_FORMAT buffer_format) {
-    // Pick the minimum NvEncode API version required to support the specified codec
-    // to maximize driver compatibility. AV1 was introduced in SDK v12.0.
-    minimum_api_version = (client_config.videoFormat <= 1) ? MAKE_NVENC_VER(11U, 0U) : MAKE_NVENC_VER(12U, 0U);
+    // HEVC recovery-point SEI requires API 12, which also covers the single-slice intra
+    // refresh fields introduced in API 11.1. Apollo targets current NVIDIA GPUs, so use
+    // the bundled SDK contract for every codec.
+    minimum_api_version = MAKE_NVENC_VER(12U, 0U);
 
     if (!nvenc && !init_library()) {
       return false;
