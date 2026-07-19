@@ -48,7 +48,9 @@ elseif(UNIX)
     endif()
 endif()
 
-include_directories(BEFORE SYSTEM "${CMAKE_SOURCE_DIR}/third-party/nv-codec-headers/include")
+# This submodule is Apollo's authoritative NVENC API contract. Keep it ahead of the
+# dependency bundle, which can carry an older copy of the same ffnvcodec headers.
+include_directories(BEFORE "${CMAKE_SOURCE_DIR}/third-party/nv-codec-headers/include")
 file(GLOB NVENC_SOURCES CONFIGURE_DEPENDS "src/nvenc/*.cpp" "src/nvenc/*.h")
 list(APPEND PLATFORM_TARGET_FILES ${NVENC_SOURCES})
 
