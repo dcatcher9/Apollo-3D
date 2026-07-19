@@ -26,6 +26,7 @@
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "rtsp.h"
+#include "stream.h"
 #include "utility.h"
 #include "video.h"
 
@@ -539,6 +540,7 @@ namespace config {
 
     ENCRYPTION_MODE_NEVER,  // lan_encryption_mode
     ENCRYPTION_MODE_OPPORTUNISTIC,  // wan_encryption_mode
+    0,  // packet_size_limit
   };
 
   nvhttp_t nvhttp {
@@ -1307,6 +1309,18 @@ namespace config {
 
     int_between_f(vars, "lan_encryption_mode", stream.lan_encryption_mode, {0, 2});
     int_between_f(vars, "wan_encryption_mode", stream.wan_encryption_mode, {0, 2});
+    {
+      int packet_size_limit = 0;
+      int_f(vars, "packetsize", packet_size_limit);
+      if (packet_size_limit == 0 || ::stream::is_valid_video_packet_size(packet_size_limit)) {
+        stream.packet_size_limit = packet_size_limit;
+      } else {
+        BOOST_LOG(warning) << "Ignoring invalid packetsize limit ["sv << packet_size_limit
+                           << "]; use 0 or "sv << ::stream::VIDEO_PACKET_SIZE_MIN << '-'
+                           << ::stream::VIDEO_PACKET_SIZE_MAX << '.';
+        stream.packet_size_limit = 0;
+      }
+    }
 
     path_f(vars, "file_apps", stream.file_apps);
 #ifndef __ANDROID__

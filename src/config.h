@@ -212,6 +212,9 @@ namespace config {
     // Video encryption settings for LAN and WAN streams
     int lan_encryption_mode;
     int wan_encryption_mode;
+
+    // Optional ceiling for the client-requested video packet size. Zero disables the ceiling.
+    int packet_size_limit;
   };
 
   struct nvhttp_t {

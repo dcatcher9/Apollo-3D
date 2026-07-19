@@ -1704,6 +1704,36 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### packetsize
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Optional ceiling for the video packet size requested by the client. Lowering it can avoid
+            fragmentation and micro-stutter on low-MTU Wi-Fi or VPN links. Account for tunnel, IP, UDP,
+            RTP, and encryption overhead when choosing a value. Smaller packets increase packet and FEC
+            overhead, so a lower bitrate may be required.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            0
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Range</td>
+        <td colspan="2">0 (disabled), or 200-65459</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            packetsize = 1346
+            @endcode</td>
+    </tr>
+</table>
+
 ## Config Files
 
 ### file_apps

@@ -388,6 +388,8 @@
     "output_name_desc_windows": "Manually specify a display device id to use for capture. If unset, the primary display is captured. Note: If you specified a GPU above, this display must be connected to that GPU. During Apollo startup, you should see the list of detected displays. Below is an example; the actual output can be found in the Troubleshooting tab.",
     "output_name_unix": "Display number",
     "output_name_windows": "Display Device Id",
+    "packetsize": "Packet Size Limit",
+    "packetsize_desc": "Optionally cap the client-requested video packet size to avoid fragmentation on low-MTU Wi-Fi or VPN links. Use 0 to disable, or 200-65459 bytes. Smaller packets add overhead and may require a lower bitrate.",
     "ping_timeout": "Ping Timeout",
     "ping_timeout_desc": "How long to wait in milliseconds for data from moonlight before shutting down the stream",
     "pkey": "Private Key",

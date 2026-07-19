@@ -55,6 +55,7 @@ namespace rtsp_stream {
     int validated_client_refresh_x100(int announced_fps, int client_refresh_x100);
     int calculate_warp_bitrate_factor(int announced_fps, int session_fps);
     bool is_safe_encoder_bitrate(std::int64_t bitrate_kbps);
+    int apply_packet_size_limit(int client_packet_size, int configured_limit);
   }  // namespace detail
 
   struct launch_session_t {

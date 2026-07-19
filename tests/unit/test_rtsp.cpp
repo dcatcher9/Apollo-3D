@@ -7,6 +7,7 @@
 #include <string_view>
 #include <unordered_map>
 
+#include <src/stream.h>
 #include <src/rtsp.h>
 
 #include "../tests_common.h"
@@ -93,4 +94,15 @@ TEST(RtspAnnounceParsingTest, EnforcesWarpAndEncoderArithmeticBounds) {
   EXPECT_TRUE(is_safe_encoder_bitrate(max_safe_kbps));
   EXPECT_FALSE(is_safe_encoder_bitrate(max_safe_kbps + 1LL));
   EXPECT_FALSE(is_safe_encoder_bitrate(0));
+}
+
+TEST(RtspAnnounceParsingTest, AppliesOnlyValidLowerPacketSizeLimits) {
+  using rtsp_stream::detail::apply_packet_size_limit;
+
+  EXPECT_EQ(apply_packet_size_limit(1392, 0), 1392);
+  EXPECT_EQ(apply_packet_size_limit(1392, 1456), 1392);
+  EXPECT_EQ(apply_packet_size_limit(1392, 1346), 1346);
+  EXPECT_EQ(apply_packet_size_limit(1392, stream::VIDEO_PACKET_SIZE_MIN), stream::VIDEO_PACKET_SIZE_MIN);
+  EXPECT_EQ(apply_packet_size_limit(1392, stream::VIDEO_PACKET_SIZE_MIN - 1), 1392);
+  EXPECT_EQ(apply_packet_size_limit(1392, stream::VIDEO_PACKET_SIZE_MAX + 1), 1392);
 }

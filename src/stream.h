@@ -48,9 +48,12 @@ namespace stream {
   constexpr std::size_t CONTROL_PACKET_SIZE_MAX =
     std::numeric_limits<std::uint16_t>::max() + CONTROL_HEADER_V2_SIZE;
 
+  [[nodiscard]] constexpr bool is_valid_video_packet_size(int packet_size) {
+    return packet_size >= VIDEO_PACKET_SIZE_MIN && packet_size <= VIDEO_PACKET_SIZE_MAX;
+  }
+
   [[nodiscard]] constexpr bool is_valid_video_transport_config(int packet_size, int min_required_fec_packets) {
-    return packet_size >= VIDEO_PACKET_SIZE_MIN &&
-           packet_size <= VIDEO_PACKET_SIZE_MAX &&
+    return is_valid_video_packet_size(packet_size) &&
            min_required_fec_packets >= 0 &&
            min_required_fec_packets <= MIN_REQUIRED_FEC_PACKETS_MAX;
   }

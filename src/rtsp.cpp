@@ -153,6 +153,14 @@ namespace rtsp_stream {
       return bitrate_kbps > 0 && bitrate_kbps <= std::numeric_limits<int>::max() / 1000;
     }
 
+    int apply_packet_size_limit(int client_packet_size, int configured_limit) {
+      if (!stream::is_valid_video_packet_size(client_packet_size) || configured_limit == 0 ||
+          !stream::is_valid_video_packet_size(configured_limit)) {
+        return client_packet_size;
+      }
+      return std::min(client_packet_size, configured_limit);
+    }
+
     std::unordered_map<std::string_view, std::string_view> parse_announce_attributes(std::string_view payload) {
       std::unordered_map<std::string_view, std::string_view> args;
 
@@ -1126,7 +1134,14 @@ namespace rtsp_stream {
         respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
         return;
       }
-      config.packetsize = *packet_size;
+      config.packetsize = detail::apply_packet_size_limit(*packet_size, ::config::stream.packet_size_limit);
+      if (config.packetsize != *packet_size) {
+        if (config.packetsize < 500) {
+          BOOST_LOG(info) << "Configured packetsize limit is small; reduce bitrate if the stream becomes unstable."sv;
+        }
+        BOOST_LOG(info) << "Applying video packetsize limit: "sv << *packet_size << " -> "sv
+                        << config.packetsize << " bytes"sv;
+      }
       config.minRequiredFecPackets = *min_fec_packets;
       config.mlFeatureFlags = required_int(detail::announce_int_field::feature_flags, "x-ml-general.featureFlags"sv);
       config.audioQosType = required_int(detail::announce_int_field::audio_qos, "x-nv-aqos.qosTrafficType"sv);
