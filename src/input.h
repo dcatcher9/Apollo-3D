@@ -5,14 +5,21 @@
 #pragma once
 
 // standard includes
+#include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <optional>
+#include <span>
+#include <vector>
 
 // local includes
+#include "crypto.h"
 #include "platform/common.h"
 #include "thread_safe.h"
-#include "crypto.h"
 
 namespace input {
+  constexpr std::size_t INPUT_PACKET_SIZE_MAX = 128;
+
   struct input_t;
 
   namespace detail {
@@ -33,6 +40,12 @@ namespace input {
   void print(void *input);
   void reset(std::shared_ptr<input_t> &input);
   void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data, const crypto::PERM& permission);
+
+  /**
+   * @brief Validate a Gen 5+ Moonlight input packet before any typed access.
+   * @return The host-endian packet magic, or std::nullopt for malformed/unsupported input.
+   */
+  [[nodiscard]] std::optional<std::uint32_t> validated_packet_magic(std::span<const std::uint8_t> input_data) noexcept;
 
   [[nodiscard]] std::unique_ptr<platf::deinit_t> init();
 

@@ -12,6 +12,7 @@ extern "C" {
 #include <bitset>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <list>
 #include <thread>
 #include <unordered_map>
@@ -50,6 +51,81 @@ namespace input {
   constexpr auto VKEY_MENU = 0x12;
   constexpr auto VKEY_LMENU = 0xA4;
   constexpr auto VKEY_RMENU = 0xA5;
+
+  std::optional<std::uint32_t> validated_packet_magic(std::span<const std::uint8_t> input_data) noexcept {
+    if (input_data.size() < sizeof(NV_INPUT_HEADER) || input_data.size() > INPUT_PACKET_SIZE_MAX) {
+      return std::nullopt;
+    }
+
+    NV_INPUT_HEADER header;
+    std::memcpy(&header, input_data.data(), sizeof(header));
+
+    const auto declared_size = util::endian::big(header.size);
+    const auto magic = util::endian::little(header.magic);
+    if (declared_size != input_data.size() - sizeof(header.size)) {
+      return std::nullopt;
+    }
+
+    std::size_t expected_size;
+    switch (magic) {
+      case ENABLE_HAPTICS_MAGIC:
+        expected_size = sizeof(NV_HAPTICS_PACKET);
+        break;
+      case KEY_DOWN_EVENT_MAGIC:
+      case KEY_UP_EVENT_MAGIC:
+        expected_size = sizeof(NV_KEYBOARD_PACKET);
+        break;
+      case UTF8_TEXT_EVENT_MAGIC:
+        if (input_data.size() > sizeof(NV_INPUT_HEADER) && input_data.size() <= sizeof(NV_UNICODE_PACKET)) {
+          return magic;
+        }
+        return std::nullopt;
+      case MOUSE_MOVE_REL_MAGIC_GEN5:
+        expected_size = sizeof(NV_REL_MOUSE_MOVE_PACKET);
+        break;
+      case MOUSE_MOVE_ABS_MAGIC:
+        expected_size = sizeof(NV_ABS_MOUSE_MOVE_PACKET);
+        break;
+      case MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5:
+      case MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5:
+        expected_size = sizeof(NV_MOUSE_BUTTON_PACKET);
+        break;
+      case MULTI_CONTROLLER_MAGIC_GEN5:
+        expected_size = sizeof(NV_MULTI_CONTROLLER_PACKET);
+        break;
+      case SCROLL_MAGIC_GEN5:
+        expected_size = sizeof(NV_SCROLL_PACKET);
+        break;
+      case SS_HSCROLL_MAGIC:
+        expected_size = sizeof(SS_HSCROLL_PACKET);
+        break;
+      case SS_TOUCH_MAGIC:
+        expected_size = sizeof(SS_TOUCH_PACKET);
+        break;
+      case SS_PEN_MAGIC:
+        expected_size = sizeof(SS_PEN_PACKET);
+        break;
+      case SS_CONTROLLER_ARRIVAL_MAGIC:
+        expected_size = sizeof(SS_CONTROLLER_ARRIVAL_PACKET);
+        break;
+      case SS_CONTROLLER_TOUCH_MAGIC:
+        expected_size = sizeof(SS_CONTROLLER_TOUCH_PACKET);
+        break;
+      case SS_CONTROLLER_MOTION_MAGIC:
+        expected_size = sizeof(SS_CONTROLLER_MOTION_PACKET);
+        break;
+      case SS_CONTROLLER_BATTERY_MAGIC:
+        expected_size = sizeof(SS_CONTROLLER_BATTERY_PACKET);
+        break;
+      default:
+        return std::nullopt;
+    }
+
+    if (input_data.size() == expected_size) {
+      return magic;
+    }
+    return std::nullopt;
+  }
 
   enum class button_state_e {
     NONE,  ///< No button state
@@ -1599,13 +1675,23 @@ namespace input {
       return;
     }
 
+    const auto magic = validated_packet_magic(input_data);
+    if (!magic) {
+      BOOST_LOG(warning) << "Dropping malformed or unsupported input packet of "sv << input_data.size() << " bytes"sv;
+      return;
+    }
+
+    // Moonlight sends this capability handshake when input starts. Apollo does not need to
+    // act on it, but accepting it avoids treating every valid client connection as malformed.
+    if (*magic == ENABLE_HAPTICS_MAGIC) {
+      return;
+    }
+
     // Have some input permission
     // Otherwise have all input permission
     if ((permission & crypto::PERM::_all_inputs) != crypto::PERM::_all_inputs) {
-      PNV_INPUT_HEADER payload = (PNV_INPUT_HEADER)input_data.data();
-
       // Check permission
-      switch (util::endian::little(payload->magic)) {
+      switch (*magic) {
         case MULTI_CONTROLLER_MAGIC_GEN5:
         case SS_CONTROLLER_ARRIVAL_MAGIC:
         case SS_CONTROLLER_TOUCH_MAGIC:
