@@ -479,8 +479,19 @@ namespace safe {
       std::lock_guard lg {_lock};
 
       if (!_count) {
-        new (_object_buf.data()) element_type;
-        if (_construct(*reinterpret_cast<element_type *>(_object_buf.data()))) {
+        auto *object = new (_object_buf.data()) element_type;
+        int construct_result;
+        try {
+          construct_result = _construct(*object);
+        } catch (...) {
+          object->~element_type();
+          throw;
+        }
+        if (construct_result) {
+          // The external constructor is responsible for rolling back resources that it started,
+          // but the C++ object itself was already placement-constructed above. Destroy it before
+          // allowing another ref() attempt to construct into the same storage.
+          object->~element_type();
           return ptr_t {nullptr};
         }
       }
@@ -494,9 +505,9 @@ namespace safe {
     construct_f _construct;
     destruct_f _destruct;
 
-    std::array<std::uint8_t, sizeof(element_type)> _object_buf;
+    alignas(element_type) std::array<std::uint8_t, sizeof(element_type)> _object_buf;
 
-    std::uint32_t _count;
+    std::uint32_t _count {0};
     std::mutex _lock;
   };
 

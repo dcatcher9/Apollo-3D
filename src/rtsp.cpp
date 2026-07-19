@@ -162,6 +162,29 @@ namespace rtsp_stream {
       return std::min(client_packet_size, configured_limit);
     }
 
+    std::optional<std::size_t> find_plaintext_header_end(std::string_view buffered, std::size_t previous_size) {
+      constexpr auto delimiter = "\r\n\r\n"sv;
+      const auto search_begin = std::min(previous_size, buffered.size());
+      const auto overlap_begin = search_begin > delimiter.size() - 1 ? search_begin - (delimiter.size() - 1) : 0;
+      const auto delimiter_begin = buffered.find(delimiter, overlap_begin);
+      if (delimiter_begin == std::string_view::npos) {
+        return std::nullopt;
+      }
+      return delimiter_begin + delimiter.size();
+    }
+
+    std::optional<std::string_view> parse_setup_stream_type(std::string_view target) {
+      const auto separator = target.find('=');
+      if (separator == std::string_view::npos || separator + 1 >= target.size()) {
+        return std::nullopt;
+      }
+
+      const auto begin = separator + 1;
+      const auto slash = target.find('/', begin);
+      const auto type = target.substr(begin, slash == std::string_view::npos ? slash : slash - begin);
+      return type.empty() ? std::nullopt : std::optional<std::string_view> {type};
+    }
+
     std::unordered_map<std::string_view, std::string_view> parse_announce_attributes(std::string_view payload) {
       std::unordered_map<std::string_view, std::string_view> args;
 
@@ -515,26 +538,25 @@ namespace rtsp_stream {
         socket->read();
       });
 
-      auto begin = std::max(socket->begin - 4, socket->begin);
-      auto buf_size = bytes + (begin - socket->begin);
-      auto end = begin + buf_size;
-
-      constexpr auto needle = "\r\n\r\n"sv;
-
-      auto it = std::search(begin, begin + buf_size, std::begin(needle), std::end(needle));
-      if (it == end) {
-        socket->begin = end;
+      const auto previous_size = static_cast<std::size_t>(socket->begin - socket->msg_buf.data());
+      const auto total_size = previous_size + bytes;
+      auto header_end = detail::find_plaintext_header_end(
+        std::string_view {socket->msg_buf.data(), total_size},
+        previous_size
+      );
+      if (!header_end) {
+        socket->begin = socket->msg_buf.data() + total_size;
 
         return;
       }
 
       // Emulate read completion for payload data
-      socket->begin = it + needle.size();
+      socket->begin = socket->msg_buf.data() + *header_end;
       socket->crlf = socket->begin;
-      buf_size = end - socket->begin;
+      const auto payload_size = total_size - *header_end;
 
       fg.disable();
-      handle_plaintext_payload(socket, ec, buf_size);
+      handle_plaintext_payload(socket, ec, payload_size);
     }
 
     void handle_data(msg_t &&req) {
@@ -663,25 +685,28 @@ namespace rtsp_stream {
      *       the session will be discarded.
      * @param launch_session Streaming session information.
      */
-    void session_raise(std::shared_ptr<launch_session_t> launch_session) {
-      // If a launch event is still pending, don't overwrite it.
-      if (launch_event.view(0s)) {
-        return;
+    bool session_raise(std::shared_ptr<launch_session_t> launch_session) {
+      std::lock_guard lock(_launch_mutex);
+      // Reservation and publication are one operation. A caller must never return a successful
+      // launch response for a session that was silently discarded behind an existing handshake.
+      const auto launch_session_id = launch_session->id;
+      if (!launch_event.try_raise(std::move(launch_session))) {
+        return false;
       }
-
-      // Raise the new launch session to prepare for the RTSP handshake
-      launch_event.raise(std::move(launch_session));
 
       // Arm the timer to expire this launch session if the client times out
       raised_timer.expires_after(config::stream.ping_timeout);
-      raised_timer.async_wait([this](const boost::system::error_code &ec) {
+      raised_timer.async_wait([this, launch_session_id](const boost::system::error_code &ec) {
         if (!ec) {
-          auto discarded = launch_event.pop(0s);
-          if (discarded) {
+          std::lock_guard lock(_launch_mutex);
+          auto pending = launch_event.view(0s);
+          if (pending && pending->id == launch_session_id) {
+            auto discarded = launch_event.pop(0s);
             BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
           }
         }
       });
+      return true;
     }
 
     /**
@@ -689,6 +714,7 @@ namespace rtsp_stream {
      * @param launch_session_id The ID of the session to clear.
      */
     void session_clear(uint32_t launch_session_id) {
+      std::lock_guard lock(_launch_mutex);
       // We currently only support a single pending RTSP session,
       // so the ID should always match the one for that session.
       auto launch_session = launch_event.view(0s);
@@ -918,6 +944,7 @@ namespace rtsp_stream {
 
     sync_util::sync_t<std::set<std::shared_ptr<stream::session_t>>> _session_slots;
     std::mutex _client_policy_mutex;
+    std::mutex _launch_mutex;
     std::unordered_map<std::string, client_policy_t> _client_policies;
 
     boost::asio::io_context io_context;
@@ -929,8 +956,8 @@ namespace rtsp_stream {
 
   rtsp_server_t server {};
 
-  void launch_session_raise(std::shared_ptr<launch_session_t> launch_session) {
-    server.session_raise(std::move(launch_session));
+  bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session) {
+    return server.session_raise(std::move(launch_session));
   }
 
   void launch_session_clear(uint32_t launch_session_id) {
@@ -1199,9 +1226,13 @@ namespace rtsp_stream {
     seqn.content = const_cast<char *>(seqn_str.c_str());
 
     std::string_view target {req->message.request.target};
-    auto begin = std::find(std::begin(target), std::end(target), '=') + 1;
-    auto end = std::find(begin, std::end(target), '/');
-    std::string_view type {begin, (size_t) std::distance(begin, end)};
+    const auto parsed_type = detail::parse_setup_stream_type(target);
+    if (!parsed_type) {
+      BOOST_LOG(warning) << "Rejecting malformed RTSP SETUP target ["sv << target << ']';
+      respond(sock, session, nullptr, 400, "BAD REQUEST", req->sequenceNumber, {});
+      return;
+    }
+    const auto type = *parsed_type;
 
     std::uint16_t port;
     if (type == "audio"sv) {

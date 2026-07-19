@@ -6,6 +6,8 @@
 #include "nvenc_base.h"
 
 // standard includes
+#include <array>
+#include <atomic>
 #include <format>
 
 // local includes
@@ -25,6 +27,8 @@
 #endif
 
 namespace {
+
+  std::array<std::atomic<int>, 3> observed_codec_max_widths {};
 
   GUID quality_preset_guid_from_number(unsigned number) {
     if (number > 7) {
@@ -88,6 +92,14 @@ namespace {
 }  // namespace
 
 namespace nvenc {
+
+  std::optional<int> max_encode_width_for_codec(int video_format) {
+    if (video_format < 0 || video_format >= static_cast<int>(observed_codec_max_widths.size())) {
+      return std::nullopt;
+    }
+    const int width = observed_codec_max_widths[video_format].load(std::memory_order_relaxed);
+    return width > 0 ? std::optional<int> {width} : std::nullopt;
+  }
 
   nvenc_base::nvenc_base(NV_ENC_DEVICE_TYPE device_type):
       device_type(device_type) {
@@ -189,6 +201,18 @@ namespace nvenc {
     {
       auto supported_width = get_encoder_cap(NV_ENC_CAPS_WIDTH_MAX);
       auto supported_height = get_encoder_cap(NV_ENC_CAPS_HEIGHT_MAX);
+      if (supported_width > 0 && client_config.videoFormat >= 0 &&
+          client_config.videoFormat < static_cast<int>(observed_codec_max_widths.size())) {
+        const int previous = observed_codec_max_widths[client_config.videoFormat].exchange(
+          supported_width,
+          std::memory_order_relaxed
+        );
+        if (previous != supported_width) {
+          BOOST_LOG(info) << "NvEnc: codec " << client_config.videoFormat
+                          << " maximum encode dimensions " << supported_width << 'x'
+                          << supported_height;
+        }
+      }
       if (encoder_params.width > supported_width || encoder_params.height > supported_height) {
         BOOST_LOG(error) << "NvEnc: gpu max encode resolution " << supported_width << "x" << supported_height << ", requested " << encoder_params.width << "x" << encoder_params.height;
         return false;

@@ -2265,6 +2265,20 @@ namespace platf::dxgi {
       return local_presenter_result_e::error;
     }
 
+    DXGI_ADAPTER_DESC presenter_adapter_desc {};
+    status = adapter->GetDesc(&presenter_adapter_desc);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Local AR presenter could not identify its graphics adapter: "sv
+                       << util::log_hex(status);
+      return local_presenter_result_e::error;
+    }
+    if (presenter_adapter_desc.AdapterLuid.HighPart != config.target_adapter_id.HighPart ||
+        presenter_adapter_desc.AdapterLuid.LowPart != config.target_adapter_id.LowPart) {
+      BOOST_LOG(info) << "Local AR physical output migrated to another graphics adapter; "sv
+                         "requesting a complete presentation-session rebuild."sv;
+      return local_presenter_result_e::rebuild;
+    }
+
     Microsoft::WRL::ComPtr<IDXGIOutput> target_output;
     DXGI_OUTPUT_DESC target_output_desc {};
     const auto target_display_name_wide = platf::from_utf8(target_display_name);

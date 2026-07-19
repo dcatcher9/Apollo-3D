@@ -47,6 +47,35 @@ namespace video {
   // handler in stream.cpp, consumed by display_vram's SBS convert().
   std::atomic<bool> sbs_debug_dump_pending {false};
 
+  sbs_output_dimensions_t host_sbs_output_dimensions(
+    int base_width,
+    int base_height,
+    int video_format,
+    int configured_max_width,
+    int runtime_max_width
+  ) {
+    // These are the capabilities reported by NV_ENC_CAPS_WIDTH_MAX on the production RTX 5080.
+    // The runtime value remains authoritative and may reduce either conservative default.
+    const int codec_max_width = video_format == 1 || video_format == 2 ? 8192 : 4096;
+    int effective_max_width = std::min(configured_max_width, codec_max_width);
+    if (runtime_max_width > 0) {
+      effective_max_width = std::min(effective_max_width, runtime_max_width);
+    }
+    const int capped_width = std::max(2, effective_max_width) & ~1;
+    const std::int64_t packed_width = static_cast<std::int64_t>(base_width) * 2;
+    if (packed_width <= capped_width) {
+      return {static_cast<int>(packed_width), base_height};
+    }
+
+    const int scaled_height = std::max(
+      2,
+      static_cast<int>(std::lround(
+        static_cast<double>(base_height) * capped_width / packed_width
+      )) & ~1
+    );
+    return {capped_width, scaled_height};
+  }
+
   // Resolve the profile-configured model name against the registry, else synthesize a custom
   // entry from the sbs_3d_depth_model/_url escape hatch.
   config::depth_model_info depth_model_for_profile(const config::video_t::sbs_t &profile) {
@@ -468,7 +497,7 @@ namespace video {
 
     config_t config;
     int frame_nr;
-    void *channel_data;
+    std::shared_ptr<void> channel_data;
   };
 
   struct sync_session_t {
@@ -1436,7 +1465,7 @@ namespace video {
     }
   }
 
-  int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+  int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, const std::shared_ptr<void> &channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     auto &frame = session.device->frame;
     frame->pts = frame_nr;
 
@@ -1510,7 +1539,7 @@ namespace video {
     return 0;
   }
 
-  int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+  int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, const std::shared_ptr<void> &channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     auto encoded_frame = session.encode_frame(frame_nr);
     if (encoded_frame.data.empty()) {
       BOOST_LOG(error) << "NvENC returned empty packet";
@@ -1530,7 +1559,7 @@ namespace video {
     return 0;
   }
 
-  int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+  int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, const std::shared_ptr<void> &channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     if (auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(&session)) {
       return encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp);
     } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(&session)) {
@@ -1947,7 +1976,7 @@ namespace video {
     platf::refresh_mouse_keys();
   }
 
-  void encode_run(
+  bool encode_run(
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
     img_event_t images,
@@ -1956,11 +1985,11 @@ namespace video {
     std::unique_ptr<platf::encode_device_t> encode_device,
     safe::signal_t &reinit_event,
     const encoder_t &encoder,
-    void *channel_data
+    std::shared_ptr<void> channel_data
   ) {
     auto session = make_encode_session(disp.get(), encoder, config, disp->width, disp->height, std::move(encode_device));
     if (!session) {
-      return;
+      return false;
     }
 
     // As a workaround for NVENC hangs and to generally speed up encoder reinit,
@@ -2004,7 +2033,7 @@ namespace video {
       // in a separate scope.
       auto dummy_img = disp->alloc_img();
       if (!dummy_img || disp->dummy_img(dummy_img.get()) || session->convert(*dummy_img)) {
-        return;
+        return true;
       }
     }
 
@@ -2015,18 +2044,18 @@ namespace video {
       // the dummy after shutdown or while an SBS dimension change is already pending.
       if (shutdown_event->peek() || !images->running() ||
           (reinit_event.peek() && frame_nr > 1) || sbs_mode_event->peek()) {
-        return;
+        return true;
       }
 
       // Encode the dummy img only once
       if (encode(frame_nr++, *session, packets, channel_data, std::chrono::steady_clock::now())) {
         BOOST_LOG(error) << "Could not encode dummy video packet"sv;
-        return;
+        return true;
       }
 
       while (true) {
         if (shutdown_event->peek() || !images->running() || (reinit_event.peek()) || sbs_mode_event->peek()) {
-          return;
+          return true;
         } else {
           std::this_thread::sleep_for(300ms);
         }
@@ -2153,6 +2182,7 @@ namespace video {
       session->request_normal_frame();
       refresh_mouse_keys_if_due(next_mouse_keys_refresh);
     }
+    return true;
   }
 
   input::touch_port_t make_port(platf::display_t *display, const config_t &config) {
@@ -2461,7 +2491,7 @@ namespace video {
   void capture_async(
     safe::mail_t mail,
     config_t &config,
-    void *channel_data
+    std::shared_ptr<void> channel_data
   ) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
 
@@ -2531,20 +2561,27 @@ namespace video {
       session_config.sbs_mode = current_sbs_mode;
       session_config.sbs_depth_status_event = sbs_depth_status_event;
       session_config.sbs_config = config::video.sbs;
+      int runtime_max_width = 0;
+      if (encoder.name == "nvenc"sv) {
+        runtime_max_width = nvenc::max_encode_width_for_codec(session_config.videoFormat).value_or(0);
+      }
       if (current_sbs_mode != SBS_OFF) {
-        const int cap = session_config.sbs_config.max_encode_width;
-        const int packed_w = base_width * 2;
-        if (packed_w <= cap) {
-          session_config.width = packed_w;  // height unchanged (already config.height)
-        } else {
-          session_config.width = std::max(2, cap & ~1);
-          session_config.height = std::max(
-            2,
-            (int) std::lround((double) config.height * session_config.width / packed_w) & ~1
-          );
-          BOOST_LOG(info) << "Host SBS: packed width "sv << packed_w << " exceeds max ("sv << cap
-                          << "); capping to "sv << session_config.width << 'x' << session_config.height
-                          << " (per-eye "sv << (session_config.width / 2) << 'x' << session_config.height << ')';
+        const auto dimensions = host_sbs_output_dimensions(
+          base_width,
+          config.height,
+          session_config.videoFormat,
+          session_config.sbs_config.max_encode_width,
+          runtime_max_width
+        );
+        session_config.width = dimensions.width;
+        session_config.height = dimensions.height;
+        const std::int64_t packed_width = static_cast<std::int64_t>(base_width) * 2;
+        if (session_config.width != packed_width) {
+          BOOST_LOG(info) << "Host SBS: requested packed width "sv << packed_width
+                          << " exceeds the effective encoder width limit; capping to "sv
+                          << session_config.width << 'x'
+                          << session_config.height << " (per-eye "sv
+                          << (session_config.width / 2) << 'x' << session_config.height << ')';
         }
       } else {
         session_config.width = base_width;
@@ -2554,15 +2591,32 @@ namespace video {
                       << session_config.sbs_config.profile << "'"sv
                       << ", output "sv << session_config.width << 'x' << session_config.height;
 
+      auto recover_failed_sbs_session = [&]() {
+        if (session_config.sbs_mode == SBS_OFF) {
+          return false;
+        }
+        if (encoder.name == "nvenc"sv) {
+          const int refreshed_max_width = nvenc::max_encode_width_for_codec(
+                                            session_config.videoFormat
+          ).value_or(0);
+          if (refreshed_max_width > 0 && refreshed_max_width < session_config.width &&
+              refreshed_max_width != runtime_max_width) {
+            BOOST_LOG(info) << "Host SBS learned a lower runtime NVENC width limit ("sv
+                            << refreshed_max_width
+                            << "); retrying with aspect-preserving SBS scaling."sv;
+            return true;
+          }
+        }
+        BOOST_LOG(error) << "Failed to create encoder at codec-safe SBS resolution "sv
+                         << session_config.width << 'x' << session_config.height
+                         << "; refusing to silently replace the requested SBS stream with flat 2D."sv;
+        sbs_depth_status_event->raise(0);
+        return false;
+      };
+
       auto encode_device = make_encode_device(*display, encoder, session_config);
       if (!encode_device) {
-        // A client SBS toggle must never end the stream: if the encoder rejected the doubled
-        // SBS resolution (e.g. codec width cap below sbs_3d_max_encode_width), drop back to
-        // flat 2D and rebuild instead of killing the video thread.
-        if (session_config.sbs_mode != SBS_OFF) {
-          BOOST_LOG(error) << "Failed to create encoder at SBS resolution "sv << session_config.width << 'x'
-                           << session_config.height << "; falling back to flat 2D."sv;
-          current_sbs_mode = SBS_OFF;
+        if (recover_failed_sbs_session()) {
           continue;
         }
         return;
@@ -2585,7 +2639,7 @@ namespace video {
       }
       hdr_event->raise(std::move(hdr_info));
 
-      encode_run(
+      const bool encode_session_created = encode_run(
         frame_nr,
         mail,
         images,
@@ -2596,13 +2650,19 @@ namespace video {
         *ref->encoder_p,
         channel_data
       );
+      if (!encode_session_created) {
+        if (recover_failed_sbs_session()) {
+          continue;
+        }
+        return;
+      }
     }
   }
 
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data
+    std::shared_ptr<void> channel_data
   ) {
     auto idr_events = mail->event<bool>(mail::idr);
 

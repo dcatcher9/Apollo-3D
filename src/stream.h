@@ -152,6 +152,5 @@ namespace stream {
 #ifdef SUNSHINE_TESTS
     void set_state_for_test(session_t &session, state_e state);
 #endif
-    inline bool send(session_t& session, const std::string_view &payload);
   }  // namespace session
 }  // namespace stream

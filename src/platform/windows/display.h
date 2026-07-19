@@ -396,6 +396,7 @@ namespace platf::dxgi {
   struct local_presenter_config_t {
     std::string source_display_name;
     RECT target_rect {};
+    LUID target_adapter_id {};
     int target_refresh_millihz = 60000;
     bool hdr = false;
     int sbs_mode = ::video::SBS_OFF;
@@ -412,6 +413,7 @@ namespace platf::dxgi {
   enum class local_presenter_result_e {
     stopped,
     reinit,
+    rebuild,
     error,
   };
 

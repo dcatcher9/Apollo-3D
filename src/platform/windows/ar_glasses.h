@@ -2,6 +2,7 @@
 
 #include "src/platform/common.h"
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -45,6 +46,16 @@ namespace ar_glasses {
   static_assert(classify_mode(1920, 1080) == presentation_mode_e::normal);
   static_assert(classify_mode(3840, 1080) == presentation_mode_e::sbs_ai);
   static_assert(classify_mode(3840, 2160) == presentation_mode_e::unsupported);
+
+  namespace detail {
+    /** Remote ownership lasts for the configured client-connect window plus scheduling grace. */
+    constexpr std::chrono::milliseconds remote_pending_duration(
+      std::chrono::milliseconds connect_timeout
+    ) {
+      return std::max(connect_timeout, std::chrono::milliseconds::zero()) +
+             std::chrono::milliseconds {2000};
+    }
+  }  // namespace detail
 
   /** Return whether a monitor model/name is specific enough to identify AR glasses automatically. */
   bool is_recognized_ar_display(std::string_view model_id, std::string_view friendly_name);

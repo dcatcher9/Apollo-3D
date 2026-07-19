@@ -6,6 +6,7 @@
 
 // standard includes
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <list>
@@ -58,6 +59,8 @@ namespace rtsp_stream {
     int calculate_warp_bitrate_factor(int announced_fps, int session_fps);
     bool is_safe_encoder_bitrate(std::int64_t bitrate_kbps);
     int apply_packet_size_limit(int client_packet_size, int configured_limit);
+    std::optional<std::size_t> find_plaintext_header_end(std::string_view buffered, std::size_t previous_size);
+    std::optional<std::string_view> parse_setup_stream_type(std::string_view target);
   }  // namespace detail
 
   struct launch_session_t {
@@ -98,7 +101,7 @@ namespace rtsp_stream {
   #endif
   };
 
-  void launch_session_raise(std::shared_ptr<launch_session_t> launch_session);
+  [[nodiscard]] bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session);
 
   /**
    * @brief Clear state for the specified launch session.

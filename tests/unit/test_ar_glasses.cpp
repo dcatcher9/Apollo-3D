@@ -59,4 +59,15 @@ TEST(ArGlassesOwnership, RenewedRemoteConnectWindowBlocksLocalPresentation) {
   EXPECT_FALSE(ar_glasses::remote_virtual_display_blocks_local());
 }
 
+TEST(ArGlassesOwnership, ReservationTracksLongConfiguredPingTimeout) {
+  EXPECT_EQ(
+    ar_glasses::detail::remote_pending_duration(120s),
+    122s
+  );
+  EXPECT_EQ(
+    ar_glasses::detail::remote_pending_duration(-1ms),
+    2s
+  );
+}
+
 #endif

@@ -66,3 +66,15 @@ TEST_P(AudioTest, TestEncode) {
   timer.join();
   capture.join();
 }
+
+TEST(AudioPacketLifetimeTest, RetainsBroadcastStateUntilPacketIsConsumed) {
+  auto channel = std::make_shared<int>(42);
+  std::weak_ptr<int> weak_channel = channel;
+  audio::packet_t packet {channel, util::buffer_t<std::uint8_t> {1}};
+
+  channel.reset();
+  EXPECT_FALSE(weak_channel.expired());
+
+  packet.first.reset();
+  EXPECT_TRUE(weak_channel.expired());
+}

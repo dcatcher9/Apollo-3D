@@ -106,3 +106,41 @@ TEST(RtspAnnounceParsingTest, AppliesOnlyValidLowerPacketSizeLimits) {
   EXPECT_EQ(apply_packet_size_limit(1392, stream::VIDEO_PACKET_SIZE_MIN - 1), 1392);
   EXPECT_EQ(apply_packet_size_limit(1392, stream::VIDEO_PACKET_SIZE_MAX + 1), 1392);
 }
+
+TEST(RtspPlaintextParsingTest, FindsHeaderDelimiterAcrossReadBoundary) {
+  using rtsp_stream::detail::find_plaintext_header_end;
+
+  constexpr std::string_view request = "OPTIONS rtsp://host RTSP/1.0\r\nCSeq: 1\r\n\r\nbody";
+  const auto split = request.find("\r\n\r\n") + 2;
+  const auto end = find_plaintext_header_end(request, split);
+
+  ASSERT_TRUE(end);
+  EXPECT_EQ(*end, request.find("body"));
+  EXPECT_FALSE(find_plaintext_header_end(request.substr(0, split), split));
+}
+
+TEST(RtspSetupParsingTest, RejectsTargetsWithoutAStreamSelector) {
+  using rtsp_stream::detail::parse_setup_stream_type;
+
+  EXPECT_EQ(parse_setup_stream_type("stream=video/0"), std::optional<std::string_view> {"video"});
+  EXPECT_EQ(parse_setup_stream_type("stream=audio"), std::optional<std::string_view> {"audio"});
+  EXPECT_FALSE(parse_setup_stream_type("stream="));
+  EXPECT_FALSE(parse_setup_stream_type("stream/video"));
+  EXPECT_FALSE(parse_setup_stream_type(""));
+}
+
+TEST(RtspLaunchReservationTest, PreservesTheFirstPendingHandshake) {
+  auto first = std::make_shared<rtsp_stream::launch_session_t>();
+  first->id = 101;
+  first->unique_id = "first";
+  auto second = std::make_shared<rtsp_stream::launch_session_t>();
+  second->id = 102;
+  second->unique_id = "second";
+
+  ASSERT_TRUE(rtsp_stream::launch_session_raise(first));
+  EXPECT_FALSE(rtsp_stream::launch_session_raise(second));
+
+  rtsp_stream::launch_session_clear(first->id);
+  EXPECT_TRUE(rtsp_stream::launch_session_raise(second));
+  rtsp_stream::launch_session_clear(second->id);
+}

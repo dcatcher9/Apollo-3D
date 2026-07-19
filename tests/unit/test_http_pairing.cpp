@@ -672,3 +672,14 @@ TEST(PairingStateTest, InvalidOtpAuthenticationDoesNotConsumeOtp) {
   EXPECT_TRUE(authenticate_otp_for_test(std::string(digest.to_string_view()), std::string(salt)));
   EXPECT_FALSE(authenticate_otp_for_test(std::string(digest.to_string_view()), std::string(salt)));
 }
+
+TEST(PairingStateTest, BoundsUnauthenticatedPairingAndSerializesManualPin) {
+  using admission = nvhttp::detail::pairing_admission_e;
+  using nvhttp::detail::pairing_admission;
+
+  EXPECT_EQ(pairing_admission(15, 16, false, false, false), admission::allowed);
+  EXPECT_EQ(pairing_admission(16, 16, false, false, false), admission::capacity_reached);
+  EXPECT_EQ(pairing_admission(16, 16, true, false, false), admission::allowed);
+  EXPECT_EQ(pairing_admission(1, 16, false, true, true), admission::manual_pin_conflict);
+  EXPECT_EQ(pairing_admission(1, 16, false, false, true), admission::allowed);
+}

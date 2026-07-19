@@ -53,12 +53,12 @@ namespace ar_glasses {
     std::chrono::steady_clock::time_point remote_session_pending_until {};
     std::optional<std::stop_source> local_session_construction_stop;
 
-    std::chrono::milliseconds remote_pending_duration(std::chrono::milliseconds connect_timeout) {
-      return std::clamp(connect_timeout + 2000ms, 2000ms, 60000ms);
-    }
-
     bool remote_blocks_local_locked(std::chrono::steady_clock::time_point now) {
       return remote_session_active || now < remote_session_pending_until;
+    }
+
+    bool same_luid(const LUID &left, const LUID &right) {
+      return left.HighPart == right.HighPart && left.LowPart == right.LowPart;
     }
 
     struct hdr_state_t {
@@ -156,6 +156,7 @@ namespace ar_glasses {
       bool operator==(const target_state_t &other) const {
         return device_id == other.device_id && device_path == other.device_path &&
                gdi_name == other.gdi_name && desktop_topology == other.desktop_topology &&
+               same_luid(adapter_id, other.adapter_id) &&
                rect.left == other.rect.left && rect.top == other.rect.top &&
                rect.right == other.rect.right && rect.bottom == other.rect.bottom &&
                refresh_millihz == other.refresh_millihz && mode == other.mode &&
@@ -378,6 +379,7 @@ namespace ar_glasses {
       const auto right_width = right->rect.right - right->rect.left;
       const auto right_height = right->rect.bottom - right->rect.top;
       return left->device_path == right->device_path &&
+             same_luid(left->adapter_id, right->adapter_id) &&
              left_width == right_width && left_height == right_height &&
              left->refresh_millihz == right->refresh_millihz && left->mode == right->mode &&
              left->desktop_topology == right->desktop_topology &&
@@ -1453,6 +1455,11 @@ namespace ar_glasses {
             BOOST_LOG(info) << "AR output mode changed during virtual HDR setup; waiting for the topology controller."sv;
             return;
           }
+          if (!same_luid(refreshed_target->adapter_id, virtual_display_identity_.AdapterLuid)) {
+            BOOST_LOG(info) << "AR output migrated to another graphics adapter during setup; "sv
+                               "waiting for the topology controller to rebuild the complete session."sv;
+            return;
+          }
           active_target = *refreshed_target;
           presentation_target = *refreshed_target;
         } else {
@@ -1482,6 +1489,7 @@ namespace ar_glasses {
         platf::dxgi::local_presenter_config_t presenter_config;
         presenter_config.source_display_name = platf::to_utf8(virtual_display_name_);
         presenter_config.target_rect = presentation_target.rect;
+        presenter_config.target_adapter_id = presentation_target.adapter_id;
         presenter_config.target_refresh_millihz = presentation_target.refresh_millihz;
         presenter_config.hdr = virtual_hdr_active;
         presenter_config.sbs_mode = presentation_target.mode == presentation_mode_e::sbs_ai ?
@@ -1964,7 +1972,7 @@ namespace ar_glasses {
     std::unique_lock lock(ownership_mutex);
     const auto now = std::chrono::steady_clock::now();
     const auto release_deadline = now + ownership_release_timeout;
-    const auto pending_duration = remote_pending_duration(connect_timeout);
+    const auto pending_duration = detail::remote_pending_duration(connect_timeout);
     remote_session_pending_until = std::max(remote_session_pending_until, now + pending_duration);
     if (local_session_construction_stop) {
       local_session_construction_stop->request_stop();
@@ -2000,7 +2008,7 @@ namespace ar_glasses {
     // released and local AR is allowed to inspect ownership again.
     remote_session_pending_until = std::max(
       remote_session_pending_until,
-      std::chrono::steady_clock::now() + remote_pending_duration(connect_timeout)
+      std::chrono::steady_clock::now() + detail::remote_pending_duration(connect_timeout)
     );
     ownership_changed.notify_all();
   }

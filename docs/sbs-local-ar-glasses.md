@@ -27,6 +27,8 @@ presenter immediately, then must remain stable for 750 ms before Apollo creates 
 session. A position-only change moves the existing presenter without recreating the virtual display.
 Changing the primary monitor or a neighboring monitor's layout recreates the session so both the
 virtual desktop and physical sink remain attached to the current topology.
+Moving the glasses to another GPU/adapter also forces a complete rebuild: the adapter LUID is part
+of both the detected target contract and the presenter's expected output identity.
 
 Only one presentation path owns an interactive virtual desktop at a time. A connecting or active
 remote virtual-display stream takes priority without being terminated: Apollo synchronously stops
@@ -36,6 +38,9 @@ waits for its stable SudoVDA adapter/target identity to leave the Windows topolo
 creates the local source. Resuming the remote client performs the inverse handoff. This arbitration
 does not depend on transient `DISPLAYn` names and does not affect remote sessions that capture a
 physical display without creating a virtual desktop.
+The remote ownership reservation uses the configured `ping_timeout` connection window (with a
+small scheduling grace), including values longer than one minute; it is not governed by a separate
+fixed lease.
 
 On connect Apollo:
 

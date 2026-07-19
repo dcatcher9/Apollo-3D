@@ -238,6 +238,13 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### global_state_cmd
+
+<table>
+    <tr><td>Description</td><td>Commands run when the first client resumes an application and undo commands run when the last client pauses it.</td></tr>
+    <tr><td>Default</td><td><code>[]</code></td></tr>
+</table>
+
 ### notify_pre_releases
 
 <table>
@@ -282,6 +289,27 @@ editing the `conf` file in a text editor. Use the examples as reference.
             system_tray = enabled
             @endcode</td>
     </tr>
+</table>
+
+### hide_tray_controls
+
+<table>
+    <tr><td>Description</td><td>Hide the Force Stop, Restart, and Quit actions from the system-tray menu.</td></tr>
+    <tr><td>Default</td><td><code>disabled</code></td></tr>
+</table>
+
+### enable_pairing
+
+<table>
+    <tr><td>Description</td><td>Allow new Moonlight-compatible clients to pair with Apollo.</td></tr>
+    <tr><td>Default</td><td><code>enabled</code></td></tr>
+</table>
+
+### enable_discovery
+
+<table>
+    <tr><td>Description</td><td>Advertise Apollo for automatic discovery. When disabled, clients must add the host address manually.</td></tr>
+    <tr><td>Default</td><td><code>enabled</code></td></tr>
 </table>
 
 ## Input
@@ -687,6 +715,20 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### enable_input_only_mode
+
+<table>
+    <tr><td>Description</td><td>Add an input-only application entry that sends controls without video or audio.</td></tr>
+    <tr><td>Default</td><td><code>disabled</code></td></tr>
+</table>
+
+### forward_rumble
+
+<table>
+    <tr><td>Description</td><td>Forward host controller-rumble messages to connected clients.</td></tr>
+    <tr><td>Default</td><td><code>enabled</code></td></tr>
+</table>
+
 ### keybindings
 
 <table>
@@ -873,6 +915,20 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### keep_sink_default
+
+<table>
+    <tr><td>Description</td><td>Keep the selected virtual audio sink as the system default while host audio output is disabled.</td></tr>
+    <tr><td>Default</td><td><code>enabled</code></td></tr>
+</table>
+
+### auto_capture_sink
+
+<table>
+    <tr><td>Description</td><td>Follow and capture a newly selected default audio sink automatically.</td></tr>
+    <tr><td>Default</td><td><code>enabled</code></td></tr>
+</table>
+
 ### adapter_name
 
 <table>
@@ -1038,6 +1094,27 @@ editing the `conf` file in a text editor. Use the examples as reference.
             output_name = {daeac860-f4db-5208-b1f5-cf59444fb768}
             @endcode</td>
     </tr>
+</table>
+
+### fallback_mode
+
+<table>
+    <tr><td>Description</td><td>Display mode used when the client supplies no mode or an application is launched from the web UI. Format: <code>WIDTHxHEIGHTxFPS</code>.</td></tr>
+    <tr><td>Default</td><td>Unset</td></tr>
+</table>
+
+### headless_mode
+
+<table>
+    <tr><td>Description</td><td>Start applications on a virtual display rather than requiring an attached physical display.</td></tr>
+    <tr><td>Default</td><td><code>disabled</code></td></tr>
+</table>
+
+### double_refreshrate
+
+<table>
+    <tr><td>Description</td><td>Create virtual displays at twice the requested refresh rate while retaining the requested stream frame rate.</td></tr>
+    <tr><td>Default</td><td><code>disabled</code></td></tr>
 </table>
 
 ### isolated_virtual_display_option
@@ -1986,6 +2063,41 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### limit_framerate
+
+<table>
+    <tr><td>Description</td><td>Limit capture cadence to the client-requested frame rate. Disable only when intentionally capturing faster than the stream.</td></tr>
+    <tr><td>Default</td><td><code>enabled</code></td></tr>
+</table>
+
+### envvar_compatibility_mode
+
+<table>
+    <tr><td>Description</td><td>Expose legacy integer-compatible environment-variable values for older launch scripts and tools.</td></tr>
+    <tr><td>Default</td><td><code>disabled</code></td></tr>
+</table>
+
+### legacy_ordering
+
+<table>
+    <tr><td>Description</td><td>Enable the application-ordering workaround needed by legacy clients that do not support Apollo's native ordering.</td></tr>
+    <tr><td>Default</td><td><code>disabled</code></td></tr>
+</table>
+
+### ignore_encoder_probe_failure
+
+<table>
+    <tr><td>Description</td><td>Continue startup after encoder probing fails. Streaming may still fail if no compatible encoder is available.</td></tr>
+    <tr><td>Default</td><td><code>disabled</code></td></tr>
+</table>
+
+### sbs_3d_profile
+
+<table>
+    <tr><td>Description</td><td>Select the startup Host SBS parameter profile. Explicit top-level <code>sbs_3d_*</code> settings override the selected profile.</td></tr>
+    <tr><td>Default</td><td><code>apollo</code></td></tr>
+</table>
+
 ### hevc_mode
 
 <table>
@@ -2433,6 +2545,13 @@ editing the `conf` file in a text editor. Use the examples as reference.
             nvenc_h264_cavlc = disabled
             @endcode</td>
     </tr>
+</table>
+
+### nvenc_intra_refresh
+
+<table>
+    <tr><td>Description</td><td>Enable NVENC intra refresh for clients that require continuous refresh recovery.</td></tr>
+    <tr><td>Default</td><td><code>disabled</code></td></tr>
 </table>
 
 ## Intel QuickSync Encoder

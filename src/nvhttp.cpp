@@ -12,6 +12,7 @@
 #include <cmath>
 #include <filesystem>
 #include <format>
+#include <limits>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -60,6 +61,24 @@ namespace nvhttp {
 
   using p_named_cert_t = crypto::p_named_cert_t;
   using PERM = crypto::PERM;
+
+  namespace detail {
+    pairing_admission_e pairing_admission(
+      std::size_t active_sessions,
+      std::size_t maximum_sessions,
+      bool replacing_existing,
+      bool manual_pin,
+      bool another_manual_pin_pending
+    ) {
+      if (!replacing_existing && active_sessions >= maximum_sessions) {
+        return pairing_admission_e::capacity_reached;
+      }
+      if (manual_pin && another_manual_pin_pending) {
+        return pairing_admission_e::manual_pin_conflict;
+      }
+      return pairing_admission_e::allowed;
+    }
+  }
 
   struct client_t {
     std::vector<p_named_cert_t> named_devices;
@@ -159,6 +178,15 @@ namespace nvhttp {
   // replacing or erasing a unique ID cannot invalidate a phase already in progress.
   std::mutex pairing_state_mutex;
   std::unordered_map<std::string, std::shared_ptr<pair_session_t>> map_id_sess;
+  constexpr std::size_t MAX_PAIRING_SESSIONS = 16;
+  std::uint64_t pairing_sequence;
+  std::mutex launch_request_mutex;
+
+  void prune_pairing_sessions_locked(std::chrono::steady_clock::time_point now) {
+    std::erase_if(map_id_sess, [now](const auto &entry) {
+      return now - entry.second->created_at > OTP_EXPIRE_DURATION;
+    });
+  }
 
   enum class otp_auth_status {
     unavailable,
@@ -1035,13 +1063,44 @@ namespace nvhttp {
 
         const auto otp_auth = args.find("otpauth");
         const bool pin_from_stdin = config::sunshine.flags[config::flag::PIN_STDIN];
-        if (otp_auth == args.end() && !pin_from_stdin) {
+        const bool manual_pin = otp_auth == args.end() && !pin_from_stdin;
+        if (manual_pin) {
           // Publish a complete pending-PIN session. pin() can never observe the map entry before
           // its asynchronous response endpoint has been attached.
           session->async_insert_pin.response = response;
+          session->manual_pin_pending = true;
         }
         {
           std::lock_guard lock(pairing_state_mutex);
+          prune_pairing_sessions_locked(std::chrono::steady_clock::now());
+
+          const auto existing = map_id_sess.find(uniqID);
+          const auto another_manual_pin_pending = std::any_of(map_id_sess.begin(), map_id_sess.end(), [&](const auto &entry) {
+            return entry.first != uniqID && entry.second->manual_pin_pending;
+          });
+          const auto admission = detail::pairing_admission(
+            map_id_sess.size(),
+            MAX_PAIRING_SESSIONS,
+            existing != map_id_sess.end(),
+            manual_pin,
+            another_manual_pin_pending
+          );
+          if (admission == detail::pairing_admission_e::capacity_reached) {
+            tree.put("root.<xmlattr>.status_code", 503);
+            tree.put("root.<xmlattr>.status_message", "Too many pairing requests are pending");
+            return;
+          }
+
+          if (admission == detail::pairing_admission_e::manual_pin_conflict) {
+            // The PIN submission API carries no unique ID. Admitting two manual waiters would
+            // make it impossible to know which client the user intended to authorize.
+            tree.put("root.<xmlattr>.status_code", 409);
+            tree.put("root.<xmlattr>.status_message", "Another pairing request is awaiting a PIN");
+            return;
+          }
+
+          session->created_at = std::chrono::steady_clock::now();
+          session->insertion_sequence = ++pairing_sequence;
           map_id_sess.insert_or_assign(uniqID, session);
         }
 
@@ -1087,6 +1146,7 @@ namespace nvhttp {
     std::shared_ptr<pair_session_t> session;
     {
       std::lock_guard lock(pairing_state_mutex);
+      prune_pairing_sessions_locked(std::chrono::steady_clock::now());
       const auto sess_it = map_id_sess.find(uniqID);
       if (sess_it != map_id_sess.end()) {
         session = sess_it->second;
@@ -1138,8 +1198,15 @@ namespace nvhttp {
     std::shared_ptr<pair_session_t> session;
     {
       std::lock_guard lock(pairing_state_mutex);
-      if (!map_id_sess.empty()) {
-        session = map_id_sess.begin()->second;
+      prune_pairing_sessions_locked(std::chrono::steady_clock::now());
+      const auto pending = std::min_element(map_id_sess.begin(), map_id_sess.end(), [](const auto &left, const auto &right) {
+        const auto left_sequence = left.second->manual_pin_pending ? left.second->insertion_sequence : std::numeric_limits<std::uint64_t>::max();
+        const auto right_sequence = right.second->manual_pin_pending ? right.second->insertion_sequence : std::numeric_limits<std::uint64_t>::max();
+        return left_sequence < right_sequence;
+      });
+      if (pending != map_id_sess.end() && pending->second->manual_pin_pending) {
+        session = pending->second;
+        session->manual_pin_pending = false;
       }
     }
     if (!session) {
@@ -1484,6 +1551,7 @@ namespace nvhttp {
       response->write(data.str());
       response->close_connection_after_response = true;
     });
+    std::lock_guard launch_lock(launch_request_mutex);
 
     auto args = request->parse_query_string();
 
@@ -1692,6 +1760,13 @@ namespace nvhttp {
       return;
     }
 
+    if (!rtsp_stream::launch_session_raise(launch_session)) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Another streaming handshake is already pending");
+      return;
+    }
+
     tree.put("root.<xmlattr>.status_code", 200);
     tree.put(
       "root.sessionUrl0",
@@ -1705,7 +1780,6 @@ namespace nvhttp {
     tree.put("root.gamesession", 1);
 
     host_audio = requested_host_audio;
-    rtsp_stream::launch_session_raise(launch_session);
   }
 
   void resume(bool &host_audio, resp_https_t response, req_https_t request) {
@@ -1723,6 +1797,7 @@ namespace nvhttp {
       response->write(data.str());
       response->close_connection_after_response = true;
     });
+    std::lock_guard launch_lock(launch_request_mutex);
 
     auto named_cert_p = get_verified_cert(request);
     if (!named_cert_p) {
@@ -1835,6 +1910,13 @@ namespace nvhttp {
     }
 #endif
 
+    if (!rtsp_stream::launch_session_raise(launch_session)) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Another streaming handshake is already pending");
+      return;
+    }
+
     tree.put("root.<xmlattr>.status_code", 200);
     tree.put(
       "root.sessionUrl0",
@@ -1848,7 +1930,6 @@ namespace nvhttp {
     tree.put("root.resume", 1);
 
     host_audio = requested_host_audio;
-    rtsp_stream::launch_session_raise(launch_session);
 
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
     system_tray::update_tray_client_connected(named_cert_p->name);
@@ -1866,6 +1947,7 @@ namespace nvhttp {
       response->write(data.str());
       response->close_connection_after_response = true;
     });
+    std::lock_guard launch_lock(launch_request_mutex);
 
     auto named_cert_p = get_verified_cert(request);
     if (!named_cert_p) {

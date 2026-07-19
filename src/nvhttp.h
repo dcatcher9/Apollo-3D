@@ -8,6 +8,7 @@
 // standard includes
 #include <string>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <list>
 #include <mutex>
@@ -55,6 +56,22 @@ namespace nvhttp {
   std::optional<int> parse_launch_int(launch_int_field field, std::string_view value);
   std::optional<crypto::aes_t> parse_remote_input_key(std::string_view key);
   std::optional<std::uint32_t> parse_remote_input_key_id(std::string_view key_id);
+
+  namespace detail {
+    enum class pairing_admission_e {
+      allowed,
+      capacity_reached,
+      manual_pin_conflict,
+    };
+
+    pairing_admission_e pairing_admission(
+      std::size_t active_sessions,
+      std::size_t maximum_sessions,
+      bool replacing_existing,
+      bool manual_pin,
+      bool another_manual_pin_pending
+    );
+  }
 
   /**
    * @brief The protocol version.
@@ -151,6 +168,12 @@ namespace nvhttp {
      * @brief used as a security measure to prevent out of order calls
      */
     PAIR_PHASE last_phase = PAIR_PHASE::NONE;
+
+    // Immutable admission metadata. The PIN endpoint has no client identifier, so at most one
+    // manual-PIN waiter is admitted and this sequence makes selection deterministic.
+    std::chrono::steady_clock::time_point created_at = std::chrono::steady_clock::now();
+    std::uint64_t insertion_sequence = 0;
+    bool manual_pin_pending = false;
 
     // Pairing phases for one client can arrive on either the HTTP or HTTPS server thread. Keep
     // each session stable after it is looked up in the global map, and serialize mutations of the

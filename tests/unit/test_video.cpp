@@ -131,3 +131,54 @@ INSTANTIATE_TEST_SUITE_P(
     std::make_tuple(9498, AVRational {4749, 50})
   )
 );
+
+TEST(HostSbsDimensionsTest, KeepsFourKPerEyeForHevcAndAv1) {
+  for (const int video_format : {1, 2}) {
+    const auto dimensions = video::host_sbs_output_dimensions(
+      3840,
+      2160,
+      video_format,
+      8192,
+      8192
+    );
+    EXPECT_EQ(dimensions.width, 7680);
+    EXPECT_EQ(dimensions.height, 2160);
+  }
+}
+
+TEST(HostSbsDimensionsTest, HonorsStricterConfiguredLimit) {
+  const auto dimensions = video::host_sbs_output_dimensions(2560, 1440, 2, 3840, 8192);
+  EXPECT_EQ(dimensions.width, 3840);
+  EXPECT_EQ(dimensions.height, 1080);
+}
+
+TEST(HostSbsDimensionsTest, CapsFiveKPerEyeToCurrentNvencLimit) {
+  const auto dimensions = video::host_sbs_output_dimensions(5120, 2160, 2, 8192, 8192);
+  EXPECT_EQ(dimensions.width, 8192);
+  EXPECT_EQ(dimensions.height, 1728);
+}
+
+TEST(HostSbsDimensionsTest, HonorsLowerRuntimeCodecCapability) {
+  const auto dimensions = video::host_sbs_output_dimensions(3840, 2160, 1, 8192, 4096);
+  EXPECT_EQ(dimensions.width, 4096);
+  EXPECT_EQ(dimensions.height, 1152);
+}
+
+TEST(HostSbsDimensionsTest, UsesMeasuredH264Capability) {
+  const auto dimensions = video::host_sbs_output_dimensions(3840, 2160, 0, 8192);
+  EXPECT_EQ(dimensions.width, 4096);
+  EXPECT_EQ(dimensions.height, 1152);
+}
+
+TEST(VideoPacketLifetimeTest, RetainsBroadcastStateUntilPacketIsConsumed) {
+  auto channel = std::make_shared<int>(42);
+  std::weak_ptr<int> weak_channel = channel;
+  video::packet_raw_generic packet {{0x01}, 1, true};
+  packet.channel_data = channel;
+
+  channel.reset();
+  EXPECT_FALSE(weak_channel.expired());
+
+  packet.channel_data.reset();
+  EXPECT_TRUE(weak_channel.expired());
+}

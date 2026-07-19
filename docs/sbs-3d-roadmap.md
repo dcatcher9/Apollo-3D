@@ -19,7 +19,11 @@ Approved AR glasses connected as a Windows monitor also use an automatic local p
    and P5/P95 stretch/recenter.
 6. Render Apollo's occlusion-aware backward probe.
 7. Convert the packed SBS raster directly to the encoder format. If doubled width exceeds
-   `sbs_3d_max_encode_width`, preserve each eye's aspect while scaling to the cap.
+   `sbs_3d_max_encode_width` or the selected codec's runtime `NV_ENC_CAPS_WIDTH_MAX`, preserve each
+   eye's aspect while scaling to the lower cap. The configured production ceiling is 8192 packed
+   pixels. The production RTX 5080 reports 4096 for H.264 and 8192 for HEVC/AV1, so a 3840x2160
+   source becomes 4096x1152 in H.264 but remains 7680x2160 in HEVC/AV1. Apollo records the
+   authoritative per-codec capability during NVENC probing and refreshes it at encoder creation.
 
 Profiles remain configuration-only parameter sets over this single geometry. Define fields with
 `sbs_3d_profile_<name>_<parameter>`; `sbs_3d_profile` selects the startup preset. Explicit top-level

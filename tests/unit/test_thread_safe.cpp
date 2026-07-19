@@ -79,3 +79,36 @@ TEST(ThreadSafeQueueTest, AccessorsReflectStoppedState) {
   EXPECT_FALSE(queue.peek());
   EXPECT_FALSE(queue.running());
 }
+
+TEST(ThreadSafeSharedTest, FailedConstructionDestroysObjectAndCanRetry) {
+  struct tracked_t {
+    ~tracked_t() {
+      if (destructions) {
+        ++*destructions;
+      }
+    }
+
+    int *destructions = nullptr;
+  };
+
+  int destructions = 0;
+  int attempts = 0;
+  auto shared = safe::make_shared<tracked_t>(
+    [&](tracked_t &object) {
+      object.destructions = &destructions;
+      return attempts++ == 0 ? -1 : 0;
+    },
+    [](tracked_t &) {}
+  );
+
+  EXPECT_FALSE(shared.ref());
+  EXPECT_EQ(destructions, 1);
+
+  {
+    auto ref = shared.ref();
+    ASSERT_TRUE(ref);
+    EXPECT_EQ(attempts, 2);
+  }
+
+  EXPECT_EQ(destructions, 2);
+}

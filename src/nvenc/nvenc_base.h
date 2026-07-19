@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include <optional>
+
 // lib includes
 #include <ffnvcodec/nvEncodeAPI.h>
 
@@ -18,6 +20,9 @@
  * @brief Standalone NVENC encoder
  */
 namespace nvenc {
+
+  /** Last per-codec width capability reported by the active NVENC driver probe. */
+  std::optional<int> max_encode_width_for_codec(int video_format);
 
   /**
    * @brief Abstract platform-agnostic base of standalone NVENC encoder.

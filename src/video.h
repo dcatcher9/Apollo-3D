@@ -97,6 +97,20 @@ namespace video {
     return av_d2q(static_cast<double>(framerate_x100) / 100.0, 1 << 26);
   }
 
+  struct sbs_output_dimensions_t {
+    int width;
+    int height;
+  };
+
+  /** Compute the codec-safe packed Host SBS size for a negotiated per-eye frame. */
+  sbs_output_dimensions_t host_sbs_output_dimensions(
+    int base_width,
+    int base_height,
+    int video_format,
+    int configured_max_width,
+    int runtime_max_width = 0
+  );
+
   /* Startup-profile-selected depth model for the host SBS pipeline. The configured name is matched
      against config::depth_model_registry(), else synthesized from the model/url escape hatch. */
   config::depth_model_info active_depth_model();
@@ -310,7 +324,10 @@ namespace video {
     };
 
     std::vector<replace_t> *replacements = nullptr;
-    void *channel_data = nullptr;
+    // Retain only the network-send state needed by the broadcast worker. This deliberately does
+    // not own the stream session (which owns the broadcast context), avoiding both dangling raw
+    // pointers and a session -> broadcast -> queued packet -> session ownership cycle.
+    std::shared_ptr<void> channel_data;
     bool after_ref_frame_invalidation = false;
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
   };
@@ -395,7 +412,7 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data
+    std::shared_ptr<void> channel_data
   );
 
   bool validate_encoder(encoder_t &encoder, bool expect_failure);
