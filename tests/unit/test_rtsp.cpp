@@ -3,8 +3,11 @@
  * @brief Tests for RTSP request parsing helpers.
  */
 
+#include <limits>
 #include <string_view>
 #include <unordered_map>
+
+#include <src/rtsp.h>
 
 #include "../tests_common.h"
 
@@ -32,4 +35,44 @@ TEST(RtspAnnounceParsingTest, RetainsFinalLineAndTrimsTrailingSpaces) {
   ASSERT_EQ(args.size(), 2);
   EXPECT_EQ(args.at("first"), "1");
   EXPECT_EQ(args.at("last"), "2");
+}
+
+TEST(RtspAnnounceParsingTest, EnforcesNumericSyntaxAndProtocolBounds) {
+  using field = rtsp_stream::detail::announce_int_field;
+  using rtsp_stream::detail::parse_announce_int;
+
+  EXPECT_EQ(parse_announce_int(field::audio_channels, "2"), 2);
+  EXPECT_EQ(parse_announce_int(field::audio_channels, "6"), 6);
+  EXPECT_EQ(parse_announce_int(field::audio_channels, "8"), 8);
+  EXPECT_FALSE(parse_announce_int(field::audio_channels, "7"));
+  EXPECT_EQ(parse_announce_int(field::audio_packet_duration, "10"), 10);
+  EXPECT_FALSE(parse_announce_int(field::audio_packet_duration, "20"));
+  EXPECT_EQ(parse_announce_int(field::control_protocol, "13"), 13);
+  EXPECT_FALSE(parse_announce_int(field::control_protocol, "0"));
+  EXPECT_EQ(parse_announce_int(field::video_format, "2"), 2);
+  EXPECT_FALSE(parse_announce_int(field::video_format, "3"));
+  EXPECT_EQ(parse_announce_int(field::binary_option, "1"), 1);
+  EXPECT_FALSE(parse_announce_int(field::binary_option, "2"));
+  EXPECT_FALSE(parse_announce_int(field::max_fps, "0"));
+  EXPECT_EQ(parse_announce_int(field::max_fps, "1000000"), 1000000);
+  EXPECT_FALSE(parse_announce_int(field::max_fps, "1000001"));
+  EXPECT_FALSE(parse_announce_int(field::bitrate_kbps, "12kbps"));
+  EXPECT_FALSE(parse_announce_int(field::feature_flags, "-1"));
+  EXPECT_FALSE(parse_announce_int(field::viewport_dimension, "16385"));
+  EXPECT_FALSE(parse_announce_int(field::configured_bitrate_kbps, "2147483648"));
+}
+
+TEST(RtspAnnounceParsingTest, EnforcesWarpAndEncoderArithmeticBounds) {
+  using rtsp_stream::detail::calculate_warp_bitrate_factor;
+  using rtsp_stream::detail::is_safe_encoder_bitrate;
+
+  EXPECT_EQ(calculate_warp_bitrate_factor(60, 60000), 1);
+  EXPECT_EQ(calculate_warp_bitrate_factor(240, 60000), 4);
+  EXPECT_EQ(calculate_warp_bitrate_factor(300, 60000), 1);
+  EXPECT_EQ(calculate_warp_bitrate_factor(60, 0), 1);
+
+  constexpr auto max_safe_kbps = std::numeric_limits<int>::max() / 1000;
+  EXPECT_TRUE(is_safe_encoder_bitrate(max_safe_kbps));
+  EXPECT_FALSE(is_safe_encoder_bitrate(max_safe_kbps + 1LL));
+  EXPECT_FALSE(is_safe_encoder_bitrate(0));
 }

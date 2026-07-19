@@ -6,8 +6,11 @@
 
 // standard includes
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <list>
+#include <optional>
+#include <string_view>
 
 // local includes
 #include "crypto.h"
@@ -24,6 +27,33 @@ namespace stream {
 
 namespace rtsp_stream {
   constexpr auto RTSP_SETUP_PORT = 21;
+
+  namespace detail {
+    enum class announce_int_field {
+      audio_channels,
+      audio_channel_mask,
+      audio_packet_duration,
+      audio_quality,
+      control_protocol,
+      feature_flags,
+      audio_qos,
+      video_qos,
+      encryption_flags,
+      viewport_dimension,
+      max_fps,
+      bitrate_kbps,
+      configured_bitrate_kbps,
+      slices_per_frame,
+      reference_frames,
+      encoder_csc_mode,
+      video_format,
+      binary_option,
+    };
+
+    std::optional<int> parse_announce_int(announce_int_field field, std::string_view value);
+    int calculate_warp_bitrate_factor(int announced_fps, int session_fps);
+    bool is_safe_encoder_bitrate(std::int64_t bitrate_kbps);
+  }  // namespace detail
 
   struct launch_session_t {
     uint32_t id;

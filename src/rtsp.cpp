@@ -12,8 +12,11 @@ extern "C" {
 // standard includes
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <format>
+#include <limits>
 #include <set>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
@@ -41,6 +44,89 @@ using namespace std::literals;
 
 namespace rtsp_stream {
   namespace detail {
+    std::optional<int> parse_announce_int(announce_int_field field, std::string_view value) {
+      const auto parsed = util::from_view_checked<int>(value);
+      if (!parsed) {
+        return std::nullopt;
+      }
+
+      const auto in_range = [&](int minimum, int maximum) {
+        return *parsed >= minimum && *parsed <= maximum;
+      };
+
+      bool valid = false;
+      switch (field) {
+        case announce_int_field::audio_channels:
+          valid = *parsed == 2 || *parsed == 6 || *parsed == 8;
+          break;
+        case announce_int_field::audio_channel_mask:
+          valid = in_range(0, 65535);
+          break;
+        case announce_int_field::audio_packet_duration:
+          valid = *parsed == 5 || *parsed == 10;
+          break;
+        case announce_int_field::audio_quality:
+        case announce_int_field::binary_option:
+          valid = in_range(0, 1);
+          break;
+        case announce_int_field::control_protocol:
+          valid = *parsed == 1 || *parsed == 13;
+          break;
+        case announce_int_field::feature_flags:
+          valid = *parsed >= 0;
+          break;
+        case announce_int_field::audio_qos:
+          valid = *parsed == 0 || *parsed == 4;
+          break;
+        case announce_int_field::video_qos:
+          valid = *parsed == 0 || *parsed == 5;
+          break;
+        case announce_int_field::encryption_flags:
+          valid = in_range(0, SS_ENC_VIDEO | SS_ENC_AUDIO | SS_ENC_CONTROL_V2);
+          break;
+        case announce_int_field::viewport_dimension:
+          valid = in_range(1, 16384);
+          break;
+        case announce_int_field::max_fps:
+          valid = in_range(1, 1000000);
+          break;
+        case announce_int_field::bitrate_kbps:
+          valid = in_range(1, 1000000);
+          break;
+        case announce_int_field::configured_bitrate_kbps:
+          valid = in_range(0, 1000000);
+          break;
+        case announce_int_field::slices_per_frame:
+          valid = in_range(1, 255);
+          break;
+        case announce_int_field::reference_frames:
+          valid = in_range(0, 16);
+          break;
+        case announce_int_field::encoder_csc_mode:
+          valid = in_range(0, 5);
+          break;
+        case announce_int_field::video_format:
+          valid = in_range(0, 2);
+          break;
+      }
+
+      return valid ? parsed : std::nullopt;
+    }
+
+    int calculate_warp_bitrate_factor(int announced_fps, int session_fps) {
+      if (announced_fps <= 0 || announced_fps > 1000000 || session_fps <= 0 || session_fps > 1000000) {
+        return 1;
+      }
+
+      const auto numerator = static_cast<std::int64_t>(announced_fps) * 1000 + session_fps / 2;
+      const auto factor = numerator / session_fps;
+      return factor >= 2 && factor <= 4 ? static_cast<int>(factor) : 1;
+    }
+
+    bool is_safe_encoder_bitrate(std::int64_t bitrate_kbps) {
+      return bitrate_kbps > 0 && bitrate_kbps <= std::numeric_limits<int>::max() / 1000;
+    }
+
     std::unordered_map<std::string_view, std::string_view> parse_announce_attributes(std::string_view payload) {
       std::unordered_map<std::string_view, std::string_view> args;
 
@@ -986,14 +1072,23 @@ namespace rtsp_stream {
     std::int64_t configuredBitrateKbps;
     config.audio.flags[audio::config_t::HOST_AUDIO] = session.host_audio;
     try {
-      config.audio.channels = util::from_view(args.at("x-nv-audio.surround.numChannels"sv));
-      config.audio.mask = util::from_view(args.at("x-nv-audio.surround.channelMask"sv));
-      config.audio.packetDuration = util::from_view(args.at("x-nv-aqos.packetDuration"sv));
+      const auto required_int = [&](detail::announce_int_field field, std::string_view name) {
+        const auto value = args.at(name);
+        const auto parsed = detail::parse_announce_int(field, value);
+        if (!parsed) {
+          throw std::invalid_argument(std::string {name});
+        }
+        return *parsed;
+      };
+
+      config.audio.channels = required_int(detail::announce_int_field::audio_channels, "x-nv-audio.surround.numChannels"sv);
+      config.audio.mask = required_int(detail::announce_int_field::audio_channel_mask, "x-nv-audio.surround.channelMask"sv);
+      config.audio.packetDuration = required_int(detail::announce_int_field::audio_packet_duration, "x-nv-aqos.packetDuration"sv);
 
       config.audio.flags[audio::config_t::HIGH_QUALITY] =
-        util::from_view(args.at("x-nv-audio.surround.AudioQuality"sv));
+        required_int(detail::announce_int_field::audio_quality, "x-nv-audio.surround.AudioQuality"sv);
 
-      config.controlProtocolType = util::from_view(args.at("x-nv-general.useReliableUdp"sv));
+      config.controlProtocolType = required_int(detail::announce_int_field::control_protocol, "x-nv-general.useReliableUdp"sv);
       const auto packet_size_arg = args.at("x-nv-video[0].packetSize"sv);
       const auto min_fec_packets_arg = args.at("x-nv-vqos[0].fec.minRequiredFecPackets"sv);
       const auto packet_size = util::from_view_checked<int>(packet_size_arg);
@@ -1006,27 +1101,31 @@ namespace rtsp_stream {
       }
       config.packetsize = *packet_size;
       config.minRequiredFecPackets = *min_fec_packets;
-      config.mlFeatureFlags = util::from_view(args.at("x-ml-general.featureFlags"sv));
-      config.audioQosType = util::from_view(args.at("x-nv-aqos.qosTrafficType"sv));
-      config.videoQosType = util::from_view(args.at("x-nv-vqos[0].qosTrafficType"sv));
-      config.encryptionFlagsEnabled = util::from_view(args.at("x-ss-general.encryptionEnabled"sv));
+      config.mlFeatureFlags = required_int(detail::announce_int_field::feature_flags, "x-ml-general.featureFlags"sv);
+      config.audioQosType = required_int(detail::announce_int_field::audio_qos, "x-nv-aqos.qosTrafficType"sv);
+      config.videoQosType = required_int(detail::announce_int_field::video_qos, "x-nv-vqos[0].qosTrafficType"sv);
+      config.encryptionFlagsEnabled = required_int(detail::announce_int_field::encryption_flags, "x-ss-general.encryptionEnabled"sv);
 
       // Legacy clients use nvFeatureFlags to indicate support for audio encryption
-      if (util::from_view(args.at("x-nv-general.featureFlags"sv)) & 0x20) {
+      if (required_int(detail::announce_int_field::feature_flags, "x-nv-general.featureFlags"sv) & 0x20) {
         config.encryptionFlagsEnabled |= SS_ENC_AUDIO;
       }
 
-      config.monitor.height = util::from_view(args.at("x-nv-video[0].clientViewportHt"sv));
-      config.monitor.width = util::from_view(args.at("x-nv-video[0].clientViewportWd"sv));
-      config.monitor.framerate = util::from_view(args.at("x-nv-video[0].maxFPS"sv));
-      config.monitor.bitrate = util::from_view(args.at("x-nv-vqos[0].bw.maximumBitrateKbps"sv));
-      config.monitor.slicesPerFrame = util::from_view(args.at("x-nv-video[0].videoEncoderSlicesPerFrame"sv));
-      config.monitor.numRefFrames = util::from_view(args.at("x-nv-video[0].maxNumReferenceFrames"sv));
-      config.monitor.encoderCscMode = util::from_view(args.at("x-nv-video[0].encoderCscMode"sv));
-      config.monitor.videoFormat = util::from_view(args.at("x-nv-vqos[0].bitStreamFormat"sv));
-      config.monitor.dynamicRange = util::from_view(args.at("x-nv-video[0].dynamicRangeMode"sv));
-      config.monitor.chromaSamplingType = util::from_view(args.at("x-ss-video[0].chromaSamplingType"sv));
-      config.monitor.enableIntraRefresh = util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
+      config.monitor.height = required_int(detail::announce_int_field::viewport_dimension, "x-nv-video[0].clientViewportHt"sv);
+      config.monitor.width = required_int(detail::announce_int_field::viewport_dimension, "x-nv-video[0].clientViewportWd"sv);
+      config.monitor.framerate = required_int(detail::announce_int_field::max_fps, "x-nv-video[0].maxFPS"sv);
+      config.monitor.bitrate = required_int(detail::announce_int_field::bitrate_kbps, "x-nv-vqos[0].bw.maximumBitrateKbps"sv);
+      config.monitor.slicesPerFrame = required_int(detail::announce_int_field::slices_per_frame, "x-nv-video[0].videoEncoderSlicesPerFrame"sv);
+      config.monitor.numRefFrames = required_int(detail::announce_int_field::reference_frames, "x-nv-video[0].maxNumReferenceFrames"sv);
+      config.monitor.encoderCscMode = required_int(detail::announce_int_field::encoder_csc_mode, "x-nv-video[0].encoderCscMode"sv);
+      config.monitor.videoFormat = required_int(detail::announce_int_field::video_format, "x-nv-vqos[0].bitStreamFormat"sv);
+      config.monitor.dynamicRange = required_int(detail::announce_int_field::binary_option, "x-nv-video[0].dynamicRangeMode"sv);
+      config.monitor.chromaSamplingType = required_int(detail::announce_int_field::binary_option, "x-ss-video[0].chromaSamplingType"sv);
+      config.monitor.enableIntraRefresh = required_int(detail::announce_int_field::binary_option, "x-ss-video[0].intraRefresh"sv);
+
+      if (session.fps <= 0 || session.fps > 1000000) {
+        throw std::invalid_argument("launch session frame rate");
+      }
 
       if (config::video.limit_framerate) {
         config.monitor.encodingFramerate = session.fps;
@@ -1046,7 +1145,7 @@ namespace rtsp_stream {
 
       config.monitor.input_only = session.input_only;
 
-      configuredBitrateKbps = util::from_view(args.at("x-ml-video.configuredBitrateKbps"sv));
+      configuredBitrateKbps = required_int(detail::announce_int_field::configured_bitrate_kbps, "x-ml-video.configuredBitrateKbps"sv);
 
       if (!configuredBitrateKbps) {
         configuredBitrateKbps = config.monitor.bitrate;
@@ -1063,13 +1162,23 @@ namespace rtsp_stream {
       BOOST_LOG(info) << "Host Streaming bitrate is [" << configuredBitrateKbps << "kbps]";
 
       // Hack: Restore bitrate for warp mode
-      size_t warp_factor = std::round((float)config.monitor.framerate * 1000 / session.fps);
-      if (config::video.limit_framerate && warp_factor >= 2) {
-        configuredBitrateKbps *= warp_factor;
-        BOOST_LOG(info) << "Warp factor [" << warp_factor << "] engaged";
+      if (config::video.limit_framerate) {
+        const auto warp_factor = detail::calculate_warp_bitrate_factor(config.monitor.framerate, session.fps);
+        if (warp_factor >= 2) {
+          configuredBitrateKbps *= warp_factor;
+          BOOST_LOG(info) << "Warp factor [" << warp_factor << "] engaged";
+        }
+      }
+
+      if (!detail::is_safe_encoder_bitrate(configuredBitrateKbps)) {
+        throw std::invalid_argument("encoding bitrate");
       }
 
     } catch (std::out_of_range &) {
+      respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+      return;
+    } catch (const std::invalid_argument &error) {
+      BOOST_LOG(warning) << "Rejecting invalid RTSP ANNOUNCE parameter: "sv << error.what();
       respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
       return;
     }
