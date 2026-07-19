@@ -477,6 +477,7 @@ namespace nvhttp {
     }
     named_cert_p->cert = std::move(certificate);
 
+    rtsp_stream::client_policy_publication_t policy_publication;
     {
       std::unique_lock lock(client_state_mutex);
       // A certificate is the client identity. Re-pairing an already-authorized certificate is
@@ -492,8 +493,16 @@ namespace nvhttp {
       client_root.named_devices.push_back(named_cert_p);
       auto authorized_client = named_cert_p;
       cert_chain.add(authorized_client);
-      client_state_generation.fetch_add(1, std::memory_order_release);
+      const auto generation = client_state_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+      policy_publication = rtsp_stream::stage_client_policy(
+        named_cert_p->uuid,
+        generation,
+        named_cert_p->name,
+        named_cert_p->perm,
+        false
+      );
     }
+    rtsp_stream::complete_client_policy(std::move(policy_publication));
 
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
     system_tray::update_tray_paired(named_cert_p->name);
@@ -2216,11 +2225,26 @@ namespace nvhttp {
 
   void
   erase_all_clients() {
+    std::vector<std::pair<std::string, std::string>> revoked_clients;
+    std::vector<rtsp_stream::client_policy_publication_t> policy_publications;
     {
       std::unique_lock lock(client_state_mutex);
+      revoked_clients.reserve(client_root.named_devices.size());
+      for (const auto &client : client_root.named_devices) {
+        revoked_clients.emplace_back(client->uuid, client->name);
+      }
       client_root.named_devices.clear();
       cert_chain.clear();
-      client_state_generation.fetch_add(1, std::memory_order_release);
+      const auto generation = client_state_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+      policy_publications.reserve(revoked_clients.size());
+      for (const auto &[uuid, name] : revoked_clients) {
+        policy_publications.push_back(
+          rtsp_stream::stage_client_policy(uuid, generation, name, crypto::PERM::_no, true)
+        );
+      }
+    }
+    for (auto &publication : policy_publications) {
+      rtsp_stream::complete_client_policy(std::move(publication));
     }
     if (!config::sunshine.flags[config::flag::FRESH_STATE]) {
       save_state();
@@ -2247,26 +2271,12 @@ namespace nvhttp {
     }
   }
 
-  bool find_and_stop_session(const std::string& uuid, bool graceful) {
-    auto session = rtsp_stream::find_session(uuid);
-    if (session) {
+  bool find_and_stop_sessions(const std::string &uuid, bool graceful) {
+    const auto sessions = rtsp_stream::find_sessions(uuid);
+    for (const auto &session : sessions) {
       stop_session(*session, graceful);
-      return true;
     }
-    return false;
-  }
-
-  void update_session_info(stream::session_t& session, const std::string& name, const crypto::PERM newPerm) {
-    stream::session::update_device_info(session, name, newPerm);
-  }
-
-  bool find_and_udpate_session_info(const std::string& uuid, const std::string& name, const crypto::PERM newPerm) {
-    auto session = rtsp_stream::find_session(uuid);
-    if (session) {
-      update_session_info(*session, name, newPerm);
-      return true;
-    }
-    return false;
+    return !sessions.empty();
   }
 
   bool update_device_info(
@@ -2280,9 +2290,8 @@ namespace nvhttp {
     const bool allow_client_commands,
     const bool always_use_virtual_display
   ) {
-    find_and_udpate_session_info(uuid, name, newPerm);
-
     bool updated = false;
+    rtsp_stream::client_policy_publication_t policy_publication;
     {
       std::unique_lock lock(client_state_mutex);
       for (auto &named_cert_p : client_root.named_devices) {
@@ -2300,10 +2309,14 @@ namespace nvhttp {
         replacement->always_use_virtual_display = always_use_virtual_display;
         named_cert_p = std::move(replacement);
         rebuild_cert_chain_locked();
-        client_state_generation.fetch_add(1, std::memory_order_release);
+        const auto generation = client_state_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+        policy_publication = rtsp_stream::stage_client_policy(uuid, generation, name, newPerm, false);
         updated = true;
         break;
       }
+    }
+    if (updated) {
+      rtsp_stream::complete_client_policy(std::move(policy_publication));
     }
     if (updated && !config::sunshine.flags[config::flag::FRESH_STATE]) {
       save_state();
@@ -2314,10 +2327,13 @@ namespace nvhttp {
   bool unpair_client(const std::string_view uuid) {
     bool removed = false;
     bool clients_empty = false;
+    std::string client_name;
+    rtsp_stream::client_policy_publication_t policy_publication;
     {
       std::unique_lock lock(client_state_mutex);
       for (auto it = client_root.named_devices.begin(); it != client_root.named_devices.end();) {
         if ((*it)->uuid == uuid) {
+          client_name = (*it)->name;
           it = client_root.named_devices.erase(it);
           removed = true;
         } else {
@@ -2326,19 +2342,23 @@ namespace nvhttp {
       }
       if (removed) {
         rebuild_cert_chain_locked();
-        client_state_generation.fetch_add(1, std::memory_order_release);
+        const auto generation = client_state_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+        policy_publication = rtsp_stream::stage_client_policy(
+          uuid,
+          generation,
+          client_name,
+          crypto::PERM::_no,
+          true
+        );
       }
       clients_empty = client_root.named_devices.empty();
     }
 
-    if (removed && !config::sunshine.flags[config::flag::FRESH_STATE]) {
-      save_state();
-    }
-
     if (removed) {
-      auto session = rtsp_stream::find_session(uuid);
-      if (session) {
-        stop_session(*session, true);
+      rtsp_stream::complete_client_policy(std::move(policy_publication));
+
+      if (!config::sunshine.flags[config::flag::FRESH_STATE]) {
+        save_state();
       }
 
       if (clients_empty) {

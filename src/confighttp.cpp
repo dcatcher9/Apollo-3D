@@ -1514,7 +1514,7 @@ namespace confighttp {
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       std::string uuid = input_tree.value("uuid", "");
-      output_tree["status"] = nvhttp::find_and_stop_session(uuid, true);
+      output_tree["status"] = nvhttp::find_and_stop_sessions(uuid, true);
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "Disconnect: "sv << e.what();

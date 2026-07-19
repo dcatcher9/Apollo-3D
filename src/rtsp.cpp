@@ -15,6 +15,7 @@ extern "C" {
 #include <cmath>
 #include <format>
 #include <limits>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
@@ -553,6 +554,13 @@ namespace rtsp_stream {
   };
 
   class rtsp_server_t {
+    struct client_policy_t {
+      std::uint64_t generation;
+      std::string name;
+      crypto::PERM permissions;
+      bool revoked;
+    };
+
   public:
     ~rtsp_server_t() {
       clear();
@@ -740,13 +748,66 @@ namespace rtsp_stream {
     /**
      * @brief Inserts the provided session into the set of sessions.
      * @param session The session to insert.
+     * @return Whether the current client policy allows insertion.
      */
-    void insert(const std::shared_ptr<stream::session_t> &session) {
-      auto lg = _session_slots.lock();
+    bool insert(const std::shared_ptr<stream::session_t> &session) {
+      // The policy lock serializes authorization publication with insertion. A pending RTSP
+      // launch therefore cannot slip through after its client was revoked or keep stale rights.
+      std::lock_guard policy_lock(_client_policy_mutex);
+      if (!apply_current_policy_locked(*session)) {
+        return false;
+      }
+
+      emplace_session_locked(session);
+      return true;
+    }
+
+    /**
+     * @brief Starts and registers a session atomically with authorization publication.
+     * @return 0 on success, 403 when authorization was revoked, or 500 when startup failed.
+     */
+    int start_and_insert(const std::shared_ptr<stream::session_t> &session, const std::string &address) {
+      // Keep the policy lock through startup. Otherwise a revocation can observe the registered
+      // session while it is still STOPPED (where graceful_stop is intentionally a no-op), after
+      // which the RTSP thread could incorrectly transition it to RUNNING.
+      std::lock_guard policy_lock(_client_policy_mutex);
+      if (!apply_current_policy_locked(*session)) {
+        return 403;
+      }
+      if (stream::session::start(*session, address)) {
+        return 500;
+      }
+
+      emplace_session_locked(session);
+      return 0;
+    }
+
+  private:
+    bool apply_current_policy_locked(stream::session_t &session) {
+      const auto policy = _client_policies.find(stream::session::uuid(session));
+      if (policy == _client_policies.end()) {
+        return static_cast<bool>(stream::session::permissions(session) & crypto::PERM::_allow_view);
+      }
+      if (policy->second.revoked || !(policy->second.permissions & crypto::PERM::_allow_view)) {
+        return false;
+      }
+      stream::session::update_client_policy(
+        session,
+        policy->second.generation,
+        policy->second.name,
+        policy->second.permissions,
+        false
+      );
+      return true;
+    }
+
+    void emplace_session_locked(const std::shared_ptr<stream::session_t> &session) {
+      auto sessions_lock = _session_slots.lock();
       _session_slots->emplace(session);
       BOOST_LOG(info) << "New streaming session started [active sessions: "sv << _session_slots->size() << ']';
     }
 
+  public:
     /**
      * @brief Runs an iteration of the RTSP server loop
      */
@@ -769,17 +830,75 @@ namespace rtsp_stream {
       clear();
     }
 
-    std::shared_ptr<stream::session_t>
-    find_session(const std::string_view& uuid) {
+    std::vector<std::shared_ptr<stream::session_t>> find_sessions(std::string_view uuid) {
+      std::vector<std::shared_ptr<stream::session_t>> sessions;
       auto lg = _session_slots.lock();
 
       for (auto &slot : *_session_slots) {
         if (slot && stream::session::uuid_match(*slot, uuid)) {
-          return slot;
+          sessions.push_back(slot);
         }
       }
 
-      return nullptr;
+      return sessions;
+    }
+
+    client_policy_publication_t stage_client_policy(
+      std::string_view uuid,
+      std::uint64_t generation,
+      std::string name,
+      crypto::PERM permissions,
+      bool revoked
+    ) {
+      client_policy_publication_t publication;
+      std::vector<std::shared_ptr<stream::session_t>> sessions;
+      client_policy_t published_policy {
+        .generation = generation,
+        .name = std::move(name),
+        .permissions = permissions,
+        .revoked = revoked,
+      };
+      {
+        // All publication and insertion paths take this lock first, then the session-set lock.
+        // Session mutation and shutdown happen only after both locks are released.
+        std::lock_guard policy_lock(_client_policy_mutex);
+        const auto current = _client_policies.find(std::string(uuid));
+        if (current != _client_policies.end() && generation <= current->second.generation) {
+          return publication;
+        }
+
+        _client_policies.insert_or_assign(
+          std::string(uuid),
+          published_policy
+        );
+
+        auto sessions_lock = _session_slots.lock();
+        for (const auto &slot : *_session_slots) {
+          if (slot && stream::session::uuid_match(*slot, uuid)) {
+            sessions.push_back(slot);
+          }
+        }
+      }
+
+      for (const auto &session : sessions) {
+        const auto result = stream::session::update_client_policy(
+          *session,
+          published_policy.generation,
+          published_policy.name,
+          published_policy.permissions,
+          published_policy.revoked
+        );
+        if (result == stream::session::client_policy_result_e::disconnect) {
+          publication.stops.push_back(
+            client_policy_stop_t {
+              .session = session,
+              .generation = published_policy.generation,
+            }
+          );
+        }
+      }
+      publication.accepted = true;
+      return publication;
     }
 
     std::list<std::string>
@@ -798,6 +917,8 @@ namespace rtsp_stream {
     std::unordered_map<std::string_view, cmd_func_t> _map_cmd_cb;
 
     sync_util::sync_t<std::set<std::shared_ptr<stream::session_t>>> _session_slots;
+    std::mutex _client_policy_mutex;
+    std::unordered_map<std::string, client_policy_t> _client_policies;
 
     boost::asio::io_context io_context;
     tcp::acceptor acceptor {io_context};
@@ -823,13 +944,52 @@ namespace rtsp_stream {
     return server.session_count();
   }
 
-  std::shared_ptr<stream::session_t> find_session(const std::string_view& uuid) {
-    return server.find_session(uuid);
+  std::vector<std::shared_ptr<stream::session_t>> find_sessions(std::string_view uuid) {
+    return server.find_sessions(uuid);
+  }
+
+  client_policy_publication_t stage_client_policy(
+    std::string_view uuid,
+    std::uint64_t generation,
+    std::string name,
+    crypto::PERM permissions,
+    bool revoked
+  ) {
+    return server.stage_client_policy(uuid, generation, std::move(name), permissions, revoked);
+  }
+
+  void complete_client_policy(client_policy_publication_t publication, bool graceful) {
+    for (const auto &stop : publication.stops) {
+      stream::session::stop_if_client_policy_current(*stop.session, stop.generation, graceful);
+    }
+  }
+
+  bool publish_client_policy(
+    std::string_view uuid,
+    std::uint64_t generation,
+    std::string name,
+    crypto::PERM permissions,
+    bool revoked
+  ) {
+    auto publication = stage_client_policy(uuid, generation, std::move(name), permissions, revoked);
+    const bool accepted = publication.accepted;
+    complete_client_policy(std::move(publication));
+    return accepted;
   }
 
   std::list<std::string> get_all_session_uuids() {
     return server.get_all_session_uuids();
   }
+
+#ifdef SUNSHINE_TESTS
+  bool insert_session_for_test(const std::shared_ptr<stream::session_t> &session) {
+    return server.insert(session);
+  }
+
+  void remove_session_for_test(const std::shared_ptr<stream::session_t> &session) {
+    server.remove(session);
+  }
+#endif
 
   void terminate_sessions() {
     server.clear(true);
@@ -1339,12 +1499,17 @@ namespace rtsp_stream {
     }
 
     auto stream_session = stream::session::alloc(config, session);
-    server->insert(stream_session);
-
-    if (stream::session::start(*stream_session, sock.remote_endpoint().address().to_string())) {
+    const auto start_result = server->start_and_insert(
+      stream_session,
+      sock.remote_endpoint().address().to_string()
+    );
+    if (start_result == 403) {
+      BOOST_LOG(warning) << "Rejecting streaming session for a client with revoked view permission"sv;
+      respond(sock, session, &option, 403, "Forbidden", req->sequenceNumber, {});
+      return;
+    }
+    if (start_result != 0) {
       BOOST_LOG(error) << "Failed to start a streaming session"sv;
-
-      server->remove(stream_session);
       respond(sock, session, &option, 500, "Internal Server Error", req->sequenceNumber, {});
       return;
     }

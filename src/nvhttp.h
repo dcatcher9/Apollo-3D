@@ -280,30 +280,12 @@ namespace nvhttp {
   void stop_session(stream::session_t& session, bool graceful);
 
   /**
-   * @brief      Finds and stop session.
+   * @brief      Finds and stops every session for a client.
    *
    * @param[in]  uuid      The uuid string
    * @param[in]  graceful  Whether to stop gracefully
    */
-  bool find_and_stop_session(const std::string& uuid, bool graceful);
-
-  /**
-   * @brief      Update device info associated to the session
-   *
-   * @param      session  The session
-   * @param[in]  name     New name
-   * @param[in]  newPerm  New permission
-   */
-  void update_session_info(stream::session_t& session, const std::string& name, const crypto::PERM newPerm);
-
-  /**
-   * @brief      Finds and udpate session information.
-   *
-   * @param[in]  uuid     The uuid string
-   * @param[in]  name     New name
-   * @param[in]  newPerm  New permission
-   */
-  bool find_and_udpate_session_info(const std::string& uuid, const std::string& name, const crypto::PERM newPerm);
+  bool find_and_stop_sessions(const std::string &uuid, bool graceful);
 
   /**
    * @brief      Update device info

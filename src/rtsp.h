@@ -10,7 +10,9 @@
 #include <memory>
 #include <list>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <vector>
 
 // local includes
 #include "crypto.h"
@@ -110,11 +112,53 @@ namespace rtsp_stream {
    */
   int session_count();
 
-  std::shared_ptr<stream::session_t>
-  find_session(const std::string_view& uuid);
+  std::vector<std::shared_ptr<stream::session_t>>
+  find_sessions(std::string_view uuid);
+
+  struct client_policy_stop_t {
+    std::shared_ptr<stream::session_t> session;
+    std::uint64_t generation;
+  };
+
+  struct client_policy_publication_t {
+    bool accepted {false};
+    std::vector<client_policy_stop_t> stops;
+  };
+
+  /**
+   * Record the latest authorization policy and update session permissions without shutting down.
+   * Callers may invoke this while holding their authorization-state lock, then complete the
+   * potentially re-entrant shutdown phase after releasing it.
+   */
+  client_policy_publication_t stage_client_policy(
+    std::string_view uuid,
+    std::uint64_t generation,
+    std::string name,
+    crypto::PERM permissions,
+    bool revoked
+  );
+
+  void complete_client_policy(client_policy_publication_t publication, bool graceful = true);
+
+  /**
+   * Publish the latest authorization policy for a client and apply it to all active sessions.
+   * Older generations are ignored, and future session insertion observes the same policy.
+   */
+  bool publish_client_policy(
+    std::string_view uuid,
+    std::uint64_t generation,
+    std::string name,
+    crypto::PERM permissions,
+    bool revoked
+  );
 
   std::list<std::string>
   get_all_session_uuids();
+
+#ifdef SUNSHINE_TESTS
+  bool insert_session_for_test(const std::shared_ptr<stream::session_t> &session);
+  void remove_session_for_test(const std::shared_ptr<stream::session_t> &session);
+#endif
 
   /**
    * @brief Terminates all running streaming sessions.

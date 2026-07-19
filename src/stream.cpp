@@ -7,6 +7,7 @@
 #include <cstring>
 #include <fstream>
 #include <future>
+#include <mutex>
 #include <optional>
 #include <queue>
 #include <stdexcept>
@@ -448,9 +449,11 @@ namespace stream {
     } control;
 
     std::uint32_t launch_session_id;
+    mutable std::mutex device_info_mutex;
     std::string device_name;
     std::string device_uuid;
-    crypto::PERM permission;
+    std::uint64_t client_policy_generation;
+    std::atomic<crypto::PERM> permission;
 
     std::list<crypto::command_entry_t> do_cmds;
     std::list<crypto::command_entry_t> undo_cmds;
@@ -1090,14 +1093,14 @@ namespace stream {
         std::copy(tagged_cipher.end() - 16, tagged_cipher.end(), std::begin(iv));
       }
 
-      input::passthrough(session->input, std::move(plaintext), session->permission);
+      input::passthrough(session->input, std::move(plaintext), session::permissions(*session));
     });
 
     server->map(packetTypes[IDX_EXEC_SERVER_CMD], sizeof(std::uint8_t), [server](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_EXEC_SERVER_CMD]"sv;
 
-      if (!(session->permission & crypto::PERM::server_cmd)) {
-        BOOST_LOG(debug) << "Permission Exec Server Cmd denied for [" << session->device_name << "]";
+      if (!(session::permissions(*session) & crypto::PERM::server_cmd)) {
+        BOOST_LOG(debug) << "Permission Exec Server Cmd denied for [" << session::client_name(*session) << "]";
         return;
       }
 
@@ -1127,8 +1130,8 @@ namespace stream {
     });
 
     server->map(packetTypes[IDX_SET_CLIPBOARD], [server](session_t *session, const std::string_view &payload) {
-      if (!(session->permission & crypto::PERM::clipboard_set)) {
-        BOOST_LOG(debug) << "Permission Clipboard Set denied for [" << session->device_name << "]";
+      if (!(session::permissions(*session) & crypto::PERM::clipboard_set)) {
+        BOOST_LOG(debug) << "Permission Clipboard Set denied for [" << session::client_name(*session) << "]";
         return;
       }
 
@@ -1136,8 +1139,8 @@ namespace stream {
     });
 
     server->map(packetTypes[IDX_FILE_TRANSFER_NONCE_REQUEST], [server](session_t *session, const std::string_view &payload) {
-      if (!(session->permission & crypto::PERM::file_upload)) {
-        BOOST_LOG(debug) << "Permission File Upload denied for [" << session->device_name << "]";
+      if (!(session::permissions(*session) & crypto::PERM::file_upload)) {
+        BOOST_LOG(debug) << "Permission File Upload denied for [" << session::client_name(*session) << "]";
         return;
       }
 
@@ -1150,13 +1153,13 @@ namespace stream {
       auto mode = *(uint8_t *) payload.data();
       if (mode > ::video::SBS_AI) {
         BOOST_LOG(warning) << "type [IDX_SET_SBS_MODE]: unknown mode "sv << (int) mode
-                           << " from ["sv << session->device_name << "]; ignored"sv;
+                           << " from ["sv << session::client_name(*session) << "]; ignored"sv;
         return;
       }
       std::string_view mode_name = mode == ::video::SBS_OFF ? "OFF"sv : "AI"sv;
       BOOST_LOG(info) << "type [IDX_SET_SBS_MODE]: client requested host SBS "sv << mode_name
                       << " ("sv << (int) mode << ") for ["sv
-                      << session->device_name << ']';
+                      << session::client_name(*session) << ']';
 
       // Turning SBS off tears down the depth estimator with no replacement, so mark the depth
       // engine idle here (display_vram only ever sets loading/ready). This clears any "loading"
@@ -1175,7 +1178,7 @@ namespace stream {
       // Debug: client tapped the "Dump 3D" button. Flag the next SBS convert() to dump one
       // frame's source/depth/SBS images to the configured debug dir (Apollo protocol extension).
       BOOST_LOG(info) << "type [IDX_SBS_DEBUG_DUMP]: client requested SBS debug frame dump for ["sv
-                      << session->device_name << ']';
+                      << session::client_name(*session) << ']';
       ::video::sbs_debug_dump_pending.store(true, std::memory_order_relaxed);
     });
 
@@ -1264,7 +1267,7 @@ namespace stream {
       // IDX_INPUT_DATA callback will attempt to decrypt unencrypted data, therefore we need pass it directly
       if (type == packetTypes[IDX_INPUT_DATA]) {
         plaintext.erase(std::begin(plaintext), std::begin(plaintext) + CONTROL_HEADER_V2_SIZE);
-        input::passthrough(session->input, std::move(plaintext), session->permission);
+        input::passthrough(session->input, std::move(plaintext), session::permissions(*session));
       } else {
         server->call(type, session, next_payload, true);
       }
@@ -2139,6 +2142,12 @@ namespace stream {
       return session.state.load(std::memory_order_relaxed);
     }
 
+#ifdef SUNSHINE_TESTS
+    void set_state_for_test(session_t &session, state_e state) {
+      session.state.store(state, std::memory_order_relaxed);
+    }
+#endif
+
     inline bool send(session_t &session, const std::string_view &payload) {
       return session.broadcast_ref->control_server.send(payload, session.control.peer);
     }
@@ -2151,43 +2160,52 @@ namespace stream {
       return session.device_uuid == uuid;
     }
 
-    bool update_device_info(session_t &session, const std::string &name, const crypto::PERM &newPerm) {
-      session.permission = newPerm;
-      if (!(newPerm & crypto::PERM::_allow_view)) {
-        BOOST_LOG(debug) << "Session: View permission revoked for [" << session.device_name << "], disconnecting...";
-        graceful_stop(session);
-        return true;
-      }
+    std::string client_name(const session_t &session) {
+      std::lock_guard lock(session.device_info_mutex);
+      return session.device_name;
+    }
 
-      BOOST_LOG(debug) << "Session: Permission updated for [" << session.device_name << "]";
+    crypto::PERM permissions(const session_t &session) {
+      return session.permission.load(std::memory_order_acquire);
+    }
 
-      if (session.device_name != name) {
-        BOOST_LOG(debug) << "Session: Device name changed from [" << session.device_name << "] to [" << name << "]";
+    client_policy_result_e update_client_policy(
+      session_t &session,
+      std::uint64_t generation,
+      std::string_view name,
+      crypto::PERM new_permissions,
+      bool revoked
+    ) {
+      std::string previous_name;
+      bool should_stop;
+      {
+        // Serialize policy publications per session. Merely making the permission atomic is not
+        // enough: two administrator updates can otherwise publish out of generation order.
+        std::lock_guard lock(session.device_info_mutex);
+        if (generation <= session.client_policy_generation) {
+          return client_policy_result_e::ignored;
+        }
+
+        session.client_policy_generation = generation;
+        session.permission.store(new_permissions, std::memory_order_release);
+        previous_name = session.device_name;
         session.device_name = name;
+        should_stop = revoked || !(new_permissions & crypto::PERM::_allow_view);
       }
 
-      return false;
+      if (should_stop) {
+        BOOST_LOG(debug) << "Session: Client authorization revoked for [" << previous_name << "], disconnecting...";
+        return client_policy_result_e::disconnect;
+      }
+
+      BOOST_LOG(debug) << "Session: Permission updated for [" << previous_name << "]";
+      if (previous_name != name) {
+        BOOST_LOG(debug) << "Session: Device name changed from [" << previous_name << "] to [" << name << "]";
+      }
+      return client_policy_result_e::updated;
     }
 
-    void stop(session_t &session) {
-      while_starting_do_nothing(session.state);
-      auto expected = state_e::RUNNING;
-      auto already_stopping = !session.state.compare_exchange_strong(expected, state_e::STOPPING);
-      if (already_stopping) {
-        return;
-      }
-
-      session.shutdown_event->raise(true);
-    }
-
-    void graceful_stop(session_t &session) {
-      while_starting_do_nothing(session.state);
-      auto expected = state_e::RUNNING;
-      auto already_stopping = !session.state.compare_exchange_strong(expected, state_e::STOPPING);
-      if (already_stopping) {
-        return;
-      }
-
+    static void signal_graceful_stop(session_t &session) {
       // reason: graceful termination
       std::uint32_t reason = 0x80030023;
 
@@ -2210,6 +2228,48 @@ namespace stream {
 
       session.shutdown_event->raise(true);
       session.controlEnd.raise(true);
+    }
+
+    static bool transition_to_stopping(session_t &session) {
+      auto expected = state_e::RUNNING;
+      return session.state.compare_exchange_strong(expected, state_e::STOPPING);
+    }
+
+    void stop(session_t &session) {
+      while_starting_do_nothing(session.state);
+      if (!transition_to_stopping(session)) {
+        return;
+      }
+
+      session.shutdown_event->raise(true);
+    }
+
+    void graceful_stop(session_t &session) {
+      while_starting_do_nothing(session.state);
+      if (!transition_to_stopping(session)) {
+        return;
+      }
+
+      signal_graceful_stop(session);
+    }
+
+    bool stop_if_client_policy_current(session_t &session, std::uint64_t generation, bool graceful) {
+      while_starting_do_nothing(session.state);
+      {
+        // Make validation and the RUNNING -> STOPPING claim one transaction with policy updates.
+        // A delayed revoke can no longer stop a session after a newer allow policy was applied.
+        std::lock_guard lock(session.device_info_mutex);
+        if (generation != session.client_policy_generation || !transition_to_stopping(session)) {
+          return false;
+        }
+      }
+
+      if (graceful) {
+        signal_graceful_stop(session);
+      } else {
+        session.shutdown_event->raise(true);
+      }
+      return true;
     }
 
     void join(session_t &session) {
@@ -2344,7 +2404,8 @@ namespace stream {
       session->launch_session_id = launch_session.id;
       session->device_name = launch_session.device_name;
       session->device_uuid = launch_session.unique_id;
-      session->permission = launch_session.perm;
+      session->client_policy_generation = 0;
+      session->permission.store(launch_session.perm, std::memory_order_relaxed);
 
       session->do_cmds = std::move(launch_session.client_do_cmds);
       session->undo_cmds = std::move(launch_session.client_undo_cmds);
