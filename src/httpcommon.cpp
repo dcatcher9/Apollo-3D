@@ -5,11 +5,20 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#include <algorithm>
+#include <array>
+#include <charconv>
+#include <cctype>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <optional>
+#include <string_view>
 #include <utility>
 
 // lib includes
+#include <boost/algorithm/string/case_conv.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/ssl/context_base.hpp>
 #include <boost/property_tree/json_parser.hpp>
@@ -36,6 +45,158 @@ namespace http {
   using namespace std::literals;
   namespace fs = std::filesystem;
   namespace pt = boost::property_tree;
+
+  namespace {
+    struct web_origin_t {
+      std::string host;
+      std::uint16_t port;
+    };
+
+    bool contains_invalid_header_character(const std::string_view value) {
+      if (value.empty()) {
+        return true;
+      }
+
+      return std::ranges::any_of(value, [](const unsigned char character) {
+        return character <= 0x20 || character == 0x7f || character == ',';
+      });
+    }
+
+    bool has_valid_https_authority_syntax(const std::string_view value) {
+      constexpr auto prefix = "https://"sv;
+      if (value.size() <= prefix.size() || !boost::iequals(value.substr(0, prefix.size()), prefix)) {
+        return false;
+      }
+
+      const auto authority_end = value.find_first_of("/?#", prefix.size());
+      const auto authority = value.substr(
+        prefix.size(),
+        authority_end == std::string_view::npos ? std::string_view::npos : authority_end - prefix.size()
+      );
+      if (authority.empty() || authority.contains('@') || authority.contains('\\')) {
+        return false;
+      }
+
+      std::string_view port;
+      if (authority.front() == '[') {
+        const auto bracket = authority.find(']');
+        if (bracket == std::string_view::npos || bracket == 1 || authority.find('[', 1) != std::string_view::npos ||
+            authority.find(']', bracket + 1) != std::string_view::npos) {
+          return false;
+        }
+
+        const auto suffix = authority.substr(bracket + 1);
+        if (suffix.empty()) {
+          return true;
+        }
+        if (suffix.front() != ':') {
+          return false;
+        }
+        port = suffix.substr(1);
+      } else {
+        if (authority.contains('[') || authority.contains(']')) {
+          return false;
+        }
+        const auto colon = authority.find(':');
+        if (colon == std::string_view::npos) {
+          return true;
+        }
+        if (colon == 0 || authority.find(':', colon + 1) != std::string_view::npos) {
+          return false;
+        }
+        port = authority.substr(colon + 1);
+      }
+
+      return !port.empty() &&
+             std::ranges::all_of(port, [](const unsigned char character) {
+               return std::isdigit(character) != 0;
+             });
+    }
+
+    std::optional<std::string> curl_url_part(CURLU *url, const CURLUPart part, const unsigned int flags = 0) {
+      char *value = nullptr;
+      if (curl_url_get(url, part, &value, flags) != CURLUE_OK) {
+        return std::nullopt;
+      }
+
+      std::string result {value};
+      curl_free(value);
+      return result;
+    }
+
+    std::string normalize_origin_host(std::string host) {
+      if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
+        host = host.substr(1, host.size() - 2);
+      }
+
+      boost::system::error_code ec;
+      const auto address = boost::asio::ip::make_address(host, ec);
+      if (!ec) {
+        return address.to_string();
+      }
+
+      boost::algorithm::to_lower(host);
+      return host;
+    }
+
+    std::optional<web_origin_t> parse_https_origin(const std::string_view value, const bool allow_resource) {
+      if (contains_invalid_header_character(value) || !has_valid_https_authority_syntax(value)) {
+        return std::nullopt;
+      }
+
+      auto *url = curl_url();
+      if (!url) {
+        return std::nullopt;
+      }
+      const auto cleanup = util::fail_guard([url]() {
+        curl_url_cleanup(url);
+      });
+
+      const std::string owned_value {value};
+      if (curl_url_set(url, CURLUPART_URL, owned_value.c_str(), 0) != CURLUE_OK) {
+        return std::nullopt;
+      }
+
+      const auto scheme = curl_url_part(url, CURLUPART_SCHEME);
+      const auto host = curl_url_part(url, CURLUPART_HOST);
+      const auto port = curl_url_part(url, CURLUPART_PORT, CURLU_DEFAULT_PORT);
+      if (!scheme || !boost::iequals(*scheme, "https") || !host || host->empty() || !port) {
+        return std::nullopt;
+      }
+
+      if (curl_url_part(url, CURLUPART_USER) || curl_url_part(url, CURLUPART_PASSWORD)) {
+        return std::nullopt;
+      }
+
+      const auto path = curl_url_part(url, CURLUPART_PATH);
+      if (!allow_resource && path && *path != "/") {
+        return std::nullopt;
+      }
+      if ((!allow_resource && curl_url_part(url, CURLUPART_QUERY)) || curl_url_part(url, CURLUPART_FRAGMENT)) {
+        return std::nullopt;
+      }
+
+      unsigned int parsed_port = 0;
+      const auto [end, error] = std::from_chars(port->data(), port->data() + port->size(), parsed_port);
+      if (error != std::errc {} || end != port->data() + port->size() || parsed_port == 0 || parsed_port > 65535) {
+        return std::nullopt;
+      }
+
+      return web_origin_t {normalize_origin_host(*host), static_cast<std::uint16_t>(parsed_port)};
+    }
+
+    bool same_https_origin(const web_origin_t &expected, const std::string_view candidate, const bool allow_resource) {
+      const auto parsed = parse_https_origin(candidate, allow_resource);
+      return parsed && expected.port == parsed->port && boost::iequals(expected.host, parsed->host);
+    }
+
+    template<std::size_t Size>
+    bool matches_sensitive_name(const std::string_view name, const std::array<std::string_view, Size> &sensitive_names) {
+      return std::ranges::any_of(sensitive_names, [name](const std::string_view sensitive_name) {
+        return boost::iequals(name, sensitive_name);
+      });
+    }
+  }  // namespace
 
   int reload_user_creds(const std::string &file);
   bool user_creds_exist(const std::string &file);
@@ -237,5 +398,67 @@ namespace http {
     curl_free(host);
     curl_url_cleanup(curlu);
     return result;
+  }
+
+  bool web_ui_origin_allowed(
+    const std::string_view host,
+    const std::optional<std::string_view> origin,
+    const std::optional<std::string_view> referer,
+    const std::optional<std::string_view> sec_fetch_site
+  ) {
+    const auto expected = parse_https_origin("https://"s + std::string {host}, false);
+    if (!expected) {
+      return false;
+    }
+
+    bool has_source_metadata = false;
+    if (sec_fetch_site) {
+      has_source_metadata = true;
+      if (!boost::iequals(*sec_fetch_site, "same-origin")) {
+        return false;
+      }
+    }
+
+    if (origin) {
+      has_source_metadata = true;
+      if (boost::iequals(*origin, "null") || !same_https_origin(*expected, *origin, false)) {
+        return false;
+      }
+    }
+
+    if (referer) {
+      has_source_metadata = true;
+      if (!same_https_origin(*expected, *referer, true)) {
+        return false;
+      }
+    }
+
+    return has_source_metadata;
+  }
+
+  std::string_view redact_request_header(const std::string_view name, const std::string_view value) {
+    static constexpr std::array sensitive_names {
+      "authorization"sv,
+      "proxy-authorization"sv,
+      "cookie"sv,
+      "set-cookie"sv,
+      "x-csrf-token"sv,
+    };
+    return matches_sensitive_name(name, sensitive_names) ? "CREDENTIALS REDACTED"sv : value;
+  }
+
+  std::string_view redact_query_parameter(const std::string_view name, const std::string_view value) {
+    static constexpr std::array sensitive_names {
+      "rikey"sv,
+      "rikeyid"sv,
+      "salt"sv,
+      "otpauth"sv,
+      "clientchallenge"sv,
+      "serverchallengeresp"sv,
+      "clientpairingsecret"sv,
+      "clientcert"sv,
+      "csrf_token"sv,
+    };
+    return matches_sensitive_name(name, sensitive_names) ? "CREDENTIALS REDACTED"sv : value;
   }
 }  // namespace http

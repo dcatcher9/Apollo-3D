@@ -8,6 +8,7 @@
 #include <functional>
 #include <chrono>
 #include <string>
+#include <string_view>
 
 // local includes
 #include "thread_safe.h"
@@ -19,6 +20,7 @@ using namespace std::chrono_literals;
 namespace confighttp {
   constexpr auto PORT_HTTPS = 1;
   constexpr auto SESSION_EXPIRE_DURATION = 24h * 15;
+  std::string make_auth_cookie(std::string_view token);
   void start();
 }  // namespace confighttp
 

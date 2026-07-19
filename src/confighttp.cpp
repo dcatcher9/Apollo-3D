@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -62,8 +63,19 @@ namespace confighttp {
   };
 
   // SESSION COOKIE
-  std::string sessionCookie;
+  static std::string sessionCookie;
   static std::chrono::time_point<std::chrono::steady_clock> cookie_creation_time;
+  static std::mutex auth_mutex;
+
+  static bool credentials_configured() {
+    std::lock_guard lock {auth_mutex};
+    return !config::sunshine.username.empty();
+  }
+
+  std::string make_auth_cookie(const std::string_view token) {
+    const auto max_age = std::chrono::duration_cast<std::chrono::seconds>(SESSION_EXPIRE_DURATION).count();
+    return std::format("auth={}; Secure; HttpOnly; SameSite=Strict; Max-Age={}; Path=/", token, max_age);
+  }
 
   /**
    * @brief Log the request details.
@@ -73,11 +85,11 @@ namespace confighttp {
     BOOST_LOG(debug) << "METHOD :: "sv << request->method;
     BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
     for (auto &[name, val] : request->header) {
-      BOOST_LOG(debug) << name << " -- " << (name == "Authorization" ? "CREDENTIALS REDACTED" : val);
+      BOOST_LOG(debug) << name << " -- " << http::redact_request_header(name, val);
     }
     BOOST_LOG(debug) << " [--] "sv;
     for (auto &[name, val] : request->parse_query_string()) {
-      BOOST_LOG(debug) << name << " -- " << val;
+      BOOST_LOG(debug) << name << " -- " << http::redact_query_parameter(name, val);
     }
     BOOST_LOG(debug) << " [--] "sv;
   }
@@ -168,6 +180,57 @@ namespace confighttp {
     return true;
   }
 
+  namespace {
+    struct request_header_t {
+      bool unique;
+      std::optional<std::string_view> value;
+    };
+
+    request_header_t get_single_request_header(const req_https_t &request, const std::string_view name) {
+      const auto range = request->header.equal_range(std::string {name});
+      if (range.first == range.second) {
+        return {true, std::nullopt};
+      }
+
+      auto entry = range.first;
+      const std::string_view value {entry->second};
+      if (++entry != range.second) {
+        return {false, std::nullopt};
+      }
+      return {true, value};
+    }
+
+    bool is_safe_http_method(const std::string_view method) {
+      return boost::iequals(method, "GET") ||
+             boost::iequals(method, "HEAD") ||
+             boost::iequals(method, "OPTIONS");
+    }
+  }  // namespace
+
+  /**
+   * @brief Reject unsafe browser requests that did not originate from this exact Web UI origin.
+   */
+  bool checkBrowserOrigin(resp_https_t response, req_https_t request) {
+    if (is_safe_http_method(request->method)) {
+      return true;
+    }
+
+    const auto host = get_single_request_header(request, "Host");
+    const auto origin = get_single_request_header(request, "Origin");
+    const auto referer = get_single_request_header(request, "Referer");
+    const auto sec_fetch_site = get_single_request_header(request, "Sec-Fetch-Site");
+    if (!host.unique || !host.value || !origin.unique || !referer.unique || !sec_fetch_site.unique ||
+        !http::web_ui_origin_allowed(*host.value, origin.value, referer.value, sec_fetch_site.value)) {
+      const auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
+      BOOST_LOG(warning) << "Web UI: ["sv << address << "] -- rejected cross-origin "sv
+                         << request->method << ' ' << request->path;
+      response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      return false;
+    }
+
+    return true;
+  }
+
   /**
    * @brief Authenticate the request.
    * @param response The HTTP response object.
@@ -178,10 +241,10 @@ namespace confighttp {
    * This function uses session cookies (if set) and ensures they have not expired.
    */
   bool authenticate(resp_https_t response, req_https_t request, bool needsRedirect = false) {
-    if (!checkIPOrigin(response, request))
+    if (!checkIPOrigin(response, request) || !checkBrowserOrigin(response, request))
       return false;
     // If credentials not set, redirect to welcome.
-    if (config::sunshine.username.empty()) {
+    if (!credentials_configured()) {
       send_redirect(response, request, "/welcome");
       return false;
     }
@@ -195,20 +258,24 @@ namespace confighttp {
         send_unauthorized(response, request);
       }
     });
-    if (sessionCookie.empty())
-      return false;
-    // Check for expiry
-    if (std::chrono::steady_clock::now() - cookie_creation_time > SESSION_EXPIRE_DURATION) {
-      sessionCookie.clear();
-      return false;
-    }
     auto cookies = request->header.find("cookie");
     if (cookies == request->header.end())
       return false;
     auto authCookie = getCookieValue(cookies->second, "auth");
-    if (authCookie.empty() ||
-        util::hex(crypto::hash(authCookie + config::sunshine.salt)).to_string() != sessionCookie)
+    if (authCookie.empty())
       return false;
+    {
+      std::lock_guard lock {auth_mutex};
+      if (sessionCookie.empty())
+        return false;
+      // Check for expiry
+      if (std::chrono::steady_clock::now() - cookie_creation_time > SESSION_EXPIRE_DURATION) {
+        sessionCookie.clear();
+        return false;
+      }
+      if (util::hex(crypto::hash(authCookie + config::sunshine.salt)).to_string() != sessionCookie)
+        return false;
+    }
     fg.disable();
     return true;
   }
@@ -421,7 +488,7 @@ namespace confighttp {
       return;
     }
 
-    if (config::sunshine.username.empty()) {
+    if (!credentials_configured()) {
       send_redirect(response, request, "/welcome");
       return;
     }
@@ -442,7 +509,7 @@ namespace confighttp {
   void getWelcomePage(resp_https_t response, req_https_t request) {
     print_req(request);
 
-    if (!config::sunshine.username.empty()) {
+    if (credentials_configured()) {
       send_redirect(response, request, "/");
       return;
     }
@@ -1238,7 +1305,14 @@ namespace confighttp {
    * @api_examples{/api/password| POST| {"currentUsername":"admin","currentPassword":"admin","newUsername":"admin","newPassword":"admin","confirmNewPassword":"admin"}}
    */
   void savePassword(resp_https_t response, req_https_t request) {
-    if ((!config::sunshine.username.empty() && !authenticate(response, request)) || !validateContentType(response, request, "application/json"))
+    if (!credentials_configured()) {
+      if (!checkIPOrigin(response, request) || !checkBrowserOrigin(response, request)) {
+        return;
+      }
+    } else if (!authenticate(response, request)) {
+      return;
+    }
+    if (!validateContentType(response, request, "application/json"))
       return;
     print_req(request);
     std::vector<std::string> errors;
@@ -1257,6 +1331,7 @@ namespace confighttp {
       if (newUsername.empty()) {
         errors.push_back("Invalid Username");
       } else {
+        std::lock_guard lock {auth_mutex};
         auto hash = util::hex(crypto::hash(password + config::sunshine.salt)).to_string();
         if (config::sunshine.username.empty() ||
             (boost::iequals(username, config::sunshine.username) && hash == config::sunshine.password)) {
@@ -1265,7 +1340,7 @@ namespace confighttp {
           else {
             http::save_user_creds(config::sunshine.credentials_file, newUsername, newPassword);
             http::reload_user_creds(config::sunshine.credentials_file);
-            sessionCookie.clear(); // force re-login
+            sessionCookie.clear();  // force re-login
             output_tree["status"] = true;
           }
         } else {
@@ -1536,7 +1611,8 @@ namespace confighttp {
    * @endcode
    */
   void login(resp_https_t response, req_https_t request) {
-    if (!checkIPOrigin(response, request) || !validateContentType(response, request, "application/json")) {
+    if (!checkIPOrigin(response, request) || !checkBrowserOrigin(response, request) ||
+        !validateContentType(response, request, "application/json")) {
       return;
     }
 
@@ -1550,14 +1626,17 @@ namespace confighttp {
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       std::string username = input_tree.value("username", "");
       std::string password = input_tree.value("password", "");
-      std::string hash = util::hex(crypto::hash(password + config::sunshine.salt)).to_string();
-      if (!boost::iequals(username, config::sunshine.username) || hash != config::sunshine.password)
-        return;
       std::string sessionCookieRaw = crypto::rand_alphabet(64);
-      sessionCookie = util::hex(crypto::hash(sessionCookieRaw + config::sunshine.salt)).to_string();
-      cookie_creation_time = std::chrono::steady_clock::now();
+      {
+        std::lock_guard lock {auth_mutex};
+        std::string hash = util::hex(crypto::hash(password + config::sunshine.salt)).to_string();
+        if (!boost::iequals(username, config::sunshine.username) || hash != config::sunshine.password)
+          return;
+        sessionCookie = util::hex(crypto::hash(sessionCookieRaw + config::sunshine.salt)).to_string();
+        cookie_creation_time = std::chrono::steady_clock::now();
+      }
       const SimpleWeb::CaseInsensitiveMultimap headers {
-        { "Set-Cookie", "auth=" + sessionCookieRaw + "; Secure; SameSite=Strict; Max-Age=2592000; Path=/" }
+        {"Set-Cookie", make_auth_cookie(sessionCookieRaw)}
       };
       response->write(headers);
       fg.disable();

@@ -963,13 +963,13 @@ namespace nvhttp {
     BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
 
     for (auto &[name, val] : request->header) {
-      BOOST_LOG(debug) << name << " -- " << val;
+      BOOST_LOG(debug) << name << " -- " << http::redact_request_header(name, val);
     }
 
     BOOST_LOG(debug) << " [--] "sv;
 
     for (auto &[name, val] : request->parse_query_string()) {
-      BOOST_LOG(debug) << name << " -- " << val;
+      BOOST_LOG(debug) << name << " -- " << http::redact_query_parameter(name, val);
     }
 
     BOOST_LOG(debug) << " [--] "sv;
@@ -1033,7 +1033,6 @@ namespace nvhttp {
         session->client.cert = util::from_hex_vec(get_arg(args, "clientcert"), true);
         session->async_insert_pin.salt = std::move(get_arg(args, "salt"));
 
-        BOOST_LOG(debug) << session->client.cert;
         const auto otp_auth = args.find("otpauth");
         const bool pin_from_stdin = config::sunshine.flags[config::flag::PIN_STDIN];
         if (otp_auth == args.end() && !pin_from_stdin) {

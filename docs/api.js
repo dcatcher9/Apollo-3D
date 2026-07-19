@@ -1,40 +1,72 @@
 function generateExamples(endpoint, method, body = null) {
+  const baseUrl = 'https://localhost:47990';
   let curlBodyString = '';
+  let pythonBodyString = '';
   let psBodyString = '';
 
   if (body) {
-    const curlJsonString = JSON.stringify(body).replace(/"/g, '\\"');
+    const jsonString = JSON.stringify(body);
+    const curlJsonString = jsonString.replace(/"/g, '\\"');
     curlBodyString = ` -d "${curlJsonString}"`;
-    psBodyString = `-Body (ConvertTo-Json ${JSON.stringify(body)})`;
+    pythonBodyString = `\n    json=json.loads('${jsonString.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'),`;
+    psBodyString = " `\n  -Body '" + jsonString.replace(/'/g, "''") + "'";
   }
 
   return {
-    cURL: `curl -u user:pass -H "Content-Type: application/json" -X ${method.trim()} -k https://localhost:47990${endpoint.trim()}${curlBodyString}`,
+    cURL: `curl -c apollo.cookies -H "Origin: ${baseUrl}" -H "Content-Type: application/json" -k ${baseUrl}/api/login -d "{\\"username\\":\\"user\\",\\"password\\":\\"pass\\"}"
+curl -b apollo.cookies -H "Origin: ${baseUrl}" -H "Content-Type: application/json" -X ${method.trim()} -k ${baseUrl}${endpoint.trim()}${curlBodyString}`,
     Python: `import json
 import requests
-from requests.auth import HTTPBasicAuth
 
-requests.${method.trim().toLowerCase()}(
-    auth=HTTPBasicAuth('user', 'pass'),
-    url='https://localhost:47990${endpoint.trim()}',
-    verify=False,${body ? `\n    json=${JSON.stringify(body)},` : ''}
+base_url = '${baseUrl}'
+session = requests.Session()
+session.headers['Origin'] = base_url
+session.post(
+    f'{base_url}/api/login',
+    json={'username': 'user', 'password': 'pass'},
+    verify=False,
+).raise_for_status()
+
+session.${method.trim().toLowerCase()}(
+    url=f'{base_url}${endpoint.trim()}',
+    verify=False,${pythonBodyString}
 ).json()`,
-    JavaScript: `fetch('https://localhost:47990${endpoint.trim()}', {
+    JavaScript: `// Run on the Apollo Web UI origin so the browser supplies matching source metadata.
+await fetch('./api/login', {
+  method: 'POST',
+  credentials: 'include',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({username: 'user', password: 'pass'}),
+});
+
+fetch('${endpoint.trim()}', {
   method: '${method.trim()}',
+  credentials: 'include',
   headers: {
-    'Authorization': 'Basic ' + btoa('user:pass'),
     'Content-Type': 'application/json',
   }${body ? `,\n  body: JSON.stringify(${JSON.stringify(body)}),` : ''}
 })
 .then(response => response.json())
 .then(data => console.log(data));`,
-    PowerShell: `Invoke-RestMethod \`
+    PowerShell: `$baseUrl = '${baseUrl}'
+$session = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+$headers = @{Origin = $baseUrl}
+Invoke-RestMethod \`
   -SkipCertificateCheck \`
   -ContentType 'application/json' \`
-  -Uri 'https://localhost:47990${endpoint.trim()}' \`
+  -Uri "$baseUrl/api/login" \`
+  -Method POST \`
+  -Headers $headers \`
+  -WebSession $session \`
+  -Body '{"username":"user","password":"pass"}'
+
+Invoke-RestMethod \`
+  -SkipCertificateCheck \`
+  -ContentType 'application/json' \`
+  -Uri "$baseUrl${endpoint.trim()}" \`
   -Method ${method.trim()} \`
-  -Headers @{Authorization = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes('user:pass'))}
-  ${psBodyString}`
+  -Headers $headers \`
+  -WebSession $session${psBodyString}`
   };
 }
 
