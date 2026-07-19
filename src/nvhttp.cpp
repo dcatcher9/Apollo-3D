@@ -579,6 +579,45 @@ namespace nvhttp {
     return launch_mode_t {*width, *height, static_cast<int>(fps)};
   }
 
+  std::optional<crypto::aes_t> parse_remote_input_key(std::string_view key) {
+    if (key.size() != 32) {
+      return std::nullopt;
+    }
+
+    const auto decode_nibble = [](char ch) -> std::optional<std::uint8_t> {
+      if (ch >= '0' && ch <= '9') {
+        return static_cast<std::uint8_t>(ch - '0');
+      }
+      if (ch >= 'a' && ch <= 'f') {
+        return static_cast<std::uint8_t>(ch - 'a' + 10);
+      }
+      if (ch >= 'A' && ch <= 'F') {
+        return static_cast<std::uint8_t>(ch - 'A' + 10);
+      }
+      return std::nullopt;
+    };
+
+    crypto::aes_t result(16);
+    for (std::size_t index = 0; index < result.size(); ++index) {
+      const auto high = decode_nibble(key[index * 2]);
+      const auto low = decode_nibble(key[index * 2 + 1]);
+      if (!high || !low) {
+        return std::nullopt;
+      }
+      result[index] = static_cast<std::uint8_t>((*high << 4) | *low);
+    }
+
+    return result;
+  }
+
+  std::optional<std::uint32_t> parse_remote_input_key_id(std::string_view key_id) {
+    if (key_id.starts_with('-')) {
+      const auto parsed = util::from_view_checked<std::int32_t>(key_id);
+      return parsed ? std::optional<std::uint32_t> {static_cast<std::uint32_t>(*parsed)} : std::nullopt;
+    }
+    return util::from_view_checked<std::uint32_t>(key_id);
+  }
+
   std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p) {
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 
@@ -586,8 +625,13 @@ namespace nvhttp {
 
     // If launched from client
     if (named_cert_p->uuid != http::unique_id) {
-      auto rikey = util::from_hex_vec(get_arg(args, "rikey"), true);
-      std::copy(rikey.cbegin(), rikey.cend(), std::back_inserter(launch_session->gcm_key));
+      const auto rikey = parse_remote_input_key(get_arg(args, "rikey"));
+      const auto rikey_id = parse_remote_input_key_id(get_arg(args, "rikeyid"));
+      if (!rikey || !rikey_id) {
+        BOOST_LOG(warning) << "Rejecting invalid remote-input encryption parameters for client ["sv << named_cert_p->name << ']';
+        return nullptr;
+      }
+      launch_session->gcm_key = *rikey;
 
       launch_session->host_audio = host_audio;
 
@@ -608,7 +652,7 @@ namespace nvhttp {
       RAND_bytes((unsigned char *) &launch_session->control_connect_data, sizeof(launch_session->control_connect_data));
 
       launch_session->iv.resize(16);
-      uint32_t prepend_iv = util::endian::big<uint32_t>(util::from_view(get_arg(args, "rikeyid")));
+      uint32_t prepend_iv = util::endian::big<uint32_t>(*rikey_id);
       auto prepend_iv_p = (uint8_t *) &prepend_iv;
       std::copy(prepend_iv_p, prepend_iv_p + sizeof(prepend_iv), std::begin(launch_session->iv));
     }
@@ -1471,7 +1515,7 @@ namespace nvhttp {
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
-      tree.put("root.<xmlattr>.status_message", "Invalid launch display mode");
+      tree.put("root.<xmlattr>.status_message", "Invalid launch parameters");
       return;
     }
 
@@ -1654,7 +1698,7 @@ namespace nvhttp {
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
-      tree.put("root.<xmlattr>.status_message", "Invalid resume display mode");
+      tree.put("root.<xmlattr>.status_message", "Invalid resume parameters");
       return;
     }
 

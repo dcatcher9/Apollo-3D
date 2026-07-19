@@ -8,6 +8,7 @@
 // standard includes
 #include <string>
 #include <chrono>
+#include <cstdint>
 #include <list>
 #include <mutex>
 #include <optional>
@@ -42,6 +43,8 @@ namespace nvhttp {
   };
 
   std::optional<launch_mode_t> parse_launch_mode(std::string_view mode);
+  std::optional<crypto::aes_t> parse_remote_input_key(std::string_view key);
+  std::optional<std::uint32_t> parse_remote_input_key_id(std::string_view key_id);
 
   /**
    * @brief The protocol version.
