@@ -4,6 +4,7 @@
  */
 
 // standard includes
+#include <cstring>
 #include <fstream>
 #include <future>
 #include <optional>
@@ -324,6 +325,19 @@ namespace stream {
       _map_type_cb.emplace(type, std::move(cb));
     }
 
+    void map(uint16_t type, std::size_t minimum_payload_size, std::function<void(session_t *, const std::string_view &)> cb) {
+      map(type, [type, minimum_payload_size, cb = std::move(cb)](session_t *session, const std::string_view &payload) {
+        if (payload.size() < minimum_payload_size) {
+          BOOST_LOG(warning) << "Dropping runt control message "sv << util::hex(type).to_string_view()
+                             << ": expected at least "sv << minimum_payload_size
+                             << " payload bytes, got "sv << payload.size();
+          return;
+        }
+
+        cb(session, payload);
+      });
+    }
+
     int send(const std::string_view &payload, net::peer_t peer) {
       auto packet = enet_packet_create(payload.data(), payload.size(), ENET_PACKET_FLAG_RELIABLE);
       if (enet_peer_send(peer, 0, packet)) {
@@ -615,7 +629,14 @@ namespace stream {
           {
             net::packet_t packet {event.packet};
 
-            auto type = *(std::uint16_t *) packet->data;
+            if (!is_valid_control_packet_size(packet->dataLength)) {
+              BOOST_LOG(warning) << "Dropping invalid control packet of "sv << packet->dataLength << " bytes"sv;
+              break;
+            }
+
+            std::uint16_t type;
+            std::memcpy(&type, packet->data, sizeof(type));
+            type = util::endian::little(type);
             std::string_view payload {(char *) packet->data + sizeof(type), packet->dataLength - sizeof(type)};
 
             call(type, session, payload, false);
@@ -1003,12 +1024,13 @@ namespace stream {
       BOOST_LOG(debug) << "type [IDX_START_B]"sv;
     });
 
-    server->map(packetTypes[IDX_LOSS_STATS], [&](session_t *session, const std::string_view &payload) {
-      int32_t *stats = (int32_t *) payload.data();
-      auto count = stats[0];
-      std::chrono::milliseconds t {stats[1]};
+    server->map(packetTypes[IDX_LOSS_STATS], 4 * sizeof(std::int32_t), [&](session_t *session, const std::string_view &payload) {
+      std::int32_t stats[4];
+      std::memcpy(stats, payload.data(), sizeof(stats));
+      auto count = util::endian::little(stats[0]);
+      std::chrono::milliseconds t {util::endian::little(stats[1])};
 
-      auto lastGoodFrame = stats[3];
+      auto lastGoodFrame = util::endian::little(stats[3]);
 
       BOOST_LOG(verbose)
         << "type [IDX_LOSS_STATS]"sv << std::endl
@@ -1025,10 +1047,11 @@ namespace stream {
       session->video.idr_events->raise(true);
     });
 
-    server->map(packetTypes[IDX_INVALIDATE_REF_FRAMES], [&](session_t *session, const std::string_view &payload) {
-      auto frames = (std::int64_t *) payload.data();
-      auto firstFrame = frames[0];
-      auto lastFrame = frames[1];
+    server->map(packetTypes[IDX_INVALIDATE_REF_FRAMES], 2 * sizeof(std::int64_t), [&](session_t *session, const std::string_view &payload) {
+      std::int64_t frames[2];
+      std::memcpy(frames, payload.data(), sizeof(frames));
+      auto firstFrame = util::endian::little(frames[0]);
+      auto lastFrame = util::endian::little(frames[1]);
 
       BOOST_LOG(debug)
         << "type [IDX_INVALIDATE_REF_FRAMES]"sv << std::endl
@@ -1038,11 +1061,19 @@ namespace stream {
       session->video.invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
     });
 
-    server->map(packetTypes[IDX_INPUT_DATA], [&](session_t *session, const std::string_view &payload) {
+    server->map(packetTypes[IDX_INPUT_DATA], sizeof(std::uint32_t), [&](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_INPUT_DATA]"sv;
 
-      auto tagged_cipher_length = util::endian::big(*(int32_t *) payload.data());
-      std::string_view tagged_cipher {payload.data() + sizeof(tagged_cipher_length), (size_t) tagged_cipher_length};
+      std::uint32_t tagged_cipher_length;
+      std::memcpy(&tagged_cipher_length, payload.data(), sizeof(tagged_cipher_length));
+      tagged_cipher_length = util::endian::big(tagged_cipher_length);
+      if (!is_valid_legacy_input_payload(payload.size(), tagged_cipher_length)) {
+        BOOST_LOG(warning) << "Dropping malformed legacy input message: declared "sv << tagged_cipher_length
+                           << " tagged-cipher bytes in a "sv << payload.size() << "-byte payload"sv;
+        return;
+      }
+
+      std::string_view tagged_cipher = payload.substr(sizeof(tagged_cipher_length), tagged_cipher_length);
 
       std::vector<uint8_t> plaintext;
 
@@ -1058,13 +1089,13 @@ namespace stream {
       }
 
       if (tagged_cipher_length >= 16 + iv.size()) {
-        std::copy(payload.end() - 16, payload.end(), std::begin(iv));
+        std::copy(tagged_cipher.end() - 16, tagged_cipher.end(), std::begin(iv));
       }
 
       input::passthrough(session->input, std::move(plaintext), session->permission);
     });
 
-    server->map(packetTypes[IDX_EXEC_SERVER_CMD], [server](session_t *session, const std::string_view &payload) {
+    server->map(packetTypes[IDX_EXEC_SERVER_CMD], sizeof(std::uint8_t), [server](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_EXEC_SERVER_CMD]"sv;
 
       if (!(session->permission & crypto::PERM::server_cmd)) {
@@ -1115,12 +1146,7 @@ namespace stream {
       }
     });
 
-    server->map(packetTypes[IDX_SET_SBS_MODE], [server](session_t *session, const std::string_view &payload) {
-      if (payload.empty()) {
-        BOOST_LOG(warning) << "type [IDX_SET_SBS_MODE]: empty payload"sv;
-        return;
-      }
-
+    server->map(packetTypes[IDX_SET_SBS_MODE], sizeof(std::uint8_t), [server](session_t *session, const std::string_view &payload) {
       // Host-side SBS mode requested by the client (Apollo protocol extension).
       // Must match SBS_MODE_* in the client's moonlight-common-c Limelight.h.
       auto mode = *(uint8_t *) payload.data();
@@ -1155,21 +1181,27 @@ namespace stream {
       ::video::sbs_debug_dump_pending.store(true, std::memory_order_relaxed);
     });
 
-    server->map(packetTypes[IDX_ENCRYPTED], [server](session_t *session, const std::string_view &payload) {
+    server->map(packetTypes[IDX_ENCRYPTED], CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + CONTROL_ENCRYPTED_SEQUENCE_SIZE, [server](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_ENCRYPTED]"sv;
 
-      auto header = (control_encrypted_p) (payload.data() - 2);
+      std::uint16_t length;
+      std::uint32_t seq;
+      std::memcpy(&length, payload.data(), sizeof(length));
+      std::memcpy(&seq, payload.data() + sizeof(length), sizeof(seq));
+      length = util::endian::little(length);
+      seq = util::endian::little(seq);
 
-      auto length = util::endian::little(header->length);
-      auto seq = util::endian::little(header->seq);
-
-      if (length < (16 + 4 + 4)) {
-        BOOST_LOG(warning) << "Control: Runt packet"sv;
+      if (!is_valid_encrypted_control_payload(payload.size(), length)) {
+        BOOST_LOG(warning) << "Dropping malformed encrypted control message: declared length "sv << length
+                           << " does not match "sv << payload.size() << " payload bytes"sv;
         return;
       }
 
-      auto tagged_cipher_length = length - 4;
-      std::string_view tagged_cipher {(char *) header->payload(), (size_t) tagged_cipher_length};
+      auto tagged_cipher_length = length - CONTROL_ENCRYPTED_SEQUENCE_SIZE;
+      std::string_view tagged_cipher = payload.substr(
+        CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + CONTROL_ENCRYPTED_SEQUENCE_SIZE,
+        tagged_cipher_length
+      );
 
       auto &cipher = session->control.cipher;
       auto &iv = session->control.incoming_iv;
@@ -1203,8 +1235,27 @@ namespace stream {
         return;
       }
 
-      auto type = *(std::uint16_t *) plaintext.data();
-      std::string_view next_payload {(char *) plaintext.data() + 4, plaintext.size() - 4};
+      if (plaintext.size() < CONTROL_HEADER_V2_SIZE) {
+        BOOST_LOG(warning) << "Dropping encrypted control message with a runt plaintext header"sv;
+        return;
+      }
+
+      std::uint16_t type;
+      std::uint16_t declared_payload_size;
+      std::memcpy(&type, plaintext.data(), sizeof(type));
+      std::memcpy(&declared_payload_size, plaintext.data() + sizeof(type), sizeof(declared_payload_size));
+      type = util::endian::little(type);
+      declared_payload_size = util::endian::little(declared_payload_size);
+      if (!is_valid_decrypted_control_payload(plaintext.size(), declared_payload_size)) {
+        BOOST_LOG(warning) << "Dropping encrypted control message with mismatched inner length: declared "sv
+                           << declared_payload_size << " bytes in a "sv << plaintext.size() << "-byte plaintext"sv;
+        return;
+      }
+
+      std::string_view next_payload {
+        (char *) plaintext.data() + CONTROL_HEADER_V2_SIZE,
+        declared_payload_size
+      };
 
       if (type == packetTypes[IDX_ENCRYPTED]) {
         BOOST_LOG(error) << "Bad packet type [IDX_ENCRYPTED] found"sv;
@@ -1214,7 +1265,7 @@ namespace stream {
 
       // IDX_INPUT_DATA callback will attempt to decrypt unencrypted data, therefore we need pass it directly
       if (type == packetTypes[IDX_INPUT_DATA]) {
-        plaintext.erase(std::begin(plaintext), std::begin(plaintext) + 4);
+        plaintext.erase(std::begin(plaintext), std::begin(plaintext) + CONTROL_HEADER_V2_SIZE);
         input::passthrough(session->input, std::move(plaintext), session->permission);
       } else {
         server->call(type, session, next_payload, true);

@@ -6,6 +6,8 @@
 
 // standard includes
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <utility>
 
 // lib includes
@@ -36,6 +38,16 @@ namespace stream {
   constexpr int MIN_REQUIRED_FEC_PACKETS_MAX = 2;
   constexpr std::size_t FEC_PACKET_INDEX_MAX = 1023;
 
+  constexpr std::size_t CONTROL_HEADER_V1_SIZE = sizeof(std::uint16_t);
+  constexpr std::size_t CONTROL_HEADER_V2_SIZE = 2 * sizeof(std::uint16_t);
+  constexpr std::size_t CONTROL_GCM_TAG_SIZE = 16;
+  constexpr std::size_t CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE = sizeof(std::uint16_t);
+  constexpr std::size_t CONTROL_ENCRYPTED_SEQUENCE_SIZE = sizeof(std::uint32_t);
+  constexpr std::size_t CONTROL_ENCRYPTED_MIN_LENGTH =
+    CONTROL_ENCRYPTED_SEQUENCE_SIZE + CONTROL_GCM_TAG_SIZE + CONTROL_HEADER_V2_SIZE;
+  constexpr std::size_t CONTROL_PACKET_SIZE_MAX =
+    std::numeric_limits<std::uint16_t>::max() + CONTROL_HEADER_V2_SIZE;
+
   [[nodiscard]] constexpr bool is_valid_video_transport_config(int packet_size, int min_required_fec_packets) {
     return packet_size >= VIDEO_PACKET_SIZE_MIN &&
            packet_size <= VIDEO_PACKET_SIZE_MAX &&
@@ -50,6 +62,38 @@ namespace stream {
   [[nodiscard]] constexpr bool is_valid_fec_block_size(std::size_t payload_size, std::size_t block_size) {
     const auto packet_count = fec_packet_count(payload_size, block_size);
     return packet_count > 0 && packet_count <= FEC_PACKET_INDEX_MAX;
+  }
+
+  [[nodiscard]] constexpr bool is_valid_control_packet_size(std::size_t packet_size) {
+    return packet_size >= CONTROL_HEADER_V1_SIZE && packet_size <= CONTROL_PACKET_SIZE_MAX;
+  }
+
+  // The ENet payload excludes the two-byte packet type, but still contains the
+  // encrypted length field followed by exactly `encrypted_length` bytes.
+  [[nodiscard]] constexpr bool is_valid_encrypted_control_payload(
+    std::size_t payload_size,
+    std::uint16_t encrypted_length
+  ) {
+    return encrypted_length >= CONTROL_ENCRYPTED_MIN_LENGTH &&
+           payload_size >= CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE &&
+           encrypted_length == payload_size - CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE;
+  }
+
+  [[nodiscard]] constexpr bool is_valid_decrypted_control_payload(
+    std::size_t plaintext_size,
+    std::uint16_t declared_payload_size
+  ) {
+    return plaintext_size >= CONTROL_HEADER_V2_SIZE &&
+           declared_payload_size == plaintext_size - CONTROL_HEADER_V2_SIZE;
+  }
+
+  [[nodiscard]] constexpr bool is_valid_legacy_input_payload(
+    std::size_t payload_size,
+    std::uint32_t tagged_cipher_size
+  ) {
+    return tagged_cipher_size >= CONTROL_GCM_TAG_SIZE &&
+           payload_size >= sizeof(tagged_cipher_size) &&
+           tagged_cipher_size == payload_size - sizeof(tagged_cipher_size);
   }
 
   struct session_t;
