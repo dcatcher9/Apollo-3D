@@ -65,6 +65,20 @@ TEST_F(BindAddressTest, UsesConfiguredAddress) {
   EXPECT_FALSE(net::get_bind_address(net::BOTH));
 }
 
+TEST_F(BindAddressTest, TracksWhetherEnetHostUsesWildcardBind) {
+  config::sunshine.bind_address.clear();
+  ENetAddress wildcard_address {};
+  auto wildcard_host = net::host_create(net::IPV4, wildcard_address, 0);
+  ASSERT_TRUE(wildcard_host);
+  EXPECT_TRUE(wildcard_host->wildcardBind);
+
+  config::sunshine.bind_address = "127.0.0.1";
+  ENetAddress explicit_address {};
+  auto explicit_host = net::host_create(net::IPV4, explicit_address, 0);
+  ASSERT_TRUE(explicit_host);
+  EXPECT_FALSE(explicit_host->wildcardBind);
+}
+
 TEST_F(BindAddressTest, ValidatesSyntaxAndAddressFamily) {
   EXPECT_TRUE(net::is_valid_bind_address("", net::IPV4));
   EXPECT_TRUE(net::is_valid_bind_address("127.0.0.1", net::IPV4));
