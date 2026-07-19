@@ -600,10 +600,8 @@ namespace stream {
     auto cb = _map_type_cb.find(type);
     if (cb == std::end(_map_type_cb)) {
       BOOST_LOG(debug)
-        << "type [Unknown] { "sv << util::hex(type).to_string_view() << " }"sv << std::endl
-        << "---data---"sv << std::endl
-        << util::hex_vec(payload) << std::endl
-        << "---end data---"sv;
+        << "Unknown control message type "sv << util::hex(type).to_string_view()
+        << " with "sv << payload.size() << " payload bytes"sv;
     } else {
       cb->second(session, payload);
     }
@@ -1099,7 +1097,7 @@ namespace stream {
       BOOST_LOG(debug) << "type [IDX_EXEC_SERVER_CMD]"sv;
 
       if (!(session->permission & crypto::PERM::server_cmd)) {
-        BOOST_LOG(debug) << "Permission Exec Server Cmd deined for [" << session->device_name << "]";
+        BOOST_LOG(debug) << "Permission Exec Server Cmd denied for [" << session->device_name << "]";
         return;
       }
 
@@ -1129,21 +1127,21 @@ namespace stream {
     });
 
     server->map(packetTypes[IDX_SET_CLIPBOARD], [server](session_t *session, const std::string_view &payload) {
-      BOOST_LOG(info) << "type [IDX_SET_CLIPBOARD]: "sv << payload << " size: " << payload.size();
-
       if (!(session->permission & crypto::PERM::clipboard_set)) {
-        BOOST_LOG(debug) << "Permission Clipboard Set deined for [" << session->device_name << "]";
+        BOOST_LOG(debug) << "Permission Clipboard Set denied for [" << session->device_name << "]";
         return;
       }
+
+      BOOST_LOG(debug) << "type [IDX_SET_CLIPBOARD]: received "sv << payload.size() << " payload bytes"sv;
     });
 
     server->map(packetTypes[IDX_FILE_TRANSFER_NONCE_REQUEST], [server](session_t *session, const std::string_view &payload) {
-      BOOST_LOG(info) << "type [IDX_FILE_TRANSFER_NONCE_REQUEST]: "sv << payload << " size: " << payload.size();
-
       if (!(session->permission & crypto::PERM::file_upload)) {
-        BOOST_LOG(debug) << "Permission File Upload deined for [" << session->device_name << "]";
+        BOOST_LOG(debug) << "Permission File Upload denied for [" << session->device_name << "]";
         return;
       }
+
+      BOOST_LOG(debug) << "type [IDX_FILE_TRANSFER_NONCE_REQUEST]: received "sv << payload.size() << " payload bytes"sv;
     });
 
     server->map(packetTypes[IDX_SET_SBS_MODE], sizeof(std::uint8_t), [server](session_t *session, const std::string_view &payload) {
