@@ -4,6 +4,7 @@
  */
 
 // standard includes
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <future>
@@ -33,6 +34,7 @@ extern "C" {
 #include "network.h"
 #include "platform/common.h"
 #include "process.h"
+#include "rtsp.h"
 #include "stream.h"
 #include "sync.h"
 #include "system_tray.h"
@@ -467,6 +469,12 @@ namespace stream {
     safe::mail_raw_t::event_t<bool> shutdown_event;
     safe::signal_t controlEnd;
 
+    // The client can send its audio/video UDP ping while platform resume work is still changing
+    // the display topology, and before ENet publishes the local source address. Capture must not
+    // feed the broadcast queues until both halves of session startup are complete.
+    safe::signal_t startup_ready;
+    safe::signal_t control_ready;
+
     std::mutex stop_mutex;
     std::atomic_bool graceful_stop_requested {false};
     std::atomic<session::state_e> state;
@@ -583,6 +591,10 @@ namespace stream {
       auto parsed_local_address = boost::asio::ip::make_address(local_address);
       session_p->video->local_address = parsed_local_address;
       session_p->audio->local_address = parsed_local_address;
+
+      // Publish the source addresses before waking the audio/video capture threads. The event's
+      // mutex provides the synchronization needed by the broadcast workers that consume them.
+      session_p->control_ready.raise(true);
 
       BOOST_LOG(debug) << "Control local address ["sv << local_address << ']';
       BOOST_LOG(debug) << "Control peer address ["sv << peer_addr << ':' << peer_port << ']';
@@ -2137,11 +2149,16 @@ namespace stream {
       session::stop(*session);
     });
 
-    while_starting_do_nothing(session->state);
-
     auto ref = broadcast.ref();
     auto error = recv_ping(session, ref, socket_e::video, session->video->ping_payload, session->video->peer, config::stream.ping_timeout);
     if (error < 0) {
+      return;
+    }
+
+    // Register for the UDP ping immediately so an early client ping is not lost, then wait until
+    // platform resume and the control connection have both completed before emitting any frames.
+    if (!session->startup_ready.view() || !session->control_ready.view() ||
+        session->state.load(std::memory_order_acquire) != session::state_e::RUNNING) {
       return;
     }
 
@@ -2158,11 +2175,16 @@ namespace stream {
       session::stop(*session);
     });
 
-    while_starting_do_nothing(session->state);
-
     auto ref = broadcast.ref();
     auto error = recv_ping(session, ref, socket_e::audio, session->audio->ping_payload, session->audio->peer, config::stream.ping_timeout);
     if (error < 0) {
+      return;
+    }
+
+    // Audio pings commonly arrive before a resumed virtual display is ready. Holding capture here
+    // prevents packets from being sent with an uninitialized local address (WSAEINVAL/10022).
+    if (!session->startup_ready.view() || !session->control_ready.view() ||
+        session->state.load(std::memory_order_acquire) != session::state_e::RUNNING) {
       return;
     }
 
@@ -2176,6 +2198,239 @@ namespace stream {
 
   namespace session {
     std::atomic_uint running_sessions;
+
+    namespace {
+      // Starting a Windows streaming session reapplies NVIDIA profile settings and can take
+      // several seconds. Keep that process-wide platform state warm briefly after the last
+      // client leaves so a transient headset disconnect can resume immediately. The mutex also
+      // serializes a grace expiry with a concurrent first-session start; generation checks make
+      // a delayed task harmless after cancellation has lost a race with task execution.
+      std::mutex platform_lifecycle_mutex;
+      std::uint64_t platform_lifecycle_generation {};
+      task_pool_util::TaskPool::task_id_t pending_platform_stop {};
+      bool platform_streaming_warm {};
+      std::optional<std::uint32_t> warm_process_instance;
+      bool warm_process_needs_resume {};
+
+      void invalidate_pending_platform_stop_locked() {
+        ++platform_lifecycle_generation;
+        if (pending_platform_stop) {
+          task_pool.cancel(pending_platform_stop);
+          pending_platform_stop = nullptr;
+        }
+      }
+
+      void stop_warm_platform_locked() {
+        invalidate_pending_platform_stop_locked();
+        warm_process_instance.reset();
+        warm_process_needs_resume = false;
+        if (!platform_streaming_warm) {
+          return;
+        }
+
+        platf::streaming_will_stop();
+        platform_streaming_warm = false;
+      }
+
+      void schedule_platform_stop_locked(std::chrono::steady_clock::duration delay) {
+        invalidate_pending_platform_stop_locked();
+        const auto generation = platform_lifecycle_generation;
+        pending_platform_stop = task_pool.pushDelayed([generation]() {
+          std::lock_guard delayed_lock(platform_lifecycle_mutex);
+          if (generation != platform_lifecycle_generation ||
+              running_sessions.load(std::memory_order_acquire) != 0 ||
+              !platform_streaming_warm) {
+            return;
+          }
+
+          // A new /launch can replace the retained process just before publishing its pending
+          // RTSP handshake. Do not terminate that new process in the HTTP -> RTSP gap;
+          // give it one fresh grace window and remember that it still needs resume semantics.
+          const auto current_process_instance = proc::proc.get_launch_session_id();
+          if (current_process_instance && current_process_instance != warm_process_instance) {
+            warm_process_instance = current_process_instance;
+            warm_process_needs_resume = true;
+            schedule_platform_stop_locked(std::max(config::stream.session_resume_grace, config::stream.ping_timeout));
+            return;
+          }
+
+          pending_platform_stop = nullptr;
+          BOOST_LOG(info) << "Streaming session resume grace expired; terminating the retained app."sv;
+          // A reconnect normally reserves the warm state before publishing its RTSP handshake.
+          // Clear any leftover reservation too so /serverinfo cannot advertise a resumable app
+          // after this authoritative expiry point.
+          rtsp_stream::clear_pending_launch_session();
+          if (proc::proc.running()) {
+            proc::proc.terminate();
+          } else {
+            display_device::revert_configuration();
+          }
+          warm_process_instance.reset();
+          warm_process_needs_resume = false;
+          platf::streaming_will_stop();
+          platform_streaming_warm = false;
+        }, delay).task_id;
+      }
+
+      void resume_first_session_locked() {
+        if (running_sessions.load(std::memory_order_acquire) == 0) {
+          return;
+        }
+
+        invalidate_pending_platform_stop_locked();
+        const auto current_process_instance = proc::proc.get_launch_session_id();
+        const bool same_active_app = platform_streaming_warm &&
+                                     !warm_process_needs_resume &&
+                                     warm_process_instance &&
+                                     current_process_instance == warm_process_instance;
+        if (platform_streaming_warm) {
+          BOOST_LOG(info) << "Reusing warm streaming platform state after a short disconnect."sv;
+        } else {
+          platf::streaming_will_start();
+          platform_streaming_warm = true;
+        }
+
+        if (same_active_app) {
+          // The short-disconnect grace intentionally kept the app and remote virtual-display
+          // ownership active. Re-running resume commands here could overlap the app's live state
+          // and is unnecessary for the same process.
+          BOOST_LOG(info) << "Resuming the existing app without replaying app resume commands."sv;
+        } else {
+          proc::proc.resume();
+        }
+        warm_process_instance.reset();
+        warm_process_needs_resume = false;
+      }
+
+      void retain_or_stop_last_session_locked() {
+        if (running_sessions.load(std::memory_order_acquire) != 0) {
+          return;
+        }
+
+        bool revert_display_config {config::video.dd.config_revert_on_disconnect};
+        invalidate_pending_platform_stop_locked();
+        const auto process_status = proc::proc.get_status();
+        if (process_status.app_id == 0) {
+          // There is no app/session state worth retaining. Match the historical cleanup path.
+          rtsp_stream::clear_pending_launch_session();
+          display_device::revert_configuration();
+          stop_warm_platform_locked();
+          return;
+        }
+
+        if (process_status.terminate_on_pause) {
+          // This per-app contract predates and intentionally overrides the global resume grace.
+          // Remote Input relies on it, and retaining such an app would leave a session that its
+          // owner explicitly requested Apollo to destroy on the final disconnect.
+          BOOST_LOG(info) << "App is configured to terminate when all clients disconnect; skipping session resume grace."sv;
+          rtsp_stream::clear_pending_launch_session();
+          proc::proc.terminate();
+          stop_warm_platform_locked();
+          return;
+        }
+
+        if (revert_display_config || !platform_streaming_warm) {
+          // An explicit display-revert policy is incompatible with retaining the virtual desktop.
+          // There is no useful fast-resume contract in this path, so clear the app state rather
+          // than leaving /serverinfo advertising a session that has no expiry timer.
+          rtsp_stream::clear_pending_launch_session();
+          proc::proc.terminate();
+          if (revert_display_config) {
+            display_device::revert_configuration();
+          }
+          stop_warm_platform_locked();
+          return;
+        }
+
+        // Keep the app and remote virtual-display ownership active during the grace. Capture,
+        // encoding, transport, and input are already stopped with the session; retaining process
+        // ownership prevents competing presentation ownership and app pause/resume command races.
+        warm_process_instance = proc::proc.get_launch_session_id();
+        warm_process_needs_resume = false;
+        // A validated HTTP launch may be waiting to replace the final active stream. Preserve
+        // the platform for at least its RTSP handshake window even when reconnect grace is off
+        // or configured shorter than ping_timeout.
+        const bool validated_launch_pending = !rtsp_stream::launch_session_available();
+        if (config::stream.session_resume_grace <= 0ms && !validated_launch_pending) {
+          BOOST_LOG(info) << "Session resume grace is disabled; terminating the retained app."sv;
+          proc::proc.terminate();
+          warm_process_instance.reset();
+          platf::streaming_will_stop();
+          platform_streaming_warm = false;
+          return;
+        }
+        const auto retention = validated_launch_pending ?
+                                 std::max(config::stream.session_resume_grace, config::stream.ping_timeout) :
+                                 config::stream.session_resume_grace;
+        schedule_platform_stop_locked(retention);
+      }
+    }  // namespace
+
+    struct platform_launch_guard_t::impl_t {
+      impl_t():
+          lock {platform_lifecycle_mutex},
+          idle {running_sessions.load(std::memory_order_acquire) == 0} {
+      }
+
+      std::unique_lock<std::mutex> lock;
+      bool idle;
+      bool committed {};
+    };
+
+    platform_launch_guard_t::platform_launch_guard_t(std::unique_ptr<impl_t> impl):
+        _impl {std::move(impl)} {
+    }
+
+    platform_launch_guard_t::platform_launch_guard_t(platform_launch_guard_t &&) noexcept = default;
+    platform_launch_guard_t &platform_launch_guard_t::operator=(platform_launch_guard_t &&) noexcept = default;
+    platform_launch_guard_t::~platform_launch_guard_t() = default;
+
+    bool platform_launch_guard_t::idle() const {
+      return _impl && _impl->idle;
+    }
+
+    void platform_launch_guard_t::commit() {
+      if (!_impl || _impl->committed || !_impl->lock.owns_lock()) {
+        return;
+      }
+
+      if (_impl->idle && platform_streaming_warm &&
+          running_sessions.load(std::memory_order_acquire) == 0) {
+        const auto current_process_instance = proc::proc.get_launch_session_id();
+        if (current_process_instance && current_process_instance != warm_process_instance) {
+          warm_process_instance = current_process_instance;
+          warm_process_needs_resume = true;
+        }
+        schedule_platform_stop_locked(std::max(config::stream.session_resume_grace, config::stream.ping_timeout));
+        BOOST_LOG(debug) << "Committed validated reconnect reservation for warm platform state."sv;
+      }
+      _impl->committed = true;
+      _impl->lock.unlock();
+    }
+
+    void platform_launch_guard_t::release() {
+      if (_impl && _impl->lock.owns_lock()) {
+        _impl->lock.unlock();
+      }
+    }
+
+    void platform_launch_guard_t::detach_retained_state() {
+      if (!_impl || !_impl->lock.owns_lock()) {
+        return;
+      }
+
+      if (_impl->idle && running_sessions.load(std::memory_order_acquire) == 0) {
+        // The Web UI launched an app without publishing an RTSP reservation. It owns no remote
+        // reconnect deadline, so cancel the old one without terminating the newly launched app.
+        stop_warm_platform_locked();
+      }
+      _impl->committed = true;
+      _impl->lock.unlock();
+    }
+
+    platform_launch_guard_t guard_platform_launch() {
+      return platform_launch_guard_t {std::make_unique<platform_launch_guard_t::impl_t>()};
+    }
 
     state_e state(session_t &session) {
       return session.state.load(std::memory_order_relaxed);
@@ -2248,6 +2503,8 @@ namespace stream {
 
       session.video->active.store(false, std::memory_order_release);
       session.audio->active.store(false, std::memory_order_release);
+      session.startup_ready.stop();
+      session.control_ready.stop();
       session.graceful_stop_requested.store(graceful, std::memory_order_relaxed);
       session.state.store(state_e::STOPPING, std::memory_order_release);
       return true;
@@ -2330,21 +2587,13 @@ namespace stream {
         exec_thread.detach();
       }
 
-      // If this is the last session, invoke the platform callbacks
-      if (--running_sessions == 0) {
-        bool revert_display_config {config::video.dd.config_revert_on_disconnect};
-        if (proc::proc.running()) {
-          proc::proc.pause();
-        } else {
-          // We have no app running and also no clients anymore.
-          revert_display_config = true;
+      // Session-count transitions share the platform lifecycle lock with validated launch work.
+      // This makes an idle encoder probe and first-session startup mutually exclusive.
+      {
+        std::lock_guard lifecycle_lock(platform_lifecycle_mutex);
+        if (running_sessions.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+          retain_or_stop_last_session_locked();
         }
-
-        if (revert_display_config) {
-          display_device::revert_configuration();
-        }
-
-        platf::streaming_will_stop();
       }
 
       BOOST_LOG(debug) << "Session ended"sv;
@@ -2381,11 +2630,18 @@ namespace stream {
 
       session.state.store(state_e::RUNNING, std::memory_order_relaxed);
 
-      // If this is the first session, invoke the platform callbacks
-      if (++running_sessions == 1) {
-        platf::streaming_will_start();
-        proc::proc.resume();
+      // Claim the first-session transition under the same lifecycle lock used by launch-time
+      // display mutation and encoder probing. No session can become active during an idle probe.
+      {
+        std::lock_guard lifecycle_lock(platform_lifecycle_mutex);
+        if (running_sessions.fetch_add(1, std::memory_order_acq_rel) == 0) {
+          resume_first_session_locked();
+        }
       }
+
+      // A/V capture may already have received its UDP ping. Release it only after display/audio
+      // platform state has finished resuming; control_ready independently protects source routing.
+      session.startup_ready.raise(true);
 
       if (!session.do_cmds.empty()) {
         auto exec_thread = std::thread([cmd_list = session.do_cmds] {
@@ -2407,6 +2663,11 @@ namespace stream {
       }
 
       return 0;
+    }
+
+    void flush_platform_state() {
+      std::lock_guard lock(platform_lifecycle_mutex);
+      stop_warm_platform_locked();
     }
 
     std::shared_ptr<session_t> alloc(config_t &config, rtsp_stream::launch_session_t &launch_session) {

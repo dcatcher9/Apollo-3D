@@ -240,6 +240,7 @@ namespace proc {
       _app.uuid,
       _virtual_display,
       _allow_client_commands,
+      _app.terminate_on_pause,
     };
   }
 
@@ -370,7 +371,11 @@ namespace proc {
   }
 #endif
 
-  int proc_t::execute(const ctx_t& app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+  int proc_t::execute(
+    const ctx_t &app,
+    std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
+    bool probe_encoder
+  ) {
     std::lock_guard lock(process_state_mutex);
     if (_app_id == input_only_app_id) {
       terminate(false, false);
@@ -573,7 +578,7 @@ namespace proc {
     // encoder matches the active GPU (which could have changed
     // due to hotplugging, driver crash, primary monitor change,
     // or any number of other factors).
-    if (rtsp_stream::session_count() == 0 && video::probe_encoders()) {
+    if (probe_encoder && video::probe_encoders()) {
       if (config::video.ignore_encoder_probe_failure) {
         BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration.";
       } else {
@@ -1138,6 +1143,14 @@ namespace proc {
   std::string proc_t::get_running_app_uuid() {
     std::lock_guard lock(process_state_mutex);
     return _app.uuid;
+  }
+
+  std::optional<std::uint32_t> proc_t::get_launch_session_id() {
+    std::lock_guard lock(process_state_mutex);
+    if (!_launch_session) {
+      return std::nullopt;
+    }
+    return _launch_session->id;
   }
 
   boost::process::environment proc_t::get_env() {

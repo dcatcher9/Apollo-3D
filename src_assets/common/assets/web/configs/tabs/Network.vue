@@ -159,6 +159,14 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
       <div class="form-text">{{ $t('config.ping_timeout_desc') }}</div>
     </div>
 
+    <!-- Session Resume Grace -->
+    <div class="mb-3">
+      <label for="session_resume_grace" class="form-label">{{ $t('config.session_resume_grace') }}</label>
+      <input type="number" min="0" max="600000" step="1000" class="form-control" id="session_resume_grace"
+             placeholder="60000" v-model="config.session_resume_grace" />
+      <div class="form-text">{{ $t('config.session_resume_grace_desc') }}</div>
+    </div>
+
     <!-- Packet Size Limit -->
     <div class="mb-3">
       <label for="packetsize" class="form-label">{{ $t('config.packetsize') }}</label>

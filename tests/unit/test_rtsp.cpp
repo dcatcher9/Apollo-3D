@@ -7,6 +7,7 @@
 #include <string_view>
 #include <unordered_map>
 
+// stream.h must precede rtsp.h so Boost.Asio includes Winsock2 before Windows.h.
 #include <src/stream.h>
 #include <src/rtsp.h>
 
@@ -141,6 +142,83 @@ TEST(RtspLaunchReservationTest, PreservesTheFirstPendingHandshake) {
   EXPECT_FALSE(rtsp_stream::launch_session_raise(second));
 
   rtsp_stream::launch_session_clear(first->id);
+  EXPECT_EQ(first->reservation(), rtsp_stream::launch_reservation_state_e::revoked);
+  EXPECT_FALSE(first->try_claim_reservation());
   EXPECT_TRUE(rtsp_stream::launch_session_raise(second));
   rtsp_stream::launch_session_clear(second->id);
+}
+
+TEST(RtspLaunchReservationTest, ExplicitTeardownClearsPendingHandshake) {
+  auto first = std::make_shared<rtsp_stream::launch_session_t>();
+  first->id = 201;
+  first->unique_id = "first";
+  auto replacement = std::make_shared<rtsp_stream::launch_session_t>();
+  replacement->id = 202;
+  replacement->unique_id = "replacement";
+
+  ASSERT_TRUE(rtsp_stream::launch_session_raise(first));
+  // Keep a reference just as an already accepted RTSP socket does. The production teardown
+  // entry point must invalidate that accepted reservation as well as emptying the pending queue.
+  const auto accepted = first;
+  ASSERT_TRUE(accepted);
+  rtsp_stream::terminate_sessions();
+  EXPECT_EQ(accepted->reservation(), rtsp_stream::launch_reservation_state_e::revoked);
+  EXPECT_FALSE(accepted->try_claim_reservation());
+  EXPECT_TRUE(rtsp_stream::launch_session_raise(replacement));
+  rtsp_stream::launch_session_clear(replacement->id);
+}
+
+TEST(RtspLaunchReservationTest, ReservationCanBeClaimedOnlyOnce) {
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->id = 301;
+  launch->unique_id = "single-claim";
+
+  ASSERT_TRUE(rtsp_stream::launch_session_available());
+  ASSERT_TRUE(rtsp_stream::launch_session_raise(launch));
+  EXPECT_FALSE(rtsp_stream::launch_session_available());
+  EXPECT_TRUE(rtsp_stream::claim_launch_session_for_test(*launch));
+  EXPECT_FALSE(rtsp_stream::claim_launch_session_for_test(*launch));
+  EXPECT_EQ(launch->reservation(), rtsp_stream::launch_reservation_state_e::claimed);
+
+  // This is the real control ordering: the control connection clears the pending record while
+  // ANNOUNCE startup still owns the claimed reservation. Clearing must not revoke that startup,
+  // and the claimed slot must remain unavailable until startup publishes its final result.
+  rtsp_stream::launch_session_clear(launch->id);
+  EXPECT_EQ(launch->reservation(), rtsp_stream::launch_reservation_state_e::claimed);
+  EXPECT_FALSE(rtsp_stream::launch_session_available());
+
+  rtsp_stream::finish_launch_session_for_test(*launch, true);
+  EXPECT_EQ(launch->reservation(), rtsp_stream::launch_reservation_state_e::claimed);
+  EXPECT_TRUE(rtsp_stream::launch_session_available());
+}
+
+TEST(RtspLaunchReservationTest, TeardownRevokesClaimedStartupBeforeReplacement) {
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->id = 401;
+  launch->unique_id = "claimed-before-teardown";
+
+  ASSERT_TRUE(rtsp_stream::launch_session_raise(launch));
+  ASSERT_TRUE(rtsp_stream::claim_launch_session_for_test(*launch));
+  rtsp_stream::terminate_sessions();
+  EXPECT_EQ(launch->reservation(), rtsp_stream::launch_reservation_state_e::revoked);
+  EXPECT_FALSE(rtsp_stream::launch_session_available());
+
+  // The startup path observes revocation, rolls back, and releases the claimed slot.
+  rtsp_stream::finish_launch_session_for_test(*launch, false);
+  EXPECT_TRUE(rtsp_stream::launch_session_available());
+}
+
+TEST(RtspLaunchReservationTest, FailedClaimedStartupRevokesAndReleasesReservation) {
+  auto failed = std::make_shared<rtsp_stream::launch_session_t>();
+  failed->id = 501;
+  failed->unique_id = "failed-startup";
+
+  ASSERT_TRUE(rtsp_stream::launch_session_raise(failed));
+  ASSERT_TRUE(rtsp_stream::claim_launch_session_for_test(*failed));
+  rtsp_stream::finish_launch_session_for_test(*failed, false);
+
+  EXPECT_EQ(failed->reservation(), rtsp_stream::launch_reservation_state_e::revoked);
+  EXPECT_FALSE(failed->try_claim_reservation());
+  EXPECT_TRUE(rtsp_stream::launch_session_available());
+  EXPECT_FALSE(rtsp_stream::launch_session_raise(failed));
 }

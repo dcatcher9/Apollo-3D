@@ -50,6 +50,7 @@ namespace nvhttp {
     gamepad_mask,
     scale_factor,
     app_id,
+    sbs_mode,
   };
 
   std::optional<launch_mode_t> parse_launch_mode(std::string_view mode);

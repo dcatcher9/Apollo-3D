@@ -534,6 +534,7 @@ namespace config {
 
   stream_t stream {
     10s,  // ping_timeout
+    60s,  // session_resume_grace
 
     APPS_JSON_PATH,
 
@@ -1141,6 +1142,7 @@ namespace config {
     int_between_f(vars, "nvenc_preset", video.nv.quality_preset, {1, 7});
     int_between_f(vars, "nvenc_vbv_increase", video.nv.vbv_percentage_increase, {0, 400});
     bool_f(vars, "nvenc_spatial_aq", video.nv.adaptive_quantization);
+    bool_f(vars, "nvenc_hevc_unidirectional_b", video.nv.hevc_unidirectional_b);
     generic_f(vars, "nvenc_twopass", video.nv.two_pass, nv::twopass_from_view);
     bool_f(vars, "nvenc_h264_cavlc", video.nv.h264_cavlc);
     bool_f(vars, "nvenc_intra_refresh", video.nv.intra_refresh);
@@ -1307,6 +1309,12 @@ namespace config {
     int_between_f(vars, "ping_timeout", to, {-1, std::numeric_limits<int>::max()});
     if (to != -1) {
       stream.ping_timeout = std::chrono::milliseconds(to);
+    }
+
+    int session_resume_grace = -1;
+    int_between_f(vars, "session_resume_grace", session_resume_grace, {0, 600000});
+    if (session_resume_grace != -1) {
+      stream.session_resume_grace = std::chrono::milliseconds(session_resume_grace);
     }
 
     int_between_f(vars, "lan_encryption_mode", stream.lan_encryption_mode, {0, 2});

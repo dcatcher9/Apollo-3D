@@ -8,8 +8,8 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <list>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -30,6 +30,12 @@ namespace stream {
 
 namespace rtsp_stream {
   constexpr auto RTSP_SETUP_PORT = 21;
+
+  enum class launch_reservation_state_e : std::uint8_t {
+    pending,
+    claimed,
+    revoked,
+  };
 
   namespace detail {
     enum class announce_int_field {
@@ -88,6 +94,41 @@ namespace rtsp_stream {
     bool enable_sops;
     bool virtual_display;
     uint32_t scale_factor;
+    int sbs_mode = 0;
+
+    // An accepted socket retains this shared object even after the pending queue is cleared.
+    // Keeping revocation here makes teardown visible to every retained copy.
+    std::atomic<launch_reservation_state_e> reservation_state {
+      launch_reservation_state_e::pending
+    };
+
+    [[nodiscard]] bool try_claim_reservation() {
+      auto expected = launch_reservation_state_e::pending;
+      return reservation_state.compare_exchange_strong(
+        expected,
+        launch_reservation_state_e::claimed,
+        std::memory_order_acq_rel,
+        std::memory_order_acquire
+      );
+    }
+
+    void revoke_reservation() {
+      reservation_state.store(launch_reservation_state_e::revoked, std::memory_order_release);
+    }
+
+    void revoke_pending_reservation() {
+      auto expected = launch_reservation_state_e::pending;
+      reservation_state.compare_exchange_strong(
+        expected,
+        launch_reservation_state_e::revoked,
+        std::memory_order_acq_rel,
+        std::memory_order_acquire
+      );
+    }
+
+    [[nodiscard]] launch_reservation_state_e reservation() const {
+      return reservation_state.load(std::memory_order_acquire);
+    }
 
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;
     std::string rtsp_url_scheme;
@@ -103,11 +144,17 @@ namespace rtsp_stream {
 
   [[nodiscard]] bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session);
 
+  /** Whether the single HTTP-to-RTSP launch reservation slot is currently available. */
+  [[nodiscard]] bool launch_session_available();
+
   /**
    * @brief Clear state for the specified launch session.
    * @param launch_session_id The ID of the session to clear.
    */
   void launch_session_clear(uint32_t launch_session_id);
+
+  /** Cancel the pending HTTP-to-RTSP launch reservation, if any. */
+  void clear_pending_launch_session();
 
   /**
    * @brief Get the number of active sessions.
@@ -161,6 +208,8 @@ namespace rtsp_stream {
 #ifdef SUNSHINE_TESTS
   bool insert_session_for_test(const std::shared_ptr<stream::session_t> &session);
   void remove_session_for_test(const std::shared_ptr<stream::session_t> &session);
+  bool claim_launch_session_for_test(launch_session_t &launch_session);
+  void finish_launch_session_for_test(launch_session_t &launch_session, bool started);
 #endif
 
   /**

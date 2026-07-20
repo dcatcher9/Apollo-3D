@@ -205,6 +205,10 @@ namespace config {
   struct stream_t {
     std::chrono::milliseconds ping_timeout;
 
+    // Retain the launched app, virtual display, and process-wide streaming setup after the last
+    // client disconnects so a transient reconnect can resume without rebuilding host state.
+    std::chrono::milliseconds session_resume_grace;
+
     std::string file_apps;
 
     int fec_percentage;

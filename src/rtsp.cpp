@@ -630,6 +630,11 @@ namespace rtsp_stream {
     }
 
     void handle_msg(tcp::socket &sock, launch_session_t &session, msg_t &&req) {
+      if (session.reservation() == launch_reservation_state_e::revoked) {
+        BOOST_LOG(debug) << "Rejecting RTSP request for a revoked launch reservation."sv;
+        return;
+      }
+
       auto func = _map_cmd_cb.find(req->message.request.command);
       if (func != std::end(_map_cmd_cb)) {
         func->second(this, sock, session, std::move(req));
@@ -653,7 +658,7 @@ namespace rtsp_stream {
       auto socket = std::move(next_socket);
 
       auto launch_session {launch_event.view(0s)};
-      if (launch_session) {
+      if (launch_session && launch_session->reservation() != launch_reservation_state_e::revoked) {
         // Associate the current RTSP session with this socket and start reading
         socket->session = launch_session;
         socket->read();
@@ -689,6 +694,10 @@ namespace rtsp_stream {
       std::lock_guard lock(_launch_mutex);
       // Reservation and publication are one operation. A caller must never return a successful
       // launch response for a session that was silently discarded behind an existing handshake.
+      if (!launch_session || _claimed_launch_session ||
+          launch_session->reservation() != launch_reservation_state_e::pending) {
+        return false;
+      }
       const auto launch_session_id = launch_session->id;
       if (!launch_event.try_raise(std::move(launch_session))) {
         return false;
@@ -702,6 +711,7 @@ namespace rtsp_stream {
           auto pending = launch_event.view(0s);
           if (pending && pending->id == launch_session_id) {
             auto discarded = launch_event.pop(0s);
+            discarded->revoke_reservation();
             BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
           }
         }
@@ -723,9 +733,57 @@ namespace rtsp_stream {
           BOOST_LOG(error) << "Attempted to clear unexpected session: "sv << launch_session_id << " vs "sv << launch_session->id;
         } else {
           raised_timer.cancel();
-          launch_event.pop();
+          auto cleared = launch_event.pop();
+          // A normal control connection may clear an already claimed launch. Preserve that state
+          // for subsequent PLAY, but ensure an unclaimed accepted socket cannot start later.
+          cleared->revoke_pending_reservation();
         }
       }
+    }
+
+    void clear_pending_launch_session() {
+      std::lock_guard lock(_launch_mutex);
+      raised_timer.cancel();
+      if (launch_event.view(0s)) {
+        auto cleared = launch_event.pop(0s);
+        cleared->revoke_reservation();
+      }
+      if (_claimed_launch_session) {
+        _claimed_launch_session->revoke_reservation();
+      }
+    }
+
+    bool launch_session_available() {
+      std::lock_guard lock(_launch_mutex);
+      return !launch_event.peek() && !_claimed_launch_session;
+    }
+
+    bool claim_launch_session(launch_session_t &launch_session) {
+      std::lock_guard lock(_launch_mutex);
+      auto pending = launch_event.view(0s);
+      if (!pending || pending.get() != &launch_session || _claimed_launch_session ||
+          !launch_session.try_claim_reservation()) {
+        return false;
+      }
+      _claimed_launch_session = std::move(pending);
+      return true;
+    }
+
+    void finish_launch_session(launch_session_t &launch_session, bool started) {
+      std::lock_guard lock(_launch_mutex);
+      if (_claimed_launch_session.get() != &launch_session) {
+        return;
+      }
+
+      if (!started) {
+        launch_session.revoke_reservation();
+        auto pending = launch_event.view(0s);
+        if (pending && pending.get() == &launch_session) {
+          raised_timer.cancel();
+          launch_event.pop(0s);
+        }
+      }
+      _claimed_launch_session.reset();
     }
 
     /**
@@ -790,21 +848,45 @@ namespace rtsp_stream {
 
     /**
      * @brief Starts and registers a session atomically with authorization publication.
-     * @return 0 on success, 403 when authorization was revoked, or 500 when startup failed.
+     * @return 0 on success, 403 when authorization was revoked, 454 when the launch reservation
+     *         was revoked, or 500 when startup failed.
      */
-    int start_and_insert(const std::shared_ptr<stream::session_t> &session, const std::string &address) {
+    int start_and_insert(
+      const std::shared_ptr<stream::session_t> &session,
+      launch_session_t &launch_session,
+      const std::string &address
+    ) {
       // Keep the policy lock through startup. Otherwise a revocation can observe the registered
       // session while it is still STOPPED (where graceful_stop is intentionally a no-op), after
       // which the RTSP thread could incorrectly transition it to RUNNING.
       std::lock_guard policy_lock(_client_policy_mutex);
       if (!apply_current_policy_locked(*session)) {
+        finish_launch_session(launch_session, false);
         return 403;
       }
+
+      // Explicit teardown revokes the shared launch object before waiting on this set lock.
+      // Therefore either teardown wins here, or it waits until the started session is inserted
+      // and then removes it before returning.
+      auto sessions_lock = _session_slots.lock();
+      if (launch_session.reservation() != launch_reservation_state_e::claimed) {
+        finish_launch_session(launch_session, false);
+        return 454;
+      }
       if (stream::session::start(*session, address)) {
+        finish_launch_session(launch_session, false);
         return 500;
       }
+      if (launch_session.reservation() == launch_reservation_state_e::revoked) {
+        stream::session::stop(*session);
+        stream::session::join(*session);
+        finish_launch_session(launch_session, false);
+        return 454;
+      }
 
-      emplace_session_locked(session);
+      _session_slots->emplace(session);
+      BOOST_LOG(info) << "New streaming session started [active sessions: "sv << _session_slots->size() << ']';
+      finish_launch_session(launch_session, true);
       return 0;
     }
 
@@ -945,6 +1027,7 @@ namespace rtsp_stream {
     sync_util::sync_t<std::set<std::shared_ptr<stream::session_t>>> _session_slots;
     std::mutex _client_policy_mutex;
     std::mutex _launch_mutex;
+    std::shared_ptr<launch_session_t> _claimed_launch_session;
     std::unordered_map<std::string, client_policy_t> _client_policies;
 
     boost::asio::io_context io_context;
@@ -960,8 +1043,16 @@ namespace rtsp_stream {
     return server.session_raise(std::move(launch_session));
   }
 
+  bool launch_session_available() {
+    return server.launch_session_available();
+  }
+
   void launch_session_clear(uint32_t launch_session_id) {
     server.session_clear(launch_session_id);
+  }
+
+  void clear_pending_launch_session() {
+    server.clear_pending_launch_session();
   }
 
   int session_count() {
@@ -1016,9 +1107,18 @@ namespace rtsp_stream {
   void remove_session_for_test(const std::shared_ptr<stream::session_t> &session) {
     server.remove(session);
   }
+
+  bool claim_launch_session_for_test(launch_session_t &launch_session) {
+    return server.claim_launch_session(launch_session);
+  }
+
+  void finish_launch_session_for_test(launch_session_t &launch_session, bool started) {
+    server.finish_launch_session(launch_session, started);
+  }
 #endif
 
   void terminate_sessions() {
+    server.clear_pending_launch_session();
     server.clear(true);
   }
 
@@ -1403,6 +1503,7 @@ namespace rtsp_stream {
       }
 
       config.monitor.input_only = session.input_only;
+      config.monitor.sbs_mode = session.sbs_mode;
 
       configuredBitrateKbps = required_int(detail::announce_int_field::configured_bitrate_kbps, "x-ml-video.configuredBitrateKbps"sv);
 
@@ -1529,9 +1630,18 @@ namespace rtsp_stream {
       return;
     }
 
+    // Claim only after the ANNOUNCE payload, codec, encryption, and authorization checks pass.
+    // A copied socket whose pending reservation was cleared cannot claim and resurrect teardown.
+    if (!server->claim_launch_session(session)) {
+      BOOST_LOG(warning) << "Rejecting stale or duplicate RTSP ANNOUNCE reservation."sv;
+      respond(sock, session, &option, 454, "Session Not Found", req->sequenceNumber, {});
+      return;
+    }
+
     auto stream_session = stream::session::alloc(config, session);
     const auto start_result = server->start_and_insert(
       stream_session,
+      session,
       sock.remote_endpoint().address().to_string()
     );
     if (start_result == 403) {
@@ -1540,6 +1650,11 @@ namespace rtsp_stream {
       return;
     }
     if (start_result != 0) {
+      if (start_result == 454) {
+        BOOST_LOG(warning) << "Rejecting RTSP session whose launch reservation was revoked during startup."sv;
+        respond(sock, session, &option, 454, "Session Not Found", req->sequenceNumber, {});
+        return;
+      }
       BOOST_LOG(error) << "Failed to start a streaming session"sv;
       respond(sock, session, &option, 500, "Internal Server Error", req->sequenceNumber, {});
       return;

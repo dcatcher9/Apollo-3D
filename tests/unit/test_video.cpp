@@ -8,6 +8,7 @@
 
 #include <src/video.h>
 #include <src/video_colorspace.h>
+#include <src/nvenc/nvenc_config.h>
 
 namespace {
   float apply_color_vector(const float (&color_vector)[4], float red, float green, float blue) {
@@ -60,6 +61,19 @@ TEST(ColorVectorsTest, UintOutputRoundsBt2020LimitedValues) {
   EXPECT_EQ(static_cast<unsigned>(apply_color_vector(vectors->color_vec_y, 1.0f, 1.0f, 1.0f)), 940u);
   EXPECT_EQ(static_cast<unsigned>(apply_color_vector(vectors->color_vec_u, 0.0f, 0.0f, 0.0f)), 512u);
   EXPECT_EQ(static_cast<unsigned>(apply_color_vector(vectors->color_vec_v, 1.0f, 0.0f, 0.0f)), 960u);
+}
+
+TEST(NvencConfigTest, GatesHevcUnidirectionalBFrames) {
+  nvenc::nvenc_config config;
+
+  EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 1, true, false));
+
+  config.hevc_unidirectional_b = true;
+  EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 0, true, false));
+  EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 2, true, false));
+  EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 1, false, false));
+  EXPECT_TRUE(nvenc::should_enable_hevc_unidirectional_b(config, 1, true, false));
+  EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 1, true, true));
 }
 
 struct EncoderTest: PlatformTestSuite, testing::WithParamInterface<video::encoder_t *> {

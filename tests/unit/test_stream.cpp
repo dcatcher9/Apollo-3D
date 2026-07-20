@@ -3,8 +3,10 @@
  * @brief Test src/stream.*
  */
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <limits>
 #include <string>
 #include <vector>
@@ -17,6 +19,55 @@ namespace stream {
 }
 
 #include "../tests_common.h"
+
+using namespace std::chrono_literals;
+
+TEST(PlatformLaunchGuardTest, SerializesConcurrentLaunchPreparation) {
+  auto first = stream::session::guard_platform_launch();
+  EXPECT_TRUE(first.idle());
+
+  auto second = std::async(std::launch::async, []() {
+    auto guard = stream::session::guard_platform_launch();
+    return guard.idle();
+  });
+
+  EXPECT_EQ(second.wait_for(20ms), std::future_status::timeout);
+  first.release();
+  EXPECT_EQ(second.wait_for(1s), std::future_status::ready);
+  EXPECT_TRUE(second.get());
+}
+
+TEST(PlatformLaunchGuardTest, CommitReleasesLaunchPreparationLock) {
+  auto first = stream::session::guard_platform_launch();
+  EXPECT_TRUE(first.idle());
+  first.commit();
+
+  auto second = std::async(std::launch::async, []() {
+    auto guard = stream::session::guard_platform_launch();
+    return guard.idle();
+  });
+
+  EXPECT_EQ(second.wait_for(1s), std::future_status::ready);
+  EXPECT_TRUE(second.get());
+
+  // Accepted HTTP paths may defensively commit during cleanup; this must remain harmless.
+  first.commit();
+  first.release();
+}
+
+TEST(PlatformLaunchGuardTest, DetachingRetainedStateReleasesLaunchPreparationLock) {
+  auto first = stream::session::guard_platform_launch();
+  EXPECT_TRUE(first.idle());
+  first.detach_retained_state();
+
+  auto second = std::async(std::launch::async, []() {
+    auto guard = stream::session::guard_platform_launch();
+    return guard.idle();
+  });
+
+  EXPECT_EQ(second.wait_for(1s), std::future_status::ready);
+  EXPECT_TRUE(second.get());
+}
 
 TEST(ConcatAndInsertTests, ConcatNoInsertionTest) {
   char b1[] = {'a', 'b'};

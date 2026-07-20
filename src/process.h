@@ -14,6 +14,7 @@
 
 // standard includes
 #include <atomic>
+#include <cstdint>
 #include <optional>
 #include <thread>
 #include <unordered_map>
@@ -116,6 +117,7 @@ namespace proc {
     std::string app_uuid;
     bool virtual_display;
     bool allow_client_commands;
+    bool terminate_on_pause;
   };
 
   class proc_t {
@@ -134,7 +136,11 @@ namespace proc {
 
     void launch_input_only();
 
-    int execute(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    int execute(
+      const ctx_t &app,
+      std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
+      bool probe_encoder
+    );
 
     /**
      * @return `_app_id` if a process is running, otherwise returns `0`
@@ -150,6 +156,7 @@ namespace proc {
     std::string get_app_image(int app_id);
     std::string get_last_run_app_name();
     std::string get_running_app_uuid();
+    std::optional<std::uint32_t> get_launch_session_id();
     boost::process::v1::environment get_env();
     void resume();
     void pause();

@@ -38,6 +38,8 @@
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "process.h"
+#include "rtsp.h"
+#include "stream.h"
 #include "utility.h"
 #include "uuid.h"
 
@@ -1550,12 +1552,18 @@ namespace confighttp {
             bad_request(response, request, "Invalid launch display mode");
             return;
           }
-          auto err = proc::proc.execute(app, launch_session);
+          auto platform_launch = stream::session::guard_platform_launch();
+          if (!rtsp_stream::launch_session_available()) {
+            bad_request(response, request, "A streaming handshake is already pending");
+            return;
+          }
+          auto err = proc::proc.execute(app, launch_session, platform_launch.idle());
           if (err) {
             bad_request(response, request, err == 503 ?
                         "Failed to initialize video capture/encoding. Is a display connected and turned on?" :
                         "Failed to start the specified application");
           } else {
+            platform_launch.detach_retained_state();
             output_tree["status"] = true;
             send_response(response, output_tree);
           }

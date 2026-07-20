@@ -23,6 +23,7 @@
 #include "nvhttp.h"
 #include "process.h"
 #include "sbs_bench_harness.h"
+#include "stream.h"
 #include "system_tray.h"
 #include "upnp.h"
 #include "uuid.h"
@@ -505,6 +506,11 @@ int main(int argc, char *argv[]) {
   httpThread.join();
   configThread.join();
   rtspThread.join();
+
+  // A recent disconnect may have left Windows streaming state warm for fast reconnect. Flush it
+  // synchronously before stopping the task pool so timer resolution, WLAN, and input state are
+  // always restored during an orderly host shutdown.
+  stream::session::flush_platform_state();
 
   task_pool.stop();
   task_pool.join();

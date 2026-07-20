@@ -85,4 +85,8 @@ TEST(NvHttpLaunchParsingTest, EnforcesScalarLaunchOptionContracts) {
   EXPECT_FALSE(parse_launch_int(field::surround_info, "0"));
   EXPECT_FALSE(parse_launch_int(field::core_version, "-1"));
   EXPECT_FALSE(parse_launch_int(field::core_version, "1x"));
+  EXPECT_EQ(parse_launch_int(field::sbs_mode, "0"), 0);
+  EXPECT_EQ(parse_launch_int(field::sbs_mode, "1"), 1);
+  EXPECT_FALSE(parse_launch_int(field::sbs_mode, "-1"));
+  EXPECT_FALSE(parse_launch_int(field::sbs_mode, "2"));
 }

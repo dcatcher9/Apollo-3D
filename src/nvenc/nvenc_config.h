@@ -31,6 +31,9 @@ namespace nvenc {
     // Allocate more bitrate to flat regions since they're visually more perceptible, uses CUDA cores
     bool adaptive_quantization = false;
 
+    // Replace HEVC P pictures with past-reference-only B pictures for better low-latency compression
+    bool hevc_unidirectional_b = false;
+
     // Don't use QP below certain value, limits peak image quality to save bitrate
     bool enable_min_qp = false;
 
@@ -52,5 +55,18 @@ namespace nvenc {
     // Intra refresh for clients that doesn't request keyframe correctly
     bool intra_refresh = false;
   };
+
+  constexpr bool should_enable_hevc_unidirectional_b(
+    const nvenc_config &config,
+    int video_format,
+    bool supported,
+    bool weighted_prediction_enabled
+  ) {
+    constexpr int hevc_video_format = 1;
+    return config.hevc_unidirectional_b &&
+           video_format == hevc_video_format &&
+           supported &&
+           !weighted_prediction_enabled;
+  }
 
 }  // namespace nvenc

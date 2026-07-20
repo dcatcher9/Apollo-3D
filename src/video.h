@@ -65,8 +65,8 @@ namespace video {
     int encodingFramerate;  // Requested display framerate
     bool input_only;
 
-    // APPEND-ONLY (see warning above). Host-side SBS mode (sbs_mode_e); not wire-serialized
-    // as part of this struct - it is toggled at runtime via the 0x3003 control message.
+    // APPEND-ONLY (see warning above). Host-side SBS mode (sbs_mode_e). It is selected during
+    // launch/resume and may also be toggled at runtime via the 0x3003 control message.
     // When != SBS_OFF the encoder output width is doubled to carry the side-by-side frame.
     int sbs_mode = SBS_OFF;
 

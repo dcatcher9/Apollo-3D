@@ -242,6 +242,23 @@ namespace nvenc {
     init_params.enableEncodeAsync = async_event_handle ? 1 : 0;
     init_params.enableWeightedPrediction = config.weighted_prediction && get_encoder_cap(NV_ENC_CAPS_SUPPORT_WEIGHTED_PREDICTION);
 
+    const bool hevc_unidirectional_b_supported =
+      client_config.videoFormat == 1 && get_encoder_cap(NV_ENC_CAPS_SUPPORT_UNIDIRECTIONAL_B);
+    if (should_enable_hevc_unidirectional_b(
+          config,
+          client_config.videoFormat,
+          hevc_unidirectional_b_supported,
+          init_params.enableWeightedPrediction
+        )) {
+      init_params.enableUniDirectionalB = 1;
+    } else if (config.hevc_unidirectional_b && client_config.videoFormat == 1) {
+      if (init_params.enableWeightedPrediction) {
+        BOOST_LOG(warning) << "NvEnc: HEVC unidirectional B-frames disabled because weighted prediction is enabled";
+      } else if (!hevc_unidirectional_b_supported) {
+        BOOST_LOG(warning) << "NvEnc: HEVC unidirectional B-frames requested but not supported by the GPU";
+      }
+    }
+
     init_params.encodeWidth = encoder_params.width;
     init_params.darWidth = encoder_params.width;
     init_params.encodeHeight = encoder_params.height;
@@ -383,6 +400,9 @@ namespace nvenc {
             format_config.outputBitDepth = NV_ENC_BIT_DEPTH_10;
           }
           set_ref_frames(format_config.maxNumRefFramesInDPB, format_config.numRefL0, 5);
+          if (init_params.enableUniDirectionalB) {
+            format_config.numRefL1 = NV_ENC_NUM_REF_FRAMES_1;
+          }
           set_minqp_if_enabled(config.min_qp_hevc);
           fill_h264_hevc_vui(format_config.hevcVUIParameters);
           if (client_config.enableIntraRefresh == 1) {
@@ -493,6 +513,9 @@ namespace nvenc {
       }
       if (init_params.enableWeightedPrediction) {
         extra += " weighted-prediction";
+      }
+      if (init_params.enableUniDirectionalB) {
+        extra += " hevc-unidirectional-b";
       }
       if (enc_config.rcParams.enableAQ) {
         extra += " spatial-aq";

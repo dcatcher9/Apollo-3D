@@ -642,6 +642,9 @@ namespace nvhttp {
       case launch_int_field::scale_factor:
         valid = *parsed >= 20 && *parsed <= 200;
         break;
+      case launch_int_field::sbs_mode:
+        valid = *parsed >= video::SBS_OFF && *parsed <= video::SBS_AI;
+        break;
     }
 
     return valid ? parsed : std::nullopt;
@@ -756,7 +759,8 @@ namespace nvhttp {
     const auto enable_hdr = parse_launch_int(launch_int_field::binary_option, get_arg(args, "hdrMode", "0"));
     const auto virtual_display = parse_launch_int(launch_int_field::binary_option, get_arg(args, "virtualDisplay", "0"));
     const auto scale_factor = parse_launch_int(launch_int_field::scale_factor, get_arg(args, "scaleFactor", "100"));
-    if (!enable_sops || !surround_info || !gamepad_mask || !enable_hdr || !virtual_display || !scale_factor) {
+    const auto sbs_mode = parse_launch_int(launch_int_field::sbs_mode, get_arg(args, "sbsMode", "0"));
+    if (!enable_sops || !surround_info || !gamepad_mask || !enable_hdr || !virtual_display || !scale_factor || !sbs_mode) {
       BOOST_LOG(warning) << "Rejecting invalid launch options for client ["sv << named_cert_p->name << ']';
       return nullptr;
     }
@@ -768,6 +772,7 @@ namespace nvhttp {
     launch_session->enable_hdr = *enable_hdr;
     launch_session->virtual_display = *virtual_display || named_cert_p->always_use_virtual_display;
     launch_session->scale_factor = static_cast<std::uint32_t>(*scale_factor);
+    launch_session->sbs_mode = *sbs_mode;
 
     launch_session->client_do_cmds = named_cert_p->do_cmds;
     launch_session->client_undo_cmds = named_cert_p->undo_cmds;
@@ -1572,34 +1577,11 @@ namespace nvhttp {
       return;
     }
     const auto appid = *parsed_appid;
-    const auto process_status = proc::proc.get_status();
-    auto current_appid = process_status.app_id;
-    const auto &current_app_uuid = process_status.app_uuid;
     bool is_input_only = config::input.enable_input_only_mode && (appid == proc::input_only_app_id || (appuuid_str == REMOTE_INPUT_UUID));
-
-    auto perm = PERM::launch;
 
     BOOST_LOG(verbose) << "Launching app [" << appid_str << "] with UUID [" << appuuid_str << "]";
     // BOOST_LOG(verbose) << "QS: " << request->query_string;
 
-    // If we have already launched an app, we should allow clients with view permission to join the input only or current app's session.
-    if (
-      current_appid > 0
-      && (appuuid_str != TERMINATE_APP_UUID || appid != proc::terminate_app_id)
-      && (is_input_only || appid == current_appid || (!appuuid_str.empty() && appuuid_str == current_app_uuid))
-    ) {
-      perm = PERM::_allow_view;
-    }
-
-    if (!(named_cert_p->perm & perm)) {
-      BOOST_LOG(debug) << "Permission LaunchApp denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
-
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 403);
-      tree.put("root.<xmlattr>.status_message", "Permission denied");
-
-      return;
-    }
     if (
       args.find("rikey"s) == std::end(args) ||
       args.find("rikeyid"s) == std::end(args) ||
@@ -1611,37 +1593,6 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "Missing a required launch parameter");
 
       return;
-    }
-
-    if (!is_input_only) {
-      // Special handling for the "terminate" app
-      if (
-        (config::input.enable_input_only_mode && appid == proc::terminate_app_id)
-        || appuuid_str == TERMINATE_APP_UUID
-      ) {
-        proc::proc.terminate();
-
-        tree.put("root.resume", 0);
-        tree.put("root.<xmlattr>.status_code", 410);
-        tree.put("root.<xmlattr>.status_message", "App terminated.");
-
-        return;
-      }
-
-      if (
-        current_appid > 0
-        && current_appid != proc::input_only_app_id
-        && (
-          (appid > 0 && appid != current_appid)
-          || (!appuuid_str.empty() && appuuid_str != current_app_uuid)
-        )
-      ) {
-        tree.put("root.resume", 0);
-        tree.put("root.<xmlattr>.status_code", 400);
-        tree.put("root.<xmlattr>.status_message", "An app is already running on this host");
-
-        return;
-      }
     }
 
     const auto local_audio = parse_launch_int(launch_int_field::binary_option, get_arg(args, "localAudioPlayMode"));
@@ -1671,7 +1622,78 @@ namespace nvhttp {
       return;
     }
 
-    bool no_active_sessions = rtsp_stream::session_count() == 0;
+    // From this point through RTSP publication, grace expiry and first-session startup are
+    // serialized with process/display mutation. Rejected paths release the guard without
+    // changing the existing grace deadline.
+    auto platform_launch = stream::session::guard_platform_launch();
+    const auto process_status = proc::proc.get_status();
+    auto current_appid = process_status.app_id;
+    const auto &current_app_uuid = process_status.app_uuid;
+
+    auto perm = PERM::launch;
+    // If we have already launched an app, allow clients with view permission to join the input
+    // only session or the currently running app.
+    if (
+      current_appid > 0
+      && (appuuid_str != TERMINATE_APP_UUID || appid != proc::terminate_app_id)
+      && (is_input_only || appid == current_appid || (!appuuid_str.empty() && appuuid_str == current_app_uuid))
+    ) {
+      perm = PERM::_allow_view;
+    }
+
+    if (!(named_cert_p->perm & perm)) {
+      BOOST_LOG(debug) << "Permission LaunchApp denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 403);
+      tree.put("root.<xmlattr>.status_message", "Permission denied");
+      return;
+    }
+
+    if (!is_input_only) {
+      // Special handling for the "terminate" app. Release the lifecycle guard first because
+      // terminating active sessions takes the same platform lock during their final join.
+      if (
+        (config::input.enable_input_only_mode && appid == proc::terminate_app_id)
+        || appuuid_str == TERMINATE_APP_UUID
+      ) {
+        platform_launch.release();
+        rtsp_stream::terminate_sessions();
+        proc::proc.terminate();
+        display_device::revert_configuration();
+        stream::session::flush_platform_state();
+
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 410);
+        tree.put("root.<xmlattr>.status_message", "App terminated.");
+        return;
+      }
+
+      if (
+        current_appid > 0
+        && current_appid != proc::input_only_app_id
+        && (
+          (appid > 0 && appid != current_appid)
+          || (!appuuid_str.empty() && appuuid_str != current_app_uuid)
+        )
+      ) {
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 400);
+        tree.put("root.<xmlattr>.status_message", "An app is already running on this host");
+        return;
+      }
+    }
+
+    // An explicit terminate request must be able to revoke an occupied handshake. For normal
+    // launches, reject an occupied HTTP-to-RTSP slot before mutating display or process state.
+    // launch_request_mutex prevents another HTTP launch from filling the slot before publication.
+    if (!rtsp_stream::launch_session_available()) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Another streaming handshake is already pending");
+      return;
+    }
+
+    const bool no_active_sessions = platform_launch.idle();
 
 #ifdef _WIN32
     if (no_active_sessions && process_status.virtual_display && (appid == current_appid || (!appuuid_str.empty() && appuuid_str == current_app_uuid)) && !ar_glasses::remote_virtual_display_starting(config::stream.ping_timeout)) {
@@ -1740,7 +1762,7 @@ namespace nvhttp {
           launch_session->client_undo_cmds.clear();
         }
 
-        auto err = proc::proc.execute(*app_iter, launch_session);
+        auto err = proc::proc.execute(*app_iter, launch_session, no_active_sessions);
         if (err) {
           tree.put("root.<xmlattr>.status_code", err);
           tree.put(
@@ -1766,6 +1788,7 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "Another streaming handshake is already pending");
       return;
     }
+    platform_launch.commit();
 
     tree.put("root.<xmlattr>.status_code", 200);
     tree.put(
@@ -1815,16 +1838,6 @@ namespace nvhttp {
       return;
     }
 
-    const auto process_status = proc::proc.get_status();
-    auto current_appid = process_status.app_id;
-    if (current_appid == 0) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 503);
-      tree.put("root.<xmlattr>.status_message", "No running app to resume");
-
-      return;
-    }
-
     auto args = request->parse_query_string();
     if (
       args.find("rikey"s) == std::end(args) ||
@@ -1837,11 +1850,9 @@ namespace nvhttp {
       return;
     }
 
-    // Newer Moonlight clients send localAudioPlayMode on /resume too,
-    // so we should use it if it's present in the args and there are
-    // no active sessions we could be interfering with.
-    const bool no_active_sessions {rtsp_stream::session_count() == 0};
-    bool requested_host_audio = host_audio;
+    // Parse every client-controlled option before acquiring the lifecycle guard. Malformed
+    // retries must not postpone an already pending grace expiry.
+    bool parsed_host_audio = host_audio;
     if (args.find("localAudioPlayMode"s) != std::end(args)) {
       const auto local_audio = parse_launch_int(launch_int_field::binary_option, get_arg(args, "localAudioPlayMode"));
       if (!local_audio) {
@@ -1850,17 +1861,48 @@ namespace nvhttp {
         tree.put("root.<xmlattr>.status_message", "Invalid local audio mode");
         return;
       }
-      if (no_active_sessions) {
-        requested_host_audio = *local_audio;
-      }
+      parsed_host_audio = *local_audio;
     }
-    auto launch_session = make_launch_session(requested_host_audio, false, args, named_cert_p.get());
+    auto launch_session = make_launch_session(parsed_host_audio, false, args, named_cert_p.get());
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
       tree.put("root.<xmlattr>.status_message", "Invalid resume parameters");
       return;
     }
+
+    auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
+    if (!launch_session->rtsp_cipher && encryption_mode == config::ENCRYPTION_MODE_MANDATORY) {
+      BOOST_LOG(error) << "Rejecting client that cannot comply with mandatory encryption requirement"sv;
+
+      tree.put("root.<xmlattr>.status_code", 403);
+      tree.put("root.<xmlattr>.status_message", "Encryption is mandatory for this host but unsupported by the client");
+      tree.put("root.gamesession", 0);
+      return;
+    }
+
+    auto platform_launch = stream::session::guard_platform_launch();
+    const auto process_status = proc::proc.get_status();
+    auto current_appid = process_status.app_id;
+    if (current_appid == 0) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "No running app to resume");
+      return;
+    }
+
+    if (!rtsp_stream::launch_session_available()) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Another streaming handshake is already pending");
+      return;
+    }
+
+    // Newer clients may change host-audio mode on resume, but only while this guarded snapshot
+    // confirms that no other stream is active.
+    const bool no_active_sessions = platform_launch.idle();
+    const bool requested_host_audio = no_active_sessions ? parsed_host_audio : host_audio;
+    launch_session->host_audio = requested_host_audio;
 
     if (!process_status.allow_client_commands || !named_cert_p->allow_client_commands) {
       launch_session->client_do_cmds.clear();
@@ -1890,17 +1932,6 @@ namespace nvhttp {
       }
     }
 
-    auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
-    if (!launch_session->rtsp_cipher && encryption_mode == config::ENCRYPTION_MODE_MANDATORY) {
-      BOOST_LOG(error) << "Rejecting client that cannot comply with mandatory encryption requirement"sv;
-
-      tree.put("root.<xmlattr>.status_code", 403);
-      tree.put("root.<xmlattr>.status_message", "Encryption is mandatory for this host but unsupported by the client");
-      tree.put("root.gamesession", 0);
-
-      return;
-    }
-
 #ifdef _WIN32
     if (no_active_sessions && process_status.virtual_display && !ar_glasses::remote_virtual_display_starting(config::stream.ping_timeout)) {
       tree.put("root.resume", 0);
@@ -1916,6 +1947,7 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "Another streaming handshake is already pending");
       return;
     }
+    platform_launch.commit();
 
     tree.put("root.<xmlattr>.status_code", 200);
     tree.put(
@@ -1976,6 +2008,9 @@ namespace nvhttp {
 
     // The config needs to be reverted regardless of whether "proc::proc.terminate()" was called or not.
     display_device::revert_configuration();
+
+    // Quit Session is an explicit teardown and bypasses the reconnect grace.
+    stream::session::flush_platform_state();
   }
 
   void appasset(resp_https_t response, req_https_t request) {

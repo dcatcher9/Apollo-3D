@@ -46,6 +46,14 @@ const config = ref(props.config)
               default="false"
     ></Checkbox>
 
+    <!-- HEVC unidirectional B-frames -->
+    <Checkbox class="mb-3"
+              id="nvenc_hevc_unidirectional_b"
+              locale-prefix="config"
+              v-model="config.nvenc_hevc_unidirectional_b"
+              default="false"
+    ></Checkbox>
+
     <!-- Single-frame VBV/HRD percentage increase -->
     <div class="mb-3">
       <label for="nvenc_vbv_increase" class="form-label">{{ $t('config.nvenc_vbv_increase') }}</label>

@@ -1807,6 +1807,29 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### session_resume_grace
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            How long, in milliseconds, to retain a launched app, virtual display, and host streaming setup after the last remote client disconnects. A reconnect during this window resumes the same desktop without rebuilding it or losing its windows. When the grace expires, Apollo terminates the retained remote app. Set to 0 to terminate immediately unless a validated replacement client is already completing its RTSP handshake; Apollo preserves that handoff for at least @code{ping_timeout}. Remote apps with @code{terminate-on-pause} enabled and configurations with @code{dd_config_revert_on_disconnect} enabled bypass this grace and tear down immediately. Valid range: 0 to 600000 (10 minutes).
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            60000
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            session_resume_grace = 60000
+            @endcode</td>
+    </tr>
+</table>
+
 ### packetsize
 
 <table>
@@ -2400,6 +2423,33 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Example</td>
         <td colspan="2">@code{}
             nvenc_spatial_aq = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### nvenc_hevc_unidirectional_b
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Replace HEVC P pictures with unidirectional B pictures whose reference lists contain only past pictures.
+            This can improve compression quality without the reordering delay of conventional B pictures.
+            The option is ignored for H.264 and AV1 and falls back to ordinary P pictures when unsupported by the GPU.
+            @note{This option only applies when using the standalone NVENC [encoder](#encoder) with HEVC.}
+            @note{This option cannot be combined with weighted prediction.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            nvenc_hevc_unidirectional_b = enabled
             @endcode</td>
     </tr>
 </table>

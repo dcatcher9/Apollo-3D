@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <utility>
 
 // lib includes
@@ -118,6 +119,42 @@ namespace stream {
   };
 
   namespace session {
+    class platform_launch_guard_t {
+    public:
+      platform_launch_guard_t(platform_launch_guard_t &&) noexcept;
+      platform_launch_guard_t &operator=(platform_launch_guard_t &&) noexcept;
+      ~platform_launch_guard_t();
+
+      platform_launch_guard_t(const platform_launch_guard_t &) = delete;
+      platform_launch_guard_t &operator=(const platform_launch_guard_t &) = delete;
+
+      /** Whether no streaming session was active when this guarded launch began. */
+      [[nodiscard]] bool idle() const;
+
+      /** Publish a validated RTSP launch and renew the retained platform deadline. */
+      void commit();
+
+      /** Release the lifecycle lock without changing the existing grace deadline. */
+      void release();
+
+      /** Detach a successful non-streaming app launch from any retained remote-session state. */
+      void detach_retained_state();
+
+    private:
+      struct impl_t;
+      explicit platform_launch_guard_t(std::unique_ptr<impl_t> impl);
+
+      std::unique_ptr<impl_t> _impl;
+
+      friend platform_launch_guard_t guard_platform_launch();
+    };
+
+    /**
+     * Serialize validated launch preparation with first-session startup and grace expiry.
+     * Destroying an uncommitted guard leaves the existing grace deadline unchanged.
+     */
+    platform_launch_guard_t guard_platform_launch();
+
     enum class state_e : int {
       STOPPED,  ///< The session is stopped
       STOPPING,  ///< The session is stopping
@@ -148,6 +185,13 @@ namespace stream {
     void graceful_stop(session_t& session);
     bool stop_if_client_policy_current(session_t &session, std::uint64_t generation, bool graceful);
     void join(session_t &session);
+
+    /**
+     * Stop any process-wide streaming state retained for fast session resume.
+     * Called during host shutdown before the global task pool is stopped.
+     */
+    void flush_platform_state();
+
     state_e state(session_t &session);
 #ifdef SUNSHINE_TESTS
     void set_state_for_test(session_t &session, state_e state);
