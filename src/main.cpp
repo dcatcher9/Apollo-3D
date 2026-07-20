@@ -397,8 +397,9 @@ int main(int argc, char *argv[]) {
 
       BOOST_LOG(info) << "Creating a temporary virtual display to probe for encoders..."sv;
 
+      VDISPLAY::creation_result_t probe_display;
       if (!config::video.adapter_name.empty()) {
-        VDISPLAY::createVirtualDisplayOnAdapter(
+        probe_display = VDISPLAY::createVirtualDisplayOnAdapter(
           probe_uuid_str.c_str(),
           "Probe",
           800,
@@ -408,7 +409,7 @@ int main(int argc, char *argv[]) {
           platf::from_utf8(config::video.adapter_name)
         );
       } else {
-        VDISPLAY::createVirtualDisplay(
+        probe_display = VDISPLAY::createVirtualDisplay(
           probe_uuid_str.c_str(),
           "Probe",
           800,
@@ -429,7 +430,43 @@ int main(int argc, char *argv[]) {
         }
       }
 
-      VDISPLAY::removeVirtualDisplay(*probe_guid);
+      if (probe_display.added()) {
+        VDISPLAY::removeVirtualDisplay(*probe_guid);
+        const auto retirement_started = std::chrono::steady_clock::now();
+        const auto retirement_deadline = retirement_started + 5s;
+        auto next_remove_retry = retirement_started + 250ms;
+        int consecutive_absent_observations = 0;
+        bool retired = false;
+        while (std::chrono::steady_clock::now() < retirement_deadline) {
+          const auto now = std::chrono::steady_clock::now();
+          if (now >= next_remove_retry) {
+            VDISPLAY::removeVirtualDisplay(*probe_guid);
+            next_remove_retry = now + 250ms;
+          }
+          const auto identity = VDISPLAY::queryVirtualDisplayIdentity(
+            *probe_display.identity,
+            probe_display.device_path,
+            probe_display.display_name
+          );
+          if (identity.state == VDISPLAY::display_identity_state_e::absent) {
+            ++consecutive_absent_observations;
+            const bool publication_quarantine_complete = !probe_display.display_name.empty() ||
+                                                         now - retirement_started >= 750ms;
+            if (consecutive_absent_observations >= 3 && publication_quarantine_complete) {
+              retired = true;
+              break;
+            }
+          } else {
+            consecutive_absent_observations = 0;
+          }
+          std::this_thread::sleep_for(50ms);
+        }
+        if (!retired) {
+          BOOST_LOG(fatal) << "The encoder-probe virtual display did not retire cleanly; "sv
+                              "refusing to start another virtual-display owner."sv;
+          return 1;
+        }
+      }
     } else if (!allow_probing) {
       BOOST_LOG(error) << "Video failed to find working encoder: probe failed and virtual display driver isn't initialized"sv;
     }

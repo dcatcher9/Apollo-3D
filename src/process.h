@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cstdint>
 #include <optional>
+#include <stop_token>
 #include <thread>
 #include <unordered_map>
 
@@ -158,6 +159,8 @@ namespace proc {
     std::string get_running_app_uuid();
     std::optional<std::uint32_t> get_launch_session_id();
     boost::process::v1::environment get_env();
+    /** Adopt the first streaming session's virtual-display lease before platform startup. */
+    bool activate_remote_virtual_display_lease(std::uint64_t lease);
     void resume();
     void pause();
     void terminate(bool immediate = false, bool needs_refresh = true);
@@ -171,7 +174,7 @@ namespace proc {
      * Release an inactive remote virtual desktop before local AR creates its own source.
      * Active or connecting remote sessions are never terminated.
      */
-    local_ar_handoff_e prepare_local_ar_handoff();
+    local_ar_handoff_e prepare_local_ar_handoff(const std::stop_source &construction_stop);
 #endif
 
   private:
@@ -190,6 +193,10 @@ namespace proc {
 
 #ifdef _WIN32
     std::optional<SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT> _virtual_display_identity;
+    std::wstring _virtual_display_device_path;
+    std::wstring _virtual_display_gdi_name;
+    bool _virtual_display_published = false;
+    std::optional<std::uint64_t> _remote_virtual_display_lease;
     bool wait_for_retired_virtual_display(std::chrono::milliseconds timeout);
     void start_hdr_worker(bool enable_hdr);
     void stop_hdr_worker();

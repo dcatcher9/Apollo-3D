@@ -5,9 +5,11 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <stop_token>
+#include <string>
 
 // platform includes
 #include <d3d11.h>
@@ -393,6 +395,21 @@ namespace platf::dxgi {
     capture_e release_snapshot() override;
   };
 
+  struct local_presenter_cursor_clip_t {
+    RECT previous_clip {};
+    RECT owned_clip {};
+    bool clip_saved = false;
+    bool previous_clip_unbounded = false;
+    bool owns_clip = false;
+    bool clip_yielded = false;
+    bool clip_unavailable_logged = false;
+    unsigned retry_failures = 0;
+    std::chrono::steady_clock::time_point retry_after {};
+
+    bool restore();
+    ~local_presenter_cursor_clip_t();
+  };
+
   struct local_presenter_config_t {
     std::string source_display_name;
     RECT target_rect {};
@@ -405,17 +422,29 @@ namespace platf::dxgi {
       std::mutex mutex;
       RECT rect {};
       std::string display_name;
+      // DisplayConfig paths are stable across the \\.\DISPLAYn renumbering that accompanies
+      // physical 2D/SBS and Advanced Color transitions. The topology controller seeds these
+      // before the presenter opens either volatile GDI name.
+      std::wstring source_device_path;
+      std::wstring target_device_path;
     };
     std::shared_ptr<target_t> live_target;
     std::shared_ptr<std::atomic<std::uint64_t>> presented_frames;
+    std::shared_ptr<local_presenter_cursor_clip_t> cursor_clip;
   };
 
   enum class local_presenter_result_e {
     stopped,
     reinit,
-    rebuild,
     error,
   };
+
+  /** Reconcile the session-owned cursor boundary while presenter resources are paused. */
+  void refresh_local_presenter_pointer_isolation(
+    const std::string &source_display_name,
+    const std::shared_ptr<local_presenter_config_t::target_t> &live_target,
+    const std::shared_ptr<local_presenter_cursor_clip_t> &cursor_clip
+  );
 
   /**
    * Capture a local display and present it to a borderless window on another display.

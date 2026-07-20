@@ -4,6 +4,7 @@
 #include <chrono>
 #include <combaseapi.h>
 #include <condition_variable>
+#include <cwctype>
 #include <dxgi.h>
 #include <dxgi1_6.h>
 #include <highlevelmonitorconfigurationapi.h>
@@ -31,6 +32,49 @@ namespace VDISPLAY {
     std::mutex watchdogWaitMutex;
     std::condition_variable_any watchdogWake;
     std::jthread watchdogThread;
+
+    bool containsCaseInsensitive(std::wstring_view value, std::wstring_view needle) {
+      return std::search(
+               value.begin(),
+               value.end(),
+               needle.begin(),
+               needle.end(),
+               [](wchar_t left, wchar_t right) {
+                 return std::towlower(left) == std::towlower(right);
+               }
+             ) != value.end();
+    }
+
+    bool isSudoVirtualDisplayPath(std::wstring_view devicePath) {
+      // Current SudoVDA/IddCx targets publish the SMKD1CE hardware ID. Keep the legacy driver-name
+      // marker as well for already deployed variants and diagnostic/probe builds.
+      return containsCaseInsensitive(devicePath, L"SMKD1CE") ||
+             containsCaseInsensitive(devicePath, L"SUDOVDA");
+    }
+
+    bool sameLuid(const LUID &left, const LUID &right) {
+      return left.HighPart == right.HighPart && left.LowPart == right.LowPart;
+    }
+
+    bool matchesVirtualDisplayIdentity(
+      const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &expectedIdentity,
+      std::wstring_view learnedDevicePath,
+      const LUID &candidateAdapter,
+      uint32_t candidateTargetId,
+      std::wstring_view candidateDevicePath
+    ) {
+      // A path learned from the exact AddVirtualDisplay result remains stable when Windows renumbers
+      // DISPLAY names or target IDs. It is therefore the strongest available post-publication key.
+      const bool learnedPath = !learnedDevicePath.empty() &&
+                               learnedDevicePath == candidateDevicePath;
+      const bool exactVirtualIdentity = sameLuid(expectedIdentity.AdapterLuid, candidateAdapter) &&
+                                        expectedIdentity.TargetId == candidateTargetId &&
+                                        isSudoVirtualDisplayPath(candidateDevicePath);
+      // Do not fall back to a matching GDI name or to "the only SudoVDA output". DISPLAY numbers
+      // are recyclable, and the driver intentionally supports multiple monitors and shared clients;
+      // neither condition proves that a candidate belongs to this retirement record.
+      return learnedPath || exactVirtualIdentity;
+    }
 
     void stopWatchdogThread() {
       std::jthread retiring;
@@ -447,7 +491,7 @@ bool findDisplayIds(const wchar_t *displayName, LUID &adapterId, uint32_t &targe
   return true;
 }
 
-bool getDisplayHDR(const LUID &adapterLuid, uint32_t targetId) {
+std::optional<bool> queryDisplayHDR(const LUID &adapterLuid, uint32_t targetId) {
   // Query the display configuration state directly. A virtual HDR desktop is represented as
   // linear scRGB to desktop applications, so its DXGI output color space is not required to be
   // the physical-output PQ/Rec.2020 space and is not a reliable HDR-enabled test.
@@ -465,7 +509,10 @@ bool getDisplayHDR(const LUID &adapterLuid, uint32_t targetId) {
   info.header.size = sizeof(info);
   info.header.adapterId = adapterLuid;
   info.header.id = targetId;
-  return DisplayConfigGetDeviceInfo(&info.header) == ERROR_SUCCESS && info.advancedColorEnabled;
+  if (DisplayConfigGetDeviceInfo(&info.header) == ERROR_SUCCESS) {
+    return info.advancedColorEnabled != 0;
+  }
+  return std::nullopt;
 }
 
 bool setDisplayHDR(const LUID& adapterId, const uint32_t& targetId, bool enableAdvancedColor) {
@@ -491,16 +538,16 @@ bool setDisplayHDR(const LUID& adapterId, const uint32_t& targetId, bool enableA
   return DisplayConfigSetDeviceInfo(&setHdrInfo.header) == ERROR_SUCCESS;
 }
 
-bool getDisplayHDRByName(const wchar_t* displayName) {
+std::optional<bool> queryDisplayHDRByName(const wchar_t* displayName) {
 	LUID adapterId;
 	uint32_t targetId;
 
 	if (!findDisplayIds(displayName, adapterId, targetId)) {
 		wprintf(L"[SUDOVDA] Failed to find display IDs for %ls!\n", displayName);
-		return false;
+		return std::nullopt;
 	}
 
-  return getDisplayHDR(adapterId, targetId);
+  return queryDisplayHDR(adapterId, targetId);
 }
 
 bool setDisplayHDRByName(const wchar_t* displayName, bool enableAdvancedColor) {
@@ -648,7 +695,7 @@ bool queryActiveDisplayConfig(
   return false;
 }
 
-std::wstring getDisplayName(const LUID &adapterLuid, uint32_t targetId) {
+display_identity_query_t queryDisplayIdentity(const LUID &adapterLuid, uint32_t targetId) {
   std::vector<DISPLAYCONFIG_PATH_INFO> paths;
   std::vector<DISPLAYCONFIG_MODE_INFO> modes;
   if (!queryActiveDisplayConfig(paths, modes)) {
@@ -665,12 +712,109 @@ std::wstring getDisplayName(const LUID &adapterLuid, uint32_t targetId) {
     sourceName.header.size = sizeof(sourceName);
     sourceName.header.adapterId = path.sourceInfo.adapterId;
     sourceName.header.id = path.sourceInfo.id;
-    if (DisplayConfigGetDeviceInfo(&sourceName.header) == ERROR_SUCCESS) {
-      return sourceName.viewGdiDeviceName;
+    DISPLAYCONFIG_TARGET_DEVICE_NAME targetName {};
+    targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+    targetName.header.size = sizeof(targetName);
+    targetName.header.adapterId = path.targetInfo.adapterId;
+    targetName.header.id = path.targetInfo.id;
+    if (DisplayConfigGetDeviceInfo(&sourceName.header) == ERROR_SUCCESS &&
+        DisplayConfigGetDeviceInfo(&targetName.header) == ERROR_SUCCESS) {
+      std::wstring display_name = sourceName.viewGdiDeviceName;
+      if (!display_name.empty()) {
+        return {
+          display_identity_state_e::present,
+          std::move(display_name),
+          targetName.monitorDevicePath,
+          targetName.monitorFriendlyDeviceName,
+        };
+      }
     }
+
+    // The exact stable adapter/target identity is still in the active topology, but Windows could
+    // not publish its GDI source name. Do not let callers mistake that transient query failure for
+    // completed removal.
+    return {};
   }
 
-  return {};
+  // Absence is authoritative only after a complete active-topology snapshot contains no exact
+  // adapter/target match.
+  return {display_identity_state_e::absent, {}, {}, {}};
+}
+
+display_identity_query_t queryVirtualDisplayIdentity(
+  const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
+  std::wstring_view devicePath,
+  std::wstring_view /*displayName*/
+) {
+  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+  if (!queryActiveDisplayConfig(paths, modes)) {
+    return {};
+  }
+
+  for (const auto &path : paths) {
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName {};
+    sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+    sourceName.header.size = sizeof(sourceName);
+    sourceName.header.adapterId = path.sourceInfo.adapterId;
+    sourceName.header.id = path.sourceInfo.id;
+
+    DISPLAYCONFIG_TARGET_DEVICE_NAME targetName {};
+    targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+    targetName.header.size = sizeof(targetName);
+    targetName.header.adapterId = path.targetInfo.adapterId;
+    targetName.header.id = path.targetInfo.id;
+    if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS ||
+        DisplayConfigGetDeviceInfo(&targetName.header) != ERROR_SUCCESS) {
+      return {};
+    }
+
+    const std::wstring_view candidatePath = targetName.monitorDevicePath;
+    if (matchesVirtualDisplayIdentity(
+          identity,
+          devicePath,
+          path.targetInfo.adapterId,
+          path.targetInfo.id,
+          candidatePath
+        )) {
+      return {
+        display_identity_state_e::present,
+        sourceName.viewGdiDeviceName,
+        targetName.monitorDevicePath,
+        targetName.monitorFriendlyDeviceName,
+      };
+    }
+  }
+  return {display_identity_state_e::absent, {}, {}, {}};
+}
+
+#ifdef SUNSHINE_TESTS
+bool isSudoVirtualDisplayPathForTest(std::wstring_view devicePath) {
+  return isSudoVirtualDisplayPath(devicePath);
+}
+
+bool virtualDisplayIdentityMatchesForTest(
+  const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &expectedIdentity,
+  std::wstring_view learnedDevicePath,
+  const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &candidateIdentity,
+  std::wstring_view candidateDevicePath
+) {
+  return matchesVirtualDisplayIdentity(
+    expectedIdentity,
+    learnedDevicePath,
+    candidateIdentity.AdapterLuid,
+    candidateIdentity.TargetId,
+    candidateDevicePath
+  );
+}
+#endif
+
+std::wstring getDisplayName(const LUID &adapterLuid, uint32_t targetId) {
+  auto identity = queryDisplayIdentity(adapterLuid, targetId);
+  if (identity.state != display_identity_state_e::present) {
+    return {};
+  }
+  return std::move(identity.display_name);
 }
 
 namespace {
@@ -709,17 +853,17 @@ namespace {
     return std::nullopt;
   }
 
-  std::wstring createVirtualDisplayImpl(
+  creation_result_t createVirtualDisplayImpl(
     const char *s_client_uid,
     const char *s_client_name,
     uint32_t width,
     uint32_t height,
     uint32_t fps,
     const GUID &guid,
-    const std::optional<LUID> &adapterLuid,
-    VIRTUAL_DISPLAY_ADD_OUT *createdDisplay
+    const std::optional<LUID> &adapterLuid
   ) {
-    VIRTUAL_DISPLAY_ADD_OUT output;
+    creation_result_t result;
+    VIRTUAL_DISPLAY_ADD_OUT output {};
     {
       // SudoVDA's render-adapter choice is process-global. Keep adapter selection and AddVirtualDisplay
       // in one critical section so local AR and remote streaming sessions cannot steal each other's GPU.
@@ -736,36 +880,40 @@ namespace {
         return {};
       }
     }
-    if (createdDisplay) {
-      *createdDisplay = output;
-    }
+    // Driver creation and Windows display-name publication are separate operations. Record Add's
+    // success immediately so callers can always retire the exact output even if name lookup times
+    // out during topology churn.
+    result.identity = output;
 
     uint32_t retryInterval = 20;
-    std::wstring deviceName;
-    while ((deviceName = getDisplayName(output.AdapterLuid, output.TargetId)).empty()) {
+    display_identity_query_t published;
+    while ((published = queryDisplayIdentity(output.AdapterLuid, output.TargetId)).state !=
+           display_identity_state_e::present) {
       Sleep(retryInterval);
       if (retryInterval > 320) {
         printf("[SUDOVDA] Cannot get name for newly added virtual display!\n");
-        return std::wstring();
+        return result;
       }
       retryInterval *= 2;
     }
 
-    wprintf(L"[SUDOVDA] Virtual display added successfully: %ls\n", deviceName.c_str());
+    wprintf(L"[SUDOVDA] Virtual display added successfully: %ls\n", published.display_name.c_str());
     printf("[SUDOVDA] Configuration: W: %d, H: %d, FPS: %d\n", width, height, fps);
 
-    return deviceName;
+    result.display_name = std::move(published.display_name);
+    result.device_path = std::move(published.device_path);
+    result.friendly_name = std::move(published.friendly_name);
+    return result;
   }
 }  // namespace
 
-std::wstring createVirtualDisplay(
+creation_result_t createVirtualDisplay(
   const char *s_client_uid,
   const char *s_client_name,
   uint32_t width,
   uint32_t height,
   uint32_t fps,
-  const GUID &guid,
-  VIRTUAL_DISPLAY_ADD_OUT *createdDisplay
+  const GUID &guid
 ) {
   return createVirtualDisplayImpl(
     s_client_uid,
@@ -774,20 +922,18 @@ std::wstring createVirtualDisplay(
     height,
     fps,
     guid,
-    primaryDisplayAdapterLuid(),
-    createdDisplay
+    primaryDisplayAdapterLuid()
   );
 }
 
-std::wstring createVirtualDisplayOnAdapter(
+creation_result_t createVirtualDisplayOnAdapter(
   const char *s_client_uid,
   const char *s_client_name,
   uint32_t width,
   uint32_t height,
   uint32_t fps,
   const GUID &guid,
-  const LUID &adapterLuid,
-  VIRTUAL_DISPLAY_ADD_OUT *createdDisplay
+  const LUID &adapterLuid
 ) {
   return createVirtualDisplayImpl(
     s_client_uid,
@@ -796,20 +942,18 @@ std::wstring createVirtualDisplayOnAdapter(
     height,
     fps,
     guid,
-    adapterLuid,
-    createdDisplay
+    adapterLuid
   );
 }
 
-std::wstring createVirtualDisplayOnAdapter(
+creation_result_t createVirtualDisplayOnAdapter(
   const char *s_client_uid,
   const char *s_client_name,
   uint32_t width,
   uint32_t height,
   uint32_t fps,
   const GUID &guid,
-  const std::wstring &adapterName,
-  VIRTUAL_DISPLAY_ADD_OUT *createdDisplay
+  const std::wstring &adapterName
 ) {
   const auto adapterLuid = adapterLuidByName(adapterName);
   if (!adapterLuid) {
@@ -823,8 +967,7 @@ std::wstring createVirtualDisplayOnAdapter(
     height,
     fps,
     guid,
-    *adapterLuid,
-    createdDisplay
+    *adapterLuid
   );
 }
 

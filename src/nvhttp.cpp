@@ -1621,6 +1621,14 @@ namespace nvhttp {
 
       return;
     }
+#ifdef _WIN32
+    bool remote_virtual_display_reserved = false;
+    auto remote_virtual_display_guard = util::fail_guard([&]() {
+      if (remote_virtual_display_reserved) {
+        ar_glasses::remote_virtual_display_ended(launch_session->id);
+      }
+    });
+#endif
 
     // From this point through RTSP publication, grace expiry and first-session startup are
     // serialized with process/display mutation. Rejected paths release the guard without
@@ -1696,11 +1704,18 @@ namespace nvhttp {
     const bool no_active_sessions = platform_launch.idle();
 
 #ifdef _WIN32
-    if (no_active_sessions && process_status.virtual_display && (appid == current_appid || (!appuuid_str.empty() && appuuid_str == current_app_uuid)) && !ar_glasses::remote_virtual_display_starting(config::stream.ping_timeout)) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 503);
-      tree.put("root.<xmlattr>.status_message", "Local AR display ownership could not be released");
-      return;
+    if (no_active_sessions && process_status.virtual_display &&
+        (appid == current_appid || (!appuuid_str.empty() && appuuid_str == current_app_uuid))) {
+      if (!ar_glasses::remote_virtual_display_starting(
+            launch_session->id,
+            config::stream.ping_timeout
+          )) {
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 503);
+        tree.put("root.<xmlattr>.status_message", "Local AR display ownership could not be released");
+        return;
+      }
+      remote_virtual_display_reserved = true;
     }
 #endif
 
@@ -1788,6 +1803,9 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "Another streaming handshake is already pending");
       return;
     }
+#ifdef _WIN32
+    remote_virtual_display_guard.disable();
+#endif
     platform_launch.commit();
 
     tree.put("root.<xmlattr>.status_code", 200);
@@ -1870,6 +1888,14 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "Invalid resume parameters");
       return;
     }
+#ifdef _WIN32
+    bool remote_virtual_display_reserved = false;
+    auto remote_virtual_display_guard = util::fail_guard([&]() {
+      if (remote_virtual_display_reserved) {
+        ar_glasses::remote_virtual_display_ended(launch_session->id);
+      }
+    });
+#endif
 
     auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
     if (!launch_session->rtsp_cipher && encryption_mode == config::ENCRYPTION_MODE_MANDATORY) {
@@ -1933,11 +1959,17 @@ namespace nvhttp {
     }
 
 #ifdef _WIN32
-    if (no_active_sessions && process_status.virtual_display && !ar_glasses::remote_virtual_display_starting(config::stream.ping_timeout)) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 503);
-      tree.put("root.<xmlattr>.status_message", "Local AR display ownership could not be released");
-      return;
+    if (no_active_sessions && process_status.virtual_display) {
+      if (!ar_glasses::remote_virtual_display_starting(
+            launch_session->id,
+            config::stream.ping_timeout
+          )) {
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 503);
+        tree.put("root.<xmlattr>.status_message", "Local AR display ownership could not be released");
+        return;
+      }
+      remote_virtual_display_reserved = true;
     }
 #endif
 
@@ -1947,6 +1979,9 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "Another streaming handshake is already pending");
       return;
     }
+#ifdef _WIN32
+    remote_virtual_display_guard.disable();
+#endif
     platform_launch.commit();
 
     tree.put("root.<xmlattr>.status_code", 200);

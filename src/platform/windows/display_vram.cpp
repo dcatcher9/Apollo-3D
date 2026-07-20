@@ -7,9 +7,11 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <optional>
 #include <thread>
 
 // platform includes
@@ -1913,119 +1915,550 @@ namespace platf::dxgi {
 
   namespace {
     constexpr wchar_t local_presenter_window_class[] = L"ApolloLocalArPresenter";
-    // Mark reinjected button/wheel events so an unexpected topology/window race can never make a
-    // synthetic event delivered back to the presenter recursively generate another SendInput.
-    constexpr ULONG_PTR local_presenter_forwarded_input_tag = 0x41524C50u;  // "ARLP"
 
-    struct local_presenter_pointer_redirect_t {
-      RECT source_rect {};
-      RECT target_rect {};
-      std::shared_ptr<local_presenter_config_t::target_t> live_target;
+    bool same_local_presenter_rect(const RECT &left, const RECT &right) {
+      return left.left == right.left && left.top == right.top &&
+             left.right == right.right && left.bottom == right.bottom;
+    }
 
-      RECT current_target_rect() const {
-        if (!live_target) {
-          return target_rect;
-        }
-        std::lock_guard lock(live_target->mutex);
-        return live_target->rect;
+    bool valid_local_presenter_rect(const RECT &rect) {
+      return rect.right > rect.left && rect.bottom > rect.top;
+    }
+
+    RECT local_presenter_virtual_screen_rect() {
+      const LONG left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+      const LONG top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+      return {
+        left,
+        top,
+        left + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+        top + GetSystemMetrics(SM_CYVIRTUALSCREEN),
+      };
+    }
+
+    std::optional<RECT> intersect_local_presenter_rects(const RECT &left, const RECT &right) {
+      RECT intersection {
+        std::max(left.left, right.left),
+        std::max(left.top, right.top),
+        std::min(left.right, right.right),
+        std::min(left.bottom, right.bottom),
+      };
+      if (!valid_local_presenter_rect(intersection)) {
+        return std::nullopt;
       }
+      return intersection;
+    }
 
-      bool redirect_pointer() const {
-        const auto sink_rect = current_target_rect();
-        POINT cursor {};
-        if (!GetCursorPos(&cursor) || !PtInRect(&sink_rect, cursor)) {
-          return false;
+    std::optional<RECT> query_local_presenter_cursor_clip(int attempts = 1) {
+      RECT clip {};
+      for (int attempt = 0; attempt < std::max(1, attempts); ++attempt) {
+        if (GetClipCursor(&clip)) {
+          return clip;
         }
-
-        const LONG source_width = source_rect.right - source_rect.left;
-        const LONG source_height = source_rect.bottom - source_rect.top;
-        const LONG sink_width = sink_rect.right - sink_rect.left;
-        const LONG sink_height = sink_rect.bottom - sink_rect.top;
-        if (source_width <= 0 || source_height <= 0 || sink_width <= 0 || sink_height <= 0) {
-          return false;
+        if (attempt + 1 < attempts) {
+          Sleep(2);
         }
-
-        const auto relative_x = std::clamp(cursor.x - sink_rect.left, 0L, sink_width - 1);
-        const auto relative_y = std::clamp(cursor.y - sink_rect.top, 0L, sink_height - 1);
-        const LONG mapped_x = source_rect.left + std::min(
-                                                   source_width - 1,
-                                                   static_cast<LONG>(
-                                                     static_cast<std::int64_t>(relative_x) * source_width / sink_width
-                                                   )
-                                                 );
-        const LONG mapped_y = source_rect.top + std::min(
-                                                  source_height - 1,
-                                                  static_cast<LONG>(
-                                                    static_cast<std::int64_t>(relative_y) * source_height / sink_height
-                                                  )
-                                                );
-        return SetCursorPos(mapped_x, mapped_y) != FALSE;
       }
+      return std::nullopt;
+    }
+
+    struct deferred_cursor_restore_t {
+      RECT previous_clip {};
+      RECT owned_clip {};
+      bool previous_clip_unbounded = false;
     };
 
-    bool cursor_is_over_presenter(HWND presenter) {
-      POINT cursor {};
-      if (!GetCursorPos(&cursor)) {
-        return true;  // fail closed: without a current point, forwarding is not provably safe
+    class deferred_cursor_restore_manager_t {
+    public:
+      deferred_cursor_restore_manager_t():
+          worker_([this]() {
+            run();
+          }) {
       }
-      const HWND hit = WindowFromPoint(cursor);
-      if (!hit) {
-        return false;
+
+      ~deferred_cursor_restore_manager_t() {
+        {
+          std::lock_guard lock(mutex_);
+          stopping_ = true;
+        }
+        changed_.notify_all();
+        if (worker_.joinable()) {
+          worker_.join();
+        }
       }
-      return hit == presenter || GetAncestor(hit, GA_ROOT) == presenter ||
-             GetAncestor(hit, GA_ROOTOWNER) == presenter;
+
+      void defer(const deferred_cursor_restore_t &restore) {
+        std::lock_guard lock(mutex_);
+        if (pending_ && !same_local_presenter_rect(pending_->owned_clip, restore.owned_clip)) {
+          BOOST_LOG(error) << "Local AR refused to overwrite an unresolved cursor-restoration record."sv;
+          return;
+        }
+        pending_ = restore;
+        retry_delay_ = 25ms;
+        changed_.notify_all();
+      }
+
+      // A new owner must not save Apollo's unresolved clip as the user's prior restriction.
+      bool ready_for_new_owner() {
+        std::lock_guard lock(mutex_);
+        resolve_once_locked();
+        return !pending_;
+      }
+
+    private:
+      bool resolve_once_locked() {
+        if (!pending_) {
+          return true;
+        }
+        const auto current = query_local_presenter_cursor_clip(3);
+        if (!current) {
+          return false;
+        }
+        if (!same_local_presenter_rect(*current, pending_->owned_clip)) {
+          // Another application replaced Apollo's clip. Its state is authoritative, so restoring
+          // the older rectangle now would corrupt that application's cursor confinement.
+          pending_.reset();
+          return true;
+        }
+        const BOOL restored = pending_->previous_clip_unbounded ?
+                                ClipCursor(nullptr) :
+                                ClipCursor(&pending_->previous_clip);
+        if (!restored) {
+          return false;
+        }
+        pending_.reset();
+        return true;
+      }
+
+      void run() {
+        std::unique_lock lock(mutex_);
+        while (!stopping_) {
+          changed_.wait(lock, [&]() {
+            return stopping_ || pending_.has_value();
+          });
+          while (!stopping_ && pending_) {
+            if (resolve_once_locked()) {
+              retry_delay_ = 25ms;
+              continue;
+            }
+            const auto delay = retry_delay_;
+            retry_delay_ = std::min(retry_delay_ * 2, 1000ms);
+            changed_.wait_for(lock, delay, [&]() {
+              return stopping_ || !pending_;
+            });
+          }
+        }
+        // Make one final best effort while Win32 and the process desktop are still alive.
+        resolve_once_locked();
+      }
+
+      std::mutex mutex_;
+      std::condition_variable changed_;
+      std::optional<deferred_cursor_restore_t> pending_;
+      std::chrono::milliseconds retry_delay_ {25};
+      bool stopping_ = false;
+      std::thread worker_;
+    };
+
+    deferred_cursor_restore_manager_t &deferred_cursor_restore_manager() {
+      static deferred_cursor_restore_manager_t manager;
+      return manager;
     }
 
-    bool forward_presenter_mouse_action(HWND presenter, UINT message, WPARAM wparam) {
-      // SetCursorPos and the live target/window rectangle can race. Re-read the global cursor and
-      // hit-test immediately before injection; if the presenter still owns that point, swallow the
-      // original event rather than feeding it back into this window procedure.
-      if (cursor_is_over_presenter(presenter)) {
+    void defer_cursor_retry(local_presenter_cursor_clip_t &clip) {
+      const unsigned shift = std::min(clip.retry_failures, 6u);
+      const auto delay = std::min(20ms * (1u << shift), 1000ms);
+      clip.retry_failures = std::min(clip.retry_failures + 1, 16u);
+      clip.retry_after = std::chrono::steady_clock::now() + delay;
+    }
+
+    void clear_cursor_retry(local_presenter_cursor_clip_t &clip) {
+      clip.retry_failures = 0;
+      clip.retry_after = {};
+    }
+
+    struct local_presenter_display_identity_t {
+      LUID adapter_id {};
+      UINT32 target_id = 0;
+      std::wstring gdi_name;
+      std::wstring device_path;
+      std::wstring friendly_name;
+    };
+
+    bool same_local_presenter_luid(const LUID &left, const LUID &right) {
+      return left.HighPart == right.HighPart && left.LowPart == right.LowPart;
+    }
+
+    std::optional<local_presenter_display_identity_t> query_local_presenter_display_identity(
+      std::wstring_view display_name
+    ) {
+      if (display_name.empty()) {
+        return std::nullopt;
+      }
+      constexpr UINT32 flags = QDC_ONLY_ACTIVE_PATHS;
+      for (int attempt = 0; attempt < 4; ++attempt) {
+        UINT32 path_count = 0;
+        UINT32 mode_count = 0;
+        if (GetDisplayConfigBufferSizes(flags, &path_count, &mode_count) != ERROR_SUCCESS) {
+          return std::nullopt;
+        }
+        std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
+        std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
+        auto query_path_count = path_count;
+        auto query_mode_count = mode_count;
+        const auto query_status = QueryDisplayConfig(
+          flags,
+          &query_path_count,
+          paths.data(),
+          &query_mode_count,
+          modes.data(),
+          nullptr
+        );
+        if (query_status == ERROR_INSUFFICIENT_BUFFER) {
+          continue;
+        }
+        if (query_status != ERROR_SUCCESS) {
+          return std::nullopt;
+        }
+        paths.resize(query_path_count);
+        for (const auto &path : paths) {
+          DISPLAYCONFIG_SOURCE_DEVICE_NAME source_name {};
+          source_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+          source_name.header.size = sizeof(source_name);
+          source_name.header.adapterId = path.sourceInfo.adapterId;
+          source_name.header.id = path.sourceInfo.id;
+          if (DisplayConfigGetDeviceInfo(&source_name.header) != ERROR_SUCCESS ||
+              display_name != source_name.viewGdiDeviceName) {
+            continue;
+          }
+
+          DISPLAYCONFIG_TARGET_DEVICE_NAME target_name {};
+          target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+          target_name.header.size = sizeof(target_name);
+          target_name.header.adapterId = path.targetInfo.adapterId;
+          target_name.header.id = path.targetInfo.id;
+          if (DisplayConfigGetDeviceInfo(&target_name.header) != ERROR_SUCCESS ||
+              !target_name.monitorDevicePath[0]) {
+            return std::nullopt;
+          }
+          return local_presenter_display_identity_t {
+            path.targetInfo.adapterId,
+            path.targetInfo.id,
+            source_name.viewGdiDeviceName,
+            target_name.monitorDevicePath,
+            target_name.monitorFriendlyDeviceName,
+          };
+        }
+        return std::nullopt;
+      }
+      return std::nullopt;
+    }
+
+    bool local_presenter_identity_is_coherent(
+      const std::shared_ptr<local_presenter_config_t::target_t> &live_target,
+      const local_presenter_display_identity_t &source,
+      const local_presenter_display_identity_t &target,
+      const LUID &expected_adapter
+    ) {
+      if (!live_target || source.device_path.empty() || target.device_path.empty() ||
+          source.device_path == target.device_path ||
+          !same_local_presenter_luid(source.adapter_id, expected_adapter) ||
+          !same_local_presenter_luid(target.adapter_id, expected_adapter) ||
+          !boost::algorithm::istarts_with(source.friendly_name, std::wstring(L"Apollo AR Des"))) {
         return false;
       }
-      INPUT input {};
-      input.type = INPUT_MOUSE;
-      input.mi.dwExtraInfo = local_presenter_forwarded_input_tag;
-      switch (message) {
-        case WM_LBUTTONDOWN:
-          input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-          break;
-        case WM_LBUTTONUP:
-          input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
-          break;
-        case WM_RBUTTONDOWN:
-          input.mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
-          break;
-        case WM_RBUTTONUP:
-          input.mi.dwFlags = MOUSEEVENTF_RIGHTUP;
-          break;
-        case WM_MBUTTONDOWN:
-          input.mi.dwFlags = MOUSEEVENTF_MIDDLEDOWN;
-          break;
-        case WM_MBUTTONUP:
-          input.mi.dwFlags = MOUSEEVENTF_MIDDLEUP;
-          break;
-        case WM_XBUTTONDOWN:
-          input.mi.dwFlags = MOUSEEVENTF_XDOWN;
-          input.mi.mouseData = GET_XBUTTON_WPARAM(wparam);
-          break;
-        case WM_XBUTTONUP:
-          input.mi.dwFlags = MOUSEEVENTF_XUP;
-          input.mi.mouseData = GET_XBUTTON_WPARAM(wparam);
-          break;
-        case WM_MOUSEWHEEL:
-          input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-          input.mi.mouseData = static_cast<DWORD>(GET_WHEEL_DELTA_WPARAM(wparam));
-          break;
-        case WM_MOUSEHWHEEL:
-          input.mi.dwFlags = MOUSEEVENTF_HWHEEL;
-          input.mi.mouseData = static_cast<DWORD>(GET_WHEEL_DELTA_WPARAM(wparam));
-          break;
-        default:
-          return false;
-      }
-      return SendInput(1, &input, sizeof(input)) == 1;
+      std::lock_guard lock(live_target->mutex);
+      return !live_target->source_device_path.empty() &&
+             !live_target->target_device_path.empty() &&
+             live_target->source_device_path == source.device_path &&
+             live_target->target_device_path == target.device_path;
     }
+
+    std::optional<RECT> query_local_presenter_display_rect(std::wstring_view display_name) {
+      if (display_name.empty()) {
+        return std::nullopt;
+      }
+
+      DEVMODEW mode {};
+      mode.dmSize = sizeof(mode);
+      const std::wstring owned_name {display_name};
+      if (!EnumDisplaySettingsExW(owned_name.c_str(), ENUM_CURRENT_SETTINGS, &mode, 0)) {
+        return std::nullopt;
+      }
+
+      RECT rect {
+        mode.dmPosition.x,
+        mode.dmPosition.y,
+        mode.dmPosition.x + static_cast<LONG>(mode.dmPelsWidth),
+        mode.dmPosition.y + static_cast<LONG>(mode.dmPelsHeight),
+      };
+      if (!valid_local_presenter_rect(rect)) {
+        return std::nullopt;
+      }
+      return rect;
+    }
+
+    struct local_presenter_pointer_isolation_t {
+      struct clip_request_t {
+        bool geometry_known = false;
+        std::optional<RECT> clip;
+      };
+
+      std::wstring source_display_name;
+      RECT source_fallback_rect {};
+      RECT target_fallback_rect {};
+      std::shared_ptr<local_presenter_config_t::target_t> live_target;
+      std::shared_ptr<local_presenter_cursor_clip_t> cursor_clip;
+
+      RECT current_source_rect() const {
+        if (const auto rect = query_local_presenter_display_rect(source_display_name)) {
+          return *rect;
+        }
+        return source_fallback_rect;
+      }
+
+      RECT current_target_rect() const {
+        RECT fallback = target_fallback_rect;
+        std::wstring display_name;
+        if (live_target) {
+          std::lock_guard lock(live_target->mutex);
+          fallback = live_target->rect;
+          display_name = platf::from_utf8(live_target->display_name);
+        }
+        if (const auto rect = query_local_presenter_display_rect(display_name)) {
+          return *rect;
+        }
+        return fallback;
+      }
+
+      clip_request_t desired_clip() const {
+        const auto source_rect = current_source_rect();
+        const auto target_rect = current_target_rect();
+        if (!valid_local_presenter_rect(source_rect) || !valid_local_presenter_rect(target_rect)) {
+          return {};
+        }
+
+        // The local-AR topology is interactive displays -> private virtual source -> physical
+        // presentation sink. A rectangular cursor clip can exclude the sink without excluding an
+        // interactive display only when the source and sink share that exact vertical boundary.
+        const bool vertically_connected = std::max(source_rect.top, target_rect.top) <
+                                          std::min(source_rect.bottom, target_rect.bottom);
+        if (target_rect.left != source_rect.right || !vertically_connected) {
+          return {true, std::nullopt};
+        }
+
+        RECT clip = local_presenter_virtual_screen_rect();
+        clip.right = source_rect.right;
+        if (!valid_local_presenter_rect(clip)) {
+          return {true, std::nullopt};
+        }
+        return {true, clip};
+      }
+
+      void acquire_clip() {
+        if (!cursor_clip || std::chrono::steady_clock::now() < cursor_clip->retry_after) {
+          return;
+        }
+        if (!deferred_cursor_restore_manager().ready_for_new_owner()) {
+          defer_cursor_retry(*cursor_clip);
+          return;
+        }
+        if (cursor_clip->clip_yielded) {
+          const auto current_clip = query_local_presenter_cursor_clip();
+          if (!current_clip) {
+            defer_cursor_retry(*cursor_clip);
+            return;
+          }
+          const auto released_clip = cursor_clip->previous_clip_unbounded ?
+                                       local_presenter_virtual_screen_rect() :
+                                       cursor_clip->previous_clip;
+          const auto unbounded_clip = local_presenter_virtual_screen_rect();
+          const bool released_to_unbounded = same_local_presenter_rect(*current_clip, unbounded_clip);
+          if (!same_local_presenter_rect(*current_clip, released_clip) && !released_to_unbounded) {
+            cursor_clip->retry_after = std::chrono::steady_clock::now() + 250ms;
+            return;  // another application still owns cursor confinement
+          }
+          if (released_to_unbounded) {
+            // ClipCursor has no ownership stack. Once another application replaces the saved
+            // restriction and releases to unbounded, that is the new state Apollo must preserve.
+            cursor_clip->previous_clip = unbounded_clip;
+            cursor_clip->previous_clip_unbounded = true;
+          }
+        }
+        auto request = desired_clip();
+        if (!request.geometry_known) {
+          return;
+        }
+        auto requested_clip = request.clip;
+        if (!requested_clip) {
+          if (!cursor_clip->clip_unavailable_logged) {
+            BOOST_LOG(debug) << "Local AR pointer confinement is unavailable for the current topology; "sv
+                                "using event-driven edge clamping."sv;
+            cursor_clip->clip_unavailable_logged = true;
+          }
+          return;
+        }
+        if (!cursor_clip->clip_saved) {
+          const auto previous_clip = query_local_presenter_cursor_clip(3);
+          if (!previous_clip) {
+            BOOST_LOG(warning) << "Local AR presenter could not save the existing cursor clip: "sv
+                               << GetLastError();
+            defer_cursor_retry(*cursor_clip);
+            return;
+          }
+          cursor_clip->previous_clip = *previous_clip;
+          cursor_clip->clip_saved = true;
+          cursor_clip->previous_clip_unbounded = same_local_presenter_rect(
+            *previous_clip,
+            local_presenter_virtual_screen_rect()
+          );
+        }
+        if (!cursor_clip->previous_clip_unbounded) {
+          requested_clip = intersect_local_presenter_rects(
+            *requested_clip,
+            cursor_clip->previous_clip
+          );
+          if (!requested_clip) {
+            BOOST_LOG(debug) << "Local AR left another application's disjoint cursor confinement untouched."sv;
+            cursor_clip->clip_yielded = true;
+            cursor_clip->retry_after = std::chrono::steady_clock::now() + 250ms;
+            return;
+          }
+        }
+        if (!ClipCursor(&*requested_clip)) {
+          BOOST_LOG(warning) << "Local AR presenter could not confine the cursor: "sv
+                             << GetLastError();
+          defer_cursor_retry(*cursor_clip);
+          return;
+        }
+
+        // ClipCursor succeeded, so Apollo may own this clip even if the verification query is
+        // transiently unavailable. Track tentative ownership so teardown can still restore it.
+        cursor_clip->owned_clip = *requested_clip;
+        cursor_clip->owns_clip = true;
+        cursor_clip->clip_yielded = false;
+        clear_cursor_retry(*cursor_clip);
+        const auto applied_clip = query_local_presenter_cursor_clip(3);
+        if (applied_clip && !same_local_presenter_rect(*applied_clip, *requested_clip)) {
+          BOOST_LOG(warning) << "Local AR cursor confinement was overridden while being applied; "sv
+                                "using event-driven edge clamping."sv;
+          cursor_clip->owns_clip = false;
+          cursor_clip->clip_yielded = true;
+          return;
+        }
+        BOOST_LOG(debug) << "Local AR cursor confined through virtual-source right edge x="sv
+                         << cursor_clip->owned_clip.right << '.';
+      }
+
+      void refresh_clip() {
+        if (!cursor_clip) {
+          return;
+        }
+        if (!cursor_clip->owns_clip) {
+          acquire_clip();
+          return;
+        }
+
+        const auto current_clip = query_local_presenter_cursor_clip();
+        if (!current_clip) {
+          // A query failure is not evidence that another application replaced Apollo's clip.
+          // Keep tentative ownership and retry on the next pointer/topology event.
+          defer_cursor_retry(*cursor_clip);
+          return;
+        }
+        if (!same_local_presenter_rect(*current_clip, cursor_clip->owned_clip)) {
+          // ClipCursor is shared system state. Never fight an application that replaces Apollo's
+          // clip, and never restore over that application's state during teardown.
+          cursor_clip->owns_clip = false;
+          cursor_clip->clip_yielded = true;
+          cursor_clip->retry_after = std::chrono::steady_clock::now() + 250ms;
+          BOOST_LOG(debug) << "Local AR cursor confinement was replaced by another application; "sv
+                              "leaving it untouched and using event-driven edge clamping."sv;
+          return;
+        }
+
+        const auto request = desired_clip();
+        if (!request.geometry_known) {
+          // Display queries commonly fail while DXGI is rebuilding. Preserve the existing clip;
+          // indeterminate geometry is not proof that the source/sink row stopped being valid.
+          return;
+        }
+        const auto requested_clip = request.clip;
+        if (!requested_clip) {
+          if (!cursor_clip->restore()) {
+            defer_cursor_retry(*cursor_clip);
+          }
+          cursor_clip->clip_unavailable_logged = false;
+          return;
+        }
+        auto bounded_clip = requested_clip;
+        if (!cursor_clip->previous_clip_unbounded) {
+          bounded_clip = intersect_local_presenter_rects(*requested_clip, cursor_clip->previous_clip);
+          if (!bounded_clip) {
+            if (cursor_clip->restore()) {
+              cursor_clip->retry_after = std::chrono::steady_clock::now() + 250ms;
+            } else {
+              defer_cursor_retry(*cursor_clip);
+            }
+            return;
+          }
+        }
+        if (same_local_presenter_rect(*bounded_clip, cursor_clip->owned_clip)) {
+          return;
+        }
+        if (!ClipCursor(&*bounded_clip)) {
+          BOOST_LOG(warning) << "Local AR presenter could not update cursor confinement: "sv
+                             << GetLastError();
+          defer_cursor_retry(*cursor_clip);
+          return;
+        }
+
+        cursor_clip->owned_clip = *bounded_clip;
+        cursor_clip->owns_clip = true;
+        clear_cursor_retry(*cursor_clip);
+        const auto applied_clip = query_local_presenter_cursor_clip(3);
+        if (applied_clip && !same_local_presenter_rect(*applied_clip, *bounded_clip)) {
+          cursor_clip->owns_clip = false;
+          cursor_clip->clip_yielded = true;
+        }
+      }
+
+      bool clamp_pointer_to_source_edge() const {
+        const auto source_rect = current_source_rect();
+        const auto target_rect = current_target_rect();
+        if (!valid_local_presenter_rect(source_rect) || !valid_local_presenter_rect(target_rect)) {
+          return false;
+        }
+
+        POINT cursor {};
+        if (!GetCursorPos(&cursor) || !PtInRect(&target_rect, cursor)) {
+          return false;
+        }
+
+        const LONG clamped_y = std::clamp(cursor.y, source_rect.top, source_rect.bottom - 1);
+        return SetCursorPos(source_rect.right - 1, clamped_y) != FALSE;
+      }
+
+      void cancel_active_pointer_interaction(HWND sink_window) const {
+        HWND recipient = GetCapture();
+        if (!recipient || recipient == sink_window) {
+          recipient = GetForegroundWindow();
+        }
+        if (!recipient || recipient == sink_window) {
+          return;
+        }
+        DWORD_PTR ignored = 0;
+        SendMessageTimeoutW(
+          recipient,
+          WM_CANCELMODE,
+          0,
+          0,
+          SMTO_ABORTIFHUNG | SMTO_BLOCK,
+          50,
+          &ignored
+        );
+      }
+    };
 
     LRESULT CALLBACK local_presenter_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
       if (message == WM_NCCREATE) {
@@ -2036,7 +2469,7 @@ namespace platf::dxgi {
           reinterpret_cast<LONG_PTR>(create->lpCreateParams)
         );
       }
-      auto *pointer_redirect = reinterpret_cast<local_presenter_pointer_redirect_t *>(
+      auto *pointer_isolation = reinterpret_cast<local_presenter_pointer_isolation_t *>(
         GetWindowLongPtrW(hwnd, GWLP_USERDATA)
       );
       switch (message) {
@@ -2047,41 +2480,53 @@ namespace platf::dxgi {
           PostQuitMessage(0);
           return 0;
         case WM_NCHITTEST:
-          // The physical sink is presentation-only. Intercept pointer entry so a click cannot land
-          // on that desktop before the cursor is redirected to the virtual source.
+          // ClipCursor is shared state and another application may replace it. Clamp at the first
+          // presenter hit-test as an event-driven fallback, before a click can reach the sink.
+          if (pointer_isolation) {
+            pointer_isolation->refresh_clip();
+            pointer_isolation->clamp_pointer_to_source_edge();
+          }
           return HTCLIENT;
         case WM_MOUSEACTIVATE:
-          return MA_NOACTIVATE;
+          return MA_NOACTIVATEANDEAT;
         case WM_MOUSEMOVE:
-          if (pointer_redirect && pointer_redirect->redirect_pointer()) {
-            return 0;
+          if (pointer_isolation) {
+            pointer_isolation->refresh_clip();
+            pointer_isolation->clamp_pointer_to_source_edge();
+          }
+          return 0;
+        case WM_DISPLAYCHANGE:
+        case WM_SETTINGCHANGE:
+        case WM_WINDOWPOSCHANGED:
+          if (pointer_isolation) {
+            pointer_isolation->refresh_clip();
           }
           break;
-        case WM_LBUTTONDOWN:
         case WM_LBUTTONUP:
-        case WM_RBUTTONDOWN:
         case WM_RBUTTONUP:
-        case WM_MBUTTONDOWN:
         case WM_MBUTTONUP:
-        case WM_XBUTTONDOWN:
         case WM_XBUTTONUP:
+          // If an application replaced ClipCursor during a drag, swallowing its release on the
+          // presentation sink could leave the source application logically pressed. Cancel that
+          // interaction explicitly before consuming the sink event.
+          if (pointer_isolation) {
+            pointer_isolation->cancel_active_pointer_interaction(hwnd);
+            pointer_isolation->refresh_clip();
+            pointer_isolation->clamp_pointer_to_source_edge();
+          }
+          return 0;
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+        case WM_XBUTTONDOWN:
         case WM_MOUSEWHEEL:
         case WM_MOUSEHWHEEL:
-          // A tagged event is one of our own injections that raced back onto the presenter. It is
-          // already the replacement for an earlier physical-sink event, so swallow it permanently.
-          if (static_cast<ULONG_PTR>(GetMessageExtraInfo()) == local_presenter_forwarded_input_tag) {
-            return 0;
+          // The sink is presentation-only. If cursor confinement was replaced between movement
+          // and this queued action, clamp it back and consume the sink-targeted action.
+          if (pointer_isolation) {
+            pointer_isolation->refresh_clip();
+            pointer_isolation->clamp_pointer_to_source_edge();
           }
-          // Every untagged button/wheel message delivered to this window originated on the
-          // physical sink.
-          // The capture-thread fallback may already have moved the global cursor before this
-          // queued message is dispatched, so forwarding must not depend on redirect_pointer()
-          // reporting a new move. Re-inject only if a fresh hit-test proves that the cursor is no
-          // longer owned by this presenter, and always swallow the presenter-targeted copy.
-          if (pointer_redirect) {
-            pointer_redirect->redirect_pointer();
-          }
-          forward_presenter_mouse_action(hwnd, message, wparam);
           return 0;
         default:
           break;
@@ -2103,6 +2548,71 @@ namespace platf::dxgi {
     }
   }  // namespace
 
+  bool local_presenter_cursor_clip_t::restore() {
+    if (!owns_clip) {
+      clip_saved = false;
+      clip_yielded = false;
+      previous_clip_unbounded = false;
+      clear_cursor_retry(*this);
+      return true;
+    }
+
+    const auto current_clip = query_local_presenter_cursor_clip(3);
+    if (current_clip && same_local_presenter_rect(*current_clip, owned_clip)) {
+      const BOOL restored = previous_clip_unbounded ? ClipCursor(nullptr) : ClipCursor(&previous_clip);
+      if (!restored) {
+        BOOST_LOG(warning) << "Local AR presenter could not restore the previous cursor clip: "sv
+                           << GetLastError();
+        return false;
+      }
+    } else if (!current_clip) {
+      return false;
+    }
+    owns_clip = false;
+    clip_saved = false;
+    clip_yielded = false;
+    previous_clip_unbounded = false;
+    clear_cursor_retry(*this);
+    return true;
+  }
+
+  local_presenter_cursor_clip_t::~local_presenter_cursor_clip_t() {
+    for (int attempt = 0; attempt < 8; ++attempt) {
+      if (restore()) {
+        return;
+      }
+      Sleep(5);
+    }
+    BOOST_LOG(warning) << "Local AR presenter could not verify and restore cursor confinement after bounded retries; "sv
+                          "deferring ownership-safe restoration until the desktop topology settles."sv;
+    deferred_cursor_restore_manager().defer({previous_clip, owned_clip, previous_clip_unbounded});
+    owns_clip = false;
+  }
+
+  void refresh_local_presenter_pointer_isolation(
+    const std::string &source_display_name,
+    const std::shared_ptr<local_presenter_config_t::target_t> &live_target,
+    const std::shared_ptr<local_presenter_cursor_clip_t> &cursor_clip
+  ) {
+    if (source_display_name.empty() || !live_target || !cursor_clip) {
+      return;
+    }
+    RECT target_rect {};
+    {
+      std::lock_guard lock(live_target->mutex);
+      target_rect = live_target->rect;
+    }
+    const auto source_name_wide = platf::from_utf8(source_display_name);
+    local_presenter_pointer_isolation_t pointer_isolation {
+      source_name_wide,
+      query_local_presenter_display_rect(source_name_wide).value_or(RECT {}),
+      target_rect,
+      live_target,
+      cursor_clip,
+    };
+    pointer_isolation.refresh_clip();
+  }
+
   local_presenter_result_e run_local_presenter(const local_presenter_config_t &config, std::stop_token stop_token) {
     auto read_target_rect = [&]() {
       if (!config.live_target) {
@@ -2120,6 +2630,31 @@ namespace platf::dxgi {
     };
     auto target_rect = read_target_rect();
     auto target_display_name = read_target_display_name();
+    const auto source_name_wide = platf::from_utf8(config.source_display_name);
+    const auto target_name_wide = platf::from_utf8(target_display_name);
+    const auto source_identity_at_start = query_local_presenter_display_identity(source_name_wide);
+    const auto target_identity_at_start = query_local_presenter_display_identity(target_name_wide);
+    if (!source_identity_at_start || !target_identity_at_start ||
+        !local_presenter_identity_is_coherent(
+          config.live_target,
+          *source_identity_at_start,
+          *target_identity_at_start,
+          config.target_adapter_id
+        )) {
+      BOOST_LOG(warning) << "Local AR presenter rejected a stale source/sink display-name generation."sv;
+      return local_presenter_result_e::reinit;
+    }
+    const auto source_rect = query_local_presenter_display_rect(source_name_wide).value_or(RECT {});
+    local_presenter_pointer_isolation_t pointer_isolation {
+      source_name_wide,
+      source_rect,
+      target_rect,
+      config.live_target,
+      config.cursor_clip,
+    };
+    // A cursor clip belongs to the complete local session, not one DXGI attempt. Reconcile it
+    // before any early return so repeated pre-window reinitializations cannot leave stale bounds.
+    pointer_isolation.refresh_clip();
     const int output_width = target_rect.right - target_rect.left;
     const int output_height = target_rect.bottom - target_rect.top;
     if (output_width <= 0 || output_height <= 0 || config.source_display_name.empty()) {
@@ -2146,6 +2681,15 @@ namespace platf::dxgi {
                       << (config.hdr ? "HDR"sv : "SDR"sv) << "; reinitializing."sv;
       return local_presenter_result_e::reinit;
     }
+    const auto source_identity_after_open = query_local_presenter_display_identity(source_name_wide);
+    DXGI_ADAPTER_DESC1 source_adapter_desc {};
+    if (!source_identity_after_open ||
+        source_identity_after_open->device_path != source_identity_at_start->device_path ||
+        !dxgi_display->adapter || FAILED(dxgi_display->adapter->GetDesc1(&source_adapter_desc)) ||
+        !same_local_presenter_luid(source_adapter_desc.AdapterLuid, source_identity_after_open->adapter_id)) {
+      BOOST_LOG(info) << "Local AR virtual source identity changed while DXGI capture was opening; reinitializing."sv;
+      return local_presenter_result_e::reinit;
+    }
 
     d3d_base_encode_device converter;
     if (converter.init(display, dxgi_display->adapter.get(), platf::pix_fmt_e::nv12)) {
@@ -2163,11 +2707,8 @@ namespace platf::dxgi {
       BOOST_LOG(error) << "Local AR presenter could not query the virtual source geometry."sv;
       return local_presenter_result_e::error;
     }
-    local_presenter_pointer_redirect_t pointer_redirect {
-      source_output_desc.DesktopCoordinates,
-      target_rect,
-      config.live_target,
-    };
+    pointer_isolation.source_fallback_rect = source_output_desc.DesktopCoordinates;
+    pointer_isolation.refresh_clip();
 
     if (!register_local_presenter_window_class()) {
       BOOST_LOG(error) << "Local AR presenter could not register its window class: "sv
@@ -2178,7 +2719,7 @@ namespace platf::dxgi {
     std::promise<std::pair<HWND, DWORD>> window_ready;
     auto window_future = window_ready.get_future();
     std::jthread window_thread([
-      &pointer_redirect,
+      &pointer_isolation,
       target_rect,
       output_width,
       output_height,
@@ -2196,16 +2737,19 @@ namespace platf::dxgi {
         nullptr,
         nullptr,
         GetModuleHandleW(nullptr),
-        &pointer_redirect
+        &pointer_isolation
       );
       const DWORD create_error = created_window ? ERROR_SUCCESS : GetLastError();
+      if (created_window) {
+        pointer_isolation.acquire_clip();
+      }
       ready.set_value({created_window, create_error});
       if (!created_window) {
         return;
       }
 
       // Capture may block for 200 ms on a static desktop. Keep Win32 input on this dedicated
-      // message loop so pointer entry and clicks are redirected immediately regardless of frame
+      // message loop so pointer entry is handled immediately regardless of frame
       // cadence. Stopping the owner posts WM_CLOSE and wakes GetMessageW().
       std::stop_callback stop_window(window_stop_token, [created_window]() {
         PostMessageW(created_window, WM_CLOSE, 0, 0);
@@ -2236,16 +2780,19 @@ namespace platf::dxgi {
       SetThreadExecutionState(ES_CONTINUOUS);
     });
 
-    SetWindowPos(
+    if (!SetWindowPos(
       window,
       HWND_TOPMOST,
       target_rect.left,
       target_rect.top,
       output_width,
       output_height,
-      SWP_NOACTIVATE | SWP_SHOWWINDOW
-    );
-    ShowWindow(window, SW_SHOWNOACTIVATE);
+      SWP_NOACTIVATE
+    )) {
+      BOOST_LOG(warning) << "Local AR presenter could not place its hidden output window: "sv
+                         << GetLastError();
+      return local_presenter_result_e::reinit;
+    }
     SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED);
 
     Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
@@ -2276,12 +2823,12 @@ namespace platf::dxgi {
         presenter_adapter_desc.AdapterLuid.LowPart != config.target_adapter_id.LowPart) {
       BOOST_LOG(info) << "Local AR physical output migrated to another graphics adapter; "sv
                          "requesting a complete presentation-session rebuild."sv;
-      return local_presenter_result_e::rebuild;
+      return local_presenter_result_e::error;
     }
 
     Microsoft::WRL::ComPtr<IDXGIOutput> target_output;
     DXGI_OUTPUT_DESC target_output_desc {};
-    const auto target_display_name_wide = platf::from_utf8(target_display_name);
+    const auto target_display_name_wide = target_name_wide;
     for (UINT output_index = 0;; ++output_index) {
       Microsoft::WRL::ComPtr<IDXGIOutput> candidate;
       const auto enum_status = adapter->EnumOutputs(output_index, &candidate);
@@ -2299,6 +2846,20 @@ namespace platf::dxgi {
     if (!target_output) {
       BOOST_LOG(warning) << "Local AR physical output "sv << target_display_name
                          << " is not yet available through DXGI; refreshing topology."sv;
+      return local_presenter_result_e::reinit;
+    }
+    const auto source_identity_before_present = query_local_presenter_display_identity(source_name_wide);
+    const auto target_identity_before_present = query_local_presenter_display_identity(target_display_name_wide);
+    if (!source_identity_before_present || !target_identity_before_present ||
+        source_identity_before_present->device_path != source_identity_at_start->device_path ||
+        target_identity_before_present->device_path != target_identity_at_start->device_path ||
+        !local_presenter_identity_is_coherent(
+          config.live_target,
+          *source_identity_before_present,
+          *target_identity_before_present,
+          config.target_adapter_id
+        )) {
+      BOOST_LOG(info) << "Local AR source/sink identity changed while presentation resources were opening; reinitializing."sv;
       return local_presenter_result_e::reinit;
     }
 
@@ -2330,7 +2891,7 @@ namespace platf::dxgi {
       return local_presenter_result_e::reinit;
     }
     target_rect = actual_target_rect;
-    SetWindowPos(
+    if (!SetWindowPos(
       window,
       HWND_TOPMOST,
       target_rect.left,
@@ -2338,7 +2899,12 @@ namespace platf::dxgi {
       output_width,
       output_height,
       SWP_NOACTIVATE | SWP_SHOWWINDOW
-    );
+    )) {
+      BOOST_LOG(warning) << "Local AR presenter could not place its output window on the verified sink: "sv
+                         << GetLastError();
+      return local_presenter_result_e::reinit;
+    }
+    ShowWindow(window, SW_SHOWNOACTIVATE);
 
     DXGI_SWAP_CHAIN_DESC1 swapchain_desc {};
     swapchain_desc.Width = output_width;
@@ -2438,12 +3004,17 @@ namespace platf::dxgi {
     std::array<std::shared_ptr<platf::img_t>, 3> image_pool;
     bool capture_cursor = true;
     bool window_closed = false;
+    auto next_pointer_fallback = std::chrono::steady_clock::now();
     auto poll_presenter_state = [&]() {
-      // Keep a polling fallback for synthetic/legacy pointer paths that do not deliver ordinary
-      // mouse messages to the presentation window. Normal input is redirected synchronously by
-      // the window procedure before it can click the physical desktop.
-      pointer_redirect.redirect_pointer();
       window_closed = !IsWindow(window);
+      // ClipCursor normally prevents entry without any polling. Keep a throttled global fallback
+      // for applications that replace it while owning Win32 mouse capture: in that case movement
+      // is routed to the captured source window and the presenter HWND receives no mouse message.
+      const auto now = std::chrono::steady_clock::now();
+      if (!window_closed && now >= next_pointer_fallback) {
+        pointer_isolation.clamp_pointer_to_source_edge();
+        next_pointer_fallback = now + 100ms;
+      }
     };
 
     auto pull_image = [&](std::shared_ptr<platf::img_t> &image) {
@@ -2505,7 +3076,7 @@ namespace platf::dxgi {
           presentation_reinit_requested = true;
           return false;
         }
-        SetWindowPos(
+        if (!SetWindowPos(
           window,
           HWND_TOPMOST,
           latest_target_rect.left,
@@ -2513,7 +3084,12 @@ namespace platf::dxgi {
           output_width,
           output_height,
           SWP_NOACTIVATE | SWP_SHOWWINDOW
-        );
+        )) {
+          BOOST_LOG(warning) << "Local AR presenter could not follow the physical sink position: "sv
+                             << GetLastError();
+          presentation_reinit_requested = true;
+          return false;
+        }
         target_rect = latest_target_rect;
       }
 

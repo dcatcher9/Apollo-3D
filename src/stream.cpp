@@ -2272,17 +2272,22 @@ namespace stream {
         }, delay).task_id;
       }
 
-      void resume_first_session_locked() {
-        if (running_sessions.load(std::memory_order_acquire) == 0) {
-          return;
-        }
-
-        invalidate_pending_platform_stop_locked();
+      bool resume_first_session_locked(std::uint32_t remote_virtual_display_lease) {
         const auto current_process_instance = proc::proc.get_launch_session_id();
         const bool same_active_app = platform_streaming_warm &&
                                      !warm_process_needs_resume &&
                                      warm_process_instance &&
                                      current_process_instance == warm_process_instance;
+        // Every accepted reconnect owns a new launch-session lease. Adopt it before potentially
+        // slow platform startup, including the warm path that intentionally skips app commands.
+        // Failure is terminal for this RTSP session: streaming without the lease would let local
+        // AR reclaim and remove the virtual display while capture is running.
+        if (!proc::proc.activate_remote_virtual_display_lease(remote_virtual_display_lease)) {
+          BOOST_LOG(error) << "Refusing to start a streaming session without its virtual-display ownership lease."sv;
+          return false;
+        }
+
+        invalidate_pending_platform_stop_locked();
         if (platform_streaming_warm) {
           BOOST_LOG(info) << "Reusing warm streaming platform state after a short disconnect."sv;
         } else {
@@ -2300,6 +2305,7 @@ namespace stream {
         }
         warm_process_instance.reset();
         warm_process_needs_resume = false;
+        return true;
       }
 
       void retain_or_stop_last_session_locked() {
@@ -2610,12 +2616,6 @@ namespace stream {
       session.control.expected_peer_address = addr_string;
       BOOST_LOG(debug) << "Expecting incoming session connections from "sv << addr_string;
 
-      // Insert this session into the session list
-      {
-        auto lg = session.broadcast_ref->control_server._sessions.lock();
-        session.broadcast_ref->control_server._sessions->push_back(&session);
-      }
-
       auto addr = boost::asio::ip::make_address(addr_string);
       session.video->peer.address(addr);
       session.video->peer.port(0);
@@ -2625,19 +2625,28 @@ namespace stream {
 
       session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
 
+      // Claim the first-session transition under the same lifecycle lock used by launch-time
+      // display mutation and encoder probing. Activate the remote display lease before creating
+      // capture threads, so a stale/superseded handshake fails without a partially live session.
+      {
+        std::lock_guard lifecycle_lock(platform_lifecycle_mutex);
+        if (running_sessions.load(std::memory_order_acquire) == 0 &&
+            !resume_first_session_locked(session.launch_session_id)) {
+          return -1;
+        }
+        running_sessions.fetch_add(1, std::memory_order_acq_rel);
+      }
+
+      // Publish the session only after platform and ownership startup have succeeded.
+      {
+        auto lg = session.broadcast_ref->control_server._sessions.lock();
+        session.broadcast_ref->control_server._sessions->push_back(&session);
+      }
+
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};
 
       session.state.store(state_e::RUNNING, std::memory_order_relaxed);
-
-      // Claim the first-session transition under the same lifecycle lock used by launch-time
-      // display mutation and encoder probing. No session can become active during an idle probe.
-      {
-        std::lock_guard lifecycle_lock(platform_lifecycle_mutex);
-        if (running_sessions.fetch_add(1, std::memory_order_acq_rel) == 0) {
-          resume_first_session_locked();
-        }
-      }
 
       // A/V capture may already have received its UDP ping. Release it only after display/audio
       // platform state has finished resuming; control_ready independently protects source routing.
