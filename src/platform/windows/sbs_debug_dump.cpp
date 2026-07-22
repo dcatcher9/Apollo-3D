@@ -12,7 +12,6 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
-#include <mutex>
 #include <system_error>
 #include <vector>
 
@@ -23,6 +22,7 @@
 #include <zlib.h>
 
 // local includes
+#include "src/config.h"
 #include "src/logging.h"
 
 // The debug-dump request flag (set by the 0x3004 control-message handler in stream.cpp). Declared
@@ -245,44 +245,44 @@ namespace platf::sbs_debug {
     // Prefer the APOLLO_SBS_DUMP override; otherwise fall back to an "sbs_dump" subfolder next to
     // the sunshine log so the feature works with no configuration. The per-dump subfolders (and
     // this root) are created on demand at dump time.
-    if (const char *d = std::getenv("APOLLO_SBS_DUMP")) {
+    if (const char *d = std::getenv("APOLLO_SBS_DUMP"); d && *d) {
       dir_ = d;
+      file_trigger_enabled_ = config::sunshine.diagnostics_enabled;
     } else if (!config::sunshine.log_file.empty()) {
       dir_ = std::filesystem::path(config::sunshine.log_file).parent_path() / "sbs_dump";
     } else {
       dir_ = "sbs_dump";
     }
-    // Encode devices (and with them this dumper) are recreated on every SBS toggle / HDR /
-    // resolution change; log the resolved dir once per process, not once per device.
-    static std::once_flag log_once;
-    std::call_once(log_once, [this]() {
-      BOOST_LOG(info) << "SBS debug frame dump dir: "sv << dir_.string();
-    });
   }
 
   void dumper::maybe_dump(ID3D11Device *device, ID3D11DeviceContext *ctx,
     ID3D11ShaderResourceView *source, ID3D11ShaderResourceView *depth,
     ID3D11ShaderResourceView *sbs, bool hdr, const std::string &model_name) {
-    if (dir_.empty()) {
-      return;
-    }
-    std::error_code ec;
-    auto trigger = dir_ / "dump.trigger";
-    bool by_button = ::video::sbs_debug_dump_pending.exchange(false, std::memory_order_relaxed);
-    bool by_file = false;
+    // Avoid an atomic read-modify-write on every rendered frame. A request that arrives after
+    // this relaxed probe is simply consumed on the next non-repeat output frame.
+    bool by_button = ::video::sbs_debug_dump_pending.load(std::memory_order_relaxed);
     if (by_button) {
-      // Also consume a trigger file if one happens to be present, so it doesn't fire again.
-      by_file = std::filesystem::exists(trigger, ec);
-    } else {
-      // The manual trigger file is a dev fallback; polling the filesystem every frame on the
-      // encode thread is wasted syscalls, so only stat it about once a second.
+      by_button = ::video::sbs_debug_dump_pending.exchange(false, std::memory_order_relaxed);
+    }
+    bool by_file = false;
+    if (!by_button) {
+      // Manual file triggering is a development fallback. Shipped/disabled diagnostics pay only
+      // the single relaxed button-flag check above: no path construction or filesystem polling.
+      if (!file_trigger_enabled_) {
+        return;
+      }
       if ((poll_counter_++ & 63) != 0) {
         return;
       }
+    }
+
+    std::error_code ec;
+    const auto trigger = dir_ / "dump.trigger";
+    if (file_trigger_enabled_) {
       by_file = std::filesystem::exists(trigger, ec);
-      if (!by_file) {
-        return;
-      }
+    }
+    if (!by_button && !by_file) {
+      return;
     }
 
     // One timestamped subfolder per dump so successive dumps never overwrite each other and the

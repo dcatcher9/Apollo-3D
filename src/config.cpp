@@ -592,6 +592,7 @@ namespace config {
     false,  // envvar_compatibility_mode
     "en",  // locale
     2,  // min_log_level
+    false,  // diagnostics_enabled
     0,  // flags
     {},  // User file
     {},  // Username
@@ -1265,7 +1266,6 @@ namespace config {
       string_f(vars, prefix + "depth_model", target.depth_model);
       string_f(vars, prefix + "depth_model_url", target.depth_model_url);
       int_between_f(vars, prefix + "max_encode_width", target.max_encode_width, {256, 16384});
-      bool_f(vars, prefix + "perf_stats", target.perf_stats);
       bool_f(vars, prefix + "cuda_graph", target.cuda_graph);
     };
 
@@ -1484,6 +1484,8 @@ namespace config {
         }
       }
     }
+
+    bool_f(vars, "diagnostics", sunshine.diagnostics_enabled);
 
     auto it = vars.find("flags"s);
     if (it != std::end(vars)) {

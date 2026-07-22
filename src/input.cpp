@@ -283,8 +283,6 @@ namespace input {
     constexpr auto VK_F1 = 0x70;
     constexpr auto VK_F13 = 0x7C;
 
-    BOOST_LOG(debug) << "Apply Shortcut: 0x"sv << util::hex((std::uint8_t) keyCode).to_string_view();
-
     if (keyCode >= VK_F1 && keyCode <= VK_F13) {
       mail::man->event<int>(mail::switch_display)->raise(keyCode - VK_F1);
       return 1;
@@ -297,227 +295,6 @@ namespace input {
     }
 
     return 0;
-  }
-
-  void print(PNV_REL_MOUSE_MOVE_PACKET packet) {
-    BOOST_LOG(debug)
-      << "--begin relative mouse move packet--"sv << std::endl
-      << "deltaX ["sv << util::endian::big(packet->deltaX) << ']' << std::endl
-      << "deltaY ["sv << util::endian::big(packet->deltaY) << ']' << std::endl
-      << "--end relative mouse move packet--"sv;
-  }
-
-  void print(PNV_ABS_MOUSE_MOVE_PACKET packet) {
-    BOOST_LOG(debug)
-      << "--begin absolute mouse move packet--"sv << std::endl
-      << "x      ["sv << util::endian::big(packet->x) << ']' << std::endl
-      << "y      ["sv << util::endian::big(packet->y) << ']' << std::endl
-      << "width  ["sv << util::endian::big(packet->width) << ']' << std::endl
-      << "height ["sv << util::endian::big(packet->height) << ']' << std::endl
-      << "--end absolute mouse move packet--"sv;
-  }
-
-  void print(PNV_MOUSE_BUTTON_PACKET packet) {
-    BOOST_LOG(debug)
-      << "--begin mouse button packet--"sv << std::endl
-      << "action ["sv << util::hex(packet->header.magic).to_string_view() << ']' << std::endl
-      << "button ["sv << util::hex(packet->button).to_string_view() << ']' << std::endl
-      << "--end mouse button packet--"sv;
-  }
-
-  void print(PNV_SCROLL_PACKET packet) {
-    BOOST_LOG(debug)
-      << "--begin mouse scroll packet--"sv << std::endl
-      << "scrollAmt1 ["sv << util::endian::big(packet->scrollAmt1) << ']' << std::endl
-      << "--end mouse scroll packet--"sv;
-  }
-
-  void print(PSS_HSCROLL_PACKET packet) {
-    BOOST_LOG(debug)
-      << "--begin mouse hscroll packet--"sv << std::endl
-      << "scrollAmount ["sv << util::endian::big(packet->scrollAmount) << ']' << std::endl
-      << "--end mouse hscroll packet--"sv;
-  }
-
-  void print(PNV_KEYBOARD_PACKET packet) {
-    BOOST_LOG(debug)
-      << "--begin keyboard packet--"sv << std::endl
-      << "keyAction ["sv << util::hex(packet->header.magic).to_string_view() << ']' << std::endl
-      << "keyCode ["sv << util::hex(packet->keyCode).to_string_view() << ']' << std::endl
-      << "modifiers ["sv << util::hex(packet->modifiers).to_string_view() << ']' << std::endl
-      << "flags ["sv << util::hex(packet->flags).to_string_view() << ']' << std::endl
-      << "--end keyboard packet--"sv;
-  }
-
-  void print(PNV_UNICODE_PACKET packet) {
-    std::string text(packet->text, util::endian::big(packet->header.size) - sizeof(packet->header.magic));
-    BOOST_LOG(debug)
-      << "--begin unicode packet--"sv << std::endl
-      << "text ["sv << text << ']' << std::endl
-      << "--end unicode packet--"sv;
-  }
-
-  void print(PNV_MULTI_CONTROLLER_PACKET packet) {
-    // Moonlight spams controller packet even when not necessary
-    BOOST_LOG(verbose)
-      << "--begin controller packet--"sv << std::endl
-      << "controllerNumber ["sv << packet->controllerNumber << ']' << std::endl
-      << "activeGamepadMask ["sv << util::hex(packet->activeGamepadMask).to_string_view() << ']' << std::endl
-      << "buttonFlags ["sv << util::hex((uint32_t) packet->buttonFlags | (packet->buttonFlags2 << 16)).to_string_view() << ']' << std::endl
-      << "leftTrigger ["sv << util::hex(packet->leftTrigger).to_string_view() << ']' << std::endl
-      << "rightTrigger ["sv << util::hex(packet->rightTrigger).to_string_view() << ']' << std::endl
-      << "leftStickX ["sv << packet->leftStickX << ']' << std::endl
-      << "leftStickY ["sv << packet->leftStickY << ']' << std::endl
-      << "rightStickX ["sv << packet->rightStickX << ']' << std::endl
-      << "rightStickY ["sv << packet->rightStickY << ']' << std::endl
-      << "--end controller packet--"sv;
-  }
-
-  /**
-   * @brief Prints a touch packet.
-   * @param packet The touch packet.
-   */
-  void print(PSS_TOUCH_PACKET packet) {
-    BOOST_LOG(debug)
-      << "--begin touch packet--"sv << std::endl
-      << "eventType ["sv << util::hex(packet->eventType).to_string_view() << ']' << std::endl
-      << "pointerId ["sv << util::hex(packet->pointerId).to_string_view() << ']' << std::endl
-      << "x ["sv << from_netfloat(packet->x) << ']' << std::endl
-      << "y ["sv << from_netfloat(packet->y) << ']' << std::endl
-      << "pressureOrDistance ["sv << from_netfloat(packet->pressureOrDistance) << ']' << std::endl
-      << "contactAreaMajor ["sv << from_netfloat(packet->contactAreaMajor) << ']' << std::endl
-      << "contactAreaMinor ["sv << from_netfloat(packet->contactAreaMinor) << ']' << std::endl
-      << "rotation ["sv << (uint32_t) packet->rotation << ']' << std::endl
-      << "--end touch packet--"sv;
-  }
-
-  /**
-   * @brief Prints a pen packet.
-   * @param packet The pen packet.
-   */
-  void print(PSS_PEN_PACKET packet) {
-    BOOST_LOG(debug)
-      << "--begin pen packet--"sv << std::endl
-      << "eventType ["sv << util::hex(packet->eventType).to_string_view() << ']' << std::endl
-      << "toolType ["sv << util::hex(packet->toolType).to_string_view() << ']' << std::endl
-      << "penButtons ["sv << util::hex(packet->penButtons).to_string_view() << ']' << std::endl
-      << "x ["sv << from_netfloat(packet->x) << ']' << std::endl
-      << "y ["sv << from_netfloat(packet->y) << ']' << std::endl
-      << "pressureOrDistance ["sv << from_netfloat(packet->pressureOrDistance) << ']' << std::endl
-      << "contactAreaMajor ["sv << from_netfloat(packet->contactAreaMajor) << ']' << std::endl
-      << "contactAreaMinor ["sv << from_netfloat(packet->contactAreaMinor) << ']' << std::endl
-      << "rotation ["sv << (uint32_t) packet->rotation << ']' << std::endl
-      << "tilt ["sv << (uint32_t) packet->tilt << ']' << std::endl
-      << "--end pen packet--"sv;
-  }
-
-  /**
-   * @brief Prints a controller arrival packet.
-   * @param packet The controller arrival packet.
-   */
-  void print(PSS_CONTROLLER_ARRIVAL_PACKET packet) {
-    BOOST_LOG(debug)
-      << "--begin controller arrival packet--"sv << std::endl
-      << "controllerNumber ["sv << (uint32_t) packet->controllerNumber << ']' << std::endl
-      << "type ["sv << util::hex(packet->type).to_string_view() << ']' << std::endl
-      << "capabilities ["sv << util::hex(packet->capabilities).to_string_view() << ']' << std::endl
-      << "supportedButtonFlags ["sv << util::hex(packet->supportedButtonFlags).to_string_view() << ']' << std::endl
-      << "--end controller arrival packet--"sv;
-  }
-
-  /**
-   * @brief Prints a controller touch packet.
-   * @param packet The controller touch packet.
-   */
-  void print(PSS_CONTROLLER_TOUCH_PACKET packet) {
-    BOOST_LOG(debug)
-      << "--begin controller touch packet--"sv << std::endl
-      << "controllerNumber ["sv << (uint32_t) packet->controllerNumber << ']' << std::endl
-      << "eventType ["sv << util::hex(packet->eventType).to_string_view() << ']' << std::endl
-      << "pointerId ["sv << util::hex(packet->pointerId).to_string_view() << ']' << std::endl
-      << "x ["sv << from_netfloat(packet->x) << ']' << std::endl
-      << "y ["sv << from_netfloat(packet->y) << ']' << std::endl
-      << "pressure ["sv << from_netfloat(packet->pressure) << ']' << std::endl
-      << "--end controller touch packet--"sv;
-  }
-
-  /**
-   * @brief Prints a controller motion packet.
-   * @param packet The controller motion packet.
-   */
-  void print(PSS_CONTROLLER_MOTION_PACKET packet) {
-    BOOST_LOG(verbose)
-      << "--begin controller motion packet--"sv << std::endl
-      << "controllerNumber ["sv << util::hex(packet->controllerNumber).to_string_view() << ']' << std::endl
-      << "motionType ["sv << util::hex(packet->motionType).to_string_view() << ']' << std::endl
-      << "x ["sv << from_netfloat(packet->x) << ']' << std::endl
-      << "y ["sv << from_netfloat(packet->y) << ']' << std::endl
-      << "z ["sv << from_netfloat(packet->z) << ']' << std::endl
-      << "--end controller motion packet--"sv;
-  }
-
-  /**
-   * @brief Prints a controller battery packet.
-   * @param packet The controller battery packet.
-   */
-  void print(PSS_CONTROLLER_BATTERY_PACKET packet) {
-    BOOST_LOG(verbose)
-      << "--begin controller battery packet--"sv << std::endl
-      << "controllerNumber ["sv << util::hex(packet->controllerNumber).to_string_view() << ']' << std::endl
-      << "batteryState ["sv << util::hex(packet->batteryState).to_string_view() << ']' << std::endl
-      << "batteryPercentage ["sv << util::hex(packet->batteryPercentage).to_string_view() << ']' << std::endl
-      << "--end controller battery packet--"sv;
-  }
-
-  void print(void *payload) {
-    auto header = (PNV_INPUT_HEADER) payload;
-
-    switch (util::endian::little(header->magic)) {
-      case MOUSE_MOVE_REL_MAGIC_GEN5:
-        print((PNV_REL_MOUSE_MOVE_PACKET) payload);
-        break;
-      case MOUSE_MOVE_ABS_MAGIC:
-        print((PNV_ABS_MOUSE_MOVE_PACKET) payload);
-        break;
-      case MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5:
-      case MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5:
-        print((PNV_MOUSE_BUTTON_PACKET) payload);
-        break;
-      case SCROLL_MAGIC_GEN5:
-        print((PNV_SCROLL_PACKET) payload);
-        break;
-      case SS_HSCROLL_MAGIC:
-        print((PSS_HSCROLL_PACKET) payload);
-        break;
-      case KEY_DOWN_EVENT_MAGIC:
-      case KEY_UP_EVENT_MAGIC:
-        print((PNV_KEYBOARD_PACKET) payload);
-        break;
-      case UTF8_TEXT_EVENT_MAGIC:
-        print((PNV_UNICODE_PACKET) payload);
-        break;
-      case MULTI_CONTROLLER_MAGIC_GEN5:
-        print((PNV_MULTI_CONTROLLER_PACKET) payload);
-        break;
-      case SS_TOUCH_MAGIC:
-        print((PSS_TOUCH_PACKET) payload);
-        break;
-      case SS_PEN_MAGIC:
-        print((PSS_PEN_PACKET) payload);
-        break;
-      case SS_CONTROLLER_ARRIVAL_MAGIC:
-        print((PSS_CONTROLLER_ARRIVAL_PACKET) payload);
-        break;
-      case SS_CONTROLLER_TOUCH_MAGIC:
-        print((PSS_CONTROLLER_TOUCH_PACKET) payload);
-        break;
-      case SS_CONTROLLER_MOTION_MAGIC:
-        print((PSS_CONTROLLER_MOTION_PACKET) payload);
-        break;
-      case SS_CONTROLLER_BATTERY_MAGIC:
-        print((PSS_CONTROLLER_BATTERY_PACKET) payload);
-        break;
-    }
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_REL_MOUSE_MOVE_PACKET packet) {
@@ -543,7 +320,6 @@ namespace input {
       touch_port = *touch_port_event->pop();
     }
     if (!touch_port) {
-      BOOST_LOG(verbose) << "Ignoring early absolute input without a touch port"sv;
       return std::nullopt;
     }
 
@@ -1611,9 +1387,6 @@ namespace input {
         }
       }
     }
-
-    // Print the final input packet
-    input::print((void *) payload);
 
     // Send the batched input to the OS
     switch (util::endian::little(payload->magic)) {

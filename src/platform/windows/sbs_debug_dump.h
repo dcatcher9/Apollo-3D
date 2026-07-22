@@ -20,8 +20,8 @@ namespace platf::sbs_debug {
    *        when a trigger fires.
    *
    * Triggers: the client "Dump 3D" button (0x3004 control message -> video::sbs_debug_dump_pending)
-   * or a "dump.trigger" file appearing in the dump dir (manual fallback). The output dir is
-   * APOLLO_SBS_DUMP if set, otherwise an "sbs_dump" folder next to the sunshine log.
+   * or, in diagnostic mode with APOLLO_SBS_DUMP set, a "dump.trigger" file in that directory.
+   * Button-triggered output falls back to an "sbs_dump" folder next to the sunshine log.
    */
   class dumper {
   public:
@@ -41,6 +41,7 @@ namespace platf::sbs_debug {
 
   private:
     std::filesystem::path dir_;
+    bool file_trigger_enabled_ = false;
     int counter_ = 0;
     unsigned poll_counter_ = 0;  ///< Rate-limits the dump.trigger file stat to ~1/s.
   };

@@ -11,7 +11,8 @@ Design for two reproducible, host-side benchmarks so every SBS change ships with
 > (`pop +6%, stretch-band −22%, flicker −15%`, `movie warp p95 6.8 → 2.1 ms`).
 
 > **STATUS (2026-07-07): both benchmarks implemented + validated.**
-> - **Perf** — in-app `sbs_3d_perf_stats` (src/sbs_perf.*): per-stage p50/p95/max + sbs_perf.json.
+> - **Perf** — in-app `diagnostics` (src/sbs_perf.*): per-stage p50/p95/max, with an
+>   explicit `sbs_perf.json` snapshot from the offline harness.
 >   Live-validated both modes (game depth 2.0/warp 1.6 ms, movie 11.0/12.9 ms).
 > - **Visual** — `tools/sbsbench/` (no-reference pop / vmisalign / stretch-band + `--seq` flicker),
 >   `split_video.py`, and the **Tier-1 headless harness** `sunshine --sbs-bench` (src/sbs_bench_harness.cpp:
@@ -133,7 +134,8 @@ Scorecard: JSON + rendered HTML, one row per clip × metric, diffed vs. a stored
 
 ## Benchmark B — perf
 
-Wire the A2 per-stage timing (`sbs_3d_perf_stats`), p50/p95/max over each clip.
+Use the global `diagnostics` per-stage timing, with p50/p95/max over each clip. The offline
+harness forces collection on and explicitly writes its JSON snapshot.
 
 - **D3D11 timestamp-disjoint queries** around each D3D pass: `rgb_to_nchw_cs`,
   `depth_minmax_cs`, `depth_minmax_ema_cs`, `buffer_to_tex_cs`, guided-upsample CS /
@@ -154,8 +156,8 @@ Wire the A2 per-stage timing (`sbs_3d_perf_stats`), p50/p95/max over each clip.
 - Single-frame dump to extend into N-frame burst: `src/platform/windows/sbs_debug_dump.{h,cpp}`
   + `video::sbs_debug_dump_pending` (0x3004).
 - Shaders: `src_assets/windows/assets/shaders/directx/` (runtime-compiled → no exe rebuild).
-- Config knobs to add: `sbs_3d_perf_stats` (already scoped as A2), `sbs_3d_bench_clips`
-  (Tier-1 input dir), `sbs_3d_burst_frames` (Tier-2 N).
+- The live timing switch is the global `diagnostics`; benchmark input and burst selection
+  remain harness concerns rather than production config knobs.
 
 ## Build order
 1. **Deterministic clip harness + Tier-1 headless runner** (reuses estimator/shaders). — the

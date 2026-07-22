@@ -8,8 +8,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
-#include <cstdlib>
-#include <filesystem>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -17,7 +15,6 @@
 #include <vector>
 
 // local includes
-#include "src/config.h"
 #include "src/logging.h"
 
 namespace sbs_perf {
@@ -26,10 +23,10 @@ namespace sbs_perf {
 
   namespace {
 
-    // How many recent samples to keep per stage (the summary is computed over this window, so
-    // it tracks the current configuration rather than the whole run). ~5-6 s at 60 fps.
+    // How many recent samples to keep per stage. Live summaries aggregate all active SBS streams;
+    // the offline harness has one stream and explicitly resets before each run.
     constexpr size_t kWindow = 512;
-    // Emit a summary line + JSON snapshot every this many convert() ticks.
+    // Emit a summary line every this many aggregate convert() ticks.
     constexpr int kSummaryInterval = 300;
 
     struct stage_stat {
@@ -90,16 +87,6 @@ namespace sbs_perf {
     std::map<std::string, stage_stat> g_stages;
     int g_frame = 0;
 
-    std::string default_json_path() {
-      if (const char *d = std::getenv("APOLLO_SBS_DUMP")) {
-        return (std::string(d) + "/sbs_perf.json");
-      }
-      if (!config::sunshine.log_file.empty()) {
-        return (std::filesystem::path(config::sunshine.log_file).parent_path() / "sbs_perf.json").string();
-      }
-      return "sbs_perf.json";
-    }
-
     // Assumes g_mutex is held.
     bool write_json_locked(const std::string &path) {
       std::ofstream f(path, std::ios::trunc);
@@ -131,8 +118,8 @@ namespace sbs_perf {
   void set_enabled(bool on) {
     bool was = g_enabled.exchange(on, std::memory_order_relaxed);
     if (on && !was) {
-      BOOST_LOG(info) << "[sbs-perf] per-stage timing enabled (summary every "sv
-                      << kSummaryInterval << " frames -> "sv << default_json_path() << ')';
+      BOOST_LOG(info) << "[sbs-perf] process-wide per-stage timing enabled (summary every "sv
+                      << kSummaryInterval << " frames; JSON snapshots are explicit)"sv;
     }
   }
 
@@ -176,7 +163,7 @@ namespace sbs_perf {
       return;
     }
 
-    std::string line = "[sbs-perf]";
+    std::string line = "[sbs-perf aggregate]";
     for (auto &[name, st] : g_stages) {
       auto s = summarize(st);
       if (s.n == 0) {
@@ -191,8 +178,6 @@ namespace sbs_perf {
       line.pop_back();
     }
     BOOST_LOG(info) << line;
-
-    write_json_locked(default_json_path());
   }
 
   void reset() {

@@ -730,7 +730,6 @@ namespace stream {
         parity_shards = minparityshards;
         fecpercentage = (100 * parity_shards) / data_shards;
 
-        BOOST_LOG(verbose) << "Increasing FEC percentage to "sv << fecpercentage << " to meet parity shard minimum"sv << std::endl;
       }
 
       if (fecpercentage != 0 &&
@@ -895,7 +894,6 @@ namespace stream {
       plaintext.lowfreq = util::endian::little(data.lowfreq);
       plaintext.highfreq = util::endian::little(data.highfreq);
 
-      BOOST_LOG(verbose) << "Rumble: "sv << msg.id << " :: "sv << util::hex(data.lowfreq).to_string_view() << " :: "sv << util::hex(data.highfreq).to_string_view();
       std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
         encrypted_payload;
 
@@ -911,7 +909,6 @@ namespace stream {
       plaintext.left = util::endian::little(data.left_trigger);
       plaintext.right = util::endian::little(data.right_trigger);
 
-      BOOST_LOG(verbose) << "Rumble triggers: "sv << msg.id << " :: "sv << util::hex(data.left_trigger).to_string_view() << " :: "sv << util::hex(data.right_trigger).to_string_view();
       std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
         encrypted_payload;
 
@@ -927,7 +924,6 @@ namespace stream {
       plaintext.reportrate = util::endian::little(data.report_rate);
       plaintext.type = data.motion_type;
 
-      BOOST_LOG(verbose) << "Motion event state: "sv << msg.id << " :: "sv << util::hex(data.report_rate).to_string_view() << " :: "sv << util::hex(data.motion_type).to_string_view();
       std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
         encrypted_payload;
 
@@ -944,7 +940,6 @@ namespace stream {
       plaintext.g = data.g;
       plaintext.b = data.b;
 
-      BOOST_LOG(verbose) << "RGB: "sv << msg.id << " :: "sv << util::hex(data.r).to_string_view() << util::hex(data.g).to_string_view() << util::hex(data.b).to_string_view();
       std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
         encrypted_payload;
 
@@ -1054,9 +1049,7 @@ namespace stream {
   }
 
   void controlBroadcastThread(control_server_t *server) {
-    server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
-      BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
-    });
+    server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *, const std::string_view &) {});
 
     server->map(packetTypes[IDX_START_A], [&](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_START_A]"sv;
@@ -1066,26 +1059,22 @@ namespace stream {
       BOOST_LOG(debug) << "type [IDX_START_B]"sv;
     });
 
-    server->map(packetTypes[IDX_LOSS_STATS], 4 * sizeof(std::int32_t), [&](session_t *session, const std::string_view &payload) {
-      std::int32_t stats[4];
-      std::memcpy(stats, payload.data(), sizeof(stats));
-      auto count = util::endian::little(stats[0]);
-      std::chrono::milliseconds t {util::endian::little(stats[1])};
+    server->map(packetTypes[IDX_LOSS_STATS], 4 * sizeof(std::int32_t),
+      [](session_t *, const std::string_view &payload) {
+        if (!config::sunshine.diagnostics_enabled) {
+          return;
+        }
+        std::int32_t stats[4];
+        std::memcpy(stats, payload.data(), sizeof(stats));
+        const auto lost = util::endian::little(stats[0]);
+        const auto window_ms = util::endian::little(stats[1]);
+        const auto last_good_frame = util::endian::little(stats[3]);
+        BOOST_LOG(info) << "Client video loss: packets="sv << lost
+                        << " window_ms="sv << window_ms
+                        << " last_good_frame="sv << last_good_frame;
+      });
 
-      auto lastGoodFrame = util::endian::little(stats[3]);
-
-      BOOST_LOG(verbose)
-        << "type [IDX_LOSS_STATS]"sv << std::endl
-        << "---begin stats---" << std::endl
-        << "loss count since last report [" << count << ']' << std::endl
-        << "time in milli since last report [" << t.count() << ']' << std::endl
-        << "last good frame [" << lastGoodFrame << ']' << std::endl
-        << "---end stats---";
-    });
-
-    server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
-      BOOST_LOG(debug) << "type [IDX_REQUEST_IDR_FRAME]"sv;
-
+    server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [](session_t *session, const std::string_view &) {
       session->video->idr_events->raise(true);
     });
 
@@ -1095,17 +1084,10 @@ namespace stream {
       auto firstFrame = util::endian::little(frames[0]);
       auto lastFrame = util::endian::little(frames[1]);
 
-      BOOST_LOG(debug)
-        << "type [IDX_INVALIDATE_REF_FRAMES]"sv << std::endl
-        << "firstFrame [" << firstFrame << ']' << std::endl
-        << "lastFrame [" << lastFrame << ']';
-
       session->video->invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
     });
 
     server->map(packetTypes[IDX_INPUT_DATA], sizeof(std::uint32_t), [&](session_t *session, const std::string_view &payload) {
-      BOOST_LOG(debug) << "type [IDX_INPUT_DATA]"sv;
-
       std::uint32_t tagged_cipher_length;
       std::memcpy(&tagged_cipher_length, payload.data(), sizeof(tagged_cipher_length));
       tagged_cipher_length = util::endian::big(tagged_cipher_length);
@@ -1224,8 +1206,6 @@ namespace stream {
     });
 
     server->map(packetTypes[IDX_ENCRYPTED], CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + CONTROL_ENCRYPTED_SEQUENCE_SIZE, [server](session_t *session, const std::string_view &payload) {
-      BOOST_LOG(verbose) << "type [IDX_ENCRYPTED]"sv;
-
       std::uint16_t length;
       std::uint32_t seq;
       std::memcpy(&length, payload.data(), sizeof(length));
@@ -1475,9 +1455,6 @@ namespace stream {
           sock.async_receive_from(asio::buffer(buf[buf_elem]), peer, 0, recv_func[buf_elem]);
         });
 
-        auto type_str = buf_elem ? "AUDIO"sv : "VIDEO"sv;
-        BOOST_LOG(verbose) << "Recv: "sv << peer.address().to_string() << ':' << peer.port() << " :: " << type_str;
-
         populate_peer_to_session();
 
         // No data, yet no error
@@ -1494,7 +1471,6 @@ namespace stream {
           // For legacy PING packets, find the matching session by address.
           auto it = peer_to_session.find(peer.address());
           if (it != std::end(peer_to_session)) {
-            BOOST_LOG(debug) << "RAISE: "sv << peer.address().to_string() << ':' << peer.port() << " :: " << type_str;
             it->second->raise(peer, std::string {buf[buf_elem].data(), bytes});
           }
         } else if (bytes >= sizeof(SS_PING)) {
@@ -1503,7 +1479,6 @@ namespace stream {
           // For new PING packets that include a client identifier, search by payload.
           auto it = peer_to_session.find(std::string {ping->payload, sizeof(ping->payload)});
           if (it != std::end(peer_to_session)) {
-            BOOST_LOG(debug) << "RAISE: "sv << peer.address().to_string() << ':' << peer.port() << " :: " << type_str;
             it->second->raise(peer, std::string {buf[buf_elem].data(), bytes});
           }
         }
@@ -1529,11 +1504,11 @@ namespace stream {
     // Video traffic is sent on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
 
-    logging::min_max_avg_periodic_logger<double> frame_processing_latency_logger(debug, "Frame processing latency", "ms");
+    logging::min_max_avg_periodic_logger<double> frame_processing_latency_logger(info, "Frame processing latency", "ms");
 
-    logging::time_delta_periodic_logger frame_send_batch_latency_logger(debug, "Network: each send_batch() latency");
-    logging::time_delta_periodic_logger frame_fec_latency_logger(debug, "Network: each FEC block latency");
-    logging::time_delta_periodic_logger frame_network_latency_logger(debug, "Network: frame's overall network latency");
+    logging::time_delta_periodic_logger frame_send_batch_latency_logger(info, "Network: each send_batch() latency");
+    logging::time_delta_periodic_logger frame_fec_latency_logger(info, "Network: each FEC block latency");
+    logging::time_delta_periodic_logger frame_network_latency_logger(info, "Network: frame's overall network latency");
 
     crypto::aes_t iv(12);
 
@@ -1636,8 +1611,6 @@ namespace stream {
         fec_blocks_begin = std::begin(fec_blocks),
         fec_blocks_end = std::begin(fec_blocks) + fec_blocks_needed;
 
-      BOOST_LOG(verbose) << "Generating "sv << fec_blocks_needed << " FEC blocks"sv;
-
       // Align individual FEC blocks to blocksize
       auto unaligned_size = payload.size() / fec_blocks_needed;
       auto aligned_size = ((unaligned_size + (blocksize - 1)) / blocksize) * blocksize;
@@ -1732,10 +1705,8 @@ namespace stream {
 
           // RTP video timestamps use a 90 KHz clock and the frame_timestamp from when the frame was captured
           // When a timestamp isn't available (duplicate frames), the timestamp from rate control is used instead.
-          bool frame_is_dupe = false;
           if (!packet->frame_timestamp) {
             packet->frame_timestamp = ratecontrol_next_frame_start;
-            frame_is_dupe = true;
           }
           using rtp_tick = std::chrono::duration<uint32_t, std::ratio<1, 90000>>;
           uint32_t timestamp = std::chrono::round<rtp_tick>(*packet->frame_timestamp - video_epoch).count();
@@ -1802,7 +1773,6 @@ namespace stream {
               // Use a batched send if it's supported on this platform
               if (!platf::send_batch(batch_info)) {
                 // Batched send is not available, so send each packet individually
-                BOOST_LOG(verbose) << "Falling back to unbatched send"sv;
                 for (auto y = 0; y < current_batch_size; y++) {
                   auto send_info = platf::send_info_t {
                     shards.prefix(next_shard_to_send + y),
@@ -1831,18 +1801,14 @@ namespace stream {
                                          std::chrono::duration_cast<std::chrono::nanoseconds>(1ms) *
                                            ratecontrol_frame_packets_sent / ratecontrol_packets_in_1ms;
 
-          frame_network_latency_logger.second_point_now_and_log();
-
-          BOOST_LOG(verbose) << "Sent Frame seq ["sv << packet->frame_index() << "] pts ["sv << timestamp
-                             << "] shards ["sv << shards.size() << "/"sv << shards.percentage << "%]"sv
-                             << (frame_is_dupe ? " Dupe" : "")
-                             << (packet->is_idr() ? " Key" : "")
-                             << (packet->after_ref_frame_invalidation ? " RFI" : "");
-
           ++blockIndex;
           lowseq += shards.size();
         });
 
+        // The start point is recorded once for the encoded frame above. Finish the sample only
+        // after every FEC block has been paced and submitted, rather than producing one partial
+        // sample per block.
+        frame_network_latency_logger.second_point_now_and_log();
         channel->lowseq = lowseq;
       } catch (const std::exception &e) {
         BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
@@ -1906,8 +1872,6 @@ namespace stream {
         break;
       }
 
-      BOOST_LOG(verbose) << "Audio [seq "sv << sequenceNumber << ", pts "sv << timestamp << "] ::  send..."sv;
-
       audio_packet.rtp.sequenceNumber = util::endian::big(sequenceNumber);
       audio_packet.rtp.timestamp = util::endian::big(timestamp);
 
@@ -1957,7 +1921,6 @@ namespace stream {
               channel->local_address,
             };
             platf::send(send_info);
-            BOOST_LOG(verbose) << "Audio FEC ["sv << (sequenceNumber & ~(RTPA_DATA_SHARDS - 1)) << ' ' << x << "] ::  send..."sv;
           }
         }
       } catch (const std::exception &e) {
@@ -2125,12 +2088,15 @@ namespace stream {
       TUPLE_2D_REF(recv_peer, msg, *msg_opt);
       if (msg.find(expected_payload) != std::string::npos) {
         // Match the new PING payload format
-        BOOST_LOG(debug) << "Received ping [v2] from "sv << recv_peer.address() << ':' << recv_peer.port() << " ["sv << util::hex_vec(msg) << ']';
+        BOOST_LOG(debug) << "Received initial "sv << (type == socket_e::video ? "video"sv : "audio"sv)
+                         << " ping [v2] from "sv << recv_peer.address() << ':' << recv_peer.port();
       } else if (!(session->config.mlFeatureFlags & ML_FF_SESSION_ID_V1) && msg == "PING"sv) {
         // Match the legacy fixed PING payload only if the new type is not supported
-        BOOST_LOG(debug) << "Received ping [v1] from "sv << recv_peer.address() << ':' << recv_peer.port() << " ["sv << util::hex_vec(msg) << ']';
+        BOOST_LOG(debug) << "Received initial "sv << (type == socket_e::video ? "video"sv : "audio"sv)
+                         << " ping [v1] from "sv << recv_peer.address() << ':' << recv_peer.port();
       } else {
-        BOOST_LOG(debug) << "Received non-ping from "sv << recv_peer.address() << ':' << recv_peer.port() << " ["sv << util::hex_vec(msg) << ']';
+        BOOST_LOG(debug) << "Ignoring an unexpected packet while waiting for the initial "sv
+                         << (type == socket_e::video ? "video"sv : "audio"sv) << " ping."sv;
         current_time = std::chrono::steady_clock::now();
         continue;
       }

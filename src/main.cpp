@@ -178,6 +178,8 @@ int main(int argc, char *argv[]) {
   // if anything is logged prior to this point, it will appear in stdout, but not in the log viewer in the UI
   // the version should be printed to the log before anything else
   BOOST_LOG(info) << PROJECT_NAME << " version: " << PROJECT_VERSION << " commit: " << PROJECT_VERSION_COMMIT;
+  BOOST_LOG(info) << "Runtime performance diagnostics: "sv
+                  << (config::sunshine.diagnostics_enabled ? "enabled"sv : "disabled"sv);
 
   // Log publisher metadata
   log_publisher_data();

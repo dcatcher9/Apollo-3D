@@ -2025,6 +2025,7 @@ namespace video {
     // A pending host SBS mode change means we must rebuild the encode session at the new
     // resolution. We only peek here; capture_async pops it and applies the new mode.
     auto sbs_mode_event = mail->event<int>(mail::sbs_mode);
+    auto depth_pipeline_ready_event = config.sbs_depth_pipeline_ready_event;
 
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
@@ -2121,10 +2122,14 @@ namespace video {
       }
 
       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+      bool converted_frame = false;
 
       // Encode at a minimum FPS to avoid image quality issues with static content
       if (!requested_idr_frame || images->peek()) {
-        if (auto img = images->pop(max_frametime)) {
+        const auto image_wait = depth_pipeline_ready_event && depth_pipeline_ready_event->peek() ?
+                                  0ns :
+                                  max_frametime;
+        if (auto img = images->pop(image_wait)) {
           last_img = img;
           frame_timestamp = img->frame_timestamp;
           if (!frame_timestamp) {
@@ -2154,6 +2159,7 @@ namespace video {
             BOOST_LOG(error) << "Could not convert image"sv;
             break;
           }
+          converted_frame = true;
 
           if (time_diff < frame_variation_threshold) {
             *frame_timestamp = encode_frame_timestamp;
@@ -2165,6 +2171,27 @@ namespace video {
         } else if (!images->running()) {
           break;
         }
+      }
+
+      // Host SBS initializes only its per-stream D3D/CUDA resources in the background; the model
+      // engine and execution context are already process-resident. If initialization completes
+      // while the desktop is static, reconvert the retained source once so the ready pipeline is
+      // installed and the client receives depth immediately instead of waiting for desktop motion.
+      if (!converted_frame && depth_pipeline_ready_event && depth_pipeline_ready_event->peek() &&
+          last_img) {
+        if (lifecycle_change_requested()) {
+          break;
+        }
+        frame_timestamp = std::chrono::steady_clock::now();
+        if (session->convert(*last_img)) {
+          BOOST_LOG(error) << "Could not activate the initialized Host SBS GPU pipeline"sv;
+          break;
+        }
+        converted_frame = true;
+      }
+
+      if (converted_frame && depth_pipeline_ready_event && depth_pipeline_ready_event->peek()) {
+        depth_pipeline_ready_event->pop(0ms);
       }
 
       // Keep this check as close as possible to encode(). A reinit may be requested while the
@@ -2560,6 +2587,8 @@ namespace video {
       config_t session_config = config;
       session_config.sbs_mode = current_sbs_mode;
       session_config.sbs_depth_status_event = sbs_depth_status_event;
+      session_config.sbs_depth_pipeline_ready_event =
+        std::make_shared<safe::event_t<bool>>();
       session_config.sbs_config = config::video.sbs;
       int runtime_max_width = 0;
       if (encoder.name == "nvenc"sv) {

@@ -5,7 +5,7 @@ receives), with authenticated depth/stereo/flow references where a dataset suppl
 and measures the real pipeline rather than a hand-maintained CPU replica, so its numbers track the
 images shown on the headset. This is the visual half of the host benchmark; see
 [docs/sbs-benchmark-plan.md](../../docs/sbs-benchmark-plan.md). The perf half is the in-app
-`sbs_3d_perf_stats` timing.
+`diagnostics` timing, which the offline harness forces on for benchmark runs.
 
 ## Workflow
 1. Capture frames: tap **Dump 3D** in the XR bar → `E:\ApolloDev\sbs_dump\dump_*/` (needs

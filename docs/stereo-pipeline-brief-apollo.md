@@ -52,9 +52,10 @@ Validate offline on a dump pair straddling a cut before headset (workflow mandat
 - D3D11 timestamp-query pairs (`ID3D11Query` DISJOINT + TIMESTAMP) around the stages of
   `convert()`: depth-input CS / composite PS / (inpaint stages when restashed), and CUDA
   events around `enqueueV3` on the depth/warp streams inside the estimator.
-- Rolling 300-frame mean/p95, logged at debug level in one line, brief-style:
-  `depth 3.1 | warp 0.6 | composite 0.4 | inpaint 4.2 | total 8.3ms | p95 9.9`
-- Gate with `sbs_3d_perf_stats = enabled` (default off; timestamp queries aren't free).
+- Rolling 300-frame p50/p95/max, logged at info level in one concise line. Live summaries are
+  process-wide aggregates when multiple SBS outputs are active; harness runs are single-stream.
+- Gate with the global `diagnostics = enabled` switch. The shipped default is disabled, while the
+  ApolloDev config enables it; timestamp queries are not allocated while diagnostics are off.
 This subsumes the CPU-side telemetry added in the inpaint stash and should land with it.
 
 ### A3 — Percentile normalization + range floor (experiment, offline-gated)

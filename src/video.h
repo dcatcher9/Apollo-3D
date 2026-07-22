@@ -82,6 +82,11 @@ namespace video {
     // only when it agrees with the requested stream rate, so a device's unrelated panel refresh
     // cannot silently override the stream cadence.
     int framerateX100 = 0;
+
+    // APPEND-ONLY. Encode-session-local completion signal for the per-stream Host SBS GPU
+    // pipeline. The background initializer raises it after its future becomes ready so the
+    // encoder can reconvert the last captured image even when the desktop is otherwise static.
+    std::shared_ptr<safe::event_t<bool>> sbs_depth_pipeline_ready_event;
   };
 
   // Preserve standard NTSC rates instead of approximating them as finite decimal fractions.

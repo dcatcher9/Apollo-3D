@@ -127,10 +127,11 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   lock/recenter/stretch controls are the supported A/B levers (see the harness
   README). Run
   it from `cmake-build-relwithdebinfo` so `assets/` resolves.
-- **Perf** — the in-app `sbs_3d_perf_stats = enabled` config knob ([src/sbs_perf.cpp](src/sbs_perf.cpp))
-  logs live `depth_infer` (CUDA events) and `sbs_convert_cpu` every 300 SBS frames and writes
-  `sbs_perf.json`. The offline harness additionally records `warp_infer` with correctly ordered
-  D3D11 timestamp queries, so a `--sbs-bench` run yields the visual scorecard and warp cost.
+- **Perf** — the global `diagnostics = enabled` config knob ([src/sbs_perf.cpp](src/sbs_perf.cpp));
+  shipped config defaults it off and `E:\ApolloDev\config\sunshine.conf` enables it. It logs a rolling
+  p50/p95/max summary for inference, depth pre/postprocess, matched-copy, warp, output-pass,
+  frame-age, and CPU submission costs every 300 SBS frames. Live diagnostics perform no JSON I/O;
+  the offline harness explicitly writes `sbs_perf.json` and records its additional harness stages.
 
 When these tools change (new metric, harness contract, or a shader they replicate), update their
 READMEs and this section so the workflow stays discoverable.

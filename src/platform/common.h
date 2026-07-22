@@ -538,8 +538,8 @@ namespace platf {
     int width {0}, height {0};
 
   protected:
-    // collect capture timing data (at loglevel debug)
-    logging::time_delta_periodic_logger sleep_overshoot_logger = {debug, "Frame capture sleep overshoot"};
+    // Diagnostics-only capture timing; the logger is a no-op when diagnostics are disabled.
+    logging::time_delta_periodic_logger sleep_overshoot_logger = {info, "Frame capture sleep overshoot"};
   };
 
   class mic_t {

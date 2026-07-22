@@ -214,6 +214,30 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### diagnostics
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Controls runtime performance diagnostics. These diagnostics retain concise frame-pacing,
+            AI inference, SBS warp, encoder/network, and local-display measurements. When disabled,
+            Apollo does not allocate GPU timing queries or perform diagnostic per-frame clock,
+            counter, or filesystem work.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2"><code>disabled</code>. Development configurations may explicitly enable it.</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            diagnostics = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### global_prep_cmd
 
 <table>

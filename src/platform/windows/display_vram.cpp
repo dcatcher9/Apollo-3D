@@ -427,10 +427,15 @@ namespace platf::dxgi {
       }
     }
 
-    void launch(depth_estimator_build_task_t task) {
+    void launch(depth_estimator_build_task_t task, std::function<void()> on_complete = {}) {
       auto completed = std::make_shared<std::atomic<bool>>(false);
-      std::thread thread([task = std::move(task), completed]() mutable {
+      std::thread thread([task = std::move(task), completed, on_complete = std::move(on_complete)]() mutable {
         task();
+        // packaged_task makes its future ready before operator() returns. Signal the encoder only
+        // after that point so it can consume the result on its own thread without a readiness race.
+        if (on_complete) {
+          on_complete();
+        }
         completed->store(true, std::memory_order_release);
       });
 
@@ -465,8 +470,8 @@ namespace platf::dxgi {
   public:
     ~d3d_base_encode_device() {
       // The encode session is already leaving the live path, so a short bounded drain cannot
-      // stall capture. It preserves the final GPU timing samples while the generation token
-      // prevents a racing replacement session from receiving this device's late results.
+      // stall capture. It preserves the final GPU timing samples; the generation token only
+      // rejects results that cross an explicit collector reset (used by the offline harness).
       drain_sbs_gpu_timers();
 
       // The background task owns D3D references and its packaged-task future does not block here.
@@ -617,8 +622,8 @@ namespace platf::dxgi {
         if (sbs_mode != ::video::SBS_OFF) {
           // Perf benchmark: CPU wall time of the whole SBS block (estimator dispatch + composite
           // draw submission). GPU-side inference times are measured separately via CUDA events in
-          // the estimator. No-op unless sbs_3d_perf_stats is on.
-          const bool perf = sbs_perf::enabled();
+          // the estimator. No-op unless runtime diagnostics are on.
+          const bool perf = diagnostics_enabled && sbs_perf::enabled();
           const auto perf_t0 = perf ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 
           // Lazy-create the depth estimator on the first SBS frame.
@@ -655,19 +660,36 @@ namespace platf::dxgi {
                 if (matched_render_slot) {
                   matched_render_slot->pending = false;
                   render_input_srv = matched_render_slot->srv.get();
-                  const double age_ms = std::chrono::duration<double, std::milli>(
-                                          std::chrono::steady_clock::now() - matched_render_slot->captured_at
-                  )
-                                          .count();
-                  matched_stats_age_sum_ms += age_ms;
-                  matched_stats_age_max_ms = std::max(matched_stats_age_max_ms, age_ms);
-                  ++matched_stats_completions;
-                  if (perf) {
-                    sbs_perf::add_sample_ms("matched_frame_age", age_ms);
+                  if (diagnostics_enabled) {
+                    const double age_ms = std::chrono::duration<double, std::milli>(
+                                            std::chrono::steady_clock::now() - matched_render_slot->captured_at
+                    )
+                                            .count();
+                    matched_stats_age_sum_ms += age_ms;
+                    matched_stats_age_max_ms = std::max(matched_stats_age_max_ms, age_ms);
+                    ++matched_stats_completions;
+                    if (perf) {
+                      sbs_perf::add_sample_ms("matched_frame_age", age_ms);
+                    }
                   }
                 } else {
-                  BOOST_LOG(error) << "Matched depth completed unknown frame "sv
-                                   << est.completed_frame_id << "; repeating the last output."sv;
+                  const auto error_now = std::chrono::steady_clock::now();
+                  if (matched_unknown_frame_error_last.time_since_epoch().count() == 0 ||
+                      error_now - matched_unknown_frame_error_last >= std::chrono::seconds(30)) {
+                    if (matched_unknown_frame_errors_suppressed) {
+                      BOOST_LOG(error) << "Matched depth completed unknown frame "sv
+                                       << est.completed_frame_id << "; repeating the last output ("sv
+                                       << matched_unknown_frame_errors_suppressed
+                                       << " similar occurrence(s) suppressed)."sv;
+                    } else {
+                      BOOST_LOG(error) << "Matched depth completed unknown frame "sv
+                                       << est.completed_frame_id << "; repeating the last output."sv;
+                    }
+                    matched_unknown_frame_error_last = error_now;
+                    matched_unknown_frame_errors_suppressed = 0;
+                  } else {
+                    ++matched_unknown_frame_errors_suppressed;
+                  }
                   // The completed inference is no longer using its source texture. Recover the
                   // old pending slot so a metadata mismatch cannot permanently exhaust the
                   // bounded two-slot queue. The current candidate is handled below if enqueued.
@@ -694,7 +716,9 @@ namespace platf::dxgi {
           if (repeat_matched_output) {
             final_sbs_srv = sbs_intermediate_srv.get();
             final_sbs_texture = sbs_intermediate_texture.get();
-            ++matched_stats_repeats;
+            if (diagnostics_enabled) {
+              ++matched_stats_repeats;
+            }
           } else {
             // Before the first matched completion, provide a flat current-frame SBS image. Once a
             // pair has completed, this branch only renders the buffered color that owns est.depth.
@@ -756,29 +780,35 @@ namespace platf::dxgi {
 
           // Debug frame dump (offline artifact inspection): on the client "Dump 3D" button or a
           // "dump.trigger" file, save this frame's 2D source, depth map and SBS result. See
-          // sbs_debug_dump.h. No-op unless APOLLO_SBS_DUMP is set.
+          // sbs_debug_dump.h. File-trigger polling requires diagnostics + APOLLO_SBS_DUMP; the
+          // explicit client button remains available without background filesystem work.
           if (!repeat_matched_output) {
             sbs_dumper.maybe_dump(device.get(), device_ctx.get(), render_input_srv, est.depth.Get(), final_sbs_srv, display->is_hdr(), sbs_config.depth_model);
           }
 
-          ++matched_stats_calls;
-          const auto now = std::chrono::steady_clock::now();
-          if (now - matched_stats_started >= std::chrono::seconds(5)) {
-            const double avg_age_ms = matched_stats_completions ?
-                                        matched_stats_age_sum_ms / matched_stats_completions :
-                                        0.0;
-            BOOST_LOG(info) << "SBS matched-frame stats: calls="sv << matched_stats_calls
-                            << " completed="sv << matched_stats_completions
-                            << " repeats="sv << matched_stats_repeats
-                            << " age_avg_ms="sv << avg_age_ms
-                            << " age_max_ms="sv << matched_stats_age_max_ms;
-            reset_matched_stats(now);
+          if (diagnostics_enabled) {
+            ++matched_stats_calls;
+            const auto now = std::chrono::steady_clock::now();
+            if (now - matched_stats_started >= std::chrono::seconds(5)) {
+              const double avg_age_ms = matched_stats_completions ?
+                                          matched_stats_age_sum_ms / matched_stats_completions :
+                                          0.0;
+              const double repeat_pct = matched_stats_calls ?
+                                            100.0 * matched_stats_repeats / matched_stats_calls :
+                                            0.0;
+              BOOST_LOG(info) << "SBS cadence: frames="sv << matched_stats_calls
+                              << " completed="sv << matched_stats_completions
+                              << " repeats="sv << matched_stats_repeats
+                              << " ("sv << repeat_pct << "%) age_ms_avg/max="sv
+                              << avg_age_ms << '/' << matched_stats_age_max_ms;
+              reset_matched_stats(now);
+            }
           }
 
           if (perf) {
             auto dt = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - perf_t0).count();
             sbs_perf::add_sample_ms("sbs_convert_cpu", dt);
-            sbs_perf::tick();  // once per SBS frame: periodic p50/p95 summary + JSON snapshot
+            sbs_perf::tick();  // once per SBS frame: periodic p50/p95/max summary
           }
         } else {
           if (rgb_present_target) {
@@ -850,16 +880,16 @@ namespace platf::dxgi {
           } catch (const std::exception &e) {
             // Don't let a background-build exception propagate on the encode thread (it would end
             // the stream); log it, clear the client's "loading" indicator, and stream flat.
-            BOOST_LOG(error) << "Depth estimator build failed: "sv << e.what();
+            BOOST_LOG(error) << "Host SBS per-stream GPU pipeline initialization failed: "sv << e.what();
             depth_estimator_failed = true;
             publish_depth_status(0);
             return false;
           }
           if (depth_estimator && depth_estimator->is_valid()) {
-            BOOST_LOG(info) << "Depth estimator ready; host SBS depth is now live."sv;
+            BOOST_LOG(info) << "Host SBS per-stream GPU pipeline ready; depth is now live."sv;
             publish_depth_status(2);  // ready -> client hides indicator
           } else {
-            BOOST_LOG(error) << "Depth estimator build returned an invalid pipeline; streaming flat SBS."sv;
+            BOOST_LOG(error) << "Host SBS per-stream GPU pipeline initialization returned an invalid result; streaming flat SBS."sv;
             depth_estimator.reset();
             depth_estimator_failed = true;
             publish_depth_status(0);
@@ -894,9 +924,9 @@ namespace platf::dxgi {
       // resource creation the constructor does (it makes no immediate-context calls). Capture
       // owning ComPtrs so a presentation-session teardown never has to wait for construction.
       auto sbs_cfg = sbs_config;
-      BOOST_LOG(info) << "Host SBS enabled; building depth model \""sv << active.name
-                      << "\" for matched-frame presentation in the background "
-                         "(streaming flat until ready)..."sv;
+      BOOST_LOG(info) << "Host SBS enabled; initializing the per-stream GPU pipeline for resident model \""sv
+                      << active.name
+                      << "\" in the background (streaming flat until ready)..."sv;
       Microsoft::WRL::ComPtr<ID3D11Device> dev(device.get());
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx(device_ctx.get());
       depth_estimator_build_task_t build_task([dev = std::move(dev), ctx = std::move(ctx), active, sbs_cfg]() mutable {
@@ -909,7 +939,15 @@ namespace platf::dxgi {
         );
       });
       depth_estimator_build = build_task.get_future();
-      depth_estimator_build_manager().launch(std::move(build_task));
+      auto pipeline_ready_event = sbs_depth_pipeline_ready_event;
+      depth_estimator_build_manager().launch(
+        std::move(build_task),
+        [pipeline_ready_event = std::move(pipeline_ready_event)]() {
+          if (pipeline_ready_event) {
+            pipeline_ready_event->raise(true);
+          }
+        }
+      );
       depth_estimator_building = true;
       publish_depth_status(3);  // device-specific pipeline initialization (engine is already ready)
       return false;
@@ -954,7 +992,7 @@ namespace platf::dxgi {
       for (auto &slot : sbs_gpu_timers) {
         slot = {};
       }
-      if (!sbs_config.perf_stats) {
+      if (!diagnostics_enabled) {
         return;
       }
 
@@ -1018,13 +1056,8 @@ namespace platf::dxgi {
             );
           }
           sbs_perf::add_sample_ms_if_current(
-            "sbs_color_convert_gpu",
+            "sbs_output_gpu",
             static_cast<double>(convert_end - warp_end) * to_ms,
-            slot.perf_generation
-          );
-          sbs_perf::add_sample_ms_if_current(
-            "sbs_render_gpu",
-            static_cast<double>(convert_end - warp_start) * to_ms,
             slot.perf_generation
           );
         }
@@ -1170,7 +1203,9 @@ namespace platf::dxgi {
 
       device_ctx->CopyResource(slot.texture.get(), source);
       slot.frame_id = frame_id;
-      slot.captured_at = std::chrono::steady_clock::now();
+      if (diagnostics_enabled) {
+        slot.captured_at = std::chrono::steady_clock::now();
+      }
       slot.pending = false;
       return true;
     }
@@ -1253,6 +1288,7 @@ namespace platf::dxgi {
       int sbs_mode_param = ::video::SBS_OFF,
       const config::video_t::sbs_t &profile = {},
       safe::mail_raw_t::event_t<int> depth_status_event = {},
+      std::shared_ptr<safe::event_t<bool>> depth_pipeline_ready_event = {},
       bool rgb_only = false
     ) {
       if (frame_texture) {
@@ -1265,11 +1301,17 @@ namespace platf::dxgi {
       }
       sbs_mode = sbs_mode_param;
       sbs_config = profile;
+      diagnostics_enabled = config::sunshine.diagnostics_enabled;
       sbs_depth_status_event = std::move(depth_status_event);
+      sbs_depth_pipeline_ready_event = std::move(depth_pipeline_ready_event);
       matched_frame_slots = {};
       sbs_frame_sequence = 0;
       matched_output_valid = false;
-      reset_matched_stats();
+      matched_unknown_frame_error_last = {};
+      matched_unknown_frame_errors_suppressed = 0;
+      if (diagnostics_enabled) {
+        reset_matched_stats();
+      }
       // WGC uses FP16 for both HDR and 10-bit SDR capture. In either case the texture is linear;
       // HDR only changes the later linear-scRGB -> Rec.2020/PQ conversion.
       sbs_intermediate_linear = display->is_hdr() ||
@@ -1597,6 +1639,7 @@ namespace platf::dxgi {
         sbs_mode_param,
         profile,
         {},
+        {},
         true
       );
     }
@@ -1882,7 +1925,9 @@ namespace platf::dxgi {
     unsigned engine_poll_counter = 0;  ///< Rate-limits the startup model-preparation wait warning.
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
     config::video_t::sbs_t sbs_config {};  ///< Immutable profile snapshot for this device.
+    bool diagnostics_enabled = false;  ///< Cached once per device; the disabled hot path only branches.
     safe::mail_raw_t::event_t<int> sbs_depth_status_event;
+    std::shared_ptr<safe::event_t<bool>> sbs_depth_pipeline_ready_event;
     vs_t sbs_reprojection_vs;
     ps_t sbs_reprojection_ps;
     cs_t sbs_depth_prefilter_cs;
@@ -1898,13 +1943,14 @@ namespace platf::dxgi {
     std::array<matched_frame_slot_t, 2> matched_frame_slots;
     std::uint64_t sbs_frame_sequence = 0;
     bool matched_output_valid = false;
-    std::chrono::steady_clock::time_point matched_stats_started =
-      std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point matched_stats_started {};
     unsigned matched_stats_calls = 0;
     unsigned matched_stats_completions = 0;
     unsigned matched_stats_repeats = 0;
     double matched_stats_age_sum_ms = 0.0;
     double matched_stats_age_max_ms = 0.0;
+    std::chrono::steady_clock::time_point matched_unknown_frame_error_last {};
+    unsigned matched_unknown_frame_errors_suppressed = 0;
     static constexpr std::size_t sbs_gpu_timer_ring_size = 16;
     std::array<sbs_gpu_timer_slot_t, sbs_gpu_timer_ring_size> sbs_gpu_timers;
     std::size_t sbs_gpu_timer_next = 0;
@@ -3002,6 +3048,7 @@ namespace platf::dxgi {
                     << "; physical output is presentation-only."sv;
 
     std::array<std::shared_ptr<platf::img_t>, 3> image_pool;
+    const bool diagnostics_enabled = ::config::sunshine.diagnostics_enabled;
     bool capture_cursor = true;
     bool window_closed = false;
     auto next_pointer_fallback = std::chrono::steady_clock::now();
@@ -3040,18 +3087,22 @@ namespace platf::dxgi {
     std::uint64_t captured_frames = 0;
     std::uint64_t presented_frames = 0;
     std::uint64_t busy_present_drops = 0;
-    auto present_stats_started = std::chrono::steady_clock::now();
+    auto present_stats_started = diagnostics_enabled ? std::chrono::steady_clock::now() :
+                                                       std::chrono::steady_clock::time_point {};
     auto log_present_stats = [&]() {
+      if (!diagnostics_enabled) {
+        return;
+      }
       const auto now = std::chrono::steady_clock::now();
       const auto elapsed = now - present_stats_started;
       if (elapsed < std::chrono::seconds(5)) {
         return;
       }
       const double elapsed_seconds = std::chrono::duration<double>(elapsed).count();
-      BOOST_LOG(debug) << "Local AR presenter stats: captured="sv << captured_frames
-                       << " presented="sv << presented_frames
-                       << " busy_drops="sv << busy_present_drops
-                       << " output_fps="sv << (presented_frames / elapsed_seconds);
+      BOOST_LOG(info) << "Local AR presenter stats: captured="sv << captured_frames
+                      << " presented="sv << presented_frames
+                      << " busy_drops="sv << busy_present_drops
+                      << " output_fps="sv << (presented_frames / elapsed_seconds);
       captured_frames = 0;
       presented_frames = 0;
       busy_present_drops = 0;
@@ -3065,7 +3116,9 @@ namespace platf::dxgi {
       if (!frame_captured) {
         return true;
       }
-      ++captured_frames;
+      if (diagnostics_enabled) {
+        ++captured_frames;
+      }
 
       const auto latest_target_rect = read_target_rect();
       if (latest_target_rect.left != target_rect.left || latest_target_rect.top != target_rect.top || latest_target_rect.right != target_rect.right || latest_target_rect.bottom != target_rect.bottom) {
@@ -3102,8 +3155,10 @@ namespace platf::dxgi {
         return false;
       }
       if (frame_latency_status != WAIT_OBJECT_0) {
-        ++busy_present_drops;
-        log_present_stats();
+        if (diagnostics_enabled) {
+          ++busy_present_drops;
+          log_present_stats();
+        }
         return true;
       }
 
@@ -3112,26 +3167,16 @@ namespace platf::dxgi {
         return false;
       }
       DXGI_PRESENT_PARAMETERS present_parameters {};
-      const bool perf = sbs_perf::enabled();
-      const auto present_started = perf ? std::chrono::steady_clock::now() :
-                                          std::chrono::steady_clock::time_point {};
       status = swapchain->Present1(
         0,
         DXGI_PRESENT_RESTRICT_TO_OUTPUT | DXGI_PRESENT_DO_NOT_WAIT,
         &present_parameters
       );
-      if (perf) {
-        sbs_perf::add_sample_ms(
-          "local_present_call_cpu",
-          std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - present_started
-          )
-            .count()
-        );
-      }
       if (status == DXGI_ERROR_WAS_STILL_DRAWING) {
-        ++busy_present_drops;
-        log_present_stats();
+        if (diagnostics_enabled) {
+          ++busy_present_drops;
+          log_present_stats();
+        }
         return true;
       }
       if (status == DXGI_ERROR_RESTRICT_TO_OUTPUT_STALE) {
@@ -3143,11 +3188,13 @@ namespace platf::dxgi {
         BOOST_LOG(error) << "Local AR presenter Present() failed: "sv << util::log_hex(status);
         return false;
       }
-      ++presented_frames;
+      if (diagnostics_enabled) {
+        ++presented_frames;
+        log_present_stats();
+      }
       if (config.presented_frames) {
         config.presented_frames->fetch_add(1, std::memory_order_relaxed);
       }
-      log_present_stats();
       return true;
     };
 
@@ -3293,7 +3340,15 @@ namespace platf::dxgi {
       }
 
       base.apply_colorspace(colorspace);
-      return base.init_output(nvenc_d3d->get_input_texture(), client_config.width, client_config.height, client_config.sbs_mode, client_config.sbs_config, client_config.sbs_depth_status_event) == 0;
+      return base.init_output(
+               nvenc_d3d->get_input_texture(),
+               client_config.width,
+               client_config.height,
+               client_config.sbs_mode,
+               client_config.sbs_config,
+               client_config.sbs_depth_status_event,
+               client_config.sbs_depth_pipeline_ready_event
+             ) == 0;
     }
 
     int convert(platf::img_t &img_base) override {

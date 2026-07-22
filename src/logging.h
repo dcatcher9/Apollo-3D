@@ -106,7 +106,8 @@ namespace logging {
         message(message),
         units(units),
         interval(interval_in_seconds),
-        enabled(config::sunshine.min_log_level <= severity.default_severity()) {
+        enabled(config::sunshine.diagnostics_enabled &&
+                config::sunshine.min_log_level <= severity.default_severity()) {
     }
 
     void collect_and_log(const T &value) {
@@ -204,7 +205,7 @@ namespace logging {
     }
 
   private:
-    std::chrono::steady_clock::time_point point1 = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point point1 {};
     min_max_avg_periodic_logger<double> logger;
   };
 

@@ -862,7 +862,7 @@ namespace sbs_bench {
     if (o.cuda_graph >= 0) {
       sbs_cfg.cuda_graph = (o.cuda_graph != 0);
     }
-    sbs_cfg.perf_stats = true;  // the harness always measures
+    config::sunshine.diagnostics_enabled = true;  // benchmark processes always measure
     sbs_perf::set_enabled(true);
     sbs_perf::reset();
     auto model = pick_model(o);

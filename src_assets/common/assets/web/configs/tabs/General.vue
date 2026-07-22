@@ -110,6 +110,14 @@ onMounted(() => {
       <div class="form-text">{{ $t('config.min_log_level_desc') }}</div>
     </div>
 
+    <!-- Runtime diagnostics -->
+    <Checkbox class="mb-3"
+              id="diagnostics"
+              locale-prefix="config"
+              v-model="config.diagnostics"
+              default="false"
+    ></Checkbox>
+
     <!-- Global Prep/State Commands -->
     <div v-for="type in ['prep', 'state']" :id="`global_${type}_cmd`" class="mb-3 d-flex flex-column">
       <label class="form-label">{{ $t(`config.global_${type}_cmd`) }}</label>

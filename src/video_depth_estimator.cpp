@@ -13,7 +13,6 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
-#include <cstring>
 #include <d3dcompiler.h>
 #include <fstream>
 #include <map>
@@ -40,10 +39,20 @@ public:
   void msvc_dummy_destructor(char flags) noexcept override {}
 #endif
   void log(Severity severity, const char *msg) noexcept override {
-    if (severity <= Severity::kWARNING) {
-      BOOST_LOG(warning) << "TensorRT: " << msg;
-    } else {
-      BOOST_LOG(info) << "TensorRT: " << msg;
+    switch (severity) {
+      case Severity::kINTERNAL_ERROR:
+      case Severity::kERROR:
+        BOOST_LOG(error) << "TensorRT: " << msg;
+        break;
+      case Severity::kWARNING:
+        BOOST_LOG(warning) << "TensorRT: " << msg;
+        break;
+      case Severity::kINFO:
+        BOOST_LOG(debug) << "TensorRT: " << msg;
+        break;
+      case Severity::kVERBOSE:
+        BOOST_LOG(verbose) << "TensorRT: " << msg;
+        break;
     }
   }
 };
@@ -897,6 +906,7 @@ namespace models {
     float max_aspect;  // aspect cap for short-side mode
     float minmax_alpha;  // temporal EMA blend for the normalized min/max
     bool cuda_graph_enabled;
+    const bool diagnostics_enabled;
     CUgraph inference_graph = nullptr;
     CUgraphExec inference_graph_exec = nullptr;
     CUdeviceptr graph_input = 0;
@@ -921,11 +931,11 @@ namespace models {
     unsigned throughput_stats_enqueues = 0;
     unsigned throughput_stats_completions = 0;
 
-    // GPU-stream timing of the async TensorRT enqueues (perf benchmark; sbs_3d_perf_stats).
+    // GPU-stream timing of the async TensorRT enqueues (diagnostics only).
     // A small ring of CUDA event pairs per engine lets several inferences be in flight; the
     // elapsed time is resolved lazily once the stop event completes and pushed to sbs_perf.
     // All CUDA calls here run on the estimator thread with cuda_ctx current, like the rest
-    // of estimate(); no-ops entirely when perf stats are off.
+    // of estimate(); no-ops entirely when diagnostics are off.
     struct perf_evt_ring {
       static constexpr int N = 4;
       CUevent start[N] {};
@@ -959,7 +969,7 @@ namespace models {
     bool d3d_perf_ready = false;
 
     void initialize_d3d_perf() {
-      if (!sbs_perf::enabled()) {
+      if (!diagnostics_enabled) {
         return;
       }
       for (auto &slot : d3d_perf_slots) {
@@ -1095,7 +1105,7 @@ namespace models {
 
     // Record a start event before an enqueue; returns the ring slot (or -1 to skip timing).
     int perf_begin(perf_evt_ring &r, CUstream stream) {
-      if (!sbs_perf::enabled()) {
+      if (!diagnostics_enabled) {
         return -1;
       }
       auto &cuda = cuda_driver_api::get();
@@ -1262,8 +1272,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_ema_buf;  // float4 {min,max,initialized,frame_state}
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> minmax_ema_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> minmax_ema_srv;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_raw_stage;  // CPU-readable copy for [NORMDBG]
-    unsigned norm_log_counter = 0;  // per-frame raw-stats trajectory for the norm-window study
     Microsoft::WRL::ComPtr<ID3D11Buffer> hist_buf;  // 256 uint bins for percentile normalization
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> hist_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_hist_buf;  // 256 weighted bins for subject tracking
@@ -1273,8 +1281,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;  // three float4 elements; see depth_subject_resolve_cs
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject_srv;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_stage;  // CPU-readable copy for the debug log
-    unsigned subject_log_counter = 0;  // paces the [SUBJDBG] readback (every 24 depth updates)
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
@@ -1313,6 +1319,7 @@ namespace models {
         max_aspect(std::max(1.0f, (float) cfg.depth_max_aspect)),
         minmax_alpha((float) cfg.minmax_ema),
         cuda_graph_enabled(cfg.cuda_graph),
+        diagnostics_enabled(config::sunshine.diagnostics_enabled),
         subject_recenter((float) cfg.subject_recenter),
         subject_stretch(cfg.subject_stretch),
         adaptive_pop(cfg.adaptive_pop),
@@ -1322,13 +1329,11 @@ namespace models {
                         cfg.zero_plane == "median" ? 2.0f :
                         cfg.zero_plane == "background" ? 3.0f : 0.0f) {
       const auto init_started = std::chrono::steady_clock::now();
-      // Perf benchmark: enable per-stage timing for this run and reset the rolling window
-      // so it reflects this encode session rather than blending across a rebuild.
+      // Enable the process-wide rolling collector for diagnostic runs. Do not reset it here:
+      // Galaxy XR and local-AR estimators may coexist, and one session must not invalidate the
+      // other session's pending D3D query generation. The offline harness resets explicitly.
       perf_depth.stage = "depth_infer";
-      sbs_perf::set_enabled(cfg.perf_stats);
-      if (cfg.perf_stats) {
-        sbs_perf::reset();
-      }
+      sbs_perf::set_enabled(diagnostics_enabled);
       initialize_d3d_perf();
 
       auto &cuda = cuda_driver_api::get();
@@ -1517,13 +1522,6 @@ namespace models {
         uav.Buffer.NumElements = 3;
         uav.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
         device->CreateUnorderedAccessView(minmax_raw_buf.Get(), &uav, &minmax_raw_uav);
-
-        // Staging copy for the [NORMDBG] raw-stats trajectory (the norm-window study).
-        D3D11_BUFFER_DESC stg = {};
-        stg.Usage = D3D11_USAGE_STAGING;
-        stg.ByteWidth = sizeof(init_raw);
-        stg.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        device->CreateBuffer(&stg, nullptr, &minmax_raw_stage);
       }
 
       // EMA'd P2/P98 bounds. initialized = 0 so the first frame seeds directly.
@@ -1595,15 +1593,6 @@ namespace models {
         if (subject_buf) {
           device->CreateUnorderedAccessView(subject_buf.Get(), nullptr, &subject_uav);
           device->CreateShaderResourceView(subject_buf.Get(), nullptr, &subject_srv);
-          // Staging copy so the debug log can read the resolved subject state back
-          // (a GPU->CPU sync; only mapped when perf stats are on, every 24 updates).
-          D3D11_BUFFER_DESC stg = {};
-          stg.Usage = D3D11_USAGE_STAGING;
-          stg.ByteWidth = sizeof(init_state);
-          stg.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-          stg.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-          stg.StructureByteStride = sizeof(float) * 4;
-          device->CreateBuffer(&stg, nullptr, &subject_stage);
         }
       }
 
@@ -1751,14 +1740,14 @@ namespace models {
         BOOST_LOG(error) << "Depth synchronization failed: " << sync;
         return make_result();
       }
-      if (sbs_perf::enabled()) {
+      if (diagnostics_enabled) {
         perf_drain(perf_depth);
       }
       ensure_cbuffers(color_space);
       if (!cbuffer) {
         return {};
       }
-      auto *d3d_timer = begin_d3d_perf(true, false);
+      auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
       normalize_depth_output();
       mark_d3d_post_end(d3d_timer);
       mark_d3d_pre_start(d3d_timer);
@@ -1841,25 +1830,6 @@ namespace models {
           ID3D11UnorderedAccessView *null_uavs_h[2] = {nullptr, nullptr};
           context->CSSetUnorderedAccessViews(0, 2, null_uavs_h, nullptr);
           context->CSSetShaderResources(0, 1, &null_srv1);
-        }
-
-        // [NORMDBG] opt-in raw min/max trajectory for normalization diagnosis. This is
-        // intentionally not perf-gated: its per-frame Map is a CPU sync and would distort
-        // timing measurements. Enable only with APOLLO_NORMDBG.
-        static const bool normdbg = std::getenv("APOLLO_NORMDBG") != nullptr;
-        if (normdbg && minmax_raw_stage) {
-          context->CopyResource(minmax_raw_stage.Get(), minmax_raw_buf.Get());
-          D3D11_MAPPED_SUBRESOURCE ms {};
-          if (SUCCEEDED(context->Map(minmax_raw_stage.Get(), 0, D3D11_MAP_READ, 0, &ms))) {
-            const uint32_t *u = (const uint32_t *) ms.pData;
-            float rmin, rmax;
-            std::memcpy(&rmin, &u[0], 4);
-            std::memcpy(&rmax, &u[1], 4);
-            BOOST_LOG(info) << "[NORMDBG] f=" << norm_log_counter++
-                            << " raw_min=" << rmin << " raw_max=" << rmax
-                            << " valid=" << u[2];
-            context->Unmap(minmax_raw_stage.Get(), 0);
-          }
         }
 
         // Pass B: fold into the EMA'd bounds and reset the accumulators (1 thread).
@@ -1957,32 +1927,11 @@ namespace models {
         context->CSSetShaderResources(0, 2, null_history_srvs);
         context->CSSetUnorderedAccessViews(0, 1, &null_history_uav, nullptr);
 
-        // Ground-truth log for the original Bestv2 reference's LOW=near convention. Apollo is
-        // HIGH=near, so print both subject values for direct comparison. Opt-in via APOLLO_SUBJDBG (NOT
-        // perf-gated: CopyResource+Map is a CPU/GPU sync that would perturb the very
-        // perf numbers a benchmark run measures), every 24 updates, off the ship path.
-        static const bool subjdbg = std::getenv("APOLLO_SUBJDBG") != nullptr;
-        if (subjdbg && subject_stage && (++subject_log_counter % 24u) == 1u) {
-          context->CopyResource(subject_stage.Get(), subject_buf.Get());
-          D3D11_MAPPED_SUBRESOURCE ms {};
-          if (SUCCEEDED(context->Map(subject_stage.Get(), 0, D3D11_MAP_READ, 0, &ms))) {
-            const float *s = (const float *) ms.pData;
-            BOOST_LOG(info) << "[SUBJDBG] u=" << subject_log_counter
-                            << " subj_hi_near=" << s[2]
-                            << " subj_low_near=" << (1.0f - s[2])
-                            << " recenter_delta=" << s[0]
-                            << " scene_age=" << s[1]
-                            << " init=" << s[3]
-                            << " zero_anchor_shift_px=" << s[8]
-                            << " zero_anchor_valid=" << s[9];
-            context->Unmap(subject_stage.Get(), 0);
-          }
-        }
       }
     }
 
-    // Called once per submitted source frame. Reports achieved inference throughput and busy
-    // drops without altering cadence; production always attempts the newest available frame.
+    // Diagnostics-only accounting for achieved inference throughput and busy drops. Callers
+    // bypass this function entirely when diagnostics are disabled, avoiding even a clock read.
     void update_throughput_stats() {
       auto now = std::chrono::steady_clock::now();
       if (last_call_time.time_since_epoch().count() != 0) {
@@ -2001,13 +1950,11 @@ namespace models {
         float stats_seconds = std::chrono::duration<float>(now - throughput_stats_start).count();
         if (stats_seconds >= 5.0f) {
           float calls = (float) std::max(1u, throughput_stats_calls);
-          if (sbs_perf::enabled()) {
-            BOOST_LOG(info) << "Depth throughput: source ~" << (int) (measured_fps + 0.5f)
-                            << "fps, completed ~" << (int) (throughput_stats_completions / stats_seconds + 0.5f)
-                            << "fps, enqueued ~" << (int) (throughput_stats_enqueues / stats_seconds + 0.5f)
-                            << "fps, busy drops " << (int) (100.0f * throughput_stats_busy_drops / calls + 0.5f)
-                            << "% (" << throughput_stats_busy_drops << '/' << throughput_stats_calls << ')';
-          }
+          BOOST_LOG(info) << "Depth throughput: source ~" << (int) (measured_fps + 0.5f)
+                          << "fps, completed ~" << (int) (throughput_stats_completions / stats_seconds + 0.5f)
+                          << "fps, enqueued ~" << (int) (throughput_stats_enqueues / stats_seconds + 0.5f)
+                          << "fps, busy drops " << (int) (100.0f * throughput_stats_busy_drops / calls + 0.5f)
+                          << "% (" << throughput_stats_busy_drops << '/' << throughput_stats_calls << ')';
           throughput_stats_start = now;
           throughput_stats_calls = 0;
           throughput_stats_busy_drops = 0;
@@ -2037,10 +1984,14 @@ namespace models {
         return false;
       }
 
-      update_throughput_stats();
+      if (diagnostics_enabled) {
+        update_throughput_stats();
+      }
       const auto query = cuda.cuStreamQuery(cu_stream);
       if (query == CUDA_ERROR_NOT_READY) {
-        throughput_stats_busy_drops++;
+        if (diagnostics_enabled) {
+          throughput_stats_busy_drops++;
+        }
         readiness_preflighted = false;
         return false;
       }
@@ -2076,12 +2027,12 @@ namespace models {
       // Production preflights before its expensive full-resolution color copy. The evaluator and
       // any direct callers do not, so retain the self-contained query/counting path here.
       const bool preflighted = std::exchange(readiness_preflighted, false);
-      if (!preflighted) {
+      if (!preflighted && diagnostics_enabled) {
         update_throughput_stats();
       }
 
-      // Perf benchmark: resolve any completed inference-timing events into samples.
-      if (sbs_perf::enabled()) {
+      // Resolve completed inference-timing events only for diagnostic runs.
+      if (diagnostics_enabled) {
         perf_drain(perf_depth);
       }
 
@@ -2091,7 +2042,9 @@ namespace models {
         auto q = cuda.cuStreamQuery(cu_stream);
         if (q == CUDA_ERROR_NOT_READY) {
           // Reuse the last normalized depth and subject state while inference is busy.
-          throughput_stats_busy_drops++;
+          if (diagnostics_enabled) {
+            throughput_stats_busy_drops++;
+          }
           return make_result();
         }
         if (q != CUDA_SUCCESS && !stream_error_logged) {
@@ -2258,7 +2211,9 @@ namespace models {
         return {};
       }
 
-      auto *d3d_timer = begin_d3d_perf(has_previous_frame, true);
+      auto *d3d_timer = diagnostics_enabled ?
+                          begin_d3d_perf(has_previous_frame, true) :
+                          nullptr;
 
       // tensor_out_buf holds the finished raw disparity from the previous asynchronous submit
       // (fully unmapped from CUDA), so consuming it here never blocks the encode thread. The
@@ -2268,7 +2223,9 @@ namespace models {
         completed_frame_id = pending_frame_id;
         completed_frame_valid = true;
         has_previous_frame = false;
-        throughput_stats_completions++;
+        if (diagnostics_enabled) {
+          throughput_stats_completions++;
+        }
       }
       mark_d3d_post_end(d3d_timer);
 
@@ -2355,7 +2312,9 @@ namespace models {
       has_previous_frame = enqueued;
       if (enqueued) {
         pending_frame_id = frame_id;
-        throughput_stats_enqueues++;
+        if (diagnostics_enabled) {
+          throughput_stats_enqueues++;
+        }
       }
 
       return make_result(completed_frame_valid, completed_frame_id, enqueued);

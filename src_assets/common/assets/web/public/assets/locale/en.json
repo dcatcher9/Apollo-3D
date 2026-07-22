@@ -343,6 +343,8 @@
     "min_log_level_5": "Fatal",
     "min_log_level_6": "None",
     "min_log_level_desc": "The minimum log level printed to standard out",
+    "diagnostics": "Performance diagnostics",
+    "diagnostics_desc": "Collect concise frame-pacing, AI, warp, encoder/network, and local-display timing. Disabled mode avoids per-frame clocks, counters, GPU timing queries, and diagnostic filesystem polling.",
     "log_path": "Logfile Path",
     "log_path_desc": "The file where the current logs of Apollo are stored.",
     "max_bitrate": "Maximum Bitrate",
