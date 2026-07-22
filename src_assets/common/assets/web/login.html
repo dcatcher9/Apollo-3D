@@ -27,8 +27,8 @@
               v-model="passwordData.password" required />
           </div>
           <div class="mb-3 form-check">
-            <label for="savePassword" class="form-check-label">{{ $t('login.save_password') }}</label>
-            <input type="checkbox" class="form-check-input" id="savePassword" v-model="savePassword"/>
+            <label for="rememberUsername" class="form-check-label">Remember username</label>
+            <input type="checkbox" class="form-check-input" id="rememberUsername" v-model="rememberUsername"/>
           </div>
           <button type="submit" class="btn btn-primary w-100 mb-2" v-bind:disabled="loading">
             {{ $t('welcome.login') }}
@@ -44,7 +44,7 @@
 </body>
 
 <script type="module">
-  import { createApp, ref, onMounted } from "vue"
+  import { createApp, ref } from "vue"
   import { loadAutoTheme } from './theme'
   import { initApp } from './init'
 
@@ -55,31 +55,36 @@
       const error = ref('');
       const success = ref(false);
       const loading = ref(false);
-      const savePassword = ref(false);
+      const rememberUsername = ref(false);
 
       const data = {
         error,
         success,
         loading,
-        savePassword,
+        rememberUsername,
         passwordData: {
           username: '',
           password: ''
         }
       }
 
-      const savedPasswordStr = localStorage.getItem('login')
-      if (savedPasswordStr) {
+      // Older Apollo versions could store a plaintext password in localStorage. Migrate only
+      // the username and remove the legacy value as soon as this page is loaded.
+      const legacyLogin = localStorage.getItem('login')
+      if (legacyLogin) {
         try {
-          const { username, password } = JSON.parse(savedPasswordStr);
-          savePassword.value = true;
-          data.passwordData = {
-            username,
-            password
-          }
+          const { username } = JSON.parse(legacyLogin);
+          if (username) localStorage.setItem('login_username', username)
         } catch (e) {
-          console.error('Reading saved password failed!', e);
+          console.error('Reading legacy login failed!', e);
         }
+        localStorage.removeItem('login')
+      }
+
+      const savedUsername = localStorage.getItem('login_username')
+      if (savedUsername) {
+        rememberUsername.value = true
+        data.passwordData.username = savedUsername
       }
 
       return data
@@ -88,8 +93,8 @@
       login() {
         this.error = null;
         this.loading = true;
-        if (!this.savePassword) {
-          localStorage.removeItem('login')
+        if (!this.rememberUsername) {
+          localStorage.removeItem('login_username')
         }
         fetch("./api/login", {
           headers: {
@@ -101,8 +106,8 @@
           this.loading = false;
           if (res.status === 200) {
             this.success = true;
-            if (this.savePassword) {
-              localStorage.setItem('login', JSON.stringify(this.passwordData));
+            if (this.rememberUsername) {
+              localStorage.setItem('login_username', this.passwordData.username);
             }
             const url = new URL(window.location);
             const redirectUrl = url.searchParams.get('redir');

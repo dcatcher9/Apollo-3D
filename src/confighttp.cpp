@@ -182,6 +182,17 @@ namespace confighttp {
     return true;
   }
 
+  /**
+   * @brief Treat the PC and its local network as the trusted Web UI boundary.
+   *
+   * Apollo's host controls are designed for direct use on a private LAN. Requests from a
+   * public address still use the credential flow when WAN access has been explicitly enabled.
+   */
+  bool is_trusted_local_request(const req_https_t &request) {
+    const auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
+    return net::from_address(address) <= net::LAN;
+  }
+
   namespace {
     struct request_header_t {
       bool unique;
@@ -245,6 +256,12 @@ namespace confighttp {
   bool authenticate(resp_https_t response, req_https_t request, bool needsRedirect = false) {
     if (!checkIPOrigin(response, request) || !checkBrowserOrigin(response, request))
       return false;
+
+    // Local control should feel appliance-like: the network boundary is the trust prompt.
+    // Unsafe browser requests still pass the strict same-origin validation above.
+    if (is_trusted_local_request(request))
+      return true;
+
     // If credentials not set, redirect to welcome.
     if (!credentials_configured()) {
       send_redirect(response, request, "/welcome");
@@ -490,6 +507,11 @@ namespace confighttp {
       return;
     }
 
+    if (is_trusted_local_request(request)) {
+      send_redirect(response, request, "/");
+      return;
+    }
+
     if (!credentials_configured()) {
       send_redirect(response, request, "/welcome");
       return;
@@ -509,6 +531,10 @@ namespace confighttp {
    * @param request The HTTP request object.
    */
   void getWelcomePage(resp_https_t response, req_https_t request) {
+    if (!checkIPOrigin(response, request)) {
+      return;
+    }
+
     print_req(request);
 
     if (credentials_configured()) {

@@ -5,277 +5,958 @@
   <%- header %>
 
   <script type="text/javascript" src="/assets/js/qrcode.min.js"></script>
-  <style scoped type="text/css">
-    .content-container {
-      padding-top: 2em;
+  <style type="text/css">
+    .devices-page {
+      --devices-accent: #f4c542;
+      --devices-accent-hover: #ffd866;
+      max-width: 1180px;
+      padding-top: 2.5rem;
+      padding-bottom: 5rem;
     }
 
-    .pin-tab-bar {
-      margin-bottom: 2em !important;
+    .devices-page-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 1.5rem;
+      margin-bottom: 2rem;
+    }
+
+    .devices-eyebrow {
+      color: var(--devices-accent);
+      font-size: .75rem;
+      font-weight: 700;
+      letter-spacing: .12em;
+      margin-bottom: .5rem;
+      text-transform: uppercase;
+    }
+
+    .devices-title {
+      font-size: clamp(2rem, 5vw, 3.25rem);
+      font-weight: 720;
+      letter-spacing: -.045em;
+      line-height: 1;
+      margin: 0;
+    }
+
+    .devices-subtitle {
+      color: var(--bs-secondary-color);
+      font-size: 1.05rem;
+      margin: .85rem 0 0;
+      max-width: 42rem;
+    }
+
+    .devices-page .btn-apollo {
+      align-items: center;
+      background: var(--devices-accent);
+      border: 0;
+      border-radius: .85rem;
+      color: #17140b;
+      display: inline-flex;
+      font-weight: 700;
+      gap: .55rem;
+      justify-content: center;
+      min-height: 46px;
+      padding: .7rem 1.1rem;
+    }
+
+    .devices-page .btn-apollo:hover,
+    .devices-page .btn-apollo:focus-visible {
+      background: var(--devices-accent-hover);
+      color: #17140b;
+    }
+
+    .surface-card {
+      background: color-mix(in srgb, var(--bs-body-bg) 86%, var(--bs-secondary-bg));
+      border: 1px solid var(--bs-border-color);
+      border-radius: 1.25rem;
+      overflow: hidden;
+    }
+
+    .pair-card {
+      margin-bottom: 2.75rem;
+      padding: clamp(1.25rem, 4vw, 2rem);
+      position: relative;
+    }
+
+    .pair-layout {
+      align-items: center;
+      display: grid;
+      gap: 2rem;
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .pair-copy {
+      max-width: 42rem;
+    }
+
+    .pair-icon,
+    .device-icon {
+      align-items: center;
+      background: color-mix(in srgb, var(--devices-accent) 16%, transparent);
+      border: 1px solid color-mix(in srgb, var(--devices-accent) 30%, transparent);
+      border-radius: 1rem;
+      color: var(--devices-accent);
+      display: inline-flex;
+      height: 3rem;
+      justify-content: center;
+      width: 3rem;
+    }
+
+    .pair-card h2,
+    .section-heading h2 {
+      font-size: 1.4rem;
+      font-weight: 680;
+      letter-spacing: -.025em;
+    }
+
+    .pair-card h2 {
+      margin: 1rem 0 .5rem;
+    }
+
+    .pair-card p {
+      color: var(--bs-secondary-color);
+      margin-bottom: 1.25rem;
+    }
+
+    .pair-security-note {
+      align-items: center;
+      color: var(--bs-secondary-color);
+      display: flex;
+      font-size: .86rem;
+      gap: .55rem;
+      margin-top: 1rem;
+    }
+
+    .pairing-layout {
+      align-items: center;
+      display: grid;
+      gap: clamp(1.5rem, 4vw, 3rem);
+      grid-template-columns: auto minmax(0, 1fr);
+    }
+
+    .pairing-qr {
+      background: #fff;
+      border-radius: 1rem;
+      box-shadow: 0 .75rem 2.5rem rgba(0, 0, 0, .12);
+      padding: .75rem;
+    }
+
+    .pairing-qr img,
+    .pairing-qr canvas {
+      display: block;
+      height: 180px !important;
+      width: 180px !important;
+    }
+
+    .pairing-state {
+      align-items: center;
+      color: var(--bs-success-text-emphasis);
+      display: flex;
+      font-size: .82rem;
+      font-weight: 700;
+      gap: .5rem;
+      margin-bottom: .65rem;
+      text-transform: uppercase;
+    }
+
+    .pairing-state-dot,
+    .status-dot {
+      background: var(--bs-success);
+      border-radius: 50%;
+      box-shadow: 0 0 0 .24rem color-mix(in srgb, var(--bs-success) 18%, transparent);
+      display: inline-block;
+      height: .55rem;
+      width: .55rem;
+    }
+
+    .pairing-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .75rem;
+    }
+
+    .legacy-pairing {
+      border-top: 1px solid var(--bs-border-color);
+      margin-top: 1.5rem;
+      padding-top: .25rem;
+    }
+
+    .legacy-pairing summary,
+    .advanced-disclosure > summary,
+    .support-disclosure > summary {
+      cursor: pointer;
+      font-weight: 650;
+      list-style: none;
+      padding: 1rem 0;
+    }
+
+    .legacy-pairing summary::-webkit-details-marker,
+    .advanced-disclosure > summary::-webkit-details-marker,
+    .support-disclosure > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .legacy-pairing summary::after,
+    .advanced-disclosure > summary::after,
+    .support-disclosure > summary::after {
+      border-bottom: 2px solid currentColor;
+      border-right: 2px solid currentColor;
+      color: var(--bs-secondary-color);
+      content: '';
+      float: right;
+      height: .45rem;
+      margin: .25rem .2rem 0 0;
+      transition: transform .18s ease;
+      transform: rotate(45deg);
+      width: .45rem;
+    }
+
+    .legacy-pairing[open] summary::after,
+    .advanced-disclosure[open] > summary::after,
+    .support-disclosure[open] > summary::after {
+      transform: rotate(225deg);
+    }
+
+    .legacy-form {
+      display: grid;
+      gap: .75rem;
+      grid-template-columns: minmax(10rem, 1fr) minmax(12rem, 2fr) auto;
+      padding: .25rem 0 1rem;
+    }
+
+    .section-heading {
+      align-items: end;
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }
+
+    .section-heading h2 {
+      margin: 0;
+    }
+
+    .section-heading p {
+      color: var(--bs-secondary-color);
+      margin: .35rem 0 0;
+    }
+
+    .device-grid {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .device-card {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      padding: 1.25rem;
+    }
+
+    .device-card.is-editing {
+      grid-column: 1 / -1;
+      padding: clamp(1.25rem, 3vw, 2rem);
+    }
+
+    .device-card-header {
+      align-items: flex-start;
+      display: flex;
+      gap: .9rem;
+    }
+
+    .device-icon {
+      border-radius: .85rem;
+      flex: 0 0 auto;
+      height: 2.75rem;
+      width: 2.75rem;
+    }
+
+    .device-name {
+      font-size: 1.05rem;
+      font-weight: 680;
+      line-height: 1.2;
+      margin: .15rem 0 .35rem;
+      overflow-wrap: anywhere;
+    }
+
+    .device-state {
+      align-items: center;
+      color: var(--bs-secondary-color);
+      display: flex;
+      font-size: .82rem;
+      gap: .45rem;
+    }
+
+    .device-state .status-dot.offline {
+      background: var(--bs-secondary-color);
+      box-shadow: none;
+      opacity: .55;
+    }
+
+    .device-card-actions {
+      display: flex;
+      gap: .35rem;
+      margin-left: auto;
+    }
+
+    .icon-button {
+      align-items: center;
+      border-radius: .7rem;
+      display: inline-flex;
+      height: 2.5rem;
+      justify-content: center;
+      width: 2.5rem;
+    }
+
+    .device-facts {
+      border-top: 1px solid var(--bs-border-color);
+      display: grid;
+      gap: .75rem;
+      margin-top: 1.15rem;
+      padding-top: 1rem;
+    }
+
+    .device-fact {
+      align-items: center;
+      display: flex;
+      gap: 1rem;
+      justify-content: space-between;
+    }
+
+    .device-fact-label {
+      color: var(--bs-secondary-color);
+      font-size: .88rem;
+    }
+
+    .device-fact-value {
+      font-size: .88rem;
+      font-weight: 650;
+      text-align: right;
+    }
+
+    .advanced-access-badge {
+      background: var(--bs-tertiary-bg);
+      border: 1px solid var(--bs-border-color);
+      border-radius: 999px;
+      color: var(--bs-secondary-color);
+      display: inline-block;
+      font-size: .7rem;
+      font-weight: 600;
+      margin-left: .35rem;
+      padding: .15rem .45rem;
+      vertical-align: .1rem;
+    }
+
+    .editor-heading {
+      align-items: center;
+      display: flex;
+      gap: .75rem;
+      justify-content: space-between;
+      margin-bottom: 1.5rem;
+    }
+
+    .editor-heading h3 {
+      font-size: 1.15rem;
+      margin: 0;
+    }
+
+    .editor-grid {
+      display: grid;
+      gap: 1.25rem;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    }
+
+    .editor-section {
+      background: color-mix(in srgb, var(--bs-tertiary-bg) 65%, transparent);
+      border: 1px solid var(--bs-border-color);
+      border-radius: 1rem;
+      padding: 1rem;
+    }
+
+    .editor-section h4 {
+      font-size: .9rem;
+      font-weight: 700;
+      margin-bottom: .85rem;
+    }
+
+    .access-options {
+      display: grid;
+      gap: .6rem;
+    }
+
+    .access-option {
+      background: var(--bs-body-bg);
+      border: 1px solid var(--bs-border-color);
+      border-radius: .85rem;
+      color: var(--bs-body-color);
+      padding: .8rem .9rem;
+      text-align: left;
+    }
+
+    .access-option:hover {
+      border-color: color-mix(in srgb, var(--devices-accent) 60%, var(--bs-border-color));
+    }
+
+    .access-option.active {
+      background: color-mix(in srgb, var(--devices-accent) 10%, var(--bs-body-bg));
+      border-color: var(--devices-accent);
+      box-shadow: 0 0 0 .16rem color-mix(in srgb, var(--devices-accent) 12%, transparent);
+    }
+
+    .access-option strong,
+    .access-option span {
+      display: block;
+    }
+
+    .access-option span {
+      color: var(--bs-secondary-color);
+      font-size: .8rem;
+      margin-top: .2rem;
+    }
+
+    .preference-list {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .preference-row {
+      align-items: center;
+      display: flex;
+      gap: 1rem;
+      justify-content: space-between;
+    }
+
+    .preference-row label {
+      font-weight: 650;
+    }
+
+    .preference-row small {
+      color: var(--bs-secondary-color);
+      display: block;
+      margin-top: .2rem;
+    }
+
+    .advanced-disclosure {
+      border-top: 1px solid var(--bs-border-color);
+      margin-top: 1.25rem;
+    }
+
+    .advanced-panel {
+      display: grid;
+      gap: 1.25rem;
+      padding-bottom: .5rem;
+    }
+
+    .permission-groups {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .permission-group {
+      background: var(--bs-tertiary-bg);
+      border-radius: .85rem;
+      padding: .9rem;
+    }
+
+    .permission-group h5 {
+      font-size: .78rem;
+      letter-spacing: .05em;
+      margin-bottom: .65rem;
+      text-transform: uppercase;
+    }
+
+    .permission-group .form-check {
+      margin-bottom: .45rem;
+    }
+
+    .technical-grid {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .command-block {
+      background: var(--bs-tertiary-bg);
+      border-radius: .85rem;
+      padding: 1rem;
+    }
+
+    .command-row {
+      align-items: center;
+      display: grid;
+      gap: .6rem;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      margin-top: .65rem;
+    }
+
+    .editor-actions {
+      display: flex;
+      gap: .75rem;
+      justify-content: flex-end;
+      margin-top: 1.25rem;
+    }
+
+    .empty-devices {
+      align-items: center;
+      color: var(--bs-secondary-color);
+      display: flex;
+      flex-direction: column;
+      gap: .75rem;
+      grid-column: 1 / -1;
+      padding: 3rem 1rem;
+      text-align: center;
+    }
+
+    .empty-devices i {
+      font-size: 1.75rem;
+      opacity: .55;
+    }
+
+    .support-disclosure {
+      border-top: 1px solid var(--bs-border-color);
+      margin-top: 1.5rem;
+    }
+
+    .support-disclosure-body {
+      align-items: center;
+      background: color-mix(in srgb, var(--bs-danger) 5%, transparent);
+      border: 1px solid color-mix(in srgb, var(--bs-danger) 25%, var(--bs-border-color));
+      border-radius: .85rem;
+      display: flex;
+      gap: 1rem;
+      justify-content: space-between;
+      padding: 1rem;
+    }
+
+    .support-disclosure-body p {
+      color: var(--bs-secondary-color);
+      font-size: .85rem;
+      margin: .2rem 0 0;
+    }
+
+    .ar-device-host {
+      margin-top: 2.75rem;
+    }
+
+    @media (max-width: 768px) {
+      .devices-page {
+        padding-top: 1.5rem;
+      }
+
+      .devices-page-header,
+      .pair-layout,
+      .pairing-layout,
+      .editor-grid,
+      .permission-groups,
+      .technical-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .devices-page-header,
+      .pair-layout {
+        display: grid;
+      }
+
+      .devices-page-header .btn-apollo,
+      .pair-layout > .btn-apollo {
+        width: 100%;
+      }
+
+      .pairing-qr {
+        justify-self: center;
+      }
+
+      .device-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .legacy-form {
+        grid-template-columns: 1fr;
+      }
+
+      .support-disclosure-body {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .command-row {
+        grid-template-columns: minmax(0, 1fr) auto;
+      }
+
+      .command-row .command-elevated {
+        grid-column: 1 / -1;
+        grid-row: 2;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .devices-page *,
+      .devices-page *::before,
+      .devices-page *::after {
+        scroll-behavior: auto !important;
+        transition-duration: .01ms !important;
+      }
     }
   </style>
 </head>
 
 <body id="app" v-cloak>
   <Navbar></Navbar>
-  <div id="content" class="container content-container d-flex flex-column align-items-center">
-    <ul class="nav nav-pills pin-tab-bar justify-content-center">
-      <li class="nav-item">
-        <a class="nav-link" :class="{active: currentTab !== '#PIN'}" href="#OTP" @click.prevent="switchTab('OTP')">{{ $t('pin.otp_pairing') }}</a>
-      </li>
-      <li class="nav-item">
-        <a class="nav-link" :class="{active: currentTab === '#PIN'}" href="#PIN" @click.prevent="switchTab('PIN')">{{ $t('pin.pin_pairing') }}</a>
-      </li>
-    </ul>
-    <form v-if="currentTab === '#PIN'" class="form d-flex flex-column align-items-center" id="form" @submit.prevent="registerDevice">
-      <div class="card flex-column d-flex p-4 mb-4">
-        <input type="text" pattern="\d*" :placeholder="`${$t('navbar.pin')}`" autofocus id="pin-input" class="form-control mt-2" required />
-        <input type="text" :placeholder="`${$t('pin.device_name')}`" id="name-input" class="form-control my-4" />
-        <button class="btn btn-primary">{{ $t('pin.send') }}</button>
+  <main id="content" class="container devices-page">
+    <header class="devices-page-header">
+      <div>
+        <div class="devices-eyebrow">Apollo XR</div>
+        <h1 class="devices-title">Devices</h1>
+        <p class="devices-subtitle">Pair Artemis, choose what each device can do, and manage local AR glasses.</p>
       </div>
-      <div id="status"></div>
-    </form>
-    <form v-else class="form d-flex flex-column align-items-center" @submit.prevent="requestOTP">
-      <div class="card flex-column d-flex p-4 mb-4">
-        <div v-show="editingHost || (otp && hostAddr)" id="qrRef"></div>
-        <p v-if="editingHost || (otp && hostAddr)" class="text-center text-secondary"><a class="text-secondary" :href="deepLink">art://{{ hostAddr }}:{{ hostPort }}</a> <i class="fas fa-fw fa-pen-to-square" @click="editHost"></i></p>
-        <h1 class="mb-4 text-center">{{ otp && otp || '????' }}</h1>
-        <div v-if="editingHost" class="d-flex flex-column align-items-stretch">
-          <input type="text" placeholder="HOST" v-model="hostAddr" autofocus class="form-control mt-2" />
-          <input type="text" placeholder="PORT" v-model="hostPort" class="form-control my-4" />
-          <button class="btn btn-primary" :disabled="!this.canSaveHost" @click.prevent="saveHost">{{ $t('_common.save') }}</button>
+    </header>
+
+    <section class="surface-card pair-card" aria-labelledby="pair-artemis-heading">
+      <div v-if="!pairingActive" class="pair-layout">
+        <div class="pair-copy">
+          <div class="pair-icon"><i class="fa-solid fa-qrcode"></i></div>
+          <h2 id="pair-artemis-heading">Pair Artemis</h2>
+          <p>Connect an Android XR headset or Android-based AR device. Apollo creates a secure, single-use pairing link that expires after three minutes.</p>
+          <div v-if="pairedDeviceName" class="alert alert-success mb-0" role="status">
+            <i class="fa-solid fa-circle-check me-2"></i>
+            {{ pairedDeviceName }} is ready to stream.
+          </div>
+          <div v-if="otpMessage" class="alert mb-0" :class="[pairedDeviceName ? 'mt-2' : '', 'alert-' + otpStatus]" role="status">{{ otpMessage }}</div>
+          <div v-if="!pairedDeviceName && !otpMessage" class="pair-security-note">
+            <i class="fa-solid fa-shield-halved"></i>
+            The pairing code is single-use and expires after three minutes.
+          </div>
         </div>
-        <div v-else class="d-flex flex-column align-items-stretch">
-          <input type="text" pattern="[0-9a-zA-Z]{4,}" :placeholder="`${$t('pin.otp_passphrase')}`" v-model="passphrase" required autofocus class="form-control mt-2" />
-          <input type="text" :placeholder="`${$t('pin.device_name')}`" v-model="deviceName" class="form-control my-4" />
-          <button class="btn btn-primary">{{ $t('pin.generate_pin') }}</button>
-        </div>
+        <button type="button" class="btn btn-apollo" :disabled="pairingPending" @click="requestOTP">
+          <span v-if="pairingPending" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+          <i v-else class="fa-solid fa-mobile-screen-button"></i>
+          {{ pairingPending ? 'Preparing…' : (pairedDeviceName ? 'Pair another device' : 'Start pairing') }}
+        </button>
       </div>
-      <div v-if="otpMessage" class="alert" :class="['alert-' + otpStatus]">{{ otpMessage }}</div>
-      <div class="alert alert-info">{{ $t('pin.otp_msg') }}</div>
-    </form>
-    <div class="alert alert-warning">
-      <b>{{ $t('_common.warning') }}</b> {{ $t('pin.warning_msg') }}
-    </div>
-    <!-- Manage Clients -->
-    <div class="card my-4 align-self-stretch">
-      <div class="card-body">
-        <div class="p-2">
-          <div class="d-flex justify-content-end align-items-center">
-            <h2 id="unpair" class="me-auto">{{ $t('pin.device_management') }}</h2>
-            <button class="btn btn-danger" :disabled="unpairAllPressed" @click="unpairAll">
-              {{ $t('pin.unpair_all') }}
+
+      <div v-else class="pairing-layout">
+        <div id="qrRef" class="pairing-qr" aria-label="Artemis pairing QR code"></div>
+        <div>
+          <div class="pairing-state"><span class="pairing-state-dot"></span> Pairing open · {{ pairingTimeLabel }}</div>
+          <h2 id="pair-artemis-heading">Scan with Artemis</h2>
+          <p>Open Artemis on your headset or glasses and scan this code. The device will appear below as soon as it is paired.</p>
+          <div class="pairing-actions">
+            <a class="btn btn-apollo" :href="deepLink">
+              <i class="fa-solid fa-arrow-up-right-from-square"></i>
+              Open in Artemis
+            </a>
+            <button type="button" class="btn btn-outline-secondary" @click="requestOTP">
+              <i class="fa-solid fa-rotate"></i>
+              New code
             </button>
           </div>
-          <br />
-          <p class="mb-0">{{ $t('pin.device_management_desc') }}</p>
-          <p class="mb-0">{{ $t('pin.device_management_warning') }} <a href="https://github.com/ClassicOldSong/Apollo/wiki/Permission-System" target="_blank">{{ $t('_common.learn_more') }}</a></p>
-          <div id="apply-alert" class="alert alert-success d-flex align-items-center mt-3" :style="{ 'display': (showApplyMessage ? 'flex !important': 'none !important') }">
-            <div class="me-2"><b>{{ $t('_common.success') }}</b> {{ $t('pin.unpair_single_success') }}</div>
-            <button class="btn btn-success ms-auto apply" @click="clickedApplyBanner">{{ $t('_common.dismiss') }}</button>
-          </div>
-          <div class="alert alert-success mt-3" v-if="unpairAllStatus === true">
-            {{ $t('pin.unpair_all_success') }}
-          </div>
-          <div class="alert alert-danger mt-3" v-if="unpairAllStatus === false">
-            {{ $t('pin.unpair_all_error') }}
-          </div>
+          <div v-if="otpMessage" class="alert mt-3 mb-0" :class="'alert-' + otpStatus" role="status">{{ otpMessage }}</div>
         </div>
       </div>
-      <ul id="client-list" class="list-group list-group-flush list-group-item-light" v-if="clients && clients.length > 0">
-        <template v-for="client in clients" class="list-group-item d-flex align-items-center">
-          <div v-if="client.editing" class="list-group-item d-flex align-items-stretch flex-column">
-            <div class="d-flex align-items-center">
-              <div class="p-2 flex-grow-1 d-flex align-items-center">
-                <span class="badge" :class="client.editPerm >= 0x04000000 ? 'bg-danger' : 'bg-primary'">
-                  [ {{permToStr(client.editPerm)}} ]
-                </span>
-                &nbsp;
-                <input v-model="client.editName" @keyup.enter="saveClient(client)" class="form-control flex-grow-1" type="text" :placeholder="$t('pin.device_name')">
+
+      <details class="legacy-pairing" :open="legacyPairingOpen" @toggle="legacyPairingOpen = $event.target.open">
+        <summary>Pair another way</summary>
+        <p class="small mb-3">Use the PIN shown by a legacy Moonlight-compatible client.</p>
+        <form class="legacy-form" @submit.prevent="registerDevice">
+          <input type="text" inputmode="numeric" pattern="\d*" placeholder="PIN" v-model.trim="legacyPin" class="form-control" required aria-label="Pairing PIN" />
+          <input type="text" :placeholder="$t('pin.device_name')" v-model.trim="legacyDeviceName" class="form-control" aria-label="Optional device name" />
+          <button class="btn btn-outline-primary" :disabled="legacyPairingPending">
+            <span v-if="legacyPairingPending" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+            <span v-else>{{ $t('pin.send') }}</span>
+          </button>
+        </form>
+        <div v-if="legacyMessage" class="alert mb-2" :class="'alert-' + legacyStatus" role="status">{{ legacyMessage }}</div>
+      </details>
+    </section>
+
+    <section aria-labelledby="remote-devices-heading">
+      <div class="section-heading">
+        <div>
+          <h2 id="remote-devices-heading">Remote XR devices</h2>
+          <p>Paired devices can browse Apollo, but only one device can stream at a time.</p>
+        </div>
+      </div>
+
+      <div v-if="clientsError" class="alert alert-danger">{{ clientsError }}</div>
+      <div v-if="showApplyMessage" class="alert alert-success d-flex align-items-center" role="status">
+        <span><i class="fa-solid fa-circle-check me-2"></i>Device removed.</span>
+        <button type="button" class="btn-close ms-auto" aria-label="Dismiss" @click="showApplyMessage = false"></button>
+      </div>
+
+      <div class="device-grid">
+        <article v-for="client in clients" :key="client.uuid" class="surface-card device-card" :class="{'is-editing': client.editing}">
+          <template v-if="!client.editing">
+            <div class="device-card-header">
+              <div class="device-icon"><i class="fa-solid fa-headset"></i></div>
+              <div class="min-w-0">
+                <h3 class="device-name">{{ displayClientName(client) }}</h3>
+                <div class="device-state">
+                  <span class="status-dot" :class="{offline: !client.connected}"></span>
+                  {{ client.connected ? 'Connected' : 'Ready' }}
+                </div>
               </div>
-              <div class="me-2 btn btn-success" @click="saveClient(client)"><i class="fas fa-check"></i></div>
-              <div class="me-2 btn btn-secondary" @click="cancelEdit(client)"><i class="fas fa-times"></i></div>
-            </div>
-            <div class="align-items-top d-flex flex-row justify-content-center">
-              <div v-for="group in permissionGroups" class="d-flex flex-column mx-2">
-                <div class="mx-2">{{ group.name }}:</div>
-                <button v-for="perm in group.permissions" class="my-1 btn btn-sm" :disabled="isSuppressed(client.editPerm, perm.name, perm.suppressed_by)" :class="(isSuppressed(client.editPerm, perm.name, perm.suppressed_by) || checkPermission(client.editPerm, perm.name)) ? 'btn-success' : 'btn-outline-secondary'" @click="togglePermission(client, perm.name)">
-                  {{ $t(`permissions.${perm.name}`) }}
+              <div class="device-card-actions">
+                <button v-if="client.connected" type="button" class="btn btn-outline-warning icon-button" title="Disconnect" :aria-label="`Disconnect ${displayClientName(client)}`" @click="disconnectClient(client.uuid)">
+                  <i class="fa-solid fa-link-slash"></i>
+                </button>
+                <button type="button" class="btn btn-outline-secondary icon-button" title="Device settings" :aria-label="`Settings for ${displayClientName(client)}`" @click="editClient(client)">
+                  <i class="fa-solid fa-gear"></i>
+                </button>
+                <button type="button" class="btn btn-outline-danger icon-button" title="Remove device" :aria-label="`Remove ${displayClientName(client)}`" @click="unpairSingle(client)">
+                  <i class="fa-solid fa-trash-can"></i>
                 </button>
               </div>
             </div>
 
-            <!-- Enable legacy ordering -->
-            <Checkbox class="mb-3"
-                      id="enable_legacy_ordering"
-                      label="pin.enable_legacy_ordering"
-                      desc="pin.enable_legacy_ordering_desc"
-                      v-model="client.editEnableLegacyOrdering"
-                      default="true"
-            ></Checkbox>
+            <div class="device-facts">
+              <div class="device-fact">
+                <span class="device-fact-label">Access</span>
+                <span class="device-fact-value">
+                  {{ accessPresetLabel(accessPresetFor(client.perm)) }}
+                  <span v-if="hasAdvancedOperations(client.perm)" class="advanced-access-badge">Advanced</span>
+                </span>
+              </div>
+              <div v-if="platform === 'windows'" class="device-fact">
+                <span class="device-fact-label">Private XR display</span>
+                <span class="device-fact-value">{{ client.always_use_virtual_display ? 'On' : 'Off' }}</span>
+              </div>
+              <div class="device-fact">
+                <span class="device-fact-label">Clipboard sharing</span>
+                <span class="device-fact-value">{{ hasClipboard(client.perm) ? 'On' : 'Off' }}</span>
+              </div>
+            </div>
+          </template>
 
-            <!-- Always Use Virtual Display -->
-            <Checkbox class="mb-3"
-                      id="always_use_virtual_display"
-                      label="pin.always_use_virtual_display"
-                      desc="pin.always_use_virtual_display_desc"
-                      v-model="client.editAlwaysUseVirtualDisplay"
-                      default="false"
-                      v-if="platform === 'windows'"
-            ></Checkbox>
-            <!-- Display Mode Override -->
-            <div class="mb-3 mt-2">
-              <label for="display_mode_override" class="form-label">{{ $t('pin.display_mode_override') }}</label>
-              <input
-                type="text"
-                class="form-control"
-                id="display_mode_override"
-                v-model="client.editDisplayMode"
-                placeholder="1920x1080x59.94"
-                @input="validateModeOverride"
-              />
-              <div class="form-text">{{ $t('pin.display_mode_override_desc') }} <a href="https://github.com/ClassicOldSong/Apollo/wiki/Display-Mode-Override" target="_blank">{{ $t('_common.learn_more') }}</a></div>
+          <form v-else @submit.prevent="saveClient(client)">
+            <div class="editor-heading">
+              <h3>Device settings</h3>
+              <button type="button" class="btn-close" aria-label="Close device settings" @click="cancelEdit(client)"></button>
             </div>
 
-            <!-- Allow client commands -->
-            <Checkbox class="mb-3"
-                      id="allow_client_commands"
-                      label="pin.allow_client_commands"
-                      desc="pin.allow_client_commands_desc"
-                      v-model="client.editAllowClientCommands"
-                      default="true"
-            ></Checkbox>
+            <div class="mb-4">
+              <label class="form-label fw-semibold" :for="`device-name-${client.uuid}`">Device name</label>
+              <input :id="`device-name-${client.uuid}`" v-model.trim="client.editName" class="form-control" type="text" :placeholder="$t('pin.device_name')">
+            </div>
 
-            <!-- connect/disconnect commands -->
-            <div class="mb-3 mt-2 d-flex flex-column" v-for="cmdType in ['do', 'undo']" v-if="client.editAllowClientCommands">
-              <label class="mb-0 orm-label">{{ $t(`pin.client_${cmdType}_cmd`) }}</label>
-              <div class="form-text">{{ $t(`pin.client_${cmdType}_cmd_desc`) }} <a href="https://github.com/ClassicOldSong/Apollo/wiki/Client-Commands" target="_blank">{{ $t('_common.learn_more') }}</a></div>
-              <table class="mt-2 table" v-if="client[`edit_${cmdType}`].length > 0">
-                <thead>
-                  <tr>
-                    <th style="width: 80%"><i class="fas fa-terminal"></i> {{ $t('_common.cmd_val') }}</th>
-                    <th style="min-width: 10em; max-width: 12em;" v-if="platform === 'windows'">
-                      <i class="fas fa-shield-alt"></i> {{ $t('_common.run_as') }}
-                    </th>
-                    <th style="min-width: 110px;"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                <tr v-for="(c, i) in client[`edit_${cmdType}`]">
-                  <td>
-                    <input type="text" class="form-control monospace" v-model="c.cmd" />
-                  </td>
-                  <td v-if="platform === 'windows'">
-                    <div class="form-check">
-                      <input type="checkbox" class="form-check-input" :id="`client-${cmdType}-cmd-admin-${i}`" v-model="c.elevated"/>
-                      <label :for="`client-${cmdType}-cmd-admin-${i}`" class="form-check-label">{{ $t('_common.elevated') }}</label>
+            <div class="editor-grid">
+              <section class="editor-section">
+                <h4>Access</h4>
+                <div class="access-options">
+                  <button type="button" class="access-option" :class="{active: client.editAccessPreset === 'stream_control'}" @click="setAccessPreset(client, 'stream_control')">
+                    <strong>Stream &amp; control</strong>
+                    <span>Browse and launch apps, stream video, and use XR, controller, mouse, and keyboard input.</span>
+                  </button>
+                  <button type="button" class="access-option" :class="{active: client.editAccessPreset === 'view_only'}" @click="setAccessPreset(client, 'view_only')">
+                    <strong>View only</strong>
+                    <span>Browse and view streams without launching apps or controlling this PC.</span>
+                  </button>
+                  <button type="button" class="access-option" :class="{active: client.editAccessPreset === 'custom'}" @click="setAccessPreset(client, 'custom')">
+                    <strong>Custom</strong>
+                    <span>Choose individual permissions in Advanced settings.</span>
+                  </button>
+                </div>
+              </section>
+
+              <section class="editor-section">
+                <h4>XR preferences</h4>
+                <div class="preference-list">
+                  <div v-if="platform === 'windows'" class="preference-row">
+                    <div>
+                      <label :for="`private-display-${client.uuid}`">Private XR display</label>
+                      <small>Create a dedicated virtual display whenever this device connects.</small>
                     </div>
-                  </td>
-                  <td>
-                    <button class="btn btn-danger me-2" @click="removeCmd(client[`edit_${cmdType}`], i)">
-                      <i class="fas fa-trash"></i>
-                    </button>
-                    <button class="btn btn-success" @click="addCmd(client[`edit_${cmdType}`], i)">
-                      <i class="fas fa-plus"></i>
-                    </button>
-                  </td>
-                </tr>
-                </tbody>
-              </table>
-              <button class="ms-0 mt-2 btn btn-success" style="margin: 0 auto" @click="addCmd(client[`edit_${cmdType}`], -1)">
-                &plus; {{ $t('config.add') }}
+                    <div class="form-check form-switch m-0">
+                      <input :id="`private-display-${client.uuid}`" class="form-check-input" type="checkbox" role="switch" v-model="client.editAlwaysUseVirtualDisplay">
+                    </div>
+                  </div>
+                  <div class="preference-row">
+                    <div>
+                      <label :for="`clipboard-${client.uuid}`">Clipboard sharing</label>
+                      <small>Allow text to move between this PC and the device.</small>
+                    </div>
+                    <div class="form-check form-switch m-0">
+                      <input :id="`clipboard-${client.uuid}`" class="form-check-input" type="checkbox" role="switch" v-model="client.editClipboard" @change="setClipboard(client)">
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <details class="advanced-disclosure" :open="client.showAdvanced">
+              <summary>Advanced settings</summary>
+              <div class="advanced-panel">
+                <div>
+                  <h4 class="h6 mb-3">Granular permissions</h4>
+                  <div class="permission-groups">
+                    <div v-for="group in permissionGroups" :key="group.name" class="permission-group">
+                      <h5>{{ group.name }}</h5>
+                      <div v-for="perm in group.permissions" :key="perm.name" class="form-check">
+                        <input
+                          type="checkbox"
+                          class="form-check-input"
+                          :id="`${client.uuid}-${perm.name}`"
+                          :checked="isSuppressed(client.editPerm, perm.name, perm.suppressed_by) || checkPermission(client.editPerm, perm.name)"
+                          :disabled="isSuppressed(client.editPerm, perm.name, perm.suppressed_by)"
+                          @change="togglePermission(client, perm.name)"
+                        >
+                        <label class="form-check-label" :for="`${client.uuid}-${perm.name}`">{{ $t(`permissions.${perm.name}`) }}</label>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="technical-grid">
+                  <div>
+                    <label class="form-label fw-semibold" :for="`display-mode-${client.uuid}`">{{ $t('pin.display_mode_override') }}</label>
+                    <input
+                      type="text"
+                      class="form-control"
+                      :id="`display-mode-${client.uuid}`"
+                      v-model="client.editDisplayMode"
+                      placeholder="1920x1080x59.94"
+                      pattern="^$|^\d+x\d+x\d+(\.\d+)?$"
+                    >
+                    <div class="form-text">Leave blank to match the mode requested by Artemis.</div>
+                  </div>
+                  <div class="preference-list pt-2">
+                    <div class="preference-row">
+                      <div>
+                        <label :for="`legacy-order-${client.uuid}`">{{ $t('pin.enable_legacy_ordering') }}</label>
+                        <small>Compatibility for older Moonlight clients.</small>
+                      </div>
+                      <div class="form-check form-switch m-0">
+                        <input :id="`legacy-order-${client.uuid}`" class="form-check-input" type="checkbox" role="switch" v-model="client.editEnableLegacyOrdering">
+                      </div>
+                    </div>
+                    <div class="preference-row">
+                      <div>
+                        <label :for="`client-commands-${client.uuid}`">{{ $t('pin.allow_client_commands') }}</label>
+                        <small>Run this device's connect and disconnect automation.</small>
+                      </div>
+                      <div class="form-check form-switch m-0">
+                        <input :id="`client-commands-${client.uuid}`" class="form-check-input" type="checkbox" role="switch" v-model="client.editAllowClientCommands">
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <template v-if="client.editAllowClientCommands">
+                  <div v-for="cmdType in ['do', 'undo']" :key="cmdType" class="command-block">
+                    <div class="d-flex align-items-start justify-content-between gap-3">
+                      <div>
+                        <h4 class="h6 mb-1">{{ $t(`pin.client_${cmdType}_cmd`) }}</h4>
+                        <div class="form-text mt-0">{{ $t(`pin.client_${cmdType}_cmd_desc`) }}</div>
+                      </div>
+                      <button type="button" class="btn btn-sm btn-outline-secondary" @click="addCmd(client[`edit_${cmdType}`], -1)">
+                        <i class="fa-solid fa-plus me-1"></i> Add command
+                      </button>
+                    </div>
+                    <div v-for="(command, index) in client[`edit_${cmdType}`]" :key="index" class="command-row">
+                      <input type="text" class="form-control font-monospace" v-model="command.cmd" placeholder="Command">
+                      <div v-if="platform === 'windows'" class="form-check command-elevated">
+                        <input type="checkbox" class="form-check-input" :id="`${client.uuid}-${cmdType}-admin-${index}`" v-model="command.elevated">
+                        <label class="form-check-label small" :for="`${client.uuid}-${cmdType}-admin-${index}`">{{ $t('_common.elevated') }}</label>
+                      </div>
+                      <button type="button" class="btn btn-outline-danger icon-button" aria-label="Remove command" @click="removeCmd(client[`edit_${cmdType}`], index)">
+                        <i class="fa-solid fa-trash-can"></i>
+                      </button>
+                    </div>
+                  </div>
+                </template>
+
+                <details>
+                  <summary class="small text-secondary">Technical details</summary>
+                  <div class="font-monospace small text-secondary mt-2">Device ID: {{ client.uuid }}</div>
+                  <div class="font-monospace small text-secondary">Permission code: {{ permToStr(client.editPerm) }}</div>
+                </details>
+              </div>
+            </details>
+
+            <div v-if="client.saveError" class="alert alert-danger mt-3 mb-0">{{ client.saveError }}</div>
+            <div class="editor-actions">
+              <button type="button" class="btn btn-outline-secondary" :disabled="client.saving" @click="cancelEdit(client)">Cancel</button>
+              <button type="submit" class="btn btn-apollo" :disabled="client.saving">
+                <span v-if="client.saving" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+                {{ client.saving ? 'Saving…' : 'Save device' }}
               </button>
             </div>
+          </form>
+        </article>
+
+        <div v-if="clientsLoaded && clients.length === 0" class="surface-card empty-devices">
+          <i class="fa-solid fa-headset"></i>
+          <div>
+            <strong>No paired devices</strong>
+            <div class="small mt-1">Pair Artemis to start streaming to Android XR.</div>
           </div>
-          <div v-else class="list-group-item d-flex align-items-center">
-            <div class="p-2 flex-grow-1 d-flex align-items-center">
-              <span class="badge" :class="client.perm >= 0x04000000 ? 'bg-danger' : 'bg-primary'">
-                [ {{permToStr(client.perm)}} ]
-              </span>
-              &nbsp;
-              <span class="me-2">{{client.name != "" ? client.name : $t('pin.unpair_single_unknown')}}</span>
-            </div>
-            <div v-if="client.connected" class="me-2 btn btn-warning" @click="disconnectClient(client.uuid)"><i class="fas fa-link-slash"></i></div>
-            <div class="me-2 btn btn-primary" @click="editClient(client)"><i class="fas fa-edit"></i></div>
-            <div class="me-2 btn btn-danger" @click="unpairSingle(client.uuid)"><i class="fas fa-trash"></i></div>
+        </div>
+      </div>
+
+      <details v-if="clients.length > 0" class="support-disclosure">
+        <summary>Device support</summary>
+        <div class="support-disclosure-body">
+          <div>
+            <strong>Remove all paired devices</strong>
+            <p>Every device will need to be paired again. An active stream will also be stopped.</p>
           </div>
-        </template>
-      </ul>
-      <ul v-else class="list-group list-group-flush list-group-item-light">
-        <div class="list-group-item p-3 text-center"><em>{{ $t('pin.unpair_single_no_devices') }}</em></div>
-      </ul>
-    </div>
-  </div>
+          <button type="button" class="btn btn-outline-danger" :disabled="unpairAllPressed" @click="unpairAll">
+            {{ unpairAllPressed ? 'Removing…' : 'Remove all devices' }}
+          </button>
+        </div>
+        <div v-if="unpairAllStatus === true" class="alert alert-success mt-3">{{ $t('pin.unpair_all_success') }}</div>
+        <div v-if="unpairAllStatus === false" class="alert alert-danger mt-3">{{ $t('pin.unpair_all_error') }}</div>
+      </details>
+    </section>
+
+    <ar-glasses v-if="platform === 'windows'" class="ar-device-host" embedded></ar-glasses>
+  </main>
 </body>
 
 <script type="module">
   import { createApp } from 'vue'
   import { initApp } from './init'
   import Navbar from './Navbar.vue'
-  import Checkbox from './Checkbox.vue'
+  import ArGlasses from './configs/tabs/ArGlasses.vue'
 
-  let resetOTPTimeout = null;
+  let pairingCountdownTimer = null;
+  let pairingPollTimer = null;
+
   const qrContainer = document.createElement('div');
-  qrContainer.className = "mb-2 p-2 bg-white"
   const qrCode = new QRCode(qrContainer);
 
   const updateQR = (url) => {
-    qrCode.clear()
-    qrCode.makeCode(url)
+    qrCode.clear();
+    qrCode.makeCode(url);
 
     const refContainer = document.querySelector('#qrRef');
-    if (refContainer) refContainer.appendChild(qrContainer);
-  }
-
-  let hostInfoCache = JSON.parse(sessionStorage.getItem('hostInfo'));
-  let hostManuallySet = false;
-
-  if (hostInfoCache) hostManuallySet = true;
-
-  const saveHostCache = ({hostAddr, hostPort}, manual) => {
-    hostInfoCache = {hostAddr, hostPort}
-    if (manual) {
-      sessionStorage.setItem('hostInfo', JSON.stringify(hostInfoCache))
-      hostManuallySet = true;
+    if (refContainer) {
+      refContainer.replaceChildren(qrContainer);
     }
-  }
+  };
+
+  const clearPairingTimers = () => {
+    if (pairingCountdownTimer !== null) clearInterval(pairingCountdownTimer);
+    if (pairingPollTimer !== null) clearInterval(pairingPollTimer);
+    pairingCountdownTimer = null;
+    pairingPollTimer = null;
+  };
+
+  const generatePairingSecret = () => {
+    const alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+    const bytes = new Uint8Array(18);
+    window.crypto.getRandomValues(bytes);
+    return Array.from(bytes, byte => alphabet[byte % alphabet.length]).join('');
+  };
 
   /**
    * Permissions:
-   enum class PERM: uint32_t {
-      _reserved        = 1,
-
-      _input           = _reserved << 8,   // Input permission group
-      input_controller = _input << 0,      // Allow controller input
-      input_touch      = _input << 1,      // Allow touch input
-      input_pen        = _input << 2,      // Allow pen input
-      input_mouse      = _input << 3,      // Allow mouse input
-      input_kbd        = _input << 4,      // Allow keyboard input
-      _all_inputs      = input_controller | input_touch | input_pen | input_mouse | input_kbd,
-
-      _operation       = _input << 8,      // Operation permission group
-      clipboard_set    = _operation << 0,  // Allow set clipboard from client
-      clipboard_read   = _operation << 1,  // Allow read clipboard from host
-      file_upload      = _operation << 2,  // Allow upload files to host
-      file_dwnload     = _operation << 3,  // Allow download files from host
-      server_cmd       = _operation << 4,  // Allow execute server cmd
-      _all_opeiations  = clipboard_set | clipboard_read | file_upload | file_dwnload | server_cmd,
-
-      _action          = _operation << 8,  // Action permission group
-      list             = _action << 0,     // Allow list apps
-      view             = _action << 1,     // Allow view streams
-      launch           = _action << 2,     // Allow launch apps
-      _allow_view      = view | launch,    // Launch contains view permission
-      _all_actions     = list | view | launch,
-
-      _default         = view | list,      // Default permissions for new clients
-      _no              = 0,                // No permissions are granted
-      _all             = _all_inputs | _all_opeiations | _all_actions, // All current permissions
-    };
-  */
-
+   * 0x00001F00 - controller, touch, pen, mouse, and keyboard input
+   * 0x001F0000 - clipboard, file transfer, and server-command operations
+   * 0x07000000 - list, view, and launch actions
+   */
   const permissionMapping = {
-    // Input permission group
     input_controller: 0x00000100,
     input_touch: 0x00000200,
     input_pen: 0x00000400,
@@ -283,454 +964,466 @@
     input_kbd: 0x00001000,
     _all_inputs: 0x00001F00,
 
-    // Operation permission group
     clipboard_set: 0x00010000,
     clipboard_read: 0x00020000,
     file_upload: 0x00040000,
     file_dwnload: 0x00080000,
     server_cmd: 0x00100000,
     _all_operations: 0x001F0000,
+    _clipboard: 0x00030000,
+    _advanced_operations: 0x001C0000,
 
-    // Action permission group
     list: 0x01000000,
     view: 0x02000000,
     launch: 0x04000000,
     _allow_view: 0x06000000,
     _all_actions: 0x07000000,
 
-    // Special permissions
     _default: 0x03000000,
     _no: 0x00000000,
     _all: 0x071F1F00
   };
 
   const permissionGroups = [
-    { name: 'Action', permissions: [
-      {
-        name: 'list',
-        suppressed_by: ['view', 'launch']
-      }, {
-        name: 'view',
-        suppressed_by: ['launch']
-      }, {
-        name: 'launch',
-        suppressed_by: []
-      }
+    { name: 'Streaming', permissions: [
+      { name: 'list', suppressed_by: ['view', 'launch'] },
+      { name: 'view', suppressed_by: ['launch'] },
+      { name: 'launch', suppressed_by: [] }
     ] },
-    { name: 'Operation', permissions: [
-      {
-        name: 'clipboard_set',
-        suppressed_by: []
-      },
-      {
-        name: 'clipboard_read',
-        suppressed_by: []
-      },
-      {
-        name: 'server_cmd',
-        suppressed_by: []
-      }
+    { name: 'Data & automation', permissions: [
+      { name: 'clipboard_set', suppressed_by: [] },
+      { name: 'clipboard_read', suppressed_by: [] },
+      { name: 'file_upload', suppressed_by: [] },
+      { name: 'file_dwnload', suppressed_by: [] },
+      { name: 'server_cmd', suppressed_by: [] }
     ] },
     { name: 'Input', permissions: [
-      {
-        name: 'input_controller',
-        suppressed_by: []
-      }, {
-        name: 'input_touch',
-        suppressed_by: []
-      }, {
-        name: 'input_pen',
-        suppressed_by: []
-      }, {
-        name: 'input_mouse',
-        suppressed_by: []
-      }, {
-        name: 'input_kbd',
-        suppressed_by: []
-      }
-    ] },
+      { name: 'input_controller', suppressed_by: [] },
+      { name: 'input_touch', suppressed_by: [] },
+      { name: 'input_pen', suppressed_by: [] },
+      { name: 'input_mouse', suppressed_by: [] },
+      { name: 'input_kbd', suppressed_by: [] }
+    ] }
   ];
-
-  let currentEditingClient = null;
-
-  const data = () => {
-    return {
-      platform: '',
-      editingHost: false,
-      currentTab: location.hash || '#OTP',
-      otp: '',
-      passphrase: '',
-      otpMessage: '',
-      otpStatus: 'warning',
-      deviceName: '',
-      hostAddr: '',
-      hostPort: '',
-      hostName: '',
-      permissionGroups,
-      clients: [],
-      showApplyMessage: false,
-      unpairAllPressed: false,
-      unpairAllStatus: null
-    }
-  }
 
   const cmdTpl = {
     cmd: '',
-    elevated: 'false'
-  }
+    elevated: false
+  };
 
-  let app = createApp({
+  let currentEditingClient = null;
+
+  const data = () => ({
+    platform: '',
+    otp: '',
+    passphrase: '',
+    hostAddr: '',
+    hostPort: '',
+    hostName: '',
+    otpMessage: '',
+    otpStatus: 'info',
+    pairingActive: false,
+    pairingPending: false,
+    pairingSecondsRemaining: 180,
+    pairingInitialClientIds: [],
+    pairedDeviceName: '',
+    legacyPairingOpen: location.hash === '#PIN',
+    legacyPairingPending: false,
+    legacyPin: '',
+    legacyDeviceName: '',
+    legacyMessage: '',
+    legacyStatus: 'info',
+    permissionGroups,
+    clients: [],
+    clientsLoaded: false,
+    clientsError: '',
+    showApplyMessage: false,
+    unpairAllPressed: false,
+    unpairAllStatus: null
+  });
+
+  const app = createApp({
     components: {
       Navbar,
-      Checkbox
+      ArGlasses
     },
     inject: ['i18n'],
     data,
     computed: {
       deepLink() {
-        return encodeURI(`art://${this.hostAddr}:${this.hostPort}?pin=${this.otp}&passphrase=${this.passphrase}&name=${this.hostName}`);
+        const params = new URLSearchParams({
+          pin: this.otp,
+          passphrase: this.passphrase,
+          name: this.hostName
+        });
+        return `art://${this.hostAddr}:${this.hostPort}?${params.toString()}`;
       },
-      canSaveHost() {
-        return !!(this.hostAddr && this.hostPort);
+      pairingTimeLabel() {
+        const minutes = Math.floor(this.pairingSecondsRemaining / 60);
+        const seconds = this.pairingSecondsRemaining % 60;
+        return `${minutes}:${seconds.toString().padStart(2, '0')} remaining`;
       }
     },
     created() {
       this.refreshClients();
     },
+    beforeUnmount() {
+      clearPairingTimers();
+    },
     methods: {
-      switchTab(currentTab) {
-        location.hash = currentTab;
-        const clients = this.clients;
-        Object.assign(this, data(), { clients });
-        hostInfoCache = null;
-        clearTimeout(resetOTPTimeout);
+      displayClientName(client) {
+        return client.name || this.i18n.t('pin.unpair_single_unknown');
       },
-      editHost() {
-        this.editingHost = !this.editingHost;
-        Object.assign(this, hostInfoCache);
-      },
-      saveHost() {
-        if (!this.canSaveHost) return;
-        updateQR(this.deepLink);
-        this.editingHost = false;
-        saveHostCache(this, true);
-      },
-      registerDevice(e) {
-        let pin = document.querySelector("#pin-input").value;
-        let name = document.querySelector("#name-input").value;
-        document.querySelector("#status").innerHTML = "";
-        let b = JSON.stringify({pin: pin, name: name});
-        fetch("./api/pin", {
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          method: 'POST',
-          body: b
-        })
-          .then((response) => response.json())
-          .then((response) => {
-            if (response.status === true) {
-              document.querySelector(
-                "#status"
-              ).innerHTML = `<div class="alert alert-success" role="alert">${this.i18n.t('pin.pair_success')}</div>`;
-              document.querySelector("#pin-input").value = "";
-              document.querySelector("#name-input").value = "";
+      async requestOTP() {
+        if (this.pairingPending) return;
 
-              setTimeout(() => this.refreshClients(), 1000);
+        this.pairingPending = true;
+        this.pairedDeviceName = '';
+        this.otpMessage = '';
+        clearPairingTimers();
 
-              alert(this.i18n.t('pin.pair_success_check_perm'));
-            } else {
-              document.querySelector(
-                "#status"
-              ).innerHTML = `<div class="alert alert-danger" role="alert">${this.i18n.t('pin.pair_failure')}</div>`;
-            }
+        try {
+          if (!this.clientsLoaded) await this.refreshClients();
+          this.pairingInitialClientIds = this.clients.map(client => client.uuid);
+          this.passphrase = generatePairingSecret();
+
+          const response = await fetch('./api/otp', {
+            credentials: 'include',
+            headers: {'Content-Type': 'application/json'},
+            method: 'POST',
+            body: JSON.stringify({passphrase: this.passphrase, deviceName: ''})
           });
-      },
-      requestOTP() {
-        if (this.editingHost) return;
-
-        fetch("./api/otp", {
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          method: 'POST',
-          body: JSON.stringify({ passphrase: this.passphrase, deviceName: this.deviceName })
-        })
-        .then(resp => resp.json())
-        .then(resp => {
-          if (!resp.status) {
-            this.otpMessage = resp.message
-            this.otpStatus = 'danger'
-            return
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok || !body.status) {
+            throw new Error(body.message || `Pairing request failed (HTTP ${response.status})`);
           }
 
-          this.otp = resp.otp
-          this.hostName = resp.name
-          this.otpStatus = 'success'
-          this.otpMessage = this.i18n.t('pin.otp_success')
+          this.otp = body.otp;
+          this.hostName = body.name;
+          const isLocalHost = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+          this.hostAddr = isLocalHost ? body.ip : location.hostname;
+          const managementPort = Number.parseInt(location.port, 10);
+          this.hostPort = Number.isFinite(managementPort) ? managementPort - 1 : 47989;
+          this.pairingSecondsRemaining = 180;
+          this.pairingActive = true;
+          this.otpStatus = 'info';
 
-          const isLocalHost = ['localhost', '127.0.0.1', '[::1]'].indexOf(location.hostname) >= 0
+          await this.$nextTick();
+          updateQR(this.deepLink);
 
-          if (hostManuallySet) {
-            Object.assign(this, hostInfoCache);
-          } else {
-            this.hostAddr = resp.ip
-            this.hostPort = parseInt(location.port, 10) - 1
-
-            if (!isLocalHost) {
-              this.hostAddr = location.hostname
-            }
-
-            saveHostCache(this);
-          }
-
-          if (this.hostAddr) {
-            updateQR(this.deepLink);
-
-            if (resetOTPTimeout !== null) clearTimeout(resetOTPTimeout)
-            resetOTPTimeout = setTimeout(() => {
-              Object.assign(this, data(), {
-                otp: this.i18n.t('pin.otp_expired'),
-                otpMessage: this.i18n.t('pin.otp_expired_msg')
-              })
-              resetOTPTimeout = null
-            }, 3 * 60 * 1000)
-
-            if (!isLocalHost) {
-              setTimeout(() => {
-                if (window.confirm(this.i18n.t('pin.otp_pair_now'))) {
-                  window.open(this.deepLink);
-                }
-              }, 0)
-            }
-          }
-        })
-      },
-      clickedApplyBanner() {
-        this.showApplyMessage = false;
-      },
-      addCmd(arr, idx) {
-        const newCmd = Object.assign({}, cmdTpl);
-        if (idx < 0) {
-          arr.push(newCmd);
-        } else {
-          arr.splice(idx + 1, 0, newCmd);
+          pairingCountdownTimer = setInterval(() => {
+            this.pairingSecondsRemaining -= 1;
+            if (this.pairingSecondsRemaining <= 0) this.expirePairing();
+          }, 1000);
+          pairingPollTimer = setInterval(() => this.refreshClients(true), 2000);
+        } catch (error) {
+          this.pairingActive = false;
+          this.otpStatus = 'danger';
+          this.otpMessage = error.message || String(error);
+        } finally {
+          this.pairingPending = false;
         }
       },
-      removeCmd(arr, idx) {
-        arr.splice(idx, 1);
+      expirePairing() {
+        clearPairingTimers();
+        this.pairingActive = false;
+        this.otp = '';
+        this.otpStatus = 'warning';
+        this.otpMessage = 'The pairing link expired. Start pairing again to create a new one.';
+      },
+      async completeArtemisPairing(client) {
+        clearPairingTimers();
+        this.pairingActive = false;
+        this.otp = '';
+        this.pairedDeviceName = this.displayClientName(client);
+        this.otpMessage = '';
+
+        try {
+          await this.applyArtemisDefaults(client);
+          await this.refreshClients();
+        } catch (error) {
+          this.otpStatus = 'warning';
+          this.otpMessage = `The device paired, but its recommended XR defaults could not be saved: ${error.message || error}`;
+        }
+      },
+      async applyArtemisDefaults(client) {
+        const payload = this.clientPayload(client);
+        payload.perm = permissionMapping._all_actions | permissionMapping._all_inputs;
+        if (this.platform === 'windows') payload.always_use_virtual_display = true;
+
+        const response = await fetch('./api/clients/update', {
+          credentials: 'include',
+          headers: {'Content-Type': 'application/json'},
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok || !body.status) {
+          throw new Error(body.message || `HTTP ${response.status}`);
+        }
+      },
+      async registerDevice() {
+        if (this.legacyPairingPending) return;
+        this.legacyPairingPending = true;
+        this.legacyMessage = '';
+
+        try {
+          const response = await fetch('./api/pin', {
+            credentials: 'include',
+            headers: {'Content-Type': 'application/json'},
+            method: 'POST',
+            body: JSON.stringify({pin: this.legacyPin, name: this.legacyDeviceName})
+          });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok || !body.status) throw new Error(this.i18n.t('pin.pair_failure'));
+
+          this.legacyStatus = 'success';
+          this.legacyMessage = this.i18n.t('pin.pair_success');
+          this.legacyPin = '';
+          this.legacyDeviceName = '';
+          setTimeout(() => this.refreshClients(), 1000);
+        } catch (error) {
+          this.legacyStatus = 'danger';
+          this.legacyMessage = error.message || String(error);
+        } finally {
+          this.legacyPairingPending = false;
+        }
+      },
+      addCmd(commands, index) {
+        const newCmd = {...cmdTpl};
+        if (index < 0) commands.push(newCmd);
+        else commands.splice(index + 1, 0, newCmd);
+      },
+      removeCmd(commands, index) {
+        commands.splice(index, 1);
       },
       editClient(client) {
-        if (currentEditingClient) {
-          this.cancelEdit(currentEditingClient);
-        }
+        if (currentEditingClient) this.cancelEdit(currentEditingClient);
+
         client.editing = true;
         client.editPerm = client.perm;
         client.editName = client.name;
         client.editAllowClientCommands = client.allow_client_commands;
         client.editEnableLegacyOrdering = client.enable_legacy_ordering;
         client.editAlwaysUseVirtualDisplay = client.always_use_virtual_display;
-        client.editDisplayMode = client.display_mode;
+        client.editDisplayMode = client.display_mode || '';
         client.edit_do = JSON.parse(JSON.stringify(client.do || []));
         client.edit_undo = JSON.parse(JSON.stringify(client.undo || []));
+        client.editAccessPreset = this.accessPresetFor(client.perm);
+        client.editClipboard = this.hasClipboard(client.perm);
+        client.showAdvanced = client.editAccessPreset === 'custom';
+        client.saveError = '';
         currentEditingClient = client;
-
-        console.log(client.do, client.undo)
       },
       cancelEdit(client) {
-        currentEditingClient = null;
+        if (currentEditingClient === client) currentEditingClient = null;
         client.editing = false;
-        client.editPerm = client.perm;
-        client.editName = client.name;
-        client.editDisplayMode = client.display_mode;
-        client.editAllowClientCommands = client.allow_client_commands;
-        client.editEnableLegacyOrdering = client.enable_legacy_ordering;
-        client.editAlwaysUseVirtualDisplay = client.always_use_virtual_display;
+        client.saveError = '';
       },
-      saveClient(client) {
-        client.editing = false;
-        currentEditingClient = null;
-        const editedClient = {
+      clientPayload(client, overrides = {}) {
+        const sourcePerm = client.editPerm === undefined ? client.perm : client.editPerm;
+        const sourceDo = client.edit_do === undefined ? client.do : client.edit_do;
+        const sourceUndo = client.edit_undo === undefined ? client.undo : client.edit_undo;
+        return {
           uuid: client.uuid,
-          name: client.editName,
-          display_mode: client.editDisplayMode.trim(),
-          allow_client_commands: client.editAllowClientCommands,
-          enable_legacy_ordering: client.editEnableLegacyOrdering,
-          always_use_virtual_display: client.editAlwaysUseVirtualDisplay,
-          perm: client.editPerm & permissionMapping._all,
-          do: client.edit_do.reduce((filtered, {cmd: _cmd, elevated}) => {
-            const cmd = _cmd.trim()
-            if (cmd) {
-              filtered.push({
-                cmd,
-                elevated
-              })
-            }
-            return filtered
+          name: client.editName === undefined ? client.name : client.editName,
+          display_mode: (client.editDisplayMode === undefined ? client.display_mode : client.editDisplayMode || '').trim(),
+          allow_client_commands: client.editAllowClientCommands === undefined ? client.allow_client_commands : client.editAllowClientCommands,
+          enable_legacy_ordering: client.editEnableLegacyOrdering === undefined ? client.enable_legacy_ordering : client.editEnableLegacyOrdering,
+          always_use_virtual_display: client.editAlwaysUseVirtualDisplay === undefined ? client.always_use_virtual_display : client.editAlwaysUseVirtualDisplay,
+          perm: sourcePerm & permissionMapping._all,
+          do: (sourceDo || []).reduce((filtered, {cmd: rawCmd, elevated}) => {
+            const cmd = (rawCmd || '').trim();
+            if (cmd) filtered.push({cmd, elevated});
+            return filtered;
           }, []),
-          undo: client.edit_undo.reduce((filtered, {cmd: _cmd, elevated}) => {
-            const cmd = _cmd.trim()
-            if (cmd) {
-              filtered.push({
-                cmd,
-                elevated
-              })
-            }
-            return filtered
-          }, [])
+          undo: (sourceUndo || []).reduce((filtered, {cmd: rawCmd, elevated}) => {
+            const cmd = (rawCmd || '').trim();
+            if (cmd) filtered.push({cmd, elevated});
+            return filtered;
+          }, []),
+          ...overrides
+        };
+      },
+      async saveClient(client) {
+        client.saving = true;
+        client.saveError = '';
+
+        try {
+          const response = await fetch('./api/clients/update', {
+            credentials: 'include',
+            headers: {'Content-Type': 'application/json'},
+            method: 'POST',
+            body: JSON.stringify(this.clientPayload(client))
+          });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok || !body.status) throw new Error(body.message || `HTTP ${response.status}`);
+
+          currentEditingClient = null;
+          client.editing = false;
+          await this.refreshClients();
+        } catch (error) {
+          client.saveError = this.i18n.t('pin.save_client_error') + (error.message || error);
+        } finally {
+          client.saving = false;
         }
-        fetch("./api/clients/update", {
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          method: 'POST',
-          body: JSON.stringify(editedClient)
-        })
-        .then(resp => resp.json())
-        .then(resp => {
-          if (resp.status) {
-            this.refreshClients();
-          } else {
-            throw new Error(resp.message);
-          }
-        })
-        .catch(err => {
-          alert(this.i18n.t('pin.save_client_error') + err);
-        })
-        .finally(() => {
-          setTimeout(() => {
-            this.refreshClients();
-          }, 1000);
-        });
+      },
+      accessPresetFor(perm) {
+        const actions = perm & permissionMapping._all_actions;
+        const inputs = perm & permissionMapping._all_inputs;
+        if ((actions & permissionMapping.launch) && inputs === permissionMapping._all_inputs) return 'stream_control';
+        if (!(actions & permissionMapping.launch) && (actions & permissionMapping._allow_view) && inputs === 0) return 'view_only';
+        return 'custom';
+      },
+      accessPresetLabel(preset) {
+        if (preset === 'stream_control') return 'Stream & control';
+        if (preset === 'view_only') return 'View only';
+        return 'Custom';
+      },
+      setAccessPreset(client, preset) {
+        client.editAccessPreset = preset;
+        if (preset === 'custom') {
+          client.showAdvanced = true;
+          return;
+        }
+
+        const clipboard = client.editPerm & permissionMapping._clipboard;
+        client.editPerm &= ~(permissionMapping._all_actions | permissionMapping._all_inputs | permissionMapping._all_operations);
+        client.editPerm |= clipboard;
+        if (preset === 'stream_control') {
+          client.editPerm |= permissionMapping._all_actions | permissionMapping._all_inputs;
+        } else {
+          client.editPerm |= permissionMapping._default;
+        }
+      },
+      setClipboard(client) {
+        client.editPerm &= ~permissionMapping._clipboard;
+        if (client.editClipboard) client.editPerm |= permissionMapping._clipboard;
+      },
+      hasClipboard(perm) {
+        return (perm & permissionMapping._clipboard) !== 0;
+      },
+      hasAdvancedOperations(perm) {
+        return (perm & permissionMapping._advanced_operations) !== 0;
       },
       permToStr(perm) {
-        const permSegments = [];
-        permSegments.push((perm >> 24) & 0xFF);
-        permSegments.push((perm >> 16) & 0xFF);
-        permSegments.push((perm >> 8) & 0xFF);
-        return permSegments.map(seg => seg.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+        return [24, 16, 8]
+          .map(shift => ((perm >> shift) & 0xFF).toString(16).toUpperCase().padStart(2, '0'))
+          .join(' ');
       },
       checkPermission(perm, permission) {
         return (perm & permissionMapping[permission]) !== 0;
       },
-      isSuppressed(perm, permission, suppressed_by) {
-        for (const suppressed of suppressed_by) {
-          if (this.checkPermission(perm, suppressed)) {
-            return true;
-          }
-        }
-        return false;
+      isSuppressed(perm, permission, suppressedBy) {
+        return suppressedBy.some(suppressed => this.checkPermission(perm, suppressed));
       },
       togglePermission(client, permission) {
         client.editPerm ^= permissionMapping[permission];
-      },
-      validateModeOverride(event) {
-        const value = event.target.value.trim();
-        if (value && !value.match(/^\d+x\d+x\d+(\.\d+)?$/)) {
-          event.target.setCustomValidity(this.i18n.t('pin.display_mode_override_error'));
-        } else {
-          event.target.setCustomValidity('');
-        }
-
-        event.target.reportValidity();
+        client.editClipboard = this.hasClipboard(client.editPerm);
+        client.editAccessPreset = this.accessPresetFor(client.editPerm);
       },
       disconnectClient(uuid) {
-        fetch("./api/clients/disconnect", {
+        fetch('./api/clients/disconnect', {
           credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json'
-          },
+          headers: {'Content-Type': 'application/json'},
           method: 'POST',
-          body: JSON.stringify({ uuid })
-        }).finally(() => {
-          setTimeout(() => {
-            this.refreshClients();
-          }, 1000);
-        });
+          body: JSON.stringify({uuid})
+        }).finally(() => setTimeout(() => this.refreshClients(), 1000));
       },
-      unpairAll() {
+      async unpairAll() {
+        if (!window.confirm('Remove every paired device? All devices will need to be paired again.')) return;
         this.unpairAllPressed = true;
-        fetch("./api/clients/unpair-all", {
-          credentials: 'include',
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-        })
-          .then((r) => r.json())
-          .then((r) => {
-            this.unpairAllPressed = false;
-            this.unpairAllStatus = r.status;
-            setTimeout(() => {
-              this.unpairAllStatus = null;
-            }, 5000);
-            this.refreshClients();
+        try {
+          const response = await fetch('./api/clients/unpair-all', {
+            credentials: 'include',
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'}
           });
-      },
-      unpairSingle(uuid) {
-        fetch("./api/clients/unpair", {
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          method: 'POST',
-          body: JSON.stringify({ uuid })
-        }).then(() => {
-          this.showApplyMessage = true;
-          this.refreshClients();
-        });
-      },
-      refreshClients() {
-        if (currentEditingClient) {
-          this.cancelEdit(currentEditingClient);
+          const body = await response.json();
+          this.unpairAllStatus = body.status;
+          await this.refreshClients();
+        } catch (_) {
+          this.unpairAllStatus = false;
+        } finally {
+          this.unpairAllPressed = false;
+          setTimeout(() => { this.unpairAllStatus = null; }, 5000);
         }
-        fetch("./api/clients/list", { credentials: 'include' })
-          .then((response) => response.json())
-          .then((response) => {
-            if (response.status && response.named_certs && response.named_certs.length) {
-              this.platform = response.platform
-              this.clients = response.named_certs.map(({
-                name,
-                uuid,
-                display_mode,
-                perm,
-                connected,
-                do: _do,
-                undo,
-                allow_client_commands,
-                always_use_virtual_display,
-                enable_legacy_ordering
-              }) => {
-                const permInt = parseInt(perm, 10);
-                return {
-                  name,
-                  uuid,
-                  display_mode,
-                  perm: permInt,
-                  connected,
-                  editing: false,
-                  do: _do,
-                  undo,
-                  allow_client_commands,
-                  enable_legacy_ordering,
-                  always_use_virtual_display
-                }
-              })
-              currentEditingClient = null;
-            } else {
-              this.clients = [];
-            }
-          })
-          .catch(e => {
-            console.error(e)
-            location.reload();
-          });
       },
+      async unpairSingle(client) {
+        const name = this.displayClientName(client);
+        if (!window.confirm(`Remove ${name}? This device will need to be paired again.`)) return;
+
+        try {
+          const response = await fetch('./api/clients/unpair', {
+            credentials: 'include',
+            headers: {'Content-Type': 'application/json'},
+            method: 'POST',
+            body: JSON.stringify({uuid: client.uuid})
+          });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok || body.status === false) throw new Error(body.message || `HTTP ${response.status}`);
+          this.showApplyMessage = true;
+          await this.refreshClients();
+        } catch (error) {
+          this.clientsError = `Could not remove ${name}: ${error.message || error}`;
+        }
+      },
+      async refreshClients(detectPairing = false) {
+        try {
+          const response = await fetch('./api/clients/list', {credentials: 'include'});
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const body = await response.json();
+          if (!body.status) throw new Error(body.message || 'Apollo did not return a device list.');
+
+          this.platform = body.platform || this.platform;
+          const clients = (body.named_certs || []).map(({
+            name,
+            uuid,
+            display_mode,
+            perm,
+            connected,
+            do: connectCommands,
+            undo,
+            allow_client_commands,
+            always_use_virtual_display,
+            enable_legacy_ordering
+          }) => ({
+            name,
+            uuid,
+            display_mode: display_mode || '',
+            perm: Number.parseInt(perm, 10),
+            connected,
+            editing: false,
+            do: connectCommands || [],
+            undo: undo || [],
+            allow_client_commands,
+            enable_legacy_ordering,
+            always_use_virtual_display,
+            saving: false,
+            saveError: ''
+          }));
+
+          this.clients = clients;
+          this.clientsLoaded = true;
+          this.clientsError = '';
+          currentEditingClient = null;
+
+          if (detectPairing && this.pairingActive) {
+            const initialIds = new Set(this.pairingInitialClientIds);
+            const newlyPaired = clients.find(client => !initialIds.has(client.uuid));
+            if (newlyPaired) await this.completeArtemisPairing(newlyPaired);
+          }
+          return clients;
+        } catch (error) {
+          this.clientsLoaded = true;
+          this.clientsError = `Could not load paired devices: ${error.message || error}`;
+          return this.clients;
+        }
+      }
     }
   });
 
   initApp(app);
 </script>
+
+</html>

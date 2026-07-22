@@ -222,7 +222,7 @@ namespace http {
       return -1;
     }
     if (!user_creds_exist(config::sunshine.credentials_file)) {
-      BOOST_LOG(info) << "Open the Web UI to set your new username and password and getting started";
+      BOOST_LOG(info) << "The Web UI is ready for passwordless control from this PC or the local network";
     } else if (reload_user_creds(config::sunshine.credentials_file)) {
       return -1;
     }

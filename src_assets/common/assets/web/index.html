@@ -5,158 +5,457 @@
   <%- header %>
 </head>
 
-<body id="app" v-cloak>
+<body id="app" class="apollo-app-shell" v-cloak>
   <Navbar></Navbar>
-  <div id="content" class="container">
-    <h1 class="my-4">{{ $t('index.welcome') }}</h1>
-    <p>{{ $t('index.description') }}</p>
-    <div class="alert alert-danger" v-if="fancyLogs.find(x => x.level === 'Fatal')">
-      <div style="line-height: 32px;">
-        <i class="fas fa-circle-exclamation" style="font-size: 32px;margin-right: 0.25em;"></i>
-        <p v-html="$t('index.startup_errors')"></p>
-        <br>
+
+  <main id="content" class="container apollo-page apollo-overview">
+    <header class="apollo-page-header">
+      <div>
+        <p class="apollo-eyebrow">Host control</p>
+        <h1>{{ hostName }}</h1>
+        <p class="apollo-page-intro">Your PC is the one place to pair devices, choose apps, and check XR readiness.</p>
       </div>
-      <ul>
-        <li v-for="v in fancyLogs.filter(x => x.level === 'Fatal')">{{v.value}}</li>
-      </ul>
-      <a class="btn btn-danger" href="./troubleshooting#logs">View Logs</a>
-    </div>
-    <!-- Version -->
-    <div class="card p-2 my-4">
-      <div class="card-body" v-if="version">
-        <h2>Version {{version.version}}</h2>
-        <br>
-        <div v-if="loading">
-          {{ $t('index.loading_latest') }}
-        </div>
-        <div class="alert alert-success" v-if="buildVersionIsDirty">
-          {{ $t('index.version_dirty') }} 🌇
-        </div>
-        <div class="alert alert-info" v-if="installedVersionNotStable">
-          {{ $t('index.installed_version_not_stable') }}
-        </div>
-        <div v-else-if="(!preReleaseBuildAvailable || !notifyPreReleases) && !stableBuildAvailable && !buildVersionIsDirty">
-          <div class="alert alert-success">
-            {{ $t('index.version_latest') }}
-          </div>
-        </div>
-        <div v-if="notifyPreReleases && preReleaseBuildAvailable">
-          <div class="alert alert-warning">
-            <div class="d-flex justify-content-between">
-              <div class="my-2">
-                <p>{{ $t('index.new_pre_release') }}</p>
-              </div>
-              <a class="btn btn-success m-1" :href="preReleaseVersion.release.html_url" target="_blank">{{ $t('index.download') }}</a>
-            </div>
-            <pre><b>{{preReleaseVersion.release.name}}</b></pre>
-            <pre>{{preReleaseVersion.release.body}}</pre>
-          </div>
-        </div>
-        <div v-if="stableBuildAvailable">
-          <div class="alert alert-warning">
-            <div class="d-flex justify-content-between">
-              <div class="my-2">
-                <p>{{ $t('index.new_stable') }}</p>
-              </div>
-              <a class="btn btn-success m-1" :href="githubVersion.release.html_url" target="_blank">{{ $t('index.download') }}</a>
-            </div>
-            <h3>{{githubVersion.release.name}}</h3>
-            <pre>{{githubVersion.release.body}}</pre>
-          </div>
+      <span class="apollo-state-pill" :class="`is-${overallState.tone}`" role="status">
+        <span class="apollo-state-dot" aria-hidden="true"></span>
+        {{ overallState.label }}
+      </span>
+    </header>
+
+    <section class="apollo-hero" :class="`is-${overallState.tone}`" aria-labelledby="hero-title">
+      <div class="apollo-hero-glow" aria-hidden="true"></div>
+      <div class="apollo-hero-copy">
+        <span class="apollo-hero-icon" aria-hidden="true">
+          <i class="fa-solid" :class="hero.icon"></i>
+        </span>
+        <div>
+          <p class="apollo-kicker">{{ hero.kicker }}</p>
+          <h2 id="hero-title">{{ hero.title }}</h2>
+          <p>{{ hero.description }}</p>
         </div>
       </div>
+      <div class="apollo-hero-actions">
+        <a v-if="hero.primaryHref" class="btn btn-apollo-primary" :href="hero.primaryHref">
+          <i class="fa-solid" :class="hero.primaryIcon" aria-hidden="true"></i>
+          {{ hero.primaryLabel }}
+        </a>
+        <button
+          v-else
+          class="btn btn-apollo-primary"
+          type="button"
+          :disabled="Boolean(actionBusy)"
+          @click="endSession">
+          <i class="fa-solid fa-stop" aria-hidden="true"></i>
+          {{ actionBusy === 'end' ? 'Ending…' : hero.primaryLabel }}
+        </button>
+        <a v-if="hero.secondaryHref" class="btn btn-apollo-quiet" :href="hero.secondaryHref">
+          {{ hero.secondaryLabel }}
+        </a>
+      </div>
+    </section>
+
+    <div v-if="primaryIssue" class="apollo-notice" :class="`is-${primaryIssue.tone}`" role="alert">
+      <span class="apollo-notice-icon" aria-hidden="true">
+        <i class="fa-solid" :class="primaryIssue.icon"></i>
+      </span>
+      <div>
+        <strong>{{ primaryIssue.title }}</strong>
+        <p>{{ primaryIssue.message }}</p>
+      </div>
+      <a :href="primaryIssue.href">{{ primaryIssue.action }} <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></a>
     </div>
-    <!-- Resources -->
-    <div class="my-4">
-      <Client-Card></Client-Card>
-      <Resource-Card></Resource-Card>
+
+    <div v-if="actionError" class="apollo-notice is-danger" role="alert">
+      <span class="apollo-notice-icon" aria-hidden="true"><i class="fa-solid fa-circle-exclamation"></i></span>
+      <div>
+        <strong>That action did not finish</strong>
+        <p>{{ actionError }}</p>
+      </div>
     </div>
-  </div>
+
+    <section class="apollo-section" aria-labelledby="readiness-title">
+      <div class="apollo-section-heading">
+        <div>
+          <p class="apollo-kicker">At a glance</p>
+          <h2 id="readiness-title">XR readiness</h2>
+        </div>
+        <button class="apollo-refresh-button" type="button" :disabled="refreshing" @click="loadOverview(true)" aria-label="Refresh host status">
+          <i class="fa-solid fa-rotate" :class="{ 'fa-spin': refreshing }" aria-hidden="true"></i>
+          <span>Refresh</span>
+        </button>
+      </div>
+
+      <div class="apollo-readiness-grid">
+        <article v-for="item in readiness" :key="item.title" class="apollo-readiness-card" :class="`is-${item.tone}`">
+          <div class="apollo-readiness-topline">
+            <span class="apollo-readiness-icon" aria-hidden="true"><i class="fa-solid" :class="item.icon"></i></span>
+            <span class="apollo-readiness-status">
+              <span class="apollo-state-dot" aria-hidden="true"></span>
+              {{ item.status }}
+            </span>
+          </div>
+          <h3>{{ item.title }}</h3>
+          <p>{{ item.description }}</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="apollo-section" aria-labelledby="session-title">
+      <div class="apollo-section-heading">
+        <div>
+          <p class="apollo-kicker">One PC, one stream</p>
+          <h2 id="session-title">Current session</h2>
+        </div>
+        <span v-if="sessionState !== 'idle'" class="apollo-session-state" :class="`is-${sessionState}`">
+          {{ sessionState === 'streaming' ? 'Streaming' : 'Waiting to reconnect' }}
+        </span>
+      </div>
+
+      <article v-if="sessionState === 'idle'" class="apollo-session-card is-empty">
+        <span class="apollo-empty-icon" aria-hidden="true"><i class="fa-solid fa-display"></i></span>
+        <div class="apollo-empty-copy">
+          <h3>No active session</h3>
+          <p>{{ pairedClients.length ? 'Apollo is ready when you open this PC in Artemis.' : 'Pair an Android XR device to start streaming from this PC.' }}</p>
+        </div>
+        <a class="btn btn-apollo-quiet" :href="pairedClients.length ? './apps' : './pin'">
+          {{ pairedClients.length ? 'Open Library' : 'Pair Artemis' }}
+        </a>
+      </article>
+
+      <article v-else class="apollo-session-card">
+        <div class="apollo-session-device">
+          <span class="apollo-device-avatar" aria-hidden="true">
+            <i class="fa-solid fa-vr-cardboard"></i>
+          </span>
+          <div>
+            <p class="apollo-session-label">{{ sessionState === 'streaming' ? 'Streaming to' : 'Session retained for' }}</p>
+            <h3>{{ sessionDeviceName }}</h3>
+            <p v-if="sessionState === 'waiting'">Apollo is keeping {{ activeAppName }} ready for a quick reconnect.</p>
+            <p v-else>{{ activeAppName }} is running from this host.</p>
+          </div>
+        </div>
+
+        <div class="apollo-session-details" aria-label="Session details">
+          <span><i class="fa-solid fa-window-maximize" aria-hidden="true"></i>{{ activeAppName }}</span>
+          <span v-if="activeClient && activeClient.display_mode"><i class="fa-solid fa-expand" aria-hidden="true"></i>{{ activeClient.display_mode }}</span>
+          <span v-if="activeClient && activeClient.always_use_virtual_display"><i class="fa-solid fa-user-shield" aria-hidden="true"></i>Private display</span>
+        </div>
+
+        <div class="apollo-session-actions">
+          <button
+            v-if="activeClient"
+            class="btn btn-apollo-quiet"
+            type="button"
+            :disabled="Boolean(actionBusy)"
+            @click="disconnectCurrent">
+            <i class="fa-solid fa-link-slash" aria-hidden="true"></i>
+            {{ actionBusy === 'disconnect' ? 'Disconnecting…' : 'Disconnect device' }}
+          </button>
+          <button
+            class="btn btn-apollo-danger"
+            type="button"
+            :disabled="Boolean(actionBusy)"
+            @click="endSession">
+            <i class="fa-solid fa-stop" aria-hidden="true"></i>
+            {{ actionBusy === 'end' ? 'Ending…' : 'End session' }}
+          </button>
+        </div>
+      </article>
+    </section>
+
+    <footer class="apollo-overview-footer">
+      <span>{{ pairedClients.length }} {{ pairedClients.length === 1 ? 'device' : 'devices' }} paired</span>
+      <span aria-hidden="true">•</span>
+      <a href="./troubleshooting#logs">Debug log</a>
+      <span aria-hidden="true">•</span>
+      <a href="./troubleshooting">Help &amp; Diagnostics</a>
+      <span v-if="config && config.version" aria-hidden="true">•</span>
+      <span v-if="config && config.version">Apollo {{ config.version }}</span>
+    </footer>
+  </main>
 </body>
 
 <script type="module">
   import { createApp } from 'vue'
   import { initApp } from './init'
   import Navbar from './Navbar.vue'
-  import ClientCard from './ClientCard.vue'
-  import ResourceCard from './ResourceCard.vue'
-  import ApolloVersion from './apollo_version'
 
-  console.log("Hello, Apollo!")
-  let app = createApp({
-    components: {
-      Navbar,
-      ClientCard,
-      ResourceCard
-    },
+  const app = createApp({
+    components: { Navbar },
     data() {
       return {
-        version: null,
-        githubVersion: null,
-        notifyPreReleases: false,
-        preReleaseVersion: null,
+        config: null,
+        apps: [],
+        currentApp: '',
+        pairedClients: [],
+        logs: '',
         loading: true,
-        logs: null,
+        refreshing: false,
+        apiError: '',
+        actionError: '',
+        actionBusy: '',
+        refreshTimer: null,
+        diagnosticsTimer: null,
       }
     },
     async created() {
-      try {
-        let config = await fetch("./api/config").then((r) => r.json());
-        this.notifyPreReleases = config.notify_pre_releases;
-        this.version = new ApolloVersion(null, config.version);
-        console.log("Version: ", this.version.version)
-        this.githubVersion = new ApolloVersion(await fetch("https://api.github.com/repos/ClassicOldSong/Apollo/releases/latest").then((r) => r.json()), null);
-        console.log("GitHub Version: ", this.githubVersion.version)
-        if (this.githubVersion) {
-          this.preReleaseVersion = new ApolloVersion((await fetch("https://api.github.com/repos/ClassicOldSong/Apollo/releases").then((r) => r.json())).find(release => release.prerelease), null);
-          console.log("Pre-Release Version: ", this.preReleaseVersion.version)
-        }
-      } catch (e) {
-        console.error(e);
-      }
-      try {
-        this.logs = (await fetch("./api/logs").then(r => r.text()))
-      } catch (e) {
-        console.error(e);
-      }
-      this.loading = false;
+      await this.loadOverview(true)
+      this.refreshTimer = window.setInterval(() => this.loadOverview(false), 5000)
+      this.diagnosticsTimer = window.setInterval(() => this.loadDiagnostics(), 30000)
+    },
+    beforeUnmount() {
+      if (this.refreshTimer) window.clearInterval(this.refreshTimer)
+      if (this.diagnosticsTimer) window.clearInterval(this.diagnosticsTimer)
     },
     computed: {
-      installedVersionNotStable() {
-        if (!this.githubVersion || !this.version) {
-          return false;
-        }
-        return this.version.isGreater(this.githubVersion);
+      hostName() {
+        return this.config?.sunshine_name || 'Apollo'
       },
-      stableBuildAvailable() {
-        if (!this.githubVersion || !this.version) {
-          return false;
-        }
-        return this.githubVersion.isGreater(this.version);
+      connectedClients() {
+        return this.pairedClients.filter(client => client.connected)
       },
-      preReleaseBuildAvailable() {
-        if (!this.preReleaseVersion || !this.githubVersion || !this.version) {
-          return false;
-        }
-        return this.preReleaseVersion.isGreater(this.version, true) && this.preReleaseVersion.isGreater(this.githubVersion, true);
+      activeClient() {
+        return this.connectedClients[0] || null
       },
-      buildVersionIsDirty() {
-        return this.version.version?.split(".").length === 5 &&
-          this.version.version.indexOf("dirty") !== -1
+      activeApp() {
+        return this.apps.find(app => app.uuid === this.currentApp) || null
       },
-      /** Parse the text errors, calculating the text, the timestamp and the level */
-      fancyLogs() {
-        if (!this.logs) return [];
-        let regex = /(\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}]):\s/g;
-        let rawLogLines = (this.logs.split(regex)).splice(1);
-        let logLines = []
-        for (let i = 0; i < rawLogLines.length; i += 2) {
-          logLines.push({ timestamp: rawLogLines[i], level: rawLogLines[i + 1].split(":")[0], value: rawLogLines[i + 1] });
+      activeAppName() {
+        return this.activeApp?.name || (this.currentApp ? 'Desktop' : 'Desktop session')
+      },
+      sessionDeviceName() {
+        if (this.activeClient) return this.activeClient.name || 'XR device'
+        const previouslyConnected = this.pairedClients.find(client => client.always_use_virtual_display)
+        return previouslyConnected?.name || 'your XR device'
+      },
+      sessionState() {
+        if (this.activeClient) return 'streaming'
+        if (this.currentApp) return 'waiting'
+        return 'idle'
+      },
+      fatalMessages() {
+        if (!this.logs) return []
+        return this.logs
+          .split(/\r?\n/)
+          .filter(line => /\]:\s*Fatal:/i.test(line))
+          .map(line => line.replace(/^.*?\]:\s*Fatal:\s*/i, '').trim())
+          .filter(Boolean)
+      },
+      latestFatal() {
+        return this.fatalMessages[this.fatalMessages.length - 1] || ''
+      },
+      encoderReady() {
+        return /Found (?:H\.264|HEVC|AV1) encoder:/i.test(this.logs)
+      },
+      depthReady() {
+        return /(?:startup depth model|depth model startup).*\b(?:ready|complete)\b/i.test(this.logs)
+      },
+      depthError() {
+        return /(?:Fatal|Error):.*(?:depth model|TensorRT).*(?:failed|unavailable|could not|error)/i.test(this.logs)
+      },
+      virtualDisplayStatus() {
+        if (!this.config || this.config.platform !== 'windows') {
+          return { status: this.loading ? 'Checking' : 'Automatic', tone: 'neutral', description: 'Apollo will use the best available display for the device.' }
         }
-        return logLines;
-      }
-    }
-  });
+        const status = Number(this.config.vdisplayStatus)
+        if (status === 0) return { status: 'Ready', tone: 'success', description: 'A private XR display is available when an app requests it.' }
+        if (status === 1 || Number.isNaN(status)) return { status: 'Checking', tone: 'neutral', description: 'Apollo is checking the private-display driver.' }
+        if (status === -2) return { status: 'Update needed', tone: 'warning', description: 'Update the private-display driver before using isolated XR sessions.' }
+        return { status: 'Needs attention', tone: 'danger', description: 'The private-display driver is not available.' }
+      },
+      overallState() {
+        if (this.apiError || this.latestFatal) return { label: 'Needs attention', tone: 'danger' }
+        if (this.activeClient) return { label: 'Streaming', tone: 'active' }
+        if (this.currentApp) return { label: 'Reconnecting', tone: 'warning' }
+        if (this.loading) return { label: 'Checking', tone: 'neutral' }
+        return { label: 'Ready', tone: 'success' }
+      },
+      hero() {
+        if (this.apiError || this.latestFatal) {
+          return {
+            kicker: 'Host attention',
+            title: 'Apollo needs a quick check',
+            description: 'Open diagnostics for a plain view of the latest host issue.',
+            icon: 'fa-triangle-exclamation',
+            primaryLabel: 'View diagnostics',
+            primaryIcon: 'fa-stethoscope',
+            primaryHref: './troubleshooting',
+            secondaryLabel: 'Open settings',
+            secondaryHref: './config',
+          }
+        }
+        if (this.activeClient) {
+          return {
+            kicker: 'Live now',
+            title: `${this.activeClient.name || 'Your XR device'} is streaming`,
+            description: `${this.activeAppName} is the only active session on this PC.`,
+            icon: 'fa-vr-cardboard',
+            primaryLabel: 'Manage device',
+            primaryIcon: 'fa-mobile-screen-button',
+            primaryHref: './pin',
+            secondaryLabel: 'Open Library',
+            secondaryHref: './apps',
+          }
+        }
+        if (this.currentApp) {
+          return {
+            kicker: 'Quick resume',
+            title: 'Session is ready to reconnect',
+            description: `${this.activeAppName} is being kept ready for your XR device.`,
+            icon: 'fa-clock-rotate-left',
+            primaryLabel: 'End session',
+            primaryIcon: 'fa-stop',
+            primaryHref: '',
+            secondaryLabel: 'Open Library',
+            secondaryHref: './apps',
+          }
+        }
+        if (!this.pairedClients.length) {
+          return {
+            kicker: 'Start here',
+            title: 'Pair your first XR device',
+            description: 'Connect Artemis once, then this PC will be ready whenever you put on your headset or glasses.',
+            icon: 'fa-link',
+            primaryLabel: 'Pair Artemis',
+            primaryIcon: 'fa-qrcode',
+            primaryHref: './pin',
+            secondaryLabel: 'Check settings',
+            secondaryHref: './config',
+          }
+        }
+        return {
+          kicker: 'Host online',
+          title: 'Ready for XR',
+          description: 'Open Apollo in Artemis to start this PC’s single streaming session.',
+          icon: 'fa-check',
+          primaryLabel: 'Pair another device',
+          primaryIcon: 'fa-plus',
+          primaryHref: './pin',
+          secondaryLabel: 'Open Library',
+          secondaryHref: './apps',
+        }
+      },
+      primaryIssue() {
+        if (this.apiError) {
+          return { tone: 'danger', icon: 'fa-cloud-arrow-down', title: 'Host status is unavailable', message: this.apiError, action: 'Open diagnostics', href: './troubleshooting' }
+        }
+        if (this.latestFatal) {
+          return { tone: 'danger', icon: 'fa-circle-exclamation', title: 'Apollo reported a startup problem', message: this.latestFatal, action: 'View logs', href: './troubleshooting#logs' }
+        }
+        if (this.virtualDisplayStatus.tone === 'danger' || this.virtualDisplayStatus.tone === 'warning') {
+          return { tone: 'warning', icon: 'fa-display', title: 'Private XR display needs attention', message: this.virtualDisplayStatus.description, action: 'Open display settings', href: './config#av' }
+        }
+        if (this.depthError) {
+          return { tone: 'warning', icon: 'fa-cubes', title: 'AI 3D is not ready', message: '2D streaming is still available while the depth engine is checked.', action: 'View diagnostics', href: './troubleshooting#logs' }
+        }
+        if (this.connectedClients.length > 1) {
+          return { tone: 'warning', icon: 'fa-users-viewfinder', title: 'More than one device is connected', message: 'Apollo is designed around one active XR session per PC.', action: 'Manage devices', href: './pin' }
+        }
+        return null
+      },
+      readiness() {
+        const streaming = this.latestFatal
+          ? { status: 'Needs attention', tone: 'danger', description: 'Resolve the startup issue before beginning a stream.' }
+          : this.activeClient
+            ? { status: 'Streaming', tone: 'active', description: `Sending ${this.activeAppName} to ${this.activeClient.name || 'your XR device'}.` }
+            : this.encoderReady
+              ? { status: 'Ready', tone: 'success', description: 'Hardware video encoding is available for Artemis.' }
+              : { status: this.loading ? 'Checking' : 'Automatic', tone: 'neutral', description: 'Apollo chooses the best encoder when streaming begins.' }
 
-  initApp(app);
+        const ai3d = this.depthError
+          ? { status: 'Needs attention', tone: 'warning', description: '2D remains available while the depth engine is checked.' }
+          : this.depthReady
+            ? { status: 'Ready', tone: 'success', description: 'Real-time depth is loaded for AI 3D mode in Artemis.' }
+            : { status: this.loading ? 'Checking' : 'On demand', tone: 'neutral', description: 'Apollo prepares AI 3D when Artemis requests it.' }
+
+        return [
+          { title: '2D streaming', icon: 'fa-display', ...streaming },
+          { title: 'AI 3D', icon: 'fa-cubes', ...ai3d },
+          { title: 'Private display', icon: 'fa-user-shield', ...this.virtualDisplayStatus },
+        ]
+      },
+    },
+    methods: {
+      async fetchJson(url) {
+        const response = await fetch(url, { credentials: 'include' })
+        if (!response.ok) throw new Error(`Apollo returned HTTP ${response.status}`)
+        return response.json()
+      },
+      async loadOverview(includeDiagnostics = false) {
+        if (this.refreshing) return
+        this.refreshing = true
+        try {
+          const requests = [this.fetchJson('./api/config'), this.fetchJson('./api/clients/list'), this.fetchJson('./api/apps')]
+          if (includeDiagnostics) requests.push(fetch('./api/logs', { credentials: 'include' }).then(response => {
+            if (!response.ok) throw new Error(`Apollo returned HTTP ${response.status}`)
+            return response.text()
+          }))
+          const [config, clients, apps, logs] = await Promise.all(requests)
+          this.config = config
+          this.pairedClients = Array.isArray(clients.named_certs) ? clients.named_certs : []
+          this.apps = Array.isArray(apps.apps) ? apps.apps : []
+          this.currentApp = apps.current_app || ''
+          if (typeof logs === 'string') this.logs = logs
+          this.apiError = ''
+        } catch (error) {
+          console.error(error)
+          this.apiError = 'Apollo could not refresh this overview. Check that the host service is still running.'
+        } finally {
+          this.loading = false
+          this.refreshing = false
+        }
+      },
+      async loadDiagnostics() {
+        try {
+          const response = await fetch('./api/logs', { credentials: 'include' })
+          if (response.ok) this.logs = await response.text()
+        } catch (error) {
+          console.debug('Apollo diagnostics are unavailable', error)
+        }
+      },
+      async postJson(url, body) {
+        const response = await fetch(url, {
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
+          body: body === undefined ? undefined : JSON.stringify(body),
+        })
+        if (!response.ok) throw new Error(`Apollo returned HTTP ${response.status}`)
+        const result = await response.json()
+        if (result.status === false) throw new Error(result.error || 'Apollo could not complete the action')
+        return result
+      },
+      async disconnectCurrent() {
+        if (!this.activeClient || this.actionBusy) return
+        this.actionBusy = 'disconnect'
+        this.actionError = ''
+        try {
+          await this.postJson('./api/clients/disconnect', { uuid: this.activeClient.uuid })
+          window.setTimeout(() => this.loadOverview(false), 750)
+        } catch (error) {
+          this.actionError = error.message
+        } finally {
+          this.actionBusy = ''
+        }
+      },
+      async endSession() {
+        if (this.actionBusy) return
+        if (!window.confirm('End the current session on this PC? The connected XR device will be disconnected.')) return
+        this.actionBusy = 'end'
+        this.actionError = ''
+        try {
+          if (this.currentApp) await this.postJson('./api/apps/close')
+          if (this.activeClient) await this.postJson('./api/clients/disconnect', { uuid: this.activeClient.uuid })
+          window.setTimeout(() => this.loadOverview(false), 750)
+        } catch (error) {
+          this.actionError = error.message
+        } finally {
+          this.actionBusy = ''
+        }
+      },
+    },
+  })
+
+  initApp(app)
 </script>
+
+</html>

@@ -1,86 +1,102 @@
-<template>
-  <nav class="navbar navbar-light navbar-expand-lg navbar-background header">
-    <div class="container">
-      <a class="navbar-brand" href="./" title="Apollo">
-        <img src="/images/logo-apollo-45.png" height="45" alt="Apollo">
-      </a>
-      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent"
-              aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
-        <span class="navbar-toggler-icon"></span>
-      </button>
-      <div class="collapse navbar-collapse" id="navbarSupportedContent">
-        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-          <li class="nav-item">
-            <a class="nav-link" href="./"><i class="fas fa-fw fa-home"></i> {{ $t('navbar.home') }}</a>
-          </li>
-          <li class="nav-item">
-            <a class="nav-link" href="./pin"><i class="fas fa-fw fa-unlock"></i> {{ $t('navbar.pin') }}</a>
-          </li>
-          <li class="nav-item">
-            <a class="nav-link" href="./apps"><i class="fas fa-fw fa-stream"></i> {{ $t('navbar.applications') }}</a>
-          </li>
-          <li class="nav-item">
-            <a class="nav-link" href="./config"><i class="fas fa-fw fa-cog"></i> {{ $t('navbar.configuration') }}</a>
-          </li>
-          <li class="nav-item">
-            <a class="nav-link" href="./password"><i class="fas fa-fw fa-user-shield"></i> {{ $t('navbar.password') }}</a>
-          </li>
-          <li class="nav-item">
-            <a class="nav-link" href="./troubleshooting"><i class="fas fa-fw fa-info"></i> {{ $t('navbar.troubleshoot') }}</a>
-          </li>
-          <li class="nav-item">
-            <ThemeToggle/>
-          </li>
-        </ul>
-      </div>
-    </div>
-  </nav>
-</template>
-
-<script>
+<script setup>
+import { computed, onMounted, ref } from 'vue'
 import ThemeToggle from './ThemeToggle.vue'
 
-export default {
-  components: { ThemeToggle },
-  created() {
-    console.log("Header mounted!")
-  },
-  mounted() {
-    let el = document.querySelector("a[href='" + document.location.pathname + "']");
-    if (el) el.classList.add("active")
+const version = ref('')
+
+const primaryItems = [
+  { id: 'overview', label: 'Overview', href: './', icon: 'fa-house' },
+  { id: 'devices', label: 'Devices', href: './pin', icon: 'fa-vr-cardboard' },
+  { id: 'library', label: 'Library', href: './apps', icon: 'fa-table-cells-large' },
+  { id: 'settings', label: 'Settings', href: './config', icon: 'fa-sliders' },
+]
+
+const currentPage = computed(() => {
+  const path = window.location.pathname.replace(/\/$/, '')
+  const page = path.substring(path.lastIndexOf('/') + 1).replace(/\.html$/, '')
+  if (!page || page === 'index') return 'overview'
+  if (page === 'pin') return 'devices'
+  if (page === 'apps') return 'library'
+  if (page === 'config') return 'settings'
+  if (page === 'troubleshooting') return 'help'
+  return ''
+})
+
+onMounted(async () => {
+  try {
+    const response = await fetch('./api/config', { credentials: 'include' })
+    if (response.ok) {
+      const config = await response.json()
+      version.value = config.version || ''
+    }
+  } catch (error) {
+    console.debug('Apollo version is unavailable', error)
   }
-}
+})
 </script>
 
-<style>
-.navbar-background {
-  background-color: #ffc400
-}
+<template>
+  <aside class="apollo-sidebar" aria-label="Apollo navigation">
+    <a class="apollo-brand" href="./" aria-label="Apollo overview">
+      <span class="apollo-brand-mark">
+        <img src="/images/logo-apollo-45.png" alt="">
+      </span>
+      <span class="apollo-brand-copy">
+        <strong>Apollo</strong>
+        <small>XR host</small>
+      </span>
+    </a>
 
-.header .nav-link {
-  color: rgba(0, 0, 0, .65) !important;
-}
+    <nav class="apollo-primary-nav" aria-label="Main navigation">
+      <a
+        v-for="item in primaryItems"
+        :key="item.id"
+        class="apollo-nav-link"
+        :class="{ active: currentPage === item.id }"
+        :href="item.href"
+        :aria-current="currentPage === item.id ? 'page' : undefined">
+        <i class="fa-solid fa-fw" :class="item.icon" aria-hidden="true"></i>
+        <span>{{ item.label }}</span>
+      </a>
+    </nav>
 
-.header .nav-link.active {
-  color: rgb(0, 0, 0) !important;
-  font-weight: 500;
-}
+    <div class="apollo-sidebar-footer">
+      <a
+        class="apollo-nav-link apollo-help-link"
+        :class="{ active: currentPage === 'help' }"
+        href="./troubleshooting"
+        :aria-current="currentPage === 'help' ? 'page' : undefined">
+        <i class="fa-solid fa-fw fa-circle-question" aria-hidden="true"></i>
+        <span>Help &amp; Logs</span>
+      </a>
+      <ThemeToggle />
+      <p v-if="version" class="apollo-version">Apollo {{ version }}</p>
+    </div>
+  </aside>
 
-.header .nav-link:hover {
-  color: rgb(0, 0, 0) !important;
-  font-weight: 500;
-}
+  <header class="apollo-mobile-header">
+    <a class="apollo-mobile-brand" href="./" aria-label="Apollo overview">
+      <img src="/images/logo-apollo-45.png" alt="">
+      <strong>Apollo</strong>
+    </a>
+    <div class="apollo-mobile-actions">
+      <a class="apollo-mobile-utility" href="./troubleshooting#logs" aria-label="Open debug log" title="Debug log">
+        <i class="fa-solid fa-file-lines" aria-hidden="true"></i>
+      </a>
+      <ThemeToggle compact />
+    </div>
+  </header>
 
-.header .navbar-toggler {
-  color: rgba(var(--bs-dark-rgb), .65) !important;
-  border: var(--bs-border-width) solid rgba(var(--bs-dark-rgb), 0.15) !important;
-}
-
-.header .navbar-toggler-icon {
-  --bs-navbar-toggler-icon-bg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30'%3e%3cpath stroke='rgba%2833, 37, 41, 0.75%29' stroke-linecap='round' stroke-miterlimit='10' stroke-width='2' d='M4 7h22M4 15h22M4 23h22'/%3e%3c/svg%3e") !important;
-}
-
-.form-control::placeholder {
-  opacity: 0.5;
-}
-</style>
+  <nav class="apollo-bottom-nav" aria-label="Main navigation">
+    <a
+      v-for="item in primaryItems"
+      :key="item.id"
+      class="apollo-bottom-link"
+      :class="{ active: currentPage === item.id }"
+      :href="item.href"
+      :aria-current="currentPage === item.id ? 'page' : undefined">
+      <i class="fa-solid" :class="item.icon" aria-hidden="true"></i>
+      <span>{{ item.label }}</span>
+    </a>
+  </nav>
+</template>

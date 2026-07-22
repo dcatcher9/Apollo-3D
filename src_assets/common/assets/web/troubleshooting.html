@@ -4,132 +4,437 @@
 <head>
       <%- header %>
       <style>
-        .troubleshooting-logs {
-          white-space: pre;
-          font-family: monospace;
-          overflow: auto;
-          max-height: 500px;
-          min-height: 500px;
-          font-size: 16px;
-          position: relative;
+        .help-page {
+          width: min(100% - 2rem, 1180px);
+          margin: 0 auto;
+          padding: 2.25rem 0 5rem;
         }
 
-        .copy-icon {
-          position: absolute;
-          top: 8px;
-          right: 8px;
-          padding: 8px;
+        .help-header {
+          margin-bottom: 1.6rem;
+        }
+
+        .help-header h1 {
+          margin: 0.15rem 0 0.35rem;
+          font-size: clamp(1.8rem, 4vw, 2.45rem);
+          font-weight: 780;
+          letter-spacing: -0.035em;
+        }
+
+        .help-header p {
+          max-width: 48rem;
+          margin: 0;
+          color: var(--apollo-text-muted);
+        }
+
+        .page-eyebrow {
+          color: var(--apollo-text-muted);
+          font-size: 0.72rem;
+          font-weight: 800;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+        }
+
+        .health-strip {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 0.85rem;
+          margin-bottom: 1.35rem;
+        }
+
+        .health-item {
+          display: flex;
+          align-items: center;
+          gap: 0.8rem;
+          min-width: 0;
+          padding: 0.9rem 1rem;
+          border: 1px solid var(--apollo-border);
+          border-radius: 1rem;
+          background: var(--apollo-surface);
+        }
+
+        .health-icon {
+          display: grid;
+          flex: 0 0 auto;
+          width: 2.25rem;
+          height: 2.25rem;
+          place-items: center;
+          border-radius: 0.72rem;
+          color: #138a55;
+          background: color-mix(in srgb, #16a365 13%, transparent);
+        }
+
+        .health-icon.idle {
+          color: var(--apollo-text-muted);
+          background: var(--apollo-surface-muted);
+        }
+
+        .health-icon.warning {
+          color: #a96600;
+          background: color-mix(in srgb, #e59a16 15%, transparent);
+        }
+
+        .health-item > div:last-child {
+          display: grid;
+          min-width: 0;
+        }
+
+        .health-item span {
+          color: var(--apollo-text-muted);
+          font-size: 0.72rem;
+        }
+
+        .health-item strong {
+          overflow: hidden;
+          font-size: 0.9rem;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .section-heading {
+          margin: 1.75rem 0 0.8rem;
+          font-size: 1rem;
+          font-weight: 750;
+        }
+
+        .recovery-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 1rem;
+        }
+
+        .recovery-card {
+          display: flex;
+          min-height: 13rem;
+          flex-direction: column;
+          padding: 1.25rem;
+          border: 1px solid var(--apollo-border);
+          border-radius: 1.15rem;
+          background: var(--apollo-surface);
+          box-shadow: 0 8px 28px rgba(15, 23, 42, 0.04);
+        }
+
+        .recovery-card-icon {
+          display: grid;
+          width: 2.5rem;
+          height: 2.5rem;
+          margin-bottom: 1rem;
+          place-items: center;
+          border-radius: 0.8rem;
+          color: var(--apollo-accent-hover);
+          background: color-mix(in srgb, var(--apollo-accent) 12%, transparent);
+        }
+
+        .recovery-card h2 {
+          margin: 0;
+          font-size: 1.08rem;
+          font-weight: 740;
+        }
+
+        .recovery-card p {
+          margin: 0.45rem 0 1rem;
+          color: var(--apollo-text-muted);
+          font-size: 0.88rem;
+        }
+
+        .recovery-card .btn {
+          align-self: flex-start;
+          margin-top: auto;
+        }
+
+        .inline-result {
+          margin: 0 0 0.8rem;
+          padding: 0.55rem 0.7rem;
+          border-radius: 0.65rem;
+          font-size: 0.8rem;
+        }
+
+        .details-card {
+          overflow: hidden;
+          margin-top: 1rem;
+          border: 1px solid var(--apollo-border);
+          border-radius: 1.15rem;
+          background: var(--apollo-surface);
+        }
+
+        .details-card summary {
+          display: flex;
+          align-items: center;
+          gap: 0.75rem;
+          padding: 1.05rem 1.2rem;
           cursor: pointer;
-          color: rgba(0, 0, 0, 1);
-          appearance: none;
-          border: none;
-          background: none;
+          font-weight: 720;
+          list-style: none;
         }
 
-        .copy-icon:hover {
-          color: rgba(0, 0, 0, 0.75);
+        .details-card summary::-webkit-details-marker {
+          display: none;
         }
 
-        .copy-icon:active {
-          color: rgba(0, 0, 0, 1);
+        .details-card summary > i {
+          color: var(--apollo-accent-hover);
+        }
+
+        .details-card summary::after {
+          margin-left: auto;
+          font-family: "Font Awesome 5 Free";
+          font-size: 0.75rem;
+          font-weight: 900;
+          content: "\f078";
+          transition: transform 150ms ease;
+        }
+
+        .details-card[open] summary::after {
+          transform: rotate(180deg);
+        }
+
+        .details-content {
+          padding: 0 1.2rem 1.2rem;
+          border-top: 1px solid var(--apollo-border);
+        }
+
+        .log-tools {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 0.75rem;
+          padding: 1rem 0;
+        }
+
+        .log-card-heading {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 1rem;
+          padding: 1.2rem;
+        }
+
+        .log-card-heading h2 {
+          margin: 0;
+          font-size: 1.08rem;
+          font-weight: 740;
+        }
+
+        .log-card-heading p {
+          margin: 0.3rem 0 0;
+          color: var(--apollo-text-muted);
+          font-size: 0.84rem;
+        }
+
+        .log-live-state {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.45rem;
+          padding: 0.35rem 0.65rem;
+          color: #138a55;
+          border-radius: 999px;
+          background: color-mix(in srgb, #16a365 13%, transparent);
+          font-size: 0.72rem;
+          font-weight: 720;
+          white-space: nowrap;
+        }
+
+        .log-live-state::before {
+          width: 0.45rem;
+          height: 0.45rem;
+          border-radius: 50%;
+          background: currentColor;
+          content: "";
+        }
+
+        .log-tools p {
+          margin: 0;
+          color: var(--apollo-text-muted);
+          font-size: 0.84rem;
+        }
+
+        .log-actions {
+          display: flex;
+          gap: 0.5rem;
+        }
+
+        .log-actions .form-control {
+          width: min(18rem, 38vw);
+        }
+
+        .troubleshooting-logs {
+          max-height: 28rem;
+          min-height: 15rem;
+          overflow: auto;
+          padding: 1rem;
+          border-radius: 0.8rem;
+          color: #d9e1ee;
+          background: #10141b;
+          font-family: monospace;
+          font-size: 0.78rem;
+          line-height: 1.5;
+          white-space: pre;
+        }
+
+        .advanced-actions {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 1rem;
+          padding-top: 1rem;
+        }
+
+        .advanced-action {
+          padding: 1rem;
+          border: 1px solid var(--apollo-border);
+          border-radius: 0.9rem;
+        }
+
+        .advanced-action h3 {
+          margin: 0;
+          font-size: 0.95rem;
+          font-weight: 720;
+        }
+
+        .advanced-action p {
+          margin: 0.35rem 0 0.85rem;
+          color: var(--apollo-text-muted);
+          font-size: 0.82rem;
+        }
+
+        @media (max-width: 760px) {
+          .help-page {
+            width: min(100% - 1rem, 1180px);
+            padding-top: 1.25rem;
+          }
+
+          .health-strip,
+          .recovery-grid,
+          .advanced-actions {
+            grid-template-columns: 1fr;
+          }
+
+          .log-tools {
+            align-items: stretch;
+            flex-direction: column;
+          }
+
+          .log-card-heading {
+            flex-direction: column;
+          }
+
+          .log-actions .form-control {
+            width: 100%;
+          }
         }
       </style>
 </head>
 
 <body id="app" v-cloak>
   <Navbar></Navbar>
-  <div class="container">
-    <h1 class="my-4">{{ $t('troubleshooting.troubleshooting') }}</h1>
-    <!-- Force Close App -->
-    <div class="card p-2 my-4">
-      <div class="card-body">
-        <h2 id="close_apps">{{ $t('troubleshooting.force_close') }}</h2>
-        <br>
-        <p>{{ $t('troubleshooting.force_close_desc') }}</p>
-        <div class="alert alert-success" v-if="closeAppStatus === true">
+  <main id="content" class="container help-page">
+    <header class="help-header">
+      <span class="page-eyebrow">Support</span>
+      <h1>Help &amp; debug log</h1>
+      <p>Check Apollo's health, inspect the live debug log, or recover the single active session.</p>
+    </header>
+
+    <section class="health-strip" aria-label="Apollo health">
+      <div class="health-item">
+        <div class="health-icon"><i class="fas fa-check"></i></div>
+        <div><span>Host service</span><strong>Running</strong></div>
+      </div>
+      <div class="health-item">
+        <div class="health-icon" :class="{ idle: !sessionActive }"><i class="fas fa-satellite-dish"></i></div>
+        <div><span>Streaming session</span><strong>{{ sessionActive ? 'Active' : 'Idle' }}</strong></div>
+      </div>
+      <div v-if="platform === 'windows'" class="health-item">
+        <div class="health-icon" :class="{ warning: !virtualDisplayReady }"><i class="fas fa-vr-cardboard"></i></div>
+        <div><span>Virtual display</span><strong>{{ virtualDisplayLabel }}</strong></div>
+      </div>
+    </section>
+
+    <h2 class="section-heading">Quick recovery</h2>
+    <section class="recovery-grid">
+      <article class="recovery-card" id="close_apps">
+        <div class="recovery-card-icon"><i class="fas fa-stop"></i></div>
+        <h2>Stop the active session</h2>
+        <p>Ends the current stream and closes its application. Paired devices and settings are kept.</p>
+        <div class="inline-result alert-success" v-if="closeAppStatus === true">
           {{ $t('troubleshooting.force_close_success') }}
         </div>
-        <div class="alert alert-danger" v-if="closeAppStatus === false">
+        <div class="inline-result alert-danger" v-if="closeAppStatus === false">
           {{ $t('troubleshooting.force_close_error') }}
         </div>
-        <div>
-          <button class="btn btn-warning" :disabled="closeAppPressed" @click="closeApp">
-            {{ $t('troubleshooting.force_close') }}
-          </button>
-        </div>
-      </div>
-    </div>
-    <!-- Restart Apollo -->
-    <div class="card p-2 my-4">
-      <div class="card-body">
-        <h2 id="restart">{{ $t('troubleshooting.restart_apollo') }}</h2>
-        <br>
+        <button class="btn-apollo-danger" :disabled="closeAppPressed || !sessionActive" @click="closeApp">
+          <span v-if="closeAppPressed" class="spinner-border spinner-border-sm me-1"></span>
+          {{ sessionActive ? 'Stop session' : 'No active session' }}
+        </button>
+      </article>
+
+      <article class="recovery-card" id="restart">
+        <div class="recovery-card-icon"><i class="fas fa-redo-alt"></i></div>
+        <h2>Restart Apollo</h2>
         <p>{{ $t('troubleshooting.restart_apollo_desc') }}</p>
-        <div class="alert alert-success" v-if="serverRestarting">
+        <div class="inline-result alert-success" v-if="serverRestarting">
           {{ $t('troubleshooting.restart_apollo_success') }}
         </div>
+        <button class="btn-apollo-primary" :disabled="serverQuitting || serverRestarting" @click="restart">
+          <span v-if="serverRestarting" class="spinner-border spinner-border-sm me-1"></span>
+          Restart host
+        </button>
+      </article>
+    </section>
+
+    <section class="details-card" id="logs" aria-labelledby="debug-log-heading">
+      <header class="log-card-heading">
         <div>
-          <button class="btn btn-warning" :disabled="serverQuitting || serverRestarting" @click="restart">
-            {{ $t('troubleshooting.restart_apollo') }}
-          </button>
+          <h2 id="debug-log-heading">Debug log</h2>
+          <p>Live host output refreshes automatically every five seconds.</p>
         </div>
-      </div>
-    </div>
-    <!-- Quit Apollo -->
-    <div class="card p-2 my-4">
-      <div class="card-body">
-        <h2 id="quit">{{ $t('troubleshooting.quit_apollo') }}</h2>
-        <br>
-        <p>{{ $t('troubleshooting.quit_apollo_desc') }}</p>
-        <div class="alert alert-success" v-if="serverQuit">
-          {{ $t('troubleshooting.quit_apollo_success') }}
-        </div>
-        <div class="alert alert-success" v-if="serverQuitting">
-          {{ $t('troubleshooting.quit_apollo_success_ongoing') }}
-        </div>
-        <div>
-          <button class="btn btn-warning" :disabled="serverQuitting || serverRestarting" @click="quit">
-            {{ $t('troubleshooting.quit_apollo') }}
-          </button>
-        </div>
-      </div>
-    </div>
-    <!-- Reset persistent display device settings -->
-    <div class="card p-2 my-4" v-if="platform === 'windows'">
-      <div class="card-body">
-        <h2 id="dd_reset">{{ $t('troubleshooting.dd_reset') }}</h2>
-        <br>
-        <p style="white-space: pre-line">{{ $t('troubleshooting.dd_reset_desc') }}</p>
-        <div class="alert alert-success" v-if="ddResetStatus === true">
-          {{ $t('troubleshooting.dd_reset_success') }}
-        </div>
-        <div class="alert alert-danger" v-if="ddResetStatus === false">
-          {{ $t('troubleshooting.dd_reset_error') }}
-        </div>
-        <div>
-          <button class="btn btn-warning" :disabled="ddResetPressed" @click="ddResetPersistence">
-            {{ $t('troubleshooting.dd_reset') }}
-          </button>
-        </div>
-      </div>
-    </div>
-    <!-- Logs -->
-    <div class="card p-2 my-4">
-      <div class="card-body">
-        <h2 id="logs">{{ $t('troubleshooting.logs') }}</h2>
-        <br>
-        <div class="d-flex justify-content-between align-items-baseline py-2">
+        <span class="log-live-state">Auto refresh</span>
+      </header>
+      <div class="details-content">
+        <div class="log-tools">
           <p>{{ $t('troubleshooting.logs_desc') }}</p>
-          <input type="text" class="form-control" v-model="logFilter" :placeholder="$t('troubleshooting.logs_find')" style="width: 300px">
-        </div>
-        <div>
-          <div class="troubleshooting-logs">
-            <button class="copy-icon"><i class="fas fa-copy " @click="copyLogs"></i></button>{{actualLogs}}
+          <div class="log-actions">
+            <input type="text" class="form-control form-control-sm" v-model="logFilter" :placeholder="$t('troubleshooting.logs_find')">
+            <button class="btn btn-outline-secondary btn-sm" type="button" @click="refreshLogs">
+              <i class="fas fa-rotate me-1"></i> Refresh
+            </button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" @click="copyLogs">
+              <i class="fas fa-copy me-1"></i> Copy
+            </button>
           </div>
         </div>
+        <div class="troubleshooting-logs">{{ actualLogs }}</div>
       </div>
-    </div>
-  </div>
+    </section>
+
+    <details class="details-card" :open="advancedRecoveryOpen" @toggle="advancedRecoveryOpen = $event.target.open">
+      <summary><i class="fas fa-tools"></i> Advanced recovery</summary>
+      <div class="details-content advanced-actions">
+        <article v-if="platform === 'windows'" class="advanced-action" id="dd_reset">
+          <h3>{{ $t('troubleshooting.dd_reset') }}</h3>
+          <p>{{ $t('troubleshooting.dd_reset_desc') }}</p>
+          <div class="inline-result alert-success" v-if="ddResetStatus === true">
+            {{ $t('troubleshooting.dd_reset_success') }}
+          </div>
+          <div class="inline-result alert-danger" v-if="ddResetStatus === false">
+            {{ $t('troubleshooting.dd_reset_error') }}
+          </div>
+          <button class="btn btn-outline-warning btn-sm" :disabled="ddResetPressed" @click="ddResetPersistence">
+            {{ $t('troubleshooting.dd_reset') }}
+          </button>
+        </article>
+
+        <article class="advanced-action" id="quit">
+          <h3>{{ $t('troubleshooting.quit_apollo') }}</h3>
+          <p>{{ $t('troubleshooting.quit_apollo_desc') }}</p>
+          <div class="inline-result alert-success" v-if="serverQuit || serverQuitting">
+            {{ serverQuitting ? $t('troubleshooting.quit_apollo_success_ongoing') : $t('troubleshooting.quit_apollo_success') }}
+          </div>
+          <button class="btn btn-outline-danger btn-sm" :disabled="serverQuitting || serverRestarting" @click="quit">
+            {{ $t('troubleshooting.quit_apollo') }}
+          </button>
+        </article>
+      </div>
+    </details>
+  </main>
 
   <script type="module">
     import { createApp } from 'vue'
@@ -155,9 +460,28 @@
           serverQuitting: false,
           serverQuit: false,
           platform: "",
+          currentApp: "",
+          vdisplayStatus: "1",
+          advancedRecoveryOpen: ['#dd_reset', '#quit'].includes(location.hash),
         };
       },
       computed: {
+        sessionActive() {
+          return Boolean(this.currentApp);
+        },
+        virtualDisplayReady() {
+          return String(this.vdisplayStatus) === '0';
+        },
+        virtualDisplayLabel() {
+          const states = {
+            0: 'Ready',
+            1: 'Checking',
+            '-1': 'Not initialized',
+            '-2': 'Update required',
+            '-3': 'Needs attention',
+          };
+          return states[String(this.vdisplayStatus)] || 'Unknown';
+        },
         actualLogs() {
           if (!this.logFilter) return this.logs;
           let lines = this.logs.split("\n");
@@ -166,21 +490,29 @@
         }
       },
       created() {
-        fetch("/api/config")
-          .then((r) => r.json())
-          .then((r) => {
-            this.platform = r.platform;
-          });
-
         this.logInterval = setInterval(() => {
           this.refreshLogs();
+          this.refreshHostState();
         }, 5000);
         this.refreshLogs();
+        this.refreshHostState();
       },
-      beforeDestroy() {
+      beforeUnmount() {
         clearInterval(this.logInterval);
       },
       methods: {
+        refreshHostState() {
+          Promise.all([
+            fetch('/api/config', { credentials: 'include' }).then((r) => r.json()),
+            fetch('./api/apps', { credentials: 'include' }).then((r) => r.json()),
+          ])
+            .then(([config, apps]) => {
+              this.platform = config.platform;
+              this.vdisplayStatus = config.vdisplayStatus;
+              this.currentApp = apps.current_app || '';
+            })
+            .catch((error) => console.error('Error fetching host state:', error));
+        },
         refreshLogs() {
           fetch("./api/logs", {
             credentials: 'include'
@@ -216,6 +548,7 @@
             .then((r) => {
               this.closeAppPressed = false;
               this.closeAppStatus = r.status;
+              if (r.status) this.currentApp = '';
               setTimeout(() => {
                 this.closeAppStatus = null;
               }, 5000);

@@ -4,103 +4,397 @@
 <head>
   <%- header %>
     <style>
+      .settings-page {
+        width: min(100% - 2rem, 1360px);
+        margin: 0 auto;
+        padding: 2.25rem 0 7rem;
+      }
+
+      .settings-page-header {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 2rem;
+        margin-bottom: 1.6rem;
+      }
+
+      .settings-page-header h1 {
+        margin: 0.15rem 0 0.35rem;
+        font-size: clamp(1.8rem, 4vw, 2.45rem);
+        font-weight: 780;
+        letter-spacing: -0.035em;
+      }
+
+      .settings-page-header p {
+        max-width: 48rem;
+        margin: 0;
+        color: var(--apollo-text-muted);
+      }
+
+      .page-eyebrow {
+        color: var(--apollo-text-muted);
+        font-size: 0.72rem;
+        font-weight: 800;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .settings-layout {
+        display: grid;
+        grid-template-columns: 15.5rem minmax(0, 1fr);
+        align-items: start;
+        gap: 1.25rem;
+      }
+
+      .settings-nav {
+        position: sticky;
+        top: 1.25rem;
+        overflow: hidden;
+        padding: 0.55rem;
+        border: 1px solid var(--apollo-border);
+        border-radius: 1.15rem;
+        background: var(--apollo-surface);
+        box-shadow: 0 8px 30px rgba(15, 23, 42, 0.045);
+      }
+
+      .settings-nav-button {
+        display: flex;
+        width: 100%;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.7rem 0.75rem;
+        border: 0;
+        border-radius: 0.75rem;
+        color: var(--apollo-text);
+        background: transparent;
+        font-size: 0.88rem;
+        font-weight: 650;
+        text-align: left;
+        transition: background-color 120ms ease, color 120ms ease;
+      }
+
+      .settings-nav-button:hover {
+        background: var(--apollo-surface-muted);
+      }
+
+      .settings-nav-button.active {
+        color: var(--apollo-accent-hover);
+        background: color-mix(in srgb, var(--apollo-accent) 12%, transparent);
+      }
+
+      .settings-nav-button i:first-child {
+        display: inline-grid;
+        width: 1.25rem;
+        place-items: center;
+        opacity: 0.82;
+      }
+
+      .settings-nav-button .chevron {
+        margin-left: auto;
+        font-size: 0.72rem;
+        transition: transform 160ms ease;
+      }
+
+      .settings-nav-button .chevron.open {
+        transform: rotate(180deg);
+      }
+
+      .settings-nav-label {
+        padding: 1rem 0.75rem 0.35rem;
+        color: var(--apollo-text-muted);
+        font-size: 0.66rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .settings-advanced-list {
+        display: grid;
+        gap: 0.12rem;
+        padding-top: 0.15rem;
+      }
+
+      .settings-advanced-list .settings-nav-button {
+        padding-left: 1rem;
+        font-size: 0.82rem;
+        font-weight: 580;
+      }
+
+      .settings-panel {
+        min-width: 0;
+        padding: 1.25rem;
+        border: 1px solid var(--apollo-border);
+        border-radius: 1.25rem;
+        background: color-mix(in srgb, var(--apollo-surface-muted) 52%, var(--apollo-surface));
+      }
+
+      .settings-panel-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.35rem 0.3rem 1.15rem;
+        margin-bottom: 1rem;
+        border-bottom: 1px solid var(--apollo-border);
+      }
+
+      .settings-panel-header h2 {
+        margin: 0;
+        font-size: 1.25rem;
+        font-weight: 750;
+      }
+
+      .settings-panel-header p {
+        margin: 0.25rem 0 0;
+        color: var(--apollo-text-muted);
+        font-size: 0.87rem;
+      }
+
       .config-page {
-        padding: 1em;
-        border: 1px solid #dee2e6;
-        border-top: none;
+        padding: 0;
+        border: 0;
       }
 
       .pre-wrap {
         white-space: pre-wrap;
       }
 
-      .buttons {
-        padding: 1em 0;
+      .settings-savebar {
+        position: fixed;
+        z-index: 1020;
+        right: max(1rem, calc((100vw - 1360px) / 2));
+        bottom: 1rem;
+        display: flex;
+        align-items: center;
+        gap: 0.8rem;
+        max-width: calc(100vw - 2rem);
+        padding: 0.65rem 0.7rem 0.65rem 1rem;
+        border: 1px solid var(--apollo-border);
+        border-radius: 1rem;
+        background: color-mix(in srgb, var(--apollo-surface) 92%, transparent);
+        box-shadow: 0 14px 44px rgba(15, 23, 42, 0.18);
+        backdrop-filter: blur(18px);
+      }
+
+      .save-state {
+        display: grid;
+        min-width: 9rem;
+      }
+
+      .save-state strong {
+        font-size: 0.82rem;
+      }
+
+      .save-state span {
+        color: var(--apollo-text-muted);
+        font-size: 0.72rem;
+      }
+
+      .settings-loading {
+        display: grid;
+        min-height: 22rem;
+        place-items: center;
+        color: var(--apollo-text-muted);
+      }
+
+      @media (max-width: 900px) {
+        .settings-layout {
+          grid-template-columns: 1fr;
+        }
+
+        .settings-nav {
+          position: static;
+        }
+
+        .settings-advanced-list {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 991.98px) {
+        .settings-savebar {
+          bottom: calc(92px + env(safe-area-inset-bottom));
+        }
+      }
+
+      @media (max-width: 600px) {
+        .settings-page {
+          width: min(100% - 1rem, 1360px);
+          padding-top: 1.25rem;
+        }
+
+        .settings-page-header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .settings-panel {
+          padding: 0.75rem;
+          border-radius: 1rem;
+        }
+
+        .settings-advanced-list {
+          grid-template-columns: 1fr;
+        }
+
+        .settings-savebar {
+          right: 0.5rem;
+          bottom: calc(88px + env(safe-area-inset-bottom));
+          left: 0.5rem;
+          justify-content: flex-end;
+          max-width: none;
+        }
+
+        .save-state {
+          min-width: 0;
+          margin-right: auto;
+        }
+
+        .settings-savebar .btn-apollo-primary,
+        .settings-savebar .btn-apollo-quiet {
+          padding-right: 0.7rem;
+          padding-left: 0.7rem;
+          font-size: 0.78rem;
+        }
       }
     </style>
 </head>
 
 <body id="app" v-cloak>
   <Navbar></Navbar>
-  <div class="container">
-    <h1 class="my-4">{{ $t('config.configuration') }}</h1>
-    <div class="form" v-if="config">
-      <!-- Header -->
-      <ul class="nav nav-tabs">
-        <li class="nav-item" v-for="tab in tabs" :key="tab.id">
-          <a class="nav-link" :class="{'active': tab.id === currentTab}" href="#"
-            @click="currentTab = tab.id">{{tab.name}}</a>
-        </li>
-      </ul>
+  <main id="content" class="container settings-page">
+    <header class="settings-page-header">
+      <div>
+        <span class="page-eyebrow">Host controls</span>
+        <h1>Settings</h1>
+        <p>Everyday options are collected here. Technical controls remain available when you need them.</p>
+      </div>
+    </header>
 
-      <!-- General Tab -->
-      <general
-        v-if="currentTab === 'general'"
-        :config="config"
-        :global-prep-cmd="global_prep_cmd"
-        :global-state-cmd="global_state_cmd"
-        :server-cmd="server_cmd"
-        :platform="platform">
-      </general>
+    <div v-if="config" class="settings-layout form" @change.capture="markDirty" @input.capture="markDirty">
+      <aside class="settings-nav" aria-label="Settings sections">
+        <button
+          class="settings-nav-button"
+          :class="{ active: currentTab === 'essential' }"
+          type="button"
+          @click="selectTab('essential')"
+        >
+          <i class="fas fa-sliders-h"></i>
+          Essentials
+        </button>
 
-      <!-- Input Tab -->
-      <inputs
-        v-if="currentTab === 'input'"
-        :config="config"
-        :platform="platform">
-      </inputs>
+        <div class="settings-nav-label">More control</div>
+        <button class="settings-nav-button" type="button" @click="advancedOpen = !advancedOpen">
+          <i class="fas fa-wrench"></i>
+          Advanced settings
+          <i class="fas fa-chevron-down chevron" :class="{ open: advancedOpen }"></i>
+        </button>
 
-      <!-- Audio/Video Tab -->
-      <audio-video
-        v-if="currentTab === 'av'"
-        :config="config"
-        :platform="platform"
-        :vdisplay="vdisplayStatus"
-      >
-      </audio-video>
+        <div v-show="advancedOpen" class="settings-advanced-list">
+          <button
+            v-for="tab in advancedTabs"
+            :key="tab.id"
+            class="settings-nav-button"
+            :class="{ active: tab.id === currentTab }"
+            type="button"
+            @click="selectTab(tab.id)"
+          >
+            <i :class="tabIcon(tab.id)"></i>
+            {{ tab.name }}
+          </button>
+        </div>
+      </aside>
 
-      <ar-glasses v-if="currentTab === 'ar-glasses'"></ar-glasses>
+      <section class="settings-panel">
+        <header v-if="currentTab !== 'essential'" class="settings-panel-header">
+          <div>
+            <h2>{{ currentTabName }}</h2>
+            <p>Advanced host configuration. Changes apply to all future sessions.</p>
+          </div>
+          <span class="badge text-bg-secondary">Advanced</span>
+        </header>
 
-      <!-- Network Tab -->
-      <network
-        v-if="currentTab === 'network'"
-        :config="config"
-        :platform="platform">
-      </network>
+        <essentials
+          v-if="currentTab === 'essential'"
+          :config="config"
+          :platform="platform"
+          :vdisplay="vdisplayStatus"
+        ></essentials>
 
-      <!-- Files Tab -->
-      <files
-        v-if="currentTab === 'files'"
-        :config="config"
-        :platform="platform">
-      </files>
+        <general
+          v-if="currentTab === 'general'"
+          :config="config"
+          :global-prep-cmd="global_prep_cmd"
+          :global-state-cmd="global_state_cmd"
+          :server-cmd="server_cmd"
+          :platform="platform">
+        </general>
 
-      <!-- Advanced Tab -->
-      <advanced
-        v-if="currentTab === 'advanced'"
-        :config="config"
-        :platform="platform">
-      </advanced>
+        <inputs
+          v-if="currentTab === 'input'"
+          :config="config"
+          :platform="platform">
+        </inputs>
 
-      <container-encoders
-        :current-tab="currentTab"
-        :config="config"
-        :platform="platform">
-      </container-encoders>
+        <audio-video
+          v-if="currentTab === 'av'"
+          :config="config"
+          :platform="platform"
+          :vdisplay="vdisplayStatus"
+        ></audio-video>
+
+        <ar-glasses v-if="currentTab === 'ar-glasses'"></ar-glasses>
+
+        <network
+          v-if="currentTab === 'network'"
+          :config="config"
+          :platform="platform">
+        </network>
+
+        <files
+          v-if="currentTab === 'files'"
+          :config="config"
+          :platform="platform">
+        </files>
+
+        <advanced
+          v-if="currentTab === 'advanced'"
+          :config="config"
+          :platform="platform">
+        </advanced>
+
+        <container-encoders
+          :current-tab="currentTab"
+          :config="config"
+          :platform="platform">
+        </container-encoders>
+      </section>
     </div>
 
-    <!-- Save and Apply buttons -->
-    <div class="alert alert-success my-4" v-if="saved && !restarted">
-      <b>{{ $t('_common.success') }}</b> {{ $t('config.apply_note') }}
+    <div v-else class="settings-loading">
+      <div><span class="spinner-border spinner-border-sm me-2"></span>Loading host settings…</div>
     </div>
-    <div class="alert alert-success my-4" v-if="restarted">
-      <b>{{ $t('_common.success') }}</b> {{ $t('config.restart_note') }}
+
+    <div v-if="config" class="settings-savebar" role="status">
+      <div class="save-state">
+        <strong v-if="restarted">Apollo is restarting</strong>
+        <strong v-else-if="saved">Settings saved</strong>
+        <strong v-else-if="dirty">Unsaved changes</strong>
+        <strong v-else>Settings are current</strong>
+        <span v-if="restarted">Reconnect in a moment</span>
+        <span v-else-if="saved">Restart to apply every change</span>
+        <span v-else>Stored on this PC</span>
+      </div>
+      <button class="btn-apollo-quiet" type="button" :disabled="saving" @click="save">
+        <i class="fas fa-save me-1"></i> Save
+      </button>
+      <button class="btn-apollo-primary" type="button" :disabled="saving" @click="apply">
+        <span v-if="saving" class="spinner-border spinner-border-sm me-1"></span>
+        <i v-else class="fas fa-redo-alt me-1"></i>
+        Save & restart
+      </button>
     </div>
-    <div class="mb-3 buttons">
-      <button class="btn btn-primary" @click="save">{{ $t('_common.save') }}</button>
-      <button class="btn btn-success mx-2" @click="apply" v-if="saved && !restarted">{{ $t('_common.apply') }}</button>
-    </div>
-  </div>
+  </main>
 </body>
 
 
@@ -108,6 +402,7 @@
   import { computed, createApp } from 'vue'
   import { initApp } from './init'
   import Navbar from './Navbar.vue'
+  import Essentials from './configs/tabs/Essentials.vue'
   import General from './configs/tabs/General.vue'
   import Inputs from './configs/tabs/Inputs.vue'
   import Network from './configs/tabs/Network.vue'
@@ -123,6 +418,7 @@
   const app = createApp({
     components: {
       Navbar,
+      Essentials,
       General,
       Inputs,
       Network,
@@ -138,13 +434,21 @@
         platform: "",
         saved: false,
         restarted: false,
+        saving: false,
+        dirty: false,
+        advancedOpen: false,
         config: null,
-        currentTab: "general",
+        currentTab: "essential",
         vdisplayStatus: "1",
         global_prep_cmd: [],
         global_state_cmd: [],
         server_cmd: [],
         tabs: [ // TODO: Move the options to each Component instead, encapsulate.
+          {
+            id: "essential",
+            name: "Essentials",
+            options: {},
+          },
           {
             id: "general",
             name: "General",
@@ -335,6 +639,14 @@
         ],
       };
     },
+    computed: {
+      advancedTabs() {
+        return this.tabs.filter((tab) => tab.id !== 'essential')
+      },
+      currentTabName() {
+        return this.tabs.find((tab) => tab.id === this.currentTab)?.name || 'Advanced settings'
+      },
+    },
     provide() {
        return {
          platform: computed(() => this.platform)
@@ -426,6 +738,38 @@
         });
     },
     methods: {
+      markDirty() {
+        this.dirty = true
+        this.saved = false
+        this.restarted = false
+      },
+      selectTab(tabId) {
+        this.currentTab = tabId
+        if (tabId === 'essential') {
+          history.replaceState(null, '', `${location.pathname}${location.search}`)
+        } else {
+          window.location.hash = tabId
+          this.advancedOpen = true
+        }
+      },
+      tabIcon(tabId) {
+        const icons = {
+          general: 'fas fa-cog',
+          input: 'fas fa-gamepad',
+          av: 'fas fa-photo-video',
+          'ar-glasses': 'fas fa-glasses',
+          network: 'fas fa-network-wired',
+          files: 'fas fa-folder-open',
+          advanced: 'fas fa-code',
+          nv: 'fas fa-microchip',
+          qsv: 'fas fa-microchip',
+          amd: 'fas fa-microchip',
+          vt: 'fas fa-microchip',
+          vaapi: 'fas fa-microchip',
+          sw: 'fas fa-microchip',
+        }
+        return icons[tabId] || 'fas fa-circle'
+      },
       forceUpdate() {
         this.$forceUpdate()
       },
@@ -446,6 +790,7 @@
       save() {
         this.saved = false;
         this.restarted = false;
+        this.saving = true;
 
         // create a temp copy of this.config to use for the post request
         let config = this.serialize();
@@ -476,11 +821,17 @@
         }).then((r) => {
           if (r.status === 200) {
             this.saved = true
+            this.dirty = false
             return this.saved
           }
           else {
             return false
           }
+        }).catch((e) => {
+          console.error(e)
+          return false
+        }).finally(() => {
+          this.saving = false
         });
       },
       apply() {
@@ -527,10 +878,14 @@
           this.tabs.forEach(tab => {
             if (tab.id === stripped_hash) {
               this.currentTab = tab.id;
+              if (tab.id !== 'essential') {
+                this.advancedOpen = true;
+              }
             }
             Object.keys(tab.options).forEach(key => {
               if (key === stripped_hash) {
                 this.currentTab = tab.id;
+                this.advancedOpen = true;
               }
               if (key === stripped_hash) {
                 // sleep for 2 seconds to allow the page to load
