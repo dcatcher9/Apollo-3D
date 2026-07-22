@@ -3,8 +3,8 @@
  * @brief Definitions for logging related functions.
  */
 // standard includes
-#include <fstream>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 
@@ -27,10 +27,6 @@
 #else
   #include <display_device/logging.h>
 #endif
-
-extern "C" {
-#include <libavutil/log.h>
-}
 
 using namespace std::literals;
 
@@ -164,13 +160,12 @@ namespace logging {
         }
         // Rename the current log file to the backup name
         std::filesystem::rename(log_file, backup_log_file);
-      } catch (std::exception& e) {
+      } catch (std::exception &e) {
         std::cout << "Failed to rotate log file: " << e.what() << std::endl;
       }
     }
 
 #ifndef __ANDROID__
-    setup_av_logging(min_log_level);
     setup_libdisplaydevice_logging(min_log_level);
 #endif
 
@@ -203,34 +198,6 @@ namespace logging {
   }
 
 #ifndef __ANDROID__
-  void setup_av_logging(int min_log_level) {
-    if (min_log_level >= 1) {
-      av_log_set_level(AV_LOG_QUIET);
-    } else {
-      av_log_set_level(AV_LOG_DEBUG);
-    }
-    av_log_set_callback([](void *ptr, int level, const char *fmt, va_list vl) {
-      static int print_prefix = 1;
-      char buffer[1024];
-
-      av_log_format_line(ptr, level, fmt, vl, buffer, sizeof(buffer), &print_prefix);
-      if (level <= AV_LOG_ERROR) {
-        // We print AV_LOG_FATAL at the error level. FFmpeg prints things as fatal that
-        // are expected in some cases, such as lack of codec support or similar things.
-        BOOST_LOG(error) << buffer;
-      } else if (level <= AV_LOG_WARNING) {
-        BOOST_LOG(warning) << buffer;
-      } else if (level <= AV_LOG_INFO) {
-        BOOST_LOG(info) << buffer;
-      } else if (level <= AV_LOG_VERBOSE) {
-        // AV_LOG_VERBOSE is less verbose than AV_LOG_DEBUG
-        BOOST_LOG(debug) << buffer;
-      } else {
-        BOOST_LOG(verbose) << buffer;
-      }
-    });
-  }
-
   void setup_libdisplaydevice_logging(int min_log_level) {
     constexpr int min_level {static_cast<int>(display_device::Logger::LogLevel::verbose)};
     constexpr int max_level {static_cast<int>(display_device::Logger::LogLevel::fatal)};
@@ -280,11 +247,8 @@ namespace logging {
       << "    --version                 | print the version of sunshine"sv << std::endl
       << std::endl
       << "    flags"sv << std::endl
-      << "        -0 | Read PIN from stdin"sv << std::endl
-      << "        -1 | Do not load previously saved state and do retain any state after shutdown"sv << std::endl
+      << "        -1 | Do not load previously saved state or retain state after shutdown"sv << std::endl
       << "           | Effectively starting as if for the first time without overwriting any pairings with your devices"sv << std::endl
-      << "        -2 | Force replacement of headers in video stream"sv << std::endl
-      << "        -p | Enable/Disable UPnP"sv << std::endl
       << std::endl;
   }
 

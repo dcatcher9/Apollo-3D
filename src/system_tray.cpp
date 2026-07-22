@@ -11,17 +11,14 @@
     #include <aclapi.h>
     #define TRAY_ICON WEB_DIR "images/apollo.ico"
     #define TRAY_ICON_PLAYING WEB_DIR "images/apollo-playing.ico"
-    #define TRAY_ICON_PAUSING WEB_DIR "images/apollo-pausing.ico"
     #define TRAY_ICON_LOCKED WEB_DIR "images/apollo-locked.ico"
   #elif defined(__linux__) || defined(linux) || defined(__linux)
     #define TRAY_ICON SUNSHINE_TRAY_PREFIX "-tray"
     #define TRAY_ICON_PLAYING SUNSHINE_TRAY_PREFIX "-playing"
-    #define TRAY_ICON_PAUSING SUNSHINE_TRAY_PREFIX "-pausing"
     #define TRAY_ICON_LOCKED SUNSHINE_TRAY_PREFIX "-locked"
   #elif defined(__APPLE__) || defined(__MACH__)
     #define TRAY_ICON WEB_DIR "images/logo-apollo-16.png"
     #define TRAY_ICON_PLAYING WEB_DIR "images/apollo-playing-16.png"
-    #define TRAY_ICON_PAUSING WEB_DIR "images/apollo-pausing-16.png"
     #define TRAY_ICON_LOCKED WEB_DIR "images/apollo-locked-16.png"
     #include <dispatch/dispatch.h>
   #endif
@@ -44,17 +41,18 @@
   // local includes
   #include "config.h"
   #include "confighttp.h"
-  #include "display_device.h"
   #include "logging.h"
-  #include "platform/common.h"
-  #include "process.h"
   #include "network.h"
+  #include "nvhttp.h"
+  #include "platform/common.h"
   #include "src/entry_handler.h"
 
 using namespace std::literals;
 
 // system_tray namespace
 namespace system_tray {
+  constexpr char product_display_name[] = PROJECT_DISPLAY_NAME;
+
   static std::atomic tray_initialized = false;
 
   // Threading variables for all platforms
@@ -68,28 +66,19 @@ namespace system_tray {
   }
 
   void
-  tray_force_stop_cb(struct tray_menu *item) {
+    tray_force_stop_cb(struct tray_menu *item) {
     BOOST_LOG(info) << "Force stop from system tray"sv;
-    proc::proc.terminate();
-  }
-
-  void tray_reset_display_device_config_cb([[maybe_unused]] struct tray_menu *item) {
-    BOOST_LOG(info) << "Resetting display device config from system tray"sv;
-
-    std::ignore = display_device::reset_persistence();
+    nvhttp::terminate_active_session();
   }
 
   void tray_restart_cb([[maybe_unused]] struct tray_menu *item) {
     BOOST_LOG(info) << "Restarting from system tray"sv;
 
-    proc::proc.terminate();
     platf::restart();
   }
 
   void tray_quit_cb([[maybe_unused]] struct tray_menu *item) {
     BOOST_LOG(info) << "Quitting from system tray"sv;
-
-    proc::proc.terminate();
 
   #ifdef _WIN32
     // If we're running in a service, return a special status to
@@ -106,33 +95,29 @@ namespace system_tray {
   // Tray menu
   static struct tray tray = {
     .icon = TRAY_ICON,
-    .tooltip = PROJECT_NAME,
+    .tooltip = product_display_name,
     .menu =
       (struct tray_menu[]) {
         // todo - use boost/locale to translate menu strings
-        { .text = "Open Apollo", .cb = tray_open_ui_cb },
-        { .text = "-" },
+        {.text = "Open Apollo XR", .cb = tray_open_ui_cb},
+        {.text = "-"},
         // { .text = "-" },
         // { .text = "Donate",
         //   .submenu =
-        //     (struct tray_menu[]) {
-        //       { .text = "GitHub Sponsors", .cb = tray_donate_github_cb },
-        //       { .text = "MEE6", .cb = tray_donate_mee6_cb },
-        //       { .text = "Patreon", .cb = tray_donate_patreon_cb },
-        //       { .text = "PayPal", .cb = tray_donate_paypal_cb },
-        //       { .text = nullptr } } },
+        //   (struct tray_menu[]) {
+        //   { .text = "GitHub Sponsors", .cb = tray_donate_github_cb },
+        //   { .text = "MEE6", .cb = tray_donate_mee6_cb },
+        //   { .text = "Patreon", .cb = tray_donate_patreon_cb },
+        //   { .text = "PayPal", .cb = tray_donate_paypal_cb },
+        //   { .text = nullptr } } },
         // { .text = "-" },
-        { .text = TRAY_MSG_NO_APP_RUNNING, .cb = tray_force_stop_cb },
-  // Currently display device settings are only supported on Windows
-  #ifdef _WIN32
-        {.text = "Reset Display Device Config", .cb = tray_reset_display_device_config_cb},
-  #endif
+        {.text = TRAY_MSG_NO_APP_RUNNING, .cb = tray_force_stop_cb},
         {.text = "Restart", .cb = tray_restart_cb},
         {.text = "Quit", .cb = tray_quit_cb},
         {.text = nullptr}
       },
-    .iconPathCount = 4,
-    .allIconPaths = {TRAY_ICON, TRAY_ICON_LOCKED, TRAY_ICON_PLAYING, TRAY_ICON_PAUSING},
+    .iconPathCount = 3,
+    .allIconPaths = {TRAY_ICON, TRAY_ICON_LOCKED, TRAY_ICON_PLAYING},
   };
 
   int init_tray() {
@@ -272,30 +257,8 @@ namespace system_tray {
     snprintf(force_close_msg, std::size(force_close_msg), "Force close [%s]", app_name.c_str());
     tray.notification_text = msg;
     tray.notification_icon = TRAY_ICON_PLAYING;
-    tray.tooltip = PROJECT_NAME;
+    tray.tooltip = product_display_name;
     tray.menu[2].text = force_close_msg;
-    tray_update(&tray);
-  }
-
-  void update_tray_pausing(std::string app_name) {
-    auto lock = std::lock_guard(tray_lifecycle_mutex);
-    if (!tray_initialized) {
-      return;
-    }
-
-    tray.notification_title = nullptr;
-    tray.notification_text = nullptr;
-    tray.notification_cb = nullptr;
-    tray.notification_icon = nullptr;
-    tray.icon = TRAY_ICON_PAUSING;
-    tray_update(&tray);
-    char msg[256];
-    snprintf(msg, std::size(msg), "Streaming paused for %s", app_name.c_str());
-    tray.icon = TRAY_ICON_PAUSING;
-    tray.notification_title = "Stream Paused";
-    tray.notification_text = msg;
-    tray.notification_icon = TRAY_ICON_PAUSING;
-    tray.tooltip = PROJECT_NAME;
     tray_update(&tray);
   }
 
@@ -317,13 +280,13 @@ namespace system_tray {
     tray.notification_icon = TRAY_ICON;
     tray.notification_title = "Application Stopped";
     tray.notification_text = msg;
-    tray.tooltip = PROJECT_NAME;
+    tray.tooltip = product_display_name;
     tray.menu[2].text = TRAY_MSG_NO_APP_RUNNING;
     tray_update(&tray);
   }
 
   void
-  update_tray_launch_error(std::string app_name, int exit_code) {
+    update_tray_launch_error(std::string app_name, int exit_code) {
     auto lock = std::lock_guard(tray_lifecycle_mutex);
     if (!tray_initialized) {
       return;
@@ -343,9 +306,9 @@ namespace system_tray {
     tray.notification_text = msg;
     tray.notification_cb = []() {
       BOOST_LOG(info) << "Force stop from notification"sv;
-      proc::proc.terminate();
+      nvhttp::terminate_active_session();
     };
-    tray.tooltip = PROJECT_NAME;
+    tray.tooltip = product_display_name;
     tray_update(&tray);
   }
 
@@ -365,7 +328,7 @@ namespace system_tray {
     tray.notification_title = "Incoming Pairing Request";
     tray.notification_text = "Click here to complete the pairing process";
     tray.notification_icon = TRAY_ICON_LOCKED;
-    tray.tooltip = PROJECT_NAME;
+    tray.tooltip = product_display_name;
     tray.notification_cb = []() {
       launch_ui("/pin#PIN");
     };
@@ -387,13 +350,13 @@ namespace system_tray {
     snprintf(
       msg,
       std::size(msg),
-      "Is '%s' an AR display? Click to choose in Apollo.",
+      "Is '%s' an AR display? Click to choose in Apollo XR.",
       display_name.c_str()
     );
     tray.notification_title = "New Monitor Detected";
     tray.notification_text = msg;
     tray.notification_icon = TRAY_ICON;
-    tray.tooltip = PROJECT_NAME;
+    tray.tooltip = product_display_name;
     tray.notification_cb = []() {
       launch_ui("/config#ar-glasses");
     };
@@ -402,7 +365,7 @@ namespace system_tray {
   }
 
   void
-  update_tray_paired(std::string device_name) {
+    update_tray_paired(std::string device_name) {
     auto lock = std::lock_guard(tray_lifecycle_mutex);
     if (!tray_initialized) {
       return;
@@ -418,12 +381,12 @@ namespace system_tray {
     tray.notification_title = "Device Paired Succesfully";
     tray.notification_text = msg;
     tray.notification_icon = TRAY_ICON;
-    tray.tooltip = PROJECT_NAME;
+    tray.tooltip = product_display_name;
     tray_update(&tray);
   }
 
   void
-  update_tray_client_connected(std::string client_name) {
+    update_tray_client_connected(std::string client_name) {
     auto lock = std::lock_guard(tray_lifecycle_mutex);
     if (!tray_initialized) {
       return;
@@ -440,7 +403,7 @@ namespace system_tray {
     tray.notification_title = "Client Connected";
     tray.notification_text = msg;
     tray.notification_icon = TRAY_ICON;
-    tray.tooltip = PROJECT_NAME;
+    tray.tooltip = product_display_name;
     tray_update(&tray);
   }
 
@@ -468,7 +431,7 @@ namespace system_tray {
       return 1;
     }
 
-    static const std::string title_str = "Open Apollo (" + config::nvhttp.sunshine_name + ":" + std::to_string(net::map_port(confighttp::PORT_HTTPS)) + ")";
+    static const std::string title_str = "Open Apollo XR (" + config::nvhttp.sunshine_name + ":" + std::to_string(net::map_port(confighttp::PORT_HTTPS)) + ")";
     tray.menu[0].text = title_str.c_str();
 
     if (config::sunshine.hide_tray_controls) {
@@ -505,7 +468,7 @@ namespace system_tray {
 }  // namespace system_tray
 
   #ifdef BOOST_PROCESS_VERSION
-    #undef BOOST_PROCESS_VERSION 1
+    #undef BOOST_PROCESS_VERSION
   #endif
 
 #endif

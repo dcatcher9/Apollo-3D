@@ -131,12 +131,11 @@ namespace ar_glasses {
 
     struct topology_recovery_parse_result_t {
       bool valid = false;
-      bool rewrite_required = false;
       std::size_t record_count = 0;
       std::string normalized_json;
     };
 
-    /** Parse and normalize recovery JSON through the production codec without touching disk. */
+    /** Parse current recovery JSON through the production codec without touching disk. */
     topology_recovery_parse_result_t parse_topology_recovery_json_for_test(std::string_view contents);
 
     /** Classify whether a single persisted recovery record owns the supplied current rectangle. */

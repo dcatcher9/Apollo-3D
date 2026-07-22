@@ -221,26 +221,25 @@ namespace input {
     int id;
 
     // When emulating the HOME button, we may need to artificially release the back button.
-    // Afterwards, the gamepad state on sunshine won't match the state on Moonlight.
+    // Afterwards, the gamepad state on Apollo won't match the state on Artemis.
     // To prevent Sunshine from sending erroneous input data to the active application,
     // Sunshine forces the button to be in a specific state until the gamepad state matches that of
-    // Moonlight once more.
+    // Artemis once more.
     button_state_e back_button_state;
   };
 
   struct input_t {
-    enum shortkey_e {
+    enum modifier_e {
       CTRL = 0x1,  ///< Control key
       ALT = 0x2,  ///< Alt key
-      SHIFT = 0x4,  ///< Shift key
-      SHORTCUT = CTRL | ALT | SHIFT  ///< Shortcut combination
+      SHIFT = 0x4  ///< Shift key
     };
 
     input_t(
       safe::mail_raw_t::event_t<input::touch_port_t> touch_port_event,
       platf::feedback_queue_t feedback_queue
     ):
-        shortcutFlags {},
+        pressed_modifiers {},
         gamepads(MAX_GAMEPADS),
         client_context {platf::allocate_client_input_context(platf_input)},
         touch_port_event {std::move(touch_port_event)},
@@ -251,8 +250,7 @@ namespace input {
         accumulated_hscroll_delta {} {
     }
 
-    // Keep track of alt+ctrl+shift key combo
-    int shortcutFlags;
+    int pressed_modifiers;
 
     bool left_alt_pressed = false;
     bool right_alt_pressed = false;
@@ -274,34 +272,7 @@ namespace input {
     int32_t accumulated_hscroll_delta;
   };
 
-  /**
-   * @brief Apply shortcut based on VKEY
-   * @param keyCode The VKEY code
-   * @return 0 if no shortcut applied, > 0 if shortcut applied.
-   */
-  inline int apply_shortcut(short keyCode) {
-    constexpr auto VK_F1 = 0x70;
-    constexpr auto VK_F13 = 0x7C;
-
-    if (keyCode >= VK_F1 && keyCode <= VK_F13) {
-      mail::man->event<int>(mail::switch_display)->raise(keyCode - VK_F1);
-      return 1;
-    }
-
-    switch (keyCode) {
-      case 0x4E /* VKEY_N */:
-        display_cursor = !display_cursor;
-        return 1;
-    }
-
-    return 0;
-  }
-
   void passthrough(std::shared_ptr<input_t> &input, PNV_REL_MOUSE_MOVE_PACKET packet) {
-    if (!config::input.mouse) {
-      return;
-    }
-
     input->mouse_left_button_timeout = DISABLE_LEFT_BUTTON_DELAY;
     platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
   }
@@ -372,10 +343,6 @@ namespace input {
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_ABS_MOUSE_MOVE_PACKET packet) {
-    if (!config::input.mouse) {
-      return;
-    }
-
     if (input->mouse_left_button_timeout == DISABLE_LEFT_BUTTON_DELAY) {
       input->mouse_left_button_timeout = ENABLE_LEFT_BUTTON_DELAY;
     }
@@ -386,7 +353,7 @@ namespace input {
     // Prevent divide by zero
     // Don't expect it to happen, but just in case
     if (!packet->width || !packet->height) {
-      BOOST_LOG(warning) << "Moonlight passed invalid dimensions"sv;
+      BOOST_LOG(warning) << "Artemis passed invalid dimensions"sv;
 
       return;
     }
@@ -411,10 +378,6 @@ namespace input {
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_MOUSE_BUTTON_PACKET packet) {
-    if (!config::input.mouse) {
-      return;
-    }
-
     auto release = util::endian::little(packet->header.magic) == MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5;
     auto button = util::endian::big(packet->button);
     if (button > 0 && button < mouse_press.size()) {
@@ -426,7 +389,7 @@ namespace input {
       mouse_press[button] = !release;
     }
     /**
-     * When Moonlight sends mouse input through absolute coordinates,
+     * When Artemis sends mouse input through absolute coordinates,
      * it's possible that BUTTON_RIGHT is pressed down immediately after releasing BUTTON_LEFT.
      * As a result, Sunshine will left-click on hyperlinks in the browser before right-clicking
      *
@@ -483,7 +446,7 @@ namespace input {
   /**
    * @brief Update flags for keyboard shortcut combo's
    */
-  inline void update_shortcutFlags(int *flags, short keyCode, bool release) {
+  inline void update_modifier_flags(int *flags, short keyCode, bool release) {
     switch (keyCode) {
       case VKEY_SHIFT:
       case VKEY_LSHIFT:
@@ -575,10 +538,6 @@ namespace input {
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_KEYBOARD_PACKET packet) {
-    if (!config::input.keyboard) {
-      return;
-    }
-
     auto release = util::endian::little(packet->header.magic) == KEY_UP_EVENT_MAGIC;
     auto keyCode = packet->keyCode & 0x00FF;
 
@@ -588,9 +547,8 @@ namespace input {
       input->right_alt_pressed = !release;
     }
 
-    // A right Alt remapped to a Windows/meta key must not also synthesize generic Alt on every
-    // non-modifier packet. Derive this from the effective mapping so explicit keybindings win
-    // over the legacy key_rightalt_to_key_win UI option.
+    // A right Alt remapped through keybindings must not also synthesize generic Alt on every
+    // non-modifier packet. Derive this from the effective mapping.
     auto modifiers = packet->modifiers;
     if (detail::suppress_synthetic_alt(map_keycode(VKEY_RMENU), input->left_alt_pressed, input->right_alt_pressed)) {
       modifiers &= ~MODIFIER_ALT;
@@ -600,13 +558,13 @@ namespace input {
     // keys that are not current pressed.
     uint8_t synthetic_modifiers = 0;
     if (!release && !is_modifier(keyCode)) {
-      if (!(input->shortcutFlags & input_t::SHIFT) && (modifiers & MODIFIER_SHIFT)) {
+      if (!(input->pressed_modifiers & input_t::SHIFT) && (modifiers & MODIFIER_SHIFT)) {
         synthetic_modifiers |= MODIFIER_SHIFT;
       }
-      if (!(input->shortcutFlags & input_t::CTRL) && (modifiers & MODIFIER_CTRL)) {
+      if (!(input->pressed_modifiers & input_t::CTRL) && (modifiers & MODIFIER_CTRL)) {
         synthetic_modifiers |= MODIFIER_CTRL;
       }
-      if (!(input->shortcutFlags & input_t::ALT) && (modifiers & MODIFIER_ALT)) {
+      if (!(input->pressed_modifiers & input_t::ALT) && (modifiers & MODIFIER_ALT)) {
         synthetic_modifiers |= MODIFIER_ALT;
       }
     }
@@ -614,12 +572,6 @@ namespace input {
     auto &pressed = key_press[make_kpid(keyCode, packet->flags)];
     if (!pressed) {
       if (!release) {
-        // A new key has been pressed down, we need to check for key combo's
-        // If a key-combo has been pressed down, don't pass it through
-        if (input->shortcutFlags == input_t::SHORTCUT && apply_shortcut(keyCode) > 0) {
-          return;
-        }
-
         if (key_press_repeat_id) {
           task_pool.cancel(key_press_repeat_id);
         }
@@ -640,7 +592,7 @@ namespace input {
 
     send_key_and_modifiers(keyCode, release, packet->flags, synthetic_modifiers);
 
-    update_shortcutFlags(&input->shortcutFlags, map_keycode(keyCode), release);
+    update_modifier_flags(&input->pressed_modifiers, map_keycode(keyCode), release);
   }
 
   /**
@@ -649,10 +601,6 @@ namespace input {
    * @param packet The scroll packet.
    */
   void passthrough(std::shared_ptr<input_t> &input, PNV_SCROLL_PACKET packet) {
-    if (!config::input.mouse) {
-      return;
-    }
-
     if (config::input.high_resolution_scrolling) {
       platf::scroll(platf_input, util::endian::big(packet->scrollAmt1));
     } else {
@@ -672,10 +620,6 @@ namespace input {
    * @param packet The scroll packet.
    */
   void passthrough(std::shared_ptr<input_t> &input, PSS_HSCROLL_PACKET packet) {
-    if (!config::input.mouse) {
-      return;
-    }
-
     if (config::input.high_resolution_scrolling) {
       platf::hscroll(platf_input, util::endian::big(packet->scrollAmount));
     } else {
@@ -690,10 +634,6 @@ namespace input {
   }
 
   void passthrough(PNV_UNICODE_PACKET packet) {
-    if (!config::input.keyboard) {
-      return;
-    }
-
     auto size = util::endian::big(packet->header.size) - sizeof(packet->header.magic);
     platf::unicode(platf_input, packet->text, size);
   }
@@ -704,10 +644,6 @@ namespace input {
    * @param packet The controller arrival packet.
    */
   void passthrough(std::shared_ptr<input_t> &input, PSS_CONTROLLER_ARRIVAL_PACKET packet) {
-    if (!config::input.controller) {
-      return;
-    }
-
     if (packet->controllerNumber < 0 || packet->controllerNumber >= input->gamepads.size()) {
       BOOST_LOG(warning) << "ControllerNumber out of range ["sv << packet->controllerNumber << ']';
       return;
@@ -744,10 +680,6 @@ namespace input {
    * @param packet The touch packet.
    */
   void passthrough(std::shared_ptr<input_t> &input, PSS_TOUCH_PACKET packet) {
-    if (!config::input.mouse) {
-      return;
-    }
-
     // Convert the client normalized coordinates to touchport coordinates
     auto coords = client_to_touchport(input, {from_clamped_netfloat(packet->x, 0.0f, 1.0f) * 65535.f, from_clamped_netfloat(packet->y, 0.0f, 1.0f) * 65535.f}, {65535.f, 65535.f});
     if (!coords) {
@@ -800,10 +732,6 @@ namespace input {
    * @param packet The pen packet.
    */
   void passthrough(std::shared_ptr<input_t> &input, PSS_PEN_PACKET packet) {
-    if (!config::input.mouse) {
-      return;
-    }
-
     // Convert the client normalized coordinates to touchport coordinates
     auto coords = client_to_touchport(input, {from_clamped_netfloat(packet->x, 0.0f, 1.0f) * 65535.f, from_clamped_netfloat(packet->y, 0.0f, 1.0f) * 65535.f}, {65535.f, 65535.f});
     if (!coords) {
@@ -858,10 +786,6 @@ namespace input {
    * @param packet The controller touch packet.
    */
   void passthrough(std::shared_ptr<input_t> &input, PSS_CONTROLLER_TOUCH_PACKET packet) {
-    if (!config::input.controller) {
-      return;
-    }
-
     if (packet->controllerNumber < 0 || packet->controllerNumber >= input->gamepads.size()) {
       BOOST_LOG(warning) << "ControllerNumber out of range ["sv << packet->controllerNumber << ']';
       return;
@@ -891,10 +815,6 @@ namespace input {
    * @param packet The controller motion packet.
    */
   void passthrough(std::shared_ptr<input_t> &input, PSS_CONTROLLER_MOTION_PACKET packet) {
-    if (!config::input.controller) {
-      return;
-    }
-
     if (packet->controllerNumber < 0 || packet->controllerNumber >= input->gamepads.size()) {
       BOOST_LOG(warning) << "ControllerNumber out of range ["sv << packet->controllerNumber << ']';
       return;
@@ -923,10 +843,6 @@ namespace input {
    * @param packet The controller battery packet.
    */
   void passthrough(std::shared_ptr<input_t> &input, PSS_CONTROLLER_BATTERY_PACKET packet) {
-    if (!config::input.controller) {
-      return;
-    }
-
     if (packet->controllerNumber < 0 || packet->controllerNumber >= input->gamepads.size()) {
       BOOST_LOG(warning) << "ControllerNumber out of range ["sv << packet->controllerNumber << ']';
       return;
@@ -948,10 +864,6 @@ namespace input {
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_MULTI_CONTROLLER_PACKET packet) {
-    if (!config::input.controller) {
-      return;
-    }
-
     if (packet->controllerNumber < 0 || packet->controllerNumber >= input->gamepads.size()) {
       BOOST_LOG(warning) << "ControllerNumber out of range ["sv << packet->controllerNumber << ']';
 
@@ -960,21 +872,9 @@ namespace input {
 
     auto &gamepad = input->gamepads[packet->controllerNumber];
 
-    // If this is an event for a new gamepad, create the gamepad now. Ideally, the client would
-    // send a controller arrival instead of this but it's still supported for legacy clients.
-    if ((packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id < 0) {
-      auto id = alloc_id(gamepadMask);
-      if (id < 0) {
-        return;
-      }
-
-      if (platf::alloc_gamepad(platf_input, {id, (uint8_t) packet->controllerNumber}, {}, input->feedback_queue)) {
-        free_id(gamepadMask, id);
-        return;
-      }
-
-      gamepad.id = id;
-    } else if (!(packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id >= 0) {
+    // Modern Artemis announces each controller before sending state. The state packet remains
+    // authoritative for removal, but it must not silently synthesize an unannounced device.
+    if (!(packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id >= 0) {
       // If this is the final event for a gamepad being removed, free the gamepad and return.
       free_gamepad(platf_input, gamepad.id);
       gamepad.id = -1;
@@ -1183,14 +1083,12 @@ namespace input {
    */
   batch_result_e batch(PSS_TOUCH_PACKET dest, PSS_TOUCH_PACKET src) {
     // Only batch hover or move events
-    if (dest->eventType != LI_TOUCH_EVENT_MOVE &&
-        dest->eventType != LI_TOUCH_EVENT_HOVER) {
+    if (dest->eventType != LI_TOUCH_EVENT_MOVE && dest->eventType != LI_TOUCH_EVENT_HOVER) {
       return batch_result_e::terminate_batch;
     }
 
     // Don't batch beyond state changing events
-    if (src->eventType != LI_TOUCH_EVENT_MOVE &&
-        src->eventType != LI_TOUCH_EVENT_HOVER) {
+    if (src->eventType != LI_TOUCH_EVENT_MOVE && src->eventType != LI_TOUCH_EVENT_HOVER) {
       return batch_result_e::terminate_batch;
     }
 
@@ -1217,8 +1115,7 @@ namespace input {
    */
   batch_result_e batch(PSS_PEN_PACKET dest, PSS_PEN_PACKET src) {
     // Only batch hover or move events
-    if (dest->eventType != LI_TOUCH_EVENT_MOVE &&
-        dest->eventType != LI_TOUCH_EVENT_HOVER) {
+    if (dest->eventType != LI_TOUCH_EVENT_MOVE && dest->eventType != LI_TOUCH_EVENT_HOVER) {
       return batch_result_e::terminate_batch;
     }
 
@@ -1250,8 +1147,7 @@ namespace input {
    */
   batch_result_e batch(PSS_CONTROLLER_TOUCH_PACKET dest, PSS_CONTROLLER_TOUCH_PACKET src) {
     // Only batch hover or move events
-    if (dest->eventType != LI_TOUCH_EVENT_MOVE &&
-        dest->eventType != LI_TOUCH_EVENT_HOVER) {
+    if (dest->eventType != LI_TOUCH_EVENT_MOVE && dest->eventType != LI_TOUCH_EVENT_HOVER) {
       return batch_result_e::terminate_batch;
     }
 
@@ -1262,8 +1158,7 @@ namespace input {
     }
 
     // Don't batch beyond state changing events
-    if (src->eventType != LI_TOUCH_EVENT_MOVE &&
-        src->eventType != LI_TOUCH_EVENT_HOVER) {
+    if (src->eventType != LI_TOUCH_EVENT_MOVE && src->eventType != LI_TOUCH_EVENT_HOVER) {
       return batch_result_e::terminate_batch;
     }
 
@@ -1442,7 +1337,7 @@ namespace input {
    * @param input The input context pointer.
    * @param input_data The input message.
    */
-  void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data, const crypto::PERM& permission) {
+  void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data, const crypto::PERM &permission) {
     // No input permissions at all
     if (!(permission & crypto::PERM::_all_inputs)) {
       return;
@@ -1454,7 +1349,7 @@ namespace input {
       return;
     }
 
-    // Moonlight sends this capability handshake when input starts. Apollo does not need to
+    // Artemis sends this capability handshake when input starts. Apollo does not need to
     // act on it, but accepting it avoids treating every valid client connection as malformed.
     if (*magic == ENABLE_HAPTICS_MAGIC) {
       return;

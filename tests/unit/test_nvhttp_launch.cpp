@@ -3,11 +3,12 @@
  * @brief Tests for GameStream launch parameter parsing.
  */
 
+#include "../tests_common.h"
+
+#include <cstdint>
 #include <limits>
 
 #include <src/nvhttp.h>
-
-#include "../tests_common.h"
 
 TEST(NvHttpLaunchParsingTest, AcceptsDeploymentModesAndFractionalRates) {
   EXPECT_EQ(nvhttp::parse_launch_mode("5120x2160x120"), (nvhttp::launch_mode_t {5120, 2160, 120000}));
@@ -65,6 +66,30 @@ TEST(NvHttpLaunchParsingTest, RejectsMalformedRemoteInputEncryptionValues) {
   EXPECT_FALSE(nvhttp::parse_remote_input_key_id("4294967296"));
 }
 
+TEST(NvHttpLaunchParsingTest, ValidatesRetainedHostSessionTokensExactly) {
+  EXPECT_EQ(nvhttp::parse_host_session_id("1"), 1U);
+  EXPECT_EQ(nvhttp::parse_host_session_id("18446744073709551615"), std::numeric_limits<std::uint64_t>::max());
+  EXPECT_FALSE(nvhttp::parse_host_session_id(""));
+  EXPECT_FALSE(nvhttp::parse_host_session_id("0"));
+  EXPECT_FALSE(nvhttp::parse_host_session_id("-1"));
+  EXPECT_FALSE(nvhttp::parse_host_session_id("1x"));
+  EXPECT_FALSE(nvhttp::parse_host_session_id("18446744073709551616"));
+
+  EXPECT_TRUE(nvhttp::detail::host_session_matches(42, 42));
+  EXPECT_FALSE(nvhttp::detail::host_session_matches(0, 0));
+  EXPECT_FALSE(nvhttp::detail::host_session_matches(42, 0));
+  EXPECT_FALSE(nvhttp::detail::host_session_matches(42, 41));
+}
+
+TEST(NvHttpLaunchParsingTest, MatchesCanonicalApplicationIdentity) {
+  EXPECT_TRUE(nvhttp::detail::app_identity_matches(7, "ABC-DEF", 7, "abc-def"));
+  EXPECT_TRUE(nvhttp::detail::app_identity_matches(std::nullopt, "ABC-DEF", 7, "abc-def"));
+  EXPECT_TRUE(nvhttp::detail::app_identity_matches(7, "", 7, "abc-def"));
+  EXPECT_FALSE(nvhttp::detail::app_identity_matches(8, "ABC-DEF", 7, "abc-def"));
+  EXPECT_FALSE(nvhttp::detail::app_identity_matches(7, "OTHER", 7, "abc-def"));
+  EXPECT_FALSE(nvhttp::detail::app_identity_matches(std::nullopt, "", 7, "abc-def"));
+}
+
 TEST(NvHttpLaunchParsingTest, EnforcesScalarLaunchOptionContracts) {
   using field = nvhttp::launch_int_field;
   using nvhttp::parse_launch_int;
@@ -76,14 +101,12 @@ TEST(NvHttpLaunchParsingTest, EnforcesScalarLaunchOptionContracts) {
   EXPECT_EQ(parse_launch_int(field::scale_factor, "200"), 200);
   EXPECT_FALSE(parse_launch_int(field::scale_factor, "19"));
   EXPECT_FALSE(parse_launch_int(field::scale_factor, "201"));
-  EXPECT_EQ(parse_launch_int(field::gamepad_mask, "-2147483648"), std::numeric_limits<int>::min());
-  EXPECT_EQ(parse_launch_int(field::gamepad_mask, "2147483647"), std::numeric_limits<int>::max());
-  EXPECT_FALSE(parse_launch_int(field::gamepad_mask, "2147483648"));
   EXPECT_EQ(parse_launch_int(field::app_id, "0"), 0);
   EXPECT_FALSE(parse_launch_int(field::app_id, "-1"));
   EXPECT_EQ(parse_launch_int(field::surround_info, "196610"), 196610);
   EXPECT_FALSE(parse_launch_int(field::surround_info, "0"));
   EXPECT_FALSE(parse_launch_int(field::core_version, "-1"));
+  EXPECT_FALSE(parse_launch_int(field::core_version, "0"));
   EXPECT_FALSE(parse_launch_int(field::core_version, "1x"));
   EXPECT_EQ(parse_launch_int(field::sbs_mode, "0"), 0);
   EXPECT_EQ(parse_launch_int(field::sbs_mode, "1"), 1);

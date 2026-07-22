@@ -18,7 +18,7 @@
 typedef long NTSTATUS;
 
 // Definition from the WDK's d3dkmthk.h
-typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE: DWORD {
+typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
   D3DKMT_GPU_PREFERENCE_STATE_UNINITIALIZED,  ///< The GPU preference isn't initialized.
   D3DKMT_GPU_PREFERENCE_STATE_HIGH_PERFORMANCE,  ///< The highest performing GPU is preferred.
   D3DKMT_GPU_PREFERENCE_STATE_MINIMUM_POWER,  ///< The minimum-powered GPU is preferred.
@@ -439,8 +439,8 @@ namespace platf::dxgi {
     }
   }
 
-  int display_base_t::init(const ::video::config_t &config, const std::string &display_name) {
-    std::once_flag windows_cpp_once_flag;
+  int display_base_t::init(const ::video::config_t &config, const std::string &display_name, capture_backend_e backend) {
+    static std::once_flag windows_cpp_once_flag;
 
     std::call_once(windows_cpp_once_flag, []() {
       DECLARE_HANDLE(DPI_AWARENESS_CONTEXT);
@@ -503,7 +503,9 @@ namespace platf::dxgi {
             continue;
           }
 
-          if (desc.AttachedToDesktop && test_dxgi_duplication(adapter_tmp, output_tmp, false)) {
+          const bool backend_available = backend == capture_backend_e::wgc ||
+                                         test_dxgi_duplication(adapter_tmp, output_tmp, false);
+          if (desc.AttachedToDesktop && backend_available) {
             output = std::move(output_tmp);
 
             offset_x = desc.DesktopCoordinates.left;
@@ -512,8 +514,7 @@ namespace platf::dxgi {
             height = desc.DesktopCoordinates.bottom - offset_y;
 
             display_rotation = desc.Rotation;
-            if (display_rotation == DXGI_MODE_ROTATION_ROTATE90 ||
-                display_rotation == DXGI_MODE_ROTATION_ROTATE270) {
+            if (display_rotation == DXGI_MODE_ROTATION_ROTATE90 || display_rotation == DXGI_MODE_ROTATION_ROTATE270) {
               width_before_rotation = height;
               height_before_rotation = width;
             } else {
@@ -613,8 +614,7 @@ namespace platf::dxgi {
       HANDLE token;
       LUID val;
 
-      if (OpenProcessToken(GetCurrentProcess(), flags, &token) &&
-          !!LookupPrivilegeValue(nullptr, SE_INC_BASE_PRIORITY_NAME, &val)) {
+      if (OpenProcessToken(GetCurrentProcess(), flags, &token) && !!LookupPrivilegeValue(nullptr, SE_INC_BASE_PRIORITY_NAME, &val)) {
         tp.PrivilegeCount = 1;
         tp.Privileges[0].Luid = val;
         tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
@@ -1009,47 +1009,38 @@ namespace platf::dxgi {
 
 namespace platf {
   /**
-   * Pick a display adapter and capture method.
-   * @param hwdevice_type enables possible use of hardware encoder
+   * Pick a display adapter and native D3D11 capture method.
    */
-  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
-    if (config::video.capture == "ddx" || config::video.capture.empty()) {
-      if (hwdevice_type == mem_type_e::dxgi) {
+  std::shared_ptr<display_t> display(
+    const std::string &display_name,
+    const video::config_t &config,
+    capture_backend_e preferred_backend
+  ) {
+    auto open_backend = [&](capture_backend_e backend) -> std::shared_ptr<display_t> {
+      if (backend == capture_backend_e::ddup) {
         auto disp = std::make_shared<dxgi::display_ddup_vram_t>();
-
-        if (!disp->init(config, display_name)) {
-          return disp;
-        }
-      } else if (hwdevice_type == mem_type_e::system) {
-        auto disp = std::make_shared<dxgi::display_ddup_ram_t>();
-
-        if (!disp->init(config, display_name)) {
-          return disp;
-        }
+        return !disp->init(config, display_name) ? std::move(disp) : nullptr;
       }
+
+      auto disp = std::make_shared<dxgi::display_wgc_vram_t>();
+      return !disp->init(config, display_name) ? std::move(disp) : nullptr;
+    };
+
+    if (auto disp = open_backend(preferred_backend)) {
+      return disp;
+    }
+    const auto fallback_backend = preferred_backend == capture_backend_e::ddup ?
+                                    capture_backend_e::wgc :
+                                    capture_backend_e::ddup;
+    if (auto disp = open_backend(fallback_backend)) {
+      return disp;
     }
 
-    if (config::video.capture == "wgc" || config::video.capture.empty()) {
-      if (hwdevice_type == mem_type_e::dxgi) {
-        auto disp = std::make_shared<dxgi::display_wgc_vram_t>();
-
-        if (!disp->init(config, display_name)) {
-          return disp;
-        }
-      } else if (hwdevice_type == mem_type_e::system) {
-        auto disp = std::make_shared<dxgi::display_wgc_ram_t>();
-
-        if (!disp->init(config, display_name)) {
-          return disp;
-        }
-      }
-    }
-
-    // ddx and wgc failed
+    // DDUP and WGC failed.
     return nullptr;
   }
 
-  std::vector<std::string> display_names(mem_type_e) {
+  std::vector<std::string> display_names() {
     std::vector<std::string> display_names;
 
     HRESULT status;
@@ -1132,8 +1123,9 @@ namespace platf {
           << "    Resolution        : "sv << width << 'x' << height << std::endl
           << std::endl;
 
-        // Don't include the display in the list if we can't actually capture it
-        if (desc.AttachedToDesktop && dxgi::test_dxgi_duplication(adapter, output, true)) {
+        // Keep outputs supported by either automatic capture backend. WGC must remain
+        // discoverable even when Desktop Duplication cannot open the monitor.
+        if (desc.AttachedToDesktop && (dxgi::test_dxgi_duplication(adapter, output, true) || dxgi::test_wgc_capture(output))) {
           display_names.emplace_back(std::move(device_name));
         }
       }

@@ -19,19 +19,12 @@ include_directories("${GTEST_SOURCE_DIR}/googletest/include" "${GTEST_SOURCE_DIR
 set(CMAKE_CXX_FLAGS "-fprofile-arcs -ftest-coverage -ggdb -O0")
 set(CMAKE_C_FLAGS "-fprofile-arcs -ftest-coverage -ggdb -O0")
 
-# if windows
-if (WIN32)
-    # For Windows: Prevent overriding the parent project's compiler/linker settings
-    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)  # cmake-lint: disable=C0103
-endif ()
+# Prevent overriding the parent project's compiler/linker settings.
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)  # cmake-lint: disable=C0103
 
 # modify SUNSHINE_DEFINITIONS
-if (WIN32)
-    list(APPEND
-            SUNSHINE_DEFINITIONS SUNSHINE_SHADERS_DIR="${CMAKE_SOURCE_DIR}/src_assets/windows/assets/shaders/directx")
-elseif (NOT APPLE)
-    list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_SHADERS_DIR="${CMAKE_SOURCE_DIR}/src_assets/linux/assets/shaders/opengl")
-endif ()
+list(APPEND
+        SUNSHINE_DEFINITIONS SUNSHINE_SHADERS_DIR="${CMAKE_SOURCE_DIR}/src_assets/windows/assets/shaders/directx")
 
 set(TEST_DEFINITIONS)  # list will be appended as needed
 
@@ -39,14 +32,6 @@ set(TEST_DEFINITIONS)  # list will be appended as needed
 list(APPEND TEST_DEFINITIONS SUNSHINE_TESTS)
 list(APPEND TEST_DEFINITIONS SUNSHINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 list(APPEND TEST_DEFINITIONS SUNSHINE_TEST_BIN_DIR="${CMAKE_CURRENT_BINARY_DIR}")
-
-if(NOT WIN32)
-    find_package(Udev 255)  # we need 255+ for udevadm verify
-    message(STATUS "UDEV_FOUND: ${UDEV_FOUND}")
-    if(UDEV_FOUND)
-        list(APPEND TEST_DEFINITIONS UDEVADM_EXECUTABLE="${UDEVADM_EXECUTABLE}")
-    endif()
-endif()
 
 file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS
         ${CMAKE_SOURCE_DIR}/tests/*.h
@@ -71,7 +56,6 @@ set(INTEGRATION_TEST_FILES
     "docs/configuration.md"
     "src_assets/common/assets/web/public/assets/locale/en.json"
     "src_assets/common/assets/web/configs/tabs/General.vue"
-    "src_assets/linux/misc/60-sunshine.rules"
 )
 
 foreach(file ${INTEGRATION_TEST_FILES})
@@ -107,11 +91,9 @@ target_link_libraries(${PROJECT_NAME}
         gtest
         ${PLATFORM_LIBRARIES})
 target_compile_definitions(${PROJECT_NAME} PUBLIC ${SUNSHINE_DEFINITIONS} ${TEST_DEFINITIONS})
-target_compile_options(${PROJECT_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${SUNSHINE_COMPILE_OPTIONS}>;$<$<COMPILE_LANGUAGE:CUDA>:${SUNSHINE_COMPILE_OPTIONS_CUDA};-std=c++17>)  # cmake-lint: disable=C0301
+target_compile_options(${PROJECT_NAME} PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
 target_link_options(${PROJECT_NAME} PRIVATE)
 
-if (WIN32)
-    # prefer static libraries since we're linking statically
-    # this fixes libcurl linking errors when using non MSYS2 version of CMake
-    set_target_properties(${PROJECT_NAME} PROPERTIES LINK_SEARCH_START_STATIC 1)
-endif ()
+# Prefer static libraries since we're linking statically. This fixes libcurl linking errors when
+# using a non-MSYS2 CMake executable.
+set_target_properties(${PROJECT_NAME} PROPERTIES LINK_SEARCH_START_STATIC 1)

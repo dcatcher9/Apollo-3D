@@ -27,7 +27,6 @@ extern "C" {
 // local includes
 #include "config.h"
 #include "crypto.h"
-#include "display_device.h"
 #include "globals.h"
 #include "input.h"
 #include "logging.h"
@@ -42,53 +41,6 @@ extern "C" {
 #include "utility.h"
 #include "video.h"
 
-#define IDX_START_A 0
-#define IDX_START_B 1
-#define IDX_INVALIDATE_REF_FRAMES 2
-#define IDX_LOSS_STATS 3
-#define IDX_INPUT_DATA 5
-#define IDX_RUMBLE_DATA 6
-#define IDX_TERMINATION 7
-#define IDX_PERIODIC_PING 8
-#define IDX_REQUEST_IDR_FRAME 9
-#define IDX_ENCRYPTED 10
-#define IDX_HDR_MODE 11
-#define IDX_RUMBLE_TRIGGER_DATA 12
-#define IDX_SET_MOTION_EVENT 13
-#define IDX_SET_RGB_LED 14
-#define IDX_EXEC_SERVER_CMD 15
-#define IDX_SET_CLIPBOARD 16
-#define IDX_FILE_TRANSFER_NONCE_REQUEST 17
-#define IDX_SET_ADAPTIVE_TRIGGERS 18
-#define IDX_SET_SBS_MODE 19
-#define IDX_SBS_DEBUG_DUMP 20
-#define IDX_DEPTH_STATUS 21
-
-static const short packetTypes[] = {
-  0x0305,  // Start A
-  0x0307,  // Start B
-  0x0301,  // Invalidate reference frames
-  0x0201,  // Loss Stats
-  0x0204,  // Frame Stats (unused)
-  0x0206,  // Input data
-  0x010b,  // Rumble data
-  0x0109,  // Termination
-  0x0200,  // Periodic Ping
-  0x0302,  // IDR frame
-  0x0001,  // fully encrypted
-  0x010e,  // HDR mode
-  0x5500,  // Rumble triggers (Sunshine protocol extension)
-  0x5501,  // Set motion event (Sunshine protocol extension)
-  0x5502,  // Set RGB LED (Sunshine protocol extension)
-  0x3000,  // Execute Server Command (Apollo protocol extension)
-  0x3001,  // Set Clipboard (Apollo protocol extension)
-  0x3002,  // File transfer nonce request (Apollo protocol extension)
-  0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
-  0x3003,  // Set SBS Mode (Apollo protocol extension)
-  0x3004,  // SBS Debug Dump (Apollo protocol extension)
-  0x3006,  // Depth Status (Apollo protocol extension, host->client)
-};
-
 namespace asio = boost::asio;
 namespace sys = boost::system;
 
@@ -98,6 +50,25 @@ using asio::ip::udp;
 using namespace std::literals;
 
 namespace stream {
+  namespace control_packet {
+    // Gen 7 encrypted control protocol and the extensions used by Artemis.
+    constexpr std::uint16_t start = 0x0307;
+    constexpr std::uint16_t invalidate_ref_frames = 0x0301;
+    constexpr std::uint16_t input = 0x0206;
+    constexpr std::uint16_t rumble = 0x010b;
+    constexpr std::uint16_t termination = 0x0109;
+    constexpr std::uint16_t periodic_ping = 0x0200;
+    constexpr std::uint16_t request_idr = 0x0302;
+    constexpr std::uint16_t encrypted = 0x0001;
+    constexpr std::uint16_t hdr_mode = 0x010e;
+    constexpr std::uint16_t rumble_triggers = 0x5500;
+    constexpr std::uint16_t set_motion_event = 0x5501;
+    constexpr std::uint16_t set_rgb_led = 0x5502;
+    constexpr std::uint16_t set_adaptive_triggers = 0x5503;
+    constexpr std::uint16_t set_sbs_mode = 0x3003;
+    constexpr std::uint16_t sbs_debug_dump = 0x3004;
+    constexpr std::uint16_t depth_status = 0x3006;
+  }  // namespace control_packet
 
   enum class socket_e : int {
     video,  ///< Video
@@ -248,7 +219,7 @@ namespace stream {
     std::uint16_t encryptedHeaderType;  // Always LE 0x0001
     std::uint16_t length;  // sizeof(seq) + 16 byte tag + secondary header and data
 
-    // seq is accepted as an arbitrary value in Moonlight
+    // seq is accepted as an arbitrary value in Artemis
     std::uint32_t seq;  // Monotonically increasing sequence number (used as IV for AES-GCM)
 
     uint8_t *payload() {
@@ -273,39 +244,43 @@ namespace stream {
 
   using audio_aes_t = std::array<char, round_to_pkcs7_padded(MAX_AUDIO_PACKET_SIZE)>;
 
-  using av_session_id_t = std::variant<asio::ip::address, std::string>;  // IP address or SS-Ping-Payload from RTSP handshake
   using message_queue_t = std::shared_ptr<safe::queue_t<std::pair<udp::endpoint, std::string>>>;
-  using message_queue_queue_t = std::shared_ptr<safe::queue_t<std::tuple<socket_e, av_session_id_t, message_queue_t>>>;
+
+  struct av_ping_route_t {
+    std::uint32_t id;
+    std::string payload;
+    message_queue_t messages;
+  };
+
+  struct av_ping_route_update_t {
+    socket_e socket_type;
+    std::uint32_t id;
+    std::optional<av_ping_route_t> route;
+  };
+
+  using av_ping_route_queue_t = std::shared_ptr<safe::queue_t<av_ping_route_update_t>>;
 
   // return bytes written on success
   // return -1 on error
-  static inline int encode_audio(bool encrypted, const audio::buffer_t &plaintext, uint8_t *destination, crypto::aes_t &iv, crypto::cipher::cbc_t &cbc) {
-    // If encryption isn't enabled
-    if (!encrypted) {
-      std::copy(std::begin(plaintext), std::end(plaintext), destination);
-      return plaintext.size();
-    }
-
+  static inline int encode_audio(const audio::buffer_t &plaintext, uint8_t *destination, crypto::aes_t &iv, crypto::cipher::cbc_t &cbc) {
     return cbc.encrypt(std::string_view {(char *) std::begin(plaintext), plaintext.size()}, destination, &iv);
-  }
-
-  static inline void while_starting_do_nothing(std::atomic<session::state_e> &state) {
-    while (state.load(std::memory_order_acquire) == session::state_e::STARTING) {
-      std::this_thread::sleep_for(1ms);
-    }
   }
 
   class control_server_t {
   public:
+    struct session_slot_t {
+      session_t *session {};
+      net::peer_t peer {};
+    };
+
     int bind(net::af_e address_family, std::uint16_t port) {
       _host = net::host_create(address_family, _addr, port);
 
       return !(bool) _host;
     }
 
-    // Get session associated with address.
-    // If none are found, try to find a session not yet claimed. (It will be marked by a port of value 0
-    // If none of those are found, return nullptr
+    // Return the sole registered session when this peer matches its established connection or
+    // its pending connect-data/address identity. A different peer can never claim the active slot.
     session_t *get_session(const net::peer_t peer, uint32_t connect_data);
 
     // Circular dependency:
@@ -359,18 +334,16 @@ namespace stream {
     // Callbacks
     std::unordered_map<std::uint16_t, std::function<void(session_t *, const std::string_view &)>> _map_type_cb;
 
-    // All active sessions (including those still waiting for a peer to connect)
-    sync_util::sync_t<std::vector<session_t *>> _sessions;
-
-    // ENet peer to session mapping for sessions with a peer connected
-    sync_util::sync_t<std::map<net::peer_t, session_t *>> _peer_to_session;
+    // Apollo admits one remote stream at a time. Keep session and peer in the same synchronized
+    // slot so publication, peer claim, and removal are one transaction.
+    sync_util::sync_t<session_slot_t> _session;
 
     ENetAddress _addr;
     net::host_t _host;
   };
 
   struct broadcast_ctx_t {
-    message_queue_queue_t message_queue_queue;
+    av_ping_route_queue_t av_ping_route_updates;
 
     std::thread recv_thread;
     std::thread video_thread;
@@ -397,7 +370,7 @@ namespace stream {
     std::string ping_payload;
     int lowseq;
     udp::endpoint peer;
-    std::optional<crypto::cipher::gcm_t> cipher;
+    crypto::cipher::gcm_t cipher;
     std::uint64_t gcm_iv_counter;
     safe::mail_raw_t::event_t<bool> idr_events;
     safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;
@@ -405,7 +378,6 @@ namespace stream {
   };
 
   struct audio_channel_t {
-    bool encrypted;
     int packet_duration;
     boost::asio::ip::address local_address;
     std::atomic_bool active {true};
@@ -441,12 +413,10 @@ namespace stream {
 
     struct {
       crypto::cipher::gcm_t cipher;
-      crypto::aes_t legacy_input_enc_iv;  // Only used when the client doesn't support full control stream encryption
       crypto::aes_t incoming_iv;
       crypto::aes_t outgoing_iv;
 
-      std::uint32_t connect_data;  // Used for new clients with ML_FF_SESSION_ID_V1
-      std::string expected_peer_address;  // Only used for legacy clients without ML_FF_SESSION_ID_V1
+      std::uint32_t connect_data;
 
       net::peer_t peer;
       std::uint32_t seq;
@@ -462,9 +432,6 @@ namespace stream {
     std::string device_uuid;
     std::uint64_t client_policy_generation;
     std::atomic<crypto::PERM> permission;
-
-    std::list<crypto::command_entry_t> do_cmds;
-    std::list<crypto::command_entry_t> undo_cmds;
 
     safe::mail_raw_t::event_t<bool> shutdown_event;
     safe::signal_t controlEnd;
@@ -493,32 +460,21 @@ namespace stream {
       "max_payload_size >= sizeof(control_encrypted_t) + sizeof(crypto::cipher::tag_size)"
     );
 
-    if (session->config.controlProtocolType != 13) {
-      return plaintext;
-    }
-
     auto seq = session->control.seq++;
 
     auto &iv = session->control.outgoing_iv;
-    if (session->config.encryptionFlagsEnabled & SS_ENC_CONTROL_V2) {
-      // We use the deterministic IV construction algorithm specified in NIST SP 800-38D
-      // Section 8.2.1. The sequence number is our "invocation" field and the 'CH' in the
-      // high bytes is the "fixed" field. Because each client provides their own unique
-      // key, our values in the fixed field need only uniquely identify each independent
-      // use of the client's key with AES-GCM in our code.
-      //
-      // The sequence number is 32 bits long which allows for 2^32 control stream messages
-      // to be sent to each client before the IV repeats.
-      iv.resize(12);
-      std::copy_n((uint8_t *) &seq, sizeof(seq), std::begin(iv));
-      iv[10] = 'H';  // Host originated
-      iv[11] = 'C';  // Control stream
-    } else {
-      // Nvidia's old style encryption uses a 16-byte IV
-      iv.resize(16);
-
-      iv[0] = (std::uint8_t) seq;
-    }
+    // We use the deterministic IV construction algorithm specified in NIST SP 800-38D
+    // Section 8.2.1. The sequence number is our "invocation" field and the 'CH' in the
+    // high bytes is the "fixed" field. Because each client provides their own unique
+    // key, our values in the fixed field need only uniquely identify each independent
+    // use of the client's key with AES-GCM in our code.
+    //
+    // The sequence number is 32 bits long which allows for 2^32 control stream messages
+    // to be sent to each client before the IV repeats.
+    iv.resize(12);
+    std::copy_n((uint8_t *) &seq, sizeof(seq), std::begin(iv));
+    iv[10] = 'H';  // Host originated
+    iv[11] = 'C';  // Control stream
 
     auto packet = (control_encrypted_p) tagged_cipher.data();
 
@@ -543,69 +499,44 @@ namespace stream {
   static auto broadcast = safe::make_shared<broadcast_ctx_t>(start_broadcast, end_broadcast);
 
   session_t *control_server_t::get_session(const net::peer_t peer, uint32_t connect_data) {
-    {
-      // Fast path - look up existing session by peer
-      auto lg = _peer_to_session.lock();
-      auto it = _peer_to_session->find(peer);
-      if (it != _peer_to_session->end()) {
-        return it->second;
-      }
+    auto slot_lock = _session.lock();
+    auto *session = _session->session;
+    if (!session) {
+      return nullptr;
     }
 
-    // Slow path - process new session
+    if (_session->peer) {
+      return _session->peer == peer ? session : nullptr;
+    }
+
+    // The sole session has not established its ENet peer yet. Modern Artemis echoes the random
+    // connect-data value from SETUP, so source address is neither identity nor authorization.
     TUPLE_2D(peer_port, peer_addr, platf::from_sockaddr_ex((sockaddr *) &peer->address.address));
-    auto lg = _sessions.lock();
-    for (auto pos = std::begin(*_sessions); pos != std::end(*_sessions); ++pos) {
-      auto session_p = *pos;
-
-      // Skip sessions that are already established
-      if (session_p->control.peer) {
-        continue;
-      }
-
-      // Identify the connection by the unique connect data if the client supports it.
-      // Only fall back to IP address matching for clients without session ID support.
-      if (session_p->config.mlFeatureFlags & ML_FF_SESSION_ID_V1) {
-        if (session_p->control.connect_data != connect_data) {
-          continue;
-        } else {
-          BOOST_LOG(debug) << "Initialized new control stream session by connect data match [v2]"sv;
-        }
-      } else {
-        if (session_p->control.expected_peer_address != peer_addr) {
-          continue;
-        } else {
-          BOOST_LOG(debug) << "Initialized new control stream session by IP address match [v1]"sv;
-        }
-      }
-
-      // Once the control stream connection is established, RTSP session state can be torn down
-      rtsp_stream::launch_session_clear(session_p->launch_session_id);
-
-      session_p->control.peer = peer;
-
-      // Use the local address from the control connection as the source address
-      // for other communications to the client. This is necessary to ensure
-      // proper routing on multi-homed hosts.
-      auto local_address = platf::from_sockaddr((sockaddr *) &peer->localAddress.address);
-      auto parsed_local_address = boost::asio::ip::make_address(local_address);
-      session_p->video->local_address = parsed_local_address;
-      session_p->audio->local_address = parsed_local_address;
-
-      // Publish the source addresses before waking the audio/video capture threads. The event's
-      // mutex provides the synchronization needed by the broadcast workers that consume them.
-      session_p->control_ready.raise(true);
-
-      BOOST_LOG(debug) << "Control local address ["sv << local_address << ']';
-      BOOST_LOG(debug) << "Control peer address ["sv << peer_addr << ':' << peer_port << ']';
-
-      // Insert this into the map for O(1) lookups in the future
-      auto ptslg = _peer_to_session.lock();
-      _peer_to_session->emplace(peer, session_p);
-      return session_p;
+    if (session->control.connect_data != connect_data) {
+      return nullptr;
     }
+    BOOST_LOG(debug) << "Initialized control stream session by connect-data match"sv;
 
-    return nullptr;
+    // Once the control stream connection is established, RTSP session state can be torn down.
+    rtsp_stream::launch_session_clear(session->launch_session_id);
+
+    _session->peer = peer;
+    session->control.peer = peer;
+
+    // Use the local address from the control connection as the source address for other
+    // communications to the client. This is necessary for correct routing on multi-homed hosts.
+    auto local_address = platf::from_sockaddr((sockaddr *) &peer->localAddress.address);
+    auto parsed_local_address = boost::asio::ip::make_address(local_address);
+    session->video->local_address = parsed_local_address;
+    session->audio->local_address = parsed_local_address;
+
+    // Publish source addresses before waking A/V capture. The event mutex provides the release
+    // ordering consumed by the capture and broadcast workers.
+    session->control_ready.raise(true);
+
+    BOOST_LOG(debug) << "Control local address ["sv << local_address << ']';
+    BOOST_LOG(debug) << "Control peer address ["sv << peer_addr << ':' << peer_port << ']';
+    return session;
   }
 
   /**
@@ -616,8 +547,8 @@ namespace stream {
    * @param reinjected `true` if this message is being reprocessed after decryption.
    */
   void control_server_t::call(std::uint16_t type, session_t *session, const std::string_view &payload, bool reinjected) {
-    // If we are using the encrypted control stream protocol, drop any messages that come off the wire unencrypted
-    if (session->config.controlProtocolType == 13 && !reinjected && type != packetTypes[IDX_ENCRYPTED]) {
+    // The only outer wire message in the modern protocol is the authenticated envelope.
+    if (!reinjected && type != control_packet::encrypted) {
       BOOST_LOG(error) << "Dropping unencrypted message on encrypted control stream: "sv << util::hex(type).to_string_view();
       return;
     }
@@ -729,11 +660,9 @@ namespace stream {
       if (parity_shards < minparityshards && fecpercentage != 0) {
         parity_shards = minparityshards;
         fecpercentage = (100 * parity_shards) / data_shards;
-
       }
 
-      if (fecpercentage != 0 &&
-          (data_shards > DATA_SHARDS_MAX || parity_shards > DATA_SHARDS_MAX || data_shards + parity_shards > DATA_SHARDS_MAX)) {
+      if (fecpercentage != 0 && (data_shards > DATA_SHARDS_MAX || parity_shards > DATA_SHARDS_MAX || data_shards + parity_shards > DATA_SHARDS_MAX)) {
         throw std::invalid_argument("Reed-Solomon shard count exceeds protocol limit");
       }
 
@@ -876,15 +805,15 @@ namespace stream {
    */
   int send_feedback_msg(session_t *session, platf::gamepad_feedback_msg_t &msg) {
     if (!session->control.peer) {
-      BOOST_LOG(warning) << "Couldn't send gamepad feedback data, still waiting for PING from Moonlight"sv;
-      // Still waiting for PING from Moonlight
+      BOOST_LOG(warning) << "Couldn't send gamepad feedback data, still waiting for PING from Artemis"sv;
+      // Still waiting for PING from Artemis
       return -1;
     }
 
     std::string payload;
     if (msg.type == platf::gamepad_feedback_e::rumble) {
       control_rumble_t plaintext;
-      plaintext.header.type = packetTypes[IDX_RUMBLE_DATA];
+      plaintext.header.type = control_packet::rumble;
       plaintext.header.payloadLength = sizeof(plaintext) - sizeof(control_header_v2);
 
       auto &data = msg.data.rumble;
@@ -900,7 +829,7 @@ namespace stream {
       payload = encode_control(session, util::view(plaintext), encrypted_payload);
     } else if (msg.type == platf::gamepad_feedback_e::rumble_triggers) {
       control_rumble_triggers_t plaintext;
-      plaintext.header.type = packetTypes[IDX_RUMBLE_TRIGGER_DATA];
+      plaintext.header.type = control_packet::rumble_triggers;
       plaintext.header.payloadLength = sizeof(plaintext) - sizeof(control_header_v2);
 
       auto &data = msg.data.rumble_triggers;
@@ -915,7 +844,7 @@ namespace stream {
       payload = encode_control(session, util::view(plaintext), encrypted_payload);
     } else if (msg.type == platf::gamepad_feedback_e::set_motion_event_state) {
       control_set_motion_event_t plaintext;
-      plaintext.header.type = packetTypes[IDX_SET_MOTION_EVENT];
+      plaintext.header.type = control_packet::set_motion_event;
       plaintext.header.payloadLength = sizeof(plaintext) - sizeof(control_header_v2);
 
       auto &data = msg.data.motion_event_state;
@@ -930,7 +859,7 @@ namespace stream {
       payload = encode_control(session, util::view(plaintext), encrypted_payload);
     } else if (msg.type == platf::gamepad_feedback_e::set_rgb_led) {
       control_set_rgb_led_t plaintext;
-      plaintext.header.type = packetTypes[IDX_SET_RGB_LED];
+      plaintext.header.type = control_packet::set_rgb_led;
       plaintext.header.payloadLength = sizeof(plaintext) - sizeof(control_header_v2);
 
       auto &data = msg.data.rgb_led;
@@ -946,7 +875,7 @@ namespace stream {
       payload = encode_control(session, util::view(plaintext), encrypted_payload);
     } else if (msg.type == platf::gamepad_feedback_e::set_adaptive_triggers) {
       control_adaptive_triggers_t plaintext;
-      plaintext.header.type = packetTypes[IDX_SET_ADAPTIVE_TRIGGERS];
+      plaintext.header.type = control_packet::set_adaptive_triggers;
       plaintext.header.payloadLength = sizeof(plaintext) - sizeof(control_header_v2);
 
       plaintext.id = util::endian::little(msg.id);
@@ -977,13 +906,13 @@ namespace stream {
 
   int send_hdr_mode(session_t *session, video::hdr_info_t hdr_info) {
     if (!session->control.peer) {
-      BOOST_LOG(warning) << "Couldn't send HDR mode, still waiting for PING from Moonlight"sv;
-      // Still waiting for PING from Moonlight
+      BOOST_LOG(warning) << "Couldn't send HDR mode, still waiting for PING from Artemis"sv;
+      // Still waiting for PING from Artemis
       return -1;
     }
 
     control_hdr_mode_t plaintext {};
-    plaintext.header.type = packetTypes[IDX_HDR_MODE];
+    plaintext.header.type = control_packet::hdr_mode;
     plaintext.header.payloadLength = sizeof(control_hdr_mode_t) - sizeof(control_header_v2);
 
     plaintext.enabled = hdr_info->enabled;
@@ -1006,12 +935,12 @@ namespace stream {
 
   int send_depth_status(session_t *session, int phase) {
     if (!session->control.peer) {
-      // Still waiting for PING from Moonlight; the periodic poll will retry on the next change.
+      // Still waiting for PING from Artemis; the periodic poll will retry on the next change.
       return -1;
     }
 
     control_depth_status_t plaintext {};
-    plaintext.header.type = packetTypes[IDX_DEPTH_STATUS];
+    plaintext.header.type = control_packet::depth_status;
     plaintext.header.payloadLength = sizeof(control_depth_status_t) - sizeof(control_header_v2);
     plaintext.phase = (std::uint8_t) phase;
 
@@ -1035,7 +964,7 @@ namespace stream {
     }
 
     control_terminate_t plaintext {};
-    plaintext.header.type = packetTypes[IDX_TERMINATION];
+    plaintext.header.type = control_packet::termination;
     plaintext.header.payloadLength = sizeof(plaintext.ec);
     plaintext.ec = util::endian::big<std::uint32_t>(0x80030023);
 
@@ -1049,36 +978,18 @@ namespace stream {
   }
 
   void controlBroadcastThread(control_server_t *server) {
-    server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *, const std::string_view &) {});
-
-    server->map(packetTypes[IDX_START_A], [&](session_t *session, const std::string_view &payload) {
-      BOOST_LOG(debug) << "type [IDX_START_A]"sv;
+    server->map(control_packet::periodic_ping, [](session_t *, const std::string_view &) {
     });
 
-    server->map(packetTypes[IDX_START_B], [&](session_t *session, const std::string_view &payload) {
-      BOOST_LOG(debug) << "type [IDX_START_B]"sv;
+    server->map(control_packet::start, [](session_t *, const std::string_view &) {
+      BOOST_LOG(debug) << "Received control-stream start"sv;
     });
 
-    server->map(packetTypes[IDX_LOSS_STATS], 4 * sizeof(std::int32_t),
-      [](session_t *, const std::string_view &payload) {
-        if (!config::sunshine.diagnostics_enabled) {
-          return;
-        }
-        std::int32_t stats[4];
-        std::memcpy(stats, payload.data(), sizeof(stats));
-        const auto lost = util::endian::little(stats[0]);
-        const auto window_ms = util::endian::little(stats[1]);
-        const auto last_good_frame = util::endian::little(stats[3]);
-        BOOST_LOG(info) << "Client video loss: packets="sv << lost
-                        << " window_ms="sv << window_ms
-                        << " last_good_frame="sv << last_good_frame;
-      });
-
-    server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [](session_t *session, const std::string_view &) {
+    server->map(control_packet::request_idr, [](session_t *session, const std::string_view &) {
       session->video->idr_events->raise(true);
     });
 
-    server->map(packetTypes[IDX_INVALIDATE_REF_FRAMES], 2 * sizeof(std::int64_t), [&](session_t *session, const std::string_view &payload) {
+    server->map(control_packet::invalidate_ref_frames, 2 * sizeof(std::int64_t), [&](session_t *session, const std::string_view &payload) {
       std::int64_t frames[2];
       std::memcpy(frames, payload.data(), sizeof(frames));
       auto firstFrame = util::endian::little(frames[0]);
@@ -1087,90 +998,7 @@ namespace stream {
       session->video->invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
     });
 
-    server->map(packetTypes[IDX_INPUT_DATA], sizeof(std::uint32_t), [&](session_t *session, const std::string_view &payload) {
-      std::uint32_t tagged_cipher_length;
-      std::memcpy(&tagged_cipher_length, payload.data(), sizeof(tagged_cipher_length));
-      tagged_cipher_length = util::endian::big(tagged_cipher_length);
-      if (!is_valid_legacy_input_payload(payload.size(), tagged_cipher_length)) {
-        BOOST_LOG(warning) << "Dropping malformed legacy input message: declared "sv << tagged_cipher_length
-                           << " tagged-cipher bytes in a "sv << payload.size() << "-byte payload"sv;
-        return;
-      }
-
-      std::string_view tagged_cipher = payload.substr(sizeof(tagged_cipher_length), tagged_cipher_length);
-
-      std::vector<uint8_t> plaintext;
-
-      auto &cipher = session->control.cipher;
-      auto &iv = session->control.legacy_input_enc_iv;
-      if (cipher.decrypt(tagged_cipher, plaintext, &iv)) {
-        // something went wrong :(
-
-        BOOST_LOG(error) << "Failed to verify tag"sv;
-
-        session::stop(*session);
-        return;
-      }
-
-      if (tagged_cipher_length >= 16 + iv.size()) {
-        std::copy(tagged_cipher.end() - 16, tagged_cipher.end(), std::begin(iv));
-      }
-
-      input::passthrough(session->input, std::move(plaintext), session::permissions(*session));
-    });
-
-    server->map(packetTypes[IDX_EXEC_SERVER_CMD], sizeof(std::uint8_t), [server](session_t *session, const std::string_view &payload) {
-      BOOST_LOG(debug) << "type [IDX_EXEC_SERVER_CMD]"sv;
-
-      if (!(session::permissions(*session) & crypto::PERM::server_cmd)) {
-        BOOST_LOG(debug) << "Permission Exec Server Cmd denied for [" << session::client_name(*session) << "]";
-        return;
-      }
-
-      uint8_t cmdIndex = *(uint8_t *) payload.data();
-
-      if (cmdIndex < config::sunshine.server_cmds.size()) {
-        const auto &cmd = config::sunshine.server_cmds[cmdIndex];
-        BOOST_LOG(info) << "Executing server command: " << cmd.cmd_name;
-
-        auto exec_thread = std::thread([&cmd] {
-          std::error_code ec;
-          auto env = proc::proc.get_env();
-          boost::filesystem::path working_dir = proc::find_working_directory(cmd.cmd_val, env);
-          auto child = platf::run_command(cmd.elevated, true, cmd.cmd_val, working_dir, env, nullptr, ec, nullptr);
-
-          if (ec) {
-            BOOST_LOG(error) << "Failed to execute server command: " << ec.message();
-          } else {
-            child.detach();
-          }
-        });
-
-        exec_thread.detach();
-      } else {
-        BOOST_LOG(error) << "Invalid server command index: " << (int) cmdIndex;
-      }
-    });
-
-    server->map(packetTypes[IDX_SET_CLIPBOARD], [server](session_t *session, const std::string_view &payload) {
-      if (!(session::permissions(*session) & crypto::PERM::clipboard_set)) {
-        BOOST_LOG(debug) << "Permission Clipboard Set denied for [" << session::client_name(*session) << "]";
-        return;
-      }
-
-      BOOST_LOG(debug) << "type [IDX_SET_CLIPBOARD]: received "sv << payload.size() << " payload bytes"sv;
-    });
-
-    server->map(packetTypes[IDX_FILE_TRANSFER_NONCE_REQUEST], [server](session_t *session, const std::string_view &payload) {
-      if (!(session::permissions(*session) & crypto::PERM::file_upload)) {
-        BOOST_LOG(debug) << "Permission File Upload denied for [" << session::client_name(*session) << "]";
-        return;
-      }
-
-      BOOST_LOG(debug) << "type [IDX_FILE_TRANSFER_NONCE_REQUEST]: received "sv << payload.size() << " payload bytes"sv;
-    });
-
-    server->map(packetTypes[IDX_SET_SBS_MODE], sizeof(std::uint8_t), [server](session_t *session, const std::string_view &payload) {
+    server->map(control_packet::set_sbs_mode, sizeof(std::uint8_t), [server](session_t *session, const std::string_view &payload) {
       // Host-side SBS mode requested by the client (Apollo protocol extension).
       // Must match SBS_MODE_* in the client's moonlight-common-c Limelight.h.
       auto mode = *(uint8_t *) payload.data();
@@ -1197,7 +1025,11 @@ namespace stream {
       session->mail->event<int>(mail::sbs_mode)->raise((int) mode);
     });
 
-    server->map(packetTypes[IDX_SBS_DEBUG_DUMP], [server](session_t *session, const std::string_view &payload) {
+    server->map(control_packet::sbs_debug_dump, [](session_t *session, const std::string_view &) {
+      if (!config::sunshine.diagnostics_enabled) {
+        return;
+      }
+
       // Debug: client tapped the "Dump 3D" button. Flag the next SBS convert() to dump one
       // frame's source/depth/SBS images to the configured debug dir (Apollo protocol extension).
       BOOST_LOG(info) << "type [IDX_SBS_DEBUG_DUMP]: client requested SBS debug frame dump for ["sv
@@ -1205,7 +1037,7 @@ namespace stream {
       ::video::sbs_debug_dump_pending.store(true, std::memory_order_relaxed);
     });
 
-    server->map(packetTypes[IDX_ENCRYPTED], CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + CONTROL_ENCRYPTED_SEQUENCE_SIZE, [server](session_t *session, const std::string_view &payload) {
+    server->map(control_packet::encrypted, CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + CONTROL_ENCRYPTED_SEQUENCE_SIZE, [server](session_t *session, const std::string_view &payload) {
       std::uint16_t length;
       std::uint32_t seq;
       std::memcpy(&length, payload.data(), sizeof(length));
@@ -1227,25 +1059,18 @@ namespace stream {
 
       auto &cipher = session->control.cipher;
       auto &iv = session->control.incoming_iv;
-      if (session->config.encryptionFlagsEnabled & SS_ENC_CONTROL_V2) {
-        // We use the deterministic IV construction algorithm specified in NIST SP 800-38D
-        // Section 8.2.1. The sequence number is our "invocation" field and the 'CC' in the
-        // high bytes is the "fixed" field. Because each client provides their own unique
-        // key, our values in the fixed field need only uniquely identify each independent
-        // use of the client's key with AES-GCM in our code.
-        //
-        // The sequence number is 32 bits long which allows for 2^32 control stream messages
-        // to be received from each client before the IV repeats.
-        iv.resize(12);
-        std::copy_n((uint8_t *) &seq, sizeof(seq), std::begin(iv));
-        iv[10] = 'C';  // Client originated
-        iv[11] = 'C';  // Control stream
-      } else {
-        // Nvidia's old style encryption uses a 16-byte IV
-        iv.resize(16);
-
-        iv[0] = (std::uint8_t) seq;
-      }
+      // We use the deterministic IV construction algorithm specified in NIST SP 800-38D
+      // Section 8.2.1. The sequence number is our "invocation" field and the 'CC' in the
+      // high bytes is the "fixed" field. Because each client provides their own unique
+      // key, our values in the fixed field need only uniquely identify each independent
+      // use of the client's key with AES-GCM in our code.
+      //
+      // The sequence number is 32 bits long which allows for 2^32 control stream messages
+      // to be received from each client before the IV repeats.
+      iv.resize(12);
+      std::copy_n((uint8_t *) &seq, sizeof(seq), std::begin(iv));
+      iv[10] = 'C';  // Client originated
+      iv[11] = 'C';  // Control stream
 
       std::vector<uint8_t> plaintext;
       if (cipher.decrypt(tagged_cipher, plaintext, &iv)) {
@@ -1279,14 +1104,14 @@ namespace stream {
         declared_payload_size
       };
 
-      if (type == packetTypes[IDX_ENCRYPTED]) {
+      if (type == control_packet::encrypted) {
         BOOST_LOG(error) << "Bad packet type [IDX_ENCRYPTED] found"sv;
         session::stop(*session);
         return;
       }
 
-      // IDX_INPUT_DATA callback will attempt to decrypt unencrypted data, therefore we need pass it directly
-      if (type == packetTypes[IDX_INPUT_DATA]) {
+      // Input data is already authenticated by the outer control-v2 envelope.
+      if (type == control_packet::input) {
         plaintext.erase(std::begin(plaintext), std::begin(plaintext) + CONTROL_HEADER_V2_SIZE);
         input::passthrough(session->input, std::move(plaintext), session::permissions(*session));
       } else {
@@ -1303,70 +1128,51 @@ namespace stream {
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
-      bool has_session_awaiting_peer = false;
-
       {
-        auto lg = server->_sessions.lock();
-
-        auto now = std::chrono::steady_clock::now();
-
-        KITTY_WHILE_LOOP(auto pos = std::begin(*server->_sessions), pos != std::end(*server->_sessions), {
-          // Don't perform additional session processing if we're shutting down
-          if (shutdown_event->peek() || broadcast_shutdown_event->peek()) {
-            break;
-          }
-
-          auto session = *pos;
-
-          if (now > session->pingTimeout) {
-            auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
-            BOOST_LOG(info) << address << ": Ping Timeout"sv;
+        auto slot_lock = server->_session.lock();
+        auto *session = server->_session->session;
+        if (session && !shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
+          if (std::chrono::steady_clock::now() > session->pingTimeout) {
+            const auto identity = server->_session->peer ?
+                                    platf::from_sockaddr((sockaddr *) &server->_session->peer->address.address) :
+                                    session->device_uuid;
+            BOOST_LOG(info) << identity << ": Ping Timeout"sv;
+            session::stop(*session);
+          } else if (proc::proc.stream_process_exited()) {
+            BOOST_LOG(info) << "Streamed application exited; stopping its session."sv;
             session::stop(*session);
           }
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
-            // Outgoing control encryption and ENet calls must remain on this thread. External
-            // shutdown callers only publish the stop mode and wake the capture workers.
+            // Outgoing control encryption and ENet calls remain on this thread. External
+            // shutdown callers only publish the stop mode and wake capture workers.
             if (session->graceful_stop_requested.load(std::memory_order_relaxed)) {
               send_termination(*server, *session);
             }
-            pos = server->_sessions->erase(pos);
-
-            if (session->control.peer) {
-              {
-                auto ptslg = server->_peer_to_session.lock();
-                server->_peer_to_session->erase(session->control.peer);
-              }
-
-              enet_peer_disconnect_now(session->control.peer, 0);
+            if (server->_session->peer) {
+              enet_peer_disconnect_now(server->_session->peer, 0);
             }
-
+            session->control.peer = nullptr;
+            server->_session->peer = nullptr;
+            server->_session->session = nullptr;
             session->controlEnd.raise(true);
-            continue;
-          }
-
-          // Remember if we have a session that's waiting for a peer to connect to the
-          // control stream. This ensures the clients are properly notified even when
-          // the app terminates before they finish connecting.
-          if (!session->control.peer) {
-            has_session_awaiting_peer = true;
+          } else if (!server->_session->peer) {
+            // The sole session is still waiting for its ENet peer.
           } else {
             auto &feedback_queue = session->control.feedback_queue;
             while (feedback_queue->peek()) {
               auto feedback_msg = feedback_queue->pop();
-
               send_feedback_msg(session, *feedback_msg);
             }
 
             auto &hdr_queue = session->control.hdr_queue;
-            while (session->control.peer && hdr_queue->peek()) {
+            while (server->_session->peer && hdr_queue->peek()) {
               auto hdr_info = hdr_queue->pop();
-
               send_hdr_mode(session, std::move(hdr_info));
             }
 
-            // Drain this session's depth-engine status to the latest phase. An event intentionally
-            // coalesces a fast loading->ready transition so cached engines don't flash the UI.
+            // Drain depth-engine state to its latest phase. The event intentionally coalesces a
+            // fast loading->ready transition so cached engines do not flash the client UI.
             auto depth_status_event = session->mail->event<int>(mail::sbs_depth_status);
             std::optional<int> depth_phase;
             while (depth_status_event->peek()) {
@@ -1374,88 +1180,74 @@ namespace stream {
                 depth_phase = *phase;
               }
             }
-            if (depth_phase && *depth_phase != session->control.last_depth_phase) {
-              if (send_depth_status(session, *depth_phase) == 0) {
-                session->control.last_depth_phase = *depth_phase;
-              }
+            if (depth_phase && *depth_phase != session->control.last_depth_phase && send_depth_status(session, *depth_phase) == 0) {
+              session->control.last_depth_phase = *depth_phase;
             }
           }
-
-          ++pos;
-        })
-      }
-
-      // Don't break until any pending sessions either expire or connect
-      if (proc::proc.running() == 0 && !has_session_awaiting_peer) {
-        BOOST_LOG(info) << "Process terminated"sv;
-        break;
+        }
       }
 
       server->iterate(150ms);
     }
 
-    // Let all remaining connections know the server is shutting down.
-    auto lg = server->_sessions.lock();
-    for (auto pos = std::begin(*server->_sessions); pos != std::end(*server->_sessions); ++pos) {
-      auto session = *pos;
-
+    // Detach the raw registration before its owning RTSP session can be destroyed.
+    auto slot_lock = server->_session.lock();
+    if (auto *session = server->_session->session) {
       send_termination(*server, *session);
-
       session->shutdown_event->raise(true);
       session->controlEnd.raise(true);
+      session->control.peer = nullptr;
+      server->_session->peer = nullptr;
+      server->_session->session = nullptr;
     }
 
     server->flush();
   }
 
   void recvThread(broadcast_ctx_t &ctx) {
-    std::map<av_session_id_t, message_queue_t> peer_to_video_session;
-    std::map<av_session_id_t, message_queue_t> peer_to_audio_session;
+    std::array<std::optional<av_ping_route_t>, 2> routes;
 
     auto &video_sock = ctx.video_sock;
     auto &audio_sock = ctx.audio_sock;
 
-    auto &message_queue_queue = ctx.message_queue_queue;
+    auto &route_updates = ctx.av_ping_route_updates;
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
 
     auto &io = ctx.io_context;
 
-    udp::endpoint peer;
+    std::array<udp::endpoint, 2> peers;
+    std::array<std::array<char, 2048>, 2> buffers;
+    std::array<std::function<void(const boost::system::error_code, size_t)>, 2> recv_func;
 
-    std::array<char, 2048> buf[2];
-    std::function<void(const boost::system::error_code, size_t)> recv_func[2];
+    auto route_index = [](socket_e type) {
+      return type == socket_e::video ? 0U : 1U;
+    };
 
-    auto populate_peer_to_session = [&]() {
-      while (message_queue_queue->peek()) {
-        auto message_queue_opt = message_queue_queue->pop();
-        TUPLE_3D_REF(socket_type, session_id, message_queue, *message_queue_opt);
+    auto apply_route_updates = [&]() {
+      while (route_updates->peek()) {
+        auto update = route_updates->pop();
+        if (!update) {
+          break;
+        }
 
-        switch (socket_type) {
-          case socket_e::video:
-            if (message_queue) {
-              peer_to_video_session.emplace(session_id, message_queue);
-            } else {
-              peer_to_video_session.erase(session_id);
-            }
-            break;
-          case socket_e::audio:
-            if (message_queue) {
-              peer_to_audio_session.emplace(session_id, message_queue);
-            } else {
-              peer_to_audio_session.erase(session_id);
-            }
-            break;
+        auto &route = routes[route_index(update->socket_type)];
+        if (update->route) {
+          route = std::move(update->route);
+        } else if (route && route->id == update->id) {
+          // A stopped session may publish removal after its successor has registered. Remove only
+          // the generation that issued this update, never the newer route occupying the slot.
+          route.reset();
         }
       }
     };
 
-    auto recv_func_init = [&](udp::socket &sock, int buf_elem, std::map<av_session_id_t, message_queue_t> &peer_to_session) {
-      recv_func[buf_elem] = [&, buf_elem](const boost::system::error_code &ec, size_t bytes) {
+    auto recv_func_init = [&](udp::socket &sock, std::size_t index) {
+      recv_func[index] = [&, index](const boost::system::error_code &ec, size_t bytes) {
         auto fg = util::fail_guard([&]() {
-          sock.async_receive_from(asio::buffer(buf[buf_elem]), peer, 0, recv_func[buf_elem]);
+          sock.async_receive_from(asio::buffer(buffers[index]), peers[index], 0, recv_func[index]);
         });
 
-        populate_peer_to_session();
+        apply_route_updates();
 
         // No data, yet no error
         if (ec == boost::system::errc::connection_refused || ec == boost::system::errc::connection_reset) {
@@ -1467,29 +1259,28 @@ namespace stream {
           return;
         }
 
-        if (bytes == 4) {
-          // For legacy PING packets, find the matching session by address.
-          auto it = peer_to_session.find(peer.address());
-          if (it != std::end(peer_to_session)) {
-            it->second->raise(peer, std::string {buf[buf_elem].data(), bytes});
-          }
-        } else if (bytes >= sizeof(SS_PING)) {
-          auto ping = (PSS_PING) buf[buf_elem].data();
+        auto &route = routes[index];
+        if (!route) {
+          return;
+        }
 
-          // For new PING packets that include a client identifier, search by payload.
-          auto it = peer_to_session.find(std::string {ping->payload, sizeof(ping->payload)});
-          if (it != std::end(peer_to_session)) {
-            it->second->raise(peer, std::string {buf[buf_elem].data(), bytes});
+        if (bytes == sizeof(SS_PING)) {
+          auto ping = reinterpret_cast<PSS_PING>(buffers[index].data());
+          if (route->payload == std::string_view {ping->payload, sizeof(ping->payload)}) {
+            route->messages->raise(
+              peers[index],
+              std::string {buffers[index].data(), bytes}
+            );
           }
         }
       };
     };
 
-    recv_func_init(video_sock, 0, peer_to_video_session);
-    recv_func_init(audio_sock, 1, peer_to_audio_session);
+    recv_func_init(video_sock, 0);
+    recv_func_init(audio_sock, 1);
 
-    video_sock.async_receive_from(asio::buffer(buf[0]), peer, 0, recv_func[0]);
-    audio_sock.async_receive_from(asio::buffer(buf[1]), peer, 0, recv_func[1]);
+    video_sock.async_receive_from(asio::buffer(buffers[0]), peers[0], 0, recv_func[0]);
+    audio_sock.async_receive_from(asio::buffer(buffers[1]), peers[1], 0, recv_func[1]);
 
     while (!broadcast_shutdown_event->peek()) {
       io.run();
@@ -1648,7 +1439,7 @@ namespace stream {
         // appear in "Other I/O" and begin waiting for interrupts.
         // This gives inconsistent performance so we'd rather avoid it.
         size_t send_batch_size = 64 * 1024 / blocksize;
-        // Also don't exceed 64 packets, which can happen when Moonlight requests
+        // Also don't exceed 64 packets, which can happen when Artemis requests
         // unusually small packet size.
         // Generic Segmentation Offload on Linux can't do more than 64.
         send_batch_size = std::min<size_t>(64, send_batch_size);
@@ -1669,7 +1460,7 @@ namespace stream {
             inspect->packet.frameIndex = packet->frame_index();
             inspect->packet.streamPacketIndex = ((uint32_t) lowseq + x) << 8;
 
-            // Match multiFecFlags with Moonlight
+            // Match multiFecFlags with Artemis
             inspect->packet.multiFecFlags = 0x10;
             inspect->packet.multiFecBlocks = (blockIndex << 4) | ((fec_blocks_needed - 1) << 6);
 
@@ -1683,8 +1474,7 @@ namespace stream {
           }
 
           frame_fec_latency_logger.first_point_now();
-          // If video encryption is enabled, we allocate space for the encryption header before each shard
-          auto shards = fec::encode(current_payload, blocksize, fecPercentage, channel->min_required_fec_packets, channel->cipher ? sizeof(video_packet_enc_prefix_t) : 0);
+          auto shards = fec::encode(current_payload, blocksize, fecPercentage, channel->min_required_fec_packets, sizeof(video_packet_enc_prefix_t));
           frame_fec_latency_logger.second_point_now_and_log();
 
           auto peer_address = channel->peer.address();
@@ -1727,26 +1517,16 @@ namespace stream {
             inspect->packet.multiFecBlocks = (blockIndex << 4) | ((fec_blocks_needed - 1) << 6);
             inspect->packet.frameIndex = packet->frame_index();
 
-            // Encrypt this shard if video encryption is enabled
-            if (channel->cipher) {
-              // We use the deterministic IV construction algorithm specified in NIST SP 800-38D
-              // Section 8.2.1. The sequence number is our "invocation" field and the 'V' in the
-              // high bytes is the "fixed" field. Because each client provides their own unique
-              // key, our values in the fixed field need only uniquely identify each independent
-              // use of the client's key with AES-GCM in our code.
-              //
-              // The IV counter is 64 bits long which allows for 2^64 encrypted video packets
-              // to be sent to each client before the IV repeats.
-              std::copy_n((uint8_t *) &channel->gcm_iv_counter, sizeof(channel->gcm_iv_counter), std::begin(iv));
-              iv[11] = 'V';  // Video stream
-              channel->gcm_iv_counter++;
+            // Use the deterministic IV construction algorithm specified in NIST SP 800-38D
+            // Section 8.2.1. The counter identifies each use of the client's unique key.
+            std::copy_n((uint8_t *) &channel->gcm_iv_counter, sizeof(channel->gcm_iv_counter), std::begin(iv));
+            iv[11] = 'V';  // Video stream
+            channel->gcm_iv_counter++;
 
-              // Encrypt the target buffer in place
-              auto *prefix = (video_packet_enc_prefix_t *) shards.prefix(x);
-              prefix->frameNumber = packet->frame_index();
-              std::copy(std::begin(iv), std::end(iv), prefix->iv);
-              channel->cipher->encrypt(std::string_view {(char *) inspect, (size_t) blocksize}, prefix->tag, (uint8_t *) inspect, &iv);
-            }
+            auto *prefix = (video_packet_enc_prefix_t *) shards.prefix(x);
+            prefix->frameNumber = packet->frame_index();
+            std::copy(std::begin(iv), std::end(iv), prefix->iv);
+            channel->cipher.encrypt(std::string_view {(char *) inspect, (size_t) blocksize}, prefix->tag, (uint8_t *) inspect, &iv);
 
             if (x - next_shard_to_send + 1 >= send_batch_size || x + 1 == shards.size()) {
               // Do pacing within the frame.
@@ -1862,11 +1642,12 @@ namespace stream {
       auto sequenceNumber = channel->sequence_number;
       auto timestamp = channel->timestamp;
 
-      *(std::uint32_t *) iv.data() = util::endian::big<std::uint32_t>(channel->av_ri_key_id + sequenceNumber);
+      const auto packet_iv = util::endian::big<std::uint32_t>(channel->av_ri_key_id + sequenceNumber);
+      std::memcpy(iv.data(), &packet_iv, sizeof(packet_iv));
 
       auto &shards_p = channel->shard_ptrs;
 
-      auto bytes = encode_audio(channel->encrypted, packet_data, shards_p[sequenceNumber % RTPA_DATA_SHARDS], iv, channel->cipher);
+      auto bytes = encode_audio(packet_data, shards_p[sequenceNumber % RTPA_DATA_SHARDS], iv, channel->cipher);
       if (bytes < 0) {
         BOOST_LOG(error) << "Couldn't encode audio packet"sv;
         break;
@@ -1991,7 +1772,7 @@ namespace stream {
       return -1;
     }
 
-    ctx.message_queue_queue = std::make_shared<message_queue_queue_t::element_type>(30);
+    ctx.av_ping_route_updates = std::make_shared<av_ping_route_queue_t::element_type>(30);
 
     // Thread construction can throw after one or more workers have started. Roll back every
     // partially initialized worker before shared_t destroys and retries this broadcast object.
@@ -2021,8 +1802,8 @@ namespace stream {
     video_packets->stop();
     audio_packets->stop();
 
-    if (ctx.message_queue_queue) {
-      ctx.message_queue_queue->stop();
+    if (ctx.av_ping_route_updates) {
+      ctx.av_ping_route_updates->stop();
     }
     ctx.io_context.stop();
 
@@ -2055,51 +1836,45 @@ namespace stream {
   }
 
   int recv_ping(session_t *session, decltype(broadcast)::ptr_t ref, socket_e type, std::string_view expected_payload, udp::endpoint &peer, std::chrono::milliseconds timeout) {
-    auto messages = std::make_shared<message_queue_t::element_type>(30);
-    av_session_id_t session_id = std::string {expected_payload};
-
-    // Only allow matches on the peer address for legacy clients
-    if (!(session->config.mlFeatureFlags & ML_FF_SESSION_ID_V1)) {
-      ref->message_queue_queue->raise(type, peer.address(), messages);
+    if (expected_payload.size() != sizeof(SS_PING::payload)) {
+      BOOST_LOG(error) << "Refusing invalid A/V ping identity length: "sv << expected_payload.size();
+      return -1;
     }
-    ref->message_queue_queue->raise(type, session_id, messages);
+
+    auto messages = std::make_shared<message_queue_t::element_type>(30);
+    ref->av_ping_route_updates->raise(av_ping_route_update_t {
+      type,
+      session->launch_session_id,
+      av_ping_route_t {
+        session->launch_session_id,
+        std::string {expected_payload},
+        messages,
+      },
+    });
 
     auto fg = util::fail_guard([&]() {
       messages->stop();
-
-      // remove message queue from session
-      if (!(session->config.mlFeatureFlags & ML_FF_SESSION_ID_V1)) {
-        ref->message_queue_queue->raise(type, peer.address(), nullptr);
-      }
-      ref->message_queue_queue->raise(type, session_id, nullptr);
+      ref->av_ping_route_updates->raise(av_ping_route_update_t {
+        type,
+        session->launch_session_id,
+        std::nullopt,
+      });
     });
 
     auto start_time = std::chrono::steady_clock::now();
     auto current_time = start_time;
 
-    while (current_time - start_time < config::stream.ping_timeout) {
+    while (current_time - start_time < timeout) {
       auto delta_time = current_time - start_time;
 
-      auto msg_opt = messages->pop(config::stream.ping_timeout - delta_time);
+      auto msg_opt = messages->pop(timeout - delta_time);
       if (!msg_opt) {
         break;
       }
 
-      TUPLE_2D_REF(recv_peer, msg, *msg_opt);
-      if (msg.find(expected_payload) != std::string::npos) {
-        // Match the new PING payload format
-        BOOST_LOG(debug) << "Received initial "sv << (type == socket_e::video ? "video"sv : "audio"sv)
-                         << " ping [v2] from "sv << recv_peer.address() << ':' << recv_peer.port();
-      } else if (!(session->config.mlFeatureFlags & ML_FF_SESSION_ID_V1) && msg == "PING"sv) {
-        // Match the legacy fixed PING payload only if the new type is not supported
-        BOOST_LOG(debug) << "Received initial "sv << (type == socket_e::video ? "video"sv : "audio"sv)
-                         << " ping [v1] from "sv << recv_peer.address() << ':' << recv_peer.port();
-      } else {
-        BOOST_LOG(debug) << "Ignoring an unexpected packet while waiting for the initial "sv
-                         << (type == socket_e::video ? "video"sv : "audio"sv) << " ping."sv;
-        current_time = std::chrono::steady_clock::now();
-        continue;
-      }
+      auto &recv_peer = msg_opt->first;
+      BOOST_LOG(debug) << "Received initial "sv << (type == socket_e::video ? "video"sv : "audio"sv)
+                       << " SS ping from "sv << recv_peer.address() << ':' << recv_peer.port();
 
       // Update connection details.
       peer = recv_peer;
@@ -2123,8 +1898,7 @@ namespace stream {
 
     // Register for the UDP ping immediately so an early client ping is not lost, then wait until
     // platform resume and the control connection have both completed before emitting any frames.
-    if (!session->startup_ready.view() || !session->control_ready.view() ||
-        session->state.load(std::memory_order_acquire) != session::state_e::RUNNING) {
+    if (!session->startup_ready.view() || !session->control_ready.view() || session->state.load(std::memory_order_acquire) != session::state_e::RUNNING) {
       return;
     }
 
@@ -2149,8 +1923,7 @@ namespace stream {
 
     // Audio pings commonly arrive before a resumed virtual display is ready. Holding capture here
     // prevents packets from being sent with an uninitialized local address (WSAEINVAL/10022).
-    if (!session->startup_ready.view() || !session->control_ready.view() ||
-        session->state.load(std::memory_order_acquire) != session::state_e::RUNNING) {
+    if (!session->startup_ready.view() || !session->control_ready.view() || session->state.load(std::memory_order_acquire) != session::state_e::RUNNING) {
       return;
     }
 
@@ -2163,20 +1936,125 @@ namespace stream {
   }
 
   namespace session {
-    std::atomic_uint running_sessions;
-
     namespace {
+      // Construct both per-session workers behind a shared gate. If creating either std::thread
+      // throws, the already-created worker is released as a no-op and joined before its thread
+      // object is destroyed. This keeps a resource-exhaustion failure from terminating the host.
+      class pending_session_workers_t {
+      public:
+        ~pending_session_workers_t() {
+          cancel();
+        }
+
+        pending_session_workers_t(const pending_session_workers_t &) = delete;
+        pending_session_workers_t &operator=(const pending_session_workers_t &) = delete;
+
+        pending_session_workers_t() = default;
+
+        bool prepare(
+          std::function<void()> audio_entry,
+          std::function<void()> video_entry,
+          bool fail_before_video_for_test = false,
+          std::function<void()> failure_handler = {}
+        ) noexcept {
+          try {
+            gate_ = std::make_shared<std::promise<bool>>();
+            auto ready = gate_->get_future().share();
+            auto start_worker = [ready, failure_handler](std::string_view name, std::function<void()> entry) {
+              return std::thread {[ready, failure_handler, name, entry = std::move(entry)]() mutable {
+                try {
+                  if (ready.get()) {
+                    entry();
+                  }
+                } catch (const std::future_error &) {
+                  // A broken startup gate is equivalent to a cancelled session.
+                  return;
+                } catch (const std::exception &exception) {
+                  BOOST_LOG(error) << name << " session worker failed: "sv << exception.what();
+                } catch (...) {
+                  BOOST_LOG(error) << name << " session worker failed with an unknown error."sv;
+                }
+
+                if (failure_handler) {
+                  failure_handler();
+                }
+              }};
+            };
+            audio_ = start_worker("Audio"sv, std::move(audio_entry));
+
+#ifdef SUNSHINE_TESTS
+            if (fail_before_video_for_test) {
+              throw std::runtime_error {"injected second session-worker start failure"};
+            }
+#else
+            (void) fail_before_video_for_test;
+#endif
+
+            video_ = start_worker("Video"sv, std::move(video_entry));
+            return true;
+          } catch (const std::exception &exception) {
+            if (!fail_before_video_for_test) {
+              BOOST_LOG(error) << "Failed to create streaming session workers: "sv << exception.what();
+            }
+          } catch (...) {
+            if (!fail_before_video_for_test) {
+              BOOST_LOG(error) << "Failed to create streaming session workers with an unknown error."sv;
+            }
+          }
+
+          cancel();
+          return false;
+        }
+
+        void commit(session_t &session) noexcept {
+          session.audioThread = std::move(audio_);
+          session.videoThread = std::move(video_);
+          resolve(true);
+        }
+
+        void cancel() noexcept {
+          resolve(false);
+          if (video_.joinable()) {
+            video_.join();
+          }
+          if (audio_.joinable()) {
+            audio_.join();
+          }
+        }
+
+        [[nodiscard]] bool has_joinable_worker() const noexcept {
+          return audio_.joinable() || video_.joinable();
+        }
+
+      private:
+        void resolve(bool run) noexcept {
+          if (!gate_) {
+            return;
+          }
+
+          try {
+            gate_->set_value(run);
+          } catch (const std::future_error &) {
+            // Resolution is intentionally idempotent for cleanup paths.
+          }
+          gate_.reset();
+        }
+
+        std::shared_ptr<std::promise<bool>> gate_;
+        std::thread audio_;
+        std::thread video_;
+      };
+
       // Starting a Windows streaming session reapplies NVIDIA profile settings and can take
-      // several seconds. Keep that process-wide platform state warm briefly after the last
-      // client leaves so a transient headset disconnect can resume immediately. The mutex also
-      // serializes a grace expiry with a concurrent first-session start; generation checks make
-      // a delayed task harmless after cancellation has lost a race with task execution.
+      // several seconds. Keep that process-wide platform state warm briefly after disconnect,
+      // but also bound an accepted launch that never completes its RTSP handshake. The mutex owns
+      // the single-active-session invariant and serializes both expiry paths with startup.
       std::mutex platform_lifecycle_mutex;
+      bool remote_session_active {};
       std::uint64_t platform_lifecycle_generation {};
       task_pool_util::TaskPool::task_id_t pending_platform_stop {};
       bool platform_streaming_warm {};
-      std::optional<std::uint32_t> warm_process_instance;
-      bool warm_process_needs_resume {};
+      std::optional<std::uint64_t> warm_process_instance;
 
       void invalidate_pending_platform_stop_locked() {
         ++platform_lifecycle_generation;
@@ -2189,7 +2067,6 @@ namespace stream {
       void stop_warm_platform_locked() {
         invalidate_pending_platform_stop_locked();
         warm_process_instance.reset();
-        warm_process_needs_resume = false;
         if (!platform_streaming_warm) {
           return;
         }
@@ -2202,50 +2079,43 @@ namespace stream {
         invalidate_pending_platform_stop_locked();
         const auto generation = platform_lifecycle_generation;
         pending_platform_stop = task_pool.pushDelayed([generation]() {
-          std::lock_guard delayed_lock(platform_lifecycle_mutex);
-          if (generation != platform_lifecycle_generation ||
-              running_sessions.load(std::memory_order_acquire) != 0 ||
-              !platform_streaming_warm) {
-            return;
-          }
+                                           std::lock_guard delayed_lock(platform_lifecycle_mutex);
+                                           if (generation != platform_lifecycle_generation || remote_session_active) {
+                                             return;
+                                           }
 
-          // A new /launch can replace the retained process just before publishing its pending
-          // RTSP handshake. Do not terminate that new process in the HTTP -> RTSP gap;
-          // give it one fresh grace window and remember that it still needs resume semantics.
-          const auto current_process_instance = proc::proc.get_launch_session_id();
-          if (current_process_instance && current_process_instance != warm_process_instance) {
-            warm_process_instance = current_process_instance;
-            warm_process_needs_resume = true;
-            schedule_platform_stop_locked(std::max(config::stream.session_resume_grace, config::stream.ping_timeout));
-            return;
-          }
+                                           // A new /launch can replace the retained process just before publishing its pending
+                                           // RTSP handshake. Do not terminate that new process in the HTTP -> RTSP gap; give it
+                                           // one fresh handshake window.
+                                            const auto current_process_instance = proc::proc.get_host_session_id();
+                                            if (current_process_instance != 0 && current_process_instance != warm_process_instance) {
+                                             warm_process_instance = current_process_instance;
+                                             schedule_platform_stop_locked(config::stream.ping_timeout);
+                                             return;
+                                           }
 
-          pending_platform_stop = nullptr;
-          BOOST_LOG(info) << "Streaming session resume grace expired; terminating the retained app."sv;
-          // A reconnect normally reserves the warm state before publishing its RTSP handshake.
-          // Clear any leftover reservation too so /serverinfo cannot advertise a resumable app
-          // after this authoritative expiry point.
-          rtsp_stream::clear_pending_launch_session();
-          if (proc::proc.running()) {
-            proc::proc.terminate();
-          } else {
-            display_device::revert_configuration();
-          }
-          warm_process_instance.reset();
-          warm_process_needs_resume = false;
-          platf::streaming_will_stop();
-          platform_streaming_warm = false;
-        }, delay).task_id;
+                                           pending_platform_stop = nullptr;
+                                           BOOST_LOG(info) << (platform_streaming_warm ? "Streaming session resume grace expired; terminating the retained app." : "Streaming launch handshake expired; terminating the unclaimed app.");
+                                           // A reconnect normally reserves the warm state before publishing its RTSP handshake.
+                                           // Clear any leftover reservation too so /serverinfo cannot advertise a resumable app
+                                           // after this authoritative expiry point.
+                                           rtsp_stream::clear_pending_launch_session();
+                                            if (proc::proc.running() > 0) {
+                                             proc::proc.terminate();
+                                           }
+                                           warm_process_instance.reset();
+                                           if (platform_streaming_warm) {
+                                             platf::streaming_will_stop();
+                                             platform_streaming_warm = false;
+                                           }
+                                         },
+                                                      delay)
+                                  .task_id;
       }
 
-      bool resume_first_session_locked(std::uint32_t remote_virtual_display_lease) {
-        const auto current_process_instance = proc::proc.get_launch_session_id();
-        const bool same_active_app = platform_streaming_warm &&
-                                     !warm_process_needs_resume &&
-                                     warm_process_instance &&
-                                     current_process_instance == warm_process_instance;
+      bool activate_remote_session_locked(std::uint32_t remote_virtual_display_lease) {
         // Every accepted reconnect owns a new launch-session lease. Adopt it before potentially
-        // slow platform startup, including the warm path that intentionally skips app commands.
+        // slow platform startup.
         // Failure is terminal for this RTSP session: streaming without the lease would let local
         // AR reclaim and remove the virtual display while capture is running.
         if (!proc::proc.activate_remote_virtual_display_lease(remote_virtual_display_lease)) {
@@ -2261,67 +2131,39 @@ namespace stream {
           platform_streaming_warm = true;
         }
 
-        if (same_active_app) {
-          // The short-disconnect grace intentionally kept the app and remote virtual-display
-          // ownership active. Re-running resume commands here could overlap the app's live state
-          // and is unnecessary for the same process.
-          BOOST_LOG(info) << "Resuming the existing app without replaying app resume commands."sv;
-        } else {
-          proc::proc.resume();
-        }
         warm_process_instance.reset();
-        warm_process_needs_resume = false;
         return true;
       }
 
-      void retain_or_stop_last_session_locked() {
-        if (running_sessions.load(std::memory_order_acquire) != 0) {
+      void retain_or_stop_session_locked() {
+        if (remote_session_active) {
           return;
         }
 
-        bool revert_display_config {config::video.dd.config_revert_on_disconnect};
         invalidate_pending_platform_stop_locked();
         const auto process_status = proc::proc.get_status();
         if (process_status.app_id == 0) {
           // There is no app/session state worth retaining. Match the historical cleanup path.
           rtsp_stream::clear_pending_launch_session();
-          display_device::revert_configuration();
           stop_warm_platform_locked();
           return;
         }
 
-        if (process_status.terminate_on_pause) {
-          // This per-app contract predates and intentionally overrides the global resume grace.
-          // Remote Input relies on it, and retaining such an app would leave a session that its
-          // owner explicitly requested Apollo to destroy on the final disconnect.
-          BOOST_LOG(info) << "App is configured to terminate when all clients disconnect; skipping session resume grace."sv;
+        if (!platform_streaming_warm) {
           rtsp_stream::clear_pending_launch_session();
           proc::proc.terminate();
-          stop_warm_platform_locked();
-          return;
-        }
-
-        if (revert_display_config || !platform_streaming_warm) {
-          // An explicit display-revert policy is incompatible with retaining the virtual desktop.
-          // There is no useful fast-resume contract in this path, so clear the app state rather
-          // than leaving /serverinfo advertising a session that has no expiry timer.
-          rtsp_stream::clear_pending_launch_session();
-          proc::proc.terminate();
-          if (revert_display_config) {
-            display_device::revert_configuration();
-          }
           stop_warm_platform_locked();
           return;
         }
 
         // Keep the app and remote virtual-display ownership active during the grace. Capture,
         // encoding, transport, and input are already stopped with the session; retaining process
-        // ownership prevents competing presentation ownership and app pause/resume command races.
-        warm_process_instance = proc::proc.get_launch_session_id();
-        warm_process_needs_resume = false;
-        // A validated HTTP launch may be waiting to replace the final active stream. Preserve
-        // the platform for at least its RTSP handshake window even when reconnect grace is off
-        // or configured shorter than ping_timeout.
+        // ownership prevents another presentation path from claiming the display.
+        const auto host_session_id = proc::proc.get_host_session_id();
+        warm_process_instance = host_session_id == 0 ? std::nullopt : std::optional<std::uint64_t> {host_session_id};
+        // The current launch reservation may still be waiting for its control connection.
+        // Preserve the platform for at least that RTSP handshake window even when reconnect
+        // grace is off or configured shorter than ping_timeout.
         const bool validated_launch_pending = !rtsp_stream::launch_session_available();
         if (config::stream.session_resume_grace <= 0ms && !validated_launch_pending) {
           BOOST_LOG(info) << "Session resume grace is disabled; terminating the retained app."sv;
@@ -2341,7 +2183,7 @@ namespace stream {
     struct platform_launch_guard_t::impl_t {
       impl_t():
           lock {platform_lifecycle_mutex},
-          idle {running_sessions.load(std::memory_order_acquire) == 0} {
+          idle {!remote_session_active} {
       }
 
       std::unique_lock<std::mutex> lock;
@@ -2366,35 +2208,16 @@ namespace stream {
         return;
       }
 
-      if (_impl->idle && platform_streaming_warm &&
-          running_sessions.load(std::memory_order_acquire) == 0) {
-        const auto current_process_instance = proc::proc.get_launch_session_id();
-        if (current_process_instance && current_process_instance != warm_process_instance) {
+      if (_impl->idle && !remote_session_active) {
+        const auto current_process_instance = proc::proc.get_host_session_id();
+        if (current_process_instance != 0) {
           warm_process_instance = current_process_instance;
-          warm_process_needs_resume = true;
         }
-        schedule_platform_stop_locked(std::max(config::stream.session_resume_grace, config::stream.ping_timeout));
-        BOOST_LOG(debug) << "Committed validated reconnect reservation for warm platform state."sv;
-      }
-      _impl->committed = true;
-      _impl->lock.unlock();
-    }
-
-    void platform_launch_guard_t::release() {
-      if (_impl && _impl->lock.owns_lock()) {
-        _impl->lock.unlock();
-      }
-    }
-
-    void platform_launch_guard_t::detach_retained_state() {
-      if (!_impl || !_impl->lock.owns_lock()) {
-        return;
-      }
-
-      if (_impl->idle && running_sessions.load(std::memory_order_acquire) == 0) {
-        // The Web UI launched an app without publishing an RTSP reservation. It owns no remote
-        // reconnect deadline, so cancel the old one without terminating the newly launched app.
-        stop_warm_platform_locked();
+        const auto timeout = platform_streaming_warm ?
+                               std::max(config::stream.session_resume_grace, config::stream.ping_timeout) :
+                               config::stream.ping_timeout;
+        schedule_platform_stop_locked(timeout);
+        BOOST_LOG(debug) << "Committed streaming launch reservation with bounded lifetime."sv;
       }
       _impl->committed = true;
       _impl->lock.unlock();
@@ -2411,6 +2234,35 @@ namespace stream {
 #ifdef SUNSHINE_TESTS
     void set_state_for_test(session_t &session, state_e state) {
       session.state.store(state, std::memory_order_relaxed);
+    }
+
+    bool claim_active_slot_for_test() {
+      std::lock_guard lock(platform_lifecycle_mutex);
+      if (remote_session_active) {
+        return false;
+      }
+      remote_session_active = true;
+      return true;
+    }
+
+    void release_active_slot_for_test() {
+      std::lock_guard lock(platform_lifecycle_mutex);
+      remote_session_active = false;
+    }
+
+    bool worker_start_rollback_for_test() {
+      std::atomic_int executed {};
+      pending_session_workers_t workers;
+      const bool prepared = workers.prepare(
+        [&executed]() {
+          ++executed;
+        },
+        [&executed]() {
+          ++executed;
+        },
+        true
+      );
+      return !prepared && executed.load() == 0 && !workers.has_joinable_worker();
     }
 #endif
 
@@ -2483,7 +2335,6 @@ namespace stream {
     }
 
     void stop(session_t &session) {
-      while_starting_do_nothing(session.state);
       if (!transition_to_stopping(session, false)) {
         return;
       }
@@ -2492,7 +2343,6 @@ namespace stream {
     }
 
     void graceful_stop(session_t &session) {
-      while_starting_do_nothing(session.state);
       if (!transition_to_stopping(session, true)) {
         return;
       }
@@ -2501,7 +2351,6 @@ namespace stream {
     }
 
     bool stop_if_client_policy_current(session_t &session, std::uint64_t generation, bool graceful) {
-      while_starting_do_nothing(session.state);
       {
         // Make validation and the RUNNING -> STOPPING claim one transaction with policy updates.
         // A delayed revoke can no longer stop a session after a newer allow policy was applied.
@@ -2540,38 +2389,22 @@ namespace stream {
       BOOST_LOG(debug) << "Resetting Input..."sv;
       input::reset(session.input);
 
-      if (!session.undo_cmds.empty()) {
-        auto exec_thread = std::thread([cmd_list = session.undo_cmds] {
-          for (auto &cmd : cmd_list) {
-            std::error_code ec;
-            auto env = proc::proc.get_env();
-            boost::filesystem::path working_dir = proc::find_working_directory(cmd.cmd, env);
-            auto child = platf::run_command(cmd.elevated, true, cmd.cmd, working_dir, env, nullptr, ec, nullptr);
-            BOOST_LOG(info) << "Spawning client undo command ["sv << cmd.cmd << "] in ["sv << working_dir << ']';
-            if (ec) {
-              BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd.cmd << "]: System: "sv << ec.message();
-            } else {
-              child.detach();
-            }
-          }
-        });
-
-        exec_thread.detach();
-      }
-
-      // Session-count transitions share the platform lifecycle lock with validated launch work.
-      // This makes an idle encoder probe and first-session startup mutually exclusive.
+      // Release the authoritative active slot only after every media/control worker has joined.
+      // Validated launch work takes the same lock, so a successor cannot overlap teardown.
       {
         std::lock_guard lifecycle_lock(platform_lifecycle_mutex);
-        if (running_sessions.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-          retain_or_stop_last_session_locked();
+        if (!remote_session_active) {
+          BOOST_LOG(error) << "Streaming session ended without owning the active-session slot."sv;
+        } else {
+          remote_session_active = false;
+          retain_or_stop_session_locked();
         }
       }
 
       BOOST_LOG(debug) << "Session ended"sv;
     }
 
-    int start(session_t &session, const std::string &addr_string) {
+    int start(session_t &session) {
       session.input = input::alloc(session.mail);
 
       session.broadcast_ref = broadcast.ref();
@@ -2579,62 +2412,68 @@ namespace stream {
         return -1;
       }
 
-      session.control.expected_peer_address = addr_string;
-      BOOST_LOG(debug) << "Expecting incoming session connections from "sv << addr_string;
-
-      auto addr = boost::asio::ip::make_address(addr_string);
-      session.video->peer.address(addr);
-      session.video->peer.port(0);
-
-      session.audio->peer.address(addr);
-      session.audio->peer.port(0);
-
       session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
 
-      // Claim the first-session transition under the same lifecycle lock used by launch-time
-      // display mutation and encoder probing. Activate the remote display lease before creating
-      // capture threads, so a stale/superseded handshake fails without a partially live session.
+      // Claim the sole session under the same lifecycle lock used by launch-time display
+      // mutation and encoder probing. A stale RTSP handshake therefore cannot create a second
+      // capture/encoder/input stack behind the HTTP admission check.
       {
         std::lock_guard lifecycle_lock(platform_lifecycle_mutex);
-        if (running_sessions.load(std::memory_order_acquire) == 0 &&
-            !resume_first_session_locked(session.launch_session_id)) {
+        if (remote_session_active) {
+          BOOST_LOG(warning) << "Rejecting a second active streaming session."sv;
           return -1;
         }
-        running_sessions.fetch_add(1, std::memory_order_acq_rel);
+        remote_session_active = true;
+        if (!activate_remote_session_locked(session.launch_session_id)) {
+          remote_session_active = false;
+          return -1;
+        }
       }
 
-      // Publish the session only after platform and ownership startup have succeeded.
-      {
-        auto lg = session.broadcast_ref->control_server._sessions.lock();
-        session.broadcast_ref->control_server._sessions->push_back(&session);
-      }
+      auto rollback_active_session = []() {
+        std::lock_guard lifecycle_lock(platform_lifecycle_mutex);
+        if (remote_session_active) {
+          remote_session_active = false;
+          retain_or_stop_session_locked();
+        }
+      };
 
-      session.audioThread = std::thread {audioThread, &session};
-      session.videoThread = std::thread {videoThread, &session};
-
-      session.state.store(state_e::RUNNING, std::memory_order_relaxed);
-
-      // A/V capture may already have received its UDP ping. Release it only after display/audio
-      // platform state has finished resuming; control_ready independently protects source routing.
-      session.startup_ready.raise(true);
-
-      if (!session.do_cmds.empty()) {
-        auto exec_thread = std::thread([cmd_list = session.do_cmds] {
-          for (auto &cmd : cmd_list) {
-            std::error_code ec;
-            auto env = proc::proc.get_env();
-            boost::filesystem::path working_dir = proc::find_working_directory(cmd.cmd, env);
-            auto child = platf::run_command(cmd.elevated, true, cmd.cmd, working_dir, env, nullptr, ec, nullptr);
-            BOOST_LOG(info) << "Spawning client do command ["sv << cmd.cmd << "] in ["sv << working_dir << ']';
-            if (ec) {
-              BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd.cmd << "]: System: "sv << ec.message();
-            } else {
-              child.detach();
+      pending_session_workers_t workers;
+      if (!workers.prepare(
+            [&session]() {
+              audioThread(&session);
+            },
+            [&session]() {
+              videoThread(&session);
+            },
+            false,
+            [&session]() {
+              stop(session);
             }
-          }
-        });
+          )) {
+        rollback_active_session();
+        return -1;
+      }
 
-        exec_thread.detach();
+      // Publish the raw control registration only after platform startup and both worker-thread
+      // constructions succeed. Its owner remains the RTSP slot; controlEnd is the lifetime barrier.
+      {
+        auto slot_lock = session.broadcast_ref->control_server._session.lock();
+        if (session.broadcast_ref->control_server._session->session) {
+          BOOST_LOG(error) << "Control server still has a registered session while the active slot is empty."sv;
+          workers.cancel();
+          rollback_active_session();
+          return -1;
+        }
+
+        session.state.store(state_e::RUNNING, std::memory_order_relaxed);
+
+        // A/V capture may already have received its UDP ping. Release it only after display/audio
+        // platform state has finished resuming; control_ready independently protects source routing.
+        session.startup_ready.raise(true);
+        session.broadcast_ref->control_server._session->session = &session;
+        session.broadcast_ref->control_server._session->peer = nullptr;
+        workers.commit(session);
       }
 
       return 0;
@@ -2657,9 +2496,6 @@ namespace stream {
       session->client_policy_generation = 0;
       session->permission.store(launch_session.perm, std::memory_order_relaxed);
 
-      session->do_cmds = std::move(launch_session.client_do_cmds);
-      session->undo_cmds = std::move(launch_session.client_undo_cmds);
-
       session->config = config;
 
       session->video = std::make_shared<video_channel_t>();
@@ -2667,13 +2503,11 @@ namespace stream {
       session->video->min_required_fec_packets = config.minRequiredFecPackets;
 
       session->audio = std::make_shared<audio_channel_t>();
-      session->audio->encrypted = config.encryptionFlagsEnabled & SS_ENC_AUDIO;
       session->audio->packet_duration = config.audio.packetDuration;
 
       session->control.connect_data = launch_session.control_connect_data;
       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
       session->control.hdr_queue = mail->event<video::hdr_info_t>(mail::hdr);
-      session->control.legacy_input_enc_iv = launch_session.iv;
       session->control.cipher = crypto::cipher::gcm_t {
         launch_session.gcm_key,
         false
@@ -2683,14 +2517,11 @@ namespace stream {
       session->video->invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
       session->video->lowseq = 0;
       session->video->ping_payload = launch_session.av_ping_payload;
-      if (config.encryptionFlagsEnabled & SS_ENC_VIDEO) {
-        BOOST_LOG(info) << "Video encryption enabled"sv;
-        session->video->cipher = crypto::cipher::gcm_t {
-          launch_session.gcm_key,
-          false
-        };
-        session->video->gcm_iv_counter = 0;
-      }
+      session->video->cipher = crypto::cipher::gcm_t {
+        launch_session.gcm_key,
+        false
+      };
+      session->video->gcm_iv_counter = 0;
 
       constexpr auto max_block_size = crypto::cipher::round_to_pkcs7_padded(2048);
 
@@ -2720,7 +2551,9 @@ namespace stream {
       };
 
       session->audio->ping_payload = launch_session.av_ping_payload;
-      session->audio->av_ri_key_id = util::endian::big(*(std::uint32_t *) launch_session.iv.data());
+      std::uint32_t av_ri_key_id;
+      std::memcpy(&av_ri_key_id, launch_session.iv.data(), sizeof(av_ri_key_id));
+      session->audio->av_ri_key_id = util::endian::big(av_ri_key_id);
       session->audio->sequence_number = 0;
       session->audio->timestamp = 0;
 

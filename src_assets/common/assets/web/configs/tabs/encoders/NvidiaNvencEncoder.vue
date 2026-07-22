@@ -3,7 +3,6 @@ import { ref } from 'vue'
 import Checkbox from "../../../Checkbox.vue";
 
 const props = defineProps([
-  'platform',
   'config',
 ])
 
@@ -79,8 +78,7 @@ const config = ref(props.config)
              aria-labelledby="panelsStayOpen-headingOne">
           <div class="accordion-body">
             <!-- NVENC Realtime HAGS priority -->
-            <Checkbox v-if="platform === 'windows'"
-                      class="mb-3"
+            <Checkbox class="mb-3"
                       id="nvenc_realtime_hags"
                       locale-prefix="config"
                       v-model="config.nvenc_realtime_hags"
@@ -92,8 +90,7 @@ const config = ref(props.config)
             </Checkbox>
 
             <!-- Prefer lower encoding latency over power savings -->
-            <Checkbox v-if="platform === 'windows'"
-                      class="mb-3"
+            <Checkbox class="mb-3"
                       id="nvenc_latency_over_power"
                       locale-prefix="config"
                       v-model="config.nvenc_latency_over_power"
@@ -101,31 +98,13 @@ const config = ref(props.config)
             ></Checkbox>
 
             <!-- Present OpenGL/Vulkan on top of DXGI -->
-            <Checkbox v-if="platform === 'windows'"
-                      class="mb-3"
+            <Checkbox class="mb-3"
                       id="nvenc_opengl_vulkan_on_dxgi"
                       locale-prefix="config"
                       v-model="config.nvenc_opengl_vulkan_on_dxgi"
                       default="true"
             ></Checkbox>
 
-            <!-- NVENC H264 CAVLC -->
-            <Checkbox class="mb-3"
-                      id="nvenc_h264_cavlc"
-                      locale-prefix="config"
-                      v-model="config.nvenc_h264_cavlc"
-                      default="false"
-            ></Checkbox>
-
-            <!-- NVENC Intra Refresh -->
-            <div>
-              <label for="nvenc_intra_refresh" class="form-label">{{ $t('config.nvenc_intra_refresh') }}</label>
-              <select id="nvenc_intra_refresh" class="form-select" v-model="config.nvenc_intra_refresh">
-                <option value="disabled">{{ $t('_common.auto') }}</option>
-                <option value="enabled">{{ $t('_common.enabled') }}</option>
-              </select>
-              <div class="form-text">{{ $t('config.nvenc_intra_refresh_desc') }}</div>
-            </div>
           </div>
         </div>
       </div>

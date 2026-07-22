@@ -14,8 +14,6 @@
 
 namespace stat_trackers {
 
-  boost::format one_digit_after_decimal();
-
   boost::format two_digits_after_decimal();
 
   template<typename T>

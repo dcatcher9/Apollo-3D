@@ -35,18 +35,8 @@ if(NOT SUNSHINE_ASSETS_DIR)
     set(SUNSHINE_ASSETS_DIR "assets")
 endif()
 
-# platform specific compile definitions
-if(WIN32)
-    include(${CMAKE_MODULE_PATH}/compile_definitions/windows.cmake)
-elseif(UNIX)
-    include(${CMAKE_MODULE_PATH}/compile_definitions/unix.cmake)
-
-    if(APPLE)
-        include(${CMAKE_MODULE_PATH}/compile_definitions/macos.cmake)
-    else()
-        include(${CMAKE_MODULE_PATH}/compile_definitions/linux.cmake)
-    endif()
-endif()
+# Apollo supports only the native Windows/NVIDIA host path.
+include(${CMAKE_MODULE_PATH}/compile_definitions/windows.cmake)
 
 # This submodule is Apollo's authoritative NVENC API contract. Keep it ahead of the
 # dependency bundle, which can carry an older copy of the same ffnvcodec headers.
@@ -63,9 +53,6 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/third-party/nanors/deps/obl/oblas_lite.c"
         "${CMAKE_SOURCE_DIR}/third-party/nanors/rs.c"
         "${CMAKE_SOURCE_DIR}/third-party/tray/src/tray.h"
-        "${CMAKE_SOURCE_DIR}/src/upnp.cpp"
-        "${CMAKE_SOURCE_DIR}/src/upnp.h"
-        "${CMAKE_SOURCE_DIR}/src/cbs.cpp"
         "${CMAKE_SOURCE_DIR}/src/utility.h"
         "${CMAKE_SOURCE_DIR}/src/uuid.h"
         "${CMAKE_SOURCE_DIR}/src/config.h"
@@ -148,18 +135,15 @@ include_directories(
         "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/enet/include"
         "${CMAKE_SOURCE_DIR}/third-party/nanors"
         "${CMAKE_SOURCE_DIR}/third-party/nanors/deps/obl"
-        ${FFMPEG_INCLUDE_DIRS}
-        ${Boost_INCLUDE_DIRS}  # has to be the last, or we get runtime error on macOS ffmpeg encoder
+        ${Boost_INCLUDE_DIRS}
 )
 
 list(APPEND SUNSHINE_EXTERNAL_LIBRARIES
-        ${MINIUPNP_LIBRARIES}
         ${CMAKE_THREAD_LIBS_INIT}
         enet
         libdisplaydevice::display_device
         nlohmann_json::nlohmann_json
         opus
-        ${FFMPEG_LIBRARIES}
         ${Boost_LIBRARIES}
         ${OPENSSL_LIBRARIES}
         ${PLATFORM_LIBRARIES})

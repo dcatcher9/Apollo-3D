@@ -39,7 +39,6 @@ namespace stream {
   constexpr int MIN_REQUIRED_FEC_PACKETS_MAX = 2;
   constexpr std::size_t FEC_PACKET_INDEX_MAX = 1023;
 
-  constexpr std::size_t CONTROL_HEADER_V1_SIZE = sizeof(std::uint16_t);
   constexpr std::size_t CONTROL_HEADER_V2_SIZE = 2 * sizeof(std::uint16_t);
   constexpr std::size_t CONTROL_GCM_TAG_SIZE = 16;
   constexpr std::size_t CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE = sizeof(std::uint16_t);
@@ -69,7 +68,7 @@ namespace stream {
   }
 
   [[nodiscard]] constexpr bool is_valid_control_packet_size(std::size_t packet_size) {
-    return packet_size >= CONTROL_HEADER_V1_SIZE && packet_size <= CONTROL_PACKET_SIZE_MAX;
+    return packet_size >= sizeof(std::uint16_t) && packet_size <= CONTROL_PACKET_SIZE_MAX;
   }
 
   // The ENet payload excludes the two-byte packet type, but still contains the
@@ -91,15 +90,6 @@ namespace stream {
            declared_payload_size == plaintext_size - CONTROL_HEADER_V2_SIZE;
   }
 
-  [[nodiscard]] constexpr bool is_valid_legacy_input_payload(
-    std::size_t payload_size,
-    std::uint32_t tagged_cipher_size
-  ) {
-    return tagged_cipher_size >= CONTROL_GCM_TAG_SIZE &&
-           payload_size >= sizeof(tagged_cipher_size) &&
-           tagged_cipher_size == payload_size - sizeof(tagged_cipher_size);
-  }
-
   struct session_t;
 
   struct config_t {
@@ -108,14 +98,8 @@ namespace stream {
 
     int packetsize;
     int minRequiredFecPackets;
-    int mlFeatureFlags;
-    int controlProtocolType;
     int audioQosType;
     int videoQosType;
-
-    uint32_t encryptionFlagsEnabled;
-
-    std::optional<int> gcmap;
   };
 
   namespace session {
@@ -134,12 +118,6 @@ namespace stream {
       /** Publish a validated RTSP launch and renew the retained platform deadline. */
       void commit();
 
-      /** Release the lifecycle lock without changing the existing grace deadline. */
-      void release();
-
-      /** Detach a successful non-streaming app launch from any retained remote-session state. */
-      void detach_retained_state();
-
     private:
       struct impl_t;
       explicit platform_launch_guard_t(std::unique_ptr<impl_t> impl);
@@ -150,7 +128,7 @@ namespace stream {
     };
 
     /**
-     * Serialize validated launch preparation with first-session startup and grace expiry.
+     * Serialize validated launch preparation with sole-session startup and grace expiry.
      * Destroying an uncommitted guard leaves the existing grace deadline unchanged.
      */
     platform_launch_guard_t guard_platform_launch();
@@ -158,7 +136,6 @@ namespace stream {
     enum class state_e : int {
       STOPPED,  ///< The session is stopped
       STOPPING,  ///< The session is stopping
-      STARTING,  ///< The session is starting
       RUNNING,  ///< The session is running
     };
 
@@ -169,8 +146,8 @@ namespace stream {
     };
 
     std::shared_ptr<session_t> alloc(config_t &config, rtsp_stream::launch_session_t &launch_session);
-    std::string uuid(const session_t& session);
-    bool uuid_match(const session_t& session, const std::string_view& uuid);
+    std::string uuid(const session_t &session);
+    bool uuid_match(const session_t &session, const std::string_view &uuid);
     std::string client_name(const session_t &session);
     crypto::PERM permissions(const session_t &session);
     client_policy_result_e update_client_policy(
@@ -180,9 +157,9 @@ namespace stream {
       crypto::PERM new_permissions,
       bool revoked
     );
-    int start(session_t &session, const std::string &addr_string);
+    int start(session_t &session);
     void stop(session_t &session);
-    void graceful_stop(session_t& session);
+    void graceful_stop(session_t &session);
     bool stop_if_client_policy_current(session_t &session, std::uint64_t generation, bool graceful);
     void join(session_t &session);
 
@@ -195,6 +172,9 @@ namespace stream {
     state_e state(session_t &session);
 #ifdef SUNSHINE_TESTS
     void set_state_for_test(session_t &session, state_e state);
+    bool claim_active_slot_for_test();
+    void release_active_slot_for_test();
+    bool worker_start_rollback_for_test();
 #endif
   }  // namespace session
 }  // namespace stream

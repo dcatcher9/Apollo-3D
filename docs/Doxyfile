@@ -24,7 +24,7 @@
 # project metadata
 DOCSET_BUNDLE_ID = dev.lizardbyte.Sunshine
 DOCSET_PUBLISHER_ID = dev.lizardbyte.Sunshine.documentation
-PROJECT_BRIEF = "Self-hosted game stream host for Moonlight."
+PROJECT_BRIEF = "Windows XR streaming host for Artemis."
 PROJECT_ICON = ../sunshine.ico
 PROJECT_LOGO = ../sunshine.png
 PROJECT_NAME = Sunshine

@@ -39,7 +39,6 @@ echo "using icon sizes:"
 echo ${icon_sizes[@]}
 
 src_vectors=("../../src_assets/common/assets/web/public/images/apollo-locked.svg"
-             "../../src_assets/common/assets/web/public/images/apollo-pausing.svg"
              "../../src_assets/common/assets/web/public/images/apollo-playing.svg"
              "../../apollo.svg")
 

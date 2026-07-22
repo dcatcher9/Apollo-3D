@@ -19,7 +19,7 @@ struct AudioTest: PlatformTestSuite, testing::WithParamInterface<std::tuple<std:
 };
 
 constexpr std::bitset<config_t::MAX_FLAGS> config_flags(const int flag = -1) {
-  std::bitset<3> result = std::bitset<config_t::MAX_FLAGS>();
+  std::bitset<config_t::MAX_FLAGS> result;
   if (flag >= 0) {
     result.set(flag);
   }
@@ -30,10 +30,9 @@ INSTANTIATE_TEST_SUITE_P(
   Configurations,
   AudioTest,
   testing::Values(
-    std::make_tuple("HIGH_STEREO", config_t {5, 2, 0x3, {0}, config_flags(config_t::HIGH_QUALITY)}),
-    std::make_tuple("SURROUND51", config_t {5, 6, 0x3F, {0}, config_flags()}),
-    std::make_tuple("SURROUND71", config_t {5, 8, 0x63F, {0}, config_flags()}),
-    std::make_tuple("SURROUND51_CUSTOM", config_t {5, 6, 0x3F, {6, 4, 2, {0, 1, 4, 5, 2, 3}}, config_flags(config_t::CUSTOM_SURROUND_PARAMS)})
+    std::make_tuple("HIGH_STEREO", config_t {5, 2, 0x3, config_flags(config_t::HIGH_QUALITY)}),
+    std::make_tuple("SURROUND51", config_t {5, 6, 0x3F, config_flags()}),
+    std::make_tuple("SURROUND71", config_t {5, 8, 0x63F, config_flags()})
   ),
   [](const auto &info) {
     return std::string(std::get<0>(info.param));

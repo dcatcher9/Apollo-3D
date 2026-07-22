@@ -303,9 +303,7 @@ namespace platf::audio {
       }
 
       // Prefer the native channel layout of captured audio device when channel counts match
-      if (mixer_waveformat->nChannels == format.channel_count &&
-          mixer_waveformat->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
-          mixer_waveformat->cbSize >= 22) {
+      if (mixer_waveformat->nChannels == format.channel_count && mixer_waveformat->wFormatTag == WAVE_FORMAT_EXTENSIBLE && mixer_waveformat->cbSize >= 22) {
         auto waveformatext_pointer = reinterpret_cast<const WAVEFORMATEXTENSIBLE *>(mixer_waveformat.get());
         capture_waveformat.dwChannelMask = waveformatext_pointer->dwChannelMask;
       }
@@ -608,8 +606,7 @@ namespace platf::audio {
       for (
         status = audio_capture->GetNextPacketSize(&packet_size);
         SUCCEEDED(status) && packet_size > 0;
-        status = audio_capture->GetNextPacketSize(&packet_size)
-      ) {
+        status = audio_capture->GetNextPacketSize(&packet_size)) {
         DWORD buffer_flags;
         status = audio_capture->GetBuffer(
           (BYTE **) &sample_aligned.samples,
@@ -768,15 +765,13 @@ namespace platf::audio {
         return nullptr;
       }
 
-      if (config::audio.keep_default) {
-        // If this is a virtual sink, set a callback that will change the sink back if it's changed
-        auto virtual_sink_info = extract_virtual_sink_info(assigned_sink);
-        if (virtual_sink_info) {
-          mic->default_endpt_changed_cb = [this] {
-            BOOST_LOG(info) << "Resetting sink to ["sv << assigned_sink << "] after default changed";
-            set_sink(assigned_sink);
-          };
-        }
+      // If this is a virtual sink, keep it selected until the XR session ends.
+      auto virtual_sink_info = extract_virtual_sink_info(assigned_sink);
+      if (virtual_sink_info) {
+        mic->default_endpt_changed_cb = [this] {
+          BOOST_LOG(info) << "Resetting sink to ["sv << assigned_sink << "] after default changed";
+          set_sink(assigned_sink);
+        };
       }
 
       return mic;
@@ -1168,7 +1163,7 @@ namespace platf {
 
     // Install Steam Streaming Speakers if needed. We do this during audio_control() to ensure
     // the sink information returned includes the new Steam Streaming Speakers device.
-    if (config::audio.install_steam_drivers && !control->find_device_id(control->match_steam_speakers())) {
+    if (!control->find_device_id(control->match_steam_speakers())) {
       // This is best effort. Don't fail if it doesn't work.
       control->install_steam_audio_drivers();
     }

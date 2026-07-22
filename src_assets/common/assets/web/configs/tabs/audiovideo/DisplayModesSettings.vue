@@ -1,10 +1,7 @@
 <script setup>
 import { ref } from 'vue'
-import { $tp } from '../../../platform-i18n'
-import PlatformLayout from '../../../PlatformLayout.vue'
 
 const props = defineProps([
-  'platform',
   'config',
 ])
 const config = ref(props.config)

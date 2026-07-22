@@ -75,7 +75,7 @@ forward the port 5201 (TCP and UDP) from your host.
 ### Packet loss (Buffer overrun)
 If the host PC (running Sunshine) has a much faster connection to the network
 than the slowest segment of the network path to the client device (running
-Moonlight), massive packet loss can occur: Sunshine emits its stream in bursts
+Artemis), massive packet loss can occur: Sunshine emits its stream in bursts
 every 16 ms (for 60 fps), but those bursts can't be passed on fast enough to the
 client and must be buffered by one of the network devices inbetween. If the
 bitrate is high enough, these buffers will overflow and data will be discarded.
@@ -184,7 +184,7 @@ Consult your distribution's documentation for details on how to do this. (Most
 often grub is used to load the kernel and set its command line.)
 
 ### AMD encoding latency issues
-If you notice unexpectedly high encoding latencies (e.g., in Moonlight's
+If you notice unexpectedly high encoding latencies (e.g., in Artemis's
 performance overlay) or strong fluctuations thereof, your system's Mesa
 libraries are outdated (<24.2). This is particularly problematic at higher
 resolutions (4K).

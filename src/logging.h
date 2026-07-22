@@ -57,12 +57,6 @@ namespace logging {
   [[nodiscard]] std::unique_ptr<deinit_t> init(int min_log_level, const std::string &log_file);
 
   /**
-   * @brief Setup AV logging.
-   * @param min_log_level The log level.
-   */
-  void setup_av_logging(int min_log_level);
-
-  /**
    * @brief Setup logging for libdisplaydevice.
    * @param min_log_level The log level.
    */
@@ -106,8 +100,7 @@ namespace logging {
         message(message),
         units(units),
         interval(interval_in_seconds),
-        enabled(config::sunshine.diagnostics_enabled &&
-                config::sunshine.min_log_level <= severity.default_severity()) {
+        enabled(config::sunshine.diagnostics_enabled && config::sunshine.min_log_level <= severity.default_severity()) {
     }
 
     void collect_and_log(const T &value) {

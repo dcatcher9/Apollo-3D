@@ -6,10 +6,6 @@ const props = defineProps({
     type: Object,
     required: true,
   },
-  platform: {
-    type: String,
-    default: '',
-  },
   vdisplay: {
     type: [String, Number],
     default: '1',
@@ -21,7 +17,7 @@ const resumeWindows = [0, 30000, 60000, 300000]
 const driverState = computed(() => {
   const states = {
     0: { label: 'Ready', tone: 'success', detail: 'Virtual display is available for XR sessions.' },
-    1: { label: 'Checking', tone: 'neutral', detail: 'Apollo has not reported virtual display health yet.' },
+    1: { label: 'Checking', tone: 'neutral', detail: 'Apollo XR has not reported virtual display health yet.' },
     '-1': { label: 'Not initialized', tone: 'warning', detail: 'The virtual display driver is not initialized.' },
     '-2': { label: 'Update required', tone: 'danger', detail: 'The installed virtual display driver is incompatible.' },
     '-3': { label: 'Needs attention', tone: 'danger', detail: 'The virtual display watchdog is not responding.' },
@@ -55,21 +51,21 @@ function setEnabled(key, event) {
         <div>
           <p class="settings-eyebrow">Identity</p>
           <h2>This PC</h2>
-          <p>How Apollo appears to your XR headset and other devices.</p>
+          <p>How Apollo XR appears to your XR headset and other devices.</p>
         </div>
       </div>
 
       <label class="simple-field" for="host-name">
         <span>Computer name</span>
-        <input id="host-name" v-model="config.sunshine_name" class="form-control" type="text" placeholder="Apollo" />
+        <input id="host-name" v-model="config.sunshine_name" class="form-control" type="text" placeholder="Apollo XR" />
       </label>
 
       <div class="simple-toggle-row">
         <div>
-          <strong>Show Apollo on the local network</strong>
-          <span>Lets Artemis and other Moonlight clients find this PC automatically.</span>
+          <strong>Show Apollo XR on the local network</strong>
+          <span>Lets Artemis find this PC automatically.</span>
         </div>
-        <label class="form-switch" aria-label="Show Apollo on the local network">
+        <label class="form-switch" aria-label="Show Apollo XR on the local network">
           <input
             class="form-check-input"
             type="checkbox"
@@ -82,7 +78,7 @@ function setEnabled(key, event) {
       <div class="simple-toggle-row">
         <div>
           <strong>Allow new devices to pair</strong>
-          <span>Turn this off when you do not want Apollo to accept pairing requests.</span>
+          <span>Turn this off when you do not want Apollo XR to accept pairing requests.</span>
         </div>
         <label class="form-switch" aria-label="Allow new devices to pair">
           <input
@@ -102,21 +98,6 @@ function setEnabled(key, event) {
           <p class="settings-eyebrow">Streaming</p>
           <h2>Session behavior</h2>
         </div>
-      </div>
-
-      <div class="simple-toggle-row flush">
-        <div>
-          <strong>Stream computer audio</strong>
-          <span>Send desktop and app audio to the active XR device.</span>
-        </div>
-        <label class="form-switch" aria-label="Stream computer audio">
-          <input
-            class="form-check-input"
-            type="checkbox"
-            :checked="isEnabled('stream_audio')"
-            @change="setEnabled('stream_audio', $event)"
-          />
-        </label>
       </div>
 
       <label class="simple-field" for="resume-window">
@@ -154,7 +135,7 @@ function setEnabled(key, event) {
       <a class="quiet-link" href="#network">Review network access <i class="fas fa-arrow-right"></i></a>
     </section>
 
-    <section v-if="platform === 'windows'" class="settings-card settings-card-wide">
+    <section class="settings-card settings-card-wide">
       <div class="settings-card-heading compact">
         <div class="settings-icon"><i class="fas fa-vr-cardboard"></i></div>
         <div>
@@ -166,18 +147,18 @@ function setEnabled(key, event) {
         </span>
       </div>
       <p class="card-note driver-note">{{ driverState.detail }}</p>
-      <a v-if="driverState.tone !== 'success'" class="quiet-link" href="./troubleshooting#dd_reset">
+      <a v-if="driverState.tone !== 'success'" class="quiet-link" href="./troubleshooting">
         Open diagnostics <i class="fas fa-arrow-right"></i>
       </a>
     </section>
 
-    <section v-if="platform === 'windows'" class="settings-card settings-card-wide tray-setting">
+    <section class="settings-card settings-card-wide tray-setting">
       <div class="simple-toggle-row flush">
         <div>
-          <strong>Keep Apollo in the system tray</strong>
+          <strong>Keep Apollo XR in the system tray</strong>
           <span>Recommended for quick access and everyday background use.</span>
         </div>
-        <label class="form-switch" aria-label="Keep Apollo in the system tray">
+        <label class="form-switch" aria-label="Keep Apollo XR in the system tray">
           <input
             class="form-check-input"
             type="checkbox"

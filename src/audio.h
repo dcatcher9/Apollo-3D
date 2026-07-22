@@ -31,20 +31,12 @@ namespace audio {
     int bitrate;
   };
 
-  struct stream_params_t {
-    int channelCount;
-    int streams;
-    int coupledStreams;
-    std::uint8_t mapping[8];
-  };
-
   extern opus_stream_config_t stream_configs[MAX_STREAM_CONFIG];
 
   struct config_t {
     enum flags_e : int {
       HIGH_QUALITY,  ///< High quality audio
       HOST_AUDIO,  ///< Host audio
-      CUSTOM_SURROUND_PARAMS,  ///< Custom surround parameters
       MAX_FLAGS  ///< Maximum number of flags
     };
 
@@ -52,21 +44,10 @@ namespace audio {
     int channels;
     int mask;
 
-    stream_params_t customStreamParams;
-
     std::bitset<MAX_FLAGS> flags;
-
-    // Who TF knows what Sunshine did
-    // putting input_only at the end of flags will always be over written to true
-    uint64_t __padding;
-
-    bool input_only;
   };
 
   struct audio_ctx_t {
-    // We want to change the sink for the first stream only
-    std::unique_ptr<std::atomic_bool> sink_flag;
-
     std::unique_ptr<platf::audio_control_t> control;
 
     bool restore_sink;
@@ -91,19 +72,4 @@ namespace audio {
    */
   audio_ctx_ref_t get_audio_ctx_ref();
 
-  /**
-   * @brief Check if the audio sink held by audio context is available.
-   * @returns True if available (and can probably be restored), false otherwise.
-   * @note Useful for delaying the release of audio context shared pointer (which
-   *       tries to restore original sink).
-   *
-   * @examples
-   * audio_ctx_ref_t audio = get_audio_ctx_ref()
-   * if (audio.get()) {
-   *     return is_audio_ctx_sink_available(*audio.get());
-   * }
-   * return false;
-   * @examples_end
-   */
-  bool is_audio_ctx_sink_available(const audio_ctx_t &ctx);
 }  // namespace audio

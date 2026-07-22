@@ -14,14 +14,7 @@ namespace system_tray {
    */
   void tray_open_ui_cb([[maybe_unused]] struct tray_menu *item);
 
-
   void tray_force_stop_cb(struct tray_menu *item);
-
-  /**
-   * @brief Callback for resetting display device configuration.
-   * @param item The tray menu item.
-   */
-  void tray_reset_display_device_config_cb([[maybe_unused]] struct tray_menu *item);
 
   /**
    * @brief Callback for restarting Sunshine from the system tray.
@@ -60,19 +53,13 @@ namespace system_tray {
   void update_tray_playing(std::string app_name);
 
   /**
-   * @brief Sets the tray icon in pausing mode (stream stopped but app running) and spawns the appropriate notification
-   * @param app_name The paused application name
-   */
-  void update_tray_pausing(std::string app_name);
-
-  /**
    * @brief Sets the tray icon in stopped mode (app and stream stopped) and spawns the appropriate notification
    * @param app_name The started application name
    */
   void update_tray_stopped(std::string app_name);
 
   void
-  update_tray_launch_error(std::string app_name, int exit_code);
+    update_tray_launch_error(std::string app_name, int exit_code);
 
   /**
    * @brief Spawns a notification for PIN Pairing. Clicking it opens the PIN Web UI Page

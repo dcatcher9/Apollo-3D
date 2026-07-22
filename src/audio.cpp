@@ -24,7 +24,6 @@ namespace audio {
 
   static int start_audio_control(audio_ctx_t &ctx);
   static void stop_audio_control(audio_ctx_t &);
-  static void apply_surround_params(opus_stream_config_t &stream, const stream_params_t &params);
 
   int map_stream(int channels, bool quality);
 
@@ -86,9 +85,6 @@ namespace audio {
   void encodeThread(sample_queue_t samples, config_t config, std::shared_ptr<void> channel_data) {
     auto packets = mail::man->queue<packet_t>(mail::audio_packets);
     auto stream = stream_configs[map_stream(config.channels, config.flags[config_t::HIGH_QUALITY])];
-    if (config.flags[config_t::CUSTOM_SURROUND_PARAMS]) {
-      apply_surround_params(stream, config.customStreamParams);
-    }
 
     // Encoding takes place on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
@@ -129,14 +125,7 @@ namespace audio {
 
   void capture(safe::mail_t mail, config_t config, std::shared_ptr<void> channel_data) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
-    if (!config::audio.stream || config.input_only) {
-      shutdown_event->view();
-      return;
-    }
     auto stream = stream_configs[map_stream(config.channels, config.flags[config_t::HIGH_QUALITY])];
-    if (config.flags[config_t::CUSTOM_SURROUND_PARAMS]) {
-      apply_surround_params(stream, config.customStreamParams);
-    }
 
     auto ref = get_audio_ctx_ref();
     if (!ref) {
@@ -184,16 +173,15 @@ namespace audio {
 
     BOOST_LOG(info) << "Selected audio sink: "sv << *sink;
 
-    // Only the first to start a session may change the default sink
-    if (!ref->sink_flag->exchange(true, std::memory_order_acquire)) {
-      // If the selected sink is different than the current one, change sinks.
-      ref->restore_sink = ref->sink.host != *sink;
-      if (ref->restore_sink) {
-        if (control->set_sink(*sink)) {
-          return;
-        }
+    // Every capture explicitly applies its requested sink. Keep restoration intent monotonic so
+    // releasing this context always returns to the host device after any virtual-sink capture.
+    const bool differs_from_host = ref->sink.host != *sink;
+    if (ref->restore_sink || differs_from_host) {
+      if (control->set_sink(*sink)) {
+        return;
       }
     }
+    ref->restore_sink = ref->restore_sink || differs_from_host;
 
     auto frame_size = config.packetDuration * stream.sampleRate / 1000;
     auto mic = control->microphone(stream.mapping, stream.channelCount, stream.sampleRate, frame_size);
@@ -230,16 +218,14 @@ namespace audio {
         case platf::capture_e::timeout:
           continue;
         case platf::capture_e::reinit:
-          if (config::audio.auto_capture) {
-            BOOST_LOG(info) << "Reinitializing audio capture"sv;
-            mic.reset();
-            do {
-              mic = control->microphone(stream.mapping, stream.channelCount, stream.sampleRate, frame_size);
-              if (!mic) {
-                BOOST_LOG(warning) << "Couldn't re-initialize audio input"sv;
-              }
-            } while (!mic && !shutdown_event->view(5s));
-          }
+          BOOST_LOG(info) << "Reinitializing audio capture"sv;
+          mic.reset();
+          do {
+            mic = control->microphone(stream.mapping, stream.channelCount, stream.sampleRate, frame_size);
+            if (!mic) {
+              BOOST_LOG(warning) << "Couldn't re-initialize audio input"sv;
+            }
+          } while (!mic && !shutdown_event->view(5s));
 
           continue;
         default:
@@ -253,19 +239,6 @@ namespace audio {
   audio_ctx_ref_t get_audio_ctx_ref() {
     static auto control_shared {safe::make_shared<audio_ctx_t>(start_audio_control, stop_audio_control)};
     return control_shared.ref();
-  }
-
-  bool is_audio_ctx_sink_available(const audio_ctx_t &ctx) {
-    if (!ctx.control) {
-      return false;
-    }
-
-    const std::string &sink = ctx.sink.host.empty() ? config::audio.sink : ctx.sink.host;
-    if (sink.empty()) {
-      return false;
-    }
-
-    return ctx.control->is_sink_available(sink);
   }
 
   int map_stream(int channels, bool quality) {
@@ -285,8 +258,6 @@ namespace audio {
     auto fg = util::fail_guard([]() {
       BOOST_LOG(warning) << "There will be no audio"sv;
     });
-
-    ctx.sink_flag = std::make_unique<std::atomic_bool>(false);
 
     // The default sink has not been replaced yet.
     ctx.restore_sink = false;
@@ -322,10 +293,4 @@ namespace audio {
     }
   }
 
-  void apply_surround_params(opus_stream_config_t &stream, const stream_params_t &params) {
-    stream.channelCount = params.channelCount;
-    stream.streams = params.streams;
-    stream.coupledStreams = params.coupledStreams;
-    stream.mapping = params.mapping;
-  }
 }  // namespace audio

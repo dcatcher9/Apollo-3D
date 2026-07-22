@@ -6,13 +6,12 @@
 #pragma once
 
 // standard includes
-#include <string>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <list>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <string_view>
 
 // lib includes
@@ -32,9 +31,6 @@ using namespace std::chrono_literals;
  */
 namespace nvhttp {
 
-  using args_t = SimpleWeb::CaseInsensitiveMultimap;
-  using cmd_list_t = std::list<crypto::command_entry_t>;
-
   struct launch_mode_t {
     int width;
     int height;
@@ -47,7 +43,6 @@ namespace nvhttp {
     core_version,
     binary_option,
     surround_info,
-    gamepad_mask,
     scale_factor,
     app_id,
     sbs_mode,
@@ -57,6 +52,7 @@ namespace nvhttp {
   std::optional<int> parse_launch_int(launch_int_field field, std::string_view value);
   std::optional<crypto::aes_t> parse_remote_input_key(std::string_view key);
   std::optional<std::uint32_t> parse_remote_input_key_id(std::string_view key_id);
+  std::optional<std::uint64_t> parse_host_session_id(std::string_view host_session_id);
 
   namespace detail {
     enum class pairing_admission_e {
@@ -72,12 +68,25 @@ namespace nvhttp {
       bool manual_pin,
       bool another_manual_pin_pending
     );
-  }
+
+    /** A resume/cancel capability must be present, nonzero, and match the retained process. */
+    constexpr bool host_session_matches(std::uint64_t retained, std::uint64_t presented) {
+      return retained != 0 && presented != 0 && retained == presented;
+    }
+
+    /** UUID is authoritative when supplied; a positive ID must agree with it. */
+    bool app_identity_matches(
+      std::optional<int> requested_app_id,
+      std::string_view requested_app_uuid,
+      int candidate_app_id,
+      std::string_view candidate_app_uuid
+    );
+  }  // namespace detail
 
   /**
    * @brief The protocol version.
    * @details The version of the GameStream protocol we are mocking.
-   * @note The negative 4th number indicates to Moonlight that this is Sunshine.
+   * @note The negative 4th number identifies Apollo as a Sunshine-compatible host to Artemis.
    */
   constexpr auto VERSION = "7.1.431.-1";
 
@@ -105,16 +114,6 @@ namespace nvhttp {
    * @examples_end
    */
   void start();
-
-  std::string
-  get_arg(const args_t &args, const char *name, const char *default_value = nullptr);
-
-  // Helper function to extract command entries
-  cmd_list_t
-  extract_command_entries(const nlohmann::json& j, const std::string& key);
-
-  std::shared_ptr<rtsp_stream::launch_session_t>
-  make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p);
 
   /**
    * @brief Setup the nvhttp server.
@@ -191,7 +190,7 @@ namespace nvhttp {
   /**
    * @brief Pair, phase 1
    *
-   * Moonlight will send a salt and client certificate, we'll also need the user provided pin.
+   * Artemis sends a salt and client certificate; Apollo also needs the user-provided PIN.
    *
    * PIN and SALT will be used to derive a shared AES key that needs to be stored
    * in order to be used to decrypt_symmetric in the next phases.
@@ -217,7 +216,7 @@ namespace nvhttp {
   /**
    * @brief Pair, phase 3
    *
-   * Moonlight will send back a `serverchallengeresp`: an AES encrypted client hash,
+   * Artemis sends back a `serverchallengeresp`: an AES-encrypted client hash,
    * we have to send back the `pairingsecret`:
    * using our private key we have to sign the certificate_signature + server_secret (generated in phase 2)
    */
@@ -235,12 +234,12 @@ namespace nvhttp {
    * We'll check that SHA256(server_challenge + client_public_cert_signature + client_secret) == client_hash
    *
    * Then using the client certificate public key we should be able to verify that
-   * the client secret has been signed by Moonlight
+   * the client secret has been signed by Artemis
    */
   void clientpairingsecret(pair_session_t &sess, boost::property_tree::ptree &tree, const std::string &client_pairing_secret);
 
   /**
-   * @brief Compare the user supplied pin to the Moonlight pin.
+   * @brief Compare the user-supplied PIN to the Artemis PIN.
    * @param pin The user supplied pin.
    * @param name The user supplied name.
    * @return `true` if the pin is correct, `false` otherwise.
@@ -250,7 +249,13 @@ namespace nvhttp {
    */
   bool pin(std::string pin, std::string name);
 
-  std::string request_otp(const std::string& passphrase, const std::string& deviceName);
+  std::string request_otp(const std::string &passphrase, const std::string &deviceName);
+
+  /** Stop and join the one remote session, then release its process and display state. */
+  void terminate_active_session();
+
+  /** End the current session and atomically replace the app catalog. */
+  void reload_apps(const std::string &file_name);
 
   /**
    * @brief Remove single client.
@@ -301,39 +306,27 @@ namespace nvhttp {
    * @param      session   The session
    * @param[in]  graceful  Whether to stop gracefully
    */
-  void stop_session(stream::session_t& session, bool graceful);
+  void stop_session(stream::session_t &session, bool graceful);
 
   /**
-   * @brief      Finds and stops every session for a client.
+   * @brief      Finds and stops the active session for a client.
    *
    * @param[in]  uuid      The uuid string
    * @param[in]  graceful  Whether to stop gracefully
    */
-  bool find_and_stop_sessions(const std::string &uuid, bool graceful);
+  bool find_and_stop_session(const std::string &uuid, bool graceful);
 
   /**
    * @brief      Update device info
    *
    * @param[in]  uuid       The uuid string
    * @param[in]  name       New name
-   * @param[in]  do_cmds    The do commands
-   * @param[in]  undo_cmds  The undo commands
    * @param[in]  newPerm    New permission
-   * @param[in]  enable_legacy_ordering  Enable legacy ordering
-   * @param[in]  allow_client_commands  Allow client commands
-   * @param[in]  always_use_virtual_display  Always use virtual display
-   * 
    * @return     Whether the update is successful
    */
   bool update_device_info(
-    const std::string& uuid,
-    const std::string& name,
-    const std::string& display_mode,
-    const cmd_list_t& do_cmds,
-    const cmd_list_t& undo_cmds,
-    const crypto::PERM newPerm,
-    const bool enable_legacy_ordering,
-    const bool allow_client_commands,
-    const bool always_use_virtual_display
+    const std::string &uuid,
+    const std::string &name,
+    const crypto::PERM newPerm
   );
 }  // namespace nvhttp

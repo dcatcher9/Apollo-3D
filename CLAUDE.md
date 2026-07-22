@@ -4,15 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Apollo is a self-hosted game-stream host — a hard fork of LizardByte's **Sunshine** that
-pairs with the **Artemis** (Moonlight Noir) client. It is a C++ application (the streaming
-server) with a Vue 3 web UI for configuration and client pairing. The fork has diverged from
-upstream Sunshine and is not intended to stay compatible with OG Sunshine/Moonlight.
+Apollo is a Windows XR-streaming host — a hard fork of LizardByte's **Sunshine** that pairs
+with modern **Artemis** clients on Android XR. It is a C++ application with a Vue 3 web UI for
+configuration and pairing. The supported contract is deliberately narrow: Windows 11, native
+NVIDIA NVENC, encrypted Artemis protocol 13, and one active remote session per host. It is not
+compatible with legacy Sunshine/Moonlight clients or non-NVIDIA/non-Windows hosts.
 
 Many internal names, the CMake project FQDN (`dev.lizardbyte.app.Sunshine`), the test binary
 (`test_sunshine`), the npm package (`sunshine`), and most docs still say "Sunshine" — that is
-expected, it is the upstream lineage. Apollo-specific additions include the built-in virtual
-display (SudoVDA, Windows-only), a per-client permission system, and clipboard sync.
+expected, it is the upstream lineage. Apollo-specific additions include SudoVDA virtual
+displays, host-side AI SBS conversion, local AR-glasses presentation, a per-client permission
+system, clipboard sync, and warm reconnect of the single session.
 
 ## Build (Windows / MSYS2 UCRT64)
 
@@ -35,16 +37,14 @@ ninja -C cmake-build-release
 `node.exe` must be on `PATH` before running CMake — the `web-ui` target invokes `npm install`
 via `find_program(NPM npm)`. **Do not** use MSYS2's `mingw-w64-ucrt-x86_64-nodejs`; it crashes
 with `std::bad_weak_ptr` under the gcc-16 libstdc++. Install official Node.js from nodejs.org or
-via nvm-windows instead. See [docs/building.md](docs/building.md) for the full dependency list
-(boost, cppwinrt, curl-winssl, MinHook, miniupnpc, onevpl, openssl, opus, nlohmann_json, …) and
-for Linux/macOS instructions.
+via nvm-windows instead. See [docs/building.md](docs/building.md) for the Windows dependency
+list (boost, cppwinrt, curl-winssl, MinHook, openssl, opus, nlohmann_json, …).
 
-CMake logic lives under [cmake/](cmake) and is orchestrated from [CMakeLists.txt](CMakeLists.txt):
-`prep/` (options, version, package config), `dependencies/`, `compile_definitions/`,
-`targets/` (per-platform: `windows.cmake`, `linux.cmake`, `macos.cmake`, `unix.cmake`),
-`packaging/`. Build options are defined in `cmake/prep/options.cmake`.
+CMake logic lives under [cmake/](cmake) and is orchestrated from [CMakeLists.txt](CMakeLists.txt).
+Historical non-Windows files remain in the tree for upstream comparison, but CMake rejects
+non-Windows builds. Build options are defined in `cmake/prep/options.cmake`.
 
-Package with CPack (`-G NSIS`/`ZIP` on Windows, `DEB`/`RPM` on Linux, `DragNDrop` on macOS).
+Package with CPack (`-G NSIS` or `ZIP`).
 
 ## Tests
 
@@ -158,17 +158,19 @@ Core C++ server lives flat in [src/](src). Major subsystems:
 - **Streaming pipeline**: [src/stream.cpp](src/stream.cpp), [src/rtsp.cpp](src/rtsp.cpp),
   [src/video.cpp](src/video.cpp), [src/audio.cpp](src/audio.cpp), [src/input.cpp](src/input.cpp) —
   RTSP control plus the video/audio/input data planes.
-- **HTTP / pairing / config**: [src/nvhttp.cpp](src/nvhttp.cpp) (Moonlight protocol HTTP),
+- **HTTP / pairing / config**: [src/nvhttp.cpp](src/nvhttp.cpp) (Artemis GameStream HTTP),
   [src/confighttp.cpp](src/confighttp.cpp) (web-UI config API), [src/httpcommon.cpp](src/httpcommon.cpp),
   [src/config.cpp](src/config.cpp), [src/crypto.cpp](src/crypto.cpp).
-- **Encoding**: [src/nvenc/](src/nvenc) (NVENC, D3D11 / CUDA paths), plus CBS bitstream helpers
-  ([src/cbs.cpp](src/cbs.cpp)) and colorspace ([src/video_colorspace.cpp](src/video_colorspace.cpp)).
+- **Encoding**: [src/nvenc/](src/nvenc) contains the native D3D11 NVENC path. H.264, HEVC,
+  and AV1 parameter sets and color metadata are produced directly by NVENC; Apollo no longer
+  links the generic FFmpeg/CBS encoder stack.
 - **Process/app launching & display**: [src/process.cpp](src/process.cpp),
   [src/display_device.cpp](src/display_device.cpp).
-- **Platform abstraction**: [src/platform/](src/platform) with `common.h` and per-OS implementations
-  under `windows/`, `linux/`, `macos/`. Capture backends (e.g. `display_wgc`, `display_vram`,
-  `kmsgrab`, `x11grab`, `wlgrab`, `vaapi`), audio, input, and the Windows-only virtual display
-  ([src/platform/windows/virtual_display.cpp](src/platform/windows/virtual_display.cpp)) all live here.
+- **Windows platform**: [src/platform/windows/](src/platform/windows) contains DXGI/WGC capture,
+  audio, input, local AR presentation, and the SudoVDA virtual display
+  ([src/platform/windows/virtual_display.cpp](src/platform/windows/virtual_display.cpp)). The
+  historical Linux/macOS source directories are retained only for upstream comparison and are
+  not part of the supported build.
 
 Vendored dependencies are git submodules under [third-party/](third-party) (Simple-Web-Server,
 moonlight-common-c, googletest, inputtino, ViGEmClient, sudovda, nvapi/nvfbc/nv-codec-headers,
@@ -181,5 +183,5 @@ etc.). Clone with `--recurse-submodules`.
 - Python tooling is linted with flake8 ([.flake8](.flake8)); JS/web with prettier
   ([.prettierrc.json](.prettierrc.json)).
 - This is GPLv3. Upstream user docs live under [docs/](docs) and on Read the Docs; Apollo-specific
-  behavior (permission system, virtual display, multi-instance) is documented in the project Wiki
+  behavior (client permissions, sole-session virtual display, and local AR presentation) is documented in the project Wiki
   referenced from [README.md](README.md).

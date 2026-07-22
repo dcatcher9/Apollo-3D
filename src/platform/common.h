@@ -16,8 +16,8 @@
 #ifndef _WIN32
   #include <boost/asio/ip/address.hpp>
   #include <boost/process/v1/child.hpp>
-  #include <boost/process/v1/group.hpp>
   #include <boost/process/v1/environment.hpp>
+  #include <boost/process/v1/group.hpp>
 #endif
 
 // local includes
@@ -34,11 +34,6 @@ extern "C" {
 using namespace std::literals;
 
 struct sockaddr;
-struct AVFrame;
-struct AVBufferRef;
-struct AVHWFramesContext;
-struct AVCodecContext;
-struct AVDictionary;
 
 #ifdef _WIN32
 // Forward declarations of boost classes to avoid having to include boost headers
@@ -228,23 +223,9 @@ namespace platf {
     };
   }  // namespace speaker
 
-  enum class mem_type_e {
-    system,  ///< System memory
-    vaapi,  ///< VAAPI
-    dxgi,  ///< DXGI
-    cuda,  ///< CUDA
-    videotoolbox,  ///< VideoToolbox
-    unknown  ///< Unknown
-  };
-
   enum class pix_fmt_e {
-    yuv420p,  ///< YUV 4:2:0
-    yuv420p10,  ///< YUV 4:2:0 10-bit
     nv12,  ///< NV12
     p010,  ///< P010
-    ayuv,  ///< AYUV
-    yuv444p16,  ///< Planar 10-bit (shifted to 16-bit) YUV 4:4:4
-    y410,  ///< Y410
     unknown  ///< Unknown
   };
 
@@ -254,13 +235,8 @@ namespace platf {
   case pix_fmt_e::x: \
     return #x##sv
     switch (pix_fmt) {
-      _CONVERT(yuv420p);
-      _CONVERT(yuv420p10);
       _CONVERT(nv12);
       _CONVERT(p010);
-      _CONVERT(ayuv);
-      _CONVERT(yuv444p16);
-      _CONVERT(y410);
       _CONVERT(unknown);
     }
 #undef _CONVERT
@@ -407,47 +383,6 @@ namespace platf {
     video::sunshine_colorspace_t colorspace;
   };
 
-  struct avcodec_encode_device_t: encode_device_t {
-    void *data {};
-    AVFrame *frame {};
-
-    int convert(platf::img_t &img) override {
-      return -1;
-    }
-
-    virtual void apply_colorspace() {
-    }
-
-    /**
-     * @brief Set the frame to be encoded.
-     * @note Implementations must take ownership of 'frame'.
-     */
-    virtual int set_frame(AVFrame *frame, AVBufferRef *hw_frames_ctx) {
-      BOOST_LOG(error) << "Illegal call to hwdevice_t::set_frame(). Did you forget to override it?";
-      return -1;
-    };
-
-    /**
-     * @brief Initialize the hwframes context.
-     * @note Implementations may set parameters during initialization of the hwframes context.
-     */
-    virtual void init_hwframes(AVHWFramesContext *frames) {};
-
-    /**
-     * @brief Provides a hook for allow platform-specific code to adjust codec options.
-     * @note Implementations may set or modify codec options prior to codec initialization.
-     */
-    virtual void init_codec_options(AVCodecContext *ctx, AVDictionary **options) {};
-
-    /**
-     * @brief Prepare to derive a context.
-     * @note Implementations may make modifications required before context derivation
-     */
-    virtual int prepare_to_derive_context(int hw_device_type) {
-      return 0;
-    };
-  };
-
   struct nvenc_encode_device_t: encode_device_t {
     virtual bool init_encoder(const video::config_t &client_config, const video::sunshine_colorspace_t &colorspace) = 0;
 
@@ -460,6 +395,11 @@ namespace platf {
     timeout,  ///< Timeout
     interrupted,  ///< Capture was interrupted
     error  ///< Error
+  };
+
+  enum class capture_backend_e : std::uint8_t {
+    ddup,
+    wgc,
   };
 
   class display_t {
@@ -498,13 +438,14 @@ namespace platf {
      */
     virtual capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) = 0;
 
+    /** Return the Windows capture implementation backing this display. */
+    virtual capture_backend_e capture_backend() const noexcept {
+      return capture_backend_e::ddup;
+    }
+
     virtual std::shared_ptr<img_t> alloc_img() = 0;
 
     virtual int dummy_img(img_t *img) = 0;
-
-    virtual std::unique_ptr<avcodec_encode_device_t> make_avcodec_encode_device(pix_fmt_e pix_fmt) {
-      return nullptr;
-    }
 
     virtual std::unique_ptr<nvenc_encode_device_t> make_nvenc_encode_device(pix_fmt_e pix_fmt) {
       return nullptr;
@@ -521,7 +462,7 @@ namespace platf {
 
     /**
      * @brief Check that a given codec is supported by the display device.
-     * @param name The FFmpeg codec name (or similar for non-FFmpeg codecs).
+     * @param name The platform encoder codec name.
      * @param config The codec configuration.
      * @return `true` if supported, `false` otherwise.
      */
@@ -583,17 +524,21 @@ namespace platf {
   std::unique_ptr<audio_control_t> audio_control();
 
   /**
-   * @brief Get the display_t instance for the given hwdevice_type.
+   * @brief Get the native D3D11 display capture instance.
    * If display_name is empty, use the first monitor that's compatible you can find
    * If you require to use this parameter in a separate thread, make a copy of it.
    * @param display_name The name of the monitor that SHOULD be displayed
    * @param config Stream configuration
-   * @return The display_t instance based on hwdevice_type.
+   * @return The display_t instance, or nullptr when both DDUP and WGC initialization fail.
    */
-  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
+  std::shared_ptr<display_t> display(
+    const std::string &display_name,
+    const video::config_t &config,
+    capture_backend_e preferred_backend = capture_backend_e::ddup
+  );
 
-  // A list of names of displays accepted as display_name with the mem_type_e
-  std::vector<std::string> display_names(mem_type_e hwdevice_type);
+  // A list of names accepted by display().
+  std::vector<std::string> display_names();
 
   /**
    * @brief Check if GPUs/drivers have changed since the last call to this function.
@@ -873,9 +818,9 @@ namespace platf {
   std::unique_ptr<high_precision_timer> create_high_precision_timer();
 
   std::string
-  get_clipboard();
+    get_clipboard();
 
   bool
-  set_clipboard(const std::string& content);
+    set_clipboard(const std::string &content);
 
 }  // namespace platf

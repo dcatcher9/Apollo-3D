@@ -79,20 +79,6 @@ namespace net {
     return WAN;
   }
 
-  std::string_view to_enum_string(net_e net) {
-    switch (net) {
-      case PC:
-        return "pc"sv;
-      case LAN:
-        return "lan"sv;
-      case WAN:
-        return "wan"sv;
-    }
-
-    // avoid warning
-    return "wan"sv;
-  }
-
   af_e af_from_enum_string(const std::string_view &view) {
     if (view == "ipv4") {
       return IPV4;
@@ -166,15 +152,6 @@ namespace net {
       return ss.str();
     } else {
       return address.to_string();
-    }
-  }
-
-  int encryption_mode_for_address(boost::asio::ip::address address) {
-    auto nettype = net::from_address(address.to_string());
-    if (nettype == net::net_e::PC || nettype == net::net_e::LAN) {
-      return config::stream.lan_encryption_mode;
-    } else {
-      return config::stream.wan_encryption_mode;
     }
   }
 

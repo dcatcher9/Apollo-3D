@@ -37,11 +37,6 @@
   #include <shellapi.h>
 #endif
 
-#if !defined(__ANDROID__) && !defined(__APPLE__)
-  // For NVENC legacy constants
-  #include <ffnvcodec/nvEncodeAPI.h>
-#endif
-
 namespace fs = std::filesystem;
 using namespace std::literals;
 
@@ -71,454 +66,16 @@ namespace config {
 
   }  // namespace nv
 
-  namespace amd {
-#if !defined(_WIN32) || defined(DOXYGEN)
-  // values accurate as of 27/12/2022, but aren't strictly necessary for MacOS build
-  #define AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_SPEED 100
-  #define AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_QUALITY 30
-  #define AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_BALANCED 70
-  #define AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_SPEED 10
-  #define AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_QUALITY 0
-  #define AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_BALANCED 5
-  #define AMF_VIDEO_ENCODER_QUALITY_PRESET_SPEED 1
-  #define AMF_VIDEO_ENCODER_QUALITY_PRESET_QUALITY 2
-  #define AMF_VIDEO_ENCODER_QUALITY_PRESET_BALANCED 0
-  #define AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_CONSTANT_QP 0
-  #define AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_CBR 3
-  #define AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR 2
-  #define AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR 1
-  #define AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_CONSTANT_QP 0
-  #define AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_CBR 3
-  #define AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR 2
-  #define AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR 1
-  #define AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CONSTANT_QP 0
-  #define AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CBR 1
-  #define AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR 2
-  #define AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR 3
-  #define AMF_VIDEO_ENCODER_AV1_USAGE_TRANSCODING 0
-  #define AMF_VIDEO_ENCODER_AV1_USAGE_LOW_LATENCY 1
-  #define AMF_VIDEO_ENCODER_AV1_USAGE_ULTRA_LOW_LATENCY 2
-  #define AMF_VIDEO_ENCODER_AV1_USAGE_WEBCAM 3
-  #define AMF_VIDEO_ENCODER_AV1_USAGE_LOW_LATENCY_HIGH_QUALITY 5
-  #define AMF_VIDEO_ENCODER_HEVC_USAGE_TRANSCODING 0
-  #define AMF_VIDEO_ENCODER_HEVC_USAGE_ULTRA_LOW_LATENCY 1
-  #define AMF_VIDEO_ENCODER_HEVC_USAGE_LOW_LATENCY 2
-  #define AMF_VIDEO_ENCODER_HEVC_USAGE_WEBCAM 3
-  #define AMF_VIDEO_ENCODER_HEVC_USAGE_LOW_LATENCY_HIGH_QUALITY 5
-  #define AMF_VIDEO_ENCODER_USAGE_TRANSCODING 0
-  #define AMF_VIDEO_ENCODER_USAGE_ULTRA_LOW_LATENCY 1
-  #define AMF_VIDEO_ENCODER_USAGE_LOW_LATENCY 2
-  #define AMF_VIDEO_ENCODER_USAGE_WEBCAM 3
-  #define AMF_VIDEO_ENCODER_USAGE_LOW_LATENCY_HIGH_QUALITY 5
-  #define AMF_VIDEO_ENCODER_UNDEFINED 0
-  #define AMF_VIDEO_ENCODER_CABAC 1
-  #define AMF_VIDEO_ENCODER_CALV 2
-#else
-  #ifdef _GLIBCXX_USE_C99_INTTYPES
-    #undef _GLIBCXX_USE_C99_INTTYPES
-  #endif
-  #include <AMF/components/VideoEncoderAV1.h>
-  #include <AMF/components/VideoEncoderHEVC.h>
-  #include <AMF/components/VideoEncoderVCE.h>
-#endif
-
-    enum class quality_av1_e : int {
-      speed = AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_SPEED,  ///< Speed preset
-      quality = AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_QUALITY,  ///< Quality preset
-      balanced = AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_BALANCED  ///< Balanced preset
-    };
-
-    enum class quality_hevc_e : int {
-      speed = AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_SPEED,  ///< Speed preset
-      quality = AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_QUALITY,  ///< Quality preset
-      balanced = AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_BALANCED  ///< Balanced preset
-    };
-
-    enum class quality_h264_e : int {
-      speed = AMF_VIDEO_ENCODER_QUALITY_PRESET_SPEED,  ///< Speed preset
-      quality = AMF_VIDEO_ENCODER_QUALITY_PRESET_QUALITY,  ///< Quality preset
-      balanced = AMF_VIDEO_ENCODER_QUALITY_PRESET_BALANCED  ///< Balanced preset
-    };
-
-    enum class rc_av1_e : int {
-      cbr = AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_CBR,  ///< CBR
-      cqp = AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_CONSTANT_QP,  ///< CQP
-      vbr_latency = AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR,  ///< VBR with latency constraints
-      vbr_peak = AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR  ///< VBR with peak constraints
-    };
-
-    enum class rc_hevc_e : int {
-      cbr = AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_CBR,  ///< CBR
-      cqp = AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_CONSTANT_QP,  ///< CQP
-      vbr_latency = AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR,  ///< VBR with latency constraints
-      vbr_peak = AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR  ///< VBR with peak constraints
-    };
-
-    enum class rc_h264_e : int {
-      cbr = AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CBR,  ///< CBR
-      cqp = AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CONSTANT_QP,  ///< CQP
-      vbr_latency = AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR,  ///< VBR with latency constraints
-      vbr_peak = AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR  ///< VBR with peak constraints
-    };
-
-    enum class usage_av1_e : int {
-      transcoding = AMF_VIDEO_ENCODER_AV1_USAGE_TRANSCODING,  ///< Transcoding preset
-      webcam = AMF_VIDEO_ENCODER_AV1_USAGE_WEBCAM,  ///< Webcam preset
-      lowlatency_high_quality = AMF_VIDEO_ENCODER_AV1_USAGE_LOW_LATENCY_HIGH_QUALITY,  ///< Low latency high quality preset
-      lowlatency = AMF_VIDEO_ENCODER_AV1_USAGE_LOW_LATENCY,  ///< Low latency preset
-      ultralowlatency = AMF_VIDEO_ENCODER_AV1_USAGE_ULTRA_LOW_LATENCY  ///< Ultra low latency preset
-    };
-
-    enum class usage_hevc_e : int {
-      transcoding = AMF_VIDEO_ENCODER_HEVC_USAGE_TRANSCODING,  ///< Transcoding preset
-      webcam = AMF_VIDEO_ENCODER_HEVC_USAGE_WEBCAM,  ///< Webcam preset
-      lowlatency_high_quality = AMF_VIDEO_ENCODER_HEVC_USAGE_LOW_LATENCY_HIGH_QUALITY,  ///< Low latency high quality preset
-      lowlatency = AMF_VIDEO_ENCODER_HEVC_USAGE_LOW_LATENCY,  ///< Low latency preset
-      ultralowlatency = AMF_VIDEO_ENCODER_HEVC_USAGE_ULTRA_LOW_LATENCY  ///< Ultra low latency preset
-    };
-
-    enum class usage_h264_e : int {
-      transcoding = AMF_VIDEO_ENCODER_USAGE_TRANSCODING,  ///< Transcoding preset
-      webcam = AMF_VIDEO_ENCODER_USAGE_WEBCAM,  ///< Webcam preset
-      lowlatency_high_quality = AMF_VIDEO_ENCODER_USAGE_LOW_LATENCY_HIGH_QUALITY,  ///< Low latency high quality preset
-      lowlatency = AMF_VIDEO_ENCODER_USAGE_LOW_LATENCY,  ///< Low latency preset
-      ultralowlatency = AMF_VIDEO_ENCODER_USAGE_ULTRA_LOW_LATENCY  ///< Ultra low latency preset
-    };
-
-    enum coder_e : int {
-      _auto = AMF_VIDEO_ENCODER_UNDEFINED,  ///< Auto
-      cabac = AMF_VIDEO_ENCODER_CABAC,  ///< CABAC
-      cavlc = AMF_VIDEO_ENCODER_CALV  ///< CAVLC
-    };
-
-    template<class T>
-    ::std::optional<int> quality_from_view(const ::std::string_view &quality_type, const ::std::optional<int>(&original)) {
-#define _CONVERT_(x) \
-  if (quality_type == #x##sv) \
-  return (int) T::x
-      _CONVERT_(balanced);
-      _CONVERT_(quality);
-      _CONVERT_(speed);
-#undef _CONVERT_
-      return original;
-    }
-
-    template<class T>
-    ::std::optional<int> rc_from_view(const ::std::string_view &rc, const ::std::optional<int>(&original)) {
-#define _CONVERT_(x) \
-  if (rc == #x##sv) \
-  return (int) T::x
-      _CONVERT_(cbr);
-      _CONVERT_(cqp);
-      _CONVERT_(vbr_latency);
-      _CONVERT_(vbr_peak);
-#undef _CONVERT_
-      return original;
-    }
-
-    template<class T>
-    ::std::optional<int> usage_from_view(const ::std::string_view &usage, const ::std::optional<int>(&original)) {
-#define _CONVERT_(x) \
-  if (usage == #x##sv) \
-  return (int) T::x
-      _CONVERT_(lowlatency);
-      _CONVERT_(lowlatency_high_quality);
-      _CONVERT_(transcoding);
-      _CONVERT_(ultralowlatency);
-      _CONVERT_(webcam);
-#undef _CONVERT_
-      return original;
-    }
-
-    int coder_from_view(const ::std::string_view &coder) {
-      if (coder == "auto"sv) {
-        return _auto;
-      }
-      if (coder == "cabac"sv || coder == "ac"sv) {
-        return cabac;
-      }
-      if (coder == "cavlc"sv || coder == "vlc"sv) {
-        return cavlc;
-      }
-
-      return _auto;
-    }
-  }  // namespace amd
-
-  namespace qsv {
-    enum preset_e : int {
-      veryslow = 1,  ///< veryslow preset
-      slower = 2,  ///< slower preset
-      slow = 3,  ///< slow preset
-      medium = 4,  ///< medium preset
-      fast = 5,  ///< fast preset
-      faster = 6,  ///< faster preset
-      veryfast = 7  ///< veryfast preset
-    };
-
-    enum cavlc_e : int {
-      _auto = false,  ///< Auto
-      enabled = true,  ///< Enabled
-      disabled = false  ///< Disabled
-    };
-
-    ::std::optional<int> preset_from_view(const ::std::string_view &preset) {
-#define _CONVERT_(x) \
-  if (preset == #x##sv) \
-  return x
-      _CONVERT_(veryslow);
-      _CONVERT_(slower);
-      _CONVERT_(slow);
-      _CONVERT_(medium);
-      _CONVERT_(fast);
-      _CONVERT_(faster);
-      _CONVERT_(veryfast);
-#undef _CONVERT_
-      return std::nullopt;
-    }
-
-    ::std::optional<int> coder_from_view(const ::std::string_view &coder) {
-      if (coder == "auto"sv) {
-        return _auto;
-      }
-      if (coder == "cabac"sv || coder == "ac"sv) {
-        return disabled;
-      }
-      if (coder == "cavlc"sv || coder == "vlc"sv) {
-        return enabled;
-      }
-      return std::nullopt;
-    }
-
-  }  // namespace qsv
-
-  namespace vt {
-
-    enum coder_e : int {
-      _auto = 0,  ///< Auto
-      cabac,  ///< CABAC
-      cavlc  ///< CAVLC
-    };
-
-    int coder_from_view(const ::std::string_view &coder) {
-      if (coder == "auto"sv) {
-        return _auto;
-      }
-      if (coder == "cabac"sv || coder == "ac"sv) {
-        return cabac;
-      }
-      if (coder == "cavlc"sv || coder == "vlc"sv) {
-        return cavlc;
-      }
-
-      return -1;
-    }
-
-    int allow_software_from_view(const ::std::string_view &software) {
-      if (software == "allowed"sv || software == "forced") {
-        return 1;
-      }
-
-      return 0;
-    }
-
-    int force_software_from_view(const ::std::string_view &software) {
-      if (software == "forced") {
-        return 1;
-      }
-
-      return 0;
-    }
-
-    int rt_from_view(const ::std::string_view &rt) {
-      if (rt == "disabled" || rt == "off" || rt == "0") {
-        return 0;
-      }
-
-      return 1;
-    }
-
-  }  // namespace vt
-
-  namespace sw {
-    int svtav1_preset_from_view(const ::std::string_view &preset) {
-#define _CONVERT_(x, y) \
-  if (preset == #x##sv) \
-  return y
-      _CONVERT_(veryslow, 1);
-      _CONVERT_(slower, 2);
-      _CONVERT_(slow, 4);
-      _CONVERT_(medium, 5);
-      _CONVERT_(fast, 7);
-      _CONVERT_(faster, 9);
-      _CONVERT_(veryfast, 10);
-      _CONVERT_(superfast, 11);
-      _CONVERT_(ultrafast, 12);
-#undef _CONVERT_
-      return 11;  // Default to superfast
-    }
-  }  // namespace sw
-
-  namespace dd {
-    video_t::dd_t::config_option_e config_option_from_view(const ::std::string_view value) {
-#define _CONVERT_(x) \
-  if (value == #x##sv) \
-  return video_t::dd_t::config_option_e::x
-      _CONVERT_(disabled);
-      _CONVERT_(verify_only);
-      _CONVERT_(ensure_active);
-      _CONVERT_(ensure_primary);
-      _CONVERT_(ensure_only_display);
-#undef _CONVERT_
-      return video_t::dd_t::config_option_e::disabled;  // Default to this if value is invalid
-    }
-
-    video_t::dd_t::resolution_option_e resolution_option_from_view(const ::std::string_view value) {
-#define _CONVERT_2_ARG_(str, val) \
-  if (value == #str##sv) \
-  return video_t::dd_t::resolution_option_e::val
-#define _CONVERT_(x) _CONVERT_2_ARG_(x, x)
-      _CONVERT_(disabled);
-      _CONVERT_2_ARG_(auto, automatic);
-      _CONVERT_(manual);
-#undef _CONVERT_
-#undef _CONVERT_2_ARG_
-      return video_t::dd_t::resolution_option_e::disabled;  // Default to this if value is invalid
-    }
-
-    video_t::dd_t::refresh_rate_option_e refresh_rate_option_from_view(const ::std::string_view value) {
-#define _CONVERT_2_ARG_(str, val) \
-  if (value == #str##sv) \
-  return video_t::dd_t::refresh_rate_option_e::val
-#define _CONVERT_(x) _CONVERT_2_ARG_(x, x)
-      _CONVERT_(disabled);
-      _CONVERT_2_ARG_(auto, automatic);
-      _CONVERT_(manual);
-#undef _CONVERT_
-#undef _CONVERT_2_ARG_
-      return video_t::dd_t::refresh_rate_option_e::disabled;  // Default to this if value is invalid
-    }
-
-    video_t::dd_t::hdr_option_e hdr_option_from_view(const ::std::string_view value) {
-#define _CONVERT_2_ARG_(str, val) \
-  if (value == #str##sv) \
-  return video_t::dd_t::hdr_option_e::val
-#define _CONVERT_(x) _CONVERT_2_ARG_(x, x)
-      _CONVERT_(disabled);
-      _CONVERT_2_ARG_(auto, automatic);
-#undef _CONVERT_
-#undef _CONVERT_2_ARG_
-      return video_t::dd_t::hdr_option_e::disabled;  // Default to this if value is invalid
-    }
-
-    video_t::dd_t::mode_remapping_t mode_remapping_from_view(const ::std::string_view value) {
-      const auto parse_entry_list {[](const auto &entry_list, auto &output_field) {
-        for (auto &[_, entry] : entry_list) {
-          auto requested_resolution = entry.template get_optional<std::string>("requested_resolution"s);
-          auto requested_fps = entry.template get_optional<std::string>("requested_fps"s);
-          auto final_resolution = entry.template get_optional<std::string>("final_resolution"s);
-          auto final_refresh_rate = entry.template get_optional<std::string>("final_refresh_rate"s);
-
-          output_field.push_back(video_t::dd_t::mode_remapping_entry_t {requested_resolution.value_or(""), requested_fps.value_or(""), final_resolution.value_or(""), final_refresh_rate.value_or("")});
-        }
-      }};
-
-      // We need to add a wrapping object to make it valid JSON, otherwise ptree cannot parse it.
-      std::stringstream json_stream;
-      json_stream << "{\"dd_mode_remapping\":" << value << "}";
-
-      boost::property_tree::ptree json_tree;
-      boost::property_tree::read_json(json_stream, json_tree);
-
-      video_t::dd_t::mode_remapping_t output;
-      parse_entry_list(json_tree.get_child("dd_mode_remapping.mixed"), output.mixed);
-      parse_entry_list(json_tree.get_child("dd_mode_remapping.resolution_only"), output.resolution_only);
-      parse_entry_list(json_tree.get_child("dd_mode_remapping.refresh_rate_only"), output.refresh_rate_only);
-
-      return output;
-    }
-  }  // namespace dd
-
   video_t video {
-    false,  // headless_mode
-    true,  // limit_framerate
-    false,  // double_refreshrate
-
-    28,  // qp
-
-    0,  // hevc_mode
-    0,  // av1_mode
-
-    2,  // min_threads
-    {
-      "superfast"s,  // preset
-      "zerolatency"s,  // tune
-      11,  // superfast
-    },  // software
-
     {},  // nv
     true,  // nv_realtime_hags
     true,  // nv_opengl_vulkan_on_dxgi
     true,  // nv_sunshine_high_power_mode
-    {},  // nv_legacy
-
-    {
-      qsv::medium,  // preset
-      qsv::_auto,  // cavlc
-      false,  // slow_hevc
-    },  // qsv
-
-    {
-      (int) amd::usage_h264_e::ultralowlatency,  // usage (h264)
-      (int) amd::usage_hevc_e::ultralowlatency,  // usage (hevc)
-      (int) amd::usage_av1_e::ultralowlatency,  // usage (av1)
-      (int) amd::rc_h264_e::vbr_latency,  // rate control (h264)
-      (int) amd::rc_hevc_e::vbr_latency,  // rate control (hevc)
-      (int) amd::rc_av1_e::vbr_latency,  // rate control (av1)
-      0,  // enforce_hrd
-      (int) amd::quality_h264_e::balanced,  // quality (h264)
-      (int) amd::quality_hevc_e::balanced,  // quality (hevc)
-      (int) amd::quality_av1_e::balanced,  // quality (av1)
-      0,  // preanalysis
-      1,  // vbaq
-      (int) amd::coder_e::_auto,  // coder
-    },  // amd
-
-    {
-      0,
-      0,
-      1,
-      -1,
-    },  // vt
-
-    {
-      false,  // strict_rc_buffer
-    },  // vaapi
-
-    {},  // capture
-    "nvenc",  // encoder (Apollo-3D requires NVIDIA CUDA/TensorRT; other backends are opt-in)
     {},  // adapter_name
     {},  // output_name
 
-    {
-      video_t::dd_t::config_option_e::disabled,  // configuration_option
-      video_t::dd_t::resolution_option_e::automatic,  // resolution_option
-      {},  // manual_resolution
-      video_t::dd_t::refresh_rate_option_e::automatic,  // refresh_rate_option
-      {},  // manual_refresh_rate
-      video_t::dd_t::hdr_option_e::automatic,  // hdr_option
-      3s,  // config_revert_delay
-      {},  // config_revert_on_disconnect
-      {},  // mode_remapping
-      {}  // wa
-    },  // display_device
-
     0,  // max_bitrate
     0,  // minimum_fps_target (0 = framerate)
-
-    "1920x1080x60",  // fallback_mode
-    false,  // isolated Display
-    false,  // ignore_encoder_probe_failure
 
     {},  // sbs (tuned defaults are the sbs_t member initializers in config.h)
   };
@@ -526,10 +83,6 @@ namespace config {
   audio_t audio {
     {},  // audio_sink
     {},  // virtual_sink
-    true,  // stream audio
-    true,  // install_steam_drivers
-    true,  // keep_sink_default
-    true,  // auto_capture
   };
 
   stream_t stream {
@@ -540,8 +93,6 @@ namespace config {
 
     20,  // fecPercentage
 
-    ENCRYPTION_MODE_NEVER,  // lan_encryption_mode
-    ENCRYPTION_MODE_OPPORTUNISTIC,  // wan_encryption_mode
     0,  // packet_size_limit
   };
 
@@ -553,7 +104,6 @@ namespace config {
 
     platf::get_host_name(),  // sunshine_name,
     "sunshine_state.json"s,  // file_state
-    {},  // external_ip
   };
 
   input_t input {
@@ -573,15 +123,10 @@ namespace config {
     true,  // back as touchpad click enabled (manual DS4 only)
     true,  // client gamepads with motion events are emulated as DS4
     true,  // client gamepads with touchpads are emulated as DS4
-    true,  // ds5_inputtino_randomize_mac
 
-    true,  // keyboard enabled
-    true,  // mouse enabled
-    true,  // controller enabled
     true,  // always send scancodes
     true,  // high resolution scrolling
     true,  // native pen/touch support
-    false,  // enable input only mode
     true,  // forward_rumble
   };
 
@@ -589,7 +134,6 @@ namespace config {
     false,  // hide_tray_controls
     true,  // enable_pairing
     true,  // enable_discovery
-    false,  // envvar_compatibility_mode
     "en",  // locale
     2,  // min_log_level
     false,  // diagnostics_enabled
@@ -604,12 +148,8 @@ namespace config {
     "ipv4",  // Address family
     {},  // Bind address (empty = all interfaces)
     platf::appdata().string() + "/sunshine.log",  // log file
-    false,  // notify_pre_releases
-    false,  // legacy_ordering
     true,  // system_tray
     {},  // prep commands
-    {},  // state commands
-    {},  // server commands
   };
 
   const std::vector<depth_model_info> &depth_model_registry() {
@@ -1002,32 +542,6 @@ namespace config {
     }
   }
 
-  void list_server_cmd_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, std::vector<server_cmd_t> &input) {
-    std::string string;
-    string_f(vars, name, string);
-
-    std::stringstream jsonStream;
-
-    // check if string is empty, i.e. when the value doesn't exist in the config file
-    if (string.empty()) {
-      return;
-    }
-
-    // We need to add a wrapping object to make it valid JSON, otherwise ptree cannot parse it.
-    jsonStream << "{\"server_cmd\":" << string << "}";
-
-    boost::property_tree::ptree jsonTree;
-    boost::property_tree::read_json(jsonStream, jsonTree);
-
-    for (auto &[_, prep_cmd] : jsonTree.get_child("server_cmd"s)) {
-      auto cmd_name = prep_cmd.get_optional<std::string>("name"s);
-      auto cmd_val = prep_cmd.get_optional<std::string>("cmd"s);
-      auto elevated = prep_cmd.get_optional<bool>("elevated"s);
-
-      input.emplace_back(cmd_name.value_or(""), cmd_val.value_or(""), elevated.value_or(false));
-    }
-  }
-
   void list_int_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, std::vector<int> &input) {
     std::vector<std::string> list;
     list_string_f(vars, name, list);
@@ -1084,17 +598,8 @@ namespace config {
     int ret = 0;
     while (*line != '\0') {
       switch (*line) {
-        case '0':
-          config::sunshine.flags[config::flag::PIN_STDIN].flip();
-          break;
         case '1':
           config::sunshine.flags[config::flag::FRESH_STATE].flip();
-          break;
-        case '2':
-          config::sunshine.flags[config::flag::FORCE_VIDEO_HEADER_REPLACE].flip();
-          break;
-        case 'p':
-          config::sunshine.flags[config::flag::UPNP].flip();
           break;
         default:
           BOOST_LOG(warning) << "config: Unrecognized flag: ["sv << *line << ']' << std::endl;
@@ -1127,112 +632,20 @@ namespace config {
       modified_config_settings[name] = val;
     }
 
-    bool_f(vars, "headless_mode", video.headless_mode);
-    bool_f(vars, "limit_framerate", video.limit_framerate);
-    bool_f(vars, "double_refreshrate", video.double_refreshrate);
-    int_f(vars, "qp", video.qp);
-    int_between_f(vars, "hevc_mode", video.hevc_mode, {0, 3});
-    int_between_f(vars, "av1_mode", video.av1_mode, {0, 3});
-    int_f(vars, "min_threads", video.min_threads);
-    string_f(vars, "sw_preset", video.sw.sw_preset);
-    if (!video.sw.sw_preset.empty()) {
-      video.sw.svtav1_preset = sw::svtav1_preset_from_view(video.sw.sw_preset);
-    }
-    string_f(vars, "sw_tune", video.sw.sw_tune);
-
     int_between_f(vars, "nvenc_preset", video.nv.quality_preset, {1, 7});
     int_between_f(vars, "nvenc_vbv_increase", video.nv.vbv_percentage_increase, {0, 400});
     bool_f(vars, "nvenc_spatial_aq", video.nv.adaptive_quantization);
     bool_f(vars, "nvenc_hevc_unidirectional_b", video.nv.hevc_unidirectional_b);
     generic_f(vars, "nvenc_twopass", video.nv.two_pass, nv::twopass_from_view);
-    bool_f(vars, "nvenc_h264_cavlc", video.nv.h264_cavlc);
-    bool_f(vars, "nvenc_intra_refresh", video.nv.intra_refresh);
     bool_f(vars, "nvenc_realtime_hags", video.nv_realtime_hags);
     bool_f(vars, "nvenc_opengl_vulkan_on_dxgi", video.nv_opengl_vulkan_on_dxgi);
     bool_f(vars, "nvenc_latency_over_power", video.nv_sunshine_high_power_mode);
 
-#if !defined(__ANDROID__) && !defined(__APPLE__)
-    video.nv_legacy.preset = video.nv.quality_preset + 11;
-    video.nv_legacy.multipass = video.nv.two_pass == nvenc::nvenc_two_pass::quarter_resolution ? NV_ENC_TWO_PASS_QUARTER_RESOLUTION :
-                                video.nv.two_pass == nvenc::nvenc_two_pass::full_resolution    ? NV_ENC_TWO_PASS_FULL_RESOLUTION :
-                                                                                                 NV_ENC_MULTI_PASS_DISABLED;
-    video.nv_legacy.h264_coder = video.nv.h264_cavlc ? NV_ENC_H264_ENTROPY_CODING_MODE_CAVLC : NV_ENC_H264_ENTROPY_CODING_MODE_CABAC;
-    video.nv_legacy.aq = video.nv.adaptive_quantization;
-    video.nv_legacy.vbv_percentage_increase = video.nv.vbv_percentage_increase;
-#endif
-
-    int_f(vars, "qsv_preset", video.qsv.qsv_preset, qsv::preset_from_view);
-    int_f(vars, "qsv_coder", video.qsv.qsv_cavlc, qsv::coder_from_view);
-    bool_f(vars, "qsv_slow_hevc", video.qsv.qsv_slow_hevc);
-
-    std::string quality;
-    string_f(vars, "amd_quality", quality);
-    if (!quality.empty()) {
-      video.amd.amd_quality_h264 = amd::quality_from_view<amd::quality_h264_e>(quality, video.amd.amd_quality_h264);
-      video.amd.amd_quality_hevc = amd::quality_from_view<amd::quality_hevc_e>(quality, video.amd.amd_quality_hevc);
-      video.amd.amd_quality_av1 = amd::quality_from_view<amd::quality_av1_e>(quality, video.amd.amd_quality_av1);
-    }
-
-    std::string rc;
-    string_f(vars, "amd_rc", rc);
-    int_f(vars, "amd_coder", video.amd.amd_coder, amd::coder_from_view);
-    if (!rc.empty()) {
-      video.amd.amd_rc_h264 = amd::rc_from_view<amd::rc_h264_e>(rc, video.amd.amd_rc_h264);
-      video.amd.amd_rc_hevc = amd::rc_from_view<amd::rc_hevc_e>(rc, video.amd.amd_rc_hevc);
-      video.amd.amd_rc_av1 = amd::rc_from_view<amd::rc_av1_e>(rc, video.amd.amd_rc_av1);
-    }
-
-    std::string usage;
-    string_f(vars, "amd_usage", usage);
-    if (!usage.empty()) {
-      video.amd.amd_usage_h264 = amd::usage_from_view<amd::usage_h264_e>(usage, video.amd.amd_usage_h264);
-      video.amd.amd_usage_hevc = amd::usage_from_view<amd::usage_hevc_e>(usage, video.amd.amd_usage_hevc);
-      video.amd.amd_usage_av1 = amd::usage_from_view<amd::usage_av1_e>(usage, video.amd.amd_usage_av1);
-    }
-
-    bool_f(vars, "amd_preanalysis", (bool &) video.amd.amd_preanalysis);
-    bool_f(vars, "amd_vbaq", (bool &) video.amd.amd_vbaq);
-    bool_f(vars, "amd_enforce_hrd", (bool &) video.amd.amd_enforce_hrd);
-
-    int_f(vars, "vt_coder", video.vt.vt_coder, vt::coder_from_view);
-    int_f(vars, "vt_software", video.vt.vt_allow_sw, vt::allow_software_from_view);
-    int_f(vars, "vt_software", video.vt.vt_require_sw, vt::force_software_from_view);
-    int_f(vars, "vt_realtime", video.vt.vt_realtime, vt::rt_from_view);
-
-    bool_f(vars, "vaapi_strict_rc_buffer", video.vaapi.strict_rc_buffer);
-
-    string_f(vars, "capture", video.capture);
-    string_f(vars, "encoder", video.encoder);
     string_f(vars, "adapter_name", video.adapter_name);
     string_f(vars, "output_name", video.output_name);
 
-    generic_f(vars, "dd_configuration_option", video.dd.configuration_option, dd::config_option_from_view);
-    generic_f(vars, "dd_resolution_option", video.dd.resolution_option, dd::resolution_option_from_view);
-    string_f(vars, "dd_manual_resolution", video.dd.manual_resolution);
-    generic_f(vars, "dd_refresh_rate_option", video.dd.refresh_rate_option, dd::refresh_rate_option_from_view);
-    string_f(vars, "dd_manual_refresh_rate", video.dd.manual_refresh_rate);
-    generic_f(vars, "dd_hdr_option", video.dd.hdr_option, dd::hdr_option_from_view);
-    {
-      int value = -1;
-      int_between_f(vars, "dd_config_revert_delay", value, {0, std::numeric_limits<int>::max()});
-      if (value >= 0) {
-        video.dd.config_revert_delay = std::chrono::milliseconds {value};
-      }
-    }
-    bool_f(vars, "dd_config_revert_on_disconnect", video.dd.config_revert_on_disconnect);
-    generic_f(vars, "dd_mode_remapping", video.dd.mode_remapping, dd::mode_remapping_from_view);
-    {
-      int value = 0;
-      int_between_f(vars, "dd_wa_hdr_toggle_delay", value, {0, 3000});
-      video.dd.wa.hdr_toggle_delay = std::chrono::milliseconds {value};
-    }
-
     int_f(vars, "max_bitrate", video.max_bitrate);
     double_between_f(vars, "minimum_fps_target", video.minimum_fps_target, {0.0, 1000.0});
-
-    string_f(vars, "fallback_mode", video.fallback_mode);
-    bool_f(vars, "isolated_virtual_display_option", video.isolated_virtual_display_option);
-    bool_f(vars, "ignore_encoder_probe_failure", video.ignore_encoder_probe_failure);
 
     // Apply one complete startup profile first. Individual sbs_3d_* keys are parsed afterwards,
     // so an explicitly configured parameter always overrides its profile value. Reinitializing
@@ -1273,8 +686,7 @@ namespace config {
     video.sbs.profile = sbs_profile;
     apply_sbs_values(video.sbs, "sbs_3d_profile_" + sbs_profile + "_");
     apply_sbs_values(video.sbs, "sbs_3d_");
-    if (video.sbs.zero_plane != "legacy" && video.sbs.zero_plane != "subject" &&
-        video.sbs.zero_plane != "median" && video.sbs.zero_plane != "background") {
+    if (video.sbs.zero_plane != "legacy" && video.sbs.zero_plane != "subject" && video.sbs.zero_plane != "median" && video.sbs.zero_plane != "background") {
       BOOST_LOG(warning) << "Invalid sbs_3d_zero_plane value '" << video.sbs.zero_plane
                          << "'; use legacy, subject, median, or background. Using legacy.";
       video.sbs.zero_plane = "legacy";
@@ -1291,17 +703,10 @@ namespace config {
     config::sunshine.credentials_file = config::nvhttp.file_state;
     path_f(vars, "credentials_file", config::sunshine.credentials_file);
 
-    string_f(vars, "external_ip", nvhttp.external_ip);
     list_prep_cmd_f(vars, "global_prep_cmd", config::sunshine.prep_cmds);
-    list_prep_cmd_f(vars, "global_state_cmd", config::sunshine.state_cmds);
-    list_server_cmd_f(vars, "server_cmd", config::sunshine.server_cmds);
 
     string_f(vars, "audio_sink", audio.sink);
     string_f(vars, "virtual_sink", audio.virtual_sink);
-    bool_f(vars, "stream_audio", audio.stream);
-    bool_f(vars, "install_steam_audio_drivers", audio.install_steam_drivers);
-    bool_f(vars, "keep_sink_default", audio.keep_default);
-    bool_f(vars, "auto_capture_sink", audio.auto_capture);
 
     string_restricted_f(vars, "origin_web_ui_allowed", nvhttp.origin_web_ui_allowed, {"pc"sv, "lan"sv, "wan"sv});
 
@@ -1317,8 +722,6 @@ namespace config {
       stream.session_resume_grace = std::chrono::milliseconds(session_resume_grace);
     }
 
-    int_between_f(vars, "lan_encryption_mode", stream.lan_encryption_mode, {0, 2});
-    int_between_f(vars, "wan_encryption_mode", stream.wan_encryption_mode, {0, 2});
     {
       int packet_size_limit = 0;
       int_f(vars, "packetsize", packet_size_limit);
@@ -1349,15 +752,6 @@ namespace config {
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 
-    // This config option will only be used by the UI
-    // When editing in the config file itself, use "keybindings"
-    bool map_rightalt_to_win = false;
-    bool_f(vars, "key_rightalt_to_key_win", map_rightalt_to_win);
-
-    if (map_rightalt_to_win) {
-      input.keybindings.emplace(0xA5, 0x5B);
-    }
-
     to = std::numeric_limits<int>::min();
     int_f(vars, "back_button_timeout", to);
 
@@ -1382,25 +776,15 @@ namespace config {
     bool_f(vars, "ds4_back_as_touchpad_click", input.ds4_back_as_touchpad_click);
     bool_f(vars, "motion_as_ds4", input.motion_as_ds4);
     bool_f(vars, "touchpad_as_ds4", input.touchpad_as_ds4);
-    bool_f(vars, "ds5_inputtino_randomize_mac", input.ds5_inputtino_randomize_mac);
-
-    bool_f(vars, "mouse", input.mouse);
-    bool_f(vars, "keyboard", input.keyboard);
-    bool_f(vars, "controller", input.controller);
 
     bool_f(vars, "always_send_scancodes", input.always_send_scancodes);
 
     bool_f(vars, "high_resolution_scrolling", input.high_resolution_scrolling);
     bool_f(vars, "native_pen_touch", input.native_pen_touch);
-    bool_f(vars, "enable_input_only_mode", input.enable_input_only_mode);
-
     bool_f(vars, "system_tray", sunshine.system_tray);
     bool_f(vars, "hide_tray_controls", sunshine.hide_tray_controls);
     bool_f(vars, "enable_pairing", sunshine.enable_pairing);
     bool_f(vars, "enable_discovery", sunshine.enable_discovery);
-    bool_f(vars, "envvar_compatibility_mode", sunshine.envvar_compatibility_mode);
-    bool_f(vars, "notify_pre_releases", sunshine.notify_pre_releases);
-    bool_f(vars, "legacy_ordering", sunshine.legacy_ordering);
     bool_f(vars, "forward_rumble", input.forward_rumble);
 
     int port = sunshine.port;
@@ -1424,13 +808,6 @@ namespace config {
         // translating a typo into the empty/wildcard setting and unexpectedly widening exposure.
         sunshine.bind_address = std::move(bind_address);
       }
-    }
-
-    bool upnp = false;
-    bool_f(vars, "upnp"s, upnp);
-
-    if (upnp) {
-      config::sunshine.flags[config::flag::UPNP].flip();
     }
 
     string_restricted_f(vars, "locale", config::sunshine.locale, {
@@ -1503,9 +880,6 @@ namespace config {
         std::cout << "Warning: Unrecognized configurable option ["sv << var << ']' << std::endl;
       }
     }
-
-    ::video::active_hevc_mode = video.hevc_mode;
-    ::video::active_av1_mode = video.av1_mode;
   }
 
   int parse(int argc, char *argv[]) {
@@ -1571,12 +945,9 @@ namespace config {
       // Create appdata folder if it does not exist
       file_handler::make_directory(platf::appdata().string());
 
-      // Create empty config file if it does not exist
+      // Create an empty config file if it does not exist.
       if (!fs::exists(sunshine.config_file)) {
-        auto cfg_file = std::ofstream {sunshine.config_file};
-#ifdef _WIN32
-        cfg_file << "server_cmd = [{\"name\":\"Bubbles\",\"cmd\":\"bubbles.scr\",\"elevated\":false}]\n";
-#endif
+        std::ofstream {sunshine.config_file};
       }
 
       // Read config file

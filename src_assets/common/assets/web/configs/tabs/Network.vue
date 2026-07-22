@@ -1,28 +1,26 @@
 <script setup>
 import { computed, ref } from 'vue'
-import Checkbox from "../../Checkbox.vue";
 
 const props = defineProps([
-  'platform',
   'config'
 ])
 
-const defaultMoonlightPort = 47989
+const defaultArtemisPort = 47989
 
 const config = ref(props.config)
-const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort)
+const effectivePort = computed(() => {
+  const port = Number(config.value?.port)
+  return Number.isFinite(port) && port > 0 ? port : defaultArtemisPort
+})
+
+const packetSizeIsValid = computed(() => {
+  const packetSize = Number(config.value?.packetsize)
+  return packetSize === 0 || (packetSize >= 200 && packetSize <= 65459)
+})
 </script>
 
 <template>
   <div id="network" class="config-page">
-    <!-- UPnP -->
-    <Checkbox class="mb-3"
-              id="upnp"
-              locale-prefix="config"
-              v-model="config.upnp"
-              default="false"
-    ></Checkbox>
-
     <!-- Address family -->
     <div class="mb-3">
       <label for="address_family" class="form-label">{{ $t('config.address_family') }}</label>
@@ -43,7 +41,7 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
     <!-- Port family -->
     <div class="mb-3">
       <label for="port" class="form-label">{{ $t('config.port') }}</label>
-      <input type="number" min="1029" max="65514" class="form-control" id="port" :placeholder="defaultMoonlightPort"
+      <input type="number" min="1029" max="65514" class="form-control" id="port" :placeholder="defaultArtemisPort"
              v-model="config.port" />
       <div class="form-text">{{ $t('config.port_desc') }}</div>
       <!-- Add warning if any port is less than 1024 -->
@@ -54,7 +52,7 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
       <div class="alert alert-danger" v-if="(+effectivePort + 21) > 65535">
         <i class="fa-solid fa-xl fa-triangle-exclamation"></i> {{ $t('config.port_alert_2') }}
       </div>
-      <!-- Create a port table for the various ports needed by Apollo -->
+      <!-- Create a port table for the various ports needed by Apollo XR -->
       <table class="table">
         <thead>
         <tr>
@@ -75,7 +73,7 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
           <td>{{ $t('config.port_tcp') }}</td>
           <td>{{+effectivePort}}</td>
           <td>
-            <div class="alert alert-primary" role="alert" v-if="+effectivePort !== defaultMoonlightPort">
+            <div class="alert alert-primary" role="alert" v-if="+effectivePort !== defaultArtemisPort">
               <i class="fa-solid fa-xl fa-circle-info"></i> {{ $t('config.port_http_port_note') }}
             </div>
           </td>
@@ -123,35 +121,6 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
       <div class="form-text">{{ $t('config.origin_web_ui_allowed_desc') }}</div>
     </div>
 
-    <!-- External IP -->
-    <div class="mb-3">
-      <label for="external_ip" class="form-label">{{ $t('config.external_ip') }}</label>
-      <input type="text" class="form-control" id="external_ip" placeholder="123.456.789.12" v-model="config.external_ip" />
-      <div class="form-text">{{ $t('config.external_ip_desc') }}</div>
-    </div>
-
-    <!-- LAN Encryption Mode -->
-    <div class="mb-3">
-      <label for="lan_encryption_mode" class="form-label">{{ $t('config.lan_encryption_mode') }}</label>
-      <select id="lan_encryption_mode" class="form-select" v-model="config.lan_encryption_mode">
-        <option value="0">{{ $t('_common.disabled_def') }}</option>
-        <option value="1">{{ $t('config.lan_encryption_mode_1') }}</option>
-        <option value="2">{{ $t('config.lan_encryption_mode_2') }}</option>
-      </select>
-      <div class="form-text">{{ $t('config.lan_encryption_mode_desc') }}</div>
-    </div>
-
-    <!-- WAN Encryption Mode -->
-    <div class="mb-3">
-      <label for="wan_encryption_mode" class="form-label">{{ $t('config.wan_encryption_mode') }}</label>
-      <select id="wan_encryption_mode" class="form-select" v-model="config.wan_encryption_mode">
-        <option value="0">{{ $t('_common.disabled') }}</option>
-        <option value="1">{{ $t('config.wan_encryption_mode_1') }}</option>
-        <option value="2">{{ $t('config.wan_encryption_mode_2') }}</option>
-      </select>
-      <div class="form-text">{{ $t('config.wan_encryption_mode_desc') }}</div>
-    </div>
-
     <!-- Ping Timeout -->
     <div class="mb-3">
       <label for="ping_timeout" class="form-label">{{ $t('config.ping_timeout') }}</label>
@@ -170,8 +139,21 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
     <!-- Packet Size Limit -->
     <div class="mb-3">
       <label for="packetsize" class="form-label">{{ $t('config.packetsize') }}</label>
-      <input type="number" min="0" max="65459" step="1" class="form-control" id="packetsize" placeholder="0" v-model="config.packetsize" />
+      <input
+        type="number"
+        min="0"
+        max="65459"
+        step="1"
+        class="form-control"
+        :class="{ 'is-invalid': !packetSizeIsValid }"
+        id="packetsize"
+        placeholder="0"
+        v-model="config.packetsize"
+      />
       <div class="form-text">{{ $t('config.packetsize_desc') }}</div>
+      <div class="invalid-feedback" v-if="!packetSizeIsValid">
+        {{ $t('config.packetsize_invalid') }}
+      </div>
     </div>
 
   </div>

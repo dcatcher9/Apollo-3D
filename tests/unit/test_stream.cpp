@@ -8,11 +8,10 @@
 #include <functional>
 #include <future>
 #include <limits>
-#include <string>
-#include <vector>
-
 #include <src/stream.h>
 #include <src/utility.h>
+#include <string>
+#include <vector>
 
 namespace stream {
   std::vector<uint8_t> concat_and_insert(uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2);
@@ -23,16 +22,18 @@ namespace stream {
 using namespace std::chrono_literals;
 
 TEST(PlatformLaunchGuardTest, SerializesConcurrentLaunchPreparation) {
-  auto first = stream::session::guard_platform_launch();
-  EXPECT_TRUE(first.idle());
+  std::future<bool> second;
+  {
+    auto first = stream::session::guard_platform_launch();
+    EXPECT_TRUE(first.idle());
 
-  auto second = std::async(std::launch::async, []() {
-    auto guard = stream::session::guard_platform_launch();
-    return guard.idle();
-  });
+    second = std::async(std::launch::async, []() {
+      auto guard = stream::session::guard_platform_launch();
+      return guard.idle();
+    });
 
-  EXPECT_EQ(second.wait_for(20ms), std::future_status::timeout);
-  first.release();
+    EXPECT_EQ(second.wait_for(20ms), std::future_status::timeout);
+  }
   EXPECT_EQ(second.wait_for(1s), std::future_status::ready);
   EXPECT_TRUE(second.get());
 }
@@ -52,21 +53,22 @@ TEST(PlatformLaunchGuardTest, CommitReleasesLaunchPreparationLock) {
 
   // Accepted HTTP paths may defensively commit during cleanup; this must remain harmless.
   first.commit();
-  first.release();
 }
 
-TEST(PlatformLaunchGuardTest, DetachingRetainedStateReleasesLaunchPreparationLock) {
-  auto first = stream::session::guard_platform_launch();
-  EXPECT_TRUE(first.idle());
-  first.detach_retained_state();
-
-  auto second = std::async(std::launch::async, []() {
-    auto guard = stream::session::guard_platform_launch();
-    return guard.idle();
+TEST(PlatformLaunchGuardTest, ActiveSlotRejectsSecondSessionAndMakesHostNonIdle) {
+  ASSERT_TRUE(stream::session::claim_active_slot_for_test());
+  auto cleanup = util::fail_guard([]() {
+    stream::session::release_active_slot_for_test();
   });
 
-  EXPECT_EQ(second.wait_for(1s), std::future_status::ready);
-  EXPECT_TRUE(second.get());
+  EXPECT_FALSE(stream::session::claim_active_slot_for_test());
+
+  auto guard = stream::session::guard_platform_launch();
+  EXPECT_FALSE(guard.idle());
+}
+
+TEST(SessionWorkerStartTest, RollsBackWhenSecondThreadCannotStart) {
+  EXPECT_TRUE(stream::session::worker_start_rollback_for_test());
 }
 
 TEST(ConcatAndInsertTests, ConcatNoInsertionTest) {
@@ -132,8 +134,8 @@ TEST(CheckedIntegerParsingTests, RejectsPartialAndOverflowingValues) {
 }
 
 TEST(ControlPayloadValidationTests, EnforcesOuterPacketBounds) {
-  EXPECT_FALSE(stream::is_valid_control_packet_size(stream::CONTROL_HEADER_V1_SIZE - 1));
-  EXPECT_TRUE(stream::is_valid_control_packet_size(stream::CONTROL_HEADER_V1_SIZE));
+  EXPECT_FALSE(stream::is_valid_control_packet_size(sizeof(std::uint16_t) - 1));
+  EXPECT_TRUE(stream::is_valid_control_packet_size(sizeof(std::uint16_t)));
   EXPECT_TRUE(stream::is_valid_control_packet_size(stream::CONTROL_PACKET_SIZE_MAX));
   EXPECT_FALSE(stream::is_valid_control_packet_size(stream::CONTROL_PACKET_SIZE_MAX + 1));
 }
@@ -142,22 +144,10 @@ TEST(ControlPayloadValidationTests, EnforcesEncryptedEnvelopeLength) {
   constexpr auto minimum_length = stream::CONTROL_ENCRYPTED_MIN_LENGTH;
 
   EXPECT_FALSE(stream::is_valid_encrypted_control_payload(minimum_length + 1, minimum_length - 1));
-  EXPECT_TRUE(stream::is_valid_encrypted_control_payload(
-    stream::CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + minimum_length,
-    minimum_length
-  ));
-  EXPECT_FALSE(stream::is_valid_encrypted_control_payload(
-    stream::CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + minimum_length - 1,
-    minimum_length
-  ));
-  EXPECT_FALSE(stream::is_valid_encrypted_control_payload(
-    stream::CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + minimum_length + 1,
-    minimum_length
-  ));
-  EXPECT_TRUE(stream::is_valid_encrypted_control_payload(
-    stream::CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + std::numeric_limits<std::uint16_t>::max(),
-    std::numeric_limits<std::uint16_t>::max()
-  ));
+  EXPECT_TRUE(stream::is_valid_encrypted_control_payload(stream::CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + minimum_length, minimum_length));
+  EXPECT_FALSE(stream::is_valid_encrypted_control_payload(stream::CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + minimum_length - 1, minimum_length));
+  EXPECT_FALSE(stream::is_valid_encrypted_control_payload(stream::CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + minimum_length + 1, minimum_length));
+  EXPECT_TRUE(stream::is_valid_encrypted_control_payload(stream::CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + std::numeric_limits<std::uint16_t>::max(), std::numeric_limits<std::uint16_t>::max()));
 }
 
 TEST(ControlPayloadValidationTests, EnforcesDecryptedInnerLength) {
@@ -166,22 +156,4 @@ TEST(ControlPayloadValidationTests, EnforcesDecryptedInnerLength) {
   EXPECT_FALSE(stream::is_valid_decrypted_control_payload(stream::CONTROL_HEADER_V2_SIZE - 1, 0));
   EXPECT_FALSE(stream::is_valid_decrypted_control_payload(stream::CONTROL_HEADER_V2_SIZE + 17, 16));
   EXPECT_FALSE(stream::is_valid_decrypted_control_payload(stream::CONTROL_HEADER_V2_SIZE + 17, 18));
-}
-
-TEST(ControlPayloadValidationTests, EnforcesLegacyInputCipherLength) {
-  constexpr auto prefix_size = sizeof(std::uint32_t);
-
-  EXPECT_TRUE(stream::is_valid_legacy_input_payload(
-    prefix_size + stream::CONTROL_GCM_TAG_SIZE,
-    stream::CONTROL_GCM_TAG_SIZE
-  ));
-  EXPECT_FALSE(stream::is_valid_legacy_input_payload(prefix_size, 0));
-  EXPECT_FALSE(stream::is_valid_legacy_input_payload(
-    prefix_size + stream::CONTROL_GCM_TAG_SIZE - 1,
-    stream::CONTROL_GCM_TAG_SIZE
-  ));
-  EXPECT_FALSE(stream::is_valid_legacy_input_payload(
-    prefix_size + stream::CONTROL_GCM_TAG_SIZE + 1,
-    stream::CONTROL_GCM_TAG_SIZE
-  ));
 }

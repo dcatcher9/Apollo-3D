@@ -29,11 +29,6 @@ namespace nvenc {
   }
 
   bool nvenc_d3d11_native::create_and_register_input_buffer() {
-    if (encoder_params.buffer_format == NV_ENC_BUFFER_FORMAT_YUV444_10BIT) {
-      BOOST_LOG(error) << "NvEnc: 10-bit 4:4:4 encoding is incompatible with D3D11 surface formats, use CUDA interop";
-      return false;
-    }
-
     if (!d3d_input_texture) {
       D3D11_TEXTURE2D_DESC desc = {};
       desc.Width = encoder_params.width;

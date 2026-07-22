@@ -335,19 +335,6 @@
       text-align: right;
     }
 
-    .advanced-access-badge {
-      background: var(--bs-tertiary-bg);
-      border: 1px solid var(--bs-border-color);
-      border-radius: 999px;
-      color: var(--bs-secondary-color);
-      display: inline-block;
-      font-size: .7rem;
-      font-weight: 600;
-      margin-left: .35rem;
-      padding: .15rem .45rem;
-      vertical-align: .1rem;
-    }
-
     .editor-heading {
       align-items: center;
       display: flex;
@@ -471,26 +458,6 @@
       margin-bottom: .45rem;
     }
 
-    .technical-grid {
-      display: grid;
-      gap: 1rem;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .command-block {
-      background: var(--bs-tertiary-bg);
-      border-radius: .85rem;
-      padding: 1rem;
-    }
-
-    .command-row {
-      align-items: center;
-      display: grid;
-      gap: .6rem;
-      grid-template-columns: minmax(0, 1fr) auto auto;
-      margin-top: .65rem;
-    }
-
     .editor-actions {
       display: flex;
       gap: .75rem;
@@ -549,8 +516,7 @@
       .pair-layout,
       .pairing-layout,
       .editor-grid,
-      .permission-groups,
-      .technical-grid {
+      .permission-groups {
         grid-template-columns: 1fr;
       }
 
@@ -579,15 +545,6 @@
       .support-disclosure-body {
         align-items: stretch;
         flex-direction: column;
-      }
-
-      .command-row {
-        grid-template-columns: minmax(0, 1fr) auto;
-      }
-
-      .command-row .command-elevated {
-        grid-column: 1 / -1;
-        grid-row: 2;
       }
     }
 
@@ -618,7 +575,7 @@
         <div class="pair-copy">
           <div class="pair-icon"><i class="fa-solid fa-qrcode"></i></div>
           <h2 id="pair-artemis-heading">Pair Artemis</h2>
-          <p>Connect an Android XR headset or Android-based AR device. Apollo creates a secure, single-use pairing link that expires after three minutes.</p>
+          <p>Connect an Android XR headset or Android-based AR device. Apollo XR creates a secure, single-use pairing link that expires after three minutes.</p>
           <div v-if="pairedDeviceName" class="alert alert-success mb-0" role="status">
             <i class="fa-solid fa-circle-check me-2"></i>
             {{ pairedDeviceName }} is ready to stream.
@@ -658,7 +615,7 @@
 
       <details class="legacy-pairing" :open="legacyPairingOpen" @toggle="legacyPairingOpen = $event.target.open">
         <summary>Pair another way</summary>
-        <p class="small mb-3">Use the PIN shown by a legacy Moonlight-compatible client.</p>
+        <p class="small mb-3">Use the PIN shown by Artemis.</p>
         <form class="legacy-form" @submit.prevent="registerDevice">
           <input type="text" inputmode="numeric" pattern="\d*" placeholder="PIN" v-model.trim="legacyPin" class="form-control" required aria-label="Pairing PIN" />
           <input type="text" :placeholder="$t('pin.device_name')" v-model.trim="legacyDeviceName" class="form-control" aria-label="Optional device name" />
@@ -675,7 +632,7 @@
       <div class="section-heading">
         <div>
           <h2 id="remote-devices-heading">Remote XR devices</h2>
-          <p>Paired devices can browse Apollo, but only one device can stream at a time.</p>
+          <p>Paired devices can browse Apollo XR, but only one device can stream at a time.</p>
         </div>
       </div>
 
@@ -715,12 +672,7 @@
                 <span class="device-fact-label">Access</span>
                 <span class="device-fact-value">
                   {{ accessPresetLabel(accessPresetFor(client.perm)) }}
-                  <span v-if="hasAdvancedOperations(client.perm)" class="advanced-access-badge">Advanced</span>
                 </span>
-              </div>
-              <div v-if="platform === 'windows'" class="device-fact">
-                <span class="device-fact-label">Private XR display</span>
-                <span class="device-fact-value">{{ client.always_use_virtual_display ? 'On' : 'Off' }}</span>
               </div>
               <div class="device-fact">
                 <span class="device-fact-label">Clipboard sharing</span>
@@ -760,17 +712,8 @@
               </section>
 
               <section class="editor-section">
-                <h4>XR preferences</h4>
+                <h4>Preferences</h4>
                 <div class="preference-list">
-                  <div v-if="platform === 'windows'" class="preference-row">
-                    <div>
-                      <label :for="`private-display-${client.uuid}`">Private XR display</label>
-                      <small>Create a dedicated virtual display whenever this device connects.</small>
-                    </div>
-                    <div class="form-check form-switch m-0">
-                      <input :id="`private-display-${client.uuid}`" class="form-check-input" type="checkbox" role="switch" v-model="client.editAlwaysUseVirtualDisplay">
-                    </div>
-                  </div>
                   <div class="preference-row">
                     <div>
                       <label :for="`clipboard-${client.uuid}`">Clipboard sharing</label>
@@ -806,65 +749,6 @@
                     </div>
                   </div>
                 </div>
-
-                <div class="technical-grid">
-                  <div>
-                    <label class="form-label fw-semibold" :for="`display-mode-${client.uuid}`">{{ $t('pin.display_mode_override') }}</label>
-                    <input
-                      type="text"
-                      class="form-control"
-                      :id="`display-mode-${client.uuid}`"
-                      v-model="client.editDisplayMode"
-                      placeholder="1920x1080x59.94"
-                      pattern="^$|^\d+x\d+x\d+(\.\d+)?$"
-                    >
-                    <div class="form-text">Leave blank to match the mode requested by Artemis.</div>
-                  </div>
-                  <div class="preference-list pt-2">
-                    <div class="preference-row">
-                      <div>
-                        <label :for="`legacy-order-${client.uuid}`">{{ $t('pin.enable_legacy_ordering') }}</label>
-                        <small>Compatibility for older Moonlight clients.</small>
-                      </div>
-                      <div class="form-check form-switch m-0">
-                        <input :id="`legacy-order-${client.uuid}`" class="form-check-input" type="checkbox" role="switch" v-model="client.editEnableLegacyOrdering">
-                      </div>
-                    </div>
-                    <div class="preference-row">
-                      <div>
-                        <label :for="`client-commands-${client.uuid}`">{{ $t('pin.allow_client_commands') }}</label>
-                        <small>Run this device's connect and disconnect automation.</small>
-                      </div>
-                      <div class="form-check form-switch m-0">
-                        <input :id="`client-commands-${client.uuid}`" class="form-check-input" type="checkbox" role="switch" v-model="client.editAllowClientCommands">
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <template v-if="client.editAllowClientCommands">
-                  <div v-for="cmdType in ['do', 'undo']" :key="cmdType" class="command-block">
-                    <div class="d-flex align-items-start justify-content-between gap-3">
-                      <div>
-                        <h4 class="h6 mb-1">{{ $t(`pin.client_${cmdType}_cmd`) }}</h4>
-                        <div class="form-text mt-0">{{ $t(`pin.client_${cmdType}_cmd_desc`) }}</div>
-                      </div>
-                      <button type="button" class="btn btn-sm btn-outline-secondary" @click="addCmd(client[`edit_${cmdType}`], -1)">
-                        <i class="fa-solid fa-plus me-1"></i> Add command
-                      </button>
-                    </div>
-                    <div v-for="(command, index) in client[`edit_${cmdType}`]" :key="index" class="command-row">
-                      <input type="text" class="form-control font-monospace" v-model="command.cmd" placeholder="Command">
-                      <div v-if="platform === 'windows'" class="form-check command-elevated">
-                        <input type="checkbox" class="form-check-input" :id="`${client.uuid}-${cmdType}-admin-${index}`" v-model="command.elevated">
-                        <label class="form-check-label small" :for="`${client.uuid}-${cmdType}-admin-${index}`">{{ $t('_common.elevated') }}</label>
-                      </div>
-                      <button type="button" class="btn btn-outline-danger icon-button" aria-label="Remove command" @click="removeCmd(client[`edit_${cmdType}`], index)">
-                        <i class="fa-solid fa-trash-can"></i>
-                      </button>
-                    </div>
-                  </div>
-                </template>
 
                 <details>
                   <summary class="small text-secondary">Technical details</summary>
@@ -953,7 +837,7 @@
   /**
    * Permissions:
    * 0x00001F00 - controller, touch, pen, mouse, and keyboard input
-   * 0x001F0000 - clipboard, file transfer, and server-command operations
+   * 0x00030000 - clipboard operations
    * 0x07000000 - list, view, and launch actions
    */
   const permissionMapping = {
@@ -966,12 +850,8 @@
 
     clipboard_set: 0x00010000,
     clipboard_read: 0x00020000,
-    file_upload: 0x00040000,
-    file_dwnload: 0x00080000,
-    server_cmd: 0x00100000,
-    _all_operations: 0x001F0000,
+    _all_operations: 0x00030000,
     _clipboard: 0x00030000,
-    _advanced_operations: 0x001C0000,
 
     list: 0x01000000,
     view: 0x02000000,
@@ -981,7 +861,7 @@
 
     _default: 0x03000000,
     _no: 0x00000000,
-    _all: 0x071F1F00
+    _all: 0x07031F00
   };
 
   const permissionGroups = [
@@ -990,12 +870,9 @@
       { name: 'view', suppressed_by: ['launch'] },
       { name: 'launch', suppressed_by: [] }
     ] },
-    { name: 'Data & automation', permissions: [
+    { name: 'Clipboard', permissions: [
       { name: 'clipboard_set', suppressed_by: [] },
-      { name: 'clipboard_read', suppressed_by: [] },
-      { name: 'file_upload', suppressed_by: [] },
-      { name: 'file_dwnload', suppressed_by: [] },
-      { name: 'server_cmd', suppressed_by: [] }
+      { name: 'clipboard_read', suppressed_by: [] }
     ] },
     { name: 'Input', permissions: [
       { name: 'input_controller', suppressed_by: [] },
@@ -1005,11 +882,6 @@
       { name: 'input_kbd', suppressed_by: [] }
     ] }
   ];
-
-  const cmdTpl = {
-    cmd: '',
-    elevated: false
-  };
 
   let currentEditingClient = null;
 
@@ -1149,7 +1021,6 @@
       async applyArtemisDefaults(client) {
         const payload = this.clientPayload(client);
         payload.perm = permissionMapping._all_actions | permissionMapping._all_inputs;
-        if (this.platform === 'windows') payload.always_use_virtual_display = true;
 
         const response = await fetch('./api/clients/update', {
           credentials: 'include',
@@ -1189,26 +1060,12 @@
           this.legacyPairingPending = false;
         }
       },
-      addCmd(commands, index) {
-        const newCmd = {...cmdTpl};
-        if (index < 0) commands.push(newCmd);
-        else commands.splice(index + 1, 0, newCmd);
-      },
-      removeCmd(commands, index) {
-        commands.splice(index, 1);
-      },
       editClient(client) {
         if (currentEditingClient) this.cancelEdit(currentEditingClient);
 
         client.editing = true;
         client.editPerm = client.perm;
         client.editName = client.name;
-        client.editAllowClientCommands = client.allow_client_commands;
-        client.editEnableLegacyOrdering = client.enable_legacy_ordering;
-        client.editAlwaysUseVirtualDisplay = client.always_use_virtual_display;
-        client.editDisplayMode = client.display_mode || '';
-        client.edit_do = JSON.parse(JSON.stringify(client.do || []));
-        client.edit_undo = JSON.parse(JSON.stringify(client.undo || []));
         client.editAccessPreset = this.accessPresetFor(client.perm);
         client.editClipboard = this.hasClipboard(client.perm);
         client.showAdvanced = client.editAccessPreset === 'custom';
@@ -1222,26 +1079,10 @@
       },
       clientPayload(client, overrides = {}) {
         const sourcePerm = client.editPerm === undefined ? client.perm : client.editPerm;
-        const sourceDo = client.edit_do === undefined ? client.do : client.edit_do;
-        const sourceUndo = client.edit_undo === undefined ? client.undo : client.edit_undo;
         return {
           uuid: client.uuid,
           name: client.editName === undefined ? client.name : client.editName,
-          display_mode: (client.editDisplayMode === undefined ? client.display_mode : client.editDisplayMode || '').trim(),
-          allow_client_commands: client.editAllowClientCommands === undefined ? client.allow_client_commands : client.editAllowClientCommands,
-          enable_legacy_ordering: client.editEnableLegacyOrdering === undefined ? client.enable_legacy_ordering : client.editEnableLegacyOrdering,
-          always_use_virtual_display: client.editAlwaysUseVirtualDisplay === undefined ? client.always_use_virtual_display : client.editAlwaysUseVirtualDisplay,
           perm: sourcePerm & permissionMapping._all,
-          do: (sourceDo || []).reduce((filtered, {cmd: rawCmd, elevated}) => {
-            const cmd = (rawCmd || '').trim();
-            if (cmd) filtered.push({cmd, elevated});
-            return filtered;
-          }, []),
-          undo: (sourceUndo || []).reduce((filtered, {cmd: rawCmd, elevated}) => {
-            const cmd = (rawCmd || '').trim();
-            if (cmd) filtered.push({cmd, elevated});
-            return filtered;
-          }, []),
           ...overrides
         };
       },
@@ -1302,9 +1143,6 @@
       },
       hasClipboard(perm) {
         return (perm & permissionMapping._clipboard) !== 0;
-      },
-      hasAdvancedOperations(perm) {
-        return (perm & permissionMapping._advanced_operations) !== 0;
       },
       permToStr(perm) {
         return [24, 16, 8]
@@ -1373,32 +1211,20 @@
           const response = await fetch('./api/clients/list', {credentials: 'include'});
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const body = await response.json();
-          if (!body.status) throw new Error(body.message || 'Apollo did not return a device list.');
+          if (!body.status) throw new Error(body.message || 'Apollo XR did not return a device list.');
 
           this.platform = body.platform || this.platform;
           const clients = (body.named_certs || []).map(({
             name,
             uuid,
-            display_mode,
             perm,
-            connected,
-            do: connectCommands,
-            undo,
-            allow_client_commands,
-            always_use_virtual_display,
-            enable_legacy_ordering
+            connected
           }) => ({
             name,
             uuid,
-            display_mode: display_mode || '',
             perm: Number.parseInt(perm, 10),
             connected,
             editing: false,
-            do: connectCommands || [],
-            undo: undo || [],
-            allow_client_commands,
-            enable_legacy_ordering,
-            always_use_virtual_display,
             saving: false,
             saveError: ''
           }));

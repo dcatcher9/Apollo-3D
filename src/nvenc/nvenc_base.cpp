@@ -191,18 +191,13 @@ namespace nvenc {
     };
 
     auto buffer_is_10bit = [&]() {
-      return buffer_format == NV_ENC_BUFFER_FORMAT_YUV420_10BIT || buffer_format == NV_ENC_BUFFER_FORMAT_YUV444_10BIT;
-    };
-
-    auto buffer_is_yuv444 = [&]() {
-      return buffer_format == NV_ENC_BUFFER_FORMAT_AYUV || buffer_format == NV_ENC_BUFFER_FORMAT_YUV444_10BIT;
+      return buffer_format == NV_ENC_BUFFER_FORMAT_YUV420_10BIT;
     };
 
     {
       auto supported_width = get_encoder_cap(NV_ENC_CAPS_WIDTH_MAX);
       auto supported_height = get_encoder_cap(NV_ENC_CAPS_HEIGHT_MAX);
-      if (supported_width > 0 && client_config.videoFormat >= 0 &&
-          client_config.videoFormat < static_cast<int>(observed_codec_max_widths.size())) {
+      if (supported_width > 0 && client_config.videoFormat >= 0 && client_config.videoFormat < static_cast<int>(observed_codec_max_widths.size())) {
         const int previous = observed_codec_max_widths[client_config.videoFormat].exchange(
           supported_width,
           std::memory_order_relaxed
@@ -224,11 +219,6 @@ namespace nvenc {
       return false;
     }
 
-    if (buffer_is_yuv444() && !get_encoder_cap(NV_ENC_CAPS_SUPPORT_YUV444_ENCODE)) {
-      BOOST_LOG(error) << "NvEnc: gpu doesn't support YUV444 encode";
-      return false;
-    }
-
     if (async_event_handle && !get_encoder_cap(NV_ENC_CAPS_ASYNC_ENCODE_SUPPORT)) {
       BOOST_LOG(warning) << "NvEnc: gpu doesn't support async encode";
       async_event_handle = nullptr;
@@ -240,21 +230,12 @@ namespace nvenc {
     init_params.tuningInfo = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
     init_params.enablePTD = 1;
     init_params.enableEncodeAsync = async_event_handle ? 1 : 0;
-    init_params.enableWeightedPrediction = config.weighted_prediction && get_encoder_cap(NV_ENC_CAPS_SUPPORT_WEIGHTED_PREDICTION);
-
     const bool hevc_unidirectional_b_supported =
       client_config.videoFormat == 1 && get_encoder_cap(NV_ENC_CAPS_SUPPORT_UNIDIRECTIONAL_B);
-    if (should_enable_hevc_unidirectional_b(
-          config,
-          client_config.videoFormat,
-          hevc_unidirectional_b_supported,
-          init_params.enableWeightedPrediction
-        )) {
+    if (should_enable_hevc_unidirectional_b(config, client_config.videoFormat, hevc_unidirectional_b_supported)) {
       init_params.enableUniDirectionalB = 1;
     } else if (config.hevc_unidirectional_b && client_config.videoFormat == 1) {
-      if (init_params.enableWeightedPrediction) {
-        BOOST_LOG(warning) << "NvEnc: HEVC unidirectional B-frames disabled because weighted prediction is enabled";
-      } else if (!hevc_unidirectional_b_supported) {
+      if (!hevc_unidirectional_b_supported) {
         BOOST_LOG(warning) << "NvEnc: HEVC unidirectional B-frames requested but not supported by the GPU";
       }
     }
@@ -312,10 +293,6 @@ namespace nvenc {
       format_config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
       format_config.sliceMode = 3;
       format_config.sliceModeData = client_config.slicesPerFrame;
-      if (buffer_is_yuv444()) {
-        format_config.chromaFormatIDC = 3;
-      }
-      format_config.enableFillerDataInsertion = config.insert_filler_data;
     };
 
     auto set_ref_frames = [&](uint32_t &ref_frames_option, NV_ENC_NUM_REF_FRAMES &L0_option, uint32_t ref_frames_default) {
@@ -333,14 +310,6 @@ namespace nvenc {
       L0_option = NV_ENC_NUM_REF_FRAMES_1;
     };
 
-    auto set_minqp_if_enabled = [&](int value) {
-      if (config.enable_min_qp) {
-        enc_config.rcParams.enableMinQP = 1;
-        enc_config.rcParams.minQP.qpInterP = value;
-        enc_config.rcParams.minQP.qpIntra = value;
-      }
-    };
-
     auto fill_h264_hevc_vui = [&](auto &vui_config) {
       vui_config.videoSignalTypePresentFlag = 1;
       vui_config.videoFormat = NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
@@ -349,7 +318,7 @@ namespace nvenc {
       vui_config.colourPrimaries = colorspace.primaries;
       vui_config.transferCharacteristics = colorspace.tranfer_function;
       vui_config.colourMatrix = colorspace.matrix;
-      vui_config.chromaSampleLocationFlag = buffer_is_yuv444() ? 0 : 1;
+      vui_config.chromaSampleLocationFlag = 1;
       vui_config.chromaSampleLocationTop = 0;
       vui_config.chromaSampleLocationBot = 0;
 
@@ -361,32 +330,16 @@ namespace nvenc {
       case 0:
         {
           // H.264
-          enc_config.profileGUID = buffer_is_yuv444() ? NV_ENC_H264_PROFILE_HIGH_444_GUID : NV_ENC_H264_PROFILE_HIGH_GUID;
+          enc_config.profileGUID = NV_ENC_H264_PROFILE_HIGH_GUID;
           auto &format_config = enc_config.encodeCodecConfig.h264Config;
           set_h264_hevc_common_format_config(format_config);
-          if (config.h264_cavlc || !get_encoder_cap(NV_ENC_CAPS_SUPPORT_CABAC)) {
+          if (!get_encoder_cap(NV_ENC_CAPS_SUPPORT_CABAC)) {
             format_config.entropyCodingMode = NV_ENC_H264_ENTROPY_CODING_MODE_CAVLC;
           } else {
             format_config.entropyCodingMode = NV_ENC_H264_ENTROPY_CODING_MODE_CABAC;
           }
           set_ref_frames(format_config.maxNumRefFrames, format_config.numRefL0, 5);
-          set_minqp_if_enabled(config.min_qp_h264);
           fill_h264_hevc_vui(format_config.h264VUIParameters);
-          if (client_config.enableIntraRefresh == 1) {
-            if (get_encoder_cap(NV_ENC_CAPS_SUPPORT_INTRA_REFRESH)) {
-              format_config.enableIntraRefresh = 1;
-              format_config.intraRefreshPeriod = 300;
-              format_config.intraRefreshCnt = 299;
-              format_config.outputRecoveryPointSEI = 1;
-              if (get_encoder_cap(NV_ENC_CAPS_SINGLE_SLICE_INTRA_REFRESH)) {
-                format_config.singleSliceIntraRefresh = 1;
-              } else {
-                BOOST_LOG(warning) << "NvEnc: Single Slice Intra Refresh not supported";
-              }
-            } else {
-              BOOST_LOG(error) << "NvEnc: Client asked for intra-refresh but the encoder does not support intra-refresh";
-            }
-          }
           break;
         }
 
@@ -403,23 +356,7 @@ namespace nvenc {
           if (init_params.enableUniDirectionalB) {
             format_config.numRefL1 = NV_ENC_NUM_REF_FRAMES_1;
           }
-          set_minqp_if_enabled(config.min_qp_hevc);
           fill_h264_hevc_vui(format_config.hevcVUIParameters);
-          if (client_config.enableIntraRefresh == 1) {
-            if (get_encoder_cap(NV_ENC_CAPS_SUPPORT_INTRA_REFRESH)) {
-              format_config.enableIntraRefresh = 1;
-              format_config.intraRefreshPeriod = 300;
-              format_config.intraRefreshCnt = 299;
-              format_config.outputRecoveryPointSEI = 1;
-              if (get_encoder_cap(NV_ENC_CAPS_SINGLE_SLICE_INTRA_REFRESH)) {
-                format_config.singleSliceIntraRefresh = 1;
-              } else {
-                BOOST_LOG(warning) << "NvEnc: Single Slice Intra Refresh not supported";
-              }
-            } else {
-              BOOST_LOG(error) << "NvEnc: Client asked for intra-refresh but the encoder does not support intra-refresh";
-            }
-          }
           break;
         }
 
@@ -429,10 +366,6 @@ namespace nvenc {
           auto &format_config = enc_config.encodeCodecConfig.av1Config;
           format_config.repeatSeqHdr = 1;
           format_config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
-          if (buffer_is_yuv444()) {
-            format_config.chromaFormatIDC = 3;
-          }
-          format_config.enableBitstreamPadding = config.insert_filler_data;
           if (buffer_is_10bit()) {
             format_config.inputBitDepth = NV_ENC_BIT_DEPTH_10;
             format_config.outputBitDepth = NV_ENC_BIT_DEPTH_10;
@@ -441,10 +374,8 @@ namespace nvenc {
           format_config.transferCharacteristics = colorspace.tranfer_function;
           format_config.matrixCoefficients = colorspace.matrix;
           format_config.colorRange = colorspace.full_range;
-          format_config.chromaSamplePosition = buffer_is_yuv444() ? 0 : 1;
+          format_config.chromaSamplePosition = 1;
           set_ref_frames(format_config.maxNumRefFramesInDPB, format_config.numFwdRefs, 8);
-          set_minqp_if_enabled(config.min_qp_av1);
-
           if (client_config.slicesPerFrame > 1) {
             // NVENC only supports slice counts that are powers of two, so we'll pick powers of two
             // with bias to rows due to hopefully more similar macroblocks with a row vs a column.
@@ -496,9 +427,6 @@ namespace nvenc {
       if (init_params.enableEncodeAsync) {
         extra += " async";
       }
-      if (buffer_is_yuv444()) {
-        extra += " yuv444";
-      }
       if (buffer_is_10bit()) {
         extra += " 10-bit";
       }
@@ -511,20 +439,11 @@ namespace nvenc {
       if (encoder_params.rfi) {
         extra += " rfi";
       }
-      if (init_params.enableWeightedPrediction) {
-        extra += " weighted-prediction";
-      }
       if (init_params.enableUniDirectionalB) {
         extra += " hevc-unidirectional-b";
       }
       if (enc_config.rcParams.enableAQ) {
         extra += " spatial-aq";
-      }
-      if (enc_config.rcParams.enableMinQP) {
-        extra += std::format(" qpmin={}", enc_config.rcParams.minQP.qpInterP);
-      }
-      if (config.insert_filler_data) {
-        extra += " filler-data";
       }
 
       BOOST_LOG(info) << "NvEnc: created encoder " << video_format_string << quality_preset_string_from_guid(init_params.presetGUID) << extra;
@@ -655,8 +574,7 @@ namespace nvenc {
       return false;
     }
 
-    if (first_frame >= encoder_state.last_rfi_range.first &&
-        last_frame <= encoder_state.last_rfi_range.second) {
+    if (first_frame >= encoder_state.last_rfi_range.first && last_frame <= encoder_state.last_rfi_range.second) {
       BOOST_LOG(debug) << "NvEnc: rfi request " << first_frame << "-" << last_frame << " already done";
       return true;
     }

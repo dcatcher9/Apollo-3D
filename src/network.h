@@ -48,7 +48,6 @@ namespace net {
   };
 
   net_e from_enum_string(const std::string_view &view);
-  std::string_view to_enum_string(net_e net);
 
   net_e from_address(const std::string_view &view);
 
@@ -103,13 +102,6 @@ namespace net {
    * @return Normalized address in URL-escaped string.
    */
   std::string addr_to_url_escaped_string(boost::asio::ip::address address);
-
-  /**
-   * @brief Get the encryption mode for the given remote endpoint address.
-   * @param address The address used to look up the desired encryption mode.
-   * @return The WAN or LAN encryption mode, based on the provided address.
-   */
-  int encryption_mode_for_address(boost::asio::ip::address address);
 
   /**
    * @brief Returns a string for use as the instance name for mDNS.

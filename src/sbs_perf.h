@@ -7,8 +7,8 @@
  * offline harness can explicitly snapshot that window to JSON. Collection follows the global
  * `diagnostics` config switch; all entry points are cheap no-ops when disabled.
  *
- * Live samples from concurrent encode sessions are intentionally aggregated into one recent
- * system-load window. A small internal mutex guards the maps and explicit harness snapshots.
+ * Live samples from the sole active encode pipeline form one recent process-wide system-load
+ * window. A small mutex guards the maps and explicit harness snapshots.
  *
  * GPU-stream stages (TensorRT depth/warp/inpaint inference) are measured with CUDA events
  * inside the estimator and the resolved elapsed-ms handed here via add_sample_ms(); this

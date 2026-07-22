@@ -53,7 +53,7 @@ Validate offline on a dump pair straddling a cut before headset (workflow mandat
   `convert()`: depth-input CS / composite PS / (inpaint stages when restashed), and CUDA
   events around `enqueueV3` on the depth/warp streams inside the estimator.
 - Rolling 300-frame p50/p95/max, logged at info level in one concise line. Live summaries are
-  process-wide aggregates when multiple SBS outputs are active; harness runs are single-stream.
+  process-wide windows for the sole active SBS pipeline; harness runs are isolated.
 - Gate with the global `diagnostics = enabled` switch. The shipped default is disabled, while the
   ApolloDev config enables it; timestamp queries are not allocated while diagnostics are off.
 This subsumes the CPU-side telemetry added in the inpaint stash and should land with it.

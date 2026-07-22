@@ -9,10 +9,6 @@
 #include "logging.h"
 #include "video.h"
 
-extern "C" {
-#include <libswscale/swscale.h>
-}
-
 namespace video {
 
   bool colorspace_is_hdr(const sunshine_colorspace_t &colorspace) {
@@ -76,50 +72,6 @@ namespace video {
     }
 
     return colorspace;
-  }
-
-  avcodec_colorspace_t avcodec_colorspace_from_sunshine_colorspace(const sunshine_colorspace_t &sunshine_colorspace) {
-    avcodec_colorspace_t avcodec_colorspace;
-
-    switch (sunshine_colorspace.colorspace) {
-      case colorspace_e::rec601:
-        // Rec. 601
-        avcodec_colorspace.primaries = AVCOL_PRI_SMPTE170M;
-        avcodec_colorspace.transfer_function = AVCOL_TRC_SMPTE170M;
-        avcodec_colorspace.matrix = AVCOL_SPC_SMPTE170M;
-        avcodec_colorspace.software_format = SWS_CS_SMPTE170M;
-        break;
-
-      case colorspace_e::rec709:
-        // Rec. 709
-        avcodec_colorspace.primaries = AVCOL_PRI_BT709;
-        avcodec_colorspace.transfer_function = AVCOL_TRC_BT709;
-        avcodec_colorspace.matrix = AVCOL_SPC_BT709;
-        avcodec_colorspace.software_format = SWS_CS_ITU709;
-        break;
-
-      case colorspace_e::bt2020sdr:
-        // Rec. 2020
-        avcodec_colorspace.primaries = AVCOL_PRI_BT2020;
-        assert(sunshine_colorspace.bit_depth == 10);
-        avcodec_colorspace.transfer_function = AVCOL_TRC_BT2020_10;
-        avcodec_colorspace.matrix = AVCOL_SPC_BT2020_NCL;
-        avcodec_colorspace.software_format = SWS_CS_BT2020;
-        break;
-
-      case colorspace_e::bt2020:
-        // Rec. 2020 with ST 2084 perceptual quantizer
-        avcodec_colorspace.primaries = AVCOL_PRI_BT2020;
-        assert(sunshine_colorspace.bit_depth == 10);
-        avcodec_colorspace.transfer_function = AVCOL_TRC_SMPTE2084;
-        avcodec_colorspace.matrix = AVCOL_SPC_BT2020_NCL;
-        avcodec_colorspace.software_format = SWS_CS_BT2020;
-        break;
-    }
-
-    avcodec_colorspace.range = sunshine_colorspace.full_range ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
-
-    return avcodec_colorspace;
   }
 
   const color_t *color_vectors_from_colorspace(const sunshine_colorspace_t &colorspace, bool unorm_output) {

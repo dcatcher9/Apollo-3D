@@ -14,7 +14,6 @@
 
 // local includes
 #include "confighttp.h"
-#include "display_device.h"
 #include "entry_handler.h"
 #include "globals.h"
 #include "httpcommon.h"
@@ -25,7 +24,6 @@
 #include "sbs_bench_harness.h"
 #include "stream.h"
 #include "system_tray.h"
-#include "upnp.h"
 #include "uuid.h"
 #include "video.h"
 #include "video_depth_estimator.h"
@@ -209,23 +207,13 @@ int main(int argc, char *argv[]) {
   // Prepare the single configured TensorRT model in the background only for the long-lived host.
   // Command modes such as --sbs-bench own their TensorRT lifecycle and must not race this work.
   // jthread joins before logging and process globals are torn down, preventing exit-time races.
-  std::jthread model_prepare_thread([
-    model = video::depth_model_for_profile(config::video.sbs),
-    adapter_name = config::video.adapter_name
-  ]() {
+  std::jthread model_prepare_thread([model = video::depth_model_for_profile(config::video.sbs),
+                                     adapter_name = config::video.adapter_name]() {
     BOOST_LOG(info) << "Preparing startup depth model '"sv << model.name << "'..."sv;
     if (!models::prepare_tensorrt_model(SUNSHINE_ASSETS_DIR, model, adapter_name)) {
       BOOST_LOG(error) << "Startup depth-model preparation failed for '"sv << model.name << "'."sv;
     }
   });
-
-  // Adding guard here first as it also performs recovery after crash,
-  // otherwise people could theoretically end up without display output.
-  // It also should be destroyed before forced shutdown to expedite the cleanup.
-  auto display_device_deinit_guard = display_device::init(platf::appdata() / "display_device.state", config::video);
-  if (!display_device_deinit_guard) {
-    BOOST_LOG(error) << "Display device session failed to initialize"sv;
-  }
 
   // nanors lazily initializes its process-wide GF lookup table when a context
   // is created. Warm it on the main thread before any broadcast worker can
@@ -331,7 +319,7 @@ int main(int argc, char *argv[]) {
 
   // Create signal handler after logging has been initialized
   auto shutdown_event = mail::man->event<bool>(mail::shutdown);
-  on_signal(SIGINT, [&force_shutdown, &display_device_deinit_guard, shutdown_event]() {
+  on_signal(SIGINT, [&force_shutdown, shutdown_event]() {
     BOOST_LOG(info) << "Interrupt handler called"sv;
 
     auto task = []() {
@@ -340,15 +328,12 @@ int main(int argc, char *argv[]) {
       lifetime::debug_trap();
     };
 
-    proc::proc.terminate();
-
     force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
 
     shutdown_event->raise(true);
-    display_device_deinit_guard = nullptr;
   });
 
-  on_signal(SIGTERM, [&force_shutdown, &display_device_deinit_guard, shutdown_event]() {
+  on_signal(SIGTERM, [&force_shutdown, shutdown_event]() {
     BOOST_LOG(info) << "Terminate handler called"sv;
 
     auto task = []() {
@@ -359,7 +344,6 @@ int main(int argc, char *argv[]) {
     force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
 
     shutdown_event->raise(true);
-    display_device_deinit_guard = nullptr;
   });
 
 #ifdef _WIN32
@@ -501,11 +485,6 @@ int main(int argc, char *argv[]) {
     }
   });
 
-  std::unique_ptr<platf::deinit_t> upnp_unmap;
-  auto sync_upnp = std::async(std::launch::async, [&upnp_unmap]() {
-    upnp_unmap = upnp::start();
-  });
-
   // FIXME: Temporary workaround: Simple-Web_server needs to be updated or replaced
   if (shutdown_event->peek()) {
     return lifetime::desired_exit_code;
@@ -514,14 +493,6 @@ int main(int argc, char *argv[]) {
   std::thread httpThread {nvhttp::start};
   std::thread configThread {confighttp::start};
   std::thread rtspThread {rtsp_stream::start};
-
-#ifdef _WIN32
-  // If we're using the default port and GameStream is enabled, warn the user
-  if (config::sunshine.port == 47989 && is_gamestream_enabled()) {
-    BOOST_LOG(fatal) << "GameStream is still enabled in GeForce Experience! This *will* cause streaming problems with Apollo!"sv;
-    BOOST_LOG(fatal) << "Disable GameStream on the SHIELD tab in GeForce Experience or change the Port setting on the Advanced tab in the Apollo Web UI."sv;
-  }
-#endif
 
   if (tray_is_enabled && config::sunshine.system_tray) {
     BOOST_LOG(info) << "Starting system tray"sv;
@@ -550,6 +521,10 @@ int main(int argc, char *argv[]) {
   // synchronously before stopping the task pool so timer resolution, WLAN, and input state are
   // always restored during an orderly host shutdown.
   stream::session::flush_platform_state();
+
+  // RTSP shutdown above has stopped and joined capture, encode, audio, control, and input. Only
+  // now is it safe to undo prep commands, restore HDR, and remove the stream-owned display.
+  proc::proc.terminate(false, false);
 
   task_pool.stop();
   task_pool.join();

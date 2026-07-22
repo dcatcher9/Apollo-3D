@@ -61,6 +61,30 @@ constexpr auto __mingw_uuidof<winrt::IDirect3DDxgiInterfaceAccess>() -> GUID con
 #endif
 
 namespace platf::dxgi {
+  bool test_wgc_capture(output_t &output) {
+    try {
+      if (!winrt::GraphicsCaptureSession::IsSupported()) {
+        return false;
+      }
+
+      DXGI_OUTPUT_DESC output_desc {};
+      if (FAILED(output->GetDesc(&output_desc))) {
+        return false;
+      }
+
+      auto monitor_factory = winrt::get_activation_factory<winrt::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
+      winrt::GraphicsCaptureItem item {nullptr};
+      return monitor_factory &&
+             SUCCEEDED(monitor_factory->CreateForMonitor(
+               output_desc.Monitor,
+               winrt::guid_of<winrt::IGraphicsCaptureItem>(),
+               winrt::put_abi(item)
+             ));
+    } catch (const winrt::hresult_error &) {
+      return false;
+    }
+  }
+
   wgc_capture_t::wgc_capture_t() {
     InitializeConditionVariable(&frame_present_cv);
   }
@@ -108,8 +132,7 @@ namespace platf::dxgi {
     display->output->GetDesc(&output_desc);
 
     auto monitor_factory = winrt::get_activation_factory<winrt::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
-    if (monitor_factory == nullptr ||
-        FAILED(status = monitor_factory->CreateForMonitor(output_desc.Monitor, winrt::guid_of<winrt::IGraphicsCaptureItem>(), winrt::put_abi(item)))) {
+    if (monitor_factory == nullptr || FAILED(status = monitor_factory->CreateForMonitor(output_desc.Monitor, winrt::guid_of<winrt::IGraphicsCaptureItem>(), winrt::put_abi(item)))) {
       BOOST_LOG(error) << "Screen capture is not supported on this device for this release of Windows: failed to acquire display: [0x"sv << util::hex(status).to_string_view() << ']';
       return -1;
     }
@@ -139,13 +162,11 @@ namespace platf::dxgi {
     }
     try {
       if (winrt::ApiInformation::IsPropertyPresent(L"Windows.Graphics.Capture.GraphicsCaptureSession", L"MinUpdateInterval")) {
-        capture_session.MinUpdateInterval(winrt::TimeSpan{ 10000000 / (config.framerate * 2) });
-      }
-      else {
+        capture_session.MinUpdateInterval(winrt::TimeSpan {10000000 / (config.framerate * 2)});
+      } else {
         BOOST_LOG(warning) << "Can't set MinUpdateInterval";
       }
-    }
-    catch (winrt::hresult_error &e) {
+    } catch (winrt::hresult_error &e) {
       BOOST_LOG(warning) << "Screen capture may not be fully supported on this device for this release of Windows: failed to set MinUpdateInterval: [0x"sv << util::hex(e.code()).to_string_view() << ']';
     }
     try {
@@ -239,108 +260,4 @@ namespace platf::dxgi {
     }
   }
 
-  int display_wgc_ram_t::init(const ::video::config_t &config, const std::string &display_name) {
-    if (display_base_t::init(config, display_name) || dup.init(this, config)) {
-      return -1;
-    }
-
-    texture.reset();
-    return 0;
-  }
-
-  /**
-   * @brief Get the next frame from the Windows.Graphics.Capture API and copy it into a new snapshot texture.
-   * @param pull_free_image_cb call this to get a new free image from the video subsystem.
-   * @param img_out the captured frame is returned here
-   * @param timeout how long to wait for the next frame
-   * @param cursor_visible whether to capture the cursor
-   */
-  capture_e display_wgc_ram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
-    HRESULT status;
-    texture2d_t src;
-    uint64_t frame_qpc;
-    dup.set_cursor_visible(cursor_visible);
-    auto capture_status = dup.next_frame(timeout, &src, frame_qpc);
-    if (capture_status != capture_e::ok) {
-      return capture_status;
-    }
-
-    auto frame_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(qpc_counter(), frame_qpc);
-    D3D11_TEXTURE2D_DESC desc;
-    src->GetDesc(&desc);
-
-    // Create the staging texture if it doesn't exist. It should match the source in size and format.
-    if (texture == nullptr) {
-      capture_format = desc.Format;
-      BOOST_LOG(info) << "Capture format ["sv << dxgi_format_to_string(capture_format) << ']';
-
-      D3D11_TEXTURE2D_DESC t {};
-      t.Width = width;
-      t.Height = height;
-      t.MipLevels = 1;
-      t.ArraySize = 1;
-      t.SampleDesc.Count = 1;
-      t.Usage = D3D11_USAGE_STAGING;
-      t.Format = capture_format;
-      t.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-
-      auto status = device->CreateTexture2D(&t, nullptr, &texture);
-
-      if (FAILED(status)) {
-        BOOST_LOG(error) << "Failed to create staging texture [0x"sv << util::hex(status).to_string_view() << ']';
-        return capture_e::error;
-      }
-    }
-
-    // It's possible for our display enumeration to race with mode changes and result in
-    // mismatched image pool and desktop texture sizes. If this happens, just reinit again.
-    if (desc.Width != width || desc.Height != height) {
-      BOOST_LOG(info) << "Capture size changed ["sv << width << 'x' << height << " -> "sv << desc.Width << 'x' << desc.Height << ']';
-      return capture_e::reinit;
-    }
-    // It's also possible for the capture format to change on the fly. If that happens,
-    // reinitialize capture to try format detection again and create new images.
-    if (capture_format != desc.Format) {
-      BOOST_LOG(info) << "Capture format changed ["sv << dxgi_format_to_string(capture_format) << " -> "sv << dxgi_format_to_string(desc.Format) << ']';
-      return capture_e::reinit;
-    }
-
-    // Copy from GPU to CPU
-    device_ctx->CopyResource(texture.get(), src.get());
-
-    if (!pull_free_image_cb(img_out)) {
-      return capture_e::interrupted;
-    }
-    auto img = (img_t *) img_out.get();
-
-    // Map the staging texture for CPU access (making it inaccessible for the GPU)
-    if (FAILED(status = device_ctx->Map(texture.get(), 0, D3D11_MAP_READ, 0, &img_info))) {
-      BOOST_LOG(error) << "Failed to map texture [0x"sv << util::hex(status).to_string_view() << ']';
-
-      return capture_e::error;
-    }
-
-    // Now that we know the capture format, we can finish creating the image
-    if (complete_img(img, false)) {
-      device_ctx->Unmap(texture.get(), 0);
-      img_info.pData = nullptr;
-      return capture_e::error;
-    }
-
-    std::copy_n((std::uint8_t *) img_info.pData, height * img_info.RowPitch, (std::uint8_t *) img->data);
-
-    // Unmap the staging texture to allow GPU access again
-    device_ctx->Unmap(texture.get(), 0);
-    img_info.pData = nullptr;
-
-    if (img) {
-      img->frame_timestamp = frame_timestamp;
-    }
-
-    return capture_e::ok;
-  }
-
-  capture_e display_wgc_ram_t::release_snapshot() {
-    return dup.release_frame();
-  }
 }  // namespace platf::dxgi

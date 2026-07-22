@@ -4,11 +4,10 @@
  */
 #include "../tests_common.h"
 
-#include <tuple>
-
+#include <src/nvenc/nvenc_config.h>
 #include <src/video.h>
 #include <src/video_colorspace.h>
-#include <src/nvenc/nvenc_config.h>
+#include <tuple>
 
 namespace {
   float apply_color_vector(const float (&color_vector)[4], float red, float green, float blue) {
@@ -66,83 +65,104 @@ TEST(ColorVectorsTest, UintOutputRoundsBt2020LimitedValues) {
 TEST(NvencConfigTest, GatesHevcUnidirectionalBFrames) {
   nvenc::nvenc_config config;
 
-  EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 1, true, false));
+  EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 1, true));
 
   config.hevc_unidirectional_b = true;
-  EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 0, true, false));
-  EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 2, true, false));
-  EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 1, false, false));
-  EXPECT_TRUE(nvenc::should_enable_hevc_unidirectional_b(config, 1, true, false));
-  EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 1, true, true));
+  EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 0, true));
+  EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 2, true));
+  EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 1, false));
+  EXPECT_TRUE(nvenc::should_enable_hevc_unidirectional_b(config, 1, true));
 }
 
-struct EncoderTest: PlatformTestSuite, testing::WithParamInterface<video::encoder_t *> {
-  void SetUp() override {
-    auto &encoder = *GetParam();
-    if (!video::validate_encoder(encoder, false)) {
-      // Encoder failed validation,
-      // if it's software - fail, otherwise skip
-      if (encoder.name == "software") {
-        FAIL() << "Software encoder not available";
-      } else {
-        GTEST_SKIP() << "Encoder not available";
-      }
-    }
-  }
-};
+TEST(CaptureBackendFailoverTest, RepeatedEarlyDdupFailuresLatchWgc) {
+  video::capture_backend_failover_t failover;
 
-INSTANTIATE_TEST_SUITE_P(
-  EncoderVariants,
-  EncoderTest,
-  testing::Values(
-#if !defined(__APPLE__)
-    &video::nvenc,
-#endif
-#ifdef _WIN32
-    &video::amdvce,
-    &video::quicksync,
-#endif
-#ifdef __linux__
-    &video::vaapi,
-#endif
-#ifdef __APPLE__
-    &video::videotoolbox,
-#endif
-    &video::software
-  ),
-  [](const auto &info) {
-    return std::string(info.param->name);
-  }
-);
+  failover.note_capture_result(
+    platf::capture_backend_e::ddup,
+    platf::capture_e::reinit,
+    0,
+    std::chrono::milliseconds(100)
+  );
+  EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::ddup);
 
-TEST_P(EncoderTest, ValidateEncoder) {
-  // todo:: test something besides fixture setup
+  failover.note_capture_result(
+    platf::capture_backend_e::ddup,
+    platf::capture_e::error,
+    1,
+    std::chrono::milliseconds(100)
+  );
+  EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::wgc);
 }
 
-struct FramerateX100Test: testing::TestWithParam<std::tuple<std::int32_t, AVRational>> {};
+TEST(CaptureBackendFailoverTest, StableDdupTenureForgivesOneOffReinit) {
+  video::capture_backend_failover_t failover;
+  failover.note_capture_result(
+    platf::capture_backend_e::ddup,
+    platf::capture_e::reinit,
+    0,
+    std::chrono::milliseconds(100)
+  );
+  failover.note_capture_result(
+    platf::capture_backend_e::ddup,
+    platf::capture_e::reinit,
+    1,
+    std::chrono::seconds(3)
+  );
+  failover.note_capture_result(
+    platf::capture_backend_e::ddup,
+    platf::capture_e::error,
+    0,
+    std::chrono::milliseconds(100)
+  );
+
+  EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::ddup);
+}
+
+TEST(CaptureBackendFailoverTest, WgcSelectionDoesNotOscillate) {
+  video::capture_backend_failover_t failover;
+  failover.note_backend_opened(platf::capture_backend_e::wgc);
+  failover.note_capture_result(
+    platf::capture_backend_e::wgc,
+    platf::capture_e::error,
+    0,
+    std::chrono::milliseconds(10)
+  );
+  failover.note_capture_result(
+    platf::capture_backend_e::ddup,
+    platf::capture_e::reinit,
+    240,
+    std::chrono::seconds(3)
+  );
+
+  EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::wgc);
+
+  failover.reset();
+  EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::ddup);
+}
+
+struct FramerateX100Test: testing::TestWithParam<std::tuple<std::int32_t, video::rational_t>> {};
 
 TEST_P(FramerateX100Test, ConvertsToExpectedRational) {
   const auto &[x100, expected] = GetParam();
   const auto actual = video::framerate_x100_to_rational(x100);
-  EXPECT_EQ(av_cmp_q(actual, expected), 0)
-    << "expected " << expected.num << '/' << expected.den
-    << ", got " << actual.num << '/' << actual.den;
+  EXPECT_EQ(actual.num, expected.num);
+  EXPECT_EQ(actual.den, expected.den);
 }
 
 INSTANTIATE_TEST_SUITE_P(
   FramerateX100Tests,
   FramerateX100Test,
   testing::Values(
-    std::make_tuple(2397, AVRational {24000, 1001}),
-    std::make_tuple(2398, AVRational {24000, 1001}),
-    std::make_tuple(2500, AVRational {25, 1}),
-    std::make_tuple(2997, AVRational {30000, 1001}),
-    std::make_tuple(3000, AVRational {30, 1}),
-    std::make_tuple(5994, AVRational {60000, 1001}),
-    std::make_tuple(6000, AVRational {60, 1}),
-    std::make_tuple(11988, AVRational {120000, 1001}),
-    std::make_tuple(23976, AVRational {240000, 1001}),
-    std::make_tuple(9498, AVRational {4749, 50})
+    std::make_tuple(2397, video::rational_t {24000, 1001}),
+    std::make_tuple(2398, video::rational_t {24000, 1001}),
+    std::make_tuple(2500, video::rational_t {25, 1}),
+    std::make_tuple(2997, video::rational_t {30000, 1001}),
+    std::make_tuple(3000, video::rational_t {30, 1}),
+    std::make_tuple(5994, video::rational_t {60000, 1001}),
+    std::make_tuple(6000, video::rational_t {60, 1}),
+    std::make_tuple(11988, video::rational_t {120000, 1001}),
+    std::make_tuple(23976, video::rational_t {240000, 1001}),
+    std::make_tuple(9498, video::rational_t {4749, 50})
   )
 );
 

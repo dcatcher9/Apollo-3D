@@ -317,29 +317,23 @@
         <essentials
           v-if="currentTab === 'essential'"
           :config="config"
-          :platform="platform"
           :vdisplay="vdisplayStatus"
         ></essentials>
 
         <general
           v-if="currentTab === 'general'"
           :config="config"
-          :global-prep-cmd="global_prep_cmd"
-          :global-state-cmd="global_state_cmd"
-          :server-cmd="server_cmd"
-          :platform="platform">
+          :global-prep-cmd="global_prep_cmd">
         </general>
 
         <inputs
           v-if="currentTab === 'input'"
-          :config="config"
-          :platform="platform">
+          :config="config">
         </inputs>
 
         <audio-video
           v-if="currentTab === 'av'"
           :config="config"
-          :platform="platform"
           :vdisplay="vdisplayStatus"
         ></audio-video>
 
@@ -347,26 +341,22 @@
 
         <network
           v-if="currentTab === 'network'"
-          :config="config"
-          :platform="platform">
+          :config="config">
         </network>
 
         <files
           v-if="currentTab === 'files'"
-          :config="config"
-          :platform="platform">
+          :config="config">
         </files>
 
         <advanced
           v-if="currentTab === 'advanced'"
-          :config="config"
-          :platform="platform">
+          :config="config">
         </advanced>
 
         <container-encoders
           :current-tab="currentTab"
-          :config="config"
-          :platform="platform">
+          :config="config">
         </container-encoders>
       </section>
     </div>
@@ -377,7 +367,7 @@
 
     <div v-if="config" class="settings-savebar" role="status">
       <div class="save-state">
-        <strong v-if="restarted">Apollo is restarting</strong>
+        <strong v-if="restarted">Apollo XR is restarting</strong>
         <strong v-else-if="saved">Settings saved</strong>
         <strong v-else-if="dirty">Unsaved changes</strong>
         <strong v-else>Settings are current</strong>
@@ -399,7 +389,7 @@
 
 
 <script type="module">
-  import { computed, createApp } from 'vue'
+  import { createApp } from 'vue'
   import { initApp } from './init'
   import Navbar from './Navbar.vue'
   import Essentials from './configs/tabs/Essentials.vue'
@@ -411,9 +401,6 @@
   import AudioVideo from './configs/tabs/AudioVideo.vue'
   import ArGlasses from './configs/tabs/ArGlasses.vue'
   import ContainerEncoders from './configs/tabs/ContainerEncoders.vue'
-  import {$tp, usePlatformI18n} from './platform-i18n'
-
-  let fallbackDisplayModeCache = "";
 
   const app = createApp({
     components: {
@@ -431,7 +418,6 @@
     },
     data() {
       return {
-        platform: "",
         saved: false,
         restarted: false,
         saving: false,
@@ -441,8 +427,6 @@
         currentTab: "essential",
         vdisplayStatus: "1",
         global_prep_cmd: [],
-        global_state_cmd: [],
-        server_cmd: [],
         tabs: [ // TODO: Move the options to each Component instead, encapsulate.
           {
             id: "essential",
@@ -458,9 +442,6 @@
               "min_log_level": 2,
               "diagnostics": "disabled",
               "global_prep_cmd": [],
-              "global_state_cmd": [],
-              "server_cmd": [],
-              "notify_pre_releases": "disabled",
               "system_tray": "enabled",
               "hide_tray_controls": "disabled",
               "enable_pairing": "enabled",
@@ -476,17 +457,14 @@
               "ds4_back_as_touchpad_click": "enabled",
               "motion_as_ds4": "enabled",
               "touchpad_as_ds4": "enabled",
-              "ds5_inputtino_randomize_mac": "enabled",
               "back_button_timeout": -1,
               "keyboard": "enabled",
               "key_repeat_delay": 500,
               "key_repeat_frequency": 24.9,
               "always_send_scancodes": "enabled",
-              "key_rightalt_to_key_win": "disabled",
               "mouse": "enabled",
               "high_resolution_scrolling": "enabled",
               "native_pen_touch": "enabled",
-              "enable_input_only_mode": "disabled",
               "forward_rumble": "enabled",
               "keybindings": "[0x10,0xA0,0x11,0xA2,0x12,0xA4]",  // todo: add this to UI
             },
@@ -497,27 +475,8 @@
             options: {
               "audio_sink": "",
               "virtual_sink": "",
-              "stream_audio": "enabled",
-              "install_steam_audio_drivers": "enabled",
-              "keep_sink_default": "enabled",
-              "auto_capture_sink": "enabled",
               "adapter_name": "",
               "output_name": "",
-              "fallback_mode": "",
-              "headless_mode": "disabled",
-              "double_refreshrate": "disabled",
-              "isolated_virtual_display_option": "disabled",
-              "dd_configuration_option": "disabled",
-              "dd_resolution_option": "auto",
-              "dd_manual_resolution": "",
-              "dd_refresh_rate_option": "auto",
-              "dd_manual_refresh_rate": "",
-              "dd_hdr_option": "auto",
-              "dd_wa_hdr_toggle_delay": 0,
-              "dd_config_revert_delay": 3000,
-              "dd_config_revert_on_disconnect": "disabled",
-              "dd_mode_remapping": {"mixed": [], "resolution_only": [], "refresh_rate_only": []},
-              "dd_wa_hdr_toggle": "disabled",
               "max_bitrate": 0,
               "minimum_fps_target": 0,
             },
@@ -531,14 +490,10 @@
             id: "network",
             name: "Network",
             options: {
-              "upnp": "disabled",
               "address_family": "ipv4",
               "bind_address": "",
               "port": 47989,
               "origin_web_ui_allowed": "lan",
-              "external_ip": "",
-              "lan_encryption_mode": 0,
-              "wan_encryption_mode": 1,
               "ping_timeout": 10000,
               "session_resume_grace": 60000,
               "packetsize": 0,
@@ -561,17 +516,7 @@
             name: "Advanced",
             options: {
               "fec_percentage": 20,
-              "qp": 28,
-              "min_threads": 2,
-              "limit_framerate": "enabled",
-              "envvar_compatibility_mode": "disabled",
-              "legacy_ordering": "disabled",
-              "ignore_encoder_probe_failure": "disabled",
               "sbs_3d_profile": "apollo",
-              "hevc_mode": 0,
-              "av1_mode": 0,
-              "capture": "",
-              "encoder": "",
             },
           },
           {
@@ -585,55 +530,7 @@
               "nvenc_vbv_increase": 0,
               "nvenc_realtime_hags": "enabled",
               "nvenc_latency_over_power": "enabled",
-              "nvenc_opengl_vulkan_on_dxgi": "enabled",
-              "nvenc_h264_cavlc": "disabled",
-              "nvenc_intra_refresh": "disabled"
-            },
-          },
-          {
-            id: "qsv",
-            name: "Intel QuickSync Encoder",
-            options: {
-              "qsv_preset": "medium",
-              "qsv_coder": "auto",
-              "qsv_slow_hevc": "disabled",
-            },
-          },
-          {
-            id: "amd",
-            name: "AMD AMF Encoder",
-            options: {
-              "amd_usage": "ultralowlatency",
-              "amd_rc": "vbr_latency",
-              "amd_enforce_hrd": "disabled",
-              "amd_quality": "balanced",
-              "amd_preanalysis": "disabled",
-              "amd_vbaq": "enabled",
-              "amd_coder": "auto",
-            },
-          },
-          {
-            id: "vt",
-            name: "VideoToolbox Encoder",
-            options: {
-              "vt_coder": "auto",
-              "vt_software": "auto",
-              "vt_realtime": "enabled",
-            },
-          },
-          {
-            id: "vaapi",
-            name: "VA-API Encoder",
-            options: {
-              "vaapi_strict_rc_buffer": "disabled",
-            },
-          },
-          {
-            id: "sw",
-            name: "Software Encoder",
-            options: {
-              "sw_preset": "superfast",
-              "sw_tune": "zerolatency",
+              "nvenc_opengl_vulkan_on_dxgi": "enabled"
             },
           },
         ],
@@ -647,11 +544,6 @@
         return this.tabs.find((tab) => tab.id === this.currentTab)?.name || 'Advanced settings'
       },
     },
-    provide() {
-       return {
-         platform: computed(() => this.platform)
-       }
-    },
     created() {
       fetch("./api/config", {
         credentials: 'include'
@@ -659,24 +551,6 @@
         .then((r) => r.json())
         .then((r) => {
           this.config = r;
-          this.platform = this.config.platform;
-
-          var app = document.getElementById("app");
-          if (this.platform === "windows") {
-            this.tabs = this.tabs.filter((el) => {
-              return el.id !== "vt" && el.id !== "vaapi";
-            });
-          }
-          if (this.platform === "linux") {
-            this.tabs = this.tabs.filter((el) => {
-              return el.id !== "amd" && el.id !== "qsv" && el.id !== "vt" && el.id !== "ar-glasses";
-            });
-          }
-          if (this.platform === "macos") {
-            this.tabs = this.tabs.filter((el) => {
-              return el.id !== "amd" && el.id !== "nv" && el.id !== "qsv" && el.id !== "vaapi" && el.id !== "ar-glasses";
-            });
-          }
 
           // remove values we don't want in the config file
           delete this.config.platform;
@@ -687,12 +561,10 @@
           this.vdisplayStatus = this.config.vdisplayStatus;
           delete this.config.vdisplayStatus;
 
-          fallbackDisplayModeCache = this.config.fallback_mode || "";
-
           // TODO: let each tab's Component handle it's own data instead of doing it here
 
           // Parse the special options before population if available
-          const specialOptions = ["dd_mode_remapping", "global_prep_cmd", "global_state_cmd", "server_cmd"]
+          const specialOptions = ["global_prep_cmd"]
           for (const optionKey of specialOptions) {
             if (typeof this.config[optionKey] === "string") {
               this.config[optionKey] = JSON.parse(this.config[optionKey]);
@@ -701,10 +573,7 @@
             }
           }
 
-          this.config.dd_mode_remapping ??= {mixed: [], resolution_only: [], refresh_rate_only: []};
           this.config.global_prep_cmd ??= [];
-          this.config.global_state_cmd ??= [];
-          this.config.server_cmd ??= [];
 
           // Populate default values from tabs options
           this.tabs.forEach(tab => {
@@ -716,24 +585,10 @@
             });
           });
 
-          if (this.platform === 'windows') {
-            this.global_prep_cmd = this.config.global_prep_cmd.map((i) => {
-              i.elevated = !!i.elevated
-              return i
-            });
-            this.global_state_cmd = this.config.global_state_cmd.map((i) => {
-              i.elevated = !!i.elevated
-              return i
-            });
-            this.server_cmd = this.config.server_cmd.map((i) => {
-              i.elevated = !!i.elevated
-              return i
-            });
-          } else {
-            this.global_prep_cmd = this.config.global_prep_cmd;
-            this.global_state_cmd = this.config.global_state_cmd;
-            this.server_cmd = this.config.server_cmd;
-          }
+          this.global_prep_cmd = this.config.global_prep_cmd.map((i) => {
+            i.elevated = !!i.elevated
+            return i
+          });
 
         });
     },
@@ -762,11 +617,6 @@
           files: 'fas fa-folder-open',
           advanced: 'fas fa-code',
           nv: 'fas fa-microchip',
-          qsv: 'fas fa-microchip',
-          amd: 'fas fa-microchip',
-          vt: 'fas fa-microchip',
-          vaapi: 'fas fa-microchip',
-          sw: 'fas fa-microchip',
         }
         return icons[tabId] || 'fas fa-circle'
       },
@@ -774,17 +624,12 @@
         this.$forceUpdate()
       },
       serialize() {
-        // Validate fallback mode
-        if (this.config.fallback_mode && !this.config.fallback_mode.match(/^\d+x\d+x\d+$/)) {
-          this.config.fallback_mode = fallbackDisplayModeCache;
-        } else {
-          fallbackDisplayModeCache = this.config.fallback_mode;
+        const packetSize = Number(this.config.packetsize);
+        if (!Number.isInteger(packetSize) || (packetSize !== 0 && (packetSize < 200 || packetSize > 65459))) {
+          this.config.packetsize = 0;
         }
         let config = JSON.parse(JSON.stringify(this.config));
         config.global_prep_cmd = this.global_prep_cmd.filter(cmd => (cmd.do && cmd.do.trim()) || (cmd.undo && cmd.undo.trim()));
-        config.global_state_cmd = this.global_state_cmd.filter(cmd => (cmd.do && cmd.do.trim()) || (cmd.undo && cmd.undo.trim()));
-        config.dd_mode_remapping = config.dd_mode_remapping;
-        config.server_cmd = this.server_cmd.filter(cmd => (cmd.name && cmd.cmd && cmd.name.trim() && cmd.cmd.trim()));
         return config;
       },
       save() {

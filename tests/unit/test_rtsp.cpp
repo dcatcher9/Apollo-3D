@@ -3,21 +3,39 @@
  * @brief Tests for RTSP request parsing helpers.
  */
 
+#include <winsock2.h>
 #include <limits>
 #include <string_view>
 #include <unordered_map>
 
-// stream.h must precede rtsp.h so Boost.Asio includes Winsock2 before Windows.h.
+// Keep Boost.Asio/Winsock2 ahead of rtsp.h's Windows headers.
+// clang-format off
 #include <src/stream.h>
 #include <src/rtsp.h>
-
 #include "../tests_common.h"
+// clang-format on
 
 namespace rtsp_stream {
   namespace detail {
     std::unordered_map<std::string_view, std::string_view> parse_announce_attributes(std::string_view payload);
   }
-}
+}  // namespace rtsp_stream
+
+namespace {
+  std::shared_ptr<rtsp_stream::launch_session_t> make_modern_launch_session(
+    std::uint32_t id,
+    const std::string &unique_id
+  ) {
+    auto session = std::make_shared<rtsp_stream::launch_session_t>();
+    session->id = id;
+    session->unique_id = unique_id;
+    session->gcm_key.assign(16, 0);
+    session->rtsp_cipher.emplace(session->gcm_key, false);
+    session->rtsp_iv_counter = 0;
+    session->av_ping_payload = "0123456789abcdef";
+    return session;
+  }
+}  // namespace
 
 TEST(RtspAnnounceParsingTest, HandlesEmptyAndMalformedAttributes) {
   const auto args = rtsp_stream::detail::parse_announce_attributes("a=empty:\r\na=missing-colon\r\na=:value\r\n");
@@ -50,6 +68,7 @@ TEST(RtspAnnounceParsingTest, EnforcesNumericSyntaxAndProtocolBounds) {
   EXPECT_EQ(parse_announce_int(field::audio_packet_duration, "10"), 10);
   EXPECT_FALSE(parse_announce_int(field::audio_packet_duration, "20"));
   EXPECT_EQ(parse_announce_int(field::control_protocol, "13"), 13);
+  EXPECT_FALSE(parse_announce_int(field::control_protocol, "1"));
   EXPECT_FALSE(parse_announce_int(field::control_protocol, "0"));
   EXPECT_EQ(parse_announce_int(field::video_format, "2"), 2);
   EXPECT_FALSE(parse_announce_int(field::video_format, "3"));
@@ -108,18 +127,6 @@ TEST(RtspAnnounceParsingTest, AppliesOnlyValidLowerPacketSizeLimits) {
   EXPECT_EQ(apply_packet_size_limit(1392, stream::VIDEO_PACKET_SIZE_MAX + 1), 1392);
 }
 
-TEST(RtspPlaintextParsingTest, FindsHeaderDelimiterAcrossReadBoundary) {
-  using rtsp_stream::detail::find_plaintext_header_end;
-
-  constexpr std::string_view request = "OPTIONS rtsp://host RTSP/1.0\r\nCSeq: 1\r\n\r\nbody";
-  const auto split = request.find("\r\n\r\n") + 2;
-  const auto end = find_plaintext_header_end(request, split);
-
-  ASSERT_TRUE(end);
-  EXPECT_EQ(*end, request.find("body"));
-  EXPECT_FALSE(find_plaintext_header_end(request.substr(0, split), split));
-}
-
 TEST(RtspSetupParsingTest, RejectsTargetsWithoutAStreamSelector) {
   using rtsp_stream::detail::parse_setup_stream_type;
 
@@ -131,12 +138,8 @@ TEST(RtspSetupParsingTest, RejectsTargetsWithoutAStreamSelector) {
 }
 
 TEST(RtspLaunchReservationTest, PreservesTheFirstPendingHandshake) {
-  auto first = std::make_shared<rtsp_stream::launch_session_t>();
-  first->id = 101;
-  first->unique_id = "first";
-  auto second = std::make_shared<rtsp_stream::launch_session_t>();
-  second->id = 102;
-  second->unique_id = "second";
+  auto first = make_modern_launch_session(101, "first");
+  auto second = make_modern_launch_session(102, "second");
 
   ASSERT_TRUE(rtsp_stream::launch_session_raise(first));
   EXPECT_FALSE(rtsp_stream::launch_session_raise(second));
@@ -148,20 +151,46 @@ TEST(RtspLaunchReservationTest, PreservesTheFirstPendingHandshake) {
   rtsp_stream::launch_session_clear(second->id);
 }
 
+TEST(RtspAnnounceParsingTest, RejectsUnsupportedCodecAndBitDepthCombinations) {
+  using rtsp_stream::detail::is_video_mode_supported;
+
+  EXPECT_TRUE(is_video_mode_supported(0, 0, true, true, true, true));
+  EXPECT_FALSE(is_video_mode_supported(0, 1, true, true, true, true));
+
+  EXPECT_FALSE(is_video_mode_supported(1, 0, false, false, true, true));
+  EXPECT_TRUE(is_video_mode_supported(1, 0, true, false, true, true));
+  EXPECT_FALSE(is_video_mode_supported(1, 1, true, false, true, true));
+  EXPECT_TRUE(is_video_mode_supported(1, 1, true, true, true, true));
+
+  EXPECT_FALSE(is_video_mode_supported(2, 0, true, true, false, false));
+  EXPECT_TRUE(is_video_mode_supported(2, 0, true, true, true, false));
+  EXPECT_FALSE(is_video_mode_supported(2, 1, true, true, true, false));
+  EXPECT_TRUE(is_video_mode_supported(2, 1, true, true, true, true));
+  EXPECT_FALSE(is_video_mode_supported(3, 0, true, true, true, true));
+}
+
+TEST(RtspLaunchReservationTest, RejectsLegacyRtspAndPingIdentity) {
+  auto plaintext = std::make_shared<rtsp_stream::launch_session_t>();
+  plaintext->id = 103;
+  plaintext->av_ping_payload = "0123456789abcdef";
+  EXPECT_FALSE(rtsp_stream::launch_session_raise(plaintext));
+
+  auto malformed_ping = make_modern_launch_session(104, "malformed-ping");
+  malformed_ping->av_ping_payload = "PING";
+  EXPECT_FALSE(rtsp_stream::launch_session_raise(malformed_ping));
+  EXPECT_TRUE(rtsp_stream::launch_session_available());
+}
+
 TEST(RtspLaunchReservationTest, ExplicitTeardownClearsPendingHandshake) {
-  auto first = std::make_shared<rtsp_stream::launch_session_t>();
-  first->id = 201;
-  first->unique_id = "first";
-  auto replacement = std::make_shared<rtsp_stream::launch_session_t>();
-  replacement->id = 202;
-  replacement->unique_id = "replacement";
+  auto first = make_modern_launch_session(201, "first");
+  auto replacement = make_modern_launch_session(202, "replacement");
 
   ASSERT_TRUE(rtsp_stream::launch_session_raise(first));
   // Keep a reference just as an already accepted RTSP socket does. The production teardown
   // entry point must invalidate that accepted reservation as well as emptying the pending queue.
   const auto accepted = first;
   ASSERT_TRUE(accepted);
-  rtsp_stream::terminate_sessions();
+  rtsp_stream::terminate_session();
   EXPECT_EQ(accepted->reservation(), rtsp_stream::launch_reservation_state_e::revoked);
   EXPECT_FALSE(accepted->try_claim_reservation());
   EXPECT_TRUE(rtsp_stream::launch_session_raise(replacement));
@@ -169,9 +198,7 @@ TEST(RtspLaunchReservationTest, ExplicitTeardownClearsPendingHandshake) {
 }
 
 TEST(RtspLaunchReservationTest, ReservationCanBeClaimedOnlyOnce) {
-  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
-  launch->id = 301;
-  launch->unique_id = "single-claim";
+  auto launch = make_modern_launch_session(301, "single-claim");
 
   ASSERT_TRUE(rtsp_stream::launch_session_available());
   ASSERT_TRUE(rtsp_stream::launch_session_raise(launch));
@@ -193,13 +220,11 @@ TEST(RtspLaunchReservationTest, ReservationCanBeClaimedOnlyOnce) {
 }
 
 TEST(RtspLaunchReservationTest, TeardownRevokesClaimedStartupBeforeReplacement) {
-  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
-  launch->id = 401;
-  launch->unique_id = "claimed-before-teardown";
+  auto launch = make_modern_launch_session(401, "claimed-before-teardown");
 
   ASSERT_TRUE(rtsp_stream::launch_session_raise(launch));
   ASSERT_TRUE(rtsp_stream::claim_launch_session_for_test(*launch));
-  rtsp_stream::terminate_sessions();
+  rtsp_stream::terminate_session();
   EXPECT_EQ(launch->reservation(), rtsp_stream::launch_reservation_state_e::revoked);
   EXPECT_FALSE(rtsp_stream::launch_session_available());
 
@@ -209,9 +234,7 @@ TEST(RtspLaunchReservationTest, TeardownRevokesClaimedStartupBeforeReplacement) 
 }
 
 TEST(RtspLaunchReservationTest, FailedClaimedStartupRevokesAndReleasesReservation) {
-  auto failed = std::make_shared<rtsp_stream::launch_session_t>();
-  failed->id = 501;
-  failed->unique_id = "failed-startup";
+  auto failed = make_modern_launch_session(501, "failed-startup");
 
   ASSERT_TRUE(rtsp_stream::launch_session_raise(failed));
   ASSERT_TRUE(rtsp_stream::claim_launch_session_for_test(*failed));

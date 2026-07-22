@@ -188,7 +188,6 @@ function add_arch_deps() {
     'libxfixes'
     'libxrandr'
     'libxtst'
-    'miniupnpc'
     'ninja'
     'nodejs'
     'npm'
@@ -231,7 +230,6 @@ function add_debian_based_deps() {
     "libdrm-dev"  # KMS
     "libevdev-dev"
     "libgbm-dev"
-    "libminiupnpc-dev"
     "libnotify-dev"
     "libnuma-dev"
     "libopus-dev"
@@ -309,7 +307,6 @@ function add_fedora_deps() {
     "libXtst-devel"  # X11
     "mesa-libGL-devel"
     "mesa-libgbm-devel"
-    "miniupnpc-devel"
     "ninja-build"
     "npm"
     "numactl-devel"

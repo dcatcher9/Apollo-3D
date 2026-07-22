@@ -35,11 +35,11 @@ of both the detected target contract and the presenter's expected output identit
 
 Only one presentation path owns an interactive virtual desktop at a time. A connecting or active
 remote virtual-display stream takes priority without being terminated: Apollo synchronously stops
-local AR before the remote display is created. When the last remote stream disconnects, Apollo
-retains its app and virtual display for `session_resume_grace`; local AR waits for that reconnect
+local AR before the remote display is created. Apollo admits only one remote stream. When it
+disconnects, Apollo retains its app and virtual display for `session_resume_grace`; local AR waits for that reconnect
 window to expire. After expiry, local AR waits for the remote SudoVDA identity to leave the Windows
 topology and only then creates its own source. Resuming the remote client performs the inverse handoff. This arbitration
-does not depend on transient `DISPLAYn` names and does not affect remote sessions that capture a
+does not depend on transient `DISPLAYn` names and does not affect a remote session that captures a
 physical display without creating a virtual desktop.
 Both handoff directions retain ownership until the retired SudoVDA adapter/target identity has
 disappeared from Windows topology; driver acknowledgement alone is not treated as completed removal.

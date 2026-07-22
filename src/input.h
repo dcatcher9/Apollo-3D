@@ -38,10 +38,10 @@ namespace input {
   }  // namespace detail
 
   void reset(std::shared_ptr<input_t> &input);
-  void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data, const crypto::PERM& permission);
+  void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data, const crypto::PERM &permission);
 
   /**
-   * @brief Validate a Gen 5+ Moonlight input packet before any typed access.
+   * @brief Validate a Gen 5+ Artemis input packet before any typed access.
    * @return The host-endian packet magic, or std::nullopt for malformed/unsupported input.
    */
   [[nodiscard]] std::optional<std::uint32_t> validated_packet_magic(std::span<const std::uint8_t> input_data) noexcept;

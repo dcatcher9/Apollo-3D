@@ -8,12 +8,10 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <list>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <vector>
 
 // local includes
 #include "crypto.h"
@@ -64,8 +62,15 @@ namespace rtsp_stream {
     int validated_client_refresh_x100(int announced_fps, int client_refresh_x100);
     int calculate_warp_bitrate_factor(int announced_fps, int session_fps);
     bool is_safe_encoder_bitrate(std::int64_t bitrate_kbps);
+    bool is_video_mode_supported(
+      int video_format,
+      int dynamic_range,
+      bool hevc_sdr,
+      bool hevc_hdr,
+      bool av1_sdr,
+      bool av1_hdr
+    );
     int apply_packet_size_limit(int client_packet_size, int configured_limit);
-    std::optional<std::size_t> find_plaintext_header_end(std::string_view buffered, std::size_t previous_size);
     std::optional<std::string_view> parse_setup_stream_type(std::string_view target);
   }  // namespace detail
 
@@ -82,14 +87,11 @@ namespace rtsp_stream {
     std::string unique_id;
     crypto::PERM perm;
 
-    bool input_only;
     bool host_audio;
     int width;
     int height;
     int fps;
-    int gcmap;
     int surround_info;
-    std::string surround_params;
     bool enable_hdr;
     bool enable_sops;
     bool virtual_display;
@@ -131,15 +133,11 @@ namespace rtsp_stream {
     }
 
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;
-    std::string rtsp_url_scheme;
-    uint32_t rtsp_iv_counter;
+    uint32_t rtsp_iv_counter = 0;
 
-    std::list<crypto::command_entry_t> client_do_cmds;
-    std::list<crypto::command_entry_t> client_undo_cmds;
-
-  #ifdef _WIN32
-    GUID display_guid{};
-  #endif
+#ifdef _WIN32
+    GUID display_guid {};
+#endif
   };
 
   [[nodiscard]] bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session);
@@ -156,14 +154,11 @@ namespace rtsp_stream {
   /** Cancel the pending HTTP-to-RTSP launch reservation, if any. */
   void clear_pending_launch_session();
 
-  /**
-   * @brief Get the number of active sessions.
-   * @return Count of active sessions.
-   */
-  int session_count();
+  /** Return the active stream when it belongs to the specified client. */
+  std::shared_ptr<stream::session_t> find_session(std::string_view uuid);
 
-  std::vector<std::shared_ptr<stream::session_t>>
-  find_sessions(std::string_view uuid);
+  /** Return the active stream's client UUID, or no value while the host is idle. */
+  std::optional<std::string> active_session_uuid();
 
   struct client_policy_stop_t {
     std::shared_ptr<stream::session_t> session;
@@ -172,7 +167,7 @@ namespace rtsp_stream {
 
   struct client_policy_publication_t {
     bool accepted {false};
-    std::vector<client_policy_stop_t> stops;
+    std::optional<client_policy_stop_t> stop;
   };
 
   /**
@@ -191,7 +186,7 @@ namespace rtsp_stream {
   void complete_client_policy(client_policy_publication_t publication, bool graceful = true);
 
   /**
-   * Publish the latest authorization policy for a client and apply it to all active sessions.
+   * Publish the latest authorization policy for a client and apply it to the active session.
    * Older generations are ignored, and future session insertion observes the same policy.
    */
   bool publish_client_policy(
@@ -202,9 +197,6 @@ namespace rtsp_stream {
     bool revoked
   );
 
-  std::list<std::string>
-  get_all_session_uuids();
-
 #ifdef SUNSHINE_TESTS
   bool insert_session_for_test(const std::shared_ptr<stream::session_t> &session);
   void remove_session_for_test(const std::shared_ptr<stream::session_t> &session);
@@ -212,10 +204,8 @@ namespace rtsp_stream {
   void finish_launch_session_for_test(launch_session_t &launch_session, bool started);
 #endif
 
-  /**
-   * @brief Terminates all running streaming sessions.
-   */
-  void terminate_sessions();
+  /** Terminate the pending or active remote streaming session. */
+  void terminate_session();
 
   /**
    * @brief Runs the RTSP server loop.

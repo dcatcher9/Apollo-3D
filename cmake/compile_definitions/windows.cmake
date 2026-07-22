@@ -17,9 +17,6 @@ add_definitions(-DCURL_STATICLIB)
 include_directories(SYSTEM ${CURL_STATIC_INCLUDE_DIRS})
 link_directories(${CURL_STATIC_LIBRARY_DIRS})
 
-# miniupnpc
-add_definitions(-DMINIUPNP_STATICLIB)
-
 # extra tools/binaries for audio/display devices
 add_subdirectory(tools)  # todo - this is temporary, only tools for Windows are needed, for now
 
@@ -44,7 +41,7 @@ add_library(sunshine_rc_object OBJECT "${CMAKE_SOURCE_DIR}/src/platform/windows/
 # Set minimal properties for RC compilation - only what's needed for the resource file
 # Otherwise compilation can fail due to "line too long" errors
 set_target_properties(sunshine_rc_object PROPERTIES
-    COMPILE_DEFINITIONS "PROJECT_ICON_PATH=${PROJECT_ICON_PATH};PROJECT_NAME=${PROJECT_NAME};PROJECT_VENDOR=${SUNSHINE_PUBLISHER_NAME};PROJECT_VERSION=${PROJECT_VERSION};PROJECT_VERSION_MAJOR=${PROJECT_VERSION_MAJOR};PROJECT_VERSION_MINOR=${PROJECT_VERSION_MINOR};PROJECT_VERSION_PATCH=${PROJECT_VERSION_PATCH}"  # cmake-lint: disable=C0301
+    COMPILE_DEFINITIONS "PROJECT_ICON_PATH=${PROJECT_ICON_PATH};PROJECT_NAME=${PROJECT_NAME};PROJECT_DISPLAY_NAME=${PROJECT_DISPLAY_NAME};PROJECT_VENDOR=${SUNSHINE_PUBLISHER_NAME};PROJECT_VERSION=${PROJECT_VERSION};PROJECT_VERSION_MAJOR=${PROJECT_VERSION_MAJOR};PROJECT_VERSION_MINOR=${PROJECT_VERSION_MINOR};PROJECT_VERSION_PATCH=${PROJECT_VERSION_PATCH}"  # cmake-lint: disable=C0301
     INCLUDE_DIRECTORIES ""
 )
 
@@ -56,7 +53,6 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_base.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_vram.cpp"
-        "${CMAKE_SOURCE_DIR}/src/platform/windows/display_ram.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_wgc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/sbs_debug_dump.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/sbs_debug_dump.cpp"

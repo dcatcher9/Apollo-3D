@@ -3,39 +3,22 @@ import { ref, onMounted } from 'vue'
 import Checkbox from '../../Checkbox.vue'
 
 const props = defineProps({
-  platform: String,
   config: Object,
-  globalPrepCmd: Array,
-  globalStateCmd: Array,
-  serverCmd: Array
+  globalPrepCmd: Array
 })
 
 const config = ref(props.config)
 const globalPrepCmd = ref(props.globalPrepCmd)
-const globalStateCmd = ref(props.globalStateCmd)
-const serverCmd = ref(props.serverCmd)
-
-const cmds = ref({
-  prep: globalPrepCmd,
-  state: globalStateCmd
-})
 
 const prepCmdTemplate = {
   do: "",
   undo: "",
 }
 
-const serverCmdTemplate = {
-  name: "",
-  cmd: ""
-}
-
 function addCmd(cmdArr, template, idx) {
   const _tpl = Object.assign({}, template);
 
-  if (props.platform === 'windows') {
-    _tpl.elevated = false;
-  }
+  _tpl.elevated = false;
   if (idx < 0) {
     cmdArr.push(_tpl);
   } else {
@@ -87,10 +70,10 @@ onMounted(() => {
       <div class="form-text">{{ $t('config.locale_desc') }}</div>
     </div>
 
-    <!-- Apollo Name -->
+    <!-- Apollo XR Name -->
     <div class="mb-3">
       <label for="sunshine_name" class="form-label">{{ $t('config.sunshine_name') }}</label>
-      <input type="text" class="form-control" id="sunshine_name" placeholder="Apollo"
+      <input type="text" class="form-control" id="sunshine_name" placeholder="Apollo XR"
              v-model="config.sunshine_name" />
       <div class="form-text">{{ $t('config.sunshine_name_desc') }}</div>
     </div>
@@ -118,31 +101,31 @@ onMounted(() => {
               default="false"
     ></Checkbox>
 
-    <!-- Global Prep/State Commands -->
-    <div v-for="type in ['prep', 'state']" :id="`global_${type}_cmd`" class="mb-3 d-flex flex-column">
-      <label class="form-label">{{ $t(`config.global_${type}_cmd`) }}</label>
-      <div class="form-text pre-wrap">{{ $t(`config.global_${type}_cmd_desc`) }}</div>
-      <table class="table" v-if="cmds[type].length > 0">
+    <!-- Global Preparation Commands -->
+    <div id="global_prep_cmd" class="mb-3 d-flex flex-column">
+      <label class="form-label">{{ $t('config.global_prep_cmd') }}</label>
+      <div class="form-text pre-wrap">{{ $t('config.global_prep_cmd_desc') }}</div>
+      <table class="table" v-if="globalPrepCmd.length > 0">
         <thead>
         <tr>
           <th scope="col"><i class="fas fa-play"></i> {{ $t('_common.do_cmd') }}</th>
           <th scope="col"><i class="fas fa-undo"></i> {{ $t('_common.undo_cmd') }}</th>
-          <th scope="col" v-if="platform === 'windows'">
+          <th scope="col">
             <i class="fas fa-shield-alt"></i> {{ $t('_common.run_as') }}
           </th>
           <th scope="col"></th>
         </tr>
         </thead>
         <tbody>
-        <tr v-for="(c, i) in cmds[type]">
+        <tr v-for="(c, i) in globalPrepCmd" :key="`prep-cmd-${i}`">
           <td>
             <input type="text" class="form-control monospace" v-model="c.do" />
           </td>
           <td>
             <input type="text" class="form-control monospace" v-model="c.undo" />
           </td>
-          <td v-if="platform === 'windows'" class="align-middle">
-            <Checkbox :id="type + '-cmd-admin-' + i"
+          <td class="align-middle">
+            <Checkbox :id="'prep-cmd-admin-' + i"
                       label="_common.elevated"
                       desc=""
                       default="false"
@@ -150,65 +133,17 @@ onMounted(() => {
             ></Checkbox>
           </td>
           <td class="text-end">
-            <button class="btn btn-danger me-2" @click="removeCmd(cmds[type], i)">
+            <button class="btn btn-danger me-2" @click="removeCmd(globalPrepCmd, i)">
               <i class="fas fa-trash"></i>
             </button>
-            <button class="btn btn-success" @click="addCmd(cmds[type], prepCmdTemplate, i)">
+            <button class="btn btn-success" @click="addCmd(globalPrepCmd, prepCmdTemplate, i)">
               <i class="fas fa-plus"></i>
             </button>
           </td>
         </tr>
         </tbody>
       </table>
-      <button class="ms-0 mt-2 btn btn-success" style="margin: 0 auto" @click="addCmd(cmds[type], prepCmdTemplate, -1)">
-        &plus; {{ $t('config.add') }}
-      </button>
-    </div>
-
-    <!-- Server Commands -->
-    <div id="server_cmd" class="mb-3 d-flex flex-column">
-      <label class="form-label">{{ $t('config.server_cmd') }}</label>
-      <div class="form-text">{{ $t('config.server_cmd_desc') }}</div>
-      <div class="form-text">
-        <a href="https://github.com/ClassicOldSong/Apollo/wiki/Server-Commands" target="_blank">{{ $t('_common.learn_more') }}</a>
-      </div>
-      <table class="table" v-if="serverCmd.length > 0">
-        <thead>
-        <tr>
-          <th scope="col"><i class="fas fa-tag"></i> {{ $t('_common.cmd_name') }}</th>
-          <th scope="col"><i class="fas fa-terminal"></i> {{ $t('_common.cmd_val') }}</th>
-          <th scope="col" v-if="platform === 'windows'">
-            <i class="fas fa-shield-alt"></i> {{ $t('_common.run_as') }}
-          </th>
-          <th scope="col"></th>
-        </tr>
-        </thead>
-        <tbody>
-        <tr v-for="(c, i) in serverCmd">
-          <td>
-            <input type="text" class="form-control" v-model="c.name" />
-          </td>
-          <td>
-            <input type="text" class="form-control monospace" v-model="c.cmd" />
-          </td>
-          <td v-if="platform === 'windows'">
-            <div class="form-check">
-              <input type="checkbox" class="form-check-input" :id="'server-cmd-admin-' + i" v-model="c.elevated"/>
-              <label :for="'server-cmd-admin-' + i" class="form-check-label">{{ $t('_common.elevated') }}</label>
-            </div>
-          </td>
-          <td class="text-end">
-            <button class="btn btn-danger me-2" @click="removeCmd(serverCmd, i)">
-              <i class="fas fa-trash"></i>
-            </button>
-            <button class="btn btn-success" @click="addCmd(serverCmd, serverCmdTemplate, i)">
-              <i class="fas fa-plus"></i>
-            </button>
-          </td>
-        </tr>
-        </tbody>
-      </table>
-      <button class="ms-0 mt-2 btn btn-success" style="margin: 0 auto" @click="addCmd(serverCmd, serverCmdTemplate, -1)">
+      <button class="ms-0 mt-2 btn btn-success" style="margin: 0 auto" @click="addCmd(globalPrepCmd, prepCmdTemplate, -1)">
         &plus; {{ $t('config.add') }}
       </button>
     </div>
@@ -227,14 +162,6 @@ onMounted(() => {
               locale-prefix="config"
               v-model="config.enable_discovery"
               default="true"
-    ></Checkbox>
-
-    <!-- Notify Pre-Releases -->
-    <Checkbox class="mb-3"
-              id="notify_pre_releases"
-              locale-prefix="config"
-              v-model="config.notify_pre_releases"
-              default="false"
     ></Checkbox>
 
     <!-- Enable system tray -->

@@ -82,14 +82,6 @@ namespace platf::dxgi {
 
   class hwdevice_t;
 
-  struct cursor_t {
-    std::vector<std::uint8_t> img_data;
-
-    DXGI_OUTDUPL_POINTER_SHAPE_INFO shape_info;
-    int x, y;
-    bool visible;
-  };
-
   class gpu_cursor_t {
   public:
     gpu_cursor_t():
@@ -165,7 +157,7 @@ namespace platf::dxgi {
 
   class display_base_t: public display_t {
   public:
-    int init(const ::video::config_t &config, const std::string &display_name);
+    int init(const ::video::config_t &config, const std::string &display_name, capture_backend_e backend);
 
     capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override;
 
@@ -256,22 +248,6 @@ namespace platf::dxgi {
   };
 
   /**
-   * Display component for devices that use software encoders.
-   */
-  class display_ram_t: public display_base_t {
-  public:
-    std::shared_ptr<img_t> alloc_img() override;
-    int dummy_img(img_t *img) override;
-    int complete_img(img_t *img, bool dummy) override;
-    std::vector<DXGI_FORMAT> get_supported_capture_formats() override;
-
-    std::unique_ptr<avcodec_encode_device_t> make_avcodec_encode_device(pix_fmt_e pix_fmt) override;
-
-    D3D11_MAPPED_SUBRESOURCE img_info;
-    texture2d_t texture;
-  };
-
-  /**
    * Display component for devices that use hardware encoders.
    */
   class display_vram_t: public display_base_t, public std::enable_shared_from_this<display_vram_t> {
@@ -282,8 +258,6 @@ namespace platf::dxgi {
     std::vector<DXGI_FORMAT> get_supported_capture_formats() override;
 
     bool is_codec_supported(std::string_view name, const ::video::config_t &config) override;
-
-    std::unique_ptr<avcodec_encode_device_t> make_avcodec_encode_device(pix_fmt_e pix_fmt) override;
 
     std::unique_ptr<nvenc_encode_device_t> make_nvenc_encode_device(pix_fmt_e pix_fmt) override;
 
@@ -308,24 +282,16 @@ namespace platf::dxgi {
   };
 
   /**
-   * Display backend that uses DDAPI with a software encoder.
-   */
-  class display_ddup_ram_t: public display_ram_t {
-  public:
-    int init(const ::video::config_t &config, const std::string &display_name);
-    capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
-    capture_e release_snapshot() override;
-
-    duplication_t dup;
-    cursor_t cursor;
-  };
-
-  /**
    * Display backend that uses DDAPI with a hardware encoder.
    */
   class display_ddup_vram_t: public display_vram_t {
   public:
     int init(const ::video::config_t &config, const std::string &display_name);
+
+    capture_backend_e capture_backend() const noexcept override {
+      return capture_backend_e::ddup;
+    }
+
     capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
     capture_e release_snapshot() override;
 
@@ -372,18 +338,6 @@ namespace platf::dxgi {
   };
 
   /**
-   * Display backend that uses Windows.Graphics.Capture with a software encoder.
-   */
-  class display_wgc_ram_t: public display_ram_t {
-    wgc_capture_t dup;
-
-  public:
-    int init(const ::video::config_t &config, const std::string &display_name);
-    capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
-    capture_e release_snapshot() override;
-  };
-
-  /**
    * Display backend that uses Windows.Graphics.Capture with a hardware encoder.
    */
   class display_wgc_vram_t: public display_vram_t {
@@ -391,9 +345,17 @@ namespace platf::dxgi {
 
   public:
     int init(const ::video::config_t &config, const std::string &display_name);
+
+    capture_backend_e capture_backend() const noexcept override {
+      return capture_backend_e::wgc;
+    }
+
     capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
     capture_e release_snapshot() override;
   };
+
+  /** Return whether Windows.Graphics.Capture can create an item for this output. */
+  bool test_wgc_capture(output_t &output);
 
   struct local_presenter_cursor_clip_t {
     RECT previous_clip {};
@@ -418,6 +380,8 @@ namespace platf::dxgi {
     bool hdr = false;
     int sbs_mode = ::video::SBS_OFF;
     config::video_t::sbs_t sbs_config {};
+    std::shared_ptr<::video::capture_backend_failover_t> capture_failover;
+
     struct target_t {
       std::mutex mutex;
       RECT rect {};
@@ -428,6 +392,7 @@ namespace platf::dxgi {
       std::wstring source_device_path;
       std::wstring target_device_path;
     };
+
     std::shared_ptr<target_t> live_target;
     std::shared_ptr<std::atomic<std::uint64_t>> presented_frames;
     std::shared_ptr<local_presenter_cursor_clip_t> cursor_clip;

@@ -64,7 +64,7 @@ onUnmounted(() => {
       <div>
         <h2 id="ar-glasses-heading">Local AR glasses</h2>
         <p class="text-body-secondary mb-0">
-          Apollo can present directly to glasses connected as a Windows display. Remote XR streaming
+          Apollo XR can present directly to glasses connected as a Windows display. Remote XR streaming
           temporarily takes priority over local presentation.
         </p>
       </div>
@@ -126,7 +126,7 @@ onUnmounted(() => {
           <summary>Technical details</summary>
           <div class="font-monospace small text-body-secondary mt-2">{{ device.id }}</div>
           <div class="small text-body-secondary mt-1">
-            {{ device.autoDetected ? 'Apollo recognized this model automatically.' : 'This choice is saved for this monitor model.' }}
+            {{ device.autoDetected ? 'Apollo XR recognized this model automatically.' : 'This choice is saved for this monitor model.' }}
           </div>
         </details>
       </article>

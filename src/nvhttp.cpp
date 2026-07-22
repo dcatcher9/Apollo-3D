@@ -6,9 +6,10 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#include <array>
 #include <atomic>
-#include <charconv>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <filesystem>
 #include <format>
@@ -19,6 +20,7 @@
 #include <utility>
 
 // lib includes
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/ssl/context_base.hpp>
 #include <boost/property_tree/json_parser.hpp>
@@ -28,7 +30,6 @@
 
 // local includes
 #include "config.h"
-#include "display_device.h"
 #include "file_handler.h"
 #include "globals.h"
 #include "httpcommon.h"
@@ -43,7 +44,6 @@
 #include "utility.h"
 #include "uuid.h"
 #include "video.h"
-#include "zwpad.h"
 
 #ifdef _WIN32
   #include "platform/windows/ar_glasses.h"
@@ -61,6 +61,7 @@ namespace nvhttp {
 
   using p_named_cert_t = crypto::p_named_cert_t;
   using PERM = crypto::PERM;
+  using args_t = SimpleWeb::CaseInsensitiveMultimap;
 
   namespace detail {
     pairing_admission_e pairing_admission(
@@ -78,7 +79,22 @@ namespace nvhttp {
       }
       return pairing_admission_e::allowed;
     }
-  }
+
+    bool app_identity_matches(
+      std::optional<int> requested_app_id,
+      std::string_view requested_app_uuid,
+      int candidate_app_id,
+      std::string_view candidate_app_uuid
+    ) {
+      if (!requested_app_uuid.empty() && !boost::iequals(requested_app_uuid, candidate_app_uuid)) {
+        return false;
+      }
+      if (requested_app_id && *requested_app_id > 0 && *requested_app_id != candidate_app_id) {
+        return false;
+      }
+      return !requested_app_uuid.empty() || (requested_app_id && *requested_app_id > 0);
+    }
+  }  // namespace detail
 
   struct client_t {
     std::vector<p_named_cert_t> named_devices;
@@ -104,7 +120,7 @@ namespace nvhttp {
       context.use_private_key_file(private_key_file, boost::asio::ssl::context::pem);
     }
 
-    std::function<bool(std::shared_ptr<Request>, SSL*)> verify;
+    std::function<bool(std::shared_ptr<Request>, SSL *)> verify;
     std::function<void(std::shared_ptr<Response>, std::shared_ptr<Request>)> on_verify_failed;
 
   protected:
@@ -181,6 +197,29 @@ namespace nvhttp {
   constexpr std::size_t MAX_PAIRING_SESSIONS = 16;
   std::uint64_t pairing_sequence;
   std::mutex launch_request_mutex;
+
+  namespace {
+    void terminate_active_session_locked() {
+      rtsp_stream::terminate_session();
+
+      if (proc::proc.running() > 0) {
+        proc::proc.terminate();
+      }
+
+      stream::session::flush_platform_state();
+    }
+  }  // namespace
+
+  void terminate_active_session() {
+    std::lock_guard launch_lock(launch_request_mutex);
+    terminate_active_session_locked();
+  }
+
+  void reload_apps(const std::string &file_name) {
+    std::lock_guard launch_lock(launch_request_mutex);
+    terminate_active_session_locked();
+    proc::refresh(file_name, false);
+  }
 
   void prune_pairing_sessions_locked(std::chrono::steady_clock::time_point now) {
     std::erase_if(map_id_sess, [now](const auto &entry) {
@@ -280,7 +319,7 @@ namespace nvhttp {
     REMOVE  ///< Remove certificate
   };
 
-  std::string get_arg(const args_t &args, const char *name, const char *default_value) {
+  static std::string get_arg(const args_t &args, const char *name, const char *default_value = nullptr) {
     auto it = args.find(name);
     if (it == std::end(args)) {
       if (default_value != nullptr) {
@@ -290,36 +329,6 @@ namespace nvhttp {
       throw std::out_of_range(name);
     }
     return it->second;
-  }
-
-  // Helper function to extract command entries from a JSON object.
-  cmd_list_t extract_command_entries(const nlohmann::json& j, const std::string& key) {
-    cmd_list_t commands;
-
-    // Check if the key exists in the JSON.
-    if (j.contains(key)) {
-      // Ensure that the value for the key is an array.
-      try {
-        for (const auto& item : j.at(key)) {
-          try {
-            // Extract "cmd" and "elevated" fields from the JSON object.
-            std::string cmd = item.at("cmd").get<std::string>();
-            bool elevated = util::get_non_string_json_value<bool>(item, "elevated", false);
-
-            // Add the command entry to the list.
-            commands.push_back({cmd, elevated});
-          } catch (const std::exception& e) {
-            BOOST_LOG(warning) << "Error parsing command entry: " << e.what();
-          }
-        }
-      } catch (const std::exception &e) {
-        BOOST_LOG(warning) << "Error retrieving key \"" << key << "\": " << e.what();
-      }
-    } else {
-      BOOST_LOG(debug) << "Key \"" << key << "\" not found in the JSON.";
-    }
-
-    return commands;
   }
 
   void save_state() {
@@ -351,26 +360,7 @@ namespace nvhttp {
         named_cert_node["name"] = final_name;
         named_cert_node["cert"] = named_cert_p->cert;
         named_cert_node["uuid"] = named_cert_p->uuid;
-        named_cert_node["display_mode"] = named_cert_p->display_mode;
         named_cert_node["perm"] = static_cast<uint32_t>(named_cert_p->perm);
-        named_cert_node["enable_legacy_ordering"] = named_cert_p->enable_legacy_ordering;
-        named_cert_node["allow_client_commands"] = named_cert_p->allow_client_commands;
-        named_cert_node["always_use_virtual_display"] = named_cert_p->always_use_virtual_display;
-
-        if (!named_cert_p->do_cmds.empty()) {
-          nlohmann::json do_cmds_node = nlohmann::json::array();
-          for (const auto &cmd : named_cert_p->do_cmds) {
-            do_cmds_node.push_back(crypto::command_entry_t::serialize(cmd));
-          }
-          named_cert_node["do"] = do_cmds_node;
-        }
-        if (!named_cert_p->undo_cmds.empty()) {
-          nlohmann::json undo_cmds_node = nlohmann::json::array();
-          for (const auto &cmd : named_cert_p->undo_cmds) {
-            undo_cmds_node.push_back(crypto::command_entry_t::serialize(cmd));
-          }
-          named_cert_node["undo"] = undo_cmds_node;
-        }
         named_cert_nodes.push_back(std::move(named_cert_node));
       }
     }
@@ -441,32 +431,6 @@ namespace nvhttp {
     client_t client;  // Local client to load into
     std::unordered_set<std::string> loaded_certificates;
 
-    // Import from the old format if available.
-    if (root.contains("devices") && !root.contains("named_devices")) {
-      for (auto &device_node : root["devices"]) {
-        // For each device, if there is a "certs" array, add a named certificate.
-        if (device_node.contains("certs")) {
-          for (auto &el : device_node["certs"]) {
-            auto certificate = canonicalize_certificate(el.get<std::string>());
-            if (certificate.empty() || !loaded_certificates.insert(certificate).second) {
-              continue;
-            }
-            auto named_cert_p = std::make_shared<crypto::named_cert_t>();
-            named_cert_p->name = "";
-            named_cert_p->cert = std::move(certificate);
-            named_cert_p->uuid = uuid_util::uuid_t::generate().string();
-            named_cert_p->display_mode = "";
-            named_cert_p->perm = PERM::_all;
-            named_cert_p->enable_legacy_ordering = true;
-            named_cert_p->allow_client_commands = true;
-            named_cert_p->always_use_virtual_display = false;
-            client.named_devices.emplace_back(named_cert_p);
-          }
-        }
-      }
-    }
-
-    // Import from the new format.
     if (root.contains("named_devices")) {
       for (auto &el : root["named_devices"]) {
         auto certificate = canonicalize_certificate(el.value("cert", ""));
@@ -477,14 +441,7 @@ namespace nvhttp {
         named_cert_p->name = el.value("name", "");
         named_cert_p->cert = std::move(certificate);
         named_cert_p->uuid = el.value("uuid", "");
-        named_cert_p->display_mode = el.value("display_mode", "");
-        named_cert_p->perm = (PERM)(util::get_non_string_json_value<uint32_t>(el, "perm", (uint32_t)PERM::_all)) & PERM::_all;
-        named_cert_p->enable_legacy_ordering = el.value("enable_legacy_ordering", true);
-        named_cert_p->allow_client_commands = el.value("allow_client_commands", true);
-        named_cert_p->always_use_virtual_display = el.value("always_use_virtual_display", false);
-        // Load command entries for "do" and "undo" keys.
-        named_cert_p->do_cmds = extract_command_entries(el, "do");
-        named_cert_p->undo_cmds = extract_command_entries(el, "undo");
+        named_cert_p->perm = (PERM) (util::get_non_string_json_value<uint32_t>(el, "perm", (uint32_t) PERM::_all)) & PERM::_all;
         client.named_devices.emplace_back(named_cert_p);
       }
     }
@@ -497,7 +454,7 @@ namespace nvhttp {
     }
   }
 
-  void add_authorized_client(const p_named_cert_t& named_cert_p) {
+  void add_authorized_client(const p_named_cert_t &named_cert_p) {
     auto certificate = canonicalize_certificate(named_cert_p->cert);
     if (certificate.empty()) {
       BOOST_LOG(warning) << "Refusing to authorize an invalid client certificate";
@@ -547,9 +504,6 @@ namespace nvhttp {
     client->name = std::move(name);
     client->cert = std::move(certificate);
     client->uuid = uuid_util::uuid_t::generate().string();
-    client->enable_legacy_ordering = true;
-    client->allow_client_commands = true;
-    client->always_use_virtual_display = false;
     add_authorized_client(client);
   }
 
@@ -625,19 +579,19 @@ namespace nvhttp {
     bool valid = false;
     switch (field) {
       case launch_int_field::core_version:
+        valid = *parsed >= 1;
+        break;
       case launch_int_field::app_id:
         valid = *parsed >= 0;
         break;
-      case launch_int_field::surround_info: {
-        const auto channels = *parsed & 0xFFFF;
-        valid = *parsed >= 0 && (channels == 2 || channels == 6 || channels == 8);
-        break;
-      }
+      case launch_int_field::surround_info:
+        {
+          const auto channels = *parsed & 0xFFFF;
+          valid = *parsed >= 0 && (channels == 2 || channels == 6 || channels == 8);
+          break;
+        }
       case launch_int_field::binary_option:
         valid = *parsed == 0 || *parsed == 1;
-        break;
-      case launch_int_field::gamepad_mask:
-        valid = true;
         break;
       case launch_int_field::scale_factor:
         valid = *parsed >= 20 && *parsed <= 200;
@@ -689,57 +643,72 @@ namespace nvhttp {
     return util::from_view_checked<std::uint32_t>(key_id);
   }
 
-  std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p) {
+  std::optional<std::uint64_t> parse_host_session_id(std::string_view host_session_id) {
+    const auto parsed = util::from_view_checked<std::uint64_t>(host_session_id);
+    return parsed && *parsed != 0 ? parsed : std::nullopt;
+  }
+
+  static std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(const args_t &args, const crypto::named_cert_t *named_cert_p) {
+    static constexpr std::array required_args {
+      "corever",
+      "localAudioPlayMode",
+      "mode",
+      "rikey",
+      "rikeyid",
+      "scaleFactor",
+      "sbsMode",
+      "sops",
+      "surroundAudioInfo",
+      "virtualDisplay",
+    };
+    for (const auto name : required_args) {
+      if (args.find(name) == args.end()) {
+        BOOST_LOG(warning) << "Rejecting client missing required modern launch parameter ["sv << name << "] for ["sv << named_cert_p->name << ']';
+        return nullptr;
+      }
+    }
+
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 
-    launch_session->id = ++session_id_counter;
+    do {
+      launch_session->id = ++session_id_counter;
+    } while (launch_session->id == 0);
 
-    // If launched from client
-    if (named_cert_p->uuid != http::unique_id) {
-      const auto rikey = parse_remote_input_key(get_arg(args, "rikey"));
-      const auto rikey_id = parse_remote_input_key_id(get_arg(args, "rikeyid"));
-      if (!rikey || !rikey_id) {
-        BOOST_LOG(warning) << "Rejecting invalid remote-input encryption parameters for client ["sv << named_cert_p->name << ']';
-        return nullptr;
-      }
-      launch_session->gcm_key = *rikey;
-
-      launch_session->host_audio = host_audio;
-
-      // Encrypted RTSP is enabled with client reported corever >= 1
-      const auto core_version = parse_launch_int(launch_int_field::core_version, get_arg(args, "corever", "0"));
-      if (!core_version) {
-        BOOST_LOG(warning) << "Rejecting invalid core version for client ["sv << named_cert_p->name << ']';
-        return nullptr;
-      }
-      if (*core_version >= 1) {
-        launch_session->rtsp_cipher = crypto::cipher::gcm_t {
-          launch_session->gcm_key, false
-        };
-        launch_session->rtsp_iv_counter = 0;
-      }
-      launch_session->rtsp_url_scheme = launch_session->rtsp_cipher ? "rtspenc://"s : "rtsp://"s;
-
-      // Generate the unique identifiers for this connection that we will send later during RTSP handshake
-      unsigned char raw_payload[8];
-      RAND_bytes(raw_payload, sizeof(raw_payload));
-      launch_session->av_ping_payload = util::hex_vec(raw_payload);
-      RAND_bytes((unsigned char *) &launch_session->control_connect_data, sizeof(launch_session->control_connect_data));
-
-      launch_session->iv.resize(16);
-      uint32_t prepend_iv = util::endian::big<uint32_t>(*rikey_id);
-      auto prepend_iv_p = (uint8_t *) &prepend_iv;
-      std::copy(prepend_iv_p, prepend_iv_p + sizeof(prepend_iv), std::begin(launch_session->iv));
+    const auto rikey = parse_remote_input_key(get_arg(args, "rikey"));
+    const auto rikey_id = parse_remote_input_key_id(get_arg(args, "rikeyid"));
+    if (!rikey || !rikey_id) {
+      BOOST_LOG(warning) << "Rejecting invalid remote-input encryption parameters for client ["sv << named_cert_p->name << ']';
+      return nullptr;
     }
+    launch_session->gcm_key = *rikey;
 
-    std::string mode;
-    if (named_cert_p->display_mode.empty()) {
-      mode = get_arg(args, "mode", config::video.fallback_mode.c_str());
-      BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name <<"] requested to ["sv << mode << ']';
-    } else {
-      mode = named_cert_p->display_mode;
-      BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name <<"] overriden to ["sv << named_cert_p->display_mode << ']';
+    // Artemis always negotiates encrypted RTSP. Reject obsolete clients before any
+    // display or application state is prepared.
+    const auto core_version = parse_launch_int(launch_int_field::core_version, get_arg(args, "corever"));
+    if (!core_version) {
+      BOOST_LOG(warning) << "Rejecting client without encrypted RTSP support ["sv << named_cert_p->name << ']';
+      return nullptr;
     }
+    launch_session->rtsp_cipher = crypto::cipher::gcm_t {
+      launch_session->gcm_key,
+      false
+    };
+
+    // Generate the unique identifiers for this connection that we will send later during RTSP handshake
+    unsigned char raw_payload[8];
+    if (RAND_bytes(raw_payload, sizeof(raw_payload)) != 1 || RAND_bytes(reinterpret_cast<unsigned char *>(&launch_session->control_connect_data), sizeof(launch_session->control_connect_data)) != 1) {
+      BOOST_LOG(error) << "Failed to generate secure streaming-session identifiers."sv;
+      return nullptr;
+    }
+    launch_session->av_ping_payload = util::hex_vec(raw_payload);
+
+    launch_session->iv.resize(16);
+    uint32_t prepend_iv = util::endian::big<uint32_t>(*rikey_id);
+    auto prepend_iv_p = (uint8_t *) &prepend_iv;
+    std::copy(prepend_iv_p, prepend_iv_p + sizeof(prepend_iv), std::begin(launch_session->iv));
+
+    const std::string mode = get_arg(args, "mode");
+    BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name << "] requested as ["sv << mode << ']';
 
     const auto parsed_mode = parse_launch_mode(mode);
     if (!parsed_mode) {
@@ -753,31 +722,25 @@ namespace nvhttp {
     launch_session->device_name = named_cert_p->name.empty() ? "ApolloDisplay"s : named_cert_p->name;
     launch_session->unique_id = named_cert_p->uuid;
     launch_session->perm = named_cert_p->perm;
-    const auto enable_sops = parse_launch_int(launch_int_field::binary_option, get_arg(args, "sops", "0"));
-    const auto surround_info = parse_launch_int(launch_int_field::surround_info, get_arg(args, "surroundAudioInfo", "196610"));
-    const auto gamepad_mask = parse_launch_int(launch_int_field::gamepad_mask, get_arg(args, "gcmap", "0"));
+    const auto enable_sops = parse_launch_int(launch_int_field::binary_option, get_arg(args, "sops"));
+    const auto host_audio = parse_launch_int(launch_int_field::binary_option, get_arg(args, "localAudioPlayMode"));
+    const auto surround_info = parse_launch_int(launch_int_field::surround_info, get_arg(args, "surroundAudioInfo"));
     const auto enable_hdr = parse_launch_int(launch_int_field::binary_option, get_arg(args, "hdrMode", "0"));
-    const auto virtual_display = parse_launch_int(launch_int_field::binary_option, get_arg(args, "virtualDisplay", "0"));
-    const auto scale_factor = parse_launch_int(launch_int_field::scale_factor, get_arg(args, "scaleFactor", "100"));
-    const auto sbs_mode = parse_launch_int(launch_int_field::sbs_mode, get_arg(args, "sbsMode", "0"));
-    if (!enable_sops || !surround_info || !gamepad_mask || !enable_hdr || !virtual_display || !scale_factor || !sbs_mode) {
+    const auto virtual_display = parse_launch_int(launch_int_field::binary_option, get_arg(args, "virtualDisplay"));
+    const auto scale_factor = parse_launch_int(launch_int_field::scale_factor, get_arg(args, "scaleFactor"));
+    const auto sbs_mode = parse_launch_int(launch_int_field::sbs_mode, get_arg(args, "sbsMode"));
+    if (!enable_sops || !host_audio || !surround_info || !enable_hdr || !virtual_display || !scale_factor || !sbs_mode) {
       BOOST_LOG(warning) << "Rejecting invalid launch options for client ["sv << named_cert_p->name << ']';
       return nullptr;
     }
 
     launch_session->enable_sops = *enable_sops;
+    launch_session->host_audio = *host_audio;
     launch_session->surround_info = *surround_info;
-    launch_session->surround_params = (get_arg(args, "surroundParams", ""));
-    launch_session->gcmap = *gamepad_mask;
     launch_session->enable_hdr = *enable_hdr;
-    launch_session->virtual_display = *virtual_display || named_cert_p->always_use_virtual_display;
+    launch_session->virtual_display = *virtual_display;
     launch_session->scale_factor = static_cast<std::uint32_t>(*scale_factor);
     launch_session->sbs_mode = *sbs_mode;
-
-    launch_session->client_do_cmds = named_cert_p->do_cmds;
-    launch_session->client_undo_cmds = named_cert_p->undo_cmds;
-
-    launch_session->input_only = input_only;
 
     return launch_session;
   }
@@ -939,14 +902,14 @@ namespace nvhttp {
         authorized_client = std::make_shared<crypto::named_cert_t>();
         authorized_client->name = client.name;
         for (char &c : authorized_client->name) {
-          if (c == '(') c = '[';
-          else if (c == ')') c = ']';
+          if (c == '(') {
+            c = '[';
+          } else if (c == ')') {
+            c = ']';
+          }
         }
         authorized_client->cert = std::move(client.cert);
         authorized_client->uuid = uuid_util::uuid_t::generate().string();
-        authorized_client->enable_legacy_ordering = true;
-        authorized_client->allow_client_commands = true;
-        authorized_client->always_use_virtual_display = false;
       } else {
         tree.put("root.paired", 0);
         BOOST_LOG(warning) << "Pair attempt failed due to same_hash: " << same_hash
@@ -988,7 +951,7 @@ namespace nvhttp {
     return current;
   }
 
-  template <class T>
+  template<class T>
   void print_req(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
     BOOST_LOG(debug) << "TUNNEL :: "sv << tunnel<T>::to_string;
 
@@ -1022,7 +985,7 @@ namespace nvhttp {
     response->close_connection_after_response = true;
   }
 
-  template <class T>
+  template<class T>
   void pair(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
     print_req<T>(request);
 
@@ -1057,18 +1020,14 @@ namespace nvhttp {
     if (it = args.find("phrase"); it != std::end(args)) {
       if (it->second == "getservercert"sv) {
         auto session = std::make_shared<pair_session_t>();
-        auto deviceName { get_arg(args, "devicename") };
-        if (deviceName == "roth"sv) {
-          deviceName = "Legacy Moonlight Client";
-        }
+        auto deviceName {get_arg(args, "devicename")};
         session->client.uniqueID = uniqID;
         session->client.name = std::move(deviceName);
         session->client.cert = util::from_hex_vec(get_arg(args, "clientcert"), true);
         session->async_insert_pin.salt = std::move(get_arg(args, "salt"));
 
         const auto otp_auth = args.find("otpauth");
-        const bool pin_from_stdin = config::sunshine.flags[config::flag::PIN_STDIN];
-        const bool manual_pin = otp_auth == args.end() && !pin_from_stdin;
+        const bool manual_pin = otp_auth == args.end();
         if (manual_pin) {
           // Publish a complete pending-PIN session. pin() can never observe the map entry before
           // its asynchronous response endpoint has been attached.
@@ -1128,19 +1087,11 @@ namespace nvhttp {
           return;
         }
 
-        if (pin_from_stdin) {
-          std::string pin;
-          std::cout << "Please insert pin: "sv;
-          std::getline(std::cin, pin);
-          getservercert(*session, tree, pin);
-          return;
-        } else {
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
-          system_tray::update_tray_require_pin();
+        system_tray::update_tray_require_pin();
 #endif
-          fg.disable();
-          return;
-        }
+        fg.disable();
+        return;
       } else if (it->second == "pairchallenge"sv) {
         tree.put("root.paired", 1);
         tree.put("root.<xmlattr>.status_code", 200);
@@ -1278,10 +1229,11 @@ namespace nvhttp {
     tree.put("root.uniqueid", http::unique_id);
     tree.put("root.HttpsPort", net::map_port(PORT_HTTPS));
     tree.put("root.ExternalPort", net::map_port(PORT_HTTP));
-    tree.put("root.MaxLumaPixelsHEVC", video::active_hevc_mode > 1 ? "1869449984" : "0");
+    const auto codec_capabilities = video::nvenc_capabilities_snapshot();
+    tree.put("root.MaxLumaPixelsHEVC", codec_capabilities.hevc ? "1869449984" : "0");
 
     // Only include the MAC address for requests sent from paired clients over HTTPS.
-    // For HTTP requests, use a placeholder MAC address that Moonlight knows to ignore.
+    // For HTTP requests, use a placeholder MAC address that Artemis knows to ignore.
     if constexpr (std::is_same_v<SunshineHTTPS, T>) {
       tree.put("root.mac", platf::get_mac_address(net::addr_to_normalized_string(local_endpoint.address())));
 
@@ -1295,44 +1247,29 @@ namespace nvhttp {
         response->close_connection_after_response = true;
         return;
       }
-      if (!!(named_cert_p->perm & PERM::server_cmd)) {
-        pt::ptree& root_node = tree.get_child("root");
+      tree.put("root.Permission", std::to_string((uint32_t) named_cert_p->perm));
 
-        if (config::sunshine.server_cmds.size() > 0) {
-          // Broadcast server_cmds
-          for (const auto& cmd : config::sunshine.server_cmds) {
-            pt::ptree cmd_node;
-            cmd_node.put_value(cmd.cmd_name);
-            root_node.push_back(std::make_pair("ServerCommand", cmd_node));
-          }
-        }
-      } else {
-        BOOST_LOG(debug) << "Permission Get ServerCommand denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
-      }
-
-      tree.put("root.Permission", std::to_string((uint32_t)named_cert_p->perm));
-
-    #ifdef _WIN32
+#ifdef _WIN32
       tree.put("root.VirtualDisplayCapable", true);
       if (!!(named_cert_p->perm & PERM::_all_actions)) {
         tree.put("root.VirtualDisplayDriverReady", proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK);
       } else {
         tree.put("root.VirtualDisplayDriverReady", true);
       }
-    #endif
+#endif
     } else {
       tree.put("root.mac", "00:00:00:00:00:00");
       tree.put("root.Permission", "0");
     }
 
-    // Moonlight clients track LAN IPv6 addresses separately from LocalIP which is expected to
+    // Artemis tracks LAN IPv6 addresses separately from LocalIP, which is expected to
     // always be an IPv4 address. If we return that same IPv6 address here, it will clobber the
     // stored LAN IPv4 address. To avoid this, we need to return an IPv4 address in this field
     // when we get a request over IPv6.
     //
     // HACK: We should return the IPv4 address of local interface here, but we don't currently
     // have that implemented. For now, we will emulate the behavior of GFE+GS-IPv6-Forwarder,
-    // which returns 127.0.0.1 as LocalIP for IPv6 connections. Moonlight clients with IPv6
+    // which returns 127.0.0.1 as LocalIP for IPv6 connections. Artemis builds with IPv6
     // support know to ignore this bogus address.
     if (local_endpoint.address().is_v6() && !local_endpoint.address().to_v6().is_v4_mapped()) {
       tree.put("root.LocalIP", "127.0.0.1");
@@ -1341,54 +1278,33 @@ namespace nvhttp {
     }
 
     uint32_t codec_mode_flags = SCM_H264;
-    if (video::last_encoder_probe_supported_yuv444_for_codec[0]) {
-      codec_mode_flags |= SCM_H264_HIGH8_444;
-    }
-    if (video::active_hevc_mode >= 2) {
+    if (codec_capabilities.hevc) {
       codec_mode_flags |= SCM_HEVC;
-      if (video::last_encoder_probe_supported_yuv444_for_codec[1]) {
-        codec_mode_flags |= SCM_HEVC_REXT8_444;
-      }
     }
-    if (video::active_hevc_mode >= 3) {
+    if (codec_capabilities.hevc_hdr) {
       codec_mode_flags |= SCM_HEVC_MAIN10;
-      if (video::last_encoder_probe_supported_yuv444_for_codec[1]) {
-        codec_mode_flags |= SCM_HEVC_REXT10_444;
-      }
     }
-    if (video::active_av1_mode >= 2) {
+    if (codec_capabilities.av1) {
       codec_mode_flags |= SCM_AV1_MAIN8;
-      if (video::last_encoder_probe_supported_yuv444_for_codec[2]) {
-        codec_mode_flags |= SCM_AV1_HIGH8_444;
-      }
     }
-    if (video::active_av1_mode >= 3) {
+    if (codec_capabilities.av1_hdr) {
       codec_mode_flags |= SCM_AV1_MAIN10;
-      if (video::last_encoder_probe_supported_yuv444_for_codec[2]) {
-        codec_mode_flags |= SCM_AV1_HIGH10_444;
-      }
     }
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
-
-    if (!config::nvhttp.external_ip.empty()) {
-      tree.put("root.ExternalIP", config::nvhttp.external_ip);
-    }
 
     tree.put("root.PairStatus", pair_status);
 
     if constexpr (std::is_same_v<SunshineHTTPS, T>) {
       const auto process_status = proc::proc.get_status();
-      int current_appid = process_status.app_id;
-      // When input only mode is enabled, the only resume method should be launching the same app again.
-      if (config::input.enable_input_only_mode && current_appid != proc::input_only_app_id) {
-        current_appid = 0;
-      }
+      const int current_appid = process_status.app_id;
       tree.put("root.currentgame", current_appid);
       tree.put("root.currentgameuuid", process_status.app_uuid);
+      tree.put("root.hostsessionid", process_status.host_session_id);
       tree.put("root.state", current_appid > 0 ? "SUNSHINE_SERVER_BUSY" : "SUNSHINE_SERVER_FREE");
     } else {
       tree.put("root.currentgame", 0);
       tree.put("root.currentgameuuid", "");
+      tree.put("root.hostsessionid", 0);
       tree.put("root.state", "SUNSHINE_SERVER_FREE");
     }
 
@@ -1401,51 +1317,16 @@ namespace nvhttp {
 
   nlohmann::json get_all_clients() {
     nlohmann::json named_cert_nodes = nlohmann::json::array();
-    std::list<std::string> connected_uuids = rtsp_stream::get_all_session_uuids();
+    const auto connected_uuid = rtsp_stream::active_session_uuid();
     std::shared_lock lock(client_state_mutex);
 
     for (const auto &named_cert : client_root.named_devices) {
       nlohmann::json named_cert_node;
       named_cert_node["name"] = named_cert->name;
       named_cert_node["uuid"] = named_cert->uuid;
-      named_cert_node["display_mode"] = named_cert->display_mode;
       named_cert_node["perm"] = static_cast<uint32_t>(named_cert->perm);
-      named_cert_node["enable_legacy_ordering"] = named_cert->enable_legacy_ordering;
-      named_cert_node["allow_client_commands"] = named_cert->allow_client_commands;
-      named_cert_node["always_use_virtual_display"] = named_cert->always_use_virtual_display;
 
-      // Add "do" commands if available
-      if (!named_cert->do_cmds.empty()) {
-        nlohmann::json do_cmds_node = nlohmann::json::array();
-        for (const auto &cmd : named_cert->do_cmds) {
-          do_cmds_node.push_back(crypto::command_entry_t::serialize(cmd));
-        }
-        named_cert_node["do"] = do_cmds_node;
-      }
-
-      // Add "undo" commands if available
-      if (!named_cert->undo_cmds.empty()) {
-        nlohmann::json undo_cmds_node = nlohmann::json::array();
-        for (const auto &cmd : named_cert->undo_cmds) {
-          undo_cmds_node.push_back(crypto::command_entry_t::serialize(cmd));
-        }
-        named_cert_node["undo"] = undo_cmds_node;
-      }
-
-      // Determine connection status
-      bool connected = false;
-      if (connected_uuids.empty()) {
-        connected = false;
-      } else {
-        for (auto it = connected_uuids.begin(); it != connected_uuids.end(); ++it) {
-          if (*it == named_cert->uuid) {
-            connected = true;
-            connected_uuids.erase(it);
-            break;
-          }
-        }
-      }
-      named_cert_node["connected"] = connected;
+      named_cert_node["connected"] = connected_uuid && *connected_uuid == named_cert->uuid;
 
       named_cert_nodes.push_back(named_cert_node);
     }
@@ -1477,46 +1358,14 @@ namespace nvhttp {
       return;
     }
     if (!!(named_cert_p->perm & PERM::_all_actions)) {
-      const auto process_status = proc::proc.get_status();
-      auto current_appid = process_status.app_id;
-      auto should_hide_inactive_apps = config::input.enable_input_only_mode && current_appid > 0 && current_appid != proc::input_only_app_id;
-
       auto app_list = proc::proc.get_apps();
+      const auto codec_capabilities = video::nvenc_capabilities_snapshot();
 
-      bool enable_legacy_ordering = config::sunshine.legacy_ordering && named_cert_p->enable_legacy_ordering;
-      size_t bits;
-      if (enable_legacy_ordering) {
-        bits = zwpad::pad_width_for_count(app_list.size());
-      }
-
-      for (size_t i = 0; i < app_list.size(); i++) {
-        auto& app = app_list[i];
-        auto appid = util::from_view(app.id);
-        if (should_hide_inactive_apps) {
-          if (
-            appid != current_appid
-            && appid != proc::input_only_app_id
-            && appid != proc::terminate_app_id
-          ) {
-            continue;
-          }
-        } else {
-          if (appid == proc::terminate_app_id) {
-            continue;
-          }
-        }
-
-        std::string app_name;
-        if (enable_legacy_ordering) {
-          app_name = zwpad::pad_for_ordering(app.name, bits, i);
-        } else {
-          app_name = app.name;
-        }
-
+      for (const auto &app : app_list) {
         pt::ptree app_node;
 
-        app_node.put("IsHdrSupported"s, video::active_hevc_mode == 3 ? 1 : 0);
-        app_node.put("AppTitle"s, app_name);
+        app_node.put("IsHdrSupported"s, (codec_capabilities.hevc_hdr || codec_capabilities.av1_hdr) ? 1 : 0);
+        app_node.put("AppTitle"s, app.name);
         app_node.put("UUID", app.uuid);
         app_node.put("IDX", app.idx);
         app_node.put("ID", app.id);
@@ -1524,7 +1373,7 @@ namespace nvhttp {
         apps.push_back(std::make_pair("App", std::move(app_node)));
       }
     } else {
-      BOOST_LOG(debug) << "Permission ListApp denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
+      BOOST_LOG(debug) << "Permission ListApp denied for [" << named_cert_p->name << "] (" << (uint32_t) named_cert_p->perm << ")";
 
       pt::ptree app_node;
 
@@ -1538,10 +1387,9 @@ namespace nvhttp {
 
       return;
     }
-
   }
 
-  void launch(bool &host_audio, resp_https_t response, req_https_t request) {
+  void launch(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
 
     pt::ptree tree;
@@ -1560,7 +1408,9 @@ namespace nvhttp {
 
     auto args = request->parse_query_string();
 
-    auto appid_str = get_arg(args, "appid", "0");
+    const bool appid_supplied = args.find("appid"s) != std::end(args);
+    const bool appuuid_supplied = args.find("appuuid"s) != std::end(args);
+    auto appid_str = get_arg(args, "appid", "");
     auto appuuid_str = get_arg(args, "appuuid", "");
     auto named_cert_p = get_verified_cert(request);
     if (!named_cert_p) {
@@ -1569,25 +1419,25 @@ namespace nvhttp {
       return;
     }
 
-    const auto parsed_appid = parse_launch_int(launch_int_field::app_id, appid_str);
-    if (!parsed_appid) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 400);
-      tree.put("root.<xmlattr>.status_message", "Invalid application ID");
-      return;
+    std::optional<int> requested_appid;
+    if (appid_supplied && !appid_str.empty()) {
+      const auto parsed_appid = parse_launch_int(launch_int_field::app_id, appid_str);
+      if (!parsed_appid) {
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 400);
+        tree.put("root.<xmlattr>.status_message", "Invalid application ID");
+        return;
+      }
+      if (*parsed_appid > 0) {
+        requested_appid = *parsed_appid;
+      }
     }
-    const auto appid = *parsed_appid;
-    bool is_input_only = config::input.enable_input_only_mode && (appid == proc::input_only_app_id || (appuuid_str == REMOTE_INPUT_UUID));
+    const int appid = requested_appid.value_or(0);
 
     BOOST_LOG(verbose) << "Launching app [" << appid_str << "] with UUID [" << appuuid_str << "]";
     // BOOST_LOG(verbose) << "QS: " << request->query_string;
 
-    if (
-      args.find("rikey"s) == std::end(args) ||
-      args.find("rikeyid"s) == std::end(args) ||
-      args.find("localAudioPlayMode"s) == std::end(args) ||
-      (args.find("appid"s) == std::end(args) && args.find("appuuid"s) == std::end(args))
-    ) {
+    if ((!appid_supplied && !appuuid_supplied) || (!requested_appid && appuuid_str.empty())) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
       tree.put("root.<xmlattr>.status_message", "Missing a required launch parameter");
@@ -1595,15 +1445,7 @@ namespace nvhttp {
       return;
     }
 
-    const auto local_audio = parse_launch_int(launch_int_field::binary_option, get_arg(args, "localAudioPlayMode"));
-    if (!local_audio) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 400);
-      tree.put("root.<xmlattr>.status_message", "Invalid local audio mode");
-      return;
-    }
-    const bool requested_host_audio = *local_audio;
-    auto launch_session = make_launch_session(requested_host_audio, is_input_only, args, named_cert_p.get());
+    auto launch_session = make_launch_session(args, named_cert_p.get());
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
@@ -1611,26 +1453,34 @@ namespace nvhttp {
       return;
     }
 
-    auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
-    if (!launch_session->rtsp_cipher && encryption_mode == config::ENCRYPTION_MODE_MANDATORY) {
-      BOOST_LOG(error) << "Rejecting client that cannot comply with mandatory encryption requirement"sv;
-
-      tree.put("root.<xmlattr>.status_code", 403);
-      tree.put("root.<xmlattr>.status_message", "Encryption is mandatory for this host but unsupported by the client");
+    const auto apps = proc::proc.get_apps();
+    auto app_by_id = apps.end();
+    auto app_by_uuid = apps.end();
+    if (requested_appid) {
+      app_by_id = std::find_if(apps.begin(), apps.end(), [appid](const auto &candidate) {
+        return candidate.id == std::to_string(appid);
+      });
+    }
+    if (!appuuid_str.empty()) {
+      app_by_uuid = std::find_if(apps.begin(), apps.end(), [&appuuid_str](const auto &candidate) {
+        return boost::iequals(candidate.uuid, appuuid_str);
+      });
+    }
+    if ((requested_appid && app_by_id == apps.end()) || (!appuuid_str.empty() && app_by_uuid == apps.end())) {
+      tree.put("root.<xmlattr>.status_code", 404);
+      tree.put("root.<xmlattr>.status_message", "Cannot find requested application");
       tree.put("root.gamesession", 0);
-
       return;
     }
-#ifdef _WIN32
-    bool remote_virtual_display_reserved = false;
-    auto remote_virtual_display_guard = util::fail_guard([&]() {
-      if (remote_virtual_display_reserved) {
-        ar_glasses::remote_virtual_display_ended(launch_session->id);
-      }
-    });
-#endif
+    if (requested_appid && !appuuid_str.empty() && app_by_id != app_by_uuid) {
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "Application ID and UUID identify different applications");
+      tree.put("root.gamesession", 0);
+      return;
+    }
+    const auto app_iter = !appuuid_str.empty() ? app_by_uuid : app_by_id;
 
-    // From this point through RTSP publication, grace expiry and first-session startup are
+    // From this point through RTSP publication, grace expiry and sole-session startup are
     // serialized with process/display mutation. Rejected paths release the guard without
     // changing the existing grace deadline.
     auto platform_launch = stream::session::guard_platform_launch();
@@ -1638,61 +1488,44 @@ namespace nvhttp {
     auto current_appid = process_status.app_id;
     const auto &current_app_uuid = process_status.app_uuid;
 
-    auto perm = PERM::launch;
-    // If we have already launched an app, allow clients with view permission to join the input
-    // only session or the currently running app.
-    if (
-      current_appid > 0
-      && (appuuid_str != TERMINATE_APP_UUID || appid != proc::terminate_app_id)
-      && (is_input_only || appid == current_appid || (!appuuid_str.empty() && appuuid_str == current_app_uuid))
-    ) {
-      perm = PERM::_allow_view;
-    }
+    const auto canonical_appid = util::from_view(app_iter->id);
+    const bool requested_current_app = current_appid > 0 && detail::app_identity_matches(
+      canonical_appid,
+      app_iter->uuid,
+      current_appid,
+      current_app_uuid
+    );
 
-    if (!(named_cert_p->perm & perm)) {
-      BOOST_LOG(debug) << "Permission LaunchApp denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
+    if (!(named_cert_p->perm & PERM::launch)) {
+      BOOST_LOG(debug) << "Permission LaunchApp denied for [" << named_cert_p->name << "] (" << (uint32_t) named_cert_p->perm << ")";
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 403);
       tree.put("root.<xmlattr>.status_message", "Permission denied");
       return;
     }
 
-    if (!is_input_only) {
-      // Special handling for the "terminate" app. Release the lifecycle guard first because
-      // terminating active sessions takes the same platform lock during their final join.
-      if (
-        (config::input.enable_input_only_mode && appid == proc::terminate_app_id)
-        || appuuid_str == TERMINATE_APP_UUID
-      ) {
-        platform_launch.release();
-        rtsp_stream::terminate_sessions();
-        proc::proc.terminate();
-        display_device::revert_configuration();
-        stream::session::flush_platform_state();
-
-        tree.put("root.resume", 0);
-        tree.put("root.<xmlattr>.status_code", 410);
-        tree.put("root.<xmlattr>.status_message", "App terminated.");
-        return;
-      }
-
-      if (
-        current_appid > 0
-        && current_appid != proc::input_only_app_id
-        && (
-          (appid > 0 && appid != current_appid)
-          || (!appuuid_str.empty() && appuuid_str != current_app_uuid)
-        )
-      ) {
-        tree.put("root.resume", 0);
-        tree.put("root.<xmlattr>.status_code", 400);
-        tree.put("root.<xmlattr>.status_message", "An app is already running on this host");
-        return;
-      }
+    if (requested_current_app) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 409);
+      tree.put("root.<xmlattr>.status_message", "The retained app must be resumed with a matching host session ID");
+      return;
     }
 
-    // An explicit terminate request must be able to revoke an occupied handshake. For normal
-    // launches, reject an occupied HTTP-to-RTSP slot before mutating display or process state.
+    if (current_appid > 0) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "An app is already running on this host");
+      return;
+    }
+
+    if (!platform_launch.idle()) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Another streaming session is already active");
+      return;
+    }
+
+    // Reject an occupied HTTP-to-RTSP slot before mutating display or process state.
     // launch_request_mutex prevents another HTTP launch from filling the slot before publication.
     if (!rtsp_stream::launch_session_available()) {
       tree.put("root.resume", 0);
@@ -1701,98 +1534,13 @@ namespace nvhttp {
       return;
     }
 
-    const bool no_active_sessions = platform_launch.idle();
-
-#ifdef _WIN32
-    if (no_active_sessions && process_status.virtual_display &&
-        (appid == current_appid || (!appuuid_str.empty() && appuuid_str == current_app_uuid))) {
-      if (!ar_glasses::remote_virtual_display_starting(
-            launch_session->id,
-            config::stream.ping_timeout
-          )) {
-        tree.put("root.resume", 0);
-        tree.put("root.<xmlattr>.status_code", 503);
-        tree.put("root.<xmlattr>.status_message", "Local AR display ownership could not be released");
-        return;
-      }
-      remote_virtual_display_reserved = true;
-    }
-#endif
-
-    if (is_input_only) {
-      BOOST_LOG(info) << "Launching input only session..."sv;
-
-      launch_session->client_do_cmds.clear();
-      launch_session->client_undo_cmds.clear();
-
-      // Still probe encoders once, if input only session is launched first
-      // But we're ignoring if it's successful or not
-      if (no_active_sessions && !process_status.virtual_display) {
-        video::probe_encoders();
-        if (current_appid == 0) {
-          proc::proc.launch_input_only();
-        }
-      }
-    } else if (appid > 0 || !appuuid_str.empty()) {
-      if (appid == current_appid || (!appuuid_str.empty() && appuuid_str == current_app_uuid)) {
-        // We're basically resuming the same app
-
-        BOOST_LOG(debug) << "Resuming app [" << process_status.app_name << "] from launch app path...";
-
-        if (!process_status.allow_client_commands || !named_cert_p->allow_client_commands) {
-          launch_session->client_do_cmds.clear();
-          launch_session->client_undo_cmds.clear();
-        }
-
-        if (current_appid == proc::input_only_app_id) {
-          launch_session->input_only = true;
-        }
-
-        if (no_active_sessions && !process_status.virtual_display) {
-          display_device::configure_display(config::video, *launch_session);
-          if (video::probe_encoders()) {
-            tree.put("root.resume", 0);
-            tree.put("root.<xmlattr>.status_code", 503);
-            tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
-
-            return;
-          }
-        }
-      } else {
-        const auto apps = proc::proc.get_apps();
-        auto app_iter = std::find_if(apps.begin(), apps.end(), [&appid_str, &appuuid_str](const auto _app) {
-          return _app.id == appid_str || _app.uuid == appuuid_str;
-        });
-
-        if (app_iter == apps.end()) {
-          BOOST_LOG(error) << "Couldn't find app with ID ["sv << appid_str << "] or UUID ["sv << appuuid_str << ']';
-          tree.put("root.<xmlattr>.status_code", 404);
-          tree.put("root.<xmlattr>.status_message", "Cannot find requested application");
-          tree.put("root.gamesession", 0);
-          return;
-        }
-
-        if (!app_iter->allow_client_commands) {
-          launch_session->client_do_cmds.clear();
-          launch_session->client_undo_cmds.clear();
-        }
-
-        auto err = proc::proc.execute(*app_iter, launch_session, no_active_sessions);
-        if (err) {
-          tree.put("root.<xmlattr>.status_code", err);
-          tree.put(
-            "root.<xmlattr>.status_message",
-            err == 503
-            ? "Failed to initialize video capture/encoding. Is a display connected and turned on?"
-            : "Failed to start the specified application");
-          tree.put("root.gamesession", 0);
-
-          return;
-        }
-      }
-    } else {
-      tree.put("root.<xmlattr>.status_code", 403);
-      tree.put("root.<xmlattr>.status_message", "How did you get here?");
+    auto err = proc::proc.execute(*app_iter, launch_session, true);
+    if (err) {
+      tree.put("root.<xmlattr>.status_code", err);
+      tree.put(
+        "root.<xmlattr>.status_message",
+        err == 503 ? "Failed to initialize video capture/encoding. Is a display connected and turned on?" : "Failed to start the specified application"
+      );
       tree.put("root.gamesession", 0);
       return;
     }
@@ -1803,9 +1551,6 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "Another streaming handshake is already pending");
       return;
     }
-#ifdef _WIN32
-    remote_virtual_display_guard.disable();
-#endif
     platform_launch.commit();
 
     tree.put("root.<xmlattr>.status_code", 200);
@@ -1813,17 +1558,16 @@ namespace nvhttp {
       "root.sessionUrl0",
       std::format(
         "{}{}:{}",
-        launch_session->rtsp_url_scheme,
+        "rtspenc://",
         net::addr_to_url_escaped_string(request->local_endpoint().address()),
         static_cast<int>(net::map_port(rtsp_stream::RTSP_SETUP_PORT))
       )
     );
     tree.put("root.gamesession", 1);
-
-    host_audio = requested_host_audio;
+    tree.put("root.hostsessionid", proc::proc.get_host_session_id());
   }
 
-  void resume(bool &host_audio, resp_https_t response, req_https_t request) {
+  void resume(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
 
     pt::ptree tree;
@@ -1847,7 +1591,7 @@ namespace nvhttp {
       return;
     }
     if (!(named_cert_p->perm & PERM::_allow_view)) {
-      BOOST_LOG(debug) << "Permission ViewApp denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
+      BOOST_LOG(debug) << "Permission ViewApp denied for [" << named_cert_p->name << "] (" << (uint32_t) named_cert_p->perm << ")";
 
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 403);
@@ -1857,31 +1601,39 @@ namespace nvhttp {
     }
 
     auto args = request->parse_query_string();
-    if (
-      args.find("rikey"s) == std::end(args) ||
-      args.find("rikeyid"s) == std::end(args)
-    ) {
+    const auto presented_host_session_id = parse_host_session_id(get_arg(args, "hostSessionId"));
+    if (!presented_host_session_id ||
+        !detail::host_session_matches(proc::proc.get_host_session_id(), *presented_host_session_id)) {
       tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 400);
-      tree.put("root.<xmlattr>.status_message", "Missing a required resume parameter");
-
+      tree.put("root.<xmlattr>.status_code", 409);
+      tree.put("root.<xmlattr>.status_message", "Missing or stale host session ID");
       return;
     }
-
-    // Parse every client-controlled option before acquiring the lifecycle guard. Malformed
-    // retries must not postpone an already pending grace expiry.
-    bool parsed_host_audio = host_audio;
-    if (args.find("localAudioPlayMode"s) != std::end(args)) {
-      const auto local_audio = parse_launch_int(launch_int_field::binary_option, get_arg(args, "localAudioPlayMode"));
-      if (!local_audio) {
+    const bool appid_supplied = args.find("appid"s) != std::end(args);
+    const auto appid_text = get_arg(args, "appid");
+    const auto appuuid = get_arg(args, "appuuid");
+    std::optional<int> requested_appid;
+    if (appid_supplied && !appid_text.empty()) {
+      const auto parsed_appid = parse_launch_int(launch_int_field::app_id, appid_text);
+      if (!parsed_appid) {
         tree.put("root.resume", 0);
         tree.put("root.<xmlattr>.status_code", 400);
-        tree.put("root.<xmlattr>.status_message", "Invalid local audio mode");
+        tree.put("root.<xmlattr>.status_message", "Invalid application ID");
         return;
       }
-      parsed_host_audio = *local_audio;
+      if (*parsed_appid > 0) {
+        requested_appid = *parsed_appid;
+      }
     }
-    auto launch_session = make_launch_session(parsed_host_audio, false, args, named_cert_p.get());
+    if (!requested_appid && appuuid.empty()) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "Missing retained application identity");
+      return;
+    }
+    // Parse every client-controlled option before acquiring the lifecycle guard. Malformed
+    // retries must not postpone an already pending grace expiry.
+    auto launch_session = make_launch_session(args, named_cert_p.get());
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
@@ -1897,23 +1649,36 @@ namespace nvhttp {
     });
 #endif
 
-    auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
-    if (!launch_session->rtsp_cipher && encryption_mode == config::ENCRYPTION_MODE_MANDATORY) {
-      BOOST_LOG(error) << "Rejecting client that cannot comply with mandatory encryption requirement"sv;
-
-      tree.put("root.<xmlattr>.status_code", 403);
-      tree.put("root.<xmlattr>.status_message", "Encryption is mandatory for this host but unsupported by the client");
-      tree.put("root.gamesession", 0);
+    auto platform_launch = stream::session::guard_platform_launch();
+    if (!platform_launch.idle()) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Another streaming session is already active");
       return;
     }
-
-    auto platform_launch = stream::session::guard_platform_launch();
     const auto process_status = proc::proc.get_status();
     auto current_appid = process_status.app_id;
-    if (current_appid == 0) {
+    if (current_appid <= 0) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 503);
       tree.put("root.<xmlattr>.status_message", "No running app to resume");
+      return;
+    }
+    if (!detail::host_session_matches(process_status.host_session_id, *presented_host_session_id)) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 409);
+      tree.put("root.<xmlattr>.status_message", "The retained host session changed before resume");
+      return;
+    }
+    if (!detail::app_identity_matches(
+          requested_appid,
+          appuuid,
+          current_appid,
+          process_status.app_uuid
+        )) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 409);
+      tree.put("root.<xmlattr>.status_message", "The requested application does not match the retained host session");
       return;
     }
 
@@ -1924,42 +1689,19 @@ namespace nvhttp {
       return;
     }
 
-    // Newer clients may change host-audio mode on resume, but only while this guarded snapshot
-    // confirms that no other stream is active.
-    const bool no_active_sessions = platform_launch.idle();
-    const bool requested_host_audio = no_active_sessions ? parsed_host_audio : host_audio;
-    launch_session->host_audio = requested_host_audio;
-
-    if (!process_status.allow_client_commands || !named_cert_p->allow_client_commands) {
-      launch_session->client_do_cmds.clear();
-      launch_session->client_undo_cmds.clear();
-    }
-
-    if (config::input.enable_input_only_mode && current_appid == proc::input_only_app_id) {
-      launch_session->input_only = true;
-    }
-
-    if (no_active_sessions && !process_status.virtual_display) {
-      // We want to prepare display only if there are no active sessions
-      // and the current session isn't virtual display at the moment.
-      // This should be done before probing encoders as it could change the active displays.
-      display_device::configure_display(config::video, *launch_session);
-
-      // Probe encoders again before streaming to ensure our chosen
-      // encoder matches the active GPU (which could have changed
-      // due to hotplugging, driver crash, primary monitor change,
-      // or any number of other factors).
+    if (!process_status.virtual_display) {
+      // Probe before mutating the retained display contract. A probe failure must leave the warm
+      // process exactly as it was so the client can retry or explicitly terminate it.
       if (video::probe_encoders()) {
         tree.put("root.resume", 0);
         tree.put("root.<xmlattr>.status_code", 503);
         tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
-
         return;
       }
     }
 
 #ifdef _WIN32
-    if (no_active_sessions && process_status.virtual_display) {
+    if (process_status.virtual_display) {
       if (!ar_glasses::remote_virtual_display_starting(
             launch_session->id,
             config::stream.ping_timeout
@@ -1972,6 +1714,13 @@ namespace nvhttp {
       remote_virtual_display_reserved = true;
     }
 #endif
+
+    if (const auto reconfigure_error = proc::proc.reconfigure_retained_session(launch_session)) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", reconfigure_error);
+      tree.put("root.<xmlattr>.status_message", "Failed to reconfigure the retained streaming session");
+      return;
+    }
 
     if (!rtsp_stream::launch_session_raise(launch_session)) {
       tree.put("root.resume", 0);
@@ -1989,14 +1738,13 @@ namespace nvhttp {
       "root.sessionUrl0",
       std::format(
         "{}{}:{}",
-        launch_session->rtsp_url_scheme,
+        "rtspenc://",
         net::addr_to_url_escaped_string(request->local_endpoint().address()),
         static_cast<int>(net::map_port(rtsp_stream::RTSP_SETUP_PORT))
       )
     );
     tree.put("root.resume", 1);
-
-    host_audio = requested_host_audio;
+    tree.put("root.hostsessionid", process_status.host_session_id);
 
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
     system_tray::update_tray_client_connected(named_cert_p->name);
@@ -2014,8 +1762,6 @@ namespace nvhttp {
       response->write(data.str());
       response->close_connection_after_response = true;
     });
-    std::lock_guard launch_lock(launch_request_mutex);
-
     auto named_cert_p = get_verified_cert(request);
     if (!named_cert_p) {
       tree.put("root.<xmlattr>.status_code", 401);
@@ -2023,7 +1769,7 @@ namespace nvhttp {
       return;
     }
     if (!(named_cert_p->perm & PERM::launch)) {
-      BOOST_LOG(debug) << "Permission CancelApp denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
+      BOOST_LOG(debug) << "Permission CancelApp denied for [" << named_cert_p->name << "] (" << (uint32_t) named_cert_p->perm << ")";
 
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 403);
@@ -2032,20 +1778,21 @@ namespace nvhttp {
       return;
     }
 
+    std::lock_guard launch_lock(launch_request_mutex);
+    const auto args = request->parse_query_string();
+    const auto presented_host_session_id = parse_host_session_id(get_arg(args, "hostSessionId"));
+    if (!presented_host_session_id ||
+        !detail::host_session_matches(proc::proc.get_host_session_id(), *presented_host_session_id)) {
+      tree.put("root.cancel", 0);
+      tree.put("root.<xmlattr>.status_code", 409);
+      tree.put("root.<xmlattr>.status_message", "Missing or stale host session ID");
+      return;
+    }
+
     tree.put("root.cancel", 1);
     tree.put("root.<xmlattr>.status_code", 200);
 
-    rtsp_stream::terminate_sessions();
-
-    if (proc::proc.running() > 0) {
-      proc::proc.terminate();
-    }
-
-    // The config needs to be reverted regardless of whether "proc::proc.terminate()" was called or not.
-    display_device::revert_configuration();
-
-    // Quit Session is an explicit teardown and bypasses the reconnect grace.
-    stream::session::flush_platform_state();
+    terminate_active_session_locked();
   }
 
   void appasset(resp_https_t response, req_https_t request) {
@@ -2065,7 +1812,7 @@ namespace nvhttp {
     }
 
     if (!(named_cert_p->perm & PERM::_all_actions)) {
-      BOOST_LOG(debug) << "Permission Get AppAsset denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
+      BOOST_LOG(debug) << "Permission Get AppAsset denied for [" << named_cert_p->name << "] (" << (uint32_t) named_cert_p->perm << ")";
 
       fg.disable();
       response->write(SimpleWeb::StatusCode::client_error_unauthorized);
@@ -2096,10 +1843,9 @@ namespace nvhttp {
     }
 
     if (
-      !(named_cert_p->perm & PERM::_allow_view)
-      || !(named_cert_p->perm & PERM::clipboard_read)
+      !(named_cert_p->perm & PERM::_allow_view) || !(named_cert_p->perm & PERM::clipboard_read)
     ) {
-      BOOST_LOG(debug) << "Permission Read Clipboard denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
+      BOOST_LOG(debug) << "Permission Read Clipboard denied for [" << named_cert_p->name << "] (" << (uint32_t) named_cert_p->perm << ")";
 
       response->write(SimpleWeb::StatusCode::client_error_unauthorized);
       response->close_connection_after_response = true;
@@ -2116,16 +1862,11 @@ namespace nvhttp {
       return;
     }
 
-    std::list<std::string> connected_uuids = rtsp_stream::get_all_session_uuids();
-
-    bool found = !connected_uuids.empty();
-
-    if (found) {
-      found = (std::find(connected_uuids.begin(), connected_uuids.end(), named_cert_p->uuid) != connected_uuids.end());
-    }
+    const auto connected_uuid = rtsp_stream::active_session_uuid();
+    const bool found = connected_uuid && *connected_uuid == named_cert_p->uuid;
 
     if (!found) {
-      BOOST_LOG(debug) << "Client ["<< named_cert_p->name << "] trying to get clipboard is not connected to a stream";
+      BOOST_LOG(debug) << "Client [" << named_cert_p->name << "] trying to get clipboard is not connected to a stream";
 
       response->write(SimpleWeb::StatusCode::client_error_forbidden);
       response->close_connection_after_response = true;
@@ -2138,7 +1879,7 @@ namespace nvhttp {
   }
 
   void
-  setClipboard(resp_https_t response, req_https_t request) {
+    setClipboard(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
 
     auto named_cert_p = get_verified_cert(request);
@@ -2149,10 +1890,9 @@ namespace nvhttp {
     }
 
     if (
-      !(named_cert_p->perm & PERM::_allow_view)
-      || !(named_cert_p->perm & PERM::clipboard_set)
+      !(named_cert_p->perm & PERM::_allow_view) || !(named_cert_p->perm & PERM::clipboard_set)
     ) {
-      BOOST_LOG(debug) << "Permission Write Clipboard denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
+      BOOST_LOG(debug) << "Permission Write Clipboard denied for [" << named_cert_p->name << "] (" << (uint32_t) named_cert_p->perm << ")";
 
       response->write(SimpleWeb::StatusCode::client_error_unauthorized);
       response->close_connection_after_response = true;
@@ -2169,16 +1909,11 @@ namespace nvhttp {
       return;
     }
 
-    std::list<std::string> connected_uuids = rtsp_stream::get_all_session_uuids();
-
-    bool found = !connected_uuids.empty();
-
-    if (found) {
-      found = (std::find(connected_uuids.begin(), connected_uuids.end(), named_cert_p->uuid) != connected_uuids.end());
-    }
+    const auto connected_uuid = rtsp_stream::active_session_uuid();
+    const bool found = connected_uuid && *connected_uuid == named_cert_p->uuid;
 
     if (!found) {
-      BOOST_LOG(debug) << "Client ["<< named_cert_p->name << "] trying to set clipboard is not connected to a stream";
+      BOOST_LOG(debug) << "Client [" << named_cert_p->name << "] trying to set clipboard is not connected to a stream";
 
       response->write(SimpleWeb::StatusCode::client_error_forbidden);
       response->close_connection_after_response = true;
@@ -2222,10 +1957,6 @@ namespace nvhttp {
     auto cert = file_handler::read_file(config::nvhttp.cert.c_str());
     setup(pkey, cert);
 
-    // resume doesn't always get the parameter "localAudioPlayMode"
-    // launch will store it in host_audio
-    bool host_audio {};
-
     https_server_t https_server {config::nvhttp.cert, config::nvhttp.pkey};
     http_server_t http_server;
 
@@ -2256,7 +1987,6 @@ namespace nvhttp {
         } else {
           BOOST_LOG(debug) << subject_name << " -- "sv << "denied"sv;
         }
-
       });
 
       const char *err_str = nullptr;
@@ -2297,11 +2027,11 @@ namespace nvhttp {
     https_server.resource["^/pair$"]["GET"] = pair<SunshineHTTPS>;
     https_server.resource["^/applist$"]["GET"] = applist;
     https_server.resource["^/appasset$"]["GET"] = appasset;
-    https_server.resource["^/launch$"]["GET"] = [&host_audio](auto resp, auto req) {
-      launch(host_audio, resp, req);
+    https_server.resource["^/launch$"]["GET"] = [](auto resp, auto req) {
+      launch(resp, req);
     };
-    https_server.resource["^/resume$"]["GET"] = [&host_audio](auto resp, auto req) {
-      resume(host_audio, resp, req);
+    https_server.resource["^/resume$"]["GET"] = [](auto resp, auto req) {
+      resume(resp, req);
     };
     https_server.resource["^/cancel$"]["GET"] = cancel;
     https_server.resource["^/actions/clipboard$"]["GET"] = getClipboard;
@@ -2361,7 +2091,7 @@ namespace nvhttp {
     }
   }
 
-  std::string request_otp(const std::string& passphrase, const std::string& deviceName) {
+  std::string request_otp(const std::string &passphrase, const std::string &deviceName) {
     if (passphrase.size() < 4) {
       return "";
     }
@@ -2375,7 +2105,10 @@ namespace nvhttp {
   }
 
   void
-  erase_all_clients() {
+    erase_all_clients() {
+    std::lock_guard launch_lock(launch_request_mutex);
+    terminate_active_session_locked();
+
     std::vector<std::pair<std::string, std::string>> revoked_clients;
     std::vector<rtsp_stream::client_policy_publication_t> policy_publications;
     {
@@ -2414,7 +2147,7 @@ namespace nvhttp {
   }
 #endif
 
-  void stop_session(stream::session_t& session, bool graceful) {
+  void stop_session(stream::session_t &session, bool graceful) {
     if (graceful) {
       stream::session::graceful_stop(session);
     } else {
@@ -2422,24 +2155,19 @@ namespace nvhttp {
     }
   }
 
-  bool find_and_stop_sessions(const std::string &uuid, bool graceful) {
-    const auto sessions = rtsp_stream::find_sessions(uuid);
-    for (const auto &session : sessions) {
-      stop_session(*session, graceful);
+  bool find_and_stop_session(const std::string &uuid, bool graceful) {
+    const auto session = rtsp_stream::find_session(uuid);
+    if (!session) {
+      return false;
     }
-    return !sessions.empty();
+    stop_session(*session, graceful);
+    return true;
   }
 
   bool update_device_info(
-    const std::string& uuid,
-    const std::string& name,
-    const std::string& display_mode,
-    const cmd_list_t& do_cmds,
-    const cmd_list_t& undo_cmds,
-    const crypto::PERM newPerm,
-    const bool enable_legacy_ordering,
-    const bool allow_client_commands,
-    const bool always_use_virtual_display
+    const std::string &uuid,
+    const std::string &name,
+    const crypto::PERM newPerm
   ) {
     bool updated = false;
     rtsp_stream::client_policy_publication_t policy_publication;
@@ -2451,13 +2179,7 @@ namespace nvhttp {
         }
         auto replacement = std::make_shared<crypto::named_cert_t>(*named_cert_p);
         replacement->name = name;
-        replacement->display_mode = display_mode;
         replacement->perm = newPerm;
-        replacement->do_cmds = do_cmds;
-        replacement->undo_cmds = undo_cmds;
-        replacement->enable_legacy_ordering = enable_legacy_ordering;
-        replacement->allow_client_commands = allow_client_commands;
-        replacement->always_use_virtual_display = always_use_virtual_display;
         named_cert_p = std::move(replacement);
         rebuild_cert_chain_locked();
         const auto generation = client_state_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -2477,7 +2199,6 @@ namespace nvhttp {
 
   bool unpair_client(const std::string_view uuid) {
     bool removed = false;
-    bool clients_empty = false;
     std::string client_name;
     rtsp_stream::client_policy_publication_t policy_publication;
     {
@@ -2502,7 +2223,6 @@ namespace nvhttp {
           true
         );
       }
-      clients_empty = client_root.named_devices.empty();
     }
 
     if (removed) {
@@ -2510,10 +2230,6 @@ namespace nvhttp {
 
       if (!config::sunshine.flags[config::flag::FRESH_STATE]) {
         save_state();
-      }
-
-      if (clients_empty) {
-        proc::proc.terminate();
       }
     }
 

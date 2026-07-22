@@ -21,8 +21,11 @@ the original `Host` value.
 ## POST /api/apps/close
 @copydoc confighttp::closeApp()
 
-## DELETE /api/apps/{index}
+## POST /api/apps/delete
 @copydoc confighttp::deleteApp()
+
+## POST /api/apps/reorder
+@copydoc confighttp::reorderApps()
 
 ## GET /api/clients/list
 @copydoc confighttp::getClients()
@@ -32,6 +35,18 @@ the original `Host` value.
 
 ## POST /api/clients/unpair-all
 @copydoc confighttp::unpairAll()
+
+## POST /api/clients/update
+@copydoc confighttp::updateClient()
+
+## POST /api/clients/disconnect
+@copydoc confighttp::disconnect()
+
+## GET /api/ar-glasses
+@copydoc confighttp::getArGlassDevices()
+
+## POST /api/ar-glasses
+@copydoc confighttp::setArGlassDevice()
 
 ## GET /api/config
 @copydoc confighttp::getConfig()
@@ -54,11 +69,11 @@ the original `Host` value.
 ## POST /api/pin
 @copydoc confighttp::savePin()
 
-## POST /api/reset-display-device-persistence
-@copydoc confighttp::resetDisplayDevicePersistence()
-
 ## POST /api/restart
 @copydoc confighttp::restart()
+
+## POST /api/quit
+@copydoc confighttp::quit()
 
 <div class="section_buttons">
 

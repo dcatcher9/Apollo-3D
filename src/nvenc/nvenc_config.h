@@ -25,48 +25,22 @@ namespace nvenc {
     // Percentage increase of VBV/HRD from the default single frame, allows low-latency variable bitrate
     int vbv_percentage_increase = 0;
 
-    // Improves fades compression, uses CUDA cores
-    bool weighted_prediction = false;
-
     // Allocate more bitrate to flat regions since they're visually more perceptible, uses CUDA cores
     bool adaptive_quantization = false;
 
     // Replace HEVC P pictures with past-reference-only B pictures for better low-latency compression
     bool hevc_unidirectional_b = false;
-
-    // Don't use QP below certain value, limits peak image quality to save bitrate
-    bool enable_min_qp = false;
-
-    // Min QP value for H.264 when enable_min_qp is selected
-    unsigned min_qp_h264 = 19;
-
-    // Min QP value for HEVC when enable_min_qp is selected
-    unsigned min_qp_hevc = 23;
-
-    // Min QP value for AV1 when enable_min_qp is selected
-    unsigned min_qp_av1 = 23;
-
-    // Use CAVLC entropy coding in H.264 instead of CABAC, not relevant and here for historical reasons
-    bool h264_cavlc = false;
-
-    // Add filler data to encoded frames to stay at target bitrate, mainly for testing
-    bool insert_filler_data = false;
-
-    // Intra refresh for clients that doesn't request keyframe correctly
-    bool intra_refresh = false;
   };
 
   constexpr bool should_enable_hevc_unidirectional_b(
     const nvenc_config &config,
     int video_format,
-    bool supported,
-    bool weighted_prediction_enabled
+    bool supported
   ) {
     constexpr int hevc_video_format = 1;
     return config.hevc_unidirectional_b &&
            video_format == hevc_video_format &&
-           supported &&
-           !weighted_prediction_enabled;
+           supported;
   }
 
 }  // namespace nvenc

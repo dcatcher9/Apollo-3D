@@ -13,7 +13,9 @@
 using namespace std::chrono_literals;
 
 namespace {
-  nlohmann::json recovery_record(std::string device_path = R"(\\?\DISPLAY#TCL03D4#test)") {
+  nlohmann::json legacy_recovery_record(
+    std::string device_path = R"(\\?\DISPLAY#TCL03D4#test)"
+  ) {
     return {
       {"device_path", std::move(device_path)},
       {"original_left", 5120},
@@ -48,7 +50,13 @@ namespace {
     };
   }
 
-  nlohmann::json recovery_document(nlohmann::json recoveries, int version = 3) {
+  nlohmann::json current_recovery_record() {
+    auto owned = nlohmann::json::array();
+    owned.emplace_back(rect_json(7040, 0, 8960, 1080));
+    return transactional_recovery_record(std::move(owned));
+  }
+
+  nlohmann::json recovery_document(nlohmann::json recoveries, int version = 4) {
     return {
       {"version", version},
       {"recoveries", std::move(recoveries)},
@@ -306,7 +314,6 @@ TEST(ArGlassesTopologyRecovery, SerializesAPlainRecordArray) {
   );
 
   ASSERT_TRUE(result.valid);
-  EXPECT_FALSE(result.rewrite_required);
   EXPECT_EQ(result.record_count, 1u);
   const auto normalized = nlohmann::json::parse(result.normalized_json);
   EXPECT_EQ(normalized.at("version"), 4);
@@ -315,20 +322,16 @@ TEST(ArGlassesTopologyRecovery, SerializesAPlainRecordArray) {
   EXPECT_TRUE(normalized.at("recoveries").front().is_object());
 }
 
-TEST(ArGlassesTopologyRecovery, MigratesLegacyVersionTwoRecord) {
-  auto legacy = recovery_record();
-  legacy["version"] = 2;
+TEST(ArGlassesTopologyRecovery, RejectsRetiredVersionTwoAndThreeRecords) {
+  auto version_two = legacy_recovery_record();
+  version_two["version"] = 2;
 
-  const auto result = ar_glasses::detail::parse_topology_recovery_json_for_test(legacy.dump());
+  auto version_three_entries = nlohmann::json::array();
+  version_three_entries.emplace_back(legacy_recovery_record());
+  const auto version_three = recovery_document(std::move(version_three_entries), 3);
 
-  ASSERT_TRUE(result.valid);
-  EXPECT_TRUE(result.rewrite_required);
-  EXPECT_EQ(result.record_count, 1u);
-  const auto normalized = nlohmann::json::parse(result.normalized_json);
-  EXPECT_EQ(normalized.at("version"), 4);
-  ASSERT_TRUE(normalized.at("recoveries").is_array());
-  ASSERT_EQ(normalized.at("recoveries").size(), 1u);
-  EXPECT_TRUE(normalized.at("recoveries").front().is_object());
+  EXPECT_FALSE(ar_glasses::detail::parse_topology_recovery_json_for_test(version_two.dump()).valid);
+  EXPECT_FALSE(ar_glasses::detail::parse_topology_recovery_json_for_test(version_three.dump()).valid);
 }
 
 TEST(ArGlassesTopologyRecovery, PendingMoveOwnsOnlyExactPendingAndConfirmedPositions) {
@@ -383,21 +386,16 @@ TEST(ArGlassesTopologyRecovery, DoesNotOwnAnUnrecognizedRectWithoutAPendingMove)
   ));
 }
 
-TEST(ArGlassesTopologyRecovery, RepairsTheKnownLeadingEmptyArrayArtifact) {
+TEST(ArGlassesTopologyRecovery, RejectsTheRetiredLeadingEmptyArrayArtifact) {
   auto recoveries = nlohmann::json::array();
   recoveries.emplace_back(nlohmann::json::array());
-  recoveries.emplace_back(recovery_record());
+  recoveries.emplace_back(current_recovery_record());
 
   const auto result = ar_glasses::detail::parse_topology_recovery_json_for_test(
     recovery_document(std::move(recoveries)).dump()
   );
 
-  ASSERT_TRUE(result.valid);
-  EXPECT_TRUE(result.rewrite_required);
-  EXPECT_EQ(result.record_count, 1u);
-  const auto normalized = nlohmann::json::parse(result.normalized_json);
-  ASSERT_EQ(normalized.at("recoveries").size(), 1u);
-  EXPECT_TRUE(normalized.at("recoveries").front().is_object());
+  EXPECT_FALSE(result.valid);
 }
 
 TEST(ArGlassesTopologyRecovery, RejectsOtherMalformedRecoveryLists) {
@@ -405,24 +403,25 @@ TEST(ArGlassesTopologyRecovery, RejectsOtherMalformedRecoveryLists) {
   sentinel_only.emplace_back(nlohmann::json::array());
 
   auto trailing_array = nlohmann::json::array();
-  trailing_array.emplace_back(recovery_record());
+  trailing_array.emplace_back(current_recovery_record());
   trailing_array.emplace_back(nlohmann::json::array());
 
   auto repeated_sentinel = nlohmann::json::array();
   repeated_sentinel.emplace_back(nlohmann::json::array());
   repeated_sentinel.emplace_back(nlohmann::json::array());
-  repeated_sentinel.emplace_back(recovery_record());
+  repeated_sentinel.emplace_back(current_recovery_record());
 
   auto null_entry = nlohmann::json::array();
   null_entry.emplace_back(nullptr);
-  null_entry.emplace_back(recovery_record());
+  null_entry.emplace_back(current_recovery_record());
 
   auto duplicate_devices = nlohmann::json::array();
-  duplicate_devices.emplace_back(recovery_record());
-  duplicate_devices.emplace_back(recovery_record());
+  duplicate_devices.emplace_back(current_recovery_record());
+  duplicate_devices.emplace_back(current_recovery_record());
 
-  auto invalid_rectangle = recovery_record();
-  invalid_rectangle["applied_right"] = invalid_rectangle["applied_left"];
+  auto invalid_rectangle = current_recovery_record();
+  invalid_rectangle["owned_rects"][0]["right"] =
+    invalid_rectangle["owned_rects"][0]["left"];
   auto malformed_record = nlohmann::json::array();
   malformed_record.emplace_back(std::move(invalid_rectangle));
 

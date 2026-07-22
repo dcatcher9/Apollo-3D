@@ -5,11 +5,12 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 #ifndef BOOST_PROCESS_VERSION
- #define BOOST_PROCESS_VERSION 1
+  #define BOOST_PROCESS_VERSION 1
 #endif
 // standard includes
 #include <condition_variable>
 #include <filesystem>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -31,14 +32,14 @@
 #include "crypto.h"
 #include "display_device.h"
 #include "file_handler.h"
+#include "httpcommon.h"
 #include "logging.h"
 #include "platform/common.h"
 #include "process.h"
-#include "httpcommon.h"
 #include "system_tray.h"
 #include "utility.h"
-#include "video.h"
 #include "uuid.h"
+#include "video.h"
 
 #ifdef _WIN32
   #include "platform/windows/ar_glasses.h"
@@ -60,8 +61,8 @@ namespace proc {
 
   namespace {
     // Process/app state is shared by NVHTTP launch/resume threads, stream teardown, and the
-    // local-AR topology controller. A recursive mutex is required because execute(), running(),
-    // and pause() intentionally call terminate().
+    // local-AR topology controller. A recursive mutex is required because running() can perform
+    // the same authoritative cleanup as terminate().
     std::recursive_mutex process_state_mutex;
 #ifdef _WIN32
     // Topology removal outlives the proc_t configuration object that initiated it. Keep the
@@ -80,14 +81,13 @@ namespace proc {
     std::mutex mutex;
     std::condition_variable_any display_changed;
     std::string display_name;
-    std::optional<std::pair<std::string, bool>> changed_display;
+    bool desired_hdr {};
+    std::uint64_t requested_revision {};
+    std::uint64_t completed_revision {};
+    bool completion_succeeded {};
+    std::unordered_map<std::string, bool> original_hdr_states;
   };
 #endif
-
-  int input_only_app_id = -1;
-  std::string input_only_app_id_str;
-  int terminate_app_id = -1;
-  std::string terminate_app_id_str;
 
 #ifdef _WIN32
   std::atomic<VDISPLAY::DRIVER_STATUS> vDisplayDriverStatus {VDISPLAY::DRIVER_STATUS::UNKNOWN};
@@ -111,7 +111,7 @@ namespace proc {
   class deinit_t: public platf::deinit_t {
   public:
     ~deinit_t() {
-      proc.terminate();
+      proc.terminate(false, false);
     }
   };
 
@@ -199,18 +199,29 @@ namespace proc {
     return cmd_path.parent_path();
   }
 
-  void proc_t::launch_input_only() {
-    std::lock_guard lock(process_state_mutex);
-    _app_id = input_only_app_id;
-    _app_name = "Remote Input";
-    _app.uuid = REMOTE_INPUT_UUID;
-    _app.terminate_on_pause = true;
-    _allow_client_commands = false;
-    placebo = true;
+  std::optional<render_size_t> calculate_render_size(
+    std::uint32_t client_width,
+    std::uint32_t client_height,
+    std::uint32_t scale_factor
+  ) {
+    if (client_width == 0 || client_height == 0 || scale_factor == 0) {
+      return std::nullopt;
+    }
 
-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
-    system_tray::update_tray_playing(_app_name);
-#endif
+    const auto scaled_width = static_cast<std::uint64_t>(client_width) * scale_factor / 100;
+    const auto scaled_height = static_cast<std::uint64_t>(client_height) * scale_factor / 100;
+    if (scaled_width > std::numeric_limits<std::uint32_t>::max() || scaled_height > std::numeric_limits<std::uint32_t>::max()) {
+      return std::nullopt;
+    }
+
+    // D3D/NVENC surfaces require even dimensions. Use the same floor behavior for every scale,
+    // including 100%, so a reconnect cannot silently change the render-size contract.
+    const auto width = static_cast<std::uint32_t>(scaled_width) & ~1U;
+    const auto height = static_cast<std::uint32_t>(scaled_height) & ~1U;
+    if (width == 0 || height == 0) {
+      return std::nullopt;
+    }
+    return render_size_t {width, height};
   }
 
   std::string proc_t::get_display_name() const {
@@ -227,25 +238,33 @@ namespace proc {
     display_name = std::move(name);
 #ifdef _WIN32
     if (_hdr_worker_state) {
+      bool changed = false;
       {
         std::lock_guard state_lock(_hdr_worker_state->mutex);
-        _hdr_worker_state->display_name = display_name;
+        if (_hdr_worker_state->display_name != display_name) {
+          _hdr_worker_state->display_name = display_name;
+          ++_hdr_worker_state->requested_revision;
+          changed = true;
+        }
       }
-      _hdr_worker_state->display_changed.notify_all();
+      if (changed) {
+        _hdr_worker_state->display_changed.notify_all();
+      }
     }
 #endif
   }
 
   process_status_t proc_t::get_status() {
     std::lock_guard lock(process_state_mutex);
-    const int active_app_id = running_locked();
+    // This method is used by /serverinfo and launch admission while capture may still be active.
+    // Never perform teardown from a read-only status request: the control/RTSP lifecycle observes
+    // command exit, stops and joins the media workers, and only then calls running()/terminate().
     return {
-      active_app_id,
+      _app_id,
       _app_name,
       _app.uuid,
       _virtual_display,
-      _allow_client_commands,
-      _app.terminate_on_pause,
+      _host_session_id,
     };
   }
 
@@ -265,121 +284,127 @@ namespace proc {
 
     auto state = std::make_shared<hdr_worker_state_t>();
     state->display_name = display_name;
+    state->desired_hdr = enable_hdr;
+    state->requested_revision = 1;
     _hdr_worker_state = state;
-    const auto hdr_option = config::video.dd.hdr_option;
-    _hdr_worker = std::jthread([state = std::move(state), enable_hdr, hdr_option](std::stop_token stop_token) {
-      auto wait_or_stop = [&](std::chrono::milliseconds duration) {
-        std::unique_lock lock(state->mutex);
-        state->display_changed.wait_for(lock, stop_token, duration, []() {
-          return false;
-        });
-        return stop_token.stop_requested();
-      };
-
-      // Windows rejects display changes while an IddCx mode transition is still settling.
-      auto retry_interval = 200ms;
-      while (!stop_token.stop_requested() && is_changing_settings_going_to_fail()) {
-        if (retry_interval > 2s) {
-          BOOST_LOG(warning) << "Restoring HDR settings failed due to retry timeout!";
-          return;
-        }
-        if (wait_or_stop(retry_interval)) {
-          return;
-        }
-        retry_interval *= 2;
-      }
-
-      std::string current_display;
-      {
-        std::unique_lock lock(state->mutex);
-        const bool available = state->display_changed.wait_for(
-          lock,
-          stop_token,
-          3s,
-          [&]() {
-            return !state->display_name.empty();
-          }
-        );
-        if (!available || stop_token.stop_requested()) {
-          if (!stop_token.stop_requested()) {
-            BOOST_LOG(warning) << "Not getting current display in time! HDR will not be toggled.";
-          }
-          return;
-        }
-        current_display = state->display_name;
-      }
-
-      const auto current_display_w = platf::from_utf8(current_display);
-      const auto initial_hdr_state = VDISPLAY::queryDisplayHDRByName(current_display_w.c_str());
-      if (!initial_hdr_state) {
-        BOOST_LOG(warning) << "Could not authoritatively query the initial HDR state for display "
-                           << current_display << "; HDR will not be toggled.";
-        return;
-      }
-      const bool initial_hdr = *initial_hdr_state;
-      if (stop_token.stop_requested()) {
-        return;
-      }
-
-      if (hdr_option == config::video_t::dd_t::hdr_option_e::automatic) {
-        // Publish the restore contract before changing the display. terminate() joins this worker
-        // and can therefore always restore even if cancellation arrives between the two setters.
+    _hdr_worker = std::jthread([state = std::move(state)](std::stop_token stop_token) {
+      while (!stop_token.stop_requested()) {
+        std::string current_display;
+        bool desired_hdr = false;
+        std::uint64_t revision = 0;
         {
-          std::lock_guard lock(state->mutex);
-          state->changed_display = std::pair {current_display, initial_hdr};
+          std::unique_lock lock(state->mutex);
+          state->display_changed.wait(lock, stop_token, [&]() {
+            return state->requested_revision > state->completed_revision && !state->display_name.empty();
+          });
+          if (stop_token.stop_requested()) {
+            return;
+          }
+          current_display = state->display_name;
+          desired_hdr = state->desired_hdr;
+          revision = state->requested_revision;
         }
 
-        VDISPLAY::setDisplayHDRByName(current_display_w.c_str(), false);
-        if (stop_token.stop_requested()) {
-          return;
-        }
-        if (enable_hdr) {
-          if (VDISPLAY::setDisplayHDRByName(current_display_w.c_str(), true)) {
-            BOOST_LOG(info) << "HDR enabled for display " << current_display;
-          } else {
-            BOOST_LOG(info) << "HDR enable failed for display " << current_display;
-          }
-        }
-      } else if (initial_hdr) {
-        {
+        const auto deadline = std::chrono::steady_clock::now() + 4s;
+        auto request_was_superseded = [&]() {
           std::lock_guard lock(state->mutex);
-          state->changed_display = std::pair {current_display, true};
-        }
-        const bool disabled = VDISPLAY::setDisplayHDRByName(current_display_w.c_str(), false);
-        bool enable_accepted = VDISPLAY::setDisplayHDRByName(current_display_w.c_str(), true);
-        bool restored = false;
-        auto restore_delay = 50ms;
-        for (int attempt = 0; attempt < 5; ++attempt) {
-          const auto current_hdr = VDISPLAY::queryDisplayHDRByName(current_display_w.c_str());
-          if (current_hdr && *current_hdr) {
-            restored = true;
+          return stop_token.stop_requested() || state->requested_revision != revision;
+        };
+        auto wait_before_retry = [&](std::chrono::milliseconds delay) {
+          std::unique_lock lock(state->mutex);
+          state->display_changed.wait_for(lock, stop_token, delay, [&]() {
+            return state->requested_revision != revision;
+          });
+          return stop_token.stop_requested() || state->requested_revision != revision;
+        };
+
+        bool success = false;
+        std::optional<bool> observed_hdr;
+        while (!request_was_superseded() && std::chrono::steady_clock::now() < deadline) {
+          if (is_changing_settings_going_to_fail()) {
+            if (wait_before_retry(100ms)) {
+              break;
+            }
+            continue;
+          }
+
+          const auto display_name_w = platf::from_utf8(current_display);
+          observed_hdr = VDISPLAY::queryDisplayHDRByName(display_name_w.c_str());
+          if (!observed_hdr) {
+            if (wait_before_retry(100ms)) {
+              break;
+            }
+            continue;
+          }
+
+          {
+            std::lock_guard lock(state->mutex);
+            if (state->requested_revision != revision) {
+              break;
+            }
+            // Preserve the state from before the first launch-time mutation. Reconfigure requests
+            // must never replace this baseline with the HDR state left by an earlier request.
+            state->original_hdr_states.try_emplace(current_display, *observed_hdr);
+          }
+
+          if (*observed_hdr == desired_hdr) {
+            success = true;
             break;
           }
-          // `disabled` promises not to change the user's HDR state. Finish restoring even when
-          // cancellation arrives between the off/on workaround calls; terminate() joins us.
-          std::this_thread::sleep_for(restore_delay);
-          enable_accepted = VDISPLAY::setDisplayHDRByName(current_display_w.c_str(), true) ||
-                            enable_accepted;
-          restore_delay *= 2;
-        }
-        if (restored) {
-          std::lock_guard lock(state->mutex);
-          state->changed_display.reset();
-          if (disabled && enable_accepted) {
-            BOOST_LOG(info) << "HDR toggled successfully for display " << current_display;
-          } else {
-            BOOST_LOG(warning) << "HDR toggle was incomplete, but the initial HDR state was restored for display "
-                               << current_display;
+          if (!VDISPLAY::setDisplayHDRByName(display_name_w.c_str(), desired_hdr)) {
+            if (wait_before_retry(100ms)) {
+              break;
+            }
+            continue;
           }
-        } else {
-          // Preserve changed_display so terminate() performs another restoration attempt. This is
-          // an error even during cancellation: otherwise disabled mode could leave the active
-          // desktop in SDR for the lifetime of the stream.
-          BOOST_LOG(error) << "HDR toggle failed and the initial HDR state could not be restored for display "
-                           << current_display;
+
+          // The API can accept the request before the topology reports the new state. Verify it
+          // instead of acknowledging a warm resume with the wrong dynamic-range contract.
+          if (wait_before_retry(100ms)) {
+            break;
+          }
+          observed_hdr = VDISPLAY::queryDisplayHDRByName(display_name_w.c_str());
+          if (observed_hdr && *observed_hdr == desired_hdr) {
+            success = true;
+            break;
+          }
+        }
+
+        {
+          std::lock_guard lock(state->mutex);
+          if (state->requested_revision != revision) {
+            continue;
+          }
+          state->completed_revision = revision;
+          state->completion_succeeded = success;
+        }
+        state->display_changed.notify_all();
+        if (!success) {
+          BOOST_LOG(warning) << "Could not apply and verify HDR " << (desired_hdr ? "on" : "off")
+                             << " for display " << current_display;
         }
       }
     });
+  }
+
+  bool proc_t::request_hdr_state(bool enable_hdr, std::chrono::milliseconds timeout) {
+    if (!_hdr_worker_state || !_hdr_worker.joinable()) {
+      return false;
+    }
+
+    std::uint64_t revision;
+    {
+      std::lock_guard lock(_hdr_worker_state->mutex);
+      _hdr_worker_state->desired_hdr = enable_hdr;
+      revision = ++_hdr_worker_state->requested_revision;
+    }
+    _hdr_worker_state->display_changed.notify_all();
+
+    std::unique_lock lock(_hdr_worker_state->mutex);
+    const bool completed = _hdr_worker_state->display_changed.wait_for(lock, timeout, [&]() {
+      return _hdr_worker_state->completed_revision >= revision;
+    });
+    return completed && _hdr_worker_state->completed_revision == revision && _hdr_worker_state->completion_succeeded;
   }
 #endif
 
@@ -389,40 +414,27 @@ namespace proc {
     bool probe_encoder
   ) {
     std::lock_guard lock(process_state_mutex);
-    if (_app_id == input_only_app_id) {
-      terminate(false, false);
-      std::this_thread::sleep_for(1s);
-    } else {
-      // Ensure starting from a clean slate
-      terminate(false, false);
-    }
+    // Ensure starting from a clean slate.
+    terminate(false, false);
 
+    const uint32_t client_width = launch_session->width ? launch_session->width : 1920;
+    const uint32_t client_height = launch_session->height ? launch_session->height : 1080;
+    const auto render_size = calculate_render_size(client_width, client_height, launch_session->scale_factor);
+    if (!render_size) {
+      BOOST_LOG(error) << "Requested client mode and render scale produce an invalid render size."sv;
+      return 400;
+    }
+    const uint32_t render_width = render_size->width;
+    const uint32_t render_height = render_size->height;
+    const int scale_factor = launch_session->scale_factor;
+
+    // Do not publish process ownership until every side-effect-free request validation has passed.
+    // In particular, a tiny scaled mode can floor to zero after enforcing even dimensions; that
+    // must leave the host idle rather than advertising an app that was never launched.
     _app = app;
     _app_id = util::from_view(app.id);
     _app_name = app.name;
     _launch_session = launch_session;
-    _allow_client_commands = app.allow_client_commands;
-
-    uint32_t client_width = launch_session->width ? launch_session->width : 1920;
-    uint32_t client_height = launch_session->height ? launch_session->height : 1080;
-
-    uint32_t render_width = client_width;
-    uint32_t render_height = client_height;
-
-    int scale_factor = launch_session->scale_factor;
-    if (_app.scale_factor != 100) {
-      scale_factor = _app.scale_factor;
-    }
-
-    if (scale_factor != 100) {
-      render_width *= ((float)scale_factor / 100);
-      render_height *= ((float)scale_factor / 100);
-
-      // Chop the last bit to ensure the scaled resolution is even numbered
-      // Most odd resolutions won't work well
-      render_width &= ~1;
-      render_height &= ~1;
-    }
 
     launch_session->width = render_width;
     launch_session->height = render_height;
@@ -433,24 +445,12 @@ namespace proc {
       // Restore to user defined output name
       config::video.output_name = this->initial_display;
       terminate();
-      display_device::revert_configuration();
     });
-
-    if (!app.gamepad.empty()) {
-      _saved_input_config = std::make_shared<config::input_t>(config::input);
-      if (app.gamepad == "disabled") {
-        config::input.controller = false;
-      } else {
-        config::input.controller = true;
-        config::input.gamepad = app.gamepad;
-      }
-    }
 
 #ifdef _WIN32
     const bool needs_virtual_display =
-      config::video.headless_mode  // Headless mode
-      || launch_session->virtual_display  // User requested virtual display
-      || _app.virtual_display  // App is configured to use virtual display
+      launch_session->virtual_display  // User requested virtual display
+      || _app.synthetic_virtual_display  // Apollo's generated Virtual Display tile
       || !video::allow_encoder_probing();  // No active display presents
     if (needs_virtual_display) {
       if (!ar_glasses::remote_virtual_display_starting(
@@ -478,26 +478,9 @@ namespace proc {
         std::string device_uuid_str;
         uuid_util::uuid_t device_uuid;
 
-        if (_app.use_app_identity) {
-          device_name = _app.name;
-          if (_app.per_client_app_identity) {
-            device_uuid = uuid_util::uuid_t::parse(launch_session->unique_id);
-            auto app_uuid = uuid_util::uuid_t::parse(_app.uuid);
-
-            // Use XOR to mix the two UUIDs
-            device_uuid.b64[0] ^= app_uuid.b64[0];
-            device_uuid.b64[1] ^= app_uuid.b64[1];
-
-            device_uuid_str = device_uuid.string();
-          } else {
-            device_uuid_str = _app.uuid;
-            device_uuid = uuid_util::uuid_t::parse(_app.uuid);
-          }
-        } else {
-          device_name = launch_session->device_name;
-          device_uuid_str = launch_session->unique_id;
-          device_uuid = uuid_util::uuid_t::parse(launch_session->unique_id);
-        }
+        device_name = launch_session->device_name;
+        device_uuid_str = launch_session->unique_id;
+        device_uuid = uuid_util::uuid_t::parse(launch_session->unique_id);
 
         memcpy(&launch_session->display_guid, &device_uuid, sizeof(GUID));
 
@@ -505,10 +488,6 @@ namespace proc {
 
         if (target_fps < 1000) {
           target_fps *= 1000;
-        }
-
-        if (config::video.double_refreshrate) {
-          target_fps *= 2;
         }
 
         VDISPLAY::creation_result_t created_display;
@@ -548,13 +527,10 @@ namespace proc {
           // Don't change display settings when no params are given
           if (launch_session->width && launch_session->height && launch_session->fps) {
             // Apply display settings
-            VDISPLAY::changeDisplaySettings(created_display.display_name.c_str(), render_width, render_height, target_fps);
-          }
-
-          // Check the ISOLATED DISPLAY configuration setting and rearrange the displays
-          if (config::video.isolated_virtual_display_option == true) {
-            // Apply the isolated display settings
-            VDISPLAY::changeDisplaySettings2(created_display.display_name.c_str(), render_width, render_height, target_fps, true);
+            if (VDISPLAY::changeDisplaySettings(created_display.display_name.c_str(), render_width, render_height, target_fps) != DISP_CHANGE_SUCCESSFUL) {
+              BOOST_LOG(error) << "Windows did not accept the requested virtual-display mode."sv;
+              return 503;
+            }
           }
 
           // Set virtual_display to true when everything went fine
@@ -567,34 +543,23 @@ namespace proc {
 
           config::video.output_name = display_device::map_display_name(this->display_name);
         } else {
-          BOOST_LOG(error) << (created_display.added() ?
-                                 "Virtual display was added, but Windows did not publish its display name in time." :
-                                 "Virtual display creation failed.");
+          BOOST_LOG(error) << (created_display.added() ? "Virtual display was added, but Windows did not publish its display name in time." : "Virtual display creation failed.");
           ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
           _remote_virtual_display_lease.reset();
           return 503;
         }
       } else {
-        // Driver isn't working so we don't need to track virtual display.
+        BOOST_LOG(error) << "A virtual display is required, but the SudoVDA driver is unavailable."sv;
         launch_session->virtual_display = false;
+        ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
+        _remote_virtual_display_lease.reset();
+        return 503;
       }
       if (!_virtual_display) {
         ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
         _remote_virtual_display_lease.reset();
       }
     }
-
-    display_device::configure_display(config::video, *launch_session);
-
-    // We should not preserve display state when using virtual display.
-    // It is already handled by Windows properly.
-    if (_virtual_display) {
-      display_device::reset_persistence();
-    }
-
-#else
-
-    display_device::configure_display(config::video, *launch_session);
 
 #endif
 
@@ -603,30 +568,15 @@ namespace proc {
     // due to hotplugging, driver crash, primary monitor change,
     // or any number of other factors).
     if (probe_encoder && video::probe_encoders()) {
-      if (config::video.ignore_encoder_probe_failure) {
-        BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration.";
-      } else {
-        return 503;
-      }
+      return 503;
     }
 
     std::string fps_str;
     char fps_buf[8];
-    snprintf(fps_buf, sizeof(fps_buf), "%.3f", (float)launch_session->fps / 1000.0f);
+    snprintf(fps_buf, sizeof(fps_buf), "%.3f", (float) launch_session->fps / 1000.0f);
     fps_str = fps_buf;
 
-    // Add Stream-specific environment variables
-    // Sunshine Compatibility
-    _env["SUNSHINE_APP_ID"] = _app.id;
-    _env["SUNSHINE_APP_NAME"] = _app.name;
-    _env["SUNSHINE_CLIENT_WIDTH"] = std::to_string(render_width);
-    _env["SUNSHINE_CLIENT_HEIGHT"] = std::to_string(render_height);
-    _env["SUNSHINE_CLIENT_FPS"] = config::sunshine.envvar_compatibility_mode ? std::to_string(std::round((float)launch_session->fps / 1000.0f)) : fps_str;
-    _env["SUNSHINE_CLIENT_HDR"] = launch_session->enable_hdr ? "true" : "false";
-    _env["SUNSHINE_CLIENT_GCMAP"] = std::to_string(launch_session->gcmap);
-    _env["SUNSHINE_CLIENT_HOST_AUDIO"] = launch_session->host_audio ? "true" : "false";
-    _env["SUNSHINE_CLIENT_ENABLE_SOPS"] = launch_session->enable_sops ? "true" : "false";
-
+    // Add stream-specific environment variables for application and preparation commands.
     _env["APOLLO_APP_ID"] = _app.id;
     _env["APOLLO_APP_NAME"] = _app.name;
     _env["APOLLO_APP_UUID"] = _app.uuid;
@@ -640,27 +590,20 @@ namespace proc {
     _env["APOLLO_CLIENT_SCALE_FACTOR"] = std::to_string(scale_factor);
     _env["APOLLO_CLIENT_FPS"] = fps_str;
     _env["APOLLO_CLIENT_HDR"] = launch_session->enable_hdr ? "true" : "false";
-    _env["APOLLO_CLIENT_GCMAP"] = std::to_string(launch_session->gcmap);
     _env["APOLLO_CLIENT_HOST_AUDIO"] = launch_session->host_audio ? "true" : "false";
-    _env["APOLLO_CLIENT_ENABLE_SOPS"] = launch_session->enable_sops ? "true" : "false";
 
     int channelCount = launch_session->surround_info & 65535;
     switch (channelCount) {
       case 2:
-        _env["SUNSHINE_CLIENT_AUDIO_CONFIGURATION"] = "2.0";
         _env["APOLLO_CLIENT_AUDIO_CONFIGURATION"] = "2.0";
         break;
       case 6:
-        _env["SUNSHINE_CLIENT_AUDIO_CONFIGURATION"] = "5.1";
         _env["APOLLO_CLIENT_AUDIO_CONFIGURATION"] = "5.1";
         break;
       case 8:
-        _env["SUNSHINE_CLIENT_AUDIO_CONFIGURATION"] = "7.1";
         _env["APOLLO_CLIENT_AUDIO_CONFIGURATION"] = "7.1";
         break;
     }
-    _env["SUNSHINE_CLIENT_AUDIO_SURROUND_PARAMS"] = launch_session->surround_params;
-    _env["APOLLO_CLIENT_AUDIO_SURROUND_PARAMS"] = launch_session->surround_params;
 
     if (!_app.output.empty() && _app.output != "null"sv) {
 #ifdef _WIN32
@@ -678,14 +621,14 @@ namespace proc {
     }
 
     std::error_code ec;
-    _app_prep_begin = std::begin(_app.prep_cmds);
-    _app_prep_it = _app_prep_begin;
+    _completed_prep_commands = 0;
 
-    for (; _app_prep_it != std::end(_app.prep_cmds); ++_app_prep_it) {
-      auto &cmd = *_app_prep_it;
+    for (std::size_t prep_index = 0; prep_index < _app.prep_cmds.size(); ++prep_index) {
+      auto &cmd = _app.prep_cmds[prep_index];
 
       // Skip empty commands
       if (cmd.do_cmd.empty()) {
+        _completed_prep_commands = prep_index + 1;
         continue;
       }
 
@@ -721,6 +664,7 @@ namespace proc {
         BOOST_LOG(error) << '[' << cmd.do_cmd << "] exited with code ["sv << ret << ']';
         return -1;
       }
+      _completed_prep_commands = prep_index + 1;
     }
 
     _env["APOLLO_APP_STATUS"] = "RUNNING";
@@ -755,8 +699,19 @@ namespace proc {
 
     _app_launch_time = std::chrono::steady_clock::now();
 
-  #ifdef _WIN32
+    do {
+      if (RAND_bytes(reinterpret_cast<unsigned char *>(&_host_session_id), sizeof(_host_session_id)) != 1) {
+        BOOST_LOG(error) << "Failed to generate a retained host-session token."sv;
+        return 500;
+      }
+    } while (_host_session_id == 0);
+
+#ifdef _WIN32
     start_hdr_worker(launch_session->enable_hdr);
+    if (_virtual_display && !request_hdr_state(launch_session->enable_hdr, 6s)) {
+      BOOST_LOG(error) << "The virtual display did not reach the requested HDR state."sv;
+      return 503;
+    }
     if (_virtual_display) {
       // Virtual-display creation, encoder probing, and application prep can take longer than the
       // original client-connect reservation. Renew it while process_state_mutex is still held so
@@ -766,7 +721,7 @@ namespace proc {
         config::stream.ping_timeout
       );
     }
-  #endif
+#endif
 
     fg.disable();
 
@@ -782,7 +737,12 @@ namespace proc {
     return running_locked();
   }
 
-  int proc_t::running_locked() {
+  bool proc_t::stream_process_exited() {
+    std::lock_guard lock(process_state_mutex);
+    return stream_process_exited_locked();
+  }
+
+  bool proc_t::stream_process_exited_locked() {
 #ifndef _WIN32
     // On POSIX OSes, we must periodically wait for our children to avoid
     // them becoming zombies. This must be synchronized carefully with
@@ -793,33 +753,123 @@ namespace proc {
     });
 #endif
 
-    if (placebo) {
-      return _app_id;
+    if (_app_id <= 0 || placebo) {
+      return false;
     } else if (_app.wait_all && _process_group && platf::process_group_running((std::uintptr_t) _process_group.native_handle())) {
-      // The app is still running if any process in the group is still running
-      return _app_id;
+      return false;
     } else if (_process.running()) {
-      // The app is still running only if the initial process launched is still running
-      return _app_id;
+      return false;
     } else if (_app.auto_detach && std::chrono::steady_clock::now() - _app_launch_time < 5s) {
       BOOST_LOG(info) << "App exited with code ["sv << _process.native_exit_code() << "] within 5 seconds of launch. Treating the app as a detached command."sv;
       BOOST_LOG(info) << "Adjust this behavior in the Applications tab or apps.json if this is not what you want."sv;
       placebo = true;
 
-    #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
       if (_process.native_exit_code() != 0) {
         system_tray::update_tray_launch_error(proc::proc.get_last_run_app_name(), _process.native_exit_code());
       }
-    #endif
+#endif
 
+      return false;
+    }
+
+    return static_cast<bool>(_process);
+  }
+
+  int proc_t::running_locked() {
+    if (!stream_process_exited_locked()) {
       return _app_id;
     }
 
     // Perform cleanup actions now if needed
-    if (_process) {
-      terminate();
+    terminate();
+
+    return 0;
+  }
+
+  std::uint64_t proc_t::get_host_session_id() const {
+    std::lock_guard lock(process_state_mutex);
+    return _host_session_id;
+  }
+
+  int proc_t::reconfigure_retained_session(std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+    std::lock_guard lock(process_state_mutex);
+    if (!launch_session || _app_id <= 0 || _host_session_id == 0 || !_launch_session) {
+      return 409;
     }
 
+    const auto render_size = calculate_render_size(
+      launch_session->width,
+      launch_session->height,
+      launch_session->scale_factor
+    );
+    if (!render_size) {
+      return 400;
+    }
+
+    // A retained physical-desktop process cannot be converted into a virtual-display process
+    // without changing desktop ownership. A process whose virtual display was forced because no
+    // physical output existed remains virtual even if the client again sends virtualDisplay=0.
+    if (launch_session->virtual_display && !_virtual_display) {
+      BOOST_LOG(warning) << "A warm resume cannot change a physical-desktop process into a virtual-display process."sv;
+      return 409;
+    }
+
+    const auto old_width = static_cast<std::uint32_t>(_launch_session->width);
+    const auto old_height = static_cast<std::uint32_t>(_launch_session->height);
+    const auto old_fps = _launch_session->fps;
+    const bool old_hdr = _launch_session->enable_hdr;
+    const bool display_mode_changed = _virtual_display &&
+                                      (old_width != render_size->width || old_height != render_size->height || old_fps != launch_session->fps);
+
+#ifdef _WIN32
+    if (_virtual_display) {
+      if (_virtual_display_gdi_name.empty()) {
+        BOOST_LOG(error) << "The retained virtual display no longer has a published Windows display name."sv;
+        return 503;
+      }
+      if (display_mode_changed &&
+          VDISPLAY::changeDisplaySettings(
+            _virtual_display_gdi_name.c_str(),
+            render_size->width,
+            render_size->height,
+            launch_session->fps
+          ) != DISP_CHANGE_SUCCESSFUL) {
+        // changeDisplaySettings() first applies a baseline mode before its exact fractional mode.
+        // Roll back even on failure because that baseline call may already have changed topology.
+        VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps);
+        BOOST_LOG(error) << "Failed to reconfigure the retained virtual-display mode."sv;
+        return 503;
+      }
+    }
+
+    if (!request_hdr_state(launch_session->enable_hdr, 6s)) {
+      if (display_mode_changed &&
+          VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps) != DISP_CHANGE_SUCCESSFUL) {
+        BOOST_LOG(error) << "Failed to roll back the retained virtual-display mode after HDR reconfiguration failed."sv;
+      }
+      if (!request_hdr_state(old_hdr, 6s)) {
+        BOOST_LOG(error) << "Failed to restore the retained session's prior HDR state after reconfiguration failed."sv;
+      }
+      return 503;
+    }
+#endif
+
+    // Commit only after every fallible display operation succeeds. The new object keeps its own
+    // RTSP encryption and transport lease, while the process-owned launch record retains its
+    // original identity/GUID and stable host-session token.
+    launch_session->width = render_size->width;
+    launch_session->height = render_size->height;
+    launch_session->virtual_display = _virtual_display;
+#ifdef _WIN32
+    launch_session->display_guid = _launch_session->display_guid;
+#endif
+    _launch_session->width = launch_session->width;
+    _launch_session->height = launch_session->height;
+    _launch_session->fps = launch_session->fps;
+    _launch_session->enable_hdr = launch_session->enable_hdr;
+    _launch_session->scale_factor = launch_session->scale_factor;
+    _launch_session->sbs_mode = launch_session->sbs_mode;
     return 0;
   }
 
@@ -837,137 +887,16 @@ namespace proc {
     return true;
   }
 
-  void proc_t::resume() {
-    std::lock_guard lock(process_state_mutex);
-    BOOST_LOG(info) << "Session resuming for app [" << _app_name << "].";
-
-    if (!_app.state_cmds.empty()) {
-      auto exec_thread = std::thread([cmd_list = _app.state_cmds, app_working_dir = _app.working_dir, _env = _env]() mutable {
-
-        _env["APOLLO_APP_STATUS"] = "RESUMING";
-
-        std::error_code ec;
-        auto _state_resume_it = std::begin(cmd_list);
-
-        for (; _state_resume_it != std::end(cmd_list); ++_state_resume_it) {
-          auto &cmd = *_state_resume_it;
-
-          // Skip empty commands
-          if (cmd.do_cmd.empty()) {
-            continue;
-          }
-
-          boost::filesystem::path working_dir = app_working_dir.empty() ?
-                                                  find_working_directory(cmd.do_cmd, _env) :
-                                                  boost::filesystem::path(app_working_dir);
-          BOOST_LOG(info) << "Executing Resume Cmd: ["sv << cmd.do_cmd << "] elevated: " << cmd.elevated;
-          auto child = platf::run_command(cmd.elevated, true, cmd.do_cmd, working_dir, _env, nullptr, ec, nullptr);
-
-          if (ec) {
-            BOOST_LOG(error) << "Couldn't run ["sv << cmd.do_cmd << "]: System: "sv << ec.message();
-            break;
-          }
-
-          child.wait(ec);
-          if (ec) {
-            BOOST_LOG(error) << '[' << cmd.do_cmd << "] wait failed: "sv << ec.message();
-            break;
-          }
-
-          auto ret = child.exit_code();
-          if (ret != 0) {
-            BOOST_LOG(error) << '[' << cmd.do_cmd << "] exited with code ["sv << ret << ']';
-            break;
-          }
-        }
-      });
-
-      exec_thread.detach();
-    }
-  }
-
-  void proc_t::pause() {
-    std::lock_guard lock(process_state_mutex);
-    if (!running_locked()) {
-      BOOST_LOG(info) << "Session already stopped, do not run pause commands.";
-      return;
-    }
-
-    if (_app.terminate_on_pause) {
-      BOOST_LOG(info) << "Terminating app [" << _app_name << "] when all clients are disconnected. Pause commands are skipped.";
-      terminate();
-      return;
-    }
-
-    BOOST_LOG(info) << "Session pausing for app [" << _app_name << "].";
-
-#ifdef _WIN32
-    if (_launch_session && _launch_session->virtual_display) {
-      if (_remote_virtual_display_lease) {
-        ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
-        _remote_virtual_display_lease.reset();
-      }
-    }
-#endif
-
-    if (!_app.state_cmds.empty()) {
-      auto exec_thread = std::thread([cmd_list = _app.state_cmds, app_working_dir = _app.working_dir, _env = _env]() mutable {
-        _env["APOLLO_APP_STATUS"] = "PAUSING";
-
-        std::error_code ec;
-        auto _state_pause_it = std::begin(cmd_list);
-
-        for (; _state_pause_it != std::end(cmd_list); ++_state_pause_it) {
-          auto &cmd = *_state_pause_it;
-
-          // Skip empty commands
-          if (cmd.undo_cmd.empty()) {
-            continue;
-          }
-
-          boost::filesystem::path working_dir = app_working_dir.empty() ?
-                                                  find_working_directory(cmd.undo_cmd, _env) :
-                                                  boost::filesystem::path(app_working_dir);
-          BOOST_LOG(info) << "Executing Pause Cmd: ["sv << cmd.undo_cmd << "] elevated: " << cmd.elevated;
-          auto child = platf::run_command(cmd.elevated, true, cmd.undo_cmd, working_dir, _env, nullptr, ec, nullptr);
-
-          if (ec) {
-            BOOST_LOG(error) << "Couldn't run ["sv << cmd.undo_cmd << "]: System: "sv << ec.message();
-            break;
-          }
-
-          child.wait(ec);
-          if (ec) {
-            BOOST_LOG(error) << '[' << cmd.undo_cmd << "] wait failed: "sv << ec.message();
-            break;
-          }
-
-          auto ret = child.exit_code();
-          if (ret != 0) {
-            BOOST_LOG(error) << '[' << cmd.undo_cmd << "] exited with code ["sv << ret << ']';
-            break;
-          }
-        }
-      });
-
-      exec_thread.detach();
-    }
-
-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
-    system_tray::update_tray_pausing(proc::proc.get_last_run_app_name());
-#endif
-  }
-
   void proc_t::terminate(bool immediate, bool needs_refresh) {
     std::lock_guard lock(process_state_mutex);
 #ifdef _WIN32
     // The worker never takes process_state_mutex, so it is safe to join while holding the process
     // state lock. This prevents an old launch from touching a display after teardown or refresh.
     stop_hdr_worker();
-    std::optional<std::pair<std::string, bool>> changed_hdr_display;
+    std::unordered_map<std::string, bool> original_hdr_states;
     if (_hdr_worker_state) {
       std::lock_guard state_lock(_hdr_worker_state->mutex);
-      changed_hdr_display = _hdr_worker_state->changed_display;
+      original_hdr_states = _hdr_worker_state->original_hdr_states;
     }
 #endif
     std::error_code ec;
@@ -982,8 +911,8 @@ namespace proc {
 
     _env["APOLLO_APP_STATUS"] = "TERMINATING";
 
-    for (; _app_prep_it != _app_prep_begin; --_app_prep_it) {
-      auto &cmd = *(_app_prep_it - 1);
+    while (_completed_prep_commands > 0) {
+      auto &cmd = _app.prep_cmds[--_completed_prep_commands];
 
       if (cmd.undo_cmd.empty()) {
         continue;
@@ -1024,13 +953,36 @@ namespace proc {
     }
 
     // Revert HDR state
-    if (has_run && changed_hdr_display) {
-      const auto &[changed_display, initial_hdr] = *changed_hdr_display;
-      auto displayNameW = platf::from_utf8(changed_display);
-      if (VDISPLAY::setDisplayHDRByName(displayNameW.c_str(), initial_hdr)) {
-        BOOST_LOG(info) << "HDR reverted for display " << changed_display;
-      } else {
-        BOOST_LOG(info) << "HDR revert failed for display " << changed_display;
+    if (has_run) {
+      for (const auto &[changed_display, initial_hdr] : original_hdr_states) {
+        const auto display_name_w = platf::from_utf8(changed_display);
+        const auto restore_deadline = std::chrono::steady_clock::now() + 2s;
+        bool restored = false;
+        while (std::chrono::steady_clock::now() < restore_deadline) {
+          if (is_changing_settings_going_to_fail()) {
+            std::this_thread::sleep_for(100ms);
+            continue;
+          }
+
+          const auto current_hdr = VDISPLAY::queryDisplayHDRByName(display_name_w.c_str());
+          if (current_hdr && *current_hdr == initial_hdr) {
+            restored = true;
+            break;
+          }
+
+          VDISPLAY::setDisplayHDRByName(display_name_w.c_str(), initial_hdr);
+          std::this_thread::sleep_for(100ms);
+        }
+        if (!restored) {
+          const auto current_hdr = VDISPLAY::queryDisplayHDRByName(display_name_w.c_str());
+          restored = current_hdr && *current_hdr == initial_hdr;
+        }
+
+        if (restored) {
+          BOOST_LOG(info) << "HDR reverted for display " << changed_display;
+        } else {
+          BOOST_LOG(error) << "HDR revert could not be verified for display " << changed_display;
+        }
       }
     }
 
@@ -1052,20 +1004,11 @@ namespace proc {
         BOOST_LOG(warning) << "Virtual Display remove failed, but it seems it was not created correctly either.";
       }
     }
+#endif
 
     // Only show the Stopped notification if we actually have an app to stop
     // Since terminate() is always run when a new app has started
     if (proc::proc.get_last_run_app_name().length() > 0 && has_run) {
-      if (used_virtual_display) {
-        display_device::reset_persistence();
-      } else {
-        display_device::revert_configuration();
-      }
-#else
-    if (proc::proc.get_last_run_app_name().length() > 0 && has_run) {
-      display_device::revert_configuration();
-#endif
-
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
       system_tray::update_tray_stopped(proc::proc.get_last_run_app_name());
 #endif
@@ -1080,9 +1023,11 @@ namespace proc {
       config::video.output_name = initial_display;
     }
 
-    _app_id = -1;
+    _app_id = 0;
     _app_name.clear();
     _app = {};
+    _completed_prep_commands = 0;
+    _host_session_id = 0;
     display_name.clear();
     initial_display.clear();
     _launch_session.reset();
@@ -1095,12 +1040,6 @@ namespace proc {
     _hdr_worker_state.reset();
 #endif
     _virtual_display = false;
-    _allow_client_commands = false;
-
-    if (_saved_input_config) {
-      config::input = *_saved_input_config;
-      _saved_input_config.reset();
-    }
 
     if (needs_refresh) {
       refresh(config::stream.file_apps, false);
@@ -1155,16 +1094,12 @@ namespace proc {
           // An AddVirtualDisplay result can precede Windows publishing the path. For such a display,
           // quarantine the stable identity for one topology debounce even when every snapshot says
           // absent, so a delayed arrival/removal notification cannot race the replacement display.
-          if (!retired_virtual_display_was_published &&
-              std::chrono::steady_clock::now() - retired_virtual_display_started < 750ms) {
+          if (!retired_virtual_display_was_published && std::chrono::steady_clock::now() - retired_virtual_display_started < 750ms) {
             const auto now = std::chrono::steady_clock::now();
             if (now >= deadline) {
               return false;
             }
-            std::this_thread::sleep_for(std::min(
-              50ms,
-              std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
-            ));
+            std::this_thread::sleep_for(std::min(50ms, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
             continue;
           }
           if (std::chrono::steady_clock::now() + 250ms > deadline) {
@@ -1294,19 +1229,6 @@ namespace proc {
   std::string proc_t::get_running_app_uuid() {
     std::lock_guard lock(process_state_mutex);
     return _app.uuid;
-  }
-
-  std::optional<std::uint32_t> proc_t::get_launch_session_id() {
-    std::lock_guard lock(process_state_mutex);
-    if (!_launch_session) {
-      return std::nullopt;
-    }
-    return _launch_session->id;
-  }
-
-  boost::process::environment proc_t::get_env() {
-    std::lock_guard lock(process_state_mutex);
-    return _env;
   }
 
   proc_t::~proc_t() {
@@ -1509,23 +1431,14 @@ namespace proc {
    * @brief Migrate the applications stored in the file tree by merging in a new app.
    *
    * This function updates the application entries in *fileTree_p* using the data in *inputTree_p*.
-   * If an app in the file tree does not have a UUID, one is generated and inserted.
    * If an app with the same UUID as the new app is found, it is replaced.
    * Additionally, empty keys (such as "prep-cmd" or "detached") and keys no longer needed ("launching", "index")
    * are removed from the input.
    *
-   * Legacy versions of Sunshine/Apollo stored boolean and integer values as strings.
-   * The following keys are converted:
-   *   - Boolean keys: "exclude-global-prep-cmd", "elevated", "auto-detach", "wait-all",
-   *                     "use-app-identity", "per-client-app-identity", "virtual-display"
-   *   - Integer keys: "exit-timeout"
-   *
-   * A migration version is stored in the file tree (under "version") so that future changes can be applied.
-   *
    * @param fileTree_p Pointer to the JSON object representing the file tree.
    * @param inputTree_p Pointer to the JSON object representing the new app.
    */
-  void migrate_apps(nlohmann::json* fileTree_p, nlohmann::json* inputTree_p) {
+  void migrate_apps(nlohmann::json *fileTree_p, nlohmann::json *inputTree_p) {
     std::string new_app_uuid;
 
     if (inputTree_p) {
@@ -1556,19 +1469,12 @@ namespace proc {
     nlohmann::json newApps = nlohmann::json::array();
     if (fileTree_p->contains("apps") && (*fileTree_p)["apps"].is_array()) {
       for (auto &app : (*fileTree_p)["apps"]) {
-        // For apps without a UUID, generate one and remove "launching".
-        if (!app.contains("uuid") || app["uuid"].get<std::string>().empty()) {
-          app["uuid"] = uuid_util::uuid_t::generate().string();
-          app.erase("launching");
-          newApps.push_back(std::move(app));
+        // If an app with the same UUID as the new app is found, replace it.
+        if (!new_app_uuid.empty() && app.at("uuid").get<std::string>() == new_app_uuid) {
+          newApps.push_back(*inputTree_p);
+          new_app_uuid.clear();
         } else {
-          // If an app with the same UUID as the new app is found, replace it.
-          if (!new_app_uuid.empty() && app["uuid"].get<std::string>() == new_app_uuid) {
-            newApps.push_back(*inputTree_p);
-            new_app_uuid.clear();
-          } else {
-            newApps.push_back(std::move(app));
-          }
+          newApps.push_back(std::move(app));
         }
       }
     }
@@ -1579,121 +1485,7 @@ namespace proc {
     (*fileTree_p)["apps"] = newApps;
   }
 
-  void migration_v2(nlohmann::json& fileTree) {
-    static const int this_version = 2;
-    // Determine the current migration version (default to 1 if not present).
-    int file_version = 1;
-    if (fileTree.contains("version")) {
-      try {
-        file_version = fileTree["version"].get<int>();
-      } catch (const std::exception& e) {
-        BOOST_LOG(info) << "Cannot parse apps.json version, treating as v1: " << e.what();
-      }
-    }
-
-    // If the version is less than this_version, perform legacy conversion.
-    if (file_version < this_version) {
-      BOOST_LOG(info) << "Migrating app list from v1 to v2...";
-      migrate_apps(&fileTree, nullptr);
-
-      // List of keys to convert to booleans.
-      std::vector<std::string> boolean_keys = {
-        "allow-client-commands",
-        "exclude-global-prep-cmd",
-        "elevated",
-        "auto-detach",
-        "wait-all",
-        "use-app-identity",
-        "per-client-app-identity",
-        "virtual-display"
-      };
-
-      // List of keys to convert to integers.
-      std::vector<std::string> integer_keys = {
-        "exit-timeout",
-        "scale-factor"
-      };
-
-      // Walk through each app and convert legacy string values.
-      for (auto &app : fileTree["apps"]) {
-        for (const auto &key : boolean_keys) {
-          if (app.contains(key)) {
-            auto& _key = app[key];
-            if (_key.is_string()) {
-              std::string s = _key.get<std::string>();
-              std::transform(s.begin(), s.end(), s.begin(), ::tolower);  // Normalize to lowercase for comparison
-              _key = (s == "true" || s == "on" || s == "yes");
-            } else if (_key.is_array()) {
-              // Check if the array contains at least one item and interpret the first element
-              if (!_key.empty() && _key[0].is_string()) {
-                std::string first = _key[0].get<std::string>();
-                std::transform(first.begin(), first.end(), first.begin(), ::tolower);  // Normalize
-                if (first == "on" || first == "true" || first == "yes") {
-                  _key = true;
-                } else if (first == "off" || first == "false" || first == "no") {
-                  _key = false;
-                } else {
-                  _key = false;  // Default for unknown values
-                }
-              } else {
-                _key = false;  // Treat empty arrays or non-string first elements as false
-              }
-            } else {
-              // Fallback: Treat truthy/falsey cases
-              if (_key.is_boolean()) {
-                // Leave booleans as they are
-              } else if (_key.is_number()) {
-                _key = (_key.get<double>() != 0);  // Non-zero numbers are truthy
-              } else if (_key.is_null()) {
-                _key = false;  // Null is false
-              } else {
-                _key = !_key.empty();  // Non-empty objects/arrays are truthy, empty ones are falsey
-              }
-            }
-          }
-        }
-
-        for (const auto &key : integer_keys) {
-          if (app.contains(key) && app[key].is_string()) {
-            std::string s = app[key].get<std::string>();
-            app[key] = std::stoi(s);
-          }
-        }
-
-        // For each entry in the "prep-cmd" array, convert "elevated" if necessary.
-        if (app.contains("prep-cmd") && app["prep-cmd"].is_array()) {
-          for (auto &prep : app["prep-cmd"]) {
-            if (prep.contains("elevated") && prep["elevated"].is_string()) {
-              std::string s = prep["elevated"].get<std::string>();
-              prep["elevated"] = (s == "true");
-            }
-          }
-        }
-      }
-
-      // Update migration version to this_version.
-      fileTree["version"] = this_version;
-
-      BOOST_LOG(info) << "Migrated app list from v1 to v2.";
-    }
-  }
-
-  void migrate(nlohmann::json& fileTree, const std::string& fileName) {
-    int last_version = 2;
-
-    int file_version = 0;
-    if (fileTree.contains("version")) {
-      file_version = fileTree["version"].get<int>();
-    }
-
-    if (file_version < last_version) {
-      migration_v2(fileTree);
-      file_handler::write_file(fileName.c_str(), fileTree.dump(4));
-    }
-  }
-
   std::optional<proc::proc_t> parse(const std::string &file_name) {
-
     // Prepare environment variables.
     auto this_env = boost::this_process::environment();
 
@@ -1708,14 +1500,13 @@ namespace proc {
       try {
         std::string content = file_handler::read_file(file_name.c_str());
         tree = nlohmann::json::parse(content);
-      } catch (const std::exception& e) {
+      } catch (const std::exception &e) {
         BOOST_LOG(warning) << "Couldn't read apps.json properly! Apps will not be loaded."sv;
+        fail_count = 1;
         break;
       }
 
       try {
-        migrate(tree, file_name);
-
         if (tree.contains("env") && tree["env"].is_object()) {
           for (auto &item : tree["env"].items()) {
             this_env[item.key()] = parse_env_val(this_env, item.value().get<std::string>());
@@ -1762,34 +1553,6 @@ namespace proc {
             }
           }
 
-          // Build the list of pause/resume commands.
-          std::vector<proc::cmd_t> state_cmds;
-          bool exclude_global_state_cmds = app_node.value("exclude-global-state-cmd", false);
-          if (!exclude_global_state_cmds) {
-            state_cmds.reserve(config::sunshine.state_cmds.size());
-            for (auto &state_cmd : config::sunshine.state_cmds) {
-              auto do_cmd = parse_env_val(this_env, state_cmd.do_cmd);
-              auto undo_cmd = parse_env_val(this_env, state_cmd.undo_cmd);
-              state_cmds.emplace_back(
-                std::move(do_cmd),
-                std::move(undo_cmd),
-                std::move(state_cmd.elevated)
-              );
-            }
-          }
-          if (app_node.contains("state-cmd") && app_node["state-cmd"].is_array()) {
-            for (auto &prep_node : app_node["state-cmd"]) {
-              std::string do_cmd = parse_env_val(this_env, prep_node.value("do", ""));
-              std::string undo_cmd = parse_env_val(this_env, prep_node.value("undo", ""));
-              bool elevated = prep_node.value("elevated", false);
-              state_cmds.emplace_back(
-                std::move(do_cmd),
-                std::move(undo_cmd),
-                std::move(elevated)
-              );
-            }
-          }
-
           // Build the list of detached commands.
           std::vector<std::string> detached;
           if (app_node.contains("detached") && app_node["detached"].is_array()) {
@@ -1799,34 +1562,29 @@ namespace proc {
           }
 
           // Process other fields.
-          if (app_node.contains("output"))
+          if (app_node.contains("output")) {
             ctx.output = parse_env_val(this_env, app_node.value("output", ""));
+          }
           std::string name = parse_env_val(this_env, app_node.value("name", ""));
-          if (app_node.contains("cmd"))
+          if (app_node.contains("cmd")) {
             ctx.cmd = parse_env_val(this_env, app_node.value("cmd", ""));
+          }
           if (app_node.contains("working-dir")) {
             ctx.working_dir = parse_env_val(this_env, app_node.value("working-dir", ""));
-    #ifdef _WIN32
+#ifdef _WIN32
             // The working directory, unlike the command itself, should not be quoted.
             boost::erase_all(ctx.working_dir, "\"");
             ctx.working_dir += '\\';
-    #endif
+#endif
           }
-          if (app_node.contains("image-path"))
+          if (app_node.contains("image-path")) {
             ctx.image_path = parse_env_val(this_env, app_node.value("image-path", ""));
+          }
 
           ctx.elevated = app_node.value("elevated", false);
           ctx.auto_detach = app_node.value("auto-detach", true);
           ctx.wait_all = app_node.value("wait-all", true);
-          ctx.exit_timeout = std::chrono::seconds { app_node.value("exit-timeout", 5) };
-          ctx.virtual_display = app_node.value("virtual-display", false);
-          ctx.scale_factor = app_node.value("scale-factor", 100);
-          ctx.use_app_identity = app_node.value("use-app-identity", false);
-          ctx.per_client_app_identity = app_node.value("per-client-app-identity", false);
-          ctx.allow_client_commands = app_node.value("allow-client-commands", true);
-          ctx.terminate_on_pause = app_node.value("terminate-on-pause", false);
-          ctx.gamepad = app_node.value("gamepad", "");
-
+          ctx.exit_timeout = std::chrono::seconds {app_node.value("exit-timeout", 5)};
           // Calculate a unique application id.
           auto possible_ids = calculate_app_id(name, ctx.image_path, i++);
           if (ids.count(std::get<0>(possible_ids)) == 0) {
@@ -1838,64 +1596,28 @@ namespace proc {
 
           ctx.name = std::move(name);
           ctx.prep_cmds = std::move(prep_cmds);
-          ctx.state_cmds = std::move(state_cmds);
           ctx.detached = std::move(detached);
 
           apps.emplace_back(std::move(ctx));
         }
 
-        fail_count = 0;
       } catch (std::exception &e) {
-        BOOST_LOG(error) << "Error happened during app loading: "sv << e.what();
-
-        fail_count += 1;
-
-        if (fail_count >= 3) {
-          // No hope for recovering
-          BOOST_LOG(warning) << "Couldn't parse/migrate apps.json properly! Apps will not be loaded."sv;
-          break;
-        }
-
-        BOOST_LOG(warning) << "App format is still invalid! Trying to re-migrate the app list..."sv;
-
-        // Always try migrating from scratch when error happened
-        tree["version"] = 0;
-
-        try {
-          migrate(tree, file_name);
-        } catch (std::exception &e) {
-          BOOST_LOG(error) << "Error happened during migration: "sv << e.what();
-          break;
-        }
-
-        this_env = boost::this_process::environment();
-        ids.clear();
-        apps.clear();
-        i = 0;
-
-        continue;
+        BOOST_LOG(error) << "Invalid apps.json v2 configuration: "sv << e.what();
+        fail_count = 1;
       }
 
-      break;
-    } while (fail_count < 3);
+    } while (false);
 
     if (fail_count > 0) {
       BOOST_LOG(warning) << "No applications configured, adding fallback Desktop entry.";
       proc::ctx_t ctx;
       ctx.idx = std::to_string(i);
-      ctx.uuid = FALLBACK_DESKTOP_UUID; // Placeholder UUID
+      ctx.uuid = FALLBACK_DESKTOP_UUID;  // Placeholder UUID
       ctx.name = "Desktop (fallback)";
       ctx.image_path = parse_env_val(this_env, "desktop-alt.png");
-      ctx.virtual_display = false;
-      ctx.scale_factor = 100;
-      ctx.use_app_identity = false;
-      ctx.per_client_app_identity = false;
-      ctx.allow_client_commands = false;
-      ctx.terminate_on_pause = false;
-
       ctx.elevated = false;
       ctx.auto_detach = true;
-      ctx.wait_all = false; // Desktop doesn't have a specific command to wait for
+      ctx.wait_all = false;  // Desktop doesn't have a specific command to wait for
       ctx.exit_timeout = 5s;
 
       // Calculate unique ID
@@ -1912,114 +1634,31 @@ namespace proc {
       apps.emplace_back(std::move(ctx));
     }
 
-    // Virtual Display entry
-  #ifdef _WIN32
+    // Keep a command-free Virtual Display launch target available whenever SudoVDA is ready.
+    // It is generated by Apollo rather than stored in apps.json, so a fresh installation and an
+    // existing user configuration expose the same private-desktop entry. The dedicated internal
+    // flag keeps this behavior without restoring the retired general per-app virtual-display key.
+#ifdef _WIN32
     if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
       proc::ctx_t ctx;
       ctx.idx = std::to_string(i);
       ctx.uuid = VIRTUAL_DISPLAY_UUID;
       ctx.name = "Virtual Display";
       ctx.image_path = parse_env_val(this_env, "virtual_desktop.png");
-      ctx.virtual_display = true;
-      ctx.scale_factor = 100;
-      ctx.use_app_identity = false;
-      ctx.per_client_app_identity = false;
-      ctx.allow_client_commands = false;
-      ctx.terminate_on_pause = false;
-
       ctx.elevated = false;
       ctx.auto_detach = true;
       ctx.wait_all = false;
+      ctx.synthetic_virtual_display = true;
       ctx.exit_timeout = 5s;
 
-      auto possible_ids = calculate_app_id(ctx.name, ctx.image_path, i++);
-      if (ids.count(std::get<0>(possible_ids)) == 0) {
-        // Avoid using index to generate id if possible
-        ctx.id = std::get<0>(possible_ids);
-      }
-      else {
-        // Fallback to include index on collision
-        ctx.id = std::get<1>(possible_ids);
-      }
+      const auto possible_ids = calculate_app_id(ctx.name, ctx.image_path, i++);
+      ctx.id = ids.contains(std::get<0>(possible_ids)) ?
+                 std::get<1>(possible_ids) :
+                 std::get<0>(possible_ids);
       ids.insert(ctx.id);
-
       apps.emplace_back(std::move(ctx));
     }
-  #endif
-
-    if (config::input.enable_input_only_mode) {
-      // Input Only entry
-      {
-        proc::ctx_t ctx;
-        ctx.idx = std::to_string(i);
-        ctx.uuid = REMOTE_INPUT_UUID;
-        ctx.name = "Remote Input";
-        ctx.image_path = parse_env_val(this_env, "input_only.png");
-        ctx.virtual_display = false;
-        ctx.scale_factor = 100;
-        ctx.use_app_identity = false;
-        ctx.per_client_app_identity = false;
-        ctx.allow_client_commands = false;
-        ctx.terminate_on_pause = true; // There's no need to keep an active input only session ongoing
-
-        ctx.elevated = false;
-        ctx.auto_detach = true;
-        ctx.wait_all = true;
-        ctx.exit_timeout = 5s;
-
-        auto possible_ids = calculate_app_id(ctx.name, ctx.image_path, i++);
-        if (ids.count(std::get<0>(possible_ids)) == 0) {
-          // Avoid using index to generate id if possible
-          ctx.id = std::get<0>(possible_ids);
-        }
-        else {
-          // Fallback to include index on collision
-          ctx.id = std::get<1>(possible_ids);
-        }
-        ids.insert(ctx.id);
-
-        input_only_app_id_str = ctx.id;
-        input_only_app_id = util::from_view(ctx.id);
-
-        apps.emplace_back(std::move(ctx));
-      }
-
-      // Terminate entry
-      {
-        proc::ctx_t ctx;
-        ctx.idx = std::to_string(i);
-        ctx.uuid = TERMINATE_APP_UUID;
-        ctx.name = "Terminate";
-        ctx.image_path = parse_env_val(this_env, "terminate.png");
-        ctx.virtual_display = false;
-        ctx.scale_factor = 100;
-        ctx.use_app_identity = false;
-        ctx.per_client_app_identity = false;
-        ctx.allow_client_commands = false;
-        ctx.terminate_on_pause = false;
-
-        ctx.elevated = false;
-        ctx.auto_detach = true;
-        ctx.wait_all = true;
-        ctx.exit_timeout = 5s;
-
-        auto possible_ids = calculate_app_id(ctx.name, ctx.image_path, i++);
-        if (ids.count(std::get<0>(possible_ids)) == 0) {
-          // Avoid using index to generate id if possible
-          ctx.id = std::get<0>(possible_ids);
-        }
-        else {
-          // Fallback to include index on collision
-          ctx.id = std::get<1>(possible_ids);
-        }
-        // ids.insert(ctx.id);
-
-        terminate_app_id_str = ctx.id;
-        terminate_app_id = util::from_view(ctx.id);
-
-        apps.emplace_back(std::move(ctx));
-      }
-    }
+#endif
 
     return proc::proc_t {
       std::move(this_env),
@@ -2033,7 +1672,7 @@ namespace proc {
       proc.terminate(false, false);
     }
 
-  #ifdef _WIN32
+#ifdef _WIN32
     size_t fail_count = 0;
     while (fail_count < 5 && vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
       initVDisplayDriver();
@@ -2044,7 +1683,7 @@ namespace proc {
       fail_count += 1;
       std::this_thread::sleep_for(1s);
     }
-  #endif
+#endif
 
     auto proc_opt = proc::parse(file_name);
 

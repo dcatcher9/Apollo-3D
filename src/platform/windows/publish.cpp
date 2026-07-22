@@ -218,7 +218,7 @@ namespace platf::publish {
     HMODULE handle = LoadLibrary("dnsapi.dll");
 
     if (!handle || load_funcs(handle)) {
-      BOOST_LOG(error) << "Couldn't load dnsapi.dll, You'll need to add PC manually from Moonlight"sv;
+      BOOST_LOG(error) << "Couldn't load dnsapi.dll; add this PC manually from Artemis"sv;
       return nullptr;
     }
 

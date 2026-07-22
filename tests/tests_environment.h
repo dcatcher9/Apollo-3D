@@ -7,6 +7,9 @@
 
 struct SunshineEnvironment: testing::Environment {
   void SetUp() override {
+    std::error_code ec;
+    std::filesystem::remove("test_sunshine.log", ec);
+    std::filesystem::remove("test_sunshine.log.backup", ec);
     mail::man = std::make_shared<safe::mail_raw_t>();
     deinit_log = logging::init(0, "test_sunshine.log");
   }
@@ -14,6 +17,9 @@ struct SunshineEnvironment: testing::Environment {
   void TearDown() override {
     deinit_log = {};
     mail::man = {};
+    std::error_code ec;
+    std::filesystem::remove("test_sunshine.log", ec);
+    std::filesystem::remove("test_sunshine.log.backup", ec);
   }
 
   std::unique_ptr<logging::deinit_t> deinit_log;

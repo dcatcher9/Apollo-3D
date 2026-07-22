@@ -5,11 +5,10 @@
 
 #include "../tests_common.h"
 
+#include <atomic>
 #include <src/nvhttp.h>
 #include <src/rtsp.h>
 #include <src/stream.h>
-
-#include <atomic>
 #include <thread>
 #include <vector>
 
@@ -375,13 +374,7 @@ TEST(PairingStateTest, KeepAliveAuthorizationRefreshesAfterUpdateAndRevoke) {
   ASSERT_TRUE(update_device_info(
     stale->uuid,
     "after-update",
-    "",
-    {},
-    {},
-    crypto::PERM::_no,
-    true,
-    false,
-    false
+    crypto::PERM::_no
   ));
   auto refreshed = refresh_authorized_client_for_test(stale);
   ASSERT_TRUE(refreshed);
@@ -412,7 +405,7 @@ namespace {
   }
 }  // namespace
 
-TEST(PairingStateTest, UpdatesEveryConcurrentSessionForClient) {
+TEST(PairingStateTest, UpdatesActiveSessionAndRejectsASecondSession) {
   const bool previous_fresh_state = config::sunshine.flags[config::flag::FRESH_STATE];
   config::sunshine.flags[config::flag::FRESH_STATE] = true;
   erase_all_clients();
@@ -421,7 +414,7 @@ TEST(PairingStateTest, UpdatesEveryConcurrentSessionForClient) {
     config::sunshine.flags[config::flag::FRESH_STATE] = previous_fresh_state;
   });
 
-  add_authorized_client_for_test("multi-session", PUBLIC_CERT);
+  add_authorized_client_for_test("single-session", PUBLIC_CERT);
   const auto client = get_authorized_client_for_test(PUBLIC_CERT);
   ASSERT_TRUE(client);
 
@@ -430,35 +423,30 @@ TEST(PairingStateTest, UpdatesEveryConcurrentSessionForClient) {
   auto unrelated = make_test_stream_session(3, "unrelated", "other", crypto::PERM::_default);
   auto session_cleanup = util::fail_guard([&]() {
     rtsp_stream::remove_session_for_test(first);
-    rtsp_stream::remove_session_for_test(second);
-    rtsp_stream::remove_session_for_test(unrelated);
   });
   ASSERT_TRUE(rtsp_stream::insert_session_for_test(first));
-  ASSERT_TRUE(rtsp_stream::insert_session_for_test(second));
-  ASSERT_TRUE(rtsp_stream::insert_session_for_test(unrelated));
+  EXPECT_FALSE(rtsp_stream::insert_session_for_test(second));
+  EXPECT_FALSE(rtsp_stream::insert_session_for_test(unrelated));
 
-  ASSERT_EQ(rtsp_stream::find_sessions(client->uuid).size(), 2);
+  EXPECT_EQ(rtsp_stream::find_session(client->uuid), first);
+  ASSERT_TRUE(rtsp_stream::active_session_uuid());
+  EXPECT_EQ(*rtsp_stream::active_session_uuid(), client->uuid);
   ASSERT_TRUE(update_device_info(
     client->uuid,
     "after",
-    "",
-    {},
-    {},
-    crypto::PERM::_all,
-    true,
-    false,
-    false
+    crypto::PERM::_all
   ));
 
   EXPECT_EQ(stream::session::permissions(*first), crypto::PERM::_all);
-  EXPECT_EQ(stream::session::permissions(*second), crypto::PERM::_all);
   EXPECT_EQ(stream::session::client_name(*first), "after");
-  EXPECT_EQ(stream::session::client_name(*second), "after");
+  EXPECT_EQ(stream::session::permissions(*second), crypto::PERM::_default);
+  EXPECT_EQ(stream::session::client_name(*second), "before");
   EXPECT_EQ(stream::session::permissions(*unrelated), crypto::PERM::_default);
   EXPECT_EQ(stream::session::client_name(*unrelated), "other");
 
   // A launch authenticated before the update but inserted afterward must receive the latest
   // policy rather than the stale permission snapshot carried by its RTSP launch record.
+  rtsp_stream::remove_session_for_test(first);
   auto late = make_test_stream_session(4, client->uuid, "stale", crypto::PERM::_default);
   ASSERT_TRUE(rtsp_stream::insert_session_for_test(late));
   auto late_cleanup = util::fail_guard([&]() {
@@ -468,7 +456,7 @@ TEST(PairingStateTest, UpdatesEveryConcurrentSessionForClient) {
   EXPECT_EQ(stream::session::client_name(*late), "after");
 }
 
-TEST(PairingStateTest, RevokingViewStopsEveryConcurrentSessionAndRejectsLateLaunch) {
+TEST(PairingStateTest, RevokingViewStopsActiveSessionAndRejectsLateLaunch) {
   const bool previous_fresh_state = config::sunshine.flags[config::flag::FRESH_STATE];
   config::sunshine.flags[config::flag::FRESH_STATE] = true;
   erase_all_clients();
@@ -482,44 +470,28 @@ TEST(PairingStateTest, RevokingViewStopsEveryConcurrentSessionAndRejectsLateLaun
   ASSERT_TRUE(client);
 
   auto first = make_test_stream_session(10, client->uuid, "before", crypto::PERM::_default);
-  auto second = make_test_stream_session(11, client->uuid, "before", crypto::PERM::_default);
-  auto unrelated = make_test_stream_session(12, "revocation-unrelated", "other", crypto::PERM::_default);
   auto session_cleanup = util::fail_guard([&]() {
     rtsp_stream::remove_session_for_test(first);
-    rtsp_stream::remove_session_for_test(second);
-    rtsp_stream::remove_session_for_test(unrelated);
   });
   ASSERT_TRUE(rtsp_stream::insert_session_for_test(first));
-  ASSERT_TRUE(rtsp_stream::insert_session_for_test(second));
-  ASSERT_TRUE(rtsp_stream::insert_session_for_test(unrelated));
 
   stream::session::set_state_for_test(*first, stream::session::state_e::RUNNING);
-  stream::session::set_state_for_test(*second, stream::session::state_e::RUNNING);
-  stream::session::set_state_for_test(*unrelated, stream::session::state_e::RUNNING);
 
   ASSERT_TRUE(update_device_info(
     client->uuid,
     "revoked-client",
-    "",
-    {},
-    {},
-    crypto::PERM::_no,
-    true,
-    false,
-    false
+    crypto::PERM::_no
   ));
 
   EXPECT_EQ(stream::session::state(*first), stream::session::state_e::STOPPING);
-  EXPECT_EQ(stream::session::state(*second), stream::session::state_e::STOPPING);
-  EXPECT_EQ(stream::session::state(*unrelated), stream::session::state_e::RUNNING);
   EXPECT_EQ(stream::session::permissions(*first), crypto::PERM::_no);
-  EXPECT_EQ(stream::session::permissions(*second), crypto::PERM::_no);
 
+  rtsp_stream::remove_session_for_test(first);
   auto late = make_test_stream_session(13, client->uuid, "stale", crypto::PERM::_all);
   EXPECT_FALSE(rtsp_stream::insert_session_for_test(late));
 }
 
-TEST(PairingStateTest, UnpairStopsEveryConcurrentSessionAndRejectsLateLaunch) {
+TEST(PairingStateTest, UnpairStopsActiveSessionAndRejectsLateLaunch) {
   const bool previous_fresh_state = config::sunshine.flags[config::flag::FRESH_STATE];
   config::sunshine.flags[config::flag::FRESH_STATE] = true;
   erase_all_clients();
@@ -533,26 +505,17 @@ TEST(PairingStateTest, UnpairStopsEveryConcurrentSessionAndRejectsLateLaunch) {
   ASSERT_TRUE(client);
 
   auto first = make_test_stream_session(20, client->uuid, "before", crypto::PERM::_default);
-  auto second = make_test_stream_session(21, client->uuid, "before", crypto::PERM::_default);
-  auto unrelated = make_test_stream_session(22, "unpair-unrelated", "other", crypto::PERM::_default);
   auto session_cleanup = util::fail_guard([&]() {
     rtsp_stream::remove_session_for_test(first);
-    rtsp_stream::remove_session_for_test(second);
-    rtsp_stream::remove_session_for_test(unrelated);
   });
   ASSERT_TRUE(rtsp_stream::insert_session_for_test(first));
-  ASSERT_TRUE(rtsp_stream::insert_session_for_test(second));
-  ASSERT_TRUE(rtsp_stream::insert_session_for_test(unrelated));
 
   stream::session::set_state_for_test(*first, stream::session::state_e::RUNNING);
-  stream::session::set_state_for_test(*second, stream::session::state_e::RUNNING);
-  stream::session::set_state_for_test(*unrelated, stream::session::state_e::RUNNING);
 
   ASSERT_TRUE(unpair_client(client->uuid));
   EXPECT_EQ(stream::session::state(*first), stream::session::state_e::STOPPING);
-  EXPECT_EQ(stream::session::state(*second), stream::session::state_e::STOPPING);
-  EXPECT_EQ(stream::session::state(*unrelated), stream::session::state_e::RUNNING);
 
+  rtsp_stream::remove_session_for_test(first);
   auto late = make_test_stream_session(23, client->uuid, "stale", crypto::PERM::_all);
   EXPECT_FALSE(rtsp_stream::insert_session_for_test(late));
 }
@@ -571,20 +534,8 @@ TEST(PairingStateTest, OlderRuntimePolicyCannotOverwriteNewerGeneration) {
   });
   ASSERT_TRUE(rtsp_stream::insert_session_for_test(session));
 
-  ASSERT_TRUE(rtsp_stream::publish_client_policy(
-    "policy-generation-order",
-    newer_generation,
-    "newer",
-    crypto::PERM::_all,
-    false
-  ));
-  EXPECT_FALSE(rtsp_stream::publish_client_policy(
-    "policy-generation-order",
-    newer_generation - 1,
-    "older",
-    crypto::PERM::_default,
-    false
-  ));
+  ASSERT_TRUE(rtsp_stream::publish_client_policy("policy-generation-order", newer_generation, "newer", crypto::PERM::_all, false));
+  EXPECT_FALSE(rtsp_stream::publish_client_policy("policy-generation-order", newer_generation - 1, "older", crypto::PERM::_default, false));
 
   EXPECT_EQ(stream::session::permissions(*session), crypto::PERM::_all);
   EXPECT_EQ(stream::session::client_name(*session), "newer");

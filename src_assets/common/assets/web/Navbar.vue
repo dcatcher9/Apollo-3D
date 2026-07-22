@@ -30,20 +30,20 @@ onMounted(async () => {
       version.value = config.version || ''
     }
   } catch (error) {
-    console.debug('Apollo version is unavailable', error)
+    console.debug('Apollo XR version is unavailable', error)
   }
 })
 </script>
 
 <template>
-  <aside class="apollo-sidebar" aria-label="Apollo navigation">
-    <a class="apollo-brand" href="./" aria-label="Apollo overview">
+  <aside class="apollo-sidebar" aria-label="Apollo XR navigation">
+    <a class="apollo-brand" href="./" aria-label="Apollo XR overview">
       <span class="apollo-brand-mark">
         <img src="/images/logo-apollo-45.png" alt="">
       </span>
       <span class="apollo-brand-copy">
-        <strong>Apollo</strong>
-        <small>XR host</small>
+        <strong>Apollo XR</strong>
+        <small>Host</small>
       </span>
     </a>
 
@@ -70,14 +70,14 @@ onMounted(async () => {
         <span>Help &amp; Logs</span>
       </a>
       <ThemeToggle />
-      <p v-if="version" class="apollo-version">Apollo {{ version }}</p>
+      <p v-if="version" class="apollo-version">Apollo XR {{ version }}</p>
     </div>
   </aside>
 
   <header class="apollo-mobile-header">
-    <a class="apollo-mobile-brand" href="./" aria-label="Apollo overview">
+    <a class="apollo-mobile-brand" href="./" aria-label="Apollo XR overview">
       <img src="/images/logo-apollo-45.png" alt="">
-      <strong>Apollo</strong>
+      <strong>Apollo XR</strong>
     </a>
     <div class="apollo-mobile-actions">
       <a class="apollo-mobile-utility" href="./troubleshooting#logs" aria-label="Open debug log" title="Debug log">

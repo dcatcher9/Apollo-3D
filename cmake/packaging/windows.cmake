@@ -71,6 +71,10 @@ execute_process(COMMAND cmd.exe /c mklink /J "${shaders_in_build_dest_native}" "
 
 set(CPACK_PACKAGE_ICON "${CMAKE_SOURCE_DIR}\\\\apollo.ico")
 
+# Rename the product in Windows UI without changing the install directory or upgrade identity.
+set(CPACK_NSIS_PACKAGE_NAME "${PROJECT_DISPLAY_NAME}")
+set(CPACK_NSIS_DISPLAY_NAME "${PROJECT_DISPLAY_NAME}")
+
 # The name of the directory that will be created in C:/Program files/
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "${CPACK_PACKAGE_NAME}")
 
@@ -78,8 +82,8 @@ set(CPACK_PACKAGE_INSTALL_DIRECTORY "${CPACK_PACKAGE_NAME}")
 set(CPACK_COMPONENT_GROUP_CORE_EXPANDED true)
 
 # sunshine binary
-set(CPACK_COMPONENT_APPLICATION_DISPLAY_NAME "${CMAKE_PROJECT_NAME}")
-set(CPACK_COMPONENT_APPLICATION_DESCRIPTION "${CMAKE_PROJECT_NAME} main application and required components.")
+set(CPACK_COMPONENT_APPLICATION_DISPLAY_NAME "${PROJECT_DISPLAY_NAME}")
+set(CPACK_COMPONENT_APPLICATION_DESCRIPTION "${PROJECT_DISPLAY_NAME} main application and required components.")
 set(CPACK_COMPONENT_APPLICATION_GROUP "Core")
 set(CPACK_COMPONENT_APPLICATION_REQUIRED true)
 set(CPACK_COMPONENT_APPLICATION_DEPENDS assets)

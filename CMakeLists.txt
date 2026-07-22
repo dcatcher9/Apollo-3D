@@ -1,12 +1,17 @@
 cmake_minimum_required(VERSION 3.20)
-# `CMAKE_CUDA_ARCHITECTURES` requires 3.18
-# `set_source_files_properties` requires 3.18
 # `cmake_path(CONVERT ... TO_NATIVE_PATH_LIST ...)` requires 3.20
-# todo - set this conditionally
 
 project(Apollo VERSION 0.0.0
-        DESCRIPTION "Self-hosted game stream host for Artemis"
+        DESCRIPTION "Apollo XR host for Artemis"
         HOMEPAGE_URL "https://github.com/ClassicOldSong/Apollo")
+
+# User-facing product name. Keep PROJECT_NAME as "Apollo" for upgrade, package-path,
+# service, and executable compatibility.
+set(PROJECT_DISPLAY_NAME "Apollo XR")
+
+if(NOT WIN32)
+    message(FATAL_ERROR "Apollo XR host supports Windows with native NVIDIA NVENC only")
+endif()
 
 set(PROJECT_LICENSE "GPL-3.0-only")
 
@@ -14,10 +19,9 @@ set(PROJECT_FQDN "dev.lizardbyte.app.Sunshine")
 
 set(PROJECT_BRIEF_DESCRIPTION "GameStream host for Artemis")  # must be <= 35 characters
 
-set(PROJECT_LONG_DESCRIPTION "Offering low latency, cloud gaming server capabilities with support for AMD, Intel, \
-and Nvidia GPUs for hardware encoding. Software encoding is also available. You can connect to Apollo from any \
-Artemis client on a variety of devices. A web UI is provided to allow configuration, and client pairing, from \
-your favorite web browser. Pair from the local server or any mobile device.")
+set(PROJECT_LONG_DESCRIPTION "Windows XR streaming host for modern Artemis clients. Apollo XR uses native NVIDIA \
+NVENC for H.264, HEVC, and AV1 video, with HDR and host-side stereoscopic conversion support. A web UI provides \
+configuration and device pairing.")
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     message(STATUS "Setting build type to 'Release' as none was specified.")
@@ -38,14 +42,6 @@ include(${CMAKE_MODULE_PATH}/prep/options.cmake)
 
 # initial prep
 include(${CMAKE_MODULE_PATH}/prep/init.cmake)
-
-# configure special package files, such as sunshine.desktop, Flatpak manifest, Portfile , etc.
-include(${CMAKE_MODULE_PATH}/prep/special_package_configuration.cmake)
-
-# Exit early if END_BUILD is ON, i.e. when only generating package manifests
-if(${END_BUILD})
-    return()
-endif()
 
 # project constants
 include(${CMAKE_MODULE_PATH}/prep/constants.cmake)

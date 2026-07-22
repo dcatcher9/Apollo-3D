@@ -107,21 +107,6 @@ void log_publisher_data() {
 }
 
 #ifdef _WIN32
-bool is_gamestream_enabled() {
-  DWORD enabled;
-  DWORD size = sizeof(enabled);
-  return RegGetValueW(
-           HKEY_LOCAL_MACHINE,
-           L"SOFTWARE\\NVIDIA Corporation\\NvStream",
-           L"EnableStreaming",
-           RRF_RT_REG_DWORD,
-           nullptr,
-           &enabled,
-           &size
-         ) == ERROR_SUCCESS &&
-         enabled != 0;
-}
-
 namespace service_ctrl {
   class service_controller {
   public:

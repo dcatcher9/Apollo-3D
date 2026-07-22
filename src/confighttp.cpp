@@ -7,15 +7,15 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#include <algorithm>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <mutex>
+#include <numeric>
 #include <set>
 #include <sstream>
 #include <thread>
-#include <numeric>
-#include <algorithm>
 
 // lib includes
 #include <boost/algorithm/string.hpp>
@@ -29,7 +29,6 @@
 #include "config.h"
 #include "confighttp.h"
 #include "crypto.h"
-#include "display_device.h"
 #include "file_handler.h"
 #include "globals.h"
 #include "httpcommon.h"
@@ -60,7 +59,7 @@ namespace confighttp {
 
   // Keep the base enum for client operations.
   enum class op_e {
-    ADD,    ///< Add client
+    ADD,  ///< Add client
     REMOVE  ///< Remove client
   };
 
@@ -153,15 +152,17 @@ namespace confighttp {
    * @param key The key to search.
    * @return The value if found, empty string otherwise.
    */
-  std::string getCookieValue(const std::string& cookieString, const std::string& key) {
+  std::string getCookieValue(const std::string &cookieString, const std::string &key) {
     std::string keyWithEqual = key + "=";
     std::size_t startPos = cookieString.find(keyWithEqual);
-    if (startPos == std::string::npos)
+    if (startPos == std::string::npos) {
       return "";
+    }
     startPos += keyWithEqual.length();
     std::size_t endPos = cookieString.find(";", startPos);
-    if (endPos == std::string::npos)
+    if (endPos == std::string::npos) {
       return cookieString.substr(startPos);
+    }
     return cookieString.substr(startPos, endPos - startPos);
   }
 
@@ -232,8 +233,7 @@ namespace confighttp {
     const auto origin = get_single_request_header(request, "Origin");
     const auto referer = get_single_request_header(request, "Referer");
     const auto sec_fetch_site = get_single_request_header(request, "Sec-Fetch-Site");
-    if (!host.unique || !host.value || !origin.unique || !referer.unique || !sec_fetch_site.unique ||
-        !http::web_ui_origin_allowed(*host.value, origin.value, referer.value, sec_fetch_site.value)) {
+    if (!host.unique || !host.value || !origin.unique || !referer.unique || !sec_fetch_site.unique || !http::web_ui_origin_allowed(*host.value, origin.value, referer.value, sec_fetch_site.value)) {
       const auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
       BOOST_LOG(warning) << "Web UI: ["sv << address << "] -- rejected cross-origin "sv
                          << request->method << ' ' << request->path;
@@ -254,13 +254,15 @@ namespace confighttp {
    * This function uses session cookies (if set) and ensures they have not expired.
    */
   bool authenticate(resp_https_t response, req_https_t request, bool needsRedirect = false) {
-    if (!checkIPOrigin(response, request) || !checkBrowserOrigin(response, request))
+    if (!checkIPOrigin(response, request) || !checkBrowserOrigin(response, request)) {
       return false;
+    }
 
     // Local control should feel appliance-like: the network boundary is the trust prompt.
     // Unsafe browser requests still pass the strict same-origin validation above.
-    if (is_trusted_local_request(request))
+    if (is_trusted_local_request(request)) {
       return true;
+    }
 
     // If credentials not set, redirect to welcome.
     if (!credentials_configured()) {
@@ -278,22 +280,26 @@ namespace confighttp {
       }
     });
     auto cookies = request->header.find("cookie");
-    if (cookies == request->header.end())
+    if (cookies == request->header.end()) {
       return false;
+    }
     auto authCookie = getCookieValue(cookies->second, "auth");
-    if (authCookie.empty())
+    if (authCookie.empty()) {
       return false;
+    }
     {
       std::lock_guard lock {auth_mutex};
-      if (sessionCookie.empty())
+      if (sessionCookie.empty()) {
         return false;
+      }
       // Check for expiry
       if (std::chrono::steady_clock::now() - cookie_creation_time > SESSION_EXPIRE_DURATION) {
         sessionCookie.clear();
         return false;
       }
-      if (util::hex(crypto::hash(authCookie + config::sunshine.salt)).to_string() != sessionCookie)
+      if (util::hex(crypto::hash(authCookie + config::sunshine.salt)).to_string() != sessionCookie) {
         return false;
+      }
     }
     fg.disable();
     return true;
@@ -337,14 +343,13 @@ namespace confighttp {
     response->write(code, tree.dump(), headers);
   }
 
-
   /**
    * @brief Validate the request content type and send bad request when mismatch.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
    * @param contentType The required content type.
    */
-  bool validateContentType(resp_https_t response, req_https_t request, const std::string_view& contentType) {
+  bool validateContentType(resp_https_t response, req_https_t request, const std::string_view &contentType) {
     auto requestContentType = request->header.find("content-type");
     if (requestContentType == request->header.end()) {
       bad_request(response, request, "Content type not provided");
@@ -432,26 +437,6 @@ namespace confighttp {
     headers.emplace("X-Frame-Options", "DENY");
     headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
     headers.emplace("Access-Control-Allow-Origin", "https://images.igdb.com/");
-    response->write(content, headers);
-  }
-
-  /**
-   * @brief Get the clients page.
-   * @param response The HTTP response object.
-   * @param request The HTTP request object.
-   */
-  void getClientsPage(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request, true)) {
-      return;
-    }
-
-    print_req(request);
-
-    std::string content = file_handler::read_file(WEB_DIR "clients.html");
-    SimpleWeb::CaseInsensitiveMultimap headers;
-    headers.emplace("Content-Type", "text/html; charset=utf-8");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
     response->write(content, headers);
   }
 
@@ -676,6 +661,23 @@ namespace confighttp {
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json file_tree = nlohmann::json::parse(content);
 
+      // Runtime-generated launch targets are deliberately not persisted in apps.json. Expose
+      // them separately so the Library can show them without allowing an edit, delete, or
+      // reorder operation to create a duplicate persisted entry.
+      file_tree["builtin_apps"] = nlohmann::json::array();
+      for (const auto &app : proc::proc.get_apps()) {
+        if (!app.synthetic_virtual_display) {
+          continue;
+        }
+
+        file_tree["builtin_apps"].push_back({
+          {"uuid", app.uuid},
+          {"name", app.name},
+          {"image-path", app.image_path},
+          {"virtual-display", true}
+        });
+      }
+
       file_tree["current_app"] = proc::proc.get_running_app_uuid();
       file_tree["host_uuid"] = http::unique_id;
       file_tree["host_name"] = config::nvhttp.sunshine_name;
@@ -746,14 +748,13 @@ namespace confighttp {
 
       // Write the updated file tree back to disk.
       file_handler::write_file(config::stream.file_apps.c_str(), fileTree.dump(4));
-      proc::refresh(config::stream.file_apps);
+      nvhttp::reload_apps(config::stream.file_apps);
 
       // Prepare and send the output response.
       nlohmann::json outputTree;
       outputTree["status"] = true;
       send_response(response, outputTree);
-    }
-    catch (std::exception &e) {
+    } catch (std::exception &e) {
       BOOST_LOG(warning) << "SaveApp: "sv << e.what();
       bad_request(response, request, e.what());
     }
@@ -773,7 +774,7 @@ namespace confighttp {
 
     print_req(request);
 
-    proc::proc.terminate();
+    nvhttp::terminate_active_session();
     nlohmann::json output_tree;
     output_tree["status"] = true;
     send_response(response, output_tree);
@@ -808,7 +809,7 @@ namespace confighttp {
       if (!input_tree.contains("order") || !input_tree["order"].is_array()) {
         throw std::runtime_error("Missing or invalid 'order' array in request body");
       }
-      const auto& order_uuids_json = input_tree["order"];
+      const auto &order_uuids_json = input_tree["order"];
 
       // Get the original apps array from the fileTree.
       // Default to an empty array if "apps" key is missing or if it's present but not an array (after logging an error).
@@ -834,7 +835,7 @@ namespace confighttp {
 
       // Phase 1: Place apps according to the 'order' array from the request.
       // Iterate through the desired order of UUIDs.
-      for (const auto& uuid_json_value : order_uuids_json) {
+      for (const auto &uuid_json_value : order_uuids_json) {
         if (!uuid_json_value.is_string()) {
           BOOST_LOG(warning) << "ReorderApps: Encountered a non-string UUID in the 'order' array. Skipping this entry.";
           continue;
@@ -845,17 +846,17 @@ namespace confighttp {
         // Find the first unmoved app in the original list that matches the current target_uuid.
         for (size_t i = 0; i < original_apps_list.size(); ++i) {
           if (item_moved[i]) {
-            continue; // This specific app object has already been placed.
+            continue;  // This specific app object has already been placed.
           }
 
-          const auto& app_item = original_apps_list[i];
+          const auto &app_item = original_apps_list[i];
           // Ensure the app item is an object and has a UUID to match against.
           if (app_item.is_object() && app_item.contains("uuid") && app_item["uuid"].is_string()) {
             if (app_item["uuid"].get<std::string>() == target_uuid) {
-              reordered_apps_list.push_back(app_item); // Add the found app object to the new list.
-              item_moved[i] = true;                    // Mark this specific object as moved.
+              reordered_apps_list.push_back(app_item);  // Add the found app object to the new list.
+              item_moved[i] = true;  // Mark this specific object as moved.
               found_match_for_ordered_uuid = true;
-              break; // Found an app for this UUID, move to the next UUID in the 'order' array.
+              break;  // Found an app for this UUID, move to the next UUID in the 'order' array.
             }
           }
         }
@@ -883,7 +884,7 @@ namespace confighttp {
       file_handler::write_file(config::stream.file_apps.c_str(), fileTree.dump(4));
 
       // Notify relevant parts of the system that the apps configuration has changed.
-      proc::refresh(config::stream.file_apps);
+      nvhttp::reload_apps(config::stream.file_apps);
 
       output_tree["status"] = true;
       send_response(response, output_tree);
@@ -925,9 +926,9 @@ namespace confighttp {
 
       // Remove any app with the matching uuid directly from the "apps" array.
       if (fileTree.contains("apps") && fileTree["apps"].is_array()) {
-        auto& apps = fileTree["apps"];
+        auto &apps = fileTree["apps"];
         apps.erase(
-          std::remove_if(apps.begin(), apps.end(), [&uuid](const nlohmann::json& app) {
+          std::remove_if(apps.begin(), apps.end(), [&uuid](const nlohmann::json &app) {
             return app.value("uuid", "") == uuid;
           }),
           apps.end()
@@ -936,14 +937,13 @@ namespace confighttp {
 
       // Write the updated JSON back to the file.
       file_handler::write_file(config::stream.file_apps.c_str(), fileTree.dump(4));
-      proc::refresh(config::stream.file_apps);
+      nvhttp::reload_apps(config::stream.file_apps);
 
       // Prepare and send the response.
       nlohmann::json outputTree;
       outputTree["status"] = true;
       send_response(response, outputTree);
-    }
-    catch (std::exception &e) {
+    } catch (std::exception &e) {
       BOOST_LOG(warning) << "DeleteApp: "sv << e.what();
       bad_request(response, request, e.what());
     }
@@ -983,7 +983,6 @@ namespace confighttp {
    * {
    *   "uuid": "<uuid>",
    *   "name": "<Friendly Name>",
-   *   "display_mode": "1920x1080x59.94",
    *   "do": [ { "cmd": "<command>", "elevated": false }, ... ],
    *   "undo": [ { "cmd": "<command>", "elevated": false }, ... ],
    *   "perm": <uint32_t>
@@ -1004,23 +1003,11 @@ namespace confighttp {
       nlohmann::json output_tree;
       std::string uuid = input_tree.value("uuid", "");
       std::string name = input_tree.value("name", "");
-      std::string display_mode = input_tree.value("display_mode", "");
-      bool enable_legacy_ordering = input_tree.value("enable_legacy_ordering", true);
-      bool allow_client_commands = input_tree.value("allow_client_commands", true);
-      bool always_use_virtual_display = input_tree.value("always_use_virtual_display", false);
-      auto do_cmds = nvhttp::extract_command_entries(input_tree, "do");
-      auto undo_cmds = nvhttp::extract_command_entries(input_tree, "undo");
       auto perm = static_cast<crypto::PERM>(input_tree.value("perm", static_cast<uint32_t>(crypto::PERM::_no)) & static_cast<uint32_t>(crypto::PERM::_all));
       output_tree["status"] = nvhttp::update_device_info(
         uuid,
         name,
-        display_mode,
-        do_cmds,
-        undo_cmds,
-        perm,
-        enable_legacy_ordering,
-        allow_client_commands,
-        always_use_virtual_display
+        perm
       );
       send_response(response, output_tree);
     } catch (std::exception &e) {
@@ -1079,13 +1066,12 @@ namespace confighttp {
     print_req(request);
 
     nvhttp::erase_all_clients();
-    proc::proc.terminate();
     nlohmann::json output_tree;
     output_tree["status"] = true;
     send_response(response, output_tree);
   }
 
-  #ifdef _WIN32
+#ifdef _WIN32
   void getArGlassDevices(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) {
       return;
@@ -1139,7 +1125,7 @@ namespace confighttp {
       bad_request(response, request, error.what());
     }
   }
-  #endif
+#endif
 
   /**
    * @brief Get the configuration settings.
@@ -1223,13 +1209,13 @@ namespace confighttp {
         // we should migrate the config file to straight json and get rid of all this nonsense
         config_stream << k << " = " << (v.is_string() ? v.get<std::string>() : v.dump()) << std::endl;
       }
-  #ifdef _WIN32
+#ifdef _WIN32
       if (!ar_glasses::write_config_with_devices(config_stream.str())) {
         throw std::runtime_error("Could not atomically save the configuration file");
       }
-  #else
+#else
       file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str());
-  #endif
+#endif
       output_tree["status"] = true;
       send_response(response, output_tree);
     } catch (std::exception &e) {
@@ -1304,10 +1290,10 @@ namespace confighttp {
     std::string content = file_handler::read_file(config::sunshine.log_file.c_str());
     SimpleWeb::CaseInsensitiveMultimap headers;
     std::string contentType = "text/plain";
-  #ifdef _WIN32
+#ifdef _WIN32
     contentType += "; charset=";
     contentType += currentCodePageToCharset();
-  #endif
+#endif
     headers.emplace("Content-Type", contentType);
     headers.emplace("X-Frame-Options", "DENY");
     headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
@@ -1340,8 +1326,9 @@ namespace confighttp {
     } else if (!authenticate(response, request)) {
       return;
     }
-    if (!validateContentType(response, request, "application/json"))
+    if (!validateContentType(response, request, "application/json")) {
       return;
+    }
     print_req(request);
     std::vector<std::string> errors;
     std::stringstream ss;
@@ -1354,18 +1341,18 @@ namespace confighttp {
       std::string password = input_tree.value("currentPassword", "");
       std::string newPassword = input_tree.value("newPassword", "");
       std::string confirmPassword = input_tree.value("confirmNewPassword", "");
-      if (newUsername.empty())
+      if (newUsername.empty()) {
         newUsername = username;
+      }
       if (newUsername.empty()) {
         errors.push_back("Invalid Username");
       } else {
         std::lock_guard lock {auth_mutex};
         auto hash = util::hex(crypto::hash(password + config::sunshine.salt)).to_string();
-        if (config::sunshine.username.empty() ||
-            (boost::iequals(username, config::sunshine.username) && hash == config::sunshine.password)) {
-          if (newPassword.empty() || newPassword != confirmPassword)
+        if (config::sunshine.username.empty() || (boost::iequals(username, config::sunshine.username) && hash == config::sunshine.password)) {
+          if (newPassword.empty() || newPassword != confirmPassword) {
             errors.push_back("Password Mismatch");
-          else {
+          } else {
             http::save_user_creds(config::sunshine.credentials_file, newUsername, newPassword);
             http::reload_user_creds(config::sunshine.credentials_file);
             sessionCookie.clear();  // force re-login
@@ -1376,10 +1363,9 @@ namespace confighttp {
         }
       }
       if (!errors.empty()) {
-        std::string error = std::accumulate(errors.begin(), errors.end(), std::string(),
-                                              [](const std::string &a, const std::string &b) {
-                                                return a.empty() ? b : a + ", " + b;
-                                              });
+        std::string error = std::accumulate(errors.begin(), errors.end(), std::string(), [](const std::string &a, const std::string &b) {
+          return a.empty() ? b : a + ", " + b;
+        });
         bad_request(response, request, error);
         return;
       }
@@ -1411,10 +1397,12 @@ namespace confighttp {
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
 
       std::string passphrase = input_tree.value("passphrase", "");
-      if (passphrase.empty())
+      if (passphrase.empty()) {
         throw std::runtime_error("Passphrase not provided!");
-      if (passphrase.size() < 4)
+      }
+      if (passphrase.size() < 4) {
         throw std::runtime_error("Passphrase too short!");
+      }
 
       std::string deviceName = input_tree.value("deviceName", "");
       output_tree["otp"] = nvhttp::request_otp(passphrase, deviceName);
@@ -1467,25 +1455,6 @@ namespace confighttp {
   }
 
   /**
-   * @brief Reset the display device persistence.
-   * @param response The HTTP response object.
-   * @param request The HTTP request object.
-   *
-   * @api_examples{/api/reset-display-device-persistence| POST| null}
-   */
-  void resetDisplayDevicePersistence(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
-    nlohmann::json output_tree;
-    output_tree["status"] = display_device::reset_persistence();
-    send_response(response, output_tree);
-  }
-
-  /**
    * @brief Restart Apollo.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
@@ -1498,8 +1467,6 @@ namespace confighttp {
     }
 
     print_req(request);
-
-    proc::proc.terminate();
 
     // We may not return from this call
     platf::restart();
@@ -1521,8 +1488,6 @@ namespace confighttp {
 
     BOOST_LOG(warning) << "Requested quit from config page!"sv;
 
-    proc::proc.terminate();
-
 #ifdef _WIN32
     if (GetConsoleWindow() == NULL) {
       lifetime::exit_sunshine(ERROR_SHUTDOWN_IN_PROGRESS, true);
@@ -1532,77 +1497,11 @@ namespace confighttp {
       lifetime::exit_sunshine(0, true);
     }
     // If exit fails, write a response after 5 seconds.
-    std::thread write_resp([response]{
+    std::thread write_resp([response] {
       std::this_thread::sleep_for(5s);
       response->write();
     });
     write_resp.detach();
-  }
-
-  /**
-   * @brief Launch an application.
-   * @param response The HTTP response object.
-   * @param request The HTTP request object.
-   */
-  void launchApp(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
-    try {
-      std::stringstream ss;
-      ss << request->content.rdbuf();
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
-
-      // Check for required uuid field in body
-      if (!input_tree.contains("uuid") || !input_tree["uuid"].is_string()) {
-        bad_request(response, request, "Missing or invalid uuid in request body");
-        return;
-      }
-      std::string uuid = input_tree["uuid"].get<std::string>();
-
-      nlohmann::json output_tree;
-      const auto apps = proc::proc.get_apps();
-      for (auto &app : apps) {
-        if (app.uuid == uuid) {
-          crypto::named_cert_t named_cert {
-            .name = "",
-            .uuid = http::unique_id,
-            .perm = crypto::PERM::_all,
-          };
-          BOOST_LOG(info) << "Launching app ["sv << app.name << "] from web UI"sv;
-          auto launch_session = nvhttp::make_launch_session(true, false, request->parse_query_string(), &named_cert);
-          if (!launch_session) {
-            bad_request(response, request, "Invalid launch display mode");
-            return;
-          }
-          auto platform_launch = stream::session::guard_platform_launch();
-          if (!rtsp_stream::launch_session_available()) {
-            bad_request(response, request, "A streaming handshake is already pending");
-            return;
-          }
-          auto err = proc::proc.execute(app, launch_session, platform_launch.idle());
-          if (err) {
-            bad_request(response, request, err == 503 ?
-                        "Failed to initialize video capture/encoding. Is a display connected and turned on?" :
-                        "Failed to start the specified application");
-          } else {
-            platform_launch.detach_retained_state();
-            output_tree["status"] = true;
-            send_response(response, output_tree);
-          }
-          return;
-        }
-      }
-      BOOST_LOG(error) << "Couldn't find app with uuid ["sv << uuid << ']';
-      bad_request(response, request, "Cannot find requested application");
-    }
-    catch (std::exception &e) {
-      BOOST_LOG(warning) << "LaunchApp: "sv << e.what();
-      bad_request(response, request, e.what());
-    }
   }
 
   /**
@@ -1623,7 +1522,7 @@ namespace confighttp {
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       std::string uuid = input_tree.value("uuid", "");
-      output_tree["status"] = nvhttp::find_and_stop_sessions(uuid, true);
+      output_tree["status"] = nvhttp::find_and_stop_session(uuid, true);
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "Disconnect: "sv << e.what();
@@ -1645,12 +1544,11 @@ namespace confighttp {
    * @endcode
    */
   void login(resp_https_t response, req_https_t request) {
-    if (!checkIPOrigin(response, request) || !checkBrowserOrigin(response, request) ||
-        !validateContentType(response, request, "application/json")) {
+    if (!checkIPOrigin(response, request) || !checkBrowserOrigin(response, request) || !validateContentType(response, request, "application/json")) {
       return;
     }
 
-    auto fg = util::fail_guard([&]{
+    auto fg = util::fail_guard([&] {
       response->write(SimpleWeb::StatusCode::client_error_unauthorized);
     });
 
@@ -1664,8 +1562,9 @@ namespace confighttp {
       {
         std::lock_guard lock {auth_mutex};
         std::string hash = util::hex(crypto::hash(password + config::sunshine.salt)).to_string();
-        if (!boost::iequals(username, config::sunshine.username) || hash != config::sunshine.password)
+        if (!boost::iequals(username, config::sunshine.username) || hash != config::sunshine.password) {
           return;
+        }
         sessionCookie = util::hex(crypto::hash(sessionCookieRaw + config::sunshine.salt)).to_string();
         cookie_creation_time = std::chrono::steady_clock::now();
       }
@@ -1676,7 +1575,7 @@ namespace confighttp {
       fg.disable();
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "Web UI Login failed: ["sv << net::addr_to_normalized_string(request->remote_endpoint().address())
-                               << "]: "sv << e.what();
+                         << "]: "sv << e.what();
       response->write(SimpleWeb::StatusCode::server_error_internal_server_error);
       fg.disable();
       return;
@@ -1690,7 +1589,7 @@ namespace confighttp {
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto port_https = net::map_port(PORT_HTTPS);
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
-    https_server_t server { config::nvhttp.cert, config::nvhttp.pkey };
+    https_server_t server {config::nvhttp.cert, config::nvhttp.pkey};
     server.default_resource["DELETE"] = [](resp_https_t response, req_https_t request) {
       bad_request(response, request);
     };
@@ -1719,19 +1618,17 @@ namespace confighttp {
     server.resource["^/api/apps$"]["POST"] = saveApp;
     server.resource["^/api/apps/reorder$"]["POST"] = reorderApps;
     server.resource["^/api/apps/delete$"]["POST"] = deleteApp;
-    server.resource["^/api/apps/launch$"]["POST"] = launchApp;
     server.resource["^/api/apps/close$"]["POST"] = closeApp;
     server.resource["^/api/logs$"]["GET"] = getLogs;
     server.resource["^/api/config$"]["GET"] = getConfig;
     server.resource["^/api/config$"]["POST"] = saveConfig;
-  #ifdef _WIN32
+#ifdef _WIN32
     server.resource["^/api/ar-glasses$"]["GET"] = getArGlassDevices;
     server.resource["^/api/ar-glasses$"]["POST"] = setArGlassDevice;
-  #endif
+#endif
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
     server.resource["^/api/restart$"]["POST"] = restart;
     server.resource["^/api/quit$"]["POST"] = quit;
-    server.resource["^/api/reset-display-device-persistence$"]["POST"] = resetDisplayDevicePersistence;
     server.resource["^/api/password$"]["POST"] = savePassword;
     server.resource["^/api/clients/unpair-all$"]["POST"] = unpairAll;
     server.resource["^/api/clients/list$"]["GET"] = getClients;
@@ -1768,14 +1665,15 @@ namespace confighttp {
         });
       } catch (boost::system::system_error &err) {
         // It's possible the exception gets thrown after calling server->stop() from a different thread
-        if (shutdown_event->peek())
+        if (shutdown_event->peek()) {
           return;
+        }
         BOOST_LOG(fatal) << "Couldn't start Configuration HTTPS server on port ["sv << port_https << "]: "sv << err.what();
         shutdown_event->raise(true);
         return;
       }
     };
-    std::thread tcp { accept_and_run, &server };
+    std::thread tcp {accept_and_run, &server};
 
     // Wait for any event
     shutdown_event->view();

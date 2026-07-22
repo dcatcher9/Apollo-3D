@@ -1,15 +1,12 @@
 # Performance Tuning
-In addition to the options available in the [Configuration](configuration.md) section, there are a few additional
-system options that can be used to help improve the performance of Sunshine.
-
-## AMD
-
-In Windows, enabling *Enhanced Sync* in AMD's settings may help reduce the latency by an additional frame. This
-applies to `amfenc` and `libx264`.
+Apollo uses the native NVIDIA NVENC path. In addition to the options in
+[Configuration](configuration.md), keep the NVIDIA driver current and avoid forcing a capture GPU
+that is not attached to the streamed display.
 
 ## NVIDIA
 
-Enabling *Fast Sync* in Nvidia settings may help reduce latency.
+Enabling *Fast Sync* in NVIDIA settings may reduce latency. For movie-oriented Artemis profiles,
+NVENC quality features can intentionally trade latency for image quality.
 
 <div class="section_buttons">
 

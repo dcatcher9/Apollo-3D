@@ -17,10 +17,10 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <NvInfer.h>
 #include <NvInferPlugin.h>
 #include <NvOnnxParser.h>
-#include <nlohmann/json.hpp>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -119,8 +119,8 @@ static bool depth_shader_bytecode(
 // out of memory and the device was removed. Pooling caps live contexts at peak concurrency.
 static std::mutex g_trt_mutex;
 static std::condition_variable g_trt_context_available;
-// One active stream normally needs one context; four permits multi-client/transition overlap
-// without allowing rapid asynchronous rebuilds to consume VRAM without bound.
+// One active stream normally needs one context; four permits bounded encoder-transition and
+// failed-warmup recovery without letting repeated rebuilds consume VRAM without bound.
 static constexpr std::size_t kMaxContextsPerEngine = 4;
 static nvinfer1::IRuntime *g_runtime = nullptr;
 static std::once_flag g_cuda_init_once;
@@ -367,7 +367,7 @@ static std::pair<int, int> aspect_aligned_dims(float aspect, int short_side, int
 // already resident, and hand back a spare pooled execution context if one is available. The CALLER
 // must hold g_trt_mutex. Context CREATION is deliberately left to the caller OUTSIDE the lock:
 // createExecutionContext() allocates ~1.3 GB of scratch and takes seconds, and holding the lock
-// across it would block concurrent teardowns' pool returns and other sessions' enqueues.
+// across it would delay pooled-context returns and subsequent pipeline acquisition.
 static nvinfer1::ICudaEngine *acquire_engine_locked(
   const std::string &engine_key,
   const std::filesystem::path &engine_path,
@@ -798,8 +798,7 @@ namespace models {
       {
         std::lock_guard<std::mutex> lock(g_trt_mutex);
         auto found = g_engines.find(engine_key);
-        if (found != g_engines.end() && !found->second.engine &&
-            allocated_context_count(found->second) == 0 && found->second.context_pool.empty()) {
+        if (found != g_engines.end() && !found->second.engine && allocated_context_count(found->second) == 0 && found->second.context_pool.empty()) {
           g_engines.erase(found);
         }
       }
@@ -1325,9 +1324,9 @@ namespace models {
         adaptive_pop(cfg.adaptive_pop),
         adaptive_pop_max_ratio((float) (std::max(cfg.adaptive_pop_max, cfg.pop_strength) /
                                         std::max(cfg.pop_strength, 0.25))),
-        zero_plane_mode(cfg.zero_plane == "subject" ? 1.0f :
-                        cfg.zero_plane == "median" ? 2.0f :
-                        cfg.zero_plane == "background" ? 3.0f : 0.0f) {
+        zero_plane_mode(cfg.zero_plane == "subject" ? 1.0f : cfg.zero_plane == "median"   ? 2.0f :
+                                                           cfg.zero_plane == "background" ? 3.0f :
+                                                                                            0.0f) {
       const auto init_started = std::chrono::steady_clock::now();
       // Enable the process-wide rolling collector for diagnostic runs. Do not reset it here:
       // Galaxy XR and local-AR estimators may coexist, and one session must not invalidate the
@@ -1391,8 +1390,7 @@ namespace models {
         {
           std::lock_guard<std::mutex> lock(g_trt_mutex);
           auto found = g_engines.find(engine_key);
-          if (found != g_engines.end() && !found->second.engine &&
-              allocated_context_count(found->second) == 0 && found->second.context_pool.empty()) {
+          if (found != g_engines.end() && !found->second.engine && allocated_context_count(found->second) == 0 && found->second.context_pool.empty()) {
             g_engines.erase(found);
           }
         }
@@ -1444,11 +1442,11 @@ namespace models {
             BOOST_LOG(warning) << "TensorRT context cap reached for this depth model; waiting for "
                                   "an asynchronous encoder teardown to return one.";
             const bool available = g_trt_context_available.wait_for(
-               lock,
-               std::chrono::seconds(5),
-               [&slot]() {
-                 return !slot.context_pool.empty() || allocated_context_count(slot) < kMaxContextsPerEngine;
-               }
+              lock,
+              std::chrono::seconds(5),
+              [&slot]() {
+                return !slot.context_pool.empty() || allocated_context_count(slot) < kMaxContextsPerEngine;
+              }
             );
             if (!available) {
               BOOST_LOG(error) << "TensorRT context cap remained saturated; leaving this encode "
@@ -1582,9 +1580,7 @@ namespace models {
         }
 
         // [0] subject/recenter, [1] stretch/convergence/pop, [2] explicit zero-plane anchor.
-        float init_state[12] = {0.0f, 0.0f, 0.0f, 0.0f,
-                                0.0f, 1.0f, 0.0f, 0.0f,
-                                0.0f, 0.0f, 0.0f, 0.0f};
+        float init_state[12] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         bd.ByteWidth = sizeof(init_state);
         bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
         bd.StructureByteStride = sizeof(float) * 4;
@@ -1892,7 +1888,10 @@ namespace models {
         context->CSSetShader(depth_subject_hist_cs.Get(), nullptr, 0);
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
         ID3D11ShaderResourceView *subject_srvs[5] = {
-          depth_srv.Get(), depth_previous_srv.Get(), tensor_in_srv.Get(), tensor_previous_input_srv.Get(),
+          depth_srv.Get(),
+          depth_previous_srv.Get(),
+          tensor_in_srv.Get(),
+          tensor_previous_input_srv.Get(),
           minmax_ema_srv.Get()
         };
         context->CSSetShaderResources(0, 5, subject_srvs);
@@ -1926,7 +1925,6 @@ namespace models {
         ID3D11UnorderedAccessView *null_history_uav = nullptr;
         context->CSSetShaderResources(0, 2, null_history_srvs);
         context->CSSetUnorderedAccessViews(0, 1, &null_history_uav, nullptr);
-
       }
     }
 

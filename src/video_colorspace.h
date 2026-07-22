@@ -4,10 +4,6 @@
  */
 #pragma once
 
-extern "C" {
-#include <libavutil/pixfmt.h>
-}
-
 namespace video {
 
   enum class colorspace_e {
@@ -29,16 +25,6 @@ namespace video {
   struct config_t;
 
   sunshine_colorspace_t colorspace_from_client_config(const config_t &config, bool hdr_display);
-
-  struct avcodec_colorspace_t {
-    AVColorPrimaries primaries;
-    AVColorTransferCharacteristic transfer_function;
-    AVColorSpace matrix;
-    AVColorRange range;
-    int software_format;
-  };
-
-  avcodec_colorspace_t avcodec_colorspace_from_sunshine_colorspace(const sunshine_colorspace_t &sunshine_colorspace);
 
   struct alignas(16) color_t {
     float color_vec_y[4];

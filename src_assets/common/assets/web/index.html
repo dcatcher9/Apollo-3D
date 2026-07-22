@@ -114,7 +114,7 @@
         <span class="apollo-empty-icon" aria-hidden="true"><i class="fa-solid fa-display"></i></span>
         <div class="apollo-empty-copy">
           <h3>No active session</h3>
-          <p>{{ pairedClients.length ? 'Apollo is ready when you open this PC in Artemis.' : 'Pair an Android XR device to start streaming from this PC.' }}</p>
+          <p>{{ pairedClients.length ? 'Apollo XR is ready when you open this PC in Artemis.' : 'Pair an Android XR device to start streaming from this PC.' }}</p>
         </div>
         <a class="btn btn-apollo-quiet" :href="pairedClients.length ? './apps' : './pin'">
           {{ pairedClients.length ? 'Open Library' : 'Pair Artemis' }}
@@ -129,15 +129,13 @@
           <div>
             <p class="apollo-session-label">{{ sessionState === 'streaming' ? 'Streaming to' : 'Session retained for' }}</p>
             <h3>{{ sessionDeviceName }}</h3>
-            <p v-if="sessionState === 'waiting'">Apollo is keeping {{ activeAppName }} ready for a quick reconnect.</p>
+            <p v-if="sessionState === 'waiting'">Apollo XR is keeping {{ activeAppName }} ready for a quick reconnect.</p>
             <p v-else>{{ activeAppName }} is running from this host.</p>
           </div>
         </div>
 
         <div class="apollo-session-details" aria-label="Session details">
           <span><i class="fa-solid fa-window-maximize" aria-hidden="true"></i>{{ activeAppName }}</span>
-          <span v-if="activeClient && activeClient.display_mode"><i class="fa-solid fa-expand" aria-hidden="true"></i>{{ activeClient.display_mode }}</span>
-          <span v-if="activeClient && activeClient.always_use_virtual_display"><i class="fa-solid fa-user-shield" aria-hidden="true"></i>Private display</span>
         </div>
 
         <div class="apollo-session-actions">
@@ -169,7 +167,7 @@
       <span aria-hidden="true">•</span>
       <a href="./troubleshooting">Help &amp; Diagnostics</a>
       <span v-if="config && config.version" aria-hidden="true">•</span>
-      <span v-if="config && config.version">Apollo {{ config.version }}</span>
+      <span v-if="config && config.version">Apollo XR {{ config.version }}</span>
     </footer>
   </main>
 </body>
@@ -208,7 +206,7 @@
     },
     computed: {
       hostName() {
-        return this.config?.sunshine_name || 'Apollo'
+        return this.config?.sunshine_name || 'Apollo XR'
       },
       connectedClients() {
         return this.pairedClients.filter(client => client.connected)
@@ -224,8 +222,7 @@
       },
       sessionDeviceName() {
         if (this.activeClient) return this.activeClient.name || 'XR device'
-        const previouslyConnected = this.pairedClients.find(client => client.always_use_virtual_display)
-        return previouslyConnected?.name || 'your XR device'
+        return 'your XR device'
       },
       sessionState() {
         if (this.activeClient) return 'streaming'
@@ -254,11 +251,11 @@
       },
       virtualDisplayStatus() {
         if (!this.config || this.config.platform !== 'windows') {
-          return { status: this.loading ? 'Checking' : 'Automatic', tone: 'neutral', description: 'Apollo will use the best available display for the device.' }
+          return { status: this.loading ? 'Checking' : 'Automatic', tone: 'neutral', description: 'Apollo XR will use the best available display for the device.' }
         }
         const status = Number(this.config.vdisplayStatus)
         if (status === 0) return { status: 'Ready', tone: 'success', description: 'A private XR display is available when an app requests it.' }
-        if (status === 1 || Number.isNaN(status)) return { status: 'Checking', tone: 'neutral', description: 'Apollo is checking the private-display driver.' }
+        if (status === 1 || Number.isNaN(status)) return { status: 'Checking', tone: 'neutral', description: 'Apollo XR is checking the private-display driver.' }
         if (status === -2) return { status: 'Update needed', tone: 'warning', description: 'Update the private-display driver before using isolated XR sessions.' }
         return { status: 'Needs attention', tone: 'danger', description: 'The private-display driver is not available.' }
       },
@@ -273,7 +270,7 @@
         if (this.apiError || this.latestFatal) {
           return {
             kicker: 'Host attention',
-            title: 'Apollo needs a quick check',
+            title: 'Apollo XR needs a quick check',
             description: 'Open diagnostics for a plain view of the latest host issue.',
             icon: 'fa-triangle-exclamation',
             primaryLabel: 'View diagnostics',
@@ -325,7 +322,7 @@
         return {
           kicker: 'Host online',
           title: 'Ready for XR',
-          description: 'Open Apollo in Artemis to start this PC’s single streaming session.',
+          description: 'Open Apollo XR in Artemis to start this PC’s single streaming session.',
           icon: 'fa-check',
           primaryLabel: 'Pair another device',
           primaryIcon: 'fa-plus',
@@ -339,7 +336,7 @@
           return { tone: 'danger', icon: 'fa-cloud-arrow-down', title: 'Host status is unavailable', message: this.apiError, action: 'Open diagnostics', href: './troubleshooting' }
         }
         if (this.latestFatal) {
-          return { tone: 'danger', icon: 'fa-circle-exclamation', title: 'Apollo reported a startup problem', message: this.latestFatal, action: 'View logs', href: './troubleshooting#logs' }
+          return { tone: 'danger', icon: 'fa-circle-exclamation', title: 'Apollo XR reported a startup problem', message: this.latestFatal, action: 'View logs', href: './troubleshooting#logs' }
         }
         if (this.virtualDisplayStatus.tone === 'danger' || this.virtualDisplayStatus.tone === 'warning') {
           return { tone: 'warning', icon: 'fa-display', title: 'Private XR display needs attention', message: this.virtualDisplayStatus.description, action: 'Open display settings', href: './config#av' }
@@ -348,7 +345,7 @@
           return { tone: 'warning', icon: 'fa-cubes', title: 'AI 3D is not ready', message: '2D streaming is still available while the depth engine is checked.', action: 'View diagnostics', href: './troubleshooting#logs' }
         }
         if (this.connectedClients.length > 1) {
-          return { tone: 'warning', icon: 'fa-users-viewfinder', title: 'More than one device is connected', message: 'Apollo is designed around one active XR session per PC.', action: 'Manage devices', href: './pin' }
+          return { tone: 'warning', icon: 'fa-users-viewfinder', title: 'More than one device is connected', message: 'Apollo XR is designed around one active XR session per PC.', action: 'Manage devices', href: './pin' }
         }
         return null
       },
@@ -359,13 +356,13 @@
             ? { status: 'Streaming', tone: 'active', description: `Sending ${this.activeAppName} to ${this.activeClient.name || 'your XR device'}.` }
             : this.encoderReady
               ? { status: 'Ready', tone: 'success', description: 'Hardware video encoding is available for Artemis.' }
-              : { status: this.loading ? 'Checking' : 'Automatic', tone: 'neutral', description: 'Apollo chooses the best encoder when streaming begins.' }
+              : { status: this.loading ? 'Checking' : 'Automatic', tone: 'neutral', description: 'Apollo XR chooses the best encoder when streaming begins.' }
 
         const ai3d = this.depthError
           ? { status: 'Needs attention', tone: 'warning', description: '2D remains available while the depth engine is checked.' }
           : this.depthReady
             ? { status: 'Ready', tone: 'success', description: 'Real-time depth is loaded for AI 3D mode in Artemis.' }
-            : { status: this.loading ? 'Checking' : 'On demand', tone: 'neutral', description: 'Apollo prepares AI 3D when Artemis requests it.' }
+            : { status: this.loading ? 'Checking' : 'On demand', tone: 'neutral', description: 'Apollo XR prepares AI 3D when Artemis requests it.' }
 
         return [
           { title: '2D streaming', icon: 'fa-display', ...streaming },
@@ -377,7 +374,7 @@
     methods: {
       async fetchJson(url) {
         const response = await fetch(url, { credentials: 'include' })
-        if (!response.ok) throw new Error(`Apollo returned HTTP ${response.status}`)
+        if (!response.ok) throw new Error(`Apollo XR returned HTTP ${response.status}`)
         return response.json()
       },
       async loadOverview(includeDiagnostics = false) {
@@ -386,7 +383,7 @@
         try {
           const requests = [this.fetchJson('./api/config'), this.fetchJson('./api/clients/list'), this.fetchJson('./api/apps')]
           if (includeDiagnostics) requests.push(fetch('./api/logs', { credentials: 'include' }).then(response => {
-            if (!response.ok) throw new Error(`Apollo returned HTTP ${response.status}`)
+            if (!response.ok) throw new Error(`Apollo XR returned HTTP ${response.status}`)
             return response.text()
           }))
           const [config, clients, apps, logs] = await Promise.all(requests)
@@ -398,7 +395,7 @@
           this.apiError = ''
         } catch (error) {
           console.error(error)
-          this.apiError = 'Apollo could not refresh this overview. Check that the host service is still running.'
+          this.apiError = 'Apollo XR could not refresh this overview. Check that the host service is still running.'
         } finally {
           this.loading = false
           this.refreshing = false
@@ -409,7 +406,7 @@
           const response = await fetch('./api/logs', { credentials: 'include' })
           if (response.ok) this.logs = await response.text()
         } catch (error) {
-          console.debug('Apollo diagnostics are unavailable', error)
+          console.debug('Apollo XR diagnostics are unavailable', error)
         }
       },
       async postJson(url, body) {
@@ -419,9 +416,9 @@
           method: 'POST',
           body: body === undefined ? undefined : JSON.stringify(body),
         })
-        if (!response.ok) throw new Error(`Apollo returned HTTP ${response.status}`)
+        if (!response.ok) throw new Error(`Apollo XR returned HTTP ${response.status}`)
         const result = await response.json()
-        if (result.status === false) throw new Error(result.error || 'Apollo could not complete the action')
+        if (result.status === false) throw new Error(result.error || 'Apollo XR could not complete the action')
         return result
       },
       async disconnectCurrent() {

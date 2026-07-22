@@ -14,10 +14,12 @@ namespace crypto {
   using x509_name_t = util::safe_ptr<X509_NAME, X509_NAME_free>;
 
   cert_chain_t::cert_chain_t():
-      _certs {}, _cert_ctx { X509_STORE_CTX_new() } {
+      _certs {},
+      _cert_ctx {X509_STORE_CTX_new()} {
   }
-  void cert_chain_t::add(p_named_cert_t& named_cert_p) {
-    x509_store_t x509_store { X509_STORE_new() };
+
+  void cert_chain_t::add(p_named_cert_t &named_cert_p) {
+    x509_store_t x509_store {X509_STORE_new()};
 
     X509_STORE_add_cert(x509_store.get(), x509(named_cert_p->cert).get());
     _certs.emplace_back(std::make_pair(named_cert_p, std::move(x509_store)));
@@ -31,8 +33,8 @@ namespace crypto {
     int err_code = X509_STORE_CTX_get_error(ctx);
 
     switch (err_code) {
-      // Expired or not-yet-valid certificates are fine. Sometimes Moonlight is running on embedded devices
-      // that don't have accurate clocks (or haven't yet synchronized by the time Moonlight first runs).
+      // Expired or not-yet-valid certificates are fine. Artemis may start before an XR device's
+      // clock has synchronized.
       // This behavior also matches what GeForce Experience does.
       case X509_V_ERR_CERT_NOT_YET_VALID:
       case X509_V_ERR_CERT_HAS_EXPIRED:
@@ -45,15 +47,15 @@ namespace crypto {
 
   /**
    * @brief Verify the certificate chain.
-   * When certificates from two or more instances of Moonlight have been added to x509_store_t,
-   * only one of them will be verified by X509_verify_cert, resulting in only a single instance of
-   * Moonlight to be able to use Sunshine
+   * When certificates from two or more Artemis installations have been added to x509_store_t,
+   * only one of them will be verified by X509_verify_cert, resulting in only a single Artemis
+   * installation being able to use Apollo.
    *
    * To circumvent this, x509_store_t instance will be created for each instance of the certificates.
    * @param cert The certificate to verify.
    * @return nullptr if the certificate is valid, otherwise an error string.
    */
-  const char * cert_chain_t::verify(x509_t::element_type *cert, p_named_cert_t& named_cert_out) {
+  const char *cert_chain_t::verify(x509_t::element_type *cert, p_named_cert_t &named_cert_out) {
     int err_code = 0;
     for (auto &[named_cert_p, x509_store] : _certs) {
       auto fg = util::fail_guard([this]() {
@@ -64,8 +66,8 @@ namespace crypto {
       X509_STORE_CTX_set_verify_cb(_cert_ctx.get(), openssl_verify_cb);
 
       // We don't care to validate the entire chain for the purposes of client auth.
-      // Some versions of clients forked from Moonlight Embedded produce client certs
-      // that OpenSSL doesn't detect as self-signed due to some X509v3 extensions.
+      // Some Artemis builds produce client certificates that OpenSSL doesn't detect as
+      // self-signed due to some X509v3 extensions.
       X509_STORE_CTX_set_flags(_cert_ctx.get(), X509_V_FLAG_PARTIAL_CHAIN);
 
       auto err = X509_verify_cert(_cert_ctx.get());

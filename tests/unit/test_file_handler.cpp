@@ -4,6 +4,7 @@
  */
 #include "../tests_common.h"
 
+#include <chrono>
 #include <format>
 #include <src/file_handler.h>
 
@@ -80,14 +81,23 @@ Hey, hey, hey!
 
 TEST_P(FileHandlerTests, WriteFileTest) {
   auto [fileNum, content] = GetParam();
-  const std::string fileName = std::format("write_file_test_{}.txt", fileNum);
-  EXPECT_EQ(file_handler::write_file(fileName.c_str(), content), 0);
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  const auto fileName = std::filesystem::temp_directory_path() /
+                        std::format("apollo_write_file_test_{}_{}.txt", nonce, fileNum);
+  EXPECT_EQ(file_handler::write_file(fileName.string().c_str(), content), 0);
+  std::error_code ec;
+  std::filesystem::remove(fileName, ec);
 }
 
 TEST_P(FileHandlerTests, ReadFileTest) {
   auto [fileNum, content] = GetParam();
-  const std::string fileName = std::format("write_file_test_{}.txt", fileNum);
-  EXPECT_EQ(file_handler::read_file(fileName.c_str()), content);
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  const auto fileName = std::filesystem::temp_directory_path() /
+                        std::format("apollo_read_file_test_{}_{}.txt", nonce, fileNum);
+  ASSERT_EQ(file_handler::write_file(fileName.string().c_str(), content), 0);
+  EXPECT_EQ(file_handler::read_file(fileName.string().c_str()), content);
+  std::error_code ec;
+  std::filesystem::remove(fileName, ec);
 }
 
 TEST(FileHandlerTests, ReadMissingFileTest) {

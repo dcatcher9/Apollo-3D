@@ -18,13 +18,7 @@
 #include <d3dcompiler.h>
 #include <DirectXMath.h>
 
-extern "C" {
-#include <libavcodec/avcodec.h>
-#include <libavutil/hwcontext_d3d11va.h>
-}
-
 // lib includes
-#include <AMF/core/Factory.h>
 #include <boost/algorithm/string/predicate.hpp>
 
 // local includes
@@ -36,7 +30,6 @@ extern "C" {
 #include "src/model_manager.h"
 #include "src/nvenc/nvenc_config.h"
 #include "src/nvenc/nvenc_d3d11_native.h"
-#include "src/nvenc/nvenc_d3d11_on_cuda.h"
 #include "src/nvenc/nvenc_utils.h"
 #include "src/sbs_perf.h"
 #include "src/video.h"
@@ -48,12 +41,6 @@ extern "C" {
 namespace platf {
   using namespace std::literals;
 }
-
-static void free_frame(AVFrame *frame) {
-  av_frame_free(&frame);
-}
-
-using frame_t = util::safe_ptr<AVFrame, free_frame>;
 
 namespace platf::dxgi {
 
@@ -129,16 +116,6 @@ namespace platf::dxgi {
   blob_t convert_yuv420_planar_y_ps_linear_hlsl;
   blob_t convert_yuv420_planar_y_ps_perceptual_quantizer_hlsl;
   blob_t convert_yuv420_planar_y_vs_hlsl;
-  blob_t convert_yuv444_packed_ayuv_ps_hlsl;
-  blob_t convert_yuv444_packed_ayuv_ps_linear_hlsl;
-  blob_t convert_yuv444_packed_vs_hlsl;
-  blob_t convert_yuv444_planar_ps_hlsl;
-  blob_t convert_yuv444_planar_ps_linear_hlsl;
-  blob_t convert_yuv444_planar_ps_perceptual_quantizer_hlsl;
-  blob_t convert_yuv444_packed_y410_ps_hlsl;
-  blob_t convert_yuv444_packed_y410_ps_linear_hlsl;
-  blob_t convert_yuv444_packed_y410_ps_perceptual_quantizer_hlsl;
-  blob_t convert_yuv444_planar_vs_hlsl;
   blob_t cursor_ps_hlsl;
   blob_t cursor_ps_normalize_white_hlsl;
   blob_t rgb_present_linear_to_srgb_ps_hlsl;
@@ -524,17 +501,15 @@ namespace platf::dxgi {
           return -1;
         }
 
-        auto draw = [&](auto &input, auto &y_or_yuv_viewports, auto &uv_viewport, bool input_is_linear) {
+        auto draw = [&](auto &input, const D3D11_VIEWPORT &y_or_yuv_viewport, const D3D11_VIEWPORT &uv_viewport, bool input_is_linear) {
           device_ctx->PSSetShaderResources(0, 1, &input);
 
           // Draw Y/YUV
           device_ctx->OMSetRenderTargets(1, &out_Y_or_YUV_rtv, nullptr);
           device_ctx->VSSetShader(convert_Y_or_YUV_vs.get(), nullptr, 0);
           device_ctx->PSSetShader(input_is_linear ? convert_Y_or_YUV_fp16_ps.get() : convert_Y_or_YUV_ps.get(), nullptr, 0);
-          auto viewport_count = (format == DXGI_FORMAT_R16_UINT) ? 3 : 1;
-          assert(viewport_count <= y_or_yuv_viewports.size());
-          device_ctx->RSSetViewports(viewport_count, y_or_yuv_viewports.data());
-          device_ctx->Draw(3 * viewport_count, 0);  // vertex shader will spread vertices across viewports
+          device_ctx->RSSetViewports(1, &y_or_yuv_viewport);
+          device_ctx->Draw(3, 0);
 
           // Draw UV if needed
           if (out_UV_rtv) {
@@ -610,15 +585,6 @@ namespace platf::dxgi {
           return true;
         };
 
-        // Clear render target view(s) once so that the aspect ratio mismatch "bars" appear black
-        if (!rtvs_cleared) {
-          auto black = create_black_texture_for_rtv_clear();
-          if (black) {
-            draw(black, out_Y_or_YUV_viewports_for_clear, out_UV_viewport_for_clear, false);
-          }
-          rtvs_cleared = true;
-        }
-
         if (sbs_mode != ::video::SBS_OFF) {
           // Perf benchmark: CPU wall time of the whole SBS block (estimator dispatch + composite
           // draw submission). GPU-side inference times are measured separately via CUDA events in
@@ -674,8 +640,7 @@ namespace platf::dxgi {
                   }
                 } else {
                   const auto error_now = std::chrono::steady_clock::now();
-                  if (matched_unknown_frame_error_last.time_since_epoch().count() == 0 ||
-                      error_now - matched_unknown_frame_error_last >= std::chrono::seconds(30)) {
+                  if (matched_unknown_frame_error_last.time_since_epoch().count() == 0 || error_now - matched_unknown_frame_error_last >= std::chrono::seconds(30)) {
                     if (matched_unknown_frame_errors_suppressed) {
                       BOOST_LOG(error) << "Matched depth completed unknown frame "sv
                                        << est.completed_frame_id << "; repeating the last output ("sv
@@ -774,7 +739,7 @@ namespace platf::dxgi {
             }
           } else {
             // Draw the SBS intermediate into encoder YUV.
-            draw(final_sbs_srv, out_Y_or_YUV_viewports, out_UV_viewport, sbs_intermediate_linear);
+            draw(final_sbs_srv, out_Y_or_YUV_viewport, out_UV_viewport, sbs_intermediate_linear);
           }
           end_sbs_gpu_timer(gpu_timer);
 
@@ -794,8 +759,8 @@ namespace platf::dxgi {
                                           matched_stats_age_sum_ms / matched_stats_completions :
                                           0.0;
               const double repeat_pct = matched_stats_calls ?
-                                            100.0 * matched_stats_repeats / matched_stats_calls :
-                                            0.0;
+                                          100.0 * matched_stats_repeats / matched_stats_calls :
+                                          0.0;
               BOOST_LOG(info) << "SBS cadence: frames="sv << matched_stats_calls
                               << " completed="sv << matched_stats_completions
                               << " repeats="sv << matched_stats_repeats
@@ -820,7 +785,7 @@ namespace platf::dxgi {
             }
           } else {
             // Plain 2D: draw the captured frame straight into the encoder output.
-            draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewports, out_UV_viewport, img.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+            draw(img_ctx.encoder_input_res, out_Y_or_YUV_viewport, out_UV_viewport, img.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
           }
         }
 
@@ -836,10 +801,6 @@ namespace platf::dxgi {
 
     void apply_colorspace(const ::video::sunshine_colorspace_t &colorspace) {
       auto color_vectors = ::video::color_vectors_from_colorspace(colorspace, true);
-
-      if (format == DXGI_FORMAT_AYUV || format == DXGI_FORMAT_R16_UINT || format == DXGI_FORMAT_Y410) {
-        color_vectors = ::video::color_vectors_from_colorspace(colorspace, false);
-      }
 
       if (!color_vectors) {
         BOOST_LOG(error) << "No vector data for colorspace"sv;
@@ -1394,35 +1355,6 @@ namespace platf::dxgi {
             }
             break;
 
-          case DXGI_FORMAT_R16_UINT:
-            // Planar 16-bit YUV 4:4:4, 10 most significant bits store the value
-            create_vertex_shader_helper(convert_yuv444_planar_vs_hlsl, convert_Y_or_YUV_vs);
-            create_pixel_shader_helper(convert_yuv444_planar_ps_hlsl, convert_Y_or_YUV_ps);
-            if (display->is_hdr()) {
-              create_pixel_shader_helper(convert_yuv444_planar_ps_perceptual_quantizer_hlsl, convert_Y_or_YUV_fp16_ps);
-            } else {
-              create_pixel_shader_helper(convert_yuv444_planar_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
-            }
-            break;
-
-          case DXGI_FORMAT_AYUV:
-            // Packed 8-bit YUV 4:4:4
-            create_vertex_shader_helper(convert_yuv444_packed_vs_hlsl, convert_Y_or_YUV_vs);
-            create_pixel_shader_helper(convert_yuv444_packed_ayuv_ps_hlsl, convert_Y_or_YUV_ps);
-            create_pixel_shader_helper(convert_yuv444_packed_ayuv_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
-            break;
-
-          case DXGI_FORMAT_Y410:
-            // Packed 10-bit YUV 4:4:4
-            create_vertex_shader_helper(convert_yuv444_packed_vs_hlsl, convert_Y_or_YUV_vs);
-            create_pixel_shader_helper(convert_yuv444_packed_y410_ps_hlsl, convert_Y_or_YUV_ps);
-            if (display->is_hdr()) {
-              create_pixel_shader_helper(convert_yuv444_packed_y410_ps_perceptual_quantizer_hlsl, convert_Y_or_YUV_fp16_ps);
-            } else {
-              create_pixel_shader_helper(convert_yuv444_packed_y410_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
-            }
-            break;
-
           default:
             BOOST_LOG(error) << "Unable to create shaders because of the unrecognized surface format";
             return -1;
@@ -1512,24 +1444,12 @@ namespace platf::dxgi {
       if (rgb_only) {
         // Local AR presents RGB directly. It needs the common capture/SBS resources above, but
         // no encoder output texture, chroma shaders, planar RTVs, or YUV conversion constants.
-        rtvs_cleared = true;
         return 0;
       }
 
-      out_Y_or_YUV_viewports[0] = {offsetX, offsetY, out_width_f, out_height_f, 0.0f, 1.0f};  // Y plane
-      out_Y_or_YUV_viewports[1] = out_Y_or_YUV_viewports[0];  // U plane
-      out_Y_or_YUV_viewports[1].TopLeftY += out_height;
-      out_Y_or_YUV_viewports[2] = out_Y_or_YUV_viewports[1];  // V plane
-      out_Y_or_YUV_viewports[2].TopLeftY += out_height;
-
-      out_Y_or_YUV_viewports_for_clear[0] = {0, 0, (float) out_width, (float) out_height, 0.0f, 1.0f};  // Y plane
-      out_Y_or_YUV_viewports_for_clear[1] = out_Y_or_YUV_viewports_for_clear[0];  // U plane
-      out_Y_or_YUV_viewports_for_clear[1].TopLeftY += out_height;
-      out_Y_or_YUV_viewports_for_clear[2] = out_Y_or_YUV_viewports_for_clear[1];  // V plane
-      out_Y_or_YUV_viewports_for_clear[2].TopLeftY += out_height;
+      out_Y_or_YUV_viewport = {offsetX, offsetY, out_width_f, out_height_f, 0.0f, 1.0f};  // Y plane
 
       out_UV_viewport = {offsetX / 2, offsetY / 2, out_width_f / 2, out_height_f / 2, 0.0f, 1.0f};
-      out_UV_viewport_for_clear = {0, 0, (float) out_width / 2, (float) out_height / 2, 0.0f, 1.0f};
 
       float subsample_offset_in[16 / sizeof(float)] {1.0f / (float) out_width_f, 1.0f / (float) out_height_f};  // aligned to 16-byte
       subsample_offset = make_buffer(device.get(), subsample_offset_in);
@@ -1553,31 +1473,16 @@ namespace platf::dxgi {
 
       DXGI_FORMAT rtv_Y_or_YUV_format = DXGI_FORMAT_UNKNOWN;
       DXGI_FORMAT rtv_UV_format = DXGI_FORMAT_UNKNOWN;
-      bool rtv_simple_clear = false;
 
       switch (format) {
         case DXGI_FORMAT_NV12:
           rtv_Y_or_YUV_format = DXGI_FORMAT_R8_UNORM;
           rtv_UV_format = DXGI_FORMAT_R8G8_UNORM;
-          rtv_simple_clear = true;
           break;
 
         case DXGI_FORMAT_P010:
           rtv_Y_or_YUV_format = DXGI_FORMAT_R16_UNORM;
           rtv_UV_format = DXGI_FORMAT_R16G16_UNORM;
-          rtv_simple_clear = true;
-          break;
-
-        case DXGI_FORMAT_AYUV:
-          rtv_Y_or_YUV_format = DXGI_FORMAT_R8G8B8A8_UINT;
-          break;
-
-        case DXGI_FORMAT_R16_UINT:
-          rtv_Y_or_YUV_format = DXGI_FORMAT_R16_UINT;
-          break;
-
-        case DXGI_FORMAT_Y410:
-          rtv_Y_or_YUV_format = DXGI_FORMAT_R10G10B10A2_UINT;
           break;
 
         default:
@@ -1609,18 +1514,12 @@ namespace platf::dxgi {
         return -1;
       }
 
-      if (rtv_simple_clear) {
-        // Clear the RTVs to ensure the aspect ratio padding is black
-        const float y_black[] = {0.0f, 0.0f, 0.0f, 0.0f};
-        device_ctx->ClearRenderTargetView(out_Y_or_YUV_rtv.get(), y_black);
-        if (out_UV_rtv) {
-          const float uv_black[] = {0.5f, 0.5f, 0.5f, 0.5f};
-          device_ctx->ClearRenderTargetView(out_UV_rtv.get(), uv_black);
-        }
-        rtvs_cleared = true;
-      } else {
-        // Can't use ClearRenderTargetView(), will clear on first convert()
-        rtvs_cleared = false;
+      // NV12 and P010 support native RTV clears. Initialize aspect-ratio padding once.
+      const float y_black[] = {0.0f, 0.0f, 0.0f, 0.0f};
+      device_ctx->ClearRenderTargetView(out_Y_or_YUV_rtv.get(), y_black);
+      if (out_UV_rtv) {
+        const float uv_black[] = {0.5f, 0.5f, 0.5f, 0.5f};
+        device_ctx->ClearRenderTargetView(out_UV_rtv.get(), uv_black);
       }
 
       return 0;
@@ -1652,18 +1551,6 @@ namespace platf::dxgi {
 
         case pix_fmt_e::p010:
           format = DXGI_FORMAT_P010;
-          break;
-
-        case pix_fmt_e::ayuv:
-          format = DXGI_FORMAT_AYUV;
-          break;
-
-        case pix_fmt_e::yuv444p16:
-          format = DXGI_FORMAT_R16_UINT;
-          break;
-
-        case pix_fmt_e::y410:
-          format = DXGI_FORMAT_Y410;
           break;
 
         default:
@@ -1836,40 +1723,6 @@ namespace platf::dxgi {
       return 0;
     }
 
-    shader_res_t create_black_texture_for_rtv_clear() {
-      constexpr auto width = 32;
-      constexpr auto height = 32;
-
-      D3D11_TEXTURE2D_DESC texture_desc = {};
-      texture_desc.Width = width;
-      texture_desc.Height = height;
-      texture_desc.MipLevels = 1;
-      texture_desc.ArraySize = 1;
-      texture_desc.SampleDesc.Count = 1;
-      texture_desc.Usage = D3D11_USAGE_IMMUTABLE;
-      texture_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-      texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-
-      std::vector<uint8_t> mem(4 * width * height, 0);
-      D3D11_SUBRESOURCE_DATA texture_data = {mem.data(), 4 * width, 0};
-
-      texture2d_t texture;
-      auto status = device->CreateTexture2D(&texture_desc, &texture_data, &texture);
-      if (FAILED(status)) {
-        BOOST_LOG(error) << "Failed to create black texture: " << util::log_hex(status);
-        return {};
-      }
-
-      shader_res_t resource_view;
-      status = device->CreateShaderResourceView(texture.get(), nullptr, &resource_view);
-      if (FAILED(status)) {
-        BOOST_LOG(error) << "Failed to create black texture resource view: " << util::log_hex(status);
-        return {};
-      }
-
-      return resource_view;
-    }
-
     ::video::color_t *color_p;
 
     buf_t subsample_offset;
@@ -1880,7 +1733,6 @@ namespace platf::dxgi {
 
     render_target_t out_Y_or_YUV_rtv;
     render_target_t out_UV_rtv;
-    bool rtvs_cleared = false;
 
     // d3d_img_t::id -> encoder_img_ctx_t
     // These store the encoder textures for each img_t that passes through
@@ -1898,8 +1750,8 @@ namespace platf::dxgi {
     ps_t convert_UV_ps;
     ps_t convert_UV_fp16_ps;
 
-    std::array<D3D11_VIEWPORT, 3> out_Y_or_YUV_viewports, out_Y_or_YUV_viewports_for_clear;
-    D3D11_VIEWPORT out_UV_viewport, out_UV_viewport_for_clear;
+    D3D11_VIEWPORT out_Y_or_YUV_viewport;
+    D3D11_VIEWPORT out_UV_viewport;
 
     DXGI_FORMAT format;
 
@@ -2173,8 +2025,7 @@ namespace platf::dxgi {
           source_name.header.size = sizeof(source_name);
           source_name.header.adapterId = path.sourceInfo.adapterId;
           source_name.header.id = path.sourceInfo.id;
-          if (DisplayConfigGetDeviceInfo(&source_name.header) != ERROR_SUCCESS ||
-              display_name != source_name.viewGdiDeviceName) {
+          if (DisplayConfigGetDeviceInfo(&source_name.header) != ERROR_SUCCESS || display_name != source_name.viewGdiDeviceName) {
             continue;
           }
 
@@ -2183,8 +2034,7 @@ namespace platf::dxgi {
           target_name.header.size = sizeof(target_name);
           target_name.header.adapterId = path.targetInfo.adapterId;
           target_name.header.id = path.targetInfo.id;
-          if (DisplayConfigGetDeviceInfo(&target_name.header) != ERROR_SUCCESS ||
-              !target_name.monitorDevicePath[0]) {
+          if (DisplayConfigGetDeviceInfo(&target_name.header) != ERROR_SUCCESS || !target_name.monitorDevicePath[0]) {
             return std::nullopt;
           }
           return local_presenter_display_identity_t {
@@ -2206,11 +2056,7 @@ namespace platf::dxgi {
       const local_presenter_display_identity_t &target,
       const LUID &expected_adapter
     ) {
-      if (!live_target || source.device_path.empty() || target.device_path.empty() ||
-          source.device_path == target.device_path ||
-          !same_local_presenter_luid(source.adapter_id, expected_adapter) ||
-          !same_local_presenter_luid(target.adapter_id, expected_adapter) ||
-          !boost::algorithm::istarts_with(source.friendly_name, std::wstring(L"Apollo AR Des"))) {
+      if (!live_target || source.device_path.empty() || target.device_path.empty() || source.device_path == target.device_path || !same_local_presenter_luid(source.adapter_id, expected_adapter) || !same_local_presenter_luid(target.adapter_id, expected_adapter) || !boost::algorithm::istarts_with(source.friendly_name, std::wstring(L"Apollo AR Des"))) {
         return false;
       }
       std::lock_guard lock(live_target->mutex);
@@ -2680,13 +2526,7 @@ namespace platf::dxgi {
     const auto target_name_wide = platf::from_utf8(target_display_name);
     const auto source_identity_at_start = query_local_presenter_display_identity(source_name_wide);
     const auto target_identity_at_start = query_local_presenter_display_identity(target_name_wide);
-    if (!source_identity_at_start || !target_identity_at_start ||
-        !local_presenter_identity_is_coherent(
-          config.live_target,
-          *source_identity_at_start,
-          *target_identity_at_start,
-          config.target_adapter_id
-        )) {
+    if (!source_identity_at_start || !target_identity_at_start || !local_presenter_identity_is_coherent(config.live_target, *source_identity_at_start, *target_identity_at_start, config.target_adapter_id)) {
       BOOST_LOG(warning) << "Local AR presenter rejected a stale source/sink display-name generation."sv;
       return local_presenter_result_e::reinit;
     }
@@ -2715,7 +2555,17 @@ namespace platf::dxgi {
     capture_config.dynamicRange = config.hdr ? 1 : 0;
     capture_config.encodingFramerate = config.target_refresh_millihz;
 
-    auto display = platf::display(platf::mem_type_e::dxgi, config.source_display_name, capture_config);
+    const auto preferred_capture_backend = config.capture_failover ?
+                                             config.capture_failover->preferred_backend() :
+                                             capture_backend_e::ddup;
+    auto display = platf::display(
+      config.source_display_name,
+      capture_config,
+      preferred_capture_backend
+    );
+    if (display && config.capture_failover) {
+      config.capture_failover->note_backend_opened(display->capture_backend());
+    }
     auto dxgi_display = std::dynamic_pointer_cast<display_base_t>(display);
     if (!dxgi_display) {
       BOOST_LOG(warning) << "Local AR presenter could not yet open virtual source display "sv
@@ -2729,10 +2579,7 @@ namespace platf::dxgi {
     }
     const auto source_identity_after_open = query_local_presenter_display_identity(source_name_wide);
     DXGI_ADAPTER_DESC1 source_adapter_desc {};
-    if (!source_identity_after_open ||
-        source_identity_after_open->device_path != source_identity_at_start->device_path ||
-        !dxgi_display->adapter || FAILED(dxgi_display->adapter->GetDesc1(&source_adapter_desc)) ||
-        !same_local_presenter_luid(source_adapter_desc.AdapterLuid, source_identity_after_open->adapter_id)) {
+    if (!source_identity_after_open || source_identity_after_open->device_path != source_identity_at_start->device_path || !dxgi_display->adapter || FAILED(dxgi_display->adapter->GetDesc1(&source_adapter_desc)) || !same_local_presenter_luid(source_adapter_desc.AdapterLuid, source_identity_after_open->adapter_id)) {
       BOOST_LOG(info) << "Local AR virtual source identity changed while DXGI capture was opening; reinitializing."sv;
       return local_presenter_result_e::reinit;
     }
@@ -2764,13 +2611,11 @@ namespace platf::dxgi {
 
     std::promise<std::pair<HWND, DWORD>> window_ready;
     auto window_future = window_ready.get_future();
-    std::jthread window_thread([
-      &pointer_isolation,
-      target_rect,
-      output_width,
-      output_height,
-      ready = std::move(window_ready)
-    ](std::stop_token window_stop_token) mutable {
+    std::jthread window_thread([&pointer_isolation,
+                                target_rect,
+                                output_width,
+                                output_height,
+                                ready = std::move(window_ready)](std::stop_token window_stop_token) mutable {
       HWND created_window = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         local_presenter_window_class,
@@ -2827,14 +2672,14 @@ namespace platf::dxgi {
     });
 
     if (!SetWindowPos(
-      window,
-      HWND_TOPMOST,
-      target_rect.left,
-      target_rect.top,
-      output_width,
-      output_height,
-      SWP_NOACTIVATE
-    )) {
+          window,
+          HWND_TOPMOST,
+          target_rect.left,
+          target_rect.top,
+          output_width,
+          output_height,
+          SWP_NOACTIVATE
+        )) {
       BOOST_LOG(warning) << "Local AR presenter could not place its hidden output window: "sv
                          << GetLastError();
       return local_presenter_result_e::reinit;
@@ -2865,8 +2710,7 @@ namespace platf::dxgi {
                        << util::log_hex(status);
       return local_presenter_result_e::error;
     }
-    if (presenter_adapter_desc.AdapterLuid.HighPart != config.target_adapter_id.HighPart ||
-        presenter_adapter_desc.AdapterLuid.LowPart != config.target_adapter_id.LowPart) {
+    if (presenter_adapter_desc.AdapterLuid.HighPart != config.target_adapter_id.HighPart || presenter_adapter_desc.AdapterLuid.LowPart != config.target_adapter_id.LowPart) {
       BOOST_LOG(info) << "Local AR physical output migrated to another graphics adapter; "sv
                          "requesting a complete presentation-session rebuild."sv;
       return local_presenter_result_e::error;
@@ -2896,15 +2740,7 @@ namespace platf::dxgi {
     }
     const auto source_identity_before_present = query_local_presenter_display_identity(source_name_wide);
     const auto target_identity_before_present = query_local_presenter_display_identity(target_display_name_wide);
-    if (!source_identity_before_present || !target_identity_before_present ||
-        source_identity_before_present->device_path != source_identity_at_start->device_path ||
-        target_identity_before_present->device_path != target_identity_at_start->device_path ||
-        !local_presenter_identity_is_coherent(
-          config.live_target,
-          *source_identity_before_present,
-          *target_identity_before_present,
-          config.target_adapter_id
-        )) {
+    if (!source_identity_before_present || !target_identity_before_present || source_identity_before_present->device_path != source_identity_at_start->device_path || target_identity_before_present->device_path != target_identity_at_start->device_path || !local_presenter_identity_is_coherent(config.live_target, *source_identity_before_present, *target_identity_before_present, config.target_adapter_id)) {
       BOOST_LOG(info) << "Local AR source/sink identity changed while presentation resources were opening; reinitializing."sv;
       return local_presenter_result_e::reinit;
     }
@@ -2938,14 +2774,14 @@ namespace platf::dxgi {
     }
     target_rect = actual_target_rect;
     if (!SetWindowPos(
-      window,
-      HWND_TOPMOST,
-      target_rect.left,
-      target_rect.top,
-      output_width,
-      output_height,
-      SWP_NOACTIVATE | SWP_SHOWWINDOW
-    )) {
+          window,
+          HWND_TOPMOST,
+          target_rect.left,
+          target_rect.top,
+          output_width,
+          output_height,
+          SWP_NOACTIVATE | SWP_SHOWWINDOW
+        )) {
       BOOST_LOG(warning) << "Local AR presenter could not place its output window on the verified sink: "sv
                          << GetLastError();
       return local_presenter_result_e::reinit;
@@ -3084,6 +2920,7 @@ namespace platf::dxgi {
     };
 
     bool presentation_reinit_requested = false;
+    std::uint64_t capture_attempt_frames = 0;
     std::uint64_t captured_frames = 0;
     std::uint64_t presented_frames = 0;
     std::uint64_t busy_present_drops = 0;
@@ -3116,6 +2953,7 @@ namespace platf::dxgi {
       if (!frame_captured) {
         return true;
       }
+      ++capture_attempt_frames;
       if (diagnostics_enabled) {
         ++captured_frames;
       }
@@ -3130,14 +2968,14 @@ namespace platf::dxgi {
           return false;
         }
         if (!SetWindowPos(
-          window,
-          HWND_TOPMOST,
-          latest_target_rect.left,
-          latest_target_rect.top,
-          output_width,
-          output_height,
-          SWP_NOACTIVATE | SWP_SHOWWINDOW
-        )) {
+              window,
+              HWND_TOPMOST,
+              latest_target_rect.left,
+              latest_target_rect.top,
+              output_width,
+              output_height,
+              SWP_NOACTIVATE | SWP_SHOWWINDOW
+            )) {
           BOOST_LOG(warning) << "Local AR presenter could not follow the physical sink position: "sv
                              << GetLastError();
           presentation_reinit_requested = true;
@@ -3198,12 +3036,27 @@ namespace platf::dxgi {
       return true;
     };
 
+    const auto capture_backend = display->capture_backend();
+    const auto capture_started = std::chrono::steady_clock::now();
     const auto capture_status = display->capture(push_image, pull_image, &capture_cursor);
+    if (config.capture_failover) {
+      const auto previous_preference = config.capture_failover->preferred_backend();
+      config.capture_failover->note_capture_result(
+        capture_backend,
+        capture_status,
+        capture_attempt_frames,
+        std::chrono::steady_clock::now() - capture_started
+      );
+      if (previous_preference != config.capture_failover->preferred_backend()) {
+        BOOST_LOG(warning) << "Local AR Desktop Duplication failed repeatedly before stable capture; "sv
+                              "using Windows.Graphics.Capture for the rest of this session."sv;
+      }
+    }
     if (presentation_reinit_requested && !stop_token.stop_requested()) {
       return local_presenter_result_e::reinit;
     }
-    if (capture_status == capture_e::reinit && !stop_token.stop_requested()) {
-      BOOST_LOG(info) << "Local AR capture topology changed; reinitializing the presenter."sv;
+    if ((capture_status == capture_e::reinit || capture_status == capture_e::error) && !stop_token.stop_requested()) {
+      BOOST_LOG(info) << "Local AR capture backend stopped; reinitializing the presenter."sv;
       return local_presenter_result_e::reinit;
     }
     if (!stop_token.stop_requested() && !window_closed) {
@@ -3215,96 +3068,6 @@ namespace platf::dxgi {
     BOOST_LOG(info) << "Local AR presentation stopped."sv;
     return local_presenter_result_e::stopped;
   }
-
-  class d3d_avcodec_encode_device_t: public avcodec_encode_device_t {
-  public:
-    int init(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
-      int result = base.init(display, adapter_p, pix_fmt);
-      data = base.device.get();
-      return result;
-    }
-
-    int convert(platf::img_t &img_base) override {
-      return base.convert(img_base);
-    }
-
-    void apply_colorspace() override {
-      base.apply_colorspace(colorspace);
-    }
-
-    void init_hwframes(AVHWFramesContext *frames) override {
-      // We may be called with a QSV or D3D11VA context
-      if (frames->device_ctx->type == AV_HWDEVICE_TYPE_D3D11VA) {
-        auto d3d11_frames = (AVD3D11VAFramesContext *) frames->hwctx;
-
-        // The encoder requires textures with D3D11_BIND_RENDER_TARGET set
-        d3d11_frames->BindFlags = D3D11_BIND_RENDER_TARGET;
-        d3d11_frames->MiscFlags = 0;
-      }
-
-      // We require a single texture
-      frames->initial_pool_size = 1;
-    }
-
-    int prepare_to_derive_context(int hw_device_type) override {
-      // QuickSync requires our device to be multithread-protected
-      if (hw_device_type == AV_HWDEVICE_TYPE_QSV) {
-        multithread_t mt;
-
-        auto status = base.device->QueryInterface(IID_ID3D11Multithread, (void **) &mt);
-        if (FAILED(status)) {
-          BOOST_LOG(warning) << "Failed to query ID3D11Multithread interface from device [0x"sv << util::hex(status).to_string_view() << ']';
-          return -1;
-        }
-
-        mt->SetMultithreadProtected(TRUE);
-      }
-
-      return 0;
-    }
-
-    int set_frame(AVFrame *frame, AVBufferRef *hw_frames_ctx) override {
-      this->hwframe.reset(frame);
-      this->frame = frame;
-
-      // Populate this frame with a hardware buffer if one isn't there already
-      if (!frame->buf[0]) {
-        auto err = av_hwframe_get_buffer(hw_frames_ctx, frame, 0);
-        if (err) {
-          char err_str[AV_ERROR_MAX_STRING_SIZE] {0};
-          BOOST_LOG(error) << "Failed to get hwframe buffer: "sv << av_make_error_string(err_str, AV_ERROR_MAX_STRING_SIZE, err);
-          return -1;
-        }
-      }
-
-      // If this is a frame from a derived context, we'll need to map it to D3D11
-      ID3D11Texture2D *frame_texture;
-      if (frame->format != AV_PIX_FMT_D3D11) {
-        frame_t d3d11_frame {av_frame_alloc()};
-
-        d3d11_frame->format = AV_PIX_FMT_D3D11;
-
-        auto err = av_hwframe_map(d3d11_frame.get(), frame, AV_HWFRAME_MAP_WRITE | AV_HWFRAME_MAP_OVERWRITE);
-        if (err) {
-          char err_str[AV_ERROR_MAX_STRING_SIZE] {0};
-          BOOST_LOG(error) << "Failed to map D3D11 frame: "sv << av_make_error_string(err_str, AV_ERROR_MAX_STRING_SIZE, err);
-          return -1;
-        }
-
-        // Get the texture from the mapped frame
-        frame_texture = (ID3D11Texture2D *) d3d11_frame->data[0];
-      } else {
-        // Otherwise, we can just use the texture inside the original frame
-        frame_texture = (ID3D11Texture2D *) frame->data[0];
-      }
-
-      return base.init_output(frame_texture, frame->width, frame->height);
-    }
-
-  private:
-    d3d_base_encode_device base;
-    frame_t hwframe;
-  };
 
   class d3d_nvenc_encode_device_t: public nvenc_encode_device_t {
   public:
@@ -3319,11 +3082,7 @@ namespace platf::dxgi {
         return false;
       }
 
-      if (pix_fmt == pix_fmt_e::yuv444p16) {
-        nvenc_d3d = std::make_unique<nvenc::nvenc_d3d11_on_cuda>(base.device.get());
-      } else {
-        nvenc_d3d = std::make_unique<nvenc::nvenc_d3d11_native>(base.device.get());
-      }
+      nvenc_d3d = std::make_unique<nvenc::nvenc_d3d11_native>(base.device.get());
       nvenc = nvenc_d3d.get();
 
       return true;
@@ -3818,7 +3577,7 @@ namespace platf::dxgi {
   }
 
   int display_ddup_vram_t::init(const ::video::config_t &config, const std::string &display_name) {
-    if (display_base_t::init(config, display_name) || dup.init(this, config)) {
+    if (display_base_t::init(config, display_name, capture_backend_e::ddup) || dup.init(this, config)) {
       return -1;
     }
 
@@ -3961,7 +3720,7 @@ namespace platf::dxgi {
   }
 
   int display_wgc_vram_t::init(const ::video::config_t &config, const std::string &display_name) {
-    if (display_base_t::init(config, display_name) || dup.init(this, config)) {
+    if (display_base_t::init(config, display_name, capture_backend_e::wgc) || dup.init(this, config)) {
       return -1;
     }
 
@@ -4094,7 +3853,7 @@ namespace platf::dxgi {
 
   /**
    * @brief Check that a given codec is supported by the display device.
-   * @param name The FFmpeg codec name (or similar for non-FFmpeg codecs).
+   * @param name The native NVENC codec name.
    * @param config The codec configuration.
    * @return `true` if supported, `false` otherwise.
    */
@@ -4102,86 +3861,12 @@ namespace platf::dxgi {
     DXGI_ADAPTER_DESC adapter_desc;
     adapter->GetDesc(&adapter_desc);
 
-    if (adapter_desc.VendorId == 0x1002) {  // AMD
-      // If it's not an AMF encoder, it's not compatible with an AMD GPU
-      if (!boost::algorithm::ends_with(name, "_amf")) {
-        return false;
-      }
-
-      // Perform AMF version checks if we're using an AMD GPU. This check is placed in display_vram_t
-      // to avoid hitting the display_ram_t path which uses software encoding and doesn't touch AMF.
-      HMODULE amfrt = LoadLibraryW(AMF_DLL_NAME);
-      if (amfrt) {
-        auto unload_amfrt = util::fail_guard([amfrt]() {
-          FreeLibrary(amfrt);
-        });
-
-        auto fnAMFQueryVersion = (AMFQueryVersion_Fn) GetProcAddress(amfrt, AMF_QUERY_VERSION_FUNCTION_NAME);
-        if (fnAMFQueryVersion) {
-          amf_uint64 version;
-          auto result = fnAMFQueryVersion(&version);
-          if (result == AMF_OK) {
-            if (config.videoFormat == 2 && version < AMF_MAKE_FULL_VERSION(1, 4, 30, 0)) {
-              // AMF 1.4.30 adds ultra low latency mode for AV1. Don't use AV1 on earlier versions.
-              // This corresponds to driver version 23.5.2 (23.10.01.45) or newer.
-              BOOST_LOG(warning) << "AV1 encoding is disabled on AMF version "sv
-                                 << AMF_GET_MAJOR_VERSION(version) << '.'
-                                 << AMF_GET_MINOR_VERSION(version) << '.'
-                                 << AMF_GET_SUBMINOR_VERSION(version) << '.'
-                                 << AMF_GET_BUILD_VERSION(version);
-              BOOST_LOG(warning) << "If your AMD GPU supports AV1 encoding, update your graphics drivers!"sv;
-              return false;
-            } else if (config.dynamicRange && version < AMF_MAKE_FULL_VERSION(1, 4, 23, 0)) {
-              // Older versions of the AMD AMF runtime can crash when fed P010 surfaces.
-              // Fail if AMF version is below 1.4.23 where HEVC Main10 encoding was introduced.
-              // AMF 1.4.23 corresponds to driver version 21.12.1 (21.40.11.03) or newer.
-              BOOST_LOG(warning) << "HDR encoding is disabled on AMF version "sv
-                                 << AMF_GET_MAJOR_VERSION(version) << '.'
-                                 << AMF_GET_MINOR_VERSION(version) << '.'
-                                 << AMF_GET_SUBMINOR_VERSION(version) << '.'
-                                 << AMF_GET_BUILD_VERSION(version);
-              BOOST_LOG(warning) << "If your AMD GPU supports HEVC Main10 encoding, update your graphics drivers!"sv;
-              return false;
-            }
-          } else {
-            BOOST_LOG(warning) << "AMFQueryVersion() failed: "sv << result;
-          }
-        } else {
-          BOOST_LOG(warning) << "AMF DLL missing export: "sv << AMF_QUERY_VERSION_FUNCTION_NAME;
-        }
-      } else {
-        BOOST_LOG(warning) << "Detected AMD GPU but AMF failed to load"sv;
-      }
-    } else if (adapter_desc.VendorId == 0x8086) {  // Intel
-      // If it's not a QSV encoder, it's not compatible with an Intel GPU
-      if (!boost::algorithm::ends_with(name, "_qsv")) {
-        return false;
-      }
-      if (config.chromaSamplingType == 1) {
-        if (config.videoFormat == 0 || config.videoFormat == 2) {
-          // QSV doesn't support 4:4:4 in H.264 or AV1
-          return false;
-        }
-        // TODO: Blacklist HEVC 4:4:4 based on adapter model
-      }
-    } else if (adapter_desc.VendorId == 0x10de) {  // Nvidia
-      // If it's not an NVENC encoder, it's not compatible with an Nvidia GPU
-      if (!boost::algorithm::ends_with(name, "_nvenc")) {
-        return false;
-      }
-    } else {
-      BOOST_LOG(warning) << "Unknown GPU vendor ID: " << util::hex(adapter_desc.VendorId).to_string_view();
+    if (adapter_desc.VendorId != 0x10de) {
+      BOOST_LOG(error) << "Apollo requires an NVIDIA display adapter; detected vendor ID "
+                       << util::hex(adapter_desc.VendorId).to_string_view();
+      return false;
     }
-
-    return true;
-  }
-
-  std::unique_ptr<avcodec_encode_device_t> display_vram_t::make_avcodec_encode_device(pix_fmt_e pix_fmt) {
-    auto device = std::make_unique<d3d_avcodec_encode_device_t>();
-    if (device->init(shared_from_this(), adapter.get(), pix_fmt) != 0) {
-      return nullptr;
-    }
-    return device;
+    return boost::algorithm::ends_with(name, "_nvenc");
   }
 
   std::unique_ptr<nvenc_encode_device_t> display_vram_t::make_nvenc_encode_device(pix_fmt_e pix_fmt) {
@@ -4216,16 +3901,6 @@ namespace platf::dxgi {
     compile_pixel_shader_helper(convert_yuv420_planar_y_ps_linear);
     compile_pixel_shader_helper(convert_yuv420_planar_y_ps_perceptual_quantizer);
     compile_vertex_shader_helper(convert_yuv420_planar_y_vs);
-    compile_pixel_shader_helper(convert_yuv444_packed_ayuv_ps);
-    compile_pixel_shader_helper(convert_yuv444_packed_ayuv_ps_linear);
-    compile_vertex_shader_helper(convert_yuv444_packed_vs);
-    compile_pixel_shader_helper(convert_yuv444_planar_ps);
-    compile_pixel_shader_helper(convert_yuv444_planar_ps_linear);
-    compile_pixel_shader_helper(convert_yuv444_planar_ps_perceptual_quantizer);
-    compile_pixel_shader_helper(convert_yuv444_packed_y410_ps);
-    compile_pixel_shader_helper(convert_yuv444_packed_y410_ps_linear);
-    compile_pixel_shader_helper(convert_yuv444_packed_y410_ps_perceptual_quantizer);
-    compile_vertex_shader_helper(convert_yuv444_planar_vs);
     compile_pixel_shader_helper(cursor_ps);
     compile_pixel_shader_helper(cursor_ps_normalize_white);
     compile_pixel_shader_helper(rgb_present_linear_to_srgb_ps);

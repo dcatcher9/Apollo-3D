@@ -1,9 +1,11 @@
 {
+  "version": 2,
   "env": {
     "PATH": "$(PATH):$(HOME)/.local/bin"
   },
   "apps": [
     {
+      "uuid": "324E9C05-F190-4439-B9C4-20B1C8C12DF6",
       "name": "Desktop",
       "image-path": "desktop.png"
     }

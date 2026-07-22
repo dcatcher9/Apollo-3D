@@ -584,7 +584,7 @@
           <div class="library-eyebrow">Artemis library</div>
           <h1 class="library-title">{{ $t('apps.applications_title') }}</h1>
           <p class="library-subtitle">
-            Choose what appears in Artemis. Launch, stop, and arrange your apps from one place.
+            Choose what appears in Artemis and arrange your app library.
           </p>
         </div>
         <button type="button" class="btn btn-primary btn-lg" @click="newApp" :disabled="actionDisabled">
@@ -609,7 +609,7 @@
           type="button"
           class="btn btn-outline-secondary"
           @click="alphabetizeApps"
-          :disabled="actionDisabled || !!searchQuery"
+          :disabled="actionDisabled || !!searchQuery || reorderableAppCount < 2"
           v-if="!listReordered"
         >
           <i class="fas fa-arrow-down-a-z me-1"></i>
@@ -626,7 +626,7 @@
         </button>
       </section>
 
-      <p class="small text-body-secondary mb-3" v-if="!searchQuery && apps.length > 1">
+      <p class="small text-body-secondary mb-3" v-if="!searchQuery && reorderableAppCount > 1">
         <i class="fas fa-grip-vertical me-1"></i>Drag cards to change their order in Artemis.
       </p>
 
@@ -637,7 +637,7 @@
           class="app-card"
           :class="{ 'is-active': currentApp === app.uuid, dragover: app.dragover }"
           :style="{ '--app-accent': appAccent(app) }"
-          :draggable="!searchQuery && !actionDisabled"
+          :draggable="!app.builtin && !searchQuery && !actionDisabled"
           @dragstart="onDragStart($event, app)"
           @dragenter="onDragEnter($event, app)"
           @dragover="onDragOver($event)"
@@ -657,11 +657,11 @@
               <span class="app-status-badge running" v-if="currentApp === app.uuid">
                 <i class="fas fa-circle fa-2xs"></i>Running
               </span>
-              <span class="app-status-badge" v-if="isEnabled(app['virtual-display'])">
-                <i class="fas fa-display"></i>Private display
+              <span class="app-status-badge" v-if="app.builtin">
+                <i class="fas fa-display"></i>Built in
               </span>
             </div>
-            <span class="app-card-grip" v-if="!searchQuery" :title="$t('apps.applications_reorder_desc')">
+            <span class="app-card-grip" v-if="!app.builtin && !searchQuery" :title="$t('apps.applications_reorder_desc')">
               <i class="fas fa-grip-vertical"></i>
             </span>
           </div>
@@ -680,16 +680,6 @@
               >
                 <i class="fas fa-stop me-1"></i>{{ $t('apps.close') }}
               </button>
-              <a
-                class="btn btn-primary"
-                :class="{ disabled: actionDisabled }"
-                :aria-disabled="actionDisabled"
-                @click.prevent="launchApp($event, app)"
-                :href="'art://launch?host_uuid=' + hostUUID + '&host_name=' + encodeURIComponent(hostName) + '&app_uuid=' + app.uuid + '&app_name=' + encodeURIComponent(app.name)"
-                v-else
-              >
-                <i class="fas fa-play me-1"></i>{{ $t('apps.launch') }}
-              </a>
               <button
                 type="button"
                 class="btn btn-outline-secondary"
@@ -697,6 +687,7 @@
                 @click="editApp(app)"
                 :aria-label="$t('apps.edit')"
                 :title="$t('apps.edit')"
+                v-if="!app.builtin"
               >
                 <i class="fas fa-pen"></i>
               </button>
@@ -717,8 +708,8 @@
                       <i class="fas fa-arrow-up-from-bracket fa-fw me-2"></i>{{ $t('apps.export_launcher_file') }}
                     </button>
                   </li>
-                  <li><hr class="dropdown-divider"></li>
-                  <li>
+                  <li v-if="!app.builtin"><hr class="dropdown-divider"></li>
+                  <li v-if="!app.builtin">
                     <button type="button" class="dropdown-item text-danger" @click="showDeleteForm(app)">
                       <i class="fas fa-trash fa-fw me-2"></i>{{ $t('apps.delete') }}
                     </button>
@@ -883,17 +874,6 @@
                 </div>
               </div>
 
-              <div class="form-check form-switch mt-4">
-                <input
-                  type="checkbox"
-                  class="form-check-input"
-                  role="switch"
-                  id="virtualDisplay"
-                  v-model="editForm['virtual-display']"
-                />
-                <label class="form-check-label fw-semibold" for="virtualDisplay">Private XR display</label>
-                <div class="form-text">Create a private virtual display whenever this application starts.</div>
-              </div>
             </div>
           </div>
         </section>
@@ -903,31 +883,11 @@
             <span class="advanced-summary-icon"><i class="fas fa-sliders"></i></span>
             <span>
               <strong class="d-block">Advanced launch options</strong>
-              <small class="text-body-secondary">Compatibility, process behavior, automation, and input overrides</small>
+              <small class="text-body-secondary">Process behavior and automation</small>
             </span>
           </summary>
           <div class="advanced-content">
-            <div class="mb-4" v-if="platform !== 'macos'">
-              <label for="gamepad" class="form-label">{{ $t('config.gamepad') }}</label>
-              <select id="gamepad" class="form-select" v-model="editForm.gamepad">
-                <option value="">{{ $t('_common.default_global') }}</option>
-                <option value="disabled">{{ $t('_common.disabled') }}</option>
-                <option value="auto">{{ $t('_common.auto') }}</option>
-                <template v-if="platform === 'linux'">
-                  <option value="ds5">{{ $t('config.gamepad_ds5') }}</option>
-                  <option value="switch">{{ $t('config.gamepad_switch') }}</option>
-                  <option value="xone">{{ $t('config.gamepad_xone') }}</option>
-                </template>
-                <template v-if="platform === 'windows'">
-                  <option value="ds4">{{ $t('config.gamepad_ds4') }}</option>
-                  <option value="x360">{{ $t('config.gamepad_x360') }}</option>
-                </template>
-              </select>
-              <div class="form-text">{{ $t('config.gamepad_desc') }}</div>
-            </div>
-
             <Checkbox
-              v-if="platform === 'windows'"
               class="mb-4"
               id="appElevation"
               label="_common.run_as"
@@ -957,63 +917,52 @@
             </div>
 
             <Checkbox
-              class="mb-4"
-              id="clientCommands"
-              label="apps.allow_client_commands"
-              desc="apps.allow_client_commands_desc"
-              v-model="editForm['allow-client-commands']"
+              class="mb-3"
+              id="excludeGlobalPrep"
+              label="apps.global_prep_name"
+              desc="apps.global_prep_desc"
+              v-model="editForm['exclude-global-prep-cmd']"
               default="true"
+              inverse-values
             ></Checkbox>
-
-            <template v-for="type in ['prep', 'state']" :key="type">
-              <Checkbox
-                class="mb-3"
-                :id="'excludeGlobal_' + type"
-                :label="'apps.global_' + type + '_name'"
-                :desc="'apps.global_' + type + '_desc'"
-                v-model="editForm['exclude-global-' + type + '-cmd']"
-                default="true"
-                inverse-values
-              ></Checkbox>
-              <div class="mb-4">
-                <label class="form-label">{{ $t('apps.cmd_' + type + '_name') }}</label>
-                <div class="form-text pre-wrap mb-2">{{ $t('apps.cmd_' + type + '_desc') }}</div>
-                <div class="table-responsive" v-if="editForm[type + '-cmd'].length > 0">
-                  <table class="table align-middle">
-                    <thead>
-                      <tr>
-                        <th scope="col"><i class="fas fa-play"></i> {{ $t('_common.do_cmd') }}</th>
-                        <th scope="col"><i class="fas fa-undo"></i> {{ $t('_common.undo_cmd') }}</th>
-                        <th scope="col" v-if="platform === 'windows'"><i class="fas fa-shield-alt"></i> {{ $t('_common.run_as') }}</th>
-                        <th scope="col"><span class="visually-hidden">{{ $t('apps.actions') }}</span></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr v-for="(c, i) in editForm[type + '-cmd']" :key="type + '-cmd-' + i">
-                        <td><input type="text" class="form-control monospace" v-model="c.do" /></td>
-                        <td><input type="text" class="form-control monospace" v-model="c.undo" /></td>
-                        <td v-if="platform === 'windows'">
-                          <Checkbox :id="type + '-cmd-admin-' + i" label="_common.elevated" desc="" v-model="c.elevated"></Checkbox>
-                        </td>
-                        <td>
-                          <div class="d-flex gap-2 justify-content-end">
-                            <button type="button" class="btn btn-outline-danger" @click="editForm[type + '-cmd'].splice(i, 1)">
-                              <i class="fas fa-trash"></i>
-                            </button>
-                            <button type="button" class="btn btn-outline-success" @click="addCmd(editForm[type + '-cmd'], i)">
-                              <i class="fas fa-plus"></i>
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-                <button type="button" class="btn btn-outline-success" @click="addCmd(editForm[type + '-cmd'], -1)">
-                  <i class="fas fa-plus me-1"></i>{{ $t('apps.add_cmds') }}
-                </button>
+            <div class="mb-4">
+              <label class="form-label">{{ $t('apps.cmd_prep_name') }}</label>
+              <div class="form-text pre-wrap mb-2">{{ $t('apps.cmd_prep_desc') }}</div>
+              <div class="table-responsive" v-if="editForm['prep-cmd'].length > 0">
+                <table class="table align-middle">
+                  <thead>
+                    <tr>
+                      <th scope="col"><i class="fas fa-play"></i> {{ $t('_common.do_cmd') }}</th>
+                      <th scope="col"><i class="fas fa-undo"></i> {{ $t('_common.undo_cmd') }}</th>
+                      <th scope="col"><i class="fas fa-shield-alt"></i> {{ $t('_common.run_as') }}</th>
+                      <th scope="col"><span class="visually-hidden">{{ $t('apps.actions') }}</span></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(c, i) in editForm['prep-cmd']" :key="'prep-cmd-' + i">
+                      <td><input type="text" class="form-control monospace" v-model="c.do" /></td>
+                      <td><input type="text" class="form-control monospace" v-model="c.undo" /></td>
+                      <td>
+                        <Checkbox :id="'prep-cmd-admin-' + i" label="_common.elevated" desc="" v-model="c.elevated"></Checkbox>
+                      </td>
+                      <td>
+                        <div class="d-flex gap-2 justify-content-end">
+                          <button type="button" class="btn btn-outline-danger" @click="editForm['prep-cmd'].splice(i, 1)">
+                            <i class="fas fa-trash"></i>
+                          </button>
+                          <button type="button" class="btn btn-outline-success" @click="addCmd(editForm['prep-cmd'], i)">
+                            <i class="fas fa-plus"></i>
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
-            </template>
+              <button type="button" class="btn btn-outline-success" @click="addCmd(editForm['prep-cmd'], -1)">
+                <i class="fas fa-plus me-1"></i>{{ $t('apps.add_cmds') }}
+              </button>
+            </div>
 
             <div class="row g-3">
               <div class="col-md-6">
@@ -1034,19 +983,6 @@
               <div class="col-lg-6">
                 <Checkbox class="mb-3" id="autoDetach" label="apps.auto_detach" desc="apps.auto_detach_desc" v-model="editForm['auto-detach']" default="true"></Checkbox>
                 <Checkbox class="mb-3" id="waitAll" label="apps.wait_all" desc="apps.wait_all_desc" v-model="editForm['wait-all']" default="true"></Checkbox>
-                <Checkbox class="mb-3" id="terminateOnPause" label="apps.terminate_on_pause" desc="apps.terminate_on_pause_desc" v-model="editForm['terminate-on-pause']" default="false"></Checkbox>
-              </div>
-              <div class="col-lg-6">
-                <Checkbox class="mb-3" id="useAppIdentity" label="apps.use_app_identity" desc="apps.use_app_identity_desc" v-model="editForm['use-app-identity']" default="false"></Checkbox>
-                <Checkbox
-                  class="mb-3"
-                  v-if="isEnabled(editForm['use-app-identity'])"
-                  id="perClientAppIdentity"
-                  label="apps.per_client_app_identity"
-                  desc="apps.per_client_app_identity_desc"
-                  v-model="editForm['per-client-app-identity']"
-                  default="false"
-                ></Checkbox>
               </div>
             </div>
 
@@ -1055,11 +991,6 @@
                 <label for="exitTimeout" class="form-label">{{ $t('apps.exit_timeout') }}</label>
                 <input type="number" class="form-control monospace" id="exitTimeout" aria-describedby="exitTimeoutHelp" v-model="editForm['exit-timeout']" min="0" placeholder="5" />
                 <div id="exitTimeoutHelp" class="form-text">{{ $t('apps.exit_timeout_desc') }}</div>
-              </div>
-              <div class="col-md-6" v-if="platform === 'windows'">
-                <label for="resolutionScaleFactor" class="form-label">{{ $t('apps.resolution_scale_factor') }}: {{ editForm['scale-factor'] }}%</label>
-                <input type="range" step="1" min="20" max="200" class="form-range" id="resolutionScaleFactor" v-model="editForm['scale-factor']" />
-                <div class="form-text">{{ $t('apps.resolution_scale_factor_desc') }}</div>
               </div>
             </div>
 
@@ -1079,27 +1010,15 @@
                     <tr><td class="monospace">APOLLO_CLIENT_HEIGHT</td><td>{{ $t('apps.env_client_height') }}</td></tr>
                     <tr><td class="monospace">APOLLO_CLIENT_FPS</td><td>{{ $t('apps.env_client_fps') }}</td></tr>
                     <tr><td class="monospace">APOLLO_CLIENT_HDR</td><td>{{ $t('apps.env_client_hdr') }}</td></tr>
-                    <tr><td class="monospace">APOLLO_CLIENT_GCMAP</td><td>{{ $t('apps.env_client_gcmap') }}</td></tr>
                     <tr><td class="monospace">APOLLO_CLIENT_HOST_AUDIO</td><td>{{ $t('apps.env_client_host_audio') }}</td></tr>
-                    <tr><td class="monospace">APOLLO_CLIENT_ENABLE_SOPS</td><td>{{ $t('apps.env_client_enable_sops') }}</td></tr>
                     <tr><td class="monospace">APOLLO_CLIENT_AUDIO_CONFIGURATION</td><td>{{ $t('apps.env_client_audio_config') }}</td></tr>
                   </tbody>
                 </table>
 
-                <div class="form-text mt-3" v-if="platform === 'windows'">
+                <div class="form-text mt-3">
                   <b>{{ $t('apps.env_rtss_cli_example') }}</b>
                   <pre>cmd /C \path\to\rtss-cli.exe limit:set %APOLLO_CLIENT_FPS%</pre>
                 </div>
-                <div class="form-text mt-3" v-if="platform === 'linux'">
-                  <b>{{ $t('apps.env_xrandr_example') }}</b>
-                  <pre>sh -c "xrandr --output HDMI-1 --mode \"${APOLLO_CLIENT_WIDTH}x${APOLLO_CLIENT_HEIGHT}\" --rate ${APOLLO_CLIENT_FPS}"</pre>
-                </div>
-                <div class="form-text mt-3" v-if="platform === 'macos'">
-                  <b>{{ $t('apps.env_displayplacer_example') }}</b>
-                  <pre>sh -c "displayplacer "id:&lt;screenId&gt; res:${APOLLO_CLIENT_WIDTH}x${APOLLO_CLIENT_HEIGHT} hz:${APOLLO_CLIENT_FPS} scaling:on origin:(0,0) degree:0""</pre>
-                </div>
-
-                <p class="form-text mb-0">{{ $t('apps.env_sunshine_compatibility') }}</p>
               </div>
             </details>
           </div>
@@ -1126,16 +1045,12 @@
   import desktopCover from '../desktop.png'
   import desktopAltCover from '../desktop-alt.png'
   import steamCover from '../steam.png'
-  import inputOnlyCover from '../input_only.png'
-  import terminateCover from '../terminate.png'
   import virtualDesktopCover from '../virtual_desktop.png'
 
   const bundledCovers = {
     "desktop.png": desktopCover,
     "desktop-alt.png": desktopAltCover,
     "steam.png": steamCover,
-    "input_only.png": inputOnlyCover,
-    "terminate.png": terminateCover,
     "virtual_desktop.png": virtualDesktopCover
   }
 
@@ -1144,22 +1059,13 @@
     "output": "",
     "cmd": "",
     "exclude-global-prep-cmd": false,
-    "exclude-global-state-cmd": false,
     "elevated": false,
     "auto-detach": true,
     "wait-all": true,
     "exit-timeout": 5,
     "prep-cmd": [],
-    "state-cmd": [],
     "detached": [],
-    "image-path": "",
-    "scale-factor": 100,
-    "use-app-identity": false,
-    "per-client-app-identity": false,
-    "allow-client-commands": true,
-    "virtual-display": false,
-    "terminate-on-pause": false,
-    "gamepad": ""
+    "image-path": ""
   }
 
   const app = createApp({
@@ -1177,7 +1083,6 @@
         coverSearching: false,
         coverFinderBusy: false,
         coverCandidates: [],
-        platform: "",
         currentApp: "",
         draggingApp: -1,
         hostName: "",
@@ -1188,6 +1093,9 @@
       };
     },
     computed: {
+      reorderableAppCount() {
+        return this.apps.filter(app => !app.builtin).length;
+      },
       filteredApps() {
         const query = this.searchQuery.toLocaleLowerCase();
         if (!query) {
@@ -1203,16 +1111,10 @@
     },
     created() {
       this.loadApps();
-
-      fetch("./api/config", {
-        credentials: 'include'
-      })
-        .then(r => r.json())
-        .then(r => this.platform = r.platform);
     },
     methods: {
       onDragStart(e, app) {
-        if (this.showEditForm || this.searchQuery || this.actionDisabled) {
+        if (app.builtin || this.showEditForm || this.searchQuery || this.actionDisabled) {
           e.preventDefault();
           return;
         }
@@ -1275,16 +1177,20 @@
         e.preventDefault();
 
         const sourceIndex = this.draggingApp;
-        if (sourceIndex !== this.apps.length - 1) {
+        const configurableApps = this.apps.filter(app => !app.builtin);
+        if (configurableApps[configurableApps.length - 1] !== this.apps[sourceIndex]) {
           const [draggedApp] = this.apps.splice(sourceIndex, 1);
-          this.apps.push(draggedApp);
+          const builtinIndex = this.apps.findIndex(app => app.builtin);
+          this.apps.splice(builtinIndex < 0 ? this.apps.length : builtinIndex, 0, draggedApp);
           this.listReordered = true;
         }
         this.onDragEnd();
       },
       alphabetizeApps() {
         const originalOrder = this.apps.map(app => app.uuid).join("\n");
-        this.apps.sort((a, b) => a.name.localeCompare(b.name));
+        const configurableApps = this.apps.filter(app => !app.builtin).sort((a, b) => a.name.localeCompare(b.name));
+        const builtinApps = this.apps.filter(app => app.builtin);
+        this.apps.splice(0, this.apps.length, ...configurableApps, ...builtinApps);
         this.listReordered = originalOrder !== this.apps.map(app => app.uuid).join("\n");
         if (!this.listReordered) {
           alert(this.$t('apps.already_ordered'));
@@ -1294,7 +1200,7 @@
         this.actionDisabled = true;
 
         const reorderedUUIDs = this.apps.reduce((reordered, i) => {
-          if (i.uuid) {
+          if (i.uuid && !i.builtin) {
             reordered.push(i.uuid)
           }
           return reordered
@@ -1328,7 +1234,14 @@
         })
         .then(r => r.json())
         .then(r => {
-          this.apps = r.apps.filter(i => i.uuid).map(i => ({...i, launching: false, dragover: false}));
+          const builtinApps = (Array.isArray(r.builtin_apps) ? r.builtin_apps : [])
+            .filter(i => i.uuid)
+            .map(i => ({...i, builtin: true, launching: false, dragover: false}));
+          const builtinUUIDs = new Set(builtinApps.map(i => i.uuid));
+          const configurableApps = (Array.isArray(r.apps) ? r.apps : [])
+            .filter(i => i.uuid && !builtinUUIDs.has(i.uuid))
+            .map(i => ({...i, builtin: false, launching: false, dragover: false}));
+          this.apps = [...configurableApps, ...builtinApps];
           this.currentApp = r.current_app;
           this.hostName = r.host_name;
           this.hostUUID = r.host_uuid;
@@ -1345,41 +1258,6 @@
         this.showEditForm = false;
         this.editForm = null;
         this.editCoverPreview = "";
-      },
-      launchApp(event, app) {
-        if (this.actionDisabled) {
-          return;
-        }
-        const isLocalHost = ['localhost', '127.0.0.1', '[::1]'].indexOf(location.hostname) >= 0
-
-        if (!isLocalHost && confirm(this.$t('apps.launch_local_client'))) {
-          const link = document.createElement('a');
-          link.href = event.currentTarget.href;
-          link.click();
-          return;
-        }
-
-        if (confirm(this.$t('apps.launch_warning'))) {
-          this.actionDisabled = true;
-          fetch("./api/apps/launch", {
-            credentials: 'include',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            method: 'POST',
-            body: JSON.stringify({ uuid: app.uuid })
-          })
-          .then(r => r.json())
-          .then(r => {
-            if (!r.status) {
-              alert(this.$t('apps.launch_failed') + r.error);
-            }
-          })
-          .finally(() => {
-            this.actionDisabled = false;
-            this.loadApps()
-          });
-        }
       },
       closeApp() {
         if (confirm(this.$t('apps.close_warning'))) {
@@ -1404,6 +1282,9 @@
         }
       },
       editApp(app) {
+        if (app.builtin) {
+          return;
+        }
         this.editForm = Object.assign(
           JSON.parse(JSON.stringify(newApp)),
           JSON.parse(JSON.stringify(app))
@@ -1411,21 +1292,13 @@
         this.editCoverPreview = this.coverPreviewUrl(app);
         this.showEditForm = true;
       },
-      isEnabled(value) {
-        if (value === true || value === 1) {
-          return true;
-        }
-        return ["true", "1", "enabled", "enable", "yes", "on"].includes(
-          value?.toString().toLowerCase().trim()
-        );
-      },
       appInitial(app) {
         const name = app?.name?.toString().trim();
         return name ? name.charAt(0).toLocaleUpperCase() : "A";
       },
       appAccent(app) {
         const palette = ["#f8b400", "#ff7a45", "#8b7cf6", "#27b3a2", "#4c8dff", "#e45c92"];
-        const name = app?.name?.toString() || "Apollo";
+        const name = app?.name?.toString() || "Apollo XR";
         let hash = 0;
         for (let i = 0; i < name.length; i += 1) {
           hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
@@ -1442,6 +1315,10 @@
         return bundledCovers[filename] || "";
       },
       appCommandSummary(app) {
+        if (app?.builtin && app?.["virtual-display"]) {
+          return "Private desktop for XR";
+        }
+
         const command = app?.cmd?.toString().trim();
         if (!command) {
           return "Desktop or no launch command";
@@ -1454,7 +1331,7 @@
       exportLauncherFile(app) {
         const link = document.createElement('a');
         const fileContent = `# Artemis app entry
-# Exported by Apollo
+# Exported by Apollo XR
 # https://github.com/ClassicOldSong/Apollo
 
 [host_uuid] ${this.hostUUID}
@@ -1467,6 +1344,10 @@
         link.click();
       },
       showDeleteForm(app) {
+        if (app.builtin) {
+          return;
+        }
+
         const resp = confirm(
           "Are you sure to delete " + app.name + "?"
         );
@@ -1497,9 +1378,7 @@
           undo: ""
         };
 
-        if (this.platform === 'windows') {
-          template.elevated = false;
-        }
+        template.elevated = false;
 
         if (idx < 0) {
           cmdArr.push(template);
@@ -1615,9 +1494,9 @@
           return;
         }
         this.editForm["exit-timeout"] = parseInt(this.editForm["exit-timeout"]) || 5
-        this.editForm["scale-factor"] = parseInt(this.editForm["scale-factor"]) || 100
         this.editForm["image-path"] = this.editForm["image-path"].toString().trim().replace(/"/g, '');
         delete this.editForm.id;
+        delete this.editForm.builtin;
         delete this.editForm.launching;
         delete this.editForm.dragover;
         this.actionDisabled = true;

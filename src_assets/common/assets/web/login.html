@@ -68,7 +68,7 @@
         }
       }
 
-      // Older Apollo versions could store a plaintext password in localStorage. Migrate only
+      // Older Apollo XR versions could store a plaintext password in localStorage. Migrate only
       // the username and remove the legacy value as soon as this page is loaded.
       const legacyLogin = localStorage.getItem('login')
       if (legacyLogin) {

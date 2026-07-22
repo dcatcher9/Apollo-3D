@@ -13,11 +13,6 @@
  */
 extern thread_pool_util::ThreadPool task_pool;
 
-/**
- * @brief A boolean flag to indicate whether the cursor should be displayed.
- */
-extern bool display_cursor;
-
 #ifdef _WIN32
   // Declare global singleton used for NVIDIA control panel modifications
   #include "platform/windows/nvprefs/nvprefs_interface.h"
@@ -47,8 +42,6 @@ namespace mail {
   MAIL(broadcast_shutdown);
   MAIL(video_packets);
   MAIL(audio_packets);
-  MAIL(switch_display);
-
   // Local mail
   MAIL(touch_port);
   MAIL(idr);

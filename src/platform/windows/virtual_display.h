@@ -50,9 +50,6 @@ namespace VDISPLAY {
 
 	LONG getDeviceSettings(const wchar_t* deviceName, DEVMODEW& devMode);
 	LONG changeDisplaySettings(const wchar_t* deviceName, int width, int height, int refresh_rate);
-	LONG changeDisplaySettings2(const wchar_t* deviceName, int width, int height, int refresh_rate, bool bApplyIsolated=false);	
-	std::wstring getPrimaryDisplay();
-	bool setPrimaryDisplay(const wchar_t* primaryDeviceName);
 	std::optional<bool> queryDisplayHDRByName(const wchar_t* displayName);
 	bool setDisplayHDRByName(const wchar_t* displayName, bool enableAdvancedColor);
 
@@ -78,7 +75,6 @@ namespace VDISPLAY {
     std::wstring_view candidateDevicePath
   );
 #endif
-  std::wstring getDisplayName(const LUID &adapterLuid, uint32_t targetId);
 	creation_result_t createVirtualDisplay(
     const char *s_client_uid,
     const char *s_client_name,

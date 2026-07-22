@@ -100,12 +100,6 @@ void log_publisher_data();
 
 #ifdef _WIN32
 /**
- * @brief Check if NVIDIA's GameStream software is running.
- * @return `true` if GameStream is enabled, `false` otherwise.
- */
-bool is_gamestream_enabled();
-
-/**
  * @brief Namespace for controlling the Sunshine service model on Windows.
  */
 namespace service_ctrl {
