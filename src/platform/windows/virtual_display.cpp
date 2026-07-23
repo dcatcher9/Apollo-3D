@@ -32,6 +32,15 @@ namespace VDISPLAY {
     std::condition_variable_any watchdogWake;
     std::jthread watchdogThread;
 
+    std::chrono::milliseconds watchdogPingInterval(uint32_t timeoutSeconds) {
+      const auto thirdOfTimeout = std::chrono::milliseconds(
+        static_cast<uint64_t>(timeoutSeconds) * 1000 / 3
+      );
+      // A longer driver lease protects the monitor from debugger and GPU-startup stalls, but the
+      // heartbeat itself should remain frequent. This also detects a dead driver promptly.
+      return std::min(thirdOfTimeout, std::chrono::milliseconds(1000));
+    }
+
     bool containsCaseInsensitive(std::wstring_view value, std::wstring_view needle) {
       return std::search(
                value.begin(),
@@ -381,54 +390,81 @@ bool startPingThread(std::function<void()> failCb) {
   std::lock_guard lifecycle_lock(driverLifecycleMutex);
   stopWatchdogThread();
 
+  // Keep the lifetime heartbeat independent of Add/RemoveVirtualDisplay. A separate shared handle
+  // avoids delaying a ping behind the process-wide mutation lock during topology transitions.
+  const auto watchdogHandle = OpenDevice(&SUVDA_INTERFACE_GUID);
+  if (watchdogHandle == INVALID_HANDLE_VALUE) {
+    printf("[SUDOVDA] Failed to open dedicated watchdog heartbeat handle.\n");
+    return false;
+  }
+
   VIRTUAL_DISPLAY_GET_WATCHDOG_OUT watchdogOut {};
-  {
-    std::lock_guard device_lock(virtualDisplayMutationMutex);
-    if (sudovdaDriverHandle == INVALID_HANDLE_VALUE) {
-      return false;
-    }
-    if (!GetWatchdogTimeout(sudovdaDriverHandle, watchdogOut)) {
-      printf("[SUDOVDA] Watchdog fetch failed!\n");
-      return false;
-    }
+  if (!GetWatchdogTimeout(watchdogHandle, watchdogOut)) {
+    printf("[SUDOVDA] Watchdog fetch failed!\n");
+    CloseHandle(watchdogHandle);
+    return false;
   }
   printf("[SUDOVDA] Watchdog: Timeout %d, Countdown %d\n", watchdogOut.Timeout, watchdogOut.Countdown);
   if (!watchdogOut.Timeout) {
+    CloseHandle(watchdogHandle);
     return true;
   }
+  if (watchdogOut.Timeout < 10) {
+    printf(
+      "[SUDOVDA] Warning: watchdog timeout is only %d seconds. "
+      "Install or configure Apollo XR's recommended 30-second timeout to prevent "
+      "the retained virtual display from being removed during GPU initialization.\n",
+      watchdogOut.Timeout
+    );
+  }
 
-  const auto sleepInterval = std::chrono::milliseconds(watchdogOut.Timeout * 1000 / 3);
+  const auto sleepInterval = watchdogPingInterval(watchdogOut.Timeout);
   std::lock_guard owner_lock(watchdogOwnerMutex);
-  watchdogThread = std::jthread([sleepInterval, failCb = std::move(failCb)](std::stop_token stop_token) {
-    uint8_t fail_count = 0;
-    while (!stop_token.stop_requested()) {
-      bool watchdog_failed = false;
-      {
-        std::lock_guard device_lock(virtualDisplayMutationMutex);
-        if (sudovdaDriverHandle == INVALID_HANDLE_VALUE) {
-          return;
-        }
-        if (PingDriver(sudovdaDriverHandle)) {
+  try {
+    watchdogThread = std::jthread([watchdogHandle, sleepInterval, failCb = std::move(failCb)](std::stop_token stop_token) {
+      // This heartbeat is the lifetime lease for every SudoVDA monitor. Favor it over ordinary
+      // application work so a busy encoder startup cannot let the driver remove an active desktop.
+      if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST)) {
+        printf("[SUDOVDA] Failed to raise watchdog heartbeat thread priority: %lu\n", GetLastError());
+      }
+
+      uint8_t fail_count = 0;
+      while (!stop_token.stop_requested()) {
+        bool watchdog_failed = false;
+        if (PingDriver(watchdogHandle)) {
           fail_count = 0;
         } else if (++fail_count > 3) {
-          // The watchdog owns handle invalidation. The callback only publishes status, avoiding a
-          // self-join when failure is reported from this worker.
-          closeDriverHandleLocked();
+          {
+            std::lock_guard device_lock(virtualDisplayMutationMutex);
+            closeDriverHandleLocked();
+          }
           watchdog_failed = true;
         }
+        if (watchdog_failed) {
+          failCb();
+          break;
+        }
+
+        std::unique_lock wait_lock(watchdogWaitMutex);
+        watchdogWake.wait_for(wait_lock, stop_token, sleepInterval, []() {
+          return false;
+        });
       }
-      if (watchdog_failed) {
-        failCb();
-        return;
-      }
-      std::unique_lock wait_lock(watchdogWaitMutex);
-      watchdogWake.wait_for(wait_lock, stop_token, sleepInterval, []() {
-        return false;
-      });
-    }
-  });
+      CloseHandle(watchdogHandle);
+    });
+  } catch (...) {
+    CloseHandle(watchdogHandle);
+    printf("[SUDOVDA] Failed to start watchdog heartbeat thread.\n");
+    return false;
+  }
   return true;
 }
+
+#ifdef SUNSHINE_TESTS
+uint32_t watchdogPingIntervalMsForTest(uint32_t timeoutSeconds) {
+  return static_cast<uint32_t>(watchdogPingInterval(timeoutSeconds).count());
+}
+#endif
 
 bool queryActiveDisplayConfig(
   std::vector<DISPLAYCONFIG_PATH_INFO> &paths,

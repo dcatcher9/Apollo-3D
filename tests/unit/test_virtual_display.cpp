@@ -22,6 +22,12 @@ TEST(VirtualDisplayIdentity, RejectsAnUnrelatedSudoOutput) {
   ));
 }
 
+TEST(VirtualDisplayWatchdog, KeepsFrequentHeartbeatsWithALongerDriverLease) {
+  EXPECT_EQ(VDISPLAY::watchdogPingIntervalMsForTest(1), 333u);
+  EXPECT_EQ(VDISPLAY::watchdogPingIntervalMsForTest(3), 1000u);
+  EXPECT_EQ(VDISPLAY::watchdogPingIntervalMsForTest(30), 1000u);
+}
+
 TEST(VirtualDisplayIdentity, MatchesTheExactUnpublishedDriverIdentity) {
   const auto retiring = identity(42, 7, 3);
 

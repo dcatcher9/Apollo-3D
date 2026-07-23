@@ -50,6 +50,7 @@ static const HANDLE OpenDevice(const GUID* interfaceGuid) {
 				NULL);
 
 			if (handle != NULL && handle != INVALID_HANDLE_VALUE) {
+				free(detail);
 				break;
 			}
 		}

@@ -68,6 +68,7 @@ namespace VDISPLAY {
   );
 #ifdef SUNSHINE_TESTS
   bool isSudoVirtualDisplayPathForTest(std::wstring_view devicePath);
+  uint32_t watchdogPingIntervalMsForTest(uint32_t timeoutSeconds);
   bool virtualDisplayIdentityMatchesForTest(
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &expectedIdentity,
     std::wstring_view learnedDevicePath,
