@@ -199,10 +199,31 @@ namespace proc {
     std::shared_ptr<rtsp_stream::launch_session_t> _launch_session;
 #ifdef _WIN32
     std::optional<SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT> _virtual_display_identity;
+    std::optional<LUID> _virtual_display_render_adapter;
     std::wstring _virtual_display_device_path;
     std::wstring _virtual_display_gdi_name;
     bool _virtual_display_published = false;
     std::optional<std::uint64_t> _remote_virtual_display_lease;
+    VDISPLAY::creation_result_t create_retained_virtual_display(
+      std::uint32_t width,
+      std::uint32_t height,
+      std::uint32_t fps,
+      const GUID &guid,
+      const std::optional<LUID> &render_adapter
+    );
+    bool retire_virtual_display(
+      const std::optional<SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT> &identity,
+      const GUID &guid,
+      const std::wstring &device_path,
+      const std::wstring &gdi_name,
+      bool was_published,
+      std::chrono::milliseconds timeout
+    );
+    void clear_virtual_display_binding();
+    void adopt_virtual_display(
+      VDISPLAY::creation_result_t created_display,
+      bool enable_hdr
+    );
     bool wait_for_retired_virtual_display(std::chrono::milliseconds timeout);
     void start_hdr_worker(bool enable_hdr);
     bool request_hdr_state(bool enable_hdr, std::chrono::milliseconds timeout);

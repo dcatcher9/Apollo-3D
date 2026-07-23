@@ -1704,7 +1704,8 @@ namespace nvhttp {
     if (process_status.virtual_display) {
       if (!ar_glasses::remote_virtual_display_starting(
             launch_session->id,
-            config::stream.ping_timeout
+            config::stream.ping_timeout,
+            true
           )) {
         tree.put("root.resume", 0);
         tree.put("root.<xmlattr>.status_code", 503);
@@ -1721,6 +1722,17 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "Failed to reconfigure the retained streaming session");
       return;
     }
+
+#ifdef _WIN32
+    if (process_status.virtual_display) {
+      // Monitor recreation and HDR verification can outlast the ordinary connect reservation.
+      // Start a fresh client-connect window only after the retained display is ready for capture.
+      ar_glasses::remote_virtual_display_awaiting_client(
+        launch_session->id,
+        config::stream.ping_timeout
+      );
+    }
+#endif
 
     if (!rtsp_stream::launch_session_raise(launch_session)) {
       tree.put("root.resume", 0);

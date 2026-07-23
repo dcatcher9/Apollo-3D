@@ -8,6 +8,7 @@
   #define BOOST_PROCESS_VERSION 1
 #endif
 // standard includes
+#include <algorithm>
 #include <condition_variable>
 #include <filesystem>
 #include <limits>
@@ -407,6 +408,86 @@ namespace proc {
     });
     return completed && _hdr_worker_state->completed_revision == revision && _hdr_worker_state->completion_succeeded;
   }
+
+  VDISPLAY::creation_result_t proc_t::create_retained_virtual_display(
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t fps,
+    const GUID &guid,
+    const std::optional<LUID> &render_adapter
+  ) {
+    if (!_launch_session) {
+      return {};
+    }
+
+    return VDISPLAY::createVirtualDisplayWithRenderAdapter(
+      _launch_session->unique_id.c_str(),
+      _launch_session->device_name.c_str(),
+      width,
+      height,
+      fps,
+      guid,
+      render_adapter
+    );
+  }
+
+  bool proc_t::retire_virtual_display(
+    const std::optional<SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT> &identity,
+    const GUID &guid,
+    const std::wstring &device_path,
+    const std::wstring &gdi_name,
+    bool was_published,
+    std::chrono::milliseconds timeout
+  ) {
+    // Never overwrite an unresolved retirement record. It is the only stable proof that an old
+    // target is gone before SudoVDA is asked to reuse the same GUID.
+    if (!wait_for_retired_virtual_display(3s)) {
+      BOOST_LOG(error) << "A previous virtual-display retirement is still unresolved."sv;
+      return false;
+    }
+    if (!identity) {
+      BOOST_LOG(error) << "Cannot retire a virtual display without its stable driver identity."sv;
+      return false;
+    }
+
+    retired_virtual_display_identity = identity;
+    retired_virtual_display_guid = guid;
+    retired_virtual_display_device_path = device_path;
+    retired_virtual_display_gdi_name = gdi_name;
+    retired_virtual_display_was_published = was_published;
+    retired_virtual_display_started = std::chrono::steady_clock::now();
+
+    if (!VDISPLAY::removeVirtualDisplay(guid)) {
+      BOOST_LOG(warning) << "The initial virtual-display remove request failed; retrying while observing topology."sv;
+    }
+    return wait_for_retired_virtual_display(timeout);
+  }
+
+  void proc_t::clear_virtual_display_binding() {
+    stop_hdr_worker();
+    _hdr_worker_state.reset();
+    _virtual_display_identity.reset();
+    _virtual_display_device_path.clear();
+    _virtual_display_gdi_name.clear();
+    _virtual_display_published = false;
+    set_display_name_locked({});
+  }
+
+  void proc_t::adopt_virtual_display(
+    VDISPLAY::creation_result_t created_display,
+    bool enable_hdr
+  ) {
+    _virtual_display_identity = std::move(created_display.identity);
+    _virtual_display_render_adapter = created_display.render_adapter_luid;
+    _virtual_display_device_path = std::move(created_display.device_path);
+    _virtual_display_gdi_name = std::move(created_display.display_name);
+    _virtual_display_published = !_virtual_display_gdi_name.empty();
+    _virtual_display = true;
+
+    set_display_name_locked(platf::to_utf8(_virtual_display_gdi_name));
+    config::video.output_name = display_device::map_display_name(display_name);
+    start_hdr_worker(enable_hdr);
+  }
 #endif
 
   int proc_t::execute(
@@ -518,6 +599,7 @@ namespace proc {
         // create, while a name-timeout still receives deterministic teardown.
         launch_session->virtual_display = created_display.added();
         _virtual_display_identity = created_display.identity;
+        _virtual_display_render_adapter = created_display.render_adapter_luid;
         _virtual_display_device_path = created_display.device_path;
         _virtual_display_gdi_name = created_display.display_name;
         _virtual_display_published = !created_display.display_name.empty();
@@ -824,33 +906,216 @@ namespace proc {
                                       (old_width != render_size->width || old_height != render_size->height || old_fps != launch_session->fps);
 
 #ifdef _WIN32
+    bool hdr_configured_by_recreation = false;
     if (_virtual_display) {
       if (_virtual_display_gdi_name.empty()) {
         BOOST_LOG(error) << "The retained virtual display no longer has a published Windows display name."sv;
         return 503;
       }
-      if (display_mode_changed &&
+
+      if (display_mode_changed) {
+        const auto requested_mode_test = VDISPLAY::testDisplaySettings(
+          _virtual_display_gdi_name.c_str(),
+          render_size->width,
+          render_size->height,
+          launch_session->fps
+        );
+        const bool fast_path_attempted = requested_mode_test == DISP_CHANGE_SUCCESSFUL;
+        const bool fast_path_succeeded =
+          fast_path_attempted &&
           VDISPLAY::changeDisplaySettings(
             _virtual_display_gdi_name.c_str(),
             render_size->width,
             render_size->height,
             launch_session->fps
-          ) != DISP_CHANGE_SUCCESSFUL) {
-        // changeDisplaySettings() first applies a baseline mode before its exact fractional mode.
-        // Roll back even on failure because that baseline call may already have changed topology.
-        VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps);
-        BOOST_LOG(error) << "Failed to reconfigure the retained virtual-display mode."sv;
-        return 503;
+          ) == DISP_CHANGE_SUCCESSFUL;
+
+        if (!fast_path_succeeded) {
+          if (fast_path_attempted) {
+            BOOST_LOG(warning) << "Windows accepted the retained virtual-display mode test but failed to apply it; replacing the monitor."sv;
+          } else {
+            BOOST_LOG(info) << "The retained virtual display does not advertise the requested mode; replacing the monitor."sv;
+          }
+
+          auto restore_failed_fast_path = [&]() {
+            if (!fast_path_attempted) {
+              return true;
+            }
+
+            const bool mode_restored =
+              VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps) == DISP_CHANGE_SUCCESSFUL;
+            const bool hdr_restored = request_hdr_state(old_hdr, 6s);
+            if (!mode_restored) {
+              BOOST_LOG(error) << "Failed to restore the retained display's prior mode after its in-place update failed."sv;
+            }
+            if (!hdr_restored) {
+              BOOST_LOG(error) << "Failed to restore the retained display's prior HDR state after its in-place update failed."sv;
+            }
+            return mode_restored && hdr_restored;
+          };
+
+          // Replacement requires the exact driver identity. If the in-place attempt may have
+          // changed a baseline mode, restore it before leaving the retained session available.
+          if (!_virtual_display_identity) {
+            BOOST_LOG(error) << "Cannot replace the retained virtual display without its stable driver identity."sv;
+            if (!restore_failed_fast_path()) {
+              BOOST_LOG(error) << "The retained display could not be restored; terminating the incoherent retained session."sv;
+              terminate();
+            }
+            return 503;
+          }
+          if (!wait_for_retired_virtual_display(3s)) {
+            BOOST_LOG(error) << "A previous virtual-display retirement blocked retained monitor replacement."sv;
+            if (!restore_failed_fast_path()) {
+              BOOST_LOG(error) << "The retained display could not be restored; terminating the incoherent retained session."sv;
+              terminate();
+            }
+            return 503;
+          }
+
+          const auto old_identity = _virtual_display_identity;
+          const auto old_render_adapter = _virtual_display_render_adapter;
+          const auto old_device_path = _virtual_display_device_path;
+          const auto old_gdi_name = _virtual_display_gdi_name;
+          const bool old_was_published = _virtual_display_published;
+          const GUID display_guid = _launch_session->display_guid;
+
+          // The worker must not query or mutate a DISPLAY name while Windows is retiring it.
+          stop_hdr_worker();
+          _hdr_worker_state.reset();
+          if (!retire_virtual_display(
+                old_identity,
+                display_guid,
+                old_device_path,
+                old_gdi_name,
+                old_was_published,
+                4s
+              )) {
+            BOOST_LOG(error) << "The retained virtual display could not be retired safely; terminating the retained session."sv;
+            terminate();
+            return 503;
+          }
+          clear_virtual_display_binding();
+
+          enum class recreation_result_e {
+            success,
+            clean_failure,
+            fatal_failure,
+          };
+
+          auto retire_candidate = [&](const VDISPLAY::creation_result_t &candidate) {
+            return retire_virtual_display(
+              candidate.identity,
+              display_guid,
+              candidate.device_path,
+              candidate.display_name,
+              !candidate.display_name.empty(),
+              4s
+            );
+          };
+
+          auto recreate_mode = [&](std::uint32_t width, std::uint32_t height, std::uint32_t fps, bool enable_hdr) {
+            auto candidate = create_retained_virtual_display(
+              width,
+              height,
+              fps,
+              display_guid,
+              old_render_adapter
+            );
+            if (!candidate.added()) {
+              BOOST_LOG(error) << "SudoVDA rejected the retained virtual-display recreation."sv;
+              return recreation_result_e::clean_failure;
+            }
+            if (candidate.display_name.empty()) {
+              BOOST_LOG(error) << "The recreated virtual display was added, but Windows did not publish it in time."sv;
+              return retire_candidate(candidate) ? recreation_result_e::clean_failure : recreation_result_e::fatal_failure;
+            }
+            if (VDISPLAY::changeDisplaySettings(candidate.display_name.c_str(), width, height, fps) != DISP_CHANGE_SUCCESSFUL) {
+              BOOST_LOG(error) << "Windows did not accept the recreated virtual display's requested mode."sv;
+              return retire_candidate(candidate) ? recreation_result_e::clean_failure : recreation_result_e::fatal_failure;
+            }
+
+            const auto candidate_display_name = platf::to_utf8(candidate.display_name);
+            bool capture_ready = false;
+            for (int attempt = 0; attempt < 3 && !capture_ready; ++attempt) {
+              const auto capturable_displays = platf::display_names();
+              capture_ready = std::find(
+                                capturable_displays.begin(),
+                                capturable_displays.end(),
+                                candidate_display_name
+                              ) != capturable_displays.end();
+              if (!capture_ready && attempt < 2) {
+                std::this_thread::sleep_for(200ms);
+              }
+            }
+            if (!capture_ready) {
+              BOOST_LOG(error) << "The recreated virtual display is published, but no capture backend can open it."sv;
+              return retire_candidate(candidate) ? recreation_result_e::clean_failure : recreation_result_e::fatal_failure;
+            }
+
+            adopt_virtual_display(std::move(candidate), enable_hdr);
+            if (!request_hdr_state(enable_hdr, 6s)) {
+              BOOST_LOG(error) << "The recreated virtual display did not reach its requested HDR state."sv;
+              stop_hdr_worker();
+              const bool retired = retire_virtual_display(
+                _virtual_display_identity,
+                display_guid,
+                _virtual_display_device_path,
+                _virtual_display_gdi_name,
+                _virtual_display_published,
+                4s
+              );
+              if (retired) {
+                clear_virtual_display_binding();
+                return recreation_result_e::clean_failure;
+              }
+              return recreation_result_e::fatal_failure;
+            }
+            return recreation_result_e::success;
+          };
+
+          const auto target_result = recreate_mode(
+            render_size->width,
+            render_size->height,
+            launch_session->fps,
+            launch_session->enable_hdr
+          );
+          if (target_result != recreation_result_e::success) {
+            if (target_result == recreation_result_e::clean_failure) {
+              BOOST_LOG(warning) << "Restoring the retained session's previous virtual-display mode."sv;
+              const auto rollback_result = recreate_mode(old_width, old_height, old_fps, old_hdr);
+              if (rollback_result == recreation_result_e::success) {
+                BOOST_LOG(info) << "The retained virtual display was restored; the client may retry its reconnect."sv;
+                return 503;
+              }
+            }
+
+            BOOST_LOG(error) << "Virtual-display replacement and rollback could not restore a coherent retained session; terminating it."sv;
+            terminate();
+            return 503;
+          }
+          hdr_configured_by_recreation = true;
+          BOOST_LOG(info) << "Retained virtual display recreated at "
+                          << render_size->width << 'x' << render_size->height
+                          << " @ " << static_cast<double>(launch_session->fps) / 1000.0 << " Hz."sv;
+        }
       }
     }
 
-    if (!request_hdr_state(launch_session->enable_hdr, 6s)) {
+    if (!hdr_configured_by_recreation && !request_hdr_state(launch_session->enable_hdr, 6s)) {
+      bool rollback_succeeded = true;
       if (display_mode_changed &&
           VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps) != DISP_CHANGE_SUCCESSFUL) {
         BOOST_LOG(error) << "Failed to roll back the retained virtual-display mode after HDR reconfiguration failed."sv;
+        rollback_succeeded = false;
       }
       if (!request_hdr_state(old_hdr, 6s)) {
         BOOST_LOG(error) << "Failed to restore the retained session's prior HDR state after reconfiguration failed."sv;
+        rollback_succeeded = false;
+      }
+      if (!rollback_succeeded) {
+        BOOST_LOG(error) << "The retained display contract is incoherent after rollback; terminating the retained session."sv;
+        terminate();
       }
       return 503;
     }
@@ -1034,6 +1299,7 @@ namespace proc {
     _launch_session.reset();
 #ifdef _WIN32
     _virtual_display_identity.reset();
+    _virtual_display_render_adapter.reset();
     _virtual_display_device_path.clear();
     _virtual_display_gdi_name.clear();
     _virtual_display_published = false;

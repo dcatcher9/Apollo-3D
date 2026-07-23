@@ -131,6 +131,28 @@ namespace VDISPLAY {
 }
 
 namespace {
+struct baseline_refresh_rates_t {
+  DWORD preferred;
+  DWORD alternate;
+};
+
+baseline_refresh_rates_t baselineRefreshRates(int refresh_rate) {
+  DWORD preferred = refresh_rate / 1000;
+  DWORD alternate = preferred;
+
+  if (refresh_rate % 1000) {
+    if (refresh_rate % 1000 >= 900) {
+      preferred += 1;
+    } else {
+      alternate += 1;
+    }
+  } else if (alternate > 0) {
+    alternate -= 1;
+  }
+
+  return {preferred, alternate};
+}
+
 LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate) {
   std::vector<DISPLAYCONFIG_PATH_INFO> pathArray;
   std::vector<DISPLAYCONFIG_MODE_INFO> modeArray;
@@ -201,37 +223,48 @@ LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int 
 }
 }  // namespace
 
+LONG testDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate) {
+  DEVMODEW devMode = {};
+  devMode.dmSize = sizeof(devMode);
+  if (!EnumDisplaySettingsW(deviceName, ENUM_CURRENT_SETTINGS, &devMode)) {
+    return DISP_CHANGE_FAILED;
+  }
+
+  const auto refreshRates = baselineRefreshRates(refresh_rate);
+  devMode.dmPelsWidth = width;
+  devMode.dmPelsHeight = height;
+  devMode.dmDisplayFrequency = refreshRates.preferred;
+  devMode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+
+  auto result = ChangeDisplaySettingsExW(deviceName, &devMode, nullptr, CDS_TEST, nullptr);
+  if (result == DISP_CHANGE_SUCCESSFUL || refreshRates.alternate == refreshRates.preferred) {
+    return result;
+  }
+
+  devMode.dmDisplayFrequency = refreshRates.alternate;
+  return ChangeDisplaySettingsExW(deviceName, &devMode, nullptr, CDS_TEST, nullptr);
+}
+
 LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate) {
   DEVMODEW devMode = {};
   devMode.dmSize = sizeof(devMode);
 
   // Old method to set at least baseline refresh rate
   if (EnumDisplaySettingsW(deviceName, ENUM_CURRENT_SETTINGS, &devMode)) {
-    DWORD targetRefreshRate = refresh_rate / 1000;
-    DWORD altRefreshRate = targetRefreshRate;
+    const auto refreshRates = baselineRefreshRates(refresh_rate);
 
-    if (refresh_rate % 1000) {
-      if (refresh_rate % 1000 >= 900) {
-        targetRefreshRate += 1;
-      } else {
-        altRefreshRate += 1;
-      }
-    } else {
-      altRefreshRate -= 1;
-    }
-
-    wprintf(L"[SUDOVDA] Applying baseline display mode [%dx%dx%d] for %ls.\n", width, height, targetRefreshRate, deviceName);
+    wprintf(L"[SUDOVDA] Applying baseline display mode [%dx%dx%d] for %ls.\n", width, height, refreshRates.preferred, deviceName);
 
     devMode.dmPelsWidth = width;
     devMode.dmPelsHeight = height;
-    devMode.dmDisplayFrequency = targetRefreshRate;
+    devMode.dmDisplayFrequency = refreshRates.preferred;
     devMode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
 
     auto res = ChangeDisplaySettingsExW(deviceName, &devMode, NULL, CDS_UPDATEREGISTRY, NULL);
 
-    if (res != ERROR_SUCCESS) {
-      wprintf(L"[SUDOVDA] Failed to apply baseline display mode, trying alt mode: [%dx%dx%d].\n", width, height, altRefreshRate);
-      devMode.dmDisplayFrequency = altRefreshRate;
+    if (res != ERROR_SUCCESS && refreshRates.alternate != refreshRates.preferred) {
+      wprintf(L"[SUDOVDA] Failed to apply baseline display mode, trying alt mode: [%dx%dx%d].\n", width, height, refreshRates.alternate);
+      devMode.dmDisplayFrequency = refreshRates.alternate;
       res = ChangeDisplaySettingsExW(deviceName, &devMode, NULL, CDS_UPDATEREGISTRY, NULL);
       if (res != ERROR_SUCCESS) {
         wprintf(L"[SUDOVDA] Failed to apply alt baseline display mode.\n");
@@ -671,6 +704,7 @@ namespace {
     const std::optional<LUID> &adapterLuid
   ) {
     creation_result_t result;
+    result.render_adapter_luid = adapterLuid;
     VIRTUAL_DISPLAY_ADD_OUT output {};
     {
       // SudoVDA's render-adapter choice is process-global. Keep adapter selection and AddVirtualDisplay
@@ -723,7 +757,7 @@ creation_result_t createVirtualDisplay(
   uint32_t fps,
   const GUID &guid
 ) {
-  return createVirtualDisplayImpl(
+  return createVirtualDisplayWithRenderAdapter(
     s_client_uid,
     s_client_name,
     width,
@@ -731,6 +765,26 @@ creation_result_t createVirtualDisplay(
     fps,
     guid,
     primaryDisplayAdapterLuid()
+  );
+}
+
+creation_result_t createVirtualDisplayWithRenderAdapter(
+  const char *s_client_uid,
+  const char *s_client_name,
+  uint32_t width,
+  uint32_t height,
+  uint32_t fps,
+  const GUID &guid,
+  const std::optional<LUID> &adapterLuid
+) {
+  return createVirtualDisplayImpl(
+    s_client_uid,
+    s_client_name,
+    width,
+    height,
+    fps,
+    guid,
+    adapterLuid
   );
 }
 

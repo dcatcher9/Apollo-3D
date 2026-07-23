@@ -21,6 +21,7 @@ namespace VDISPLAY {
 		std::wstring device_path;
 		std::wstring friendly_name;
 		std::optional<SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT> identity;
+		std::optional<LUID> render_adapter_luid;
 
 		[[nodiscard]] bool added() const {
 			return identity.has_value();
@@ -49,6 +50,7 @@ namespace VDISPLAY {
 	};
 
 	LONG getDeviceSettings(const wchar_t* deviceName, DEVMODEW& devMode);
+	LONG testDisplaySettings(const wchar_t* deviceName, int width, int height, int refresh_rate);
 	LONG changeDisplaySettings(const wchar_t* deviceName, int width, int height, int refresh_rate);
 	std::optional<bool> queryDisplayHDRByName(const wchar_t* displayName);
 	bool setDisplayHDRByName(const wchar_t* displayName, bool enableAdvancedColor);
@@ -83,6 +85,15 @@ namespace VDISPLAY {
     uint32_t height,
     uint32_t fps,
     const GUID &guid
+  );
+  creation_result_t createVirtualDisplayWithRenderAdapter(
+    const char *s_client_uid,
+    const char *s_client_name,
+    uint32_t width,
+    uint32_t height,
+    uint32_t fps,
+    const GUID &guid,
+    const std::optional<LUID> &adapterLuid
   );
   creation_result_t createVirtualDisplayOnAdapter(
     const char *s_client_uid,
