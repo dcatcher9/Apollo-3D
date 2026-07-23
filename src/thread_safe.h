@@ -5,9 +5,12 @@
 #pragma once
 
 // standard includes
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -291,25 +294,49 @@ namespace safe {
   public:
     using status_t = util::optional_t<T>;
 
+    struct raise_result_t {
+      bool queued;
+      std::size_t dropped;
+    };
+
     queue_t(std::uint32_t max_elements = 32):
-        _max_elements {max_elements} {
+        _max_elements {std::max<std::uint32_t>(1, max_elements)} {
     }
 
     template<class... Args>
     void raise(Args &&...args) {
+      (void) raise_with_overflow_policy(true, std::forward<Args>(args)...);
+    }
+
+    /**
+     * @brief Queue a value with an explicit full-queue policy.
+     *
+     * When the queue is full, all stale values are removed atomically. If
+     * @p queue_newest_after_overflow is false, the new value is also discarded.
+     * This lets reference-dependent producers request a recovery frame without
+     * exposing a newly encoded delta frame whose references were just dropped.
+     */
+    template<class... Args>
+    raise_result_t raise_with_overflow_policy(bool queue_newest_after_overflow, Args &&...args) {
       std::lock_guard ul {_lock};
 
       if (!_continue) {
-        return;
+        return {false, 0};
       }
 
-      if (_queue.size() == _max_elements) {
+      std::size_t dropped = 0;
+      if (_queue.size() >= _max_elements) {
+        dropped = _queue.size();
         _queue.clear();
+        if (!queue_newest_after_overflow) {
+          return {false, dropped};
+        }
       }
 
       _queue.emplace_back(std::forward<Args>(args)...);
 
       _cv.notify_all();
+      return {true, dropped};
     }
 
     bool peek() {
@@ -571,7 +598,7 @@ namespace safe {
     }
 
     template<class T>
-    queue_t<T> queue(const std::string_view &id) {
+    queue_t<T> queue(const std::string_view &id, std::uint32_t max_elements = 32) {
       std::lock_guard lg {mutex};
 
       auto it = id_to_post.find(id);
@@ -579,7 +606,7 @@ namespace safe {
         return lock<queue_t<T>>(it->second);
       }
 
-      auto post = std::make_shared<typename queue_t<T>::element_type>(shared_from_this(), 32);
+      auto post = std::make_shared<typename queue_t<T>::element_type>(shared_from_this(), max_elements);
       id_to_post.emplace(std::pair<std::string, std::weak_ptr<void>> {std::string {id}, post});
 
       return post;

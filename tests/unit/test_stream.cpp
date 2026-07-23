@@ -122,6 +122,99 @@ TEST(VideoTransportConfigTests, EnforcesTenBitFecPacketIndex) {
   EXPECT_FALSE(stream::is_valid_fec_block_size(1, 0));
 }
 
+TEST(VideoTransportConfigTests, EstimatesFecShardsIncludingMinimumParity) {
+  constexpr std::size_t block_size = 1000;
+
+  EXPECT_EQ(stream::video_fec_shard_count(10'000, block_size, 20, 0), 12);
+  EXPECT_EQ(stream::video_fec_shard_count(1, block_size, 1, 2), 3);
+  EXPECT_EQ(stream::video_fec_shard_count(1, block_size, 0, 2), 1);
+  EXPECT_EQ(stream::video_fec_shard_count(0, block_size, 20, 2), 0);
+}
+
+TEST(VideoPacingTests, UsesBitrateFecCadenceAndBoundedBatches) {
+  constexpr std::size_t payload_packet_bytes = 1376;
+  constexpr std::size_t wire_packet_bytes = 1440;
+  constexpr std::size_t estimated_data_packets = 104;
+  constexpr std::size_t estimated_wire_packets = 125;
+
+  const auto plan = stream::make_video_pacing_plan(
+    104'108,
+    90'000,
+    estimated_data_packets,
+    estimated_wire_packets,
+    payload_packet_bytes,
+    wire_packet_bytes
+  );
+
+  EXPECT_GT(plan.target_wire_bps, 104'108'000);
+  EXPECT_LE(plan.target_wire_bps, stream::VIDEO_PACING_MAX_WIRE_BPS);
+  EXPECT_GT(plan.packets_per_quantum, 1);
+  EXPECT_LE(
+    stream::video_pacing_offset(estimated_wire_packets, plan.packets_per_second).count(),
+    plan.max_frame_span_ns
+  );
+}
+
+TEST(VideoPacingTests, LowBitrateThirtyFpsStreamRemainsNegotiatedRateAware) {
+  const auto low_rate = stream::make_video_pacing_plan(
+    10'000,
+    30'000,
+    30,
+    36,
+    1376,
+    1440
+  );
+  EXPECT_GT(low_rate.target_wire_bps, 10'000'000);
+  EXPECT_LT(low_rate.target_wire_bps, 20'000'000);
+  EXPECT_EQ(low_rate.target_wire_bps, 16'588'801);
+  EXPECT_LE(
+    stream::video_pacing_offset(36, low_rate.packets_per_second).count(),
+    low_rate.max_frame_span_ns
+  );
+}
+
+TEST(VideoPacingTests, UsesFallbackOnlyForInvalidBitrateAndCapsPathologicalFrames) {
+  const auto invalid_bitrate = stream::make_video_pacing_plan(
+    0,
+    60'000,
+    60,
+    72,
+    1376,
+    1440
+  );
+  EXPECT_GT(invalid_bitrate.target_wire_bps, stream::VIDEO_PACING_FALLBACK_ENCODED_BPS);
+  EXPECT_LT(invalid_bitrate.target_wire_bps, stream::VIDEO_PACING_MAX_WIRE_BPS);
+
+  const auto oversized_frame = stream::make_video_pacing_plan(
+    1'000'000,
+    120'000,
+    3410,
+    4092,
+    1376,
+    1440
+  );
+  EXPECT_EQ(oversized_frame.target_wire_bps, stream::VIDEO_PACING_MAX_WIRE_BPS);
+}
+
+TEST(VideoPacingTests, BoundsLateScheduleCatchupToOneQuantum) {
+  EXPECT_EQ(stream::video_pacing_rebase_ns(5'000'000, 5'500'000), 0);
+  EXPECT_EQ(stream::video_pacing_rebase_ns(5'000'000, 6'000'000), 0);
+  EXPECT_EQ(stream::video_pacing_rebase_ns(5'000'000, 25'000'000), 19'000'000);
+  EXPECT_EQ(
+    5'000'000 + stream::video_pacing_rebase_ns(5'000'000, 25'000'000),
+    25'000'000 - stream::VIDEO_PACING_MAX_CATCHUP_NS
+  );
+}
+
+TEST(VideoPacingTests, RetainsFractionalCadenceAndBoundsQueueAge) {
+  EXPECT_EQ(stream::video_frame_interval_ns(60'000), 16'666'666);
+  EXPECT_EQ(stream::video_frame_interval_ns(59'940), 16'683'350);
+  EXPECT_GT(stream::video_frame_interval_ns(59'940), stream::video_frame_interval_ns(60'000));
+
+  EXPECT_EQ(stream::video_packet_max_queue_age_ns(90'000), 50'000'000);
+  EXPECT_EQ(stream::video_packet_max_queue_age_ns(30'000), 99'999'999);
+}
+
 TEST(CheckedIntegerParsingTests, RejectsPartialAndOverflowingValues) {
   EXPECT_EQ(util::from_view_checked<int>("1392"), 1392);
   EXPECT_EQ(util::from_view_checked<int>("-1"), -1);

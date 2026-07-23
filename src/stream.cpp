@@ -364,11 +364,16 @@ namespace stream {
   struct video_channel_t {
     int packet_size;
     int min_required_fec_packets;
+    int encoded_bitrate_kbps;
+    int framerate_millihz;
     boost::asio::ip::address local_address;
     std::atomic_bool active {true};
+    std::atomic_bool pacing_plan_logged {false};
+    std::atomic_bool idr_pacing_plan_logged {false};
+    bool awaiting_recovery_idr {false};
 
     std::string ping_payload;
-    int lowseq;
+    std::uint32_t lowseq;
     udp::endpoint peer;
     crypto::cipher::gcm_t cipher;
     std::uint64_t gcm_iv_counter;
@@ -1022,6 +1027,9 @@ namespace stream {
       // Hand the requested mode to this session's video pipeline. capture_async consumes it and
       // rebuilds the encode device at the new resolution (W x H for OFF, 2W x H for AI). The
       // single configured depth model is prepared once during host startup.
+      // Log the recalculated pacing plan after the output dimensions change.
+      session->video->pacing_plan_logged.store(false, std::memory_order_release);
+      session->video->idr_pacing_plan_logged.store(false, std::memory_order_release);
       session->mail->event<int>(mail::sbs_mode)->raise((int) mode);
     });
 
@@ -1289,7 +1297,10 @@ namespace stream {
 
   void videoBroadcastThread(udp::socket &sock) {
     auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
-    auto packets = mail::man->queue<video::packet_t>(mail::video_packets);
+    auto packets = mail::man->queue<video::packet_t>(
+      mail::video_packets,
+      video::ENCODED_PACKET_QUEUE_LIMIT
+    );
     auto video_epoch = std::chrono::steady_clock::now();
 
     // Video traffic is sent on this thread
@@ -1322,6 +1333,30 @@ namespace stream {
       if (!channel || !channel->active.load(std::memory_order_acquire)) {
         continue;
       }
+
+      auto request_recovery_idr = [&](std::string_view reason) {
+        if (!channel->awaiting_recovery_idr) {
+          BOOST_LOG(warning) << "Dropping encoded video until a recovery IDR ("sv << reason << ")."sv;
+        }
+        channel->awaiting_recovery_idr = true;
+        channel->idr_events->try_raise(true);
+      };
+
+      const auto encoded_packet_age = std::chrono::steady_clock::now() - packet->encoded_timestamp;
+      const auto max_encoded_packet_age = std::chrono::nanoseconds {
+        video_packet_max_queue_age_ns(channel->framerate_millihz)
+      };
+      if (encoded_packet_age > max_encoded_packet_age) {
+        request_recovery_idr("encoded packet exceeded the host backlog age limit"sv);
+        continue;
+      }
+      if (channel->awaiting_recovery_idr) {
+        if (!packet->is_idr()) {
+          continue;
+        }
+        channel->awaiting_recovery_idr = false;
+      }
+
       auto lowseq = channel->lowseq;
 
       std::string_view payload {(char *) packet->data(), packet->data_size()};
@@ -1427,38 +1462,82 @@ namespace stream {
       // actual split because the final partial block can be one shard larger.
       if (!fec_block_sizes_valid) {
         BOOST_LOG(error) << "Dropping encoded frame that exceeds the 10-bit FEC packet index (needed "sv << max_packets_per_block << " packets per block)"sv;
+        request_recovery_idr("encoded frame exceeded the FEC packet-index limit"sv);
         continue;
       }
 
       try {
-        // Use around 80% of 1Gbps          1Gbps            percent    ms     packet      byte
-        size_t ratecontrol_packets_in_1ms = std::giga::num * 80 / 100 / 1000 / blocksize / 8;
+        const auto wire_packet_bytes = blocksize + sizeof(video_packet_enc_prefix_t);
+        std::size_t estimated_data_packets = 0;
+        std::size_t estimated_wire_packets = 0;
+        for (auto it = fec_blocks_begin; it != fec_blocks_end; ++it) {
+          estimated_data_packets += fec_packet_count(it->size(), blocksize);
+          estimated_wire_packets += video_fec_shard_count(
+            it->size(),
+            blocksize,
+            fecPercentage,
+            channel->min_required_fec_packets
+          );
+        }
+        const auto pacing_plan = make_video_pacing_plan(
+          channel->encoded_bitrate_kbps,
+          channel->framerate_millihz,
+          estimated_data_packets,
+          estimated_wire_packets,
+          payload_blocksize,
+          wire_packet_bytes
+        );
 
         // Send less than 64K in a single batch.
         // On Windows, batches above 64K seem to bypass SO_SNDBUF regardless of its size,
         // appear in "Other I/O" and begin waiting for interrupts.
-        // This gives inconsistent performance so we'd rather avoid it.
-        size_t send_batch_size = 64 * 1024 / blocksize;
+        // This gives inconsistent performance so we'd rather avoid it. Also cap each batch to
+        // roughly one pacing quantum so a nominally paced frame is not emitted as a few 64K bursts.
+        size_t send_batch_size = std::max<std::size_t>(1, 64 * 1024 / wire_packet_bytes);
         // Also don't exceed 64 packets, which can happen when Artemis requests
         // unusually small packet size.
         // Generic Segmentation Offload on Linux can't do more than 64.
-        send_batch_size = std::min<size_t>(64, send_batch_size);
+        send_batch_size = std::min({
+          std::size_t {64},
+          send_batch_size,
+          pacing_plan.packets_per_quantum,
+        });
 
-        // Don't ignore the last ratecontrol group of the previous frame
+        const auto ceiling_label =
+          pacing_plan.target_wire_bps == VIDEO_PACING_MAX_WIRE_BPS ? ", ceiling-limited"sv : ""sv;
+        if (packet->is_idr()) {
+          if (!channel->idr_pacing_plan_logged.exchange(true, std::memory_order_acq_rel)) {
+            BOOST_LOG(debug) << "Video IDR packet pacing (transient): target="sv
+                             << (pacing_plan.target_wire_bps / 1'000'000.0)
+                             << " Mbps"sv << ceiling_label
+                             << "; steady-state pacing will be logged on the first inter frame."sv;
+          }
+        } else if (!channel->pacing_plan_logged.exchange(true, std::memory_order_acq_rel)) {
+          BOOST_LOG(info) << "Video packet pacing (steady state): target="sv
+                          << (pacing_plan.target_wire_bps / 1'000'000.0)
+                          << " Mbps"sv << ceiling_label
+                          << " (negotiated bitrate + actual packet overhead/cadence), batch<="sv
+                          << send_batch_size
+                          << " packets, frame-span<="sv
+                          << (pacing_plan.max_frame_span_ns / 1'000'000.0) << " ms."sv;
+        }
+
+        // Don't overlap this frame with the final paced packet of the previous frame.
         auto ratecontrol_frame_start = std::max(ratecontrol_next_frame_start, std::chrono::steady_clock::now());
 
         size_t ratecontrol_frame_packets_sent = 0;
-        size_t ratecontrol_group_packets_sent = 0;
 
         auto blockIndex = 0;
         std::for_each(fec_blocks_begin, fec_blocks_end, [&](std::string_view &current_payload) {
           auto packets = (current_payload.size() + (blocksize - 1)) / blocksize;
+          const auto block_lowseq = lowseq;
 
           for (int x = 0; x < packets; ++x) {
             auto *inspect = (video_packet_raw_t *) &current_payload[x * blocksize];
 
             inspect->packet.frameIndex = packet->frame_index();
-            inspect->packet.streamPacketIndex = ((uint32_t) lowseq + x) << 8;
+            inspect->packet.streamPacketIndex =
+              (block_lowseq + static_cast<std::uint32_t>(x)) << 8;
 
             // Match multiFecFlags with Artemis
             inspect->packet.multiFecFlags = 0x10;
@@ -1476,6 +1555,12 @@ namespace stream {
           frame_fec_latency_logger.first_point_now();
           auto shards = fec::encode(current_payload, blocksize, fecPercentage, channel->min_required_fec_packets, sizeof(video_packet_enc_prefix_t));
           frame_fec_latency_logger.second_point_now_and_log();
+
+          // Reserve this whole block's sequence range before the first send. If a send throws
+          // after transmitting only part of the block, the recovery IDR must start after the
+          // abandoned range rather than reusing sequence numbers the client already observed.
+          lowseq += static_cast<std::uint32_t>(shards.size());
+          channel->lowseq = lowseq;
 
           auto peer_address = channel->peer.address();
           auto batch_info = platf::batched_send_info_t {
@@ -1511,7 +1596,9 @@ namespace stream {
                shards.percentage << 4);
 
             inspect->rtp.header = 0x80 | FLAG_EXTENSION;
-            inspect->rtp.sequenceNumber = util::endian::big<uint16_t>(lowseq + x);
+            inspect->rtp.sequenceNumber = util::endian::big<uint16_t>(
+              static_cast<std::uint16_t>(block_lowseq + static_cast<std::uint32_t>(x))
+            );
             inspect->rtp.timestamp = util::endian::big<uint32_t>(timestamp);
 
             inspect->packet.multiFecBlocks = (blockIndex << 4) | ((fec_blocks_needed - 1) << 6);
@@ -1529,20 +1616,25 @@ namespace stream {
             channel->cipher.encrypt(std::string_view {(char *) inspect, (size_t) blocksize}, prefix->tag, (uint8_t *) inspect, &iv);
 
             if (x - next_shard_to_send + 1 >= send_batch_size || x + 1 == shards.size()) {
-              // Do pacing within the frame.
-              // Also trigger pacing before the first send_batch() of the frame
-              // to account for the last send_batch() of the previous frame.
-              if (ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms || ratecontrol_frame_packets_sent == 0) {
-                auto due = ratecontrol_frame_start +
-                           std::chrono::duration_cast<std::chrono::nanoseconds>(1ms) *
-                             ratecontrol_frame_packets_sent / ratecontrol_packets_in_1ms;
-
-                auto now = std::chrono::steady_clock::now();
-                if (now < due) {
-                  timer->sleep_for(due - now);
-                }
-
-                ratecontrol_group_packets_sent = 0;
+              // Pace every bounded batch. The first batch is due immediately; subsequent batches
+              // are distributed according to the negotiated bitrate/FEC/cadence plan.
+              const auto due = ratecontrol_frame_start +
+                               video_pacing_offset(ratecontrol_frame_packets_sent, pacing_plan.packets_per_second);
+              auto now = std::chrono::steady_clock::now();
+              const auto schedule_rebase = std::chrono::nanoseconds {
+                video_pacing_rebase_ns(
+                  std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    due - ratecontrol_frame_start
+                  ).count(),
+                  std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    now - ratecontrol_frame_start
+                  ).count()
+                )
+              };
+              ratecontrol_frame_start += schedule_rebase;
+              const auto bounded_due = due + schedule_rebase;
+              if (now < bounded_due) {
+                timer->sleep_for(bounded_due - now);
               }
 
               size_t current_batch_size = x - next_shard_to_send + 1;
@@ -1570,28 +1662,28 @@ namespace stream {
               }
               frame_send_batch_latency_logger.second_point_now_and_log();
 
-              ratecontrol_group_packets_sent += current_batch_size;
               ratecontrol_frame_packets_sent += current_batch_size;
               next_shard_to_send = x + 1;
             }
           }
 
-          // remember this in case the next frame comes immediately
-          ratecontrol_next_frame_start = ratecontrol_frame_start +
-                                         std::chrono::duration_cast<std::chrono::nanoseconds>(1ms) *
-                                           ratecontrol_frame_packets_sent / ratecontrol_packets_in_1ms;
-
           ++blockIndex;
-          lowseq += shards.size();
         });
+
+        // Remember the final scheduled packet time in case the next frame is already queued.
+        ratecontrol_next_frame_start = ratecontrol_frame_start +
+                                       video_pacing_offset(
+                                         ratecontrol_frame_packets_sent,
+                                         pacing_plan.packets_per_second
+                                       );
 
         // The start point is recorded once for the encoded frame above. Finish the sample only
         // after every FEC block has been paced and submitted, rather than producing one partial
         // sample per block.
         frame_network_latency_logger.second_point_now_and_log();
-        channel->lowseq = lowseq;
       } catch (const std::exception &e) {
         BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
+        request_recovery_idr("video packetization or send failed"sv);
         std::this_thread::sleep_for(100ms);
       }
     }
@@ -1795,7 +1887,10 @@ namespace stream {
 
     broadcast_shutdown_event->raise(true);
 
-    auto video_packets = mail::man->queue<video::packet_t>(mail::video_packets);
+    auto video_packets = mail::man->queue<video::packet_t>(
+      mail::video_packets,
+      video::ENCODED_PACKET_QUEUE_LIMIT
+    );
     auto audio_packets = mail::man->queue<audio::packet_t>(mail::audio_packets);
 
     // Minimize delay stopping video/audio threads
@@ -2501,6 +2596,10 @@ namespace stream {
       session->video = std::make_shared<video_channel_t>();
       session->video->packet_size = config.packetsize;
       session->video->min_required_fec_packets = config.minRequiredFecPackets;
+      session->video->encoded_bitrate_kbps = config.monitor.bitrate;
+      session->video->framerate_millihz = config.monitor.encodingFramerate > 0 ?
+                                            config.monitor.encodingFramerate :
+                                            config.monitor.framerate * 1000;
 
       session->audio = std::make_shared<audio_channel_t>();
       session->audio->packet_duration = config.audio.packetDuration;

@@ -46,6 +46,13 @@ namespace platf::dxgi {
 
   using d3d_query_t = util::safe_ptr<ID3D11Query, Release<ID3D11Query>>;
 
+  struct alignas(16) sdr_color_transform_t {
+    std::uint32_t target_bt2020;
+    std::uint32_t source_is_hdr;
+    float source_sdr_white_scrgb;
+    float padding;
+  };
+
   template<class T>
   buf_t make_buffer(device_t::pointer device, const T &t) {
     static_assert(sizeof(T) % 16 == 0, "Buffer needs to be aligned on a 16-byte alignment");
@@ -459,13 +466,16 @@ namespace platf::dxgi {
     int convert_rgb(
       platf::img_t &img,
       ID3D11Texture2D *target_texture,
-      ID3D11RenderTargetView *target
+      ID3D11RenderTargetView *target,
+      bool target_is_linear
     ) {
       rgb_present_texture = target_texture;
       rgb_present_target = target;
+      rgb_present_target_is_linear = target_is_linear;
       auto clear_target = util::fail_guard([this]() {
         rgb_present_texture = nullptr;
         rgb_present_target = nullptr;
+        rgb_present_target_is_linear = false;
       });
       return convert(img);
     }
@@ -503,6 +513,13 @@ namespace platf::dxgi {
 
         auto draw = [&](auto &input, const D3D11_VIEWPORT &y_or_yuv_viewport, const D3D11_VIEWPORT &uv_viewport, bool input_is_linear) {
           device_ctx->PSSetShaderResources(0, 1, &input);
+          ID3D11Buffer *converter_buffers[] = {
+            color_matrix.get(),
+            sdr_color_transform.get(),
+          };
+          // Bind both converter constants for every shader variant. Other passes use their own
+          // PS constant-buffer slots, so never rely on stale context state between SBS/RGB draws.
+          device_ctx->PSSetConstantBuffers(0, 2, converter_buffers);
 
           // Draw Y/YUV
           device_ctx->OMSetRenderTargets(1, &out_Y_or_YUV_rtv, nullptr);
@@ -526,8 +543,8 @@ namespace platf::dxgi {
           device_ctx->OMSetRenderTargets(1, &rgb_present_target, nullptr);
           device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
           device_ctx->PSSetShader(
-            input_is_linear && !display->is_hdr() ? rgb_present_linear_to_srgb_ps.get() :
-                                                    rgb_present_ps.get(),
+            input_is_linear && !rgb_present_target_is_linear ? rgb_present_linear_to_srgb_ps.get() :
+                                                               rgb_present_ps.get(),
             nullptr,
             0
           );
@@ -598,7 +615,9 @@ namespace platf::dxgi {
 
           // Production always uses bounded matched pairing: infer asynchronously from a private
           // color slot, then warp only the slot whose frame identity completed.
-          const auto input_color_space = img.format == DXGI_FORMAT_R16G16B16A16_FLOAT ?
+          const bool input_is_linear =
+            img.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+          const auto input_color_space = input_is_linear ?
                                            (display->is_hdr() ? models::input_color_space::scrgb_hdr :
                                                                 models::input_color_space::linear_sdr) :
                                            models::input_color_space::srgb;
@@ -735,11 +754,11 @@ namespace platf::dxgi {
             // encode/decode round trip. Exact layouts take the copy fast path; retain the shader
             // for any future mode whose source and physical target require scaling or conversion.
             if (!copy_rgb(final_sbs_texture)) {
-              draw_rgb(final_sbs_srv, sbs_intermediate_linear);
+              draw_rgb(final_sbs_srv, input_is_linear);
             }
           } else {
             // Draw the SBS intermediate into encoder YUV.
-            draw(final_sbs_srv, out_Y_or_YUV_viewport, out_UV_viewport, sbs_intermediate_linear);
+            draw(final_sbs_srv, out_Y_or_YUV_viewport, out_UV_viewport, input_is_linear);
           }
           end_sbs_gpu_timer(gpu_timer);
 
@@ -799,23 +818,60 @@ namespace platf::dxgi {
       return 0;
     }
 
-    void apply_colorspace(const ::video::sunshine_colorspace_t &colorspace) {
+    bool apply_colorspace(const ::video::sunshine_colorspace_t &colorspace) {
       auto color_vectors = ::video::color_vectors_from_colorspace(colorspace, true);
 
       if (!color_vectors) {
         BOOST_LOG(error) << "No vector data for colorspace"sv;
-        return;
+        return false;
       }
 
       auto color_matrix = make_buffer(device.get(), *color_vectors);
       if (!color_matrix) {
         BOOST_LOG(warning) << "Failed to create color matrix"sv;
-        return;
+        return false;
+      }
+
+      // This flag is consumed only by the linear-input shader. The encoded BGRA shader
+      // categorically treats its actual input as SDR, which is required for WGC SDR capture on
+      // an HDR desktop and also avoids relying on DDup's initially-unknown capture format.
+      const bool source_is_hdr = ::video::hdr_to_sdr_tonemap_required(
+        ::video::colorspace_is_hdr(colorspace),
+        display->is_hdr(),
+        true
+      );
+      constexpr float fallback_sdr_white_nits = 203.0f;
+      float sdr_white_nits = fallback_sdr_white_nits;
+      if (source_is_hdr) {
+        const auto queried_sdr_white_nits = display->get_sdr_white_nits();
+        if (queried_sdr_white_nits && *queried_sdr_white_nits > 0.0f) {
+          sdr_white_nits = *queried_sdr_white_nits;
+        } else {
+          BOOST_LOG(warning)
+            << "Failed to query the display's SDR reference white; using "sv
+            << fallback_sdr_white_nits << " nits for HDR-to-SDR tone mapping."sv;
+        }
+      }
+
+      const sdr_color_transform_t transform {
+        colorspace.colorspace == ::video::colorspace_e::bt2020sdr,
+        source_is_hdr,
+        sdr_white_nits / 80.0f,
+        0.0f,
+      };
+      auto sdr_color_transform = make_buffer(device.get(), transform);
+      if (!sdr_color_transform) {
+        BOOST_LOG(warning) << "Failed to create SDR color-transform constants"sv;
+        return false;
       }
 
       device_ctx->VSSetConstantBuffers(3, 1, &color_matrix);
       device_ctx->PSSetConstantBuffers(0, 1, &color_matrix);
       this->color_matrix = std::move(color_matrix);
+      this->sdr_color_transform = std::move(sdr_color_transform);
+      output_black_y = color_vectors->color_vec_y[3];
+      output_neutral_uv = color_vectors->color_vec_u[3];
+      return true;
     }
 
     // Create the D3D depth pipeline on demand (first SBS frame). The heavy TensorRT engine,
@@ -1273,10 +1329,16 @@ namespace platf::dxgi {
       if (diagnostics_enabled) {
         reset_matched_stats();
       }
-      // WGC uses FP16 for both HDR and 10-bit SDR capture. In either case the texture is linear;
-      // HDR only changes the later linear-scRGB -> Rec.2020/PQ conversion.
-      sbs_intermediate_linear = display->is_hdr() ||
-                                display->capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+      // DDup discovers its capture format on the first frame, after these resources are created.
+      // Preserve FP16 storage while HDR/10-bit discovery is pending; WGC's already-known BGRA
+      // format remains BGRA even on a physical HDR display. The transfer state is deliberately
+      // separate and follows each actual img.format in convert().
+      sbs_intermediate_fp16 = ::video::sbs_intermediate_requires_fp16(
+        display->capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT,
+        display->capture_format == DXGI_FORMAT_UNKNOWN,
+        display->is_hdr(),
+        format == DXGI_FORMAT_P010
+      );
 
       HRESULT status = S_OK;
 
@@ -1414,7 +1476,8 @@ namespace platf::dxgi {
         tex_desc.Height = (UINT) std::lround(out_height_f);
         tex_desc.MipLevels = 1;
         tex_desc.ArraySize = 1;
-        tex_desc.Format = sbs_intermediate_linear ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
+        tex_desc.Format = sbs_intermediate_fp16 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+                                                  DXGI_FORMAT_B8G8R8A8_UNORM;
         tex_desc.SampleDesc.Count = 1;
         tex_desc.Usage = D3D11_USAGE_DEFAULT;
         tex_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
@@ -1515,10 +1578,15 @@ namespace platf::dxgi {
       }
 
       // NV12 and P010 support native RTV clears. Initialize aspect-ratio padding once.
-      const float y_black[] = {0.0f, 0.0f, 0.0f, 0.0f};
+      const float y_black[] = {output_black_y, output_black_y, output_black_y, output_black_y};
       device_ctx->ClearRenderTargetView(out_Y_or_YUV_rtv.get(), y_black);
       if (out_UV_rtv) {
-        const float uv_black[] = {0.5f, 0.5f, 0.5f, 0.5f};
+        const float uv_black[] = {
+          output_neutral_uv,
+          output_neutral_uv,
+          output_neutral_uv,
+          output_neutral_uv,
+        };
         device_ctx->ClearRenderTargetView(out_UV_rtv.get(), uv_black);
       }
 
@@ -1727,6 +1795,9 @@ namespace platf::dxgi {
 
     buf_t subsample_offset;
     buf_t color_matrix;
+    buf_t sdr_color_transform;
+    float output_black_y = 0.0f;
+    float output_neutral_uv = 0.5f;
 
     blend_t blend_disable;
     sampler_state_t sampler_linear;
@@ -1761,6 +1832,7 @@ namespace platf::dxgi {
     texture2d_t output_texture;
     ID3D11Texture2D *rgb_present_texture = nullptr;  ///< Non-owning swapchain texture during convert_rgb().
     ID3D11RenderTargetView *rgb_present_target = nullptr;  ///< Non-owning swapchain RTV during convert_rgb().
+    bool rgb_present_target_is_linear = false;  ///< True for a linear scRGB swapchain, independent of the physical output mode.
     bool rgb_copy_path_logged = false;
     bool rgb_copy_fallback_logged = false;
     ps_t rgb_present_ps;
@@ -1790,7 +1862,7 @@ namespace platf::dxgi {
     texture2d_t sbs_warp_depth_texture;
     unordered_access_t sbs_warp_depth_uav;
     shader_res_t sbs_warp_depth_srv;
-    bool sbs_intermediate_linear = false;
+    bool sbs_intermediate_fp16 = false;
     D3D11_VIEWPORT sbs_viewport;
     std::array<matched_frame_slot_t, 2> matched_frame_slots;
     std::uint64_t sbs_frame_sequence = 0;
@@ -3000,7 +3072,9 @@ namespace platf::dxgi {
         return true;
       }
 
-      if (converter.convert_rgb(*image, backbuffer.Get(), backbuffer_rtv.Get())) {
+      // The swapchain transfer contract controls RGB presentation. In SDR, DWM may composite the
+      // G22 swapchain onto an HDR physical output, so the output's live HDR state is not relevant.
+      if (converter.convert_rgb(*image, backbuffer.Get(), backbuffer_rtv.Get(), config.hdr)) {
         BOOST_LOG(error) << "Local AR presenter failed to convert a captured frame."sv;
         return false;
       }
@@ -3094,11 +3168,19 @@ namespace platf::dxgi {
       }
 
       auto nvenc_colorspace = nvenc::nvenc_colorspace_from_sunshine_colorspace(colorspace);
-      if (!nvenc_d3d->create_encoder(config::video.nv, client_config, nvenc_colorspace, buffer_format)) {
+      if (!nvenc_d3d->create_encoder(
+            config::video.nv,
+            client_config,
+            nvenc_colorspace,
+            buffer_format,
+            hdr_metadata
+          )) {
         return false;
       }
 
-      base.apply_colorspace(colorspace);
+      if (!base.apply_colorspace(colorspace)) {
+        return false;
+      }
       return base.init_output(
                nvenc_d3d->get_input_texture(),
                client_config.width,
@@ -3228,7 +3310,7 @@ namespace platf::dxgi {
         return capture_e::error;
       }
 
-      D3D11_TEXTURE2D_DESC desc;
+      D3D11_TEXTURE2D_DESC desc {};
       src->GetDesc(&desc);
 
       // It's possible for our display enumeration to race with mode changes and result in
@@ -3621,10 +3703,20 @@ namespace platf::dxgi {
         return -1;
       }
 
-      // Use a 300 nit target for the mouse cursor. We should really get
-      // the user's SDR white level in nits, but there is no API that
-      // provides that information to Win32 apps.
-      float white_multiplier_data[16 / sizeof(float)] {300.0f / 80.f};  // aligned to 16-byte
+      constexpr float fallback_sdr_white_nits = 203.0f;
+      const auto queried_sdr_white_nits = get_sdr_white_nits();
+      const float sdr_white_nits =
+        queried_sdr_white_nits && *queried_sdr_white_nits > 0.0f ?
+          *queried_sdr_white_nits :
+          fallback_sdr_white_nits;
+      if (!queried_sdr_white_nits || *queried_sdr_white_nits <= 0.0f) {
+        BOOST_LOG(warning)
+          << "Failed to query the display's SDR reference white; using "sv
+          << fallback_sdr_white_nits << " nits for the HDR cursor."sv;
+      }
+
+      // scRGB 1.0 represents 80 nits. Cursor texture RGB was decoded from sRGB by the shader.
+      float white_multiplier_data[16 / sizeof(float)] {sdr_white_nits / 80.0f};  // aligned to 16-byte
       auto white_multiplier = make_buffer(device.get(), white_multiplier_data);
       if (!white_multiplier) {
         BOOST_LOG(warning) << "Failed to create cursor blending (normalized white) white multiplier constant buffer";
@@ -3672,7 +3764,7 @@ namespace platf::dxgi {
     }
 
     auto frame_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(qpc_counter(), frame_qpc);
-    D3D11_TEXTURE2D_DESC desc;
+    D3D11_TEXTURE2D_DESC desc {};
     src->GetDesc(&desc);
 
     // It's possible for our display enumeration to race with mode changes and result in
@@ -3831,7 +3923,7 @@ namespace platf::dxgi {
     return {
       // scRGB FP16 is the ideal format for Wide Color Gamut and Advanced Color
       // displays (both SDR and HDR). This format uses linear gamma, so we will
-      // use a linear->PQ shader for HDR and a linear->sRGB shader for SDR.
+      // use a linear->PQ shader for HDR and the declared BT.709/BT.2020 transfer for SDR.
       DXGI_FORMAT_R16G16B16A16_FLOAT,
 
       // DXGI_FORMAT_R10G10B10A2_UNORM seems like it might give us frames already
@@ -3858,8 +3950,13 @@ namespace platf::dxgi {
    * @return `true` if supported, `false` otherwise.
    */
   bool display_vram_t::is_codec_supported(std::string_view name, const ::video::config_t &config) {
-    DXGI_ADAPTER_DESC adapter_desc;
-    adapter->GetDesc(&adapter_desc);
+    DXGI_ADAPTER_DESC adapter_desc {};
+    const auto status = adapter->GetDesc(&adapter_desc);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Failed to query the display adapter description [0x"sv
+                       << util::hex(status).to_string_view() << ']';
+      return false;
+    }
 
     if (adapter_desc.VendorId != 0x10de) {
       BOOST_LOG(error) << "Apollo requires an NVIDIA display adapter; detected vendor ID "

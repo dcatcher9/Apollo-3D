@@ -41,8 +41,12 @@ int main(int argc, char *argv[]) {
   for (int x = 0; factory->EnumAdapters1(x, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++x) {
     dxgi::adapter_t adapter {adapter_p};
 
-    DXGI_ADAPTER_DESC1 adapter_desc;
-    adapter->GetDesc1(&adapter_desc);
+    DXGI_ADAPTER_DESC1 adapter_desc {};
+    status = adapter->GetDesc1(&adapter_desc);
+    if (FAILED(status)) {
+      std::cerr << "Failed to query adapter description: 0x" << std::hex << status << std::endl;
+      continue;
+    }
 
     std::cout
       << "====== ADAPTER ====="sv << std::endl;
@@ -61,8 +65,12 @@ int main(int argc, char *argv[]) {
     for (int y = 0; adapter->EnumOutputs(y, &output_p) != DXGI_ERROR_NOT_FOUND; ++y) {
       dxgi::output_t output {output_p};
 
-      DXGI_OUTPUT_DESC desc;
-      output->GetDesc(&desc);
+      DXGI_OUTPUT_DESC desc {};
+      status = output->GetDesc(&desc);
+      if (FAILED(status)) {
+        std::cerr << "Failed to query output description: 0x" << std::hex << status << std::endl;
+        continue;
+      }
 
       auto width = desc.DesktopCoordinates.right - desc.DesktopCoordinates.left;
       auto height = desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;

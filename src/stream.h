@@ -5,6 +5,8 @@
 #pragma once
 
 // standard includes
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -38,6 +40,13 @@ namespace stream {
   // two minimum parity shards.
   constexpr int MIN_REQUIRED_FEC_PACKETS_MAX = 2;
   constexpr std::size_t FEC_PACKET_INDEX_MAX = 1023;
+  // ANNOUNCE validation normally guarantees a positive encoder bitrate. Keep a modest fallback
+  // for defensive callers without forcing valid low-bitrate streams up to a large fixed rate.
+  constexpr std::uint64_t VIDEO_PACING_FALLBACK_ENCODED_BPS = 10'000'000;
+  constexpr std::uint64_t VIDEO_PACING_MAX_WIRE_BPS = 800'000'000;
+  constexpr std::int64_t VIDEO_PACING_QUANTUM_NS = 1'000'000;
+  constexpr std::int64_t VIDEO_PACING_MAX_CATCHUP_NS = VIDEO_PACING_QUANTUM_NS;
+  constexpr std::int64_t VIDEO_BACKLOG_MIN_MAX_AGE_NS = 50'000'000;
 
   constexpr std::size_t CONTROL_HEADER_V2_SIZE = 2 * sizeof(std::uint16_t);
   constexpr std::size_t CONTROL_GCM_TAG_SIZE = 16;
@@ -65,6 +74,156 @@ namespace stream {
   [[nodiscard]] constexpr bool is_valid_fec_block_size(std::size_t payload_size, std::size_t block_size) {
     const auto packet_count = fec_packet_count(payload_size, block_size);
     return packet_count > 0 && packet_count <= FEC_PACKET_INDEX_MAX;
+  }
+
+  [[nodiscard]] constexpr std::uint64_t ceil_div_u64(std::uint64_t numerator, std::uint64_t denominator) {
+    return denominator == 0 ? 0 : numerator / denominator + (numerator % denominator != 0);
+  }
+
+  [[nodiscard]] constexpr std::size_t video_fec_shard_count(
+    std::size_t payload_size,
+    std::size_t block_size,
+    int fec_percentage,
+    int min_required_fec_packets
+  ) {
+    const auto data_shards = fec_packet_count(payload_size, block_size);
+    if (data_shards == 0 || fec_percentage <= 0) {
+      return data_shards;
+    }
+
+    const auto parity_shards = std::max<std::size_t>(
+      ceil_div_u64(data_shards * static_cast<std::uint64_t>(fec_percentage), 100),
+      static_cast<std::size_t>(std::max(0, min_required_fec_packets))
+    );
+    return data_shards + parity_shards;
+  }
+
+  [[nodiscard]] constexpr std::int64_t video_frame_interval_ns(int framerate_millihz) {
+    return framerate_millihz > 0 ? static_cast<std::int64_t>(1'000'000'000'000ULL / framerate_millihz) :
+                                   0;
+  }
+
+  [[nodiscard]] constexpr std::int64_t video_packet_max_queue_age_ns(int framerate_millihz) {
+    const auto frame_interval_ns = video_frame_interval_ns(framerate_millihz);
+    return frame_interval_ns > 0 ?
+             std::max(VIDEO_BACKLOG_MIN_MAX_AGE_NS, frame_interval_ns * 3) :
+             VIDEO_BACKLOG_MIN_MAX_AGE_NS;
+  }
+
+  struct video_pacing_plan_t {
+    std::uint64_t target_wire_bps;
+    std::uint64_t packets_per_second;
+    std::size_t packets_per_quantum;
+    std::int64_t frame_interval_ns;
+    std::int64_t max_frame_span_ns;
+  };
+
+  /**
+   * Build a bounded pacing plan from the encoded-data rate and this frame's expected wire size.
+   *
+   * The nominal rate accounts for the actual data/parity shard ratio and per-packet transport
+   * overhead. A frame-size-derived lower bound keeps every frame within 75% of one frame
+   * interval, leaving capture/encode scheduling slack. The ceiling is a safety limit for
+   * pathological frames, not the ordinary pacing rate.
+   */
+  [[nodiscard]] constexpr video_pacing_plan_t make_video_pacing_plan(
+    int encoded_bitrate_kbps,
+    int framerate_millihz,
+    std::size_t estimated_data_packets,
+    std::size_t estimated_wire_packets,
+    std::size_t encoded_payload_packet_bytes,
+    std::size_t wire_packet_bytes
+  ) {
+    const auto safe_data_packets = std::max<std::size_t>(1, estimated_data_packets);
+    const auto safe_wire_packets = std::max(safe_data_packets, estimated_wire_packets);
+    const auto safe_payload_bytes = std::max<std::size_t>(1, encoded_payload_packet_bytes);
+    const auto safe_wire_bytes = std::max<std::size_t>(1, wire_packet_bytes);
+    const auto encoded_bps = encoded_bitrate_kbps > 0 ?
+                               static_cast<std::uint64_t>(encoded_bitrate_kbps) * 1000 :
+                               VIDEO_PACING_FALLBACK_ENCODED_BPS;
+    const auto nominal_fec_bps = std::min(
+      VIDEO_PACING_MAX_WIRE_BPS,
+      ceil_div_u64(
+        encoded_bps * static_cast<std::uint64_t>(safe_wire_packets),
+        static_cast<std::uint64_t>(safe_data_packets)
+      )
+    );
+    const auto nominal_wire_bps = std::min(
+      VIDEO_PACING_MAX_WIRE_BPS,
+      ceil_div_u64(
+        nominal_fec_bps * safe_wire_bytes,
+        safe_payload_bytes
+      )
+    );
+
+    auto frame_interval_ns = video_frame_interval_ns(framerate_millihz);
+    if (frame_interval_ns <= 0) {
+      frame_interval_ns = video_frame_interval_ns(60'000);
+    }
+    const auto max_frame_span_ns = std::max<std::int64_t>(1, frame_interval_ns * 3 / 4);
+    const auto estimated_wire_bits =
+      static_cast<std::uint64_t>(safe_wire_packets) *
+      safe_wire_bytes * 8;
+    const auto cadence_wire_bps = ceil_div_u64(
+      estimated_wire_bits * 1'000'000'000ULL,
+      static_cast<std::uint64_t>(max_frame_span_ns)
+    );
+    const auto target_wire_bps = std::min(
+      VIDEO_PACING_MAX_WIRE_BPS,
+      std::max(nominal_wire_bps, cadence_wire_bps)
+    );
+    const auto packets_per_second = std::max<std::uint64_t>(
+      1,
+      ceil_div_u64(target_wire_bps, safe_wire_bytes * 8)
+    );
+    const auto packets_per_quantum = static_cast<std::size_t>(
+      std::max<std::uint64_t>(
+        1,
+        ceil_div_u64(
+          packets_per_second * static_cast<std::uint64_t>(VIDEO_PACING_QUANTUM_NS),
+          1'000'000'000ULL
+        )
+      )
+    );
+
+    return {
+      target_wire_bps,
+      packets_per_second,
+      packets_per_quantum,
+      frame_interval_ns,
+      max_frame_span_ns,
+    };
+  }
+
+  /**
+   * Move a late pacing schedule forward while retaining at most one quantum of catch-up credit.
+   * This avoids turning a delayed timer callback into an unbounded run of immediate send batches.
+   */
+  [[nodiscard]] constexpr std::int64_t video_pacing_rebase_ns(
+    std::int64_t scheduled_ns,
+    std::int64_t now_ns,
+    std::int64_t max_catchup_ns = VIDEO_PACING_MAX_CATCHUP_NS
+  ) {
+    if (now_ns <= scheduled_ns) {
+      return 0;
+    }
+
+    const auto overdue_ns = now_ns - scheduled_ns;
+    return std::max<std::int64_t>(0, overdue_ns - std::max<std::int64_t>(0, max_catchup_ns));
+  }
+
+  [[nodiscard]] constexpr std::chrono::nanoseconds video_pacing_offset(
+    std::size_t packets_sent,
+    std::uint64_t packets_per_second
+  ) {
+    return std::chrono::nanoseconds {
+      static_cast<std::int64_t>(
+        ceil_div_u64(
+          static_cast<std::uint64_t>(packets_sent) * 1'000'000'000ULL,
+          std::max<std::uint64_t>(1, packets_per_second)
+        )
+      )
+    };
   }
 
   [[nodiscard]] constexpr bool is_valid_control_packet_size(std::size_t packet_size) {

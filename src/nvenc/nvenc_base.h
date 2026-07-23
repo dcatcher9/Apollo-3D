@@ -24,6 +24,20 @@ namespace nvenc {
   /** Last per-codec width capability reported by the active NVENC driver probe. */
   std::optional<int> max_encode_width_for_codec(int video_format);
 
+  struct nvenc_hdr_metadata_t {
+    std::optional<MASTERING_DISPLAY_INFO> mastering_display;
+    std::optional<CONTENT_LIGHT_LEVEL> content_light_level;
+  };
+
+  /**
+   * Convert Sunshine's wire metadata to the codec-specific integer units expected by NVENC.
+   * HEVC and AV1 use different mastering-display denominators.
+   */
+  nvenc_hdr_metadata_t hdr_metadata_from_sunshine(
+    const std::optional<SS_HDR_METADATA> &metadata,
+    int video_format
+  );
+
   /**
    * @brief Abstract platform-agnostic base of standalone NVENC encoder.
    *        Derived classes perform platform-specific operations.
@@ -45,9 +59,16 @@ namespace nvenc {
      * @param client_config Stream configuration requested by the client.
      * @param colorspace YUV colorspace.
      * @param buffer_format Platform-agnostic input surface format.
+     * @param hdr_metadata Mastering-display and optional content-light metadata.
      * @return `true` on success, `false` on error
      */
-    bool create_encoder(const nvenc_config &config, const video::config_t &client_config, const nvenc_colorspace_t &colorspace, NV_ENC_BUFFER_FORMAT buffer_format);
+    bool create_encoder(
+      const nvenc_config &config,
+      const video::config_t &client_config,
+      const nvenc_colorspace_t &colorspace,
+      NV_ENC_BUFFER_FORMAT buffer_format,
+      const std::optional<SS_HDR_METADATA> &hdr_metadata
+    );
 
     /**
      * @brief Destroy the encoder.
@@ -121,8 +142,10 @@ namespace nvenc {
       NV_ENC_BUFFER_FORMAT buffer_format = NV_ENC_BUFFER_FORMAT_UNDEFINED;
       uint32_t ref_frames_in_dpb = 0;
       bool rfi = false;
+      int video_format = -1;
     } encoder_params;
 
+    nvenc_hdr_metadata_t hdr_metadata;
     std::string last_nvenc_error_string;
 
     // Derived classes set these variables

@@ -33,6 +33,7 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
 #include "src/display_device.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/platform/windows/virtual_display.h"
 #include "src/video.h"
 
 namespace platf {
@@ -110,7 +111,7 @@ namespace platf::dxgi {
       }
     }
 
-    DXGI_OUTDUPL_DESC dup_desc;
+    DXGI_OUTDUPL_DESC dup_desc {};
     dup->GetDesc(&dup_desc);
 
     BOOST_LOG(info) << "Desktop resolution ["sv << dup_desc.ModeDesc.Width << 'x' << dup_desc.ModeDesc.Height << ']';
@@ -485,8 +486,13 @@ namespace platf::dxgi {
       for (int x = 0; factory->EnumAdapters1(x, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++x) {
         dxgi::adapter_t adapter_tmp {adapter_p};
 
-        DXGI_ADAPTER_DESC1 adapter_desc;
-        adapter_tmp->GetDesc1(&adapter_desc);
+        DXGI_ADAPTER_DESC1 adapter_desc {};
+        status = adapter_tmp->GetDesc1(&adapter_desc);
+        if (FAILED(status)) {
+          BOOST_LOG(warning) << "Failed to query DXGI adapter description [0x"sv
+                             << util::hex(status).to_string_view() << ']';
+          continue;
+        }
 
         if (!adapter_name.empty() && adapter_desc.Description != adapter_name) {
           continue;
@@ -496,8 +502,13 @@ namespace platf::dxgi {
         for (int y = 0; adapter_tmp->EnumOutputs(y, &output_p) != DXGI_ERROR_NOT_FOUND; ++y) {
           dxgi::output_t output_tmp {output_p};
 
-          DXGI_OUTPUT_DESC desc;
-          output_tmp->GetDesc(&desc);
+          DXGI_OUTPUT_DESC desc {};
+          status = output_tmp->GetDesc(&desc);
+          if (FAILED(status)) {
+            BOOST_LOG(warning) << "Failed to query DXGI output description [0x"sv
+                               << util::hex(status).to_string_view() << ']';
+            continue;
+          }
 
           if (!output_name.empty() && desc.DeviceName != output_name) {
             continue;
@@ -590,8 +601,13 @@ namespace platf::dxgi {
       return -1;
     }
 
-    DXGI_ADAPTER_DESC adapter_desc;
-    adapter->GetDesc(&adapter_desc);
+    DXGI_ADAPTER_DESC adapter_desc {};
+    status = adapter->GetDesc(&adapter_desc);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Failed to query selected DXGI adapter description [0x"sv
+                       << util::hex(status).to_string_view() << ']';
+      return -1;
+    }
 
     auto description = to_utf8(adapter_desc.Description);
     BOOST_LOG(info)
@@ -735,20 +751,23 @@ namespace platf::dxgi {
     dxgi::output6_t output6 {};
     status = output->QueryInterface(IID_IDXGIOutput6, (void **) &output6);
     if (SUCCEEDED(status)) {
-      DXGI_OUTPUT_DESC1 desc1;
-      output6->GetDesc1(&desc1);
-
-      BOOST_LOG(info)
-        << std::endl
-        << "Colorspace         : "sv << colorspace_to_string(desc1.ColorSpace) << std::endl
-        << "Bits Per Color     : "sv << desc1.BitsPerColor << std::endl
-        << "Red Primary        : ["sv << desc1.RedPrimary[0] << ',' << desc1.RedPrimary[1] << ']' << std::endl
-        << "Green Primary      : ["sv << desc1.GreenPrimary[0] << ',' << desc1.GreenPrimary[1] << ']' << std::endl
-        << "Blue Primary       : ["sv << desc1.BluePrimary[0] << ',' << desc1.BluePrimary[1] << ']' << std::endl
-        << "White Point        : ["sv << desc1.WhitePoint[0] << ',' << desc1.WhitePoint[1] << ']' << std::endl
-        << "Min Luminance      : "sv << desc1.MinLuminance << " nits"sv << std::endl
-        << "Max Luminance      : "sv << desc1.MaxLuminance << " nits"sv << std::endl
-        << "Max Full Luminance : "sv << desc1.MaxFullFrameLuminance << " nits"sv;
+      DXGI_OUTPUT_DESC1 desc1 {};
+      status = output6->GetDesc1(&desc1);
+      if (SUCCEEDED(status)) {
+        BOOST_LOG(info)
+          << std::endl
+          << "Colorspace         : "sv << colorspace_to_string(desc1.ColorSpace) << std::endl
+          << "Bits Per Color     : "sv << desc1.BitsPerColor << std::endl
+          << "Red Primary        : ["sv << desc1.RedPrimary[0] << ',' << desc1.RedPrimary[1] << ']' << std::endl
+          << "Green Primary      : ["sv << desc1.GreenPrimary[0] << ',' << desc1.GreenPrimary[1] << ']' << std::endl
+          << "Blue Primary       : ["sv << desc1.BluePrimary[0] << ',' << desc1.BluePrimary[1] << ']' << std::endl
+          << "White Point        : ["sv << desc1.WhitePoint[0] << ',' << desc1.WhitePoint[1] << ']' << std::endl
+          << "Min Luminance      : "sv << desc1.MinLuminance << " nits"sv << std::endl
+          << "Max Luminance      : "sv << desc1.MaxLuminance << " nits"sv << std::endl
+          << "Max Full Luminance : "sv << desc1.MaxFullFrameLuminance << " nits"sv;
+      } else {
+        BOOST_LOG(warning) << "Failed to query IDXGIOutput6 description [0x"sv << util::hex(status).to_string_view() << ']';
+      }
     }
 
     if (!timer || !*timer) {
@@ -768,8 +787,12 @@ namespace platf::dxgi {
       return false;
     }
 
-    DXGI_OUTPUT_DESC1 desc1;
-    output6->GetDesc1(&desc1);
+    DXGI_OUTPUT_DESC1 desc1 {};
+    status = output6->GetDesc1(&desc1);
+    if (FAILED(status)) {
+      BOOST_LOG(warning) << "Failed to query IDXGIOutput6 description [0x"sv << util::hex(status).to_string_view() << ']';
+      return false;
+    }
 
     return desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
   }
@@ -785,8 +808,12 @@ namespace platf::dxgi {
       return false;
     }
 
-    DXGI_OUTPUT_DESC1 desc1;
-    output6->GetDesc1(&desc1);
+    DXGI_OUTPUT_DESC1 desc1 {};
+    status = output6->GetDesc1(&desc1);
+    if (FAILED(status)) {
+      BOOST_LOG(warning) << "Failed to query IDXGIOutput6 HDR metadata [0x"sv << util::hex(status).to_string_view() << ']';
+      return false;
+    }
 
     // The primaries reported here seem to correspond to scRGB (Rec. 709)
     // which we then convert to Rec 2020 in our scRGB FP16 -> PQ shader
@@ -825,6 +852,44 @@ namespace platf::dxgi {
     metadata.maxFullFrameLuminance = desc1.MaxFullFrameLuminance;
 
     return true;
+  }
+
+  std::optional<float> display_base_t::get_sdr_white_nits() {
+    DXGI_OUTPUT_DESC output_desc {};
+    if (!output || FAILED(output->GetDesc(&output_desc))) {
+      return std::nullopt;
+    }
+
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+    if (!VDISPLAY::queryActiveDisplayConfig(paths, modes)) {
+      return std::nullopt;
+    }
+
+    for (const auto &path : paths) {
+      DISPLAYCONFIG_SOURCE_DEVICE_NAME source_name {};
+      source_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+      source_name.header.size = sizeof(source_name);
+      source_name.header.adapterId = path.sourceInfo.adapterId;
+      source_name.header.id = path.sourceInfo.id;
+      if (DisplayConfigGetDeviceInfo(&source_name.header) != ERROR_SUCCESS || std::wstring_view(source_name.viewGdiDeviceName) != std::wstring_view(output_desc.DeviceName)) {
+        continue;
+      }
+
+      DISPLAYCONFIG_SDR_WHITE_LEVEL white_level {};
+      white_level.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+      white_level.header.size = sizeof(white_level);
+      white_level.header.adapterId = path.targetInfo.adapterId;
+      white_level.header.id = path.targetInfo.id;
+      if (DisplayConfigGetDeviceInfo(&white_level.header) != ERROR_SUCCESS) {
+        return std::nullopt;
+      }
+
+      // Windows encodes SDR reference white relative to 80 nits, with 1000 == 80 nits.
+      return (float) white_level.SDRWhiteLevel * 80.0f / 1000.0f;
+    }
+
+    return std::nullopt;
   }
 
   const char *format_str[] = {
@@ -1073,7 +1138,7 @@ namespace platf {
       }
 
       dxgi::adapter_t adapter {adapter_p};
-      DXGI_ADAPTER_DESC1 adapter_desc;
+      DXGI_ADAPTER_DESC1 adapter_desc {};
       status = adapter->GetDesc1(&adapter_desc);
       if (FAILED(status)) {
         BOOST_LOG(error) << "Failed to query DXGI adapter [0x"sv << util::hex(status).to_string_view() << ']';
@@ -1105,7 +1170,7 @@ namespace platf {
 
         dxgi::output_t output {output_p};
 
-        DXGI_OUTPUT_DESC desc;
+        DXGI_OUTPUT_DESC desc {};
         status = output->GetDesc(&desc);
         if (FAILED(status)) {
           BOOST_LOG(error) << "Failed to query DXGI output [0x"sv << util::hex(status).to_string_view() << ']';

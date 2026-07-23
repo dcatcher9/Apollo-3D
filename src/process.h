@@ -110,6 +110,7 @@ namespace proc {
     std::string app_uuid;
     bool virtual_display;
     std::uint64_t host_session_id;
+    bool enable_hdr;
   };
 
   struct render_size_t {

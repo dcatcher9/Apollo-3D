@@ -7,6 +7,7 @@
 // standard includes
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <numeric>
 
 // local includes
@@ -17,6 +18,10 @@
 #include "video_colorspace.h"
 
 namespace video {
+  // The broadcast worker should never be allowed to accumulate hundreds of milliseconds of
+  // already encoded video. Three frames absorb ordinary encoder/network scheduling jitter while
+  // keeping recovery bounded when the sender cannot keep up.
+  constexpr std::uint32_t ENCODED_PACKET_QUEUE_LIMIT = 3;
 
   /* Host-side SBS 3D mode requested by the client via the 0x3003 control message.
      Must match the SBS_MODE_* wire values in the client's moonlight-common-c Limelight.h. */
@@ -97,6 +102,9 @@ namespace video {
     const auto divisor = std::gcd(framerate_x100, 100);
     return {framerate_x100 / divisor, 100 / divisor};
   }
+
+  /** HTTP hdrMode and RTSP dynamicRange must describe the same selected SDR/HDR format. */
+  bool hdr_stream_negotiation_is_coherent(bool launch_hdr, int dynamic_range) noexcept;
 
   struct sbs_output_dimensions_t {
     int width;
@@ -181,6 +189,9 @@ namespace video {
     std::shared_ptr<void> channel_data;
     bool after_ref_frame_invalidation = false;
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+    // Timestamp after encoding, used independently from the capture timestamp to bound only
+    // host-side encoded-packet backlog.
+    std::chrono::steady_clock::time_point encoded_timestamp = std::chrono::steady_clock::now();
   };
 
   struct packet_raw_generic: packet_raw_t {

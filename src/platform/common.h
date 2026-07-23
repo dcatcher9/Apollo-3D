@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 
 // lib includes
@@ -387,6 +388,7 @@ namespace platf {
     virtual bool init_encoder(const video::config_t &client_config, const video::sunshine_colorspace_t &colorspace) = 0;
 
     nvenc::nvenc_base *nvenc = nullptr;
+    std::optional<SS_HDR_METADATA> hdr_metadata;
   };
 
   enum class capture_e : int {

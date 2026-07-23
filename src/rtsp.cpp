@@ -10,6 +10,7 @@ extern "C" {
 }
 
 // standard includes
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <format>
@@ -151,6 +152,37 @@ namespace rtsp_stream {
 
     bool is_safe_encoder_bitrate(std::int64_t bitrate_kbps) {
       return bitrate_kbps > 0 && bitrate_kbps <= std::numeric_limits<int>::max() / 1000;
+    }
+
+    std::int64_t reserve_video_bitrate_for_fec(std::int64_t total_bitrate_kbps, int fec_percentage) {
+      if (total_bitrate_kbps <= 0 || fec_percentage <= 0) {
+        return total_bitrate_kbps;
+      }
+
+      // Video FEC parity is expressed as a percentage of data shards, so total wire payload is
+      // data * (1 + F). Reserve data bitrate with B / (1 + F), not B * (1 - F).
+      const auto bounded_fec_percentage = std::clamp(fec_percentage, 0, 255);
+      return total_bitrate_kbps * 100 / (100 + bounded_fec_percentage);
+    }
+
+    std::int64_t calculate_video_bitrate_budget(
+      std::int64_t total_bitrate_kbps,
+      int fec_percentage,
+      std::int64_t audio_bitrate_kbps
+    ) {
+      if (total_bitrate_kbps <= 0) {
+        return total_bitrate_kbps;
+      }
+
+      // Audio and fixed transport/control overhead consume the total wire budget and do not
+      // themselves receive video FEC. Deduct them first, then reserve parity from what remains.
+      auto video_wire_budget_kbps = total_bitrate_kbps;
+      video_wire_budget_kbps -= std::min(
+        std::max<std::int64_t>(0, audio_bitrate_kbps),
+        video_wire_budget_kbps / 5
+      );
+      video_wire_budget_kbps -= std::min<std::int64_t>(500, video_wire_budget_kbps / 10);
+      return reserve_video_bitrate_for_fec(video_wire_budget_kbps, fec_percentage);
     }
 
     bool is_video_mode_supported(
@@ -1325,20 +1357,16 @@ namespace rtsp_stream {
     if (configuredBitrateKbps) {
       BOOST_LOG(debug) << "Client configured bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
 
-      // If the FEC percentage isn't too high, adjust the configured bitrate to ensure video
-      // traffic doesn't exceed the user's selected bitrate when the FEC shards are included.
-      if (config::stream.fec_percentage <= 80) {
-        configuredBitrateKbps /= 100.f / (100 - config::stream.fec_percentage);
-      }
-
-      // Adjust the bitrate to account for audio traffic bandwidth usage (capped at 20% reduction).
-      // The bitrate per channel is 256 Kbps for high quality mode and 96 Kbps for normal quality.
-      auto audioBitrateAdjustment = (config.audio.flags[audio::config_t::HIGH_QUALITY] ? 256 : 96) * config.audio.channels;
-      configuredBitrateKbps -= std::min((std::int64_t) audioBitrateAdjustment, configuredBitrateKbps / 5);
-
-      // Reduce it by another 500Kbps to account for A/V packet overhead and control data
-      // traffic (capped at 10% reduction).
-      configuredBitrateKbps -= std::min((std::int64_t) 500, configuredBitrateKbps / 10);
+      // The bitrate request is a total wire budget. Audio/control are not protected by video FEC,
+      // so deduct them before reserving the remaining budget for video data plus parity.
+      const auto audioBitrateKbps =
+        (config.audio.flags[audio::config_t::HIGH_QUALITY] ? 256 : 96) *
+        config.audio.channels;
+      configuredBitrateKbps = detail::calculate_video_bitrate_budget(
+        configuredBitrateKbps,
+        config::stream.fec_percentage,
+        audioBitrateKbps
+      );
 
       BOOST_LOG(debug) << "Final adjusted video encoding bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
       config.monitor.bitrate = configuredBitrateKbps;

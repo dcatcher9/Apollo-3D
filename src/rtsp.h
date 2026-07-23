@@ -62,6 +62,12 @@ namespace rtsp_stream {
     int validated_client_refresh_x100(int announced_fps, int client_refresh_x100);
     int calculate_warp_bitrate_factor(int announced_fps, int session_fps);
     bool is_safe_encoder_bitrate(std::int64_t bitrate_kbps);
+    std::int64_t reserve_video_bitrate_for_fec(std::int64_t total_bitrate_kbps, int fec_percentage);
+    std::int64_t calculate_video_bitrate_budget(
+      std::int64_t total_bitrate_kbps,
+      int fec_percentage,
+      std::int64_t audio_bitrate_kbps
+    );
     bool is_video_mode_supported(
       int video_format,
       int dynamic_range,

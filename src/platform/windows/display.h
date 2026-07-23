@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <stop_token>
 #include <string>
 
@@ -232,6 +233,7 @@ namespace platf::dxgi {
 
     virtual bool is_hdr() override;
     virtual bool get_hdr_metadata(SS_HDR_METADATA &metadata) override;
+    std::optional<float> get_sdr_white_nits();
 
     const char *dxgi_format_to_string(DXGI_FORMAT format);
     const char *colorspace_to_string(DXGI_COLOR_SPACE_TYPE type);

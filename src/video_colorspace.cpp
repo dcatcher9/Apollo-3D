@@ -5,6 +5,10 @@
 // this include
 #include "video_colorspace.h"
 
+// standard includes
+#include <algorithm>
+#include <cmath>
+
 // local includes
 #include "logging.h"
 #include "video.h"
@@ -13,6 +17,53 @@ namespace video {
 
   bool colorspace_is_hdr(const sunshine_colorspace_t &colorspace) {
     return colorspace.colorspace == colorspace_e::bt2020;
+  }
+
+  float srgb_code_to_bt709_code(float value) {
+    const float x = std::clamp(value, 0.0f, 1.0f);
+    if (x <= 0.04045f) {
+      return x * (4.5f / 12.92f);
+    }
+
+    if (x < 0.142825681303039f) {
+      const float t = (2.0f * x - 0.183275681303039f) / 0.102375681303039f;
+      return (((-0.0000203208382756466f * t + 0.000379028747322516f) * t +
+               0.00808284888652290f) *
+                t +
+              0.0330765198090362f) *
+               t +
+             0.0394817883386249f;
+    }
+
+    const float t = (2.0f * x - 1.142825681303039f) / 0.857174318696961f;
+    return std::clamp(
+      (((0.00127867013357397f * t - 0.00322804757744502f) * t +
+        0.0124427001451592f) *
+         t +
+       0.462640801365181f) *
+          t +
+        0.526902601731455f,
+      0.0f,
+      1.0f
+    );
+  }
+
+  bool hdr_to_sdr_tonemap_required(
+    bool target_is_hdr,
+    bool source_display_is_hdr,
+    bool input_is_linear
+  ) noexcept {
+    return !target_is_hdr && source_display_is_hdr && input_is_linear;
+  }
+
+  bool sbs_intermediate_requires_fp16(
+    bool capture_is_fp16,
+    bool capture_format_is_unknown,
+    bool source_display_is_hdr,
+    bool output_is_10bit
+  ) noexcept {
+    return capture_is_fp16 ||
+           (capture_format_is_unknown && (source_display_is_hdr || output_is_10bit));
   }
 
   sunshine_colorspace_t colorspace_from_client_config(const config_t &config, bool hdr_display) {

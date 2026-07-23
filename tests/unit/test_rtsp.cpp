@@ -116,6 +116,23 @@ TEST(RtspAnnounceParsingTest, EnforcesWarpAndEncoderArithmeticBounds) {
   EXPECT_FALSE(is_safe_encoder_bitrate(0));
 }
 
+TEST(RtspAnnounceParsingTest, ReservesFecAsParityRelativeToVideoData) {
+  using rtsp_stream::detail::calculate_video_bitrate_budget;
+  using rtsp_stream::detail::reserve_video_bitrate_for_fec;
+
+  EXPECT_EQ(reserve_video_bitrate_for_fec(100'000, 0), 100'000);
+  EXPECT_EQ(reserve_video_bitrate_for_fec(100'000, 10), 90'909);
+  EXPECT_EQ(reserve_video_bitrate_for_fec(100'000, 20), 83'333);
+  EXPECT_EQ(reserve_video_bitrate_for_fec(100'000, 255), 28'169);
+  EXPECT_EQ(reserve_video_bitrate_for_fec(0, 20), 0);
+
+  // 131000 - 512 Kbps audio - 500 Kbps control/packet allowance = 129988 Kbps
+  // of video wire budget, then 20% parity relative to data => floor(129988 / 1.2).
+  EXPECT_EQ(calculate_video_bitrate_budget(131'000, 20, 512), 108'323);
+  // Low budgets retain the established 20% audio and 10% fixed-overhead caps.
+  EXPECT_EQ(calculate_video_bitrate_budget(1'000, 20, 10'000), 600);
+}
+
 TEST(RtspAnnounceParsingTest, AppliesOnlyValidLowerPacketSizeLimits) {
   using rtsp_stream::detail::apply_packet_size_limit;
 

@@ -80,6 +80,34 @@ TEST(ThreadSafeQueueTest, AccessorsReflectStoppedState) {
   EXPECT_FALSE(queue.running());
 }
 
+TEST(ThreadSafeQueueTest, CanAtomicallyDiscardOverflowAndRecoveryDependentNewestValue) {
+  safe::queue_t<int> queue {2};
+  queue.raise(1);
+  queue.raise(2);
+
+  const auto result = queue.raise_with_overflow_policy(false, 3);
+
+  EXPECT_FALSE(result.queued);
+  EXPECT_EQ(result.dropped, 2);
+  EXPECT_FALSE(queue.peek());
+}
+
+TEST(ThreadSafeQueueTest, CanReplaceOverflowWithNewestRecoveryValue) {
+  safe::queue_t<int> queue {2};
+  queue.raise(1);
+  queue.raise(2);
+
+  const auto result = queue.raise_with_overflow_policy(true, 3);
+
+  EXPECT_TRUE(result.queued);
+  EXPECT_EQ(result.dropped, 2);
+  ASSERT_TRUE(queue.peek());
+  const auto value = queue.pop(0ms);
+  ASSERT_TRUE(value);
+  EXPECT_EQ(*value, 3);
+  EXPECT_FALSE(queue.peek());
+}
+
 TEST(ThreadSafeSharedTest, FailedConstructionDestroysObjectAndCanRetry) {
   struct tracked_t {
     ~tracked_t() {

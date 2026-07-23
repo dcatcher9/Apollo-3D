@@ -21,6 +21,33 @@ namespace video {
 
   bool colorspace_is_hdr(const sunshine_colorspace_t &colorspace);
 
+  /**
+   * Bounded polynomial composite of the sRGB EOTF and BT.709 OETF used by the optimized BGRA8
+   * shader path. This scalar reference is exposed for dense numerical contract tests.
+   */
+  float srgb_code_to_bt709_code(float value);
+
+  /**
+   * Whether an actual input frame needs the scRGB HDR-to-SDR tone map.
+   * Encoded BGRA capture remains SDR even when the physical display has HDR enabled.
+   */
+  bool hdr_to_sdr_tonemap_required(
+    bool target_is_hdr,
+    bool source_display_is_hdr,
+    bool input_is_linear
+  ) noexcept;
+
+  /**
+   * Whether an SBS intermediate must retain FP16 precision while capture format discovery
+   * is still pending. Transfer state is tracked separately from the actual frame format.
+   */
+  bool sbs_intermediate_requires_fp16(
+    bool capture_is_fp16,
+    bool capture_format_is_unknown,
+    bool source_display_is_hdr,
+    bool output_is_10bit
+  ) noexcept;
+
   // Declared in video.h
   struct config_t;
 

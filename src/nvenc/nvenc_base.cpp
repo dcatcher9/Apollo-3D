@@ -101,6 +101,58 @@ namespace nvenc {
     return width > 0 ? std::optional<int> {width} : std::nullopt;
   }
 
+  nvenc_hdr_metadata_t hdr_metadata_from_sunshine(
+    const std::optional<SS_HDR_METADATA> &metadata,
+    int video_format
+  ) {
+    nvenc_hdr_metadata_t result;
+    if (!metadata || (video_format != 1 && video_format != 2)) {
+      return result;
+    }
+
+    const auto rescale = [](std::uint32_t value, std::uint32_t numerator, std::uint32_t denominator) {
+      return static_cast<std::uint32_t>(
+        (static_cast<std::uint64_t>(value) * numerator + denominator / 2) / denominator
+      );
+    };
+
+    const std::uint32_t chroma_denominator = video_format == 2 ? 65536u : 50000u;
+    const auto chroma = [&](const auto &point) {
+      return CHROMA_POINTS {
+        static_cast<std::uint16_t>(std::min(rescale(point.x, chroma_denominator, 50000u), 65535u)),
+        static_cast<std::uint16_t>(std::min(rescale(point.y, chroma_denominator, 50000u), 65535u)),
+      };
+    };
+
+    MASTERING_DISPLAY_INFO mastering_display {};
+    // Sunshine stores primaries in RGB order; NVENC's structure is ordered G, B, R.
+    mastering_display.r = chroma(metadata->displayPrimaries[0]);
+    mastering_display.g = chroma(metadata->displayPrimaries[1]);
+    mastering_display.b = chroma(metadata->displayPrimaries[2]);
+    mastering_display.whitePoint = chroma(metadata->whitePoint);
+    if (video_format == 2) {
+      // AV1 mastering-display metadata uses 1/256 nit maximum and 1/16384 nit minimum.
+      mastering_display.maxLuma =
+        static_cast<std::uint32_t>(metadata->maxDisplayLuminance) * 256u;
+      mastering_display.minLuma =
+        rescale(metadata->minDisplayLuminance, 16384u, 10000u);
+    } else {
+      // HEVC mastering-display colour volume SEI uses 1/10000 nit for both luminances.
+      mastering_display.maxLuma =
+        static_cast<std::uint32_t>(metadata->maxDisplayLuminance) * 10000u;
+      mastering_display.minLuma = metadata->minDisplayLuminance;
+    }
+    result.mastering_display = mastering_display;
+
+    if (metadata->maxContentLightLevel || metadata->maxFrameAverageLightLevel) {
+      result.content_light_level = CONTENT_LIGHT_LEVEL {
+        metadata->maxContentLightLevel,
+        metadata->maxFrameAverageLightLevel,
+      };
+    }
+    return result;
+  }
+
   nvenc_base::nvenc_base(NV_ENC_DEVICE_TYPE device_type):
       device_type(device_type) {
   }
@@ -109,7 +161,13 @@ namespace nvenc {
     // Use destroy_encoder() instead
   }
 
-  bool nvenc_base::create_encoder(const nvenc_config &config, const video::config_t &client_config, const nvenc_colorspace_t &colorspace, NV_ENC_BUFFER_FORMAT buffer_format) {
+  bool nvenc_base::create_encoder(
+    const nvenc_config &config,
+    const video::config_t &client_config,
+    const nvenc_colorspace_t &colorspace,
+    NV_ENC_BUFFER_FORMAT buffer_format,
+    const std::optional<SS_HDR_METADATA> &hdr_metadata
+  ) {
     if (!nvenc && !init_library()) {
       return false;
     }
@@ -125,6 +183,8 @@ namespace nvenc {
     encoder_params.height = client_config.height;
     encoder_params.buffer_format = buffer_format;
     encoder_params.rfi = true;
+    encoder_params.video_format = client_config.videoFormat;
+    this->hdr_metadata = hdr_metadata_from_sunshine(hdr_metadata, client_config.videoFormat);
 
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS session_params = {NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER};
     session_params.device = device;
@@ -370,6 +430,8 @@ namespace nvenc {
             format_config.numRefL1 = NV_ENC_NUM_REF_FRAMES_1;
           }
           fill_h264_hevc_vui(format_config.hevcVUIParameters);
+          format_config.outputMasteringDisplay = this->hdr_metadata.mastering_display.has_value();
+          format_config.outputMaxCll = this->hdr_metadata.content_light_level.has_value();
           break;
         }
 
@@ -388,6 +450,8 @@ namespace nvenc {
           format_config.matrixCoefficients = colorspace.matrix;
           format_config.colorRange = colorspace.full_range;
           format_config.chromaSamplePosition = 1;
+          format_config.outputMasteringDisplay = this->hdr_metadata.mastering_display.has_value();
+          format_config.outputMaxCll = this->hdr_metadata.content_light_level.has_value();
           set_ref_frames(format_config.maxNumRefFramesInDPB, format_config.numFwdRefs, 8);
           if (client_config.slicesPerFrame > 1) {
             // NVENC only supports slice counts that are powers of two, so we'll pick powers of two
@@ -499,6 +563,7 @@ namespace nvenc {
 
     encoder_state = {};
     encoder_params = {};
+    hdr_metadata = {};
   }
 
   nvenc_encoded_frame nvenc_base::encode_frame(uint64_t frame_index, bool force_idr) {
@@ -537,6 +602,18 @@ namespace nvenc {
     pic_params.bufferFmt = mapped_input_buffer.mappedBufferFmt;
     pic_params.outputBitstream = output_bitstream;
     pic_params.completionEvent = async_event_handle;
+
+    if (encoder_params.video_format == 1) {
+      pic_params.codecPicParams.hevcPicParams.pMasteringDisplay =
+        hdr_metadata.mastering_display ? &*hdr_metadata.mastering_display : nullptr;
+      pic_params.codecPicParams.hevcPicParams.pMaxCll =
+        hdr_metadata.content_light_level ? &*hdr_metadata.content_light_level : nullptr;
+    } else if (encoder_params.video_format == 2) {
+      pic_params.codecPicParams.av1PicParams.pMasteringDisplay =
+        hdr_metadata.mastering_display ? &*hdr_metadata.mastering_display : nullptr;
+      pic_params.codecPicParams.av1PicParams.pMaxCll =
+        hdr_metadata.content_light_level ? &*hdr_metadata.content_light_level : nullptr;
+    }
 
     if (nvenc_failed(nvenc->nvEncEncodePicture(encoder, &pic_params))) {
       BOOST_LOG(error) << "NvEnc: NvEncEncodePicture() failed: " << last_nvenc_error_string;

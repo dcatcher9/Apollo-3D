@@ -265,6 +265,7 @@ namespace proc {
       _app.uuid,
       _virtual_display,
       _host_session_id,
+      _launch_session && _launch_session->enable_hdr,
     };
   }
 

@@ -33,6 +33,10 @@ namespace video {
   // handler in stream.cpp, consumed by display_vram's SBS convert().
   std::atomic<bool> sbs_debug_dump_pending {false};
 
+  bool hdr_stream_negotiation_is_coherent(bool launch_hdr, int dynamic_range) noexcept {
+    return launch_hdr == (dynamic_range > 0);
+  }
+
   sbs_output_dimensions_t host_sbs_output_dimensions(
     int base_width,
     int base_height,
@@ -619,11 +623,23 @@ namespace video {
     }
   }
 
-  int encode(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, const std::shared_ptr<void> &channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+  struct encoded_packet_publish_result_t {
+    bool failed;
+    std::size_t dropped_packets;
+    bool request_idr;
+  };
+
+  encoded_packet_publish_result_t encode(
+    int64_t frame_nr,
+    nvenc_encode_session_t &session,
+    safe::mail_raw_t::queue_t<packet_t> &packets,
+    const std::shared_ptr<void> &channel_data,
+    std::optional<std::chrono::steady_clock::time_point> frame_timestamp
+  ) {
     auto encoded_frame = session.encode_frame(frame_nr);
     if (encoded_frame.data.empty()) {
       BOOST_LOG(error) << "NvENC returned empty packet";
-      return -1;
+      return {true, 0, false};
     }
 
     if (frame_nr != encoded_frame.frame_index) {
@@ -634,9 +650,22 @@ namespace video {
     packet->channel_data = channel_data;
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
     packet->frame_timestamp = frame_timestamp;
-    packets->raise(std::move(packet));
+    const bool packet_is_idr = packet->is_idr();
+    // A queued IDR can replace stale packets and immediately repair the reference chain. A delta
+    // frame cannot: if the queue is full, discard both the stale queue and this delta frame, then
+    // ask the encoder for a fresh IDR on its next iteration.
+    const auto publish_result = packets->raise_with_overflow_policy(
+      packet_is_idr,
+      std::move(packet)
+    );
+    const auto dropped_packets = publish_result.dropped +
+                                 (!publish_result.queued && publish_result.dropped > 0 ? 1 : 0);
 
-    return 0;
+    return {
+      false,
+      dropped_packets,
+      publish_result.dropped > 0 && !packet_is_idr,
+    };
   }
 
   std::unique_ptr<nvenc_encode_session_t> make_encode_session(const config_t &client_config, std::unique_ptr<platf::nvenc_encode_device_t> encode_device) {
@@ -697,7 +726,10 @@ namespace video {
     BOOST_LOG(info) << "Encoding Frame threshold: "sv << encode_frame_threshold;
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
-    auto packets = mail::man->queue<packet_t>(mail::video_packets);
+    auto packets = mail::man->queue<packet_t>(
+      mail::video_packets,
+      ENCODED_PACKET_QUEUE_LIMIT
+    );
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
     // A pending host SBS mode change means we must rebuild the encode session at the new
@@ -719,6 +751,8 @@ namespace video {
     std::chrono::steady_clock::time_point encode_frame_timestamp;
     auto next_mouse_keys_refresh = std::chrono::steady_clock::now() + 1s;
     bool missing_frame_timestamp_warning_logged = false;
+    std::size_t encoded_queue_drops_since_log = 0;
+    auto next_encoded_queue_drop_log = std::chrono::steady_clock::now();
 
     // Most recent real captured frame. On a host SBS toggle the display and its capture session
     // survive, so no new frame is delivered until
@@ -851,9 +885,34 @@ namespace video {
         break;
       }
 
-      if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
+      const auto publish_result = encode(
+        frame_nr++,
+        *session,
+        packets,
+        channel_data,
+        frame_timestamp
+      );
+      if (publish_result.failed) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         break;
+      }
+      if (publish_result.dropped_packets > 0) {
+        encoded_queue_drops_since_log += publish_result.dropped_packets;
+        if (publish_result.request_idr) {
+          idr_events->try_raise(true);
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= next_encoded_queue_drop_log) {
+          BOOST_LOG(warning) << "Encoded video queue backpressure dropped "sv
+                             << encoded_queue_drops_since_log
+                             << " frame(s); queue capacity="sv
+                             << ENCODED_PACKET_QUEUE_LIMIT
+                             << (publish_result.request_idr ? ", recovery IDR requested."sv :
+                                                              ", newest IDR retained."sv);
+          encoded_queue_drops_since_log = 0;
+          next_encoded_queue_drop_log = now + 5s;
+        }
       }
 
       session->request_normal_frame();
@@ -892,7 +951,22 @@ namespace video {
     };
   }
 
-  std::unique_ptr<platf::nvenc_encode_device_t> make_encode_device(platf::display_t &disp, const config_t &config) {
+  std::unique_ptr<platf::nvenc_encode_device_t> make_encode_device(
+    platf::display_t &disp,
+    const config_t &config,
+    bool enforce_launch_hdr_contract = false
+  ) {
+    if (enforce_launch_hdr_contract) {
+      const auto process_status = proc::proc.get_status();
+      if (!hdr_stream_negotiation_is_coherent(process_status.enable_hdr, config.dynamicRange)) {
+        BOOST_LOG(error)
+          << "Rejecting incoherent color session: HTTP hdrMode="sv
+          << process_status.enable_hdr << " but RTSP dynamicRange="sv
+          << config.dynamicRange << '.';
+        return nullptr;
+      }
+    }
+
     auto colorspace = colorspace_from_client_config(config, disp.is_hdr());
 
     const auto pix_fmt = colorspace.bit_depth == 10 ? platf::pix_fmt_e::p010 : platf::pix_fmt_e::nv12;
@@ -917,6 +991,15 @@ namespace video {
 
     if (result) {
       result->colorspace = colorspace;
+      if (colorspace_is_hdr(colorspace)) {
+        SS_HDR_METADATA metadata {};
+        if (disp.get_hdr_metadata(metadata)) {
+          result->hdr_metadata = metadata;
+        } else {
+          BOOST_LOG(error)
+            << "Couldn't get display HDR metadata for the native encoder bitstream."sv;
+        }
+      }
     }
 
     return result;
@@ -1046,7 +1129,7 @@ namespace video {
         return false;
       };
 
-      auto encode_device = make_encode_device(*display, session_config);
+      auto encode_device = make_encode_device(*display, session_config, true);
       if (!encode_device) {
         if (recover_failed_sbs_session()) {
           continue;
@@ -1063,7 +1146,8 @@ namespace video {
       // Update client with our current HDR display state
       hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);
       if (colorspace_is_hdr(encode_device->colorspace)) {
-        if (display->get_hdr_metadata(hdr_info->metadata)) {
+        if (encode_device->hdr_metadata) {
+          hdr_info->metadata = *encode_device->hdr_metadata;
           hdr_info->enabled = true;
         } else {
           BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
@@ -1122,9 +1206,12 @@ namespace video {
 
     session->request_idr_frame();
 
-    auto packets = mail::man->queue<packet_t>(mail::video_packets);
+    auto packets = mail::man->queue<packet_t>(
+      mail::video_packets,
+      ENCODED_PACKET_QUEUE_LIMIT
+    );
     while (!packets->peek()) {
-      if (encode(1, *session, packets, nullptr, {})) {
+      if (encode(1, *session, packets, nullptr, {}).failed) {
         return -1;
       }
     }
