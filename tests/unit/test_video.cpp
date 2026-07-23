@@ -62,9 +62,17 @@ TEST(ColorVectorsTest, UintOutputRoundsBt2020LimitedValues) {
   EXPECT_EQ(static_cast<unsigned>(apply_color_vector(vectors->color_vec_v, 1.0f, 0.0f, 0.0f)), 960u);
 }
 
+TEST(NvencConfigTest, UsesVerifiedStreamingDefaults) {
+  nvenc::nvenc_config config;
+
+  EXPECT_EQ(config.vbv_percentage_increase, 100);
+  EXPECT_TRUE(config.hevc_unidirectional_b);
+}
+
 TEST(NvencConfigTest, GatesHevcUnidirectionalBFrames) {
   nvenc::nvenc_config config;
 
+  config.hevc_unidirectional_b = false;
   EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 1, true));
 
   config.hevc_unidirectional_b = true;
@@ -72,6 +80,16 @@ TEST(NvencConfigTest, GatesHevcUnidirectionalBFrames) {
   EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 2, true));
   EXPECT_FALSE(nvenc::should_enable_hevc_unidirectional_b(config, 1, false));
   EXPECT_TRUE(nvenc::should_enable_hevc_unidirectional_b(config, 1, true));
+}
+
+TEST(NvencConfigTest, ForcesSplitEncodingOnlyForWideModernCodecs) {
+  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(false, 1, 7680, 2));
+  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(true, 0, 7680, 2));
+  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(true, 1, 4096, 2));
+  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(true, 1, 7680, 1));
+  EXPECT_FALSE(nvenc::should_force_split_frame_encoding(true, 3, 7680, 2));
+  EXPECT_TRUE(nvenc::should_force_split_frame_encoding(true, 1, 7680, 2));
+  EXPECT_TRUE(nvenc::should_force_split_frame_encoding(true, 2, 8192, 3));
 }
 
 TEST(CaptureBackendFailoverTest, RepeatedEarlyDdupFailuresLatchWgc) {

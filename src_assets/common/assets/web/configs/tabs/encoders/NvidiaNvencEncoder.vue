@@ -50,13 +50,13 @@ const config = ref(props.config)
               id="nvenc_hevc_unidirectional_b"
               locale-prefix="config"
               v-model="config.nvenc_hevc_unidirectional_b"
-              default="false"
+              default="true"
     ></Checkbox>
 
-    <!-- Single-frame VBV/HRD percentage increase -->
+    <!-- VBV/HRD buffer percentage increase -->
     <div class="mb-3">
       <label for="nvenc_vbv_increase" class="form-label">{{ $t('config.nvenc_vbv_increase') }}</label>
-      <input type="number" min="0" max="400" class="form-control" id="nvenc_vbv_increase" placeholder="0"
+      <input type="number" min="0" max="400" class="form-control" id="nvenc_vbv_increase" placeholder="100"
              v-model="config.nvenc_vbv_increase" />
       <div class="form-text">
         {{ $t('config.nvenc_vbv_increase_desc') }}<br>

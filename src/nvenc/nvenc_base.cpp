@@ -252,10 +252,23 @@ namespace nvenc {
       init_params.frameRateDen = framerate.den;
     }
 
-    // Keep the API upgrade behavior-neutral. Split-frame encoding can reduce latency but
-    // also reduces compression efficiency and must be evaluated separately.
+    const int encoder_engine_count = client_config.videoFormat > 0 ?
+                                       get_encoder_cap(NV_ENC_CAPS_NUM_ENCODER_ENGINES) :
+                                       0;
+    const bool split_frame_encoding = should_force_split_frame_encoding(
+      client_config.sbs_mode == video::SBS_AI,
+      client_config.videoFormat,
+      encoder_params.width,
+      encoder_engine_count
+    );
+
+    // Packed Host SBS is wider than 4K and can saturate one NVENC engine before reaching the
+    // requested cadence. Let the driver split that workload across its available engines,
+    // while preserving the single-engine bitstream for ordinary HEVC/AV1 streams.
     if (client_config.videoFormat > 0) {
-      init_params.splitEncodeMode = NV_ENC_SPLIT_DISABLE_MODE;
+      init_params.splitEncodeMode = split_frame_encoding ?
+                                      NV_ENC_SPLIT_AUTO_FORCED_MODE :
+                                      NV_ENC_SPLIT_DISABLE_MODE;
     }
 
     NV_ENC_PRESET_CONFIG preset_config = {};
@@ -441,6 +454,9 @@ namespace nvenc {
       }
       if (init_params.enableUniDirectionalB) {
         extra += " hevc-unidirectional-b";
+      }
+      if (split_frame_encoding) {
+        extra += std::format(" split-encode auto-forced ({} engines available)", encoder_engine_count);
       }
       if (enc_config.rcParams.enableAQ) {
         extra += " spatial-aq";
