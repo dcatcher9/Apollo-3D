@@ -67,6 +67,20 @@ TEST(ThreadSafeEventTest, TimedPopWakesWhenStopped) {
   EXPECT_FALSE(event.running());
 }
 
+TEST(ThreadSafeEventTest, TimedViewWakesWhenStopped) {
+  safe::event_t<int> event;
+  std::thread stopper {[&event] {
+    std::this_thread::sleep_for(10ms);
+    event.stop();
+  }};
+
+  auto value = event.view(1s);
+  stopper.join();
+
+  EXPECT_FALSE(value);
+  EXPECT_FALSE(event.running());
+}
+
 TEST(ThreadSafeQueueTest, AccessorsReflectStoppedState) {
   safe::queue_t<int> queue;
   queue.raise(42);
@@ -108,6 +122,20 @@ TEST(ThreadSafeQueueTest, CanReplaceOverflowWithNewestRecoveryValue) {
   EXPECT_FALSE(queue.peek());
 }
 
+TEST(ThreadSafeQueueTest, TimedPopWakesWhenStopped) {
+  safe::queue_t<int> queue;
+  std::thread stopper {[&queue] {
+    std::this_thread::sleep_for(10ms);
+    queue.stop();
+  }};
+
+  auto value = queue.pop(1s);
+  stopper.join();
+
+  EXPECT_FALSE(value);
+  EXPECT_FALSE(queue.running());
+}
+
 TEST(ThreadSafeSharedTest, FailedConstructionDestroysObjectAndCanRetry) {
   struct tracked_t {
     ~tracked_t() {
@@ -139,4 +167,57 @@ TEST(ThreadSafeSharedTest, FailedConstructionDestroysObjectAndCanRetry) {
   }
 
   EXPECT_EQ(destructions, 2);
+}
+
+TEST(ThreadSafeSharedTest, CopyAssignmentBalancesReferencesAndHandlesEmptyPointers) {
+  struct tracked_t {
+    ~tracked_t() {
+      if (destructions) {
+        ++*destructions;
+      }
+    }
+
+    int *destructions = nullptr;
+  };
+
+  int destructions = 0;
+  int external_destructions = 0;
+  auto shared = safe::make_shared<tracked_t>(
+    [&](tracked_t &object) {
+      object.destructions = &destructions;
+      return 0;
+    },
+    [&](tracked_t &) {
+      ++external_destructions;
+    }
+  );
+  using ptr_t = decltype(shared)::ptr_t;
+
+  ptr_t empty_a;
+  ptr_t empty_b;
+  empty_a = empty_b;
+  EXPECT_FALSE(empty_a);
+
+  auto first = shared.ref();
+  ASSERT_TRUE(first);
+  ptr_t second;
+  second = first;
+  ASSERT_TRUE(second);
+  second = second;
+  ASSERT_TRUE(second);
+
+  first = empty_a;
+  EXPECT_FALSE(first);
+  EXPECT_EQ(destructions, 0);
+  EXPECT_EQ(external_destructions, 0);
+
+  second = empty_a;
+  EXPECT_FALSE(second);
+  EXPECT_EQ(destructions, 1);
+  EXPECT_EQ(external_destructions, 1);
+}
+
+TEST(ThreadSafePostTest, EmptyMailDestructionIsSafe) {
+  safe::post_t<safe::event_t<int>> post {safe::mail_t {}};
+  EXPECT_FALSE(post.mail);
 }

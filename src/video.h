@@ -170,19 +170,6 @@ namespace video {
 
     virtual size_t data_size() = 0;
 
-    struct replace_t {
-      std::string_view old;
-      std::string_view _new;
-
-      KITTY_DEFAULT_CONSTR_MOVE(replace_t)
-
-      replace_t(std::string_view old, std::string_view _new) noexcept:
-          old {std::move(old)},
-          _new {std::move(_new)} {
-      }
-    };
-
-    std::vector<replace_t> *replacements = nullptr;
     // Retain only the network-send state needed by the broadcast worker. This deliberately does
     // not own the stream session (which owns the broadcast context), avoiding both dangling raw
     // pointers and a session -> broadcast -> queued packet -> session ownership cycle.

@@ -95,6 +95,33 @@ TEST(ConcatAndInsertTests, ConcatSmallStrideTest) {
   ASSERT_EQ(res, expected);
 }
 
+TEST(ConcatAndInsertTests, ConcatAcrossBufferBoundaryAndUnevenFinalSlice) {
+  char b1[] = {'a', 'b', 'c'};
+  char b2[] = {'d', 'e', 'f', 'g'};
+  auto res = stream::concat_and_insert(1, 4, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
+  auto expected = std::vector<uint8_t> {0, 'a', 'b', 'c', 'd', 0, 'e', 'f', 'g'};
+  ASSERT_EQ(res, expected);
+}
+
+TEST(ConcatAndInsertTests, RejectsZeroStrideAndSizeOverflow) {
+  constexpr char data[] = {'a'};
+
+  EXPECT_TRUE(stream::concat_and_insert(1, 0, std::string_view {data, sizeof(data)}, {}).empty());
+  EXPECT_TRUE(
+    stream::concat_and_insert(
+      std::numeric_limits<std::uint64_t>::max(),
+      1,
+      std::string_view {data, sizeof(data)},
+      {}
+    )
+      .empty()
+  );
+}
+
+TEST(ConcatAndInsertTests, EmptyInputProducesEmptyOutput) {
+  EXPECT_TRUE(stream::concat_and_insert(1, 1, {}, {}).empty());
+}
+
 TEST(VideoTransportConfigTests, EnforcesPacketAndFecWireBounds) {
   EXPECT_FALSE(stream::is_valid_video_packet_size(stream::VIDEO_PACKET_SIZE_MIN - 1));
   EXPECT_TRUE(stream::is_valid_video_packet_size(stream::VIDEO_PACKET_SIZE_MIN));

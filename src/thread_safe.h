@@ -141,14 +141,11 @@ namespace safe {
     status_t view(std::chrono::duration<Rep, Period> delay) {
       std::unique_lock ul {_lock};
 
-      if (!_continue) {
+      if (!_cv.wait_for(ul, delay, [this] {
+            return (bool) _status || !_continue;
+          }) ||
+          !_continue) {
         return util::false_v<status_t>;
-      }
-
-      while (!_status) {
-        if (!_continue || _cv.wait_for(ul, delay) == std::cv_status::timeout) {
-          return util::false_v<status_t>;
-        }
       }
 
       return _status;
@@ -348,14 +345,11 @@ namespace safe {
     status_t pop(std::chrono::duration<Rep, Period> delay) {
       std::unique_lock ul {_lock};
 
-      if (!_continue) {
+      if (!_cv.wait_for(ul, delay, [this] {
+            return !_queue.empty() || !_continue;
+          }) ||
+          !_continue) {
         return util::false_v<status_t>;
-      }
-
-      while (_queue.empty()) {
-        if (!_continue || _cv.wait_for(ul, delay) == std::cv_status::timeout) {
-          return util::false_v<status_t>;
-        }
       }
 
       auto val = std::move(_queue.front());
@@ -447,13 +441,9 @@ namespace safe {
       }
 
       ptr_t &operator=(const ptr_t &ptr) noexcept {
-        if (!ptr.owner) {
-          release();
-
-          return *this;
-        }
-
-        return *this = std::move(*ptr.owner->ref());
+        ptr_t replacement {ptr};
+        std::swap(owner, replacement.owner);
+        return *this;
       }
 
       ptr_t &operator=(ptr_t &&ptr) noexcept {
@@ -565,7 +555,9 @@ namespace safe {
     mail_t mail;
 
     ~post_t() {
-      cleanup(mail.get());
+      if (mail) {
+        cleanup(mail.get());
+      }
     }
   };
 

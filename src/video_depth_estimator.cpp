@@ -16,6 +16,7 @@
 #include <d3dcompiler.h>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <NvInfer.h>
@@ -65,7 +66,7 @@ static std::mutex g_depth_shader_cache_mutex;
 
 struct depth_shader_cache_entry {
   std::filesystem::file_time_type modified;
-  std::vector<std::uint8_t> bytecode;
+  std::shared_ptr<const std::vector<std::uint8_t>> bytecode;
 };
 
 static std::map<std::filesystem::path, depth_shader_cache_entry> g_depth_shader_cache;
@@ -75,9 +76,8 @@ static void set_model_prepare_status(const std::string &engine_name, models::eng
   g_model_prepare_status[engine_name] = status;
 }
 
-static bool depth_shader_bytecode(
-  const std::filesystem::path &path,
-  std::vector<std::uint8_t> &bytecode
+static std::shared_ptr<const std::vector<std::uint8_t>> depth_shader_bytecode(
+  const std::filesystem::path &path
 ) {
   // D3D shader bytecode is device-independent. Cache blobs across device recreation, but compare
   // source mtimes so a newly created estimator sees an edit without restarting. Never hold the
@@ -87,8 +87,7 @@ static bool depth_shader_bytecode(
   {
     std::lock_guard<std::mutex> lock(g_depth_shader_cache_mutex);
     if (auto it = g_depth_shader_cache.find(path); it != g_depth_shader_cache.end() && !ec && it->second.modified == modified) {
-      bytecode = it->second.bytecode;
-      return true;
+      return it->second.bytecode;
     }
   }
 
@@ -99,15 +98,18 @@ static bool depth_shader_bytecode(
     if (err) {
       BOOST_LOG(error) << "Shader compile error (" << path << "): " << (char *) err->GetBufferPointer();
     }
-    return false;
+    return {};
   }
   auto *begin = static_cast<const std::uint8_t *>(blob->GetBufferPointer());
-  bytecode.assign(begin, begin + blob->GetBufferSize());
+  auto bytecode = std::make_shared<const std::vector<std::uint8_t>>(
+    begin,
+    begin + blob->GetBufferSize()
+  );
   if (!ec) {
     std::lock_guard<std::mutex> lock(g_depth_shader_cache_mutex);
     g_depth_shader_cache.insert_or_assign(path, depth_shader_cache_entry {modified, bytecode});
   }
-  return true;
+  return bytecode;
 }
 
 // Shared TensorRT state. The runtime and engine are created once and shared by every
@@ -1300,11 +1302,11 @@ namespace models {
     bool context_warmed = false;  // only warmed contexts may return to context_pool
 
     bool compile_shader(const std::filesystem::path &path, Microsoft::WRL::ComPtr<ID3D11ComputeShader> &out_cs) {
-      std::vector<std::uint8_t> bytecode;
-      if (!depth_shader_bytecode(path, bytecode)) {
+      auto bytecode = depth_shader_bytecode(path);
+      if (!bytecode) {
         return false;
       }
-      return SUCCEEDED(device->CreateComputeShader(bytecode.data(), bytecode.size(), nullptr, &out_cs));
+      return SUCCEEDED(device->CreateComputeShader(bytecode->data(), bytecode->size(), nullptr, &out_cs));
     }
 
     impl(Microsoft::WRL::ComPtr<ID3D11Device> d, Microsoft::WRL::ComPtr<ID3D11DeviceContext> c, const std::filesystem::path &assets_dir, const config::video_t::sbs_t &cfg, const config::depth_model_info &model):

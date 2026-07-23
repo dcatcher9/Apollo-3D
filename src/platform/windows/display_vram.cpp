@@ -1841,8 +1841,8 @@ namespace platf::dxgi {
 
     std::unique_ptr<models::video_depth_estimator> depth_estimator;
     // The per-device D3D estimator is built on a background thread and borrows the startup-warmed
-    // TensorRT context. The future is declared after device/device_ctx so its destructor (which
-    // joins the build) runs while those are still alive.
+    // TensorRT context. The process-level build manager owns and joins the worker; the task itself
+    // captures owning D3D references, so abandoning this non-blocking future during teardown is safe.
     std::future<std::unique_ptr<models::video_depth_estimator>> depth_estimator_build;
     bool depth_estimator_building = false;
     bool depth_estimator_failed = false;  ///< Build threw; stream flat, don't retry on this device.
