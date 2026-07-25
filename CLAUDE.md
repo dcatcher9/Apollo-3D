@@ -119,10 +119,14 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   composite shaders over a fixed directory of frames (split a short video with
   `tools/sbsbench/split_video.py`), writing `sbs_%05d.png` + `depth_%05d.png`, deterministically
   and with no game/client. Score with `python tools/sbsbench/sbsbench.py --seq <out> --baseline
-  base.json` → pop_spread (near-to-far stereo VOLUME, the gated pop metric — subject-anchoring-fair,
-  unlike median-|dx| pop_px which is reported-only), vmisalign (geometry, must stay ~0),
-  disocc_frac/disocc_smear (disocclusion severity), flicker (temporal shimmer, which the offline
-  sim can't measure). Capture a baseline before the change; `--pop-strength`,
+  base.json` → `exact_visible_pop_spread_pct` (near-to-far stereo VOLUME, subject-anchoring-fair),
+  vmisalign (geometry, must stay ~0), disocc_frac/disocc_smear (disocclusion severity), flicker
+  (temporal shimmer). **A green exit code does NOT mean pop is safe.** Baseline regressions are
+  gated only for `role: primary` metrics (`run_eval.py`), plus the non-tradeable `role: hard`
+  bounds. Stereo-volume and stretch/fold/shear metrics are `role: diagnostic` and are reported,
+  not gated — see `tools/sbsbench/thresholds.json` for each metric's role. Raising pop typically
+  keeps the ±3% comfort tails inside their hard bound while degrading the ungated artifact
+  diagnostics, so read those by hand. Capture a baseline before the change; `--pop-strength`,
   `--depth-short-side`, `--ema`, `--minmax-ema`, and the subject
   lock/recenter/stretch controls are the supported A/B levers (see the harness
   README). Run

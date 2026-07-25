@@ -119,6 +119,14 @@ Harness A/B levers (after `--extra`):
   854 pixels, production preserves Bestv2's literal pixel shift and independently applies the
   reference-aspect correction; non-16:9 low-resolution inputs therefore receive both effects.
   This behavior requires a dedicated 4:3 A/B before changing.
+  **Gotcha: `--pop-strength F` alone collapses the adaptive band.** The harness applies
+  `adaptive_pop_max = max(adaptive_pop_max, pop_strength)`, so raising only the floor makes the
+  adaptive ratio 1.0 and you have measured a FIXED gain, with the search radius sized to it. To
+  test a ceiling, pass `--adaptive-pop-max` and leave `--pop-strength` alone.
+  **Also note the `depth_gt_*` metrics are structurally invariant to pop**, zero-plane,
+  `--subject-lock` and convergence changes: they are computed on the pre-warp depth map, which
+  none of those levers touch. Their neutrality on such a run is a tautology, not evidence of
+  safety. They do respond to `--depth-short-side`, `--ema*`, `--minmax-ema` and model changes.
 - `--literal-bestv2` — comparison-only reference mode. It bypasses production resolution,
   aspect, and pop scaling and writes the fact to `contract.json`; never use it for quality gates or
   committed baselines.

@@ -59,7 +59,7 @@ namespace config {
       double subject_lock = 0.5;  ///< Validated subject anchor compromise. 1 pins the subject exactly; 0 leaves the Bestv2 bands unanchored.
       double subject_recenter = 0.35;  ///< How strongly the depth field is shifted to put the tracked subject at mid-depth before the band mapping (0-1).
       bool subject_stretch = true;  ///< Bestv2 shape_depth_for_pop stretch: rescale the permanent P5/P95 band to [0,1].
-      std::string zero_plane = "legacy";  ///< Shot-latched screen-plane anchor: legacy, subject, median, or background. Experimental modes preserve disparity range and eye symmetry.
+      std::string zero_plane = "median";  ///< Shot-latched screen-plane anchor: legacy, subject, median, or background. Experimental modes preserve disparity range and eye symmetry. `median` is the validated default: it latches the anchor per shot instead of tracking it per frame, which removes the anchor wobble that legacy feeds into the warp.
       std::string depth_model = "depth_anything_v2_fp16";  ///< Local ONNX stem/logical model name. Identifies models so each gets its own recipe-specific engine cache.
       std::string depth_model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< URL to download the depth model ONNX from if <depth_model>.onnx is absent. Point this (and depth_model) elsewhere to use a different model.
       int max_encode_width = 8192;  ///< Configured maximum packed Host SBS width. The effective cap is the lower of this value and the selected codec's NVENC capability (RTX 5080: H.264 4096, HEVC/AV1 8192); wider requests are aspect-preservingly scaled.

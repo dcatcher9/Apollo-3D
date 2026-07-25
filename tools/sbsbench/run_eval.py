@@ -1771,8 +1771,10 @@ def main():
         args.conf, expected_config_profile, "pop_strength", 1.25, args.extra,
         "--pop-strength")
     expected_adaptive_max = max(expected_adaptive_max, expected_pop)
+    # These fallbacks mirror the C++ defaults in src/config.h and must move with them, or the
+    # harness contract check rejects every clip before any measurement runs.
     expected_zero_plane = expected_profile_string(
-        args.conf, expected_config_profile, "zero_plane", "legacy", args.extra,
+        args.conf, expected_config_profile, "zero_plane", "median", args.extra,
         "--zero-plane")
     if expected_zero_plane not in ("legacy", "subject", "median", "background"):
         fail(f"invalid zero_plane value: {expected_zero_plane!r}")

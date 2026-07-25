@@ -108,6 +108,19 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
   disocclusion. The evaluator-only confidence audit remains useful for diagnosis, but it must not
   directly scale local parallax. Evidence: `local-compress-target-s10` and
   `local-compress-target-s20` under `cmake-build-relwithdebinfo/sbs_eval/`.
+  **The strip boundary was the symptom; the root cause is deeper, and it generalizes.** The
+  backward search in `sbs_reprojection_ps.hlsl` solves `(x - uv) - eyeSign*P = 0` and selects the
+  root of greatest depth. That selection is only well-posed because `P` is a monotone function of
+  depth ALONE. Any gain that varies with image position makes `P` a function of `(x, d)`, so the
+  gain enters the root equation directly: it can create spurious crossings and erase real ones, and
+  "frontmost depth" stops implying "frontmost in parallax". Blurring the mask does not fix this —
+  the field would have to vary on a scale much larger than the search radius to be locally
+  constant, which destroys the silhouette localization that motivated it. **Rule: reshaping
+  expressed as a function of depth is safe; reshaping expressed as a function of image position is
+  not.** That single rule explains the whole ledger — the Bestv2 curve, `subject_stretch` and
+  `subject_recenter` all reshape in the depth domain and all shipped. Depth-domain reshaping
+  additionally requires `S'(d) > 0` everywhere, since a non-monotone `P(d)` inverts the occlusion
+  ordering the frontmost-root rule depends on.
 - DA-V2 Base FP16 was re-screened as a model-only replacement for Small and rejected as the
   production default. On the extended suite it improved GT boundary F1 from 45.07% to 50.27%, but
   left GT depth RMSE flat (11.28% to 11.26%), worsened mean source halo from 2.68 to 2.99, and
@@ -180,6 +193,21 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
   1.30 for the cave/daylight clips and backed off only to approximately 1.27/1.25 for the
   close-up/forest clips. Fixed 1.30 added at most 0.045 percentage points of pop spread and traded
   mixed artistic-reference deltas, so there is not yet evidence for a more complex controller.
+  **Caveat for anyone re-testing this (added 2026-07-24): do not re-run these experiments and read
+  the exit code.** The 1.35 and 2.0 rejections were measured against a metric schema in which
+  `source_halo_p95`, `source_stretch_pct`, `source_residual_p95` and `flow_temporal_p95` were
+  primary and baseline-gated. `source_halo_p95` — the metric that actually rejected 1.35 — no
+  longer exists, and the others are no longer primary. Under the current schema three of the four
+  baseline-gated metrics are `depth_gt_*`, computed on the pre-warp depth map and therefore
+  structurally invariant to pop; only `static_jitter_p95` responds. A pop change can regress halo,
+  stretch, fold, shear and disocclusion while `run_eval.py` still exits 0. Read the diagnostics by
+  hand. Two further confounds: (1) the adaptive band is a ratio of only 1.04, below the `rel_tol`
+  noise floor of every metric that could judge it, so the neutral `spring-adaptive-vs-fixed130`
+  result is uninformative rather than reassuring; (2) `Bestv2SearchRadius` scales with
+  `adaptive_pop_max` while `Bestv2ProbeSteps` is fixed, so raising the ceiling coarsens the probe
+  for every scene — including scenes the controller declined to boost, which pay the cost and
+  receive none of the gain. Decouple probe geometry from strength before attributing any ceiling
+  regression to the gain itself.
 - Art3D-style shot-level zero-plane placement was screened as three scene-latched treatments:
   tracked subject, depth median, and far/mid-background (P25). Each resolves its anchor through
   the final Bestv2 curve and stores the source-pixel shift, so percentile motion cannot make
@@ -188,11 +216,31 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
   volume and daylight halo/stretch, but core lost fast-motion volume and added c747/c841 warp
   costs. Subject improved Spring artifact/reference fidelity but reduced character volume;
   background was the least harmful core treatment but weaker than median on Spring. Visual
-  inspection confirmed convergence redistribution rather than universal detail recovery. Keep
-  `sbs_3d_zero_plane = legacy`; retain the explicit modes for controlled headset labels and a
-  future semantic controller. Depth histograms alone are not a safe selector: scenes with similar
-  percentiles and edge density chose different winners. Evidence:
+  inspection confirmed convergence redistribution rather than universal detail recovery. Depth
+  histograms alone are not a safe selector: scenes with similar percentiles and edge density chose
+  different winners. Evidence:
   `zero-plane-{legacy,subject,median,background}-{core-screen,spring}`.
+- **SUPERSEDED 2026-07-24: `sbs_3d_zero_plane` now defaults to `median`.** The headset preference
+  label this decision was waiting on was collected and is decisively positive. Re-measured on the
+  current metric schema (`pop-A-control` vs `zp-subject` vs `zp-median`, core suite), the earlier
+  costs do not reproduce and the earlier framing understated the win:
+  - **Stereo volume is unchanged on all 11 clips** (pop spread 1.008 -> 1.008). The "core lost
+    fast-motion volume" cost does not reproduce: fast_motion is 1.044 -> 1.044.
+  - **Mapping stretch improved on all 11 clips**, -15% to -80% (mean 0.633 -> 0.254).
+  - **Static jitter improved on 10 of 11**, mean 1.816 -> 1.344. The one movement against is c747
+    (+0.137), well inside its 0.5 gate threshold. c841 *improved* 31.8%, so that earlier cost does
+    not reproduce either.
+  - `experimental_stereo_window_crossed_burden_pct` left 0.000 for the first time (-> 0.0128),
+    i.e. content finally renders in front of the screen plane at all.
+  - Zero hard failures in all three arms; `exact_mapping_fold_pct` stayed 0.000.
+  **Why it improves the warp, which the "anchor is a constant offset" model does not predict:** the
+  explicit modes do not merely add a constant. They replace legacy's *per-frame EMA-tracked* anchor
+  with a *shot-latched* one and zero the legacy convergence bias. Legacy's anchor therefore wobbles
+  every frame, translating the whole disparity field slightly, and that wobble was feeding both
+  stretch and jitter. **The legacy per-frame adaptive anchor is itself a source of temporal
+  instability.** `subject` is a close second and remains available.
+  **Note for pop re-tuning:** the ~58% stretch reduction is real headroom. Any future pop-ceiling
+  experiment should be run against this baseline, not against legacy.
 
 Do not reintroduce a removed processor without a current core and extended comparison, visual
 evidence, and a headset-motivated hypothesis.
@@ -222,9 +270,11 @@ comfort and integrity remain hard gates.
 2. Collect headset preference labels for the current scene-latched 1.25-1.30 adaptive-pop band.
    The Spring true-stereo A/B is neutral and does not support raising the ceiling or replacing the
    current edge-risk controller without perceptual evidence.
-3. Collect scene-level headset labels for explicit zero-plane placement. A learned/semantic
-   selector may use image content and depth together; do not ship a percentile-only rule from the
-   current small suite.
+3. ~~Collect scene-level headset labels for explicit zero-plane placement.~~ **Done 2026-07-24:
+   `median` was labelled decisively better in the headset and is now the default** (see the
+   superseding entry above). The remaining open work is the *per-scene selector*, not the global
+   default: a learned/semantic selector may use image content and depth together, but do not ship
+   a percentile-only rule from the current small suite.
 
 ## References
 
