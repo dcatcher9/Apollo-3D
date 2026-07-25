@@ -35,6 +35,10 @@ RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 unweighted bins 
 // smooths the same kind of quantity -- a depth-domain range -- rather than the convergence EMA,
 // which smooths an anchor. Reset on a cut like every other temporal state here.
 #define STRETCH_BAND_EMA 0.18f
+// Band percentile tail. The band clips by design; at 0.05 (P5/P95) the measured plateau reached
+// 15.8%/22.6% of pixels because the EMA lags the live distribution. Widening reduces the CLIPPING
+// itself rather than softening its edge.
+#define STRETCH_BAND_TAIL 0.02f
 
 #define POP_RISK_LOW 0.04f
 #define POP_RISK_HIGH 0.20f
@@ -75,8 +79,8 @@ void main() {
         float ptotal = 0.0f;
         for (uint pb = 0; pb < NUM_BINS; pb++) ptotal += (float)PlainHist[pb];
         if (ptotal > 0.5f && (subject_stretch > 0.5f || zero_plane_mode > 0.5f)) {
-            float lo_c = 0.05f * ptotal, bg_c = 0.25f * ptotal;
-            float med_c = 0.50f * ptotal, hi_c = 0.95f * ptotal;
+            float lo_c = STRETCH_BAND_TAIL * ptotal, bg_c = 0.25f * ptotal;
+            float med_c = 0.50f * ptotal, hi_c = (1.0f - STRETCH_BAND_TAIL) * ptotal;
             float pc = 0.0f, hv = 1.0f;
             bool got_lo = false, got_bg = false, got_med = false;
             for (uint qb = 0; qb < NUM_BINS; qb++) {
@@ -216,8 +220,10 @@ void main() {
                 scene_age == POP_CLASSIFY_SETTLE_FRAMES) {
                 float zero_anchor_depth = zero_plane_mode < 1.5f ? subj :
                                           zero_plane_mode < 2.5f ? median_val : background_val;
+                // Must shape identically to Bestv2WarpDepth, or the anchor stops describing the
+                // plane the warp actually renders: one soft clamp over the recentred band value.
                 float zero_anchor_shaped = subject_stretch > 0.5f ?
-                    saturate((zero_anchor_depth - lo_val) * inv_range) : zero_anchor_depth;
+                    (zero_anchor_depth - lo_val) * inv_range : zero_anchor_depth;
                 zero_anchor_shaped = saturate(zero_anchor_shaped + delta);
                 zero_anchor_shift = Bestv2RawShiftPxFast(zero_anchor_shaped);
                 zero_valid = 1.0f;

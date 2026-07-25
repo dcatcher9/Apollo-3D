@@ -70,7 +70,6 @@ struct Bestv2Params {
     float parallax_scale;
     float convergence_bias;
     float output_scale;
-    float clamp_abs;
 };
 
 Bestv2Params MakeBestv2Params(float4 s0, float4 s1, float4 s2,
@@ -94,7 +93,6 @@ Bestv2Params MakeBestv2Params(float4 s0, float4 s1, float4 s2,
     float adaptive_ratio = adaptive_pop > 0.5f ? max(s1.w, 1.0f) : 1.0f;
     float strength = literal_bestv2 > 0.5f ? 1.0f : pop_strength * adaptive_ratio;
     p.output_scale = strength * aspect_scale;
-    p.clamp_abs = 0.071f * aspect_scale;
     return p;
 }
 
@@ -104,7 +102,11 @@ float DepthParallax(float d, float4 s0, float4 s1, Bestv2Params p,
     float shift_px = Bestv2RawShiftPxFast(shaped_depth);
     float parallax = (shift_px - p.anchor_shift_px) * p.parallax_scale;
     parallax += p.convergence_bias;
-    return clamp(parallax * p.output_scale, -p.clamp_abs, p.clamp_abs);
+    // No safety clamp: it was provably unreachable. reach = 9.979 * (0.35/854) * strength *
+    // aspect_scale and the old bound was 0.071 * aspect_scale, so aspect cancels and binding needs
+    // strength > 17.36, while config.cpp validates BOTH pop_strength and adaptive_pop_max into
+    // [0.25, 2.0]. 8.7x margin, enforced rather than incidental.
+    return parallax * p.output_scale;
 }
 
 // Probe SPACING is what the historical calibration actually pinned; the step count was only ever
@@ -199,7 +201,7 @@ static const float BESTV2_SEARCH_MARGIN = 1.10f;
 // resolved in Bestv2Params. The reachable interval is therefore computed exactly:
 //
 //   [ (S_MIN - anchor)*parallax_scale + convergence_bias,
-//     (S_MAX - anchor)*parallax_scale + convergence_bias ] * output_scale, clamped to +-clamp_abs
+//     (S_MAX - anchor)*parallax_scale + convergence_bias ] * output_scale
 //
 // The previous formulation bounded the same quantity globally instead, and was about six times
 // wider than any displacement that can occur at the shipped defaults, because it budgeted for
@@ -225,7 +227,7 @@ float Bestv2SearchRadius(Bestv2Params p) {
     float hi = (BESTV2_SHIFT_PX_MAX - p.anchor_shift_px) * p.parallax_scale + p.convergence_bias;
     // output_scale is strictly positive, so scaling the interval preserves it.
     float reach = max(abs(lo), abs(hi)) * p.output_scale;
-    return min(reach, p.clamp_abs) * BESTV2_SEARCH_MARGIN;
+    return reach * BESTV2_SEARCH_MARGIN;
 }
 
 // Bound worst-case tall/high-resolution work. The live packed target contains two source-sized

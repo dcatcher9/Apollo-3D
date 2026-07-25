@@ -385,6 +385,113 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
   **Note for pop re-tuning:** the ~58% stretch reduction is real headroom. Any future pop-ceiling
   experiment should be run against this baseline, not against legacy.
 
+- Pre-fusing the depth model's expanded exact-GELU pattern into a single `Gelu` node was screened
+  against the Artemis client's equivalent rewrite and rejected as a no-op for the host. The client
+  gained 15.7% (22.20 -> 18.72 ms) by collapsing the per-block `Div/Erf/Add/Mul/Mul` DAG, because
+  its runtime dispatches one kernel per op. TensorRT does not: verbose build logs show the parser
+  reading all 12 `Erf` chains, then `After Myelin optimization: 1 layers` — the whole ViT becomes a
+  single `ForeignNode[graph_input_cast0...graph_output_cast0]` with generated fused kernels, so the
+  expanded form never costs extra dispatches. A fused ONNX (838 -> 790 nodes, 12 `Gelu`, 0 `Erf`;
+  TensorRT's parser accepts `Gelu` at opset 14 even though the ONNX checker does not) reached the
+  *same* single Myelin layer and byte-identical 49,324,544 B activation memory. `trtexec` at the
+  production `--builderOptimizationLevel=5`, 400 iterations at 1x3x434x770, measured median GPU
+  compute 1.54077 ms baseline vs 1.53125 ms fused: **0.62%**, against a p50-p90 spread of 0.003 ms.
+  Do not port client model-graph fusions to the host without first checking whether Myelin already
+  subsumes them.
+
+- `depth_short_side` stays at 434, decided on **stereo volume**, not on GT edge agreement. Matched
+  ladders were run on both suites at 57abea70 (identical executable and shader shas, only
+  `--depth-short-side` differing): core `dss-434/392/336/280`, extended `dssx-434/392/336`. Note a
+  matched same-sha control did not previously exist on either suite; comparing against an older
+  baseline is what produced the earlier misleading read.
+  - **The two suites agree on every metric they share.** `exact_visible_pop_spread_pct` at 392 is
+    -1.58% on core and -1.74% on extended, and degrades monotonically on core: -1.58% / -3.58% /
+    -7.88% at 392 / 336 / 280. Restricted to the five real core captures it is -0.46% / -3.17% /
+    -5.00%, so the volume loss is genuine on true content and not a synthetic artifact. Everything
+    else is flat and `exact_mapping_fold_pct` stays 0.000. 434 is kept because that loss buys only
+    6.83% of `depth_infer` (1.512 -> 1.409 ms) — 0.10 ms, which changes no frame budget.
+  - **Lower depth resolution does not cost temporal stability on real content.** `static_jitter_p95`
+    rises +7.61% / +22.26% / +47.33% across the whole core suite, but that is entirely synthetic:
+    real captures move +0.10% / -1.54% / -6.50% (flat, trending better) while synthetic/generated
+    clips move +12.03% / +36.30% / +79.11%, driven by `fast_motion` alone going 3.145 -> 11.058.
+    Quote the real-capture split, never the suite mean, for this metric.
+  - **`depth_gt_edge_f1` is not a usable discriminator at this scale and must be read as
+    diagnostic.** It does not track actual depth change: between 434 and 392, tartanair_house_motion
+    changed *more* (3-frame-mean affine-aligned depth NRMSE 4.12%) yet scored -0.08%, while
+    tartanair_house_easy changed *less* (3.20%) yet scored -49.8%. Both vkitti clips changed ~0.04%
+    and scored ~0.00%. The suite mean of -8.26% is produced entirely by that one clip; the other
+    seven average +3.4%. Visual inspection of the depth maps at all three resolutions confirms
+    neither the -49.8% collapse nor the +18.8% best case is apparent. house_easy is a low-texture
+    indoor scene whose edge content swings across frames (0.34% of pixels at f8 vs 3.83% at f20),
+    and `depth_gt_edge_f1` is the only metric in schema 32 exporting no support count, so nothing
+    gates it on edge population. `depth_gt_polarity_ok` held at 100.0 everywhere.
+- Depth input shapes must avoid the TensorRT tactic cliff just above a 128-token boundary. Measured
+  with `trtexec` at `--builderOptimizationLevel=5`, 300 iterations: 1675 tokens 1.499 ms, 1706
+  (production 16:9 770x434) 1.509, 1737 1.521, 1761 1.510, then **1793 tokens 1.988 ms and 1825
+  1.982** — a +31% step, not a token-count effect, since 1761 -> 1793 is only +1.8% tokens. 1792 is
+  14x128, so the DINOv2 CLS token is what pushes the sequence into an extra, badly-utilized tile.
+  Consequence: do not raise `depth_short_side` to 448, which `aspect_aligned_dims` turns into
+  798x448 = 1825 tokens for 16:9 and lands past the cliff. Current production shapes are all clear
+  of it: 16:9 770x434 = 1706, 5K2K 994x420 = 2131, 21:9 1008x420 = 2161. Cost is also sub-linear in
+  tokens below the cliff (-1.8% tokens bought only -0.67% latency), so shaving tokens is a poor
+  perf lever regardless.
+
+- **Cardboarding from hard band clamping — measured, fixed offline, awaiting headset arbitration.**
+  `Bestv2WarpDepth` applied `saturate()` twice, and since `DepthParallax` is a pure function of
+  shaped depth plus frame-uniform scalars, every clipped pixel received an *identical* disparity:
+  a flat plateau with no relief. Measured from the exported backward maps (mass sitting exactly at
+  a displacement extreme), the plateau covered **15.84% of pixels on extended and 22.57% on core**,
+  reaching 68.24% on `c525` — the previously recorded "~10%" was an underestimate. It is not
+  legitimate far-plane background: every plateau swallowed 4-46% of the frame's depth range.
+  `clamp_abs` was ruled out as the cause — at `0.071 * aspect_scale` it is ~72 px on a 1024-wide
+  eye while measured displacements peak at 3.7-8.3 px, so it never binds.
+  - **Shipped fix: fold the two clamps into one and WIDEN the band, `STRETCH_BAND_TAIL` 0.05 ->
+    0.02 (P5/P95 -> P2/P98).** Folding is free and strictly better (`saturate(saturate(x) + a)` is
+    not `saturate(x + a)`; the inner clamp collapses every `x < 0` onto the constant `a` while the
+    folded form still ramps over `[-a, 0]`) but on its own only relocates the clipped window, whose
+    width is 1 either way. Reducing the clipped FRACTION is what removes cardboarding.
+  - **A soft-knee variant was implemented, measured and REJECTED — do not retry it.** Softening the
+    band edge keeps exactly the same over-clipping and charges the band interior for it. Measured
+    from the backward maps against identical percentiles: the knee cost **6.3-6.4% of p10-p90
+    mid-scene relief** and 4.08%/3.65% of gated stereo volume, versus ~0 for widening. The volume
+    loss was the knee moving the reachable disparity endpoints inward, NOT a consequence of
+    de-saturating. If cardboarding needs more work, widen further or attack the EMA lag — never
+    reintroduce a knee in `Bestv2WarpDepth`.
+  - Result (`wideband-{core,ext}` vs `dss-434`/`dssx-434`): plateau **22.57% -> 16.50% core and
+    15.84% -> 9.21% extended**, `exact_mapping_stretch_pct` -8.11%/-4.57%, `static_jitter_p95`
+    -1.80%/-4.03%, `vmisalign_p99_pct` -0.72%/-6.39%, fold 0.000 and image integrity 100.0, with
+    `exact_visible_pop_spread_pct` **-1.05% core / +0.00% extended** — no primary-axis cost.
+  - The residual plateau is NOT percentile-driven: P1/P99 (`wide99-*`) moved it only 9.21 -> 8.71
+    extended and 16.50 -> 16.23 core for no further gain. What remains is `STRETCH_BAND_EMA` lag —
+    the band trails the live distribution, so more clips than the nominal 4% fall outside it. That
+    is the next lever, and it is a stability trade because the band is a multiplicative gain.
+  - `depth_subject_resolve_cs` duplicates the shaping for the zero anchor rather than calling
+    `Bestv2WarpDepth`. Shaping it differently makes the anchor describe a different plane than the
+    warp renders — during this work an inconsistent version cost core `vmisalign_p99_pct` +8.76%.
+    **Any change to the shaping function must be mirrored there.**
+  - **Both remaining clamps on the per-pixel path were proved unreachable and removed.**
+    (a) `Bestv2RawShiftPxFast`'s input `saturate(d)`: every call site already delivers [0,1] —
+    `Bestv2WarpDepth` returns `saturate(...)` on its shaped path, `depth_subject_resolve_cs`
+    saturates before calling, and the one unshaped passthrough (`sbs_forward_coverage_cs`) never
+    reaches it because `DepthParallax` sits inside `if (shaped)` and the raw value feeds
+    `saturate(shaped_depth)` instead. (b) `DepthParallax`'s `clamp_abs`: reach is
+    `9.979 * (0.35/854) * strength * aspect_scale` against a bound of `0.071 * aspect_scale`, so
+    **aspect cancels** and binding needs `strength > 17.36`, while `config.cpp:665-667` validates
+    both `pop_strength` and `adaptive_pop_max` into [0.25, 2.0]. The 8.7x margin is therefore
+    enforced, not incidental. Its coupled `min(reach, clamp_abs)` in `Bestv2SearchRadius` went with
+    it. Note the fit domain is unaffected — shaped depth is still exactly [0,1].
+  - Removal is metric-identical but **not** byte-identical (`noclamp-*` vs `wideband-*`): all nine
+    reported metrics match to five decimals on all 23 clips, worst clip 0.000%, yet every artifact
+    hash differs. Dropping a clamp lets the compiler fuse and schedule the multiply differently, so
+    the warp map moves at float LSB level — the same class of trap as the probe-lattice
+    accumulator. Warp time fell 1.27%/1.25%, consistent across both suites but inside the ~3% noise
+    envelope that the untouched `depth_infer` stage showed in the same runs (+0.49%/+2.89%), so
+    treat the perf gain as unproven and the simplification as the actual justification.
+  - **`exact_visible_pop_spread_pct` rewards clipping and must not be the sole gate here.** It is a
+    p0.5..p99.5 spread, so pinning 16-23% of pixels onto the two extreme disparities places those
+    percentiles inside the plateaus and reports the clip bounds rather than scene relief. Read it
+    alongside a plateau-excluded relief measure when judging any band change.
+
 Do not reintroduce a removed processor without a current core and extended comparison, visual
 evidence, and a headset-motivated hypothesis.
 
