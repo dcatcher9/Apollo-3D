@@ -252,6 +252,18 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
   measures row-to-row displacement inconsistency, the likely cause is depth noise between adjacent
   scanlines rather than silhouette structure -- which neither an edge count nor an edge magnitude
   can observe. Diagnose that clip before tuning the classifier further.
+  **Classifier thresholds recalibrated 2026-07-24, and this was the real defect.** Instrumenting the
+  resolved multiplier (rather than inferring it) showed the controller was emitting its FLOOR on 19
+  of 23 clips; the only clips reaching the ceiling were the three synthetic ones. Measuring the
+  weighted edge fraction across the whole suite explains why: the synthetic clips sit at
+  0.0001-0.0087 while real footage spans 0.038-0.245 (median ~0.10), so the old 0.007/0.016
+  endpoints saturated on everything real and the band was inert. Endpoints are now 0.04/0.20,
+  roughly the 10th-90th percentile of real content, and the band is genuinely exercised (clean
+  depth -> near ceiling, busy -> floor, the rest spread between). Classification is also deferred
+  until the depth field settles, reusing the cut detector's 8-update window, because an unsettled
+  field reads smoother than the shot really is. Headset-validated. Note `bonn_person_close` barely
+  moves: a close-up real person has the densest depth edges in the suite (0.24) and still sits at
+  the floor, so the configuration already judged good in the headset is preserved.
   **Also unlatched and unexamined:** `subject_stretch` recomputes its P5/P95 band every frame with
   no temporal smoothing, while subject depth, convergence and the normalization min/max are all
   EMA'd. It is the only per-frame adaptive gain in the depth domain with no smoothing, and the same

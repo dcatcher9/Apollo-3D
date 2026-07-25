@@ -18,13 +18,6 @@ StructuredBuffer<float4> MinMaxEma : register(t4);  // w = current-frame validit
 
 #define NUM_BINS 256
 
-// Edge-risk accumulation is fixed-point because InterlockedAdd is integer-only. A texel exactly at
-// the 0.02 gradient threshold contributes EDGE_WEIGHT_SCALE, so the resolve stage recovers the
-// historical edge fraction by dividing the sum by EDGE_WEIGHT_SCALE. Worst case is
-// texels * MAX * SCALE, which stays well inside uint32 at every supported depth resolution.
-#define EDGE_WEIGHT_SCALE 256.0f
-#define EDGE_WEIGHT_MAX 8.0f
-
 groupshared uint g_hist[NUM_BINS];
 groupshared uint g_plain[NUM_BINS];
 groupshared uint g_edge_count;

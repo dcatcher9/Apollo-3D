@@ -18,6 +18,22 @@ RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 unweighted bins 
 
 #define NUM_BINS 256
 
+// Updates to wait after a cut before classifying scene risk for adaptive pop. Matches the depth
+// cut detector's settling window below, which exists because normalization settling perturbs
+// 50-60% of depth texels on the first few frames. Until then the floor is held, so an unsettled
+// field can never win the ceiling for a whole shot.
+#define POP_CLASSIFY_SETTLE_FRAMES 8.0f
+
+// Scene-risk endpoints, calibrated against the MEASURED weighted edge fraction of the committed
+// suites rather than against synthetic content. Across all 23 clips the three synthetic ones
+// (fast_motion 0.0001, flat_transition 0.0048, flat_page 0.0087) sit far below real footage, which
+// spans 0.038-0.245 with a median near 0.10. The previous 0.007/0.016 endpoints therefore
+// saturated on every real clip, pinning the controller to its floor and making the adaptive band
+// inert -- only the synthetic clips ever reached the ceiling. These endpoints span roughly the
+// 10th-90th percentile of real content so the band is actually exercised.
+#define POP_RISK_LOW 0.04f
+#define POP_RISK_HIGH 0.20f
+
 [numthreads(1, 1, 1)]
 void main() {
     // Total weighted votes.
@@ -126,16 +142,28 @@ void main() {
         float pop_ratio = max(s1.w, 1.0f);
         if (adaptive_pop > 0.5f && ptotal > 0.5f) {
             // PlainHist[NUM_BINS] accumulates gradient-magnitude-weighted edge texels in fixed
-            // point (see EDGE_WEIGHT_SCALE in depth_subject_hist_cs). Dividing by the scale yields
+            // point (EDGE_WEIGHT_SCALE is shared via include/depth_constants.hlsl). Dividing by it yields
             // a threshold-equivalent edge fraction: identical to the historical count when every
             // edge sits at the threshold, and proportionally larger when edges are more violent.
             // The 0.007/0.016 endpoints below therefore keep their original calibration.
-            float edge_fraction = (float)PlainHist[NUM_BINS] / (ptotal * 256.0f);
+            float edge_fraction = (float)PlainHist[NUM_BINS] / (ptotal * EDGE_WEIGHT_SCALE);
             if (!initialized || hard_cut) {
+                // Classify on a SETTLED depth field, never on the cut frame. Normalization
+                // settling changes 50-60% of depth texels on the first few frames (see the cut
+                // detector above, which waits the same 8 updates for exactly this reason). An
+                // unsettled field reads smoother than the shot really is, so a busy scene can be
+                // classified as clean and hold the full ceiling for its entire duration -- which
+                // is what gave the opening shot of tartanair_house_easy maximum pop and the worst
+                // cross-row shear in the suite. Hold the conservative floor until it settles:
+                // when the risk is not yet measurable, do not grant the bonus.
+                pop_ratio = 1.0f;
+            } else if (scene_age == POP_CLASSIFY_SETTLE_FRAMES) {
+                // One classification per shot, on the first settled field, then bit-stable until
+                // the next cut. Equality rather than >= keeps that single-shot latch exact.
                 // Full extra pop is safe for low-complexity depth fields (<=0.7% edge texels).
-                // Fade to the base strength by 1.6%; the extended suite validated the 1.30
-                // endpoint itself, so this classification only decides where the gain is useful.
-                float confidence = 1.0f - smoothstep(0.007f, 0.016f, edge_fraction);
+                // Fade to the base strength by 1.6%; the classification decides only where the
+                // configured gain is useful, not what the endpoints are.
+                float confidence = 1.0f - smoothstep(POP_RISK_LOW, POP_RISK_HIGH, edge_fraction);
                 pop_ratio = lerp(1.0f, max(adaptive_pop_max_ratio, 1.0f), confidence);
             }
         } else {

@@ -26,4 +26,14 @@ cbuffer Constants : register(b0) {
     float padding2;
 };
 
+// Adaptive-pop edge risk is accumulated in fixed point because InterlockedAdd is integer-only.
+// Each qualifying texel contributes min(grad / 0.02, EDGE_WEIGHT_MAX) * EDGE_WEIGHT_SCALE, so a
+// texel exactly at the gradient threshold contributes EDGE_WEIGHT_SCALE and the consumer recovers
+// a threshold-equivalent edge fraction by dividing the sum by EDGE_WEIGHT_SCALE * texel count.
+// Shared here because the producer (depth_subject_hist_cs) and the consumer
+// (depth_subject_resolve_cs) must agree exactly: a mismatch silently rescales scene risk and
+// changes which scenes receive extra pop. Do not duplicate these values.
+#define EDGE_WEIGHT_SCALE 256.0f
+#define EDGE_WEIGHT_MAX 8.0f
+
 #endif
