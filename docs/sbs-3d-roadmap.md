@@ -267,9 +267,28 @@ comfort and integrity remain hard gates.
 
 1. Correlate the new previous-only GT ghost-edge diagnostic with additional known-motion scenes
    and headset evidence before allowing it to become a primary gate.
-2. Collect headset preference labels for the current scene-latched 1.25-1.30 adaptive-pop band.
-   The Spring true-stereo A/B is neutral and does not support raising the ceiling or replacing the
-   current edge-risk controller without perceptual evidence.
+2. Re-tune the adaptive-pop band, in this order. The 1.25-1.30 band is not defensible as a
+   validated result in its current form: the shader receives a RATIO of
+   `adaptive_pop_max / pop_strength` = **1.04**, which is below the `rel_tol` noise floor (0.15-0.20)
+   of every metric that could judge it. A controller with 4% authority can neither be validated nor
+   falsified, which is why `spring-adaptive-vs-fixed130` came back neutral. Either widen it enough
+   to matter or delete it.
+   1. **Decouple probe geometry from strength first.** `Bestv2SearchRadius` scales with
+      `adaptive_pop_max`, but `Bestv2ProbeSteps` is a fixed `24 * aspect_scale`, so probe spacing
+      `2R/steps` is proportional to strength. Raising the ceiling therefore coarsens the probe for
+      **every** scene, including scenes the controller declined to boost -- they pay the cost and
+      receive none of the gain. Any ceiling A/B run before this fix is partly measuring its own
+      probe degradation, which is a strong candidate for why 1.35 and 2.0 both failed.
+   2. Only then run the ceiling ladder, against the `median` zero-plane baseline rather than
+      legacy, since that change bought roughly 58% of mapping-stretch headroom.
+   3. Read the diagnostics by hand. The gate cannot answer this question -- see the caveat on the
+      adaptive-pop entry above.
+   Separately, a second-order finding worth acting on: `Bestv2SearchRadius` is bounded for a worst
+   case of one extreme band minus an oppositely signed subject band, but with the shipped
+   `subject_lock = 0.5` anchor the reachable displacement is well under that bound, so a large
+   fraction of every probe falls where no root can exist. Reclaiming it would raise probe density
+   at identical cost. That changes behaviour today and needs its own measured A/B, unlike the
+   decoupling in (i) which is a no-op at the shipped configuration.
 3. ~~Collect scene-level headset labels for explicit zero-plane placement.~~ **Done 2026-07-24:
    `median` was labelled decisively better in the headset and is now the default** (see the
    superseding entry above). The remaining open work is the *per-scene selector*, not the global

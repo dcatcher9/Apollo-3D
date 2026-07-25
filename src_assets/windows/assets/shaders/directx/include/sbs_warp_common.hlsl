@@ -105,6 +105,13 @@ float DepthParallax(float d, float4 s0, float4 s1, Bestv2Params p,
     return clamp(parallax * p.output_scale, -p.clamp_abs, p.clamp_abs);
 }
 
+// Strength that sizes the backward search. Shared by the radius and the probe count so the two
+// cannot drift: probe spacing is 2*radius/steps, and it stays invariant only while both use this.
+float Bestv2SearchStrength() {
+    return literal_bestv2 > 0.5f ? 1.0f :
+           (adaptive_pop > 0.5f ? adaptive_pop_max : pop_strength);
+}
+
 float Bestv2SearchRadius(float source_width, float source_height) {
     // Conservative bound for the pixel bands + zero-parallax trim + convergence. The preset's
     // 7.1% clamp is a safety limit, not the normal search span; using it directly would make the
@@ -113,9 +120,7 @@ float Bestv2SearchRadius(float source_width, float source_height) {
     // 9.99 - .95*(-2.52) = 12.384 px, not merely the 9.99 px foreground amplitude.
     // Search radius must cover the configured adaptive ceiling. The actual per-frame ratio is
     // GPU-resident in SubjectState and unavailable to this loop-bound helper.
-    float strength = literal_bestv2 > 0.5f ? 1.0f :
-                     (adaptive_pop > 0.5f ? adaptive_pop_max : pop_strength);
-    return Bestv2AspectScale(source_width, source_height, literal_bestv2) * strength *
+    return Bestv2AspectScale(source_width, source_height, literal_bestv2) * Bestv2SearchStrength() *
            (0.004f + (12.51f * 0.35f + 0.006f * 4.0f) /
                        Bestv2ParallaxWidth(source_width, literal_bestv2));
 }
@@ -127,8 +132,20 @@ float Bestv2SearchRadius(float source_width, float source_height) {
 // beyond the validated raster envelope and preserves a functional fallback there.
 static const float BESTV2_MAX_DEPTH_PROBES = 8.75e8f;
 
+// Strength the 24-step count was calibrated against, i.e. the shipped adaptive_pop_max. Probe
+// spacing is 2*Bestv2SearchRadius/steps and the radius scales with strength, so holding the step
+// count fixed makes every probe coarser as the pop ceiling rises -- including in scenes the
+// adaptive controller declined to boost, which then pay the cost and receive none of the gain.
+// Normalizing by this constant keeps spacing invariant to strength while reproducing the exact
+// historical 24 * aspect_scale at the shipped configuration.
+static const float BESTV2_CALIBRATED_STRENGTH = 1.30f;
+
 int Bestv2ProbeSteps(float source_width, float source_height, float aspect_scale) {
-    int desired = clamp((int)round(24.0f * aspect_scale), 12, 72);
+    // literal_bestv2 is a fixed-strength comparison reference; its spacing never varies, so it
+    // keeps the historical count exactly rather than being renormalized.
+    float strength_ratio = literal_bestv2 > 0.5f ? 1.0f :
+                           (Bestv2SearchStrength() / BESTV2_CALIBRATED_STRENGTH);
+    int desired = clamp((int)round(24.0f * aspect_scale * strength_ratio), 12, 72);
     float packed_pixels = max(2.0f * source_width * source_height, 1.0f);
     int work_budget = max((int)floor(BESTV2_MAX_DEPTH_PROBES / packed_pixels) - 1, 4);
     return min(desired, work_budget);
