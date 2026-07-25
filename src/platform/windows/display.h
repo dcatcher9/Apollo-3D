@@ -162,6 +162,8 @@ namespace platf::dxgi {
 
     capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override;
 
+    void set_client_frame_rate(int framerate, int framerate_x100) override;
+
     factory1_t factory;
     adapter_t adapter;
     output_t output;
@@ -174,8 +176,14 @@ namespace platf::dxgi {
     int width_before_rotation;
     int height_before_rotation;
 
+    // Guarded by client_frame_rate_mutex once capture() is running: a live 0x3007 video-mode
+    // change republishes the cadence from the encode thread while capture is in flight.
     int client_frame_rate;
     DXGI_RATIONAL client_frame_rate_strict {};
+    // Bumped by set_client_frame_rate() whenever the published cadence actually changes. The
+    // capture loop watches it so it can re-derive its pacing interval without a display reinit.
+    std::atomic<std::uint64_t> client_frame_rate_generation {0};
+    std::mutex client_frame_rate_mutex;
 
     DXGI_FORMAT capture_format;
     D3D_FEATURE_LEVEL feature_level;

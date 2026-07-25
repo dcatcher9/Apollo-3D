@@ -8,6 +8,7 @@
 #include <functional>
 #include <future>
 #include <limits>
+#include <src/process.h>
 #include <src/stream.h>
 #include <src/utility.h>
 #include <string>
@@ -276,4 +277,249 @@ TEST(ControlPayloadValidationTests, EnforcesDecryptedInnerLength) {
   EXPECT_FALSE(stream::is_valid_decrypted_control_payload(stream::CONTROL_HEADER_V2_SIZE - 1, 0));
   EXPECT_FALSE(stream::is_valid_decrypted_control_payload(stream::CONTROL_HEADER_V2_SIZE + 17, 16));
   EXPECT_FALSE(stream::is_valid_decrypted_control_payload(stream::CONTROL_HEADER_V2_SIZE + 17, 18));
+}
+
+TEST(ControlPayloadValidationTests, EnforcesLiveVideoModeGeometryBounds) {
+  EXPECT_TRUE(stream::is_valid_live_video_mode_dimension(1920));
+  EXPECT_TRUE(stream::is_valid_live_video_mode_dimension(stream::LIVE_VIDEO_MODE_DIMENSION_MIN));
+  EXPECT_TRUE(stream::is_valid_live_video_mode_dimension(stream::LIVE_VIDEO_MODE_DIMENSION_MAX));
+
+  // 4:2:0 subsampling runs through the whole encode path, so odd dimensions are never encodable.
+  EXPECT_FALSE(stream::is_valid_live_video_mode_dimension(1921));
+  EXPECT_FALSE(stream::is_valid_live_video_mode_dimension(0));
+  EXPECT_FALSE(stream::is_valid_live_video_mode_dimension(-1920));
+  EXPECT_FALSE(stream::is_valid_live_video_mode_dimension(stream::LIVE_VIDEO_MODE_DIMENSION_MAX + 2));
+
+  // Widths beyond any codec's capability stay valid on the wire: the encode loop caps them, and
+  // capping cannot fail where rejecting a creatable mode would deny a deliverable one.
+  EXPECT_TRUE(stream::is_valid_live_video_mode_dimension(10240));
+}
+
+TEST(ControlPayloadValidationTests, EnforcesLiveVideoModeFrameRateBounds) {
+  EXPECT_TRUE(stream::is_valid_live_video_mode_framerate_x100(6000));
+  EXPECT_TRUE(stream::is_valid_live_video_mode_framerate_x100(2397));
+  EXPECT_TRUE(stream::is_valid_live_video_mode_framerate_x100(2997));
+  EXPECT_TRUE(stream::is_valid_live_video_mode_framerate_x100(stream::LIVE_VIDEO_MODE_FRAMERATE_X100_MIN));
+  EXPECT_TRUE(stream::is_valid_live_video_mode_framerate_x100(stream::LIVE_VIDEO_MODE_FRAMERATE_X100_MAX));
+
+  EXPECT_FALSE(stream::is_valid_live_video_mode_framerate_x100(0));
+  EXPECT_FALSE(stream::is_valid_live_video_mode_framerate_x100(99));
+  EXPECT_FALSE(stream::is_valid_live_video_mode_framerate_x100(-6000));
+  EXPECT_FALSE(stream::is_valid_live_video_mode_framerate_x100(stream::LIVE_VIDEO_MODE_FRAMERATE_X100_MAX + 1));
+}
+
+TEST(LiveVideoModeAckTests, MapsEveryDisplayOutcomeToItsWireStatus) {
+  // A desktop that already presented the geometry still delivers the mode the client asked for,
+  // so it must read as success and not as a reason to reconnect.
+  EXPECT_EQ(
+    stream::live_video_mode_ack_status(proc::live_video_mode_result_e::applied),
+    stream::live_video_mode_ack_e::applied
+  );
+  EXPECT_EQ(
+    stream::live_video_mode_ack_status(proc::live_video_mode_result_e::unchanged),
+    stream::live_video_mode_ack_e::applied
+  );
+  EXPECT_EQ(
+    stream::live_video_mode_ack_status(proc::live_video_mode_result_e::needs_reconnect),
+    stream::live_video_mode_ack_e::rejected_needs_reconnect
+  );
+  EXPECT_EQ(
+    stream::live_video_mode_ack_status(proc::live_video_mode_result_e::failed),
+    stream::live_video_mode_ack_e::failed
+  );
+
+  // An outcome the mapping does not know must degrade to the retryable status, never to a
+  // permanent refusal that would make a client give up on a deliverable mode.
+  EXPECT_EQ(
+    stream::live_video_mode_ack_status(static_cast<proc::live_video_mode_result_e>(99)),
+    stream::live_video_mode_ack_e::failed
+  );
+}
+
+TEST(LiveVideoModeAckTests, WireStatusValuesAreFrozen) {
+  // These numbers are on the wire and are mirrored by the client's Limelight.h. Renumbering them
+  // silently changes what an existing client believes happened.
+  EXPECT_EQ(static_cast<std::uint16_t>(stream::live_video_mode_ack_e::applied), 0);
+  EXPECT_EQ(static_cast<std::uint16_t>(stream::live_video_mode_ack_e::rejected_invalid), 1);
+  EXPECT_EQ(static_cast<std::uint16_t>(stream::live_video_mode_ack_e::rejected_needs_reconnect), 2);
+  EXPECT_EQ(static_cast<std::uint16_t>(stream::live_video_mode_ack_e::failed), 3);
+}
+
+TEST(LiveVideoModeAckTests, EncodesTheAppliedModeInWireOrder) {
+  const stream::live_video_mode_ack_t ack {
+    0xBEEF,
+    stream::live_video_mode_ack_e::rejected_needs_reconnect,
+    1920,
+    1080,
+    2997,
+    40000,
+  };
+
+  std::uint8_t payload[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] {};
+  ASSERT_TRUE(stream::encode_live_video_mode_ack_payload(ack, payload));
+
+  // u16 request_id, u16 status, u16 applied_width, u16 applied_height,
+  // u16 applied_framerate_x100, u32 applied_bitrate_kbps -- all little-endian, no padding. The
+  // trailing u32 lands on an odd multiple of two on purpose; the body is packed.
+  const std::uint8_t expected[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] = {
+    0xEF,
+    0xBE,  // request_id 0xBEEF echoed verbatim
+    0x02,
+    0x00,  // rejected_needs_reconnect
+    0x80,
+    0x07,  // 1920
+    0x38,
+    0x04,  // 1080
+    0xB5,
+    0x0B,  // 2997
+    0x40,
+    0x9C,
+    0x00,
+    0x00,  // 40000
+  };
+  EXPECT_TRUE(std::equal(std::begin(payload), std::end(payload), std::begin(expected)));
+}
+
+TEST(LiveVideoModeAckTests, ReportsAClampedApplyAsAppliedWithTheClampedMode) {
+  // The whole point of the applied_* fields: a per-eye 5120x2160 SBS request packs to 10240, which
+  // exceeds the 8192 codec ceiling, so the host installs 4096 per eye with an aspect-scaled height.
+  // That is a successful apply, not a failure, and the client must be told the clamped geometry so
+  // its confirmation check does not mistake the clamp for a refusal and revert.
+  const auto packed = video::host_sbs_output_dimensions(5120, 2160, 2, 8192, 8192);
+  ASSERT_EQ(packed.width, 8192);
+  ASSERT_EQ(packed.height, 1728);
+
+  // The encode loop reports the BASE per-eye geometry, before SBS doubling.
+  const video::effective_video_mode_t effective {packed.width / 2, packed.height, 6000, 38000};
+  const video::video_mode_applied_t report {{7}, true, effective};
+
+  const auto status = report.applied ?
+                        stream::live_video_mode_ack_e::applied :
+                        stream::live_video_mode_ack_e::failed;
+  EXPECT_EQ(status, stream::live_video_mode_ack_e::applied);
+
+  const stream::live_video_mode_ack_t ack {
+    report.request_ids.front(),
+    status,
+    report.mode.width,
+    report.mode.height,
+    report.mode.framerateX100,
+    report.mode.bitrate,
+  };
+  EXPECT_NE(ack.applied_width, 5120);
+  EXPECT_EQ(ack.applied_width, 4096);
+  EXPECT_EQ(ack.applied_height, 1728);
+
+  std::uint8_t payload[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] {};
+  ASSERT_TRUE(stream::encode_live_video_mode_ack_payload(ack, payload));
+  EXPECT_EQ(payload[2], 0x00);  // status applied
+  EXPECT_EQ(payload[3], 0x00);
+  EXPECT_EQ(payload[4], 0x00);  // 4096
+  EXPECT_EQ(payload[5], 0x10);
+  EXPECT_EQ(payload[6], 0xC0);  // 1728
+  EXPECT_EQ(payload[7], 0x06);
+}
+
+TEST(LiveVideoModeAckTests, ReportsANonSbsClampAsAppliedWithTheClampedMode) {
+  // Same contract without SBS: H.264 tops out at 4096, so a 5120-wide live request installs 4096
+  // with an aspect-scaled height and still reports success.
+  const auto clamped = video::clamp_encode_dimensions(5120, 2160, 0, 4096);
+  ASSERT_EQ(clamped.width, 4096);
+  ASSERT_EQ(clamped.height, 1728);
+
+  const stream::live_video_mode_ack_t ack {
+    3,
+    stream::live_video_mode_ack_e::applied,
+    clamped.width,
+    clamped.height,
+    6000,
+    25000,
+  };
+
+  std::uint8_t payload[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] {};
+  ASSERT_TRUE(stream::encode_live_video_mode_ack_payload(ack, payload));
+  EXPECT_EQ(static_cast<int>(payload[2]) | (static_cast<int>(payload[3]) << 8), 0);
+  EXPECT_EQ(static_cast<int>(payload[4]) | (static_cast<int>(payload[5]) << 8), 4096);
+  EXPECT_EQ(static_cast<int>(payload[6]) | (static_cast<int>(payload[7]) << 8), 1728);
+}
+
+TEST(LiveVideoModeAckTests, EncodesTheWireFieldExtremes) {
+  const stream::live_video_mode_ack_t ack {
+    std::numeric_limits<std::uint16_t>::max(),
+    stream::live_video_mode_ack_e::failed,
+    std::numeric_limits<std::uint16_t>::max(),
+    std::numeric_limits<std::uint16_t>::max(),
+    std::numeric_limits<std::uint16_t>::max(),
+    std::numeric_limits<std::uint32_t>::max(),
+  };
+
+  std::uint8_t payload[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] {};
+  ASSERT_TRUE(stream::encode_live_video_mode_ack_payload(ack, payload));
+  EXPECT_EQ(payload[0], 0xFF);
+  EXPECT_EQ(payload[1], 0xFF);
+  EXPECT_EQ(payload[2], 0x03);
+  EXPECT_EQ(payload[3], 0x00);
+  for (std::size_t i = 4; i < stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE; ++i) {
+    EXPECT_EQ(payload[i], 0xFF);
+  }
+
+  const stream::live_video_mode_ack_t zeroed {0, stream::live_video_mode_ack_e::applied, 0, 0, 0, 0};
+  ASSERT_TRUE(stream::encode_live_video_mode_ack_payload(zeroed, payload));
+  for (const auto byte : payload) {
+    EXPECT_EQ(byte, 0x00);
+  }
+}
+
+TEST(LiveVideoModeAckTests, RefusesValuesThatCannotHaveComeOffTheWire) {
+  // Every reachable acknowledgement carries an id decoded from the request's own u16 field and a
+  // mode the encoder actually ran, so these are host bugs rather than client input. The encoder
+  // must not truncate them silently.
+  std::uint8_t payload[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] {};
+  const auto reject = [&](const stream::live_video_mode_ack_t &ack) {
+    EXPECT_FALSE(stream::encode_live_video_mode_ack_payload(ack, payload));
+  };
+
+  const auto status = stream::live_video_mode_ack_e::applied;
+  reject({65536, status, 1920, 1080, 6000, 20000});
+  reject({-1, status, 1920, 1080, 6000, 20000});
+  reject({1, status, 65536, 1080, 6000, 20000});
+  reject({1, status, 1920, 65536, 6000, 20000});
+  reject({1, status, 1920, 1080, 65536, 20000});
+  reject({1, status, 1920, 1080, 6000, 4294967296LL});
+  reject({1, status, -1, 1080, 6000, 20000});
+  reject({1, status, 1920, -1, 6000, 20000});
+  reject({1, status, 1920, 1080, -1, 20000});
+  reject({1, status, 1920, 1080, 6000, -1});
+
+  // A refused encode leaves the caller's buffer untouched rather than half-written.
+  for (const auto byte : payload) {
+    EXPECT_EQ(byte, 0x00);
+  }
+}
+
+TEST(LiveVideoModeAckTests, RefusalsReportTheModeStillInEffect) {
+  // A refused request must never be answered with zeros or with the rejected request echoed back:
+  // the client resynchronizes its UI from these fields.
+  video::effective_video_mode_publisher_t publisher {{1920, 1080, 6000, 20000}};
+  EXPECT_EQ(publisher.current().width, 1920);
+
+  publisher.publish({2560, 1440, 12000, 45000});
+  const auto in_effect = publisher.current();
+  EXPECT_EQ(in_effect.width, 2560);
+  EXPECT_EQ(in_effect.height, 1440);
+  EXPECT_EQ(in_effect.framerateX100, 12000);
+  EXPECT_EQ(in_effect.bitrate, 45000);
+
+  const stream::live_video_mode_ack_t ack {
+    42,
+    stream::live_video_mode_ack_e::rejected_needs_reconnect,
+    in_effect.width,
+    in_effect.height,
+    in_effect.framerateX100,
+    in_effect.bitrate,
+  };
+  std::uint8_t payload[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] {};
+  ASSERT_TRUE(stream::encode_live_video_mode_ack_payload(ack, payload));
+  EXPECT_EQ(static_cast<int>(payload[0]) | (static_cast<int>(payload[1]) << 8), 42);
+  EXPECT_EQ(static_cast<int>(payload[4]) | (static_cast<int>(payload[5]) << 8), 2560);
 }

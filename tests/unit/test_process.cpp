@@ -46,6 +46,30 @@ TEST(ProcessTest, InvalidRenderSizeLeavesProcessIdle) {
   EXPECT_EQ(status.host_session_id, 0U);
 }
 
+TEST(ProcessTest, LiveVideoModeIsRefusedWithoutAVirtualDisplay) {
+  proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
+
+  // An idle host owns no desktop it may resize, so the change can only come from a fresh launch.
+  EXPECT_EQ(
+    process.apply_live_video_mode(1920, 1080, 60000),
+    proc::live_video_mode_result_e::needs_reconnect
+  );
+
+  // Nonsense geometry never reaches the Windows topology.
+  EXPECT_EQ(
+    process.apply_live_video_mode(0, 1080, 60000),
+    proc::live_video_mode_result_e::needs_reconnect
+  );
+  EXPECT_EQ(
+    process.apply_live_video_mode(1920, 1080, 0),
+    proc::live_video_mode_result_e::needs_reconnect
+  );
+
+  // The control thread's fast-path hint must say "no display work" so a bitrate-only change is
+  // never queued behind a topology transition that would not happen anyway.
+  EXPECT_FALSE(process.live_video_mode_needs_display_change(1920, 1080));
+}
+
 TEST(ProcessTest, MalformedCommandDoesNotEscapeWorkingDirectoryResolution) {
   const std::string malformed_command {"command\\"};
   const auto env = boost::this_process::environment();

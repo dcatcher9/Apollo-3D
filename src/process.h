@@ -127,6 +127,18 @@ namespace proc {
     std::uint32_t scale_factor
   );
 
+  /**
+   * Outcome of a live (no-reconnect) stream geometry/rate change.
+   * The underlying type is fixed so stream.h can declare this opaquely for its 0x3008
+   * acknowledgement mapping without including this header.
+   */
+  enum class live_video_mode_result_e : int {
+    applied,  ///< The desktop now presents the requested mode.
+    unchanged,  ///< Nothing had to change; the encoder may rebuild immediately.
+    needs_reconnect,  ///< Not applicable live; only a fresh launch can deliver this mode.
+    failed,  ///< Attempted and rolled back; the session keeps its previous mode.
+  };
+
   class proc_t {
   public:
     KITTY_DEFAULT_CONSTR_MOVE_THROW(proc_t)
@@ -168,6 +180,22 @@ namespace proc {
     std::uint64_t get_host_session_id() const;
     /** Apply a reconnect's render/display/HDR contract without relaunching the application. */
     int reconfigure_retained_session(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    /**
+     * Resize the session's virtual desktop in place for a live 0x3007 mode change. The streaming
+     * session, its capture pipeline and its RTSP session all survive. Never recreates the monitor:
+     * recreation retires it from the Windows topology and would kill the in-flight capture.
+     * @param width Requested desktop width in pixels.
+     * @param height Requested desktop height in pixels.
+     * @param fps_millihz Requested refresh rate in millihertz, matching launch_session_t::fps.
+     */
+    live_video_mode_result_e apply_live_video_mode(int width, int height, int fps_millihz);
+    /**
+     * Non-blocking hint for the control thread: would `apply_live_video_mode` have real work to do?
+     * A bitrate-only or frame-rate-only change never touches the Windows topology, so the caller
+     * can rebuild the encoder straight away instead of paying for a worker dispatch. This never
+     * waits on the process lock; a transition already in flight conservatively answers "yes".
+     */
+    bool live_video_mode_needs_display_change(int width, int height) const;
     /** Adopt the remote streaming session's virtual-display lease before platform startup. */
     bool activate_remote_virtual_display_lease(std::uint64_t lease);
     void terminate(bool immediate = false, bool needs_refresh = true);

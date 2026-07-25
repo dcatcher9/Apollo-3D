@@ -67,6 +67,34 @@ namespace video {
     return {capped_width, scaled_height};
   }
 
+  sbs_output_dimensions_t clamp_encode_dimensions(
+    int width,
+    int height,
+    int video_format,
+    int runtime_max_width
+  ) {
+    // Same conservative per-codec ceiling as host_sbs_output_dimensions; the runtime NVENC
+    // capability remains authoritative when it is known.
+    const int codec_max_width = video_format == 1 || video_format == 2 ? 8192 : 4096;
+    int effective_max_width = codec_max_width;
+    if (runtime_max_width > 0) {
+      effective_max_width = std::min(effective_max_width, runtime_max_width);
+    }
+    const int capped_width = std::max(2, effective_max_width) & ~1;
+    if (width <= capped_width) {
+      return {width, height};
+    }
+
+    const int scaled_height = std::max(
+      2,
+      static_cast<int>(std::lround(
+        static_cast<double>(height) * capped_width / width
+      )) &
+        ~1
+    );
+    return {capped_width, scaled_height};
+  }
+
   platf::capture_backend_e capture_backend_failover_t::preferred_backend() const noexcept {
     return preferred_backend_;
   }
@@ -220,6 +248,12 @@ namespace video {
 
     safe::signal_t reinit_event;
     sync_util::sync_t<std::weak_ptr<platf::display_t>> display_wp;
+
+    // Latest live video mode (0x3007) applied by the encode thread. captureThread folds it into
+    // its own capture config so a *later* display reinitialization rebuilds at the current mode
+    // instead of reverting to the mode negotiated at launch. The in-flight capture session is
+    // retuned through display_t::set_client_frame_rate() rather than through this copy.
+    sync_util::sync_t<std::optional<video_mode_change_t>> live_video_mode;
   };
 
   int start_capture_async(capture_thread_async_ctx_t &ctx);
@@ -352,7 +386,8 @@ namespace video {
   void captureThread(
     std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
     sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
-    safe::signal_t &reinit_event
+    safe::signal_t &reinit_event,
+    sync_util::sync_t<std::optional<video_mode_change_t>> &live_video_mode
   ) {
     std::optional<capture_ctx_t> capture_ctx;
 
@@ -576,6 +611,22 @@ namespace video {
               std::this_thread::sleep_for(20ms);
             }
 
+            // Adopt the newest live video mode before rebuilding the display. Without this a
+            // reinitialization triggered after a 0x3007 change would recreate the capture session
+            // with the launch-time cadence and geometry.
+            {
+              auto lg = live_video_mode.lock();
+              if (*live_video_mode) {
+                const auto &mode = **live_video_mode;
+                capture_ctx->config.width = mode.width;
+                capture_ctx->config.height = mode.height;
+                capture_ctx->config.framerate = mode.framerate;
+                capture_ctx->config.framerateX100 = mode.framerateX100;
+                capture_ctx->config.encodingFramerate = mode.encodingFramerate;
+                capture_ctx->config.bitrate = mode.bitrate;
+              }
+            }
+
             while (capture_ctx_queue->running()) {
               // Release the display before reenumerating displays, since some capture backends
               // only support a single display session per device/application.
@@ -735,6 +786,8 @@ namespace video {
     // A pending host SBS mode change means we must rebuild the encode session at the new
     // resolution. We only peek here; capture_async pops it and applies the new mode.
     auto sbs_mode_event = mail->event<int>(mail::sbs_mode);
+    // Same contract for a live client-requested resolution/frame-rate/bitrate change (0x3007).
+    auto video_mode_event = mail->queue<video_mode_change_t>(mail::video_mode);
     auto depth_pipeline_ready_event = config.sbs_depth_pipeline_ready_event;
 
     {
@@ -765,19 +818,21 @@ namespace video {
       const bool shutting_down = shutdown_event->peek();
       const bool capture_stopped = !images->running();
       const bool display_reinit_pending = reinit_event.peek();
-      const bool sbs_mode_change_pending = sbs_mode_event->peek();
+      // Both the SBS toggle and a live video-mode change alter the encode geometry/cadence, so
+      // both require the encode session to be rebuilt in place.
+      const bool encode_config_change_pending = sbs_mode_event->peek() || video_mode_event->peek();
 
       // If capture has to reinitialize before it has produced a frame, encode the dummy once so
-      // Artemis knows the host is alive. An SBS-only change always rebuilds immediately because
-      // it changes the encode dimensions.
-      if (!shutting_down && !capture_stopped && !(display_reinit_pending && frame_nr > 1) && !sbs_mode_change_pending) {
+      // Artemis knows the host is alive. An encode-config-only change always rebuilds immediately
+      // because it changes the encode dimensions.
+      if (!shutting_down && !capture_stopped && !(display_reinit_pending && frame_nr > 1) && !encode_config_change_pending) {
         return false;
       }
 
-      // Same-display SBS rebuild: hand the current desktop to the next session. Never retain an
+      // Same-display rebuild: hand the current desktop to the next session. Never retain an
       // image across a real display reinitialization because it may own resources from the old
       // display. Do not overwrite a newer frame that capture has already queued.
-      if (last_img && !shutting_down && !capture_stopped && !display_reinit_pending && sbs_mode_change_pending) {
+      if (last_img && !shutting_down && !capture_stopped && !display_reinit_pending && encode_config_change_pending) {
         images->try_raise(std::move(last_img));
       }
 
@@ -1041,13 +1096,53 @@ namespace video {
     // width; when SBS is on we double it so the encoder emits a 2W x H side-by-side frame.
     auto sbs_mode_event = mail->event<int>(mail::sbs_mode);
     auto sbs_depth_status_event = mail->event<int>(mail::sbs_depth_status);
-    const int base_width = config.width;
+    // Live client-requested geometry/rate/bitrate change (0x3007 control message). It rewrites
+    // `config`, which every derived value below is rebuilt from on each iteration. This is a queue
+    // rather than a single-slot event: every request owes the client an acknowledgement, so a
+    // burst arriving inside one frame must not silently overwrite the earlier requests' ids.
+    auto video_mode_event = mail->queue<video_mode_change_t>(mail::video_mode);
+    int base_width = config.width;
     int current_sbs_mode = config.sbs_mode;
+    // Geometry/cadence that has already produced a working encoder for this session, plus whether
+    // the config currently in hand came from a live client request. A client-requested mode that
+    // NVENC ultimately refuses must fall back to the proven one rather than end the session.
+    std::optional<video_mode_change_t> proven_video_mode;
+    bool config_from_live_video_mode = false;
+    // Every live request owes the client exactly one answer, and only this loop knows the geometry
+    // that actually gets installed. `active_ack_request_id` is the newest request still waiting for
+    // an encode session; anything it overrode moves to `superseded_ack_request_ids` and is reported
+    // as not applied, together with the mode that ended up running instead.
+    auto video_mode_applied_queue = mail->queue<video_mode_applied_t>(mail::video_mode_applied);
+    std::optional<int> active_ack_request_id;
+    std::vector<int> superseded_ack_request_ids;
 
     // Encoding takes place on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
 
     while (!shutdown_event->peek() && images->running()) {
+      // Drain live video-mode changes before the reinitialization gate. Capture may already be
+      // rebuilding its display, and it has to see the new mode before it does so.
+      while (video_mode_event->peek()) {
+        if (auto mode = video_mode_event->pop(0ms)) {
+          base_width = mode->width;
+          config.width = mode->width;
+          config.height = mode->height;
+          config.framerate = mode->framerate;
+          config.framerateX100 = mode->framerateX100;
+          config.encodingFramerate = mode->encodingFramerate;
+          config.bitrate = mode->bitrate;
+          capture_thread_ctx.live_video_mode = std::optional<video_mode_change_t> {*mode};
+          config_from_live_video_mode = true;
+          if (active_ack_request_id) {
+            superseded_ack_request_ids.push_back(*active_ack_request_id);
+          }
+          active_ack_request_id = mode->request_id;
+          BOOST_LOG(info) << "Applying live video mode "sv << config.width << 'x' << config.height
+                          << '@' << (config.framerateX100 > 0 ? config.framerateX100 / 100.0 : (double) config.framerate)
+                          << "Hz, "sv << config.bitrate << "kbps"sv;
+        }
+      }
+
       // Wait for the main capture event when the display is being reinitialized
       if (capture_thread_ctx.reinit_event.peek()) {
         std::this_thread::sleep_for(20ms);
@@ -1063,6 +1158,12 @@ namespace video {
 
         display = capture_thread_ctx.display_wp->lock();
       }
+
+      // Retune the running capture session every iteration rather than only when the mode
+      // changes. The call is a no-op when the cadence already matches, and republishing it
+      // unconditionally means a display rebuilt by captureThread is corrected here even if it
+      // raced the mode change and was created with the previous rate.
+      display->set_client_frame_rate(config.framerate, config.framerateX100);
 
       // Apply the latest requested host SBS mode (drain to the most recent value).
       while (sbs_mode_event->peek()) {
@@ -1101,7 +1202,22 @@ namespace video {
                           << (session_config.width / 2) << 'x' << session_config.height << ')';
         }
       } else {
-        session_config.width = base_width;
+        // A live 0x3007 change can request any width the wire format can carry, and the control
+        // thread deliberately does not reject an oversized one: a failed non-SBS encoder creation
+        // returns from capture_async and kills the session, whereas capping always succeeds.
+        const auto dimensions = clamp_encode_dimensions(
+          base_width,
+          config.height,
+          session_config.videoFormat,
+          runtime_max_width
+        );
+        session_config.width = dimensions.width;
+        session_config.height = dimensions.height;
+        if (dimensions.width != base_width) {
+          BOOST_LOG(info) << "Requested encode width "sv << base_width
+                          << " exceeds the effective encoder width limit; capping to "sv
+                          << session_config.width << 'x' << session_config.height;
+        }
       }
       BOOST_LOG(info) << "Encode session: host SBS mode "sv
                       << current_sbs_mode << ", profile '"sv
@@ -1129,12 +1245,90 @@ namespace video {
         return false;
       };
 
+      // A live mode arrives from the client mid-stream, so an unencodable request must not be
+      // fatal. Fall back to the last geometry that actually produced an encoder; the stream then
+      // continues at the previous mode instead of dropping.
+      auto revert_failed_live_video_mode = [&]() {
+        if (!config_from_live_video_mode || !proven_video_mode) {
+          return false;
+        }
+
+        BOOST_LOG(warning) << "The client's live video mode "sv << config.width << 'x' << config.height
+                           << " could not be encoded; reverting to "sv
+                           << proven_video_mode->width << 'x' << proven_video_mode->height << '.';
+        base_width = proven_video_mode->width;
+        config.width = proven_video_mode->width;
+        config.height = proven_video_mode->height;
+        config.framerate = proven_video_mode->framerate;
+        config.framerateX100 = proven_video_mode->framerateX100;
+        config.encodingFramerate = proven_video_mode->encodingFramerate;
+        config.bitrate = proven_video_mode->bitrate;
+        capture_thread_ctx.live_video_mode = proven_video_mode;
+        config_from_live_video_mode = false;
+        // The request never made it into an encode session, so it must not be reported as applied.
+        // It is answered once the fallback session comes up and its real mode is known.
+        if (active_ack_request_id) {
+          superseded_ack_request_ids.push_back(*active_ack_request_id);
+          active_ack_request_id.reset();
+        }
+        return true;
+      };
+
       auto encode_device = make_encode_device(*display, session_config, true);
       if (!encode_device) {
         if (recover_failed_sbs_session()) {
           continue;
         }
+        if (revert_failed_live_video_mode()) {
+          continue;
+        }
         return;
+      }
+
+      // The requested geometry produced a real encoder, so it is now the safe fallback.
+      proven_video_mode = video_mode_change_t {
+        config.width,
+        config.height,
+        config.framerate,
+        config.framerateX100,
+        config.encodingFramerate,
+        config.bitrate,
+        active_ack_request_id.value_or(0),
+      };
+      config_from_live_video_mode = false;
+
+      // Publish what this session really runs. SBS packs two eyes into one encoded frame, so the
+      // base per-eye width is half the encoded width; both are reported after the codec-width cap,
+      // which can differ from the request. The bitrate is the encoder budget, not the wire budget.
+      const effective_video_mode_t effective_mode {
+        session_config.sbs_mode != SBS_OFF ? session_config.width / 2 : session_config.width,
+        session_config.height,
+        // A launch that never negotiated an exact refresh rate leaves framerateX100 at zero. The
+        // client is owed a real rate, so fall back to the whole-frames-per-second figure.
+        session_config.framerateX100 > 0 ? session_config.framerateX100 : session_config.framerate * 100,
+        session_config.bitrate,
+      };
+      if (config.effective_mode) {
+        config.effective_mode->publish(effective_mode);
+      }
+
+      // Answer the live requests this session resolves. Superseded ones are reported as not
+      // applied so the client can drop them and resynchronize on the mode that is really running.
+      if (!superseded_ack_request_ids.empty()) {
+        video_mode_applied_queue->raise(video_mode_applied_t {
+          std::move(superseded_ack_request_ids),
+          false,
+          effective_mode,
+        });
+        superseded_ack_request_ids.clear();
+      }
+      if (active_ack_request_id) {
+        video_mode_applied_queue->raise(video_mode_applied_t {
+          {*active_ack_request_id},
+          true,
+          effective_mode,
+        });
+        active_ack_request_id.reset();
       }
 
       // absolute mouse coordinates require that the dimensions of the screen are known
@@ -1383,7 +1577,8 @@ namespace video {
       captureThread,
       capture_thread_ctx.capture_ctx_queue,
       std::ref(capture_thread_ctx.display_wp),
-      std::ref(capture_thread_ctx.reinit_event)
+      std::ref(capture_thread_ctx.reinit_event),
+      std::ref(capture_thread_ctx.live_video_mode)
     };
 
     return 0;

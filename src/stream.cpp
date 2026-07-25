@@ -8,10 +8,12 @@
 #include <cstring>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <queue>
 #include <stdexcept>
+#include <thread>
 
 // lib includes
 #include <boost/endian/arithmetic.hpp>
@@ -68,6 +70,9 @@ namespace stream {
     constexpr std::uint16_t set_sbs_mode = 0x3003;
     constexpr std::uint16_t sbs_debug_dump = 0x3004;
     constexpr std::uint16_t depth_status = 0x3006;
+    // 0x3005 is retired (Set Depth Model); older clients may still emit it, so it is not reused.
+    constexpr std::uint16_t set_video_mode = 0x3007;
+    constexpr std::uint16_t live_video_mode_ack = 0x3008;
   }  // namespace control_packet
 
   enum class socket_e : int {
@@ -213,6 +218,29 @@ namespace stream {
     std::uint8_t phase;  // 0 idle/failure, 1 engine load/build, 2 ready, 3 device-pipeline init
   };
 
+  // Client->host live stream geometry/rate change (Apollo protocol extension 0x3007). The frame
+  // rate is carried in hundredths of a hertz so fractional rates (23.976, 29.97) survive the trip.
+  // `bitrate_kbps` is the total wire budget, exactly as RTSP ANNOUNCE reports it; the host applies
+  // its own clamp and FEC/audio deduction before the value reaches the encoder.
+  struct control_set_video_mode_t {
+    std::uint16_t width;
+    std::uint16_t height;
+    std::uint16_t framerate_x100;
+    // Opaque client-generated correlation token, echoed verbatim in the 0x3008 acknowledgement.
+    // The host never validates it and never infers an ordering from it.
+    std::uint16_t request_id;
+    std::uint32_t bitrate_kbps;
+  };
+
+  // Host->client acknowledgement of a 0x3007 request (Apollo protocol extension 0x3008). The body
+  // is a raw byte array so its exact little-endian layout is owned by
+  // encode_live_video_mode_ack_payload() and cannot drift with struct packing.
+  struct control_live_video_mode_ack_t {
+    control_header_v2 header;
+
+    std::uint8_t body[LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE];
+  };
+
 #pragma pack(pop)
 
   typedef struct control_encrypted_t {
@@ -238,6 +266,55 @@ namespace stream {
 
   constexpr std::size_t round_to_pkcs7_padded(std::size_t size) {
     return ((size + 15) / 16) * 16;
+  }
+
+  live_video_mode_ack_e live_video_mode_ack_status(proc::live_video_mode_result_e result) {
+    switch (result) {
+      case proc::live_video_mode_result_e::applied:
+      // "Unchanged" means the desktop already presented the requested geometry, so the mode the
+      // client asked for is live once the encoder rebuilds. From the client's point of view that
+      // is indistinguishable from a real transition, and it must not be reported as a failure.
+      case proc::live_video_mode_result_e::unchanged:
+        return live_video_mode_ack_e::applied;
+      case proc::live_video_mode_result_e::needs_reconnect:
+        return live_video_mode_ack_e::rejected_needs_reconnect;
+      case proc::live_video_mode_result_e::failed:
+        return live_video_mode_ack_e::failed;
+    }
+
+    // An unmapped outcome is a host bug, not a client one. Report the retryable status so a
+    // client is never told to give up on a mode the host may still be able to deliver.
+    return live_video_mode_ack_e::failed;
+  }
+
+  bool encode_live_video_mode_ack_payload(
+    const live_video_mode_ack_t &ack,
+    std::uint8_t (&out)[LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE]
+  ) {
+    constexpr std::int64_t u16_max = std::numeric_limits<std::uint16_t>::max();
+    constexpr std::int64_t u32_max = std::numeric_limits<std::uint32_t>::max();
+    if (ack.request_id < 0 || ack.request_id > u16_max || ack.applied_width < 0 || ack.applied_width > u16_max || ack.applied_height < 0 || ack.applied_height > u16_max || ack.applied_framerate_x100 < 0 || ack.applied_framerate_x100 > u16_max || ack.applied_bitrate_kbps < 0 || ack.applied_bitrate_kbps > u32_max) {
+      return false;
+    }
+
+    const std::uint16_t fields[5] = {
+      static_cast<std::uint16_t>(ack.request_id),
+      static_cast<std::uint16_t>(ack.status),
+      static_cast<std::uint16_t>(ack.applied_width),
+      static_cast<std::uint16_t>(ack.applied_height),
+      static_cast<std::uint16_t>(ack.applied_framerate_x100),
+    };
+    for (std::size_t i = 0; i < 5; ++i) {
+      out[i * 2] = static_cast<std::uint8_t>(fields[i] & 0xFF);
+      out[i * 2 + 1] = static_cast<std::uint8_t>((fields[i] >> 8) & 0xFF);
+    }
+
+    const auto bitrate = static_cast<std::uint32_t>(ack.applied_bitrate_kbps);
+    out[10] = static_cast<std::uint8_t>(bitrate & 0xFF);
+    out[11] = static_cast<std::uint8_t>((bitrate >> 8) & 0xFF);
+    out[12] = static_cast<std::uint8_t>((bitrate >> 16) & 0xFF);
+    out[13] = static_cast<std::uint8_t>((bitrate >> 24) & 0xFF);
+    return true;
   }
 
   constexpr std::size_t MAX_AUDIO_PACKET_SIZE = 1400;
@@ -364,8 +441,10 @@ namespace stream {
   struct video_channel_t {
     int packet_size;
     int min_required_fec_packets;
-    int encoded_bitrate_kbps;
-    int framerate_millihz;
+    // Written by the control thread on a live 0x3007 mode change, read per frame by
+    // videoBroadcastThread when it rebuilds the pacing plan.
+    std::atomic_int encoded_bitrate_kbps;
+    std::atomic_int framerate_millihz;
     boost::asio::ip::address local_address;
     std::atomic_bool active {true};
     std::atomic_bool pacing_plan_logged {false};
@@ -451,6 +530,178 @@ namespace stream {
     std::atomic_bool graceful_stop_requested {false};
     std::atomic<session::state_e> state;
   };
+
+  namespace {
+    // A live 0x3007 change can require resizing the session's virtual desktop, which is seconds of
+    // Windows topology work. The control thread also carries client input and must never block for
+    // that, so the change is handed to a short-lived worker. Everything the worker needs is owned
+    // by shared_ptr, so it stays valid even if the session ends while the resize is in flight.
+    struct live_video_mode_request_t {
+      safe::mail_t mail;
+      std::shared_ptr<video_channel_t> video;
+      // What the encode loop is really running. A refused request is answered with this, so the
+      // client learns the mode still in effect instead of getting its rejected request back.
+      std::shared_ptr<video::effective_video_mode_publisher_t> effective_mode;
+      video::video_mode_change_t change;
+      std::string client_name;
+    };
+
+    /**
+     * Queue one acknowledgement for the control thread to encrypt and send.
+     *
+     * This is the only step any off-control thread performs. The control thread owns outgoing
+     * control encryption and every ENet call, and it is also the thread that clears
+     * session_t::control.peer and the server's session slot, so handing it a plain value keeps
+     * the peer and GCM state from ever being touched by a worker. If the session has already gone
+     * away, the value lands in a mailbox nobody drains and dies with the mail: the acknowledgement
+     * is dropped and the client's own timeout covers it.
+     */
+    void queue_live_video_mode_ack(const safe::mail_t &mail, const live_video_mode_ack_t &ack) {
+      mail->queue<live_video_mode_ack_t>(mail::live_video_mode_ack, LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT)->raise(ack);
+    }
+
+    /**
+     * Answer a request that never reached the encode loop. Only the encoder knows the geometry it
+     * installed, so a refusal reports the last mode it published instead.
+     */
+    void reject_live_video_mode(
+      const safe::mail_t &mail,
+      const std::shared_ptr<video::effective_video_mode_publisher_t> &effective_mode,
+      int request_id,
+      live_video_mode_ack_e status
+    ) {
+      const auto mode = effective_mode ?
+                          effective_mode->current() :
+                          video::effective_video_mode_t {};
+      queue_live_video_mode_ack(
+        mail,
+        live_video_mode_ack_t {
+          request_id,
+          status,
+          mode.width,
+          mode.height,
+          mode.framerateX100,
+          mode.bitrate,
+        }
+      );
+    }
+
+    std::mutex live_video_mode_mutex;
+    bool live_video_mode_worker_running = false;
+    // Only the most recent request matters; a burst collapses to one display transition.
+    std::optional<live_video_mode_request_t> live_video_mode_pending;
+
+    /**
+     * Hand the new mode to the video pipeline. The send pacer derives its plan from these values
+     * every frame, so they must land before the new geometry reaches the encoder, and the log
+     * latches are re-armed so the recalculated plan is reported once.
+     */
+    void commit_live_video_mode(const live_video_mode_request_t &request) {
+      request.video->encoded_bitrate_kbps.store(request.change.bitrate, std::memory_order_relaxed);
+      request.video->framerate_millihz.store(request.change.encodingFramerate, std::memory_order_relaxed);
+      request.video->pacing_plan_logged.store(false, std::memory_order_release);
+      request.video->idr_pacing_plan_logged.store(false, std::memory_order_release);
+      // A queue, not a single-slot event: two requests arriving inside one frame both owe the
+      // client an answer, so the earlier one must not be overwritten before the encode loop sees it.
+      request.mail->queue<video::video_mode_change_t>(mail::video_mode)->raise(request.change);
+    }
+
+    /**
+     * Resize the virtual desktop first, then rebuild the encoder, so the encoder is created into
+     * an already-correct desktop size instead of aspect-fitting the old one into the new frame.
+     */
+    void dispatch_live_video_mode(live_video_mode_request_t request) {
+      std::optional<live_video_mode_request_t> superseded;
+      bool start_worker = false;
+      {
+        std::lock_guard lock(live_video_mode_mutex);
+        superseded = std::exchange(live_video_mode_pending, std::move(request));
+        if (!live_video_mode_worker_running) {
+          live_video_mode_worker_running = true;
+          start_worker = true;
+        }
+      }
+
+      // A queued request that a newer one displaced was never applied, so it is answered as a
+      // retryable failure carrying the mode still in effect. Without this a client that changed
+      // its mind would be left waiting out a timeout for a reply that never comes.
+      if (superseded) {
+        reject_live_video_mode(
+          superseded->mail,
+          superseded->effective_mode,
+          superseded->change.request_id,
+          live_video_mode_ack_e::failed
+        );
+      }
+
+      if (!start_worker) {
+        return;
+      }
+
+      std::thread worker([]() {
+        while (true) {
+          std::optional<live_video_mode_request_t> job;
+          {
+            std::lock_guard lock(live_video_mode_mutex);
+            if (!live_video_mode_pending) {
+              live_video_mode_worker_running = false;
+              return;
+            }
+            job = std::move(live_video_mode_pending);
+            live_video_mode_pending.reset();
+          }
+
+          // The session can end while a display transition is in flight. Never resize a desktop
+          // for a stream that is already gone. The acknowledgement is dropped with it; the client
+          // is disconnected at that point and its own timeout covers the missing reply.
+          if (job->mail->event<bool>(mail::shutdown)->peek()) {
+            continue;
+          }
+
+          const auto result = proc::proc.apply_live_video_mode(
+            job->change.width,
+            job->change.height,
+            job->change.encodingFramerate
+          );
+
+          switch (result) {
+            case proc::live_video_mode_result_e::applied:
+            case proc::live_video_mode_result_e::unchanged:
+              if (job->mail->event<bool>(mail::shutdown)->peek()) {
+                continue;
+              }
+              // The desktop is ready; the encode loop installs the mode and answers the client
+              // itself, because only it knows the geometry that ends up running.
+              commit_live_video_mode(*job);
+              break;
+            case proc::live_video_mode_result_e::needs_reconnect:
+              BOOST_LOG(warning) << "type [IDX_SET_VIDEO_MODE]: "sv << job->change.width << 'x'
+                                 << job->change.height << " cannot be applied without reconnecting for ["sv
+                                 << job->client_name << "]; the stream keeps its current mode."sv;
+              reject_live_video_mode(
+                job->mail,
+                job->effective_mode,
+                job->change.request_id,
+                live_video_mode_ack_status(result)
+              );
+              break;
+            case proc::live_video_mode_result_e::failed:
+              BOOST_LOG(warning) << "type [IDX_SET_VIDEO_MODE]: the desktop could not be resized to "sv
+                                 << job->change.width << 'x' << job->change.height << " for ["sv
+                                 << job->client_name << "]; the stream keeps its current mode."sv;
+              reject_live_video_mode(
+                job->mail,
+                job->effective_mode,
+                job->change.request_id,
+                live_video_mode_ack_status(result)
+              );
+              break;
+          }
+        }
+      });
+      worker.detach();
+    }
+  }  // namespace
 
   /**
    * First part of cipher must be struct of type control_encrypted_t
@@ -959,6 +1210,47 @@ namespace stream {
     return 0;
   }
 
+  /**
+   * @brief Answer one live video-mode request (0x3008).
+   *
+   * Runs only on the control thread, which owns outgoing control encryption and every ENet call,
+   * and which is also the thread that clears session_t::control.peer. Callers that decided the
+   * outcome elsewhere queue a plain value through mail::live_video_mode_ack instead of touching
+   * the peer or the cipher themselves.
+   */
+  int send_live_video_mode_ack(session_t *session, const live_video_mode_ack_t &ack) {
+    if (!session->control.peer) {
+      // Still waiting for PING from Artemis, or the peer is already gone. There is nothing to
+      // answer; the client's own request timeout covers the missing reply.
+      return -1;
+    }
+
+    control_live_video_mode_ack_t plaintext {};
+    plaintext.header.type = control_packet::live_video_mode_ack;
+    plaintext.header.payloadLength = sizeof(control_live_video_mode_ack_t) - sizeof(control_header_v2);
+    if (!encode_live_video_mode_ack_payload(ack, plaintext.body)) {
+      BOOST_LOG(error) << "Refusing to send a live video-mode acknowledgement that does not fit the wire format"sv;
+      return -1;
+    }
+
+    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
+      encrypted_payload;
+
+    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
+    if (payload.empty() || session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+      TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
+      BOOST_LOG(warning) << "Couldn't send live video-mode acknowledgement to ["sv << addr << ':' << port << ']';
+      return -1;
+    }
+
+    BOOST_LOG(debug) << "Sent live video-mode ack: request "sv << ack.request_id
+                     << " status="sv << static_cast<int>(ack.status) << ", in effect "sv
+                     << ack.applied_width << 'x' << ack.applied_height
+                     << '@' << (ack.applied_framerate_x100 / 100.0) << "Hz "sv
+                     << ack.applied_bitrate_kbps << "kbps"sv;
+    return 0;
+  }
+
   void send_termination(control_server_t &server, session_t &session) {
     if (!session.control.peer) {
       return;
@@ -1027,6 +1319,103 @@ namespace stream {
       session->video->pacing_plan_logged.store(false, std::memory_order_release);
       session->video->idr_pacing_plan_logged.store(false, std::memory_order_release);
       session->mail->event<int>(mail::sbs_mode)->raise((int) mode);
+    });
+
+    server->map(control_packet::set_video_mode, sizeof(control_set_video_mode_t), [](session_t *session, const std::string_view &payload) {
+      // Live resolution/frame-rate/bitrate change requested by the client (Apollo protocol
+      // extension). The encode session is rebuilt in place exactly as the 0x3003 SBS toggle
+      // does; the capture session, the virtual display and the RTSP session all survive.
+      control_set_video_mode_t request {};
+      std::memcpy(&request, payload.data(), sizeof(request));
+      const int width = util::endian::little(request.width);
+      const int height = util::endian::little(request.height);
+      const int framerate_x100 = util::endian::little(request.framerate_x100);
+      // Opaque correlation token. It is never validated, never ordered on, and never acted upon;
+      // it is only carried through to the acknowledgement.
+      const int request_id = util::endian::little(request.request_id);
+      const std::int64_t requested_bitrate_kbps = util::endian::little(request.bitrate_kbps);
+
+      // A malformed request must never reach the encoder: capture_async cannot recover from a
+      // failed non-SBS encoder creation and would tear the whole session down. Every rejection
+      // still answers the client, reporting the mode that stays in effect, so it can drop the
+      // request and resynchronize instead of waiting out a timeout.
+      const auto reject = [&](std::string_view reason) {
+        BOOST_LOG(warning) << "type [IDX_SET_VIDEO_MODE]: ignoring "sv << width << 'x' << height
+                           << '@' << (framerate_x100 / 100.0) << " from ["sv
+                           << session::client_name(*session) << "]: "sv << reason;
+        reject_live_video_mode(
+          session->mail,
+          session->config.monitor.effective_mode,
+          request_id,
+          live_video_mode_ack_e::rejected_invalid
+        );
+      };
+      if (!is_valid_live_video_mode_dimension(width) || !is_valid_live_video_mode_dimension(height)) {
+        reject("resolution must be even and within 2..16384"sv);
+        return;
+      }
+      if (!is_valid_live_video_mode_framerate_x100(framerate_x100)) {
+        reject("frame rate must be within 1..1000 Hz"sv);
+        return;
+      }
+      // Encoder width limits are deliberately not checked here: the encode loop owns the codec
+      // capability snapshot and clamps an oversized request the same way it already caps an SBS
+      // packed width. Clamping there cannot fail, whereas rejecting a creatable mode here would.
+
+      // Reproduce the ANNOUNCE-time budget so a live change and a fresh launch agree for the same
+      // request. The Warp multiplier is deliberately not applied: it compensates for a launch-time
+      // framerate negotiation, whereas this message carries the client's true rate directly.
+      std::int64_t bitrate_kbps = requested_bitrate_kbps;
+      if (config::video.max_bitrate > 0 && config::video.max_bitrate < bitrate_kbps) {
+        bitrate_kbps = config::video.max_bitrate;
+      }
+      if (!rtsp_stream::detail::is_safe_encoder_bitrate(bitrate_kbps)) {
+        reject("bitrate is outside the safe encoder range"sv);
+        return;
+      }
+      const std::int64_t audio_bitrate_kbps =
+        (session->config.audio.flags[audio::config_t::HIGH_QUALITY] ? 256 : 96) *
+        session->config.audio.channels;
+      bitrate_kbps = rtsp_stream::detail::calculate_video_bitrate_budget(
+        bitrate_kbps,
+        config::stream.fec_percentage,
+        audio_bitrate_kbps
+      );
+
+      video::video_mode_change_t change {};
+      change.width = width;
+      change.height = height;
+      change.framerateX100 = framerate_x100;
+      change.framerate = (framerate_x100 + 50) / 100;
+      change.encodingFramerate = framerate_x100 * 10;
+      change.bitrate = (int) bitrate_kbps;
+      change.request_id = request_id;
+
+      BOOST_LOG(info) << "type [IDX_SET_VIDEO_MODE]: client requested "sv << width << 'x' << height
+                      << '@' << (framerate_x100 / 100.0) << "Hz "sv << requested_bitrate_kbps
+                      << "kbps (encoder budget "sv << change.bitrate << "kbps) for ["sv
+                      << session::client_name(*session) << ']';
+
+      live_video_mode_request_t mode_request {
+        session->mail,
+        session->video,
+        session->config.monitor.effective_mode,
+        change,
+        session::client_name(*session),
+      };
+
+      // Fast path: a bitrate-only or frame-rate-only change leaves the desktop alone, so the
+      // encoder can be rebuilt from this thread without any Windows topology work. The encode loop
+      // answers the client once it knows what it actually installed.
+      if (!proc::proc.live_video_mode_needs_display_change(width, height)) {
+        commit_live_video_mode(mode_request);
+        return;
+      }
+
+      // Otherwise the virtual desktop has to be resized first. That is far too slow for the
+      // control thread, which also carries input, so hand it to the worker; it raises
+      // mail::video_mode only once the new desktop mode is verified.
+      dispatch_live_video_mode(std::move(mode_request));
     });
 
     server->map(control_packet::sbs_debug_dump, [](session_t *session, const std::string_view &) {
@@ -1186,6 +1575,45 @@ namespace stream {
             }
             if (depth_phase && *depth_phase != session->control.last_depth_phase && send_depth_status(session, *depth_phase) == 0) {
               session->control.last_depth_phase = *depth_phase;
+            }
+
+            // Turn the encode loop's reports into acknowledgements. Only it knows the geometry it
+            // really installed, which can differ from the request when an oversized width is
+            // capped, so it is the only component that can answer an applied request truthfully.
+            auto video_mode_applied_queue = session->mail->queue<video::video_mode_applied_t>(mail::video_mode_applied);
+            while (video_mode_applied_queue->peek()) {
+              if (auto applied = video_mode_applied_queue->pop(0ms)) {
+                const auto status = applied->applied ?
+                                      live_video_mode_ack_e::applied :
+                                      live_video_mode_ack_e::failed;
+                for (const auto request_id : applied->request_ids) {
+                  queue_live_video_mode_ack(
+                    session->mail,
+                    live_video_mode_ack_t {
+                      request_id,
+                      status,
+                      applied->mode.width,
+                      applied->mode.height,
+                      applied->mode.framerateX100,
+                      applied->mode.bitrate,
+                    }
+                  );
+                }
+              }
+            }
+
+            // Answer every live video-mode request (0x3007) exactly once. Unlike the depth phase
+            // these must not coalesce, so they arrive on a real queue: a client that sends two
+            // requests is owed two replies. The detached virtual-display worker and the encode
+            // loop only enqueue outcomes, leaving the peer, the cipher and ENet to this thread.
+            auto ack_queue = session->mail->queue<live_video_mode_ack_t>(
+              mail::live_video_mode_ack,
+              LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT
+            );
+            while (server->_session->peer && ack_queue->peek()) {
+              if (auto ack = ack_queue->pop(0ms)) {
+                send_live_video_mode_ack(session, *ack);
+              }
             }
           }
         }
@@ -2577,6 +3005,18 @@ namespace stream {
       session->permission.store(launch_session.perm, std::memory_order_relaxed);
 
       session->config = config;
+
+      // Seed the effective-mode view with the launch mode so a live request refused before the
+      // encode loop has published anything still reports a real mode rather than zeros. The video
+      // thread receives a copy of session->config.monitor, so both sides share this publisher.
+      session->config.monitor.effective_mode = std::make_shared<video::effective_video_mode_publisher_t>(
+        video::effective_video_mode_t {
+          config.monitor.width,
+          config.monitor.height,
+          config.monitor.framerateX100 > 0 ? config.monitor.framerateX100 : config.monitor.framerate * 100,
+          config.monitor.bitrate,
+        }
+      );
 
       session->video = std::make_shared<video_channel_t>();
       session->video->packet_size = config.packetsize;

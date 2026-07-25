@@ -48,10 +48,12 @@ TEST(DirectxShaderTest, CompilesAllColorShaderVariants) {
 TEST(DirectxShaderSourceTest, ConvertsEveryChromaTapBeforeAveraging) {
   const std::string shader_dir =
     SUNSHINE_SOURCE_DIR "/src_assets/windows/assets/shaders/directx/";
+
   struct shader_family_t {
     const char *entrypoint;
     const char *converter;
   };
+
   constexpr std::array families {
     shader_family_t {"convert_yuv420_packed_uv_type0_ps.hlsl", "convert_base.hlsl"},
     shader_family_t {"convert_yuv420_packed_uv_type0s_ps.hlsl", "convert_base.hlsl"},
@@ -414,6 +416,54 @@ TEST(HostSbsDimensionsTest, UsesMeasuredH264Capability) {
   const auto dimensions = video::host_sbs_output_dimensions(3840, 2160, 0, 8192);
   EXPECT_EQ(dimensions.width, 4096);
   EXPECT_EQ(dimensions.height, 1152);
+}
+
+TEST(ClampEncodeDimensionsTest, PassesThroughAnEncodableMode) {
+  for (const int video_format : {0, 1, 2}) {
+    const auto dimensions = video::clamp_encode_dimensions(1920, 1080, video_format, 8192);
+    EXPECT_EQ(dimensions.width, 1920);
+    EXPECT_EQ(dimensions.height, 1080);
+  }
+}
+
+TEST(ClampEncodeDimensionsTest, CapsAnOversizedRequestPreservingAspect) {
+  // A live 0x3007 request can name any width the wire format carries. H.264 tops out at 4096, so
+  // the request must be capped rather than refused: a failed non-SBS encoder creation ends the
+  // whole session, whereas capping always produces a creatable mode.
+  const auto dimensions = video::clamp_encode_dimensions(8192, 4320, 0, 8192);
+  EXPECT_EQ(dimensions.width, 4096);
+  EXPECT_EQ(dimensions.height, 2160);
+}
+
+TEST(ClampEncodeDimensionsTest, HonorsLowerRuntimeCodecCapability) {
+  const auto dimensions = video::clamp_encode_dimensions(7680, 4320, 1, 4096);
+  EXPECT_EQ(dimensions.width, 4096);
+  EXPECT_EQ(dimensions.height, 2304);
+}
+
+TEST(ClampEncodeDimensionsTest, IgnoresAnUnknownRuntimeCapability) {
+  // A zero runtime capability means "not probed yet"; the conservative per-codec ceiling applies.
+  const auto hevc = video::clamp_encode_dimensions(7680, 4320, 1, 0);
+  EXPECT_EQ(hevc.width, 7680);
+  EXPECT_EQ(hevc.height, 4320);
+
+  const auto h264 = video::clamp_encode_dimensions(7680, 4320, 0, 0);
+  EXPECT_EQ(h264.width, 4096);
+  EXPECT_EQ(h264.height, 2304);
+}
+
+TEST(ClampEncodeDimensionsTest, AlwaysProducesAnEvenEncodableSize) {
+  // 4:2:0 subsampling means an odd derived height would be unencodable, and a degenerate cap must
+  // still leave a usable surface rather than a zero-sized one.
+  const auto scaled = video::clamp_encode_dimensions(4098, 1081, 0, 4096);
+  EXPECT_EQ(scaled.width, 4096);
+  EXPECT_EQ(scaled.height % 2, 0);
+  EXPECT_GT(scaled.height, 0);
+
+  const auto degenerate = video::clamp_encode_dimensions(4096, 2160, 0, 1);
+  EXPECT_EQ(degenerate.width, 2);
+  EXPECT_GE(degenerate.height, 2);
+  EXPECT_EQ(degenerate.height % 2, 0);
 }
 
 TEST(VideoPacketLifetimeTest, RetainsBroadcastStateUntilPacketIsConsumed) {

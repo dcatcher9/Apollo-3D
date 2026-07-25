@@ -8,7 +8,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <numeric>
+#include <vector>
 
 // local includes
 #include "config.h"
@@ -34,6 +36,82 @@ namespace video {
      SBS convert() in display_vram consumes it (exchange->false) and dumps one frame's source,
      depth and SBS-result images to the configured debug dir. */
   extern std::atomic<bool> sbs_debug_dump_pending;
+
+  /* Live stream geometry/rate change requested by the client via the 0x3007 control message.
+     Resolution, frame rate and bitrate change without reconnecting: the encode session is torn
+     down and rebuilt in place, exactly as the 0x3003 SBS toggle already does.
+
+     These are post-validation encoder values, not the client's raw request. The control handler
+     applies the same clamp and FEC/audio wire-budget deduction that RTSP ANNOUNCE applies, so a
+     live change and a fresh launch produce an identical encoder budget for the same request. */
+  struct video_mode_change_t {
+    int width;  // Base (per-eye) width; SBS doubling is applied on top of this.
+    int height;
+    int framerate;  // Whole frames per second, used for per-frame bitrate budgeting.
+    int framerateX100;  // Exact rate in hundredths of a hertz; preserves 23.976/29.97.
+    int encodingFramerate;  // Requested display framerate in millihertz.
+    int bitrate;  // Encoder budget in kbps, after the wire-budget transformation.
+    // Opaque client-generated correlation token. The host never interprets or validates it and
+    // never assumes an ordering from it; it exists only to be echoed back in the acknowledgement.
+    int request_id;
+  };
+
+  /**
+   * What an encode session is actually running, as opposed to what the client asked for.
+   *
+   * The two can legitimately differ: an oversized width is capped to the codec ceiling with the
+   * height scaled to preserve aspect, and the bitrate is the post-budget encoder value rather than
+   * the requested wire budget. `width`/`height` are the BASE (per-eye) values, i.e. before any SBS
+   * doubling, so they remain directly comparable to what the client requested.
+   */
+  struct effective_video_mode_t {
+    int width;
+    int height;
+    int framerateX100;
+    int bitrate;
+  };
+
+  /**
+   * Latest effective mode, published by the encode loop and readable by any thread.
+   *
+   * A client that is told its request was refused still needs to know what is running, so this is
+   * seeded with the launch mode and is never empty.
+   */
+  class effective_video_mode_publisher_t {
+  public:
+    explicit effective_video_mode_publisher_t(const effective_video_mode_t &initial):
+        _mode {initial} {
+    }
+
+    void publish(const effective_video_mode_t &mode) {
+      std::lock_guard lock {_mutex};
+      _mode = mode;
+    }
+
+    [[nodiscard]] effective_video_mode_t current() const {
+      std::lock_guard lock {_mutex};
+      return _mode;
+    }
+
+  private:
+    mutable std::mutex _mutex;
+    effective_video_mode_t _mode;
+  };
+
+  /**
+   * Outcome of installing a live video mode, reported by the encode loop once an encode session
+   * has actually been created. Only this loop knows the geometry that was really installed, so it
+   * is the only place that can answer a 0x3007 request truthfully.
+   */
+  struct video_mode_applied_t {
+    // Every request this encode session answers. More than one when a client's requests were
+    // collapsed: the newest is honoured and the rest are reported as not applied.
+    std::vector<int> request_ids;
+    // False when the requests were superseded, or when the mode had to be rolled back because the
+    // encoder refused it. `mode` then describes what is running instead.
+    bool applied;
+    effective_video_mode_t mode;
+  };
 
   /* Encoding configuration requested by remote client */
   struct config_t {
@@ -82,6 +160,10 @@ namespace video {
     // pipeline. The background initializer raises it after its future becomes ready so the
     // encoder can reconvert the last captured image even when the desktop is otherwise static.
     std::shared_ptr<safe::event_t<bool>> sbs_depth_pipeline_ready_event;
+
+    // APPEND-ONLY. Session-shared view of the mode the encode loop is actually running. The
+    // control stream reads it to tell a client what is in effect when its live request is refused.
+    std::shared_ptr<effective_video_mode_publisher_t> effective_mode;
   };
 
   // Preserve standard NTSC rates instead of approximating them as finite decimal fractions.
@@ -138,6 +220,19 @@ namespace video {
     int base_height,
     int video_format,
     int configured_max_width,
+    int runtime_max_width = 0
+  );
+
+  /**
+   * Clamp a requested encode size to what the codec can actually encode, scaling the height to
+   * preserve the aspect ratio. A live 0x3007 mode change is deliberately not width-checked on the
+   * control thread, because a rejected-but-creatable mode is worse than a capped one: a failed
+   * non-SBS encoder creation tears the whole session down, while capping cannot fail.
+   */
+  sbs_output_dimensions_t clamp_encode_dimensions(
+    int width,
+    int height,
+    int video_format,
     int runtime_max_width = 0
   );
 

@@ -1139,6 +1139,171 @@ namespace proc {
     return 0;
   }
 
+  bool proc_t::live_video_mode_needs_display_change(int width, int height) const {
+    std::unique_lock lock(process_state_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+      // A display transition is already running. Answering conservatively queues this request
+      // behind it instead of blocking the control thread, which also carries client input.
+      return true;
+    }
+
+#ifdef _WIN32
+    if (!_virtual_display || !_launch_session || _virtual_display_gdi_name.empty()) {
+      return false;
+    }
+    return _launch_session->width != width || _launch_session->height != height;
+#else
+    return false;
+#endif
+  }
+
+  live_video_mode_result_e proc_t::apply_live_video_mode(int width, int height, int fps_millihz) {
+    std::lock_guard lock(process_state_mutex);
+    if (width <= 0 || height <= 0 || fps_millihz <= 0) {
+      return live_video_mode_result_e::needs_reconnect;
+    }
+    if (!_launch_session || _app_id <= 0 || _host_session_id == 0) {
+      return live_video_mode_result_e::needs_reconnect;
+    }
+
+#ifdef _WIN32
+    // Only a display this host created can be resized under the user's feet. A physical desktop
+    // belongs to the person sitting at it.
+    if (!_virtual_display || _virtual_display_gdi_name.empty()) {
+      return live_video_mode_result_e::needs_reconnect;
+    }
+
+    const auto old_width = static_cast<std::uint32_t>(_launch_session->width);
+    const auto old_height = static_cast<std::uint32_t>(_launch_session->height);
+    const auto old_fps = _launch_session->fps;
+    const bool enable_hdr = _launch_session->enable_hdr;
+
+    // Frame-rate-only and bitrate-only changes are owned entirely by capture pacing and the
+    // encoder. Switching the virtual display's refresh rate for them would stall capture and
+    // invalidate the DXGI factory for no benefit.
+    if (old_width == static_cast<std::uint32_t>(width) && old_height == static_cast<std::uint32_t>(height)) {
+      return live_video_mode_result_e::unchanged;
+    }
+
+    // A locked session or an unreachable display-configuration API is transient, not a property of
+    // the requested mode. Report it as retryable so the client is not sent off to reconnect for a
+    // mode this display could deliver a moment later.
+    if (is_changing_settings_going_to_fail()) {
+      BOOST_LOG(warning) << "Cannot resize the virtual display right now (the session is locked or "
+                            "the display-configuration API is unavailable)."sv;
+      return live_video_mode_result_e::failed;
+    }
+
+    // Probe before touching anything. If the mode is not advertised, the only way to obtain it is
+    // to recreate the monitor, and recreation retires the display from the Windows topology, which
+    // destroys the running capture session. Refuse and let the client decide to reconnect.
+    if (VDISPLAY::testDisplaySettings(_virtual_display_gdi_name.c_str(), width, height, fps_millihz) != DISP_CHANGE_SUCCESSFUL) {
+      BOOST_LOG(info) << "The virtual display does not advertise "sv << width << 'x' << height
+                      << " @ "sv << (static_cast<double>(fps_millihz) / 1000.0)
+                      << " Hz; the client must reconnect to obtain it."sv;
+      return live_video_mode_result_e::needs_reconnect;
+    }
+
+    // The worker must not query or mutate a DISPLAY name while Windows is switching its mode.
+    stop_hdr_worker();
+    _hdr_worker_state.reset();
+
+    // Windows can renumber \\.\DISPLAYn across a mode change, so re-resolve the GDI name from the
+    // stable driver identity while waiting for the new geometry to settle.
+    auto settle_at = [&](std::uint32_t target_width, std::uint32_t target_height) {
+      const auto deadline = std::chrono::steady_clock::now() + 3s;
+      int stable_observations = 0;
+      while (std::chrono::steady_clock::now() < deadline) {
+        if (_virtual_display_identity) {
+          const auto identity = VDISPLAY::queryVirtualDisplayIdentity(
+            *_virtual_display_identity,
+            _virtual_display_device_path,
+            _virtual_display_gdi_name
+          );
+          if (identity.state == VDISPLAY::display_identity_state_e::present && !identity.display_name.empty()) {
+            _virtual_display_gdi_name = identity.display_name;
+            _virtual_display_device_path = identity.device_path;
+            _virtual_display_published = true;
+          }
+        }
+
+        DEVMODEW mode {};
+        const bool geometry_ready = VDISPLAY::getDeviceSettings(_virtual_display_gdi_name.c_str(), mode) &&
+                                    mode.dmPelsWidth == target_width &&
+                                    mode.dmPelsHeight == target_height;
+        if (geometry_ready) {
+          if (++stable_observations >= 3) {
+            return true;
+          }
+        } else {
+          stable_observations = 0;
+        }
+        std::this_thread::sleep_for(50ms);
+      }
+      return false;
+    };
+
+    // Republish the (possibly renumbered) display name so captureThread targets the display that
+    // actually carries the mode, then bring the HDR worker back up on that name.
+    auto republish_display = [&]() {
+      set_display_name_locked(platf::to_utf8(_virtual_display_gdi_name));
+      config::video.output_name = display_device::map_display_name(display_name);
+      start_hdr_worker(enable_hdr);
+    };
+
+    auto roll_back = [&]() {
+      // changeDisplaySettings() reports the DisplayConfig status, so verify the applied geometry
+      // rather than trusting the return code on its own.
+      bool restored = VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps) == ERROR_SUCCESS &&
+                      settle_at(old_width, old_height);
+      republish_display();
+      if (!request_hdr_state(enable_hdr, 6s)) {
+        BOOST_LOG(error) << "The virtual display did not hold its HDR contract after rolling back a live mode change."sv;
+        restored = false;
+      }
+      return restored;
+    };
+
+    const auto change_status = VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), width, height, fps_millihz);
+    if (change_status != ERROR_SUCCESS || !settle_at(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height))) {
+      BOOST_LOG(error) << "The virtual display did not settle at the requested live mode "sv
+                       << width << 'x' << height << "; rolling back."sv;
+      if (!roll_back()) {
+        BOOST_LOG(error) << "The virtual display could not be restored to its previous mode. The "
+                            "session continues, but the client should reconnect."sv;
+      }
+      return live_video_mode_result_e::failed;
+    }
+
+    republish_display();
+
+    // HDR coherence is session-fatal: make_encode_device enforces the launch dynamic-range
+    // contract and kills the session when the display no longer matches it.
+    if (!request_hdr_state(enable_hdr, 6s)) {
+      BOOST_LOG(error) << "The virtual display did not reach its required HDR state after the live "
+                          "mode change; rolling back."sv;
+      stop_hdr_worker();
+      _hdr_worker_state.reset();
+      if (!roll_back()) {
+        BOOST_LOG(error) << "The virtual display could not be restored to its previous mode. The "
+                            "session continues, but the client should reconnect."sv;
+      }
+      return live_video_mode_result_e::failed;
+    }
+
+    // Commit last, exactly like reconfigure_retained_session: every fallible display operation has
+    // already succeeded, so the recorded contract now matches what Windows is presenting.
+    _launch_session->width = width;
+    _launch_session->height = height;
+    _launch_session->fps = fps_millihz;
+    BOOST_LOG(info) << "Virtual display resized live to "sv << width << 'x' << height
+                    << " @ "sv << (static_cast<double>(fps_millihz) / 1000.0) << " Hz."sv;
+    return live_video_mode_result_e::applied;
+#else
+    return live_video_mode_result_e::needs_reconnect;
+#endif
+  }
+
   bool proc_t::activate_remote_virtual_display_lease(std::uint64_t lease) {
     std::lock_guard lock(process_state_mutex);
 #ifdef _WIN32

@@ -445,6 +445,16 @@ namespace platf {
       return capture_backend_e::ddup;
     }
 
+    /**
+     * @brief Publish a new client frame rate to a capture session that is already running.
+     * Called from the encode thread when the client changes the stream cadence mid-stream
+     * (0x3007), so implementations must be safe to call concurrently with capture().
+     * @param framerate Whole frames per second.
+     * @param framerate_x100 Exact rate in hundredths of a hertz, or 0 when it is not known.
+     */
+    virtual void set_client_frame_rate(int framerate, int framerate_x100) {
+    }
+
     virtual std::shared_ptr<img_t> alloc_img() = 0;
 
     virtual int dummy_img(img_t *img) = 0;

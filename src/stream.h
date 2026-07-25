@@ -25,6 +25,12 @@ namespace rtsp_stream {
   struct launch_session_t;
 }
 
+namespace proc {
+  // Opaque declaration so the acknowledgement mapping can be declared here without pulling
+  // Boost.Process into every consumer of stream.h. The underlying type must match process.h.
+  enum class live_video_mode_result_e : int;
+}  // namespace proc
+
 namespace stream {
   constexpr auto VIDEO_STREAM_PORT = 9;
   constexpr auto CONTROL_PORT = 10;
@@ -248,6 +254,93 @@ namespace stream {
     return plaintext_size >= CONTROL_HEADER_V2_SIZE &&
            declared_payload_size == plaintext_size - CONTROL_HEADER_V2_SIZE;
   }
+
+  // Bounds for a live 0x3007 stream geometry/rate change. Dimensions must be even because the
+  // whole encode path is 4:2:0 subsampled, and the frame rate travels in hundredths of a hertz so
+  // fractional rates (23.976, 29.97) survive the wire.
+  //
+  // The encoder's own maximum width is deliberately NOT part of this check: the encode loop owns
+  // the codec capability snapshot and clamps an oversized request the same way it already caps an
+  // SBS packed width. Clamping there always succeeds, whereas rejecting a creatable mode here
+  // would deny a mode the host could actually deliver.
+  constexpr int LIVE_VIDEO_MODE_DIMENSION_MIN = 2;
+  constexpr int LIVE_VIDEO_MODE_DIMENSION_MAX = 16384;
+  constexpr int LIVE_VIDEO_MODE_FRAMERATE_X100_MIN = 100;
+  constexpr int LIVE_VIDEO_MODE_FRAMERATE_X100_MAX = 100'000;
+
+  [[nodiscard]] constexpr bool is_valid_live_video_mode_dimension(int dimension) {
+    return dimension >= LIVE_VIDEO_MODE_DIMENSION_MIN &&
+           dimension <= LIVE_VIDEO_MODE_DIMENSION_MAX &&
+           (dimension & 1) == 0;
+  }
+
+  [[nodiscard]] constexpr bool is_valid_live_video_mode_framerate_x100(int framerate_x100) {
+    return framerate_x100 >= LIVE_VIDEO_MODE_FRAMERATE_X100_MIN &&
+           framerate_x100 <= LIVE_VIDEO_MODE_FRAMERATE_X100_MAX;
+  }
+
+  /**
+   * Host->client outcome of a live 0x3007 video-mode request, carried by the 0x3008
+   * acknowledgement. Exactly one acknowledgement is produced per accepted control message, so a
+   * client never has to distinguish "host refused" from "host is slow" by timing out.
+   *
+   * WIRE-VISIBLE VALUES. These travel on the control stream and must match the
+   * LIVE_VIDEO_MODE_ACK_* constants in the client's moonlight-common-c Limelight.h. Treat the
+   * numbering as append-only; never renumber or reuse a value.
+   */
+  enum class live_video_mode_ack_e : std::uint16_t {
+    applied = 0,  ///< The requested mode is live on the stream.
+    rejected_invalid = 1,  ///< Failed validation. The client must not retry the same request.
+    rejected_needs_reconnect = 2,  ///< Valid, but only a full reconnect can reach this mode.
+    failed = 3,  ///< Transient failure; the change was rolled back and the client may retry.
+  };
+
+  /** Map a virtual-display transition outcome onto its wire acknowledgement status. */
+  [[nodiscard]] live_video_mode_ack_e live_video_mode_ack_status(proc::live_video_mode_result_e result);
+
+  // The acknowledgement body that follows the control header: u16 request_id, u16 status,
+  // u16 applied_width, u16 applied_height, u16 applied_framerate_x100, u32 applied_bitrate_kbps,
+  // all little-endian. The trailing u32 is deliberately unaligned; the struct is packed and the
+  // body is serialized field by field, so no padding is ever inserted.
+  constexpr std::size_t LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE = 14;
+
+  // A client cannot have many requests outstanding, and the control thread drains this every
+  // iteration. The bound only exists so a pathological client cannot grow the queue without limit.
+  constexpr std::uint32_t LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT = 8;
+
+  /**
+   * One acknowledgement, queued by whichever component decided the outcome and sent by the control
+   * thread.
+   *
+   * `request_id` is the client's opaque correlation token, echoed verbatim. The `applied_*` fields
+   * always describe the mode that is REALLY in effect, never the request:
+   *  - on `applied`, that is the running encode session after every host-side transformation, so a
+   *    width capped to the codec ceiling reports the capped value and its aspect-scaled height.
+   *    `applied_width`/`applied_height` are base (per-eye) values, before any SBS doubling, and
+   *    `applied_bitrate_kbps` is the derived encoder budget rather than the requested wire budget.
+   *  - on every refusal, that is the mode the session kept, so the client can resynchronize its UI
+   *    to reality instead of being handed zeros or its own rejected request back.
+   */
+  struct live_video_mode_ack_t {
+    int request_id;
+    live_video_mode_ack_e status;
+    int applied_width;
+    int applied_height;
+    int applied_framerate_x100;
+    std::int64_t applied_bitrate_kbps;
+  };
+
+  /**
+   * Serialize an acknowledgement body in wire order. No control header is written.
+   *
+   * @return `false` when a field does not fit its wire width, in which case @p out is untouched.
+   * Every reachable acknowledgement carries an id decoded from the request's own u16 field and a
+   * mode the encoder actually ran, so a rejection here means the caller invented a value.
+   */
+  [[nodiscard]] bool encode_live_video_mode_ack_payload(
+    const live_video_mode_ack_t &ack,
+    std::uint8_t (&out)[LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE]
+  );
 
   struct session_t;
 

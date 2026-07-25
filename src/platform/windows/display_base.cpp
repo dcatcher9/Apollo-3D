@@ -200,31 +200,67 @@ namespace platf::dxgi {
     release_frame();
   }
 
+  void display_base_t::set_client_frame_rate(int framerate, int framerate_x100) {
+    if (framerate <= 0) {
+      return;
+    }
+
+    DXGI_RATIONAL strict {};
+    if (framerate_x100 > 0) {
+      const auto rational = ::video::framerate_x100_to_rational(framerate_x100);
+      strict = {
+        static_cast<UINT>(rational.num),
+        static_cast<UINT>(rational.den),
+      };
+    }
+
+    {
+      std::lock_guard lock(client_frame_rate_mutex);
+      if (client_frame_rate == framerate && client_frame_rate_strict.Numerator == strict.Numerator && client_frame_rate_strict.Denominator == strict.Denominator) {
+        return;
+      }
+      client_frame_rate = framerate;
+      client_frame_rate_strict = strict;
+    }
+
+    // Publish after the values are visible so the capture loop never re-derives a torn cadence.
+    client_frame_rate_generation.fetch_add(1, std::memory_order_release);
+  }
+
   capture_e display_base_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
     auto adjust_client_frame_rate = [&]() -> DXGI_RATIONAL {
-      if (client_frame_rate_strict.Numerator > 0) {
-        return client_frame_rate_strict;
+      int requested_frame_rate;
+      DXGI_RATIONAL requested_frame_rate_strict;
+      {
+        std::lock_guard lock(client_frame_rate_mutex);
+        requested_frame_rate = client_frame_rate;
+        requested_frame_rate_strict = client_frame_rate_strict;
+      }
+
+      if (requested_frame_rate_strict.Numerator > 0) {
+        return requested_frame_rate_strict;
       }
 
       // Adjust capture frame interval when display refresh rate is not integral but very close to requested fps.
       if (display_refresh_rate.Denominator > 1) {
         DXGI_RATIONAL candidate = display_refresh_rate;
-        if (client_frame_rate % display_refresh_rate_rounded == 0) {
-          candidate.Numerator *= client_frame_rate / display_refresh_rate_rounded;
-        } else if (display_refresh_rate_rounded % client_frame_rate == 0) {
-          candidate.Denominator *= display_refresh_rate_rounded / client_frame_rate;
+        if (requested_frame_rate % display_refresh_rate_rounded == 0) {
+          candidate.Numerator *= requested_frame_rate / display_refresh_rate_rounded;
+        } else if (display_refresh_rate_rounded % requested_frame_rate == 0) {
+          candidate.Denominator *= display_refresh_rate_rounded / requested_frame_rate;
         }
         double candidate_rate = (double) candidate.Numerator / candidate.Denominator;
         // Can only decrease requested fps, otherwise client may start accumulating frames and suffer increased latency.
-        if (client_frame_rate > candidate_rate && candidate_rate / client_frame_rate > 0.99) {
+        if (requested_frame_rate > candidate_rate && candidate_rate / requested_frame_rate > 0.99) {
           BOOST_LOG(info) << "Adjusted capture rate to " << candidate_rate << "fps to better match display";
           return candidate;
         }
       }
 
-      return {(uint32_t) client_frame_rate, 1};
+      return {(uint32_t) requested_frame_rate, 1};
     };
 
+    auto observed_frame_rate_generation = client_frame_rate_generation.load(std::memory_order_acquire);
     DXGI_RATIONAL client_frame_rate_adjusted = adjust_client_frame_rate();
     std::optional<std::chrono::steady_clock::time_point> frame_pacing_group_start;
     uint32_t frame_pacing_group_frames = 0;
@@ -241,6 +277,20 @@ namespace platf::dxgi {
     sleep_overshoot_logger.reset();
 
     while (true) {
+      // A live 0x3007 video-mode change republishes the client cadence while this capture session
+      // keeps running. Re-derive the pacing interval and start a fresh pacing group so the new
+      // rate takes effect without throwing away the display and its retained-image optimization.
+      const auto current_frame_rate_generation = client_frame_rate_generation.load(std::memory_order_acquire);
+      if (current_frame_rate_generation != observed_frame_rate_generation) {
+        observed_frame_rate_generation = current_frame_rate_generation;
+        client_frame_rate_adjusted = adjust_client_frame_rate();
+        frame_pacing_group_start = std::nullopt;
+        frame_pacing_group_frames = 0;
+        BOOST_LOG(info) << "Capture pacing updated to "
+                        << ((double) client_frame_rate_adjusted.Numerator / client_frame_rate_adjusted.Denominator)
+                        << "fps for a live video-mode change";
+      }
+
       // This will return false if the HDR state changes or for any number of other
       // display or GPU changes. We should reinit to examine the updated state of
       // the display subsystem. It is recommended to call this once per frame.
