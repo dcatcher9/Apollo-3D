@@ -294,8 +294,19 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
   and motion masks it. Blending toward unsmoothed at high motion would therefore surrender benefit
   rather than recover it. Two clips with nearly identical motion land on opposite sides
   (`tartanair_house_easy` 0.338 improves 18.3%; `sintel_ambush` 0.350 regresses 19.0%), so whatever
-  separates them is not motion. `sintel_ambush` is the one real clip that regresses on shear and is
-  the right place to look for a better signal.
+  separates them is not motion. `sintel_ambush` is the one real clip that regresses on shear, but
+  visual inspection says there is nothing there to find -- see the metric caveat below.
+  **`warp_cross_row_shear_severity_pct` moves double digits for sub-perceptual differences --
+  weigh it accordingly.** Inspected twice, both times the same result. On `sintel_ambush` frame 14
+  (the worst shear frame of the worst-regressing clip) the band-EMA and no-band-EMA renders differ
+  by 149 pixels out of ~819,000 (0.018%), mean difference 0.08 gray levels, and are
+  indistinguishable at 5x magnification on the exact region of maximum disagreement -- yet the
+  metric reports +19.0%. On `tartanair_house_easy` a 23.5 reading (2.2x its pre-change value)
+  showed no visible tear at 8x magnification either. The metric scores the displacement MAP, not
+  pixels, so it responds strongly to coordinate differences that produce no visible change,
+  particularly on smooth-ramp or low-texture content. It is `role: diagnostic` and
+  `label_status: experimental` for good reason. Do not let a shear delta of a few percent decide a
+  tradeoff, and inspect before treating a large one as a defect.
   **Correction to the accepted-entry claim above:** "consistently positive" holds for SHEAR (8 of 12
   extended clips improved) but overstates JITTER, where the extended mean was driven almost entirely
   by `sintel_market` (-25.3%) with eight of twelve clips at exactly 0.0%. `static_jitter_p95` is
