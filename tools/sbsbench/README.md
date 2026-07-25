@@ -196,6 +196,12 @@ fresh `<model>.active-engine.json` naming the exact nonempty TensorRT artifact a
 SHA-256; an unrelated/stale engine never satisfies preflight. `--allow-build` performs one untimed
 one-frame harness preflight and revalidates that manifest before any measured clip. The runner
 warns and skips the perf gate if another sunshine.exe is running.
+**Any rebuild of `sunshine.exe` -- and any edit to a shader under `src_assets/.../shaders/`, which
+is hardlinked into the build assets and therefore needs no rebuild to take effect -- makes the
+preflight report "manifest predates sunshine.exe" and exit 2 until you pass `--allow-build` once**
+(or start the binary manually). Shader edits are the easy one to miss precisely because they do not
+require a build step. Reach for `--allow-build` on the first run after touching either, rather than
+diagnosing it again.
 
 Configured disparity/integrity engineering bounds apply even in comparison-only runs. The image-
 relative disparity bounds are not a calibrated retinal-angle comfort guarantee. Baseline updates are staged in

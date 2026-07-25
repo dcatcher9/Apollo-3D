@@ -1765,10 +1765,10 @@ def main():
         "--cuda-graph")
     expected_adaptive = expected_adaptive_pop(args.conf, expected_config_profile, args.extra)
     expected_adaptive_max = expected_profile_number(
-        args.conf, expected_config_profile, "adaptive_pop_max", 1.30, args.extra,
+        args.conf, expected_config_profile, "adaptive_pop_max", 2.00, args.extra,
         "--adaptive-pop-max")
     expected_pop = expected_profile_number(
-        args.conf, expected_config_profile, "pop_strength", 1.25, args.extra,
+        args.conf, expected_config_profile, "pop_strength", 1.20, args.extra,
         "--pop-strength")
     expected_adaptive_max = max(expected_adaptive_max, expected_pop)
     # These fallbacks mirror the C++ defaults in src/config.h and must move with them, or the

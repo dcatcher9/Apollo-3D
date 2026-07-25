@@ -208,6 +208,55 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
   for every scene — including scenes the controller declined to boost, which pay the cost and
   receive none of the gain. Decouple probe geometry from strength before attributing any ceiling
   regression to the gain itself.
+  **SUPERSEDED 2026-07-24: the band is now 1.20-1.50.** With the probe geometry decoupled and the
+  zero plane on `median`, a ceiling ladder on the core suite shows the historical rejection does not
+  survive the new baseline. Against the configuration that shipped before 2026-07-24
+  (`legacy` zero plane, 1.25-1.30 band), the adopted 1.20-1.50 band is **strictly dominant on every
+  measured axis**: pop spread 1.0081 -> 1.0455 (+3.7%), mapping stretch 0.6325 -> 0.2750 (-56.5%),
+  cross-row shear 4.1665 -> 4.1013 (-1.6%), static jitter p95 1.8159 -> 1.3708 (-24.5%), fold 0.000
+  throughout, zero hard failures. More stereo volume AND fewer artifacts than the previous default.
+  1.25-1.50 was also measured and buys more volume (+6.0%) but costs +2.9% shear; the wider 1.20
+  floor was preferred because it lets the controller back off far enough on edge-dense scenes to
+  keep shear below the old baseline, and the floor can be raised later if more volume is wanted.
+  This also repairs the controller's authority: the ratio goes from 1.04 to 1.25, i.e. from below
+  the noise floor of every judging metric to something that can actually be measured working.
+  Evidence: `ceil-control`, `ceil-140`, `ceil-150`, `band-120-150` under
+  `cmake-build-relwithdebinfo/sbs_eval/`.
+  **SUPERSEDED again 2026-07-24: the shipped band is 1.20-2.00, paired with a magnitude-weighted
+  risk statistic.** The extended suite was run and it did NOT reproduce the core-suite claim: at
+  1.20-1.50 extended volume was -1.1% (a loss, which the no-compensation policy forbids), and the
+  1.20 floor was the cause -- 1.25-1.50 recovered it to +2.3%. Ceilings were then laddered to 2.00.
+  Fold stayed 0.000 at every rung on both suites, no hard bound was approached, and warp time rose
+  only ~27% at 2.00 (inside the 0.30 perf tolerance), so neither comfort nor topology nor perf is
+  what limits the ceiling.
+  What limits it is `warp_cross_row_shear_severity_pct`, and the extended per-clip data showed the
+  cost is **not diffuse**: at 1.20-2.00, nine of twelve clips were flat or improved and the entire
+  +31.4% mean came from `tartanair_house_easy` (10.7 -> 23.5) and `spring_skeleton_cave`
+  (1.2 -> 3.3). A wide band did not create a new problem; it made an existing classifier weakness
+  visible, because at the old 1.04 ratio a misclassification cost 4% and at 1.67 it costs 67%.
+  **The classifier now weights each edge texel by gradient magnitude instead of counting it.** Warp
+  stress scales with the disparity step a silhouette produces, so a few violent discontinuities must
+  outrank many gentle ones -- a distinction a threshold count cannot make. The weight is
+  `grad / 0.02` capped at 8x, accumulated in fixed point, so a frame whose edges all sit exactly at
+  the threshold reproduces the old count exactly and the 0.007/0.016 endpoints keep their
+  calibration. No threshold was retuned.
+  Result: strictly selective. Four core clips and nine extended clips are bit-identical; where it
+  acts, artifacts fall 2-3x faster than the pop it gives up (c339 -29% pop for -52% shear and -65%
+  stretch; c747 -19% pop for -54% shear). Nothing regressed on any axis. `spring_skeleton_cave`
+  drops to 1.12, below its pre-today 1.22. **This statistic is what makes a 2.00 ceiling defensible**
+  -- with the count-based classifier, 2.00 hands full pop to scenes that demonstrably cannot take it.
+  Evidence: `band-120-200-*`, `riskstat-core`, `riskstat-ext`, `final-120-200-weighted`.
+  **Open residual, do not lose this:** `tartanair_house_easy` did not move at all under the weighted
+  statistic (23.54 -> 23.54) and remains ~2.2x its pre-today shear. Magnitude weighting was
+  therefore falsified as an explanation for that clip. Since `warp_cross_row_shear_severity_pct`
+  measures row-to-row displacement inconsistency, the likely cause is depth noise between adjacent
+  scanlines rather than silhouette structure -- which neither an edge count nor an edge magnitude
+  can observe. Diagnose that clip before tuning the classifier further.
+  **Also unlatched and unexamined:** `subject_stretch` recomputes its P5/P95 band every frame with
+  no temporal smoothing, while subject depth, convergence and the normalization min/max are all
+  EMA'd. It is the only per-frame adaptive gain in the depth domain with no smoothing, and the same
+  argument used to shot-latch the zero plane applies to it verbatim. At a 2.00 ceiling its wobble is
+  multiplied by up to 2.0.
 - Art3D-style shot-level zero-plane placement was screened as three scene-latched treatments:
   tracked subject, depth median, and far/mid-background (P25). Each resolves its anchor through
   the final Bestv2 curve and stores the source-pixel shift, so percentile motion cannot make

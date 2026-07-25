@@ -125,7 +125,12 @@ void main() {
         // the base is the floor and the configured ceiling is never exceeded.
         float pop_ratio = max(s1.w, 1.0f);
         if (adaptive_pop > 0.5f && ptotal > 0.5f) {
-            float edge_fraction = (float)PlainHist[NUM_BINS] / ptotal;
+            // PlainHist[NUM_BINS] accumulates gradient-magnitude-weighted edge texels in fixed
+            // point (see EDGE_WEIGHT_SCALE in depth_subject_hist_cs). Dividing by the scale yields
+            // a threshold-equivalent edge fraction: identical to the historical count when every
+            // edge sits at the threshold, and proportionally larger when edges are more violent.
+            // The 0.007/0.016 endpoints below therefore keep their original calibration.
+            float edge_fraction = (float)PlainHist[NUM_BINS] / (ptotal * 256.0f);
             if (!initialized || hard_cut) {
                 // Full extra pop is safe for low-complexity depth fields (<=0.7% edge texels).
                 // Fade to the base strength by 1.6%; the extended suite validated the 1.30

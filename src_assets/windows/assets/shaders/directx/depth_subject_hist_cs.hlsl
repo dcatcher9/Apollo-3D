@@ -17,6 +17,14 @@ StructuredBuffer<float4> MinMaxEma : register(t4);  // w = current-frame validit
 #include "include/depth_constants.hlsl"
 
 #define NUM_BINS 256
+
+// Edge-risk accumulation is fixed-point because InterlockedAdd is integer-only. A texel exactly at
+// the 0.02 gradient threshold contributes EDGE_WEIGHT_SCALE, so the resolve stage recovers the
+// historical edge fraction by dividing the sum by EDGE_WEIGHT_SCALE. Worst case is
+// texels * MAX * SCALE, which stays well inside uint32 at every supported depth resolution.
+#define EDGE_WEIGHT_SCALE 256.0f
+#define EDGE_WEIGHT_MAX 8.0f
+
 groupshared uint g_hist[NUM_BINS];
 groupshared uint g_plain[NUM_BINS];
 groupshared uint g_edge_count;
@@ -47,7 +55,15 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
         // Fixed controller thresholds: changing the independent EMA ablation knobs must not
         // silently alter scene classification.
         if (grad >= 0.02f) {
-            InterlockedAdd(g_edge_count, 1u);
+            // Weight each edge texel by how far past the threshold it is, instead of counting it
+            // once. Warp stress scales with the disparity STEP a silhouette produces, so a few
+            // violent discontinuities outrank many gentle ones -- a distinction a threshold count
+            // cannot make, and the reason edge-dense-but-soft scenes were classified alongside
+            // sharp ones. Capped so a handful of extreme texels cannot dominate the frame.
+            // Calibration is preserved: a frame whose edges all sit exactly at the threshold
+            // yields exactly the old count, so the resolve stage's fractions keep their meaning.
+            float weight = min(grad * (1.0f / 0.02f), EDGE_WEIGHT_MAX);
+            InterlockedAdd(g_edge_count, (uint)(weight * EDGE_WEIGHT_SCALE + 0.5f));
         }
         if (abs(d - PreviousDepth[dtid.xy]) >= 0.05f) {
             InterlockedAdd(g_change_count, 1u);

@@ -687,9 +687,12 @@ namespace config {
     apply_sbs_values(video.sbs, "sbs_3d_profile_" + sbs_profile + "_");
     apply_sbs_values(video.sbs, "sbs_3d_");
     if (video.sbs.zero_plane != "legacy" && video.sbs.zero_plane != "subject" && video.sbs.zero_plane != "median" && video.sbs.zero_plane != "background") {
+      // Fall back to the shipped default rather than a hard-coded mode, so a typo cannot silently
+      // opt a user out of the validated default.
       BOOST_LOG(warning) << "Invalid sbs_3d_zero_plane value '" << video.sbs.zero_plane
-                         << "'; use legacy, subject, median, or background. Using legacy.";
-      video.sbs.zero_plane = "legacy";
+                         << "'; use legacy, subject, median, or background. Using "
+                         << video_t::sbs_t {}.zero_plane << '.';
+      video.sbs.zero_plane = video_t::sbs_t {}.zero_plane;
     }
     video.sbs.max_encode_width &= ~1;
 
