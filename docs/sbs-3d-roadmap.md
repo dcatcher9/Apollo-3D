@@ -462,7 +462,9 @@ selection until a hard cut.
   - Result (`wideband-{core,ext}` vs `dss-434`/`dssx-434`): plateau **22.57% -> 16.50% core and
     15.84% -> 9.21% extended**, `exact_mapping_stretch_pct` -8.11%/-4.57%, `static_jitter_p95`
     -1.80%/-4.03%, `vmisalign_p99_pct` -0.72%/-6.39%, fold 0.000 and image integrity 100.0, with
-    `exact_visible_pop_spread_pct` **-1.05% core / +0.00% extended** — no primary-axis cost.
+    `exact_visible_pop_spread_pct` **-1.05% core / +0.00% extended** — no stereo-volume cost.
+    (That metric is `role: diagnostic`, not primary; it is quoted here because it is the axis
+    the soft-knee variant lost, not because it gates.)
   - The residual plateau is NOT percentile-driven: P1/P99 (`wide99-*`) moved it only 9.21 -> 8.71
     extended and 16.50 -> 16.23 core for no further gain.
   - **Both EMA'd ranges are now attack-fast/release-slow envelopes** (`envfollow-*`). There were two
@@ -523,6 +525,29 @@ selection until a hard cut.
     p0.5..p99.5 spread, so pinning 16-23% of pixels onto the two extreme disparities places those
     percentiles inside the plateaus and reports the clip bounds rather than scene relief. Read it
     alongside a plateau-excluded relief measure when judging any band change.
+
+- **The depth profile bound is 1036, not 1008, so ultrawide reaches the configured short side.**
+  `aspect_aligned_dims` is capped by the TensorRT profile kMAX, and at 1008 both production
+  ultrawide cases lost a patch row: 5K2K resolved to 994x420 and 21:9 to 1008x420 rather than a
+  434 short side. `models::depth_engine_max_dim` now carries the bound (1036 = 74 patches) and
+  the recipe tag moved to `trt-opt770x434-max1036-level5-v3` — the tag MUST change with the
+  profile or the cached engine is silently reused, since the filename encodes only opt shape
+  and builder level.
+  - Controlled on the extended suite (`uncap-ext` vs `rebase2-ext`): exactly the four ultrawide
+    clips changed shape — sintel 980x420 -> 1022x434 (2101 -> 2264 tokens) and vkitti
+    980x294 -> 1022x308 (1471 -> 1607) — while the other eight kept their tensors.
+  - On those four, `depth_gt_affine_nrmse_pct` improved **-4.74%**, and that is trustworthy:
+    the eight unchanged-shape clips drifted only 0.003% on the same metric, so the engine
+    rebuild contributes essentially nothing to it. Stereo volume was neutral (+0.05%).
+    **Gated run passes** against the committed baselines.
+  - Two apparent regressions need the control to read correctly. `vmisalign_p99_pct` +12.09% is
+    not credible — the unchanged-shape clips drifted 9.14% worst-case from the engine rebuild
+    alone, on absolute values of ~0.02%. `static_jitter_p95` +5.88% is larger than its control
+    drift (0.40% mean, 1.77% worst) and is probably real; it is the same accuracy-versus-
+    temporal-stability tension the depth-resolution ladder found, and it stays inside the
+    metric's 0.20 rel_tol. Worth headset attention on ultrawide content.
+  - Cost is confined to ultrawide: `depth_infer` +9.92% on those clips (1.853 -> 2.037 ms).
+    16:9 tensors are unchanged and pay nothing.
 
 Do not reintroduce a removed processor without a current core and extended comparison, visual
 evidence, and a headset-motivated hypothesis.

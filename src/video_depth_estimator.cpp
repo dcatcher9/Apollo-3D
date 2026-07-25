@@ -679,7 +679,8 @@ namespace models {
         nvinfer1::OptProfileSelector::kOPT,
         dims_for(depth_engine_opt_height, depth_engine_opt_width)
       ) &&
-      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, dims_for(1008, 1008));
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX,
+                             dims_for(depth_engine_max_dim, depth_engine_max_dim));
     if (!profile_ok || config->addOptimizationProfile(profile) < 0) {
       BOOST_LOG(error) << "TensorRT rejected the depth optimization profile.";
       return false;
@@ -2067,7 +2068,7 @@ namespace models {
       if (target_w == 0 || target_h == 0) {
         // The capture surface can report a 0x0 descriptor mid HDR/mode transition or
         // before the first real frame. Deriving the model resolution from that yields a
-        // garbage size (NaN aspect -> integer-overflow -> clamps to 1008x1008) that would
+        // garbage size (NaN aspect -> integer-overflow -> clamps to the profile max) that would
         // be cached for the whole session. Wait for a valid frame instead.
         if (input_desc.Width == 0 || input_desc.Height == 0) {
           return {};
@@ -2075,8 +2076,8 @@ namespace models {
         float aspect_ratio = (float) input_desc.Width / (float) input_desc.Height;
         // Keep the patch-aligned tensor as close as possible to source aspect while respecting
         // the TensorRT profile, configured aspect cap, and native size.
-        int max_w = std::min(1008, (int) input_desc.Width);
-        int max_h = std::min(1008, (int) input_desc.Height);
+        int max_w = std::min(models::depth_engine_max_dim, (int) input_desc.Width);
+        int max_h = std::min(models::depth_engine_max_dim, (int) input_desc.Height);
         const float fitted_aspect = aspect_ratio >= 1.0f ? std::min(aspect_ratio, max_aspect) : 1.0f / std::min(1.0f / aspect_ratio, max_aspect);
         const auto fitted_dims = aspect_aligned_dims(
           fitted_aspect,

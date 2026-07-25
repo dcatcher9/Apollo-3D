@@ -12,7 +12,12 @@ namespace models {
     inline constexpr int depth_engine_opt_width = 770;
     inline constexpr int depth_engine_opt_height = 434;
     inline constexpr int depth_engine_builder_level = 5;
-    inline constexpr char depth_engine_recipe[] = "trt-opt770x434-level5-v2";
+    // Upper bound of the dynamic-shape profile, and the cap applied when fitting the source
+    // aspect. 1036 = 74 patches, chosen so the two ultrawide production cases reach the full
+    // configured short side instead of dropping a patch row: 21:9 needs 1036x434 and 5K2K
+    // 1022x434, both of which the previous 1008 bound forced down to a 420 short side.
+    inline constexpr int depth_engine_max_dim = 1036;
+    inline constexpr char depth_engine_recipe[] = "trt-opt770x434-max1036-level5-v3";
 
     /**
      * @brief Recipe-specific cached TensorRT engine filename.
