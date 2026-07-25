@@ -605,7 +605,7 @@ namespace sbs_bench {
       double output_scale = 1.0;  // per-eye linear scale vs source; preserves source aspect
       double pop_strength = -1.0;  // final shared stereo-parallax multiplier; <0 = conf
       double adaptive_pop_max = -1.0;  // absolute ceiling; <0 = conf
-      std::string zero_plane;  // empty = conf; legacy, subject, median, or background
+      std::string zero_plane;  // empty = conf; subject, median, or background
       bool simulate_hdr = false;  // decode sRGB frames into linear scRGB FP16 and use HDR paths
       double hdr_scale = 4.0;  // scRGB multiplier after sRGB EOTF (4.0 = 320-nit diffuse white)
       int max_width = 0;  // 0 -> use config max_encode_width
@@ -727,10 +727,10 @@ namespace sbs_bench {
         BOOST_LOG(error) << "sbs-bench: --adaptive-pop-max must be between 0.25 and 2";
         return false;
       }
-      if (!o.zero_plane.empty() && o.zero_plane != "legacy" &&
+      if (!o.zero_plane.empty() &&
           o.zero_plane != "subject" && o.zero_plane != "median" &&
           o.zero_plane != "background") {
-        BOOST_LOG(error) << "sbs-bench: --zero-plane must be legacy, subject, median, or background";
+        BOOST_LOG(error) << "sbs-bench: --zero-plane must be subject, median, or background";
         return false;
       }
       if (!(o.hdr_scale > 0.0 && o.hdr_scale <= 64.0)) {
@@ -1072,6 +1072,8 @@ namespace sbs_bench {
         const float eye_aspect = (float) eye_w / (float) eye_h;
         const float content_scale_x = eye_aspect > aspect ? aspect / eye_aspect : 1.0f;
         const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
+        // Slot-for-slot mirror of the b2 `Constants` cbuffer in sbs_warp_common.hlsl; see the
+        // matching note in display_vram.cpp. Slot 7 is padding left by removed subject_lock.
         float repro_params[8] = {
           sbs_cfg.subject_stretch ? 1.0f : 0.0f,
           content_scale_x,

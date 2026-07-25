@@ -922,7 +922,7 @@ namespace models {
     bool subject_stretch;  // apply the shape_depth_for_pop 5/95 disparity stretch
     bool adaptive_pop;
     float adaptive_pop_max_ratio;
-    float zero_plane_mode;  // 0 legacy, 1 subject, 2 median depth, 3 far/mid-background
+    float zero_plane_mode;  // 1 subject, 2 median depth, 3 far/mid-background
 
     // Throughput telemetry for the permanent stream-cadence matched-frame pipeline.
     float measured_fps = 0.0f;
@@ -1327,9 +1327,12 @@ namespace models {
         adaptive_pop(cfg.adaptive_pop),
         adaptive_pop_max_ratio((float) (std::max(cfg.adaptive_pop_max, cfg.pop_strength) /
                                         std::max(cfg.pop_strength, 0.25))),
-        zero_plane_mode(cfg.zero_plane == "subject" ? 1.0f : cfg.zero_plane == "median"   ? 2.0f :
-                                                           cfg.zero_plane == "background" ? 3.0f :
-                                                                                            0.0f) {
+        // Unrecognised falls back to `median`, the default and validated plane. It must NOT fall
+        // back to 0: that was `legacy`, which no longer exists, and the shader would read it as
+        // `subject` (its selector is `< 1.5f`). config.cpp resets bad strings, but the offline
+        // harness assigns sbs_cfg directly and bypasses that.
+        zero_plane_mode(cfg.zero_plane == "subject" ? 1.0f : cfg.zero_plane == "background" ? 3.0f :
+                                                                                             2.0f) {
       const auto init_started = std::chrono::steady_clock::now();
       // Enable the process-wide rolling collector for diagnostic runs. Do not reset it here:
       // Galaxy XR and local-AR estimators may coexist, and one session must not invalidate the

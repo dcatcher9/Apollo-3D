@@ -689,7 +689,7 @@ namespace config {
       // Fall back to the shipped default rather than a hard-coded mode, so a typo cannot silently
       // opt a user out of the validated default.
       BOOST_LOG(warning) << "Invalid sbs_3d_zero_plane value '" << video.sbs.zero_plane
-                         << "'; use legacy, subject, median, or background. Using "
+                         << "'; use subject, median, or background. Using "
                          << video_t::sbs_t {}.zero_plane << '.';
       video.sbs.zero_plane = video_t::sbs_t {}.zero_plane;
     }

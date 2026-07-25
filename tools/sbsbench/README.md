@@ -182,7 +182,7 @@ Harness A/B levers (after `--extra`):
 - `--subject-stretch` — shape_depth_for_pop 5/95 percentile stretch (default on in the permanent
   Bestv2 subject path).
 - `--no-subject-stretch` — disable that stretch for an accepted-feature ablation.
-- `--zero-plane legacy|subject|median|background` — choose a shot-latched screen-plane anchor.
+- `--zero-plane subject|median|background` — choose a shot-latched screen-plane anchor.
   The three explicit modes are experimental camera-offset treatments; they preserve
   symmetric eye geometry and the disparity scale, and update only at startup or a hard scene cut.
   SUPERSEDED 2026-07-24: `median` is now the production default (headset-validated). The earlier
@@ -240,7 +240,7 @@ Percent/normalized outputs are preferred; raw pixel diagnostics are never compar
 resolutions. Harness depth is 16-bit so
 sub-1/255 changes remain measurable.
 
-**Eval schema 32 / harness contract 16:** `run_eval.py` pins the profile, model, and zero-plane
+**Eval schema 33 / harness contract 16:** `run_eval.py` pins the profile, model, and zero-plane
 mode explicitly, records the exact Sunshine executable, runtime HLSL tree, engine, and ONNX
 hashes, and has no alternate warp selector. A normal report requires all four to match;
 `--report-allow-executable-diff` explicitly permits a code/shader A/B, while

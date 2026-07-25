@@ -977,6 +977,12 @@ namespace platf::dxgi {
     }
 
     void update_sbs_constant_buffer(float content_scale_x, float content_scale_y) {
+      // Slot-for-slot mirror of the `Constants` cbuffer in
+      // shaders/directx/include/sbs_warp_common.hlsl, which sbs_reprojection_ps and
+      // sbs_forward_coverage_cs both bind at b2. Every entry must stay in declaration
+      // order; to add a field, append it here AND to the include. Slot 7 is dead padding
+      // left by the removed subject_lock rather than a reused slot, so the 8-float size
+      // and every other index are unchanged.
       float sbs_params[8] {
         sbs_config.subject_stretch ? 1.0f : 0.0f,
         content_scale_x,
