@@ -978,14 +978,14 @@ namespace platf::dxgi {
 
     void update_sbs_constant_buffer(float content_scale_x, float content_scale_y) {
       float sbs_params[8] {
-        (float) sbs_config.subject_lock,
         sbs_config.subject_stretch ? 1.0f : 0.0f,
         content_scale_x,
         content_scale_y,
         (float) sbs_config.pop_strength,
         0.0f,
         sbs_config.adaptive_pop ? 1.0f : 0.0f,
-        (float) std::max(sbs_config.adaptive_pop_max, sbs_config.pop_strength)
+        (float) std::max(sbs_config.adaptive_pop_max, sbs_config.pop_strength),
+        0.0f  // padding0 (was subject_lock)
       };
       sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);
     }

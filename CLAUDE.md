@@ -97,7 +97,7 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   worst frame), 2 = setup error.** Results + provenance (git sha, models, clip hashes) land in
   `<build-dir>/sbs_eval/<label>/results.json`. After an INTENDED metric change, re-baseline with
   `--update-baselines` and commit the baselines together with the change. Supported A/B levers
-  pass through, for example `--extra --pop-strength 1.25` or `--extra --subject-lock 0.6`.
+  pass through, for example `--extra --pop-strength 1.25` or `--extra --depth-short-side 392`.
   Changing bench.conf or the clip set
   invalidates baselines.
 - **Adding a clip to the eval set**: a clip is just a directory of same-size `frame_%05d.jpg`
@@ -133,7 +133,7 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   keeps the ±3% comfort tails inside their hard bound while degrading the ungated artifact
   diagnostics, so read those by hand. Capture a baseline before the change; `--pop-strength`,
   `--depth-short-side`, `--ema`, `--minmax-ema`, and the subject
-  lock/recenter/stretch controls are the supported A/B levers (see the harness
+  recenter/stretch controls are the supported A/B levers (see the harness
   README). Run
   it from `cmake-build-relwithdebinfo` so `assets/` resolves.
 - **Perf** — the global `diagnostics = enabled` config knob ([src/sbs_perf.cpp](src/sbs_perf.cpp));

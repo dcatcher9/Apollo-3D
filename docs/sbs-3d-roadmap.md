@@ -553,6 +553,28 @@ selection until a hard cut.
   - Cost is confined to ultrawide: `depth_infer` +9.92% on those clips (1.853 -> 2.037 ms).
     16:9 tensors are unchanged and pay nothing.
 
+- **The `legacy` zero plane is removed, and with it every processor only it used.** `median` has
+  been the validated default since 2026-07-24 and `legacy`'s per-frame anchor wobble was already
+  documented as a source of stretch and jitter. Removing the mode deletes: the `convergence_bias`
+  (identically 0 under every explicit plane), the convergence EMA that fed it (`SubjectState[1].z`,
+  now unused), the `explicit_zero_plane` and `zero_anchor_shift_px` params, and `sbs_3d_subject_lock`
+  — which only ever scaled the legacy anchor and had therefore been **inert under every shipped
+  configuration**, while `--subject-lock` was still advertised as an A/B lever that did nothing.
+  - The per-output-pixel cost went with it. `MakeBestv2Params` used to run `Bestv2WarpDepth` plus
+    the degree-7 shift polynomial unconditionally to build the legacy anchor, then discard it on
+    the explicit path — about 16.6M wasted evaluations per frame on a 7680x2160 target, and an HLSL
+    ternary would not have avoided it because both sides evaluate.
+  - The zero anchor is now resolved unconditionally. It was previously skipped for `legacy` and for
+    a degenerate histogram, with the warp falling back to the subject-anchor path; the percentile
+    defaults (median 0.5, background 0.25, lo 0 / range 1) give a sane plane with no histogram, so
+    nothing is left to branch on and the fallback is unreachable rather than merely unused.
+  - **Behaviourally a no-op, as predicted**: every reported metric is identical to five decimals on
+    both suites with worst per-clip drift 0.0000%, and both gated runs pass. Artifacts are not
+    byte-identical — removing code lets the compiler reschedule floats, the same effect seen when
+    the dead clamps went. Warp time -2.15% core / -2.39% extended. Evidence: `nolegacy-{core,ext}`.
+  - `zero_plane_mode` keeps its numbering (1 subject, 2 median, 3 background); 0 is simply never
+    emitted. Do not renumber — the shader selects on `< 1.5` / `< 2.5` thresholds.
+
 Do not reintroduce a removed processor without a current core and extended comparison, visual
 evidence, and a headset-motivated hypothesis.
 

@@ -35,7 +35,6 @@ float Bestv2ParallaxWidth(float source_width, float literal_mode) {
 
 // Apollo's shared depth-shaping and disparity contract.
 cbuffer Constants : register(b2) {
-    float subject_lock;
     float subject_stretch;
     float content_scale_x;       // source content width / output-eye width (per-eye letterbox)
     float content_scale_y;       // source content height / output-eye height
@@ -43,6 +42,7 @@ cbuffer Constants : register(b2) {
     float literal_bestv2;        // harness-only: bypass production resolution/aspect/pop scaling
     float adaptive_pop;          // use SubjectState[1].w scene-risk multiplier
     float adaptive_pop_max;      // configured ceiling; the resolved ratio arrives in SubjectState
+    float padding0;              // was subject_lock, which only scaled the removed legacy anchor
 };
 
 // Map one eye's output UV into the mono source. Letterbox/pillarbox is applied independently in
@@ -60,15 +60,11 @@ bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {
 }
 
 // Loop-invariant values for the production warp. Keeping the original
-// operation groups here avoids recomputing source geometry, subject shift and convergence for
+// operation groups here avoids recomputing source geometry and the resolved anchor for
 // every search probe while retaining the same Bestv2 field.
 struct Bestv2Params {
-    float subject_shift_px;
-    float zero_anchor_shift_px;
-    float explicit_zero_plane;
     float anchor_shift_px;
     float parallax_scale;
-    float convergence_bias;
     float output_scale;
 };
 
@@ -77,18 +73,9 @@ Bestv2Params MakeBestv2Params(float4 s0, float4 s1, float4 s2,
                               bool use_subject_stretch) {
     Bestv2Params p;
     float parallax_width = Bestv2ParallaxWidth(source_width, literal_bestv2);
-    float subject_depth = Bestv2WarpDepth(s0.z, s0, s1, true, use_subject_stretch);
-    p.subject_shift_px = Bestv2RawShiftPxFast(subject_depth);
-    p.zero_anchor_shift_px = s2.x;
-    p.explicit_zero_plane = s2.y;
+    // Shot-latched explicit zero plane, resolved unconditionally by depth_subject_resolve_cs.
+    p.anchor_shift_px = s2.x;
     p.parallax_scale = 0.35f / parallax_width;
-    // Legacy retains the Bestv2 trim/convergence exactly. Explicit modes instead place their
-    // shot-latched anchor on the screen plane, so adding the legacy offset would defeat t.
-    p.convergence_bias = p.explicit_zero_plane > 0.5f ? 0.0f :
-                         -0.008f * 0.5f + s1.z * 4.0f / parallax_width;
-    // Frame-uniform: hoisted out of the probe loop, and read directly by the search bound below.
-    p.anchor_shift_px = p.explicit_zero_plane > 0.5f ? p.zero_anchor_shift_px :
-                        subject_lock * p.subject_shift_px;
     float aspect_scale = Bestv2AspectScale(source_width, source_height, literal_bestv2);
     float adaptive_ratio = adaptive_pop > 0.5f ? max(s1.w, 1.0f) : 1.0f;
     float strength = literal_bestv2 > 0.5f ? 1.0f : pop_strength * adaptive_ratio;
@@ -101,7 +88,6 @@ float DepthParallax(float d, float4 s0, float4 s1, Bestv2Params p,
     float shaped_depth = Bestv2WarpDepth(d, s0, s1, true, use_subject_stretch);
     float shift_px = Bestv2RawShiftPxFast(shaped_depth);
     float parallax = (shift_px - p.anchor_shift_px) * p.parallax_scale;
-    parallax += p.convergence_bias;
     // No safety clamp: it was provably unreachable. reach = 9.979 * (0.35/854) * strength *
     // aspect_scale and the old bound was 0.071 * aspect_scale, so aspect cancels and binding needs
     // strength > 17.36, while config.cpp validates BOTH pop_strength and adaptive_pop_max into
@@ -199,8 +185,8 @@ static const float BESTV2_SEARCH_MARGIN = 1.10f;
 // depth, which is confined to [0,1]; everything else it touches is frame-uniform and already
 // resolved in Bestv2Params. The reachable interval is therefore computed exactly:
 //
-//   [ (S_MIN - anchor)*parallax_scale + convergence_bias,
-//     (S_MAX - anchor)*parallax_scale + convergence_bias ] * output_scale
+//   [ (S_MIN - anchor)*parallax_scale,
+//     (S_MAX - anchor)*parallax_scale ] * output_scale
 //
 // The previous formulation bounded the same quantity globally instead, and was about six times
 // wider than any displacement that can occur at the shipped defaults, because it budgeted for
@@ -222,8 +208,8 @@ static const float BESTV2_SEARCH_MARGIN = 1.10f;
 // the same lattice, which is the real gate here: the gated metrics are depth-side and cannot see
 // a warp change at all.
 float Bestv2SearchRadius(Bestv2Params p) {
-    float lo = (BESTV2_SHIFT_PX_MIN - p.anchor_shift_px) * p.parallax_scale + p.convergence_bias;
-    float hi = (BESTV2_SHIFT_PX_MAX - p.anchor_shift_px) * p.parallax_scale + p.convergence_bias;
+    float lo = (BESTV2_SHIFT_PX_MIN - p.anchor_shift_px) * p.parallax_scale;
+    float hi = (BESTV2_SHIFT_PX_MAX - p.anchor_shift_px) * p.parallax_scale;
     // output_scale is strictly positive, so scaling the interval preserves it.
     float reach = max(abs(lo), abs(hi)) * p.output_scale;
     return reach * BESTV2_SEARCH_MARGIN;

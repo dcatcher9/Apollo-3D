@@ -80,7 +80,7 @@ creates a reusable execution context for, and warms the single selected model at
 ```
 python tools/sbsbench/run_eval.py                     # all committed clips vs committed baselines
 python tools/sbsbench/run_eval.py --update-baselines  # accepted defaults only; --extra is rejected
-python tools/sbsbench/run_eval.py --extra --subject-lock 0.6   # pass supported A/B levers
+python tools/sbsbench/run_eval.py --extra --pop-strength 1.25   # pass supported A/B levers
 python tools/sbsbench/run_eval.py --label profile-b --conf profile-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/profile-a --report-allow-config-diff
 python tools/sbsbench/run_eval.py --label model-b --conf model-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/model-a --report-allow-config-diff --report-allow-model-diff
 python tools/sbsbench/run_eval.py --label cadence-b --report-control cmake-build-relwithdebinfo/sbs_eval/cadence-a --report-allow-depth-step-diff --extra --depth-every 2
@@ -144,7 +144,7 @@ Harness A/B levers (after `--extra`):
   adaptive ratio 1.0 and you have measured a FIXED gain, with the search radius sized to it. To
   test a ceiling, pass `--adaptive-pop-max` and leave `--pop-strength` alone.
   **Also note the `depth_gt_*` metrics are structurally invariant to pop**, zero-plane,
-  `--subject-lock` and convergence changes: they are computed on the pre-warp depth map, which
+  subject-recenter and stretch changes: they are computed on the pre-warp depth map, which
   none of those levers touch. Their neutrality on such a run is a tautology, not evidence of
   safety. They do respond to `--depth-short-side`, `--ema*`, `--minmax-ema` and model changes.
 - `--literal-bestv2` — comparison-only reference mode. It bypasses production resolution,
@@ -178,7 +178,6 @@ Harness A/B levers (after `--extra`):
   — accepted flowless moving-edge EMA (`0.05`, `0.02`, `0.25`). It preserves ordinary EMA outside a deterministic
   depth-transition mask and blends masked pixels toward current depth. A 16-bit
   `ema_mask_<frame>.png` locality artifact is required whenever enabled.
-- `--subject-lock F` — subject anchor strength (e.g. `0.95`).
 - `--subject-recenter F` — subject depth-field recenter strength.
 - `--subject-stretch` — shape_depth_for_pop 5/95 percentile stretch (default on in the permanent
   Bestv2 subject path).

@@ -2,7 +2,7 @@
 // (depth_subject_hist_cs), EMA it for stability, and precompute everything the
 // reprojection needs per pixel:
 //   SubjectState[0] = { recenter_delta, scene_age, subject_depth_ema, initialized }
-//   SubjectState[1] = { stretch_lo, stretch_inv_range, Bestv2 convergence EMA,
+//   SubjectState[1] = { stretch_lo, stretch_inv_range, unused (was the legacy convergence EMA),
 //                       adaptive pop ratio }
 //   SubjectState[2] = { shot-latched zero-plane anchor shift in source pixels, valid,
 //                       depth-cut state (-1 cooldown, 0 startup, 1 ready), color history valid }
@@ -78,7 +78,7 @@ void main() {
         float background_val = 0.25f, median_val = 0.5f;
         float ptotal = 0.0f;
         for (uint pb = 0; pb < NUM_BINS; pb++) ptotal += (float)PlainHist[pb];
-        if (ptotal > 0.5f && (subject_stretch > 0.5f || zero_plane_mode > 0.5f)) {
+        if (ptotal > 0.5f) {
             float lo_c = STRETCH_BAND_TAIL * ptotal, bg_c = 0.25f * ptotal;
             float med_c = 0.50f * ptotal, hi_c = (1.0f - STRETCH_BAND_TAIL) * ptotal;
             float pc = 0.0f, hv = 1.0f;
@@ -168,9 +168,6 @@ void main() {
         float subj_str = saturate((subj - lo_val) * inv_range);
         float delta = (0.5f - subj_str) * subject_recenter;
         s = float4(delta, 0.0f, subj, 1.0f);
-        float conv_target = (1.0f - subj) * 0.006f;
-        float conv_ema = (!initialized || hard_cut) ? conv_target :
-                         lerp(s1.z, conv_target, 0.10f);
 
         // Depth-edge density predicts warp risk. Between cuts the multiplier remains bit-stable;
         // the base is the floor and the configured ceiling is never exceeded.
@@ -213,9 +210,15 @@ void main() {
         // final shift rather than raw depth prevents later percentile/recenter motion from making
         // convergence breathe. Subject, median, and far/mid-background correspond to the paper's
         // shot-level affine offset t.
+        // Resolved unconditionally. It used to be skipped for the removed `legacy` mode and for a
+        // degenerate histogram, and the warp then fell back to a subject-anchor path. That path is
+        // gone, so the anchor must always exist by the time s0.w marks the state initialized --
+        // which it does, since this block and the s0 write share the same `total > 0.5f` guard.
+        // With no histogram the percentile defaults (median 0.5, background 0.25, lo 0 / range 1)
+        // still yield a sane plane, so there is nothing left to branch on.
         float zero_anchor_shift = s2.x;
         float zero_valid = s2.y;
-        if (zero_plane_mode > 0.5f && ptotal > 0.5f) {
+        {
             // Keep RE-RESOLVING the anchor until the depth field settles, then freeze it for the
             // shot. Latching on the cut frame itself is the same defect that was fixed above for
             // the pop classifier: normalization settling perturbs 50-60% of depth texels on the
@@ -240,10 +243,8 @@ void main() {
                 zero_anchor_shift = Bestv2RawShiftPxFast(zero_anchor_shaped);
                 zero_valid = 1.0f;
             }
-        } else {
-            zero_valid = 0.0f;
         }
-        s1 = float4(lo_val, inv_range, conv_ema, pop_ratio);
+        s1 = float4(lo_val, inv_range, 0.0f, pop_ratio);
         s2 = float4(zero_anchor_shift, zero_valid,
                     depth_cut_state,
                     1.0f); // current NCHW input is copied to history after this dispatch

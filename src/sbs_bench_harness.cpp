@@ -613,7 +613,6 @@ namespace sbs_bench {
       int output_every = 1;  // process every input for temporal state; dump only every Nth
       int depth_every = 1;  // infer every Nth source frame; reuse depth between updates
       // Apollo depth-pipeline A/B levers; <0 / false -> use the conf's value.
-      double subject_lock = -1.0;  // subject anchor strength override (e.g. 0.95)
       double subject_recenter = -1.0;  // global subject recenter override
       int depth_short_side = 0;  // depth inference short-side override (0 = conf)
       double ema = -1.0;  // per-pixel depth EMA override (1.0 = off)
@@ -676,8 +675,6 @@ namespace sbs_bench {
           o.depth_override_root = next("--depth-override-root");
         } else if (a == "--depth-override-all") {
           o.depth_override_all = true;
-        } else if (a == "--subject-lock") {
-          o.subject_lock = std::stod(next("--subject-lock"));
         } else if (a == "--subject-recenter") {
           o.subject_recenter = std::stod(next("--subject-recenter"));
         } else if (a == "--depth-short-side") {
@@ -832,9 +829,6 @@ namespace sbs_bench {
       sbs_cfg.zero_plane = o.zero_plane;
     }
     sbs_cfg.adaptive_pop_max = std::max(sbs_cfg.adaptive_pop_max, sbs_cfg.pop_strength);
-    if (o.subject_lock >= 0.0) {
-      sbs_cfg.subject_lock = o.subject_lock;
-    }
     if (o.subject_recenter >= 0.0) {
       sbs_cfg.subject_recenter = o.subject_recenter;
     }
@@ -1079,14 +1073,14 @@ namespace sbs_bench {
         const float content_scale_x = eye_aspect > aspect ? aspect / eye_aspect : 1.0f;
         const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
         float repro_params[8] = {
-          (float) sbs_cfg.subject_lock,
           sbs_cfg.subject_stretch ? 1.0f : 0.0f,
           content_scale_x,
           content_scale_y,
           (float) sbs_cfg.pop_strength,
           o.literal_bestv2 ? 1.0f : 0.0f,
           sbs_cfg.adaptive_pop ? 1.0f : 0.0f,
-          (float) sbs_cfg.adaptive_pop_max
+          (float) sbs_cfg.adaptive_pop_max,
+          0.0f  // padding0 (was subject_lock)
         };
         repro_cb = const_buffer(dev.Get(), repro_params);
         D3D11_TEXTURE2D_DESC td = {};

@@ -672,7 +672,6 @@ namespace config {
       int_f(vars, prefix + "depth_short_side", target.depth_short_side);
       double_between_f(vars, prefix + "depth_max_aspect", target.depth_max_aspect, {1.0, 8.0});
       double_between_f(vars, prefix + "minmax_ema", target.minmax_ema, {0.001, 1.0});
-      double_between_f(vars, prefix + "subject_lock", target.subject_lock, {0.0, 1.0});
       double_between_f(vars, prefix + "subject_recenter", target.subject_recenter, {0.0, 1.0});
       bool_f(vars, prefix + "subject_stretch", target.subject_stretch);
       string_f(vars, prefix + "zero_plane", target.zero_plane);
@@ -686,7 +685,7 @@ namespace config {
     video.sbs.profile = sbs_profile;
     apply_sbs_values(video.sbs, "sbs_3d_profile_" + sbs_profile + "_");
     apply_sbs_values(video.sbs, "sbs_3d_");
-    if (video.sbs.zero_plane != "legacy" && video.sbs.zero_plane != "subject" && video.sbs.zero_plane != "median" && video.sbs.zero_plane != "background") {
+    if (video.sbs.zero_plane != "subject" && video.sbs.zero_plane != "median" && video.sbs.zero_plane != "background") {
       // Fall back to the shipped default rather than a hard-coded mode, so a typo cannot silently
       // opt a user out of the validated default.
       BOOST_LOG(warning) << "Invalid sbs_3d_zero_plane value '" << video.sbs.zero_plane
