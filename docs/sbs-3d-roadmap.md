@@ -264,11 +264,27 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
   field reads smoother than the shot really is. Headset-validated. Note `bonn_person_close` barely
   moves: a close-up real person has the densest depth edges in the suite (0.24) and still sits at
   the floor, so the configuration already judged good in the headset is preserved.
-  **Also unlatched and unexamined:** `subject_stretch` recomputes its P5/P95 band every frame with
-  no temporal smoothing, while subject depth, convergence and the normalization min/max are all
-  EMA'd. It is the only per-frame adaptive gain in the depth domain with no smoothing, and the same
-  argument used to shot-latch the zero plane applies to it verbatim. At a 2.00 ceiling its wobble is
-  multiplied by up to 2.0.
+  **`subject_stretch` band smoothing was tried and REJECTED 2026-07-24 -- do not simply retry it.**
+  The band is still the only per-frame adaptive gain in the depth domain with no temporal smoothing
+  (subject depth, convergence and the normalization min/max are all EMA'd), and the argument for
+  latching it still stands. But smoothing it is not a free win. Three variants were measured:
+  fixed 0.10, fixed 0.18 (matching `minmax_ema`, the analogous depth-range smoother), and a
+  motion-adaptive weight blending to 1.0 on `change_fraction`. All three improve real footage
+  (extended: jitter -4%, shear -7%, stretch -3%; a 240-frame native bbb clip: jitter -6.6%) and all
+  three regress `fast_motion` jitter catastrophically, 1.715 -> ~3.15 (+87%). Stereo volume stays
+  flat throughout, so these are pure stabilizer effects, not a changed depth mapping.
+  Two hypotheses were falsified. It is NOT simple lag: nearly doubling the weight recovered almost
+  nothing (3.211 -> 3.146). And it is NOT the motion signal: the motion-adaptive variant is
+  bit-identical to fixed 0.18 on that clip, i.e. `change_fraction` never rises enough to engage,
+  so `fast_motion`'s DEPTH field is not actually changing fast despite the clip's name. The
+  mechanism is not understood; understand it before retrying.
+  **Methodology note, because it nearly caused a wrong conclusion:** the 24-frame clips are shorter
+  than a 0.10 EMA's convergence time (95% needs ~28 frames) and are stride-subsampled, which looks
+  like it should invalidate temporal measurements. It does not. A controlled A/B on the same source
+  and start -- 240 frames at native 30fps versus 24 frames at 10fps -- produced essentially the same
+  verdict (jitter -6.6% vs -5.7%). Clip length and stride are not what flips temporal results here;
+  content is. Do not dismiss a temporal measurement on clip-length grounds without running that
+  control.
 - Art3D-style shot-level zero-plane placement was screened as three scene-latched treatments:
   tracked subject, depth median, and far/mid-background (P25). Each resolves its anchor through
   the final Bestv2 curve and stores the source-pixel shift, so percentile motion cannot make
