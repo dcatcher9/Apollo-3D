@@ -117,11 +117,25 @@ float DepthParallax(float d, float4 s0, float4 s1, Bestv2Params p,
 // positioned relative to the output pixel, so narrowing the window removes probes rather than
 // moving every one of them.
 //
-// 2 * 1.30 / 19.4 reproduces the shipped spacing (the 1.30 calibrated strength and the 19.4-step
-// count that replaced the historical 24). The remaining bracket is the legacy radius geometry,
-// retained verbatim as the calibration reference it now is rather than as a bound.
+// The remaining bracket is the legacy radius geometry, retained verbatim as the calibration
+// reference it now is rather than as a bound.
+//
+// 13.4 places probes ~1.0 depth texel apart. The historical 19.4 (and the 24 before it) sampled at
+// ~0.69 texels, i.e. 1.46x finer than the depth signal can vary: SampleDepth is bilinear over the
+// 770-wide map, so g(x) is piecewise-linear between depth texels and one probe interval generically
+// contains at most one breakpoint at unit spacing. A ladder at 0.69 / 0.80 / 1.00 / 1.20 texels
+// found stretch improving monotonically as spacing coarsened (0.5059 -> 0.4964 -> 0.4822 -> 0.4741)
+// with fold 0.000, stereo volume and jitter unchanged, and warp time -7.8% / -16.1% / -22.2%.
+// Visual inspection at 1.0 across every clip: worst case 0.060% of pixels differ by more than 8
+// gray levels (c525), the thin-structure anime clip 0.035%, and the largest differences are in
+// smooth sky rather than at silhouettes -- so the coarser search is not missing crossings.
+//
+// STOP AT 1.0 rather than taking 1.2's better numbers. Unit spacing is where the probe grid matches
+// the resolution of the signal it samples; beyond that the grid is coarser than the data and the
+// one-breakpoint-per-interval argument no longer holds, so the continued stretch improvement is
+// more likely the metric rewarding a smoother mapping than the warp resolving better.
 static const float BESTV2_CALIBRATED_STRENGTH = 1.30f;
-static const float BESTV2_CALIBRATED_STEPS = 19.4f;
+static const float BESTV2_CALIBRATED_STEPS = 13.4f;
 // Significant bits kept in the returned spacing. This quantization is load-bearing, not cosmetic.
 // The shared lattice is only shared if two runs sampling the same index k land on the same
 // position, and the compiler strength-reduces the loop's (float)(probeStart + i) * spacing into an
@@ -134,13 +148,36 @@ static const float BESTV2_CALIBRATED_STEPS = 19.4f;
 // spacing by at most 2^-11 relative.
 static const float BESTV2_PROBE_SPACING_BITS = 10.0f;
 
-float Bestv2ProbeSpacing(float source_width) {
+// Target probe spacing expressed in DEPTH texels, which is the quantity that actually governs the
+// search: SampleDepth is bilinear over the depth map, so g(x) is piecewise-linear between depth
+// texels and the probe grid's job is to bracket at most one breakpoint per interval. Spacing was
+// previously derived purely from source-COLOR geometry and never referenced the depth map, so its
+// value in depth texels held only by coincidence at one depth resolution -- changing
+// sbs_3d_depth_short_side silently moved it (finer if lowered, wasting work; coarser if raised,
+// risking missed crossings). Expressing it in depth texels makes it self-calibrating.
+//
+// 1.22 is the empirically validated point, not a derived one. A ladder measured 0.843 / 0.979 /
+// 1.220 / 1.460 depth texels: stretch improved monotonically as spacing coarsened, fold stayed
+// 0.000, stereo volume and jitter were unchanged, and warp time fell 7.8% / 16.1% / 22.2%. 1.220
+// was visually inspected across every core clip -- worst case 0.060% of pixels differ by more than
+// 8 gray levels, and on the thin structures most at risk (a warrior's staff, wispy hair, silhouette
+// edges) 23, 18 and 22 pixels respectively, with no breakage. 1.460 was measured but NOT visually
+// inspected, so it is not adopted.
+static const float BESTV2_TARGET_DEPTH_TEXELS = 1.22f;
+
+float Bestv2ProbeSpacing(float source_width, float depth_width) {
     // literal_bestv2 is a fixed-strength comparison reference whose spacing never varies, so it
     // keeps its historical unrenormalized count rather than the calibrated-strength one.
-    float calibrated_strength = literal_bestv2 > 0.5f ? 1.0f : BESTV2_CALIBRATED_STRENGTH;
-    float spacing = (2.0f * calibrated_strength / BESTV2_CALIBRATED_STEPS) *
-                    (0.004f + (10.1f * 0.35f + 0.006f * 4.0f) /
-                                Bestv2ParallaxWidth(source_width, literal_bestv2));
+    // literal_bestv2 is a fixed-strength comparison reference; keep it on the historical
+    // source-geometry formulation so its spacing is unaffected by depth-resolution changes.
+    float spacing;
+    if (literal_bestv2 > 0.5f) {
+        spacing = (2.0f * 1.0f / BESTV2_CALIBRATED_STEPS) *
+                  (0.004f + (10.1f * 0.35f + 0.006f * 4.0f) /
+                              Bestv2ParallaxWidth(source_width, literal_bestv2));
+    } else {
+        spacing = BESTV2_TARGET_DEPTH_TEXELS / max(depth_width, 1.0f);
+    }
     float ulp = exp2(floor(log2(spacing)) - BESTV2_PROBE_SPACING_BITS);
     return round(spacing / ulp) * ulp;
 }

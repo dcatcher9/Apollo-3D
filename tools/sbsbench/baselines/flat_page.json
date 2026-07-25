@@ -1,7 +1,7 @@
 {
   "aggregate": {
     "exact_binocular_support_count": 399770.3333333333,
-    "exact_binocular_support_pct": 95.25995163690476,
+    "exact_binocular_support_pct": 95.2601574697502,
     "exact_local_polarity_component_pct": 0.0,
     "exact_local_polarity_support_count": 43025.333333333336,
     "exact_mapping_fold_pct": 0.0,
@@ -10,30 +10,30 @@
     "exact_negative_disparity_pct": 1.0144275426864624,
     "exact_over_3pct_area_pct": 0.0,
     "exact_polarity_ok": 100.0,
-    "exact_polarity_support_pct": 40.00155893961588,
+    "exact_polarity_support_pct": 40.0015754699707,
     "exact_positive_disparity_pct": 0.5921190977096558,
-    "exact_symmetry_residual_p95_pct": 1.609325408935547e-05,
-    "exact_visible_pop_spread_pct": 1.2115921179453533,
+    "exact_symmetry_residual_p95_pct": 1.2069940567016602e-05,
+    "exact_visible_pop_spread_pct": 1.2116071979204814,
     "exact_visible_support_count": 5722.333333333333,
-    "experimental_stereo_window_crossed_burden_pct": 0.017142772674560547,
+    "experimental_stereo_window_crossed_burden_pct": 0.01714284159243107,
     "experimental_stereo_window_support_count": 143853.33333333334,
     "image_integrity_pct": 100.0,
     "image_integrity_support": 27.992616445485297,
     "image_integrity_worst_patch_bad_pct": 0.0,
     "interocular_color_gain_rivalry_burden_pct": 0.0,
     "interocular_color_gain_rivalry_evidence_sufficient": 100.0,
-    "interocular_exposure_rivalry_burden_pct": 0.006804026008462192,
+    "interocular_exposure_rivalry_burden_pct": 0.006801357311711275,
     "interocular_exposure_rivalry_evidence_sufficient": 100.0,
-    "interocular_phase_orientation_burden_pct": 0.7460631397320162,
+    "interocular_phase_orientation_burden_pct": 0.744907598982333,
     "interocular_phase_orientation_evidence_sufficient": 100.0,
     "source_coverage_pct": 100.0,
     "source_coverage_worst_patch_bad_pct": 0.0,
     "source_fidelity_support_pct": 100.0,
     "static_support": 1.0,
-    "vmisalign_p99_pct": 0.0012290349974727697,
+    "vmisalign_p99_pct": 0.0012215469712201358,
     "vmisalign_support_pct": 72.49299719887955,
     "warp_cross_row_shear_severity_pct": 0.0,
-    "warp_cross_row_shear_support_count": 336923.0,
+    "warp_cross_row_shear_support_count": 336923.6666666667,
     "_n": 24,
     "_models": [
       ""
@@ -50,14 +50,14 @@
     "depth_gt_lag_f1_p95": 0.0
   },
   "perf_ms": {
-    "depth_infer": 1.45994,
-    "depth_postprocess_gpu": 0.083552,
-    "depth_preprocess_gpu": 0.170496,
-    "sbs_composite_cpu": 0.0047,
-    "warp_infer": 0.03504
+    "depth_infer": 1.4593,
+    "depth_postprocess_gpu": 0.083328,
+    "depth_preprocess_gpu": 0.166016,
+    "sbs_composite_cpu": 0.0046,
+    "warp_infer": 0.029984
   },
   "meta": {
-    "git_sha": "19888cbf",
+    "git_sha": "b9c97287",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -132,14 +132,14 @@
       ]
     },
     "executable_sha256": "c658b0dc229f3bae93db2de56bee57e8ab1b76c09e38758f789c35d599cd0593",
-    "runtime_shader_sha256": "bf5d4371934d26b00adba00c28d3e6b13385927a821911b072c07703789ddd2e",
+    "runtime_shader_sha256": "9ce3d5d9475f34619b4eda7b4b87919a320dce9f5f2632bbe80b4c4977845d31",
     "engine_name": "depth_anything_v2_fp16.trt-opt770x434-level5-v2.trt11_1_0-sm120-gpuec0860237209d3fe-onnx2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04.engine",
     "engine_sha256": "e54fe5b921df85b65cba29be6ef7e4cbb0c51b90b0f850947eba22521a290f28",
     "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
     "gpu_contention": false,
     "run_kind": "baseline-update",
-    "timestamp": "2026-07-25T04:47:23",
-    "run_name": "zprelatch-rebaseline",
+    "timestamp": "2026-07-25T05:34:11",
+    "run_name": "depthrel-rebaseline",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "source_frame_count": 24,
@@ -147,7 +147,7 @@
     "description": "Synthetic static document/desktop page: flat-content depth hallucination (A3).",
     "expected_flat": true,
     "gt_depth_kind": "disparity",
-    "scored_artifact_sha256": "113448f346e8b1c08bee3583dd7204fa9740564eebcbf775d3549c5317e41209",
+    "scored_artifact_sha256": "cfc0ad41fde4e17554d731979398ccfeef6ab3f391a233198cd2b76c3516082f",
     "clip_sha1": "a839c5fb2d32"
   }
 }

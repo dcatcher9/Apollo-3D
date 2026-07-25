@@ -71,7 +71,9 @@ float2 Reproject(float2 uv, float eyeSign, bool use_subject_stretch) {
 
     // Probes sit on the global lattice k * spacing rather than at uv.x +- i * step, so the window
     // can be narrowed without moving any probe that survives.
-    float spacing = Bestv2ProbeSpacing((float)sourceWidth);
+    uint depthWidth, depthHeight;
+    DepthTexture.GetDimensions(depthWidth, depthHeight);
+    float spacing = Bestv2ProbeSpacing((float)sourceWidth, (float)depthWidth);
     int intervals = Bestv2ProbeIntervals(
         searchRadius, Bestv2MaxProbes((float)sourceWidth, (float)sourceHeight), spacing);
     int probeStart = Bestv2ProbeStart(uv.x, searchRadius, spacing);
