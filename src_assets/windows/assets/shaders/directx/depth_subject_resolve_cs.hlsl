@@ -99,9 +99,9 @@ void main() {
             }
         }
 
-        // Subject and convergence histories always need cut detection. Adaptive-pop and explicit
-        // zero-plane camera parameters are optionally latched below, but disabling both must not
-        // allow the preceding shot's subject/convergence EMA to bleed into a new scene.
+        // The subject history always needs cut detection. Adaptive-pop and explicit zero-plane
+        // camera parameters are optionally latched below, but disabling both must not allow the
+        // preceding shot's subject EMA to bleed into a new scene.
         float scene_age = initialized ? min(previous_scene_age + 1.0f, 65535.0f) : 0.0f;
         float change_fraction = ptotal > 0.5f ? (float)PlainHist[NUM_BINS + 1] / ptotal : 0.0f;
         float color_change_fraction = ptotal > 0.5f ?
@@ -139,7 +139,7 @@ void main() {
         }
 
         // Damp the stretch band, the last per-frame adaptive gain in the depth domain that had no
-        // smoothing at all (subject depth, convergence and the normalization min/max are all EMA'd).
+        // smoothing at all (subject depth and the normalization min/max are both EMA'd).
         // lo/inv_range form a MULTIPLICATIVE gain, so an unsmoothed band makes the depth mapping
         // breathe between cuts and that wobble is then multiplied by the pop strength.
         // Consistently positive on real content: core-real jitter -2.0%, extended -4.3%, and -6.6%
@@ -161,7 +161,7 @@ void main() {
             inv_range = 1.0f / max(hi_val - lo_val, 1e-4f);
         }
 
-        // Reset temporal subject/convergence state on a detected cut. Otherwise the previous
+        // Reset temporal subject state on a detected cut. Otherwise the previous
         // scene bleeds into the first frames of the new shot even though pop/zero-plane relatch.
         // Between cuts retain the validated Bestv2 SubjectDepthEMA (new-value weight 0.20).
         float subj = (!initialized || hard_cut) ? subj_raw : lerp(s.z, subj_raw, 0.20f);

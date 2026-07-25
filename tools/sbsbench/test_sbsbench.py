@@ -637,7 +637,7 @@ class EvalContractTests(unittest.TestCase):
         with open(shader, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("LeftColorTexture.GetDimensions(sourceWidth, sourceHeight)", text)
-        self.assertIn("Bestv2ProbeSpacing((float)sourceWidth)", text)
+        self.assertIn("Bestv2ProbeSpacing((float)sourceWidth, (float)depthWidth)", text)
         self.assertIn("s0, s1, s2, (float)sourceWidth, (float)sourceHeight", text)
         self.assertEqual(text.count("DepthParallax("), 2)
         self.assertNotIn("Bestv2SearchRadius((float)dw)", text)
@@ -664,7 +664,7 @@ class EvalContractTests(unittest.TestCase):
             text = fh.read()
         self.assertIn("BESTV2_CALIBRATION_WIDTH = 854.0f", text)
         self.assertIn("return min(max(source_width, 1.0f), BESTV2_CALIBRATION_WIDTH)", text)
-        self.assertGreaterEqual(text.count("/ parallax_width"), 2)
+        self.assertGreaterEqual(text.count("/ parallax_width"), 1)
 
     def test_bestv2_preserves_angular_pop_across_source_aspects(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -688,17 +688,17 @@ class EvalContractTests(unittest.TestCase):
             text = fh.read()
         self.assertIn("float pop_strength;", text)
         self.assertIn("pop_strength * adaptive_ratio", text)
-        self.assertIn("clamp(parallax * p.output_scale", text)
+        self.assertIn("return parallax * p.output_scale;", text)
 
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
             config = fh.read()
         self.assertIn('prefix + "pop_strength", target.pop_strength, {0.25, 2.0}', config)
         with open(os.path.join(repo, "src", "config.h"), encoding="utf-8") as fh:
             config_header = fh.read()
-        self.assertIn("double pop_strength = 1.25;", config_header)
+        self.assertIn("double pop_strength = 1.20;", config_header)
         self.assertIn("bool adaptive_pop = true;", config_header)
-        self.assertIn("double adaptive_pop_max = 1.30;", config_header)
-        self.assertIn('std::string zero_plane = "legacy";', config_header)
+        self.assertIn("double adaptive_pop_max = 2.00;", config_header)
+        self.assertIn('std::string zero_plane = "median";', config_header)
 
         with open(os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
                   encoding="utf-8") as fh:
@@ -712,7 +712,9 @@ class EvalContractTests(unittest.TestCase):
             adaptive = fh.read()
         self.assertIn("change_fraction >= 0.65f", adaptive)
         self.assertIn("scene_age >= 8.0f", adaptive)
-        self.assertIn("smoothstep(0.007f, 0.016f, edge_fraction)", adaptive)
+        self.assertIn("smoothstep(POP_RISK_LOW, POP_RISK_HIGH, edge_fraction)", adaptive)
+        self.assertIn("#define POP_RISK_LOW 0.04f", adaptive)
+        self.assertIn("#define POP_RISK_HIGH 0.20f", adaptive)
         self.assertNotIn("lerp(pop_ratio, target_ratio", adaptive)
         self.assertIn("Bestv2RawShiftPxFast(zero_anchor_shaped)", adaptive)
         self.assertIn("color_history_valid", adaptive)
@@ -720,7 +722,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("color_change_fraction >= 0.70f", adaptive)
         self.assertIn("scene_age >= 2.0f", adaptive)
         self.assertIn("(!initialized || hard_cut) ? subj_raw", adaptive)
-        self.assertIn("(!initialized || hard_cut) ? conv_target", adaptive)
+        self.assertIn("(!initialized || hard_cut) ? subj_raw", adaptive)
+        self.assertNotIn("conv_target", adaptive)
         self.assertIn("bool hard_cut = initialized &&", adaptive)
         self.assertNotIn("scene_control && initialized", adaptive)
         self.assertIn("s.y = scene_age;", adaptive)
@@ -793,7 +796,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("float Bestv2SearchRadius(Bestv2Params p) {", text)
         self.assertIn("(BESTV2_SHIFT_PX_MIN - p.anchor_shift_px) * p.parallax_scale", text)
         self.assertIn("(BESTV2_SHIFT_PX_MAX - p.anchor_shift_px) * p.parallax_scale", text)
-        self.assertIn("min(reach, p.clamp_abs) * BESTV2_SEARCH_MARGIN", text)
+        self.assertIn("return reach * BESTV2_SEARCH_MARGIN;", text)
+        self.assertNotIn("clamp_abs", text)
         self.assertNotIn("Bestv2SearchStrength", text)
 
         # The declared extrema must really bound the shipped curve over its saturated domain.
@@ -922,8 +926,12 @@ class EvalContractTests(unittest.TestCase):
                                "directx", "include", "sbs_warp_common.hlsl"),
                   encoding="utf-8") as fh:
             common = fh.read()
-        self.assertIn("p.explicit_zero_plane > 0.5f ? p.zero_anchor_shift_px", common)
-        self.assertIn("p.explicit_zero_plane > 0.5f ? 0.0f", common)
+        self.assertIn("p.anchor_shift_px = s2.x;", common)
+        # `legacy` is removed, so there is no non-explicit plane left to bias for.
+        self.assertNotIn("convergence_bias", common)
+        self.assertNotIn("explicit_zero_plane", common)
+        self.assertNotIn("float subject_lock;", common)
+        self.assertNotIn("subject_lock *", common)
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
                   encoding="utf-8") as fh:
             harness = fh.read()
@@ -1478,7 +1486,10 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             estimator = fh.read()
         self.assertIn("depth_engine_builder_level = 5", manager)
-        self.assertIn("trt-opt770x434-level5-v2", manager)
+        self.assertIn("trt-opt770x434-max1036-level5-v3", manager)
+        # The bound belongs in the tag: the cached engine filename encodes only the opt
+        # shape and builder level, so a kMAX change would otherwise reuse a stale engine.
+        self.assertIn("depth_engine_max_dim = 1036", manager)
         self.assertIn("setBuilderOptimizationLevel(depth_engine_builder_level)", estimator)
 
     def test_live_and_eval_shaders_use_level3_optimization(self):

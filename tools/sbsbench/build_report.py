@@ -1288,6 +1288,15 @@ SUPPORTING_HEATMAP_AXES = (
     ("interocular_exposure_rivalry_burden_pct", "exposure"),
     ("interocular_color_gain_rivalry_burden_pct", "colour"),
     ("flow_temporal_p95", "flow temporal"),
+    # Cardboarding evidence. The fraction says how much of the frame renders at one disparity;
+    # the depth span says whether that is legitimate flat geometry (~0) or destroyed relief.
+    # Both are needed -- the fraction alone conflates the two.
+    ("exact_disparity_plateau_far_pct", "far plateau"),
+    ("exact_disparity_plateau_near_pct", "near plateau"),
+    ("exact_disparity_plateau_far_depth_span_pct", "far plateau span"),
+    ("exact_disparity_plateau_near_depth_span_pct", "near plateau span"),
+    # Evidence behind depth_gt_edge_f1, which only gates at or above 1.0% support.
+    ("depth_gt_edge_support_pct", "GT edge support"),
 )
 
 
@@ -1645,6 +1654,26 @@ def scorecard_charts():
 
 # metric -> (short header, what it measures, direction). Only the ones that appear render.
 METRIC_DEFS = [
+    ("exact_disparity_plateau_far_pct",
+         "plateau_far",
+         "Share of the binocular field rendering at exactly the minimum disparity. Shaped-depth clamping maps every pixel outside the subject band onto one shaped depth, and the parallax field is a pure function of it, so those pixels render as a flat plane with no relief. exact_visible_pop_spread_pct cannot see this: it is a p0.5..p99.5 spread, so pinning pixels onto the extremes places those percentiles inside the plateaus and rewards clipping.",
+         "lower = less cardboarding"),
+    ("exact_disparity_plateau_near_pct",
+         "plateau_near",
+         "Share of the binocular field rendering at exactly the maximum disparity. See the far plateau; read both with their depth spans.",
+         "lower = less cardboarding"),
+    ("exact_disparity_plateau_far_depth_span_pct",
+         "plateau_far_span",
+         "Depth range the far plateau swallowed, as a share of the frame's. This is what separates real cardboarding from legitimate flat geometry: ~0 means those pixels genuinely share one depth (sky, a far wall) and one plane is the correct rendering, while a wide span means relief was destroyed. Measured on processed depth, so it cannot see relief already flattened by the upstream normalization clip.",
+         "lower = less destroyed relief"),
+    ("exact_disparity_plateau_near_depth_span_pct",
+         "plateau_near_span",
+         "Depth range the near plateau swallowed, as a share of the frame's. See the far plateau span.",
+         "lower = less destroyed relief"),
+    ("depth_gt_edge_support_pct",
+         "gt_edge_support",
+         "Share of valid pixels that are GT boundary, i.e. the evidence depth_gt_edge_f1 was scored over. That F1 compares thresholded binary edge sets, so on weak-gradient content a small depth change flips edge membership wholesale; it therefore only gates at or above 1.0% support.",
+         "context for depth_gt_edge_f1"),
     ("exact_visible_pop_spread_pct",
          "visible_pop",
          "Source-structure-weighted visible relief from the exact production warp map. Unlike raw requested disparity, this estimates stereo volume carried by image structure a viewer can actually fuse; its support is reported separately.",
