@@ -31,6 +31,11 @@ RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 unweighted bins 
 // saturated on every real clip, pinning the controller to its floor and making the adaptive band
 // inert -- only the synthetic clips ever reached the ceiling. These endpoints span roughly the
 // 10th-90th percentile of real content so the band is actually exercised.
+// New-value weight for the P5/P95 stretch band EMA. Matches sbs_3d_minmax_ema (0.18), which
+// smooths the same kind of quantity -- a depth-domain range -- rather than the convergence EMA,
+// which smooths an anchor. Reset on a cut like every other temporal state here.
+#define STRETCH_BAND_EMA 0.18f
+
 #define POP_RISK_LOW 0.04f
 #define POP_RISK_HIGH 0.20f
 
@@ -124,6 +129,20 @@ void main() {
             // motion: after two updates the detector is rearmed regardless.
             depth_cut_state = 1.0f;
             depth_cut_ready = true;
+        }
+
+        // Damp the stretch band, the last per-frame adaptive gain in the depth domain that had no
+        // smoothing at all (subject depth, convergence and the normalization min/max are all EMA'd).
+        // lo/inv_range form a MULTIPLICATIVE gain, so an unsmoothed band makes the depth mapping
+        // breathe between cuts and that wobble is then multiplied by the pop strength.
+        // Consistently positive on real content: core-real jitter -2.0%, extended -4.3%, and -6.6%
+        // on a 240-frame native clip, with stereo volume flat. It DOES regress the synthetic
+        // async-depth-ghost probe (fast_motion jitter 1.72 -> 3.15); see the roadmap -- the likely
+        // mechanism is that band smoothing compounds an existing depth/color temporal misalignment,
+        // which that clip exists to expose. Revisit if async-depth ghosting is ever chased directly.
+        if (initialized && !hard_cut) {
+            lo_val = lerp(s1.x, lo_val, STRETCH_BAND_EMA);
+            inv_range = lerp(s1.y, inv_range, STRETCH_BAND_EMA);
         }
 
         // Reset temporal subject/convergence state on a detected cut. Otherwise the previous
