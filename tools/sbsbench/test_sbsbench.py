@@ -1,6 +1,7 @@
 import io
 import ast
 import json
+import math
 import os
 import subprocess
 import sys
@@ -636,10 +637,14 @@ class EvalContractTests(unittest.TestCase):
         with open(shader, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("LeftColorTexture.GetDimensions(sourceWidth, sourceHeight)", text)
-        self.assertIn("Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight)", text)
+        self.assertIn("Bestv2ProbeSpacing((float)sourceWidth)", text)
         self.assertIn("s0, s1, s2, (float)sourceWidth, (float)sourceHeight", text)
         self.assertEqual(text.count("DepthParallax("), 2)
         self.assertNotIn("Bestv2SearchRadius((float)dw)", text)
+        # The window is sized from the frame's own resolved parallax, not from source geometry
+        # and a global worst case.
+        self.assertIn("Bestv2SearchRadius(params)", text)
+        self.assertNotIn("Bestv2SearchRadius((float)sourceWidth", text)
 
     def test_forward_coverage_diagnostic_uses_source_geometry(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -777,6 +782,46 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('model.name + ".active-engine.json"', estimator)
         self.assertIn('{"onnx_sha256", artifact.source_sha256}', estimator)
 
+    def test_warp_search_window_is_the_frames_own_displacement_bound(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
+                              "include", "sbs_warp_common.hlsl")
+        with open(common, encoding="utf-8") as fh:
+            text = fh.read()
+        # The window must be built from the SAME resolved per-frame values the parallax mapping
+        # uses, never from the configured adaptive ceiling or a global anchor worst case.
+        self.assertIn("float Bestv2SearchRadius(Bestv2Params p) {", text)
+        self.assertIn("(BESTV2_SHIFT_PX_MIN - p.anchor_shift_px) * p.parallax_scale", text)
+        self.assertIn("(BESTV2_SHIFT_PX_MAX - p.anchor_shift_px) * p.parallax_scale", text)
+        self.assertIn("min(reach, p.clamp_abs) * BESTV2_SEARCH_MARGIN", text)
+        self.assertNotIn("Bestv2SearchStrength", text)
+
+        # The declared extrema must really bound the shipped curve over its saturated domain.
+        d = np.linspace(0.0, 1.0, 200001)
+        shift = (-1.39635933 + d * (2.776208766 + d * (21.04503417 + d * (
+            -94.6673759 + d * (376.6610774 + d * (-645.141824 + d * (
+                482.8701123 - 133.5645677 * d)))))))
+        self.assertLessEqual(float(shift.max()), 8.58230571)
+        self.assertGreaterEqual(float(shift.min()), -1.39635933)
+
+        # A window narrowed against a wider one is only provably equivalent while the probes sit
+        # on one shared lattice, which requires k * spacing to be exact. The compiler turns the
+        # position into an accumulator seeded at each run's own start, so spacing is quantized to
+        # a power-of-two multiple and every partial sum stays exactly representable.
+        self.assertIn("float ulp = exp2(floor(log2(spacing)) - BESTV2_PROBE_SPACING_BITS);", text)
+        self.assertIn("return round(spacing / ulp) * ulp;", text)
+        shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
+                              "sbs_reprojection_ps.hlsl")
+        with open(shader, encoding="utf-8") as fh:
+            reproject = fh.read()
+        self.assertIn("float x = (float)(probeStart + i) * spacing;", reproject)
+        spacing = (2.0 * 1.30 / 19.4) * (0.004 + (10.1 * 0.35 + 0.006 * 4.0) / 854.0)
+        ulp = 2.0 ** (math.floor(math.log2(spacing)) - 10.0)
+        quantized = round(spacing / ulp) * ulp
+        self.assertLess(abs(quantized - spacing) / spacing, 2.0 ** -11)
+        # every probe index the loop can reach keeps k * spacing exactly representable
+        self.assertLess(round(spacing / ulp) * math.ceil(2.0 / spacing), 2 ** 24)
+
     def test_warp_probe_work_caps_tall_mode_at_32_total_samples(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
@@ -784,15 +829,29 @@ class EvalContractTests(unittest.TestCase):
         with open(common, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("BESTV2_MAX_DEPTH_PROBES", text)
-        self.assertIn("Bestv2ProbeSteps", text)
-        aspect_scale = (5120.0 / 2160.0) / (3552.0 / 3840.0)
-        desired = min(max(round(24.0 * aspect_scale), 12), 72)
-        budget = max(int(8.75e8 // (2.0 * 3552.0 * 3840.0)) - 1, 4)
-        self.assertEqual(desired, 62)
-        self.assertEqual(budget + 1, 32)
-        landscape_desired = 24
-        landscape_budget = max(int(8.75e8 // (2.0 * 5120.0 * 2160.0)) - 1, 4)
-        self.assertGreaterEqual(landscape_budget, landscape_desired)
+        self.assertIn("Bestv2MaxProbes", text)
+        self.assertIn("Bestv2ProbeIntervals", text)
+        self.assertIn("Bestv2ProbeStart", text)
+        self.assertNotIn("Bestv2ProbeSteps", text)
+
+        def max_probes(w, h):
+            return max(int(8.75e8 // (2.0 * w * h)), 5)
+
+        # The probe count is no longer chosen: spacing is fixed and the window is sized per frame,
+        # so the count follows from both. The budget only caps pathological rasters.
+        spacing = (2.0 * 1.30 / 19.4) * (0.004 + (10.1 * 0.35 + 0.006 * 4.0) / 854.0)
+
+        def lattice_probes(w, h, strength):
+            aspect_scale = min(max((5120.0 / 2160.0) / (w / h), 0.5), 3.0)
+            radius = aspect_scale * strength * (0.004 + (10.1 * 0.35 + 0.006 * 4.0) / 854.0)
+            # intervals + the loop's initial sample
+            return math.ceil(2.0 * radius / spacing) + 2
+
+        self.assertEqual(max_probes(3552.0, 3840.0), 32)
+        self.assertGreater(lattice_probes(3552.0, 3840.0, 2.0), max_probes(3552.0, 3840.0))
+        for width, height in ((5120.0, 2160.0), (3840.0, 2160.0), (1920.0, 1080.0)):
+            self.assertLessEqual(lattice_probes(width, height, 2.0),
+                                 max_probes(width, height))
 
     def test_adaptive_pop_last_flag_wins(self):
         conf = os.path.join(os.path.dirname(__file__), "bench.conf")

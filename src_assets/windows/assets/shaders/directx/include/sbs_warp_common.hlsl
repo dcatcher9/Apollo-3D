@@ -42,7 +42,7 @@ cbuffer Constants : register(b2) {
     float pop_strength;          // final production stereo-parallax multiplier
     float literal_bestv2;        // harness-only: bypass production resolution/aspect/pop scaling
     float adaptive_pop;          // use SubjectState[1].w scene-risk multiplier
-    float adaptive_pop_max;      // absolute ceiling used to conservatively size the probe search
+    float adaptive_pop_max;      // configured ceiling; the resolved ratio arrives in SubjectState
 };
 
 // Map one eye's output UV into the mono source. Letterbox/pillarbox is applied independently in
@@ -66,6 +66,7 @@ struct Bestv2Params {
     float subject_shift_px;
     float zero_anchor_shift_px;
     float explicit_zero_plane;
+    float anchor_shift_px;
     float parallax_scale;
     float convergence_bias;
     float output_scale;
@@ -86,6 +87,9 @@ Bestv2Params MakeBestv2Params(float4 s0, float4 s1, float4 s2,
     // shot-latched anchor on the screen plane, so adding the legacy offset would defeat t.
     p.convergence_bias = p.explicit_zero_plane > 0.5f ? 0.0f :
                          -0.008f * 0.5f + s1.z * 4.0f / parallax_width;
+    // Frame-uniform: hoisted out of the probe loop, and read directly by the search bound below.
+    p.anchor_shift_px = p.explicit_zero_plane > 0.5f ? p.zero_anchor_shift_px :
+                        subject_lock * p.subject_shift_px;
     float aspect_scale = Bestv2AspectScale(source_width, source_height, literal_bestv2);
     float adaptive_ratio = adaptive_pop > 0.5f ? max(s1.w, 1.0f) : 1.0f;
     float strength = literal_bestv2 > 0.5f ? 1.0f : pop_strength * adaptive_ratio;
@@ -98,76 +102,140 @@ float DepthParallax(float d, float4 s0, float4 s1, Bestv2Params p,
                     bool use_subject_stretch) {
     float shaped_depth = Bestv2WarpDepth(d, s0, s1, true, use_subject_stretch);
     float shift_px = Bestv2RawShiftPxFast(shaped_depth);
-    float anchor_shift_px = p.explicit_zero_plane > 0.5f ? p.zero_anchor_shift_px :
-                            subject_lock * p.subject_shift_px;
-    float parallax = (shift_px - anchor_shift_px) * p.parallax_scale;
+    float parallax = (shift_px - p.anchor_shift_px) * p.parallax_scale;
     parallax += p.convergence_bias;
     return clamp(parallax * p.output_scale, -p.clamp_abs, p.clamp_abs);
 }
 
-// Strength that sizes the backward search. Shared by the radius and the probe count so the two
-// cannot drift: probe spacing is 2*radius/steps, and it stays invariant only while both use this.
-float Bestv2SearchStrength() {
-    return literal_bestv2 > 0.5f ? 1.0f :
-           (adaptive_pop > 0.5f ? adaptive_pop_max : pop_strength);
+// Probe SPACING is what the historical calibration actually pinned; the step count was only ever
+// the number of probes needed to achieve that spacing across an oversized radius. The former
+// formulation derived spacing as 2*radius/step_count, in which the aspect scale
+// and the search strength appeared in both factors purely so they would cancel --
+// BESTV2_CALIBRATED_STRENGTH and the step count's strength renormalization existed only to make
+// that cancellation exact. Expressing spacing directly collapses all of it, and it is what makes
+// the search window sizeable per frame: the probes then sit on a global lattice instead of being
+// positioned relative to the output pixel, so narrowing the window removes probes rather than
+// moving every one of them.
+//
+// 2 * 1.30 / 19.4 reproduces the shipped spacing (the 1.30 calibrated strength and the 19.4-step
+// count that replaced the historical 24). The remaining bracket is the legacy radius geometry,
+// retained verbatim as the calibration reference it now is rather than as a bound.
+static const float BESTV2_CALIBRATED_STRENGTH = 1.30f;
+static const float BESTV2_CALIBRATED_STEPS = 19.4f;
+// Significant bits kept in the returned spacing. This quantization is load-bearing, not cosmetic.
+// The shared lattice is only shared if two runs sampling the same index k land on the same
+// position, and the compiler strength-reduces the loop's (float)(probeStart + i) * spacing into an
+// accumulator seeded at each run's OWN starting index -- so in general they do not. Forcing
+// spacing to an exact multiple of a power of two removes the difference instead of forbidding the
+// transform: every partial sum k * spacing is then exactly representable (|k| stays in the
+// hundreds and the mantissa product well under 2^24), so accumulating and multiplying agree
+// bit-for-bit. Marking the position `precise` also works and needs no quantization, but it blocks
+// the strength reduction and measured about 18% more warp time. The quantization itself moves
+// spacing by at most 2^-11 relative.
+static const float BESTV2_PROBE_SPACING_BITS = 10.0f;
+
+float Bestv2ProbeSpacing(float source_width) {
+    // literal_bestv2 is a fixed-strength comparison reference whose spacing never varies, so it
+    // keeps its historical unrenormalized count rather than the calibrated-strength one.
+    float calibrated_strength = literal_bestv2 > 0.5f ? 1.0f : BESTV2_CALIBRATED_STRENGTH;
+    float spacing = (2.0f * calibrated_strength / BESTV2_CALIBRATED_STEPS) *
+                    (0.004f + (10.1f * 0.35f + 0.006f * 4.0f) /
+                                Bestv2ParallaxWidth(source_width, literal_bestv2));
+    float ulp = exp2(floor(log2(spacing)) - BESTV2_PROBE_SPACING_BITS);
+    return round(spacing / ulp) * ulp;
 }
 
-float Bestv2SearchRadius(float source_width, float source_height) {
-    // Conservative bound for the pixel bands + zero-parallax trim + convergence. The preset's
-    // 7.1% clamp is a safety limit, not the normal search span; using it directly would make the
-    // fixed probe count too coarse at high resolution.
-    //
-    // The shift bound is derived from the curve rather than estimated. Bestv2RawShiftPxFast spans
-    // [-1.3964, +8.5823] over its saturated [0,1] domain (both the stretch and recenter stages
-    // saturate before it, so the domain cannot exceed that). The anchor is
-    // subject_lock * S(d_subj) with subject_lock configurable in [0,1], and the probe's shift is
-    // evaluated at an independent depth, so the reachable |shift - anchor| is maximised at
-    // subject_lock = 1.0: |[-1.3964 - 8.5823, 8.5823 + 1.3964]| = 9.979 px. 10.1 adds margin for
-    // the polynomial's <0.01 px approximation error and float slack, and remains valid for EVERY
-    // configured subject_lock, not just the shipped 0.5.
-    //
-    // This replaces a previous 12.51 px estimate whose stated derivation
-    // ("9.99 - .95*(-2.52) = 12.384") assumed a curve minimum of -2.52 that the current
-    // Bestv2 polynomial does not have -- it appears to predate a curve change. The old value
-    // oversized the radius by ~20%, and since probe spacing is 2*radius/steps with a fixed step
-    // count, that was ~20% of every probe spent where no root can exist.
-    // Search radius must cover the configured adaptive ceiling. The actual per-frame ratio is
-    // GPU-resident in SubjectState and unavailable to this loop-bound helper.
-    return Bestv2AspectScale(source_width, source_height, literal_bestv2) * Bestv2SearchStrength() *
-           (0.004f + (10.1f * 0.35f + 0.006f * 4.0f) /
-                       Bestv2ParallaxWidth(source_width, literal_bestv2));
+// Extrema of Bestv2RawShiftPxFast. The polynomial is evaluated only on [0,1] -- Bestv2WarpDepth
+// saturates, and the stretch and recenter stages saturate before it -- and on that interval its
+// extrema are the endpoints: S(0) and S(1). Verified numerically over the closed interval; the
+// polynomial has no interior extremum outside [S(0), S(1)].
+static const float BESTV2_SHIFT_PX_MIN = -1.39635933f;
+static const float BESTV2_SHIFT_PX_MAX = 8.58230571f;
+// The bound below is exact rather than estimated, so this only has to keep float evaluation slack
+// from putting a root exactly on the window edge, where its outer bracketing probe would be one
+// lattice cell away. 10% is far more than the polynomial's <0.01 px error needs.
+static const float BESTV2_SEARCH_MARGIN = 1.10f;
+
+// Every root of the backward search satisfies (x - uv.x) = eyeSign * DepthParallax(depth(x)), so
+// the window only has to cover max|DepthParallax|. DepthParallax's single free input is the shaped
+// depth, which is confined to [0,1]; everything else it touches is frame-uniform and already
+// resolved in Bestv2Params. The reachable interval is therefore computed exactly:
+//
+//   [ (S_MIN - anchor)*parallax_scale + convergence_bias,
+//     (S_MAX - anchor)*parallax_scale + convergence_bias ] * output_scale, clamped to +-clamp_abs
+//
+// The previous formulation bounded the same quantity globally instead, and was about six times
+// wider than any displacement that can occur at the shipped defaults, because it budgeted for
+// three things simultaneously:
+//   (a) a convergence bias worth ~49% of the radius, which is identically zero whenever an
+//       explicit zero plane is selected -- the default since sbs_3d_zero_plane became `median`;
+//   (b) the most adverse anchor ANY frame could produce (|S| span 9.979 px) rather than this
+//       frame's, though the anchor is a resolved per-frame scalar sitting in Bestv2Params; and
+//   (c) adaptive_pop_max rather than the strength the adaptive controller actually resolved --
+//       so scenes the controller declined to boost paid the widest window and received none of
+//       the gain, and widening the pop band made every scene's probe more expensive.
+// The old comment claimed the resolved ratio was "unavailable to this loop-bound helper". It was
+// not: SubjectState[1] is read at the only call site, and MakeBestv2Params already consumes it.
+//
+// Against the pre-change renderer this cuts mean probes per output pixel from 42.7 to about 16.0
+// on core and 45.0 to about 15.1 on extended (reconstructed from the exported warp maps, since
+// the count is not exported), for measured warp time -45.9% and -49.2%. Every rendered, depth and
+// warp-map artifact on both suites stayed byte-identical to a run that kept the old window on
+// the same lattice, which is the real gate here: the gated metrics are depth-side and cannot see
+// a warp change at all.
+float Bestv2SearchRadius(Bestv2Params p) {
+    float lo = (BESTV2_SHIFT_PX_MIN - p.anchor_shift_px) * p.parallax_scale + p.convergence_bias;
+    float hi = (BESTV2_SHIFT_PX_MAX - p.anchor_shift_px) * p.parallax_scale + p.convergence_bias;
+    // output_scale is strictly positive, so scaling the interval preserves it.
+    float reach = max(abs(lo), abs(hi)) * p.output_scale;
+    return min(reach, p.clamp_abs) * BESTV2_SEARCH_MARGIN;
 }
 
 // Bound worst-case tall/high-resolution work. The live packed target contains two source-sized
-// eyes; ~0.875G depth samples caps 3552x3840 at 31 loop steps plus the initial sample (32 total),
-// matching the user's retained probe-quality setting instead of allowing ~1.7G samples. Normal
-// landscape modes remain at their calibrated 24 steps. The four-step floor is only reachable far
+// eyes; ~0.875G depth samples caps 3552x3840 at 32 samples per output pixel instead of allowing
+// ~1.7G. With spacing fixed and the window sized from the frame's real displacement bound, normal
+// rasters land far below this and never reach it; the five-sample floor is only meaningful far
 // beyond the validated raster envelope and preserves a functional fallback there.
 static const float BESTV2_MAX_DEPTH_PROBES = 8.75e8f;
 
-// Strength the 24-step count was calibrated against, i.e. the shipped adaptive_pop_max. Probe
-// spacing is 2*Bestv2SearchRadius/steps and the radius scales with strength, so holding the step
-// count fixed makes every probe coarser as the pop ceiling rises -- including in scenes the
-// adaptive controller declined to boost, which then pay the cost and receive none of the gain.
-// Normalizing by this constant keeps spacing invariant to strength while reproducing the exact
-// historical 24 * aspect_scale at the shipped configuration.
-static const float BESTV2_CALIBRATED_STRENGTH = 1.30f;
-
-int Bestv2ProbeSteps(float source_width, float source_height, float aspect_scale) {
-    // literal_bestv2 is a fixed-strength comparison reference; its spacing never varies, so it
-    // keeps the historical count exactly rather than being renormalized.
-    float strength_ratio = literal_bestv2 > 0.5f ? 1.0f :
-                           (Bestv2SearchStrength() / BESTV2_CALIBRATED_STRENGTH);
-    // 19.4 rather than 24: the radius was tightened from a stale 12.51 px estimate to the derived
-    // 10.1 px bound, and measuring that change showed 20% finer probe spacing bought exactly
-    // nothing (pop/jitter/fold unchanged, stretch +0.5%) -- the useful search interval was already
-    // over-resolved. So spend the reclaimed radius on FEWER probes at the original spacing instead
-    // of denser probes: 24 * (10.1 / 12.51) = 19.4 reproduces the historical spacing at ~20% less
-    // loop work. Spacing, not step count, is what the calibration actually pinned.
-    int desired = clamp((int)round(19.4f * aspect_scale * strength_ratio), 12, 72);
+// Total depth samples one output pixel may take, including the loop's initial sample.
+int Bestv2MaxProbes(float source_width, float source_height) {
     float packed_pixels = max(2.0f * source_width * source_height, 1.0f);
-    int work_budget = max((int)floor(BESTV2_MAX_DEPTH_PROBES / packed_pixels) - 1, 4);
-    return min(desired, work_budget);
+    return max((int)floor(BESTV2_MAX_DEPTH_PROBES / packed_pixels), 5);
+}
+
+// Probe intervals along the global lattice k * spacing. The run starts at the lattice cell holding
+// uv_x - radius (see Bestv2ProbeStart), so its phase varies by up to one cell per output pixel;
+// one extra interval absorbs that and guarantees the covered span always contains
+// [uv_x - radius, uv_x + radius]. A root at the very edge of the window therefore still has both
+// of its bracketing probes sampled, in a narrowed window exactly as in a wide one.
+//
+// The count is frame-uniform rather than derived per pixel from ceil((uv_x + radius)/spacing).
+// Both were measured at the shipped narrow radius on the same clip: uniform 0.0366 ms against
+// 0.0381 ms for the per-pixel form, whose trip count diverges inside a wave by the wave's own
+// width in lattice cells. At the old oversized radius the measured ranking was the other way
+// round, for reasons that were not chased down -- so treat this as measured at the shipped
+// window, not as a general rule, and re-measure if the window ever widens again.
+//
+// `spacing` is scaled in place when the work budget cannot afford the full lattice. The factor is
+// integral so the thinned probes remain a sub-lattice of the same grid and stay exactly
+// representable, and it is frame-uniform like the count itself. Only rasters far beyond the
+// validated envelope reach it, and there two runs with different radii may land on different
+// lattices and lose the byte-exactness argument.
+int Bestv2ProbeIntervals(float radius, int max_probes, inout float spacing) {
+    int intervals = (int)ceil((2.0f * radius) / spacing) + 1;
+    int decimate = max((intervals + max_probes) / max_probes, 1);
+    if (decimate > 1) {
+        spacing *= (float)decimate;
+        intervals = (int)ceil((2.0f * radius) / spacing) + 1;
+    }
+    return intervals;
+}
+
+// First lattice index of the run. Monotone in uv_x and independent of everything else, so two runs
+// that share `spacing` sample bit-identical positions wherever their windows overlap.
+int Bestv2ProbeStart(float uv_x, float radius, float spacing) {
+    return (int)floor((uv_x - radius) / spacing);
 }
 
 #endif

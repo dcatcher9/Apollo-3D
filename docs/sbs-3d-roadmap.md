@@ -426,17 +426,47 @@ comfort and integrity remain hard gates.
    extended, with stretch -1.7%/-0.4%, stereo volume bit-identical, fold 0.000 and jitter
    unchanged.** The calibration pinned probe SPACING; the step count was only ever the number
    needed to achieve it across an oversized radius.
-   **Much more is available and it can be byte-exact.** The window is still ~6x wider than the
-   maximum displacement that can occur at the shipped defaults, from three stacking slacks:
-   (a) `convergence_bias` is identically 0 whenever `explicit_zero_plane > 0.5`
-   (`sbs_warp_common.hlsl:87-88`), which is now the default, yet the radius still budgets
-   ~49% of itself for it; (b) the shift bound is the global worst case rather than the frame's,
-   though the anchor is already computed in `MakeBestv2Params`; and (c) the radius uses
-   `adaptive_pop_max` rather than the resolved per-frame ratio -- and the comment claiming that
-   ratio is "unavailable to this loop-bound helper" is FALSE, since `s1` is in scope at the only
-   call site and `MakeBestv2Params` already reads `s1.w`. Snapping the probe start to a fixed
-   lattice makes the narrowed probe set a strict SUBSET of the current one, so this validates by
-   byte-compare of `sbs_*`/`depth_*`/`warp_map_*.f32` rather than by metric argument.
+   **DONE 2026-07-25, byte-exact on both suites.** All three predicted slacks were real:
+   (a) `convergence_bias` is identically 0 under the `median` default yet was ~49% of the radius,
+   (b) the shift bound was the global worst case rather than the frame's, and (c) the radius used
+   `adaptive_pop_max` rather than the resolved ratio -- the claim that the ratio was "unavailable
+   to this loop-bound helper" was simply false. `Bestv2SearchRadius` now takes the `Bestv2Params`
+   the mapping already built and returns
+   `1.10 * min(clamp_abs, max|(S(d) - anchor) * parallax_scale + convergence_bias| * output_scale)`,
+   which is exact rather than conservative because `S`'s extrema over its saturated [0,1] domain
+   are its endpoints and everything else is frame-uniform.
+   **Mean probes per output pixel 42.7 -> 16.0 (core) and 45.0 -> 15.1 (extended); warp time
+   0.0668 -> 0.0361 ms (-45.9%) and 0.1460 -> 0.0742 ms (-49.2%).** Stereo volume, jitter and the
+   disparity tails are bit-identical, fold stayed 0.000, mapping stretch moved +0.66%/+0.13% and
+   cross-row shear -0.14%/-0.77%.
+   **What made it validatable, and this is the reusable part.** Probes used to sit at
+   `uv.x +- i*step`, i.e. relative to the output pixel, so narrowing the window MOVED every probe
+   and no subset argument existed. They now sit on a global lattice `k * spacing` with `spacing`
+   an explicit calibrated constant (`2 * 1.30 / 19.4 * <legacy radius geometry>`), which is what
+   `BESTV2_CALIBRATED_STRENGTH` and the step count's strength renormalization were secretly
+   maintaining -- both collapsed into it. A narrowed window is then a strict subset at bit-identical
+   positions, every root is provably inside both windows, and a bracket outside the root region
+   cannot change sign, so the two runs MUST agree bit-for-bit. Gate: `sbs_*`, `depth_*`,
+   `warp_map_*.f32`, `warp_mask_*` and `raw_*` byte-compared, 1320 core + 1440 extended files,
+   zero differences. That gate is the whole point -- three of the four baseline-gated metrics are
+   `depth_gt_*` and are structurally blind to a warp change.
+   **The float trap that nearly invalidated it.** The first Step B attempt differed from Step A on
+   exactly one clip (`aigen_cogvideox_rain`, the only core clip narrower than 854 px), by ~2e-5 of
+   normalized source U across ~15% of pixels. It was not a lost root -- tripling the margin changed
+   nothing. The compiler strength-reduces `(float)(probeStart + i) * spacing` into an accumulator
+   **seeded at each run's own starting index**, so the "shared" lattice was not shared. Two fixes
+   work: marking the position `precise` (blocks the transform, costs ~18% more warp time) or
+   quantizing `spacing` to a power-of-two multiple so every partial sum is exactly representable
+   and accumulation equals multiplication (shipped; moves spacing by <2^-11). **Any future
+   byte-compare across two shaders that index the same grid differently is exposed to this.**
+   Two smaller findings: the loop trip count is frame-uniform because at the narrow radius that
+   measured faster than a per-pixel count (0.0366 vs 0.0381 ms), though at the old oversized radius
+   the ranking inverted; and the `clamp(..., 12, 72)` step floor is gone, since a 12-probe floor
+   would have bound at the new counts. The no-root `bgX` fallback remains unreachable, now by
+   proof rather than by observation: the window's outermost probes lie beyond `max|parallax|`, so
+   `g` has opposite signs at the two ends and the IVT guarantees a crossing. The byte-compare
+   confirms it -- `bgX`'s search span shrank ~3x with no output change anywhere.
+   Evidence: `probe-control-{core,ext}`, `lattice2-{core,extended}`, `tight2-{core,extended}`.
 3. ~~Collect scene-level headset labels for explicit zero-plane placement.~~ **Done 2026-07-24:
    `median` was labelled decisively better in the headset and is now the default** (see the
    superseding entry above). The remaining open work is the *per-scene selector*, not the global

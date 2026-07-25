@@ -45,8 +45,8 @@ float2 Reproject(float2 uv, float eyeSign, bool use_subject_stretch) {
     // produced state (init != 0 -- it is 0 for the first frames). Mandatory shader/resource
     // initialization is validated before the estimator is published. Decide it ONCE here
     // from the runtime state, and read the frame-uniform SubjectState once, so the probe loop
-    // below issues no per-probe buffer loads (DepthParallax gets s0/s1 as args). `shaped` also
-    // gates searchRadius, so the search span and the parallax mapping can never disagree.
+    // below issues no per-probe buffer loads (DepthParallax gets s0/s1 as args). The search span is
+    // then derived from the same Bestv2Params the mapping uses, so the two cannot disagree.
     float4 s0 = SubjectState[0];
     float4 s1 = SubjectState[1];
     float4 s2 = SubjectState[2];
@@ -57,18 +57,24 @@ float2 Reproject(float2 uv, float eyeSign, bool use_subject_stretch) {
     uint sourceWidth, sourceHeight;
     LeftColorTexture.GetDimensions(sourceWidth, sourceHeight);
 
-    float aspectScale = Bestv2AspectScale(
-        (float)sourceWidth, (float)sourceHeight, literal_bestv2);
-    float searchRadius = shaped ? Bestv2SearchRadius((float)sourceWidth, (float)sourceHeight) : 0.0f;
-    if (searchRadius <= 1e-6f) {
+    if (!shaped) {
         return uv;  // subject state is not initialized yet
     }
     Bestv2Params params = MakeBestv2Params(
         s0, s1, s2, (float)sourceWidth, (float)sourceHeight, use_subject_stretch);
+    // Sized from THIS frame's resolved anchor, strength and convergence rather than from a global
+    // worst case, so the window matches the displacement that can actually occur.
+    float searchRadius = Bestv2SearchRadius(params);
+    if (searchRadius <= 1e-6f) {
+        return uv;  // this frame's parallax field is degenerate; the root is uv.x itself
+    }
 
-    int steps = Bestv2ProbeSteps((float)sourceWidth, (float)sourceHeight, aspectScale);
-    float startX = uv.x - searchRadius;
-    float stepX  = (2.0f * searchRadius) / (float)steps;
+    // Probes sit on the global lattice k * spacing rather than at uv.x +- i * step, so the window
+    // can be narrowed without moving any probe that survives.
+    float spacing = Bestv2ProbeSpacing((float)sourceWidth);
+    int intervals = Bestv2ProbeIntervals(
+        searchRadius, Bestv2MaxProbes((float)sourceWidth, (float)sourceHeight), spacing);
+    int probeStart = Bestv2ProbeStart(uv.x, searchRadius, spacing);
 
     // A source at position x forward-warps to out(x) = x - eyeSign * parallax(depth(x)).
     // We want out(x) == uv.x, i.e. g(x) = (x - uv.x) - eyeSign * parallax(depth(x)) == 0.
@@ -85,15 +91,17 @@ float2 Reproject(float2 uv, float eyeSign, bool use_subject_stretch) {
     float bgX     = uv.x;
     float bgDepth = 2.0f;  // above any normalized depth (<= 1)
 
-    float prevX = startX;
+    // Positions are exact multiples of the quantized spacing (see Bestv2ProbeSpacing), so they
+    // depend only on the lattice index and not on where this run's window happened to start.
+    float prevX = (float)probeStart * spacing;
     float prevD = SampleDepth(prevX, uv.y);
     float prevG = (prevX - uv.x) - eyeSign * DepthParallax(
         prevD, s0, s1, params, use_subject_stretch);
     if (prevD < bgDepth) { bgDepth = prevD; bgX = prevX; }
 
     [loop]
-    for (int i = 1; i <= steps; i++) {
-        float x = startX + stepX * i;
+    for (int i = 1; i <= intervals; i++) {
+        float x = (float)(probeStart + i) * spacing;
         float d = SampleDepth(x, uv.y);
         float g = (x - uv.x) - eyeSign * DepthParallax(
             d, s0, s1, params, use_subject_stretch);
