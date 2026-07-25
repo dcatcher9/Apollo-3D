@@ -1,24 +1,24 @@
 {
   "aggregate": {
-    "exact_binocular_support_count": 401045.125,
-    "exact_binocular_support_pct": 95.95408354145005,
+    "exact_binocular_support_count": 401051.0833333333,
+    "exact_binocular_support_pct": 95.96169053125637,
     "exact_local_polarity_component_pct": 0.1110864252388358,
-    "exact_local_polarity_support_count": 13798.833333333334,
+    "exact_local_polarity_support_count": 13796.5,
     "exact_mapping_fold_pct": 0.0,
     "exact_mapping_stretch_pct": 0.7060752141575012,
     "exact_mapping_support_pct": 100.0,
-    "exact_negative_disparity_pct": 1.2310898303985596,
+    "exact_negative_disparity_pct": 1.22903311252594,
     "exact_over_3pct_area_pct": 0.0,
     "exact_polarity_ok": 100.0,
-    "exact_polarity_support_pct": 73.04751618703206,
+    "exact_polarity_support_pct": 73.05007235209148,
     "exact_positive_disparity_pct": 0.0003739511303137988,
     "exact_symmetry_residual_p95_pct": 1.0684318112907931e-05,
-    "exact_visible_pop_spread_pct": 0.9684043998519579,
-    "exact_visible_support_count": 266301.5833333333,
-    "experimental_stereo_window_crossed_burden_pct": 0.006804860662668943,
-    "experimental_stereo_window_support_count": 144811.41666666666,
+    "exact_visible_pop_spread_pct": 0.96840417633454,
+    "exact_visible_support_count": 266299.1666666667,
+    "experimental_stereo_window_crossed_burden_pct": 0.006767758168280125,
+    "experimental_stereo_window_support_count": 144809.29166666666,
     "image_integrity_pct": 100.0,
-    "image_integrity_support": 39.527174212314684,
+    "image_integrity_support": 39.53791408747704,
     "image_integrity_worst_patch_bad_pct": 0.0,
     "interocular_color_gain_rivalry_burden_pct": 0.33989467188682376,
     "interocular_color_gain_rivalry_evidence_sufficient": 100.0,
@@ -32,8 +32,8 @@
     "static_support": 0.7222220696525905,
     "vmisalign_p99_pct": 0.011072774430460034,
     "vmisalign_support_pct": 94.9859943977591,
-    "warp_cross_row_shear_severity_pct": 2.3570592137531334,
-    "warp_cross_row_shear_support_count": 275981.375,
+    "warp_cross_row_shear_severity_pct": 2.3575001827732915,
+    "warp_cross_row_shear_support_count": 275883.6666666667,
     "_n": 24,
     "_models": [
       ""
@@ -49,14 +49,14 @@
     "static_jitter_p95": 0.9277886152267456
   },
   "perf_ms": {
-    "depth_infer": 1.45952,
-    "depth_postprocess_gpu": 0.087136,
-    "depth_preprocess_gpu": 0.141024,
+    "depth_infer": 1.4617,
+    "depth_postprocess_gpu": 0.087008,
+    "depth_preprocess_gpu": 0.154912,
     "sbs_composite_cpu": 0.005,
-    "warp_infer": 0.033952
+    "warp_infer": 0.034016
   },
   "meta": {
-    "git_sha": "b7e0e52b",
+    "git_sha": "19888cbf",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -131,20 +131,20 @@
       ]
     },
     "executable_sha256": "c658b0dc229f3bae93db2de56bee57e8ab1b76c09e38758f789c35d599cd0593",
-    "runtime_shader_sha256": "8da0f6d36f6bb6e756c352038984d02950a3a7740c2de69e694633781936474a",
+    "runtime_shader_sha256": "bf5d4371934d26b00adba00c28d3e6b13385927a821911b072c07703789ddd2e",
     "engine_name": "depth_anything_v2_fp16.trt-opt770x434-level5-v2.trt11_1_0-sm120-gpuec0860237209d3fe-onnx2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04.engine",
     "engine_sha256": "e54fe5b921df85b65cba29be6ef7e4cbb0c51b90b0f850947eba22521a290f28",
     "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
     "gpu_contention": false,
     "run_kind": "baseline-update",
-    "timestamp": "2026-07-25T02:02:27",
-    "run_name": "window-rebaseline",
+    "timestamp": "2026-07-25T04:47:23",
+    "run_name": "zprelatch-rebaseline",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "source_frame_count": 24,
     "name": "warrior-cliff",
     "description": "Banner-bearing warrior on a cloudy mountaintop, hair against bright sky.",
-    "scored_artifact_sha256": "e44f986be10b7962addffe13a21c31287279e3c967799c52d5a8430f224f74dd",
+    "scored_artifact_sha256": "8f2005391473b9b9e1d83f80990f23fbc89cf2b06fe5b7465888a9a7c66342f5",
     "clip_sha1": "b3b3400d5e3b"
   }
 }

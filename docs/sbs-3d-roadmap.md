@@ -333,6 +333,24 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
   verdict (jitter -6.6% vs -5.7%). Clip length and stride are not what flips temporal results here;
   content is. Do not dismiss a temporal measurement on clip-length grounds without running that
   control.
+- **The shot-latched zero-plane anchor is now resolved TWICE per shot (2026-07-25).** It was
+  latched on the cut frame itself, which is the same defect fixed earlier for the pop classifier
+  thirty lines away in the same shader: normalization settling perturbs 50-60% of depth texels on
+  the first frames, and `lo_val`/`inv_range`/`delta` feeding the anchor are raw cut-frame values
+  too (the stretch band's EMA resets on a cut by design). It matters more here than for pop,
+  because the point of a shot-latched plane is that it does not move, so a bad latch is
+  unrecoverable until the next cut.
+  The fix resolves once immediately -- so a new shot never renders on the PREVIOUS shot's plane --
+  and once more at `scene_age == POP_CLASSIFY_SETTLE_FRAMES`. Extended jitter -4.2%, extended
+  stretch -0.7%, core unchanged to four significant figures, `scene_cut` unchanged at 4.900, and
+  `experimental_stereo_window_crossed_burden_pct` +12% (more content in front of the screen plane,
+  which is the axis this line of work exists to move). `exact_visible_pop_spread_pct` is
+  offset-invariant and reads 0.0000% as expected.
+  **Continuously re-resolving through the settle window was tried first and is WORSE -- do not
+  retry it.** The intent was to avoid a visible convergence step by letting the plane drift and
+  then lock. It converts one correction into ~8 frames of motion, and `scene_cut` -- the clip built
+  to probe normalization swim across cuts -- regressed 4.900 -> 8.190 on `static_jitter_p95` (+67%),
+  driving a +17.8% core mean. Resolve twice; do not track.
 - Art3D-style shot-level zero-plane placement was screened as three scene-latched treatments:
   tracked subject, depth median, and far/mid-background (P25). Each resolves its anchor through
   the final Bestv2 curve and stores the source-pixel shift, so percentile motion cannot make

@@ -50,14 +50,14 @@
     "depth_gt_lag_f1_p95": 0.0
   },
   "perf_ms": {
-    "depth_infer": 1.45955,
-    "depth_postprocess_gpu": 0.083136,
-    "depth_preprocess_gpu": 0.165248,
-    "sbs_composite_cpu": 0.0044,
-    "warp_infer": 0.035008
+    "depth_infer": 1.45994,
+    "depth_postprocess_gpu": 0.083552,
+    "depth_preprocess_gpu": 0.170496,
+    "sbs_composite_cpu": 0.0047,
+    "warp_infer": 0.03504
   },
   "meta": {
-    "git_sha": "b7e0e52b",
+    "git_sha": "19888cbf",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -132,14 +132,14 @@
       ]
     },
     "executable_sha256": "c658b0dc229f3bae93db2de56bee57e8ab1b76c09e38758f789c35d599cd0593",
-    "runtime_shader_sha256": "8da0f6d36f6bb6e756c352038984d02950a3a7740c2de69e694633781936474a",
+    "runtime_shader_sha256": "bf5d4371934d26b00adba00c28d3e6b13385927a821911b072c07703789ddd2e",
     "engine_name": "depth_anything_v2_fp16.trt-opt770x434-level5-v2.trt11_1_0-sm120-gpuec0860237209d3fe-onnx2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04.engine",
     "engine_sha256": "e54fe5b921df85b65cba29be6ef7e4cbb0c51b90b0f850947eba22521a290f28",
     "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
     "gpu_contention": false,
     "run_kind": "baseline-update",
-    "timestamp": "2026-07-25T02:02:27",
-    "run_name": "window-rebaseline",
+    "timestamp": "2026-07-25T04:47:23",
+    "run_name": "zprelatch-rebaseline",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "source_frame_count": 24,
@@ -147,7 +147,7 @@
     "description": "Synthetic static document/desktop page: flat-content depth hallucination (A3).",
     "expected_flat": true,
     "gt_depth_kind": "disparity",
-    "scored_artifact_sha256": "7c442614c8f9cf94f677321b041aa0a8aba370379e0696e9321d4c91268294eb",
+    "scored_artifact_sha256": "113448f346e8b1c08bee3583dd7204fa9740564eebcbf775d3549c5317e41209",
     "clip_sha1": "a839c5fb2d32"
   }
 }

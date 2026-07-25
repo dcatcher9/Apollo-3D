@@ -200,7 +200,20 @@ void main() {
         float zero_anchor_shift = s2.x;
         float zero_valid = s2.y;
         if (zero_plane_mode > 0.5f && ptotal > 0.5f) {
-            if (!initialized || hard_cut || zero_valid < 0.5f) {
+            // Keep RE-RESOLVING the anchor until the depth field settles, then freeze it for the
+            // shot. Latching on the cut frame itself is the same defect that was fixed above for
+            // the pop classifier: normalization settling perturbs 50-60% of depth texels on the
+            // first frames, and lo_val/inv_range/delta feeding the anchor below are raw cut-frame
+            // values too (the stretch band's EMA is reset on a cut by design). A bad latch here is
+            // worse than a bad pop class, because the whole point of a shot-latched zero plane is
+            // that it does not move -- so it is unrecoverable until the next cut.
+            // Resolve TWICE, not continuously: once immediately so the new shot never renders on
+            // the previous shot's plane, then once more when the field has settled. Tracking every
+            // frame through the settle window was measured and is worse -- it converts one
+            // correction into ~8 frames of drift, and scene_cut (the clip built to probe
+            // normalization swim across cuts) regressed 4.90 -> 8.19 on static_jitter_p95.
+            if (!initialized || hard_cut || zero_valid < 0.5f ||
+                scene_age == POP_CLASSIFY_SETTLE_FRAMES) {
                 float zero_anchor_depth = zero_plane_mode < 1.5f ? subj :
                                           zero_plane_mode < 2.5f ? median_val : background_val;
                 float zero_anchor_shaped = subject_stretch > 0.5f ?
