@@ -414,9 +414,13 @@ selection until a hard cut.
     6.83% of `depth_infer` (1.512 -> 1.409 ms) — 0.10 ms, which changes no frame budget.
   - **Lower depth resolution does not cost temporal stability on real content.** `static_jitter_p95`
     rises +7.61% / +22.26% / +47.33% across the whole core suite, but that is entirely synthetic:
-    real captures move +0.10% / -1.54% / -6.50% (flat, trending better) while synthetic/generated
-    clips move +12.03% / +36.30% / +79.11%, driven by `fast_motion` alone going 3.145 -> 11.058.
-    Quote the real-capture split, never the suite mean, for this metric.
+    non-synthetic content moves **-3.35% at 280** (i.e. jitter IMPROVES) while the four
+    constructed probes move +70.98%, driven by `fast_motion` alone going 3.145 -> 11.058.
+    Quote the split, never the suite mean. `tools/sbsbench/compare_runs.py` now prints it
+    automatically and marks synthetic groups NOT DECISIVE; the four probe clips carry
+    `content_type: synthetic` in their `meta.json`. Note c339 and c647 are annotated
+    `ai-generated`, so an earlier grouping of "all c* clips" as real captures was wrong;
+    c525/c747/c841 remain unannotated rather than have provenance invented for them.
   - **`depth_gt_edge_f1` is not a usable discriminator at this scale and must be read as
     diagnostic.** It does not track actual depth change: between 434 and 392, tartanair_house_motion
     changed *more* (3-frame-mean affine-aligned depth NRMSE 4.12%) yet scored -0.08%, while

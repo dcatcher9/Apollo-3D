@@ -23,6 +23,26 @@ images shown on the headset. This is the visual half of the host benchmark; see
 
 Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 
+### Comparing two eval runs — use `compare_runs.py`, not an ad-hoc mean
+
+```
+python tools/sbsbench/compare_runs.py <control-run-dir> <treatment-run-dir> [--all-roles]
+```
+
+Hand-averaging two `results.json` files is how this suite gets misread, twice over:
+
+* Filtering NaNs per run independently makes the two means cover **different clip subsets**, so
+  the delta compares different things. `compare_runs.py` intersects on clips where BOTH runs have
+  an applicable, finite value, and prints how many clips it dropped.
+* A suite mean can be produced almost entirely by the synthetic probe clips, which exist to expose
+  one failure mode and are not representative content. `static_jitter_p95` at
+  `--depth-short-side 280` reads **+47% across the whole core suite but -3.35% on non-synthetic
+  content**, because `fast_motion` alone moves +252%. The tool always prints the per-`content_type`
+  split and marks synthetic groups NOT DECISIVE; it never shows a bare suite mean.
+
+`content_type` comes from each clip's `meta.json`. Clips without one report as `unclassified` and
+are treated as decisive — annotate rather than assume.
+
 ## One-command eval loop (start here)
 
 Production configuration resolves one profile at host startup:
