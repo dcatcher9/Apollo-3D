@@ -2128,7 +2128,10 @@ namespace platf::dxgi {
       const local_presenter_display_identity_t &target,
       const LUID &expected_adapter
     ) {
-      if (!live_target || source.device_path.empty() || target.device_path.empty() || source.device_path == target.device_path || !same_local_presenter_luid(source.adapter_id, expected_adapter) || !same_local_presenter_luid(target.adapter_id, expected_adapter) || !boost::algorithm::istarts_with(source.friendly_name, std::wstring(L"Apollo AR Des"))) {
+      // The source is a SudoVDA output: its CCD path lives on the IddCx adapter, whose LUID is
+      // not the render GPU's. Only the physical sink is required to stay on the expected adapter;
+      // the source is pinned by its driver-learned device path and Apollo-owned friendly name.
+      if (!live_target || source.device_path.empty() || target.device_path.empty() || source.device_path == target.device_path || !same_local_presenter_luid(target.adapter_id, expected_adapter) || !boost::algorithm::istarts_with(source.friendly_name, std::wstring(L"Apollo AR Des"))) {
         return false;
       }
       std::lock_guard lock(live_target->mutex);
@@ -2651,7 +2654,9 @@ namespace platf::dxgi {
     }
     const auto source_identity_after_open = query_local_presenter_display_identity(source_name_wide);
     DXGI_ADAPTER_DESC1 source_adapter_desc {};
-    if (!source_identity_after_open || source_identity_after_open->device_path != source_identity_at_start->device_path || !dxgi_display->adapter || FAILED(dxgi_display->adapter->GetDesc1(&source_adapter_desc)) || !same_local_presenter_luid(source_adapter_desc.AdapterLuid, source_identity_after_open->adapter_id)) {
+    // DXGI attributes the SudoVDA output to its render GPU, while CCD reports the IddCx adapter.
+    // The zero-copy contract is that capture opened on the same GPU that presents to the sink.
+    if (!source_identity_after_open || source_identity_after_open->device_path != source_identity_at_start->device_path || !dxgi_display->adapter || FAILED(dxgi_display->adapter->GetDesc1(&source_adapter_desc)) || !same_local_presenter_luid(source_adapter_desc.AdapterLuid, config.target_adapter_id)) {
       BOOST_LOG(info) << "Local AR virtual source identity changed while DXGI capture was opening; reinitializing."sv;
       return local_presenter_result_e::reinit;
     }
