@@ -16,7 +16,8 @@ Approved AR glasses connected as a Windows monitor also use an automatic local p
 3. Transform model output into Apollo's high-is-near convention.
 4. Normalize with permanent P2/P98 bounds and temporal range EMA.
 5. Apply per-pixel EMA, accepted edge/change-aware EMA, Bestv2-derived subject estimation,
-   and P5/P95 stretch/recenter.
+   and P2/P98 stretch/recenter (both the normalization range and the stretch band are
+   attack-fast/release-slow envelopes, never narrower than the live percentiles).
 6. Render Apollo's occlusion-aware backward probe.
 7. Convert the packed SBS raster directly to the encoder format. If doubled width exceeds
    `sbs_3d_max_encode_width` or the selected codec's runtime `NV_ENC_CAPS_WIDTH_MAX`, preserve each
@@ -32,8 +33,9 @@ Normal and Host SBS AI; changing the host profile requires restarting Apollo.
 
 Bestv2 disparity is calibrated at the evaluator's 854-pixel source width and normalized to the
 5120x2160 Artemis reference aspect. `sbs_3d_pop_strength` scales the final parallax (`0.25`–`2`,
-default floor `1.25`) without changing that resolution correction. The accepted scene latch may
-select up to `1.30` from depth-edge risk and holds the selection until a hard cut.
+default floor `1.20`) without changing that resolution correction. The accepted scene latch may
+select up to `sbs_3d_adaptive_pop_max` (default `2.00`) from depth-edge risk and holds the
+selection until a hard cut.
 
 ## Frozen processor decisions
 
@@ -53,9 +55,9 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
   Evidence:
   `plane-specialize-core` and `plane-specialize-extended`.
 - The specialized loop precomputes its subject shift, parallax scale, convergence bias, output
-  scale and safety bound once per output pixel. This removes repeated invariant arithmetic from
-  every probe and reduced warp time by a further 3.38% on core and 3.19% on extended, again with
-  no primary-axis regression or hard failure. Evidence: `parallax-invariants-core` and
+  scale and (then-present) safety bound once per output pixel. This removes repeated invariant
+  arithmetic from every probe and reduced warp time by a further 3.38% on core and 3.19% on
+  extended, again with no primary-axis regression or hard failure. Evidence: `parallax-invariants-core` and
   `parallax-invariants-extended`.
 - The initialized-subject test is performed by the existing search-radius early return rather than
   repeated inside the specialized loop. All rendered, depth and coverage artifacts remained
@@ -462,9 +464,24 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
     -1.80%/-4.03%, `vmisalign_p99_pct` -0.72%/-6.39%, fold 0.000 and image integrity 100.0, with
     `exact_visible_pop_spread_pct` **-1.05% core / +0.00% extended** — no primary-axis cost.
   - The residual plateau is NOT percentile-driven: P1/P99 (`wide99-*`) moved it only 9.21 -> 8.71
-    extended and 16.50 -> 16.23 core for no further gain. What remains is `STRETCH_BAND_EMA` lag —
-    the band trails the live distribution, so more clips than the nominal 4% fall outside it. That
-    is the next lever, and it is a stability trade because the band is a multiplicative gain.
+    extended and 16.50 -> 16.23 core for no further gain.
+  - **Both EMA'd ranges are now attack-fast/release-slow envelopes** (`envfollow-*`). There were two
+    lagging ranges, not one, and both saturate downstream: the normalization P2/P98 in
+    `depth_minmax_ema_cs` (clipped by `buffer_to_tex_cs`) and the stretch band in
+    `depth_subject_resolve_cs` (clipped by `Bestv2WarpDepth`). A symmetric EMA lags the live
+    percentiles, and any frame whose smoothed range is narrower than the live one clips the
+    difference — lag becomes clipped depth. Each now expands immediately to cover the live
+    percentiles and contracts at its original alpha. Expansion is also the stability-safe direction:
+    the range is a multiplicative gain, so growing it LOWERS the gain, and fast shrinking is what
+    makes the mapping breathe. The band is additionally smoothed in (lo, hi) space rather than on
+    the reciprocal `inv_range`. Plateau 9.21 -> 8.11 extended and 16.50 -> 15.77 core, with core
+    `static_jitter_p95` -2.75% (it did not regress, contrary to the stability concern), pop
+    +0.08%/-0.49%, fold 0.000 and integrity 100.0.
+  - **Extended is now at the design floor.** Two independent P2/P98 stages compose — the
+    normalization clips ~4% and the band clips ~4% — so ~8% is what the current architecture
+    implies, and extended measures 8.11%. Core sits higher (15.77%) because its synthetic and flat
+    clips have degenerate depth distributions. Further reduction requires removing one of the two
+    normalization stages, not more tuning.
   - `depth_subject_resolve_cs` duplicates the shaping for the zero anchor rather than calling
     `Bestv2WarpDepth`. Shaping it differently makes the anchor describe a different plane than the
     warp renders — during this work an inconsistent version cost core `vmisalign_p99_pct` +8.76%.
@@ -557,7 +574,8 @@ comfort and integrity remain hard gates.
    `adaptive_pop_max` rather than the resolved ratio -- the claim that the ratio was "unavailable
    to this loop-bound helper" was simply false. `Bestv2SearchRadius` now takes the `Bestv2Params`
    the mapping already built and returns
-   `1.10 * min(clamp_abs, max|(S(d) - anchor) * parallax_scale + convergence_bias| * output_scale)`,
+   `1.10 * min(clamp_abs, max|(S(d) - anchor) * parallax_scale + convergence_bias| * output_scale)`
+   (the `clamp_abs` term was later proved unreachable and removed; see the cardboarding entry),
    which is exact rather than conservative because `S`'s extrema over its saturated [0,1] domain
    are its endpoints and everything else is frame-uniform.
    **Mean probes per output pixel 42.7 -> 16.0 (core) and 45.0 -> 15.1 (extended); warp time

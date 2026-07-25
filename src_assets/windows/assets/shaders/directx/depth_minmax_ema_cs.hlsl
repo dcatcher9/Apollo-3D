@@ -66,8 +66,14 @@ void main() {
         s.z = 1.0f;
         s.w = 2.0f;
     } else {
-        s.x = lerp(s.x, new_min, minmax_alpha);
-        s.y = lerp(s.y, new_max, minmax_alpha);
+        // Attack fast, release slow. A symmetric EMA lags the live percentiles, and whenever the
+        // smoothed range is NARROWER than the frame's, buffer_to_tex_cs saturates the difference
+        // away -- lag becomes clipped depth. Expanding immediately to cover [new_min, new_max]
+        // makes that impossible, while contraction still decays at minmax_alpha. Expansion is also
+        // the safe direction for stability: the range is a multiplicative gain, so growing it
+        // LOWERS the gain, and it is fast SHRINKING that makes the depth scale breathe.
+        s.x = min(lerp(s.x, new_min, minmax_alpha), new_min);
+        s.y = max(lerp(s.y, new_max, minmax_alpha), new_max);
         s.w = 1.0f;
     }
     MinMaxEma[0] = s;

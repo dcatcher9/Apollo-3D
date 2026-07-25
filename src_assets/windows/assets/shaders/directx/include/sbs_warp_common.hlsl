@@ -61,7 +61,7 @@ bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {
 
 // Loop-invariant values for the production warp. Keeping the original
 // operation groups here avoids recomputing source geometry, subject shift and convergence for
-// every search probe while retaining the same Bestv2 field and safety bound.
+// every search probe while retaining the same Bestv2 field.
 struct Bestv2Params {
     float subject_shift_px;
     float zero_anchor_shift_px;
@@ -113,8 +113,8 @@ float DepthParallax(float d, float4 s0, float4 s1, Bestv2Params p,
 // the number of probes needed to achieve that spacing across an oversized radius. The former
 // formulation derived spacing as 2*radius/step_count, in which the aspect scale
 // and the search strength appeared in both factors purely so they would cancel --
-// BESTV2_CALIBRATED_STRENGTH and the step count's strength renormalization existed only to make
-// that cancellation exact. Expressing spacing directly collapses all of it, and it is what makes
+// a now-removed calibrated-strength constant and the step count's strength renormalization
+// existed only to make that cancellation exact. Expressing spacing directly collapses all of it, and it is what makes
 // the search window sizeable per frame: the probes then sit on a global lattice instead of being
 // positioned relative to the output pixel, so narrowing the window removes probes rather than
 // moving every one of them.
@@ -136,7 +136,6 @@ float DepthParallax(float d, float4 s0, float4 s1, Bestv2Params p,
 // the resolution of the signal it samples; beyond that the grid is coarser than the data and the
 // one-breakpoint-per-interval argument no longer holds, so the continued stretch improvement is
 // more likely the metric rewarding a smoother mapping than the warp resolving better.
-static const float BESTV2_CALIBRATED_STRENGTH = 1.30f;
 static const float BESTV2_CALIBRATED_STEPS = 13.4f;
 // Significant bits kept in the returned spacing. This quantization is load-bearing, not cosmetic.
 // The shared lattice is only shared if two runs sampling the same index k land on the same

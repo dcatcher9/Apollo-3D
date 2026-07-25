@@ -144,9 +144,18 @@ void main() {
         // async-depth-ghost probe (fast_motion jitter 1.72 -> 3.15); see the roadmap -- the likely
         // mechanism is that band smoothing compounds an existing depth/color temporal misalignment,
         // which that clip exists to expose. Revisit if async-depth ghosting is ever chased directly.
-        if (initialized && !hard_cut) {
-            lo_val = lerp(s1.x, lo_val, STRETCH_BAND_EMA);
-            inv_range = lerp(s1.y, inv_range, STRETCH_BAND_EMA);
+        // Attack fast, release slow, and smooth in (lo, hi) space rather than on the reciprocal.
+        // A symmetric EMA lags the live percentiles, and any frame whose band is narrower than the
+        // live P2/P98 clips the difference in Bestv2WarpDepth -- that lag is what kept the plateau
+        // above the 4% this band nominally implies. Expanding to cover the live percentiles
+        // immediately removes lag-induced clipping; contraction still decays at STRETCH_BAND_EMA,
+        // which is the direction that actually causes the mapping to breathe.
+        if (initialized && !hard_cut && subject_stretch > 0.5f) {
+            float hi_live = lo_val + 1.0f / max(inv_range, 1e-4f);
+            float prev_hi = s1.x + 1.0f / max(s1.y, 1e-4f);
+            lo_val = min(lerp(s1.x, lo_val, STRETCH_BAND_EMA), lo_val);
+            float hi_val = max(lerp(prev_hi, hi_live, STRETCH_BAND_EMA), hi_live);
+            inv_range = 1.0f / max(hi_val - lo_val, 1e-4f);
         }
 
         // Reset temporal subject/convergence state on a detected cut. Otherwise the previous
