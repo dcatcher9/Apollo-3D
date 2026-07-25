@@ -281,11 +281,26 @@ select up to `1.30` from depth-edge risk and holds the selection until a hard cu
   top of an existing depth/color misalignment, and async depth is a PRODUCTION condition (the live
   pipeline drops frames when inference is busy), so revisit this if async-depth ghosting is ever
   chased directly.
-  A motion-adaptive weight (blending to 1.0, i.e. back to unsmoothed, on `change_fraction`) was
-  also measured and came out identical to fixed 0.18 on real content, so the added complexity buys
-  nothing measurable at those engagement thresholds. Thresholds were chosen from the cut detector's
-  constants rather than from a measured `change_fraction` distribution, which is the same mistake
-  that left the pop classifier inert -- measure the distribution before retrying it.
+  **Motion-adaptive weighting was properly tested and FALSIFIED -- do not retry it without a
+  different signal.** `change_fraction` was instrumented and its real distribution measured across
+  19 real clips: near-static content sits at 0.001-0.008 (c747, spring_daylight_path, c841, anime,
+  spring_character_close, c525), mild motion at 0.03-0.10, and genuinely dynamic content at
+  0.18-0.35 with per-frame peaks to 0.76. So the signal has plenty of dynamic range and the earlier
+  thresholds were not obviously wrong.
+  The hypothesis still fails, because **the benefit of smoothing does not decline with motion**.
+  Correlating the shear improvement against measured motion: low-motion clips (<0.10) mean -5.5%,
+  high-motion clips (>=0.10) mean -3.1%. If anything low-motion content benefits MORE, which is
+  mechanically sensible -- a wobbling band is most visible when nothing else in the frame moves,
+  and motion masks it. Blending toward unsmoothed at high motion would therefore surrender benefit
+  rather than recover it. Two clips with nearly identical motion land on opposite sides
+  (`tartanair_house_easy` 0.338 improves 18.3%; `sintel_ambush` 0.350 regresses 19.0%), so whatever
+  separates them is not motion. `sintel_ambush` is the one real clip that regresses on shear and is
+  the right place to look for a better signal.
+  **Correction to the accepted-entry claim above:** "consistently positive" holds for SHEAR (8 of 12
+  extended clips improved) but overstates JITTER, where the extended mean was driven almost entirely
+  by `sintel_market` (-25.3%) with eight of twelve clips at exactly 0.0%. `static_jitter_p95` is
+  quantized enough not to register small changes, so treat small jitter deltas on this suite as
+  no-signal rather than as evidence.
   Superseded detail from the first attempt, kept because the falsifications are reusable:
   The band is still the only per-frame adaptive gain in the depth domain with no temporal smoothing
   (subject depth, convergence and the normalization min/max are all EMA'd), and the argument for
