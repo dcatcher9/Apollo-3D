@@ -499,10 +499,24 @@ selection until a hard cut.
     c525 and 73.4% on spring_character_close. Earlier entries here quoted the pooled near+far
     figure as if all of it were destroyed relief; it is not. Any future measurement MUST separate
     the two plateaus and validate against raw depth, or it will chase legitimate flat geometry.
-  - Residual work, if any, is the far plateau on flat-background content — not architectural. The
-    two normalization stages serve different purposes (stage 1 gives temporal scale stability
+  - **The far plateau is closed as a warp concern.** Measured with `exact_disparity_plateau_far_*`
+    after the band, envelope and bin-edge fixes, no clip on either suite shows destroyed relief:
+    the largest fractions are entirely flat content (c525 53.27% at span 0.0%, vkitti_drive_rain
+    19.89% at 0.0%, c339 18.60% at 0.0%) and the widest spans are small (bonn_person_close 6.1%,
+    c647 4.4%, sintel_ambush 3.8%). The warp is faithfully rendering what it receives.
+    **Caveat, and it bounds the claim:** that metric samples PROCESSED depth, which the stage-1
+    normalization has already clipped, so it cannot see relief flattened before the warp. The
+    earlier raw-referenced measurement put c525's far plateau at 76.9% of the RAW range. So the
+    remaining question belongs to the depth normalization, not the warp, and needs a
+    `raw_*.f32`-referenced measure to answer.
+  - The two normalization stages serve different purposes (stage 1 gives temporal scale stability
     against DA-V2's per-frame scale drift; stage 2 allocates the parallax budget to the mid-range)
     and the evidence does not support collapsing them.
+  - `STRETCH_BAND_EMA`'s `fast_motion` regression (jitter 1.72 -> 3.15) is NOT chased. That clip is
+    now annotated `content_type: synthetic` and `compare_runs.py` marks it NOT DECISIVE, so it can
+    no longer contaminate a suite mean. The original hypothesis stands — band smoothing compounds
+    an existing depth/color temporal misalignment that the clip exists to expose — and it should be
+    revisited only if async-depth ghosting is chased directly on real content.
   - `depth_subject_resolve_cs` duplicates the shaping for the zero anchor rather than calling
     `Bestv2WarpDepth`. Shaping it differently makes the anchor describe a different plane than the
     warp renders — during this work an inconsistent version cost core `vmisalign_p99_pct` +8.76%.
