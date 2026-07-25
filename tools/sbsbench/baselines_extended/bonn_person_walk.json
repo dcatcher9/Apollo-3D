@@ -1,10 +1,15 @@
 {
   "aggregate": {
     "depth_gt_affine_nrmse_pct": 11.606243133544922,
-    "depth_gt_edge_f1": 26.017012990111585,
+    "depth_gt_edge_f1": 26.63918226592685,
+    "depth_gt_edge_support_pct": 0.8354240517156359,
     "depth_gt_polarity_ok": 100.0,
     "exact_binocular_support_count": 289535.125,
     "exact_binocular_support_pct": 88.91695149739583,
+    "exact_disparity_plateau_far_depth_span_pct": 0.0020258059057025606,
+    "exact_disparity_plateau_far_pct": 0.10325037884467747,
+    "exact_disparity_plateau_near_depth_span_pct": 8.426148622429636,
+    "exact_disparity_plateau_near_pct": 2.9436635176340737,
     "exact_local_polarity_component_pct": 0.25176018775336034,
     "exact_local_polarity_support_count": 38747.75,
     "exact_mapping_fold_pct": 0.0,
@@ -53,14 +58,14 @@
     "depth_gt_lag_f1_p95": 1.382862079084302
   },
   "perf_ms": {
-    "depth_infer": 1.27955,
-    "depth_postprocess_gpu": 0.079936,
-    "depth_preprocess_gpu": 0.121184,
-    "sbs_composite_cpu": 0.0053,
+    "depth_infer": 1.28013,
+    "depth_postprocess_gpu": 0.07888,
+    "depth_preprocess_gpu": 0.124416,
+    "sbs_composite_cpu": 0.0051,
     "warp_infer": 0.024544
   },
   "meta": {
-    "git_sha": "4c21e2ac",
+    "git_sha": "909ab368",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "3dbbc6790aa2",
@@ -88,12 +93,12 @@
     "zero_plane": "median",
     "literal_bestv2": false,
     "depth_compensation": "none",
-    "eval_schema": 32,
+    "eval_schema": 33,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "f7c8f0e231ddd31a",
-    "label_contract_sha256": "5ca00f4b8e00e25f",
+    "metric_sha256": "96428083de5d0541",
+    "label_contract_sha256": "23bfa9fc83092da0",
     "metric_runtime": {
       "python": "3.14.3",
       "numpy": "2.5.0",
@@ -142,8 +147,8 @@
     "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
     "gpu_contention": false,
     "run_kind": "baseline-update",
-    "timestamp": "2026-07-25T10:08:04",
-    "run_name": "rebase3-ext",
+    "timestamp": "2026-07-25T10:45:46",
+    "run_name": "rebase4-ext",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "source_frame_count": 24,
@@ -157,7 +162,7 @@
     "citation": "Palazzolo et al., ReFusion, IROS 2019",
     "license_note": "Official page requests citation; prepared media remains external to Git.",
     "source_suite": "extended-v3",
-    "scored_artifact_sha256": "f6ddbd3fdbeec28791eee793cc26b09a0cb31227d824b01c991b45dbc4a18243",
+    "scored_artifact_sha256": "a6e693285e4b00dfe8baee71f746c23fc36cf7aa8bca24200fd94570b63a0eb0",
     "clip_sha1": "29cacb5ce074"
   }
 }

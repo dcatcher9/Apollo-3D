@@ -2,6 +2,10 @@
   "aggregate": {
     "exact_binocular_support_count": 404379.0833333333,
     "exact_binocular_support_pct": 96.36063235494184,
+    "exact_disparity_plateau_far_depth_span_pct": 0.010902895720942567,
+    "exact_disparity_plateau_far_pct": 0.6377758992214998,
+    "exact_disparity_plateau_near_depth_span_pct": 7.270378388402453,
+    "exact_disparity_plateau_near_pct": 5.867061952749888,
     "exact_local_polarity_component_pct": 0.011056748763026232,
     "exact_local_polarity_support_count": 58832.708333333336,
     "exact_mapping_fold_pct": 0.0,
@@ -49,14 +53,14 @@
     "static_jitter_p95": 1.9999998807907104
   },
   "perf_ms": {
-    "depth_infer": 1.45651,
-    "depth_postprocess_gpu": 0.085504,
-    "depth_preprocess_gpu": 0.150816,
-    "sbs_composite_cpu": 0.0054,
-    "warp_infer": 0.031808
+    "depth_infer": 1.45658,
+    "depth_postprocess_gpu": 0.086176,
+    "depth_preprocess_gpu": 0.151616,
+    "sbs_composite_cpu": 0.0068,
+    "warp_infer": 0.031744
   },
   "meta": {
-    "git_sha": "4c21e2ac",
+    "git_sha": "909ab368",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -83,12 +87,12 @@
     "zero_plane": "median",
     "literal_bestv2": false,
     "depth_compensation": "none",
-    "eval_schema": 32,
+    "eval_schema": 33,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "f7c8f0e231ddd31a",
-    "label_contract_sha256": "5ca00f4b8e00e25f",
+    "metric_sha256": "96428083de5d0541",
+    "label_contract_sha256": "23bfa9fc83092da0",
     "metric_runtime": {
       "python": "3.14.3",
       "numpy": "2.5.0",
@@ -137,14 +141,14 @@
     "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
     "gpu_contention": false,
     "run_kind": "baseline-update",
-    "timestamp": "2026-07-25T10:05:52",
-    "run_name": "rebase3-core",
+    "timestamp": "2026-07-25T10:43:34",
+    "run_name": "rebase4-core",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "source_frame_count": 24,
     "name": "palace-hall",
     "description": "Robed cultivator bowing in a bright golden palace hall.",
-    "scored_artifact_sha256": "42c24d458ccc1511cdf99e0b43d5ebad0ed61100a856849414dcffca872a29a5",
+    "scored_artifact_sha256": "1a07b21400b00768675594b922c87eefc3bdc4e21d90add3a34f2c39b620f2e7",
     "clip_sha1": "1ff2aa060c61"
   }
 }

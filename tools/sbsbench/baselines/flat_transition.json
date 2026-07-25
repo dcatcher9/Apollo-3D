@@ -2,6 +2,10 @@
   "aggregate": {
     "exact_binocular_support_count": 400444.5416666667,
     "exact_binocular_support_pct": 94.04729886319282,
+    "exact_disparity_plateau_far_depth_span_pct": 0.014691882643020196,
+    "exact_disparity_plateau_far_pct": 0.46700717275962234,
+    "exact_disparity_plateau_near_depth_span_pct": 6.588875117768275,
+    "exact_disparity_plateau_near_pct": 3.0080573558807373,
     "exact_local_polarity_component_pct": 0.03315466651931259,
     "exact_local_polarity_support_count": 21172.5,
     "exact_mapping_fold_pct": 0.0,
@@ -50,14 +54,14 @@
     "depth_gt_lag_f1_p95": 0.0
   },
   "perf_ms": {
-    "depth_infer": 1.45571,
-    "depth_postprocess_gpu": 0.084736,
-    "depth_preprocess_gpu": 0.142176,
-    "sbs_composite_cpu": 0.0055,
-    "warp_infer": 0.02528
+    "depth_infer": 1.45558,
+    "depth_postprocess_gpu": 0.084672,
+    "depth_preprocess_gpu": 0.164544,
+    "sbs_composite_cpu": 0.0059,
+    "warp_infer": 0.02544
   },
   "meta": {
-    "git_sha": "4c21e2ac",
+    "git_sha": "909ab368",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -84,12 +88,12 @@
     "zero_plane": "median",
     "literal_bestv2": false,
     "depth_compensation": "none",
-    "eval_schema": 32,
+    "eval_schema": 33,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "f7c8f0e231ddd31a",
-    "label_contract_sha256": "5ca00f4b8e00e25f",
+    "metric_sha256": "96428083de5d0541",
+    "label_contract_sha256": "23bfa9fc83092da0",
     "metric_runtime": {
       "python": "3.14.3",
       "numpy": "2.5.0",
@@ -138,15 +142,15 @@
     "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
     "gpu_contention": false,
     "run_kind": "baseline-update",
-    "timestamp": "2026-07-25T10:05:52",
-    "run_name": "rebase3-core",
+    "timestamp": "2026-07-25T10:43:34",
+    "run_name": "rebase4-core",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "source_frame_count": 24,
     "name": "flat_transition",
     "description": "Textured depth scene cutting to a static flat page: normalization recovery and false-stereo decay.",
     "gt_depth_kind": "disparity",
-    "scored_artifact_sha256": "f0848d3692a6166eacec71d9f2ca06419e1350497588e7172bfa0720a397109c",
+    "scored_artifact_sha256": "419d3601eda559fdc799957d2e34580f586d1be509afc31f95b8e0ac02d1b149",
     "clip_sha1": "2f5bde33326b"
   }
 }

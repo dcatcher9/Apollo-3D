@@ -2,6 +2,10 @@
   "aggregate": {
     "exact_binocular_support_count": 335472.875,
     "exact_binocular_support_pct": 95.44495081018518,
+    "exact_disparity_plateau_far_depth_span_pct": 0.0001865594017484858,
+    "exact_disparity_plateau_far_pct": 18.12718121210734,
+    "exact_disparity_plateau_near_depth_span_pct": 10.572625758979965,
+    "exact_disparity_plateau_near_pct": 4.587050338586171,
     "exact_local_polarity_component_pct": 0.13329591693559703,
     "exact_local_polarity_support_count": 43184.666666666664,
     "exact_mapping_fold_pct": 0.0,
@@ -49,14 +53,14 @@
     "static_jitter_p95": 1.9999998807907104
   },
   "perf_ms": {
-    "depth_infer": 1.37875,
-    "depth_postprocess_gpu": 0.082208,
-    "depth_preprocess_gpu": 0.1496,
-    "sbs_composite_cpu": 0.0048,
-    "warp_infer": 0.030016
+    "depth_infer": 1.37856,
+    "depth_postprocess_gpu": 0.081856,
+    "depth_preprocess_gpu": 0.15664,
+    "sbs_composite_cpu": 0.0053,
+    "warp_infer": 0.029984
   },
   "meta": {
-    "git_sha": "4c21e2ac",
+    "git_sha": "909ab368",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -83,12 +87,12 @@
     "zero_plane": "median",
     "literal_bestv2": false,
     "depth_compensation": "none",
-    "eval_schema": 32,
+    "eval_schema": 33,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "f7c8f0e231ddd31a",
-    "label_contract_sha256": "5ca00f4b8e00e25f",
+    "metric_sha256": "96428083de5d0541",
+    "label_contract_sha256": "23bfa9fc83092da0",
     "metric_runtime": {
       "python": "3.14.3",
       "numpy": "2.5.0",
@@ -137,8 +141,8 @@
     "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
     "gpu_contention": false,
     "run_kind": "baseline-update",
-    "timestamp": "2026-07-25T10:05:52",
-    "run_name": "rebase3-core",
+    "timestamp": "2026-07-25T10:43:34",
+    "run_name": "rebase4-core",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "source_frame_count": 24,
@@ -154,7 +158,7 @@
     "source_url": "https://github.com/user-attachments/assets/fe0a78e6-b669-4800-8cf0-b5f9b5145b52",
     "source_window": "0.500s; 24 contiguous frames at the native 8 fps and 720x480 resolution",
     "source_artifacts": "Visual inspection of frames 1, 12 and 24 found no stable white outline attached to the child. The source itself contains strong motion/defocus blur, translucent rain streaks, bright splash rims, atmospheric veiling and AI-generated temporal shape changes; these must not be attributed to stereo warping.",
-    "scored_artifact_sha256": "cfa77ecc1ce31cb29386730b1fd54031989bdc7ef16e335c92588ddaaad1fa1d",
+    "scored_artifact_sha256": "232710d6b5b5712c9f283cd7b63bee5d1db9007e8e781de8f588a49c9f2f916d",
     "clip_sha1": "5a3b6632212b"
   }
 }

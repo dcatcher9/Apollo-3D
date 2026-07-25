@@ -1,10 +1,15 @@
 {
   "aggregate": {
     "depth_gt_affine_nrmse_pct": 9.684904436270395,
-    "depth_gt_edge_f1": 69.76766935133526,
+    "depth_gt_edge_f1": 52.47896358694226,
+    "depth_gt_edge_support_pct": 0.5762138362108632,
     "depth_gt_polarity_ok": 100.0,
     "exact_binocular_support_count": 387960.3333333333,
     "exact_binocular_support_pct": 88.86314392089844,
+    "exact_disparity_plateau_far_depth_span_pct": 1.1320709321254834,
+    "exact_disparity_plateau_far_pct": 0.9144535338588563,
+    "exact_disparity_plateau_near_depth_span_pct": 6.678755289706369,
+    "exact_disparity_plateau_near_pct": 1.8538151147804456,
     "exact_local_polarity_component_pct": 0.19944990429621529,
     "exact_local_polarity_support_count": 12256.666666666666,
     "exact_mapping_fold_pct": 0.0,
@@ -55,14 +60,14 @@
     "depth_gt_lag_f1_p95": 0.0
   },
   "perf_ms": {
-    "depth_infer": 1.18416,
-    "depth_postprocess_gpu": 0.073856,
-    "depth_preprocess_gpu": 0.13008,
-    "sbs_composite_cpu": 0.0054,
-    "warp_infer": 0.027168
+    "depth_infer": 1.18397,
+    "depth_postprocess_gpu": 0.074112,
+    "depth_preprocess_gpu": 0.141696,
+    "sbs_composite_cpu": 0.0053,
+    "warp_infer": 0.0272
   },
   "meta": {
-    "git_sha": "4c21e2ac",
+    "git_sha": "909ab368",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "3dbbc6790aa2",
@@ -90,12 +95,12 @@
     "zero_plane": "median",
     "literal_bestv2": false,
     "depth_compensation": "none",
-    "eval_schema": 32,
+    "eval_schema": 33,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "f7c8f0e231ddd31a",
-    "label_contract_sha256": "5ca00f4b8e00e25f",
+    "metric_sha256": "96428083de5d0541",
+    "label_contract_sha256": "23bfa9fc83092da0",
     "metric_runtime": {
       "python": "3.14.3",
       "numpy": "2.5.0",
@@ -144,8 +149,8 @@
     "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
     "gpu_contention": false,
     "run_kind": "baseline-update",
-    "timestamp": "2026-07-25T10:08:04",
-    "run_name": "rebase3-ext",
+    "timestamp": "2026-07-25T10:45:46",
+    "run_name": "rebase4-ext",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "source_frame_count": 24,
@@ -159,7 +164,7 @@
     "citation": "Wang et al., TartanAir, IROS 2020",
     "license_note": "Dataset CC BY 4.0; prepared media remains external to keep the repository small.",
     "source_suite": "extended-v3",
-    "scored_artifact_sha256": "5ed2873dc43d5a773afacd758ed2f1d73e5dbbc43b388a60f83aa78d337bb7fa",
+    "scored_artifact_sha256": "a399d7049f8c29afd2626bda4e46b5ac3ae78caafe23059df4e1d47e7cfe00f8",
     "clip_sha1": "3dcc51c9c695"
   }
 }

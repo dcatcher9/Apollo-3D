@@ -552,7 +552,9 @@ annotations.
 
 | metric | meaning | direction |
 |--------|---------|-----------|
-| `exact_visible_pop_spread_pct` | source-structure-supported exact disparity spread; abstains without horizontal evidence | higher = more visible stereo volume |
+| `exact_visible_pop_spread_pct` | source-structure-supported exact disparity spread; abstains without horizontal evidence. **Caution: this is a p0.5..p99.5 spread, so it REWARDS clipping** — pinning pixels onto the two extreme disparities places those percentiles inside the plateaus and reports the clip bounds rather than scene relief. Read it with the plateau metrics below. | higher = more visible stereo volume |
+| `exact_disparity_plateau_far_pct` / `_near_pct` | share of the binocular field rendering at exactly the min / max disparity — a flat plane with no relief | lower = less cardboarding |
+| `exact_disparity_plateau_far_depth_span_pct` / `_near_depth_span_pct` | depth range each plateau swallowed, as a share of the frame's. **This is what separates real cardboarding from legitimate flat geometry**: ~0 means those pixels genuinely share one depth (sky, a far wall) and one plane is correct, while a wide span means relief was destroyed. Never read the plateau fraction alone. | lower = less destroyed relief |
 | `exact_positive_disparity_pct` / `exact_negative_disparity_pct` | output-Jacobian-weighted p99.9 tails of actual mutually visible `x_right - x_left` disparity | each <=3% under the current experimental hard limit |
 | `exact_over_3pct_area_pct` | mutually visible rendered area outside that current limit | lower = less over-limit burden |
 | `exact_mapping_stretch_pct` / `exact_mapping_fold_pct` | low-Jacobian repeated columns and reversed coordinate steps | lower = less stretch/fold |
@@ -631,7 +633,8 @@ evidence is retained and none of it becomes a single-frame model label.
 | metric | meaning | direction |
 |--------|---------|-----------|
 | `depth_gt_affine_nrmse_pct` | robust positive-affine aligned RMSE normalized by robust GT range, in percent | lower = better global relative depth |
-| `depth_gt_edge_f1` | strict boundary F1 with one-pixel positional tolerance | higher = better boundaries |
+| `depth_gt_edge_f1` | strict boundary F1 with one-pixel positional tolerance. **Only gates where `depth_gt_edge_support_pct` >= 1.0** — it scores thresholded binary edge sets, so on weak-gradient content a small depth change flips edge membership wholesale and the score swings without the depth moving. It is still reported below that support, but as a diagnostic. | higher = better boundaries |
+| `depth_gt_edge_support_pct` | share of valid pixels that are GT boundary — the evidence the F1 above was computed over | context for `depth_gt_edge_f1` |
 | `depth_gt_polarity_ok` | explicit sign of prediction-to-GT affine fit | must remain 100% |
 
 Per-pixel bad-disparity rates remain optional raw evidence for dataset inspection, but are absent

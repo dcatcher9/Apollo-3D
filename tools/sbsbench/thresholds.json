@@ -3,40 +3,328 @@
   "_scope_note": "perceptual risk metrics may become DA-V2 augmentation labels after controlled-corruption and headset validation. Stereo volume is a style descriptor, not an unbounded reward: select the strongest scale only after independent safety/coherence/artifact constraints pass. conformance metrics catch renderer/transport contract bugs and are never perceptual labels. gt-only metrics require authenticated reference depth/disparity. temporal-only metrics evaluate sequences and are not single-frame policy labels.",
   "_comfort_note": "Disparity percentages are normalized image disparity, not retinal angle. The existing +/-3% tails and over-limit burden are retained as experimental safety heuristics until calibrated for a fixed display FOV and headset/user study.",
   "metrics": {
-    "exact_visible_pop_spread_pct": {"scope": "style", "role": "diagnostic", "axis": "stereo", "requires": "exact_visible_support_count", "better": "higher", "rel_tol": 0.15, "abs_floor": 0.04},
-
-    "exact_binocular_support_pct": {"scope": "conformance", "role": "hard", "axis": "stereo-evidence", "better": "higher", "rel_tol": 0.0, "abs_floor": 0.25, "hard_min": 80.0, "trigger_min": 80.0},
-    "exact_positive_disparity_pct": {"scope": "perceptual", "role": "hard", "label": "hard", "label_status": "experimental", "axis": "comfort", "requires": "exact_binocular_support_count", "better": "lower", "rel_tol": 0.0, "abs_floor": 0.1, "hard_max": 3.0, "trigger": 3.0},
-    "exact_negative_disparity_pct": {"scope": "perceptual", "role": "hard", "label": "hard", "label_status": "experimental", "axis": "comfort", "requires": "exact_binocular_support_count", "better": "lower", "rel_tol": 0.0, "abs_floor": 0.1, "hard_max": 3.0, "trigger": 3.0},
-    "exact_over_3pct_area_pct": {"scope": "perceptual", "role": "diagnostic", "label": "risk", "label_status": "experimental", "axis": "comfort", "requires": "exact_binocular_support_count", "better": "lower", "rel_tol": 0.2, "abs_floor": 0.05},
-    "exact_symmetry_residual_p95_pct": {"scope": "conformance", "role": "hard", "axis": "stereo-geometry", "requires": "exact_binocular_support_count", "better": "lower", "rel_tol": 0.0, "abs_floor": 0.02, "hard_max": 0.1, "trigger": 0.1},
-    "exact_polarity_ok": {"scope": "conformance", "role": "hard", "axis": "geometry", "requires": "exact_polarity_support_pct", "better": "higher", "rel_tol": 0.0, "abs_floor": 1.0, "hard_min": 100.0, "trigger_min": 100.0},
-    "exact_local_polarity_component_pct": {"scope": "conformance", "role": "diagnostic", "axis": "geometry", "requires": "exact_local_polarity_support_count", "better": "lower", "rel_tol": 0.2, "abs_floor": 0.05},
-
-    "exact_mapping_stretch_pct": {"scope": "perceptual", "role": "diagnostic", "axis": "warp", "requires": "exact_mapping_support_pct", "better": "lower", "rel_tol": 0.2, "abs_floor": 0.5},
-    "exact_mapping_fold_pct": {"scope": "perceptual", "role": "diagnostic", "axis": "warp", "requires": "exact_mapping_support_pct", "better": "lower", "rel_tol": 0.2, "abs_floor": 0.05},
-    "warp_cross_row_shear_severity_pct": {"scope": "perceptual", "role": "diagnostic", "label": "risk", "label_status": "experimental", "axis": "warp", "requires": "warp_cross_row_shear_support_count", "better": "lower", "rel_tol": 0.2, "abs_floor": 0.5},
-    "experimental_stereo_window_crossed_burden_pct": {"scope": "perceptual", "role": "diagnostic", "label": "risk", "label_status": "experimental", "axis": "stereo-window", "requires": "experimental_stereo_window_support_count", "better": "lower", "rel_tol": 0.2, "abs_floor": 0.02},
-    "interocular_phase_orientation_burden_pct": {"scope": "perceptual", "role": "diagnostic", "label": "risk", "label_status": "experimental", "axis": "binocular-conflict", "requires": "interocular_phase_orientation_evidence_sufficient", "better": "lower", "rel_tol": 0.2, "abs_floor": 0.5},
-    "interocular_exposure_rivalry_burden_pct": {"scope": "conformance", "role": "diagnostic", "axis": "binocular-color", "requires": "interocular_exposure_rivalry_evidence_sufficient", "better": "lower", "rel_tol": 0.2, "abs_floor": 0.5},
-    "interocular_color_gain_rivalry_burden_pct": {"scope": "conformance", "role": "diagnostic", "axis": "binocular-color", "requires": "interocular_color_gain_rivalry_evidence_sufficient", "better": "lower", "rel_tol": 0.2, "abs_floor": 1.5},
-    "source_coverage_pct": {"scope": "conformance", "role": "hard", "axis": "integrity", "requires": "source_fidelity_support_pct", "better": "higher", "rel_tol": 0.0, "abs_floor": 0.25, "hard_min": 99.0, "trigger_min": 99.0},
-    "image_integrity_pct": {"scope": "conformance", "role": "hard", "axis": "integrity", "requires": "image_integrity_support", "better": "higher", "rel_tol": 0.0, "abs_floor": 1.0, "hard_min": 80.0, "trigger_min": 80.0},
-    "source_coverage_worst_patch_bad_pct": {"scope": "conformance", "role": "hard", "axis": "localized-integrity", "requires": "source_fidelity_support_pct", "better": "lower", "rel_tol": 0.0, "abs_floor": 2.0, "hard_max": 20.0, "trigger": 20.0},
-    "image_integrity_worst_patch_bad_pct": {"scope": "conformance", "role": "hard", "axis": "localized-integrity", "requires": "image_integrity_support", "better": "lower", "rel_tol": 0.0, "abs_floor": 5.0, "hard_max": 25.0, "trigger": 25.0},
-    "vmisalign_p99_pct": {"scope": "conformance", "role": "hard", "axis": "stereo-geometry", "requires": "vmisalign_support_pct", "better": "lower", "rel_tol": 0.0, "abs_floor": 0.02, "trigger": 0.1, "hard_max": 0.1},
-
-    "depth_gt_affine_nrmse_pct": {"scope": "gt-only", "role": "primary", "axis": "depth", "requires": "gt_depth_accuracy", "better": "lower", "rel_tol": 0.15, "abs_floor": 1.0},
-    "depth_gt_edge_f1": {"scope": "gt-only", "role": "primary", "axis": "depth-edge", "requires": "gt_depth_accuracy", "better": "higher", "rel_tol": 0.1, "abs_floor": 5.0},
-    "depth_gt_polarity_ok": {"scope": "gt-only", "role": "hard", "axis": "depth", "requires": "gt_depth_accuracy", "better": "higher", "rel_tol": 0.0, "abs_floor": 1.0, "hard_min": 100.0, "trigger_min": 100.0},
-
-    "static_jitter_p95": {"scope": "temporal-only", "role": "primary", "axis": "stability", "requires": "static_support", "better": "lower", "rel_tol": 0.2, "abs_floor": 0.5},
-    "flow_temporal_p95": {"scope": "temporal-only", "role": "diagnostic", "axis": "stability", "requires": "flow_support", "better": "lower", "rel_tol": 0.2, "abs_floor": 1.0},
-    "depth_gt_lag_f1_p95": {"scope": "temporal-only", "role": "primary", "axis": "depth-stability", "requires": "gt_depth_temporal", "better": "lower", "rel_tol": 0.2, "abs_floor": 5.0}
+    "exact_visible_pop_spread_pct": {
+      "scope": "style",
+      "role": "diagnostic",
+      "axis": "stereo",
+      "requires": "exact_visible_support_count",
+      "better": "higher",
+      "rel_tol": 0.15,
+      "abs_floor": 0.04
+    },
+    "exact_binocular_support_pct": {
+      "scope": "conformance",
+      "role": "hard",
+      "axis": "stereo-evidence",
+      "better": "higher",
+      "rel_tol": 0.0,
+      "abs_floor": 0.25,
+      "hard_min": 80.0,
+      "trigger_min": 80.0
+    },
+    "exact_positive_disparity_pct": {
+      "scope": "perceptual",
+      "role": "hard",
+      "label": "hard",
+      "label_status": "experimental",
+      "axis": "comfort",
+      "requires": "exact_binocular_support_count",
+      "better": "lower",
+      "rel_tol": 0.0,
+      "abs_floor": 0.1,
+      "hard_max": 3.0,
+      "trigger": 3.0
+    },
+    "exact_negative_disparity_pct": {
+      "scope": "perceptual",
+      "role": "hard",
+      "label": "hard",
+      "label_status": "experimental",
+      "axis": "comfort",
+      "requires": "exact_binocular_support_count",
+      "better": "lower",
+      "rel_tol": 0.0,
+      "abs_floor": 0.1,
+      "hard_max": 3.0,
+      "trigger": 3.0
+    },
+    "exact_over_3pct_area_pct": {
+      "scope": "perceptual",
+      "role": "diagnostic",
+      "label": "risk",
+      "label_status": "experimental",
+      "axis": "comfort",
+      "requires": "exact_binocular_support_count",
+      "better": "lower",
+      "rel_tol": 0.2,
+      "abs_floor": 0.05
+    },
+    "exact_symmetry_residual_p95_pct": {
+      "scope": "conformance",
+      "role": "hard",
+      "axis": "stereo-geometry",
+      "requires": "exact_binocular_support_count",
+      "better": "lower",
+      "rel_tol": 0.0,
+      "abs_floor": 0.02,
+      "hard_max": 0.1,
+      "trigger": 0.1
+    },
+    "exact_polarity_ok": {
+      "scope": "conformance",
+      "role": "hard",
+      "axis": "geometry",
+      "requires": "exact_polarity_support_pct",
+      "better": "higher",
+      "rel_tol": 0.0,
+      "abs_floor": 1.0,
+      "hard_min": 100.0,
+      "trigger_min": 100.0
+    },
+    "exact_local_polarity_component_pct": {
+      "scope": "conformance",
+      "role": "diagnostic",
+      "axis": "geometry",
+      "requires": "exact_local_polarity_support_count",
+      "better": "lower",
+      "rel_tol": 0.2,
+      "abs_floor": 0.05
+    },
+    "exact_mapping_stretch_pct": {
+      "scope": "perceptual",
+      "role": "diagnostic",
+      "axis": "warp",
+      "requires": "exact_mapping_support_pct",
+      "better": "lower",
+      "rel_tol": 0.2,
+      "abs_floor": 0.5
+    },
+    "exact_mapping_fold_pct": {
+      "scope": "perceptual",
+      "role": "diagnostic",
+      "axis": "warp",
+      "requires": "exact_mapping_support_pct",
+      "better": "lower",
+      "rel_tol": 0.2,
+      "abs_floor": 0.05
+    },
+    "warp_cross_row_shear_severity_pct": {
+      "scope": "perceptual",
+      "role": "diagnostic",
+      "label": "risk",
+      "label_status": "experimental",
+      "axis": "warp",
+      "requires": "warp_cross_row_shear_support_count",
+      "better": "lower",
+      "rel_tol": 0.2,
+      "abs_floor": 0.5
+    },
+    "experimental_stereo_window_crossed_burden_pct": {
+      "scope": "perceptual",
+      "role": "diagnostic",
+      "label": "risk",
+      "label_status": "experimental",
+      "axis": "stereo-window",
+      "requires": "experimental_stereo_window_support_count",
+      "better": "lower",
+      "rel_tol": 0.2,
+      "abs_floor": 0.02
+    },
+    "interocular_phase_orientation_burden_pct": {
+      "scope": "perceptual",
+      "role": "diagnostic",
+      "label": "risk",
+      "label_status": "experimental",
+      "axis": "binocular-conflict",
+      "requires": "interocular_phase_orientation_evidence_sufficient",
+      "better": "lower",
+      "rel_tol": 0.2,
+      "abs_floor": 0.5
+    },
+    "interocular_exposure_rivalry_burden_pct": {
+      "scope": "conformance",
+      "role": "diagnostic",
+      "axis": "binocular-color",
+      "requires": "interocular_exposure_rivalry_evidence_sufficient",
+      "better": "lower",
+      "rel_tol": 0.2,
+      "abs_floor": 0.5
+    },
+    "interocular_color_gain_rivalry_burden_pct": {
+      "scope": "conformance",
+      "role": "diagnostic",
+      "axis": "binocular-color",
+      "requires": "interocular_color_gain_rivalry_evidence_sufficient",
+      "better": "lower",
+      "rel_tol": 0.2,
+      "abs_floor": 1.5
+    },
+    "source_coverage_pct": {
+      "scope": "conformance",
+      "role": "hard",
+      "axis": "integrity",
+      "requires": "source_fidelity_support_pct",
+      "better": "higher",
+      "rel_tol": 0.0,
+      "abs_floor": 0.25,
+      "hard_min": 99.0,
+      "trigger_min": 99.0
+    },
+    "image_integrity_pct": {
+      "scope": "conformance",
+      "role": "hard",
+      "axis": "integrity",
+      "requires": "image_integrity_support",
+      "better": "higher",
+      "rel_tol": 0.0,
+      "abs_floor": 1.0,
+      "hard_min": 80.0,
+      "trigger_min": 80.0
+    },
+    "source_coverage_worst_patch_bad_pct": {
+      "scope": "conformance",
+      "role": "hard",
+      "axis": "localized-integrity",
+      "requires": "source_fidelity_support_pct",
+      "better": "lower",
+      "rel_tol": 0.0,
+      "abs_floor": 2.0,
+      "hard_max": 20.0,
+      "trigger": 20.0
+    },
+    "image_integrity_worst_patch_bad_pct": {
+      "scope": "conformance",
+      "role": "hard",
+      "axis": "localized-integrity",
+      "requires": "image_integrity_support",
+      "better": "lower",
+      "rel_tol": 0.0,
+      "abs_floor": 5.0,
+      "hard_max": 25.0,
+      "trigger": 25.0
+    },
+    "vmisalign_p99_pct": {
+      "scope": "conformance",
+      "role": "hard",
+      "axis": "stereo-geometry",
+      "requires": "vmisalign_support_pct",
+      "better": "lower",
+      "rel_tol": 0.0,
+      "abs_floor": 0.02,
+      "trigger": 0.1,
+      "hard_max": 0.1
+    },
+    "depth_gt_affine_nrmse_pct": {
+      "scope": "gt-only",
+      "role": "primary",
+      "axis": "depth",
+      "requires": "gt_depth_accuracy",
+      "better": "lower",
+      "rel_tol": 0.15,
+      "abs_floor": 1.0
+    },
+    "depth_gt_edge_f1": {
+      "scope": "gt-only",
+      "role": "primary",
+      "axis": "depth-edge",
+      "requires": "gt_depth_edge",
+      "better": "higher",
+      "rel_tol": 0.1,
+      "abs_floor": 5.0
+    },
+    "depth_gt_polarity_ok": {
+      "scope": "gt-only",
+      "role": "hard",
+      "axis": "depth",
+      "requires": "gt_depth_accuracy",
+      "better": "higher",
+      "rel_tol": 0.0,
+      "abs_floor": 1.0,
+      "hard_min": 100.0,
+      "trigger_min": 100.0
+    },
+    "static_jitter_p95": {
+      "scope": "temporal-only",
+      "role": "primary",
+      "axis": "stability",
+      "requires": "static_support",
+      "better": "lower",
+      "rel_tol": 0.2,
+      "abs_floor": 0.5
+    },
+    "flow_temporal_p95": {
+      "scope": "temporal-only",
+      "role": "diagnostic",
+      "axis": "stability",
+      "requires": "flow_support",
+      "better": "lower",
+      "rel_tol": 0.2,
+      "abs_floor": 1.0
+    },
+    "depth_gt_lag_f1_p95": {
+      "scope": "temporal-only",
+      "role": "primary",
+      "axis": "depth-stability",
+      "requires": "gt_depth_temporal",
+      "better": "lower",
+      "rel_tol": 0.2,
+      "abs_floor": 5.0
+    },
+    "depth_gt_edge_support_pct": {
+      "scope": "gt-only",
+      "role": "diagnostic",
+      "axis": "depth",
+      "requires": "gt_depth_accuracy",
+      "better": "higher",
+      "rel_tol": 0.3,
+      "abs_floor": 0.5
+    },
+    "exact_disparity_plateau_far_pct": {
+      "scope": "perceptual",
+      "role": "diagnostic",
+      "axis": "stereo-volume",
+      "requires": "exact_binocular_support_count",
+      "better": "lower",
+      "rel_tol": 0.3,
+      "abs_floor": 1.0
+    },
+    "exact_disparity_plateau_near_pct": {
+      "scope": "perceptual",
+      "role": "diagnostic",
+      "axis": "stereo-volume",
+      "requires": "exact_binocular_support_count",
+      "better": "lower",
+      "rel_tol": 0.3,
+      "abs_floor": 1.0
+    },
+    "exact_disparity_plateau_far_depth_span_pct": {
+      "scope": "perceptual",
+      "role": "diagnostic",
+      "axis": "stereo-volume",
+      "requires": "exact_binocular_support_count",
+      "better": "lower",
+      "rel_tol": 0.3,
+      "abs_floor": 2.0
+    },
+    "exact_disparity_plateau_near_depth_span_pct": {
+      "scope": "perceptual",
+      "role": "diagnostic",
+      "axis": "stereo-volume",
+      "requires": "exact_binocular_support_count",
+      "better": "lower",
+      "rel_tol": 0.3,
+      "abs_floor": 2.0
+    }
   },
   "perf_ms": {
-    "depth_infer": {"rel_tol": 0.3, "abs_floor": 1.0},
-    "warp_infer": {"rel_tol": 0.3, "abs_floor": 1.0}
+    "depth_infer": {
+      "rel_tol": 0.3,
+      "abs_floor": 1.0
+    },
+    "warp_infer": {
+      "rel_tol": 0.3,
+      "abs_floor": 1.0
+    }
   },
   "report": {
     "_doc": "Visualization references only; never gates, scores, or training labels.",

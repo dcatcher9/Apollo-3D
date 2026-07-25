@@ -2,6 +2,10 @@
   "aggregate": {
     "exact_binocular_support_count": 2031382.4166666667,
     "exact_binocular_support_pct": 96.2907986111111,
+    "exact_disparity_plateau_far_depth_span_pct": 1.659459079187399,
+    "exact_disparity_plateau_far_pct": 2.9816037813822427,
+    "exact_disparity_plateau_near_depth_span_pct": 0.05328276108535849,
+    "exact_disparity_plateau_near_pct": 1.180588240424792,
     "exact_local_polarity_component_pct": 0.019244515313135757,
     "exact_local_polarity_support_count": 53851.25,
     "exact_mapping_fold_pct": 0.0,
@@ -48,14 +52,14 @@
     "gt_depth_lag_measured_transition_count": 0.0
   },
   "perf_ms": {
-    "depth_infer": 1.45686,
-    "depth_postprocess_gpu": 0.082912,
-    "depth_preprocess_gpu": 0.155616,
-    "sbs_composite_cpu": 0.0057,
+    "depth_infer": 1.45728,
+    "depth_postprocess_gpu": 0.082752,
+    "depth_preprocess_gpu": 0.17664,
+    "sbs_composite_cpu": 0.0063,
     "warp_infer": 0.12528
   },
   "meta": {
-    "git_sha": "4c21e2ac",
+    "git_sha": "909ab368",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "3dbbc6790aa2",
@@ -83,12 +87,12 @@
     "zero_plane": "median",
     "literal_bestv2": false,
     "depth_compensation": "none",
-    "eval_schema": 32,
+    "eval_schema": 33,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "f7c8f0e231ddd31a",
-    "label_contract_sha256": "5ca00f4b8e00e25f",
+    "metric_sha256": "96428083de5d0541",
+    "label_contract_sha256": "23bfa9fc83092da0",
     "metric_runtime": {
       "python": "3.14.3",
       "numpy": "2.5.0",
@@ -137,8 +141,8 @@
     "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
     "gpu_contention": false,
     "run_kind": "baseline-update",
-    "timestamp": "2026-07-25T10:08:04",
-    "run_name": "rebase3-ext",
+    "timestamp": "2026-07-25T10:45:46",
+    "run_name": "rebase4-ext",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "source_frame_count": 24,
@@ -154,7 +158,7 @@
     "evaluation_role": "reference-only",
     "source_artifacts": "The source includes baked sun bloom and fine high-contrast gravel texture; the original frame is required when reviewing halo and stretch evidence.",
     "source_suite": "extended-v3",
-    "scored_artifact_sha256": "14160c4e6ca33d389ca26db23fb067c79da584be67ee42779290061c9dead3b8",
+    "scored_artifact_sha256": "9fdd711ac76804f01486e81a90c228a4f26925dc0cbc65c4514e00b46f4895a9",
     "clip_sha1": "0e3752cd0f12"
   }
 }

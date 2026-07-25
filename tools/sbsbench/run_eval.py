@@ -52,7 +52,7 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-EVAL_SCHEMA = 32  # compact exact-map/topology/binocular-conflict contract; harness contract 16
+EVAL_SCHEMA = 33  # adds depth_gt_edge_support_pct and the disparity-plateau diagnostics; harness contract 16
 BASELINE_SNAPSHOT_SCHEMA = 1
 BASELINE_SNAPSHOT_FILE = "baseline_snapshot.json"
 TRAINING_LABEL_STATUS = "qualified"

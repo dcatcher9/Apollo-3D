@@ -124,7 +124,12 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   (temporal shimmer). **A green exit code does NOT mean pop is safe.** Baseline regressions are
   gated only for `role: primary` metrics (`run_eval.py`), plus the non-tradeable `role: hard`
   bounds. Stereo-volume and stretch/fold/shear metrics are `role: diagnostic` and are reported,
-  not gated — see `tools/sbsbench/thresholds.json` for each metric's role. Raising pop typically
+  not gated — see `tools/sbsbench/thresholds.json` for each metric's role. Two traps:
+  `exact_visible_pop_spread_pct` is a p0.5..p99.5 spread and therefore REWARDS clipping, so read
+  it beside `exact_disparity_plateau_*` (fraction at an extreme, and the depth span each plateau
+  swallowed — span ~0 is legitimate flat geometry, a wide span is destroyed relief); and
+  `depth_gt_edge_f1` only gates where `depth_gt_edge_support_pct` >= 1.0, because it scores
+  thresholded edge sets and swings wildly on weak-gradient content. Raising pop typically
   keeps the ±3% comfort tails inside their hard bound while degrading the ungated artifact
   diagnostics, so read those by hand. Capture a baseline before the change; `--pop-strength`,
   `--depth-short-side`, `--ema`, `--minmax-ema`, and the subject

@@ -54,6 +54,8 @@ import sbs_stereo_window_metrics  # noqa: E402
 import sbs_warp_shear_metrics  # noqa: E402
 
 TEMPORAL_MIN_SUPPORT = 0.1
+# Minimum GT boundary support (percent of valid pixels) for depth_gt_edge_f1 to gate.
+GT_EDGE_MIN_SUPPORT_PCT = 1.0
 VERTICAL_MISALIGNMENT_QUANTILE = 0.99
 # Minimum independently measured support for a detector to become applicable.  A positive count
 # is not automatically enough. Percentage/fraction supports use a strict positive threshold because
@@ -819,6 +821,31 @@ def exact_warp_mapping_metrics(mapping, shape, depth=None, warp_mask=None, tail=
         sampled = sampled_depth[binocular_valid]
         ordered = near_signed[binocular_valid]
         sample_weight = area_weight_map[binocular_valid]
+        # Disparity plateaus. Shaped-depth clamping maps every pixel outside the subject band onto
+        # ONE shaped depth, and the parallax field is a pure function of shaped depth plus
+        # frame-uniform scalars, so all of them render at an identical disparity -- a flat plane
+        # with no relief. exact_visible_pop_spread_pct cannot see this: it is a p0.5..p99.5 spread,
+        # so pinning pixels onto the two extremes places those percentiles inside the plateaus and
+        # REWARDS clipping. Report each plateau separately, with the depth range it swallowed:
+        # a plateau covering one depth is legitimate flat geometry (sky, a far wall) and the
+        # correct rendering, while one spanning a wide depth range is destroyed relief. Both are
+        # needed -- the plateau fraction alone conflates the two, which is exactly the mistake the
+        # cardboarding work made before splitting near from far.
+        depth_span = (weighted_pct(sampled, sample_weight, 0.99)
+                      - weighted_pct(sampled, sample_weight, 0.01))
+        for _name, _extreme in (("far", float(np.min(ordered))),
+                                ("near", float(np.max(ordered)))):
+            _at = np.isclose(ordered, _extreme, atol=1e-3, rtol=0.0)
+            _w = float(np.sum(sample_weight))
+            out[f"exact_disparity_plateau_{_name}_pct"] = float(
+                np.sum(sample_weight[_at]) / max(_w, 1e-9) * 100.0)
+            _span = 0.0
+            if np.count_nonzero(_at) >= 64 and depth_span > 1e-6:
+                _span = float(
+                    (weighted_pct(sampled[_at], sample_weight[_at], 0.99)
+                     - weighted_pct(sampled[_at], sample_weight[_at], 0.01))
+                    / depth_span * 100.0)
+            out[f"exact_disparity_plateau_{_name}_depth_span_pct"] = _span
         d20 = weighted_pct(sampled, sample_weight, 0.20)
         d80 = weighted_pct(sampled, sample_weight, 0.80)
         far, near = sampled <= d20, sampled >= d80
@@ -1526,7 +1553,17 @@ def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity", valid
     pred_edge, gt_edge = depth_ground_truth_edges(
         aligned, target, valid, trange, threshold_factor=0.04)
     strict_edge_f1 = _boundary_f1(pred_edge, gt_edge, tolerance=1)
+    # How much GT boundary the F1 was actually computed over. The score compares THRESHOLDED
+    # binary edge sets, so on weakly-textured content -- where gradients sit near the 0.04 cutoff
+    # -- a small depth change flips edge membership wholesale and the F1 swings without the depth
+    # meaningfully moving. Measured on the depth-resolution ladder: tartanair_house_motion changed
+    # MORE (4.12% affine-aligned depth NRMSE) and scored -0.08%, while tartanair_house_easy changed
+    # LESS (3.20%) and scored -49.8%. Export the support so that instability is visible instead of
+    # being read as a boundary regression.
+    edge_support_pct = float(
+        np.count_nonzero(gt_edge) / max(np.count_nonzero(valid), 1) * 100.0)
     return {
+        "depth_gt_edge_support_pct": edge_support_pct,
         "depth_gt_affine_nrmse_pct": affine_nrmse_pct,
         "depth_gt_valid_pct": float(np.mean(valid) * 100.0),
         # A negative affine fit is a polarity inversion, not a monocular scale ambiguity.  The
@@ -2398,6 +2435,23 @@ def metric_evidence_state(metric, spec, observed, clip_meta=None):
     # hard gate.
     if requirement == "gt_depth_accuracy":
         return "applicable" if clip_meta.get("required_gt_depth") is True else "unsupported"
+    # depth_gt_edge_f1 additionally needs enough GT boundary to be stable. It scores THRESHOLDED
+    # binary edge sets, so where gradients sit near the 0.04 cutoff a small depth change flips
+    # membership wholesale. Measured against the depth-resolution ladder, clips under 1% GT edge
+    # support swung +5.3% to -49.8% while every clip at/above 1.99% moved at most 5.5% and three of
+    # four moved under 0.1% -- and the swings did not track actual depth change (house_motion
+    # changed MORE by affine NRMSE and scored flat; house_easy changed LESS and scored -49.8%).
+    # The value is still reported; this only stops it GATING on clips with no boundary evidence.
+    # Calibrated on the eight extended clips carrying authenticated GT depth.
+    if requirement == "gt_depth_edge":
+        if clip_meta.get("required_gt_depth") is not True:
+            return "unsupported"
+        support = observed.get("depth_gt_edge_support_pct")
+        if (not np.isscalar(support) or isinstance(support, (bool, np.bool_)) or
+                not np.issubdtype(np.asarray(support).dtype, np.number) or
+                not np.isfinite(support)):
+            return "missing"
+        return "applicable" if float(support) >= GT_EDGE_MIN_SUPPORT_PCT else "unsupported"
     if requirement in EVIDENCE_SUPPORT_REQUIREMENTS:
         support = observed.get(requirement)
         # Missing/invalid support is not proof of exemption.  Only a measured value below the

@@ -1,10 +1,15 @@
 {
   "aggregate": {
     "depth_gt_affine_nrmse_pct": 13.10459852218628,
-    "depth_gt_edge_f1": 19.413906193716333,
+    "depth_gt_edge_f1": 34.121601053166245,
+    "depth_gt_edge_support_pct": 0.7876334452337419,
     "depth_gt_polarity_ok": 100.0,
     "exact_binocular_support_count": 433332.0,
     "exact_binocular_support_pct": 94.13277162324398,
+    "exact_disparity_plateau_far_depth_span_pct": 0.008324223438918366,
+    "exact_disparity_plateau_far_pct": 0.11484403226252955,
+    "exact_disparity_plateau_near_depth_span_pct": 10.87689201702385,
+    "exact_disparity_plateau_near_pct": 7.664442300796509,
     "exact_local_polarity_component_pct": 0.3624116850312992,
     "exact_local_polarity_support_count": 54843.916666666664,
     "exact_mapping_fold_pct": 0.0,
@@ -53,14 +58,14 @@
     "depth_gt_lag_f1_p95": 2.6023973575657053
   },
   "perf_ms": {
-    "depth_infer": 2.62064,
-    "depth_postprocess_gpu": 0.094912,
-    "depth_preprocess_gpu": 0.118272,
-    "sbs_composite_cpu": 0.0061,
-    "warp_infer": 0.034336
+    "depth_infer": 2.61782,
+    "depth_postprocess_gpu": 0.094272,
+    "depth_preprocess_gpu": 0.120768,
+    "sbs_composite_cpu": 0.0055,
+    "warp_infer": 0.034368
   },
   "meta": {
-    "git_sha": "4c21e2ac",
+    "git_sha": "909ab368",
     "git_dirty": true,
     "clip_set_sha1": {
       "bonn_person_close": "3dbbc6790aa2",
@@ -88,12 +93,12 @@
     "zero_plane": "median",
     "literal_bestv2": false,
     "depth_compensation": "none",
-    "eval_schema": 32,
+    "eval_schema": 33,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "f7c8f0e231ddd31a",
-    "label_contract_sha256": "5ca00f4b8e00e25f",
+    "metric_sha256": "96428083de5d0541",
+    "label_contract_sha256": "23bfa9fc83092da0",
     "metric_runtime": {
       "python": "3.14.3",
       "numpy": "2.5.0",
@@ -142,8 +147,8 @@
     "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
     "gpu_contention": false,
     "run_kind": "baseline-update",
-    "timestamp": "2026-07-25T10:08:04",
-    "run_name": "rebase3-ext",
+    "timestamp": "2026-07-25T10:45:46",
+    "run_name": "rebase4-ext",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "source_frame_count": 24,
@@ -159,7 +164,7 @@
     "license_note": "Official research dataset derived from the open Sintel film; prepared media remains external to Git.",
     "evaluation_role": "ground-truth",
     "source_suite": "extended-v3",
-    "scored_artifact_sha256": "9243e0fbee1f1b04477f5fe33ae5fd5ae028ffce3fa0c01be33af0b8a565abe5",
+    "scored_artifact_sha256": "92f972191c05d8fb4daf4004395d989c3be7b7e5900dde78853697ade0a1fa06",
     "clip_sha1": "c1fd5a5a67b4"
   }
 }

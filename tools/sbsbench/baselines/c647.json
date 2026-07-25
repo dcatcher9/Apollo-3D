@@ -2,6 +2,10 @@
   "aggregate": {
     "exact_binocular_support_count": 395457.7083333333,
     "exact_binocular_support_pct": 94.48044740437157,
+    "exact_disparity_plateau_far_depth_span_pct": 4.4228511188787385,
+    "exact_disparity_plateau_far_pct": 20.342640161514282,
+    "exact_disparity_plateau_near_depth_span_pct": 0.005715137198938067,
+    "exact_disparity_plateau_near_pct": 1.4509217515587807,
     "exact_local_polarity_component_pct": 0.26186118541461356,
     "exact_local_polarity_support_count": 83491.0,
     "exact_mapping_fold_pct": 0.0,
@@ -49,14 +53,14 @@
     "static_jitter_p95": 1.5675795793533325
   },
   "perf_ms": {
-    "depth_infer": 1.45664,
-    "depth_postprocess_gpu": 0.08128,
-    "depth_preprocess_gpu": 0.142656,
-    "sbs_composite_cpu": 0.0054,
+    "depth_infer": 1.45629,
+    "depth_postprocess_gpu": 0.082336,
+    "depth_preprocess_gpu": 0.150176,
+    "sbs_composite_cpu": 0.0063,
     "warp_infer": 0.028032
   },
   "meta": {
-    "git_sha": "4c21e2ac",
+    "git_sha": "909ab368",
     "git_dirty": true,
     "clip_set_sha1": {
       "aigen_cogvideox_rain": "5a3b6632212b",
@@ -83,12 +87,12 @@
     "zero_plane": "median",
     "literal_bestv2": false,
     "depth_compensation": "none",
-    "eval_schema": 32,
+    "eval_schema": 33,
     "depth_step": "current-once",
     "depth_reuse_interval": 1,
     "conf_sha256": "679341c6d0d9db4d",
-    "metric_sha256": "f7c8f0e231ddd31a",
-    "label_contract_sha256": "5ca00f4b8e00e25f",
+    "metric_sha256": "96428083de5d0541",
+    "label_contract_sha256": "23bfa9fc83092da0",
     "metric_runtime": {
       "python": "3.14.3",
       "numpy": "2.5.0",
@@ -137,8 +141,8 @@
     "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
     "gpu_contention": false,
     "run_kind": "baseline-update",
-    "timestamp": "2026-07-25T10:05:52",
-    "run_name": "rebase3-core",
+    "timestamp": "2026-07-25T10:43:34",
+    "run_name": "rebase4-core",
     "cuda_graph": true,
     "cuda_graph_captured": true,
     "source_frame_count": 24,
@@ -146,7 +150,7 @@
     "description": "Woman washing laundry by a lantern-lit courtyard pond at night.",
     "content_type": "ai-generated",
     "source_artifacts": "Visual inspection of frames 1, 12 and 24 found strong pre-existing bloom and clipped white edges around the dress, arms, lantern, cloth, wet stone and water reflections. Fine hair/hand geometry also changes in the source; those effects are not automatically warp halos or white-line regressions.",
-    "scored_artifact_sha256": "f21dfade104eb026216f17193f66674029a3b249ddc4a767b406ab9ab4bda053",
+    "scored_artifact_sha256": "bf37c500adf70c36e8e6186579676a5c0e08f8a1f8924bb5758c80ffe680dc72",
     "clip_sha1": "dfff8c7b9459"
   }
 }
