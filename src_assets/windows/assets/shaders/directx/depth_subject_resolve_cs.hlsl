@@ -85,11 +85,14 @@ void main() {
             bool got_lo = false, got_bg = false, got_med = false;
             for (uint qb = 0; qb < NUM_BINS; qb++) {
                 pc += (float)PlainHist[qb];
+                // Band BOUNDS take the crossing bin's outer edge so a large atom in that bin is
+                // not cut through and clipped (see depth_minmax_ema_cs for the same reasoning).
+                // background/median are point estimates, not bounds, so they keep the bin center.
                 float qv = ((float)qb + 0.5f) / (float)NUM_BINS;
-                if (!got_lo && pc >= lo_c) { lo_val = qv; got_lo = true; }
+                if (!got_lo && pc >= lo_c) { lo_val = (float)qb / (float)NUM_BINS; got_lo = true; }
                 if (!got_bg && pc >= bg_c) { background_val = qv; got_bg = true; }
                 if (!got_med && pc >= med_c) { median_val = qv; got_med = true; }
-                if (pc >= hi_c) { hv = qv; break; }
+                if (pc >= hi_c) { hv = ((float)qb + 1.0f) / (float)NUM_BINS; break; }
             }
             if (subject_stretch > 0.5f) {
                 inv_range = 1.0f / max(hv - lo_val, 1e-4f);

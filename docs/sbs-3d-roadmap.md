@@ -477,11 +477,26 @@ selection until a hard cut.
     the reciprocal `inv_range`. Plateau 9.21 -> 8.11 extended and 16.50 -> 15.77 core, with core
     `static_jitter_p95` -2.75% (it did not regress, contrary to the stability concern), pop
     +0.08%/-0.49%, fold 0.000 and integrity 100.0.
-  - **Extended is now at the design floor.** Two independent P2/P98 stages compose — the
-    normalization clips ~4% and the band clips ~4% — so ~8% is what the current architecture
-    implies, and extended measures 8.11%. Core sits higher (15.77%) because its synthetic and flat
-    clips have degenerate depth distributions. Further reduction requires removing one of the two
-    normalization stages, not more tuning.
+  - **Percentile bounds now take the crossing bin's OUTER EDGE, not its center** (both stages,
+    `binedge-*`). A percentile only excludes its nominal fraction when the distribution is smooth
+    across the crossing bin; when a large atom sits there a centered bound cuts through it. c525
+    puts 66.1% of its pixels in histogram bin 0. An outer edge can only widen the range, costing at
+    most one bin (~0.4%) of precision. Plateau 8.11 -> 7.62 extended and 15.77 -> 15.15 core, with
+    stretch -0.25%/-1.00%, jitter -0.05%/-0.63%, shear -1.68%/-0.83%, pop -0.02%/-0.10%, fold 0.000.
+  - **Correction: the plateau figure overstates cardboarding, and removing a normalization stage is
+    NOT warranted.** Separating the near and far plateaus and testing each against `raw_*.f32`
+    (pre-normalization model output) shows the two behave completely differently. The LARGE near
+    plateau is legitimate: it swallows ~0% of the raw depth spread (c525 50.78% of pixels / 0.0%
+    spread, vkitti_drive_rain 19.81% / 0.0%, c339 17.74% / 0.0%), i.e. the model genuinely assigns
+    those pixels one depth and rendering them on one plane is correct. Only the FAR plateau destroys
+    real range, and it is small — mean ~4% of pixels, though it reaches 76.9% of the raw range on
+    c525 and 73.4% on spring_character_close. Earlier entries here quoted the pooled near+far
+    figure as if all of it were destroyed relief; it is not. Any future measurement MUST separate
+    the two plateaus and validate against raw depth, or it will chase legitimate flat geometry.
+  - Residual work, if any, is the far plateau on flat-background content — not architectural. The
+    two normalization stages serve different purposes (stage 1 gives temporal scale stability
+    against DA-V2's per-frame scale drift; stage 2 allocates the parallax budget to the mid-range)
+    and the evidence does not support collapsing them.
   - `depth_subject_resolve_cs` duplicates the shaping for the zero anchor rather than calling
     `Bestv2WarpDepth`. Shaping it differently makes the anchor describe a different plane than the
     warp renders — during this work an inconsistent version cost core `vmisalign_p99_pct` +8.76%.

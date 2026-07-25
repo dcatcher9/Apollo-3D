@@ -38,12 +38,19 @@ void main() {
         [loop]
         for (uint b = 0; b < NUM_BINS; b++) {
             cum += (float)Histogram[b];
+            // Take the crossing bin's OUTER EDGE, not its center. A percentile only excludes its
+            // nominal 2% when the distribution is smooth across the crossing bin; when a large
+            // atom sits there -- sky, a far wall, DA-V2's flat background -- a bin-center bound
+            // cuts through the atom and clips a large share of the frame to a single depth. c525
+            // puts 66.1% of its pixels in bin 0, and the centered bound saturated 49.9% of the
+            // frame to exactly 0. An outer edge can only widen the range, so it clips at most the
+            // nominal fraction, and costs at most one bin (~0.4%) of range precision.
             if (!found_lo && cum >= lo_count) {
-                pct_min = new_min + ((float)b + 0.5f) * bin_w;
+                pct_min = new_min + (float)b * bin_w;
                 found_lo = true;
             }
             if (!found_hi && cum >= hi_count) {
-                pct_max = new_min + ((float)b + 0.5f) * bin_w;
+                pct_max = new_min + ((float)b + 1.0f) * bin_w;
                 found_hi = true;
             }
             Histogram[b] = 0u;  // reset for the next frame's accumulation
