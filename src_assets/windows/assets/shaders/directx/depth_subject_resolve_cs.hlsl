@@ -164,7 +164,7 @@ void main() {
             // point (EDGE_WEIGHT_SCALE is shared via include/depth_constants.hlsl). Dividing by it yields
             // a threshold-equivalent edge fraction: identical to the historical count when every
             // edge sits at the threshold, and proportionally larger when edges are more violent.
-            // The 0.007/0.016 endpoints below therefore keep their original calibration.
+            // The POP_RISK_LOW/HIGH endpoints below are calibrated to measured content.
             float edge_fraction = (float)PlainHist[NUM_BINS] / (ptotal * EDGE_WEIGHT_SCALE);
             if (!initialized || hard_cut) {
                 // Classify on a SETTLED depth field, never on the cut frame. Normalization
@@ -179,9 +179,9 @@ void main() {
             } else if (scene_age == POP_CLASSIFY_SETTLE_FRAMES) {
                 // One classification per shot, on the first settled field, then bit-stable until
                 // the next cut. Equality rather than >= keeps that single-shot latch exact.
-                // Full extra pop is safe for low-complexity depth fields (<=0.7% edge texels).
-                // Fade to the base strength by 1.6%; the classification decides only where the
-                // configured gain is useful, not what the endpoints are.
+                // Full extra pop for low-complexity depth fields (<= POP_RISK_LOW weighted
+                // edge fraction), fading to the floor by POP_RISK_HIGH. The classification decides
+                // only where the configured gain is useful, not what the endpoints are.
                 float confidence = 1.0f - smoothstep(POP_RISK_LOW, POP_RISK_HIGH, edge_fraction);
                 pop_ratio = lerp(1.0f, max(adaptive_pop_max_ratio, 1.0f), confidence);
             }

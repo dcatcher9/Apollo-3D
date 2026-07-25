@@ -116,12 +116,25 @@ float Bestv2SearchRadius(float source_width, float source_height) {
     // Conservative bound for the pixel bands + zero-parallax trim + convergence. The preset's
     // 7.1% clamp is a safety limit, not the normal search span; using it directly would make the
     // fixed probe count too coarse at high resolution.
-    // Worst case is one extreme band minus an oppositely signed subject band: approximately
-    // 9.99 - .95*(-2.52) = 12.384 px, not merely the 9.99 px foreground amplitude.
+    //
+    // The shift bound is derived from the curve rather than estimated. Bestv2RawShiftPxFast spans
+    // [-1.3964, +8.5823] over its saturated [0,1] domain (both the stretch and recenter stages
+    // saturate before it, so the domain cannot exceed that). The anchor is
+    // subject_lock * S(d_subj) with subject_lock configurable in [0,1], and the probe's shift is
+    // evaluated at an independent depth, so the reachable |shift - anchor| is maximised at
+    // subject_lock = 1.0: |[-1.3964 - 8.5823, 8.5823 + 1.3964]| = 9.979 px. 10.1 adds margin for
+    // the polynomial's <0.01 px approximation error and float slack, and remains valid for EVERY
+    // configured subject_lock, not just the shipped 0.5.
+    //
+    // This replaces a previous 12.51 px estimate whose stated derivation
+    // ("9.99 - .95*(-2.52) = 12.384") assumed a curve minimum of -2.52 that the current
+    // Bestv2 polynomial does not have -- it appears to predate a curve change. The old value
+    // oversized the radius by ~20%, and since probe spacing is 2*radius/steps with a fixed step
+    // count, that was ~20% of every probe spent where no root can exist.
     // Search radius must cover the configured adaptive ceiling. The actual per-frame ratio is
     // GPU-resident in SubjectState and unavailable to this loop-bound helper.
     return Bestv2AspectScale(source_width, source_height, literal_bestv2) * Bestv2SearchStrength() *
-           (0.004f + (12.51f * 0.35f + 0.006f * 4.0f) /
+           (0.004f + (10.1f * 0.35f + 0.006f * 4.0f) /
                        Bestv2ParallaxWidth(source_width, literal_bestv2));
 }
 
@@ -145,7 +158,13 @@ int Bestv2ProbeSteps(float source_width, float source_height, float aspect_scale
     // keeps the historical count exactly rather than being renormalized.
     float strength_ratio = literal_bestv2 > 0.5f ? 1.0f :
                            (Bestv2SearchStrength() / BESTV2_CALIBRATED_STRENGTH);
-    int desired = clamp((int)round(24.0f * aspect_scale * strength_ratio), 12, 72);
+    // 19.4 rather than 24: the radius was tightened from a stale 12.51 px estimate to the derived
+    // 10.1 px bound, and measuring that change showed 20% finer probe spacing bought exactly
+    // nothing (pop/jitter/fold unchanged, stretch +0.5%) -- the useful search interval was already
+    // over-resolved. So spend the reclaimed radius on FEWER probes at the original spacing instead
+    // of denser probes: 24 * (10.1 / 12.51) = 19.4 reproduces the historical spacing at ~20% less
+    // loop work. Spacing, not step count, is what the calibration actually pinned.
+    int desired = clamp((int)round(19.4f * aspect_scale * strength_ratio), 12, 72);
     float packed_pixels = max(2.0f * source_width * source_height, 1.0f);
     int work_budget = max((int)floor(BESTV2_MAX_DEPTH_PROBES / packed_pixels) - 1, 4);
     return min(desired, work_budget);

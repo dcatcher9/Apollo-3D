@@ -114,7 +114,7 @@ a controlled feature A/B.
 
 Harness A/B levers (after `--extra`):
 - `--pop-strength F` — multiply the final shared stereo-parallax field (`0.25`-`2`; default
-  `1.25`). This is the user-facing pop control. It is separate from the internal
+  `1.20`, the adaptive floor). This is the user-facing pop control. It is separate from the internal
   854-pixel Bestv2 calibration that keeps apparent depth stable across source resolutions. Below
   854 pixels, production preserves Bestv2's literal pixel shift and independently applies the
   reference-aspect correction; non-16:9 low-resolution inputs therefore receive both effects.
@@ -166,7 +166,8 @@ Harness A/B levers (after `--extra`):
 - `--zero-plane legacy|subject|median|background` — choose a shot-latched screen-plane anchor.
   The three explicit modes are experimental camera-offset treatments; they preserve
   symmetric eye geometry and the disparity scale, and update only at startup or a hard scene cut.
-  `legacy` remains the production default because fixed anchors produced scene-dependent
+  SUPERSEDED 2026-07-24: `median` is now the production default (headset-validated). The earlier
+position was that `legacy` remains the default because fixed anchors produced scene-dependent
   tradeoffs rather than a suite-wide improvement.
 - `--cuda-graph on|off` — capture and replay the TensorRT enqueue when the mapped D3D tensor
   addresses remain stable. The first enqueue for a new address/shape is an uncaptured warmup.
@@ -174,9 +175,11 @@ Harness A/B levers (after `--extra`):
 Production uses the equivalent `sbs_3d_pop_strength = F` key. Like every individual SBS key it
 overrides every profile; omit it to retain each profile's configured/default value (`1.25`).
 Scene-adaptive pop is enabled by default. It selects once per scene between the `1.25` floor and
-the validated `sbs_3d_adaptive_pop_max = 1.30` ceiling using normalized-depth edge density, then
+the validated `sbs_3d_adaptive_pop_max = 2.00` ceiling using a gradient-magnitude-weighted edge
+statistic, then
 holds the result bit-stable until a hard cut. Set `sbs_3d_adaptive_pop = false` for the fixed floor.
-The former experimental 2.0 ceiling was rejected: comfort remained within 3%, but temporal and
+SUPERSEDED 2026-07-24: the 2.0 ceiling is now the shipped default. The earlier rejection read:
+comfort remained within 3%, but temporal and
 warp artifacts regressed. Symmetric left/right geometry is unchanged.
 The equivalent production key is `sbs_3d_zero_plane`. Keep it at the default `legacy` outside a
 controlled headset or evaluator A/B; `subject`, `median`, and `background` change convergence

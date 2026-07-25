@@ -408,12 +408,35 @@ comfort and integrity remain hard gates.
       legacy, since that change bought roughly 58% of mapping-stretch headroom.
    3. Read the diagnostics by hand. The gate cannot answer this question -- see the caveat on the
       adaptive-pop entry above.
-   Separately, a second-order finding worth acting on: `Bestv2SearchRadius` is bounded for a worst
-   case of one extreme band minus an oppositely signed subject band, but with the shipped
-   `subject_lock = 0.5` anchor the reachable displacement is well under that bound, so a large
-   fraction of every probe falls where no root can exist. Reclaiming it would raise probe density
-   at identical cost. That changes behaviour today and needs its own measured A/B, unlike the
-   decoupling in (i) which is a no-op at the shipped configuration.
+   **DONE 2026-07-24, and the outcome inverted the expected benefit.** The radius bound was
+   re-derived from the curve (`Bestv2RawShiftPxFast` spans [-1.3964, +8.5823] over a domain both
+   the stretch and recenter stages saturate, so with `subject_lock` configurable in [0,1] the
+   reachable |shift - anchor| maxes at 9.979 px) and tightened 12.51 -> 10.1. The previous value's
+   stated derivation cited a curve minimum of -2.52 that the polynomial does not have; it evidently
+   predated a curve change.
+   Note the roadmap's original premise here was also wrong: it assumed the slack came from
+   `subject_lock = 0.5`, but under `zero_plane != legacy` -- the default since today -- the anchor
+   is `s2.x` and is NOT scaled by `subject_lock`, so its worst case is the full 9.979 px. The
+   number coincides, so the bound is safe, but the reasoning did not survive the zero-plane change.
+   **Tightening the radius bought nothing** (pop/jitter/fold unchanged, stretch +0.5%): 20% finer
+   probe spacing made no difference, i.e. the useful search interval was already over-resolved.
+   That null result is what made the real win visible -- spend the reclaimed radius on FEWER probes
+   at the ORIGINAL spacing instead of denser ones. `Bestv2ProbeSteps` 24 -> 19.4 (= 24 x 10.1/12.51)
+   reproduces the historical spacing at ~20% less loop work: **warp time -16.0% core / -14.5%
+   extended, with stretch -1.7%/-0.4%, stereo volume bit-identical, fold 0.000 and jitter
+   unchanged.** The calibration pinned probe SPACING; the step count was only ever the number
+   needed to achieve it across an oversized radius.
+   **Much more is available and it can be byte-exact.** The window is still ~6x wider than the
+   maximum displacement that can occur at the shipped defaults, from three stacking slacks:
+   (a) `convergence_bias` is identically 0 whenever `explicit_zero_plane > 0.5`
+   (`sbs_warp_common.hlsl:87-88`), which is now the default, yet the radius still budgets
+   ~49% of itself for it; (b) the shift bound is the global worst case rather than the frame's,
+   though the anchor is already computed in `MakeBestv2Params`; and (c) the radius uses
+   `adaptive_pop_max` rather than the resolved per-frame ratio -- and the comment claiming that
+   ratio is "unavailable to this loop-bound helper" is FALSE, since `s1` is in scope at the only
+   call site and `MakeBestv2Params` already reads `s1.w`. Snapping the probe start to a fixed
+   lattice makes the narrowed probe set a strict SUBSET of the current one, so this validates by
+   byte-compare of `sbs_*`/`depth_*`/`warp_map_*.f32` rather than by metric argument.
 3. ~~Collect scene-level headset labels for explicit zero-plane placement.~~ **Done 2026-07-24:
    `median` was labelled decisively better in the headset and is now the default** (see the
    superseding entry above). The remaining open work is the *per-scene selector*, not the global
