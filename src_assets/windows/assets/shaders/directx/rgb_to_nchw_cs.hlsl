@@ -1,5 +1,6 @@
 Texture2D<float4> InputTexture : register(t0);
 RWStructuredBuffer<float> OutputBuffer : register(u0);
+RWStructuredBuffer<float> OutputAppearanceOrdinal : register(u1);
 SamplerState LinearSampler : register(s0);
 
 #include "include/depth_constants.hlsl"
@@ -13,9 +14,28 @@ void main(uint3 DTid : SV_DispatchThreadID) {
 
     // Calculate normalized UV coordinates based on target dimensions (center of the pixel)
     float2 uv = float2((DTid.x + 0.5f) / (float)target_w, (DTid.y + 0.5f) / (float)target_h);
+    uint base_idx = DTid.y * target_w + DTid.x;
 
     // Sample with linear filtering (SampleLevel bypasses mipmapping)
     float4 pixel = InputTexture.SampleLevel(LinearSampler, uv, 0);
+
+    // Preserve one exposure-ordinal signal BEFORE the model's HDR tonemapper. Reinhard uses a
+    // per-pixel luminance divisor, so maxRGB reconstructed from the post-tone-map NCHW tensor is
+    // not rank invariant: a global exposure change can reverse two differently coloured pixels.
+    //
+    // Point sampling is deliberate. A nonlinear exposure curve followed by bilinear mixing can
+    // also reverse the ordering of two mixtures even when the curve is globally monotone. At a
+    // fixed capture texel, however, maxRGB commutes with an identical monotone channel curve; a
+    // pair can retain its order or collapse to a tie, never reverse it. The later census requires
+    // reliable contrast in both frames, so ties abstain.
+    uint source_w, source_h;
+    InputTexture.GetDimensions(source_w, source_h);
+    uint2 source_point = min(
+        uint2(uv * float2(source_w, source_h)),
+        uint2(source_w - 1u, source_h - 1u));
+    float3 capture_rgb = InputTexture.Load(int3(source_point, 0)).rgb;
+    OutputAppearanceOrdinal[base_idx] =
+        max(capture_rgb.r, max(capture_rgb.g, capture_rgb.b));
 
     // HDR capture is scRGB: LINEAR light with Rec.709 primaries (so primaries already match
     // the SDR-trained model; only the transfer function differs). Compress highlights with
@@ -31,7 +51,6 @@ void main(uint3 DTid : SV_DispatchThreadID) {
 
     // NCHW Layout mapping: Output shape is [1, 3, target_h, target_w]
     uint channel_stride = target_w * target_h;
-    uint base_idx = DTid.y * target_w + DTid.x;
     
     // Write R, G, B channels
     OutputBuffer[base_idx] = r;

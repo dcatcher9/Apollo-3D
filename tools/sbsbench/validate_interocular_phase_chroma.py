@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Validate the experimental interocular phase metric on real source frames.
+"""Validate the experimental interocular phase metric on authenticated source frames.
 
 This standalone corruption validator does not edit evaluator thresholds or qualify training
-labels.  It renders clean intended disparity from real source frames, applies controlled one-eye
-faults and benign controls, and fails closed when an expected response or abstention is absent.
+labels.  It renders clean intended disparity from authenticated source frames, applies controlled
+one-eye faults and benign controls, and fails closed when an expected response or abstention is absent.
 The JSON report retains every scenario metric so later human/headset calibration can audit the
 detector rather than trusting a single pass/fail bit.
 """

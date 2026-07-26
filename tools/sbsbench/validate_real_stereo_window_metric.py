@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Falsify the experimental stereo-window metric on authenticated real source frames.
+"""Falsify the experimental stereo-window metric on authenticated source frames.
 
 The validator reuses the shared authenticated clip provenance checks and deterministic
-frame selection, but renders only synthetic *exact inverse maps*.  Real image content therefore
+frame selection, but renders only synthetic *exact inverse maps*.  Source image content therefore
 drives the metric's contrast/frequency/orientation weighting while the desired border geometry is
 known exactly.  It covers central crossed disparity (benign), graded crossed cuts, sign separation,
 source-derived contrast/orientation/frequency stimuli, aspect-fit bars, raw-U clamps, folds, and
@@ -106,7 +106,7 @@ def _monotonic_check(name, levels, values, *, minimum_response=0.0, tolerance=1e
     if any(value is None or not np.isfinite(value) for value in values):
         return _check(name, "abstain", "one or more levels lacked qualified support", **record)
     if float(values[-1]) <= minimum_response:
-        return _check(name, "abstain", "real source lacks enough visible evidence", **record)
+        return _check(name, "abstain", "source frame lacks enough visible evidence", **record)
     monotonic = all(float(after) + tolerance >= float(before)
                     for before, after in zip(values[:-1], values[1:]))
     responsive = float(values[-1]) > float(values[0]) + minimum_response
@@ -154,7 +154,7 @@ def _profile_image(profile, width, height, orientation):
 
 
 def _periodic_profile_image(profile, width, height, orientation):
-    """Tile one real-source profile at equal pixel frequency in either orientation.
+    """Tile one authenticated-source profile at equal pixel frequency in either orientation.
 
     A once-per-picture vertical profile can be locally flat exactly at the lateral cut bands,
     while its horizontal transpose exposes the full profile along those bands.  Tiling the same
@@ -200,7 +200,7 @@ def _controlled_source_checks(source, shape):
     crossed_map = signed_maps(shape, -2.0)
     prefix = "experimental_stereo_window_"
 
-    # Preserve real content while scaling its physical contrast about neutral gray.  Per-frame
+    # Preserve source content while scaling its physical contrast about neutral gray.  Per-frame
     # normalization in the metric would fail this check by making all four responses equal.
     contrast_metrics = []
     for level in CONTRAST_LEVELS:
@@ -498,14 +498,14 @@ def build_report(clip_roots=None, frames_per_clip=1, max_width=512, max_clips=No
 
     return {
         "schema": SCHEMA,
-        "purpose": "authenticated-real-source falsification of stereo-window metrics",
+        "purpose": "authenticated-source falsification of stereo-window metrics",
         "training_label_qualification": "blocked",
         "auto_promotes_labels": False,
         "qualification_note": (
             "Passing controlled exact-map checks is necessary but not sufficient. Independent "
             "real renderer failures and display/viewer psychophysics remain required."),
         "limitations": [
-            "contrast/orientation/frequency stimuli are deterministic transforms of real frames",
+            "contrast/orientation/frequency stimuli are deterministic transforms of source frames",
             "picture-space frequency is not calibrated cycles per degree",
             "simulated HDR validates evaluator order, not HDR perceptual thresholds",
         ],

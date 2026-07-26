@@ -973,7 +973,7 @@ class LabelProvenanceTests(unittest.TestCase):
             "literal_bestv2": False,
             "adaptive_pop": False,
             "adaptive_pop_max": 1.3,
-            "zero_plane": 0.5,
+            "zero_plane": "median",
             "metric_runtime": {"python": "3.x", "numpy": "2.x", "pillow": "11.x"},
             "scored_artifact_sha256": {"clip": "artifacts"},
             "training_label_gate": {"passed": True},
@@ -1096,7 +1096,7 @@ class ReportEvidenceContractTests(unittest.TestCase):
                 with open(os.path.join(artifact_dir, "contract.json"), "w",
                           encoding="utf-8") as stream:
                     json.dump({
-                        "schema": 16,
+                        "schema": 17,
                         "model": "depth_anything_v2_fp16",
                         "profile": "apollo",
                         "depth_step": "current-once",
@@ -1106,7 +1106,23 @@ class ReportEvidenceContractTests(unittest.TestCase):
                         "cuda_graph": True,
                         "adaptive_pop": True,
                         "adaptive_pop_max": 1.3,
-                        "zero_plane": "legacy",
+                        "zero_plane": "median",
+                        "subject_state": {
+                            "file": "subject_state.json", "schema": 1,
+                            "capture": "every-source-frame-after-estimator-update",
+                        },
+                    }, stream)
+                with open(os.path.join(artifact_dir, "subject_state.json"), "w",
+                          encoding="utf-8") as stream:
+                    json.dump({
+                        "schema": 1,
+                        "source": "depth_subject_resolve_cs.SubjectState",
+                        "capture": "every-source-frame-after-estimator-update",
+                        "fields": list(sbsbench.SUBJECT_STATE_FIELDS),
+                        "frames": [{"frame_id": "00000", "values": [
+                            0.0, 0.0, 0.5, 1.0, 0.0, 1.0,
+                            0.0, 1.0, 0.0, 1.0, 3.0, 1.0,
+                        ]}],
                     }, stream)
                 with open(os.path.join(artifact_dir, "sbs_perf.json"), "w",
                           encoding="utf-8") as stream:
@@ -1145,7 +1161,7 @@ class ReportEvidenceContractTests(unittest.TestCase):
                 "cuda_graph": True,
                 "adaptive_pop": True,
                 "adaptive_pop_max": 1.3,
-                "zero_plane": "legacy",
+                "zero_plane": "median",
                 "training_labels": run_eval.training_label_manifest(thresholds),
                 "run_kind": "comparison-only",
                 "timestamp": "2026-07-17T00:00:00",
@@ -1165,7 +1181,7 @@ class ReportEvidenceContractTests(unittest.TestCase):
                     "cuda_graph": True,
                     "adaptive_pop": True,
                     "adaptive_pop_max": 1.3,
-                    "zero_plane": "legacy",
+                    "zero_plane": "median",
                     "source_frame_count": 1,
                     "scored_artifact_sha256": artifact_hash,
                     "content_type": "synthetic",

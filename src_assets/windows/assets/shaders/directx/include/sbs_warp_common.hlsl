@@ -42,7 +42,11 @@ cbuffer Constants : register(b2) {
     float literal_bestv2;        // harness-only: bypass production resolution/aspect/pop scaling
     float adaptive_pop;          // use SubjectState[1].w scene-risk multiplier
     float adaptive_pop_max;      // configured ceiling; the resolved ratio arrives in SubjectState
-    float padding0;              // was subject_lock, which only scaled the removed legacy anchor
+    // Production-only draw guard. After depth history is initialized, a completed all-invalid
+    // inference holds the old depth on GPU; the reprojection pixel shader discards that draw so it
+    // also holds the matching old color. With no valid history yet, it draws live flat SBS.
+    // The offline harness leaves this zero.
+    float preserve_previous_on_invalid;
 };
 
 // Map one eye's output UV into the mono source. Letterbox/pillarbox is applied independently in
@@ -247,11 +251,27 @@ int Bestv2MaxProbes(float source_width, float source_height) {
 // validated envelope reach it, and there two runs with different radii may land on different
 // lattices and lose the byte-exactness argument.
 int Bestv2ProbeIntervals(float radius, int max_probes, inout float spacing) {
-    int intervals = (int)ceil((2.0f * radius) / spacing) + 1;
-    int decimate = max((intervals + max_probes) / max_probes, 1);
-    if (decimate > 1) {
-        spacing *= (float)decimate;
+    // The caller samples once before its loop, so only max_probes - 1 loop intervals fit the
+    // TOTAL-sample budget.
+    int max_intervals = max(max_probes - 1, 1);
+    float base_spacing = spacing;
+    float span_in_base_cells = (2.0f * radius) / base_spacing;
+    int intervals = (int)ceil(span_in_base_cells) + 1;
+    if (intervals > max_intervals) {
+        // The extra right-edge bracket is part of the interval requirement, not something that
+        // may be removed to meet the work cap. Choose a coarser sub-lattice against the remaining
+        // max_intervals - 1 span cells, then guard the recomputed float result by increasing the
+        // integral decimation until both invariants hold.
+        int span_intervals = max(max_intervals - 1, 1);
+        int decimate = max((int)ceil(span_in_base_cells / (float)span_intervals), 1);
+        spacing = base_spacing * (float)decimate;
         intervals = (int)ceil((2.0f * radius) / spacing) + 1;
+        [loop]
+        while (intervals > max_intervals) {
+            ++decimate;
+            spacing = base_spacing * (float)decimate;
+            intervals = (int)ceil((2.0f * radius) / spacing) + 1;
+        }
     }
     return intervals;
 }

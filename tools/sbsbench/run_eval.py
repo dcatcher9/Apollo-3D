@@ -14,7 +14,7 @@ a machine-readable results.json with provenance, and its EXIT CODE is the verdic
 Typical use:
   python tools/sbsbench/run_eval.py                     # eval vs committed baselines
   python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change: re-baseline
-  python tools/sbsbench/run_eval.py --extra --subject-lock 0.6  # pass supported A/B levers
+  python tools/sbsbench/run_eval.py --extra --zero-plane background  # pass supported A/B levers
 
 Results land in <build-dir>/sbs_eval/<label>/ (SBS+depth frames per clip + results.json).
 Baselines/thresholds/conf are committed next to this script; changing bench.conf or the clip set
@@ -26,6 +26,7 @@ import datetime
 import glob
 import hashlib
 import json
+import ntpath
 import os
 import platform
 import re
@@ -52,11 +53,20 @@ REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 
-EVAL_SCHEMA = 33  # adds depth_gt_edge_support_pct and the disparity-plateau diagnostics; harness contract 16
+EVAL_SCHEMA = 34  # adds authenticated per-frame shot-state evidence; harness contract 17
 BASELINE_SNAPSHOT_SCHEMA = 1
 BASELINE_SNAPSHOT_FILE = "baseline_snapshot.json"
 TRAINING_LABEL_STATUS = "qualified"
 TRAINING_LABEL_ROLES = {"reward", "risk", "hard"}
+CONTENT_TYPES = {
+    "ai-generated",
+    "anime",
+    "unclassified",
+    "synthetic",
+    "real-capture",
+    "animation",
+    "simulation",
+}
 
 
 def production_subprocess_env():
@@ -122,8 +132,9 @@ def scored_artifact_digests(directory):
     """Hash authenticated and numeric-only artifact sets in one file traversal."""
     scored_fixed = {
         "contract.json", "sbs_perf.json", "warp_map_shape.json", "hdr_output_stats.json",
+        "subject_state.json",
     }
-    numeric_fixed = {"warp_map_shape.json", "hdr_output_stats.json"}
+    numeric_fixed = {"warp_map_shape.json", "hdr_output_stats.json", "subject_state.json"}
     frame_pattern = re.compile(r"^(?:sbs|depth|warp_map|warp_mask)_\d+\.(?:png|f32)$")
     paths = sorted(
         path for path in glob.glob(os.path.join(directory, "*"))
@@ -300,10 +311,20 @@ def load_clip_metadata(path, suite=None, required=True):
         raise ValueError(
             f"invalid clip metadata {meta_path}: reference_stereo_available must be boolean")
     if "evaluation_role" in meta and meta["evaluation_role"] not in {
-            "ground-truth", "reference-only"}:
+            "ground-truth", "reference-only", "conformance-only"}:
         raise ValueError(
-            f"invalid clip metadata {meta_path}: evaluation_role must be ground-truth or "
-            "reference-only")
+            f"invalid clip metadata {meta_path}: evaluation_role must be ground-truth, "
+            "reference-only, or conformance-only")
+    content_type = meta.get("content_type")
+    if content_type is not None and content_type not in CONTENT_TYPES:
+        raise ValueError(
+            f"invalid clip metadata {meta_path}: content_type {content_type!r} is not one of "
+            f"{sorted(CONTENT_TYPES)!r}")
+    if (meta.get("evaluation_role") == "conformance-only" and
+            any(meta.get(key) is True for key in requirement_keys)):
+        raise ValueError(
+            f"invalid clip metadata {meta_path}: conformance-only clips cannot declare "
+            "consumed depth/flow ground truth")
     if suite == "extended":
         if not isinstance(meta.get("dataset"), str) or not meta["dataset"].strip():
             raise ValueError(f"invalid extended clip metadata {meta_path}: dataset is required")
@@ -312,6 +333,10 @@ def load_clip_metadata(path, suite=None, required=True):
                 "evaluation_role" not in meta):
             meta["evaluation_role"] = "reference-only"
         is_reference_only = meta.get("evaluation_role") == "reference-only"
+        if meta.get("evaluation_role") == "conformance-only":
+            raise ValueError(
+                f"invalid extended clip metadata {meta_path}: conformance-only is reserved for "
+                "deterministic core probes")
         if not has_consumed_gt and not (
                 is_reference_only and meta.get("reference_stereo_available") is True):
             raise ValueError(
@@ -326,6 +351,114 @@ def load_clip_metadata(path, suite=None, required=True):
             raise ValueError(
                 f"invalid extended clip metadata {meta_path}: required GT depth needs "
                 "gt_depth_kind=disparity, metric, or depth")
+    if required and content_type is None:
+        raise ValueError(
+            f"invalid clip metadata {meta_path}: explicit content_type classification is required")
+    shot_contract = meta.get("shot_state_contract")
+    if meta.get("evaluation_role") == "conformance-only" and shot_contract is None:
+        raise ValueError(
+            f"invalid clip metadata {meta_path}: conformance-only requires an authenticated "
+            "shot_state_contract hard invariant")
+    if shot_contract is not None:
+        if not isinstance(shot_contract, dict):
+            raise ValueError(
+                f"invalid clip metadata {meta_path}: shot_state_contract must be an object")
+        common_keys = {"kind", "monitor_from_frame", "expected_pulse_frames"}
+        kind = shot_contract.get("kind")
+        kind_keys = {
+            "hard-cut": set(),
+            "exposure-only": {
+                "stable_from_frame", "base_frame", "gain_percent_by_frame",
+                "rgb_transform",
+            },
+            "latched-motion-hard-cut": {
+                "setup_pulse_frame", "persistent_motion_frames",
+                "escape_pulse_frame", "source_base_frame_by_frame",
+                "horizontal_roll_px_by_frame", "rgb_transform",
+            },
+        }
+        expected_keys = common_keys | kind_keys.get(kind, set())
+        if kind not in kind_keys or set(shot_contract) != expected_keys:
+            raise ValueError(
+                f"invalid clip metadata {meta_path}: unsupported or incomplete "
+                f"shot_state_contract {shot_contract!r}")
+        monitor_from = shot_contract.get("monitor_from_frame")
+        pulses = shot_contract.get("expected_pulse_frames")
+        if monitor_from != 2 or isinstance(monitor_from, bool):
+            raise ValueError(
+                f"invalid clip metadata {meta_path}: monitor_from_frame must be exactly 2 "
+                "so startup pulses cannot be hidden")
+        if (not isinstance(pulses, list) or
+                any(not isinstance(frame, int) or isinstance(frame, bool) or frame < monitor_from
+                    for frame in pulses) or len(set(pulses)) != len(pulses)):
+            raise ValueError(
+                f"invalid clip metadata {meta_path}: expected_pulse_frames must be unique "
+                "integer frame numbers inside the monitored interval")
+        frame_count = len(glob.glob(os.path.join(path, "frame_*.*")))
+        if monitor_from > frame_count or any(frame > frame_count for frame in pulses):
+            raise ValueError(
+                f"invalid clip metadata {meta_path}: shot-state frame contract exceeds "
+                f"the {frame_count}-frame clip")
+        if kind == "exposure-only":
+            gains = shot_contract.get("gain_percent_by_frame")
+            base_frame = shot_contract.get("base_frame")
+            stable_from = shot_contract.get("stable_from_frame")
+            if pulses:
+                raise ValueError(
+                    f"invalid clip metadata {meta_path}: exposure-only stimulus cannot expect "
+                    "a shot pulse")
+            if (not isinstance(stable_from, int) or isinstance(stable_from, bool) or
+                    not monitor_from <= stable_from <= frame_count):
+                raise ValueError(
+                    f"invalid clip metadata {meta_path}: stable_from_frame must be inside "
+                    "the monitored source interval")
+            if (not isinstance(base_frame, int) or isinstance(base_frame, bool) or
+                    not 1 <= base_frame <= frame_count):
+                raise ValueError(
+                    f"invalid clip metadata {meta_path}: base_frame is outside the clip")
+            if (not isinstance(gains, list) or len(gains) != frame_count or
+                    any(not isinstance(gain, int) or isinstance(gain, bool) or gain <= 0
+                        for gain in gains)):
+                raise ValueError(
+                    f"invalid clip metadata {meta_path}: gain_percent_by_frame must contain "
+                    "one positive integer per source frame")
+            if shot_contract.get("rgb_transform") != (
+                    "min(255, (base_rgb * gain_percent + 50) // 100)"):
+                raise ValueError(
+                    f"invalid clip metadata {meta_path}: unknown exposure RGB transform")
+        if kind == "latched-motion-hard-cut":
+            setup = shot_contract.get("setup_pulse_frame")
+            persistent = shot_contract.get("persistent_motion_frames")
+            escape = shot_contract.get("escape_pulse_frame")
+            base_frames = shot_contract.get("source_base_frame_by_frame")
+            shifts = shot_contract.get("horizontal_roll_px_by_frame")
+            if (not isinstance(setup, int) or isinstance(setup, bool) or
+                    not isinstance(escape, int) or isinstance(escape, bool) or
+                    not monitor_from <= setup < escape <= frame_count or
+                    pulses != [setup, escape]):
+                raise ValueError(
+                    f"invalid clip metadata {meta_path}: latched-motion pulse schedule must "
+                    "contain exactly the setup cut and later escape cut")
+            if (not isinstance(persistent, list) or persistent != [setup, escape - 1]):
+                raise ValueError(
+                    f"invalid clip metadata {meta_path}: persistent_motion_frames must span "
+                    "from the setup cut through the frame before the escape cut")
+            if (not isinstance(base_frames, list) or len(base_frames) != frame_count or
+                    any(not isinstance(frame, int) or isinstance(frame, bool) or
+                        not 1 <= frame <= frame_count for frame in base_frames)):
+                raise ValueError(
+                    f"invalid clip metadata {meta_path}: source_base_frame_by_frame must "
+                    "contain one valid source frame id per frame")
+            if (not isinstance(shifts, list) or len(shifts) != frame_count or
+                    any(not isinstance(shift, int) or isinstance(shift, bool)
+                        for shift in shifts)):
+                raise ValueError(
+                    f"invalid clip metadata {meta_path}: horizontal_roll_px_by_frame must "
+                    "contain one integer shift per frame")
+            if shot_contract.get("rgb_transform") != (
+                    "np.roll(base_rgb, horizontal_shift_px, axis=1)"):
+                raise ValueError(
+                    f"invalid clip metadata {meta_path}: unknown latched-motion RGB transform")
     reference_patterns = {
         "required_gt_depth": os.path.join(path, "gt_depth", "frame_*.*"),
         "required_gt_flow": os.path.join(path, "gt_flow", "frame_*.npz"),
@@ -345,7 +478,7 @@ def published_clip_metadata(source_meta):
         "name", "description", "expected_flat", "gt_depth_kind", "required_gt_depth",
         "required_gt_flow", "reference_stereo_available", "dataset", "homepage", "citation",
         "license_note", "content_type", "evaluation_role", "source_url", "source_window",
-        "source_artifacts",
+        "source_artifacts", "shot_state_contract",
     )
     published = {key: source_meta[key] for key in keys if key in source_meta}
     if "suite" in source_meta:
@@ -378,7 +511,8 @@ def source_evidence_digests(path):
     meta = load_clip_metadata(path, required=False)
     semantic = {k: meta[k] for k in ("expected_flat", "gt_depth_kind", "dataset",
                                      "required_gt_depth", "required_gt_flow",
-                                     "reference_stereo_available", "evaluation_role") if k in meta}
+                                     "reference_stereo_available", "evaluation_role",
+                                     "content_type", "shot_state_contract") if k in meta}
     semantic_bytes = json.dumps(semantic, sort_keys=True).encode()
     legacy.update(semantic_bytes)
     full.update(semantic_bytes)
@@ -430,6 +564,31 @@ def preflight_baselines(base_dir, clips, required_common, clip_hashes):
     return baselines
 
 
+def clips_requiring_committed_baselines(clips, clip_metadata):
+    """Return the scored clips whose decision authority includes a numeric baseline.
+
+    ``conformance-only`` core probes are decided by authenticated hard invariants (for example,
+    an exact production shot-state pulse schedule), not by tolerance against yesterday's value.
+    Every other role remains fail-closed: omitting or misspelling a role cannot waive its
+    committed baseline.
+    """
+    missing_metadata = [clip for clip in clips if clip not in clip_metadata]
+    if missing_metadata:
+        raise ValueError(
+            f"missing source metadata for scored clip(s): {missing_metadata}")
+    invalid_exemptions = [
+        clip for clip in clips
+        if clip_metadata[clip].get("evaluation_role") == "conformance-only" and
+        not isinstance(clip_metadata[clip].get("shot_state_contract"), dict)
+    ]
+    if invalid_exemptions:
+        raise ValueError(
+            "conformance-only clip(s) have no authenticated hard contract: "
+            f"{invalid_exemptions}")
+    return [clip for clip in clips
+            if clip_metadata[clip].get("evaluation_role") != "conformance-only"]
+
+
 def build_baseline_snapshot(base_dir, baselines):
     """Freeze the exact preflighted baseline evidence used by a gated run."""
     entries = {}
@@ -462,7 +621,8 @@ def validate_baseline_snapshot(snapshot, clips, required_common, clip_hashes):
             f"baseline snapshot schema must be {BASELINE_SNAPSHOT_SCHEMA}")
     entries = snapshot.get("clips")
     if not isinstance(entries, dict) or set(entries) != set(clips):
-        raise ValueError("baseline snapshot clips must exactly cover the scored clip set")
+        raise ValueError(
+            "baseline snapshot clips must exactly cover the baseline-required clip set")
     baselines = {}
     for clip in clips:
         entry = entries[clip]
@@ -1115,7 +1275,7 @@ def authoritative_remeasurement_clip_meta(
     ``results.json`` is only a cache.  In particular, an edited ``expected_flat`` flag or a
     forged ``source_frame_count`` can change metric applicability and label completeness.  This
     function deliberately does not read the cached per-clip metadata while constructing the
-    replacement.  The source ``meta.json``, the schema-16 harness contract, and the complete set
+    replacement.  The source ``meta.json``, the schema-17 harness contract, and the complete set
     of decoded metric image identities are the authorities.
     """
     run_meta = results.get("meta")
@@ -1134,6 +1294,9 @@ def authoritative_remeasurement_clip_meta(
                     if path.lower().endswith((".png", ".jpg", ".jpeg"))}
     if not source_files:
         raise ValueError(f"clips.{clip}: source has no decodable image frames")
+    if source_meta.get("shot_state_contract"):
+        sbsbench.validate_shot_state_source(
+            source_files, source_meta["shot_state_contract"])
 
     artifact_dir = os.path.join(run_dir, clip)
     scored_images = {
@@ -1177,9 +1340,9 @@ def authoritative_remeasurement_clip_meta(
             contract = json.load(contract_file)
     except (OSError, ValueError) as exc:
         raise ValueError(f"clips.{clip}: invalid harness contract {contract_path}: {exc}") from exc
-    if not isinstance(contract, dict) or contract.get("schema") != 16:
+    if not isinstance(contract, dict) or contract.get("schema") != 17:
         raise ValueError(
-            f"clips.{clip}: harness contract schema must be 16, got "
+            f"clips.{clip}: harness contract schema must be 17, got "
             f"{contract.get('schema') if isinstance(contract, dict) else None!r}")
     contract_keys = (
         "model", "profile", "depth_compensation", "literal_bestv2", "cuda_graph",
@@ -1189,6 +1352,20 @@ def authoritative_remeasurement_clip_meta(
     for key in contract_keys:
         if key not in contract:
             raise ValueError(f"clips.{clip}: harness contract is missing {key}")
+    expected_subject_state = {
+        "file": "subject_state.json",
+        "schema": 1,
+        "capture": "every-source-frame-after-estimator-update",
+    }
+    if contract.get("subject_state") != expected_subject_state:
+        raise ValueError(
+            f"clips.{clip}: missing/unknown subject-state trace contract")
+    state_trace = sbsbench.load_subject_state_trace(
+        os.path.join(artifact_dir, expected_subject_state["file"]))
+    if set(state_trace) != source_ids:
+        raise ValueError(
+            f"clips.{clip}: subject-state/source frame-id mismatch: "
+            f"state={sorted(state_trace)}, source={sorted(source_ids)}")
     for key in ("model", "profile", "depth_compensation", "literal_bestv2", "cuda_graph",
                 "adaptive_pop", "adaptive_pop_max", "zero_plane", "depth_step",
                 "depth_reuse_interval"):
@@ -1286,6 +1463,13 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
 
     baseline_manifests = {}
     if run_kind == "baseline-gated":
+        source_clip_meta = {
+            clip: load_clip_metadata(
+                os.path.join(clips_root, clip), suite=meta.get("suite"), required=True)
+            for clip in clips
+        }
+        baseline_required_clips = clips_requiring_committed_baselines(
+            list(clips), source_clip_meta)
         snapshot_path = os.path.join(run_dir, BASELINE_SNAPSHOT_FILE)
         try:
             with open(snapshot_path, encoding="utf-8") as snapshot_file:
@@ -1297,7 +1481,7 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
             meta.get("baseline_snapshot_sha256"), sha256_json(snapshot),
             "meta.baseline_snapshot_sha256")
         baseline_manifests = validate_baseline_snapshot(
-            snapshot, list(clips), baseline_required_context(meta),
+            snapshot, baseline_required_clips, baseline_required_context(meta),
             recorded_clip_hashes)
 
     for clip in clips:
@@ -1365,12 +1549,17 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
                 aggregate, thresholds, clip, entry_meta, worst=worst, rows=rows))
             expected_evidence_failures.extend(
                 perf_evidence_failures(None, perf, thresholds, clip))
-        else:
+        elif clip in baseline_manifests:
             clip_evidence, clip_regressions = score_baseline_comparison(
                 aggregate, perf, rows, worst, entry_meta, baseline_manifests[clip],
                 thresholds, clip, skip_perf_regressions=bool(meta.get("gpu_contention")))
             expected_evidence_failures.extend(clip_evidence)
             expected_regressions.extend(clip_regressions)
+        else:
+            expected_evidence_failures.extend(primary_evidence_failures(
+                aggregate, thresholds, clip, entry_meta, worst=worst, rows=rows))
+            expected_evidence_failures.extend(
+                perf_evidence_failures(None, perf, thresholds, clip))
 
     expected["issues"] = expected_issues
     expected["hard_failures"] = expected_hard_failures
@@ -1415,6 +1604,33 @@ def normalize_cli_paths(args):
     if args.report_out:
         args.report_out = os.path.abspath(args.report_out)
     return args
+
+
+def safe_path_component(value, description):
+    """Validate a user-controlled name before joining it to an evaluator-owned directory."""
+    if not isinstance(value, str) or not value or value in (".", ".."):
+        raise ValueError(f"{description} must be a non-empty basename")
+    # Check both native and Windows syntax. Evaluations and their manifests are routinely moved
+    # between Windows and POSIX hosts, so accepting a drive-qualified or backslash-separated name
+    # on one platform would make it unsafe on the other.
+    if (os.path.isabs(value) or ntpath.isabs(value) or
+            os.path.basename(value) != value or ntpath.basename(value) != value):
+        raise ValueError(f"{description} must be a basename without path separators: {value!r}")
+    return value
+
+
+def confined_child(root, component, description):
+    """Resolve one safe child and prove it remains below ``root`` before destructive use."""
+    component = safe_path_component(component, description)
+    resolved_root = os.path.realpath(os.path.abspath(root))
+    resolved_child = os.path.realpath(os.path.join(resolved_root, component))
+    try:
+        contained = os.path.commonpath((resolved_root, resolved_child)) == resolved_root
+    except ValueError:
+        contained = False
+    if not contained or resolved_child == resolved_root:
+        raise ValueError(f"{description} escapes evaluator output root: {component!r}")
+    return resolved_child
 
 
 def require_current_build(build_dir):
@@ -1664,7 +1880,7 @@ def main():
     ap.add_argument("--baseline-dir", help="override suite baseline directory")
     ap.add_argument("--label", default=None, help="run label (default: timestamp)")
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[],
-                    help="extra harness args, e.g. --extra --subject-lock 0.6")
+                    help="extra harness args, e.g. --extra --zero-plane background")
     ap.add_argument("--update-baselines", action="store_true",
                     help="write this run as the new committed baselines (use after intended changes)")
     ap.add_argument("--comparison-only", action="store_true",
@@ -1684,6 +1900,11 @@ def main():
                     help="allow an explicit old-code versus new-code report (binary and HLSL)")
     ap.add_argument("--allow-build", action="store_true", help="proceed even if engines are missing")
     args = normalize_cli_paths(ap.parse_args())
+    label = args.label or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    try:
+        label = safe_path_component(label, "run label")
+    except ValueError as exc:
+        fail(str(exc))
     if args.comparison_only and args.update_baselines:
         fail("--comparison-only and --update-baselines are mutually exclusive")
     if args.update_baselines and args.extra:
@@ -1734,6 +1955,10 @@ def main():
     if not clips:
         fail("no clips in " + clips_dir)
     try:
+        clips = [safe_path_component(clip, "clip name") for clip in clips]
+    except ValueError as exc:
+        fail(str(exc))
+    try:
         source_clip_meta = {
             clip: load_clip_metadata(os.path.join(clips_dir, clip), suite=args.suite)
             for clip in clips
@@ -1743,8 +1968,16 @@ def main():
     depth_override_counts = (validate_depth_override_manifest(
         depth_override_root, clips_dir, clips, depth_reuse_interval, depth_override_all)
         if depth_override_root else {clip: 0 for clip in clips})
+    try:
+        baseline_required_clips = clips_requiring_committed_baselines(
+            clips, source_clip_meta)
+    except ValueError as exc:
+        fail(str(exc))
     if not args.update_baselines and not args.comparison_only:
-        missing_baselines = [c for c in clips if not os.path.exists(os.path.join(base_dir, c + ".json"))]
+        missing_baselines = [
+            clip for clip in baseline_required_clips
+            if not os.path.exists(os.path.join(base_dir, clip + ".json"))
+        ]
         if missing_baselines:
             fail(f"missing committed baseline(s) in {base_dir}: {missing_baselines}. "
                  "Use --comparison-only for a matched A/B or --update-baselines after validation.")
@@ -1776,7 +2009,7 @@ def main():
     expected_zero_plane = expected_profile_string(
         args.conf, expected_config_profile, "zero_plane", "median", args.extra,
         "--zero-plane")
-    if expected_zero_plane not in ("legacy", "subject", "median", "background"):
+    if expected_zero_plane not in ("subject", "median", "background"):
         fail(f"invalid zero_plane value: {expected_zero_plane!r}")
     expected_model = expected_depth_model(args.conf, expected_config_profile, args.extra)
 
@@ -1806,7 +2039,7 @@ def main():
         })
         try:
             baseline_manifests = preflight_baselines(
-                base_dir, clips, required_baseline_context, clip_hashes)
+                base_dir, baseline_required_clips, required_baseline_context, clip_hashes)
             baseline_snapshot = build_baseline_snapshot(base_dir, baseline_manifests)
         except ValueError as exc:
             fail(str(exc))
@@ -1842,8 +2075,11 @@ def main():
             fail("refusing --update-baselines while another sunshine.exe is running; "
                  "close the live host so committed performance baselines are trustworthy")
 
-    label = args.label or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_root = os.path.join(args.build_dir, "sbs_eval", label)
+    eval_root = os.path.join(args.build_dir, "sbs_eval")
+    try:
+        out_root = confined_child(eval_root, label, "run label")
+    except ValueError as exc:
+        fail(str(exc))
     os.makedirs(out_root, exist_ok=True)
 
     meta = {
@@ -1881,7 +2117,10 @@ def main():
     sbsbench.enable_reusable_spatial_executor()
     for clip in clips:
         clip_dir = os.path.join(clips_dir, clip)
-        out_dir = os.path.join(out_root, clip)
+        try:
+            out_dir = confined_child(out_root, clip, "clip name")
+        except ValueError as exc:
+            fail(str(exc))
         shutil.rmtree(out_dir, ignore_errors=True)  # a reused label must not retain stale frame IDs
         cmd = [exe, os.path.abspath(args.conf), "--sbs-bench",
                "--frames", clip_dir, "--out", out_dir,
@@ -1903,7 +2142,7 @@ def main():
             fail(f"{clip}: harness did not write contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
         expected_contract = {
-            "schema": 16,
+            "schema": 17,
             "model": expected_model,
             "profile": expected_config_profile,
             "depth_step": depth_step,
@@ -1919,6 +2158,11 @@ def main():
             "zero_plane": expected_zero_plane,
             "literal_bestv2": literal_bestv2,
             "cuda_graph": expected_cuda_graph,
+            "subject_state": {
+                "file": "subject_state.json",
+                "schema": 1,
+                "capture": "every-source-frame-after-estimator-update",
+            },
         }
         mismatched = {key: (expected, contract.get(key))
                       for key, expected in expected_contract.items()
@@ -1940,6 +2184,14 @@ def main():
             os.path.join(clip_dir, "frame_*.*"), "frame_")
         source_ids = set(source_by_id)
         clip_meta["source_frame_count"] = len(source_ids)
+        try:
+            state_trace = sbsbench.load_subject_state_trace(
+                os.path.join(out_dir, contract["subject_state"]["file"]))
+        except ValueError as exc:
+            fail(f"{clip}: {exc}")
+        if set(state_trace) != source_ids:
+            fail(f"{clip}: subject-state/source frame-id mismatch "
+                 f"state={sorted(state_trace)} source={sorted(source_ids)}")
         sbs_by_id = sbsbench.indexed_files(os.path.join(out_dir, "sbs_*.png"), "sbs_")
         sbs_ids = set(sbs_by_id)
         depth_ids = set(sbsbench.indexed_files(os.path.join(out_dir, "depth_*.png"), "depth_"))
@@ -2106,21 +2358,31 @@ def main():
         # from: if the clip content changed, gating against it is meaningless -- skip it loudly
         # instead of silently comparing apples to oranges.
         bp = os.path.join(base_dir, clip + ".json")
-        if not args.update_baselines and not args.comparison_only:
+        if (not args.update_baselines and not args.comparison_only and
+                clip in baseline_manifests):
             base = baseline_manifests[clip]
             clip_evidence, clip_regressions = score_baseline_comparison(
                 agg, perf, rows, worst, clip_meta, base, thresholds, clip,
                 skip_perf_regressions=contention)
             evidence_failures.extend(clip_evidence)
             regressions.extend(clip_regressions)
+        elif not args.update_baselines and not args.comparison_only:
+            # Conformance-only probes have no numeric baseline by design. Their authenticated
+            # hard bounds above decide pass/fail; still fail closed if any otherwise-applicable
+            # current evidence or performance record is missing.
+            evidence_failures.extend(primary_evidence_failures(
+                agg, thresholds, clip, clip_meta, worst=worst, rows=rows))
+            evidence_failures.extend(perf_evidence_failures(
+                None, perf, thresholds, clip))
 
         if args.update_baselines:
             evidence_failures.extend(primary_evidence_failures(
                 agg, thresholds, clip, clip_meta, worst=worst, rows=rows))
             evidence_failures.extend(perf_evidence_failures(None, perf, thresholds, clip))
-            baseline_updates[bp] = {
-                "aggregate": agg, "perf_ms": perf,
-                "meta": {**meta, **clip_meta, "clip_sha1": meta["clip_set_sha1"][clip]}}
+            if clip in baseline_required_clips:
+                baseline_updates[bp] = {
+                    "aggregate": agg, "perf_ms": perf,
+                    "meta": {**meta, **clip_meta, "clip_sha1": meta["clip_set_sha1"][clip]}}
 
     verdict = ("hard_failures" if hard_failures else
                "evidence_failures" if evidence_failures else

@@ -71,6 +71,57 @@ namespace platf::sbs_debug {
       return (uint8_t) std::lround(s * 255.0f);
     }
 
+    enum class depth_dumpability {
+      valid,
+      invalid,
+      unreadable,
+    };
+
+    // A dump is an explicitly requested, already-blocking diagnostic operation, so reading this
+    // 16-byte GPU state does not add a synchronization point to normal streaming.
+    depth_dumpability classify_depth_completion(ID3D11Device *device, ID3D11DeviceContext *ctx,
+      ID3D11ShaderResourceView *depth_frame_state) {
+      if (!depth_frame_state) {
+        return depth_dumpability::valid;
+      }
+
+      Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+      depth_frame_state->GetResource(&resource);
+      Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
+      if (!resource || FAILED(resource.As(&buffer))) {
+        return depth_dumpability::unreadable;
+      }
+
+      D3D11_BUFFER_DESC source_desc = {};
+      buffer->GetDesc(&source_desc);
+      if (source_desc.ByteWidth < sizeof(float) * 4) {
+        return depth_dumpability::unreadable;
+      }
+
+      D3D11_BUFFER_DESC staging_desc = source_desc;
+      staging_desc.Usage = D3D11_USAGE_STAGING;
+      staging_desc.BindFlags = 0;
+      staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      staging_desc.MiscFlags = 0;
+      staging_desc.StructureByteStride = 0;
+      Microsoft::WRL::ComPtr<ID3D11Buffer> staging;
+      if (FAILED(device->CreateBuffer(&staging_desc, nullptr, &staging))) {
+        return depth_dumpability::unreadable;
+      }
+
+      ctx->CopyResource(staging.Get(), buffer.Get());
+      D3D11_MAPPED_SUBRESOURCE mapped = {};
+      if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return depth_dumpability::unreadable;
+      }
+      const float frame_state = static_cast<const float *>(mapped.pData)[3];
+      ctx->Unmap(staging.Get(), 0);
+      if (!std::isfinite(frame_state)) {
+        return depth_dumpability::unreadable;
+      }
+      return frame_state >= 0.5f ? depth_dumpability::valid : depth_dumpability::invalid;
+    }
+
     // Diagnostic scRGB preview. Compress luminance uniformly so hue is retained, then apply a
     // second uniform scale only when a wide-gamut component remains above the PNG gamut.
     inline void tonemap_scrgb(float &r, float &g, float &b) {
@@ -257,13 +308,11 @@ namespace platf::sbs_debug {
 
   void dumper::maybe_dump(ID3D11Device *device, ID3D11DeviceContext *ctx,
     ID3D11ShaderResourceView *source, ID3D11ShaderResourceView *depth,
-    ID3D11ShaderResourceView *sbs, bool hdr, const std::string &model_name) {
+    ID3D11ShaderResourceView *sbs, ID3D11ShaderResourceView *depth_frame_state,
+    bool hdr, const std::string &model_name) {
     // Avoid an atomic read-modify-write on every rendered frame. A request that arrives after
-    // this relaxed probe is simply consumed on the next non-repeat output frame.
+    // this relaxed probe is simply consumed on the next valid, non-repeat output frame.
     bool by_button = ::video::sbs_debug_dump_pending.load(std::memory_order_relaxed);
-    if (by_button) {
-      by_button = ::video::sbs_debug_dump_pending.exchange(false, std::memory_order_relaxed);
-    }
     bool by_file = false;
     if (!by_button) {
       // Manual file triggering is a development fallback. Shipped/disabled diagnostics pay only
@@ -283,6 +332,27 @@ namespace platf::sbs_debug {
     }
     if (!by_button && !by_file) {
       return;
+    }
+    const auto dumpability = classify_depth_completion(device, ctx, depth_frame_state);
+    if (dumpability == depth_dumpability::invalid) {
+      // Preserve both trigger forms until a genuine same-frame color/depth pair completes.
+      return;
+    }
+    if (dumpability == depth_dumpability::unreadable) {
+      if (by_button) {
+        ::video::sbs_debug_dump_pending.exchange(false, std::memory_order_relaxed);
+      }
+      if (by_file) {
+        std::filesystem::remove(trigger, ec);
+      }
+      BOOST_LOG(warning) << "SBS debug dump skipped: depth validity state could not be read."sv;
+      return;
+    }
+    if (by_button) {
+      by_button = ::video::sbs_debug_dump_pending.exchange(false, std::memory_order_relaxed);
+      if (!by_button && !by_file) {
+        return;
+      }
     }
 
     // One timestamped subfolder per dump so successive dumps never overwrite each other and the

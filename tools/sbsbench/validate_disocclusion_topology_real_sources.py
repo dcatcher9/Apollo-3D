@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Falsify topology metrics with controlled corruptions of authenticated real source frames.
+"""Falsify topology metrics with controlled corruptions of authenticated source frames.
 
 This validator complements the compact synthetic unit tests.  It uses committed core frames and
 prepared public-suite frames under the shared authenticated provenance contract,
@@ -692,11 +692,11 @@ def build_report(clip_roots, frames_per_clip=1, max_width=256, max_clips_per_sui
     summary.update({"clips": len(clips), "samples": len(samples)})
     return {
         "schema": SCHEMA,
-        "purpose": "authenticated-real-source controlled topology corruption falsification",
+        "purpose": "authenticated-source controlled topology corruption falsification",
         "training_label_qualification": "blocked",
         "auto_promotes_labels": False,
         "qualification_note": (
-            "Passing is necessary but never sufficient. Synthetic topology on a real source is "
+            "Passing is necessary but never sufficient. Synthetic topology on a source frame is "
             "not scene ground truth or human/headset calibration."),
         "limitations": [
             "synthetic depth topology is not ground truth for the original source scene",

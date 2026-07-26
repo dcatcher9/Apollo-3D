@@ -33,7 +33,11 @@ bool IsMovingEdge(int2 p) {
     gradient = max(gradient, abs(current - CurrentDepth(p + int2( 1, 0))));
     gradient = max(gradient, abs(current - CurrentDepth(p + int2(0, -1))));
     gradient = max(gradient, abs(current - CurrentDepth(p + int2(0,  1))));
-    return change >= ema_edge_change && gradient >= ema_edge_gradient;
+    // ema_edge_gradient is specified in the same 434-reference-texel units as the subject and
+    // adaptive-pop spatial thresholds. Keep the motion mask stable when a profile/native cap
+    // resolves a 392- or 420-short-side grid.
+    float reference_gradient = gradient * DepthReferenceTexelScale();
+    return change >= ema_edge_change && reference_gradient >= ema_edge_gradient;
 }
 
 [numthreads(16, 16, 1)]

@@ -29,6 +29,9 @@ Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 python tools/sbsbench/compare_runs.py <control-run-dir> <treatment-run-dir> [--all-roles]
 ```
 
+The comparator requires both runs to contain the same authenticated clip set and current evaluator
+provenance before it reads any metric values.
+
 Hand-averaging two `results.json` files is how this suite gets misread, twice over:
 
 * Filtering NaNs per run independently makes the two means cover **different clip subsets**, so
@@ -36,12 +39,17 @@ Hand-averaging two `results.json` files is how this suite gets misread, twice ov
   an applicable, finite value, and prints how many clips it dropped.
 * A suite mean can be produced almost entirely by the synthetic probe clips, which exist to expose
   one failure mode and are not representative content. `static_jitter_p95` at
-  `--depth-short-side 280` reads **+47% across the whole core suite but -3.35% on non-synthetic
-  content**, because `fast_motion` alone moves +252%. The tool always prints the per-`content_type`
-  split and marks synthetic groups NOT DECISIVE; it never shows a bare suite mean.
+  `--depth-short-side 280` historically read **+47% across the whole core suite but -3.35% across
+  the seven clips then grouped merely as non-synthetic**, because `fast_motion` alone moved +252%.
+  That historical subset includes three clips now explicitly `unclassified`; it is not the
+  comparator's current aggregate. The tool always prints the per-`content_type` split, marks both
+  synthetic probes and unclassified content NOT DECISIVE, and labels its aggregate
+  `ALL CLASSIFIED NON-PROBE`; it never shows a bare suite mean.
 
-`content_type` comes from each clip's `meta.json`. Clips without one report as `unclassified` and
-are treated as decisive — annotate rather than assume.
+`content_type` comes from each clip's `meta.json`. Both runs must explicitly classify every clip
+and agree on the classification; missing, unknown, or mismatched classifications are a setup
+error. The controlled values are `real-capture`, `animation`, `simulation`, `ai-generated`,
+`anime`, `synthetic`, and `unclassified`.
 
 ## One-command eval loop (start here)
 
@@ -58,7 +66,7 @@ For example:
 ```
 sbs_3d_profile = cinema
 sbs_3d_profile_cinema_depth_model = depth_anything_v2_base_fp16
-sbs_3d_profile_cinema_pop_strength = 1.25
+sbs_3d_profile_cinema_pop_strength = 1.20
 ```
 
 Every profile uses Apollo's occlusion-aware warp; profiles select depth-processing, model, pop,
@@ -80,7 +88,7 @@ creates a reusable execution context for, and warms the single selected model at
 ```
 python tools/sbsbench/run_eval.py                     # all committed clips vs committed baselines
 python tools/sbsbench/run_eval.py --update-baselines  # accepted defaults only; --extra is rejected
-python tools/sbsbench/run_eval.py --extra --pop-strength 1.25   # pass supported A/B levers
+python tools/sbsbench/run_eval.py --extra --pop-strength 1.40   # pass supported A/B levers
 python tools/sbsbench/run_eval.py --label profile-b --conf profile-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/profile-a --report-allow-config-diff
 python tools/sbsbench/run_eval.py --label model-b --conf model-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/model-a --report-allow-config-diff --report-allow-model-diff
 python tools/sbsbench/run_eval.py --label cadence-b --report-control cmake-build-relwithdebinfo/sbs_eval/cadence-a --report-allow-depth-step-diff --extra --depth-every 2
@@ -122,8 +130,12 @@ in-memory pixel remeasurement; no cached JSON metric authenticates itself.
 
 Committed baselines are canonical production-profile runs. Move an accepted setting into the
 profile/config before `--update-baselines`; the runner rejects harness `--extra` overrides so a
-treatment baseline cannot later masquerade as the default. Missing hard, baseline-supported
-primary, or configured performance evidence fails closed. `rescore_run.py` is metric-only: it
+treatment baseline cannot later masquerade as the default. Deterministic core probes explicitly
+marked `evaluation_role: conformance-only` are the one exception: their authenticated hard
+invariants decide them directly, so the default gate neither requires nor writes a numeric
+baseline for them. Every other role still requires an exact committed baseline. Missing hard,
+baseline-supported primary, current conformance, or configured performance evidence fails closed.
+`rescore_run.py` is metric-only: it
 accepts only explicitly comparison-only runs produced by the current evaluator schema, preserves
 that schema, verifies the recorded source hashes, and uses the run's recorded clip root.
 
@@ -183,26 +195,22 @@ Harness A/B levers (after `--extra`):
   Bestv2 subject path).
 - `--no-subject-stretch` — disable that stretch for an accepted-feature ablation.
 - `--zero-plane subject|median|background` — choose a shot-latched screen-plane anchor.
-  The three explicit modes are experimental camera-offset treatments; they preserve
-  symmetric eye geometry and the disparity scale, and update only at startup or a hard scene cut.
-  SUPERSEDED 2026-07-24: `median` is now the production default (headset-validated). The earlier
-position was that `legacy` remains the default because fixed anchors produced scene-dependent
-  tradeoffs rather than a suite-wide improvement.
+  All three preserve symmetric eye geometry and the disparity scale, and update only at startup or
+  a hard scene cut. `median` is the headset-validated production default; `subject` and
+  `background` are experimental camera-offset treatments. The historical per-frame `legacy` mode
+  was removed because its moving anchor caused visible convergence wobble.
 - `--cuda-graph on|off` — capture and replay the TensorRT enqueue when the mapped D3D tensor
   addresses remain stable. The first enqueue for a new address/shape is an uncaptured warmup.
 
 Production uses the equivalent `sbs_3d_pop_strength = F` key. Like every individual SBS key it
-overrides every profile; omit it to retain each profile's configured/default value (`1.25`).
-Scene-adaptive pop is enabled by default. It selects once per scene between the `1.25` floor and
+overrides every profile; omit it to retain each profile's configured/default value (`1.20`).
+Scene-adaptive pop is enabled by default. It selects once per scene between the `1.20` floor and
 the validated `sbs_3d_adaptive_pop_max = 2.00` ceiling using a gradient-magnitude-weighted edge
 statistic, then
 holds the result bit-stable until a hard cut. Set `sbs_3d_adaptive_pop = false` for the fixed floor.
-SUPERSEDED 2026-07-24: the 2.0 ceiling is now the shipped default. The earlier rejection read:
-comfort remained within 3%, but temporal and
-warp artifacts regressed. Symmetric left/right geometry is unchanged.
-The equivalent production key is `sbs_3d_zero_plane`. Keep it at the default `legacy` outside a
-controlled headset or evaluator A/B; `subject`, `median`, and `background` change convergence
-placement without changing the configured pop multiplier.
+The equivalent production key is `sbs_3d_zero_plane`. Its default is `median`; `subject` and
+`background` remain controlled headset/evaluator A/B treatments that change convergence placement
+without changing the configured pop multiplier.
 CUDA Graph replay is enabled by default for every profile. Use `sbs_3d_cuda_graph = false` only
 for driver diagnosis or a controlled performance A/B; unsupported/capture-failed systems already
 fall back to ordinary TensorRT enqueue automatically.
@@ -240,7 +248,7 @@ Percent/normalized outputs are preferred; raw pixel diagnostics are never compar
 resolutions. Harness depth is 16-bit so
 sub-1/255 changes remain measurable.
 
-**Eval schema 33 / harness contract 16:** `run_eval.py` pins the profile, model, and zero-plane
+**Eval schema 34 / harness contract 17:** `run_eval.py` pins the profile, model, and zero-plane
 mode explicitly, records the exact Sunshine executable, runtime HLSL tree, engine, and ONNX
 hashes, and has no alternate warp selector. A normal report requires all four to match;
 `--report-allow-executable-diff` explicitly permits a code/shader A/B, while
@@ -267,14 +275,27 @@ model labels must match the hashes, `meta.training_labels` and each clip's `labe
 scores are not labels. Schema 29 replaced the broad proxy list with explicitly scoped
 perceptual/conformance/GT/temporal evidence. Schema 32 replaces inferred source-profile artifact
 scores with exact-map topology, strict renderer conformance, authenticated GT, and registered
-temporal evidence. Old results and baselines are intentionally stale.
+temporal evidence. Schema 33 adds authenticated depth-edge support and disparity-plateau
+diagnostics. Old results and baselines are intentionally stale.
+Schema 34 adds `subject_state.json`, a benchmark-only readback of the production GPU
+`SubjectState` after every source-frame update. Authenticated clip metadata declares expected shot
+pulse frames; `scene_cut` and `flat_transition` each require exactly one pulse at frame 13, while
+the lossless exposure-only probe requires none and holds the already-settled zero-anchor shift and
+adaptive-pop ratio bit-stable. Pulse monitoring starts at frame 2 so startup relatches cannot hide;
+the exposure contract separately declares frame 10 as the start of settled drift measurement.
+`sustained_motion_scene_cut` requires setup and true-cut pulses at frames 11 and 27, proves both
+proposal arms remain closed throughout the intervening motion, and therefore authenticates the
+second pulse as the latched relative-geometry escape. The evaluator authenticates every exposure
+frame against its exact integer global-RGB-gain transform and every sustained-motion frame against
+its declared source-frame/horizontal-roll construction before applying those hard conformance
+gates. No readback or CPU/GPU synchronization was added to the production capture loop.
 Output folders
 are cleared before reuse. `--output-every N` reduces saved artifacts while still processing every
 input frame, so sampling cannot change temporal state.
 
 There are deliberately **no qualified model labels in the current threshold contract**. Exact
 comfort, clamp, topology, binocular-conflict, and mapping-stretch candidates are
-marked `experimental` pending controlled-corruption and headset calibration, so schema-32 frames abstain with
+marked `experimental` pending controlled-corruption and headset calibration, so schema-34 frames abstain with
 `no_qualified_training_labels`. Exact mapped-source residual, color, coverage and integrity
 remain active report/run-gate evidence but have `scope: "conformance"` and no training `label`:
 they verify that the renderer reproduced the coordinate selected by its own warp, which cannot
@@ -287,7 +308,8 @@ valid/visible pixels; disparity clips that require GT fail closed when it is mis
 Invalid, occluded, non-finite, and resize-unsupported pixels never enter accuracy or boundary
 statistics. Missing GT means reference metrics are absent—not zero and not inferred. `flat_page`
 and `fast_motion` carry deterministic 16-bit disparity ground truth generated by
-`make_synth_clips.py`; recorded movie clips remain no-reference.
+`make_synth_clips.py`. Any clip without those sidecars, including all five legacy `c*` clips,
+remains no-reference.
 
 Schema 4 also accepts native float32 `gt_depth/frame_*.npy` and exact forward-flow
 `gt_flow/frame_*.npz` sidecars. Each flow sidecar belongs to its current frame and contains
@@ -306,6 +328,9 @@ are migrated in memory to this diagnostic declaration and never published or int
 new preparation writes only the new contract. Sintel preparation also preserves the
 official occlusion and out-of-frame masks and writes explicit all-pixel and non-occluded validity
 masks. Every semantic scoring sidecar participates in the clip identity hash.
+Deterministic core fixtures whose authority is an exact renderer/state-machine invariant use
+`"evaluation_role": "conformance-only"`. They cannot declare consumed depth/flow GT and do not
+turn a hand-authored scene sketch into monocular depth-accuracy truth.
 
 Clips may declare `"expected_flat": true` in `meta.json`. They remain explicit false-stereo and
 depth-hallucination diagnostics but do not vote on the general-content enhanced-pop objective.
@@ -319,10 +344,11 @@ the real pipeline over a fixed frame sequence with the built-in `--sbs-bench` su
 harness — runs the real estimator + real composite shaders, no game/client).
 
 ### The committed clip set (quick eval)
-A small clip set lives in **`tools/sbsbench/clips/<name>/frame_*.jpg`** (24 JPEG frames) so eval is
-fast and reproducible with no per-run preprocessing. It contains five recorded movie clips
-(c339/c525/c647/c747/c841), one open cel-anime clip, one official AI-video-model gallery clip,
-and three generated failure-mode clips from [make_synth_clips.py](make_synth_clips.py):
+A small clip set lives in **`tools/sbsbench/clips/<name>/frame_*.(jpg|png)`** (normally 24 frames) so eval is
+fast and reproducible with no per-run preprocessing. It contains five legacy `c*` clips—c339 and
+c647 are declared `ai-generated`, while c525/c747/c841 are `unclassified`—plus one open
+`anime` clip, one official AI-video-model gallery clip declared `ai-generated`, and five
+six `synthetic` failure-mode/control clips from [make_synth_clips.py](make_synth_clips.py):
 
 | clip | targets | validated fingerprint |
 |------|---------|----------------------|
@@ -330,7 +356,10 @@ and three generated failure-mode clips from [make_synth_clips.py](make_synth_cli
 | `aigen_cogvideox_rain` | AI-video human motion, rain, splash, blur and low contrast | source already contains rain/splash rims and generative temporal inconsistency; tests whether the warp adds to them |
 | `scene_cut` | depth-normalization response across a hard cut | exact geometry and temporal evidence verify one state update per source frame |
 | `flat_page` | flat-content depth hallucination + amplification | static-input false-stereo and depth-boundary noise floor |
+| `flat_transition` | depth-normalization recovery from textured depth to a flat page | exact scene transition and false-stereo decay |
 | `fast_motion` | known 30 px/frame motion | current-frame depth separates warp/edge behavior from live async lag |
+| `exposure_flash_strobe` | exact global exposure flashes/strobe over one fixed synthetic scene | production GPU shot trace must accept zero cuts; settled zero plane/pop remain unchanged |
+| `sustained_motion_scene_cut` | true cut while both proposal arms remain closed by persistent motion | exact roll schedule and production trace prove the later pulse used the latched relative-geometry escape |
 
 ### Public extended suite (decision eval)
 
@@ -344,12 +373,21 @@ python tools/sbsbench/prepare_public_datasets.py
 python tools/sbsbench/run_eval.py --suite extended --comparison-only --label public-apollo
 ```
 
-`extended-v3` contains twelve visually inspected 24-frame clips. The first four remain:
+When only manifest-owned semantic metadata changes, use
+`prepare_public_datasets.py --refresh-metadata-only`. It verifies the existing frame/reference
+layout, rechecks pinned decoded-evidence hashes for range-backed clips, and atomically refreshes
+`meta.json` without redownloading or rewriting media.
+
+`extended-v3` contains twelve visually inspected 24-frame clips from public benchmark datasets.
+The manifest classifies the two Bonn clips as `real-capture`, the two TartanAir and two Virtual
+KITTI clips as `simulation`, and the two Sintel and four Spring clips as `animation`. “Public” and
+“external” describe provenance and storage, not a claim that every clip is captured reality. The
+first four remain:
 
 | clip | source | coverage / reference |
 |------|--------|----------------------|
-| `bonn_person_walk` | Bonn RGB-D Dynamic | real walking person, silhouette motion, registered depth |
-| `bonn_person_close` | Bonn RGB-D Dynamic | close person/robot occlusion, registered depth |
+| `bonn_person_walk` | Bonn RGB-D Dynamic | declared real-capture: walking person, silhouette motion, registered depth |
+| `bonn_person_close` | Bonn RGB-D Dynamic | declared real-capture: close person/robot occlusion, registered depth |
 | `tartanair_house_easy` | TartanAir V2 | attic/bed transition, exact metric depth and flow |
 | `tartanair_house_motion` | TartanAir V2 | indoor/outdoor rotation, exact metric depth and flow |
 
@@ -463,8 +501,8 @@ are coequal, non-compensating axes: stronger depth cannot buy permission for riv
 failure, or missing content. The evaluator intentionally has no scalar score that could average
 one such failure away.
 
-Schema 32 currently exposes 26 report metrics: 11 fail-closed hard constraints, four primary
-quality axes, and 11 supporting diagnostics. The report must present those roles separately. In
+Schema 33 currently exposes 31 report metrics: 11 fail-closed hard constraints, four primary
+quality axes, and 16 supporting diagnostics. The report must present those roles separately. In
 particular, all 11 hard constraints must appear in its top constraint view, while unavailable GT
 or temporal evidence is shown as not applicable rather than as a zero-valued pass.
 
@@ -479,25 +517,27 @@ masks; they remain separate rather than being fused into one artifact score. Dis
 bad-fill remains a standalone falsifier because mono input cannot authenticate revealed content.
 
 Metric implementation changes must pass controlled-corruption unit tests and each detector's
-authenticated-real/source-content validator before an A/B result is trusted:
+authenticated-source/content validator before an A/B result is trusted:
 
 ```
-python -m unittest discover -s tools/sbsbench -p "test_sbs_*.py"
+python -m unittest discover -s tools/sbsbench -p "test_*.py"
 python tools/sbsbench/validate_real_stereo_window_metric.py --suite both --strict --output <window.json>
 python tools/sbsbench/validate_disocclusion_topology_real_sources.py --suite both --strict --output <topology.json>
 python tools/sbsbench/validate_interocular_phase_chroma.py --output <phase.json>
-python tools/sbsbench/validate_interocular_photometric_rivalry.py --run <schema32-run> --output <photometric.json>
-python tools/sbsbench/validate_actual_sbs_metric_corruptions.py --run <schema32-run> --max-clips 4 --output <actual-output.json>
+python tools/sbsbench/validate_interocular_photometric_rivalry.py --run <schema34-run> --output <photometric.json>
+python tools/sbsbench/validate_actual_sbs_metric_corruptions.py --run <schema34-run> --max-clips 4 --output <actual-output.json>
 ```
 
-The unit tests provide precisely controlled corruption truth. The standalone validators apply
-deterministic ladders and benign controls to real source content, retain every scenario's response
-and abstention, and are permanently unable to auto-promote labels. The stereo-window and topology
+The canonical unit-test command runs every `test_*.py` module; optional learned-oracle tests report
+as skipped when their external runtime is unavailable. The unit tests provide precisely controlled
+corruption truth. The standalone validators apply deterministic ladders and benign controls to
+authenticated source imagery, retain every scenario's response and abstention, and are permanently
+unable to auto-promote labels. The stereo-window and topology
 validators additionally enforce the shared authenticated clip-provenance contract across core and
-extended suites. Passing synthetic tests alone is insufficient: real-image content-dependent
-support floors and false positives are exactly what the standalone validators are intended to
-expose. A validator pass remains necessary rather than sufficient; label qualification still
-requires headset-correlated human inspection.
+extended suites. Passing unit-level synthetic tests alone is insufficient: source-image
+content-dependent support floors and false positives are exactly what the standalone validators
+are intended to expose. A validator pass remains necessary rather than sufficient; label
+qualification still requires headset-correlated human inspection.
 Evidence minima are part of the metric contract, not report decoration: actual binocular tails
 need 1,024 mutually visible samples, visible volume and local polarity need 256, and cross-row
 shear needs 512 qualified pixels. New experimental detectors enforce their own native-equivalent
@@ -577,7 +617,7 @@ annotations.
 | `exact_positive_disparity_pct` / `exact_negative_disparity_pct` | output-Jacobian-weighted p99.9 tails of actual mutually visible `x_right - x_left` disparity | each <=3% under the current experimental hard limit |
 | `exact_over_3pct_area_pct` | mutually visible rendered area outside that current limit | lower = less over-limit burden |
 | `exact_mapping_stretch_pct` / `exact_mapping_fold_pct` | low-Jacobian repeated columns and reversed coordinate steps | lower = less stretch/fold |
-| `warp_cross_row_shear_severity_pct` | unsupported horizontal displacement change between adjacent rows, excluding real source boundaries and other topology failures | lower = less scanline-like tearing; diagnostic pending qualification |
+| `warp_cross_row_shear_severity_pct` | unsupported horizontal displacement change between adjacent rows, excluding observed source-image boundaries and other topology failures | lower = less scanline-like tearing; diagnostic pending qualification |
 | `experimental_stereo_window_crossed_burden_pct` | contrast/frequency/orientation-weighted crossed disparity that is actually cut by a lateral stereo window | lower = less perceptible window conflict; experimental |
 | `interocular_phase_orientation_burden_pct` | coherent exact-source-registered equal-detail phase/orientation disagreement | lower = less binocular structural conflict; experimental |
 | `interocular_exposure_rivalry_burden_pct` | coherent source-relative linear-light exposure disagreement between eyes; shared binocular transforms cancel | lower = less binocular exposure rivalry; experimental |
@@ -596,11 +636,11 @@ improving a viewer's overall stereo experience.
 The three interocular axes are intentionally separate: phase/orientation, exposure, and colour-gain
 rivalry are perceptually different and must not cancel. Shared binocular photometric transforms
 cancel, while unilateral global or localized changes remain evidence. Folded, clamped, disjoint, flat, or
-unsupported correspondences abstain. They remain diagnostic until real one-eye-fault and headset
-qualification passes. Former blur, ringing, double-edge, jagged, missing-edge, color-fringe,
+unsupported correspondences abstain. They remain diagnostic until visually verified one-eye-fault
+and headset qualification passes. Former blur, ringing, double-edge, jagged, missing-edge, color-fringe,
 median-normalized chroma, low-frequency luma-rivalry, detail-energy-rivalry, and raw
-depth-edge-offset probes were removed
-after expanded real-image ladders found weak sensitivity and/or benign-control false positives.
+depth-edge-offset probes were removed after expanded authenticated source-image ladders found weak
+sensitivity and/or benign-control false positives.
 They are absent from implementation, the compact manifest, decisions, reports, and training
 labels; rejected detectors are not kept as dormant alternatives that can silently return.
 
@@ -663,8 +703,8 @@ their one-pixel threshold is not comparable across arbitrary depth/disparity res
 ## Independent stereo oracles under qualification
 
 Learned image models are optional offline diagnostics. They do not enter the compact manifest,
-gates, or training labels until they pass the same corruption, benign-transform, real-clip, and
-headset checks as deterministic metrics:
+gates, or training labels until they pass the same corruption, benign-transform,
+authenticated-source-clip, and headset checks as deterministic metrics:
 
 - the optional [NVIDIA FLIP appearance oracle](NVIDIA_FLIP_APPEARANCE_ORACLE.md) compares each
   final eye to its exact regenerated source sample and reports worst-eye perceptual tails; it

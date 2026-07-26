@@ -96,7 +96,7 @@ It checks blur, thin-line deletion, ringing, halo, jagged edges, and double edge
 severity ladders; one-eye versus symmetric defects; clean fractional geometry; hostile bars;
 invalid-map masking; flat content; HDR abstention; and missing-dependency behavior.
 
-The authenticated real-source falsification pass uses only clips accepted by the shared dataset
+The authenticated-source falsification pass uses only clips accepted by the shared dataset
 provenance contract:
 
 ```powershell

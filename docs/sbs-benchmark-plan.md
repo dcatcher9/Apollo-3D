@@ -37,9 +37,10 @@ Design for two reproducible, host-side benchmarks so every SBS change ships with
 > Spring Stereo adds four independent 1920x1080 cinematic clips. All four produce complete
 > polarity-preserving artistic-style evidence; their official archives are sampled reproducibly
 > through verified HTTP byte ranges instead of downloading unrelated multi-gigabyte members.
-> A first adaptive-pop calibration (`spring-adaptive-vs-fixed130`) was neutral. Fixed 1.30 changed
-> pop spread by no more than 0.045 percentage points and produced mixed artistic-reference deltas;
-> keep the validated scene-latched 1.25-1.30 controller until headset preference evidence exists.
+> Historical result: the first adaptive-pop calibration (`spring-adaptive-vs-fixed130`) was
+> neutral. Fixed 1.30 changed pop spread by no more than 0.045 percentage points and produced mixed
+> artistic-reference deltas. Its recommendation to retain the 1.25-1.30 band is superseded:
+> production now uses a scene-latched 1.20-2.00 band with a shot-latched median zero plane.
 
 ## Why the offline warpsim was removed
 
@@ -85,6 +86,8 @@ baselines live separately in `baselines_extended/`, so they cannot be mixed with
   | `fast_motion` | ghost / async lag band |
   | `scene_cut` | depth swim after cuts (A1) |
   | `flat_page` | V2 hallucination + range amplification (A3) |
+  | `exposure_flash_strobe` | exposure-only false shot cuts / zero-plane-pop relatch |
+  | `sustained_motion_scene_cut` | latched no-starvation escape during persistent motion |
 
   Seed these from existing `E:\ApolloDev\sbs_dump\dump_*` frames (single frames are fine for
   no-reference spatial metrics; multi-frame sequences are required for temporal metrics — see

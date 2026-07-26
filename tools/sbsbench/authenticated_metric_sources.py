@@ -1,4 +1,4 @@
-"""Shared fail-closed discovery for real-source metric falsification suites.
+"""Shared fail-closed discovery for authenticated-source metric falsification suites.
 
 This module intentionally contains no quality metric.  Validators reuse one deterministic clip,
 provenance, frame-selection, resize, and source-hash contract instead of importing a rejected

@@ -7,6 +7,11 @@ from PIL import Image
 
 from tools.sbsbench import isqoe_oracle
 
+try:
+    import torch
+except (ImportError, OSError):
+    torch = None
+
 
 class IsqoeOracleTests(unittest.TestCase):
     def test_dropout_api_adapter_accepts_module_and_float(self):
@@ -36,9 +41,8 @@ class IsqoeOracleTests(unittest.TestCase):
             ref.write_text(revision + "\n", encoding="ascii")
             self.assertEqual(isqoe_oracle._repository_revision(root), revision)
 
+    @unittest.skipUnless(torch is not None, "optional PyTorch dependency is not installed")
     def test_packed_eye_order_is_measured_both_ways(self):
-        import torch
-
         model = isqoe_oracle.IsqoeModel.__new__(isqoe_oracle.IsqoeModel)
         model.torch = torch
         model.device = "cpu"
@@ -63,9 +67,8 @@ class IsqoeOracleTests(unittest.TestCase):
         self.assertFalse(payload["training_label_eligible"])
         self.assertEqual(len(payload["input_sha256"]), 64)
 
+    @unittest.skipUnless(torch is not None, "optional PyTorch dependency is not installed")
     def test_non_finite_model_score_is_rejected(self):
-        import torch
-
         model = isqoe_oracle.IsqoeModel.__new__(isqoe_oracle.IsqoeModel)
         model.torch = torch
         model.device = "cpu"

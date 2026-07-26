@@ -1262,6 +1262,12 @@ HARD_DISPLAY = (
     ("source_coverage_worst_patch_bad_pct", "Worst localized missing patch", "%"),
     ("image_integrity_worst_patch_bad_pct", "Worst localized texture damage", "%"),
     ("depth_gt_polarity_ok", "Authenticated GT depth polarity", "%"),
+    ("shot_state_pulse_mismatch", "Shot pulse contract mismatch", ""),
+    ("shot_state_trace_inconsistent", "Shot trace consistency", ""),
+    ("shot_state_initialized_ok", "Shot state initialized", "%"),
+    ("shot_state_relative_escape_ok", "Latched relative escape", "%"),
+    ("shot_state_zero_anchor_drift_px", "Exposure zero-anchor drift", " px"),
+    ("shot_state_adaptive_pop_drift", "Exposure adaptive-pop drift", ""),
 )
 
 HARD_SUPPORT_KEYS = {
@@ -1275,6 +1281,12 @@ HARD_SUPPORT_KEYS = {
     "image_integrity_pct": "image_integrity_support",
     "source_coverage_worst_patch_bad_pct": "source_fidelity_support_pct",
     "image_integrity_worst_patch_bad_pct": "image_integrity_support",
+    "shot_state_pulse_mismatch": "shot_state_contract_support",
+    "shot_state_trace_inconsistent": "shot_state_contract_support",
+    "shot_state_initialized_ok": "shot_state_contract_support",
+    "shot_state_relative_escape_ok": "latched_motion_contract_support",
+    "shot_state_zero_anchor_drift_px": "exposure_shot_state_contract_support",
+    "shot_state_adaptive_pop_drift": "exposure_shot_state_contract_support",
 }
 
 SUPPORTING_HEATMAP_AXES = (
@@ -1297,6 +1309,8 @@ SUPPORTING_HEATMAP_AXES = (
     ("exact_disparity_plateau_near_depth_span_pct", "near plateau span"),
     # Evidence behind depth_gt_edge_f1, which only gates at or above 1.0% support.
     ("depth_gt_edge_support_pct", "GT edge support"),
+    ("shot_state_accepted_pulse", "accepted shot pulses"),
+    ("shot_state_expected_pulse", "expected shot pulses"),
 )
 
 
@@ -1770,6 +1784,30 @@ METRIC_DEFS = [
     ("depth_gt_polarity_ok", "gt_polarity",
          "Explicit prediction-to-GT sign check; a negative fit is a catastrophic near/far inversion.",
          "must remain 100%"),
+    ("shot_state_accepted_pulse", "shot_pulses",
+         "Accepted production shot-state pulses reconstructed from initialized scene-age resets in the benchmark-only GPU SubjectState trace.",
+         "must match the clip contract"),
+    ("shot_state_expected_pulse", "expected_shot_pulses",
+         "Expected shot-pulse count declared by the authenticated synthetic clip contract.",
+         "context for accepted shot pulses"),
+    ("shot_state_pulse_mismatch", "shot_pulse_mismatch",
+         "Per-frame disagreement between accepted production shot pulses and the authenticated expected-pulse schedule.",
+         "must remain zero"),
+    ("shot_state_trace_inconsistent", "shot_trace_consistency",
+         "Disagreement between an initialized scene-age reset and entry into the production cut-latched state flag.",
+         "must remain zero"),
+    ("shot_state_initialized_ok", "shot_state_initialized",
+         "The monitored trace has initialized subject state, a valid zero-plane anchor, and valid matched model-input history.",
+         "must remain 100%"),
+    ("shot_state_relative_escape_ok", "relative_escape",
+         "The setup cut remains latched with both proposal arms closed through persistent motion, then the later accepted cut arrives only after the relative-geometry refractory window.",
+         "must remain 100%"),
+    ("shot_state_zero_anchor_drift_px", "exposure_anchor_drift",
+         "Absolute source-pixel movement of the settled shot-latched zero-plane anchor during an exactly authenticated global-exposure sequence.",
+         "must remain zero"),
+    ("shot_state_adaptive_pop_drift", "exposure_pop_drift",
+         "Absolute change in the settled shot-latched adaptive-pop ratio during an exactly authenticated global-exposure sequence.",
+         "must remain zero"),
 ]
 _ROLE_ORDER = {"hard": 0, "primary": 1, "diagnostic": 2, "reported": 3}
 

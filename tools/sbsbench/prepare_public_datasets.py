@@ -14,9 +14,11 @@ import glob
 import hashlib
 import io
 import json
+import ntpath
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,10 +34,75 @@ from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MANIFEST_PATH = os.path.join(HERE, "datasets", "manifest.json")
+CONTENT_TYPES = {
+    "ai-generated", "anime", "unclassified", "synthetic",
+    "real-capture", "animation", "simulation",
+}
+ADAPTER_SELECTION_CONTRACTS = {
+    "tum_rgbd_zip": {
+        "source_fields": ("rgb_timestamp", "depth_timestamp"),
+        "identity_fields": (),
+    },
+    "tartanair_v2_zip": {
+        "source_fields": ("dataset_frame",),
+        "identity_fields": ("trajectory", "camera"),
+    },
+    "sintel_stereo_zip": {
+        "source_fields": ("dataset_frame",),
+        "identity_fields": ("sequence", "pass"),
+    },
+    "spring_http_range_zip": {
+        "source_fields": ("dataset_frame",),
+        "identity_fields": ("sequence", "split"),
+    },
+    "vkitti2_tar": {
+        "source_fields": ("dataset_frame",),
+        "identity_fields": ("scene", "variant", "camera"),
+    },
+}
+ADAPTER_EVIDENCE_EXTENSIONS = {
+    "tum_rgbd_zip": {"source": ".png", "depth": ".png"},
+    "tartanair_v2_zip": {
+        "source": ".png", "depth": ".npy", "flow": ".npz",
+    },
+    "sintel_stereo_zip": {
+        "source": ".png", "depth": ".npy", "stereo": ".png",
+    },
+    "spring_http_range_zip": {"source": ".png", "stereo": ".png"},
+    "vkitti2_tar": {"source": ".png", "depth": ".png"},
+}
 
 
 def fail(message):
     raise RuntimeError(message)
+
+
+def safe_path_component(value, description):
+    """Validate a manifest-owned name before joining it to a dataset cache directory."""
+    if not isinstance(value, str) or not value or value in (".", ".."):
+        raise ValueError(f"{description} must be a non-empty basename")
+    # Manifests move between Windows and POSIX machines. Reject either platform's absolute,
+    # drive-qualified, or separator-bearing spelling regardless of the current host.
+    if (os.path.isabs(value) or ntpath.isabs(value)
+            or os.path.basename(value) != value
+            or ntpath.basename(value) != value):
+        raise ValueError(
+            f"{description} must be a basename without path separators: {value!r}")
+    return value
+
+
+def confined_child(root, component, description):
+    """Resolve one child and prove it remains below ``root`` before replacing/deleting it."""
+    component = safe_path_component(component, description)
+    resolved_root = os.path.realpath(os.path.abspath(root))
+    resolved_child = os.path.realpath(os.path.join(resolved_root, component))
+    try:
+        contained = os.path.commonpath((resolved_root, resolved_child)) == resolved_root
+    except ValueError:
+        contained = False
+    if not contained or resolved_child == resolved_root:
+        raise ValueError(f"{description} escapes dataset cache root: {component!r}")
+    return resolved_child
 
 
 def sha256(path):
@@ -52,7 +119,16 @@ def load_manifest(path):
     if data.get("schema") not in (1, 2):
         fail(f"unsupported dataset manifest schema: {data.get('schema')}")
     datasets, clips = data.get("datasets", {}), data.get("clips", {})
+    safe_path_component(data.get("prepared_suite"), "prepared suite")
+    for dataset_id, dataset in datasets.items():
+        for archive_id, spec in (dataset.get("archives") or {}).items():
+            if "filename" in spec:
+                safe_path_component(
+                    spec["filename"], f"{dataset_id}.{archive_id} archive filename")
     for clip_id, clip in clips.items():
+        safe_path_component(clip_id, "clip ID")
+        if clip.get("content_type") not in CONTENT_TYPES:
+            fail(f"{clip_id}: content_type must be one of {sorted(CONTENT_TYPES)}")
         try:
             archive_specs = [datasets[clip["dataset"]]["archives"][name]
                              for name in clip["archives"]]
@@ -75,7 +151,7 @@ def archive_spec(manifest, clip, archive_name):
 
 def download_archive(spec, downloads_dir):
     os.makedirs(downloads_dir, exist_ok=True)
-    path = os.path.join(downloads_dir, spec["filename"])
+    path = confined_child(downloads_dir, spec["filename"], "archive filename")
     expected = spec.get("sha256")
     if os.path.exists(path) and (not expected or sha256(path) == expected.lower()):
         return path
@@ -195,12 +271,54 @@ def associate_timestamps(rgb, depth, max_delta):
     return pairs
 
 
-def selected(items, clip):
+def expected_source_indices(clip):
+    """Return the exact source-window indexes shared by extraction and metadata refresh."""
     start, stride, count = (int(clip[k]) for k in ("start", "stride", "count"))
-    indexes = [start + i * stride for i in range(count)]
-    if not indexes or indexes[-1] >= len(items):
+    if start < 0 or stride <= 0 or count <= 0:
+        fail(f"invalid selection window {start}:{stride}:{count}")
+    return [start + i * stride for i in range(count)]
+
+
+def selected(items, clip):
+    indexes = expected_source_indices(clip)
+    if indexes[-1] >= len(items):
+        start, stride, count = (int(clip[k]) for k in ("start", "stride", "count"))
         fail(f"selection {start}:{stride}:{count} exceeds {len(items)} available samples")
     return [(i, items[i]) for i in indexes]
+
+
+def adapter_selection_identity(clip):
+    """Return the manifest-owned identity fields emitted by this adapter's selection rows."""
+    adapter = clip.get("adapter")
+    try:
+        fields = ADAPTER_SELECTION_CONTRACTS[adapter]["identity_fields"]
+    except KeyError:
+        fail(f"unsupported adapter selection contract: {adapter!r}")
+    values = {**clip, "split": "test"}
+    try:
+        return {field: values[field] for field in fields}
+    except KeyError as exc:
+        fail(f"{adapter}: selection identity is missing {exc.args[0]!r}")
+
+
+def make_selection_entry(clip, source_index, **source_values):
+    """Build one selection row from the same adapter contract refresh validation consumes."""
+    adapter = clip.get("adapter")
+    try:
+        expected_fields = set(ADAPTER_SELECTION_CONTRACTS[adapter]["source_fields"])
+    except KeyError:
+        fail(f"unsupported adapter selection contract: {adapter!r}")
+    actual_fields = set(source_values)
+    if actual_fields != expected_fields:
+        fail(
+            f"{adapter}: invalid selection source fields "
+            f"(missing={sorted(expected_fields - actual_fields)}, "
+            f"unexpected={sorted(actual_fields - expected_fields)})")
+    return {
+        "source_index": source_index,
+        **source_values,
+        **adapter_selection_identity(clip),
+    }
 
 
 def _zip_relative_member(zf, list_member, relative):
@@ -276,8 +394,8 @@ def prepare_tum(clip_id, clip, dataset, archives, out_dir, suite):
                                os.path.join(out_dir, f"frame_{output_id:05d}.png"), rgb=True)
             _write_image_bytes(zf.read(_zip_relative_member(zf, depth_list, depth_path)),
                                os.path.join(out_dir, "gt_depth", f"frame_{output_id:05d}.png"))
-            selection.append({"source_index": source_i, "rgb_timestamp": rgb_ts,
-                              "depth_timestamp": depth_ts})
+            selection.append(make_selection_entry(
+                clip, source_i, rgb_timestamp=rgb_ts, depth_timestamp=depth_ts))
     return selection
 
 
@@ -424,7 +542,8 @@ def prepare_tartanair(clip_id, clip, dataset, archives, out_dir, suite):
                 flow = _normalize_flow(flow)
                 np.savez_compressed(os.path.join(out_dir, "gt_flow", f"frame_{output_id:05d}.npz"),
                                     flow=flow, valid=(mask == 0) & np.isfinite(flow).all(axis=2))
-            selection.append({"source_index": source_i, "dataset_frame": frame_id})
+            selection.append(make_selection_entry(
+                clip, source_i, dataset_frame=frame_id))
         return selection
     finally:
         image_zip.close()
@@ -537,8 +656,8 @@ def prepare_sintel(clip_id, clip, dataset, archives, out_dir, suite):
             for directory, mask in masks.items():
                 Image.fromarray(mask.astype(np.uint8) * 255).save(
                     os.path.join(out_dir, directory, frame_name), compress_level=3)
-            selection.append({"source_index": source_i, "dataset_frame": frame_id,
-                              "sequence": sequence, "pass": render_pass})
+            selection.append(make_selection_entry(
+                clip, source_i, dataset_frame=frame_id))
         if range_backed:
             authenticate_prepared_range_evidence(clip_id, clip, out_dir)
         return selection
@@ -568,8 +687,8 @@ def prepare_spring(clip_id, clip, dataset, archives, out_dir, suite):
             _write_image_bytes(right_zip.read(right[frame_id]),
                                os.path.join(out_dir, "gt_right", f"frame_{output_id:05d}.png"),
                                rgb=True)
-            selection.append({"source_index": source_i, "dataset_frame": frame_id,
-                              "sequence": sequence, "split": "test"})
+            selection.append(make_selection_entry(
+                clip, source_i, dataset_frame=frame_id))
         authenticate_prepared_range_evidence(clip_id, clip, out_dir)
         return selection
 
@@ -605,12 +724,196 @@ def prepare_vkitti2(clip_id, clip, dataset, archives, out_dir, suite):
                                os.path.join(out_dir, f"frame_{output_id:05d}.png"), rgb=True)
             _write_image_bytes(_tar_member_bytes(depth_tar, depths[frame_id]),
                                os.path.join(out_dir, "gt_depth", f"frame_{output_id:05d}.png"))
-            selection.append({"source_index": source_i, "dataset_frame": frame_id,
-                              "scene": scene, "variant": variant, "camera": camera})
+            selection.append(make_selection_entry(
+                clip, source_i, dataset_frame=frame_id))
         return selection
     finally:
         rgb_tar.close()
         depth_tar.close()
+
+
+def prepared_clip_metadata(manifest, clip, selection):
+    """Build the source-semantic metadata shared by extraction and metadata-only refreshes."""
+    dataset = manifest["datasets"][clip["dataset"]]
+    has_gt_depth = clip["adapter"] != "spring_http_range_zip"
+    meta = {
+        "name": clip["name"], "description": clip["description"],
+        "content_type": clip["content_type"],
+        "dataset": dataset["title"], "homepage": dataset["homepage"],
+        "citation": dataset["citation"], "license_note": dataset["license_note"],
+        "suite": manifest["prepared_suite"],
+        "required_gt_depth": has_gt_depth,
+        "required_gt_flow": clip["adapter"] == "tartanair_v2_zip",
+        "evaluation_role": ("reference-only" if not has_gt_depth else "ground-truth"),
+        "selection": selection,
+    }
+    if has_gt_depth:
+        meta["gt_depth_kind"] = ("disparity" if clip["adapter"] == "sintel_stereo_zip"
+                                 else "metric")
+    if clip["adapter"] in ("sintel_stereo_zip", "spring_http_range_zip"):
+        meta["reference_stereo_available"] = True
+    for key in ("source_artifacts", "source_artifact_frame"):
+        if key in clip:
+            meta[key] = clip[key]
+    if "prepared_evidence_sha256" in clip:
+        meta["prepared_evidence_sha256"] = clip["prepared_evidence_sha256"]
+    return meta
+
+
+def validate_prepared_selection(clip_id, clip, selection):
+    """Authenticate a cached selection against the adapter's exact manifest window."""
+    expected_indices = expected_source_indices(clip)
+    if not isinstance(selection, list) or len(selection) != len(expected_indices):
+        fail(
+            f"{clip_id}: prepared selection does not match manifest count "
+            f"{len(expected_indices)}")
+    adapter = clip.get("adapter")
+    try:
+        source_fields = set(ADAPTER_SELECTION_CONTRACTS[adapter]["source_fields"])
+    except KeyError:
+        fail(f"{clip_id}: unsupported adapter selection contract: {adapter!r}")
+    identity = adapter_selection_identity(clip)
+    expected_keys = {"source_index", *source_fields, *identity}
+    for output_id, (entry, expected_index) in enumerate(zip(selection, expected_indices)):
+        if not isinstance(entry, dict):
+            fail(f"{clip_id}: prepared selection row {output_id} must be an object")
+        actual_keys = set(entry)
+        if actual_keys != expected_keys:
+            fail(
+                f"{clip_id}: prepared selection row {output_id} fields do not match "
+                f"{adapter} contract (missing={sorted(expected_keys - actual_keys)}, "
+                f"unexpected={sorted(actual_keys - expected_keys)})")
+        source_index = entry["source_index"]
+        if type(source_index) is not int or source_index != expected_index:
+            fail(
+                f"{clip_id}: prepared selection row {output_id} source_index="
+                f"{source_index!r}, expected {expected_index}")
+        for key, expected in identity.items():
+            if entry[key] != expected:
+                fail(
+                    f"{clip_id}: prepared selection row {output_id} {key}="
+                    f"{entry[key]!r}, expected {expected!r}")
+        if "dataset_frame" in source_fields and type(entry["dataset_frame"]) is not int:
+            fail(
+                f"{clip_id}: prepared selection row {output_id} dataset_frame "
+                "must be an integer")
+        for timestamp in ("rgb_timestamp", "depth_timestamp"):
+            if timestamp in source_fields:
+                value = entry[timestamp]
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not np.isfinite(value)):
+                    fail(
+                        f"{clip_id}: prepared selection row {output_id} {timestamp} "
+                        "must be finite numeric evidence")
+    return selection
+
+
+def require_prepared_frame_ids(
+        clip_id, directory, expected_ids, evidence_name, expected_extension):
+    """Require exact numeric IDs, regular files, and the adapter's emitted evidence format."""
+    if not os.path.isdir(directory):
+        fail(f"{clip_id}: prepared {evidence_name} directory is missing")
+    if not re.fullmatch(r"\.[a-z0-9]+", expected_extension):
+        raise ValueError(f"invalid expected evidence extension: {expected_extension!r}")
+    paths = glob.glob(os.path.join(directory, "frame_*.*"))
+    identities = {}
+    malformed = []
+    non_regular = []
+    wrong_extensions = []
+    for path in paths:
+        match = re.fullmatch(r"frame_(\d+)\.[^.]+", os.path.basename(path))
+        if match is None:
+            malformed.append(os.path.basename(path))
+            continue
+        frame_id = int(match.group(1))
+        identities.setdefault(frame_id, []).append(path)
+        try:
+            regular = stat.S_ISREG(os.lstat(path).st_mode)
+        except OSError:
+            regular = False
+        if not regular:
+            non_regular.append(os.path.basename(path))
+        if os.path.splitext(path)[1].lower() != expected_extension:
+            wrong_extensions.append(os.path.basename(path))
+    duplicates = sorted(frame_id for frame_id, matches in identities.items()
+                        if len(matches) != 1)
+    actual_ids = set(identities)
+    expected_ids = set(expected_ids)
+    if (malformed or non_regular or wrong_extensions or duplicates
+            or actual_ids != expected_ids):
+        missing = sorted(expected_ids - actual_ids)
+        unexpected = sorted(actual_ids - expected_ids)
+        fail(
+            f"{clip_id}: prepared {evidence_name} identities are invalid "
+            f"(missing={missing}, unexpected={unexpected}, duplicates={duplicates}, "
+            f"malformed={sorted(malformed)}, non_regular={sorted(non_regular)}, "
+            f"wrong_extensions={sorted(wrong_extensions)}, "
+            f"expected_extension={expected_extension})")
+
+
+def refresh_prepared_clip_metadata(manifest, clip_id, clip, prepared_root):
+    """Refresh manifest-owned metadata without downloading or rewriting authenticated pixels."""
+    final = confined_child(prepared_root, clip_id, "clip ID")
+    meta_path = os.path.join(final, "meta.json")
+    try:
+        with open(meta_path, encoding="utf-8") as stream:
+            existing = json.load(stream)
+    except (OSError, ValueError) as exc:
+        fail(f"{clip_id}: cannot refresh invalid prepared metadata: {exc}")
+    if not isinstance(existing, dict):
+        fail(f"{clip_id}: prepared metadata root must be an object")
+    selection = validate_prepared_selection(clip_id, clip, existing.get("selection"))
+
+    adapter = clip["adapter"]
+    try:
+        evidence_extensions = ADAPTER_EVIDENCE_EXTENSIONS[adapter]
+    except KeyError:
+        fail(f"{clip_id}: unsupported adapter evidence contract: {adapter!r}")
+    expected_frame_ids = range(len(selection))
+    require_prepared_frame_ids(
+        clip_id, final, expected_frame_ids, "source frame",
+        evidence_extensions["source"])
+    if "depth" in evidence_extensions:
+        require_prepared_frame_ids(
+            clip_id, os.path.join(final, "gt_depth"), expected_frame_ids,
+            "depth evidence", evidence_extensions["depth"])
+    if "stereo" in evidence_extensions:
+        require_prepared_frame_ids(
+            clip_id, os.path.join(final, "gt_right"), expected_frame_ids,
+            "stereo evidence", evidence_extensions["stereo"])
+    if "flow" in evidence_extensions:
+        require_prepared_frame_ids(
+            clip_id, os.path.join(final, "gt_flow"), range(1, len(selection)),
+            "flow evidence", evidence_extensions["flow"])
+
+    dataset = manifest["datasets"][clip["dataset"]]
+    for key, expected in (
+            ("name", clip["name"]),
+            ("dataset", dataset["title"]),
+            ("suite", manifest["prepared_suite"])):
+        if existing.get(key) != expected:
+            fail(f"{clip_id}: prepared metadata {key}={existing.get(key)!r}, "
+                 f"expected {expected!r}")
+    archive_specs = [dataset["archives"][name] for name in clip["archives"]]
+    if any(spec.get("access") == "http_range_zip" for spec in archive_specs):
+        authenticate_prepared_range_evidence(clip_id, clip, final)
+
+    refreshed = {**existing, **prepared_clip_metadata(manifest, clip, selection)}
+    refreshed.pop("required_gt_stereo", None)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix="meta.", suffix=".json.tmp", dir=final, text=True)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(refreshed, stream, indent=2)
+            stream.write("\n")
+        os.replace(temporary, meta_path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    print(f"metadata refreshed: {clip_id} -> {meta_path}", flush=True)
 
 
 def prepare_clip(manifest, clip_id, clip, downloads_dir, prepared_root):
@@ -621,13 +924,15 @@ def prepare_clip(manifest, clip_id, clip, downloads_dir, prepared_root):
         if spec.get("access") == "http_range_zip":
             archives[name] = spec
             continue
-        path = os.path.join(downloads_dir, spec["filename"])
+        path = confined_child(downloads_dir, spec["filename"], "archive filename")
         if not os.path.exists(path):
             fail(f"archive missing; run without --no-download first: {path}")
         archives[name] = path
-    final = os.path.join(prepared_root, clip_id)
     os.makedirs(prepared_root, exist_ok=True)
+    final = confined_child(prepared_root, clip_id, "clip ID")
     temp = tempfile.mkdtemp(prefix=clip_id + ".", dir=prepared_root)
+    temp = confined_child(
+        prepared_root, os.path.basename(temp), "temporary prepared clip directory")
     try:
         if clip["adapter"] == "tum_rgbd_zip":
             selection = prepare_tum(clip_id, clip, dataset, archives, temp,
@@ -646,27 +951,7 @@ def prepare_clip(manifest, clip_id, clip, downloads_dir, prepared_root):
                                         manifest["prepared_suite"])
         else:
             fail(f"unsupported adapter: {clip['adapter']}")
-        has_gt_depth = clip["adapter"] != "spring_http_range_zip"
-        meta = {
-            "name": clip["name"], "description": clip["description"],
-            "dataset": dataset["title"], "homepage": dataset["homepage"],
-            "citation": dataset["citation"], "license_note": dataset["license_note"],
-            "suite": manifest["prepared_suite"],
-            "required_gt_depth": has_gt_depth,
-            "required_gt_flow": clip["adapter"] == "tartanair_v2_zip",
-            "evaluation_role": ("reference-only" if not has_gt_depth else "ground-truth"),
-            "selection": selection,
-        }
-        if has_gt_depth:
-            meta["gt_depth_kind"] = ("disparity" if clip["adapter"] == "sintel_stereo_zip"
-                                     else "metric")
-        if clip["adapter"] in ("sintel_stereo_zip", "spring_http_range_zip"):
-            meta["reference_stereo_available"] = True
-        for key in ("source_artifacts", "source_artifact_frame"):
-            if key in clip:
-                meta[key] = clip[key]
-        if "prepared_evidence_sha256" in clip:
-            meta["prepared_evidence_sha256"] = clip["prepared_evidence_sha256"]
+        meta = prepared_clip_metadata(manifest, clip, selection)
         with open(os.path.join(temp, "meta.json"), "w", encoding="utf-8") as fh:
             json.dump(meta, fh, indent=2)
         if os.path.isdir(final):
@@ -685,16 +970,29 @@ def main():
     ap.add_argument("--clips", nargs="*", help="clip IDs to prepare (default: all)")
     ap.add_argument("--download-only", action="store_true")
     ap.add_argument("--no-download", action="store_true")
+    ap.add_argument(
+        "--refresh-metadata-only", action="store_true",
+        help="authenticate existing prepared evidence and atomically refresh manifest-owned "
+             "metadata without downloading or rewriting frames")
     args = ap.parse_args()
+    if args.refresh_metadata_only and args.download_only:
+        fail("--refresh-metadata-only cannot be combined with --download-only")
     manifest = load_manifest(args.manifest)
     cache = os.path.abspath(args.cache or os.environ.get("APOLLO_SBS_DATASETS")
                             or manifest["default_cache"])
     downloads = os.path.join(cache, "downloads")
-    prepared = os.path.join(cache, "prepared", manifest["prepared_suite"])
+    prepared = confined_child(
+        os.path.join(cache, "prepared"), manifest["prepared_suite"], "prepared suite")
     clip_ids = args.clips or list(manifest["clips"])
     unknown = sorted(set(clip_ids) - set(manifest["clips"]))
     if unknown:
         fail(f"unknown clip IDs: {unknown}")
+    if args.refresh_metadata_only:
+        for clip_id in clip_ids:
+            refresh_prepared_clip_metadata(
+                manifest, clip_id, manifest["clips"][clip_id], prepared)
+        print(f"suite root: {prepared}")
+        return
     if not args.no_download:
         seen = set()
         for clip_id in clip_ids:
@@ -716,7 +1014,7 @@ def main():
                     continue
                 if spec["filename"] in seen:
                     continue
-                path = os.path.join(downloads, spec["filename"])
+                path = confined_child(downloads, spec["filename"], "archive filename")
                 if not os.path.exists(path):
                     fail(f"archive missing: {path}")
                 if spec.get("sha256") and sha256(path) != spec["sha256"].lower():

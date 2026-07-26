@@ -1,6 +1,13 @@
 {
   "name": "scene_cut",
   "description": "Hard cut spliced kitchen-vlog -> washerwoman-pond: depth-normalization swim across cuts (A1).",
+  "shot_state_contract": {
+    "kind": "hard-cut",
+    "monitor_from_frame": 2,
+    "expected_pulse_frames": [
+      13
+    ]
+  },
   "content_type": "synthetic",
   "provenance_note": "Constructed probe: hard cut spliced from two committed clips by make_synth_clips.py."
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Falsify the optional FLIP oracle on authenticated real-source frames.
+"""Falsify the optional FLIP oracle on authenticated source frames.
 
 This is a controlled-corruption qualification tool, not an evaluator gate.  It regenerates clean
 eyes through exact intended maps, injects known appearance faults, verifies benign geometry and
@@ -261,7 +261,7 @@ def _main():
     failed = sum(check["status"] == "fail" for check in checks)
     payload = {
         "schema": SCHEMA,
-        "validator": "authenticated-real-source-FLIP-corruption-suite",
+        "validator": "authenticated-source-FLIP-corruption-suite",
         "status": "pass" if records and failed == 0 else "fail",
         "role": "offline_metric_falsification_only",
         "training_label_eligible": False,

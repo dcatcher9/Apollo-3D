@@ -76,7 +76,16 @@ EVIDENCE_SUPPORT_REQUIREMENTS = {
     "interocular_phase_orientation_evidence_sufficient": 100.0,
     "interocular_exposure_rivalry_evidence_sufficient": 100.0,
     "interocular_color_gain_rivalry_evidence_sufficient": 100.0,
+    "shot_state_contract_support": 1.0,
+    "exposure_shot_state_contract_support": 1.0,
+    "latched_motion_contract_support": 1.0,
 }
+SUBJECT_STATE_FIELDS = (
+    "subject_recenter_delta", "scene_age", "subject_depth_ema", "initialized",
+    "stretch_lo", "stretch_inv_range", "depth_change_baseline_ema", "adaptive_pop_ratio",
+    "zero_anchor_shift_px", "zero_anchor_valid", "cut_flags",
+    "model_input_history_valid",
+)
 
 
 # ---------------------------------------------------------------------------- io
@@ -172,6 +181,261 @@ def indexed_files(pattern, prefix):
             raise ValueError(f"duplicate {prefix} frame id {frame_id}: {out[frame_id]} and {path}")
         out[frame_id] = path
     return out
+
+
+def load_subject_state_trace(path):
+    """Load the harness-only GPU SubjectState readback under its exact schema."""
+    try:
+        with open(path, encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"invalid subject-state trace {path}: {exc}") from exc
+    required = {
+        "schema": 1,
+        "source": "depth_subject_resolve_cs.SubjectState",
+        "capture": "every-source-frame-after-estimator-update",
+        "fields": list(SUBJECT_STATE_FIELDS),
+    }
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid subject-state trace {path}: root must be an object")
+    mismatch = {key: (expected, payload.get(key)) for key, expected in required.items()
+                if payload.get(key) != expected}
+    frames = payload.get("frames")
+    if mismatch or not isinstance(frames, list):
+        raise ValueError(
+            f"invalid subject-state trace contract {path}: fields={mismatch}, frames=list required")
+    trace = {}
+    for index, frame in enumerate(frames):
+        if not isinstance(frame, dict) or set(frame) != {"frame_id", "values"}:
+            raise ValueError(
+                f"invalid subject-state frame {index} in {path}: exact frame_id/values required")
+        frame_text = frame["frame_id"]
+        if not isinstance(frame_text, str) or not frame_text.isdigit():
+            raise ValueError(
+                f"invalid subject-state frame id {frame_text!r} at record {index} in {path}")
+        frame_id = int(frame_text)
+        values = frame["values"]
+        if (frame_id in trace or not isinstance(values, list) or
+                len(values) != len(SUBJECT_STATE_FIELDS)):
+            raise ValueError(
+                f"invalid/duplicate subject-state frame {frame_text!r} in {path}")
+        numeric = np.asarray(values)
+        if (numeric.dtype.kind not in "iu f".replace(" ", "") or
+                any(isinstance(value, (bool, np.bool_)) for value in values)):
+            raise ValueError(f"non-numeric subject-state value in frame {frame_text} of {path}")
+        numeric = numeric.astype(np.float64)
+        if not np.isfinite(numeric).all():
+            raise ValueError(f"non-finite subject-state value in frame {frame_text} of {path}")
+        trace[frame_id] = {
+            field: float(value) for field, value in zip(SUBJECT_STATE_FIELDS, numeric)
+        }
+        cut_flags = trace[frame_id]["cut_flags"]
+        if cut_flags < 0.0 or abs(cut_flags - round(cut_flags)) > 1e-6:
+            raise ValueError(
+                f"subject-state cut_flags is not a non-negative integer in frame "
+                f"{frame_text} of {path}")
+    if not trace:
+        raise ValueError(f"subject-state trace has no frames: {path}")
+    return trace
+
+
+def validate_exposure_only_source(src_by_id, contract):
+    """Prove the declared clip is exactly one lossless scene under a global monotone RGB gain."""
+    frame_ids = sorted(src_by_id)
+    gains = contract.get("gain_percent_by_frame")
+    base_frame = contract.get("base_frame")
+    if frame_ids != list(range(1, len(frame_ids) + 1)):
+        raise ValueError(
+            "exposure-only shot-state contract requires contiguous one-based source frame ids")
+    if (not isinstance(gains, list) or len(gains) != len(frame_ids) or
+            not isinstance(base_frame, int) or base_frame not in src_by_id):
+        raise ValueError("exposure-only shot-state contract does not match the source frame set")
+    with Image.open(src_by_id[base_frame]) as image:
+        base = np.asarray(image.convert("RGB"), dtype=np.uint32)
+    for frame_id, gain_percent in zip(frame_ids, gains):
+        if (not isinstance(gain_percent, int) or isinstance(gain_percent, bool) or
+                gain_percent <= 0):
+            raise ValueError("exposure gain schedule must contain positive integers")
+        expected = np.minimum(
+            (base * np.uint32(gain_percent) + 50) // 100, 255).astype(np.uint8)
+        with Image.open(src_by_id[frame_id]) as image:
+            actual = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        if actual.shape != expected.shape or not np.array_equal(actual, expected):
+            raise ValueError(
+                f"frame {frame_id} violates the declared global-RGB-gain exposure contract")
+
+
+def validate_latched_motion_hard_cut_source(src_by_id, contract):
+    """Authenticate the exact roll/replacement construction of the starvation probe."""
+    frame_ids = sorted(src_by_id)
+    base_frames = contract.get("source_base_frame_by_frame")
+    shifts = contract.get("horizontal_roll_px_by_frame")
+    setup = contract.get("setup_pulse_frame")
+    persistent = contract.get("persistent_motion_frames")
+    escape = contract.get("escape_pulse_frame")
+    if frame_ids != list(range(1, len(frame_ids) + 1)):
+        raise ValueError(
+            "latched-motion shot-state contract requires contiguous one-based source frame ids")
+    if (not isinstance(base_frames, list) or len(base_frames) != len(frame_ids) or
+            not isinstance(shifts, list) or len(shifts) != len(frame_ids)):
+        raise ValueError(
+            "latched-motion source construction does not match the source frame set")
+    if persistent != [setup, escape - 1]:
+        raise ValueError("latched-motion persistent range does not end immediately before escape")
+
+    arrays = {}
+    for frame_id in frame_ids:
+        with Image.open(src_by_id[frame_id]) as image:
+            arrays[frame_id] = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    for frame_id, (base_frame, shift) in enumerate(zip(base_frames, shifts), 1):
+        if (not isinstance(base_frame, int) or isinstance(base_frame, bool) or
+                base_frame not in arrays or not isinstance(shift, int) or
+                isinstance(shift, bool)):
+            raise ValueError("latched-motion source schedule contains an invalid base/shift")
+        expected = np.roll(arrays[base_frame], shift, axis=1)
+        if arrays[frame_id].shape != expected.shape or not np.array_equal(
+                arrays[frame_id], expected):
+            raise ValueError(
+                f"frame {frame_id} violates the declared horizontal-roll source contract")
+
+    prelude_base = base_frames[0]
+    final_base = base_frames[escape - 1]
+    if (any(base != prelude_base for base in base_frames[:setup - 1]) or
+            any(shift != 0 for shift in shifts[:setup - 1]) or
+            any(base != setup for base in base_frames[setup - 1:escape - 1]) or
+            base_frames[setup - 1] != setup or shifts[setup - 1] != 0 or
+            any(base != final_base for base in base_frames[escape - 1:]) or
+            any(shift != 0 for shift in shifts[escape - 1:]) or
+            final_base != prelude_base):
+        raise ValueError(
+            "latched-motion source phases do not match prelude/motion/return construction")
+    motion_shifts = shifts[setup - 1:escape - 1]
+    if (len(set(motion_shifts)) < 2 or
+            any(left == right for left, right in zip(
+                motion_shifts, motion_shifts[1:]))):
+        raise ValueError(
+            "latched-motion phase must change horizontal roll on every persistent frame")
+    if np.array_equal(arrays[prelude_base], arrays[setup]):
+        raise ValueError("latched-motion setup and return scene must be visually distinct")
+
+
+def validate_shot_state_source(src_by_id, contract):
+    """Authenticate any shot-state contract carrying an exact source construction."""
+    kind = contract.get("kind")
+    if kind == "exposure-only":
+        validate_exposure_only_source(src_by_id, contract)
+    elif kind == "latched-motion-hard-cut":
+        validate_latched_motion_hard_cut_source(src_by_id, contract)
+
+
+def apply_shot_state_contract(rows, frame_ids, trace, contract):
+    """Attach per-frame evidence from the production SubjectState transition trace.
+
+    A pulse is independently observable as both an initialized scene-age reset and entry into the
+    CUT_LATCHED flag. The mismatch metric catches a missing expected cut, any extra cut, and
+    disagreement between those two state-machine effects. Exposure-only clips additionally
+    require the already-settled zero anchor and adaptive-pop ratio to remain bit-stable.
+    """
+    monitor_from = contract["monitor_from_frame"]
+    expected_pulses = set(contract["expected_pulse_frames"])
+    kind = contract["kind"]
+    row_by_id = {row["_frame_id"]: row for row in rows}
+    monitor_ids = [frame_id for frame_id in frame_ids if frame_id >= monitor_from]
+    if not monitor_ids:
+        raise ValueError("shot-state contract has no monitored frames")
+    missing = sorted(set(frame_ids) - set(trace))
+    extra = sorted(set(trace) - set(frame_ids))
+    if missing or extra:
+        raise ValueError(
+            f"subject-state/source frame-id mismatch: missing={missing}, extra={extra}")
+
+    stable_from = contract.get("stable_from_frame", monitor_from)
+    stable_ids = [frame_id for frame_id in monitor_ids if frame_id >= stable_from]
+    if kind == "exposure-only" and not stable_ids:
+        raise ValueError("exposure shot-state contract has no settled stability frames")
+    reference = trace[stable_ids[0]] if kind == "exposure-only" else None
+
+    relative_escape_ok = None
+    if kind == "latched-motion-hard-cut":
+        setup = contract["setup_pulse_frame"]
+        escape = contract["escape_pulse_frame"]
+
+        def age_reset_at(frame_id):
+            previous_id = predecessor_frame_id(trace, frame_id)
+            if previous_id is None:
+                return False
+            before, after = trace[previous_id], trace[frame_id]
+            return (before["initialized"] > 0.5 and before["scene_age"] > 0.5 and
+                    after["initialized"] > 0.5 and after["scene_age"] < 0.5)
+
+        persistent_ids = list(range(setup, escape))
+        escape_previous = trace.get(predecessor_frame_id(trace, escape))
+        relative_escape_ok = bool(
+            setup in trace and escape in trace and
+            age_reset_at(setup) and age_reset_at(escape) and
+            int(round(trace[setup]["cut_flags"])) == 16 and
+            all(frame_id in trace and int(round(trace[frame_id]["cut_flags"])) == 16
+                for frame_id in persistent_ids) and
+            all(not age_reset_at(frame_id) for frame_id in range(setup + 1, escape)) and
+            escape_previous is not None and escape_previous["scene_age"] >= 8.0)
+
+    accepted_count = expected_count = 0
+    previous = trace.get(predecessor_frame_id(trace, monitor_ids[0]))
+    for frame_id in monitor_ids:
+        current = trace[frame_id]
+        row = row_by_id[frame_id]
+        expected = frame_id in expected_pulses
+        age_reset = (previous is not None and previous["initialized"] > 0.5 and
+                     previous["scene_age"] > 0.5 and current["initialized"] > 0.5 and
+                     current["scene_age"] < 0.5)
+        previous_flags = int(round(previous["cut_flags"])) if previous is not None else 0
+        current_flags = int(round(current["cut_flags"]))
+        # CUT_FLAG_LATCHED remains set while the independent geometry/appearance arms recover.
+        # An accepted shot canonicalizes the whole flag word back to exactly LATCHED (16), so
+        # 19 -> 16 is a later cut just as 3 -> 16 is the first one.
+        # A relative-geometry escape is deliberately reachable while both proposal arms remain
+        # closed, so its canonical state transition is 16 -> 16 plus the scene-age reset. Treat
+        # that reset as a valid re-acceptance of the already-latched flag; otherwise the trace
+        # checker rejects the exact starvation escape it is meant to monitor.
+        latch_entry = (
+            previous is not None and current_flags == 16 and
+            (previous_flags != 16 or age_reset))
+        accepted = bool(age_reset)
+        row["shot_state_contract_support"] = 1.0
+        if kind == "exposure-only" and frame_id >= stable_from:
+            row["exposure_shot_state_contract_support"] = 1.0
+        if kind == "latched-motion-hard-cut":
+            row["latched_motion_contract_support"] = 1.0
+            row["shot_state_relative_escape_ok"] = (
+                100.0 if relative_escape_ok else 0.0)
+        row["shot_state_accepted_pulse"] = 1.0 if accepted else 0.0
+        row["shot_state_expected_pulse"] = 1.0 if expected else 0.0
+        row["shot_state_pulse_mismatch"] = 1.0 if accepted != expected else 0.0
+        row["shot_state_trace_inconsistent"] = 1.0 if age_reset != latch_entry else 0.0
+        row["shot_state_initialized_ok"] = (
+            100.0 if current["initialized"] > 0.5 and
+            current["zero_anchor_valid"] > 0.5 and
+            current["model_input_history_valid"] > 0.5 else 0.0)
+        if kind == "exposure-only" and frame_id >= stable_from:
+            row["shot_state_zero_anchor_drift_px"] = abs(
+                current["zero_anchor_shift_px"] - reference["zero_anchor_shift_px"])
+            row["shot_state_adaptive_pop_drift"] = abs(
+                current["adaptive_pop_ratio"] - reference["adaptive_pop_ratio"])
+        accepted_count += int(accepted)
+        expected_count += int(expected)
+        previous = current
+    summary = {
+        "shot_state_contract_support": float(len(monitor_ids)),
+        "shot_state_accepted_pulse": float(accepted_count),
+        "shot_state_expected_pulse": float(expected_count),
+    }
+    if kind == "exposure-only":
+        summary["exposure_shot_state_contract_support"] = float(len(stable_ids))
+    if kind == "latched-motion-hard-cut":
+        summary["latched_motion_contract_support"] = float(len(monitor_ids))
+        summary["shot_state_relative_escape_ok"] = (
+            100.0 if relative_escape_ok else 0.0)
+    return summary
 
 
 def predecessor_frame_id(indexed, frame_id):
@@ -1061,10 +1325,17 @@ HARD_MAX_AGG = {
     "interocular_color_gain_rivalry_evidence_sufficient",
     "exact_local_polarity_component_pct",
     "source_coverage_worst_patch_bad_pct", "image_integrity_worst_patch_bad_pct",
+    "shot_state_pulse_mismatch", "shot_state_trace_inconsistent",
+    "shot_state_zero_anchor_drift_px", "shot_state_adaptive_pop_drift",
 }
 HARD_MIN_AGG = {
     "exact_binocular_support_pct", "source_coverage_pct", "image_integrity_pct",
     "exact_polarity_ok", "depth_gt_polarity_ok",
+    "shot_state_initialized_ok", "shot_state_relative_escape_ok",
+}
+SUM_AGG = {
+    # Binary per-frame events whose clip contract is explicitly a count.
+    "shot_state_accepted_pulse", "shot_state_expected_pulse",
 }
 
 
@@ -1162,7 +1433,7 @@ def source_relative_metrics(eye, src_gray, max_shift=None,
 
     Horizontal source search makes intended stereo displacement free. Coverage measures how much
     of the interior can still be explained by source content, while integrity measures retention
-    of real source texture. This permissive matcher is diagnostic only; harness evaluation uses
+    of observed source texture. This permissive matcher is diagnostic only; harness evaluation uses
     ``exact_source_relative_metrics`` and the exact production map.
     """
     original_h, original_w = eye.shape
@@ -2224,6 +2495,7 @@ def measure_sequence(seq_dir, frames_dir=None):
         extra_flow = sorted(set(flow_by_id) - expected_flow_ids)
         raise ValueError(f"GT-flow/frame-id mismatch: missing GT={missing_flow}, extra GT={extra_flow}")
     gt_kind = "disparity"
+    clip_meta = {}
     require_gt_depth = require_gt_flow = reference_stereo_available = False
     if frames_dir:
         meta_path = os.path.join(frames_dir, "meta.json")
@@ -2264,6 +2536,9 @@ def measure_sequence(seq_dir, frames_dir=None):
         raise ValueError(
             "clip declares diagnostic stereo reference availability, but no gt_right sidecars "
             "were found")
+    shot_state_contract = clip_meta.get("shot_state_contract")
+    if shot_state_contract:
+        validate_shot_state_source(src_by_id, shot_state_contract)
 
     spatial_jobs = [{
         "frame_id": frame_id,
@@ -2283,6 +2558,18 @@ def measure_sequence(seq_dir, frames_dir=None):
     if measured_ids != frame_ids:
         raise RuntimeError(
             f"spatial metric frame order changed: expected={frame_ids}, got={measured_ids}")
+    shot_state_summary = {}
+    if shot_state_contract:
+        for row in rows:
+            row["shot_state_contract_support"] = 0.0
+            if shot_state_contract.get("kind") == "exposure-only":
+                row["exposure_shot_state_contract_support"] = 0.0
+            if shot_state_contract.get("kind") == "latched-motion-hard-cut":
+                row["latched_motion_contract_support"] = 0.0
+        trace_path = os.path.join(seq_dir, "subject_state.json")
+        trace = load_subject_state_trace(trace_path)
+        shot_state_summary = apply_shot_state_contract(
+            rows, frame_ids, trace, shot_state_contract)
 
     static_jitters = []
     flow_temporals, depth_gt_lags = [], []
@@ -2359,6 +2646,7 @@ def measure_sequence(seq_dir, frames_dir=None):
             prev_src, prev_gt_depth = src, gt_depth
             prev_gt_valid = gt_valid
     agg = aggregate(rows)
+    agg.update(shot_state_summary)
     agg.update({key: float(value) for key, value in transition_counts.items()})
     if (transition_counts["static_measured_transition_count"] !=
             transition_counts["static_applicable_transition_count"]):
@@ -2428,6 +2716,18 @@ def metric_evidence_state(metric, spec, observed, clip_meta=None):
     """
     clip_meta = clip_meta or {}
     requirement = spec.get("requires", "always")
+    if requirement in {
+            "shot_state_contract_support", "exposure_shot_state_contract_support",
+            "latched_motion_contract_support"}:
+        contract = clip_meta.get("shot_state_contract")
+        if not isinstance(contract, dict):
+            return "unsupported"
+        if (requirement == "exposure_shot_state_contract_support" and
+                contract.get("kind") != "exposure-only"):
+            return "unsupported"
+        if (requirement == "latched_motion_contract_support" and
+                contract.get("kind") != "latched-motion-hard-cut"):
+            return "unsupported"
     # A synthetic sidecar can be useful for temporal boundary lag without being a fair monocular
     # depth-accuracy target. Only clips that explicitly authenticate required GT depth may make
     # global accuracy/polarity metrics applicable. Resolve this from provenance before looking at
@@ -2733,8 +3033,9 @@ def aggregate(rows):
         vals = [r[k] for r in rows if k in r]
         if vals:
             # A one-frame comfort/integrity failure cannot be averaged away by a clean clip.
-            agg[k] = float(max(vals) if k in HARD_MAX_AGG else min(vals) if k in HARD_MIN_AGG
-                           else np.mean(vals))
+            agg[k] = float(max(vals) if k in HARD_MAX_AGG else
+                           min(vals) if k in HARD_MIN_AGG else
+                           sum(vals) if k in SUM_AGG else np.mean(vals))
     agg["_n"] = len(rows)
     agg["_models"] = sorted({r.get("_model", "") for r in rows})
     return agg
@@ -2770,7 +3071,8 @@ def filter_aggregate_by_evidence(rows, aggregate_metrics, metric_specs, clip_met
             continue
         filtered[metric] = float(
             max(values) if metric in HARD_MAX_AGG else
-            min(values) if metric in HARD_MIN_AGG else np.mean(values))
+            min(values) if metric in HARD_MIN_AGG else
+            sum(values) if metric in SUM_AGG else np.mean(values))
     return filtered
 
 

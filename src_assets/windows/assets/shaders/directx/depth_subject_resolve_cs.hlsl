@@ -2,16 +2,17 @@
 // (depth_subject_hist_cs), EMA it for stability, and precompute everything the
 // reprojection needs per pixel:
 //   SubjectState[0] = { recenter_delta, scene_age, subject_depth_ema, initialized }
-//   SubjectState[1] = { stretch_lo, stretch_inv_range, unused (was the legacy convergence EMA),
+//   SubjectState[1] = { stretch_lo, stretch_inv_range, depth-change baseline,
 //                       adaptive pop ratio }
 //   SubjectState[2] = { shot-latched zero-plane anchor shift in source pixels, valid,
-//                       depth-cut state (-1 cooldown, 0 startup, 1 ready), color history valid }
+//                       cut-state flags (stored exactly as a uint-valued float),
+//                       model-input history valid }
 // The reprojection then evaluates the permanent Bestv2 pixel-calibrated field.
 // Resets the histogram for the next frame's accumulation.
 
 RWStructuredBuffer<uint>   SubjectHist  : register(u0);  // 256 weighted bins (subject estimate)
 RWStructuredBuffer<float4> SubjectState : register(u1);  // [0..2], see header above
-RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 unweighted bins (stretch 5/95 pct)
+RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 bins + four evidence counters
 
 #include "include/depth_constants.hlsl"
 #include "include/bestv2_curve.hlsl"
@@ -24,16 +25,27 @@ RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 unweighted bins 
 // field can never win the ceiling for a whole shot.
 #define POP_CLASSIFY_SETTLE_FRAMES 8.0f
 
+// Independent proposal arms prevent one signal from starving the other. A cut clears both arms.
+// Geometry rearms after two low-depth updates; appearance rearms after two updates without the
+// qualified broad-RGB + ordinal proposal. CUT_FLAG_LATCHED distinguishes that recovery state from
+// startup, where no weak or relative cut path is allowed.
+#define CUT_FLAG_GEOMETRY_ARMED 1u
+#define CUT_FLAG_APPEARANCE_ARMED 2u
+#define CUT_FLAG_GEOMETRY_LOW_ONCE 4u
+#define CUT_FLAG_APPEARANCE_QUIET_ONCE 8u
+#define CUT_FLAG_LATCHED 16u
+
 // Scene-risk endpoints, calibrated against the MEASURED weighted edge fraction of the committed
-// suites rather than against synthetic content. Across all 23 clips the three synthetic ones
-// (fast_motion 0.0001, flat_transition 0.0048, flat_page 0.0087) sit far below real footage, which
-// spans 0.038-0.245 with a median near 0.10. The previous 0.007/0.016 endpoints therefore
-// saturated on every real clip, pinning the controller to its floor and making the adaptive band
-// inert -- only the synthetic clips ever reached the ceiling. These endpoints span roughly the
-// 10th-90th percentile of real content so the band is actually exercised.
+// suites. The three stable-shot synthetic probes used for calibration (fast_motion 0.0001,
+// flat_transition 0.0048, flat_page 0.0087) sit far below the remaining non-probe measurements,
+// which span 0.038-0.245 with a median near 0.10. Those measurements mix declared real-capture,
+// animation, simulation, ai-generated, anime and unclassified content. The previous 0.007/0.016
+// endpoints saturated across that mixed set, pinning the controller to its floor and making the
+// adaptive band inert. These endpoints span roughly its
+// 10th-90th percentile so the band is actually exercised.
 // New-value weight for the P5/P95 stretch band EMA. Matches sbs_3d_minmax_ema (0.18), which
-// smooths the same kind of quantity -- a depth-domain range -- rather than the convergence EMA,
-// which smooths an anchor. Reset on a cut like every other temporal state here.
+// smooths the same kind of quantity -- a depth-domain range -- rather than an anchor smoother.
+// Reset on a cut like every other temporal state here.
 #define STRETCH_BAND_EMA 0.18f
 // Band percentile tail. The band clips by design; at 0.05 (P5/P95) the measured plateau reached
 // 15.8%/22.6% of pixels because the EMA lags the live distribution. Widening reduces the CLIPPING
@@ -104,46 +116,109 @@ void main() {
         // preceding shot's subject EMA to bleed into a new scene.
         float scene_age = initialized ? min(previous_scene_age + 1.0f, 65535.0f) : 0.0f;
         float change_fraction = ptotal > 0.5f ? (float)PlainHist[NUM_BINS + 1] / ptotal : 0.0f;
-        float color_change_fraction = ptotal > 0.5f ?
-                                      (float)PlainHist[NUM_BINS + 2] / ptotal : 0.0f;
+        float structural_change_fraction = ptotal > 0.5f ?
+                                           (float)PlainHist[NUM_BINS + 2] / ptotal : 0.0f;
+        float raw_rgb_change_fraction = ptotal > 0.5f ?
+                                        (float)PlainHist[NUM_BINS + 3] / ptotal : 0.0f;
         // Normalization settling can change 50-60% of depth texels on the first few frames.
-        // The committed scene-cut clip reaches 66.8%, so 65% separates that cut from ordinary
-        // startup/motion in the current core suite. Depth-change detection therefore waits for
-        // settling, but color-change detection can safely arm as soon as one real prior NCHW
-        // input exists. This avoids an eight-update blind window for similar-depth shot cuts.
-        float depth_cut_state = s2.z;
-        bool depth_cut_ready = depth_cut_state > 0.5f;
-        bool color_history_valid = s2.w > 0.5f;
-        bool hard_cut = initialized &&
-                        ((depth_cut_ready && change_fraction >= 0.65f) ||
-                         (color_history_valid && color_change_fraction >= 0.70f));
-        if (!depth_cut_ready && initialized && scene_age >= 8.0f) {
-            // Become ready for the *next* update; the last startup-settling frame cannot
-            // retroactively classify itself as a depth cut.
-            depth_cut_state = 1.0f;
-            depth_cut_ready = true;
-        }
-        if (!initialized || hard_cut) {
+        // The measured committed cuts reach 62.5% and 63.1%, while ordinary core motion stays
+        // below 19.7%; 60% is therefore the armed geometry authority. The weaker 25% path requires
+        // BOTH broad RGB replacement and ordinal structural change. A flash passes broad RGB but
+        // fails ordinal structure; detailed motion can pass ordinal but stays far below broad RGB.
+        bool model_input_history_valid = s2.w > 0.5f;
+        bool appearance_proposal =
+            model_input_history_valid &&
+            raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH &&
+            structural_change_fraction >= STRUCTURAL_COLOR_CUT_HIGH;
+        // A frame-wide color replacement with no ordinal structure is exposure-like. Neural
+        // depth is not geometry authority on that exact transition: HDR tone mapping and model
+        // normalization can move most depth texels even though the captured scene did not move.
+        // Keep this veto local to the transition; ordinary geometry-only changes (no broad RGB)
+        // and structurally qualified editorial cuts remain eligible.
+        bool exposure_like_transition =
+            model_input_history_valid &&
+            raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH &&
+            structural_change_fraction < STRUCTURAL_COLOR_EXPOSURE_QUIET;
+        uint cut_flags = (uint)max(s2.z, 0.0f);
+        bool geometry_armed = (cut_flags & CUT_FLAG_GEOMETRY_ARMED) != 0u;
+        bool appearance_armed = (cut_flags & CUT_FLAG_APPEARANCE_ARMED) != 0u;
+        bool cut_latched = (cut_flags & CUT_FLAG_LATCHED) != 0u;
+        float depth_change_baseline = initialized ? saturate(s1.z) : change_fraction;
+
+        // A relative geometry spike is the no-starvation escape while absolute geometry remains
+        // latched high. The EMA is evaluated from the PREVIOUS update, reset to every accepted cut,
+        // and then follows steady evidence. A constant high signal therefore cannot periodically
+        // retrigger. The normal settling window is also a refractory: a cut-frame normalization
+        // jump cannot masquerade as a second cut. After settling, a sufficiently large new rise
+        // remains detectable without a periodic cooldown escape.
+        bool relative_geometry_spike =
+            cut_latched && !geometry_armed &&
+            !exposure_like_transition &&
+            scene_age >= POP_CLASSIFY_SETTLE_FRAMES &&
+            change_fraction >= DEPTH_CUT_RELATIVE_FLOOR &&
+            (change_fraction >= depth_change_baseline + DEPTH_CUT_RELATIVE_MARGIN ||
+             change_fraction >=
+                 depth_change_baseline * DEPTH_CUT_RELATIVE_MULTIPLIER);
+        bool shot_cut =
+            initialized &&
+            ((geometry_armed && !exposure_like_transition &&
+              change_fraction >= DEPTH_CUT_HIGH) ||
+             (appearance_armed && appearance_proposal &&
+              change_fraction >= DEPTH_CUT_CORROBORATE) ||
+             relative_geometry_spike);
+
+        if (!initialized) {
             scene_age = 0.0f;
-        }
-        if (hard_cut) {
-            depth_cut_state = -1.0f;
-            depth_cut_ready = false;
-        } else if (depth_cut_state < -0.5f &&
-                   ((change_fraction < 0.35f && color_change_fraction < 0.50f) ||
-                    scene_age >= 2.0f)) {
-            // Prefer a genuinely stable frame, but never stay blind indefinitely during sustained
-            // motion: after two updates the detector is rearmed regardless.
-            depth_cut_state = 1.0f;
-            depth_cut_ready = true;
+            cut_flags = 0u;
+            depth_change_baseline = change_fraction;
+        } else if (shot_cut) {
+            scene_age = 0.0f;
+            cut_flags = CUT_FLAG_LATCHED;
+            depth_change_baseline = change_fraction;
+        } else {
+            depth_change_baseline =
+                lerp(depth_change_baseline, change_fraction, DEPTH_CUT_BASELINE_ALPHA);
+            if (!cut_latched) {
+                if (scene_age >= POP_CLASSIFY_SETTLE_FRAMES) {
+                    // Arm for the NEXT update. Startup normalization and appearance changes can
+                    // never fire either weak branch on the update that completes settling.
+                    cut_flags = CUT_FLAG_GEOMETRY_ARMED | CUT_FLAG_APPEARANCE_ARMED;
+                }
+            } else {
+                if (!geometry_armed) {
+                    if (change_fraction < DEPTH_CUT_LOW) {
+                        if ((cut_flags & CUT_FLAG_GEOMETRY_LOW_ONCE) != 0u) {
+                            cut_flags |= CUT_FLAG_GEOMETRY_ARMED;
+                            cut_flags &= ~CUT_FLAG_GEOMETRY_LOW_ONCE;
+                        } else {
+                            cut_flags |= CUT_FLAG_GEOMETRY_LOW_ONCE;
+                        }
+                    } else {
+                        cut_flags &= ~CUT_FLAG_GEOMETRY_LOW_ONCE;
+                    }
+                }
+                if (!appearance_armed) {
+                    if (!appearance_proposal) {
+                        if ((cut_flags & CUT_FLAG_APPEARANCE_QUIET_ONCE) != 0u) {
+                            cut_flags |= CUT_FLAG_APPEARANCE_ARMED;
+                            cut_flags &= ~CUT_FLAG_APPEARANCE_QUIET_ONCE;
+                        } else {
+                            cut_flags |= CUT_FLAG_APPEARANCE_QUIET_ONCE;
+                        }
+                    } else {
+                        cut_flags &= ~CUT_FLAG_APPEARANCE_QUIET_ONCE;
+                    }
+                }
+            }
         }
 
         // Damp the stretch band, the last per-frame adaptive gain in the depth domain that had no
         // smoothing at all (subject depth and the normalization min/max are both EMA'd).
         // lo/inv_range form a MULTIPLICATIVE gain, so an unsmoothed band makes the depth mapping
         // breathe between cuts and that wobble is then multiplied by the pop strength.
-        // Consistently positive on real content: core-real jitter -2.0%, extended -4.3%, and -6.6%
-        // on a 240-frame native clip, with stereo volume flat. It DOES regress the synthetic
+        // Aggregate jitter changed -2.0% on the historical seven-clip non-synthetic core grouping,
+        // -4.3% on the mixed-content public extended suite, and -6.6% on a 240-frame native clip,
+        // with stereo volume flat. It DOES regress the synthetic
         // async-depth-ghost probe (fast_motion jitter 1.72 -> 3.15); see the roadmap -- the likely
         // mechanism is that band smoothing compounds an existing depth/color temporal misalignment,
         // which that clip exists to expose. Revisit if async-depth ghosting is ever chased directly.
@@ -153,7 +228,7 @@ void main() {
         // above the 4% this band nominally implies. Expanding to cover the live percentiles
         // immediately removes lag-induced clipping; contraction still decays at STRETCH_BAND_EMA,
         // which is the direction that actually causes the mapping to breathe.
-        if (initialized && !hard_cut && subject_stretch > 0.5f) {
+        if (initialized && !shot_cut && subject_stretch > 0.5f) {
             float hi_live = lo_val + 1.0f / max(inv_range, 1e-4f);
             float prev_hi = s1.x + 1.0f / max(s1.y, 1e-4f);
             lo_val = min(lerp(s1.x, lo_val, STRETCH_BAND_EMA), lo_val);
@@ -164,7 +239,7 @@ void main() {
         // Reset temporal subject state on a detected cut. Otherwise the previous
         // scene bleeds into the first frames of the new shot even though pop/zero-plane relatch.
         // Between cuts retain the validated Bestv2 SubjectDepthEMA (new-value weight 0.20).
-        float subj = (!initialized || hard_cut) ? subj_raw : lerp(s.z, subj_raw, 0.20f);
+        float subj = (!initialized || shot_cut) ? subj_raw : lerp(s.z, subj_raw, 0.20f);
         float subj_str = saturate((subj - lo_val) * inv_range);
         float delta = (0.5f - subj_str) * subject_recenter;
         s = float4(delta, 0.0f, subj, 1.0f);
@@ -173,13 +248,15 @@ void main() {
         // the base is the floor and the configured ceiling is never exceeded.
         float pop_ratio = max(s1.w, 1.0f);
         if (adaptive_pop > 0.5f && ptotal > 0.5f) {
-            // PlainHist[NUM_BINS] accumulates gradient-magnitude-weighted edge texels in fixed
-            // point (EDGE_WEIGHT_SCALE is shared via include/depth_constants.hlsl). Dividing by it yields
-            // a threshold-equivalent edge fraction: identical to the historical count when every
-            // edge sits at the threshold, and proportionally larger when edges are more violent.
-            // The POP_RISK_LOW/HIGH endpoints below are calibrated to measured content.
+            // PlainHist[NUM_BINS] accumulates 434-reference-texel
+            // gradient-magnitude-weighted edges in fixed point (the producer also scales its
+            // saturation cap). EDGE_WEIGHT_SCALE is shared via include/depth_constants.hlsl.
+            // Dividing by it yields a resolution-stable threshold-equivalent edge fraction:
+            // identical to the historical count at the 434 grid and proportionally larger when
+            // edges are more violent. The POP_RISK_LOW/HIGH endpoints below remain tied to their
+            // measured 434-short-side calibration.
             float edge_fraction = (float)PlainHist[NUM_BINS] / (ptotal * EDGE_WEIGHT_SCALE);
-            if (!initialized || hard_cut) {
+            if (!initialized || shot_cut) {
                 // Classify on a SETTLED depth field, never on the cut frame. Normalization
                 // settling changes 50-60% of depth texels on the first few frames (see the cut
                 // detector above, which waits the same 8 updates for exactly this reason). An
@@ -231,7 +308,7 @@ void main() {
             // frame through the settle window was measured and is worse -- it converts one
             // correction into ~8 frames of drift, and scene_cut (the clip built to probe
             // normalization swim across cuts) regressed 4.90 -> 8.19 on static_jitter_p95.
-            if (!initialized || hard_cut || zero_valid < 0.5f ||
+            if (!initialized || shot_cut || zero_valid < 0.5f ||
                 scene_age == POP_CLASSIFY_SETTLE_FRAMES) {
                 float zero_anchor_depth = zero_plane_mode < 1.5f ? subj :
                                           zero_plane_mode < 2.5f ? median_val : background_val;
@@ -244,9 +321,9 @@ void main() {
                 zero_valid = 1.0f;
             }
         }
-        s1 = float4(lo_val, inv_range, 0.0f, pop_ratio);
+        s1 = float4(lo_val, inv_range, depth_change_baseline, pop_ratio);
         s2 = float4(zero_anchor_shift, zero_valid,
-                    depth_cut_state,
+                    (float)cut_flags,
                     1.0f); // current NCHW input is copied to history after this dispatch
     }
     // total == 0 (uninitialized depth): keep previous state.
@@ -262,4 +339,5 @@ void main() {
     PlainHist[NUM_BINS] = 0u;
     PlainHist[NUM_BINS + 1] = 0u;
     PlainHist[NUM_BINS + 2] = 0u;
+    PlainHist[NUM_BINS + 3] = 0u;
 }

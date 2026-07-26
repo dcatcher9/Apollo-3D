@@ -279,6 +279,90 @@
       "rel_tol": 0.3,
       "abs_floor": 0.5
     },
+    "shot_state_accepted_pulse": {
+      "scope": "conformance",
+      "role": "diagnostic",
+      "axis": "shot-state",
+      "requires": "shot_state_contract_support",
+      "better": "lower",
+      "rel_tol": 0.0,
+      "abs_floor": 1.0
+    },
+    "shot_state_expected_pulse": {
+      "scope": "conformance",
+      "role": "diagnostic",
+      "axis": "shot-state",
+      "requires": "shot_state_contract_support",
+      "better": "lower",
+      "rel_tol": 0.0,
+      "abs_floor": 1.0
+    },
+    "shot_state_pulse_mismatch": {
+      "scope": "conformance",
+      "role": "hard",
+      "axis": "shot-state",
+      "requires": "shot_state_contract_support",
+      "better": "lower",
+      "rel_tol": 0.0,
+      "abs_floor": 0.0,
+      "hard_max": 0.0,
+      "trigger": 0.0
+    },
+    "shot_state_trace_inconsistent": {
+      "scope": "conformance",
+      "role": "hard",
+      "axis": "shot-state",
+      "requires": "shot_state_contract_support",
+      "better": "lower",
+      "rel_tol": 0.0,
+      "abs_floor": 0.0,
+      "hard_max": 0.0,
+      "trigger": 0.0
+    },
+    "shot_state_initialized_ok": {
+      "scope": "conformance",
+      "role": "hard",
+      "axis": "shot-state",
+      "requires": "shot_state_contract_support",
+      "better": "higher",
+      "rel_tol": 0.0,
+      "abs_floor": 0.0,
+      "hard_min": 100.0,
+      "trigger_min": 100.0
+    },
+    "shot_state_relative_escape_ok": {
+      "scope": "conformance",
+      "role": "hard",
+      "axis": "shot-state",
+      "requires": "latched_motion_contract_support",
+      "better": "higher",
+      "rel_tol": 0.0,
+      "abs_floor": 0.0,
+      "hard_min": 100.0,
+      "trigger_min": 100.0
+    },
+    "shot_state_zero_anchor_drift_px": {
+      "scope": "conformance",
+      "role": "hard",
+      "axis": "shot-state",
+      "requires": "exposure_shot_state_contract_support",
+      "better": "lower",
+      "rel_tol": 0.0,
+      "abs_floor": 0.000001,
+      "hard_max": 0.000001,
+      "trigger": 0.000001
+    },
+    "shot_state_adaptive_pop_drift": {
+      "scope": "conformance",
+      "role": "hard",
+      "axis": "shot-state",
+      "requires": "exposure_shot_state_contract_support",
+      "better": "lower",
+      "rel_tol": 0.0,
+      "abs_floor": 0.000001,
+      "hard_max": 0.000001,
+      "trigger": 0.000001
+    },
     "exact_disparity_plateau_far_pct": {
       "scope": "perceptual",
       "role": "diagnostic",

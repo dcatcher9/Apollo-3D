@@ -39,11 +39,15 @@ namespace models {
   struct estimate_result {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject;  ///< permanent Bestv2 subject state (t2 of the reprojection)
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_frame_state;  ///< {min,max,initialized,frame_state}; frame_state 0 means an all-invalid completion held the prior depth.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask;  ///< Edge-selective EMA snap mask.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Raw model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
     int raw_width = 0;
     int raw_height = 0;
-    bool completed_frame_valid = false;  ///< A new processed depth result completed during this call.
+    // A TensorRT result completed and its GPU normalization passes were submitted. The associated
+    // depth_frame_state decides on-GPU whether this completion contains valid depth or must hold
+    // the previous matched color/depth output.
+    bool completed_frame_valid = false;
     std::uint64_t completed_frame_id = 0;  ///< Caller-provided identity of that completed result.
     bool inference_enqueued = false;  ///< This call submitted inference for the supplied input frame.
     bool cuda_graph_active = false;  ///< TensorRT enqueue is currently replaying a captured graph.

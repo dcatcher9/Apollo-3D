@@ -1,4 +1,4 @@
-"""Contract tests for the authenticated-real-source stereo-window validator."""
+"""Contract tests for the authenticated-source stereo-window validator."""
 
 import json
 import os

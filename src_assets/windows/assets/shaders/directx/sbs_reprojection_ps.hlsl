@@ -17,11 +17,14 @@ Texture2D<float4> LeftColorTexture : register(t0);
 Texture2D<float>  DepthTexture      : register(t1);
 // Subject-tracking state from depth_subject_resolve_cs. [0] = {recenter_delta, scene_age,
 // subject_depth_ema, initialized}; [1] = {stretch_lo_val, stretch_inv_range,
-// convergence_ema, adaptive_pop_ratio}.
+// depth_change_baseline, adaptive_pop_ratio}.
 StructuredBuffer<float4> SubjectState : register(t2);
 // Bound only by the offline harness mask pass. It is produced by forward-splatting the exact
 // shared parallax field, exposing holes that this backward gather necessarily paints over.
 Texture2D<uint> ForwardCoverageTexture : register(t3);
+// {min, max, initialized, frame_state}; frame_state == 0 means this TensorRT completion was
+// entirely invalid and every depth/subject output deliberately held its preceding value.
+StructuredBuffer<float4> DepthFrameState : register(t4);
 SamplerState      LinearSampler     : register(s0);
 
 struct PS_INPUT {
@@ -133,6 +136,17 @@ float2 Reproject(float2 uv, float eyeSign, bool use_subject_stretch) {
 }
 
 float4 main_ps(PS_INPUT input) : SV_TARGET {
+    // Once real depth exists, an all-invalid TensorRT completion leaves depth/subject state
+    // untouched. Discarding every pixel likewise holds the last matched color/depth pair without
+    // a CPU readback or GPU flush. Before the first valid depth, do draw this completion: the
+    // uninitialized subject state makes Reproject() return the identity mapping, keeping flat SBS
+    // color live instead of freezing the first invalid frame forever.
+    if (preserve_previous_on_invalid > 0.5f
+            && DepthFrameState[0].w < 0.5f
+            && DepthFrameState[0].z >= 0.5f) {
+        discard;
+    }
+
     float2 uv = input.TexCoord;
 
     // Full SBS: left half (0..0.5) = left eye, right half (0.5..1) = right eye.

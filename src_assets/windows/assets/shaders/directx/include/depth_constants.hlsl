@@ -26,14 +26,54 @@ cbuffer Constants : register(b0) {
     float padding2;
 };
 
+// Spatial depth-gradient thresholds are calibrated on the patch-aligned 434-texel short side.
+// Derive the transfer scale from the ACTUAL resolved tensor dimensions, not depth_short_side:
+// profile/native caps can resolve a different grid (for example 392 or 420). Multiplying a
+// finite difference by current/reference expresses it in 434-reference-texel units. The 434 grid
+// is exactly identity, preserving its calibrated shader arithmetic.
+#define DEPTH_GRADIENT_REFERENCE_SHORT_SIDE 434.0f
+float DepthReferenceTexelScale() {
+    return (float)min(target_w, target_h) / DEPTH_GRADIENT_REFERENCE_SHORT_SIDE;
+}
+
 // Adaptive-pop edge risk is accumulated in fixed point because InterlockedAdd is integer-only.
-// Each qualifying texel contributes min(grad / 0.02, EDGE_WEIGHT_MAX) * EDGE_WEIGHT_SCALE, so a
-// texel exactly at the gradient threshold contributes EDGE_WEIGHT_SCALE and the consumer recovers
-// a threshold-equivalent edge fraction by dividing the sum by EDGE_WEIGHT_SCALE * texel count.
+// Each qualifying texel contributes min(reference_grad / 0.02,
+// EDGE_WEIGHT_MAX * current/reference) * EDGE_WEIGHT_SCALE. Below the cap, the smaller weight of
+// a coarser grid cancels its larger one-texel silhouette fraction. The cap needs the same scale or
+// saturated discontinuities would still change risk with resolution. The consumer recovers a
+// threshold-equivalent edge fraction by dividing the sum by EDGE_WEIGHT_SCALE * texel count.
 // Shared here because the producer (depth_subject_hist_cs) and the consumer
 // (depth_subject_resolve_cs) must agree exactly: a mismatch silently rescales scene risk and
 // changes which scenes receive extra pop. Do not duplicate these values.
+#define EDGE_GRADIENT_THRESHOLD 0.02f
 #define EDGE_WEIGHT_SCALE 256.0f
 #define EDGE_WEIGHT_MAX 8.0f
+
+// Scene-cut evidence contract. A broad RGB delta finds frame-wide appearance replacement, while
+// the ordinal producer compares all ten pairwise orderings in a center/left/right/up/down stencil
+// of capture-domain, point-sampled max(R,G,B). Sampling before the model's luminance-coupled HDR
+// tonemapper and before bilinear mixing is part of the contract: maxRGB then commutes with an
+// identical monotone curve on every channel. Clipping creates ties, which abstain because a
+// comparison must have this much contrast in BOTH frames. Requiring BOTH frame-wide RGB
+// replacement and ordinal structure rejects flashes/exposure and ordinary detailed motion
+// respectively. Depth geometry still corroborates the proposal. Conversely, broad RGB
+// replacement with ordinal evidence inside a narrower QUIET band explicitly vetoes
+// standalone/relative depth authority on that transition: a neural-depth jump caused by exposure
+// or HDR tone mapping is not scene geometry and must not reset the zero plane. The band between
+// quiet and proposal entry remains ambiguous and preserves standalone geometry authority.
+#define RAW_RGB_PIXEL_DELTA 0.20f
+#define RAW_RGB_CUT_HIGH 0.70f
+#define STRUCTURAL_ORDINAL_CONTRAST_FLOOR 0.01f
+#define STRUCTURAL_ORDINAL_MIN_COMMON 4u
+#define STRUCTURAL_ORDINAL_MIN_FLIPS 2u
+#define STRUCTURAL_COLOR_EXPOSURE_QUIET 0.01f
+#define STRUCTURAL_COLOR_CUT_HIGH 0.03f
+#define DEPTH_CUT_HIGH 0.60f
+#define DEPTH_CUT_CORROBORATE 0.25f
+#define DEPTH_CUT_LOW 0.10f
+#define DEPTH_CUT_BASELINE_ALPHA 0.125f
+#define DEPTH_CUT_RELATIVE_FLOOR 0.30f
+#define DEPTH_CUT_RELATIVE_MARGIN 0.20f
+#define DEPTH_CUT_RELATIVE_MULTIPLIER 2.0f
 
 #endif

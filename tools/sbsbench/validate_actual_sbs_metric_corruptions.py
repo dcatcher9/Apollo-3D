@@ -2,7 +2,7 @@
 """Falsify retained deterministic SBS metrics on real harness output.
 
 This is deliberately a standalone validation tool, not an evaluator or threshold tuner.  It
-loads an already-rendered schema-32 run, authenticates the source clip and exact production
+loads an already-rendered schema-34 run, authenticates the source clip and exact production
 inverse-warp sidecars, then injects bounded defects into copies of the *actual* SBS eyes.  It
 checks detector direction, footprint response, localization, support, and benign controls.
 
@@ -33,10 +33,10 @@ import sbsbench  # noqa: E402
 
 
 SCHEMA = 1
-EXPECTED_EVAL_SCHEMA = 32
-EXPECTED_HARNESS_SCHEMA = 16
+EXPECTED_EVAL_SCHEMA = 34
+EXPECTED_HARNESS_SCHEMA = 17
 DEFAULT_RUN = os.path.join(
-    REPO_ROOT, "cmake-build-relwithdebinfo", "sbs_eval", "metric-schema32-core-control")
+    REPO_ROOT, "cmake-build-relwithdebinfo", "sbs_eval", "metric-schema34-core-control")
 PREFERRED_CLIPS = ("c647", "c339", "anime_morevna_closeup", "aigen_cogvideox_rain")
 FOOTPRINT_FRACTIONS = (0.0008, 0.005, 0.01, 0.02, 0.05)
 
@@ -89,7 +89,8 @@ def _select_clip_ids(results, requested, max_clips):
     if missing:
         raise ValueError(f"run has no requested clips: {missing}")
     if len(selected) < 2:
-        raise ValueError("actual-output validation requires at least two real clips")
+        raise ValueError(
+            "actual-output validation requires at least two independent non-probe clips")
     return selected
 
 
@@ -739,7 +740,7 @@ def build_report(run_dir, requested_clips=None, max_clips=2):
     ]
     return {
         "schema": SCHEMA,
-        "validator": "actual-schema32-SBS-controlled-corruption-falsifier",
+        "validator": "actual-schema34-SBS-controlled-corruption-falsifier",
         "experimental": True,
         "training_label_qualification": "blocked",
         "eligible_training_labels": [],
@@ -788,10 +789,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--run", default=DEFAULT_RUN,
-        help="completed schema-32 core eval directory containing actual harness artifacts")
+        help="completed schema-34 core eval directory containing actual harness artifacts")
     parser.add_argument(
         "--clip", action="append", default=[],
-        help="clip id to validate; repeat for multiple clips (default: two preferred real clips)")
+        help="clip id to validate; repeat for multiple clips "
+             "(default: two preferred independent non-probe clips)")
     parser.add_argument("--max-clips", type=int, default=2)
     parser.add_argument("--output", help="JSON report path (default: <run>/actual-metric-validator.json)")
     args = parser.parse_args()

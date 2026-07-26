@@ -13,6 +13,7 @@
 
   // standard includes
   #include <algorithm>
+  #include <array>
   #include <cctype>
   #include <chrono>
   #include <cmath>
@@ -522,6 +523,96 @@ namespace sbs_bench {
       ctx->Unmap(stage_cache.Get(), 0);
     }
 
+    struct subject_state_record {
+      std::string frame_id;
+      std::array<float, 12> values {};
+    };
+
+    // Benchmark-only state trace. This readback is deliberately confined to the synchronous
+    // offline harness; the live capture loop must remain free of staging copies and Map calls.
+    bool read_subject_state(ID3D11Device *dev, ID3D11DeviceContext *ctx,
+                            ID3D11ShaderResourceView *srv,
+                            ComPtr<ID3D11Buffer> &stage_cache,
+                            std::array<float, 12> &values) {
+      if (!srv) {
+        return false;
+      }
+      ComPtr<ID3D11Resource> resource;
+      srv->GetResource(&resource);
+      ComPtr<ID3D11Buffer> buffer;
+      if (FAILED(resource.As(&buffer))) {
+        return false;
+      }
+      D3D11_BUFFER_DESC desc {};
+      buffer->GetDesc(&desc);
+      if (desc.ByteWidth < values.size() * sizeof(float) ||
+          desc.StructureByteStride != 4 * sizeof(float)) {
+        return false;
+      }
+      bool recreate = !stage_cache;
+      if (!recreate) {
+        D3D11_BUFFER_DESC stage_desc {};
+        stage_cache->GetDesc(&stage_desc);
+        recreate = stage_desc.ByteWidth != desc.ByteWidth;
+      }
+      if (recreate) {
+        D3D11_BUFFER_DESC stage_desc = desc;
+        stage_desc.Usage = D3D11_USAGE_STAGING;
+        stage_desc.BindFlags = 0;
+        stage_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stage_desc.MiscFlags = 0;
+        stage_cache.Reset();
+        if (FAILED(dev->CreateBuffer(&stage_desc, nullptr, &stage_cache))) {
+          return false;
+        }
+      }
+      ctx->CopyResource(stage_cache.Get(), buffer.Get());
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return false;
+      }
+      std::memcpy(values.data(), mapped.pData, values.size() * sizeof(float));
+      ctx->Unmap(stage_cache.Get(), 0);
+      return std::all_of(values.begin(), values.end(), [](float value) {
+        return std::isfinite(value);
+      });
+    }
+
+    bool write_subject_state_trace(const fs::path &path,
+                                   const std::vector<subject_state_record> &records) {
+      std::ofstream out(path);
+      if (!out) {
+        return false;
+      }
+      out.imbue(std::locale::classic());
+      out << std::setprecision(std::numeric_limits<float>::max_digits10);
+      out << "{\n"
+          << "  \"schema\": 1,\n"
+          << "  \"source\": \"depth_subject_resolve_cs.SubjectState\",\n"
+          << "  \"capture\": \"every-source-frame-after-estimator-update\",\n"
+          << "  \"fields\": [\"subject_recenter_delta\", \"scene_age\", "
+             "\"subject_depth_ema\", \"initialized\", \"stretch_lo\", "
+             "\"stretch_inv_range\", \"depth_change_baseline_ema\", "
+             "\"adaptive_pop_ratio\", \"zero_anchor_shift_px\", "
+             "\"zero_anchor_valid\", \"cut_flags\", "
+             "\"model_input_history_valid\"],\n"
+          << "  \"frames\": [\n";
+      for (size_t index = 0; index < records.size(); ++index) {
+        const auto &record = records[index];
+        out << "    {\"frame_id\": " << json_string(record.frame_id) << ", \"values\": [";
+        for (size_t value_index = 0; value_index < record.values.size(); ++value_index) {
+          if (value_index != 0) {
+            out << ", ";
+          }
+          out << record.values[value_index];
+        }
+        out << "]}" << (index + 1 == records.size() ? "\n" : ",\n");
+      }
+      out << "  ]\n}\n";
+      out.flush();
+      return out.good();
+    }
+
     // Keep output identities tied to source identities. Positional renumbering made a dropped
     // source frame silently shift every depth/SBS/source comparison by one.
     std::string source_frame_id(const fs::path &path) {
@@ -956,6 +1047,8 @@ namespace sbs_bench {
     ComPtr<ID3D11ShaderResourceView> warp_depth_srv;
     ComPtr<ID3D11Texture2D> ema_mask_stage;
     ComPtr<ID3D11Buffer> raw_depth_stage;
+    ComPtr<ID3D11Buffer> subject_state_stage;
+    std::vector<subject_state_record> subject_state_records;
     bool raw_shape_written = false;
     bool warp_mapping_shape_written = false;
     float hdr_output_min = std::numeric_limits<float>::infinity();
@@ -1073,7 +1166,8 @@ namespace sbs_bench {
         const float content_scale_x = eye_aspect > aspect ? aspect / eye_aspect : 1.0f;
         const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
         // Slot-for-slot mirror of the b2 `Constants` cbuffer in sbs_warp_common.hlsl; see the
-        // matching note in display_vram.cpp. Slot 7 is padding left by removed subject_lock.
+        // Slot 7 is the production invalid-completion draw guard. The synchronous evaluator has
+        // no previous packed target to preserve, so it always leaves the guard disabled.
         float repro_params[8] = {
           sbs_cfg.subject_stretch ? 1.0f : 0.0f,
           content_scale_x,
@@ -1082,7 +1176,7 @@ namespace sbs_bench {
           o.literal_bestv2 ? 1.0f : 0.0f,
           sbs_cfg.adaptive_pop ? 1.0f : 0.0f,
           (float) sbs_cfg.adaptive_pop_max,
-          0.0f  // padding0 (was subject_lock)
+          0.0f  // preserve_previous_on_invalid
         };
         repro_cb = const_buffer(dev.Get(), repro_params);
         D3D11_TEXTURE2D_DESC td = {};
@@ -1199,6 +1293,18 @@ namespace sbs_bench {
         est.depth = override_depth_srv;
         ++applied_depth_override_frames;
       }
+
+      // Export one state sample for every source frame, even when --output-every skips composite
+      // artifacts. This makes accepted shot pulses and the zero/pop latches directly testable
+      // without adding any synchronization or readback to production.
+      subject_state_record state_record;
+      state_record.frame_id = output_id;
+      if (!read_subject_state(dev.Get(), ctx.Get(), est.subject.Get(),
+                              subject_state_stage, state_record.values)) {
+        BOOST_LOG(error) << "sbs-bench: cannot read subject state for frame " << output_id;
+        return 6;
+      }
+      subject_state_records.push_back(state_record);
 
       // Sampling output must never sample the depth/EMA/subject pipeline itself. Every source
       // frame above was inferred and consumed; only expensive composite/readback is skipped.
@@ -1435,6 +1541,12 @@ namespace sbs_bench {
       BOOST_LOG(error) << "sbs-bench: no warp mapping shape contract was written";
       return 8;
     }
+    if (subject_state_records.size() != frames.size() ||
+        !write_subject_state_trace(
+          fs::path(o.out) / "subject_state.json", subject_state_records)) {
+      BOOST_LOG(error) << "sbs-bench: failed writing complete subject_state.json";
+      return 8;
+    }
 
     sbs_perf::dump_json((fs::path(o.out) / "sbs_perf.json").string());
     {
@@ -1443,7 +1555,7 @@ namespace sbs_bench {
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
-                 << "  \"schema\": 16,\n"
+                 << "  \"schema\": 17,\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
                  << "  \"depth_step\": "
@@ -1466,6 +1578,9 @@ namespace sbs_bench {
                  << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n"
                  << "  \"cuda_graph\": " << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
                  << "  \"cuda_graph_captured\": " << (cuda_graph_captured ? "true" : "false") << ",\n"
+                 << "  \"subject_state\": {\"file\": \"subject_state.json\", "
+                    "\"schema\": 1, \"capture\": "
+                    "\"every-source-frame-after-estimator-update\"},\n"
                  << "  \"warp_mask\": {\"red\": \"forward_disocclusion_before_fill\"},\n"
                  << "  \"warp_mapping\": {\n"
                  << "    \"file_pattern\": \"warp_map_<frame-id>.f32\",\n"

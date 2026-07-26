@@ -1264,6 +1264,12 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_previous_input_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_previous_input_srv;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_previous_input_uav;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> appearance_ordinal_buf;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> appearance_ordinal_srv;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> appearance_ordinal_uav;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> previous_appearance_ordinal_buf;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> previous_appearance_ordinal_srv;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> previous_appearance_ordinal_uav;
 
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_out_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_out_srv;
@@ -1278,7 +1284,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> hist_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_hist_buf;  // 256 weighted bins for subject tracking
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_hist_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_plain_buf;  // 256 unweighted bins for the stretch 5/95
+    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_plain_buf;  // 256 bins + four evidence counters
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_plain_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;  // three float4 elements; see depth_subject_resolve_cs
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_uav;
@@ -1563,7 +1569,8 @@ namespace models {
       }
 
       // Subject tracking: weighted histogram (256 uint bins), plain histogram plus depth-edge,
-      // depth-change, and model-input color-change counters (259 uints), and three-float4 state.
+      // depth-change, ordinal-structure, and broad-RGB-change counters (260 uints), and
+      // three-float4 state.
       {
         uint32_t init_hist[256] = {};
         D3D11_BUFFER_DESC bd = {};
@@ -1577,7 +1584,7 @@ namespace models {
         if (subject_hist_buf) {
           device->CreateUnorderedAccessView(subject_hist_buf.Get(), nullptr, &subject_hist_uav);
         }
-        uint32_t init_plain[259] = {};
+        uint32_t init_plain[260] = {};
         bd.ByteWidth = sizeof(init_plain);
         D3D11_SUBRESOURCE_DATA plain_sd = {init_plain, 0, 0};
         device->CreateBuffer(&bd, &plain_sd, &subject_plain_buf);
@@ -1585,7 +1592,8 @@ namespace models {
           device->CreateUnorderedAccessView(subject_plain_buf.Get(), nullptr, &subject_plain_uav);
         }
 
-        // [0] subject/recenter, [1] stretch/convergence/pop, [2] explicit zero-plane anchor.
+        // [0] subject/recenter, [1] stretch/depth-cut baseline/pop,
+        // [2] explicit zero-plane anchor/cut flags.
         float init_state[12] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         bd.ByteWidth = sizeof(init_state);
         bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
@@ -1716,6 +1724,7 @@ namespace models {
       estimate_result r;
       r.depth = output_srv();
       r.subject = subject_srv;
+      r.depth_frame_state = minmax_ema_srv;
       r.ema_motion_mask = ema_motion_mask_srv;
       r.raw_model_depth = tensor_out_srv;
       r.raw_width = target_w;
@@ -1893,22 +1902,26 @@ namespace models {
       {
         context->CSSetShader(depth_subject_hist_cs.Get(), nullptr, 0);
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        ID3D11ShaderResourceView *subject_srvs[5] = {
+        ID3D11ShaderResourceView *subject_srvs[7] = {
           depth_srv.Get(),
           depth_previous_srv.Get(),
           tensor_in_srv.Get(),
           tensor_previous_input_srv.Get(),
-          minmax_ema_srv.Get()
+          minmax_ema_srv.Get(),
+          appearance_ordinal_srv.Get(),
+          previous_appearance_ordinal_srv.Get()
         };
-        context->CSSetShaderResources(0, 5, subject_srvs);
+        context->CSSetShaderResources(0, 7, subject_srvs);
         ID3D11UnorderedAccessView *hist_uavs[2] = {subject_hist_uav.Get(), subject_plain_uav.Get()};
         context->CSSetUnorderedAccessViews(0, 2, hist_uavs, nullptr);
         context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
         ID3D11UnorderedAccessView *null_uavs_h2[2] = {nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 2, null_uavs_h2, nullptr);
-        ID3D11ShaderResourceView *null_subject_srvs[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
-        context->CSSetShaderResources(0, 5, null_subject_srvs);
+        ID3D11ShaderResourceView *null_subject_srvs[7] = {
+          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr
+        };
+        context->CSSetShaderResources(0, 7, null_subject_srvs);
 
         context->CSSetShader(depth_subject_resolve_cs.Get(), nullptr, 0);
         ID3D11UnorderedAccessView *subj_uavs[3] = {subject_hist_uav.Get(), subject_uav.Get(), subject_plain_uav.Get()};
@@ -1918,19 +1931,28 @@ namespace models {
         ID3D11UnorderedAccessView *null_uavs2[3] = {nullptr, nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 3, null_uavs2, nullptr);
 
-        // tensor_in_buf still owns the NCHW input that produced this completed depth. Preserve it
-        // only when this frame also produced valid depth; otherwise the last valid depth/color pair
+        // tensor_in_buf and appearance_ordinal_buf still own the display-referred NCHW input and
+        // capture-domain ordinal signal that produced this completed depth. Preserve both only
+        // when this frame also produced valid depth; otherwise the last valid depth/color pair
         // remains intact for cut detection without a CPU readback.
         context->CSSetShader(depth_valid_history_cs.Get(), nullptr, 0);
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        ID3D11ShaderResourceView *history_srvs[2] = {minmax_ema_srv.Get(), tensor_in_srv.Get()};
-        context->CSSetShaderResources(0, 2, history_srvs);
-        context->CSSetUnorderedAccessViews(0, 1, tensor_previous_input_uav.GetAddressOf(), nullptr);
+        ID3D11ShaderResourceView *history_srvs[3] = {
+          minmax_ema_srv.Get(),
+          tensor_in_srv.Get(),
+          appearance_ordinal_srv.Get()
+        };
+        ID3D11UnorderedAccessView *history_uavs[2] = {
+          tensor_previous_input_uav.Get(),
+          previous_appearance_ordinal_uav.Get()
+        };
+        context->CSSetShaderResources(0, 3, history_srvs);
+        context->CSSetUnorderedAccessViews(0, 2, history_uavs, nullptr);
         context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
-        ID3D11ShaderResourceView *null_history_srvs[2] = {nullptr, nullptr};
-        ID3D11UnorderedAccessView *null_history_uav = nullptr;
-        context->CSSetShaderResources(0, 2, null_history_srvs);
-        context->CSSetUnorderedAccessViews(0, 1, &null_history_uav, nullptr);
+        ID3D11ShaderResourceView *null_history_srvs[3] = {nullptr, nullptr, nullptr};
+        ID3D11UnorderedAccessView *null_history_uavs[2] = {nullptr, nullptr};
+        context->CSSetShaderResources(0, 3, null_history_srvs);
+        context->CSSetUnorderedAccessViews(0, 2, null_history_uavs, nullptr);
       }
     }
 
@@ -2136,7 +2158,44 @@ namespace models {
                        SUCCEEDED(device->CreateUnorderedAccessView(
                          tensor_previous_input_buf.Get(),
                          nullptr,
-                         &tensor_previous_input_uav
+                              &tensor_previous_input_uav
+                            ));
+
+        // One capture-domain point maxRGB scalar per model texel. Keeping it outside TensorRT's
+        // three-plane input preserves a pre-tone-map exposure ordinal without changing the engine
+        // binding size. Current/history are copied in lockstep with the valid NCHW/depth pair.
+        auto appearance_desc = buf_desc;
+        appearance_desc.ByteWidth = target_w * target_h * sizeof(float);
+        resources_ok = resources_ok &&
+                       SUCCEEDED(device->CreateBuffer(
+                         &appearance_desc,
+                         nullptr,
+                         &appearance_ordinal_buf
+                       )) &&
+                       SUCCEEDED(device->CreateShaderResourceView(
+                         appearance_ordinal_buf.Get(),
+                         nullptr,
+                         &appearance_ordinal_srv
+                       )) &&
+                       SUCCEEDED(device->CreateUnorderedAccessView(
+                         appearance_ordinal_buf.Get(),
+                         nullptr,
+                         &appearance_ordinal_uav
+                       )) &&
+                       SUCCEEDED(device->CreateBuffer(
+                         &appearance_desc,
+                         nullptr,
+                         &previous_appearance_ordinal_buf
+                       )) &&
+                       SUCCEEDED(device->CreateShaderResourceView(
+                         previous_appearance_ordinal_buf.Get(),
+                         nullptr,
+                         &previous_appearance_ordinal_srv
+                       )) &&
+                       SUCCEEDED(device->CreateUnorderedAccessView(
+                         previous_appearance_ordinal_buf.Get(),
+                         nullptr,
+                         &previous_appearance_ordinal_uav
                        ));
 
         buf_desc.ByteWidth = target_w * target_h * sizeof(float);
@@ -2238,14 +2297,18 @@ namespace models {
       context->CSSetShader(rgb_to_nchw_cs.Get(), nullptr, 0);
       context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
       context->CSSetShaderResources(0, 1, &input_srv);
-      context->CSSetUnorderedAccessViews(0, 1, tensor_in_uav.GetAddressOf(), nullptr);
+      ID3D11UnorderedAccessView *preprocess_uavs[2] = {
+        tensor_in_uav.Get(),
+        appearance_ordinal_uav.Get()
+      };
+      context->CSSetUnorderedAccessViews(0, 2, preprocess_uavs, nullptr);
       context->CSSetSamplers(0, 1, linear_sampler.GetAddressOf());
 
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
-      ID3D11UnorderedAccessView *null_uav = nullptr;
+      ID3D11UnorderedAccessView *null_uavs[2] = {nullptr, nullptr};
       ID3D11ShaderResourceView *null_srv = nullptr;
-      context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+      context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
       context->CSSetShaderResources(0, 1, &null_srv);
       end_d3d_perf(d3d_timer);
       // No explicit Flush: cuGraphicsMapResources() below already guarantees the

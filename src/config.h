@@ -51,7 +51,8 @@ namespace config {
       double adaptive_pop_max = 2.00;  ///< Validated absolute ceiling for adaptive pop (pop_strength-2). Values below pop_strength clamp to the floor. The 1.20-2.00 band gives the controller a 1.67 ratio, so the scene classifier dominates quality; its risk statistic is gradient-magnitude weighted and its endpoints are calibrated to measured content (see depth_subject_resolve_cs). The former 1.25-1.30 band was a 1.04 ratio, below the noise floor of every metric that could judge it.
       double ema = 0.5;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
       double ema_edge_change = 0.05;  ///< Edge-selective EMA: minimum current-vs-history depth change. 0 disables it.
-      double ema_edge_gradient = 0.02;  ///< Edge-selective EMA: minimum current depth gradient.
+      /// Edge-selective EMA: minimum current depth gradient in 434-short-side reference-texel units.
+      double ema_edge_gradient = 0.02;
       double ema_edge_strength = 0.25;  ///< Edge-selective EMA blend toward current depth inside the mask.
       int depth_short_side = 432;  ///< Depth map short-side resolution, clamped to the frame's native short side. At 16:9 this maps to about 768x432, matching the VisionDepth3D reference input.
       double depth_max_aspect = 4.0;  ///< Aspect-ratio cap (long side <= short * this). Bounds worst-case inference cost on ultrawide.

@@ -726,9 +726,19 @@ namespace platf::dxgi {
             // Bind the sampler explicitly rather than relying on it persisting from init().
             device_ctx->PSSetSamplers(0, 1, &sampler_linear);
 
-            ID3D11ShaderResourceView *srvs[] = {render_input_srv, warp_depth, est.subject.Get()};
-            device_ctx->PSSetShaderResources(0, 3, srvs);
-            ID3D11Buffer *sbs_cb[] = {sbs_reprojection_cbuffer.get()};
+            ID3D11ShaderResourceView *srvs[] = {
+              render_input_srv,
+              warp_depth,
+              est.subject.Get(),
+              nullptr,
+              est.depth_frame_state.Get(),
+            };
+            device_ctx->PSSetShaderResources(0, (UINT) std::size(srvs), srvs);
+            ID3D11Buffer *sbs_cb[] = {
+              matched_render_slot ?
+                sbs_reprojection_completed_cbuffer.get() :
+                sbs_reprojection_cbuffer.get()
+            };
             device_ctx->PSSetConstantBuffers(2, 1, sbs_cb);
             device_ctx->Draw(3, 0);  // Fullscreen triangle
 
@@ -737,8 +747,14 @@ namespace platf::dxgi {
             device_ctx->OMSetRenderTargets(1, null_rtvs, nullptr);
 
             // Clear shader resources
-            ID3D11ShaderResourceView *null_srvs[] = {nullptr, nullptr, nullptr};
-            device_ctx->PSSetShaderResources(0, 3, null_srvs);
+            ID3D11ShaderResourceView *null_srvs[] = {
+              nullptr,
+              nullptr,
+              nullptr,
+              nullptr,
+              nullptr,
+            };
+            device_ctx->PSSetShaderResources(0, (UINT) std::size(null_srvs), null_srvs);
 
             final_sbs_srv = sbs_intermediate_srv.get();
             final_sbs_texture = sbs_intermediate_texture.get();
@@ -757,7 +773,8 @@ namespace platf::dxgi {
               draw_rgb(final_sbs_srv, input_is_linear);
             }
           } else {
-            // Draw the SBS intermediate into encoder YUV.
+            // Host SBS accepts identity-oriented sources only. Portrait is represented by actual
+            // W < H display dimensions, so this final conversion never rotates a packed 2W frame.
             draw(final_sbs_srv, out_Y_or_YUV_viewport, out_UV_viewport, input_is_linear);
           }
           end_sbs_gpu_timer(gpu_timer);
@@ -767,7 +784,16 @@ namespace platf::dxgi {
           // sbs_debug_dump.h. File-trigger polling requires diagnostics + APOLLO_SBS_DUMP; the
           // explicit client button remains available without background filesystem work.
           if (!repeat_matched_output) {
-            sbs_dumper.maybe_dump(device.get(), device_ctx.get(), render_input_srv, est.depth.Get(), final_sbs_srv, display->is_hdr(), sbs_config.depth_model);
+            sbs_dumper.maybe_dump(
+              device.get(),
+              device_ctx.get(),
+              render_input_srv,
+              est.depth.Get(),
+              final_sbs_srv,
+              matched_render_slot ? est.depth_frame_state.Get() : nullptr,
+              display->is_hdr(),
+              sbs_config.depth_model
+            );
           }
 
           if (diagnostics_enabled) {
@@ -980,9 +1006,7 @@ namespace platf::dxgi {
       // Slot-for-slot mirror of the `Constants` cbuffer in
       // shaders/directx/include/sbs_warp_common.hlsl, which sbs_reprojection_ps and
       // sbs_forward_coverage_cs both bind at b2. Every entry must stay in declaration
-      // order; to add a field, append it here AND to the include. Slot 7 is dead padding
-      // left by the removed subject_lock rather than a reused slot, so the 8-float size
-      // and every other index are unchanged.
+      // order; to add a field, append it here AND to the include.
       float sbs_params[8] {
         sbs_config.subject_stretch ? 1.0f : 0.0f,
         content_scale_x,
@@ -991,9 +1015,11 @@ namespace platf::dxgi {
         0.0f,
         sbs_config.adaptive_pop ? 1.0f : 0.0f,
         (float) std::max(sbs_config.adaptive_pop_max, sbs_config.pop_strength),
-        0.0f  // padding0 (was subject_lock)
+        0.0f  // ordinary/flat draw: overwrite the packed target
       };
       sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);
+      sbs_params[7] = 1.0f;
+      sbs_reprojection_completed_cbuffer = make_buffer(device.get(), sbs_params);
     }
 
     struct sbs_gpu_timer_slot_t {
@@ -1365,6 +1391,14 @@ namespace platf::dxgi {
   }
       const bool sbs_on = sbs_mode != ::video::SBS_OFF;
       const bool downscaling = display->width > width || display->height > height;
+      if (sbs_on &&
+          display->display_rotation != DXGI_MODE_ROTATION_UNSPECIFIED &&
+          display->display_rotation != DXGI_MODE_ROTATION_IDENTITY) {
+        BOOST_LOG(error) << "Host SBS requires an identity-oriented source display. "
+                         << "Use an explicit portrait resolution instead of Windows display "
+                            "rotation.";
+        return -1;
+      }
 
       // FP16 capture is linear for both HDR and Advanced Color SDR. Runtime shader selection uses
       // the actual input transfer plus the negotiated display mode; resource format alone is not
@@ -1462,6 +1496,11 @@ namespace platf::dxgi {
         }
       }
       update_sbs_constant_buffer(content_scale_x, content_scale_y);
+      if (!sbs_reprojection_cbuffer || !sbs_reprojection_completed_cbuffer) {
+        BOOST_LOG(error) << "Failed to create SBS reprojection constant buffers";
+        return -1;
+      }
+
       auto out_width_f = sbs_on ? (float) out_width : fitted_width;
       auto out_height_f = sbs_on ? (float) out_height : fitted_height;
 
@@ -1862,6 +1901,7 @@ namespace platf::dxgi {
     ps_t sbs_reprojection_ps;
     cs_t sbs_depth_prefilter_cs;
     buf_t sbs_reprojection_cbuffer;
+    buf_t sbs_reprojection_completed_cbuffer;
     texture2d_t sbs_intermediate_texture;
     render_target_t sbs_intermediate_rtv;
     shader_res_t sbs_intermediate_srv;

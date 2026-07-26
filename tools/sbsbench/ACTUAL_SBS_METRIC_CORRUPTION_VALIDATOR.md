@@ -4,18 +4,18 @@
 against copies of real SBS frames produced by the D3D11 harness. It is deliberately separate from
 `run_eval.py`: the validator cannot alter thresholds, rescore a run, or qualify a training label.
 
-The default input is the completed schema-32 core run:
+The default input is the completed schema-34 core run:
 
 ```powershell
 E:\ApolloDev\venvs\artistic-policy\Scripts\python.exe `
   tools\sbsbench\validate_actual_sbs_metric_corruptions.py `
-  --run cmake-build-relwithdebinfo\sbs_eval\metric-schema32-core-control `
+  --run cmake-build-relwithdebinfo\sbs_eval\metric-schema34-core-control `
   --max-clips 2
 ```
 
-The tool validates at least two independent real clips. For each selected interior frame it
+The tool validates at least two independent non-probe source clips. For each selected interior frame it
 authenticates the committed source pixels against the clip hash recorded by the run, requires the
-harness schema-16 exact-map contract, checks the packed SBS/map/source geometry, and records SHA-256
+harness schema-17 exact-map/state-trace contract, checks the packed SBS/map/source geometry, and records SHA-256
 hashes for the source, SBS output, warp map, warp mask, and contracts.
 
 ## Controlled falsification matrix

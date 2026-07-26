@@ -98,6 +98,7 @@
   "clips": {
     "bonn_person_walk": {
       "dataset": "bonn_dynamic",
+      "content_type": "real-capture",
       "adapter": "tum_rgbd_zip",
       "archives": ["person_tracking"],
       "name": "bonn-person-walk",
@@ -109,6 +110,7 @@
     },
     "bonn_person_close": {
       "dataset": "bonn_dynamic",
+      "content_type": "real-capture",
       "adapter": "tum_rgbd_zip",
       "archives": ["person_tracking"],
       "name": "bonn-person-close",
@@ -120,6 +122,7 @@
     },
     "tartanair_house_easy": {
       "dataset": "tartanair_v2",
+      "content_type": "simulation",
       "adapter": "tartanair_v2_zip",
       "archives": ["archviz_image", "archviz_depth", "archviz_flow"],
       "trajectory": "P000",
@@ -132,6 +135,7 @@
     },
     "tartanair_house_motion": {
       "dataset": "tartanair_v2",
+      "content_type": "simulation",
       "adapter": "tartanair_v2_zip",
       "archives": ["archviz_image", "archviz_depth", "archviz_flow"],
       "trajectory": "P002",
@@ -144,6 +148,7 @@
     },
     "sintel_ambush": {
       "dataset": "mpi_sintel_stereo",
+      "content_type": "animation",
       "adapter": "sintel_stereo_zip",
       "archives": ["stereo_training"],
       "sequence": "ambush_4",
@@ -157,6 +162,7 @@
     },
     "sintel_market": {
       "dataset": "mpi_sintel_stereo",
+      "content_type": "animation",
       "adapter": "sintel_stereo_zip",
       "archives": ["stereo_training"],
       "sequence": "market_2",
@@ -170,6 +176,7 @@
     },
     "spring_skeleton_cave": {
       "dataset": "spring_stereo",
+      "content_type": "animation",
       "adapter": "spring_http_range_zip",
       "archives": ["test_left", "test_right"],
       "sequence": "0019",
@@ -184,6 +191,7 @@
     },
     "spring_character_close": {
       "dataset": "spring_stereo",
+      "content_type": "animation",
       "adapter": "spring_http_range_zip",
       "archives": ["test_left", "test_right"],
       "sequence": "0035",
@@ -198,6 +206,7 @@
     },
     "spring_daylight_path": {
       "dataset": "spring_stereo",
+      "content_type": "animation",
       "adapter": "spring_http_range_zip",
       "archives": ["test_left", "test_right"],
       "sequence": "0042",
@@ -212,6 +221,7 @@
     },
     "spring_forest_seeds": {
       "dataset": "spring_stereo",
+      "content_type": "animation",
       "adapter": "spring_http_range_zip",
       "archives": ["test_left", "test_right"],
       "sequence": "0046",
@@ -226,6 +236,7 @@
     },
     "vkitti_drive_clone": {
       "dataset": "virtual_kitti_2",
+      "content_type": "simulation",
       "adapter": "vkitti2_tar",
       "archives": ["rgb", "depth"],
       "scene": "Scene01",
@@ -239,6 +250,7 @@
     },
     "vkitti_drive_rain": {
       "dataset": "virtual_kitti_2",
+      "content_type": "simulation",
       "adapter": "vkitti2_tar",
       "archives": ["rgb", "depth"],
       "scene": "Scene20",

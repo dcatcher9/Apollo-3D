@@ -1,8 +1,10 @@
 import io
 import ast
+import glob
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -18,6 +20,7 @@ from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import audit_depth_transform  # noqa: E402
 import audit_depth_confidence  # noqa: E402
+import make_synth_clips  # noqa: E402
 import prepare_public_datasets  # noqa: E402
 import prepare_flow_ema_reference  # noqa: E402
 import run_eval  # noqa: E402
@@ -104,6 +107,302 @@ class EvalContractTests(unittest.TestCase):
             with open(os.path.join(clip, "meta.json"), "w", encoding="utf-8") as fh:
                 json.dump({"reference_stereo_available": True}, fh)
             self.assertNotEqual(changed_pixels, run_eval.sha1_dir(clip))
+
+    def test_clip_hash_authenticates_content_classification(self):
+        with tempfile.TemporaryDirectory() as clip:
+            Image.fromarray(np.zeros((8, 12, 3), np.uint8)).save(
+                os.path.join(clip, "frame_00000.png"))
+            meta_path = os.path.join(clip, "meta.json")
+            with open(meta_path, "w", encoding="utf-8") as fh:
+                json.dump({"content_type": "real-capture"}, fh)
+            capture_hashes = run_eval.source_evidence_digests(clip)
+            with open(meta_path, "w", encoding="utf-8") as fh:
+                json.dump({"content_type": "synthetic"}, fh)
+            self.assertNotEqual(capture_hashes, run_eval.source_evidence_digests(clip))
+
+    def test_clip_hash_excludes_labels_but_authenticates_shot_state_semantics(self):
+        with tempfile.TemporaryDirectory() as clip:
+            for frame_id in (1, 2):
+                Image.fromarray(np.zeros((8, 12, 3), np.uint8)).save(
+                    os.path.join(clip, f"frame_{frame_id:05d}.png"))
+            meta_path = os.path.join(clip, "meta.json")
+            contract = {
+                "kind": "hard-cut", "monitor_from_frame": 2,
+                "expected_pulse_frames": [2],
+            }
+            with open(meta_path, "w", encoding="utf-8") as fh:
+                json.dump({
+                    "name": "human label A", "description": "wording A",
+                    "content_type": "synthetic", "shot_state_contract": contract,
+                }, fh)
+            original = run_eval.source_evidence_digests(clip)
+            with open(meta_path, "w", encoding="utf-8") as fh:
+                json.dump({
+                    "name": "human label B", "description": "wording B",
+                    "content_type": "synthetic", "shot_state_contract": contract,
+                }, fh)
+            self.assertEqual(original, run_eval.source_evidence_digests(clip))
+            contract["expected_pulse_frames"] = []
+            with open(meta_path, "w", encoding="utf-8") as fh:
+                json.dump({
+                    "name": "human label B", "description": "wording B",
+                    "content_type": "synthetic", "shot_state_contract": contract,
+                }, fh)
+            self.assertNotEqual(original, run_eval.source_evidence_digests(clip))
+
+    def test_exposure_probe_is_reproducible_and_pixel_authenticated(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        committed = os.path.join(
+            repo, "tools", "sbsbench", "clips", "exposure_flash_strobe")
+        committed_meta = run_eval.load_clip_metadata(committed, suite="core")
+        self.assertEqual(committed_meta["content_type"], "synthetic")
+        self.assertEqual(committed_meta["evaluation_role"], "conformance-only")
+        self.assertEqual(
+            committed_meta["shot_state_contract"]["monitor_from_frame"], 2)
+        self.assertEqual(
+            committed_meta["shot_state_contract"]["stable_from_frame"], 10)
+        self.assertFalse(os.path.exists(os.path.join(committed, "gt_depth")))
+        committed_frames = sbsbench.indexed_files(
+            os.path.join(committed, "frame_*.*"), "frame_")
+        sbsbench.validate_exposure_only_source(
+            committed_frames, committed_meta["shot_state_contract"])
+
+        with tempfile.TemporaryDirectory() as generated_root, mock.patch.object(
+                make_synth_clips, "CLIPS", generated_root):
+            make_synth_clips.exposure_flash_strobe()
+            make_synth_clips.write_meta(
+                "exposure_flash_strobe",
+                **make_synth_clips.clip_metadata("exposure_flash_strobe"))
+            generated = os.path.join(generated_root, "exposure_flash_strobe")
+            generated_meta = run_eval.load_clip_metadata(generated, suite="core")
+            generated_frames = sbsbench.indexed_files(
+                os.path.join(generated, "frame_*.*"), "frame_")
+            self.assertEqual(generated_meta, committed_meta)
+            self.assertEqual(set(generated_frames), set(committed_frames))
+            for frame_id in generated_frames:
+                with open(generated_frames[frame_id], "rb") as actual, open(
+                        committed_frames[frame_id], "rb") as expected:
+                    self.assertEqual(actual.read(), expected.read(), frame_id)
+
+            # A single non-exposure pixel invalidates the semantic contract before state metrics.
+            tampered = np.asarray(Image.open(generated_frames[12]).convert("RGB")).copy()
+            tampered[0, 0, 0] ^= 1
+            Image.fromarray(tampered).save(generated_frames[12])
+            with self.assertRaisesRegex(ValueError, "global-RGB-gain"):
+                sbsbench.validate_exposure_only_source(
+                    generated_frames, generated_meta["shot_state_contract"])
+
+    def test_sustained_motion_cut_is_reproducible_and_source_authenticated(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        committed = os.path.join(
+            repo, "tools", "sbsbench", "clips", "sustained_motion_scene_cut")
+        committed_meta = run_eval.load_clip_metadata(committed, suite="core")
+        contract = committed_meta["shot_state_contract"]
+        self.assertEqual(committed_meta["evaluation_role"], "conformance-only")
+        self.assertEqual(contract["kind"], "latched-motion-hard-cut")
+        self.assertEqual(contract["monitor_from_frame"], 2)
+        self.assertEqual(contract["expected_pulse_frames"], [11, 27])
+        committed_frames = sbsbench.indexed_files(
+            os.path.join(committed, "frame_*.*"), "frame_")
+        sbsbench.validate_latched_motion_hard_cut_source(
+            committed_frames, contract)
+
+        with tempfile.TemporaryDirectory() as generated_root, mock.patch.object(
+                make_synth_clips, "CLIPS", generated_root):
+            # The generator reads its two source anchors from the clip root, so copy only those
+            # authenticated inputs into the isolated regeneration tree.
+            for source, frame in (("c841", 1), ("c647", 13)):
+                source_dir = os.path.join(generated_root, source)
+                os.makedirs(source_dir)
+                shutil.copyfile(
+                    os.path.join(repo, "tools", "sbsbench", "clips", source,
+                                 f"frame_{frame:05d}.jpg"),
+                    os.path.join(source_dir, f"frame_{frame:05d}.jpg"))
+            make_synth_clips.sustained_motion_scene_cut()
+            make_synth_clips.write_meta(
+                "sustained_motion_scene_cut",
+                **make_synth_clips.clip_metadata("sustained_motion_scene_cut"))
+            generated = os.path.join(generated_root, "sustained_motion_scene_cut")
+            generated_meta = run_eval.load_clip_metadata(generated, suite="core")
+            generated_frames = sbsbench.indexed_files(
+                os.path.join(generated, "frame_*.*"), "frame_")
+            self.assertEqual(generated_meta, committed_meta)
+            self.assertEqual(set(generated_frames), set(committed_frames))
+            for frame_id in generated_frames:
+                with open(generated_frames[frame_id], "rb") as actual, open(
+                        committed_frames[frame_id], "rb") as expected:
+                    self.assertEqual(actual.read(), expected.read(), frame_id)
+
+            tampered = np.asarray(Image.open(generated_frames[18]).convert("RGB")).copy()
+            tampered[0, 0, 0] ^= 1
+            Image.fromarray(tampered).save(generated_frames[18])
+            with self.assertRaisesRegex(ValueError, "horizontal-roll"):
+                sbsbench.validate_latched_motion_hard_cut_source(
+                    generated_frames, generated_meta["shot_state_contract"])
+
+    @staticmethod
+    def subject_state(age, flags, anchor=2.5, pop=1.25):
+        return {
+            "subject_recenter_delta": 0.0, "scene_age": float(age),
+            "subject_depth_ema": 0.55, "initialized": 1.0,
+            "stretch_lo": 0.1, "stretch_inv_range": 1.25,
+            "depth_change_baseline_ema": 0.08, "adaptive_pop_ratio": float(pop),
+            "zero_anchor_shift_px": float(anchor), "zero_anchor_valid": 1.0,
+            "cut_flags": float(flags), "model_input_history_valid": 1.0,
+        }
+
+    def test_shot_state_contract_observes_exactly_one_real_cut(self):
+        rows = [{"_frame_id": frame_id} for frame_id in range(1, 7)]
+        trace = {
+            1: self.subject_state(0, 3),
+            2: self.subject_state(1, 3),
+            3: self.subject_state(2, 3),
+            4: self.subject_state(0, 16, anchor=3.0, pop=1.0),
+            5: self.subject_state(1, 16, anchor=3.0, pop=1.0),
+            6: self.subject_state(2, 16, anchor=3.0, pop=1.0),
+        }
+        summary = sbsbench.apply_shot_state_contract(
+            rows, list(range(1, 7)), trace, {
+                "kind": "hard-cut", "monitor_from_frame": 2,
+                "expected_pulse_frames": [4],
+            })
+        self.assertEqual(summary["shot_state_accepted_pulse"], 1.0)
+        self.assertEqual(summary["shot_state_expected_pulse"], 1.0)
+        self.assertEqual(max(row.get("shot_state_pulse_mismatch", 0.0) for row in rows), 0.0)
+        self.assertEqual(
+            max(row.get("shot_state_trace_inconsistent", 0.0) for row in rows), 0.0)
+        self.assertEqual(
+            sbsbench.aggregate(rows)["shot_state_accepted_pulse"], 1.0)
+
+    def test_exposure_contract_rejects_relatched_state_and_latch_drift(self):
+        rows = [{"_frame_id": frame_id} for frame_id in range(1, 7)]
+        trace = {frame_id: self.subject_state(frame_id - 1, 3)
+                 for frame_id in range(1, 7)}
+        contract = {
+            "kind": "exposure-only", "monitor_from_frame": 2,
+            "stable_from_frame": 3,
+            "expected_pulse_frames": [],
+        }
+        summary = sbsbench.apply_shot_state_contract(
+            rows, list(range(1, 7)), trace, contract)
+        self.assertEqual(summary["shot_state_accepted_pulse"], 0.0)
+        self.assertEqual(
+            max(row.get("shot_state_zero_anchor_drift_px", 0.0) for row in rows), 0.0)
+        self.assertEqual(
+            max(row.get("shot_state_adaptive_pop_drift", 0.0) for row in rows), 0.0)
+
+        reset_rows = [{"_frame_id": frame_id} for frame_id in range(1, 7)]
+        trace[5] = self.subject_state(0, 16, anchor=3.25, pop=1.0)
+        sbsbench.apply_shot_state_contract(
+            reset_rows, list(range(1, 7)), trace, contract)
+        reset = next(row for row in reset_rows if row["_frame_id"] == 5)
+        self.assertEqual(reset["shot_state_pulse_mismatch"], 1.0)
+        self.assertGreater(reset["shot_state_zero_anchor_drift_px"], 0.0)
+        self.assertGreater(reset["shot_state_adaptive_pop_drift"], 0.0)
+
+    def test_exposure_pulse_monitoring_cannot_hide_startup_relatched_state(self):
+        rows = [{"_frame_id": frame_id} for frame_id in range(1, 6)]
+        trace = {
+            1: self.subject_state(1, 3),
+            2: self.subject_state(0, 16),
+            3: self.subject_state(1, 16),
+            4: self.subject_state(2, 16),
+            5: self.subject_state(3, 16),
+        }
+        summary = sbsbench.apply_shot_state_contract(
+            rows, list(range(1, 6)), trace, {
+                "kind": "exposure-only", "monitor_from_frame": 2,
+                "stable_from_frame": 4, "expected_pulse_frames": [],
+            })
+        self.assertEqual(summary["shot_state_accepted_pulse"], 1.0)
+        startup = next(row for row in rows if row["_frame_id"] == 2)
+        self.assertEqual(startup["shot_state_pulse_mismatch"], 1.0)
+        self.assertNotIn("shot_state_zero_anchor_drift_px", startup)
+        self.assertIn(
+            "shot_state_zero_anchor_drift_px",
+            next(row for row in rows if row["_frame_id"] == 4))
+
+    def test_shot_trace_recognizes_later_cut_after_independent_rearm(self):
+        rows = [{"_frame_id": frame_id} for frame_id in range(1, 9)]
+        trace = {
+            1: self.subject_state(0, 3),
+            2: self.subject_state(1, 3),
+            3: self.subject_state(2, 3),
+            4: self.subject_state(0, 16),
+            5: self.subject_state(1, 17),
+            6: self.subject_state(2, 19),
+            7: self.subject_state(0, 16),
+            8: self.subject_state(1, 16),
+        }
+        summary = sbsbench.apply_shot_state_contract(
+            rows, list(range(1, 9)), trace, {
+                "kind": "hard-cut", "monitor_from_frame": 2,
+                "expected_pulse_frames": [4, 7],
+            })
+        self.assertEqual(summary["shot_state_accepted_pulse"], 2.0)
+        self.assertEqual(
+            sbsbench.aggregate(rows)["shot_state_accepted_pulse"], 2.0)
+        self.assertEqual(max(
+            row.get("shot_state_pulse_mismatch", 0.0) for row in rows), 0.0)
+        self.assertEqual(max(
+            row.get("shot_state_trace_inconsistent", 0.0) for row in rows), 0.0)
+
+    def test_shot_trace_accepts_relative_cut_with_latched_flags_unchanged(self):
+        rows = [{"_frame_id": frame_id} for frame_id in range(1, 13)]
+        trace = {
+            1: self.subject_state(0, 3),
+            2: self.subject_state(1, 3),
+            3: self.subject_state(0, 16),
+        }
+        for frame_id in range(4, 12):
+            trace[frame_id] = self.subject_state(frame_id - 3, 16)
+        trace[12] = self.subject_state(0, 16)
+        summary = sbsbench.apply_shot_state_contract(
+            rows, list(range(1, 13)), trace, {
+                "kind": "hard-cut", "monitor_from_frame": 2,
+                "expected_pulse_frames": [3, 12],
+            })
+        self.assertEqual(summary["shot_state_accepted_pulse"], 2.0)
+        self.assertEqual(max(
+            row.get("shot_state_pulse_mismatch", 0.0) for row in rows), 0.0)
+        self.assertEqual(max(
+            row.get("shot_state_trace_inconsistent", 0.0) for row in rows), 0.0)
+
+    def test_latched_motion_contract_proves_relative_escape_precondition(self):
+        rows = [{"_frame_id": frame_id} for frame_id in range(1, 13)]
+        trace = {
+            1: self.subject_state(0, 3),
+            2: self.subject_state(1, 3),
+            3: self.subject_state(0, 16),
+        }
+        for frame_id in range(4, 12):
+            trace[frame_id] = self.subject_state(frame_id - 3, 16)
+        trace[12] = self.subject_state(0, 16)
+        contract = {
+            "kind": "latched-motion-hard-cut", "monitor_from_frame": 2,
+            "expected_pulse_frames": [3, 12],
+            "setup_pulse_frame": 3, "escape_pulse_frame": 12,
+        }
+        summary = sbsbench.apply_shot_state_contract(
+            rows, list(range(1, 13)), trace, contract)
+        self.assertEqual(summary["shot_state_relative_escape_ok"], 100.0)
+        self.assertEqual(min(
+            row.get("shot_state_relative_escape_ok", 100.0)
+            for row in rows if row["_frame_id"] >= 2), 100.0)
+
+        trace[11] = self.subject_state(8, 17)
+        failed_rows = [{"_frame_id": frame_id} for frame_id in range(1, 13)]
+        failed = sbsbench.apply_shot_state_contract(
+            failed_rows, list(range(1, 13)), trace, contract)
+        self.assertEqual(failed["shot_state_relative_escape_ok"], 0.0)
+
+    def test_unattributed_core_clips_are_explicitly_unclassified(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        for clip in ("c525", "c747", "c841"):
+            with self.subTest(clip=clip), open(
+                    os.path.join(repo, "tools", "sbsbench", "clips", clip, "meta.json"),
+                    encoding="utf-8") as fh:
+                self.assertEqual(json.load(fh).get("content_type"), "unclassified")
 
     def test_clip_hash_covers_all_semantic_reference_sidecars(self):
         sidecars = (
@@ -440,6 +739,14 @@ class EvalContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "root must be an object"):
                 run_eval.load_clip_metadata(clip)
             with open(meta_path, "w", encoding="utf-8") as fh:
+                json.dump({"content_type": "capture"}, fh)
+            with self.assertRaisesRegex(ValueError, "content_type .* is not one of"):
+                run_eval.load_clip_metadata(clip)
+            with open(meta_path, "w", encoding="utf-8") as fh:
+                json.dump({}, fh)
+            with self.assertRaisesRegex(ValueError, "explicit content_type"):
+                run_eval.load_clip_metadata(clip)
+            with open(meta_path, "w", encoding="utf-8") as fh:
                 json.dump({"dataset": "public"}, fh)
             with self.assertRaisesRegex(ValueError, "consumed depth/flow GT"):
                 run_eval.load_clip_metadata(clip, suite="extended")
@@ -449,14 +756,18 @@ class EvalContractTests(unittest.TestCase):
             Image.fromarray(np.zeros((8, 12, 3), np.uint8)).save(
                 os.path.join(gt_right, "frame_00000.png"))
             with open(meta_path, "w", encoding="utf-8") as fh:
-                json.dump({"dataset": "public", "reference_stereo_available": True}, fh)
+                json.dump({
+                    "dataset": "public", "content_type": "animation",
+                    "reference_stereo_available": True,
+                }, fh)
             inferred_reference = run_eval.load_clip_metadata(clip, suite="extended")
             self.assertEqual(inferred_reference["evaluation_role"], "reference-only")
             self.assertFalse(inferred_reference.get("required_gt_depth", False))
 
             with open(meta_path, "w", encoding="utf-8") as fh:
                 json.dump({
-                    "dataset": "public", "reference_stereo_available": True,
+                    "dataset": "public", "content_type": "animation",
+                    "reference_stereo_available": True,
                     "evaluation_role": "reference-only",
                 }, fh)
             reference_meta = run_eval.load_clip_metadata(clip, suite="extended")
@@ -472,7 +783,8 @@ class EvalContractTests(unittest.TestCase):
             np.save(os.path.join(gt_depth, "frame_00000.npy"), np.ones((8, 12), np.float32))
             with open(meta_path, "w", encoding="utf-8") as fh:
                 json.dump({
-                    "dataset": "public", "required_gt_depth": True,
+                    "dataset": "public", "content_type": "real-capture",
+                    "required_gt_depth": True,
                     "gt_depth_kind": "metric", "reference_stereo_available": True,
                 }, fh)
             self.assertTrue(run_eval.load_clip_metadata(
@@ -480,7 +792,8 @@ class EvalContractTests(unittest.TestCase):
 
             with open(meta_path, "w", encoding="utf-8") as fh:
                 json.dump({
-                    "dataset": "public", "required_gt_depth": True,
+                    "dataset": "public", "content_type": "real-capture",
+                    "required_gt_depth": True,
                     "gt_depth_kind": "metric", "required_gt_stereo": True,
                 }, fh)
             migrated = run_eval.load_clip_metadata(clip, suite="extended")
@@ -508,6 +821,59 @@ class EvalContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "stale/incompatible"):
                 run_eval.preflight_baselines(
                     baseline_dir, ["clip"], context, {"clip": "cliphash"})
+
+    def test_only_conformance_only_clips_are_exempt_from_committed_baselines(self):
+        clips = ["decisive", "reference", "probe"]
+        metadata = {
+            "decisive": {"content_type": "real-capture"},
+            "reference": {
+                "content_type": "animation",
+                "evaluation_role": "reference-only",
+            },
+            "probe": {
+                "content_type": "synthetic",
+                "evaluation_role": "conformance-only",
+                "shot_state_contract": {"kind": "hard-cut"},
+            },
+        }
+        self.assertEqual(
+            run_eval.clips_requiring_committed_baselines(clips, metadata),
+            ["decisive", "reference"])
+        metadata["probe"]["evaluation_role"] = "ground-truth"
+        self.assertEqual(
+            run_eval.clips_requiring_committed_baselines(clips, metadata),
+            clips)
+        del metadata["reference"]
+        with self.assertRaisesRegex(ValueError, "missing source metadata"):
+            run_eval.clips_requiring_committed_baselines(clips, metadata)
+
+        metadata["reference"] = {"evaluation_role": "reference-only"}
+        metadata["probe"] = {"evaluation_role": "conformance-only"}
+        with self.assertRaisesRegex(ValueError, "no authenticated hard contract"):
+            run_eval.clips_requiring_committed_baselines(clips, metadata)
+
+    def test_baseline_snapshot_exactly_covers_only_required_clips(self):
+        context = {"eval_schema": run_eval.EVAL_SCHEMA, "run_kind": "baseline-update"}
+        manifest = {
+            "meta": {**context, "clip_sha1": "decisive-hash", "extra_args": []},
+            "aggregate": {"quality": 1.0},
+            "perf_ms": {"warp": 1.0},
+        }
+        with tempfile.TemporaryDirectory() as baseline_dir:
+            path = os.path.join(baseline_dir, "decisive.json")
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(manifest, stream)
+            snapshot = run_eval.build_baseline_snapshot(
+                baseline_dir, {"decisive": manifest})
+            validated = run_eval.validate_baseline_snapshot(
+                snapshot, ["decisive"], context,
+                {"decisive": "decisive-hash", "probe": "probe-hash"})
+            self.assertEqual(set(validated), {"decisive"})
+            with self.assertRaisesRegex(
+                    ValueError, "baseline-required clip set"):
+                run_eval.validate_baseline_snapshot(
+                    snapshot, ["decisive", "probe"], context,
+                    {"decisive": "decisive-hash", "probe": "probe-hash"})
 
     def test_hard_constraint_summary_uses_worst_clip_not_mean(self):
         aggregates = {"safe": {"comfort": 1.0}, "unsafe": {"comfort": 5.0}}
@@ -584,6 +950,32 @@ class EvalContractTests(unittest.TestCase):
         run_eval.normalize_cli_paths(args)
         self.assertTrue(os.path.isabs(args.build_dir))
         self.assertTrue(os.path.isabs(args.conf))
+
+    def test_eval_clip_names_and_labels_are_single_safe_path_components(self):
+        self.assertEqual(run_eval.safe_path_component("scene_cut", "clip name"), "scene_cut")
+        for unsafe in ("", ".", "..", "../clip", "nested/clip", r"..\clip",
+                       r"nested\clip", "/absolute", r"C:\absolute"):
+            with self.subTest(unsafe=unsafe), self.assertRaisesRegex(
+                    ValueError, "basename|path separators"):
+                run_eval.safe_path_component(unsafe, "clip name")
+
+    def test_eval_output_child_is_confined_before_recursive_delete(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = os.path.join(temporary, "sbs_eval")
+            outside = os.path.join(temporary, "source-frames")
+            os.makedirs(root)
+            os.makedirs(outside)
+            self.assertEqual(
+                run_eval.confined_child(root, "safe-label", "run label"),
+                os.path.realpath(os.path.join(root, "safe-label")))
+
+            link = os.path.join(root, "reused-label")
+            try:
+                os.symlink(outside, link, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlinks are unavailable")
+            with self.assertRaisesRegex(ValueError, "escapes evaluator output root"):
+                run_eval.confined_child(root, "reused-label", "run label")
 
     def test_eval_builds_production_binary_and_fails_closed_on_build_error(self):
         current = mock.Mock(returncode=0, stdout="ninja: no work to do.\n", stderr="")
@@ -710,21 +1102,57 @@ class EvalContractTests(unittest.TestCase):
                                "directx", "depth_subject_resolve_cs.hlsl"),
                   encoding="utf-8") as fh:
             adaptive = fh.read()
-        self.assertIn("change_fraction >= 0.65f", adaptive)
-        self.assertIn("scene_age >= 8.0f", adaptive)
+        with open(os.path.join(repo, "src_assets", "windows", "assets", "shaders",
+                               "directx", "depth_subject_hist_cs.hlsl"),
+                  encoding="utf-8") as fh:
+            cut_evidence = fh.read()
+        with open(os.path.join(repo, "src_assets", "windows", "assets", "shaders",
+                               "directx", "include", "depth_constants.hlsl"),
+                  encoding="utf-8") as fh:
+            depth_constants = fh.read()
+        self.assertIn("change_fraction >= DEPTH_CUT_HIGH", adaptive)
+        self.assertIn("scene_age >= POP_CLASSIFY_SETTLE_FRAMES", adaptive)
         self.assertIn("smoothstep(POP_RISK_LOW, POP_RISK_HIGH, edge_fraction)", adaptive)
         self.assertIn("#define POP_RISK_LOW 0.04f", adaptive)
         self.assertIn("#define POP_RISK_HIGH 0.20f", adaptive)
         self.assertNotIn("lerp(pop_ratio, target_ratio", adaptive)
         self.assertIn("Bestv2RawShiftPxFast(zero_anchor_shaped)", adaptive)
-        self.assertIn("color_history_valid", adaptive)
-        self.assertIn("color_history_valid && color_change_fraction >= 0.70f", adaptive)
-        self.assertIn("color_change_fraction >= 0.70f", adaptive)
-        self.assertIn("scene_age >= 2.0f", adaptive)
-        self.assertIn("(!initialized || hard_cut) ? subj_raw", adaptive)
-        self.assertIn("(!initialized || hard_cut) ? subj_raw", adaptive)
+        self.assertIn("model_input_history_valid", adaptive)
+        self.assertIn("appearance_proposal", adaptive)
+        self.assertIn("raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH", adaptive)
+        self.assertIn(
+            "structural_change_fraction >= STRUCTURAL_COLOR_CUT_HIGH", adaptive)
+        self.assertIn("change_fraction >= DEPTH_CUT_CORROBORATE", adaptive)
+        self.assertIn("change_fraction < DEPTH_CUT_LOW", adaptive)
+        self.assertIn("relative_geometry_spike", adaptive)
+        self.assertIn("CUT_FLAG_GEOMETRY_ARMED", adaptive)
+        self.assertIn("CUT_FLAG_APPEARANCE_ARMED", adaptive)
+        self.assertNotIn("cut_state = -2.0f", adaptive)
+        self.assertNotIn("scene_age >= 2.0f", adaptive)
+        self.assertIn("(!initialized || shot_cut) ? subj_raw", adaptive)
+        self.assertIn("CurrentModelColor", cut_evidence)
+        self.assertIn("PreviousModelColor", cut_evidence)
+        self.assertIn("CurrentAppearanceOrdinal", cut_evidence)
+        self.assertIn("PreviousAppearanceOrdinal", cut_evidence)
+        self.assertIn("RAW_RGB_PIXEL_DELTA", cut_evidence)
+        self.assertIn("PlainHist[NUM_BINS + 3]", cut_evidence)
+        self.assertNotIn("max(color.r, max(color.g, color.b))", cut_evidence)
+        self.assertIn("for (int first = 0; first < 4; ++first)", cut_evidence)
+        self.assertIn("for (int second = first + 1; second < 5; ++second)",
+                      cut_evidence)
+        self.assertIn("abs(current_delta) >= STRUCTURAL_ORDINAL_CONTRAST_FLOOR",
+                      cut_evidence)
+        self.assertIn("ordering_flips * 2u >= common_comparisons", cut_evidence)
+        self.assertIn("#define RAW_RGB_CUT_HIGH 0.70f", depth_constants)
+        self.assertIn("#define STRUCTURAL_COLOR_CUT_HIGH 0.03f", depth_constants)
+        self.assertIn("#define DEPTH_CUT_HIGH 0.60f", depth_constants)
+        self.assertIn("#define DEPTH_CUT_CORROBORATE 0.25f", depth_constants)
+        self.assertIn("#define DEPTH_CUT_RELATIVE_FLOOR 0.30f", depth_constants)
+        self.assertIn("#define DEPTH_CUT_RELATIVE_MARGIN 0.20f", depth_constants)
+        self.assertIn("#define DEPTH_CUT_RELATIVE_MULTIPLIER 2.0f", depth_constants)
         self.assertNotIn("conv_target", adaptive)
-        self.assertIn("bool hard_cut = initialized &&", adaptive)
+        self.assertIn("bool shot_cut =", adaptive)
+        self.assertIn("initialized &&", adaptive)
         self.assertNotIn("scene_control && initialized", adaptive)
         self.assertIn("s.y = scene_age;", adaptive)
 
@@ -837,6 +1265,9 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("Bestv2ProbeIntervals", text)
         self.assertIn("Bestv2ProbeStart", text)
         self.assertNotIn("Bestv2ProbeSteps", text)
+        self.assertIn("int max_intervals = max(max_probes - 1, 1);", text)
+        self.assertIn("while (intervals > max_intervals)", text)
+        self.assertNotIn("return min(intervals, max_intervals);", text)
 
         def max_probes(w, h):
             return max(int(8.75e8 // (2.0 * w * h)), 5)
@@ -851,11 +1282,61 @@ class EvalContractTests(unittest.TestCase):
             # intervals + the loop's initial sample
             return math.ceil(2.0 * radius / spacing) + 2
 
+        def capped_probe_layout(radius, probe_spacing, max_total_probes):
+            # Mirror Bestv2ProbeIntervals exactly. The caller performs one sample before
+            # consuming the returned intervals, so the interval budget is total - 1.
+            max_intervals = max(max_total_probes - 1, 1)
+            base_spacing = probe_spacing
+            span_in_base_cells = (2.0 * radius) / base_spacing
+            intervals = math.ceil(span_in_base_cells) + 1
+            if intervals > max_intervals:
+                span_intervals = max(max_intervals - 1, 1)
+                decimate = max(math.ceil(span_in_base_cells / span_intervals), 1)
+                probe_spacing = base_spacing * decimate
+                intervals = math.ceil((2.0 * radius) / probe_spacing) + 1
+                while intervals > max_intervals:
+                    decimate += 1
+                    probe_spacing = base_spacing * decimate
+                    intervals = math.ceil((2.0 * radius) / probe_spacing) + 1
+            return intervals, probe_spacing
+
         self.assertEqual(max_probes(3552.0, 3840.0), 32)
         self.assertGreater(lattice_probes(3552.0, 3840.0, 2.0), max_probes(3552.0, 3840.0))
         for width, height in ((5120.0, 2160.0), (3840.0, 2160.0), (1920.0, 1080.0)):
             self.assertLessEqual(lattice_probes(width, height, 2.0),
                                  max_probes(width, height))
+
+        tall_aspect_scale = min(max((5120.0 / 2160.0) / (3552.0 / 3840.0), 0.5), 3.0)
+        tall_radius = tall_aspect_scale * 2.0 * (
+            0.004 + (10.1 * 0.35 + 0.006 * 4.0) / 854.0)
+        cases = (
+            # Representative tall-mode radius and its real 32-sample raster budget.
+            (tall_radius, spacing, max_probes(3552.0, 3840.0)),
+            # No search radius still has to account for the caller's initial sample.
+            (0.0, spacing, 5),
+            # After 2x decimation, ceil(61 / 2) + 1 is still 32 intervals. Meeting a
+            # 31-interval budget therefore requires 3x decimation; truncating the final
+            # right-edge bracket would satisfy the count while breaking coverage.
+            (30.5, 1.0, 32),
+            # A very dense pathological lattice against the minimum total budget.
+            (5000.25, 0.125, 5),
+        )
+        for radius, probe_spacing, total_cap in cases:
+            returned_intervals, effective_spacing = capped_probe_layout(
+                radius, probe_spacing, total_cap)
+            self.assertLessEqual(1 + returned_intervals, total_cap)
+            # ProbeStart floors the left edge to the global lattice. Verify several lattice
+            # phases, including the worst phase immediately below the next cell: the final probe
+            # must still reach beyond the right edge after budget-driven decimation.
+            for phase in (0.0, 0.01, 0.25, 0.5, 0.99, 1.0 - 1e-9):
+                left = phase * effective_spacing
+                right = left + 2.0 * radius
+                start = math.floor(left / effective_spacing)
+                end = (start + returned_intervals) * effective_spacing
+                self.assertLessEqual(start * effective_spacing, left)
+                self.assertGreaterEqual(end + 1e-9, right)
+        boundary_intervals, boundary_spacing = capped_probe_layout(30.5, 1.0, 32)
+        self.assertEqual((boundary_intervals, boundary_spacing), (22, 3.0))
 
     def test_adaptive_pop_last_flag_wins(self):
         conf = os.path.join(os.path.dirname(__file__), "bench.conf")
@@ -876,7 +1357,7 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
-        self.assertIn('"  \\"schema\\": 16,\\n"', harness)
+        self.assertIn('"  \\"schema\\": 17,\\n"', harness)
         self.assertIn('\\"depth_override_frames\\"', harness)
         self.assertIn('\\"zero_plane\\"', harness)
         self.assertIn('"mapping_ps"', harness)
@@ -885,6 +1366,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('raw_reproject_source_u_normalized', harness)
         self.assertIn('live_sample_transform', harness)
         self.assertIn('\\"warp_mapping\\"', harness)
+        self.assertIn('fs::path(o.out) / "subject_state.json"', harness)
 
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
                   encoding="utf-8") as fh:
@@ -915,7 +1397,8 @@ class EvalContractTests(unittest.TestCase):
             evaluator = fh.read()
         self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
         self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
-        self.assertIn('"schema": 16', evaluator)
+        self.assertIn('"schema": 17', evaluator)
+        self.assertIn('"subject_state.json"', evaluator)
         self.assertIn('"warp_map_*.f32"', evaluator)
         self.assertIn('expected_mapping_bytes = width * height * 4', evaluator)
         self.assertIn('depth_override_root and not args.comparison_only', evaluator)
@@ -939,8 +1422,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('o.zero_plane != "background"', harness)
         conf = os.path.join(os.path.dirname(__file__), "bench.conf")
         self.assertEqual(run_eval.expected_profile_string(
-            conf, "apollo", "zero_plane", "legacy", ["--zero-plane", "median"],
-            "--zero-plane"), "median")
+            conf, "apollo", "zero_plane", "median", ["--zero-plane", "background"],
+            "--zero-plane"), "background")
 
     def test_live_depth_pairing_is_bounded_and_sync_is_evaluation_only(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1147,7 +1630,10 @@ class EvalContractTests(unittest.TestCase):
         display = os.path.join(repo, "src", "platform", "windows", "display_vram.cpp")
         with open(display, encoding="utf-8") as fh:
             pipeline = fh.read()
-        self.assertIn("tex_desc.Format = sbs_intermediate_linear ? DXGI_FORMAT_R16G16B16A16_FLOAT", pipeline)
+        self.assertIn(
+            "tex_desc.Format = sbs_intermediate_fp16 ? DXGI_FORMAT_R16G16B16A16_FLOAT",
+            pipeline,
+        )
         self.assertNotIn("sbs_sharpen", pipeline)
         self.assertIn("input_is_linear ? convert_Y_or_YUV_fp16_ps.get()", pipeline)
         self.assertIn("models::input_color_space::linear_sdr", pipeline)
@@ -1169,7 +1655,8 @@ class EvalContractTests(unittest.TestCase):
             display = fh.read()
         with open(shader_path, encoding="utf-8") as fh:
             shader = fh.read()
-        self.assertIn("input_is_linear && !display->is_hdr()", display)
+        self.assertIn("bool rgb_present_target_is_linear = false;", display)
+        self.assertIn("input_is_linear && !rgb_present_target_is_linear", display)
         self.assertIn("rgb_present_linear_to_srgb_ps.get()", display)
         self.assertNotIn("frame_is_hdr = d3d_image.format", display)
         self.assertIn("ApplySRGBCurve(saturate(source.rgb))", shader)
@@ -1331,7 +1818,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(set(primary_style),
                          configured_primary | {"exact_visible_pop_spread_pct"})
         self.assertEqual(set(hard), configured_hard)
-        self.assertEqual(len(hard), 11)
+        self.assertEqual(len(hard), 17)
         self.assertEqual(set(supporting),
                          configured_diagnostic - {"exact_visible_pop_spread_pct"})
         self.assertIn("exact_local_polarity_component_pct", supporting)
@@ -1361,9 +1848,17 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn("bool allow_client_commands", public)
         self.assertIn("struct process_status_t", header)
         self.assertIn("process_status_t get_status()", header)
-        self.assertIn("std::lock_guard lock(process_state_mutex);\n    const int active_app_id = running_locked();",
-                      implementation)
-        self.assertIn("set_display_name_locked(platf::to_utf8(vdisplayName));", implementation)
+        status_start = implementation.index("process_status_t proc_t::get_status()")
+        status_end = implementation.index("#ifdef _WIN32", status_start)
+        status_implementation = implementation[status_start:status_end]
+        self.assertIn("std::lock_guard lock(process_state_mutex);", status_implementation)
+        self.assertIn("return {\n      _app_id,\n      _app_name,", status_implementation)
+        self.assertIn("_virtual_display,", status_implementation)
+        self.assertNotIn("running_locked()", status_implementation)
+        self.assertIn(
+            "set_display_name_locked(platf::to_utf8(_virtual_display_gdi_name));",
+            implementation,
+        )
         self.assertNotIn("proc::proc.virtual_display", nvhttp)
         self.assertNotIn("proc::proc.allow_client_commands", nvhttp)
         self.assertIn("proc::proc.get_status()", nvhttp)
@@ -1377,10 +1872,14 @@ class EvalContractTests(unittest.TestCase):
             ownership = fh.read()
         launch_tail = process[process.index("start_hdr_worker(launch_session->enable_hdr);"):
                               process.index("fg.disable();")]
-        self.assertIn("remote_virtual_display_awaiting_client(config::stream.ping_timeout)",
-                      launch_tail)
+        self.assertIn(
+            "remote_virtual_display_awaiting_client(\n"
+            "        *_remote_virtual_display_lease,\n"
+            "        config::stream.ping_timeout",
+            launch_tail,
+        )
         self.assertIn("std::chrono::steady_clock::now() + "
-                      "remote_pending_duration(connect_timeout)", ownership)
+                      "detail::remote_pending_duration(connect_timeout)", ownership)
 
     def test_live_gpu_timer_tail_is_bounded_and_generation_safe(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -2332,13 +2831,272 @@ class EvalContractTests(unittest.TestCase):
         pairs = prepare_public_datasets.associate_timestamps(rgb, depth, 0.03)
         self.assertEqual([(p[1], p[3]) for p in pairs], [("r0", "d0"), ("r1", "d1")])
 
+    def test_public_dataset_manifest_paths_are_single_safe_components(self):
+        self.assertEqual(
+            prepare_public_datasets.safe_path_component("clip-name", "clip ID"),
+            "clip-name")
+        for unsafe in ("", ".", "..", "../clip", "nested/clip", r"..\clip",
+                       r"nested\clip", "/absolute", r"C:\absolute", "C:relative"):
+            with self.subTest(unsafe=unsafe), self.assertRaisesRegex(
+                    ValueError, "basename|path separators"):
+                prepare_public_datasets.safe_path_component(unsafe, "clip ID")
+
+    def test_public_dataset_prepared_child_rejects_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = os.path.join(temporary, "prepared")
+            outside = os.path.join(temporary, "outside")
+            os.makedirs(root)
+            os.makedirs(outside)
+            link = os.path.join(root, "clip")
+            try:
+                os.symlink(outside, link, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlinks are unavailable")
+            with self.assertRaisesRegex(ValueError, "escapes dataset cache root"):
+                prepare_public_datasets.confined_child(root, "clip", "clip ID")
+
+    def test_public_dataset_manifest_rejects_escaping_clip_id(self):
+        manifest = {
+            "schema": 2,
+            "prepared_suite": "extended-v3",
+            "datasets": {"demo": {"archives": {}}},
+            "clips": {"..": {
+                "dataset": "demo", "archives": [], "content_type": "simulation",
+            }},
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as stream:
+            path = stream.name
+            json.dump(manifest, stream)
+        try:
+            with self.assertRaisesRegex(ValueError, "clip ID must be a non-empty basename"):
+                prepare_public_datasets.load_manifest(path)
+        finally:
+            os.unlink(path)
+
+    def test_public_dataset_metadata_refresh_is_authenticated_and_atomic(self):
+        with tempfile.TemporaryDirectory() as root:
+            prepared = os.path.join(root, "prepared")
+            clip_dir = os.path.join(prepared, "clip")
+            depth_dir = os.path.join(clip_dir, "gt_depth")
+            os.makedirs(depth_dir)
+            for frame_id in range(2):
+                pixels = np.full((4, 6, 3), frame_id, np.uint8)
+                Image.fromarray(pixels, "RGB").save(
+                    os.path.join(clip_dir, f"frame_{frame_id:05d}.png"))
+                Image.fromarray(pixels[..., 0], "L").save(
+                    os.path.join(depth_dir, f"frame_{frame_id:05d}.png"))
+            with open(os.path.join(clip_dir, "meta.json"), "w", encoding="utf-8") as stream:
+                json.dump({
+                    "name": "demo", "dataset": "Demo Dataset", "suite": "extended-v3",
+                    "selection": [
+                        {
+                            "source_index": 4,
+                            "rgb_timestamp": 1.0,
+                            "depth_timestamp": 1.1,
+                        },
+                        {
+                            "source_index": 5,
+                            "rgb_timestamp": 2.0,
+                            "depth_timestamp": 2.1,
+                        },
+                    ],
+                    "legacy_annotation": "preserve me",
+                }, stream)
+            clip = {
+                "dataset": "demo", "adapter": "tum_rgbd_zip", "archives": ["frames"],
+                "name": "demo", "description": "fixture", "content_type": "real-capture",
+                "start": 4, "stride": 1, "count": 2,
+            }
+            manifest = {
+                "prepared_suite": "extended-v3",
+                "datasets": {"demo": {
+                    "title": "Demo Dataset", "homepage": "https://example.invalid",
+                    "citation": "Fixture", "license_note": "Fixture only",
+                    "archives": {"frames": {"filename": "unused.zip"}},
+                }},
+            }
+
+            prepare_public_datasets.refresh_prepared_clip_metadata(
+                manifest, "clip", clip, prepared)
+
+            with open(os.path.join(clip_dir, "meta.json"), encoding="utf-8") as stream:
+                refreshed = json.load(stream)
+            self.assertEqual(refreshed["content_type"], "real-capture")
+            self.assertEqual(refreshed["evaluation_role"], "ground-truth")
+            self.assertEqual(refreshed["gt_depth_kind"], "metric")
+            self.assertEqual(refreshed["legacy_annotation"], "preserve me")
+            self.assertFalse(glob.glob(os.path.join(clip_dir, "meta.*.json.tmp")))
+
+    def test_public_dataset_metadata_refresh_rejects_noncontiguous_frame_identities(self):
+        with tempfile.TemporaryDirectory() as clip_dir:
+            for frame_id in (0, 2):
+                Image.new("RGB", (2, 2)).save(
+                    os.path.join(clip_dir, f"frame_{frame_id:05d}.png"))
+            with self.assertRaisesRegex(
+                    RuntimeError, r"source frame identities.*missing=\[1\].*unexpected=\[2\]"):
+                prepare_public_datasets.require_prepared_frame_ids(
+                    "clip", clip_dir, range(2), "source frame", ".png")
+
+    def test_public_dataset_metadata_refresh_rejects_stale_source_window(self):
+        clip = {
+            "adapter": "tum_rgbd_zip", "start": 4, "stride": 1, "count": 2,
+        }
+        selection = [
+            {"source_index": 4, "rgb_timestamp": 1.0, "depth_timestamp": 1.1},
+            {"source_index": 5, "rgb_timestamp": 2.0, "depth_timestamp": 2.1},
+        ]
+        self.assertIs(
+            prepare_public_datasets.validate_prepared_selection(
+                "clip", clip, selection),
+            selection,
+        )
+        for field, changed in (("start", 5), ("stride", 2)):
+            changed_clip = {**clip, field: changed}
+            with self.subTest(field=field), self.assertRaisesRegex(
+                    RuntimeError, r"selection row \d+ source_index=.*expected"):
+                prepare_public_datasets.validate_prepared_selection(
+                    "clip", changed_clip, selection)
+
+    def test_public_dataset_selection_requires_exact_adapter_identity(self):
+        clip = {
+            "adapter": "sintel_stereo_zip", "start": 5, "stride": 1, "count": 2,
+            "sequence": "ambush_4", "pass": "final",
+        }
+        selection = [
+            {
+                "source_index": 5, "dataset_frame": 6,
+                "sequence": "ambush_4", "pass": "final",
+            },
+            {
+                "source_index": 6, "dataset_frame": 7,
+                "sequence": "ambush_4", "pass": "final",
+            },
+        ]
+        prepare_public_datasets.validate_prepared_selection("clip", clip, selection)
+
+        wrong_identity = [dict(row) for row in selection]
+        wrong_identity[0]["sequence"] = "market_2"
+        with self.assertRaisesRegex(RuntimeError, r"sequence='market_2'.*'ambush_4'"):
+            prepare_public_datasets.validate_prepared_selection(
+                "clip", clip, wrong_identity)
+
+        missing_identity = [dict(row) for row in selection]
+        missing_identity[0].pop("pass")
+        with self.assertRaisesRegex(RuntimeError, r"fields do not match.*missing=\['pass'\]"):
+            prepare_public_datasets.validate_prepared_selection(
+                "clip", clip, missing_identity)
+
+        extra_identity = [dict(row) for row in selection]
+        extra_identity[0]["camera"] = "Camera_0"
+        with self.assertRaisesRegex(RuntimeError, r"unexpected=\['camera'\]"):
+            prepare_public_datasets.validate_prepared_selection(
+                "clip", clip, extra_identity)
+
+        tartan_clip = {
+            "adapter": "tartanair_v2_zip", "start": 40, "stride": 1, "count": 1,
+            "trajectory": "P000", "camera": "lcam_front",
+        }
+        tartan_row = prepare_public_datasets.make_selection_entry(
+            tartan_clip, 40, dataset_frame=40)
+        self.assertEqual(
+            {key: tartan_row[key] for key in ("trajectory", "camera")},
+            {"trajectory": "P000", "camera": "lcam_front"},
+        )
+        stale_tartan = {**tartan_row, "trajectory": "P002"}
+        with self.assertRaisesRegex(RuntimeError, r"trajectory='P002'.*'P000'"):
+            prepare_public_datasets.validate_prepared_selection(
+                "clip", tartan_clip, [stale_tartan])
+
+    def test_public_dataset_evidence_rejects_wrong_extension(self):
+        with tempfile.TemporaryDirectory() as clip_dir:
+            Image.new("RGB", (2, 2)).save(
+                os.path.join(clip_dir, "frame_00000.jpg"))
+            with self.assertRaisesRegex(
+                    RuntimeError, r"wrong_extensions=\['frame_00000.jpg'\].*\.png"):
+                prepare_public_datasets.require_prepared_frame_ids(
+                    "clip", clip_dir, range(1), "source frame", ".png")
+
+    def test_tartanair_flow_evidence_rejects_npy_instead_of_npz(self):
+        with tempfile.TemporaryDirectory() as flow_dir:
+            np.save(
+                os.path.join(flow_dir, "frame_00001.npy"),
+                np.zeros((2, 2, 2), np.float32),
+            )
+            with self.assertRaisesRegex(
+                    RuntimeError, r"wrong_extensions=\['frame_00001.npy'\].*\.npz"):
+                prepare_public_datasets.require_prepared_frame_ids(
+                    "clip", flow_dir, range(1, 2), "flow evidence", ".npz")
+
+    def test_public_dataset_evidence_rejects_directory_masquerading_as_frame(self):
+        with tempfile.TemporaryDirectory() as clip_dir:
+            os.makedirs(os.path.join(clip_dir, "frame_00000.png"))
+            with self.assertRaisesRegex(
+                    RuntimeError, r"non_regular=\['frame_00000.png'\]"):
+                prepare_public_datasets.require_prepared_frame_ids(
+                    "clip", clip_dir, range(1), "source frame", ".png")
+
+    def test_tartanair_metadata_refresh_requires_every_flow_sidecar(self):
+        with tempfile.TemporaryDirectory() as root:
+            prepared = os.path.join(root, "prepared")
+            clip_dir = os.path.join(prepared, "clip")
+            depth_dir = os.path.join(clip_dir, "gt_depth")
+            flow_dir = os.path.join(clip_dir, "gt_flow")
+            os.makedirs(depth_dir)
+            os.makedirs(flow_dir)
+            for frame_id in range(3):
+                Image.new("RGB", (2, 2)).save(
+                    os.path.join(clip_dir, f"frame_{frame_id:05d}.png"))
+                np.save(
+                    os.path.join(depth_dir, f"frame_{frame_id:05d}.npy"),
+                    np.ones((2, 2), np.float32))
+            # A three-frame sequence requires flow sidecars 1 and 2. Leave 2 absent.
+            np.savez_compressed(
+                os.path.join(flow_dir, "frame_00001.npz"),
+                flow=np.zeros((2, 2, 2), np.float32),
+                valid=np.ones((2, 2), bool))
+            with open(os.path.join(clip_dir, "meta.json"), "w", encoding="utf-8") as stream:
+                json.dump({
+                    "name": "demo", "dataset": "Demo Dataset", "suite": "extended-v3",
+                    "selection": [
+                        {
+                            "source_index": i,
+                            "dataset_frame": i,
+                            "trajectory": "P000",
+                            "camera": "lcam_front",
+                        }
+                        for i in range(3)
+                    ],
+                }, stream)
+            clip = {
+                "dataset": "demo", "adapter": "tartanair_v2_zip",
+                "archives": ["frames"], "name": "demo", "description": "fixture",
+                "trajectory": "P000", "camera": "lcam_front",
+                "content_type": "simulation", "start": 0, "stride": 1, "count": 3,
+            }
+            manifest = {
+                "prepared_suite": "extended-v3",
+                "datasets": {"demo": {
+                    "title": "Demo Dataset", "homepage": "https://example.invalid",
+                    "citation": "Fixture", "license_note": "Fixture only",
+                    "archives": {"frames": {"filename": "unused.zip"}},
+                }},
+            }
+
+            with self.assertRaisesRegex(
+                    RuntimeError, r"flow evidence identities.*missing=\[2\]"):
+                prepare_public_datasets.refresh_prepared_clip_metadata(
+                    manifest, "clip", clip, prepared)
+
     def test_range_dataset_manifest_requires_pinned_prepared_evidence(self):
         manifest = {
             "schema": 2,
+            "prepared_suite": "extended-v3",
             "datasets": {"demo": {"archives": {
                 "frames": {"access": "http_range_zip", "url": "https://example.invalid"},
             }}},
-            "clips": {"clip": {"dataset": "demo", "archives": ["frames"]}},
+            "clips": {"clip": {
+                "dataset": "demo", "archives": ["frames"], "content_type": "animation",
+            }},
         }
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as stream:
             path = stream.name
@@ -2352,6 +3110,11 @@ class EvalContractTests(unittest.TestCase):
             self.assertEqual(
                 prepare_public_datasets.load_manifest(path)["clips"]["clip"]
                 ["prepared_evidence_sha256"], "a" * 64)
+            manifest["clips"]["clip"]["content_type"] = "capture"
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(manifest, stream)
+            with self.assertRaisesRegex(RuntimeError, "content_type must be one of"):
+                prepare_public_datasets.load_manifest(path)
         finally:
             os.unlink(path)
 
@@ -2399,7 +3162,8 @@ class EvalContractTests(unittest.TestCase):
                                 self.png_bytes(0, "L"))
             out = os.path.join(root, "out")
             os.makedirs(out)
-            clip = {"archives": ["stereo"], "sequence": "demo", "pass": "final",
+            clip = {"adapter": "sintel_stereo_zip", "archives": ["stereo"],
+                    "sequence": "demo", "pass": "final",
                     "start": 0, "stride": 1, "count": 2}
             rows = prepare_public_datasets.prepare_sintel(
                 "demo", clip, {}, {"stereo": archive}, out, "test")
@@ -2464,7 +3228,10 @@ class EvalContractTests(unittest.TestCase):
                 archives["test_" + side] = {"url": path, "size": os.path.getsize(path)}
             out = os.path.join(root, "out")
             os.makedirs(out)
-            clip = {"sequence": "0003", "start": 1, "stride": 1, "count": 2}
+            clip = {
+                "adapter": "spring_http_range_zip", "sequence": "0003",
+                "start": 1, "stride": 1, "count": 2,
+            }
 
             def memory_reader(url, expected_size):
                 with open(url, "rb") as archive_file:
@@ -2507,7 +3274,8 @@ class EvalContractTests(unittest.TestCase):
                         tf.addfile(info, io.BytesIO(data))
             out = os.path.join(root, "out")
             os.makedirs(out)
-            clip = {"scene": "Scene01", "variant": "clone", "camera": "Camera_0",
+            clip = {"adapter": "vkitti2_tar", "scene": "Scene01",
+                    "variant": "clone", "camera": "Camera_0",
                     "start": 1, "stride": 1, "count": 2}
             rows = prepare_public_datasets.prepare_vkitti2(
                 "demo", clip, {}, archives, out, "test")

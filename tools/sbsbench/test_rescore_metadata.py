@@ -14,6 +14,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 import rescore_run  # noqa: E402
 import run_eval  # noqa: E402
+import sbsbench  # noqa: E402
 
 
 class RescoreMetadataTests(unittest.TestCase):
@@ -43,7 +44,7 @@ class RescoreMetadataTests(unittest.TestCase):
         np.zeros((8, 24), np.float32).tofile(
             os.path.join(artifact_dir, "warp_map_00000.f32"))
         contract = {
-            "schema": 16,
+            "schema": 17,
             "model": "depth_anything_v2_fp16",
             "profile": "apollo",
             "depth_step": "current-once",
@@ -53,11 +54,27 @@ class RescoreMetadataTests(unittest.TestCase):
             "cuda_graph": True,
             "adaptive_pop": True,
             "adaptive_pop_max": 1.3,
-            "zero_plane": "legacy",
+            "zero_plane": "median",
+            "subject_state": {
+                "file": "subject_state.json", "schema": 1,
+                "capture": "every-source-frame-after-estimator-update",
+            },
         }
         with open(os.path.join(artifact_dir, "contract.json"), "w",
                   encoding="utf-8") as stream:
             json.dump(contract, stream)
+        with open(os.path.join(artifact_dir, "subject_state.json"), "w",
+                  encoding="utf-8") as stream:
+            json.dump({
+                "schema": 1,
+                "source": "depth_subject_resolve_cs.SubjectState",
+                "capture": "every-source-frame-after-estimator-update",
+                "fields": list(sbsbench.SUBJECT_STATE_FIELDS),
+                "frames": [{"frame_id": "00000", "values": [
+                    0.0, 0.0, 0.5, 1.0, 0.0, 1.0,
+                    0.0, 1.0, 0.0, 1.0, 3.0, 1.0,
+                ]}],
+            }, stream)
         artifact_hash = run_eval.scored_artifact_sha256(artifact_dir)
         data = {
             "meta": {

@@ -16,6 +16,12 @@ import validate_actual_sbs_metric_corruptions as validator  # noqa: E402
 
 
 class ActualSbsMetricCorruptionValidatorTests(unittest.TestCase):
+    def test_current_schema_identity_and_default_run(self):
+        self.assertEqual(validator.EXPECTED_EVAL_SCHEMA, 34)
+        self.assertEqual(validator.EXPECTED_HARNESS_SCHEMA, 17)
+        self.assertTrue(validator.DEFAULT_RUN.endswith(
+            os.path.join("sbs_eval", "metric-schema34-core-control")))
+
     @staticmethod
     def _textured_fixture(height=72, width=128):
         y, x = np.mgrid[:height, :width].astype(np.float32)
@@ -172,11 +178,14 @@ class ActualSbsMetricCorruptionValidatorTests(unittest.TestCase):
         self.assertEqual(report["eligible_training_labels"], [])
         self.assertFalse(report["auto_promotes_thresholds"])
         self.assertTrue(report["summary"]["overall_pass"])
+        self.assertEqual(
+            report["validator"], "actual-schema34-SBS-controlled-corruption-falsifier")
+        self.assertEqual(report["run"]["eval_schema"], 34)
 
     def test_wrong_eval_schema_fails_before_artifact_discovery(self):
         with tempfile.TemporaryDirectory() as root:
             with open(os.path.join(root, "results.json"), "w", encoding="utf-8") as stream:
-                json.dump({"meta": {"eval_schema": 31}}, stream)
+                json.dump({"meta": {"eval_schema": 32}}, stream)
             with self.assertRaisesRegex(ValueError, "eval schema"):
                 validator.build_report(root)
 

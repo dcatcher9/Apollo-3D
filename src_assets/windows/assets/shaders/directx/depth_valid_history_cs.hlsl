@@ -3,7 +3,9 @@
 // an all-NaN frame to advance color history independently.
 StructuredBuffer<float4> MinMaxEma : register(t0);  // w = current-frame validity
 StructuredBuffer<float> CurrentModelInput : register(t1);
+StructuredBuffer<float> CurrentAppearanceOrdinal : register(t2);
 RWStructuredBuffer<float> PreviousModelInput : register(u0);
+RWStructuredBuffer<float> PreviousAppearanceOrdinal : register(u1);
 
 #include "include/depth_constants.hlsl"
 
@@ -17,4 +19,5 @@ void main(uint3 dtid : SV_DispatchThreadID) {
     PreviousModelInput[idx] = CurrentModelInput[idx];
     PreviousModelInput[idx + plane] = CurrentModelInput[idx + plane];
     PreviousModelInput[idx + 2u * plane] = CurrentModelInput[idx + 2u * plane];
+    PreviousAppearanceOrdinal[idx] = CurrentAppearanceOrdinal[idx];
 }

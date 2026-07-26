@@ -30,12 +30,16 @@ namespace platf::sbs_debug {
     /**
      * @brief If a dump is pending, save the current frame's source, depth and SBS-result SRVs
      *        as PNG images (grayscale for R32_FLOAT depth) into a fresh timestamped subfolder.
-     *        Any SRV may be null (skipped). Cheap no-op otherwise. Call once per SBS convert().
+     *        Any image SRV may be null (skipped). When depth_frame_state is supplied, an
+     *        all-invalid completion defers the trigger so a dump can never mix a new source,
+     *        held depth, and the previously preserved SBS result. Cheap no-op otherwise.
+     *        Call once per SBS convert().
      */
     void maybe_dump(ID3D11Device *device, ID3D11DeviceContext *ctx,
       ID3D11ShaderResourceView *source,
       ID3D11ShaderResourceView *depth,
       ID3D11ShaderResourceView *sbs,
+      ID3D11ShaderResourceView *depth_frame_state,
       bool hdr,
       const std::string &depth_model);
 

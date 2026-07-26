@@ -92,28 +92,39 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
 
 - **One command runs the whole loop**: `python tools/sbsbench/run_eval.py` — harnesses every
   committed clip (`tools/sbsbench/clips/`) through the real pipeline with the pinned
-  `tools/sbsbench/bench.conf`, scores all metrics, and gates against the committed baselines
-  (`tools/sbsbench/baselines/` + `thresholds.json`). **Exit 0 = pass, 1 = regression (named, with
+  `tools/sbsbench/bench.conf`, scores all metrics, and gates baseline-bearing clips against the
+  committed baselines (`tools/sbsbench/baselines/` + `thresholds.json`). Deterministic core probes
+  explicitly marked `evaluation_role: conformance-only` are decided by authenticated hard
+  invariants and neither require nor write a numeric baseline. Every other role remains
+  fail-closed on a missing baseline. **Exit 0 = pass, 1 = regression (named, with
   worst frame), 2 = setup error.** Results + provenance (git sha, models, clip hashes) land in
   `<build-dir>/sbs_eval/<label>/results.json`. After an INTENDED metric change, re-baseline with
   `--update-baselines` and commit the baselines together with the change. Supported A/B levers
   pass through, for example `--extra --pop-strength 1.25` or `--extra --depth-short-side 392`.
-  Changing bench.conf or the clip set
-  invalidates baselines.
-- **Adding a clip to the eval set**: a clip is just a directory of same-size `frame_%05d.jpg`
-  frames under `tools/sbsbench/clips/<name>/` — `run_eval.py` auto-discovers it, no registration.
+  Changing `bench.conf` invalidates baselines; changing a baseline-bearing clip's source or
+  scoring semantics invalidates that clip's baseline. Adding a conformance-only probe does not.
+- **Adding a clip to the eval set**: a clip is just a directory of same-size numbered
+  `frame_%05d.jpg` or lossless `frame_%05d.png` files under
+  `tools/sbsbench/clips/<name>/` — `run_eval.py` auto-discovers it, no registration.
   From a video: `python tools/sbsbench/split_video.py video.mp4 -o tools/sbsbench/clips/<name>
   --width 854 --jpg --max 24` (854/24 matches the committed set's speed; full-res frames are also
   valid — the eval never resizes input, so a big clip is simply a slower, more sensitive eval).
   Synthetic/spliced clips: add a generator to `tools/sbsbench/make_synth_clips.py` (keeps the
-  clip deterministic and licensing-free). Add a `clips/<id>/meta.json` = `{"name": "<scene-name>",
-  "description": "..."}` — the report labels clips by that name and run_eval copies it into
-  results.json (the frame content, not meta.json, defines the clip's identity hash, so editing the
-  name never invalidates a baseline). Pick content that isolates ONE failure mode (see the
-  clip table in the README). Then run `run_eval.py --update-baselines` and **commit the frames,
-  the generator change (if any), and the new `baselines/<name>.json` together**; sanity-check the
-  new clip's baseline numbers and worst frames before committing (a mis-sized or mis-ordered clip
-  shows up as nonsense metrics, not an error).
+  clip deterministic and licensing-free). Add `clips/<id>/meta.json` with `name`, `description`,
+  an explicit `content_type`, and the applicable evidence role/flags (`evaluation_role`,
+  `required_gt_*`, `expected_flat`, or `shot_state_contract`) — the report labels clips by name
+  and `run_eval.py` copies the published fields into `results.json`. Clip identity hashes source
+  pixels, authenticated GT/reference sidecars, and scoring semantics (`content_type`,
+  `evaluation_role`, evidence requirements, dataset/depth kind, flat expectation, and shot-state
+  contract). Human-readable `name`, `description`, and provenance wording remain deliberately
+  excluded, so editing only those labels does not invalidate a baseline. Pick content that
+  isolates ONE failure mode (see the
+  clip table in the README). Then run `run_eval.py --update-baselines`. For a baseline-bearing
+  clip, **commit the frames, the generator change (if any), and the new
+  `baselines/<name>.json` together** and sanity-check its numbers/worst frames. For a
+  `conformance-only` probe, commit the frames, generator, source-authentication contract, and hard
+  invariant instead; `--update-baselines` intentionally writes no baseline for it. A mis-sized or
+  mis-ordered ordinary clip shows up as nonsense metrics, not an error.
 - **Visual** — the headless frame-fed harness `sunshine --sbs-bench` (implemented in
   [src/sbs_bench_harness.cpp](src/sbs_bench_harness.cpp)): runs the real depth estimator + real
   composite shaders over a fixed directory of frames (split a short video with
