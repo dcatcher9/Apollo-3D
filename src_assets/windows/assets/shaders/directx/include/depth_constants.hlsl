@@ -52,7 +52,7 @@ float DepthReferenceTexelScale() {
 // Scene-cut evidence contract. A broad RGB delta finds frame-wide appearance replacement, while
 // the ordinal producer compares all ten pairwise orderings in a center/left/right/up/down stencil
 // of capture-domain, point-sampled max(R,G,B). Sampling before the model's luminance-coupled HDR
-// tonemapper and before bilinear mixing is part of the contract: maxRGB then commutes with an
+// tonemapper and before spatial filtering is part of the contract: maxRGB then commutes with an
 // identical monotone curve on every channel. Clipping creates ties, which abstain because a
 // comparison must have this much contrast in BOTH frames. Requiring BOTH frame-wide RGB
 // replacement and ordinal structure rejects flashes/exposure and ordinary detailed motion

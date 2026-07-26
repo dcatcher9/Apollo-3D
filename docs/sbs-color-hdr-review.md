@@ -16,6 +16,16 @@ for HDR. The pipeline therefore carries three explicit depth-input modes:
 | 10-bit SDR | RGBA FP16, linear Rec.709 | sRGB OETF | RGBA FP16 | target Rec.709/Rec.2020 primaries and BT.709/BT.2020 OETF, then requested SDR YUV |
 | HDR | RGBA FP16, linear scRGB/Rec.709 | luminance tone map, then sRGB OETF | RGBA FP16 | Rec.709 to Rec.2020, 80 nits per scRGB unit, ST 2084 PQ, then YUV |
 
+Depth input minification integrates the capture-domain source-texel footprint before applying the
+single color transform listed above. This preserves the prior linear-HDR ordering while avoiding
+LOD-0 aliasing; applying the nonlinear HDR transform independently to every spatial tap would be a
+different color operation.
+
+An RTX 5080 ABBA run at the live `3840x2160 -> 770x434` ratio measured
+`depth_preprocess_gpu` p50 at `0.142 -> 0.162 ms` for SDR (+0.020 ms, 128 frames per
+run) and `0.266 -> 0.342 ms` for simulated FP16 scRGB (+0.076 ms, 32 frames per run).
+All eight benchmark runs completed without estimator busy drops.
+
 Apollo's warp does not apply a color transfer function or clamp FP16 HDR samples. Transfer and
 gamut conversion happen at the final encode boundary, after the warp.
 
@@ -64,9 +74,9 @@ gamut conversion happen at the final encode boundary, after the warp.
 
 - **Capture:** WGC requests FP16 when the client asks for 10-bit. Desktop Duplication prefers
   FP16 for Advanced Color and falls back to 8-bit formats for SDR.
-- **Depth:** preprocessing and guided filtering share `depth_color.hlsl`. Negative wide-gamut
-  scRGB components are mapped into the model gamut; source pixels used for rendering remain
-  untouched.
+- **Depth:** preprocessing integrates the exact capture texel cells covered by each model texel,
+  then preprocessing and guided filtering share `depth_color.hlsl`. Negative wide-gamut scRGB
+  components are mapped into the model gamut; source pixels used for rendering remain untouched.
 - **Warp:** source RGB is sampled and copied without a transfer/gamut conversion. Empty regions are
   black in the same linear or encoded domain. FP16 remains unclamped through Apollo.
 - **Post-warp:** no additional color operation; the rejected Bestv2 sharpen was removed.

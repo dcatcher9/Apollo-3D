@@ -9,16 +9,57 @@ import measure_scene_cut_evidence as evidence
 
 
 class SceneCutEvidenceTests(unittest.TestCase):
-    def test_d3d_resize_identity_preserves_rgb(self):
+    def test_d3d_model_resize_identity_preserves_rgb(self):
         source = np.arange(5 * 7 * 3, dtype=np.float32).reshape(5, 7, 3)
         source /= float(source.max())
-        resized = evidence.d3d_bilinear_resize_rgb(source, 7, 5)
+        resized = evidence.d3d_model_resize_rgb(source, 7, 5)
         np.testing.assert_allclose(resized, source, atol=1e-7)
         np.testing.assert_allclose(
             evidence.point_resize_max_rgb(source, 7, 5),
             np.max(source, axis=2),
             atol=0.0,
         )
+
+    def test_d3d_model_resize_exactly_averages_four_by_four_footprint(self):
+        source = np.arange(4 * 4, dtype=np.float32).reshape(4, 4)
+        source = source[..., None].repeat(3, axis=2)
+        resized = evidence.d3d_model_resize_rgb(source, 1, 1)
+        np.testing.assert_allclose(
+            resized[0, 0],
+            np.full(3, np.mean(source[..., 0]), dtype=np.float32),
+            atol=1e-6,
+        )
+
+    def test_d3d_model_resize_preserves_center_impulse_at_five_to_one(self):
+        source = np.zeros((5, 5, 3), dtype=np.float32)
+        source[2, 2, :] = 1.0
+        resized = evidence.d3d_model_resize_rgb(source, 1, 1)
+        np.testing.assert_allclose(
+            resized[0, 0],
+            np.full(3, 1.0 / 25.0, dtype=np.float32),
+            atol=1e-7,
+        )
+
+    def test_d3d_model_resize_uses_fractional_source_cell_overlap(self):
+        source = np.arange(3, dtype=np.float32).reshape(1, 3, 1)
+        source = source.repeat(3, axis=2)
+        resized = evidence.d3d_model_resize_rgb(source, 2, 1)
+        expected = np.array([1.0 / 3.0, 5.0 / 3.0], dtype=np.float32)
+        np.testing.assert_allclose(resized[0, :, 0], expected, atol=1e-6)
+        np.testing.assert_allclose(resized[0, :, 1], expected, atol=1e-6)
+        np.testing.assert_allclose(resized[0, :, 2], expected, atol=1e-6)
+
+    def test_live_noninteger_footprints_preserve_a_uniform_field(self):
+        source = np.ones((1, 3840, 3), dtype=np.float32)
+        resized = evidence.d3d_model_resize_rgb(source, 770, 1)
+        np.testing.assert_allclose(resized, 1.0, rtol=0.0, atol=2e-7)
+
+    def test_d3d_model_resize_retains_bilinear_upscale_fallback(self):
+        source = np.array([0.0, 1.0], dtype=np.float32).reshape(1, 2, 1)
+        source = source.repeat(3, axis=2)
+        resized = evidence.d3d_model_resize_rgb(source, 4, 1)
+        expected = np.array([0.0, 0.25, 0.75, 1.0], dtype=np.float32)
+        np.testing.assert_allclose(resized[0, :, 0], expected, atol=1e-7)
 
     def test_point_ordinal_uses_exact_target_center_source_texel(self):
         source = np.arange(4 * 6 * 3, dtype=np.float32).reshape(4, 6, 3)

@@ -49,7 +49,7 @@ TEST(HostSbsSceneCutTest, CaptureOrdinalSurvivesHdrExposureThatReversesTonemappe
   EXPECT_GT(post_tonemap_max_rgb(warm, 3.0f), post_tonemap_max_rgb(neutral, 3.0f));
 
   // Point-sampled capture maxRGB remains a positive scalar multiple, so its ordering cannot
-  // reverse. The production shader stores this signal before tone mapping and bilinear mixing.
+  // reverse. The production shader stores this signal before tone mapping and spatial filtering.
   EXPECT_LT(capture_max_rgb(warm, 1.0f), capture_max_rgb(neutral, 1.0f));
   EXPECT_LT(capture_max_rgb(warm, 3.0f), capture_max_rgb(neutral, 3.0f));
 }

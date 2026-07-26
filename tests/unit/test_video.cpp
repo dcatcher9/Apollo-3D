@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <src/nvenc/nvenc_base.h>
@@ -17,6 +19,10 @@
 #include <vector>
 
 #ifdef _WIN32
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <wrl/client.h>
+
 namespace platf::dxgi {
   int init();
 }
@@ -266,6 +272,303 @@ TEST(DirectxShaderTest, CompilesAllColorShaderVariants) {
   // D3DCompileFromFile does not require a D3D device. This covers BGRA8, FP16 SDR, PQ,
   // planar luma, both chroma sitings, and the HDR cursor shader in one focused check.
   EXPECT_EQ(platf::dxgi::init(), 0);
+}
+
+TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
+  using Microsoft::WRL::ComPtr;
+
+  ComPtr<ID3D11Device> device;
+  ComPtr<ID3D11DeviceContext> context;
+  D3D_FEATURE_LEVEL feature_level {};
+  constexpr D3D_FEATURE_LEVEL requested_levels[] = {
+    D3D_FEATURE_LEVEL_11_0
+  };
+  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(
+    nullptr,
+    D3D_DRIVER_TYPE_WARP,
+    nullptr,
+    0,
+    requested_levels,
+    static_cast<UINT>(std::size(requested_levels)),
+    D3D11_SDK_VERSION,
+    &device,
+    &feature_level,
+    &context
+  )));
+  ASSERT_GE(feature_level, D3D_FEATURE_LEVEL_11_0);
+
+  const std::filesystem::path shader_path =
+    SUNSHINE_SHADERS_DIR "/rgb_to_nchw_cs.hlsl";
+  ComPtr<ID3DBlob> shader_blob;
+  ComPtr<ID3DBlob> shader_errors;
+  const auto compile_status = D3DCompileFromFile(
+    shader_path.c_str(),
+    nullptr,
+    D3D_COMPILE_STANDARD_FILE_INCLUDE,
+    "main",
+    "cs_5_0",
+    D3DCOMPILE_OPTIMIZATION_LEVEL3,
+    0,
+    &shader_blob,
+    &shader_errors
+  );
+  ASSERT_TRUE(SUCCEEDED(compile_status))
+    << (shader_errors ?
+          static_cast<const char *>(shader_errors->GetBufferPointer()) :
+          "no compiler diagnostics");
+
+  ComPtr<ID3D11ComputeShader> shader;
+  ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
+    shader_blob->GetBufferPointer(),
+    shader_blob->GetBufferSize(),
+    nullptr,
+    &shader
+  )));
+
+  D3D11_SAMPLER_DESC sampler_desc {};
+  sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+  sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+  sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+  sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+  sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+  sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+  ComPtr<ID3D11SamplerState> sampler;
+  ASSERT_TRUE(SUCCEEDED(device->CreateSamplerState(&sampler_desc, &sampler)));
+
+  using rgba_pixel_t = std::array<float, 4>;
+  const auto run_case = [&](
+                          UINT source_width,
+                          UINT source_height,
+                          UINT target_width,
+                          UINT target_height,
+                          const std::vector<rgba_pixel_t> &source_pixels,
+                          std::vector<float> &model_output,
+                          std::vector<float> &appearance_ordinal
+                        ) {
+    if (source_pixels.size() !=
+        static_cast<std::size_t>(source_width) * source_height) {
+      return false;
+    }
+
+    D3D11_TEXTURE2D_DESC texture_desc {};
+    texture_desc.Width = source_width;
+    texture_desc.Height = source_height;
+    texture_desc.MipLevels = 1;
+    texture_desc.ArraySize = 1;
+    texture_desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    texture_desc.SampleDesc.Count = 1;
+    texture_desc.Usage = D3D11_USAGE_IMMUTABLE;
+    texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA texture_data {};
+    texture_data.pSysMem = source_pixels.data();
+    texture_data.SysMemPitch = source_width * sizeof(rgba_pixel_t);
+
+    ComPtr<ID3D11Texture2D> input_texture;
+    ComPtr<ID3D11ShaderResourceView> input_srv;
+    if (FAILED(device->CreateTexture2D(
+          &texture_desc,
+          &texture_data,
+          &input_texture
+        )) ||
+        FAILED(device->CreateShaderResourceView(
+          input_texture.Get(),
+          nullptr,
+          &input_srv
+        ))) {
+      return false;
+    }
+
+    const auto create_output = [&](
+                                 UINT float_count,
+                                 ComPtr<ID3D11Buffer> &buffer,
+                                 ComPtr<ID3D11UnorderedAccessView> &uav
+                               ) {
+      D3D11_BUFFER_DESC desc {};
+      desc.ByteWidth = float_count * sizeof(float);
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+      desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+      desc.StructureByteStride = sizeof(float);
+      return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer)) &&
+             SUCCEEDED(device->CreateUnorderedAccessView(
+               buffer.Get(),
+               nullptr,
+               &uav
+             ));
+    };
+
+    const UINT target_texels = target_width * target_height;
+    ComPtr<ID3D11Buffer> model_buffer;
+    ComPtr<ID3D11UnorderedAccessView> model_uav;
+    ComPtr<ID3D11Buffer> appearance_buffer;
+    ComPtr<ID3D11UnorderedAccessView> appearance_uav;
+    if (!create_output(target_texels * 3u, model_buffer, model_uav) ||
+        !create_output(target_texels, appearance_buffer, appearance_uav)) {
+      return false;
+    }
+
+    std::array<std::uint32_t, 16> constants {};
+    constants[0] = target_width;
+    constants[1] = target_height;
+    constants[2] = 0u;  // display-referred sRGB input
+    D3D11_BUFFER_DESC constant_desc {};
+    constant_desc.ByteWidth = sizeof(constants);
+    constant_desc.Usage = D3D11_USAGE_IMMUTABLE;
+    constant_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_SUBRESOURCE_DATA constant_data {};
+    constant_data.pSysMem = constants.data();
+    ComPtr<ID3D11Buffer> constant_buffer;
+    if (FAILED(device->CreateBuffer(
+          &constant_desc,
+          &constant_data,
+          &constant_buffer
+        ))) {
+      return false;
+    }
+
+    ID3D11ShaderResourceView *input_srvs[] = {input_srv.Get()};
+    ID3D11UnorderedAccessView *output_uavs[] = {
+      model_uav.Get(),
+      appearance_uav.Get()
+    };
+    ID3D11Buffer *constant_buffers[] = {constant_buffer.Get()};
+    ID3D11SamplerState *samplers[] = {sampler.Get()};
+    context->CSSetShader(shader.Get(), nullptr, 0);
+    context->CSSetShaderResources(0, 1, input_srvs);
+    context->CSSetUnorderedAccessViews(0, 2, output_uavs, nullptr);
+    context->CSSetConstantBuffers(0, 1, constant_buffers);
+    context->CSSetSamplers(0, 1, samplers);
+    context->Dispatch(
+      (target_width + 15u) / 16u,
+      (target_height + 15u) / 16u,
+      1u
+    );
+
+    ID3D11ShaderResourceView *null_srvs[] = {nullptr};
+    ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr};
+    context->CSSetShaderResources(0, 1, null_srvs);
+    context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
+
+    const auto read_buffer = [&](
+                               ID3D11Buffer *source,
+                               UINT float_count,
+                               std::vector<float> &values
+                             ) {
+      D3D11_BUFFER_DESC staging_desc {};
+      source->GetDesc(&staging_desc);
+      staging_desc.Usage = D3D11_USAGE_STAGING;
+      staging_desc.BindFlags = 0;
+      staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      staging_desc.MiscFlags = 0;
+      staging_desc.StructureByteStride = 0;
+
+      ComPtr<ID3D11Buffer> staging;
+      if (FAILED(device->CreateBuffer(&staging_desc, nullptr, &staging))) {
+        return false;
+      }
+      context->CopyResource(staging.Get(), source);
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(context->Map(
+            staging.Get(),
+            0,
+            D3D11_MAP_READ,
+            0,
+            &mapped
+          ))) {
+        return false;
+      }
+      const auto *begin = static_cast<const float *>(mapped.pData);
+      values.assign(begin, begin + float_count);
+      context->Unmap(staging.Get(), 0);
+      return true;
+    };
+
+    return read_buffer(
+             model_buffer.Get(),
+             target_texels * 3u,
+             model_output
+           ) &&
+           read_buffer(
+             appearance_buffer.Get(),
+             target_texels,
+             appearance_ordinal
+           );
+  };
+
+  constexpr std::array imagenet_mean {0.485f, 0.456f, 0.406f};
+  constexpr std::array imagenet_stddev {0.229f, 0.224f, 0.225f};
+  const auto reconstructed_channel = [&](
+                                       const std::vector<float> &model_output,
+                                       UINT target_texels,
+                                       UINT target_index,
+                                       UINT channel
+                                     ) {
+    return model_output[channel * target_texels + target_index] *
+             imagenet_stddev[channel] +
+           imagenet_mean[channel];
+  };
+
+  {
+    std::vector<rgba_pixel_t> source_pixels(
+      25,
+      rgba_pixel_t {0.0f, 0.0f, 0.0f, 1.0f}
+    );
+    source_pixels[12] = {1.0f, 1.0f, 1.0f, 1.0f};
+    std::vector<float> model_output;
+    std::vector<float> appearance_ordinal;
+    ASSERT_TRUE(run_case(
+      5,
+      5,
+      1,
+      1,
+      source_pixels,
+      model_output,
+      appearance_ordinal
+    ));
+    ASSERT_EQ(model_output.size(), 3u);
+    ASSERT_EQ(appearance_ordinal.size(), 1u);
+    for (UINT channel = 0; channel < 3u; ++channel) {
+      EXPECT_NEAR(
+        reconstructed_channel(model_output, 1, 0, channel),
+        1.0f / 25.0f,
+        2e-6f
+      );
+    }
+    EXPECT_FLOAT_EQ(appearance_ordinal[0], 1.0f);
+  }
+
+  {
+    std::vector<rgba_pixel_t> source_pixels {
+      rgba_pixel_t {0.0f, 0.0f, 0.0f, 1.0f},
+      rgba_pixel_t {0.3f, 0.3f, 0.3f, 1.0f},
+      rgba_pixel_t {0.6f, 0.6f, 0.6f, 1.0f}
+    };
+    std::vector<float> model_output;
+    std::vector<float> appearance_ordinal;
+    ASSERT_TRUE(run_case(
+      3,
+      1,
+      2,
+      1,
+      source_pixels,
+      model_output,
+      appearance_ordinal
+    ));
+    ASSERT_EQ(model_output.size(), 6u);
+    ASSERT_EQ(appearance_ordinal.size(), 2u);
+    constexpr std::array expected_model_values {0.1f, 0.5f};
+    for (UINT target_index = 0; target_index < 2u; ++target_index) {
+      for (UINT channel = 0; channel < 3u; ++channel) {
+        EXPECT_NEAR(
+          reconstructed_channel(model_output, 2, target_index, channel),
+          expected_model_values[target_index],
+          2e-6f
+        );
+      }
+    }
+    EXPECT_FLOAT_EQ(appearance_ordinal[0], 0.0f);
+    EXPECT_FLOAT_EQ(appearance_ordinal[1], 0.6f);
+  }
 }
 #endif
 
@@ -670,12 +973,32 @@ TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryAr
   );
   EXPECT_NE(histogram.find("CurrentAppearanceOrdinal"), std::string::npos);
   EXPECT_NE(histogram.find("PreviousAppearanceOrdinal"), std::string::npos);
+  const auto footprint_filter = preprocess.find("float4 SampleModelFootprint");
+  const auto footprint_sample =
+    preprocess.find("float4 pixel = SampleModelFootprint");
+  const auto footprint_load =
+    preprocess.find("InputTexture.Load(int3(source_x, source_y, 0))");
+  const auto ordinal_point_load =
+    preprocess.find(
+      "float3 capture_rgb = InputTexture.Load(int3(source_point, 0)).rgb"
+    );
   const auto ordinal_write = preprocess.find("OutputAppearanceOrdinal[base_idx]");
   const auto tone_map = preprocess.find("DepthColorToSrgb(pixel.rgb, color_mode)");
+  ASSERT_NE(footprint_filter, std::string::npos);
+  ASSERT_NE(footprint_sample, std::string::npos);
+  ASSERT_NE(footprint_load, std::string::npos);
+  ASSERT_NE(ordinal_point_load, std::string::npos);
   ASSERT_NE(ordinal_write, std::string::npos);
   ASSERT_NE(tone_map, std::string::npos);
+  EXPECT_LT(footprint_filter, footprint_sample);
+  EXPECT_LT(footprint_sample, ordinal_point_load);
+  EXPECT_LT(ordinal_point_load, ordinal_write);
   EXPECT_LT(ordinal_write, tone_map);
-  EXPECT_NE(preprocess.find("InputTexture.Load"), std::string::npos);
+  EXPECT_NE(preprocess.find("float2 source_scale"), std::string::npos);
+  EXPECT_NE(preprocess.find("float2 source_lo"), std::string::npos);
+  EXPECT_NE(preprocess.find("float2 source_hi"), std::string::npos);
+  EXPECT_NE(preprocess.find("x_coverage * y_coverage"), std::string::npos);
+  EXPECT_NE(preprocess.find("weighted_sum / footprint_area"), std::string::npos);
   EXPECT_NE(history.find("PreviousAppearanceOrdinal[idx]"), std::string::npos);
   EXPECT_NE(histogram.find("RAW_RGB_PIXEL_DELTA"), std::string::npos);
   EXPECT_NE(histogram.find("PlainHist[NUM_BINS + 3]"), std::string::npos);
@@ -702,8 +1025,11 @@ TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryAr
     std::string::npos
   );
   EXPECT_NE(resolve.find("geometry_armed && !exposure_like_transition"), std::string::npos);
+  const auto relative_geometry_latch =
+    resolve.find("cut_latched && !geometry_armed &&");
+  ASSERT_NE(relative_geometry_latch, std::string::npos);
   EXPECT_NE(
-    resolve.find("cut_latched && !geometry_armed &&\n            !exposure_like_transition"),
+    resolve.find("!exposure_like_transition", relative_geometry_latch),
     std::string::npos
   );
   EXPECT_NE(resolve.find("change_fraction >= DEPTH_CUT_CORROBORATE"), std::string::npos);

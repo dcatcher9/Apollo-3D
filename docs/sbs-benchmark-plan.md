@@ -55,8 +55,9 @@ Its code was removed after the real-pipeline evaluator became authoritative.
    re-hallucination), depth swim after cuts, mask jitter are all temporal. A one-frame replica
    cannot see them — and they are the dominant live complaints now.
 3. **Replica drift.** warpsim is a hand-maintained CPU-fp32 reimplementation of the shaders.
-   fp16 rounding, HW-bilinear-vs-torch-antialias, and D3D sampler semantics differ subtly, and
-   the warp amplifies tiny deltas (the measured 6.85% pre-smoothed-depth finding).
+   fp16 rounding, hardware area/bilinear sampling vs torch antialiasing, and D3D sampling
+   semantics differ subtly, and the warp amplifies tiny deltas (the measured 6.85%
+   pre-smoothed-depth finding).
 4. **Missing downstream stages.** NVENC HDR-8K compression, client decode, XR optics/resampling
    are never simulated; some "artifacts" are encode/scaling, not warp.
 5. **Config skew.** Hardcoded region constants + a knob subset vs. whatever was live.

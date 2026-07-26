@@ -116,7 +116,7 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
 
         // Broad replacement is measured on the exact display-referred model inputs that produced
         // the matched depths. Structural order comes from the separately preserved capture-domain
-        // point maxRGB signal: it precedes HDR Reinhard and avoids nonlinear-then-bilinear mixing.
+        // point maxRGB signal: it precedes HDR Reinhard and avoids nonlinear spatial mixing.
         // Under an identical monotone curve on every channel, pair order can only stay ordered or
         // collapse to a rejected tie. Codec noise, color matrices, and local tone mapping remain
         // outside that exposure model. Depth geometry is still the shot-reset authority.

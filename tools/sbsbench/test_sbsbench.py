@@ -1624,6 +1624,10 @@ class EvalContractTests(unittest.TestCase):
                 text = fh.read()
                 self.assertIn('include/depth_color.hlsl', text)
                 self.assertIn("DepthColorToSrgb", text)
+                footprint = text.find("float4 pixel = SampleModelFootprint")
+                transform = text.find("DepthColorToSrgb(pixel.rgb, color_mode)")
+                self.assertGreaterEqual(footprint, 0)
+                self.assertGreater(transform, footprint)
 
     def test_hdr_warp_stays_linear_fp16_until_pq_conversion(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

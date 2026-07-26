@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Measure Apollo's scene-cut evidence per frame without modifying benchmark artifacts.
 
-The appearance paths mirror production: source RGB is resized with D3D11's pixel-center bilinear
-geometry for the broad model-input delta, while the exposure ordinal is point sampled in the
-capture domain before tone mapping or bilinear mixing. The ordinal is compared with the
-cross-5/all-10-pairs census. The depth path compares the harness's normalized 16-bit depth dumps
-at the same 0.05 texel threshold used by production.
+The appearance paths mirror production: source RGB is resized with D3D11-style source-texel
+footprint integration for the broad model-input delta, while the exposure ordinal is point
+sampled in the capture domain before tone mapping or spatial filtering. The ordinal is compared
+with the cross-5/all-10-pairs census. The depth path compares the harness's normalized 16-bit
+depth dumps at the same 0.05 texel threshold used by production.
 
 Example:
   python tools/sbsbench/measure_scene_cut_evidence.py \
@@ -46,8 +46,9 @@ def numbered_files(root: Path, pattern: re.Pattern[str]) -> dict[int, Path]:
     return files
 
 
-def d3d_bilinear_resize_rgb(rgb: np.ndarray, width: int, height: int) -> np.ndarray:
-    """Resize RGB at the same normalized pixel centers used by rgb_to_nchw_cs.hlsl."""
+def _d3d_bilinear_resize_rgb(
+        rgb: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Pixel-center bilinear fallback used only if a target axis would upscale."""
     if rgb.ndim != 3 or rgb.shape[2] != 3:
         raise ValueError(f"expected HxWx3 RGB input, got {rgb.shape}")
     source_height, source_width, _ = rgb.shape
@@ -72,10 +73,64 @@ def d3d_bilinear_resize_rgb(rgb: np.ndarray, width: int, height: int) -> np.ndar
     return top * (1.0 - y_weight) + bottom * y_weight
 
 
+def _area_axis_contributions(
+        source_size: int, target_size: int) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Return float32 source-cell overlap weights matching SampleModelFootprint."""
+    scale = np.float32(source_size) / np.float32(target_size)
+    result: list[tuple[np.ndarray, np.ndarray]] = []
+    for target_index in range(target_size):
+        source_lo = np.float32(target_index) * scale
+        source_hi = np.float32(target_index + 1) * scale
+        first = max(int(np.floor(source_lo)), 0)
+        end = min(int(np.ceil(source_hi)), source_size)
+        indices = np.arange(first, end, dtype=np.int32)
+        coverage = np.maximum(
+            np.minimum(source_hi, indices.astype(np.float32) + np.float32(1.0)) -
+            np.maximum(source_lo, indices.astype(np.float32)),
+            np.float32(0.0),
+        )
+        # The shader derives each endpoint independently in float32, so rounding can make an
+        # individual interval differ slightly from the nominal global scale. Normalize by the
+        # same per-target interval used by SampleModelFootprint's footprint-area division.
+        interval = max(source_hi - source_lo, np.float32(1e-6))
+        result.append((indices, coverage / interval))
+    return result
+
+
+def d3d_model_resize_rgb(rgb: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Mirror rgb_to_nchw_cs's source-texel footprint integration mathematically."""
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError(f"expected HxWx3 RGB input, got {rgb.shape}")
+    source_height, source_width, _ = rgb.shape
+    if min(source_width, source_height, width, height) <= 0:
+        raise ValueError("source and target dimensions must be positive")
+    if source_width < width or source_height < height:
+        return _d3d_bilinear_resize_rgb(rgb, width, height)
+
+    horizontal_weights = _area_axis_contributions(source_width, width)
+    horizontal = np.empty((source_height, width, 3), dtype=np.float32)
+    for target_x, (indices, weights) in enumerate(horizontal_weights):
+        horizontal[:, target_x, :] = np.sum(
+            rgb[:, indices, :] * weights[None, :, None],
+            axis=1,
+            dtype=np.float32,
+        )
+
+    vertical_weights = _area_axis_contributions(source_height, height)
+    output = np.empty((height, width, 3), dtype=np.float32)
+    for target_y, (indices, weights) in enumerate(vertical_weights):
+        output[target_y, :, :] = np.sum(
+            horizontal[indices, :, :] * weights[:, None, None],
+            axis=0,
+            dtype=np.float32,
+        )
+    return output
+
+
 def model_rgb(path: Path, width: int, height: int) -> np.ndarray:
     with Image.open(path) as image:
         rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
-    return d3d_bilinear_resize_rgb(rgb, width, height)
+    return d3d_model_resize_rgb(rgb, width, height)
 
 
 def point_resize_max_rgb(rgb: np.ndarray, width: int, height: int) -> np.ndarray:

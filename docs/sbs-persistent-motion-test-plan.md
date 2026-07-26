@@ -16,7 +16,8 @@ texel votes after at least four usable pairs, two reversals, and a reversal majo
 `max(R,G,B)` commutes with an identical global monotone curve on every channel. Gain, offset,
 gamma, and clipping can therefore preserve an ordering or collapse it into an abstaining tie, but
 cannot reverse it. Apollo records this scalar from fixed point-sampled capture texels before the
-HDR tonemapper and before bilinear model resizing; both operations can otherwise reverse ranks.
+HDR tonemapper and before area-filtered model resizing; both operations can otherwise reverse
+ranks.
 The guarantee is scoped to matched capture samples under a global per-channel transform. Codec
 noise, color-matrix changes, and local tone mapping are not global exposure.
 
@@ -79,25 +80,27 @@ python tools/sbsbench/measure_scene_cut_evidence.py ^
   --artifacts-root cmake-build-relwithdebinfo/sbs_eval/<run> --summary
 ```
 
-The committed core clips measured at their exact dumped model grids:
+The committed core clips measured at their exact dumped model grids with the footprint-sampling
+treatment (`sampling-area-treatment-v1`, runtime shader SHA-256
+`598b56a241c243022b186ebee7d3ebbeb3396c2c885711d24dc47a3a56c098fb`):
 
 | Clip / pair class | max raw RGB | max ordinal | max depth |
 |---|---:|---:|---:|
-| `flat_transition` known cut | 0.960375 | 0.033413 | 0.624609 |
-| `scene_cut` known cut | 0.826043 | 0.129041 | 0.630738 |
-| `sustained_motion_scene_cut` setup cut | 0.827638 | 0.121931 | 0.656772 |
-| `sustained_motion_scene_cut` steady alternating roll | 0.731022 | 0.244880 | 0.288398 |
-| `sustained_motion_scene_cut` later true cut | 0.822365 | 0.123050 | 0.686376 |
-| `exposure_flash_strobe` largest SDR flash | 1.000000 | 0.000000 | 0.580522 |
-| `c525` exposure-heavy sequence | 0.795637 | 0.025154 | 0.016781 |
-| largest ordinary raw RGB (`c647`) | 0.127590 | 0.078500 | 0.072709 |
-| largest ordinary depth (`aigen_cogvideox_rain`) | 0.037934 | 0.050352 | 0.196809 |
+| `flat_transition` known cut | 0.958651 | 0.033413 | 0.632135 |
+| `scene_cut` known cut | 0.825872 | 0.129041 | 0.631064 |
+| `sustained_motion_scene_cut` setup cut | 0.827473 | 0.121931 | 0.657628 |
+| `sustained_motion_scene_cut` settled alternating roll | 0.730929 | 0.244880 | 0.289329 |
+| `sustained_motion_scene_cut` later true cut | 0.822383 | 0.123050 | 0.687480 |
+| `exposure_flash_strobe` largest SDR flash | 1.000000 | 0.000000 | 0.570274 |
+| `c525` exposure-heavy sequence | 0.795745 | 0.025154 | 0.016793 |
+| largest ordinary raw RGB (`c647`) | 0.127401 | 0.078500 | 0.072658 |
+| largest ordinary depth (`aigen_cogvideox_rain`) | 0.037917 | 0.050352 | 0.194175 |
 
 Across the ordinary core clips, `raw >= 0.70 && ordinal >= 0.03` selects the two annotated cut
 pairs. The sustained-motion conformance probe deliberately keeps that proposal high after its
 setup cut to prove latching and the relative escape. The broad RGB branch rejects ordinary
 detailed motion, while the ordinal branch rejects exposure replacement. The `0.25` depth
-corroboration floor remains above the measured ordinary-motion maximum of `0.196809`; the `0.60`
+corroboration floor remains above the measured ordinary-motion maximum of `0.194175`; the `0.60`
 absolute geometry floor remains below the known different-depth cuts. Recalibrate all three
 frame-level thresholds together if model preprocessing, the depth normalizer, or the descriptor
 changes.
