@@ -507,6 +507,10 @@ namespace stream {
 
       platf::feedback_queue_t feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
+      // mail_raw_t keeps only a weak reference to each post. Retain this queue for the full
+      // session lifetime so worker/encode-thread replies cannot disappear between raise() and
+      // the control thread's next drain.
+      safe::mail_raw_t::queue_t<live_video_mode_ack_t> live_video_mode_ack_queue;
       int last_depth_phase = -1;  // last depth-engine phase pushed to this client (see IDX_DEPTH_STATUS)
     } control;
 
@@ -552,9 +556,11 @@ namespace stream {
      * This is the only step any off-control thread performs. The control thread owns outgoing
      * control encryption and every ENet call, and it is also the thread that clears
      * session_t::control.peer and the server's session slot, so handing it a plain value keeps
-     * the peer and GCM state from ever being touched by a worker. If the session has already gone
-     * away, the value lands in a mailbox nobody drains and dies with the mail: the acknowledgement
-     * is dropped and the client's own timeout covers it.
+     * the peer and GCM state from ever being touched by a worker. session_t::control retains the
+     * queue's strong owner; mail_raw_t itself stores only a weak reference, so a producer-only
+     * temporary would otherwise destroy the acknowledgement before the control thread could drain
+     * it. If the session has already gone away, the queue dies with it and the client's own
+     * timeout covers the missing reply.
      */
     void queue_live_video_mode_ack(const safe::mail_t &mail, const live_video_mode_ack_t &ack) {
       mail->queue<live_video_mode_ack_t>(mail::live_video_mode_ack, LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT)->raise(ack);
@@ -1606,10 +1612,7 @@ namespace stream {
             // these must not coalesce, so they arrive on a real queue: a client that sends two
             // requests is owed two replies. The detached virtual-display worker and the encode
             // loop only enqueue outcomes, leaving the peer, the cipher and ENet to this thread.
-            auto ack_queue = session->mail->queue<live_video_mode_ack_t>(
-              mail::live_video_mode_ack,
-              LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT
-            );
+            auto &ack_queue = session->control.live_video_mode_ack_queue;
             while (server->_session->peer && ack_queue->peek()) {
               if (auto ack = ack_queue->pop(0ms)) {
                 send_live_video_mode_ack(session, *ack);
@@ -3032,6 +3035,10 @@ namespace stream {
       session->control.connect_data = launch_session.control_connect_data;
       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
       session->control.hdr_queue = mail->event<video::hdr_info_t>(mail::hdr);
+      session->control.live_video_mode_ack_queue = mail->queue<live_video_mode_ack_t>(
+        mail::live_video_mode_ack,
+        LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT
+      );
       session->control.cipher = crypto::cipher::gcm_t {
         launch_session.gcm_key,
         false
