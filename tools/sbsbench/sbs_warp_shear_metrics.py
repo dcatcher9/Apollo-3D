@@ -192,7 +192,7 @@ def _horizontal_runs(mask, shear, threshold, width):
 
 def _measure_eye(mapping, source_boundary_strength, source_u, content, *, source_width,
                  scale_x, threshold, source_edge_fraction, source_edge_dilation_ref_px,
-                 topology_min_step_ratio, min_support_count):
+                 topology_min_step_ratio, min_support_count, return_maps, compact):
     height, width = mapping.shape
     finite = np.isfinite(mapping)
     live_u = np.clip(mapping, 0.0, 1.0)
@@ -205,6 +205,7 @@ def _measure_eye(mapping, source_boundary_strength, source_u, content, *, source
     healthy_topology = np.ones(mapping.shape, dtype=bool)
     healthy_topology[:, :-1] &= healthy_step
     healthy_topology[:, 1:] &= healthy_step
+    del source_x, source_step, healthy_step
 
     source_boundary = _mapped_source_boundary(
         source_boundary_strength, mapping, scale_x, source_edge_fraction,
@@ -214,6 +215,12 @@ def _measure_eye(mapping, source_boundary_strength, source_u, content, *, source
     pair_support = np.zeros_like(pixel_support)
     pair_support[1:] = pixel_support[1:] & pixel_support[:-1]
     pair_support &= ~source_boundary
+    del finite, live_u, unclamped, pixel_support
+    if not return_maps:
+        # The scalar path has incorporated these masks into pair_support.  Releasing them here
+        # prevents each eye's diagnostic maps from surviving into the next eye and also lets
+        # NumPy reuse their storage for the shear reductions below.
+        del source_boundary, healthy_topology
 
     displacement = ((mapping - source_u[None, :]) * scale_x * width)
     row_shear = np.zeros_like(mapping, dtype=np.float32)
@@ -222,40 +229,44 @@ def _measure_eye(mapping, source_boundary_strength, source_u, content, *, source
     normalization = (height / float(width)) * (
         _REFERENCE_EYE_WIDTH / _REFERENCE_EYE_HEIGHT)
     row_shear[1:] = np.abs(displacement[1:] - displacement[:-1]) * normalization
+    del displacement
 
     bad = pair_support & (row_shear > threshold)
     support_count = int(np.count_nonzero(pair_support))
-    content_pairs = np.zeros_like(content)
-    content_pairs[1:] = content[1:] & content[:-1]
-    support_pct = float(support_count / max(np.count_nonzero(content_pairs), 1) * 100.0)
-    maps = {
-        "row_shear_ref_px_per_row": row_shear,
-        "support": pair_support,
-        "bad": bad,
-        "source_boundary": source_boundary,
-        "healthy_topology": healthy_topology,
-    }
-    metrics = {
-        "warp_cross_row_shear_support_pct": support_pct,
-        "warp_cross_row_shear_support_count": support_count,
-    }
+    maps = None
+    if return_maps:
+        maps = {
+            "row_shear_ref_px_per_row": row_shear,
+            "support": pair_support,
+            "bad": bad,
+            "source_boundary": source_boundary,
+            "healthy_topology": healthy_topology,
+        }
+    metrics = {"warp_cross_row_shear_support_count": support_count}
+    if not compact:
+        content_pairs = np.zeros_like(content)
+        content_pairs[1:] = content[1:] & content[:-1]
+        metrics["warp_cross_row_shear_support_pct"] = float(
+            support_count / max(np.count_nonzero(content_pairs), 1) * 100.0)
     if support_count < min_support_count:
-        metrics.update({
-            "warp_cross_row_shear_severity_pct": None,
-            "warp_cross_row_shear_bad_area_pct": None,
-            "warp_cross_row_shear_largest_run_pct": None,
-        })
+        metrics["warp_cross_row_shear_severity_pct"] = None
+        if not compact:
+            metrics.update({
+                "warp_cross_row_shear_bad_area_pct": None,
+                "warp_cross_row_shear_largest_run_pct": None,
+            })
         return metrics, maps
 
     burdens, largest = _horizontal_runs(bad, row_shear, threshold, width)
     strongest = sorted(burdens, reverse=True)[:4]
     severity = math.sqrt(float(np.mean(np.square(strongest)))) if strongest else 0.0
-    metrics.update({
-        "warp_cross_row_shear_severity_pct": severity,
-        "warp_cross_row_shear_bad_area_pct": float(
-            np.count_nonzero(bad) / support_count * 100.0),
-        "warp_cross_row_shear_largest_run_pct": float(largest / width * 100.0),
-    })
+    metrics["warp_cross_row_shear_severity_pct"] = severity
+    if not compact:
+        metrics.update({
+            "warp_cross_row_shear_bad_area_pct": float(
+                np.count_nonzero(bad) / support_count * 100.0),
+            "warp_cross_row_shear_largest_run_pct": float(largest / width * 100.0),
+        })
     return metrics, maps
 
 
@@ -263,7 +274,7 @@ def measure_cross_row_shear(source_u_map, mapping_shape, *, source=None,
                             unwarped_source=None, shear_threshold_ref_px=0.5,
                             source_edge_fraction=0.02, source_edge_dilation_ref_px=1.0,
                             topology_min_step_ratio=0.35, min_support_count=64,
-                            return_maps=False):
+                            return_maps=False, compact=False):
     """Measure unsupported row-wise horizontal shear from an exact inverse-warp map.
 
     ``source_u_map`` may be one HxW eye or the harness' packed Hx(2W) map.  Packed input returns
@@ -283,6 +294,8 @@ def measure_cross_row_shear(source_u_map, mapping_shape, *, source=None,
     * ``warp_cross_row_shear_support_pct`` and ``_count``: minimum support in either input eye.
 
     Severity fields are ``None`` when any supplied eye has insufficient evidence.
+    ``compact=True`` emits only severity and its support count for canonical evaluation; the
+    default retains every diagnostic scalar used by standalone validators.
     """
     if shear_threshold_ref_px <= 0.0:
         raise ValueError("shear_threshold_ref_px must be positive")
@@ -294,6 +307,8 @@ def measure_cross_row_shear(source_u_map, mapping_shape, *, source=None,
         raise ValueError("topology_min_step_ratio must be between zero and one")
     if min_support_count < 1:
         raise ValueError("min_support_count must be positive")
+    if compact and return_maps:
+        raise ValueError("compact cross-row shear scoring cannot return diagnostic maps")
 
     (mapping, height, eye_width, source_width, _, scale_x,
      scale_y) = _validate_geometry(source_u_map, mapping_shape)
@@ -305,7 +320,7 @@ def measure_cross_row_shear(source_u_map, mapping_shape, *, source=None,
 
     eye_count = mapping.shape[1] // eye_width
     per_eye = []
-    per_eye_maps = []
+    per_eye_maps = [] if return_maps else None
     for eye_index in range(eye_count):
         eye_map = mapping[:, eye_index * eye_width:(eye_index + 1) * eye_width]
         metrics, maps = _measure_eye(
@@ -314,21 +329,27 @@ def measure_cross_row_shear(source_u_map, mapping_shape, *, source=None,
             source_edge_fraction=source_edge_fraction,
             source_edge_dilation_ref_px=source_edge_dilation_ref_px,
             topology_min_step_ratio=topology_min_step_ratio,
-            min_support_count=min_support_count)
+            min_support_count=min_support_count,
+            return_maps=return_maps,
+            compact=compact)
         per_eye.append(metrics)
-        per_eye_maps.append(maps)
+        if return_maps:
+            per_eye_maps.append(maps)
 
     out = {
-        "warp_cross_row_shear_support_pct": min(
-            eye["warp_cross_row_shear_support_pct"] for eye in per_eye),
         "warp_cross_row_shear_support_count": min(
             eye["warp_cross_row_shear_support_count"] for eye in per_eye),
     }
+    if not compact:
+        out["warp_cross_row_shear_support_pct"] = min(
+            eye["warp_cross_row_shear_support_pct"] for eye in per_eye)
     scored_keys = (
-        "warp_cross_row_shear_severity_pct",
-        "warp_cross_row_shear_bad_area_pct",
-        "warp_cross_row_shear_largest_run_pct",
-    )
+        ("warp_cross_row_shear_severity_pct",)
+        if compact else (
+            "warp_cross_row_shear_severity_pct",
+            "warp_cross_row_shear_bad_area_pct",
+            "warp_cross_row_shear_largest_run_pct",
+        ))
     for key in scored_keys:
         values = [eye[key] for eye in per_eye]
         out[key] = None if any(value is None for value in values) else max(values)

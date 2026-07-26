@@ -590,6 +590,7 @@ def _local_vertical_offsets(eye, expected, valid, max_height=540,
         eye = resize_to(eye, width, height)
         expected = resize_to(expected, width, height)
         valid = resize_mask_conservative(valid, width, height)
+    fully_valid = bool(np.all(valid))
 
     tile = max(16, min(64, int(round(height * 0.10))))
     max_shift = max(2, min(12, int(np.ceil(height * 0.03))))
@@ -608,11 +609,15 @@ def _local_vertical_offsets(eye, expected, valid, max_height=540,
     candidate_offsets = range(-max_shift, max_shift + 1)
     for y in y_positions:
         for x in x_positions:
-            output_valid = valid[y:y + tile, x:x + tile]
-            if int(output_valid.sum()) < min_pixels:
-                continue
             output = eye[y:y + tile, x:x + tile]
-            output_values = output[output_valid]
+            if fully_valid:
+                output_valid = None
+                output_values = output.ravel()
+            else:
+                output_valid = valid[y:y + tile, x:x + tile]
+                if int(output_valid.sum()) < min_pixels:
+                    continue
+                output_values = output[output_valid]
             output_centered = output_values - float(output_values.mean())
             output_norm = float(np.linalg.norm(output_centered))
             output_std = output_norm / np.sqrt(max(output_centered.size, 1))
@@ -623,17 +628,34 @@ def _local_vertical_offsets(eye, expected, valid, max_height=540,
             texture = []
             for shift in candidate_offsets:
                 ry = y - shift
-                reference_valid = valid[ry:ry + tile, x:x + tile]
-                joint = output_valid & reference_valid
-                if int(joint.sum()) < min_pixels:
-                    scores.append(float("-inf"))
-                    texture.append(0.0)
-                    continue
-                a = output[joint]
-                b = expected[ry:ry + tile, x:x + tile][joint]
-                a = a - float(a.mean())
+                reference = expected[ry:ry + tile, x:x + tile]
+                if fully_valid:
+                    joint = None
+                    joint_pixels = output_values.size
+                    b = reference.ravel()
+                else:
+                    reference_valid = valid[ry:ry + tile, x:x + tile]
+                    joint = output_valid & reference_valid
+                    joint_pixels = int(joint.sum())
+                    if joint_pixels < min_pixels:
+                        scores.append(float("-inf"))
+                        texture.append(0.0)
+                        continue
+                    b = reference[joint]
                 b = b - float(b.mean())
-                na, nb = float(np.linalg.norm(a)), float(np.linalg.norm(b))
+                # ``joint`` is a subset of ``output_valid`` by construction, so equal
+                # cardinality proves the masks are identical.  The common all-valid case can
+                # therefore reuse the output terms computed above instead of re-indexing,
+                # re-centering, and re-normalizing the same tile for every candidate shift.
+                # Keep the original calculation for clipped/invalid reference patches.
+                if joint_pixels == output_values.size:
+                    a = output_centered
+                    na = output_norm
+                else:
+                    a = output[joint]
+                    a = a - float(a.mean())
+                    na = float(np.linalg.norm(a))
+                nb = float(np.linalg.norm(b))
                 reference_std = nb / np.sqrt(max(b.size, 1))
                 if min(na, nb) <= 1e-8 or reference_std < min_std:
                     scores.append(float("-inf"))
@@ -728,6 +750,16 @@ def weighted_pct(vals, wts, q):
     return float(np.interp(q, c, vals))
 
 
+def weighted_pcts(vals, wts, quantiles):
+    """Evaluate several weighted quantiles with one identical sort/cumulative-weight pass."""
+    order = np.argsort(vals)
+    vals = vals[order]
+    wts = wts[order]
+    c = np.cumsum(wts)
+    c /= c[-1]
+    return tuple(float(value) for value in np.interp(quantiles, c, vals))
+
+
 REFERENCE_STREAM_ASPECT = sbs_interocular_metrics.REFERENCE_STREAM_ASPECT
 
 
@@ -762,8 +794,18 @@ def _sample_rgb_uv(image, u, v):
     image = np.asarray(image, dtype=np.float32)
     if image.ndim != 3 or image.shape[2] != 3:
         raise ValueError(f"RGB sampler requires HxWx3, got {image.shape}")
-    return np.stack([_sample_scalar_uv(image[..., channel], u, v)
-                     for channel in range(3)], axis=-1)
+    # Coordinates and bilinear weights are identical for all three channels.  Compute them once
+    # instead of invoking the scalar sampler three times over the same UV grid.
+    h, w, _ = image.shape
+    x = np.clip(np.asarray(u, np.float32) * w - 0.5, 0.0, w - 1.0)
+    y = np.clip(np.asarray(v, np.float32) * h - 0.5, 0.0, h - 1.0)
+    x0, y0 = np.floor(x).astype(np.int32), np.floor(y).astype(np.int32)
+    x1, y1 = np.minimum(x0 + 1, w - 1), np.minimum(y0 + 1, h - 1)
+    wx, wy = x - x0, y - y0
+    return (((1.0 - wx) * (1.0 - wy))[..., None] * image[y0, x0]
+            + (wx * (1.0 - wy))[..., None] * image[y0, x1]
+            + ((1.0 - wx) * wy)[..., None] * image[y1, x0]
+            + (wx * wy)[..., None] * image[y1, x1]).astype(np.float32)
 
 
 def _srgb_to_linear(rgb):
@@ -918,7 +960,8 @@ def _exact_binocular_geometry(mapping, shape, coverage_map=None):
             if coverage_map is not None:
                 invertible &= coverage_map[output_row, offset:offset + eye_width]
             position, unique = sbs_interocular_metrics._invert_row(
-                output_x, source_u_row, invertible, target_u)
+                output_x, source_u_row, invertible, target_u,
+                values_are_output_positions=True)
             positions.append(position)
             jacobians.append(_inverse_position_jacobian(position, unique, nominal_step))
         common = (np.isfinite(positions[0]) & np.isfinite(positions[1])
@@ -1050,8 +1093,8 @@ def exact_warp_mapping_metrics(mapping, shape, depth=None, warp_mask=None, tail=
     if binocular_count:
         signed = binocular["disparity"][binocular_valid]
         area_weight = binocular["weight"][binocular_valid]
-        lo_tail = weighted_pct(signed, area_weight, 1.0 - tail)
-        hi_tail = weighted_pct(signed, area_weight, tail)
+        lo_tail, hi_tail = weighted_pcts(
+            signed, area_weight, (1.0 - tail, tail))
         one_pixel_pct = perceived_disparity_pct(1.0, eye_width, height)
         disparity_pct = signed * one_pixel_pct
         out.update({
@@ -1095,8 +1138,9 @@ def exact_warp_mapping_metrics(mapping, shape, depth=None, warp_mask=None, tail=
         # correct rendering, while one spanning a wide depth range is destroyed relief. Both are
         # needed -- the plateau fraction alone conflates the two, which is exactly the mistake the
         # cardboarding work made before splitting near from far.
-        depth_span = (weighted_pct(sampled, sample_weight, 0.99)
-                      - weighted_pct(sampled, sample_weight, 0.01))
+        depth_p01, d20, d80, depth_p99 = weighted_pcts(
+            sampled, sample_weight, (0.01, 0.20, 0.80, 0.99))
+        depth_span = depth_p99 - depth_p01
         for _name, _extreme in (("far", float(np.min(ordered))),
                                 ("near", float(np.max(ordered)))):
             _at = np.isclose(ordered, _extreme, atol=1e-3, rtol=0.0)
@@ -1105,13 +1149,10 @@ def exact_warp_mapping_metrics(mapping, shape, depth=None, warp_mask=None, tail=
                 np.sum(sample_weight[_at]) / max(_w, 1e-9) * 100.0)
             _span = 0.0
             if np.count_nonzero(_at) >= 64 and depth_span > 1e-6:
-                _span = float(
-                    (weighted_pct(sampled[_at], sample_weight[_at], 0.99)
-                     - weighted_pct(sampled[_at], sample_weight[_at], 0.01))
-                    / depth_span * 100.0)
+                _at_p01, _at_p99 = weighted_pcts(
+                    sampled[_at], sample_weight[_at], (0.01, 0.99))
+                _span = float((_at_p99 - _at_p01) / depth_span * 100.0)
             out[f"exact_disparity_plateau_{_name}_depth_span_pct"] = _span
-        d20 = weighted_pct(sampled, sample_weight, 0.20)
-        d80 = weighted_pct(sampled, sample_weight, 0.80)
         far, near = sampled <= d20, sampled >= d80
         if d80 - d20 >= 0.02 and far.any() and near.any():
             margin = (weighted_pct(ordered[near], sample_weight[near], 0.50)
@@ -1247,8 +1288,7 @@ def exact_visible_disparity_metrics(mapping, shape, src_gray, tail=0.995, warp_m
         return out
     signed = geometry["disparity"][supported]
     signed_weights = geometry["weight"][supported] * evidence_weight[supported]
-    lo = weighted_pct(signed, signed_weights, 1.0 - tail)
-    hi = weighted_pct(signed, signed_weights, tail)
+    lo, hi = weighted_pcts(signed, signed_weights, (1.0 - tail, tail))
     out.update({
         "exact_visible_pop_spread_pct": perceived_disparity_pct(
             hi - lo, eye_width, height),
@@ -1586,7 +1626,7 @@ def worst_local_bad_fraction(bad, support, radius=None, min_support_fraction=0.2
 
 def exact_source_relative_metrics(eye, src_gray, sampled_source_u, shape,
                                   coverage_error=4.0 / 255.0, eye_rgb=None, src_rgb=None,
-                                  hdr_scale=None, expected_evidence=None):
+                                  hdr_scale=None, expected_evidence=None, compact=False):
     """Source fidelity using the exact source coordinate consumed by the production shader.
 
     The former matcher selected whichever nearby source patch best explained each candidate
@@ -1614,16 +1654,22 @@ def exact_source_relative_metrics(eye, src_gray, sampled_source_u, shape,
     values = residual[valid] * 255.0
     coverage_bad = valid & (residual > coverage_error)
     out = {
-        "source_residual_p50": float(np.percentile(values, 50)),
-        "source_residual_p95": float(np.percentile(values, 95)),
         "source_coverage_pct": float(np.mean(values <= coverage_error * 255.0) * 100.0),
         "source_fidelity_support_pct": float(np.mean(valid) * 100.0),
     }
+    if not compact:
+        # Standalone corruption validators retain the residual distribution. Canonical scoring
+        # consumes only the coverage/integrity contract below, so sorting millions of residuals
+        # for these discarded diagnostics would be redundant there.
+        out.update({
+            "source_residual_p50": float(np.percentile(values, 50)),
+            "source_residual_p95": float(np.percentile(values, 95)),
+        })
     local_coverage = worst_local_bad_fraction(
         coverage_bad, valid, min_support_fraction=0.80)
     if local_coverage is not None:
         out["source_coverage_worst_patch_bad_pct"] = local_coverage
-    if expected_rgb is not None:
+    if expected_rgb is not None and not compact:
         rgb_delta = np.abs(eye_rgb - expected_rgb)
         color_error = np.max(rgb_delta, axis=-1)[valid] * 255.0
         out["source_color_residual_p95"] = float(np.percentile(color_error, 95))
@@ -1847,28 +1893,36 @@ def depth_ground_truth_metrics(prediction, ground_truth, kind="disparity", valid
 
 def depth_ground_truth_lag(prediction, ground_truth, previous_ground_truth,
                            kind="disparity", validity=None,
-                           previous_validity=None):
+                           previous_validity=None, current_edge_f1=None):
     """Positive boundary-F1 advantage for the previous GT frame over the current GT frame.
 
     Current depth should match current-frame geometry at least as well as the previous frame.
     Held depth on moving content instead matches the previous silhouette better. Clamp at zero
     so unrelated prediction noise cannot cancel real lag in other frames.
     """
-    current = depth_ground_truth_metrics(prediction, ground_truth, kind, validity)
+    current = (depth_ground_truth_metrics(prediction, ground_truth, kind, validity)
+               if current_edge_f1 is None else None)
     previous = depth_ground_truth_metrics(
         prediction, previous_ground_truth, kind, previous_validity)
-    if current is None or previous is None:
+    if previous is None or (current is None and current_edge_f1 is None):
         return None
-    return max(0.0, previous["depth_gt_edge_f1"] - current["depth_gt_edge_f1"])
+    current_f1 = (current["depth_gt_edge_f1"]
+                  if current_edge_f1 is None else float(current_edge_f1))
+    return max(0.0, previous["depth_gt_edge_f1"] - current_f1)
+
+
+def _static_region_mask_resized(now, before, ew, motion_threshold):
+    """Source-static mask from source frames already resized to eye geometry."""
+    moving = np.abs(now - before) >= motion_threshold
+    radius = max(4, round(40 * eye_scale(ew)))
+    return ~hdilate(moving, radius)
 
 
 def static_region_mask(src, prev_src, ew, eh, motion_threshold=3.0 / 255.0):
     """Source-static eye-resolution mask with disparity-radius exclusion around motion."""
     now = resize_to(src, ew, eh)
     before = resize_to(prev_src, ew, eh)
-    moving = np.abs(now - before) >= motion_threshold
-    radius = max(4, round(40 * eye_scale(ew)))
-    return ~hdilate(moving, radius)
+    return _static_region_mask_resized(now, before, ew, motion_threshold)
 
 
 def static_region_jitter(left, right, prev_left, prev_right, src, prev_src,
@@ -1883,11 +1937,13 @@ def static_region_jitter(left, right, prev_left, prev_right, src, prev_src,
     evidence remains (camera motion / scene cut).
     """
     eh, ew = left.shape
-    stable = static_region_mask(src, prev_src, ew, eh, motion_threshold)
+    now = resize_to(src, ew, eh)
+    before = resize_to(prev_src, ew, eh)
+    stable = _static_region_mask_resized(now, before, ew, motion_threshold)
     support = float(stable.mean())
     if support < min_support:
         return None, support
-    source_delta = resize_to(src, ew, eh) - resize_to(prev_src, ew, eh)
+    source_delta = now - before
     left_delta = np.abs((left - prev_left) - source_delta)[stable] * 255.0
     right_delta = np.abs((right - prev_right) - source_delta)[stable] * 255.0
     return max(float(np.percentile(left_delta, 95)),
@@ -2102,7 +2158,7 @@ def measure(dump_dir):
 def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_kind="disparity",
                       gt_depth_valid=None,
                       warp_mask=None, warp_mapping=None, warp_mapping_shape=None,
-                      src_rgb=None, hdr_scale=None):
+                      src_rgb=None, hdr_scale=None, compact=False):
     """Spatial metrics for one harness SBS frame and its authenticated sidecars."""
     sbs_rgb = load_rgb(path)
     sbs = rgb_luma(sbs_rgb)
@@ -2143,11 +2199,11 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
             lm = exact_source_relative_metrics(
                 left, src_gray, map_left, warp_mapping_shape,
                 eye_rgb=left_rgb if src_rgb is not None else None, src_rgb=src_rgb,
-                hdr_scale=hdr_scale, expected_evidence=expected_left)
+                hdr_scale=hdr_scale, expected_evidence=expected_left, compact=compact)
             rm = exact_source_relative_metrics(
                 right, src_gray, map_right, warp_mapping_shape,
                 eye_rgb=right_rgb if src_rgb is not None else None, src_rgb=src_rgb,
-                hdr_scale=hdr_scale, expected_evidence=expected_right)
+                hdr_scale=hdr_scale, expected_evidence=expected_right, compact=compact)
             vertical_px, vertical_pct, vertical_support = exact_vertical_misalignment(
                 left, right, src_gray, map_left, map_right, warp_mapping_shape,
                 src_rgb=src_rgb, hdr_scale=hdr_scale,
@@ -2187,7 +2243,8 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
                 binocular_geometry=binocular_geometry))
             shear = sbs_warp_shear_metrics.measure_cross_row_shear(
                 warp_mapping, warp_mapping_shape,
-                source=src_rgb if src_rgb is not None else src_gray)
+                source=src_rgb if src_rgb is not None else src_gray,
+                compact=compact)
             out.update({key: float(value) for key, value in shear.items()
                         if value is not None})
             if src_rgb is not None:
@@ -2323,7 +2380,11 @@ def _measure_sequence_spatial_job(job):
         warp_mask = None
         if job["warp_mask_path"]:
             with Image.open(job["warp_mask_path"]) as mask_image:
-                warp_mask = (np.asarray(mask_image.convert("RGB"), np.float32) / 255.0)
+                # Every canonical consumer uses the red channel only. Keep conversion semantics
+                # identical for palette/grayscale inputs without retaining a 3-channel NumPy
+                # array for the lifetime of this high-resolution frame job.
+                red_channel = mask_image.convert("RGB").getchannel("R")
+                warp_mask = np.asarray(red_channel, np.float32) / 255.0
         warp_mapping = (
             load_warp_mapping(job["warp_mapping_path"], job["mapping_shape"])
             if job["warp_mapping_path"] else None)
@@ -2331,7 +2392,7 @@ def _measure_sequence_spatial_job(job):
             job["sbs_path"], depth, src, gt_depth, job["gt_kind"],
             gt_depth_valid=gt_valid, warp_mask=warp_mask,
             warp_mapping=warp_mapping, warp_mapping_shape=job["mapping_shape"],
-            src_rgb=src_rgb, hdr_scale=job["hdr_scale"])
+            src_rgb=src_rgb, hdr_scale=job["hdr_scale"], compact=job["compact"])
         row["_frame_id"] = frame_id
         return row
     except Exception as exc:
@@ -2406,7 +2467,7 @@ def _measure_sequence_spatial_rows(jobs):
         return list(executor.map(_measure_sequence_spatial_job, jobs))
 
 
-def measure_sequence(seq_dir, frames_dir=None):
+def measure_sequence(seq_dir, frames_dir=None, compact=False):
     """Measure one authenticated harness clip under spatial and motion-aware contracts.
 
     Temporal image changes are never measured as raw frame differences: ordinary source motion
@@ -2552,6 +2613,7 @@ def measure_sequence(seq_dir, frames_dir=None):
         "mapping_shape": mapping_shape,
         "gt_kind": gt_kind,
         "hdr_scale": hdr_scale,
+        "compact": compact,
     } for frame_id in frame_ids]
     rows = _measure_sequence_spatial_rows(spatial_jobs)
     measured_ids = [row.get("_frame_id") for row in rows]
@@ -2637,7 +2699,8 @@ def measure_sequence(seq_dir, frames_dir=None):
                     transition_counts["gt_depth_transition_count"] += 1
                     depth_gt_lag = depth_ground_truth_lag(
                         depth, gt_depth, prev_gt_depth, gt_kind,
-                        validity=gt_valid, previous_validity=prev_gt_valid)
+                        validity=gt_valid, previous_validity=prev_gt_valid,
+                        current_edge_f1=row.get("depth_gt_edge_f1"))
                     if depth_gt_lag is not None:
                         row["depth_gt_lag_f1"] = depth_gt_lag
                         depth_gt_lags.append(depth_gt_lag)

@@ -701,6 +701,32 @@ class EvidenceSemanticsTests(unittest.TestCase):
         self.assertLess(metrics["source_color_residual_p95"], 1e-3)
         self.assertGreater(wrong_transfer["source_color_residual_p95"], 5.0)
 
+    def test_compact_exact_source_skips_only_discarded_residual_diagnostics(self):
+        shape = mapping_shape(96, 48)
+        rng = np.random.default_rng(41)
+        source_rgb = rng.random((48, 96, 3), dtype=np.float32)
+        eye_rgb = source_rgb.copy()
+        eye_rgb[12:28, 34:58] *= 0.75
+        sampled_u = identity_mapping(shape)[:, :shape["eye_width"]]
+        arguments = (
+            sbsbench.rgb_luma(eye_rgb), sbsbench.rgb_luma(source_rgb),
+            sampled_u, shape,
+        )
+        keywords = {"eye_rgb": eye_rgb, "src_rgb": source_rgb}
+
+        full = sbsbench.exact_source_relative_metrics(*arguments, **keywords)
+        compact = sbsbench.exact_source_relative_metrics(
+            *arguments, **keywords, compact=True)
+
+        discarded = {
+            "source_residual_p50", "source_residual_p95", "source_color_residual_p95",
+        }
+        self.assertTrue(discarded.issubset(full))
+        self.assertTrue(discarded.isdisjoint(compact))
+        self.assertEqual(
+            {key: value for key, value in full.items() if key not in discarded},
+            compact)
+
 
 class FrameLabelContractTests(unittest.TestCase):
     SPECS = {
@@ -942,6 +968,7 @@ class LabelProvenanceTests(unittest.TestCase):
                 "thresholds.json": "{}\n",
                 "run_eval.py": "runner-v1\n",
                 "rescore_run.py": "rescorer-v1\n",
+                "eval_parallel.py": "clip-association-v1\n",
             }
             for name, contents in paths.items():
                 with open(os.path.join(directory, name), "w", encoding="utf-8") as stream:
@@ -1227,6 +1254,44 @@ class ReportEvidenceContractTests(unittest.TestCase):
 
             control_payload = result("control", control_dir)
             treatment_payload = result("treatment", treatment_dir)
+            treatment_artifact_digests = run_eval.scored_artifact_digests(
+                os.path.join(treatment_dir, "demo"))
+            changed_artifact_digests = (
+                "0" * len(treatment_artifact_digests[0]),
+                treatment_artifact_digests[1],
+            )
+            with mock.patch.object(
+                    run_eval, "scored_artifact_digests",
+                    side_effect=[
+                        treatment_artifact_digests,
+                        changed_artifact_digests,
+                    ]):
+                with self.assertRaisesRegex(
+                        ValueError, "scored artifacts changed during"):
+                    run_eval.verify_results_against_artifacts(
+                        treatment_payload, treatment_dir, clips_root, thresholds)
+
+            seeded_session = run_eval.new_remeasurement_session()
+            seeded_measurement = sbsbench.measure_sequence(
+                os.path.join(treatment_dir, "demo"), clip_dir, compact=True)
+            run_eval._seed_authenticated_remeasurement(
+                seeded_session, "demo",
+                os.path.join(treatment_dir, "demo"), clip_dir,
+                seeded_measurement,
+                expected_source_sha1=clip_hash,
+                expected_artifact_sha256=(
+                    treatment_payload["meta"]["scored_artifact_sha256"]["demo"]))
+            run_eval._publish_report_remeasurement_session(seeded_session)
+            self.assertIs(
+                run_eval._take_report_remeasurement_session(), seeded_session)
+            self.assertIsNone(run_eval._take_report_remeasurement_session())
+            with mock.patch.object(
+                    run_eval.eval_parallel, "measure_clip_sequences",
+                    side_effect=AssertionError("seeded treatment must not be remeasured")):
+                run_eval.verify_results_against_artifacts(
+                    treatment_payload, treatment_dir, clips_root, thresholds,
+                    remeasurement_session=seeded_session)
+
             treatment_session = run_eval.new_remeasurement_session()
             run_eval.verify_results_against_artifacts(
                 treatment_payload, treatment_dir, clips_root, thresholds,

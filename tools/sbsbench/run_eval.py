@@ -13,10 +13,13 @@ a machine-readable results.json with provenance, and its EXIT CODE is the verdic
 
 Typical use:
   python tools/sbsbench/run_eval.py                     # eval vs committed baselines
+  python tools/sbsbench/run_eval.py --jobs 1            # serial CPU scoring reference
   python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change: re-baseline
   python tools/sbsbench/run_eval.py --extra --zero-plane background  # pass supported A/B levers
 
-Results land in <build-dir>/sbs_eval/<label>/ (SBS+depth frames per clip + results.json).
+GPU harnesses run serially so their performance evidence remains valid. CPU metric scoring runs
+concurrently across clips (up to eight jobs by default). Results land in
+<build-dir>/sbs_eval/<label>/ (SBS+depth frames per clip + results.json).
 Baselines/thresholds/conf are committed next to this script; changing bench.conf or the clip set
 invalidates the baselines -- regenerate them in the same commit.
 """
@@ -52,6 +55,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
+import eval_parallel  # noqa: E402  (evaluator scheduling; deliberately not metric math)
 
 EVAL_SCHEMA = 34  # adds authenticated per-frame shot-state evidence; harness contract 17
 BASELINE_SNAPSHOT_SCHEMA = 1
@@ -97,6 +101,34 @@ def suite_defaults(name):
 def fail(message):
     print("run_eval: " + message, file=sys.stderr)
     raise SystemExit(2)
+
+
+def scoring_jobs_arg(value):
+    """Argparse converter for bounded CPU clip-scoring concurrency."""
+    try:
+        jobs = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if not 1 <= jobs <= eval_parallel.CLIP_SCORING_MAX_WORKERS:
+        raise argparse.ArgumentTypeError(
+            f"must be from 1 to {eval_parallel.CLIP_SCORING_MAX_WORKERS}")
+    return jobs
+
+
+def configured_scoring_pixel_budget():
+    """Return the validated per-clip image budget used by CPU scoring."""
+    configured = os.environ.get(
+        sbsbench.SEQUENCE_SPATIAL_PIXEL_BUDGET_ENV,
+        str(sbsbench.SEQUENCE_SPATIAL_DEFAULT_PIXEL_BUDGET_MPX))
+    try:
+        budget = float(configured)
+    except ValueError as exc:
+        raise ValueError(
+            f"{sbsbench.SEQUENCE_SPATIAL_PIXEL_BUDGET_ENV} must be positive") from exc
+    if not np.isfinite(budget) or budget <= 0.0:
+        raise ValueError(
+            f"{sbsbench.SEQUENCE_SPATIAL_PIXEL_BUDGET_ENV} must be positive")
+    return budget
 
 
 def image_size_set(paths):
@@ -172,6 +204,7 @@ def scored_artifact_sha256(directory):
 
 _REMEASUREMENT_SESSION_TOKEN = object()
 _REMEASUREMENT_SESSION_ENTRIES = weakref.WeakKeyDictionary()
+_PENDING_REPORT_REMEASUREMENT_SESSION = None
 
 
 class _RemeasurementSession:
@@ -202,6 +235,72 @@ def _validated_remeasurement_entries(session):
         return _REMEASUREMENT_SESSION_ENTRIES[session]
     except KeyError as exc:
         raise TypeError("unregistered remeasurement session") from exc
+
+
+def _remeasurement_cache_key(clip, numeric_digest, source_sha256):
+    return (
+        clip, numeric_digest, source_sha256, metric_contract_sha(),
+        json.dumps(metric_runtime_provenance(), sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _seed_authenticated_remeasurement(
+        session, clip, artifact_dir, source_dir, measured, *,
+        expected_source_sha1=None, expected_source_sha256=None,
+        expected_artifact_sha256=None, expected_numeric_digest=None):
+    """Bind just-produced rows to current bytes inside an opaque report session."""
+    entries = _validated_remeasurement_entries(session)
+    if not isinstance(measured, tuple) or len(measured) != 2:
+        raise TypeError("seeded remeasurement must be a (rows, aggregate) tuple")
+    source_sha1, source_sha256 = source_evidence_digests(source_dir)
+    artifact_sha256, numeric_digest = scored_artifact_digests(artifact_dir)
+    if numeric_digest is None:
+        raise ValueError(f"cannot seed {clip!r}: no numeric metric inputs")
+    if expected_source_sha1 is not None:
+        _require_matching_result(
+            source_sha1, expected_source_sha1, f"seeded source evidence for {clip}")
+    if expected_source_sha256 is not None:
+        _require_matching_result(
+            source_sha256, expected_source_sha256,
+            f"seeded full source evidence for {clip}")
+    if expected_artifact_sha256 is not None:
+        _require_matching_result(
+            artifact_sha256, expected_artifact_sha256, f"seeded scored artifacts for {clip}")
+    if expected_numeric_digest is not None:
+        _require_matching_result(
+            numeric_digest, expected_numeric_digest,
+            f"seeded numeric artifacts for {clip}")
+    _seed_remeasurement_by_digest(
+        session, clip, numeric_digest, source_sha256, measured)
+
+
+def _seed_remeasurement_by_digest(
+        session, clip, numeric_digest, source_sha256, measured):
+    """Seed rows already covered by the caller's completed pre/post digest check."""
+    entries = _validated_remeasurement_entries(session)
+    if not isinstance(measured, tuple) or len(measured) != 2:
+        raise TypeError("seeded remeasurement must be a (rows, aggregate) tuple")
+    key = _remeasurement_cache_key(clip, numeric_digest, source_sha256)
+    if key in entries:
+        raise ValueError(f"duplicate seeded remeasurement for {clip!r}")
+    entries[key] = copy.deepcopy(measured)
+
+
+def _publish_report_remeasurement_session(session):
+    """Offer one process-local session to the next in-process report construction."""
+    global _PENDING_REPORT_REMEASUREMENT_SESSION
+    _validated_remeasurement_entries(session)
+    if _PENDING_REPORT_REMEASUREMENT_SESSION is not None:
+        raise RuntimeError("a report remeasurement session is already pending")
+    _PENDING_REPORT_REMEASUREMENT_SESSION = session
+
+
+def _take_report_remeasurement_session():
+    """Consume the one-shot in-process session, or return None for standalone reports."""
+    global _PENDING_REPORT_REMEASUREMENT_SESSION
+    session = _PENDING_REPORT_REMEASUREMENT_SESSION
+    _PENDING_REPORT_REMEASUREMENT_SESSION = None
+    return session
 
 
 def metric_contract_files():
@@ -242,6 +341,15 @@ def metric_runtime_provenance():
     }
 
 
+def label_contract_files():
+    """Return every local source file that can alter reusable-label association or semantics."""
+    return metric_contract_files() + [
+        os.path.join(SCRIPT_DIR, "run_eval.py"),
+        os.path.join(SCRIPT_DIR, "rescore_run.py"),
+        os.path.join(SCRIPT_DIR, "eval_parallel.py"),
+    ]
+
+
 def label_contract_sha():
     """Hash every local semantic component that can change reusable frame labels.
 
@@ -250,10 +358,7 @@ def label_contract_sha():
     runner must invalidate cached labels even when the underlying pixel metric did not change.
     Runtime shader/executable/model/config/source hashes are recorded separately in the context.
     """
-    return sha256_files(metric_contract_files() + [
-        os.path.join(SCRIPT_DIR, "run_eval.py"),
-        os.path.join(SCRIPT_DIR, "rescore_run.py"),
-    ])
+    return sha256_files(label_contract_files())
 
 
 def label_context_sha(meta):
@@ -1412,7 +1517,7 @@ def _authenticated_remeasurement_clip_meta(
 
 
 def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
-                                     remeasurement_session=None):
+                                     remeasurement_session=None, scoring_jobs=1):
     """Remeasure a completed run and reject any stale or forged JSON evidence.
 
     ``results.json`` is a cache and presentation index, never an authority. This verifier binds it
@@ -1484,6 +1589,9 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
             snapshot, baseline_required_clips, baseline_required_context(meta),
             recorded_clip_hashes)
 
+    worker_count = eval_parallel.clip_scoring_worker_count(scoring_jobs, len(clips))
+    verified_clips = {}
+    measurement_jobs = []
     for clip in clips:
         entry = clips[clip]
         if not isinstance(entry, dict):
@@ -1509,22 +1617,66 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
             entry_meta.get("scored_artifact_sha256"), actual_artifact_hash,
             f"clips.{clip}.meta.scored_artifact_sha256")
 
-        cache_key = (
-            clip, numeric_digest, source_sha256, metric_contract_sha(),
-            json.dumps(metric_runtime_provenance(), sort_keys=True, separators=(",", ":")),
-        )
+        cache_key = _remeasurement_cache_key(clip, numeric_digest, source_sha256)
         measured = (copy.deepcopy(reusable_entries[cache_key])
                     if reusable_entries is not None and cache_key in reusable_entries else None)
+        verified_clips[clip] = {
+            "entry": entry,
+            "entry_meta": entry_meta,
+            "artifact_dir": artifact_dir,
+            "source_dir": source_dir,
+            "cache_key": cache_key,
+            "source_digests": (actual_clip_hash, source_sha256),
+            "artifact_digests": (actual_artifact_hash, numeric_digest),
+            "measured": measured,
+        }
         if measured is None:
-            try:
-                measured = sbsbench.measure_sequence(artifact_dir, source_dir)
-            except (OSError, RuntimeError, ValueError) as exc:
-                raise ValueError(
-                    f"clips.{clip}: authoritative remeasurement failed: {exc}") from exc
+            measurement_jobs.append((clip, artifact_dir, source_dir))
+
+    measured_missing = []
+    if measurement_jobs:
+        try:
+            measured_missing = eval_parallel.measure_clip_sequences(
+                measurement_jobs, jobs=min(worker_count, len(measurement_jobs)))
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(f"authoritative remeasurement failed: {exc}") from exc
+        for clip, measured in measured_missing:
+            verified_clips[clip]["measured"] = measured
+
+    # Authentication and measurement are separate phases so CPU jobs can overlap. Rehash every
+    # input before accepting or caching rows: otherwise a source/artifact mutation during that
+    # phase gap could be scored under the digest authenticated before the worker pool started.
+    for clip in clips:
+        verified = verified_clips[clip]
+        try:
+            post_source = source_evidence_digests(verified["source_dir"])
+            post_artifact = scored_artifact_digests(verified["artifact_dir"])
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"clips.{clip}: cannot re-authenticate scored artifacts after "
+                f"remeasurement: {exc}") from exc
+        _require_matching_result(
+            post_source, verified["source_digests"],
+            f"clips.{clip}.source evidence changed during authoritative remeasurement")
+        _require_matching_result(
+            post_artifact, verified["artifact_digests"],
+            f"clips.{clip}.scored artifacts changed during authoritative remeasurement")
+
+    # Only stable, twice-authenticated measurements may become process-local cache authority.
+    for clip, measured in measured_missing:
+        if reusable_entries is not None:
+            cache_key = verified_clips[clip]["cache_key"]
+            if cache_key not in reusable_entries:
+                reusable_entries[cache_key] = copy.deepcopy(measured)
+
+    for clip in clips:
+        verified = verified_clips[clip]
+        entry = verified["entry"]
+        entry_meta = verified["entry_meta"]
+        artifact_dir = verified["artifact_dir"]
+        measured = verified["measured"]
         if not isinstance(measured, tuple) or len(measured) != 2:
             raise ValueError(f"clips.{clip}: authoritative remeasurement produced no sequence")
-        if reusable_entries is not None and cache_key not in reusable_entries:
-            reusable_entries[cache_key] = copy.deepcopy(measured)
         rows, aggregate = measured
         aggregate = sbsbench.filter_aggregate_by_evidence(
             rows, aggregate, thresholds["metrics"], entry_meta)
@@ -1899,6 +2051,10 @@ def main():
     ap.add_argument("--report-allow-executable-diff", action="store_true",
                     help="allow an explicit old-code versus new-code report (binary and HLSL)")
     ap.add_argument("--allow-build", action="store_true", help="proceed even if engines are missing")
+    ap.add_argument(
+        "--jobs", type=scoring_jobs_arg,
+        default=min(8, os.cpu_count() or 1, eval_parallel.CLIP_SCORING_MAX_WORKERS),
+        help="parallel CPU clip-scoring jobs (default: up to 8); GPU harnesses stay serial")
     args = normalize_cli_paths(ap.parse_args())
     label = args.label or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     try:
@@ -1956,6 +2112,14 @@ def main():
         fail("no clips in " + clips_dir)
     try:
         clips = [safe_path_component(clip, "clip name") for clip in clips]
+    except ValueError as exc:
+        fail(str(exc))
+    duplicates = sorted({clip for clip in clips if clips.count(clip) > 1})
+    if duplicates:
+        fail(f"duplicate clip name(s): {duplicates}")
+    scoring_jobs = eval_parallel.clip_scoring_worker_count(args.jobs, len(clips))
+    try:
+        scoring_pixel_budget_mpx = configured_scoring_pixel_budget()
     except ValueError as exc:
         fail(str(exc))
     try:
@@ -2018,7 +2182,13 @@ def main():
     label_sha = label_contract_sha()
     metric_runtime = metric_runtime_provenance()
     try:
-        clip_hashes = {clip: sha1_dir(os.path.join(clips_dir, clip)) for clip in clips}
+        source_evidence_hashes = {
+            clip: source_evidence_digests(os.path.join(clips_dir, clip))
+            for clip in clips
+        }
+        clip_hashes = {
+            clip: source_evidence_hashes[clip][0] for clip in clips
+        }
     except ValueError as exc:
         fail(str(exc))
     baseline_manifests = {}
@@ -2105,6 +2275,8 @@ def main():
         "runtime_shader_sha256": shader_sha,
         **model_artifacts,
         "gpu_contention": contention,
+        "scoring_jobs": scoring_jobs,
+        "scoring_pixel_budget_mpx": scoring_pixel_budget_mpx,
         "run_kind": ("baseline-update" if args.update_baselines else
                      "comparison-only" if args.comparison_only else "baseline-gated"),
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"), "run_name": label,
@@ -2113,8 +2285,9 @@ def main():
         meta["baseline_snapshot_sha256"] = sha256_json(baseline_snapshot)
     results, regressions, issues, hard_failures = {}, [], [], []
     scored_artifact_hashes = {}
+    scored_numeric_hashes = {}
     evidence_failures, baseline_updates = [], {}
-    sbsbench.enable_reusable_spatial_executor()
+    prepared_clips = {}
     for clip in clips:
         clip_dir = os.path.join(clips_dir, clip)
         try:
@@ -2316,19 +2489,64 @@ def main():
         # Carry the clip's own metadata (scene name/description) into results so the run dir is
         # self-describing and the report can label clips without the source clips dir.
         clip_meta.update(published_clip_metadata(source_clip_meta[clip]))
-        artifact_sha = scored_artifact_sha256(out_dir)
+        artifact_sha, numeric_sha = scored_artifact_digests(out_dir)
+        if numeric_sha is None:
+            fail(f"{clip}: no numeric metric inputs")
         scored_artifact_hashes[clip] = artifact_sha
+        scored_numeric_hashes[clip] = numeric_sha
         clip_meta["scored_artifact_sha256"] = artifact_sha
         # `suite` is evaluator provenance ("core" or "extended") and is used to select the
         # committed baseline namespace. Prepared-dataset manifests may also carry their own suite
         # revision (for example "extended-v3"); keep that useful label under a distinct key so it
         # cannot overwrite the run contract when baseline metadata is merged below.
+        prepared_clips[clip] = {
+            "clip_dir": clip_dir,
+            "out_dir": out_dir,
+            "clip_meta": clip_meta,
+        }
 
-        print(f"[{clip}] scoring...", flush=True)
+    print(
+        f"[scoring] {len(clips)} clips with {scoring_jobs} CPU job"
+        f"{'' if scoring_jobs == 1 else 's'}; GPU harnesses completed serially...",
+        flush=True)
+    measurement_jobs = [
+        (clip, prepared_clips[clip]["out_dir"], prepared_clips[clip]["clip_dir"])
+        for clip in clips
+    ]
+    try:
+        measured_clips = dict(eval_parallel.measure_clip_sequences(
+            measurement_jobs, jobs=scoring_jobs))
+    except (OSError, RuntimeError, ValueError) as exc:
+        fail(str(exc))
+
+    # The serial artifact-validation phase and parallel scoring phase are intentionally separate.
+    # Prove no early clip/source changed in that gap before its rows can affect gates or baselines.
+    for clip in clips:
         try:
-            rows, agg = sbsbench.measure_sequence(out_dir, clip_dir)
+            post_source_digests = source_evidence_digests(
+                prepared_clips[clip]["clip_dir"])
+            post_artifact_digests = scored_artifact_digests(
+                prepared_clips[clip]["out_dir"])
+        except (OSError, ValueError) as exc:
+            fail(f"{clip}: cannot re-authenticate inputs after scoring: {exc}")
+        try:
+            _require_matching_result(
+                post_source_digests, source_evidence_hashes[clip],
+                f"{clip}: source evidence changed during scoring")
+            _require_matching_result(
+                post_artifact_digests,
+                (scored_artifact_hashes[clip], scored_numeric_hashes[clip]),
+                f"{clip}: scored artifacts changed during scoring")
         except ValueError as exc:
-            fail(f"{clip}: {exc}")
+            fail(str(exc))
+
+    for clip in clips:
+        print(f"[{clip}] scoring complete", flush=True)
+        prepared = prepared_clips[clip]
+        clip_dir = prepared["clip_dir"]
+        out_dir = prepared["out_dir"]
+        clip_meta = prepared["clip_meta"]
+        rows, agg = measured_clips[clip]
         agg = sbsbench.filter_aggregate_by_evidence(
             rows, agg, thresholds["metrics"], clip_meta)
         perf_p = os.path.join(out_dir, "sbs_perf.json")
@@ -2420,22 +2638,52 @@ def main():
         if not os.path.exists(os.path.join(control_dir, "results.json")):
             fail(f"report control has no results.json: {control_dir}")
         report_path = os.path.abspath(args.report_out or os.path.join(out_root, "report.html"))
-        report_cmd = [sys.executable, os.path.join(SCRIPT_DIR, "generate_report.py"),
-                      control_dir, out_root, report_path]
+        report_argv = [os.path.join(SCRIPT_DIR, "generate_report.py"),
+                       control_dir, out_root, report_path,
+                       "--scoring-jobs", str(scoring_jobs)]
         if args.report_allow_config_diff:
-            report_cmd.append("--allow-config-diff")
+            report_argv.append("--allow-config-diff")
         if args.report_allow_model_diff:
-            report_cmd.append("--allow-model-diff")
+            report_argv.append("--allow-model-diff")
         if args.report_allow_depth_step_diff:
-            report_cmd.append("--allow-depth-step-diff")
+            report_argv.append("--allow-depth-step-diff")
         if args.report_allow_executable_diff:
-            report_cmd.append("--allow-executable-diff")
+            report_argv.append("--allow-executable-diff")
         # Scoring is complete. Do not retain the evaluator's 24 idle workers while the report
-        # child creates its own pixel-verification pool.
+        # verifier creates its own pixel pool. Seed only byte-bound scalar rows; the report still
+        # independently hashes treatment inputs before and after consuming this process-local
+        # cache and remeasures the control.
         sbsbench.disable_reusable_spatial_executor()
-        report_run = subprocess.run(report_cmd, capture_output=True, text=True)
-        if report_run.returncode:
-            fail("report generation failed: " + (report_run.stderr or report_run.stdout)[-2000:])
+        report_session = new_remeasurement_session()
+        try:
+            for clip in clips:
+                _seed_remeasurement_by_digest(
+                    report_session, clip, scored_numeric_hashes[clip],
+                    source_evidence_hashes[clip][1], measured_clips[clip])
+            _publish_report_remeasurement_session(report_session)
+        except (OSError, TypeError, ValueError) as exc:
+            fail(f"cannot seed authenticated report remeasurement: {exc}")
+
+        # build_report.py is intentionally top-level. Execute its guarded launcher in this
+        # process so the opaque treatment session remains in memory; Windows worker children only
+        # import run_eval definitions and therefore do not recursively construct the report.
+        current_module = sys.modules[__name__]
+        canonical_module = sys.modules.get("run_eval")
+        if canonical_module is not None and canonical_module is not current_module:
+            fail("cannot construct in-process report with a second run_eval module loaded")
+        sys.modules["run_eval"] = current_module
+        original_argv = sys.argv
+        try:
+            sys.argv = report_argv
+            import generate_report
+            generate_report.main()
+        except SystemExit as exc:
+            fail(f"report generation failed: {exc}")
+        except Exception as exc:
+            fail(f"report generation failed: {exc}")
+        finally:
+            sys.argv = original_argv
+            _take_report_remeasurement_session()
 
     print(f"\n=== {verdict.upper()} ===  ({res_path})")
     for r in regressions:

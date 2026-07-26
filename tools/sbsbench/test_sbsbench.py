@@ -37,6 +37,31 @@ class EvalContractTests(unittest.TestCase):
         Image.fromarray(array, mode=mode).save(stream, "PNG")
         return stream.getvalue()
 
+    def test_rgb_sampler_reuses_uv_math_without_numeric_drift(self):
+        rng = np.random.default_rng(23)
+        image = rng.random((19, 31, 3), dtype=np.float32)
+        u = rng.uniform(-0.2, 1.2, (13, 17)).astype(np.float32)
+        v = rng.uniform(-0.2, 1.2, (13, 17)).astype(np.float32)
+        expected = np.stack([
+            sbsbench._sample_scalar_uv(image[..., channel], u, v)
+            for channel in range(3)
+        ], axis=-1)
+
+        actual = sbsbench._sample_rgb_uv(image, u, v)
+        self.assertTrue(np.array_equal(actual, expected))
+
+    def test_multi_weighted_percentile_reuses_sort_without_numeric_drift(self):
+        rng = np.random.default_rng(29)
+        values = rng.integers(-20, 21, 4096).astype(np.float32)
+        weights = rng.random(values.size, dtype=np.float32) + np.float32(1e-4)
+        quantiles = (0.001, 0.01, 0.20, 0.50, 0.80, 0.99, 0.999)
+        expected = tuple(
+            sbsbench.weighted_pct(values, weights, quantile)
+            for quantile in quantiles)
+
+        actual = sbsbench.weighted_pcts(values, weights, quantiles)
+        self.assertEqual(actual, expected)
+
     def test_metric_hash_is_independent_of_text_line_endings(self):
         paths = []
         try:
@@ -440,6 +465,16 @@ class EvalContractTests(unittest.TestCase):
             "sbs_interocular_photometric_rivalry.py", "sbs_stereo_window_metrics.py",
             "sbs_warp_shear_metrics.py", "thresholds.json",
         })
+
+    def test_label_contract_covers_parallel_result_association(self):
+        names = {os.path.basename(path) for path in run_eval.label_contract_files()}
+        self.assertIn("eval_parallel.py", names)
+        self.assertNotIn(
+            "eval_parallel.py",
+            {os.path.basename(path) for path in run_eval.metric_contract_files()})
+        self.assertEqual(
+            run_eval.label_contract_sha(),
+            run_eval.sha256_files(run_eval.label_contract_files()))
 
     def test_named_profiles_and_explicit_overrides_share_production_precedence(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
@@ -2511,6 +2546,23 @@ class EvalContractTests(unittest.TestCase):
             current_source, previous_source)
         self.assertAlmostEqual(worse_eye, 4.0, places=4)
 
+    def test_static_jitter_resizes_each_source_frame_only_once(self):
+        rng = np.random.default_rng(42)
+        previous_source = rng.random((72, 120), dtype=np.float32)
+        current_source = previous_source + 1.0 / 255.0
+        previous_eye = sbsbench.resize_to(previous_source, 80, 48)
+        current_eye = sbsbench.resize_to(current_source, 80, 48)
+
+        with mock.patch.object(
+                sbsbench, "resize_to", wraps=sbsbench.resize_to) as resize:
+            measured = sbsbench.static_region_jitter(
+                current_eye, current_eye, previous_eye, previous_eye,
+                current_source, previous_source)
+
+        self.assertEqual(resize.call_count, 2)
+        self.assertEqual(measured[1], 1.0)
+        self.assertLess(measured[0], 1e-4)
+
     def test_perceived_disparity_is_client_aspect_invariant(self):
         ref = sbsbench.perceived_disparity_pct(51.2, 5120, 2160)
         # The aspect correction keeps pixel disparity constant when pixel height is unchanged;
@@ -2594,6 +2646,24 @@ class EvalContractTests(unittest.TestCase):
             sbsbench.depth_ground_truth_lag(previous, current, previous), 50.0)
         self.assertEqual(
             sbsbench.depth_ground_truth_lag(current, current, previous), 0.0)
+
+    def test_ground_truth_depth_lag_reuses_current_spatial_edge_score(self):
+        previous = np.zeros((32, 48), np.float32)
+        previous[8:24, 8:20] = 1.0
+        current = np.zeros_like(previous)
+        current[8:24, 18:30] = 1.0
+        current_metrics = sbsbench.depth_ground_truth_metrics(previous, current)
+        expected = sbsbench.depth_ground_truth_lag(previous, current, previous)
+
+        with mock.patch.object(
+                sbsbench, "depth_ground_truth_metrics",
+                wraps=sbsbench.depth_ground_truth_metrics) as measure_gt:
+            reused = sbsbench.depth_ground_truth_lag(
+                previous, current, previous,
+                current_edge_f1=current_metrics["depth_gt_edge_f1"])
+
+        self.assertEqual(measure_gt.call_count, 1)
+        self.assertEqual(reused, expected)
 
     def test_ground_truth_edge_tolerance_works_in_both_axes(self):
         gt = np.full((96, 160), 0.25, np.float32)

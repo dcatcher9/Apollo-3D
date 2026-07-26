@@ -69,7 +69,8 @@ def main():
     for clip_name in clip_names:
         clip_start = time.perf_counter()
         rows, _aggregate = sbsbench.measure_sequence(
-            str(args.run_dir / clip_name), str(args.clips_root / clip_name))
+            str(args.run_dir / clip_name), str(args.clips_root / clip_name),
+            compact=True)
         elapsed = time.perf_counter() - clip_start
         timings.append({"clip": clip_name, "frames": len(rows), "seconds": elapsed})
         print(f"{clip_name}: {len(rows)} frames in {elapsed:.3f}s", flush=True)

@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 from PIL import Image
@@ -119,6 +120,200 @@ class RescoreMetadataTests(unittest.TestCase):
                 os.path.join(source_dir, "frame_00001.png"))
             with self.assertRaisesRegex(SystemExit, "frame-id mismatch"):
                 rescore_run.authoritative_clip_meta(data, "demo", clips_root, run_dir)
+
+    def _two_clip_main_fixture(self, root):
+        clips_root = os.path.join(root, "clips")
+        run_dir = os.path.join(root, "run")
+        os.makedirs(clips_root)
+        os.makedirs(run_dir)
+        clip_names = ["zeta", "alpha"]
+        data = {
+            "meta": {
+                "run_kind": "comparison-only",
+                "eval_schema": run_eval.EVAL_SCHEMA,
+                "clips_root": clips_root,
+                "clip_set_sha1": {
+                    clip: f"source-sha1-{clip}" for clip in clip_names},
+                "scored_artifact_sha256": {
+                    clip: f"artifact-sha256-{clip}" for clip in clip_names},
+            },
+            "clips": {
+                clip: {"meta": {}, "perf_ms": {"forged": 999.0}}
+                for clip in clip_names
+            },
+        }
+        result_path = os.path.join(run_dir, "results.json")
+        with open(result_path, "w", encoding="utf-8") as stream:
+            json.dump(data, stream)
+        return clip_names, clips_root, run_dir, result_path
+
+    def test_main_parallelizes_in_input_order_and_replaces_output_atomically(self):
+        with tempfile.TemporaryDirectory() as root:
+            clip_names, clips_root, run_dir, result_path = (
+                self._two_clip_main_fixture(root))
+            source_calls = []
+            artifact_calls = []
+            measurement_calls = []
+
+            def source_digests(path):
+                clip = os.path.basename(path)
+                source_calls.append(clip)
+                return f"source-sha1-{clip}", f"source-sha256-{clip}"
+
+            def artifact_digests(path):
+                clip = os.path.basename(path)
+                artifact_calls.append(clip)
+                return f"artifact-sha256-{clip}", f"numeric-sha256-{clip}"
+
+            def clip_meta(_data, clip, _clips_root, _run_dir,
+                          source_sha1=None, artifact_sha256=None):
+                self.assertEqual(source_sha1, f"source-sha1-{clip}")
+                self.assertEqual(artifact_sha256, f"artifact-sha256-{clip}")
+                return {
+                    "scored_artifact_sha256": artifact_sha256,
+                    "source_frame_count": 1,
+                }
+
+            def measure(sequence_jobs, jobs):
+                measurement_calls.append((list(sequence_jobs), jobs))
+                return [
+                    (clip, ([{"_frame_id": index, "quality": index + 1.0}],
+                            {"quality": index + 1.0}))
+                    for index, (clip, _artifact_dir, _source_dir)
+                    in enumerate(sequence_jobs)
+                ]
+
+            output_path = os.path.join(run_dir, "results.rescored.json")
+            real_replace = os.replace
+            argv = [
+                "rescore_run.py", run_dir, "--clips-root", clips_root,
+                "--jobs", "2",
+            ]
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(
+                        rescore_run.run_eval, "source_evidence_digests",
+                        side_effect=source_digests), \
+                    mock.patch.object(
+                        rescore_run.run_eval, "scored_artifact_digests",
+                        side_effect=artifact_digests), \
+                    mock.patch.object(
+                        rescore_run.run_eval, "load_perf_metrics",
+                        return_value={"depth_infer": 1.25}), \
+                    mock.patch.object(
+                        rescore_run, "authoritative_clip_meta",
+                        side_effect=clip_meta), \
+                    mock.patch.object(
+                        rescore_run.eval_parallel, "measure_clip_sequences",
+                        side_effect=measure), \
+                    mock.patch.object(
+                        rescore_run.sbsbench, "filter_aggregate_by_evidence",
+                        side_effect=lambda _rows, aggregate, _specs, _meta: aggregate), \
+                    mock.patch.object(
+                        rescore_run.run_eval, "score_clip_gates",
+                        return_value=({}, [], [])), \
+                    mock.patch.object(
+                        rescore_run.run_eval, "primary_evidence_failures",
+                        return_value=[]), \
+                    mock.patch.object(
+                        rescore_run.run_eval, "perf_evidence_failures",
+                        return_value=[]), \
+                    mock.patch.object(
+                        rescore_run.run_eval, "build_frame_records",
+                        side_effect=lambda rows, _thresholds, _meta: rows), \
+                    mock.patch.object(
+                        rescore_run.run_eval, "summarize_frame_labels",
+                        return_value={}), \
+                    mock.patch.object(
+                        rescore_run.run_eval, "bind_training_labels_to_evidence_gate"), \
+                    mock.patch.object(
+                        rescore_run.os, "replace", wraps=real_replace) as replace:
+                rescore_run.main()
+
+            expected_jobs = [
+                (clip, os.path.join(run_dir, clip), os.path.join(clips_root, clip))
+                for clip in clip_names
+            ]
+            self.assertEqual(measurement_calls, [(expected_jobs, 2)])
+            self.assertEqual(source_calls, clip_names + clip_names)
+            self.assertEqual(artifact_calls, clip_names + clip_names)
+            replace.assert_called_once_with(output_path + ".tmp", output_path)
+            self.assertTrue(os.path.exists(output_path))
+            self.assertFalse(os.path.exists(output_path + ".tmp"))
+
+            with open(output_path, encoding="utf-8") as stream:
+                rescored = json.load(stream)
+            self.assertEqual(list(rescored["clips"]), clip_names)
+            self.assertEqual(rescored["meta"]["scoring_jobs"], 2)
+            self.assertEqual(
+                [rescored["clips"][clip]["aggregate"]["quality"]
+                 for clip in clip_names],
+                [1.0, 2.0])
+            self.assertTrue(all(
+                rescored["clips"][clip]["perf_ms"] == {"depth_infer": 1.25}
+                for clip in clip_names))
+            with open(result_path, encoding="utf-8") as stream:
+                original = json.load(stream)
+            self.assertTrue(all(
+                "aggregate" not in original["clips"][clip] for clip in clip_names))
+
+    def test_main_rejects_post_measure_source_mutation_without_output(self):
+        with tempfile.TemporaryDirectory() as root:
+            clip_names, clips_root, run_dir, result_path = (
+                self._two_clip_main_fixture(root))
+            source_counts = {clip: 0 for clip in clip_names}
+
+            def source_digests(path):
+                clip = os.path.basename(path)
+                source_counts[clip] += 1
+                suffix = "-changed" if clip == "alpha" and source_counts[clip] > 1 else ""
+                return (
+                    f"source-sha1-{clip}{suffix}",
+                    f"source-sha256-{clip}{suffix}",
+                )
+
+            def artifact_digests(path):
+                clip = os.path.basename(path)
+                return f"artifact-sha256-{clip}", f"numeric-sha256-{clip}"
+
+            def clip_meta(_data, clip, _clips_root, _run_dir,
+                          source_sha1=None, artifact_sha256=None):
+                return {
+                    "scored_artifact_sha256": artifact_sha256,
+                    "source_frame_count": 1,
+                }
+
+            measured = [
+                (clip, ([{"_frame_id": index}], {"quality": index + 1.0}))
+                for index, clip in enumerate(clip_names)
+            ]
+            output_path = os.path.join(run_dir, "results.rescored.json")
+            argv = [
+                "rescore_run.py", run_dir, "--clips-root", clips_root,
+                "--jobs", "2",
+            ]
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(
+                        rescore_run.run_eval, "source_evidence_digests",
+                        side_effect=source_digests), \
+                    mock.patch.object(
+                        rescore_run.run_eval, "scored_artifact_digests",
+                        side_effect=artifact_digests), \
+                    mock.patch.object(
+                        rescore_run, "authoritative_clip_meta",
+                        side_effect=clip_meta), \
+                    mock.patch.object(
+                        rescore_run.eval_parallel, "measure_clip_sequences",
+                        return_value=measured), \
+                    self.assertRaisesRegex(
+                        SystemExit, "alpha: source evidence changed during rescoring"):
+                rescore_run.main()
+
+            self.assertFalse(os.path.exists(output_path))
+            self.assertFalse(os.path.exists(output_path + ".tmp"))
+            with open(result_path, encoding="utf-8") as stream:
+                original = json.load(stream)
+            self.assertTrue(all(
+                "aggregate" not in original["clips"][clip] for clip in clip_names))
 
 
 if __name__ == "__main__":

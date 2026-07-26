@@ -71,6 +71,14 @@ frame sequences. A Tier-2 in-stream capture removes 4.
 Both benchmarks are meaningless without identical input every run. Foundation = a fixed clip
 library fed through the real pipeline.
 
+The evaluator deliberately serializes the production GPU harness so per-stage TensorRT/D3D11
+timings remain valid. Once all clip artifacts are authenticated, CPU scoring and report
+remeasurement run concurrently across clips (`run_eval.py --jobs N`, default up to eight) while
+preserving source order in results and failures. Each job receives one 24-megapixel image-working
+set budget; `--jobs 1` retains the memory-minimal serial reference. An immediately requested A/B
+report reuses the treatment rows still held by `run_eval.py` after re-authenticating their bytes;
+standalone reports remeasure both inputs because serialized result JSON is never metric authority.
+
 There are two levels: the committed **core** library for rapid iteration, and the reproducibly
 prepared **extended** public-data suite for feature acceptance and the final warp decision. Run
 `prepare_public_datasets.py` once, then select it with `run_eval.py --suite extended`. Extended

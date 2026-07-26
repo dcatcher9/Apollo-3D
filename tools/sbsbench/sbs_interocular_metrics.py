@@ -111,22 +111,28 @@ def _monotonic_runs(source_u, content):
     # that jump would manufacture mutual visibility.  Four output samples and an 8x robust local
     # allowance retain legitimate smooth stretch while rejecting discontinuities/fold seams.
     maximum_step = max(4.0 / source_u.size, 8.0 * typical_step)
-    start = 0
-    for offset in range(1, indices.size):
-        previous, current = indices[offset - 1], indices[offset]
-        step = float(source_u[current] - source_u[previous])
-        if current != previous + 1 or step <= 1e-8 or step > maximum_step:
-            run = indices[start:offset]
-            if run.size >= 2:
-                yield run
-            start = offset
-    run = indices[start:]
-    if run.size >= 2:
-        yield run
+    # Preserve the scalar loop's Python-float comparisons at the threshold boundaries while
+    # finding every break in NumPy.  Only the much smaller set of qualifying runs is iterated.
+    comparison_steps = differences.astype(np.float64, copy=False)
+    breaks = (~adjacent
+              | (comparison_steps <= 1e-8)
+              | (comparison_steps > maximum_step))
+    boundaries = np.flatnonzero(breaks) + 1
+    starts = np.concatenate((np.zeros(1, dtype=boundaries.dtype), boundaries))
+    stops = np.concatenate((boundaries, np.asarray((indices.size,), dtype=boundaries.dtype)))
+    qualifying = (stops - starts) >= 2
+    for start, stop in zip(starts[qualifying], stops[qualifying]):
+        yield indices[start:stop]
 
 
-def _invert_row(eye_row, source_u_row, content_x, target_u):
-    """Invert one exact source-U row while rejecting folded/multiple correspondences."""
+def _invert_row(eye_row, source_u_row, content_x, target_u, *,
+                values_are_output_positions=False):
+    """Invert one exact source-U row while rejecting folded/multiple correspondences.
+
+    ``values_are_output_positions`` is the exact-geometry fast path: the caller has supplied
+    ``eye_row == arange(width)``, so the recovered values and positions are identical and require
+    only one interpolation.
+    """
     width = target_u.size
     value_sum = np.zeros(width, dtype=np.float64)
     count = np.zeros(width, dtype=np.int32)
@@ -144,8 +150,9 @@ def _invert_row(eye_row, source_u_row, content_x, target_u):
         if not selected.any():
             continue
         targets = target_u[selected]
-        values = np.interp(targets, run_u, eye_row[run])
         positions = np.interp(targets, run_u, run.astype(np.float32))
+        values = (positions if values_are_output_positions else
+                  np.interp(targets, run_u, eye_row[run]))
         value_sum[selected] += values
         count[selected] += 1
         min_position[selected] = np.minimum(min_position[selected], positions)

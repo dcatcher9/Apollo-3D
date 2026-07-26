@@ -87,6 +87,7 @@ creates a reusable execution context for, and warms the single selected model at
 
 ```
 python tools/sbsbench/run_eval.py                     # all committed clips vs committed baselines
+python tools/sbsbench/run_eval.py --jobs 1            # serial CPU-scoring reference
 python tools/sbsbench/run_eval.py --update-baselines  # accepted defaults only; --extra is rejected
 python tools/sbsbench/run_eval.py --extra --pop-strength 1.40   # pass supported A/B levers
 python tools/sbsbench/run_eval.py --label profile-b --conf profile-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/profile-a --report-allow-config-diff
@@ -105,16 +106,28 @@ Generate or regenerate an authenticated HTML report with the Windows-safe parall
 
 ```
 python tools/sbsbench/generate_report.py <control-run> <treatment-run> <report.html>
+python tools/sbsbench/generate_report.py <control-run> <treatment-run> <report.html> --scoring-jobs 1
 ```
 
-Metric scoring parallelizes independent frames with one reusable process pool. The documented
-`generate_report.py` entry point safely provides the same process backend on Windows; only a direct
-`build_report.py` invocation falls back to threads because that HTML module is intentionally
-top-level. Numeric libraries stay single-threaded inside each worker to avoid nested CPU
-oversubscription. The automatic worker cap is 24 and is reduced by a 24-megapixel in-flight image
-budget. Developers can override these bounds with `SBSBENCH_SPATIAL_WORKERS` and
-`SBSBENCH_SPATIAL_PIXEL_BUDGET_MPX`; ordinary gates should use the defaults. Profile preserved
-artifacts without rerunning TensorRT or the harness:
+`run_eval.py` always completes the real GPU harnesses serially: concurrent TensorRT/D3D11 runs
+would contaminate the `sbs_perf.json` evidence. It then scores clips with `--jobs N` ordered CPU
+workers (default up to eight), and passes that value to report verification. Results, failures,
+baseline updates, and console summaries retain clip order regardless of worker completion order.
+The default image-working-set allowance is 24 megapixels per scoring job; use `--jobs 1` for the
+former serial/memory-minimal behavior.
+
+Within each clip, metric scoring parallelizes independent frames with one reusable process pool.
+The documented `generate_report.py` entry point safely provides the same process backend on
+Windows; only a direct `build_report.py` invocation falls back to threads because that HTML module
+is intentionally top-level. Numeric libraries stay single-threaded inside each worker to avoid
+nested CPU oversubscription. The automatic worker cap is 24. Developers can override the image
+and worker bounds with `SBSBENCH_SPATIAL_WORKERS` and `SBSBENCH_SPATIAL_PIXEL_BUDGET_MPX`;
+ordinary gates should use the defaults. Standalone reports also default to up to eight scoring
+jobs and accept `--scoring-jobs N`; use `--scoring-jobs 1` for serial report remeasurement.
+When `run_eval.py --report-control ...` creates the report immediately, the report reuses the
+just-authenticated treatment rows in process (with before/after artifact hashes) and remeasures
+only the control. A standalone report has no trusted live rows and therefore remeasures both
+inputs. Profile preserved artifacts without rerunning TensorRT or the harness:
 
 ```
 python tools/sbsbench/profile_eval.py <run> --clips-root tools/sbsbench/clips --workers 1
@@ -137,7 +150,8 @@ baseline for them. Every other role still requires an exact committed baseline. 
 baseline-supported primary, current conformance, or configured performance evidence fails closed.
 `rescore_run.py` is metric-only: it
 accepts only explicitly comparison-only runs produced by the current evaluator schema, preserves
-that schema, verifies the recorded source hashes, and uses the run's recorded clip root.
+that schema, verifies the recorded source hashes before and after measurement, uses the run's
+recorded clip root, and accepts the same ordered `--jobs N` CPU parallelism.
 
 **Profile / model (important):** the evaluator resolves the depth model from the selected profile
 and then the explicit `sbs_3d_depth_model` override, exactly like production. There is no separate

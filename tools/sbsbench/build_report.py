@@ -7,6 +7,7 @@ section per triggered issue with control/treatment crops at each issue's WORST f
 Usage: generate_report.py <control_run_dir> <treat_run_dir> <out.html>
        (run dirs = <build-dir>/sbs_eval/<label>/ containing results.json + <clip>/sbs_*.png)
 """
+import argparse
 import base64
 import functools
 import html
@@ -23,11 +24,43 @@ for _thread_env in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"
 import numpy as np  # noqa: E402  (thread limits must precede numeric-runtime import)
 from PIL import Image, ImageDraw, ImageFilter  # noqa: E402
 
+REPORT_SCORING_JOBS_ENV = "SBSBENCH_REPORT_SCORING_JOBS"
+REPORT_SCORING_MAX_JOBS = 16  # Keep aligned with eval_parallel.CLIP_SCORING_MAX_WORKERS.
+
+
+def _positive_job_count(value):
+    try:
+        jobs = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if not 1 <= jobs <= REPORT_SCORING_MAX_JOBS:
+        raise argparse.ArgumentTypeError(
+            f"must be from 1 to {REPORT_SCORING_MAX_JOBS}")
+    return jobs
+
+
+def _report_scoring_jobs(argv, environ):
+    """Resolve report verification concurrency from the CLI or guarded-launcher handoff."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--scoring-jobs", type=_positive_job_count)
+    options, _ = parser.parse_known_args(argv)
+    if options.scoring_jobs is not None:
+        return options.scoring_jobs
+    inherited = environ.get(REPORT_SCORING_JOBS_ENV)
+    if inherited is None:
+        return None
+    try:
+        return _positive_job_count(inherited)
+    except argparse.ArgumentTypeError as exc:
+        raise SystemExit(f"{REPORT_SCORING_JOBS_ENV} {exc}") from exc
+
+
 ctrl_dir, treat_dir, out_html = sys.argv[1], sys.argv[2], sys.argv[3]
 allow_config_diff = "--allow-config-diff" in sys.argv[4:]
 allow_model_diff = "--allow-model-diff" in sys.argv[4:]
 allow_depth_step_diff = "--allow-depth-step-diff" in sys.argv[4:]
 allow_executable_diff = "--allow-executable-diff" in sys.argv[4:]
+REPORT_SCORING_JOBS = _report_scoring_jobs(sys.argv[4:], os.environ)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402
@@ -45,7 +78,6 @@ if __name__ == "__main__":
     os.environ[sbsbench.SEQUENCE_SPATIAL_BACKEND_ENV] = "thread"
 else:
     os.environ.setdefault(sbsbench.SEQUENCE_SPATIAL_BACKEND_ENV, "thread")
-sbsbench.enable_reusable_spatial_executor()
 
 CTRL = json.load(open(os.path.join(ctrl_dir, "results.json")))
 TREAT = json.load(open(os.path.join(treat_dir, "results.json")))
@@ -168,26 +200,32 @@ if set(CLIPS) != set(TREAT["clips"]):
 
 
 def _validate_authoritative_results(
-        run, run_dir, side, clips_root, remeasurement_session=None):
+        run, run_dir, side, clips_root, remeasurement_session=None, scoring_jobs=None):
     """Remeasure report inputs; JSON aggregate caches never authenticate themselves."""
     try:
+        verification_options = {"remeasurement_session": remeasurement_session}
+        if scoring_jobs is not None:
+            verification_options["scoring_jobs"] = scoring_jobs
         return run_eval.verify_results_against_artifacts(
             run, run_dir, clips_root, THRESHOLD_CFG,
-            remeasurement_session=remeasurement_session)
+            **verification_options)
     except (OSError, RuntimeError, ValueError) as exc:
         raise SystemExit(
             f"refusing {side} results that fail authoritative remeasurement: {exc}") from exc
 
 
 _validated_run_dirs = {}
-_remeasurement_session = run_eval.new_remeasurement_session()
+_remeasurement_session = (
+    run_eval._take_report_remeasurement_session()
+    or run_eval.new_remeasurement_session())
 for _run, _run_dir, _side in (
         (CTRL, ctrl_dir, "control"), (TREAT, treat_dir, "treatment")):
     _validation_key = os.path.normcase(os.path.abspath(_run_dir))
     if _validation_key not in _validated_run_dirs:
         _validated_run_dirs[_validation_key] = _validate_authoritative_results(
             _run, _run_dir, _side, CLIPS_ROOT,
-            remeasurement_session=_remeasurement_session)
+            remeasurement_session=_remeasurement_session,
+            scoring_jobs=REPORT_SCORING_JOBS)
 # Compact decision/report vector. Numeric support fields remain in results.json but do not become
 # separate report axes. Metrics omitted here are intentionally not presented as SBS quality.
 # metric, header, worse-is-higher, always-show, notable-threshold

@@ -101,6 +101,9 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   `<build-dir>/sbs_eval/<label>/results.json`. After an INTENDED metric change, re-baseline with
   `--update-baselines` and commit the baselines together with the change. Supported A/B levers
   pass through, for example `--extra --pop-strength 1.25` or `--extra --depth-short-side 392`.
+  GPU harnesses remain serial so their timing evidence is uncontended; authenticated CPU scoring
+  is ordered but parallel across clips (`--jobs`, default up to eight, `--jobs 1` for the serial
+  reference), and report remeasurement inherits the same job count.
   Changing `bench.conf` invalidates baselines; changing a baseline-bearing clip's source or
   scoring semantics invalidates that clip's baseline. Adding a conformance-only probe does not.
 - **Adding a clip to the eval set**: a clip is just a directory of same-size numbered

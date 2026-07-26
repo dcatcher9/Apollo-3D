@@ -97,31 +97,6 @@ def _sample_grid(image, width, height):
     return ((1.0 - fy) * top + fy * bottom).astype(np.float32)
 
 
-def _monotonic_runs(source_u, usable):
-    """Yield increasing runs without interpolating through occlusion jumps or folds."""
-    source_u = np.asarray(source_u, dtype=np.float32)
-    indices = np.flatnonzero(np.asarray(usable, dtype=bool) & np.isfinite(source_u))
-    if indices.size < 2:
-        return
-    adjacent = indices[1:] == indices[:-1] + 1
-    differences = source_u[indices[1:]] - source_u[indices[:-1]]
-    ordinary = differences[adjacent & (differences > 1e-8)]
-    typical_step = float(np.median(ordinary)) if ordinary.size else 1.0 / source_u.size
-    maximum_step = max(4.0 / source_u.size, 8.0 * typical_step)
-    start = 0
-    for offset in range(1, indices.size):
-        previous, current = indices[offset - 1], indices[offset]
-        step = float(source_u[current] - source_u[previous])
-        if current != previous + 1 or step <= 1e-8 or step > maximum_step:
-            run = indices[start:offset]
-            if run.size >= 2:
-                yield run
-            start = offset
-    run = indices[start:]
-    if run.size >= 2:
-        yield run
-
-
 def _invert_row(output_x, source_u, usable, target_u):
     """Recover output positions for source samples and reject ambiguous inverses."""
     count = np.zeros(target_u.size, dtype=np.int32)
@@ -130,7 +105,7 @@ def _invert_row(output_x, source_u, usable, target_u):
     maximum = np.full(target_u.size, -np.inf, dtype=np.float64)
     # The live sampler clamps raw U.  Such pixels no longer identify a unique source coordinate.
     invertible = np.asarray(usable, dtype=bool) & (source_u >= 0.0) & (source_u <= 1.0)
-    for run in _monotonic_runs(source_u, invertible):
+    for run in _geometry._monotonic_runs(source_u, invertible):
         run_u = source_u[run]
         selected = ((target_u >= max(float(run_u[0]), 0.0) - 1e-7)
                     & (target_u <= min(float(run_u[-1]), 1.0) + 1e-7))
@@ -507,10 +482,10 @@ def measure_stereo_window_violation(
     crossed_risk, crossed_left, crossed_right, crossed_proximity, _ = _border_risk(
         crossed, geometry, crossed=True, component_jump_pct=component_jump_pct,
         depth=depth_grid, depth_jump=depth_jump, seed_margin_px=seed_margin_px)
-    uncrossed = common & (disparity_pct >= disparity_threshold_pct)
     if compact:
         uncrossed_risk = uncrossed_left = uncrossed_right = uncrossed_proximity = None
     else:
+        uncrossed = common & (disparity_pct >= disparity_threshold_pct)
         uncrossed_risk, uncrossed_left, uncrossed_right, uncrossed_proximity, _ = _border_risk(
             uncrossed, geometry, crossed=False, component_jump_pct=component_jump_pct,
             depth=depth_grid, depth_jump=depth_jump, seed_margin_px=seed_margin_px)

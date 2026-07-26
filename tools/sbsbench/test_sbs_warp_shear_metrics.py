@@ -174,6 +174,45 @@ class WarpShearMetricTests(unittest.TestCase):
                     "warp_cross_row_shear_largest_run_pct"):
             self.assertAlmostEqual(single[key], packed[key], places=6, msg=key)
 
+    def test_return_maps_does_not_change_packed_scalars(self):
+        shape = mapping_shape(320, 180)
+        source = vertical_feature_source(320, 180)
+        clean = identity_map(shape)
+        damaged = add_row_ramp(clean, shape, 1.2)
+        packed = np.concatenate((clean, damaged), axis=1)
+
+        for min_support_count in (64, packed.size):
+            with self.subTest(min_support_count=min_support_count):
+                scalar_only = measure(
+                    packed, shape, source, min_support_count=min_support_count)
+                with_maps, maps = measure(
+                    packed, shape, source, min_support_count=min_support_count,
+                    return_maps=True)
+
+                self.assertEqual(scalar_only, with_maps)
+                self.assertEqual(
+                    set(maps),
+                    {"row_shear_ref_px_per_row", "support", "bad",
+                     "source_boundary", "healthy_topology"})
+                for value in maps.values():
+                    self.assertEqual(value.shape, packed.shape)
+
+    def test_compact_mode_retains_only_canonical_scalars(self):
+        shape = mapping_shape(320, 180)
+        source = vertical_feature_source(320, 180)
+        mapping = add_row_ramp(identity_map(shape), shape, 1.2)
+        full = measure(mapping, shape, source)
+        compact = measure(mapping, shape, source, compact=True)
+
+        self.assertEqual(compact, {
+            "warp_cross_row_shear_support_count":
+                full["warp_cross_row_shear_support_count"],
+            "warp_cross_row_shear_severity_pct":
+                full["warp_cross_row_shear_severity_pct"],
+        })
+        with self.assertRaisesRegex(ValueError, "compact.*diagnostic maps"):
+            measure(mapping, shape, source, compact=True, return_maps=True)
+
     def test_optional_real_c647_tear_exceeds_c525(self):
         repo_root = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
         run_root = os.environ.get(
