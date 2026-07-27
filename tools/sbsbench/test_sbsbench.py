@@ -10,6 +10,8 @@ import sys
 import tarfile
 import tempfile
 import argparse
+import threading
+import time
 import unittest
 from unittest import mock
 import zipfile
@@ -26,6 +28,7 @@ import prepare_flow_ema_reference  # noqa: E402
 import run_eval  # noqa: E402
 import rescore_run  # noqa: E402
 import sbsbench  # noqa: E402
+import eval_parallel  # noqa: E402
 
 
 class EvalContractTests(unittest.TestCase):
@@ -265,15 +268,73 @@ class EvalContractTests(unittest.TestCase):
                 sbsbench.validate_latched_motion_hard_cut_source(
                     generated_frames, generated_meta["shot_state_contract"])
 
+    def assert_structureless_bridge_is_reproducible_and_source_authenticated(
+            self, clip_name, uniform_rgb):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        committed = os.path.join(
+            repo, "tools", "sbsbench", "clips", clip_name)
+        committed_meta = run_eval.load_clip_metadata(committed, suite="core")
+        contract = committed_meta["shot_state_contract"]
+        self.assertEqual(committed_meta["evaluation_role"], "conformance-only")
+        self.assertEqual(contract["kind"], "structureless-history-bridge")
+        self.assertEqual(contract["expected_pulse_frames"], [18, 21])
+        self.assertEqual(contract["uniform_rgb"], list(uniform_rgb))
+        committed_frames = sbsbench.indexed_files(
+            os.path.join(committed, "frame_*.*"), "frame_")
+        run_eval.validate_structureless_history_bridge_source(
+            committed, contract)
+
+        with tempfile.TemporaryDirectory() as generated_root, mock.patch.object(
+                make_synth_clips, "CLIPS", generated_root):
+            source_anchors = (
+                make_synth_clips.BRIDGE_SCENE_A_BY_CLIP[clip_name],
+                make_synth_clips.BRIDGE_SCENE_B,
+            )
+            for source, frame in source_anchors:
+                source_dir = os.path.join(generated_root, source)
+                os.makedirs(source_dir, exist_ok=True)
+                shutil.copyfile(
+                    os.path.join(repo, "tools", "sbsbench", "clips", source,
+                                 f"frame_{frame:05d}.jpg"),
+                    os.path.join(source_dir, f"frame_{frame:05d}.jpg"))
+            make_synth_clips.GENERATORS[clip_name]()
+            make_synth_clips.write_meta(
+                clip_name, **make_synth_clips.clip_metadata(clip_name))
+            generated = os.path.join(generated_root, clip_name)
+            generated_meta = run_eval.load_clip_metadata(generated, suite="core")
+            generated_frames = sbsbench.indexed_files(
+                os.path.join(generated, "frame_*.*"), "frame_")
+            self.assertEqual(generated_meta, committed_meta)
+            self.assertEqual(set(generated_frames), set(committed_frames))
+            for frame_id in generated_frames:
+                with open(generated_frames[frame_id], "rb") as actual, open(
+                        committed_frames[frame_id], "rb") as expected:
+                    self.assertEqual(actual.read(), expected.read(), frame_id)
+
+            tampered = np.asarray(Image.open(generated_frames[18]).convert("RGB")).copy()
+            tampered[0, 0, 0] = 1
+            Image.fromarray(tampered).save(generated_frames[18])
+            with self.assertRaisesRegex(ValueError, "structureless-history"):
+                run_eval.validate_structureless_history_bridge_source(
+                    generated, generated_meta["shot_state_contract"])
+
+    def test_black_structureless_bridge_is_reproducible_and_source_authenticated(self):
+        self.assert_structureless_bridge_is_reproducible_and_source_authenticated(
+            "structureless_history_bridge", (0, 0, 0))
+
+    def test_white_structureless_bridge_is_reproducible_and_source_authenticated(self):
+        self.assert_structureless_bridge_is_reproducible_and_source_authenticated(
+            "structureless_white_history_bridge", (255, 255, 255))
+
     @staticmethod
-    def subject_state(age, flags, anchor=2.5, pop=1.25):
+    def subject_state(age, flags, anchor=2.5, pop=1.25, history=1.0):
         return {
             "subject_recenter_delta": 0.0, "scene_age": float(age),
             "subject_depth_ema": 0.55, "initialized": 1.0,
             "stretch_lo": 0.1, "stretch_inv_range": 1.25,
             "depth_change_baseline_ema": 0.08, "adaptive_pop_ratio": float(pop),
             "zero_anchor_shift_px": float(anchor), "zero_anchor_valid": 1.0,
-            "cut_flags": float(flags), "model_input_history_valid": 1.0,
+            "cut_flags": float(flags), "model_input_history_valid": float(history),
         }
 
     def test_shot_state_contract_observes_exactly_one_real_cut(self):
@@ -298,6 +359,29 @@ class EvalContractTests(unittest.TestCase):
             max(row.get("shot_state_trace_inconsistent", 0.0) for row in rows), 0.0)
         self.assertEqual(
             sbsbench.aggregate(rows)["shot_state_accepted_pulse"], 1.0)
+
+    def test_structureless_bridge_contract_observes_bounded_slate_and_return_cuts(self):
+        rows = [{"_frame_id": frame_id} for frame_id in range(1, 23)]
+        trace = {
+            frame_id: self.subject_state(frame_id - 1, 3)
+            for frame_id in range(1, 18)
+        }
+        trace[18] = self.subject_state(0, 16)
+        trace[19] = self.subject_state(1, 16)
+        trace[20] = self.subject_state(2, 19)
+        trace[21] = self.subject_state(0, 16)
+        trace[22] = self.subject_state(1, 16)
+        contract = {
+            "kind": "structureless-history-bridge", "monitor_from_frame": 2,
+            "expected_pulse_frames": [18, 21], "flash_frame": 11,
+            "flash_return_frame": 12, "slate_frame": 17,
+            "persistent_frame": 18, "new_scene_frame": 21,
+        }
+        summary = sbsbench.apply_shot_state_contract(
+            rows, list(range(1, 23)), trace, contract)
+        self.assertEqual(summary["shot_state_accepted_pulse"], 2.0)
+        self.assertEqual(max(
+            row.get("shot_state_trace_inconsistent", 0.0) for row in rows), 0.0)
 
     def test_exposure_contract_rejects_relatched_state_and_latch_drift(self):
         rows = [{"_frame_id": frame_id} for frame_id in range(1, 7)]
@@ -857,6 +941,23 @@ class EvalContractTests(unittest.TestCase):
                 run_eval.preflight_baselines(
                     baseline_dir, ["clip"], context, {"clip": "cliphash"})
 
+    def test_numeric_baseline_context_excludes_reusable_label_implementation(self):
+        candidate = {
+            "suite": "core",
+            "model": "model",
+            "profile": "apollo",
+            "eval_schema": run_eval.EVAL_SCHEMA,
+            "depth_step": "current-once",
+            "depth_compensation": "none",
+            "conf_sha256": "config",
+            "metric_sha256": "numeric-metrics",
+            "label_contract_sha256": "labels-only",
+            "metric_runtime": {"python": "test"},
+        }
+        context = run_eval.baseline_required_context(candidate)
+        self.assertEqual(context["metric_sha256"], "numeric-metrics")
+        self.assertNotIn("label_contract_sha256", context)
+
     def test_only_conformance_only_clips_are_exempt_from_committed_baselines(self):
         clips = ["decisive", "reference", "probe"]
         metadata = {
@@ -1154,6 +1255,14 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("Bestv2RawShiftPxFast(zero_anchor_shaped)", adaptive)
         self.assertIn("model_input_history_valid", adaptive)
         self.assertIn("appearance_proposal", adaptive)
+        self.assertIn("current_structural_support_fraction", adaptive)
+        self.assertIn("previous_structural_support_fraction", adaptive)
+        self.assertIn("common_structural_support_fraction", adaptive)
+        self.assertIn("structureless_transition", adaptive)
+        self.assertIn("same_scene_gap_return", adaptive)
+        self.assertIn("next_model_input_history_state", adaptive)
+        self.assertIn("model_input_history_gap", adaptive)
+        self.assertIn("low_structure_scene", adaptive)
         self.assertIn("raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH", adaptive)
         self.assertIn(
             "structural_change_fraction >= STRUCTURAL_COLOR_CUT_HIGH", adaptive)
@@ -1171,6 +1280,9 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("PreviousAppearanceOrdinal", cut_evidence)
         self.assertIn("RAW_RGB_PIXEL_DELTA", cut_evidence)
         self.assertIn("PlainHist[NUM_BINS + 3]", cut_evidence)
+        self.assertIn("PlainHist[NUM_BINS + 4]", cut_evidence)
+        self.assertIn("PlainHist[NUM_BINS + 5]", cut_evidence)
+        self.assertIn("PlainHist[NUM_BINS + 6]", cut_evidence)
         self.assertNotIn("max(color.r, max(color.g, color.b))", cut_evidence)
         self.assertIn("for (int first = 0; first < 4; ++first)", cut_evidence)
         self.assertIn("for (int second = first + 1; second < 5; ++second)",
@@ -1179,6 +1291,7 @@ class EvalContractTests(unittest.TestCase):
                       cut_evidence)
         self.assertIn("ordering_flips * 2u >= common_comparisons", cut_evidence)
         self.assertIn("#define RAW_RGB_CUT_HIGH 0.70f", depth_constants)
+        self.assertIn("#define STRUCTURAL_COLOR_MIN_SUPPORT 0.01f", depth_constants)
         self.assertIn("#define STRUCTURAL_COLOR_CUT_HIGH 0.03f", depth_constants)
         self.assertIn("#define DEPTH_CUT_HIGH 0.60f", depth_constants)
         self.assertIn("#define DEPTH_CUT_CORROBORATE 0.25f", depth_constants)
@@ -2299,6 +2412,97 @@ class EvalContractTests(unittest.TestCase):
                 sbsbench.SEQUENCE_SPATIAL_BACKEND_ENV: "invalid"}):
             with self.assertRaisesRegex(ValueError, "must be 'process' or 'thread'"):
                 sbsbench._measure_sequence_spatial_rows([{}] * 2)
+
+    def test_clip_parallelism_reserves_the_inner_peak_from_one_global_budget(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            os.makedirs(seq)
+            os.makedirs(frames)
+            for frame_id in range(8):
+                Image.new("RGB", (100, 100)).save(
+                    os.path.join(seq, f"sbs_{frame_id:05d}.png"))
+            with open(os.path.join(seq, "warp_map_shape.json"), "w",
+                      encoding="utf-8") as shape_file:
+                json.dump({"width": 100, "height": 100}, shape_file)
+            job = ("clip", seq, frames)
+            with mock.patch.dict(os.environ, {
+                    sbsbench.SEQUENCE_SPATIAL_PIXEL_BUDGET_ENV: "0.03",
+            }, clear=True):
+                budget = eval_parallel._configured_pixel_budget_pixels()
+                self.assertEqual(budget, 30_000)
+                # Eight frames select three 10k-pixel workers under a 30k global allowance.
+                self.assertEqual(
+                    eval_parallel._clip_spatial_reservation(job, budget),
+                    30_000)
+
+            # An explicit worker override cannot bypass the memory contract.
+            with mock.patch.dict(os.environ, {
+                    sbsbench.SEQUENCE_SPATIAL_PIXEL_BUDGET_ENV: "0.03",
+                    sbsbench.SEQUENCE_SPATIAL_WORKERS_ENV: "4",
+            }, clear=True), self.assertRaisesRegex(ValueError, "run-global"):
+                eval_parallel._clip_spatial_reservation(job, 30_000)
+
+            no_map = os.path.join(root, "no-map")
+            os.makedirs(no_map)
+            for frame_id in range(8):
+                Image.new("RGB", (100, 100)).save(
+                    os.path.join(no_map, f"sbs_{frame_id:05d}.png"))
+            with mock.patch.dict(os.environ, {
+                    sbsbench.SEQUENCE_SPATIAL_PIXEL_BUDGET_ENV: "0.03",
+            }, clear=True), mock.patch.object(
+                    sbsbench.os, "cpu_count", return_value=8
+            ), self.assertRaisesRegex(ValueError, "run-global"):
+                # A legacy sequence without mapping_shape passes ``None`` to the real inner
+                # worker calculation. Reserve that actual eight-worker peak, not the three
+                # workers a guessed 10k-pixel shape would have selected.
+                eval_parallel._clip_spatial_reservation(
+                    ("no-map", no_map, frames), 30_000)
+
+            oversized = os.path.join(root, "oversized")
+            os.makedirs(oversized)
+            Image.new("RGB", (201, 150)).save(
+                os.path.join(oversized, "sbs_00000.png"))
+            with mock.patch.dict(os.environ, {
+                    sbsbench.SEQUENCE_SPATIAL_PIXEL_BUDGET_ENV: "0.03",
+            }, clear=True), self.assertRaisesRegex(
+                    ValueError, "packed frame above"):
+                eval_parallel._clip_spatial_reservation(
+                    ("oversized", oversized, frames), 30_000)
+
+    def test_concurrent_clip_scoring_never_exceeds_global_pixel_budget(self):
+        weights = {"first": 60, "second": 60, "third": 40}
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def fake_measure(job):
+            nonlocal active, peak
+            weight = weights[job[0]]
+            with lock:
+                active += weight
+                peak = max(peak, active)
+            time.sleep(0.03)
+            with lock:
+                active -= weight
+            return job[0], {"measured": True}
+
+        jobs = [(clip, "seq-" + clip, "frames-" + clip) for clip in weights]
+        with mock.patch.object(
+                eval_parallel, "_configured_pixel_budget_pixels", return_value=100
+        ), mock.patch.object(
+                eval_parallel, "_clip_spatial_reservation",
+                side_effect=lambda job, _: weights[job[0]]
+        ), mock.patch.object(
+                eval_parallel, "_measure_clip_sequence_job", side_effect=fake_measure
+        ), mock.patch.object(
+                sbsbench, "enable_reusable_spatial_executor"
+        ):
+            measured = eval_parallel.measure_clip_sequences(jobs, jobs=3)
+
+        self.assertEqual([clip for clip, _ in measured], list(weights))
+        self.assertLessEqual(peak, 100)
+        self.assertEqual(active, 0)
 
     def test_sequence_reports_complete_temporal_transition_coverage(self):
         with tempfile.TemporaryDirectory() as root:

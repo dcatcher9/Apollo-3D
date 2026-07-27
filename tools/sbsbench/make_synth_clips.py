@@ -19,6 +19,12 @@ changing a clip's design, and regenerate baselines in the same commit.
   sustained_motion_scene_cut
                an initial cut latches shot state, broad persistent motion keeps both detector
                arms closed, then a second real cut must use the relative-geometry escape.
+  structureless_history_bridge
+               a lossless structured A -> black -> A flash followed by structured A -> black
+               slate -> different structured B. The flash is ignored; persistent black and B cut.
+  structureless_white_history_bridge
+               the same authenticated history bridge using saturated white, whose lower raw-RGB
+               replacement fraction exercises the support-loss-specific appearance gate.
 """
 import argparse
 import json
@@ -42,6 +48,23 @@ SUSTAINED_SETUP_CUT_FRAME = 11
 SUSTAINED_TRUE_CUT_FRAME = 27
 SUSTAINED_FRAME_COUNT = 36
 SUSTAINED_ROLL_PX = 96
+BRIDGE_FLASH_FRAME = 11
+BRIDGE_FLASH_RETURN_FRAME = 12
+BRIDGE_SLATE_FRAME = 17
+BRIDGE_PERSISTENT_FRAME = BRIDGE_SLATE_FRAME + 1
+BRIDGE_NEW_SCENE_FRAME = 21
+BRIDGE_FRAME_COUNT = 30
+BRIDGE_UNIFORM_RGB_BY_CLIP = {
+    "structureless_history_bridge": (0, 0, 0),
+    "structureless_white_history_bridge": (255, 255, 255),
+}
+BRIDGE_SCENE_A_BY_CLIP = {
+    "structureless_history_bridge": ("c841", 1),
+    # The bright page replaces only 28.6% of host model texels when changed to uniform white.
+    # This prevents the conformance clip from accidentally depending on the ordinary 70% raw gate.
+    "structureless_white_history_bridge": ("flat_page", 1),
+}
+BRIDGE_SCENE_B = ("c647", 13)
 
 # name + description written to each clip's meta.json (self-describing; the report labels by name).
 DESC = {
@@ -59,6 +82,16 @@ DESC = {
     "sustained_motion_scene_cut": (
         "A setup cut latches shot state; broad persistent horizontal motion prevents either "
         "proposal arm from rearming, then a real scene cut must use the relative-depth escape."
+    ),
+    "structureless_history_bridge": (
+        "A one-frame black flash returns to structured scene A without a cut; a later black "
+        "slate must cut when low structure persists, then different structured scene B must cut "
+        "on its visible return."
+    ),
+    "structureless_white_history_bridge": (
+        "A one-frame white flash returns to structured scene A without a cut; a later white "
+        "slate must cut when low structure persists, then different structured scene B must cut "
+        "on its visible return."
     ),
 }
 
@@ -204,6 +237,48 @@ def sustained_motion_scene_cut():
             os.path.join(out, f"frame_{frame_id:05d}.png"))
 
 
+def _structureless_history_bridge(clip, uniform_rgb):
+    """Bridge structureless intervals without confusing a clipped flash with a new scene."""
+    scene_a_clip, scene_a_frame = BRIDGE_SCENE_A_BY_CLIP[clip]
+    scene_b_clip, scene_b_frame = BRIDGE_SCENE_B
+    with Image.open(os.path.join(
+            CLIPS, scene_a_clip, f"frame_{scene_a_frame:05d}.jpg")) as image:
+        scene_a = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    with Image.open(os.path.join(
+            CLIPS, scene_b_clip, f"frame_{scene_b_frame:05d}.jpg")) as image:
+        scene_b = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    if scene_a.shape != scene_b.shape:
+        raise ValueError("structureless bridge source anchors must have identical dimensions")
+    uniform = np.empty_like(scene_a)
+    uniform[...] = uniform_rgb
+
+    out = os.path.join(CLIPS, clip)
+    os.makedirs(out, exist_ok=True)
+    for frame_id in range(1, BRIDGE_FRAME_COUNT + 1):
+        if frame_id == BRIDGE_FLASH_FRAME:
+            frame = uniform
+        elif BRIDGE_SLATE_FRAME <= frame_id < BRIDGE_NEW_SCENE_FRAME:
+            frame = uniform
+        elif frame_id < BRIDGE_NEW_SCENE_FRAME:
+            frame = scene_a
+        else:
+            frame = scene_b
+        Image.fromarray(frame).save(
+            os.path.join(out, f"frame_{frame_id:05d}.png"))
+
+
+def structureless_history_bridge():
+    _structureless_history_bridge(
+        "structureless_history_bridge",
+        BRIDGE_UNIFORM_RGB_BY_CLIP["structureless_history_bridge"])
+
+
+def structureless_white_history_bridge():
+    _structureless_history_bridge(
+        "structureless_white_history_bridge",
+        BRIDGE_UNIFORM_RGB_BY_CLIP["structureless_white_history_bridge"])
+
+
 def clip_metadata(clip):
     if clip == "flat_page":
         return {"expected_flat": True, "gt_depth_kind": "disparity"}
@@ -269,6 +344,26 @@ def clip_metadata(clip):
                 "rgb_transform": "np.roll(base_rgb, horizontal_shift_px, axis=1)",
             },
         }
+    if clip in BRIDGE_UNIFORM_RGB_BY_CLIP:
+        return {
+            "evaluation_role": "conformance-only",
+            "shot_state_contract": {
+                "kind": "structureless-history-bridge",
+                "monitor_from_frame": SHOT_STATE_MONITOR_FROM_FRAME,
+                "expected_pulse_frames": [
+                    BRIDGE_PERSISTENT_FRAME,
+                    BRIDGE_NEW_SCENE_FRAME,
+                ],
+                "flash_frame": BRIDGE_FLASH_FRAME,
+                "flash_return_frame": BRIDGE_FLASH_RETURN_FRAME,
+                "slate_frame": BRIDGE_SLATE_FRAME,
+                "persistent_frame": BRIDGE_PERSISTENT_FRAME,
+                "new_scene_frame": BRIDGE_NEW_SCENE_FRAME,
+                "uniform_rgb": list(BRIDGE_UNIFORM_RGB_BY_CLIP[clip]),
+                "rgb_transform": (
+                    "scene_a; one uniform flash; scene_a; uniform slate; scene_b"),
+            },
+        }
     raise ValueError(f"unknown synthetic clip {clip}")
 
 
@@ -279,6 +374,8 @@ GENERATORS = {
     "flat_transition": flat_transition,
     "exposure_flash_strobe": exposure_flash_strobe,
     "sustained_motion_scene_cut": sustained_motion_scene_cut,
+    "structureless_history_bridge": structureless_history_bridge,
+    "structureless_white_history_bridge": structureless_white_history_bridge,
 }
 
 

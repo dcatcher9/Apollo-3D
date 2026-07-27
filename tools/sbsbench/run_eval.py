@@ -249,7 +249,7 @@ def _seed_authenticated_remeasurement(
         expected_source_sha1=None, expected_source_sha256=None,
         expected_artifact_sha256=None, expected_numeric_digest=None):
     """Bind just-produced rows to current bytes inside an opaque report session."""
-    entries = _validated_remeasurement_entries(session)
+    _validated_remeasurement_entries(session)
     if not isinstance(measured, tuple) or len(measured) != 2:
         raise TypeError("seeded remeasurement must be a (rows, aggregate) tuple")
     source_sha1, source_sha256 = source_evidence_digests(source_dir)
@@ -359,6 +359,64 @@ def label_contract_sha():
     Runtime shader/executable/model/config/source hashes are recorded separately in the context.
     """
     return sha256_files(label_contract_files())
+
+
+def validate_structureless_history_bridge_source(path, contract):
+    """Authenticate a lossless A->uniform->A flash and A->uniform->B bridge.
+
+    This is source-contract validation, not a pixel metric. Keeping it in the runner preserves the
+    numeric metric hash used by committed baselines while the stricter label/source contract still
+    invalidates reusable labels.
+    """
+    src_by_id = sbsbench.indexed_files(
+        os.path.join(path, "frame_*.*"), "frame_")
+    frame_ids = sorted(src_by_id)
+    flash = contract.get("flash_frame")
+    flash_return = contract.get("flash_return_frame")
+    slate = contract.get("slate_frame")
+    persistent = contract.get("persistent_frame")
+    new_scene = contract.get("new_scene_frame")
+    uniform_rgb = contract.get("uniform_rgb")
+    if frame_ids != list(range(1, len(frame_ids) + 1)):
+        raise ValueError(
+            "structureless-history bridge requires contiguous one-based source frame ids")
+    if (not all(isinstance(frame, int) and not isinstance(frame, bool)
+                for frame in (flash, flash_return, slate, persistent, new_scene)) or
+            flash_return != flash + 1 or persistent != slate + 1 or
+            not 2 <= flash < flash_return < slate < persistent < new_scene <= len(frame_ids) or
+            not isinstance(uniform_rgb, list) or len(uniform_rgb) != 3 or
+            any(not isinstance(value, int) or isinstance(value, bool) or
+                not 0 <= value <= 255 for value in uniform_rgb)):
+        raise ValueError("structureless-history source schedule is invalid")
+    if any(os.path.splitext(src_by_id[frame_id])[1].lower() != ".png"
+           for frame_id in frame_ids):
+        raise ValueError("structureless-history bridge frames must use lossless PNG")
+
+    with Image.open(src_by_id[1]) as image:
+        scene_a = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    with Image.open(src_by_id[new_scene]) as image:
+        scene_b = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    if (scene_a.shape != scene_b.shape or
+            not np.any(scene_a != scene_a[0, 0]) or
+            not np.any(scene_b != scene_b[0, 0]) or
+            np.array_equal(scene_a, scene_b)):
+        raise ValueError(
+            "structureless-history bridge endpoints must be equal-size distinct structured scenes")
+    uniform = np.empty_like(scene_a)
+    uniform[...] = np.asarray(uniform_rgb, dtype=np.uint8)
+
+    for frame_id in frame_ids:
+        if frame_id == flash or slate <= frame_id < new_scene:
+            expected = uniform
+        elif frame_id < new_scene:
+            expected = scene_a
+        else:
+            expected = scene_b
+        with Image.open(src_by_id[frame_id]) as image:
+            actual = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        if actual.shape != expected.shape or not np.array_equal(actual, expected):
+            raise ValueError(
+                f"frame {frame_id} violates the declared structureless-history source contract")
 
 
 def label_context_sha(meta):
@@ -481,6 +539,10 @@ def load_clip_metadata(path, suite=None, required=True):
                 "escape_pulse_frame", "source_base_frame_by_frame",
                 "horizontal_roll_px_by_frame", "rgb_transform",
             },
+            "structureless-history-bridge": {
+                "flash_frame", "flash_return_frame", "slate_frame",
+                "persistent_frame", "new_scene_frame", "uniform_rgb", "rgb_transform",
+            },
         }
         expected_keys = common_keys | kind_keys.get(kind, set())
         if kind not in kind_keys or set(shot_contract) != expected_keys:
@@ -564,6 +626,34 @@ def load_clip_metadata(path, suite=None, required=True):
                     "np.roll(base_rgb, horizontal_shift_px, axis=1)"):
                 raise ValueError(
                     f"invalid clip metadata {meta_path}: unknown latched-motion RGB transform")
+        if kind == "structureless-history-bridge":
+            flash = shot_contract.get("flash_frame")
+            flash_return = shot_contract.get("flash_return_frame")
+            slate = shot_contract.get("slate_frame")
+            persistent = shot_contract.get("persistent_frame")
+            new_scene = shot_contract.get("new_scene_frame")
+            schedule = (flash, flash_return, slate, persistent, new_scene)
+            if (any(not isinstance(frame, int) or isinstance(frame, bool)
+                    for frame in schedule) or
+                    not monitor_from <= flash or flash_return != flash + 1 or
+                    persistent != slate + 1 or
+                    not flash_return < slate < persistent < new_scene <= frame_count or
+                    pulses != [persistent, new_scene]):
+                raise ValueError(
+                    f"invalid clip metadata {meta_path}: structureless-history bridge must "
+                    "contain one-frame flash, a bounded persistent-slate pulse, and a "
+                    "new-scene pulse")
+            uniform = shot_contract.get("uniform_rgb")
+            if (not isinstance(uniform, list) or len(uniform) != 3 or
+                    any(not isinstance(value, int) or isinstance(value, bool) or
+                        not 0 <= value <= 255 for value in uniform)):
+                raise ValueError(
+                    f"invalid clip metadata {meta_path}: uniform_rgb must contain three bytes")
+            if shot_contract.get("rgb_transform") != (
+                    "scene_a; one uniform flash; scene_a; uniform slate; scene_b"):
+                raise ValueError(
+                    f"invalid clip metadata {meta_path}: unknown structureless bridge transform")
+            validate_structureless_history_bridge_source(path, shot_contract)
     reference_patterns = {
         "required_gt_depth": os.path.join(path, "gt_depth", "frame_*.*"),
         "required_gt_flow": os.path.join(path, "gt_flow", "frame_*.npz"),
@@ -761,7 +851,6 @@ def baseline_required_context(candidate_meta):
         "depth_compensation": candidate_meta.get("depth_compensation"),
         "conf_sha256": candidate_meta.get("conf_sha256"),
         "metric_sha256": candidate_meta.get("metric_sha256"),
-        "label_contract_sha256": candidate_meta.get("label_contract_sha256"),
         "metric_runtime": candidate_meta.get("metric_runtime"),
     }
 

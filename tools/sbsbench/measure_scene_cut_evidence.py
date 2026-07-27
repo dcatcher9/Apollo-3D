@@ -4,8 +4,10 @@
 The appearance paths mirror production: source RGB is resized with D3D11-style source-texel
 footprint integration for the broad model-input delta, while the exposure ordinal is point
 sampled in the capture domain before tone mapping or spatial filtering. The ordinal is compared
-with the cross-5/all-10-pairs census. The depth path compares the harness's normalized 16-bit
-depth dumps at the same 0.05 texel threshold used by production.
+with the cross-5/all-10-pairs census, and the first structurally unsupported update retains the
+last supported appearance/depth history. Persistence advances it on the next update. The depth
+path compares the harness's normalized 16-bit depth dumps at the same 0.05 texel threshold used by
+production.
 
 Example:
   python tools/sbsbench/measure_scene_cut_evidence.py \
@@ -31,6 +33,7 @@ DEFAULT_CLIPS_ROOT = SCRIPT_DIR / "clips"
 FRAME_RE = re.compile(r"^frame_(\d+)\.(?:jpg|jpeg|png)$", re.IGNORECASE)
 DEPTH_RE = re.compile(r"^depth_(\d+)\.png$", re.IGNORECASE)
 ORDINAL_OFFSETS = ((0, 0), (-1, 0), (1, 0), (0, -1), (0, 1))
+STRUCTURAL_SUPPORT_FLOOR = 0.01
 
 
 def numbered_files(root: Path, pattern: re.Pattern[str]) -> dict[int, Path]:
@@ -166,29 +169,48 @@ def ordinal_samples(values: np.ndarray) -> tuple[np.ndarray, ...]:
     )
 
 
-def structural_change_fraction(
+def structural_evidence_fractions(
         current: np.ndarray,
         previous: np.ndarray,
-        contrast_floor: float = 0.01) -> float:
-    """Shader-equivalent maxRGB cross-5 ordinal-change fraction."""
+        contrast_floor: float = 0.01) -> tuple[float, float, float, float]:
+    """Return shader-equivalent change/current/previous/common support fractions."""
     if current.shape != previous.shape or current.ndim != 2:
         raise ValueError(
             f"structural planes must be equal-size 2-D arrays, got "
             f"{current.shape} and {previous.shape}")
     current_samples = ordinal_samples(current)
     previous_samples = ordinal_samples(previous)
+    current_support = np.zeros(current.shape, dtype=np.uint8)
+    previous_support = np.zeros(current.shape, dtype=np.uint8)
     common = np.zeros(current.shape, dtype=np.uint8)
     flips = np.zeros(current.shape, dtype=np.uint8)
     for first in range(4):
         for second in range(first + 1, 5):
             current_delta = current_samples[first] - current_samples[second]
             previous_delta = previous_samples[first] - previous_samples[second]
-            reliable = ((np.abs(current_delta) >= contrast_floor) &
-                        (np.abs(previous_delta) >= contrast_floor))
+            current_reliable = np.abs(current_delta) >= contrast_floor
+            previous_reliable = np.abs(previous_delta) >= contrast_floor
+            current_support += current_reliable
+            previous_support += previous_reliable
+            reliable = current_reliable & previous_reliable
             common += reliable
             flips += reliable & ((current_delta < 0.0) != (previous_delta < 0.0))
     changed = (common >= 4) & (flips >= 2) & (2 * flips >= common)
-    return float(np.mean(changed))
+    return (
+        float(np.mean(changed)),
+        float(np.mean(current_support >= 4)),
+        float(np.mean(previous_support >= 4)),
+        float(np.mean(common >= 4)),
+    )
+
+
+def structural_change_fraction(
+        current: np.ndarray,
+        previous: np.ndarray,
+        contrast_floor: float = 0.01) -> float:
+    """Shader-equivalent maxRGB cross-5 ordinal-change fraction."""
+    return structural_evidence_fractions(
+        current, previous, contrast_floor)[0]
 
 
 def raw_rgb_change_fraction(
@@ -247,7 +269,9 @@ def measure_clip(
     previous_rgb = None
     previous_ordinal = None
     previous_depth = None
-    previous_frame = None
+    appearance_history_frame = None
+    previous_depth_frame = None
+    appearance_history_held = False
     for frame_id in sorted(source_files):
         rgb = model_rgb(source_files[frame_id], width, height)
         ordinal = appearance_ordinal(source_files[frame_id], width, height)
@@ -256,26 +280,40 @@ def measure_clip(
             raise ValueError(
                 f"{clip_dir.name} frame {frame_id}: depth shape {depth.shape} "
                 f"does not match raw model shape {(height, width)}")
+        hold_appearance_history = False
         if (previous_rgb is not None and previous_ordinal is not None and
                 previous_depth is not None):
+            structural = structural_evidence_fractions(
+                ordinal,
+                previous_ordinal,
+                contrast_floor,
+            )
+            hold_appearance_history = (
+                not appearance_history_held and
+                structural[2] >= STRUCTURAL_SUPPORT_FLOOR and
+                structural[1] < STRUCTURAL_SUPPORT_FLOOR)
             records.append({
                 "clip": clip_dir.name,
-                "previous_frame": int(previous_frame),
+                "previous_frame": int(previous_depth_frame),
+                "appearance_previous_frame": int(appearance_history_frame),
+                "appearance_history_held": 1 if hold_appearance_history else 0,
                 "frame": frame_id,
                 "raw_rgb_change_fraction": raw_rgb_change_fraction(
                     rgb, previous_rgb, rgb_threshold),
-                "structural_change_fraction": structural_change_fraction(
-                    ordinal,
-                    previous_ordinal,
-                    contrast_floor,
-                ),
+                "structural_change_fraction": structural[0],
+                "current_structural_support_fraction": structural[1],
+                "previous_structural_support_fraction": structural[2],
+                "common_structural_support_fraction": structural[3],
                 "depth_change_fraction": depth_change_fraction(
                     depth, previous_depth, depth_threshold),
             })
-        previous_rgb = rgb
-        previous_ordinal = ordinal
-        previous_depth = depth
-        previous_frame = frame_id
+        if previous_rgb is None or not hold_appearance_history:
+            previous_rgb = rgb
+            previous_ordinal = ordinal
+            previous_depth = depth
+            appearance_history_frame = frame_id
+            previous_depth_frame = frame_id
+        appearance_history_held = hold_appearance_history
     return records
 
 

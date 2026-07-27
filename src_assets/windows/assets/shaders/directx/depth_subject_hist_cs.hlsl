@@ -7,8 +7,8 @@
 
 Texture2D<float>         DepthTexture : register(t0);  // normalized depth, high = near
 RWStructuredBuffer<uint> SubjectHist  : register(u0);  // 256 bins, weight in 1/1024 units
-RWStructuredBuffer<uint> PlainHist    : register(u1);  // bins + edge/depth/ordinal/raw-RGB counts
-Texture2D<float>         PreviousDepth : register(t1);
+RWStructuredBuffer<uint> PlainHist    : register(u1);  // bins + cut-evidence counts
+Texture2D<float>         PreviousDepth : register(t1);  // last structurally reliable endpoint
 StructuredBuffer<float>  CurrentModelInput : register(t2);  // completed frame, NCHW ImageNet
 StructuredBuffer<float>  PreviousModelInput : register(t3);
 StructuredBuffer<float4> MinMaxEma : register(t4);  // w = current-frame validity
@@ -31,6 +31,9 @@ groupshared uint g_edge_count;
 groupshared uint g_change_count;
 groupshared uint g_structural_change_count;
 groupshared uint g_raw_rgb_change_count;
+groupshared uint g_current_structural_support_count;
+groupshared uint g_previous_structural_support_count;
+groupshared uint g_common_structural_support_count;
 // A 16x16 group plus a one-pixel halo of the pre-tone-map point-sampled ordinal signal.
 groupshared float g_current_appearance_ordinal[STRUCTURE_TILE_TEXELS];
 groupshared float g_previous_appearance_ordinal[STRUCTURE_TILE_TEXELS];
@@ -64,6 +67,9 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
         g_change_count = 0u;
         g_structural_change_count = 0u;
         g_raw_rgb_change_count = 0u;
+        g_current_structural_support_count = 0u;
+        g_previous_structural_support_count = 0u;
+        g_common_structural_support_count = 0u;
     }
 
     // Cooperatively load the 18x18 ordinal tile. The final 68 halo samples are handled by the
@@ -141,6 +147,8 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
             previous_samples[sample_index] =
                 g_previous_appearance_ordinal[tile_index];
         }
+        uint current_comparisons = 0u;
+        uint previous_comparisons = 0u;
         uint common_comparisons = 0u;
         uint ordering_flips = 0u;
         [unroll]
@@ -149,9 +157,13 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
             for (int second = first + 1; second < 5; ++second) {
                 float current_delta = current_samples[first] - current_samples[second];
                 float previous_delta = previous_samples[first] - previous_samples[second];
-                bool common_reliable =
-                    abs(current_delta) >= STRUCTURAL_ORDINAL_CONTRAST_FLOOR &&
+                bool current_reliable =
+                    abs(current_delta) >= STRUCTURAL_ORDINAL_CONTRAST_FLOOR;
+                bool previous_reliable =
                     abs(previous_delta) >= STRUCTURAL_ORDINAL_CONTRAST_FLOOR;
+                current_comparisons += current_reliable ? 1u : 0u;
+                previous_comparisons += previous_reliable ? 1u : 0u;
+                bool common_reliable = current_reliable && previous_reliable;
                 if (common_reliable) {
                     ++common_comparisons;
                     if ((current_delta < 0.0f) != (previous_delta < 0.0f)) {
@@ -164,6 +176,15 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
             common_comparisons >= STRUCTURAL_ORDINAL_MIN_COMMON &&
             ordering_flips >= STRUCTURAL_ORDINAL_MIN_FLIPS &&
             ordering_flips * 2u >= common_comparisons;
+        if (current_comparisons >= STRUCTURAL_ORDINAL_MIN_COMMON) {
+            InterlockedAdd(g_current_structural_support_count, 1u);
+        }
+        if (previous_comparisons >= STRUCTURAL_ORDINAL_MIN_COMMON) {
+            InterlockedAdd(g_previous_structural_support_count, 1u);
+        }
+        if (common_comparisons >= STRUCTURAL_ORDINAL_MIN_COMMON) {
+            InterlockedAdd(g_common_structural_support_count, 1u);
+        }
         if (ordinal_changed) {
             InterlockedAdd(g_structural_change_count, 1u);
         }
@@ -198,5 +219,8 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
         InterlockedAdd(PlainHist[NUM_BINS + 1], g_change_count);
         InterlockedAdd(PlainHist[NUM_BINS + 2], g_structural_change_count);
         InterlockedAdd(PlainHist[NUM_BINS + 3], g_raw_rgb_change_count);
+        InterlockedAdd(PlainHist[NUM_BINS + 4], g_current_structural_support_count);
+        InterlockedAdd(PlainHist[NUM_BINS + 5], g_previous_structural_support_count);
+        InterlockedAdd(PlainHist[NUM_BINS + 6], g_common_structural_support_count);
     }
 }

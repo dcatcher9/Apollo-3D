@@ -101,6 +101,26 @@ class SceneCutEvidenceTests(unittest.TestCase):
             0.75,
         )
 
+    def test_structure_support_distinguishes_black_gap_from_preserved_exposure(self):
+        width, height = 32, 24
+        x = np.arange(width, dtype=np.float32)[None, :]
+        y = np.arange(height, dtype=np.float32)[:, None]
+        structured = np.mod(0.17 + 0.031 * (3 * x + 5 * y), 0.71)
+        exposed = structured * 1.25 + 0.04
+        black = np.zeros_like(structured)
+
+        exposure_fractions = evidence.structural_evidence_fractions(
+            exposed, structured)
+        self.assertEqual(exposure_fractions[0], 0.0)
+        self.assertGreater(min(exposure_fractions[1:]), 0.01)
+
+        black_fractions = evidence.structural_evidence_fractions(
+            black, structured)
+        self.assertEqual(black_fractions[0], 0.0)
+        self.assertEqual(black_fractions[1], 0.0)
+        self.assertGreater(black_fractions[2], 0.01)
+        self.assertEqual(black_fractions[3], 0.0)
+
     def test_measure_clip_emits_adjacent_source_depth_pairs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -122,7 +142,76 @@ class SceneCutEvidenceTests(unittest.TestCase):
         self.assertEqual([row["frame"] for row in records], [2, 3])
         self.assertEqual(records[0]["raw_rgb_change_fraction"], 0.0)
         self.assertEqual(records[0]["structural_change_fraction"], 0.0)
+        self.assertEqual(records[0]["current_structural_support_fraction"], 0.0)
+        self.assertEqual(records[0]["previous_structural_support_fraction"], 0.0)
+        self.assertEqual(records[0]["common_structural_support_fraction"], 0.0)
         self.assertEqual(records[0]["depth_change_fraction"], 1.0)
+
+    def test_measure_clip_retains_supported_appearance_and_depth_across_one_black(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            clip = root / "clip"
+            artifacts = root / "artifacts"
+            clip.mkdir()
+            artifacts.mkdir()
+            width, height = 32, 24
+            x = np.arange(width, dtype=np.uint8)[None, :]
+            y = np.arange(height, dtype=np.uint8)[:, None]
+            horizontal = np.broadcast_to(24 + x * 5, (height, width))
+            vertical = np.broadcast_to(24 + y * 7, (height, width))
+            frames = (horizontal, np.zeros((height, width), dtype=np.uint8), vertical)
+            for frame_id, values in enumerate(frames, start=1):
+                rgb = np.repeat(values[..., None], 3, axis=2)
+                Image.fromarray(rgb).save(clip / f"frame_{frame_id:05d}.png")
+                Image.fromarray(
+                    np.full((height, width), frame_id * 1000, dtype=np.uint16)
+                ).save(artifacts / f"depth_{frame_id:05d}.png")
+            (artifacts / "raw_shape.json").write_text(
+                f'{{"width": {width}, "height": {height}}}', encoding="utf-8")
+
+            records = evidence.measure_clip(clip, artifacts)
+
+        black, returned = records
+        self.assertEqual(black["appearance_previous_frame"], 1)
+        self.assertEqual(black["appearance_history_held"], 1)
+        self.assertEqual(returned["previous_frame"], 1)
+        self.assertEqual(returned["appearance_previous_frame"], 1)
+        self.assertEqual(returned["appearance_history_held"], 0)
+        self.assertGreater(returned["structural_change_fraction"], 0.5)
+        self.assertGreater(returned["common_structural_support_fraction"], 0.5)
+
+    def test_measure_clip_releases_history_after_second_structureless_update(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            clip = root / "clip"
+            artifacts = root / "artifacts"
+            clip.mkdir()
+            artifacts.mkdir()
+            width, height = 32, 24
+            x = np.arange(width, dtype=np.uint8)[None, :]
+            structured = np.broadcast_to(24 + x * 5, (height, width))
+            flat = np.zeros((height, width), dtype=np.uint8)
+            for frame_id, values in enumerate(
+                    (structured, flat, flat, structured), start=1):
+                rgb = np.repeat(values[..., None], 3, axis=2)
+                Image.fromarray(rgb).save(clip / f"frame_{frame_id:05d}.png")
+                Image.fromarray(
+                    np.full((height, width), frame_id * 1000, dtype=np.uint16)
+                ).save(artifacts / f"depth_{frame_id:05d}.png")
+            (artifacts / "raw_shape.json").write_text(
+                f'{{"width": {width}, "height": {height}}}', encoding="utf-8")
+
+            records = evidence.measure_clip(clip, artifacts)
+
+        first_flat, persistent_flat, returned = records
+        self.assertEqual(first_flat["appearance_previous_frame"], 1)
+        self.assertEqual(first_flat["previous_frame"], 1)
+        self.assertEqual(first_flat["appearance_history_held"], 1)
+        self.assertEqual(persistent_flat["appearance_previous_frame"], 1)
+        self.assertEqual(persistent_flat["previous_frame"], 1)
+        self.assertEqual(persistent_flat["appearance_history_held"], 0)
+        self.assertEqual(returned["appearance_previous_frame"], 3)
+        self.assertEqual(returned["previous_frame"], 3)
 
 
 if __name__ == "__main__":

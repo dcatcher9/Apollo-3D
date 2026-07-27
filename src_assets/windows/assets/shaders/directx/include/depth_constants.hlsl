@@ -59,15 +59,27 @@ float DepthReferenceTexelScale() {
 // respectively. Depth geometry still corroborates the proposal. Conversely, broad RGB
 // replacement with ordinal evidence inside a narrower QUIET band explicitly vetoes
 // standalone/relative depth authority on that transition: a neural-depth jump caused by exposure
-// or HDR tone mapping is not scene geometry and must not reset the zero plane. The band between
-// quiet and proposal entry remains ambiguous and preserves standalone geometry authority.
+// or HDR tone mapping is not scene geometry and must not reset the zero plane. That exposure
+// classification is evidence-backed only when enough texels have reliable structure in the
+// current frame, history frame, and their intersection. Reliable structure disappearing is held
+// out separately regardless of raw color distance: preserve the last reliable appearance/depth
+// history for one update. Only a near-exact supported endpoint return is suppressed, so a clipped
+// flash returning to the same shot cannot reset state. A second low-structure update releases the
+// veto and lets preserved A-vs-current depth decide, while a photometrically similar but
+// geometrically different supported return also remains visible. The band between quiet and
+// proposal entry remains ambiguous and preserves standalone geometry authority.
 #define RAW_RGB_PIXEL_DELTA 0.20f
 #define RAW_RGB_CUT_HIGH 0.70f
 #define STRUCTURAL_ORDINAL_CONTRAST_FLOOR 0.01f
 #define STRUCTURAL_ORDINAL_MIN_COMMON 4u
 #define STRUCTURAL_ORDINAL_MIN_FLIPS 2u
+#define STRUCTURAL_COLOR_MIN_SUPPORT 0.01f
 #define STRUCTURAL_COLOR_EXPOSURE_QUIET 0.01f
 #define STRUCTURAL_COLOR_CUT_HIGH 0.03f
+// Fraction of model texels allowed to differ by RAW_RGB_PIXEL_DELTA while still calling a
+// structureless-gap return the same visible endpoint. This is deliberately far below the broad
+// 70% proposal: low appearance evidence must not veto independently preserved A-vs-B geometry.
+#define STRUCTURELESS_RETURN_RGB_SAME_MAX 0.01f
 #define DEPTH_CUT_HIGH 0.60f
 #define DEPTH_CUT_CORROBORATE 0.25f
 #define DEPTH_CUT_LOW 0.10f

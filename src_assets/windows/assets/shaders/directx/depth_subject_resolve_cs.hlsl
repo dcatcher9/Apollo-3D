@@ -6,13 +6,15 @@
 //                       adaptive pop ratio }
 //   SubjectState[2] = { shot-latched zero-plane anchor shift in source pixels, valid,
 //                       cut-state flags (stored exactly as a uint-valued float),
-//                       model-input history valid }
+//                       model-input history state:
+//                         0 empty, 1 normal advance, 2 one-update hold,
+//                         3 persistent-low endpoint (advance + return authority) }
 // The reprojection then evaluates the permanent Bestv2 pixel-calibrated field.
 // Resets the histogram for the next frame's accumulation.
 
 RWStructuredBuffer<uint>   SubjectHist  : register(u0);  // 256 weighted bins (subject estimate)
 RWStructuredBuffer<float4> SubjectState : register(u1);  // [0..2], see header above
-RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 bins + four evidence counters
+RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 bins + seven evidence counters
 
 #include "include/depth_constants.hlsl"
 #include "include/bestv2_curve.hlsl"
@@ -27,8 +29,10 @@ RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 bins + four evid
 
 // Independent proposal arms prevent one signal from starving the other. A cut clears both arms.
 // Geometry rearms after two low-depth updates; appearance rearms after two updates without the
-// qualified broad-RGB + ordinal proposal. CUT_FLAG_LATCHED distinguishes that recovery state from
-// startup, where no weak or relative cut path is allowed.
+// qualified broad-RGB + ordinal proposal. CUT_FLAG_LATCHED is a permanent "has accepted a cut"
+// phase marker for this estimator lifetime: independent branch rearm deliberately never clears
+// it. That asymmetry distinguishes post-cut recovery from startup, where no weak or relative cut
+// path is allowed.
 #define CUT_FLAG_GEOMETRY_ARMED 1u
 #define CUT_FLAG_APPEARANCE_ARMED 2u
 #define CUT_FLAG_GEOMETRY_LOW_ONCE 4u
@@ -120,25 +124,75 @@ void main() {
                                            (float)PlainHist[NUM_BINS + 2] / ptotal : 0.0f;
         float raw_rgb_change_fraction = ptotal > 0.5f ?
                                         (float)PlainHist[NUM_BINS + 3] / ptotal : 0.0f;
+        float current_structural_support_fraction = ptotal > 0.5f ?
+                                                    (float)PlainHist[NUM_BINS + 4] / ptotal : 0.0f;
+        float previous_structural_support_fraction = ptotal > 0.5f ?
+                                                     (float)PlainHist[NUM_BINS + 5] / ptotal : 0.0f;
+        float common_structural_support_fraction = ptotal > 0.5f ?
+                                                   (float)PlainHist[NUM_BINS + 6] / ptotal : 0.0f;
         // Normalization settling can change 50-60% of depth texels on the first few frames.
         // The measured committed cuts reach 62.5% and 63.1%, while ordinary core motion stays
         // below 19.7%; 60% is therefore the armed geometry authority. The weaker 25% path requires
         // BOTH broad RGB replacement and ordinal structural change. A flash passes broad RGB but
         // fails ordinal structure; detailed motion can pass ordinal but stays far below broad RGB.
         bool model_input_history_valid = s2.w > 0.5f;
+        bool model_input_history_gap = s2.w > 1.5f && s2.w < 2.5f;
+        bool low_structure_scene = s2.w > 2.5f;
         bool appearance_proposal =
             model_input_history_valid &&
             raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH &&
             structural_change_fraction >= STRUCTURAL_COLOR_CUT_HIGH;
-        // A frame-wide color replacement with no ordinal structure is exposure-like. Neural
-        // depth is not geometry authority on that exact transition: HDR tone mapping and model
-        // normalization can move most depth texels even though the captured scene did not move.
-        // Keep this veto local to the transition; ordinary geometry-only changes (no broad RGB)
-        // and structurally qualified editorial cuts remain eligible.
-        bool exposure_like_transition =
+        bool current_structure_reliable =
+            current_structural_support_fraction >= STRUCTURAL_COLOR_MIN_SUPPORT;
+        bool previous_structure_reliable =
+            previous_structural_support_fraction >= STRUCTURAL_COLOR_MIN_SUPPORT;
+        bool common_structure_reliable =
+            common_structural_support_fraction >= STRUCTURAL_COLOR_MIN_SUPPORT;
+        bool broad_rgb_transition =
             model_input_history_valid &&
-            raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH &&
+            raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH;
+        // Quiet ordinal change is evidence of exposure only when both frames and their common
+        // comparison sites carry enough usable structure. Without these support checks, a black
+        // or fully clipped frame vacuously looks exposure-like because every ordinal pair abstains.
+        bool exposure_like_transition =
+            broad_rgb_transition &&
+            current_structure_reliable &&
+            previous_structure_reliable &&
+            common_structure_reliable &&
             structural_change_fraction < STRUCTURAL_COLOR_EXPOSURE_QUIET;
+        // A transition from reliable structure into a structureless frame is intentionally
+        // deferred and the last reliable appearance/depth history is retained below. Raw RGB
+        // cannot qualify the flat frame itself: a uniform value can match the previous scene's
+        // dominant color. The next supported frame resolves the deferred relation against the
+        // preserved endpoint.
+        bool structureless_candidate =
+            model_input_history_valid &&
+            previous_structure_reliable &&
+            !current_structure_reliable;
+        // One update is enough to distinguish a flash from persistent low-detail content. Hold A
+        // exactly once. On a second consecutive low-structure update, preserved A-vs-current
+        // geometry is authoritative and history advances afterward whether or not it crosses the
+        // cut threshold; that prevents an indefinite veto and prevents periodic retriggers.
+        bool structureless_transition =
+            structureless_candidate &&
+            !model_input_history_gap;
+        bool persistent_structureless_transition =
+            structureless_candidate &&
+            model_input_history_gap;
+        // The history-copy pass holds depth and appearance together. Suppress only a near-exact
+        // supported endpoint return. The former broad-RGB (<70%) veto classified many visibly
+        // different endpoints as "same"; a low-appearance B could then overrule authoritative
+        // A-vs-B depth. A strict 1% endpoint-equivalence bound still bridges an exact clipped flash
+        // while allowing photometrically similar, geometrically different content to cut.
+        bool same_scene_gap_return =
+            model_input_history_gap &&
+            current_structure_reliable &&
+            raw_rgb_change_fraction < STRUCTURELESS_RETURN_RGB_SAME_MAX &&
+            structural_change_fraction < STRUCTURAL_COLOR_EXPOSURE_QUIET;
+        bool appearance_veto =
+            exposure_like_transition ||
+            structureless_transition ||
+            same_scene_gap_return;
         uint cut_flags = (uint)max(s2.z, 0.0f);
         bool geometry_armed = (cut_flags & CUT_FLAG_GEOMETRY_ARMED) != 0u;
         bool appearance_armed = (cut_flags & CUT_FLAG_APPEARANCE_ARMED) != 0u;
@@ -153,7 +207,7 @@ void main() {
         // remains detectable without a periodic cooldown escape.
         bool relative_geometry_spike =
             cut_latched && !geometry_armed &&
-            !exposure_like_transition &&
+            !appearance_veto &&
             scene_age >= POP_CLASSIFY_SETTLE_FRAMES &&
             change_fraction >= DEPTH_CUT_RELATIVE_FLOOR &&
             (change_fraction >= depth_change_baseline + DEPTH_CUT_RELATIVE_MARGIN ||
@@ -161,10 +215,12 @@ void main() {
                  depth_change_baseline * DEPTH_CUT_RELATIVE_MULTIPLIER);
         bool shot_cut =
             initialized &&
-            ((geometry_armed && !exposure_like_transition &&
+            ((geometry_armed && !appearance_veto &&
               change_fraction >= DEPTH_CUT_HIGH) ||
              (appearance_armed && appearance_proposal &&
               change_fraction >= DEPTH_CUT_CORROBORATE) ||
+             (low_structure_scene && current_structure_reliable &&
+              change_fraction >= DEPTH_CUT_HIGH) ||
              relative_geometry_spike);
 
         if (!initialized) {
@@ -176,8 +232,13 @@ void main() {
             cut_flags = CUT_FLAG_LATCHED;
             depth_change_baseline = change_fraction;
         } else {
-            depth_change_baseline =
-                lerp(depth_change_baseline, change_fraction, DEPTH_CUT_BASELINE_ALPHA);
+            // The structureless frame has no trustworthy geometry. Its comparison to the
+            // preserved endpoint must not pull the relative-cut baseline upward and hide the
+            // supported A-vs-B return that resolves the deferred transition.
+            if (!structureless_transition) {
+                depth_change_baseline =
+                    lerp(depth_change_baseline, change_fraction, DEPTH_CUT_BASELINE_ALPHA);
+            }
             if (!cut_latched) {
                 if (scene_age >= POP_CLASSIFY_SETTLE_FRAMES) {
                     // Arm for the NEXT update. Startup normalization and appearance changes can
@@ -211,6 +272,11 @@ void main() {
                 }
             }
         }
+        float next_model_input_history_state =
+            structureless_transition ? 2.0f :
+            ((persistent_structureless_transition ||
+              (low_structure_scene && !current_structure_reliable)) ? 3.0f :
+             1.0f);
 
         // Damp the stretch band, the last per-frame adaptive gain in the depth domain that had no
         // smoothing at all (subject depth and the normalization min/max are both EMA'd).
@@ -324,7 +390,9 @@ void main() {
         s1 = float4(lo_val, inv_range, depth_change_baseline, pop_ratio);
         s2 = float4(zero_anchor_shift, zero_valid,
                     (float)cut_flags,
-                    1.0f); // current NCHW input is copied to history after this dispatch
+                    next_model_input_history_state);
+        // depth_valid_history_cs holds only state 2. State 3 advances the persistent-low endpoint
+        // while retaining one supported-return authority.
     }
     // total == 0 (uninitialized depth): keep previous state.
 
@@ -340,4 +408,7 @@ void main() {
     PlainHist[NUM_BINS + 1] = 0u;
     PlainHist[NUM_BINS + 2] = 0u;
     PlainHist[NUM_BINS + 3] = 0u;
+    PlainHist[NUM_BINS + 4] = 0u;
+    PlainHist[NUM_BINS + 5] = 0u;
+    PlainHist[NUM_BINS + 6] = 0u;
 }

@@ -172,6 +172,11 @@ Run each sequence for at least 20 seconds, followed by five seconds of a static 
 9. A cut during uninterrupted persistent motion (the deterministic host fixture covers the
    offline path; repeat it on Galaxy XR for end-to-end behavior).
 10. Sustained motion that stops, independently rearms the branches, then cuts again.
+11. A structured A -> B -> C editorial-cut sweep with the second cut placed one through eight
+    valid depth updates after the first. Run each spacing once with a stable interstitial shot and
+    once with uninterrupted motion. This is the explicit decision test for the retained
+    anti-double-pulse refractory: record both missed second cuts and false relatches from the first
+    cut before changing the relative-geometry settle boundary.
 
 Repeat the pan, corridor, flash, and true-cut cases with SDR/HDR, 16:9/21:9/32:9, each supported
 depth model, fixed/adaptive pop, and every zero-plane mode.
@@ -194,5 +199,8 @@ telemetry and headset video. The contract passes when:
   immediately and performs its existing settled-age correction without another cut pulse;
 - a true cut during persistent motion remains observable through an independently ready
   appearance arm or a relative geometry edge;
+- the rapid-cut sweep identifies the shortest spacing that accepts the second cut without ever
+  turning one cut's normalization settling into a second pulse; keep the current refractory until
+  that false-positive/false-negative boundary has headset evidence;
 - fixed HUD elements remain stable relative to the zero plane;
 - diagnostics introduce no GPU queue stall or production readback.

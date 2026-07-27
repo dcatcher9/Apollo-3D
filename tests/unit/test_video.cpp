@@ -54,7 +54,14 @@ namespace {
              1.099f * std::pow(linear, 0.45f) - 0.099f;
   }
 
-  float structural_change_fraction(
+  struct structural_evidence_t {
+    float change_fraction;
+    float current_support_fraction;
+    float previous_support_fraction;
+    float common_support_fraction;
+  };
+
+  structural_evidence_t structural_evidence(
     const std::vector<float> &current,
     const std::vector<float> &previous,
     int width,
@@ -69,6 +76,9 @@ namespace {
       return values[static_cast<std::size_t>(sy * width + sx)];
     };
     std::size_t changed = 0;
+    std::size_t current_supported = 0;
+    std::size_t previous_supported = 0;
+    std::size_t common_supported = 0;
     for (int y = 0; y < height; ++y) {
       for (int x = 0; x < width; ++x) {
         std::array<float, 5> current_samples {};
@@ -79,6 +89,8 @@ namespace {
           previous_samples[index] =
             sample(previous, x + offsets[index][0], y + offsets[index][1]);
         }
+        unsigned current_comparisons = 0;
+        unsigned previous_comparisons = 0;
         unsigned common_comparisons = 0;
         unsigned ordering_flips = 0;
         for (std::size_t first = 0; first < 4; ++first) {
@@ -87,8 +99,11 @@ namespace {
               current_samples[first] - current_samples[second];
             const float previous_delta =
               previous_samples[first] - previous_samples[second];
-            if (std::abs(current_delta) >= 0.01f &&
-                std::abs(previous_delta) >= 0.01f) {
+            const bool current_reliable = std::abs(current_delta) >= 0.01f;
+            const bool previous_reliable = std::abs(previous_delta) >= 0.01f;
+            current_comparisons += current_reliable ? 1u : 0u;
+            previous_comparisons += previous_reliable ? 1u : 0u;
+            if (current_reliable && previous_reliable) {
               ++common_comparisons;
               if ((current_delta < 0.0f) != (previous_delta < 0.0f)) {
                 ++ordering_flips;
@@ -96,13 +111,31 @@ namespace {
             }
           }
         }
+        current_supported += current_comparisons >= 4 ? 1u : 0u;
+        previous_supported += previous_comparisons >= 4 ? 1u : 0u;
+        common_supported += common_comparisons >= 4 ? 1u : 0u;
         if (common_comparisons >= 4 && ordering_flips >= 2 &&
             ordering_flips * 2 >= common_comparisons) {
           ++changed;
         }
       }
     }
-    return static_cast<float>(changed) / static_cast<float>(width * height);
+    const auto denominator = static_cast<float>(width * height);
+    return {
+      static_cast<float>(changed) / denominator,
+      static_cast<float>(current_supported) / denominator,
+      static_cast<float>(previous_supported) / denominator,
+      static_cast<float>(common_supported) / denominator,
+    };
+  }
+
+  float structural_change_fraction(
+    const std::vector<float> &current,
+    const std::vector<float> &previous,
+    int width,
+    int height
+  ) {
+    return structural_evidence(current, previous, width, height).change_fraction;
   }
 
   constexpr unsigned cut_flag_geometry_armed = 1u;
@@ -117,6 +150,7 @@ namespace {
     unsigned cut_flags = cut_flags_ready;
     float scene_age = 8.0f;
     float depth_change_baseline = 0.0f;
+    float model_input_history_state = 1.0f;
     bool initialized = true;
   };
 
@@ -125,19 +159,58 @@ namespace {
     float depth_change_fraction,
     float raw_rgb_change_fraction,
     float structural_change_fraction,
-    bool model_input_history_valid = true
+    float current_structural_support_fraction = 1.0f,
+    float previous_structural_support_fraction = 1.0f,
+    float common_structural_support_fraction = 1.0f
   ) {
     state.scene_age = state.initialized ?
                         std::min(state.scene_age + 1.0f, 65535.0f) :
                         0.0f;
+    const bool model_input_history_valid =
+      state.model_input_history_state > 0.5f;
+    const bool model_input_history_gap =
+      state.model_input_history_state > 1.5f &&
+      state.model_input_history_state < 2.5f;
+    const bool low_structure_scene =
+      state.model_input_history_state > 2.5f;
     const bool appearance_proposal =
       model_input_history_valid &&
       raw_rgb_change_fraction >= 0.70f &&
       structural_change_fraction >= 0.03f;
-    const bool exposure_like_transition =
+    const bool current_structure_reliable =
+      current_structural_support_fraction >= 0.01f;
+    const bool previous_structure_reliable =
+      previous_structural_support_fraction >= 0.01f;
+    const bool common_structure_reliable =
+      common_structural_support_fraction >= 0.01f;
+    const bool broad_rgb_transition =
       model_input_history_valid &&
-      raw_rgb_change_fraction >= 0.70f &&
+      raw_rgb_change_fraction >= 0.70f;
+    const bool exposure_like_transition =
+      broad_rgb_transition &&
+      current_structure_reliable &&
+      previous_structure_reliable &&
+      common_structure_reliable &&
       structural_change_fraction < 0.01f;
+    const bool structureless_candidate =
+      model_input_history_valid &&
+      previous_structure_reliable &&
+      !current_structure_reliable;
+    const bool structureless_transition =
+      structureless_candidate &&
+      !model_input_history_gap;
+    const bool persistent_structureless_transition =
+      structureless_candidate &&
+      model_input_history_gap;
+    const bool same_scene_gap_return =
+      model_input_history_gap &&
+      current_structure_reliable &&
+      raw_rgb_change_fraction < 0.01f &&
+      structural_change_fraction < 0.01f;
+    const bool appearance_veto =
+      exposure_like_transition ||
+      structureless_transition ||
+      same_scene_gap_return;
     const bool geometry_armed =
       (state.cut_flags & cut_flag_geometry_armed) != 0u;
     const bool appearance_armed =
@@ -147,17 +220,19 @@ namespace {
       std::clamp(state.depth_change_baseline, 0.0f, 1.0f);
     const bool relative_geometry_spike =
       cut_latched && !geometry_armed &&
-      !exposure_like_transition &&
+      !appearance_veto &&
       state.scene_age >= 8.0f &&
       depth_change_fraction >= 0.30f &&
       (depth_change_fraction >= state.depth_change_baseline + 0.20f ||
        depth_change_fraction >= state.depth_change_baseline * 2.0f);
     const bool shot_cut =
       state.initialized &&
-      ((geometry_armed && !exposure_like_transition &&
+      ((geometry_armed && !appearance_veto &&
         depth_change_fraction >= 0.60f) ||
        (appearance_armed && appearance_proposal &&
         depth_change_fraction >= 0.25f) ||
+       (low_structure_scene && current_structure_reliable &&
+        depth_change_fraction >= 0.60f) ||
        relative_geometry_spike);
 
     if (!state.initialized) {
@@ -169,8 +244,10 @@ namespace {
       state.cut_flags = cut_flag_latched;
       state.depth_change_baseline = depth_change_fraction;
     } else {
-      state.depth_change_baseline +=
-        (depth_change_fraction - state.depth_change_baseline) * 0.125f;
+      if (!structureless_transition) {
+        state.depth_change_baseline +=
+          (depth_change_fraction - state.depth_change_baseline) * 0.125f;
+      }
       if (!cut_latched) {
         if (state.scene_age >= 8.0f) {
           state.cut_flags = cut_flags_ready;
@@ -202,6 +279,11 @@ namespace {
         }
       }
     }
+    state.model_input_history_state =
+      structureless_transition ? 2.0f :
+      (persistent_structureless_transition ||
+       (low_structure_scene && !current_structure_reliable)) ? 3.0f :
+      1.0f;
     state.initialized = true;
     return shot_cut;
   }
@@ -715,10 +797,12 @@ TEST(HostSbsSceneCutTest, OrdinalEvidenceRejectsMonotoneExposureButDetectsConten
     }
   }
 
-  EXPECT_FLOAT_EQ(
-    structural_change_fraction(exposed, original, width, height),
-    0.0f
-  );
+  const auto exposure_evidence =
+    structural_evidence(exposed, original, width, height);
+  EXPECT_FLOAT_EQ(exposure_evidence.change_fraction, 0.0f);
+  EXPECT_GT(exposure_evidence.current_support_fraction, 0.01f);
+  EXPECT_GT(exposure_evidence.previous_support_fraction, 0.01f);
+  EXPECT_GT(exposure_evidence.common_support_fraction, 0.01f);
   EXPECT_GT(
     structural_change_fraction(different, original, width, height),
     0.02f
@@ -793,6 +877,16 @@ TEST(HostSbsSceneCutTest, OrdinalEvidenceRejectsMonotoneExposureButDetectsConten
     structural_change_fraction(clipped_gain, clipped_pattern, width, height),
     0.0f
   );
+
+  // A flat endpoint is not evidence that ordinal structure was preserved. It has no reliable
+  // current or common comparison sites, even though the structured history remains well supported.
+  const std::vector<float> black(width * height, 0.0f);
+  const auto black_evidence =
+    structural_evidence(black, original, width, height);
+  EXPECT_FLOAT_EQ(black_evidence.change_fraction, 0.0f);
+  EXPECT_FLOAT_EQ(black_evidence.current_support_fraction, 0.0f);
+  EXPECT_GT(black_evidence.previous_support_fraction, 0.01f);
+  EXPECT_FLOAT_EQ(black_evidence.common_support_fraction, 0.0f);
 }
 
 TEST(HostSbsSceneCutTest, AppearanceFusionRejectsExposureAndHonorsExactBounds) {
@@ -850,6 +944,165 @@ TEST(HostSbsSceneCutTest, ExposureLikeTransitionVetoesAbsoluteAndRelativeDepthAu
   EXPECT_TRUE(advance_shot_cut(structural_cut, 0.60f, 0.70f, 0.03f));
 }
 
+TEST(HostSbsSceneCutTest, StructurelessGapBridgesSaturatedFlashAndFindsDifferentReturn) {
+  // Entering a fully clipped frame has no usable current/common ordinal support. Suppress its
+  // neural-depth jump and hold the last reliable appearance/depth history instead of treating
+  // abstention as proof of preserved exposure structure.
+  shot_cut_state_t flash;
+  EXPECT_FALSE(advance_shot_cut(
+    flash,
+    0.95f,
+    1.0f,
+    0.0f,
+    0.0f,
+    0.90f,
+    0.0f
+  ));
+  EXPECT_FLOAT_EQ(flash.model_input_history_state, 2.0f);
+  EXPECT_FLOAT_EQ(flash.depth_change_baseline, 0.0f);
+
+  // Appearance and depth history remain paired to A. The exact appearance endpoint proves this
+  // is the same shot, so consume the return without a cut and resume normal history.
+  EXPECT_FALSE(advance_shot_cut(
+    flash,
+    0.05f,
+    0.0f,
+    0.0f,
+    0.90f,
+    0.90f,
+    0.90f
+  ));
+  EXPECT_FLOAT_EQ(flash.model_input_history_state, 1.0f);
+
+  // Raw RGB cannot qualify support loss: a flat value can match the dominant color of the
+  // preceding scene. Reliable-to-structureless transitions are therefore held even at negligible
+  // raw delta; the next supported frame is the authoritative endpoint comparison.
+  shot_cut_state_t white_flash;
+  EXPECT_FALSE(advance_shot_cut(
+    white_flash,
+    0.95f,
+    0.085f,
+    0.0f,
+    0.0f,
+    0.90f,
+    0.0f
+  ));
+  EXPECT_FLOAT_EQ(white_flash.model_input_history_state, 2.0f);
+
+  // A second consecutive low-structure update is persistent content, not a one-frame flash.
+  // Release the veto, compare against the held A depth, and advance history after the decision.
+  shot_cut_state_t persistent_flat;
+  EXPECT_FALSE(advance_shot_cut(
+    persistent_flat,
+    0.95f,
+    1.0f,
+    0.0f,
+    0.0f,
+    0.90f,
+    0.0f
+  ));
+  EXPECT_FLOAT_EQ(persistent_flat.model_input_history_state, 2.0f);
+  EXPECT_TRUE(advance_shot_cut(
+    persistent_flat,
+    0.60f,
+    1.0f,
+    0.0f,
+    0.0f,
+    0.90f,
+    0.0f
+  ));
+  EXPECT_FLOAT_EQ(persistent_flat.model_input_history_state, 3.0f);
+  EXPECT_EQ(persistent_flat.cut_flags, cut_flag_latched);
+  // The accepted flat endpoint is now the reference, so persistence cannot pulse periodically.
+  EXPECT_FALSE(advance_shot_cut(
+    persistent_flat,
+    0.0f,
+    0.0f,
+    0.0f,
+    0.0f,
+    0.0f,
+    0.0f
+  ));
+  EXPECT_FLOAT_EQ(persistent_flat.model_input_history_state, 3.0f);
+  EXPECT_NE(persistent_flat.cut_flags & cut_flag_latched, 0u);
+  // The first supported return consumes the event-scoped authority and can cut even though the
+  // ordinary post-cut geometry arm is still refractory.
+  EXPECT_TRUE(advance_shot_cut(
+    persistent_flat,
+    0.60f,
+    0.01f,
+    0.0f,
+    0.90f,
+    0.0f,
+    0.0f
+  ));
+  EXPECT_FLOAT_EQ(persistent_flat.model_input_history_state, 1.0f);
+  EXPECT_EQ(persistent_flat.cut_flags, cut_flag_latched);
+
+  // A changed structured return must retain standalone A-vs-B geometry authority even when both
+  // appearance signals are quiet. The old "< broad RGB" return veto suppressed this exact case.
+  shot_cut_state_t changed_return;
+  changed_return.model_input_history_state = 2.0f;
+  EXPECT_TRUE(advance_shot_cut(
+    changed_return,
+    0.60f,
+    0.01f,
+    0.0f,
+    0.90f,
+    0.90f,
+    0.90f
+  ));
+
+  shot_cut_state_t slate;
+  EXPECT_FALSE(advance_shot_cut(
+    slate,
+    0.95f,
+    1.0f,
+    0.0f,
+    0.0f,
+    0.90f,
+    0.0f
+  ));
+  EXPECT_FLOAT_EQ(slate.model_input_history_state, 2.0f);
+
+  // A different structured endpoint is compared with the preserved pre-slate shot. Broad RGB,
+  // changed ordinal structure, and depth corroboration accept exactly that visible return.
+  EXPECT_TRUE(advance_shot_cut(
+    slate,
+    0.60f,
+    0.80f,
+    0.10f,
+    0.90f,
+    0.90f,
+    0.40f
+  ));
+  EXPECT_FLOAT_EQ(slate.model_input_history_state, 1.0f);
+}
+
+TEST(HostSbsSceneCutTest, ExposureClassificationRequiresExactStructuralSupportFloor) {
+  shot_cut_state_t below_support;
+  EXPECT_TRUE(advance_shot_cut(
+    below_support,
+    0.60f,
+    0.70f,
+    0.0f,
+    0.90f,
+    0.90f,
+    0.009f
+  ));
+
+  shot_cut_state_t exact_support;
+  EXPECT_FALSE(advance_shot_cut(
+    exact_support,
+    0.95f,
+    0.70f,
+    0.0f,
+    0.90f,
+    0.90f,
+    0.01f
+  ));
+}
+
 TEST(HostSbsSceneCutTest, StartupArmsOnSettledUpdateAndFiresOnlyAfterward) {
   shot_cut_state_t startup;
   startup.cut_flags = 0u;
@@ -884,6 +1137,8 @@ TEST(HostSbsSceneCutTest, PersistentEvidencePulsesOnceAndIndependentArmsRecover)
     state.cut_flags,
     cut_flag_latched | cut_flag_geometry_armed | cut_flag_appearance_armed
   );
+  EXPECT_NE(state.cut_flags & cut_flag_latched, 0u)
+    << "independent proposal rearm must retain the permanent post-cut phase marker";
 
   // Arming affects the following update, so the second quiet update did not pulse.
   EXPECT_TRUE(advance_shot_cut(state, 0.60f, 0.80f, 0.03f));
@@ -960,12 +1215,15 @@ TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryAr
   const auto constants = read_source_file(shader_dir + "include/depth_constants.hlsl");
   const auto preprocess = read_source_file(shader_dir + "rgb_to_nchw_cs.hlsl");
   const auto history = read_source_file(shader_dir + "depth_valid_history_cs.hlsl");
+  const auto estimator =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
 
   ASSERT_FALSE(histogram.empty());
   ASSERT_FALSE(resolve.empty());
   ASSERT_FALSE(constants.empty());
   ASSERT_FALSE(preprocess.empty());
   ASSERT_FALSE(history.empty());
+  ASSERT_FALSE(estimator.empty());
   EXPECT_NE(histogram.find("CurrentModelColor"), std::string::npos);
   EXPECT_NE(
     histogram.find("groupshared float g_current_appearance_ordinal"),
@@ -1000,8 +1258,25 @@ TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryAr
   EXPECT_NE(preprocess.find("x_coverage * y_coverage"), std::string::npos);
   EXPECT_NE(preprocess.find("weighted_sum / footprint_area"), std::string::npos);
   EXPECT_NE(history.find("PreviousAppearanceOrdinal[idx]"), std::string::npos);
+  EXPECT_NE(history.find("PreviousReliableDepth[dtid.xy]"), std::string::npos);
+  EXPECT_NE(history.find("CurrentDepth[dtid.xy]"), std::string::npos);
+  EXPECT_NE(
+    history.find(
+      "SubjectState[2].w > 1.5f && SubjectState[2].w < 2.5f"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(estimator.find("depth_cut_history_srv.Get()"), std::string::npos);
+  EXPECT_NE(estimator.find("depth_cut_history_uav.Get()"), std::string::npos);
+  EXPECT_NE(estimator.find("ID3D11ShaderResourceView *history_srvs[5]"), std::string::npos);
+  EXPECT_NE(estimator.find("ID3D11UnorderedAccessView *history_uavs[3]"), std::string::npos);
   EXPECT_NE(histogram.find("RAW_RGB_PIXEL_DELTA"), std::string::npos);
   EXPECT_NE(histogram.find("PlainHist[NUM_BINS + 3]"), std::string::npos);
+  EXPECT_NE(histogram.find("PlainHist[NUM_BINS + 4]"), std::string::npos);
+  EXPECT_NE(histogram.find("PlainHist[NUM_BINS + 5]"), std::string::npos);
+  EXPECT_NE(histogram.find("PlainHist[NUM_BINS + 6]"), std::string::npos);
+  EXPECT_NE(histogram.find("current_comparisons"), std::string::npos);
+  EXPECT_NE(histogram.find("previous_comparisons"), std::string::npos);
   EXPECT_NE(histogram.find("tile_idx += 256u"), std::string::npos);
   EXPECT_NE(
     histogram.find("for (int first = 0; first < 4; ++first)"),
@@ -1019,17 +1294,26 @@ TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryAr
   EXPECT_EQ(histogram.find("CurrentModelLuma"), std::string::npos);
   EXPECT_NE(resolve.find("appearance_proposal"), std::string::npos);
   EXPECT_NE(resolve.find("exposure_like_transition"), std::string::npos);
+  EXPECT_NE(resolve.find("structureless_transition"), std::string::npos);
+  EXPECT_NE(resolve.find("same_scene_gap_return"), std::string::npos);
+  EXPECT_NE(
+    resolve.find("raw_rgb_change_fraction < STRUCTURELESS_RETURN_RGB_SAME_MAX"),
+    std::string::npos
+  );
+  EXPECT_NE(resolve.find("next_model_input_history_state"), std::string::npos);
+  EXPECT_NE(resolve.find("model_input_history_gap"), std::string::npos);
+  EXPECT_NE(resolve.find("low_structure_scene"), std::string::npos);
   EXPECT_NE(resolve.find("raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH"), std::string::npos);
   EXPECT_NE(
     resolve.find("structural_change_fraction < STRUCTURAL_COLOR_EXPOSURE_QUIET"),
     std::string::npos
   );
-  EXPECT_NE(resolve.find("geometry_armed && !exposure_like_transition"), std::string::npos);
+  EXPECT_NE(resolve.find("geometry_armed && !appearance_veto"), std::string::npos);
   const auto relative_geometry_latch =
     resolve.find("cut_latched && !geometry_armed &&");
   ASSERT_NE(relative_geometry_latch, std::string::npos);
   EXPECT_NE(
-    resolve.find("!exposure_like_transition", relative_geometry_latch),
+    resolve.find("!appearance_veto", relative_geometry_latch),
     std::string::npos
   );
   EXPECT_NE(resolve.find("change_fraction >= DEPTH_CUT_CORROBORATE"), std::string::npos);
@@ -1040,6 +1324,10 @@ TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryAr
   );
   EXPECT_NE(resolve.find("CUT_FLAG_GEOMETRY_ARMED"), std::string::npos);
   EXPECT_NE(resolve.find("CUT_FLAG_APPEARANCE_ARMED"), std::string::npos);
+  EXPECT_NE(
+    resolve.find("low_structure_scene && current_structure_reliable"),
+    std::string::npos
+  );
   EXPECT_NE(resolve.find("change_fraction < DEPTH_CUT_LOW"), std::string::npos);
   EXPECT_NE(
     resolve.find(
@@ -1052,7 +1340,12 @@ TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryAr
   EXPECT_EQ(resolve.find("color_change_fraction"), std::string::npos);
   EXPECT_NE(constants.find("#define RAW_RGB_PIXEL_DELTA 0.20f"), std::string::npos);
   EXPECT_NE(constants.find("#define RAW_RGB_CUT_HIGH 0.70f"), std::string::npos);
+  EXPECT_NE(constants.find("#define STRUCTURAL_COLOR_MIN_SUPPORT 0.01f"), std::string::npos);
   EXPECT_NE(constants.find("#define STRUCTURAL_COLOR_CUT_HIGH 0.03f"), std::string::npos);
+  EXPECT_NE(
+    constants.find("#define STRUCTURELESS_RETURN_RGB_SAME_MAX 0.01f"),
+    std::string::npos
+  );
   EXPECT_NE(
     constants.find("#define STRUCTURAL_COLOR_EXPOSURE_QUIET 0.01f"),
     std::string::npos

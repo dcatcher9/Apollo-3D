@@ -113,8 +113,9 @@ python tools/sbsbench/generate_report.py <control-run> <treatment-run> <report.h
 would contaminate the `sbs_perf.json` evidence. It then scores clips with `--jobs N` ordered CPU
 workers (default up to eight), and passes that value to report verification. Results, failures,
 baseline updates, and console summaries retain clip order regardless of worker completion order.
-The default image-working-set allowance is 24 megapixels per scoring job; use `--jobs 1` for the
-former serial/memory-minimal behavior.
+The default image-working-set allowance is 24 megapixels for the whole scoring run. A weighted
+semaphore shares it across every concurrent clip and its inner frame workers; `--jobs N` therefore
+cannot multiply the allowance. Use `--jobs 1` for the former serial/minimal-scheduling behavior.
 
 Within each clip, metric scoring parallelizes independent frames with one reusable process pool.
 The documented `generate_report.py` entry point safely provides the same process backend on
@@ -124,6 +125,9 @@ nested CPU oversubscription. The automatic worker cap is 24. Developers can over
 and worker bounds with `SBSBENCH_SPATIAL_WORKERS` and `SBSBENCH_SPATIAL_PIXEL_BUDGET_MPX`;
 ordinary gates should use the defaults. Standalone reports also default to up to eight scoring
 jobs and accept `--scoring-jobs N`; use `--scoring-jobs 1` for serial report remeasurement.
+An explicit spatial-worker override that would exceed the run-global pixel allowance fails closed
+instead of silently bypassing the memory contract. A single packed frame above the allowance also
+fails with the environment variable needed to raise the limit, preserving a literal global bound.
 When `run_eval.py --report-control ...` creates the report immediately, the report reuses the
 just-authenticated treatment rows in process (with before/after artifact hashes) and remeasures
 only the control. A standalone report has no trusted live rows and therefore remeasures both
@@ -302,7 +306,10 @@ proposal arms remain closed throughout the intervening motion, and therefore aut
 second pulse as the latched relative-geometry escape. The evaluator authenticates every exposure
 frame against its exact integer global-RGB-gain transform and every sustained-motion frame against
 its declared source-frame/horizontal-roll construction before applying those hard conformance
-gates. No readback or CPU/GPU synchronization was added to the production capture loop.
+gates. The two structureless-history probes require no pulse for a one-update black/white flash,
+then require a pulse on the second consecutive low-structure update and another on the different
+supported scene return. Their exact lossless A/flat/A and A/flat/B construction is authenticated
+before scoring. No readback or CPU/GPU synchronization was added to the production capture loop.
 Output folders
 are cleared before reuse. `--output-every N` reduces saved artifacts while still processing every
 input frame, so sampling cannot change temporal state.
@@ -361,8 +368,8 @@ harness — runs the real estimator + real composite shaders, no game/client).
 A small clip set lives in **`tools/sbsbench/clips/<name>/frame_*.(jpg|png)`** (normally 24 frames) so eval is
 fast and reproducible with no per-run preprocessing. It contains five legacy `c*` clips—c339 and
 c647 are declared `ai-generated`, while c525/c747/c841 are `unclassified`—plus one open
-`anime` clip, one official AI-video-model gallery clip declared `ai-generated`, and five
-six `synthetic` failure-mode/control clips from [make_synth_clips.py](make_synth_clips.py):
+`anime` clip, one official AI-video-model gallery clip declared `ai-generated`, and eight
+`synthetic` failure-mode/control clips from [make_synth_clips.py](make_synth_clips.py):
 
 | clip | targets | validated fingerprint |
 |------|---------|----------------------|
@@ -374,6 +381,8 @@ six `synthetic` failure-mode/control clips from [make_synth_clips.py](make_synth
 | `fast_motion` | known 30 px/frame motion | current-frame depth separates warp/edge behavior from live async lag |
 | `exposure_flash_strobe` | exact global exposure flashes/strobe over one fixed synthetic scene | production GPU shot trace must accept zero cuts; settled zero plane/pop remain unchanged |
 | `sustained_motion_scene_cut` | true cut while both proposal arms remain closed by persistent motion | exact roll schedule and production trace prove the later pulse used the latched relative-geometry escape |
+| `structureless_history_bridge` | one black flash, then persistent black and a different scene | exact trace rejects the flash, accepts the second low-structure update, and accepts the supported B return |
+| `structureless_white_history_bridge` | saturated-white version whose first flat frame can have weak raw-RGB evidence | exact trace proves support loss gets one bounded hold without starving persistent or returned geometry |
 
 ### Public extended suite (decision eval)
 

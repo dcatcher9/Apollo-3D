@@ -1284,7 +1284,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> hist_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_hist_buf;  // 256 weighted bins for subject tracking
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_hist_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_plain_buf;  // 256 bins + four evidence counters
+    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_plain_buf;  // 256 bins + seven evidence counters
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_plain_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;  // three float4 elements; see depth_subject_resolve_cs
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_uav;
@@ -1295,6 +1295,11 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_srv;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_previous_tex;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_previous_srv;
+    // Cut detection keeps a separate reliable depth endpoint. The ordinary previous texture must
+    // still advance every frame for temporal EMA, including through clipped/structureless frames.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_cut_history_tex;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_cut_history_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_cut_history_srv;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> ema_motion_mask_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ema_motion_mask_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask_srv;
@@ -1569,7 +1574,8 @@ namespace models {
       }
 
       // Subject tracking: weighted histogram (256 uint bins), plain histogram plus depth-edge,
-      // depth-change, ordinal-structure, and broad-RGB-change counters (260 uints), and
+      // depth-change, ordinal-structure, broad-RGB-change, and three structure-support counters
+      // (263 uints), and
       // three-float4 state.
       {
         uint32_t init_hist[256] = {};
@@ -1584,7 +1590,7 @@ namespace models {
         if (subject_hist_buf) {
           device->CreateUnorderedAccessView(subject_hist_buf.Get(), nullptr, &subject_hist_uav);
         }
-        uint32_t init_plain[260] = {};
+        uint32_t init_plain[263] = {};
         bd.ByteWidth = sizeof(init_plain);
         D3D11_SUBRESOURCE_DATA plain_sd = {init_plain, 0, 0};
         device->CreateBuffer(&bd, &plain_sd, &subject_plain_buf);
@@ -1904,7 +1910,7 @@ namespace models {
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
         ID3D11ShaderResourceView *subject_srvs[7] = {
           depth_srv.Get(),
-          depth_previous_srv.Get(),
+          depth_cut_history_srv.Get(),
           tensor_in_srv.Get(),
           tensor_previous_input_srv.Get(),
           minmax_ema_srv.Get(),
@@ -1931,28 +1937,34 @@ namespace models {
         ID3D11UnorderedAccessView *null_uavs2[3] = {nullptr, nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 3, null_uavs2, nullptr);
 
-        // tensor_in_buf and appearance_ordinal_buf still own the display-referred NCHW input and
-        // capture-domain ordinal signal that produced this completed depth. Preserve both only
-        // when this frame also produced valid depth; otherwise the last valid depth/color pair
-        // remains intact for cut detection without a CPU readback.
+        // tensor_in_buf, appearance_ordinal_buf and depth_tex still own the matched inputs/result
+        // for this completed inference. Advance the complete appearance/depth tuple only when the
+        // resolve pass selects state 1 or 3. State 2 retains the last structurally reliable tuple
+        // for one black/clipped update, so an immediate supported return compares A against A or B
+        // rather than the empty slate. State 3 advances an accepted persistent-low endpoint.
         context->CSSetShader(depth_valid_history_cs.Get(), nullptr, 0);
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        ID3D11ShaderResourceView *history_srvs[3] = {
+        ID3D11ShaderResourceView *history_srvs[5] = {
           minmax_ema_srv.Get(),
           tensor_in_srv.Get(),
-          appearance_ordinal_srv.Get()
+          appearance_ordinal_srv.Get(),
+          subject_srv.Get(),
+          depth_srv.Get()
         };
-        ID3D11UnorderedAccessView *history_uavs[2] = {
+        ID3D11UnorderedAccessView *history_uavs[3] = {
           tensor_previous_input_uav.Get(),
-          previous_appearance_ordinal_uav.Get()
+          previous_appearance_ordinal_uav.Get(),
+          depth_cut_history_uav.Get()
         };
-        context->CSSetShaderResources(0, 3, history_srvs);
-        context->CSSetUnorderedAccessViews(0, 2, history_uavs, nullptr);
+        context->CSSetShaderResources(0, 5, history_srvs);
+        context->CSSetUnorderedAccessViews(0, 3, history_uavs, nullptr);
         context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
-        ID3D11ShaderResourceView *null_history_srvs[3] = {nullptr, nullptr, nullptr};
-        ID3D11UnorderedAccessView *null_history_uavs[2] = {nullptr, nullptr};
-        context->CSSetShaderResources(0, 3, null_history_srvs);
-        context->CSSetUnorderedAccessViews(0, 2, null_history_uavs, nullptr);
+        ID3D11ShaderResourceView *null_history_srvs[5] = {
+          nullptr, nullptr, nullptr, nullptr, nullptr
+        };
+        ID3D11UnorderedAccessView *null_history_uavs[3] = {nullptr, nullptr, nullptr};
+        context->CSSetShaderResources(0, 5, null_history_srvs);
+        context->CSSetUnorderedAccessViews(0, 3, null_history_uavs, nullptr);
       }
     }
 
@@ -2230,6 +2242,24 @@ namespace models {
                        SUCCEEDED(device->CreateTexture2D(&previous_desc, nullptr, &depth_previous_tex)) &&
                        SUCCEEDED(device->CreateShaderResourceView(depth_previous_tex.Get(), nullptr, &depth_previous_srv));
 
+        auto cut_history_desc = tex_desc;
+        resources_ok = resources_ok &&
+                       SUCCEEDED(device->CreateTexture2D(
+                         &cut_history_desc,
+                         nullptr,
+                         &depth_cut_history_tex
+                       )) &&
+                       SUCCEEDED(device->CreateUnorderedAccessView(
+                         depth_cut_history_tex.Get(),
+                         nullptr,
+                         &depth_cut_history_uav
+                       )) &&
+                       SUCCEEDED(device->CreateShaderResourceView(
+                         depth_cut_history_tex.Get(),
+                         nullptr,
+                         &depth_cut_history_srv
+                       ));
+
         auto mask_desc = tex_desc;
         mask_desc.Format = DXGI_FORMAT_R32_UINT;
         mask_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
@@ -2247,6 +2277,7 @@ namespace models {
         // Clear depth so the range->pixel EMA initializes from a known value.
         const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         context->ClearUnorderedAccessViewFloat(depth_uav.Get(), clear_color);
+        context->ClearUnorderedAccessViewFloat(depth_cut_history_uav.Get(), clear_color);
         const UINT clear_uint[4] = {0u, 0u, 0u, 0u};
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_uint);
 
