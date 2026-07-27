@@ -3,6 +3,7 @@
   #include "src/platform/windows/virtual_display.h"
 
   #include <cstring>
+  #include <limits>
 
   #include <gtest/gtest.h>
 
@@ -633,6 +634,410 @@ TEST(VirtualDisplayRetirement, ADefiniteLearnedMatchOverridesAnEarlierNameFailur
   EXPECT_EQ(
     VDISPLAY::virtualDisplayRetirementStateForTest(retiring, learned_path, candidates),
     VDISPLAY::display_identity_state_e::present
+  );
+}
+
+TEST(VirtualDisplayDetach, AReappearingActivePathInvalidatesOlderInactiveEvidence) {
+  const auto latest_active = VDISPLAY::desktopDetachEvidenceForTest(
+    false,
+    3,
+    std::chrono::milliseconds(500)
+  );
+  EXPECT_FALSE(latest_active.path_confirmed_inactive);
+  EXPECT_FALSE(latest_active.shell_settled);
+}
+
+TEST(VirtualDisplayDetach, AnUnknownLatestObservationCannotAuthorizeRemoval) {
+  // Both an active result and a failed/null observation map to latestPathInactive=false.
+  // Even arbitrarily old counters from prior absence observations must not survive it.
+  const auto latest_unknown = VDISPLAY::desktopDetachEvidenceForTest(
+    false,
+    std::numeric_limits<unsigned int>::max(),
+    std::chrono::hours(24)
+  );
+  EXPECT_FALSE(latest_unknown.path_confirmed_inactive);
+  EXPECT_FALSE(latest_unknown.shell_settled);
+}
+
+TEST(VirtualDisplayDetach, RequiresRepeatedAbsenceAndShellSettleTime) {
+  const auto too_few_observations = VDISPLAY::desktopDetachEvidenceForTest(
+    true,
+    2,
+    std::chrono::seconds(1)
+  );
+  EXPECT_FALSE(too_few_observations.path_confirmed_inactive);
+  EXPECT_FALSE(too_few_observations.shell_settled);
+
+  const auto not_shell_settled = VDISPLAY::desktopDetachEvidenceForTest(
+    true,
+    3,
+    std::chrono::milliseconds(499)
+  );
+  EXPECT_TRUE(not_shell_settled.path_confirmed_inactive);
+  EXPECT_FALSE(not_shell_settled.shell_settled);
+
+  const auto settled = VDISPLAY::desktopDetachEvidenceForTest(
+    true,
+    3,
+    std::chrono::milliseconds(500)
+  );
+  EXPECT_TRUE(settled.path_confirmed_inactive);
+  EXPECT_TRUE(settled.shell_settled);
+}
+
+TEST(VirtualDisplayColorRestore, DoesNotReassertMatchingUserStateForActiveModeLag) {
+  EXPECT_EQ(
+    VDISPLAY::colorReconcileActionForTest(
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR,
+      DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR
+    ),
+    VDISPLAY::color_reconcile_action_e::wait_for_active_mode
+  );
+
+  EXPECT_EQ(
+    VDISPLAY::colorReconcileActionForTest(
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR,
+      DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR
+    ),
+    VDISPLAY::color_reconcile_action_e::wait_for_active_mode
+  );
+}
+
+TEST(VirtualDisplayColorRestore, ActiveModeOnlyLagStopsBlockingAfterBoundedEvidence) {
+  EXPECT_FALSE(VDISPLAY::activeColorModeObservationSettledForTest(
+    false,
+    true,
+    3,
+    std::chrono::milliseconds(500)
+  ));
+  EXPECT_FALSE(VDISPLAY::activeColorModeObservationSettledForTest(
+    true,
+    false,
+    3,
+    std::chrono::milliseconds(500)
+  ));
+  EXPECT_FALSE(VDISPLAY::activeColorModeObservationSettledForTest(
+    true,
+    true,
+    2,
+    std::chrono::seconds(1)
+  ));
+  EXPECT_FALSE(VDISPLAY::activeColorModeObservationSettledForTest(
+    true,
+    true,
+    3,
+    std::chrono::milliseconds(499)
+  ));
+  EXPECT_TRUE(VDISPLAY::activeColorModeObservationSettledForTest(
+    true,
+    true,
+    3,
+    std::chrono::milliseconds(500)
+  ));
+}
+
+TEST(VirtualDisplayColorRestore, SelectsOnlyMismatchedUserStateSetters) {
+  EXPECT_EQ(
+    VDISPLAY::colorReconcileActionForTest(
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR,
+      DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR
+    ),
+    VDISPLAY::color_reconcile_action_e::set_legacy_advanced_color
+  );
+  EXPECT_EQ(
+    VDISPLAY::colorReconcileActionForTest(
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR,
+      DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR
+    ),
+    VDISPLAY::color_reconcile_action_e::set_hdr_user_state
+  );
+  EXPECT_EQ(
+    VDISPLAY::colorReconcileActionForTest(
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR,
+      DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR
+    ),
+    VDISPLAY::color_reconcile_action_e::set_wcg_user_state
+  );
+}
+
+TEST(VirtualDisplayColorRestore, TriesTheOtherUserBitAfterOneSetterWasAccepted) {
+  EXPECT_EQ(
+    VDISPLAY::colorReconcileActionAfterAcceptedSettersForTest(
+      false,
+      true,
+      false,
+      true,
+      true,
+      false
+    ),
+    VDISPLAY::color_reconcile_action_e::set_wcg_user_state
+  );
+  EXPECT_EQ(
+    VDISPLAY::colorReconcileActionAfterAcceptedSettersForTest(
+      false,
+      true,
+      false,
+      true,
+      true,
+      true
+    ),
+    VDISPLAY::color_reconcile_action_e::wait_for_active_mode
+  );
+}
+
+TEST(VirtualDisplayColorRestore, AcceptedSetterIsNeverRepeatedDuringOneDetach) {
+  EXPECT_EQ(
+    VDISPLAY::repeatedColorSetterAttemptCountForTest(
+      VDISPLAY::color_reconcile_action_e::set_legacy_advanced_color,
+      20
+    ),
+    1u
+  );
+  EXPECT_EQ(
+    VDISPLAY::repeatedColorSetterAttemptCountForTest(
+      VDISPLAY::color_reconcile_action_e::set_hdr_user_state,
+      20
+    ),
+    1u
+  );
+  EXPECT_EQ(
+    VDISPLAY::repeatedColorSetterAttemptCountForTest(
+      VDISPLAY::color_reconcile_action_e::set_wcg_user_state,
+      20
+    ),
+    1u
+  );
+  EXPECT_EQ(
+    VDISPLAY::repeatedColorSetterAttemptCountForTest(
+      VDISPLAY::color_reconcile_action_e::wait_for_active_mode,
+      20
+    ),
+    0u
+  );
+  EXPECT_EQ(
+    VDISPLAY::repeatedColorSetterAttemptCountForTest(
+      VDISPLAY::color_reconcile_action_e::settled,
+      20
+    ),
+    0u
+  );
+}
+
+TEST(VirtualDisplayColorRestore, NoSetterIsConsumedWithoutAPollIteration) {
+  EXPECT_EQ(
+    VDISPLAY::repeatedColorSetterAttemptCountForTest(
+      VDISPLAY::color_reconcile_action_e::set_legacy_advanced_color,
+      0
+    ),
+    0u
+  );
+  EXPECT_EQ(
+    VDISPLAY::repeatedColorSetterAttemptCountForTest(
+      VDISPLAY::color_reconcile_action_e::set_hdr_user_state,
+      0
+    ),
+    0u
+  );
+  EXPECT_EQ(
+    VDISPLAY::repeatedColorSetterAttemptCountForTest(
+      VDISPLAY::color_reconcile_action_e::set_wcg_user_state,
+      0
+    ),
+    0u
+  );
+}
+
+TEST(VirtualDisplayColorRestore, RejectedSetterRetriesUseAOneSecondBackoff) {
+  EXPECT_FALSE(VDISPLAY::rejectedColorSetterRetryAllowedForTest(
+    std::chrono::milliseconds(0)
+  ));
+  EXPECT_FALSE(VDISPLAY::rejectedColorSetterRetryAllowedForTest(
+    std::chrono::milliseconds(999)
+  ));
+  EXPECT_TRUE(VDISPLAY::rejectedColorSetterRetryAllowedForTest(
+    std::chrono::milliseconds(1000)
+  ));
+  EXPECT_TRUE(VDISPLAY::rejectedColorSetterRetryAllowedForTest(
+    std::chrono::seconds(10)
+  ));
+}
+
+TEST(VirtualDisplayColorRestore, BackedOffHdrSetterDoesNotBlockIndependentWcgRestore) {
+  EXPECT_TRUE(VDISPLAY::wcgSetterSelectedDuringHdrBackoffForTest());
+}
+
+TEST(VirtualDisplayColorRestore, RetiresOnlyAStablyMissingSurvivorAndRearmsOnReturn) {
+  EXPECT_FALSE(VDISPLAY::missingColorSurvivorRetiredForTest(
+    false,
+    30,
+    std::chrono::seconds(5)
+  ));
+  EXPECT_FALSE(VDISPLAY::missingColorSurvivorRetiredForTest(
+    true,
+    2,
+    std::chrono::seconds(1)
+  ));
+  EXPECT_FALSE(VDISPLAY::missingColorSurvivorRetiredForTest(
+    true,
+    3,
+    std::chrono::milliseconds(499)
+  ));
+  EXPECT_TRUE(VDISPLAY::missingColorSurvivorRetiredForTest(
+    true,
+    3,
+    std::chrono::milliseconds(500)
+  ));
+  EXPECT_TRUE(VDISPLAY::retiredColorSurvivorReactivatesForTest());
+}
+
+TEST(VirtualDisplayColorRestore, RetryCapturesOnlyWhenADetachNeedsAnUncapturedContract) {
+  EXPECT_FALSE(VDISPLAY::detachRetryCapturesColorContractForTest(false, false, false));
+  EXPECT_FALSE(VDISPLAY::detachRetryCapturesColorContractForTest(false, true, false));
+  EXPECT_FALSE(VDISPLAY::detachRetryCapturesColorContractForTest(true, false, false));
+  EXPECT_FALSE(VDISPLAY::detachRetryCapturesColorContractForTest(true, true, false));
+
+  EXPECT_TRUE(VDISPLAY::detachRetryCapturesColorContractForTest(false, false, true));
+  EXPECT_TRUE(VDISPLAY::detachRetryCapturesColorContractForTest(false, true, true));
+  EXPECT_TRUE(VDISPLAY::detachRetryCapturesColorContractForTest(true, false, true));
+  EXPECT_FALSE(VDISPLAY::detachRetryCapturesColorContractForTest(true, true, true));
+}
+
+TEST(VirtualDisplayColorRestore, RetryAddsNewSurvivorsWithoutOverwritingOriginalContracts) {
+  EXPECT_TRUE(VDISPLAY::colorSurvivorContractMergePreservesExistingForTest());
+}
+
+TEST(VirtualDisplayColorRestore, NewDetachApplyResetsPerTransitionObservationState) {
+  EXPECT_TRUE(VDISPLAY::colorSurvivorTransitionStateResetsForReapplyForTest());
+}
+
+TEST(VirtualDisplayRetirement, CoalescesDuplicateAllPathTargetsBeforeIdentityQueries) {
+  const auto duplicate = identity(42, 7, 3);
+  const auto unrelated = identity(43, 8, 9);
+  const std::vector<VDISPLAY::retirement_path_candidate_t> candidates {
+    {duplicate, {}, true, true},
+    {duplicate, {}, false, true},
+    {unrelated, {}, true, true},
+  };
+
+  EXPECT_EQ(
+    VDISPLAY::coalescedRetirementCandidateCountForTest(candidates),
+    2u
+  );
+}
+
+TEST(VirtualDisplayRetirement, CoalescingKeepsTheAdapterAsPartOfTheTargetIdentity) {
+  const auto first_adapter = identity(42, 7, 3);
+  const auto second_adapter = identity(43, 8, 3);
+  const std::vector<VDISPLAY::retirement_path_candidate_t> candidates {
+    {first_adapter, {}, true, true},
+    {second_adapter, {}, true, true},
+  };
+
+  EXPECT_EQ(
+    VDISPLAY::coalescedRetirementCandidateCountForTest(candidates),
+    2u
+  );
+}
+
+TEST(VirtualDisplayRetirement, DriverRemovalRequiresAuthoritativeActivePathAbsence) {
+  EXPECT_TRUE(VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(
+    true,
+    VDISPLAY::display_identity_state_e::absent
+  ));
+  EXPECT_FALSE(VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(
+    true,
+    VDISPLAY::display_identity_state_e::present
+  ));
+  EXPECT_FALSE(VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(
+    true,
+    VDISPLAY::display_identity_state_e::indeterminate
+  ));
+
+  // The sole-output path cannot be detached while retaining a desktop and is the only explicit
+  // exception. There is no surviving multi-monitor Explorer state to protect in that case.
+  EXPECT_TRUE(VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(
+    false,
+    VDISPLAY::display_identity_state_e::present
+  ));
+}
+
+TEST(VirtualDisplayRetirement, StableAbsenceEvidenceResetsOnInvalidationOrNonAbsence) {
+  EXPECT_EQ(
+    VDISPLAY::advanceStableAbsenceEvidence(
+      2,
+      false,
+      VDISPLAY::display_identity_state_e::absent
+    ),
+    3u
+  );
+  EXPECT_EQ(
+    VDISPLAY::advanceStableAbsenceEvidence(
+      2,
+      false,
+      VDISPLAY::display_identity_state_e::present
+    ),
+    0u
+  );
+  EXPECT_EQ(
+    VDISPLAY::advanceStableAbsenceEvidence(
+      2,
+      false,
+      VDISPLAY::display_identity_state_e::indeterminate
+    ),
+    0u
+  );
+  EXPECT_EQ(
+    VDISPLAY::advanceStableAbsenceEvidence(
+      2,
+      true,
+      VDISPLAY::display_identity_state_e::absent
+    ),
+    0u
   );
 }
 

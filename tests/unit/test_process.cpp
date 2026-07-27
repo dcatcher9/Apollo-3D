@@ -70,6 +70,22 @@ TEST(ProcessTest, LiveVideoModeIsRefusedWithoutAVirtualDisplay) {
   EXPECT_FALSE(process.live_video_mode_needs_display_change(1920, 1080));
 }
 
+#ifdef _WIN32
+TEST(ProcessTest, DriverRemovalRequiresConfirmedDetachWhenDesktopDeactivationWasRequested) {
+  EXPECT_FALSE(proc::retiredVirtualDisplayRemovalAllowedForTest(true, false));
+  EXPECT_TRUE(proc::retiredVirtualDisplayRemovalAllowedForTest(true, true));
+  EXPECT_TRUE(proc::retiredVirtualDisplayRemovalAllowedForTest(false, false));
+  EXPECT_TRUE(proc::retiredVirtualDisplayRemovalAllowedForTest(false, true));
+}
+
+TEST(ProcessTest, RetirementHandoffMarksOnlyTheBoundDisplayOrAnUnboundCandidate) {
+  EXPECT_TRUE(proc::virtualDisplayRetirementHandoffMarksSessionForTest(false, false));
+  EXPECT_TRUE(proc::virtualDisplayRetirementHandoffMarksSessionForTest(false, true));
+  EXPECT_TRUE(proc::virtualDisplayRetirementHandoffMarksSessionForTest(true, true));
+  EXPECT_FALSE(proc::virtualDisplayRetirementHandoffMarksSessionForTest(true, false));
+}
+#endif
+
 TEST(ProcessTest, MalformedCommandDoesNotEscapeWorkingDirectoryResolution) {
   const std::string malformed_command {"command\\"};
   const auto env = boost::this_process::environment();

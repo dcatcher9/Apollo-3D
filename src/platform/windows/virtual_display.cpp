@@ -351,6 +351,36 @@ namespace VDISPLAY {
       bool device_info_available = true;
     };
 
+    std::vector<retirement_candidate_t> coalesceRetirementCandidates(
+      const std::vector<retirement_candidate_t> &candidates
+    ) {
+      std::vector<retirement_candidate_t> coalesced;
+      coalesced.reserve(candidates.size());
+      for (const auto &candidate : candidates) {
+        const auto existing = std::find_if(
+          coalesced.begin(),
+          coalesced.end(),
+          [&](const retirement_candidate_t &entry) {
+            return sameLuid(entry.identity.AdapterLuid, candidate.identity.AdapterLuid) &&
+                   entry.identity.TargetId == candidate.identity.TargetId;
+          }
+        );
+        if (existing == coalesced.end()) {
+          coalesced.push_back(candidate);
+          continue;
+        }
+
+        existing->target_available =
+          existing->target_available || candidate.target_available;
+        if (existing->device_path.empty() && !candidate.device_path.empty()) {
+          existing->device_path = candidate.device_path;
+        }
+        existing->device_info_available =
+          existing->device_info_available && candidate.device_info_available;
+      }
+      return coalesced;
+    }
+
     display_identity_state_e classifyVirtualDisplayRetirementState(
       const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
       std::wstring_view learnedDevicePath,
@@ -389,6 +419,28 @@ namespace VDISPLAY {
       return indeterminate_candidate ?
                display_identity_state_e::indeterminate :
                display_identity_state_e::absent;
+    }
+
+    struct detach_settle_evidence_t {
+      bool path_confirmed_inactive = false;
+      bool shell_settled = false;
+    };
+
+    detach_settle_evidence_t desktopDetachEvidence(
+      bool latest_path_inactive,
+      unsigned int consecutive_inactive_observations,
+      std::chrono::milliseconds continuously_inactive_for
+    ) {
+      constexpr unsigned int required_inactive_observations = 3;
+      constexpr auto shell_settle_time = std::chrono::milliseconds(500);
+      const bool path_confirmed_inactive =
+        latest_path_inactive &&
+        consecutive_inactive_observations >= required_inactive_observations;
+      return {
+        path_confirmed_inactive,
+        path_confirmed_inactive &&
+          continuously_inactive_for >= shell_settle_time,
+      };
     }
 
     void stopWatchdogThread() {
@@ -889,6 +941,222 @@ namespace {
     DISPLAYCONFIG_ADVANCED_COLOR_MODE active_mode {DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR};
   };
 
+  enum class color_reconcile_action_internal_e {
+    settled,
+    wait_for_active_mode,
+    set_legacy_advanced_color,
+    set_hdr_user_state,
+    set_wcg_user_state,
+  };
+
+  struct color_setter_attempts_t {
+    bool legacy = false;
+    bool hdr = false;
+    bool wcg = false;
+    std::chrono::steady_clock::time_point legacy_retry_not_before {};
+    std::chrono::steady_clock::time_point hdr_retry_not_before {};
+    std::chrono::steady_clock::time_point wcg_retry_not_before {};
+  };
+
+  struct active_mode_settle_state_t {
+    unsigned int consecutive_mismatch_observations = 0;
+    std::chrono::steady_clock::time_point mismatch_since {};
+    bool grace_expired = false;
+  };
+
+  bool colorUserStatesMatch(
+    const display_color_contract_t &current,
+    const display_color_contract_t &expected
+  ) {
+    if (current.api != expected.api) {
+      return false;
+    }
+    if (expected.api == color_contract_api_e::legacy) {
+      return current.legacy_advanced_color_enabled ==
+             expected.legacy_advanced_color_enabled;
+    }
+    return current.hdr_user_enabled == expected.hdr_user_enabled &&
+           current.wcg_user_enabled == expected.wcg_user_enabled;
+  }
+
+  bool activeColorModeObservationSettled(
+    bool user_states_match,
+    bool latest_active_mode_mismatch,
+    unsigned int consecutive_mismatch_observations,
+    std::chrono::milliseconds continuously_mismatched_for
+  ) {
+    constexpr unsigned int required_mismatch_observations = 3;
+    constexpr auto active_mode_grace = std::chrono::milliseconds(500);
+    return user_states_match &&
+           latest_active_mode_mismatch &&
+           consecutive_mismatch_observations >= required_mismatch_observations &&
+           continuously_mismatched_for >= active_mode_grace;
+  }
+
+  bool consumeColorSetterAttempt(
+    color_reconcile_action_internal_e action,
+    color_setter_attempts_t &attempts
+  ) {
+    bool *attempted = nullptr;
+    switch (action) {
+      case color_reconcile_action_internal_e::set_legacy_advanced_color:
+        attempted = &attempts.legacy;
+        break;
+      case color_reconcile_action_internal_e::set_hdr_user_state:
+        attempted = &attempts.hdr;
+        break;
+      case color_reconcile_action_internal_e::set_wcg_user_state:
+        attempted = &attempts.wcg;
+        break;
+      case color_reconcile_action_internal_e::settled:
+      case color_reconcile_action_internal_e::wait_for_active_mode:
+        return false;
+    }
+    if (*attempted) {
+      return false;
+    }
+    *attempted = true;
+    return true;
+  }
+
+  bool colorSetterWasAccepted(
+    color_reconcile_action_internal_e action,
+    const color_setter_attempts_t &attempts
+  ) {
+    switch (action) {
+      case color_reconcile_action_internal_e::set_legacy_advanced_color:
+        return attempts.legacy;
+      case color_reconcile_action_internal_e::set_hdr_user_state:
+        return attempts.hdr;
+      case color_reconcile_action_internal_e::set_wcg_user_state:
+        return attempts.wcg;
+      case color_reconcile_action_internal_e::settled:
+      case color_reconcile_action_internal_e::wait_for_active_mode:
+        return false;
+    }
+    return false;
+  }
+
+  std::chrono::steady_clock::time_point &colorSetterRetryNotBefore(
+    color_reconcile_action_internal_e action,
+    color_setter_attempts_t &attempts
+  ) {
+    switch (action) {
+      case color_reconcile_action_internal_e::set_legacy_advanced_color:
+        return attempts.legacy_retry_not_before;
+      case color_reconcile_action_internal_e::set_hdr_user_state:
+        return attempts.hdr_retry_not_before;
+      case color_reconcile_action_internal_e::set_wcg_user_state:
+        return attempts.wcg_retry_not_before;
+      case color_reconcile_action_internal_e::settled:
+      case color_reconcile_action_internal_e::wait_for_active_mode:
+        break;
+    }
+    return attempts.hdr_retry_not_before;
+  }
+
+  bool colorSetterRetryAvailable(
+    color_reconcile_action_internal_e action,
+    color_setter_attempts_t &attempts,
+    std::chrono::steady_clock::time_point now
+  ) {
+    return !colorSetterWasAccepted(action, attempts) &&
+           now >= colorSetterRetryNotBefore(action, attempts);
+  }
+
+  void deferRejectedColorSetter(
+    color_reconcile_action_internal_e action,
+    color_setter_attempts_t &attempts,
+    std::chrono::steady_clock::time_point now
+  ) {
+    constexpr auto rejected_setter_backoff = std::chrono::seconds(1);
+    colorSetterRetryNotBefore(action, attempts) =
+      now + rejected_setter_backoff;
+  }
+
+  color_reconcile_action_internal_e colorReconcileAction(
+    const display_color_contract_t &current,
+    const display_color_contract_t &expected,
+    const color_setter_attempts_t *attempts = nullptr
+  ) {
+    if (current.api != expected.api) {
+      return color_reconcile_action_internal_e::wait_for_active_mode;
+    }
+    if (expected.api == color_contract_api_e::legacy) {
+      if (current.legacy_advanced_color_enabled !=
+          expected.legacy_advanced_color_enabled) {
+        return !attempts || !attempts->legacy ?
+                 color_reconcile_action_internal_e::set_legacy_advanced_color :
+                 color_reconcile_action_internal_e::wait_for_active_mode;
+      }
+      return color_reconcile_action_internal_e::settled;
+    }
+    const bool hdr_mismatch =
+      current.hdr_user_enabled != expected.hdr_user_enabled;
+    const bool wcg_mismatch =
+      current.wcg_user_enabled != expected.wcg_user_enabled;
+    if (hdr_mismatch && (!attempts || !attempts->hdr)) {
+      return color_reconcile_action_internal_e::set_hdr_user_state;
+    }
+    if (wcg_mismatch && (!attempts || !attempts->wcg)) {
+      return color_reconcile_action_internal_e::set_wcg_user_state;
+    }
+    if (hdr_mismatch || wcg_mismatch) {
+      return color_reconcile_action_internal_e::wait_for_active_mode;
+    }
+    if (current.advanced_color_active == expected.advanced_color_active &&
+        current.active_mode == expected.active_mode) {
+      return color_reconcile_action_internal_e::settled;
+    }
+    // activeColorMode is an observed policy/driver result. Reasserting an already-matching user
+    // preference can itself trigger another display transition and prevent this state from
+    // settling, so wait without issuing a setter.
+    return color_reconcile_action_internal_e::wait_for_active_mode;
+  }
+
+  color_reconcile_action_internal_e colorReconcileActionWithRetryCadence(
+    const display_color_contract_t &current,
+    const display_color_contract_t &expected,
+    color_setter_attempts_t &attempts,
+    std::chrono::steady_clock::time_point now
+  ) {
+    auto action = colorReconcileAction(current, expected, &attempts);
+    if (action == color_reconcile_action_internal_e::set_legacy_advanced_color) {
+      return colorSetterRetryAvailable(action, attempts, now) ?
+               action :
+               color_reconcile_action_internal_e::wait_for_active_mode;
+    }
+    if (expected.api != color_contract_api_e::modern ||
+        current.api != color_contract_api_e::modern) {
+      return action;
+    }
+
+    const bool hdr_mismatch =
+      current.hdr_user_enabled != expected.hdr_user_enabled;
+    const bool wcg_mismatch =
+      current.wcg_user_enabled != expected.wcg_user_enabled;
+    if (hdr_mismatch &&
+        colorSetterRetryAvailable(
+          color_reconcile_action_internal_e::set_hdr_user_state,
+          attempts,
+          now
+        )) {
+      return color_reconcile_action_internal_e::set_hdr_user_state;
+    }
+    if (wcg_mismatch &&
+        colorSetterRetryAvailable(
+          color_reconcile_action_internal_e::set_wcg_user_state,
+          attempts,
+          now
+        )) {
+      return color_reconcile_action_internal_e::set_wcg_user_state;
+    }
+    if (hdr_mismatch || wcg_mismatch) {
+      return color_reconcile_action_internal_e::wait_for_active_mode;
+    }
+    return action;
+  }
+
   std::optional<display_color_contract_t> queryDisplayColorContract(
     const LUID &adapter_id,
     UINT32 target_id
@@ -951,41 +1219,78 @@ namespace {
   bool reconcileDisplayColorContract(
     const LUID &adapter_id,
     UINT32 target_id,
-    const display_color_contract_t &expected
+    const display_color_contract_t &expected,
+    color_setter_attempts_t &attempts,
+    active_mode_settle_state_t &active_mode_settle
   ) {
     const auto current = queryDisplayColorContract(adapter_id, target_id);
-    if (!current || current->api != expected.api) {
+    if (!current) {
       return false;
     }
-    if (expected.api == color_contract_api_e::legacy) {
-      if (current->legacy_advanced_color_enabled ==
-          expected.legacy_advanced_color_enabled) {
+    const auto now = std::chrono::steady_clock::now();
+    const auto action =
+      colorReconcileActionWithRetryCadence(*current, expected, attempts, now);
+    switch (action) {
+      case color_reconcile_action_internal_e::settled:
+        active_mode_settle = {};
         return true;
-      }
-      setDisplayHDR(adapter_id, target_id, expected.legacy_advanced_color_enabled);
-      return false;
-    }
-
-    if (current->hdr_user_enabled != expected.hdr_user_enabled) {
-      setDisplayHdrModern(adapter_id, target_id, expected.hdr_user_enabled);
-      return false;
-    }
-    if (current->wcg_user_enabled != expected.wcg_user_enabled) {
-      setDisplayWcg(adapter_id, target_id, expected.wcg_user_enabled);
-      return false;
-    }
-    if (current->advanced_color_active == expected.advanced_color_active &&
-        current->active_mode == expected.active_mode) {
-      return true;
-    }
-
-    // User preferences match but the active mode has not settled. Reassert only the expected
-    // non-SDR mode; policy-limited SDR is observed until the bounded caller deadline instead of
-    // changing either saved user preference.
-    if (expected.active_mode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR) {
-      setDisplayHdrModern(adapter_id, target_id, true);
-    } else if (expected.active_mode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_WCG) {
-      setDisplayWcg(adapter_id, target_id, true);
+      case color_reconcile_action_internal_e::set_legacy_advanced_color:
+        active_mode_settle = {};
+        if (colorSetterRetryAvailable(action, attempts, now)) {
+          if (setDisplayHDR(
+                adapter_id,
+                target_id,
+                expected.legacy_advanced_color_enabled
+              )) {
+            consumeColorSetterAttempt(action, attempts);
+          } else {
+            deferRejectedColorSetter(action, attempts, now);
+          }
+        }
+        break;
+      case color_reconcile_action_internal_e::set_hdr_user_state:
+        active_mode_settle = {};
+        if (colorSetterRetryAvailable(action, attempts, now)) {
+          if (setDisplayHdrModern(adapter_id, target_id, expected.hdr_user_enabled)) {
+            consumeColorSetterAttempt(action, attempts);
+          } else {
+            deferRejectedColorSetter(action, attempts, now);
+          }
+        }
+        break;
+      case color_reconcile_action_internal_e::set_wcg_user_state:
+        active_mode_settle = {};
+        if (colorSetterRetryAvailable(action, attempts, now)) {
+          if (setDisplayWcg(adapter_id, target_id, expected.wcg_user_enabled)) {
+            consumeColorSetterAttempt(action, attempts);
+          } else {
+            deferRejectedColorSetter(action, attempts, now);
+          }
+        }
+        break;
+      case color_reconcile_action_internal_e::wait_for_active_mode:
+        if (!colorUserStatesMatch(*current, expected)) {
+          active_mode_settle = {};
+          break;
+        }
+        if (active_mode_settle.grace_expired) {
+          return true;
+        }
+        {
+          if (active_mode_settle.consecutive_mismatch_observations == 0) {
+            active_mode_settle.mismatch_since = now;
+          }
+          ++active_mode_settle.consecutive_mismatch_observations;
+          active_mode_settle.grace_expired = activeColorModeObservationSettled(
+            true,
+            true,
+            active_mode_settle.consecutive_mismatch_observations,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+              now - active_mode_settle.mismatch_since
+            )
+          );
+          return active_mode_settle.grace_expired;
+        }
     }
     return false;
   }
@@ -993,7 +1298,90 @@ namespace {
   struct survivor_color_state_t {
     std::wstring device_path;
     display_color_contract_t contract;
+    color_setter_attempts_t setter_attempts;
+    active_mode_settle_state_t active_mode_settle;
+    bool retired = false;
+    unsigned int consecutive_missing_observations = 0;
+    std::chrono::steady_clock::time_point missing_since {};
   };
+
+  bool missingColorSurvivorRetired(
+    bool latest_missing,
+    unsigned int consecutive_missing_observations,
+    std::chrono::milliseconds continuously_missing_for
+  ) {
+    constexpr unsigned int required_missing_observations = 3;
+    constexpr auto missing_settle_time = std::chrono::milliseconds(500);
+    return latest_missing &&
+           consecutive_missing_observations >= required_missing_observations &&
+           continuously_missing_for >= missing_settle_time;
+  }
+
+  void observeColorSurvivorPresence(
+    survivor_color_state_t &survivor,
+    bool present,
+    std::chrono::steady_clock::time_point now
+  ) {
+    if (present) {
+      survivor.retired = false;
+      survivor.consecutive_missing_observations = 0;
+      survivor.missing_since = {};
+      return;
+    }
+    if (survivor.retired) {
+      return;
+    }
+    if (survivor.consecutive_missing_observations == 0) {
+      survivor.missing_since = now;
+    }
+    ++survivor.consecutive_missing_observations;
+    survivor.retired = missingColorSurvivorRetired(
+      true,
+      survivor.consecutive_missing_observations,
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - survivor.missing_since
+      )
+    );
+  }
+
+  void mergeSurvivorColorStates(
+    std::vector<survivor_color_state_t> &expected_states,
+    const std::vector<survivor_color_state_t> &current_states
+  ) {
+    for (const auto &current : current_states) {
+      const auto existing = std::find_if(
+        expected_states.begin(),
+        expected_states.end(),
+        [&](const survivor_color_state_t &expected) {
+          return expected.device_path == current.device_path;
+        }
+      );
+      if (existing == expected_states.end()) {
+        expected_states.push_back(current);
+      }
+    }
+  }
+
+  void resetSurvivorColorTransitionState(
+    std::vector<survivor_color_state_t> &expected_states
+  ) {
+    for (auto &expected : expected_states) {
+      expected.setter_attempts = {};
+      expected.active_mode_settle = {};
+    }
+  }
+
+  bool anyActiveModeGraceExpired(
+    const std::vector<survivor_color_state_t> &expected_states
+  ) {
+    return std::any_of(
+      expected_states.begin(),
+      expected_states.end(),
+      [](const survivor_color_state_t &expected) {
+        return expected.active_mode_settle.grace_expired;
+      }
+    );
+  }
 
   struct detach_snapshot_t {
     detach_plan_e state {detach_plan_e::ambiguous_identity};
@@ -1079,7 +1467,7 @@ namespace {
   }
 
   bool restoreSurvivorColorStatesOnce(
-    const std::vector<survivor_color_state_t> &expected_states
+    std::vector<survivor_color_state_t> &expected_states
   ) {
     std::vector<DISPLAYCONFIG_PATH_INFO> paths;
     std::vector<DISPLAYCONFIG_MODE_INFO> modes;
@@ -1107,18 +1495,42 @@ namespace {
           return false;
         }
         matched[index] = true;
+        observeColorSurvivorPresence(
+          expected_states[index],
+          true,
+          std::chrono::steady_clock::now()
+        );
         if (!reconcileDisplayColorContract(
               path.targetInfo.adapterId,
               path.targetInfo.id,
-              expected_states[index].contract
+              expected_states[index].contract,
+              expected_states[index].setter_attempts,
+              expected_states[index].active_mode_settle
             )) {
-          // Advanced Color can renumber this target. Perform at most one setter per fresh CCD
-          // snapshot, then resolve every survivor again before trusting the result.
+          // Advanced Color can renumber this target. Perform each required user-state setter at
+          // most once for the entire detach transition, then resolve every survivor again before
+          // trusting the result.
           return false;
         }
       }
     }
-    return std::find(matched.begin(), matched.end(), false) == matched.end();
+
+    const auto now = std::chrono::steady_clock::now();
+    bool all_resolved = true;
+    for (std::size_t index = 0; index < expected_states.size(); ++index) {
+      if (matched[index]) {
+        continue;
+      }
+      auto &expected = expected_states[index];
+      if (expected.retired) {
+        continue;
+      }
+      observeColorSurvivorPresence(expected, false, now);
+      if (!expected.retired) {
+        all_resolved = false;
+      }
+    }
+    return all_resolved;
   }
 
   desktop_detach_result_t detachPlanFailure(detach_plan_e state) {
@@ -1136,27 +1548,51 @@ namespace {
   }
 }  // namespace
 
+struct desktop_detach_context_t {
+  bool was_already_inactive = false;
+  bool has_captured_color_contract = false;
+  std::vector<survivor_color_state_t> expected_color_states;
+};
+
+namespace {
+  bool detachRetryMustCaptureColorContract(
+    bool has_context,
+    bool context_has_captured_color_contract,
+    bool path_needs_detach
+  ) {
+    return path_needs_detach &&
+           (!has_context || !context_has_captured_color_contract);
+  }
+}
+
 desktop_detach_result_t deactivateVirtualDisplay(
   const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
   std::wstring_view devicePath,
-  std::chrono::milliseconds timeout
+  std::chrono::milliseconds timeout,
+  std::shared_ptr<desktop_detach_context_t> &context
 ) {
   const auto deadline =
     std::chrono::steady_clock::now() + std::max(timeout, std::chrono::milliseconds::zero());
+  constexpr UINT32 validate_flags = SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG;
+  constexpr UINT32 apply_flags = SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG;
+  const bool continuing_transition = static_cast<bool>(context);
   auto snapshot = buildVirtualDisplayDetachSnapshot(identity, devicePath);
   if (!snapshot) {
     return {desktop_detach_state_e::topology_query_failed, ERROR_GEN_FAILURE};
   }
-  bool was_already_inactive = snapshot->state == detach_plan_e::already_inactive;
-  if (!was_already_inactive && snapshot->state != detach_plan_e::ready) {
+  bool was_already_inactive =
+    continuing_transition ?
+      context->was_already_inactive :
+      snapshot->state == detach_plan_e::already_inactive;
+  if (snapshot->state != detach_plan_e::ready &&
+      snapshot->state != detach_plan_e::already_inactive) {
+    if (snapshot->state == detach_plan_e::skipped_only_active) {
+      context.reset();
+    }
     return detachPlanFailure(snapshot->state);
   }
 
-  constexpr UINT32 validate_flags = SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG;
-  constexpr UINT32 apply_flags = SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG;
-  std::vector<survivor_color_state_t> expected_color_states;
-
-  if (!was_already_inactive) {
+  if (snapshot->state == detach_plan_e::ready) {
     LONG validation_status = SetDisplayConfig(
       static_cast<UINT32>(snapshot->paths.size()),
       snapshot->paths.data(),
@@ -1174,12 +1610,15 @@ desktop_detach_result_t deactivateVirtualDisplay(
     if (!snapshot) {
       return {desktop_detach_state_e::topology_query_failed, ERROR_GEN_FAILURE};
     }
-    was_already_inactive = snapshot->state == detach_plan_e::already_inactive;
-    if (!was_already_inactive && snapshot->state != detach_plan_e::ready) {
+    if (snapshot->state != detach_plan_e::ready &&
+        snapshot->state != detach_plan_e::already_inactive) {
+      if (snapshot->state == detach_plan_e::skipped_only_active) {
+        context.reset();
+      }
       return detachPlanFailure(snapshot->state);
     }
 
-    if (!was_already_inactive) {
+    if (snapshot->state == detach_plan_e::ready) {
       validation_status = SetDisplayConfig(
         static_cast<UINT32>(snapshot->paths.size()),
         snapshot->paths.data(),
@@ -1191,7 +1630,30 @@ desktop_detach_result_t deactivateVirtualDisplay(
         return {desktop_detach_state_e::validation_failed, validation_status};
       }
 
-      expected_color_states = snapshot->survivor_color_states;
+      const bool capture_color_contract = detachRetryMustCaptureColorContract(
+        static_cast<bool>(context),
+        context && context->has_captured_color_contract,
+        true
+      );
+      if (!context) {
+        context = std::make_shared<desktop_detach_context_t>();
+      }
+      if (capture_color_contract) {
+        context->expected_color_states = snapshot->survivor_color_states;
+      } else {
+        // A monitor may join while a prior detach is settling. Preserve every original contract
+        // already owned by the context and add only newly active survivors before another apply.
+        mergeSurvivorColorStates(
+          context->expected_color_states,
+          snapshot->survivor_color_states
+        );
+      }
+      context->was_already_inactive = false;
+      context->has_captured_color_contract = true;
+      was_already_inactive = false;
+      // Each SetDisplayConfig apply is a new color transition. Retain the original user contract,
+      // but allow one accepted setter per preference again and require a fresh active-mode grace.
+      resetSurvivorColorTransitionState(context->expected_color_states);
       const LONG apply_status = SetDisplayConfig(
         static_cast<UINT32>(snapshot->paths.size()),
         snapshot->paths.data(),
@@ -1200,49 +1662,70 @@ desktop_detach_result_t deactivateVirtualDisplay(
         apply_flags | snapshot->set_display_config_awareness_flags
       );
       if (apply_status != ERROR_SUCCESS) {
+        if (!continuing_transition) {
+          context.reset();
+        }
         return {desktop_detach_state_e::apply_failed, apply_status};
       }
     }
+  }
+  if (!context) {
+    context = std::make_shared<desktop_detach_context_t>();
+    context->was_already_inactive = true;
+    context->has_captured_color_contract = false;
+    was_already_inactive = true;
   }
 
   // Removing the active desktop path and removing the IddCx monitor must be separate events.
   // Require stable active-path absence, then leave Explorer time to finish migrating windows and
   // rebuilding its multi-monitor taskbar before the driver monitor disappears.
-  auto stable_since = std::chrono::steady_clock::now();
-  constexpr auto shell_settle_time = std::chrono::milliseconds(500);
-  constexpr unsigned int required_absent_observations = 3;
-  unsigned int consecutive_absent_observations = 0;
+  auto inactive_since = std::chrono::steady_clock::now();
+  unsigned int consecutive_inactive_observations = 0;
+  bool latest_path_inactive = false;
   bool color_states_match = true;
   while (true) {
     const auto observation = buildVirtualDisplayDetachSnapshot(identity, devicePath);
     color_states_match =
-      expected_color_states.empty() ||
-      restoreSurvivorColorStatesOnce(expected_color_states);
-    if (observation &&
-        observation->state == detach_plan_e::already_inactive &&
-        color_states_match) {
-      ++consecutive_absent_observations;
+      context->expected_color_states.empty() ||
+      restoreSurvivorColorStatesOnce(context->expected_color_states);
+    latest_path_inactive =
+      observation && observation->state == detach_plan_e::already_inactive;
+    if (latest_path_inactive) {
+      ++consecutive_inactive_observations;
     } else {
-      consecutive_absent_observations = 0;
-      stable_since = std::chrono::steady_clock::now();
+      consecutive_inactive_observations = 0;
+      inactive_since = std::chrono::steady_clock::now();
     }
 
     const auto now = std::chrono::steady_clock::now();
-    if (consecutive_absent_observations >= required_absent_observations &&
-        now - stable_since >= shell_settle_time) {
+    const auto evidence = desktopDetachEvidence(
+      latest_path_inactive,
+      consecutive_inactive_observations,
+      std::chrono::duration_cast<std::chrono::milliseconds>(now - inactive_since)
+    );
+    if (evidence.shell_settled && color_states_match) {
+      const bool active_mode_grace_expired =
+        anyActiveModeGraceExpired(context->expected_color_states);
+      context.reset();
       return {
         was_already_inactive ?
           desktop_detach_state_e::already_inactive :
           desktop_detach_state_e::detached,
         ERROR_SUCCESS,
+        true,
+        true,
+        active_mode_grace_expired,
       };
     }
     if (now >= deadline) {
       return {
-        color_states_match ?
-          desktop_detach_state_e::settle_timeout :
-          desktop_detach_state_e::color_restore_timeout,
+        evidence.shell_settled && !color_states_match ?
+          desktop_detach_state_e::color_restore_timeout :
+          desktop_detach_state_e::settle_timeout,
         ERROR_TIMEOUT,
+        evidence.path_confirmed_inactive,
+        evidence.shell_settled,
+        anyActiveModeGraceExpired(context->expected_color_states),
       };
     }
     std::this_thread::sleep_for(std::min(
@@ -1364,31 +1847,60 @@ display_identity_state_e queryVirtualDisplayRetirementState(
     return display_identity_state_e::indeterminate;
   }
 
-  std::vector<retirement_candidate_t> candidates;
-  candidates.reserve(paths.size());
+  std::vector<retirement_candidate_t> raw_candidates;
+  raw_candidates.reserve(paths.size());
   for (const auto &path : paths) {
-    retirement_candidate_t candidate {
+    raw_candidates.push_back({
       {path.targetInfo.adapterId, path.targetInfo.id},
       {},
       path.targetInfo.targetAvailable != FALSE,
       true,
-    };
+    });
+  }
+
+  // QDC_ALL_PATHS returns possible source-to-target combinations, so one target can appear many
+  // times. Collapse those paths before calling DisplayConfigGetDeviceInfo; device identity and
+  // availability are target properties and only need to be queried once.
+  auto candidates = coalesceRetirementCandidates(raw_candidates);
+  for (auto &candidate : candidates) {
     if (candidate.target_available) {
       DISPLAYCONFIG_TARGET_DEVICE_NAME target_name {};
       target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
       target_name.header.size = sizeof(target_name);
-      target_name.header.adapterId = path.targetInfo.adapterId;
-      target_name.header.id = path.targetInfo.id;
+      target_name.header.adapterId = candidate.identity.AdapterLuid;
+      target_name.header.id = candidate.identity.TargetId;
       if (DisplayConfigGetDeviceInfo(&target_name.header) == ERROR_SUCCESS) {
         candidate.device_path = target_name.monitorDevicePath;
       } else {
         candidate.device_info_available = false;
       }
     }
-    candidates.push_back(std::move(candidate));
   }
 
   return classifyVirtualDisplayRetirementState(identity, devicePath, candidates);
+}
+
+bool isDriverRemovalSafeAfterDesktopDetach(
+  bool requiresActivePathAbsence,
+  display_identity_state_e activePathState
+) {
+  // The only intentional exception is a sole active virtual output: no surviving desktop or
+  // multi-monitor shell state exists to preserve. Every normal detach requires an authoritative
+  // exact active-topology absence observation immediately before driver removal.
+  return !requiresActivePathAbsence ||
+         activePathState == display_identity_state_e::absent;
+}
+
+unsigned int advanceStableAbsenceEvidence(
+  unsigned int priorAbsentObservations,
+  bool evidenceInvalidated,
+  display_identity_state_e latestState
+) {
+  if (evidenceInvalidated ||
+      latestState != display_identity_state_e::absent) {
+    return 0;
+  }
+  return priorAbsentObservations + 1;
 }
 
 #ifdef SUNSHINE_TESTS
@@ -1462,6 +1974,288 @@ display_identity_state_e virtualDisplayRetirementStateForTest(
     learnedDevicePath,
     internal_candidates
   );
+}
+
+desktop_detach_evidence_t desktopDetachEvidenceForTest(
+  bool latestPathInactive,
+  unsigned int consecutiveInactiveObservations,
+  std::chrono::milliseconds continuouslyInactiveFor
+) {
+  const auto evidence = desktopDetachEvidence(
+    latestPathInactive,
+    consecutiveInactiveObservations,
+    continuouslyInactiveFor
+  );
+  return {
+    evidence.path_confirmed_inactive,
+    evidence.shell_settled,
+  };
+}
+
+color_reconcile_action_e colorReconcileActionForTest(
+  bool legacyApi,
+  bool currentLegacyEnabled,
+  bool expectedLegacyEnabled,
+  bool currentHdrUserEnabled,
+  bool expectedHdrUserEnabled,
+  bool currentWcgUserEnabled,
+  bool expectedWcgUserEnabled,
+  bool currentAdvancedColorActive,
+  bool expectedAdvancedColorActive,
+  DISPLAYCONFIG_ADVANCED_COLOR_MODE currentActiveMode,
+  DISPLAYCONFIG_ADVANCED_COLOR_MODE expectedActiveMode
+) {
+  const display_color_contract_t current {
+    legacyApi ? color_contract_api_e::legacy : color_contract_api_e::modern,
+    currentLegacyEnabled,
+    currentHdrUserEnabled,
+    currentWcgUserEnabled,
+    currentAdvancedColorActive,
+    currentActiveMode,
+  };
+  const display_color_contract_t expected {
+    legacyApi ? color_contract_api_e::legacy : color_contract_api_e::modern,
+    expectedLegacyEnabled,
+    expectedHdrUserEnabled,
+    expectedWcgUserEnabled,
+    expectedAdvancedColorActive,
+    expectedActiveMode,
+  };
+  switch (colorReconcileAction(current, expected)) {
+    case color_reconcile_action_internal_e::settled:
+      return color_reconcile_action_e::settled;
+    case color_reconcile_action_internal_e::wait_for_active_mode:
+      return color_reconcile_action_e::wait_for_active_mode;
+    case color_reconcile_action_internal_e::set_legacy_advanced_color:
+      return color_reconcile_action_e::set_legacy_advanced_color;
+    case color_reconcile_action_internal_e::set_hdr_user_state:
+      return color_reconcile_action_e::set_hdr_user_state;
+    case color_reconcile_action_internal_e::set_wcg_user_state:
+      return color_reconcile_action_e::set_wcg_user_state;
+  }
+  return color_reconcile_action_e::wait_for_active_mode;
+}
+
+color_reconcile_action_e colorReconcileActionAfterAcceptedSettersForTest(
+  bool currentHdrUserEnabled,
+  bool expectedHdrUserEnabled,
+  bool currentWcgUserEnabled,
+  bool expectedWcgUserEnabled,
+  bool hdrSetterAccepted,
+  bool wcgSetterAccepted
+) {
+  const display_color_contract_t current {
+    color_contract_api_e::modern,
+    false,
+    currentHdrUserEnabled,
+    currentWcgUserEnabled,
+  };
+  const display_color_contract_t expected {
+    color_contract_api_e::modern,
+    false,
+    expectedHdrUserEnabled,
+    expectedWcgUserEnabled,
+  };
+  const color_setter_attempts_t attempts {
+    false,
+    hdrSetterAccepted,
+    wcgSetterAccepted,
+  };
+  switch (colorReconcileAction(current, expected, &attempts)) {
+    case color_reconcile_action_internal_e::settled:
+      return color_reconcile_action_e::settled;
+    case color_reconcile_action_internal_e::wait_for_active_mode:
+      return color_reconcile_action_e::wait_for_active_mode;
+    case color_reconcile_action_internal_e::set_legacy_advanced_color:
+      return color_reconcile_action_e::set_legacy_advanced_color;
+    case color_reconcile_action_internal_e::set_hdr_user_state:
+      return color_reconcile_action_e::set_hdr_user_state;
+    case color_reconcile_action_internal_e::set_wcg_user_state:
+      return color_reconcile_action_e::set_wcg_user_state;
+  }
+  return color_reconcile_action_e::wait_for_active_mode;
+}
+
+unsigned int repeatedColorSetterAttemptCountForTest(
+  color_reconcile_action_e action,
+  unsigned int repetitions
+) {
+  color_reconcile_action_internal_e internal_action;
+  switch (action) {
+    case color_reconcile_action_e::settled:
+      internal_action = color_reconcile_action_internal_e::settled;
+      break;
+    case color_reconcile_action_e::wait_for_active_mode:
+      internal_action = color_reconcile_action_internal_e::wait_for_active_mode;
+      break;
+    case color_reconcile_action_e::set_legacy_advanced_color:
+      internal_action = color_reconcile_action_internal_e::set_legacy_advanced_color;
+      break;
+    case color_reconcile_action_e::set_hdr_user_state:
+      internal_action = color_reconcile_action_internal_e::set_hdr_user_state;
+      break;
+    case color_reconcile_action_e::set_wcg_user_state:
+      internal_action = color_reconcile_action_internal_e::set_wcg_user_state;
+      break;
+  }
+
+  color_setter_attempts_t attempts;
+  unsigned int consumed = 0;
+  for (unsigned int repetition = 0; repetition < repetitions; ++repetition) {
+    consumed += consumeColorSetterAttempt(internal_action, attempts) ? 1u : 0u;
+  }
+  return consumed;
+}
+
+bool missingColorSurvivorRetiredForTest(
+  bool latestMissing,
+  unsigned int consecutiveMissingObservations,
+  std::chrono::milliseconds continuouslyMissingFor
+) {
+  return missingColorSurvivorRetired(
+    latestMissing,
+    consecutiveMissingObservations,
+    continuouslyMissingFor
+  );
+}
+
+bool retiredColorSurvivorReactivatesForTest() {
+  survivor_color_state_t survivor;
+  survivor.retired = true;
+  survivor.consecutive_missing_observations = 3;
+  survivor.missing_since =
+    std::chrono::steady_clock::now() - std::chrono::milliseconds(500);
+  observeColorSurvivorPresence(
+    survivor,
+    true,
+    std::chrono::steady_clock::now()
+  );
+  return !survivor.retired &&
+         survivor.consecutive_missing_observations == 0 &&
+         survivor.missing_since == std::chrono::steady_clock::time_point {};
+}
+
+bool detachRetryCapturesColorContractForTest(
+  bool hasContext,
+  bool contextHasCapturedColorContract,
+  bool pathNeedsDetach
+) {
+  return detachRetryMustCaptureColorContract(
+    hasContext,
+    contextHasCapturedColorContract,
+    pathNeedsDetach
+  );
+}
+
+bool activeColorModeObservationSettledForTest(
+  bool userStatesMatch,
+  bool latestActiveModeMismatch,
+  unsigned int consecutiveMismatchObservations,
+  std::chrono::milliseconds continuouslyMismatchedFor
+) {
+  return activeColorModeObservationSettled(
+    userStatesMatch,
+    latestActiveModeMismatch,
+    consecutiveMismatchObservations,
+    continuouslyMismatchedFor
+  );
+}
+
+bool rejectedColorSetterRetryAllowedForTest(
+  std::chrono::milliseconds elapsedSinceFailure
+) {
+  color_setter_attempts_t attempts;
+  const auto failure_time =
+    std::chrono::steady_clock::time_point {} + std::chrono::seconds(10);
+  deferRejectedColorSetter(
+    color_reconcile_action_internal_e::set_hdr_user_state,
+    attempts,
+    failure_time
+  );
+  return colorSetterRetryAvailable(
+    color_reconcile_action_internal_e::set_hdr_user_state,
+    attempts,
+    failure_time + elapsedSinceFailure
+  );
+}
+
+bool colorSurvivorContractMergePreservesExistingForTest() {
+  survivor_color_state_t original;
+  original.device_path = LR"(\\?\DISPLAY#PHYSICAL#original)";
+  original.contract.api = color_contract_api_e::modern;
+  original.contract.hdr_user_enabled = true;
+
+  auto changed_original = original;
+  changed_original.contract.hdr_user_enabled = false;
+  survivor_color_state_t newly_connected;
+  newly_connected.device_path = LR"(\\?\DISPLAY#PHYSICAL#new)";
+
+  std::vector<survivor_color_state_t> expected {original};
+  mergeSurvivorColorStates(expected, {changed_original, newly_connected});
+  return expected.size() == 2 &&
+         expected[0].contract.hdr_user_enabled &&
+         expected[1].device_path == newly_connected.device_path;
+}
+
+bool wcgSetterSelectedDuringHdrBackoffForTest() {
+  const display_color_contract_t current {
+    color_contract_api_e::modern,
+    false,
+    false,
+    false,
+  };
+  const display_color_contract_t expected {
+    color_contract_api_e::modern,
+    false,
+    true,
+    true,
+  };
+  color_setter_attempts_t attempts;
+  const auto failure_time =
+    std::chrono::steady_clock::time_point {} + std::chrono::seconds(10);
+  deferRejectedColorSetter(
+    color_reconcile_action_internal_e::set_hdr_user_state,
+    attempts,
+    failure_time
+  );
+  return colorReconcileActionWithRetryCadence(
+           current,
+           expected,
+           attempts,
+           failure_time
+         ) == color_reconcile_action_internal_e::set_wcg_user_state;
+}
+
+bool colorSurvivorTransitionStateResetsForReapplyForTest() {
+  survivor_color_state_t survivor;
+  survivor.setter_attempts.hdr = true;
+  survivor.setter_attempts.hdr_retry_not_before =
+    std::chrono::steady_clock::time_point {} + std::chrono::seconds(20);
+  survivor.active_mode_settle.consecutive_mismatch_observations = 4;
+  survivor.active_mode_settle.grace_expired = true;
+  std::vector<survivor_color_state_t> expected {survivor};
+  resetSurvivorColorTransitionState(expected);
+  return !expected[0].setter_attempts.hdr &&
+         expected[0].setter_attempts.hdr_retry_not_before ==
+           std::chrono::steady_clock::time_point {} &&
+         expected[0].active_mode_settle.consecutive_mismatch_observations == 0 &&
+         !expected[0].active_mode_settle.grace_expired;
+}
+
+std::size_t coalescedRetirementCandidateCountForTest(
+  const std::vector<retirement_path_candidate_t> &candidates
+) {
+  std::vector<retirement_candidate_t> internal_candidates;
+  internal_candidates.reserve(candidates.size());
+  for (const auto &candidate : candidates) {
+    internal_candidates.push_back({
+      candidate.identity,
+      candidate.device_path,
+      candidate.target_available,
+      candidate.device_info_available,
+    });
+  }
+  return coalesceRetirementCandidates(internal_candidates).size();
 }
 #endif
 

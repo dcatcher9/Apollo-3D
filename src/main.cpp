@@ -417,35 +417,97 @@ int main(int argc, char *argv[]) {
       }
 
       if (probe_display.added()) {
-        VDISPLAY::removeVirtualDisplay(*probe_guid);
         const auto retirement_started = std::chrono::steady_clock::now();
-        const auto retirement_deadline = retirement_started + 5s;
-        auto next_remove_retry = retirement_started + 250ms;
-        int consecutive_absent_observations = 0;
+        const auto retirement_deadline = retirement_started + 8s;
+        auto next_remove_retry = retirement_started;
+        unsigned int consecutive_absent_observations = 0;
+        bool remove_ready = false;
+        bool remove_accepted = false;
+        bool requires_active_path_absence = false;
         bool retired = false;
+        std::shared_ptr<VDISPLAY::desktop_detach_context_t> detach_context;
         while (std::chrono::steady_clock::now() < retirement_deadline) {
           const auto now = std::chrono::steady_clock::now();
-          if (now >= next_remove_retry) {
-            VDISPLAY::removeVirtualDisplay(*probe_guid);
+          if (!remove_ready) {
+            const auto detach_budget = std::min(
+              1500ms,
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                retirement_deadline - now
+              )
+            );
+            const auto detach = VDISPLAY::deactivateVirtualDisplay(
+              *probe_display.identity,
+              probe_display.device_path,
+              detach_budget,
+              detach_context
+            );
+            if (detach.state == VDISPLAY::desktop_detach_state_e::detached ||
+                detach.state == VDISPLAY::desktop_detach_state_e::already_inactive) {
+              remove_ready = true;
+              requires_active_path_absence = true;
+            } else if (
+              detach.state == VDISPLAY::desktop_detach_state_e::skipped_only_active
+            ) {
+              // With no surviving desktop there is no multi-monitor shell state to preserve.
+              remove_ready = true;
+              requires_active_path_absence = false;
+            } else {
+              std::this_thread::sleep_for(250ms);
+              continue;
+            }
+          }
+
+          if (!remove_accepted && now >= next_remove_retry) {
+            if (requires_active_path_absence) {
+              const auto active_state = VDISPLAY::queryVirtualDisplayIdentity(
+                *probe_display.identity,
+                probe_display.device_path,
+                probe_display.display_name
+              ).state;
+              if (!VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(
+                    true,
+                    active_state
+                  )) {
+                // Detach readiness can become stale if Windows reattaches the path. Re-enter the
+                // same context-preserving detach sequence instead of hot-removing it.
+                remove_ready = false;
+                requires_active_path_absence = false;
+                detach_context.reset();
+                consecutive_absent_observations =
+                  VDISPLAY::advanceStableAbsenceEvidence(
+                    consecutive_absent_observations,
+                    true,
+                    active_state
+                  );
+                continue;
+              }
+            }
+            remove_accepted = VDISPLAY::removeVirtualDisplay(*probe_guid);
             next_remove_retry = now + 250ms;
           }
-          const auto identity = VDISPLAY::queryVirtualDisplayIdentity(
+
+          // Once CCD detaches a target, active-path absence alone no longer proves that the IddCx
+          // monitor is gone. Query the complete topology and require stable exact absence.
+          const auto identity = VDISPLAY::queryVirtualDisplayRetirementState(
             *probe_display.identity,
             probe_display.device_path,
             probe_display.display_name
           );
-          if (identity.state == VDISPLAY::display_identity_state_e::absent) {
-            ++consecutive_absent_observations;
+          consecutive_absent_observations =
+            VDISPLAY::advanceStableAbsenceEvidence(
+              consecutive_absent_observations,
+              false,
+              identity
+            );
+          if (identity == VDISPLAY::display_identity_state_e::absent) {
             const bool publication_quarantine_complete = !probe_display.display_name.empty() ||
                                                          now - retirement_started >= 750ms;
             if (consecutive_absent_observations >= 3 && publication_quarantine_complete) {
               retired = true;
               break;
             }
-          } else {
-            consecutive_absent_observations = 0;
           }
-          std::this_thread::sleep_for(50ms);
+          std::this_thread::sleep_for(250ms);
         }
         if (!retired) {
           BOOST_LOG(fatal) << "The encoder-probe virtual display did not retire cleanly; "sv

@@ -54,6 +54,17 @@ namespace proc {
     remote_busy,
     cleanup_timeout,
   };
+
+  #ifdef SUNSHINE_TESTS
+  bool retiredVirtualDisplayRemovalAllowedForTest(
+    bool desktopDeactivationRequested,
+    bool detachConfirmedReady
+  );
+  bool virtualDisplayRetirementHandoffMarksSessionForTest(
+    bool hasBoundDisplay,
+    bool retiringBoundDisplay
+  );
+  #endif
 #endif
 
   typedef config::prep_cmd_t cmd_t;
@@ -231,6 +242,7 @@ namespace proc {
     std::wstring _virtual_display_device_path;
     std::wstring _virtual_display_gdi_name;
     bool _virtual_display_published = false;
+    bool _virtual_display_retirement_handed_off = false;
     std::optional<std::uint64_t> _remote_virtual_display_lease;
     VDISPLAY::creation_result_t create_retained_virtual_display(
       std::uint32_t width,
@@ -246,14 +258,17 @@ namespace proc {
       const std::wstring &gdi_name,
       bool was_published,
       std::chrono::milliseconds timeout,
-      bool deactivate_desktop = false
+      bool deactivate_desktop
     );
+    static bool prepare_retired_virtual_display_for_removal(std::chrono::milliseconds timeout);
+    static void schedule_retired_virtual_display_cleanup();
+    static bool has_retired_virtual_display();
     void clear_virtual_display_binding();
     void adopt_virtual_display(
       VDISPLAY::creation_result_t created_display,
       bool enable_hdr
     );
-    bool wait_for_retired_virtual_display(std::chrono::milliseconds timeout);
+    static bool wait_for_retired_virtual_display(std::chrono::milliseconds timeout);
     void start_hdr_worker(bool enable_hdr);
     bool request_hdr_state(bool enable_hdr, std::chrono::milliseconds timeout);
     void stop_hdr_worker();

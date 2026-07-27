@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -65,7 +66,12 @@ namespace VDISPLAY {
   struct desktop_detach_result_t {
     desktop_detach_state_e state {desktop_detach_state_e::topology_query_failed};
     LONG windows_status {ERROR_SUCCESS};
+    bool path_confirmed_inactive = false;
+    bool shell_settled = false;
+    bool active_mode_grace_expired = false;
   };
+
+  struct desktop_detach_context_t;
 
 	LONG getDeviceSettings(const wchar_t* deviceName, DEVMODEW& devMode);
 	LONG testDisplaySettings(const wchar_t* deviceName, int width, int height, int refresh_rate);
@@ -91,10 +97,20 @@ namespace VDISPLAY {
     std::wstring_view devicePath,
     std::wstring_view displayName
   );
+  bool isDriverRemovalSafeAfterDesktopDetach(
+    bool requiresActivePathAbsence,
+    display_identity_state_e activePathState
+  );
+  unsigned int advanceStableAbsenceEvidence(
+    unsigned int priorAbsentObservations,
+    bool evidenceInvalidated,
+    display_identity_state_e latestState
+  );
   desktop_detach_result_t deactivateVirtualDisplay(
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
     std::wstring_view devicePath,
-    std::chrono::milliseconds timeout
+    std::chrono::milliseconds timeout,
+    std::shared_ptr<desktop_detach_context_t> &context
   );
 #ifdef SUNSHINE_TESTS
   enum class desktop_detach_plan_e {
@@ -102,6 +118,19 @@ namespace VDISPLAY {
     already_inactive,
     skipped_only_active,
     ambiguous_identity,
+  };
+
+  enum class color_reconcile_action_e {
+    settled,
+    wait_for_active_mode,
+    set_legacy_advanced_color,
+    set_hdr_user_state,
+    set_wcg_user_state,
+  };
+
+  struct desktop_detach_evidence_t {
+    bool path_confirmed_inactive = false;
+    bool shell_settled = false;
   };
 
   struct retirement_path_candidate_t {
@@ -132,6 +161,62 @@ namespace VDISPLAY {
   display_identity_state_e virtualDisplayRetirementStateForTest(
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
     std::wstring_view learnedDevicePath,
+    const std::vector<retirement_path_candidate_t> &candidates
+  );
+  desktop_detach_evidence_t desktopDetachEvidenceForTest(
+    bool latestPathInactive,
+    unsigned int consecutiveInactiveObservations,
+    std::chrono::milliseconds continuouslyInactiveFor
+  );
+  color_reconcile_action_e colorReconcileActionForTest(
+    bool legacyApi,
+    bool currentLegacyEnabled,
+    bool expectedLegacyEnabled,
+    bool currentHdrUserEnabled,
+    bool expectedHdrUserEnabled,
+    bool currentWcgUserEnabled,
+    bool expectedWcgUserEnabled,
+    bool currentAdvancedColorActive,
+    bool expectedAdvancedColorActive,
+    DISPLAYCONFIG_ADVANCED_COLOR_MODE currentActiveMode,
+    DISPLAYCONFIG_ADVANCED_COLOR_MODE expectedActiveMode
+  );
+  color_reconcile_action_e colorReconcileActionAfterAcceptedSettersForTest(
+    bool currentHdrUserEnabled,
+    bool expectedHdrUserEnabled,
+    bool currentWcgUserEnabled,
+    bool expectedWcgUserEnabled,
+    bool hdrSetterAccepted,
+    bool wcgSetterAccepted
+  );
+  unsigned int repeatedColorSetterAttemptCountForTest(
+    color_reconcile_action_e action,
+    unsigned int repetitions
+  );
+  bool missingColorSurvivorRetiredForTest(
+    bool latestMissing,
+    unsigned int consecutiveMissingObservations,
+    std::chrono::milliseconds continuouslyMissingFor
+  );
+  bool retiredColorSurvivorReactivatesForTest();
+  bool detachRetryCapturesColorContractForTest(
+    bool hasContext,
+    bool contextHasCapturedColorContract,
+    bool pathNeedsDetach
+  );
+  bool activeColorModeObservationSettledForTest(
+    bool userStatesMatch,
+    bool latestActiveModeMismatch,
+    unsigned int consecutiveMismatchObservations,
+    std::chrono::milliseconds continuouslyMismatchedFor
+  );
+  bool rejectedColorSetterRetryAllowedForTest(
+    std::chrono::milliseconds elapsedSinceFailure
+  );
+  bool colorSurvivorContractMergePreservesExistingForTest();
+  bool wcgSetterSelectedDuringHdrBackoffForTest();
+  bool colorSurvivorTransitionStateResetsForReapplyForTest();
+  std::size_t coalescedRetirementCandidateCountForTest(
     const std::vector<retirement_path_candidate_t> &candidates
   );
 #endif
