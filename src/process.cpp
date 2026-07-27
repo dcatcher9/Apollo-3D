@@ -1569,6 +1569,14 @@ namespace proc {
           retired_virtual_display_gdi_name.clear();
           retired_virtual_display_was_published = false;
           retired_virtual_display_started = {};
+          // Explorer can finish rebuilding for the new topology having lost its whole taskbar
+          // button list, including buttons for windows that never left their display. Done here
+          // rather than after the remove call because the shell only settles once the output is
+          // genuinely gone -- restoring earlier would just be undone by the rebuild still running.
+          if (const int restored = platf::restore_taskbar_buttons(); restored > 0) {
+            BOOST_LOG(info) << "Re-registered " << restored
+                            << " taskbar buttons after the virtual display was removed";
+          }
           return !retired_virtual_display_identity.has_value();
         }
       } else {

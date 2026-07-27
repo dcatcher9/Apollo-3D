@@ -26,6 +26,7 @@
 // prevent clang format from "optimizing" the header include order
 // clang-format off
 #include <dwmapi.h>
+#include <shobjidl.h>
 #include <iphlpapi.h>
 #include <iterator>
 #include <timeapi.h>
@@ -1793,6 +1794,83 @@ namespace platf {
     }
 
     return output;
+  }
+
+  namespace {
+    /**
+     * Mirrors the shell's own rule for which windows earn a taskbar button. The cloak test is the
+     * one that is easy to miss: suspended UWP apps and windows belonging to another Windows
+     * virtual desktop are visible by every other measure, and adding buttons for them would put
+     * entries on the taskbar that the shell deliberately hides.
+     */
+    bool is_taskbar_eligible(HWND window) {
+      if (!IsWindowVisible(window) || GetWindow(window, GW_OWNER) != nullptr) {
+        return false;
+      }
+      if (GetWindowTextLengthW(window) == 0) {
+        return false;
+      }
+      const LONG_PTR ex_style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+      if ((ex_style & WS_EX_TOOLWINDOW) && !(ex_style & WS_EX_APPWINDOW)) {
+        return false;
+      }
+      BOOL cloaked = FALSE;
+      if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
+          && cloaked) {
+        return false;
+      }
+      return true;
+    }
+
+    struct taskbar_restore_ctx_t {
+      ITaskbarList *taskbar;
+      int restored;
+    };
+
+    BOOL CALLBACK restore_taskbar_button(HWND window, LPARAM param) {
+      auto *ctx = reinterpret_cast<taskbar_restore_ctx_t *>(param);
+      if (is_taskbar_eligible(window) && SUCCEEDED(ctx->taskbar->AddTab(window))) {
+        ++ctx->restored;
+      }
+      return TRUE;
+    }
+  }  // namespace
+
+  int restore_taskbar_buttons() {
+    // COM may already be live on this thread in either mode; RPC_E_CHANGED_MODE means someone
+    // else owns the initialization and this call must not balance it.
+    const HRESULT com_status = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const bool owns_com = SUCCEEDED(com_status);
+    auto com_guard = util::fail_guard([owns_com]() {
+      if (owns_com) {
+        CoUninitialize();
+      }
+    });
+    if (FAILED(com_status) && com_status != RPC_E_CHANGED_MODE) {
+      print_status("Could not initialize COM to restore taskbar buttons"sv, com_status);
+      return 0;
+    }
+
+    ITaskbarList *taskbar = nullptr;
+    HRESULT status = CoCreateInstance(
+      CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&taskbar));
+    if (FAILED(status) || taskbar == nullptr) {
+      print_status("Could not create the shell taskbar interface"sv, status);
+      return 0;
+    }
+    auto taskbar_guard = util::fail_guard([taskbar]() {
+      taskbar->Release();
+    });
+
+    status = taskbar->HrInit();
+    if (FAILED(status)) {
+      print_status("Could not initialize the shell taskbar interface"sv, status);
+      return 0;
+    }
+
+    taskbar_restore_ctx_t ctx {taskbar, 0};
+    EnumWindows(restore_taskbar_button, reinterpret_cast<LPARAM>(&ctx));
+    return ctx.restored;
   }
 
   std::string to_utf8(const std::wstring_view &string) {

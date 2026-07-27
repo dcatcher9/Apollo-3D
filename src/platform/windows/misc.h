@@ -91,4 +91,20 @@ namespace platf {
    * @return The converted UTF-8 string.
    */
   std::string to_utf8(const std::wstring_view &string);
+
+  /**
+   * @brief Re-register every taskbar-eligible window with the shell.
+   *
+   * Removing a display makes Explorer rebuild its taskbar, and it can finish that rebuild having
+   * lost the whole button list -- including buttons for windows on displays that never changed.
+   * The windows themselves are untouched: they stay visible, keep their position and remain
+   * reachable with Alt+Tab, so the only damage is that the taskbar no longer lists them.
+   *
+   * There is no API to ask Explorer to re-enumerate, but ITaskbarList::AddTab adds a specific
+   * window back, and is harmless for one already listed. Applying it to every eligible top-level
+   * window restores the list without touching windows the shell deliberately hides.
+   *
+   * @return the number of windows re-registered, or 0 if the shell interface was unavailable.
+   */
+  int restore_taskbar_buttons();
 }  // namespace platf
