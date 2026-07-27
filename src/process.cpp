@@ -1441,6 +1441,12 @@ namespace proc {
       }
       if (VDISPLAY::removeVirtualDisplay(_launch_session->display_guid)) {
         BOOST_LOG(info) << "Virtual Display removed successfully";
+        // Settle the topology here rather than leaving it to the next session. The IOCTL only
+        // requests removal; Windows publishes it afterwards, and the shell's taskbar rebuild
+        // happens against that. Waiting here is also what puts the taskbar restore on the path a
+        // user actually takes -- quitting and stopping -- instead of on the one that only runs
+        // when something starts a new session later.
+        wait_for_retired_virtual_display(1500ms);
       } else if (_virtual_display) {
         BOOST_LOG(warning) << "Virtual Display remove failed";
       } else {
