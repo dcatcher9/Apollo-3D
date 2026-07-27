@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <functional>
 #include <optional>
 #include <string>
@@ -49,6 +50,23 @@ namespace VDISPLAY {
 		WATCHDOG_FAILED      = -3
 	};
 
+  enum class desktop_detach_state_e {
+    detached,
+    already_inactive,
+    skipped_only_active,
+    ambiguous_identity,
+    topology_query_failed,
+    validation_failed,
+    apply_failed,
+    color_restore_timeout,
+    settle_timeout,
+  };
+
+  struct desktop_detach_result_t {
+    desktop_detach_state_e state {desktop_detach_state_e::topology_query_failed};
+    LONG windows_status {ERROR_SUCCESS};
+  };
+
 	LONG getDeviceSettings(const wchar_t* deviceName, DEVMODEW& devMode);
 	LONG testDisplaySettings(const wchar_t* deviceName, int width, int height, int refresh_rate);
 	LONG changeDisplaySettings(const wchar_t* deviceName, int width, int height, int refresh_rate);
@@ -68,7 +86,31 @@ namespace VDISPLAY {
     std::wstring_view devicePath,
     std::wstring_view displayName
   );
+  display_identity_state_e queryVirtualDisplayRetirementState(
+    const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
+    std::wstring_view devicePath,
+    std::wstring_view displayName
+  );
+  desktop_detach_result_t deactivateVirtualDisplay(
+    const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
+    std::wstring_view devicePath,
+    std::chrono::milliseconds timeout
+  );
 #ifdef SUNSHINE_TESTS
+  enum class desktop_detach_plan_e {
+    ready,
+    already_inactive,
+    skipped_only_active,
+    ambiguous_identity,
+  };
+
+  struct retirement_path_candidate_t {
+    SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT identity {};
+    std::wstring device_path;
+    bool target_available = false;
+    bool device_info_available = true;
+  };
+
   bool isSudoVirtualDisplayPathForTest(std::wstring_view devicePath);
   uint32_t watchdogPingIntervalMsForTest(uint32_t timeoutSeconds);
   bool virtualDisplayIdentityMatchesForTest(
@@ -76,6 +118,21 @@ namespace VDISPLAY {
     std::wstring_view learnedDevicePath,
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &candidateIdentity,
     std::wstring_view candidateDevicePath
+  );
+  bool rebaseVirtualDisplaySurvivorsForTest(
+    const std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
+    std::vector<DISPLAYCONFIG_MODE_INFO> &modes
+  );
+  desktop_detach_plan_e prepareVirtualDisplayDetachPathsForTest(
+    const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
+    std::wstring_view learnedDevicePath,
+    const std::vector<std::wstring> &candidateDevicePaths,
+    std::vector<DISPLAYCONFIG_PATH_INFO> &paths
+  );
+  display_identity_state_e virtualDisplayRetirementStateForTest(
+    const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
+    std::wstring_view learnedDevicePath,
+    const std::vector<retirement_path_candidate_t> &candidates
   );
 #endif
 	creation_result_t createVirtualDisplay(

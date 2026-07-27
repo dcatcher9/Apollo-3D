@@ -73,6 +73,9 @@ namespace proc {
     std::wstring retired_virtual_display_device_path;
     std::wstring retired_virtual_display_gdi_name;
     bool retired_virtual_display_was_published = false;
+    bool retired_virtual_display_remove_accepted = false;
+    bool retired_virtual_display_requires_device_absence = false;
+    std::chrono::steady_clock::time_point retired_virtual_display_remove_not_before {};
     std::chrono::steady_clock::time_point retired_virtual_display_started {};
 #endif
   }  // namespace
@@ -437,7 +440,8 @@ namespace proc {
     const std::wstring &device_path,
     const std::wstring &gdi_name,
     bool was_published,
-    std::chrono::milliseconds timeout
+    std::chrono::milliseconds timeout,
+    bool deactivate_desktop
   ) {
     // Never overwrite an unresolved retirement record. It is the only stable proof that an old
     // target is gone before SudoVDA is asked to reuse the same GUID.
@@ -450,17 +454,91 @@ namespace proc {
       return false;
     }
 
+    const auto retirement_deadline =
+      std::chrono::steady_clock::now() + std::max(timeout, std::chrono::milliseconds::zero());
+    const auto remaining_time = [&]() {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= retirement_deadline) {
+        return std::chrono::milliseconds::zero();
+      }
+      return std::chrono::duration_cast<std::chrono::milliseconds>(retirement_deadline - now);
+    };
+
+    bool desktop_path_inactive = false;
+    bool defer_driver_removal = false;
+    if (deactivate_desktop) {
+      const auto detach = VDISPLAY::deactivateVirtualDisplay(
+        *identity,
+        device_path,
+        std::min(remaining_time(), 5000ms)
+      );
+      switch (detach.state) {
+        case VDISPLAY::desktop_detach_state_e::detached:
+          desktop_path_inactive = true;
+          BOOST_LOG(info) << "Virtual display detached from the Windows desktop before driver removal."sv;
+          break;
+        case VDISPLAY::desktop_detach_state_e::already_inactive:
+          desktop_path_inactive = true;
+          BOOST_LOG(debug) << "Virtual display was already inactive before driver removal."sv;
+          break;
+        case VDISPLAY::desktop_detach_state_e::skipped_only_active:
+          BOOST_LOG(info) << "Keeping the virtual display active until driver removal because it is the only desktop output."sv;
+          break;
+        case VDISPLAY::desktop_detach_state_e::ambiguous_identity:
+          BOOST_LOG(warning) << "Could not identify exactly one active virtual-display path; falling back to direct driver removal."sv;
+          break;
+        case VDISPLAY::desktop_detach_state_e::topology_query_failed:
+          BOOST_LOG(warning) << "Could not query a complete desktop topology before virtual-display removal; "
+                                "falling back to direct driver removal."sv;
+          break;
+        case VDISPLAY::desktop_detach_state_e::validation_failed:
+          BOOST_LOG(warning) << "Windows rejected validation of the temporary virtual-display detach (status "
+                             << detach.windows_status << "); falling back to direct driver removal."sv;
+          break;
+        case VDISPLAY::desktop_detach_state_e::apply_failed:
+          BOOST_LOG(warning) << "Windows could not detach the virtual display from the desktop (status "
+                             << detach.windows_status << "); falling back to direct driver removal."sv;
+          break;
+        case VDISPLAY::desktop_detach_state_e::color_restore_timeout:
+          desktop_path_inactive = true;
+          defer_driver_removal = true;
+          BOOST_LOG(error) << "The virtual display was detached, but a surviving display's "
+                              "Advanced Color state could not be restored before the deadline; "
+                              "deferring driver removal."sv;
+          break;
+        case VDISPLAY::desktop_detach_state_e::settle_timeout:
+          desktop_path_inactive = true;
+          defer_driver_removal = true;
+          BOOST_LOG(warning) << "The virtual-display desktop path was detached or already inactive, "
+                                "but its shell-settle interval could not be verified before the "
+                                "deadline; deferring driver removal."sv;
+          break;
+      }
+    }
+
     retired_virtual_display_identity = identity;
     retired_virtual_display_guid = guid;
     retired_virtual_display_device_path = device_path;
     retired_virtual_display_gdi_name = gdi_name;
     retired_virtual_display_was_published = was_published;
+    retired_virtual_display_remove_accepted = false;
+    retired_virtual_display_requires_device_absence = desktop_path_inactive;
     retired_virtual_display_started = std::chrono::steady_clock::now();
+    retired_virtual_display_remove_not_before =
+      defer_driver_removal ? retired_virtual_display_started + 1s :
+                             retired_virtual_display_started;
 
-    if (!VDISPLAY::removeVirtualDisplay(guid)) {
+    if (defer_driver_removal) {
+      return false;
+    }
+
+    retired_virtual_display_remove_accepted = VDISPLAY::removeVirtualDisplay(guid);
+    if (!retired_virtual_display_remove_accepted) {
+      retired_virtual_display_remove_not_before =
+        std::chrono::steady_clock::now() + 250ms;
       BOOST_LOG(warning) << "The initial virtual-display remove request failed; retrying while observing topology."sv;
     }
-    return wait_for_retired_virtual_display(timeout);
+    return wait_for_retired_virtual_display(remaining_time());
   }
 
   void proc_t::clear_virtual_display_binding() {
@@ -1385,12 +1463,10 @@ namespace proc {
 
     // Revert HDR state
     if (has_run) {
-      // The virtual display is destroyed a few lines below, so reverting its HDR state changes a
-      // setting on an output that is about to stop existing. It is not merely wasted work: an HDR
-      // toggle is a full display reconfiguration, and issuing one milliseconds before the same
-      // output disappears makes the shell rebuild against a display set that changes underneath
-      // it. Explorer loses its entire taskbar button list when that race is lost -- including
-      // buttons for windows on displays that never moved.
+      // The virtual display is retired a few lines below, so reverting its HDR state changes a
+      // setting on an output that is about to stop existing. An HDR toggle is a full display
+      // reconfiguration; avoid inserting redundant topology churn immediately before the
+      // controlled desktop-detach and driver-removal sequence.
       const std::string virtual_display_name = platf::to_utf8(_virtual_display_gdi_name);
       for (const auto &[changed_display, initial_hdr] : original_hdr_states) {
         if (!virtual_display_name.empty() && changed_display == virtual_display_name) {
@@ -1432,15 +1508,21 @@ namespace proc {
     bool used_virtual_display = vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK && _launch_session && _launch_session->virtual_display;
     if (used_virtual_display) {
       if (_virtual_display_identity) {
-        retired_virtual_display_identity = _virtual_display_identity;
-        retired_virtual_display_guid = _launch_session->display_guid;
-        retired_virtual_display_device_path = _virtual_display_device_path;
-        retired_virtual_display_gdi_name = _virtual_display_gdi_name;
-        retired_virtual_display_was_published = _virtual_display_published;
-        retired_virtual_display_started = std::chrono::steady_clock::now();
-      }
-      if (VDISPLAY::removeVirtualDisplay(_launch_session->display_guid)) {
-        BOOST_LOG(info) << "Virtual Display removed successfully";
+        if (retire_virtual_display(
+              _virtual_display_identity,
+              _launch_session->display_guid,
+              _virtual_display_device_path,
+              _virtual_display_gdi_name,
+              _virtual_display_published,
+              6s,
+              true
+            )) {
+          BOOST_LOG(info) << "Virtual Display removed successfully";
+        } else {
+          BOOST_LOG(warning) << "Virtual Display removal did not settle before teardown completed";
+        }
+      } else if (VDISPLAY::removeVirtualDisplay(_launch_session->display_guid)) {
+        BOOST_LOG(info) << "Virtual Display removed successfully without a published driver identity";
       } else if (_virtual_display) {
         BOOST_LOG(warning) << "Virtual Display remove failed";
       } else {
@@ -1500,7 +1582,12 @@ namespace proc {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     constexpr unsigned int required_absent_observations = 3;
     unsigned int consecutive_absent_observations = 0;
-    auto next_remove_retry = std::chrono::steady_clock::now();
+    auto next_remove_retry = std::max(
+      std::chrono::steady_clock::now(),
+      retired_virtual_display_remove_not_before
+    );
+    const auto poll_interval =
+      retired_virtual_display_requires_device_absence ? 100ms : 50ms;
 
     auto is_same_identity = [&](const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &candidate) {
       return candidate.AdapterLuid.HighPart == identity.AdapterLuid.HighPart &&
@@ -1519,20 +1606,39 @@ namespace proc {
       }
 
       const auto observation_time = std::chrono::steady_clock::now();
-      if (retired_virtual_display_guid && observation_time >= next_remove_retry) {
+      if (!retired_virtual_display_remove_accepted &&
+          retired_virtual_display_guid &&
+          observation_time >= next_remove_retry) {
         // Driver removal can fail transiently during an IddCx/topology transition. Retain the GUID
         // with the stable identity and retry; otherwise one failed IOCTL blocks all later virtual
         // displays until Apollo restarts.
-        VDISPLAY::removeVirtualDisplay(*retired_virtual_display_guid);
+        if (VDISPLAY::removeVirtualDisplay(*retired_virtual_display_guid)) {
+          retired_virtual_display_remove_accepted = true;
+        }
         next_remove_retry = observation_time + 250ms;
+        retired_virtual_display_remove_not_before = next_remove_retry;
       }
 
-      const auto query = VDISPLAY::queryVirtualDisplayIdentity(
-        identity,
-        retired_virtual_display_device_path,
-        retired_virtual_display_gdi_name
-      );
-      if (query.state == VDISPLAY::display_identity_state_e::absent) {
+      const auto query_retirement_state = [&]() {
+        if (retired_virtual_display_requires_device_absence) {
+          // A deliberate desktop detach removes the active path before the driver monitor
+          // disappears, so active-path absence alone is not proof of driver retirement.
+          return VDISPLAY::queryVirtualDisplayRetirementState(
+            identity,
+            retired_virtual_display_device_path,
+            retired_virtual_display_gdi_name
+          );
+        }
+        return VDISPLAY::queryVirtualDisplayIdentity(
+                 identity,
+                 retired_virtual_display_device_path,
+                 retired_virtual_display_gdi_name
+        ).state;
+      };
+      const auto query = query_retirement_state();
+      // Authoritative topology absence is sufficient even if REMOVE returned false: the monitor
+      // may already have disappeared externally or before its GUID was published.
+      if (query == VDISPLAY::display_identity_state_e::absent) {
         ++consecutive_absent_observations;
         if (consecutive_absent_observations >= required_absent_observations) {
           // An AddVirtualDisplay result can precede Windows publishing the path. For such a display,
@@ -1543,19 +1649,18 @@ namespace proc {
             if (now >= deadline) {
               return false;
             }
-            std::this_thread::sleep_for(std::min(50ms, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
+            std::this_thread::sleep_for(std::min(
+              poll_interval,
+              std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+            ));
             continue;
           }
           if (std::chrono::steady_clock::now() + 250ms > deadline) {
             return false;
           }
           std::this_thread::sleep_for(250ms);
-          const auto settled_query = VDISPLAY::queryVirtualDisplayIdentity(
-            identity,
-            retired_virtual_display_device_path,
-            retired_virtual_display_gdi_name
-          );
-          if (settled_query.state != VDISPLAY::display_identity_state_e::absent) {
+          const auto settled_query = query_retirement_state();
+          if (settled_query != VDISPLAY::display_identity_state_e::absent) {
             consecutive_absent_observations = 0;
             continue;
           }
@@ -1568,6 +1673,9 @@ namespace proc {
           retired_virtual_display_device_path.clear();
           retired_virtual_display_gdi_name.clear();
           retired_virtual_display_was_published = false;
+          retired_virtual_display_remove_accepted = false;
+          retired_virtual_display_requires_device_absence = false;
+          retired_virtual_display_remove_not_before = {};
           retired_virtual_display_started = {};
           return !retired_virtual_display_identity.has_value();
         }
@@ -1579,7 +1687,10 @@ namespace proc {
       if (now >= deadline) {
         return false;
       }
-      std::this_thread::sleep_for(std::min(50ms, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
+      std::this_thread::sleep_for(std::min(
+        poll_interval,
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+      ));
     }
   }
 

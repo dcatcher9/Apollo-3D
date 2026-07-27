@@ -245,7 +245,8 @@ namespace proc {
       const std::wstring &device_path,
       const std::wstring &gdi_name,
       bool was_published,
-      std::chrono::milliseconds timeout
+      std::chrono::milliseconds timeout,
+      bool deactivate_desktop = false
     );
     void clear_virtual_display_binding();
     void adopt_virtual_display(
