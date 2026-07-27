@@ -1385,7 +1385,19 @@ namespace proc {
 
     // Revert HDR state
     if (has_run) {
+      // The virtual display is destroyed a few lines below, so reverting its HDR state changes a
+      // setting on an output that is about to stop existing. It is not merely wasted work: an HDR
+      // toggle is a full display reconfiguration, and issuing one milliseconds before the same
+      // output disappears makes the shell rebuild against a display set that changes underneath
+      // it. Explorer loses its entire taskbar button list when that race is lost -- including
+      // buttons for windows on displays that never moved.
+      const std::string virtual_display_name = platf::to_utf8(_virtual_display_gdi_name);
       for (const auto &[changed_display, initial_hdr] : original_hdr_states) {
+        if (!virtual_display_name.empty() && changed_display == virtual_display_name) {
+          BOOST_LOG(info) << "Skipping HDR revert for " << changed_display
+                          << "; the virtual display is about to be removed";
+          continue;
+        }
         const auto display_name_w = platf::from_utf8(changed_display);
         const auto restore_deadline = std::chrono::steady_clock::now() + 2s;
         bool restored = false;
