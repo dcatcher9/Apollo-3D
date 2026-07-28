@@ -953,9 +953,29 @@ TEST(EffectiveVideoModePublisherTests, ProductionPublishesAfterEncoderInitializa
   ASSERT_FALSE(source.empty());
 
   const auto capture_begin = source.find("void capture_async(");
+  const auto hdr_snapshot = source.find(
+    "hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);",
+    capture_begin
+  );
+  const auto hdr_device_read = source.find(
+    "colorspace_is_hdr(encode_device->colorspace)",
+    hdr_snapshot
+  );
   const auto encoder_init = source.find(
     "auto encode_session = make_encode_session(",
     capture_begin
+  );
+  const auto encode_device_transfer = source.find(
+    "std::move(encode_device)",
+    encoder_init
+  );
+  const auto capture_end = source.find(
+    "\n  void capture(",
+    encode_device_transfer
+  );
+  const auto post_transfer_device_read = source.find(
+    "encode_device->",
+    encode_device_transfer
   );
   const auto effective_publish = source.find(
     "config.effective_mode->publish(effective_mode);",
@@ -965,12 +985,28 @@ TEST(EffectiveVideoModePublisherTests, ProductionPublishesAfterEncoderInitializa
     "video_mode_applied_queue->raise(video_mode_applied_t",
     effective_publish
   );
+  const auto hdr_publish = source.find(
+    "hdr_event->raise(std::move(hdr_info));",
+    encoder_init
+  );
   ASSERT_NE(capture_begin, std::string::npos);
+  ASSERT_NE(hdr_snapshot, std::string::npos);
+  ASSERT_NE(hdr_device_read, std::string::npos);
   ASSERT_NE(encoder_init, std::string::npos);
+  ASSERT_NE(encode_device_transfer, std::string::npos);
+  ASSERT_NE(capture_end, std::string::npos);
   ASSERT_NE(effective_publish, std::string::npos);
   ASSERT_NE(completion_publish, std::string::npos);
+  ASSERT_NE(hdr_publish, std::string::npos);
+  EXPECT_LT(hdr_snapshot, encoder_init);
+  EXPECT_LT(hdr_device_read, encoder_init);
+  EXPECT_TRUE(
+    post_transfer_device_read == std::string::npos ||
+    post_transfer_device_read >= capture_end
+  );
   EXPECT_LT(encoder_init, effective_publish);
   EXPECT_LT(effective_publish, completion_publish);
+  EXPECT_LT(encoder_init, hdr_publish);
 }
 
 TEST(HostSbsSceneCutTest, AppearanceFusionRejectsExposureAndHonorsExactBounds) {

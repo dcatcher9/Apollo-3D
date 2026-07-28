@@ -1326,6 +1326,21 @@ namespace video {
         }
         return;
       }
+
+      // Snapshot the HDR state while capture_async still owns the encode device. The device is
+      // transferred into the encode session below and must not be dereferenced after that move.
+      // Publication remains after successful encoder initialization so a failed candidate never
+      // advertises HDR state for a session that did not start.
+      hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);
+      if (colorspace_is_hdr(encode_device->colorspace)) {
+        if (encode_device->hdr_metadata) {
+          hdr_info->metadata = *encode_device->hdr_metadata;
+          hdr_info->enabled = true;
+        } else {
+          BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
+        }
+      }
+
       auto encode_session = make_encode_session(
         session_config,
         std::move(encode_device)
@@ -1405,15 +1420,6 @@ namespace video {
       touch_port_event->raise(make_port(display.get(), config));
 
       // Update client with our current HDR display state
-      hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);
-      if (colorspace_is_hdr(encode_device->colorspace)) {
-        if (encode_device->hdr_metadata) {
-          hdr_info->metadata = *encode_device->hdr_metadata;
-          hdr_info->enabled = true;
-        } else {
-          BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
-        }
-      }
       hdr_event->raise(std::move(hdr_info));
 
       encode_run(
