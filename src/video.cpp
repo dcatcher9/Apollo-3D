@@ -29,9 +29,6 @@ using namespace std::literals;
 
 namespace video {
 
-  // Debug frame-dump request flag (declared in video.h); set by the 0x3004 control message
-  // handler in stream.cpp, consumed by display_vram's SBS convert().
-  std::atomic<bool> sbs_debug_dump_pending {false};
   namespace {
     std::atomic_uint32_t sbs_telemetry_generation_counter {0};
 

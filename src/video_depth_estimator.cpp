@@ -683,8 +683,7 @@ namespace models {
         nvinfer1::OptProfileSelector::kOPT,
         dims_for(depth_engine_opt_height, depth_engine_opt_width)
       ) &&
-      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX,
-                             dims_for(depth_engine_max_dim, depth_engine_max_dim));
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, dims_for(depth_engine_max_dim, depth_engine_max_dim));
     if (!profile_ok || config->addOptimizationProfile(profile) < 0) {
       BOOST_LOG(error) << "TensorRT rejected the depth optimization profile.";
       return false;
@@ -933,12 +932,14 @@ namespace models {
     // without ever flushing or waiting on the encode thread.
     static constexpr std::size_t telemetry_state_float_count =
       sbs_adaptive_state::word_count;
+
     struct telemetry_readback_slot {
       Microsoft::WRL::ComPtr<ID3D11Buffer> staging;
       Microsoft::WRL::ComPtr<ID3D11Query> completion;
       bool pending = false;
       std::uint64_t sampled_frame_id = 0;
     };
+
     std::array<telemetry_readback_slot, 3> telemetry_readback_slots;
     std::size_t telemetry_readback_next = 0;
     bool telemetry_readback_ready = false;
@@ -1128,8 +1129,7 @@ namespace models {
 
       D3D11_QUERY_DESC query_desc {D3D11_QUERY_EVENT, 0};
       for (auto &slot : telemetry_readback_slots) {
-        if (FAILED(device->CreateBuffer(&staging_desc, nullptr, &slot.staging)) ||
-            FAILED(device->CreateQuery(&query_desc, &slot.completion))) {
+        if (FAILED(device->CreateBuffer(&staging_desc, nullptr, &slot.staging)) || FAILED(device->CreateQuery(&query_desc, &slot.completion))) {
           for (auto &created : telemetry_readback_slots) {
             created.staging.Reset();
             created.completion.Reset();
@@ -1511,6 +1511,14 @@ namespace models {
 
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_out_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_out_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> raw_snapshot_buf;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_snapshot_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> model_input_snapshot_buf;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> model_input_snapshot_srv;
+    bool raw_snapshot_error_logged = false;
+    bool model_input_snapshot_error_logged = false;
+    unsigned raw_snapshot_retry_frames = 0;
+    unsigned model_input_snapshot_retry_frames = 0;
 
     // GPU-resident min/max for per-frame disparity normalization (no CPU readback).
     Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_raw_buf;  // min bits, max bits, valid count
@@ -1581,7 +1589,7 @@ namespace models {
         // `subject` (its selector is `< 1.5f`). config.cpp resets bad strings, but the offline
         // harness assigns sbs_cfg directly and bypasses that.
         zero_plane_mode(cfg.zero_plane == "subject" ? 1.0f : cfg.zero_plane == "background" ? 3.0f :
-                                                                                             2.0f) {
+                                                                                              2.0f) {
       const auto init_started = std::chrono::steady_clock::now();
       // Enable the process-wide rolling collector for diagnostic runs. Do not reset it here:
       // Galaxy XR and local-AR estimators may coexist, and one session must not invalidate the
@@ -1965,13 +1973,25 @@ namespace models {
       return depth_srv;
     }
 
-    estimate_result make_result(bool completed_frame_valid = false, std::uint64_t completed_frame_id = 0, bool inference_enqueued = false) {
+    estimate_result make_result(
+      bool completed_frame_valid = false,
+      std::uint64_t completed_frame_id = 0,
+      bool inference_enqueued = false,
+      bool raw_snapshot_valid = false,
+      bool model_input_snapshot_valid = false
+    ) {
       estimate_result r;
       r.depth = output_srv();
       r.subject = subject_srv;
       r.depth_frame_state = minmax_ema_srv;
       r.ema_motion_mask = ema_motion_mask_srv;
       r.raw_model_depth = tensor_out_srv;
+      if (raw_snapshot_valid) {
+        r.raw_model_depth_snapshot = raw_snapshot_srv;
+      }
+      if (model_input_snapshot_valid) {
+        r.model_input_snapshot = model_input_snapshot_srv;
+      }
       r.raw_width = target_w;
       r.raw_height = target_h;
       r.completed_frame_valid = completed_frame_valid;
@@ -1979,6 +1999,54 @@ namespace models {
       r.inference_enqueued = inference_enqueued;
       r.cuda_graph_active = inference_graph_exec != nullptr && !graph_capture_failed;
       return r;
+    }
+
+    bool snapshot_buffer(
+      ID3D11Buffer *source,
+      Microsoft::WRL::ComPtr<ID3D11Buffer> &snapshot,
+      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &snapshot_srv,
+      bool &error_logged,
+      unsigned &retry_frames,
+      std::string_view label
+    ) {
+      if (!source) {
+        return false;
+      }
+      if (retry_frames > 0) {
+        --retry_frames;
+        return false;
+      }
+
+      D3D11_BUFFER_DESC source_desc {};
+      source->GetDesc(&source_desc);
+      bool recreate = !snapshot || !snapshot_srv;
+      if (!recreate) {
+        D3D11_BUFFER_DESC snapshot_desc {};
+        snapshot->GetDesc(&snapshot_desc);
+        recreate = snapshot_desc.ByteWidth != source_desc.ByteWidth ||
+                   snapshot_desc.StructureByteStride != source_desc.StructureByteStride ||
+                   snapshot_desc.MiscFlags != source_desc.MiscFlags;
+      }
+      if (recreate) {
+        snapshot.Reset();
+        snapshot_srv.Reset();
+        if (FAILED(device->CreateBuffer(&source_desc, nullptr, &snapshot)) || FAILED(device->CreateShaderResourceView(snapshot.Get(), nullptr, &snapshot_srv))) {
+          snapshot.Reset();
+          snapshot_srv.Reset();
+          if (!error_logged) {
+            BOOST_LOG(warning) << "Depth estimator could not allocate the Dump 3D " << label
+                               << " snapshot.";
+            error_logged = true;
+          }
+          // Keep a retained request recoverable after transient device pressure without retrying
+          // two allocations on every completed inference indefinitely.
+          retry_frames = 120;
+          return false;
+        }
+      }
+      context->CopyResource(snapshot.Get(), source);
+      retry_frames = 0;
+      return true;
     }
 
     // estimate() has already submitted one inference. Wait for that exact inference, consume it
@@ -2169,7 +2237,13 @@ namespace models {
         ID3D11UnorderedAccessView *null_uavs_h2[2] = {nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 2, null_uavs_h2, nullptr);
         ID3D11ShaderResourceView *null_subject_srvs[7] = {
-          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr
         };
         context->CSSetShaderResources(0, 7, null_subject_srvs);
 
@@ -2204,7 +2278,11 @@ namespace models {
         context->CSSetUnorderedAccessViews(0, 3, history_uavs, nullptr);
         context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
         ID3D11ShaderResourceView *null_history_srvs[5] = {
-          nullptr, nullptr, nullptr, nullptr, nullptr
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr
         };
         ID3D11UnorderedAccessView *null_history_uavs[3] = {nullptr, nullptr, nullptr};
         context->CSSetShaderResources(0, 5, null_history_srvs);
@@ -2289,12 +2367,19 @@ namespace models {
       return true;
     }
 
-    estimate_result estimate(ID3D11ShaderResourceView *input_srv, input_color_space color_space, std::uint64_t frame_id) {
+    estimate_result estimate(
+      ID3D11ShaderResourceView *input_srv,
+      input_color_space color_space,
+      std::uint64_t frame_id,
+      bool snapshot_raw_model_depth
+    ) {
       if (!valid || !input_srv) {
         return {};
       }
       bool completed_frame_valid = false;
       std::uint64_t completed_frame_id = 0;
+      bool raw_snapshot_valid = false;
+      bool model_input_snapshot_valid = false;
 
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid()) {
@@ -2414,8 +2499,8 @@ namespace models {
                        SUCCEEDED(device->CreateUnorderedAccessView(
                          tensor_previous_input_buf.Get(),
                          nullptr,
-                              &tensor_previous_input_uav
-                            ));
+                         &tensor_previous_input_uav
+                       ));
 
         // One capture-domain point maxRGB scalar per model texel. Keeping it outside TensorRT's
         // three-plane input preserves a pre-tone-map exposure ordinal without changing the engine
@@ -2558,14 +2643,39 @@ namespace models {
       // caller uses completed_frame_id to select the color slot that produced this exact result.
       if (has_previous_frame) {
         normalize_depth_output();
+        // Production post-process timing ends at the normalized depth result. The two stable
+        // Dump 3D copies below are explicit diagnostic work and must not contaminate live
+        // depth_postprocess_gpu samples.
+        mark_d3d_post_end(d3d_timer);
+        if (snapshot_raw_model_depth) {
+          // tensor_in_buf and tensor_out_buf still own the exact completed frame here. Preserve
+          // both before the current frame's preprocess and CUDA mapping reuse those allocations.
+          raw_snapshot_valid = snapshot_buffer(
+            tensor_out_buf.Get(),
+            raw_snapshot_buf,
+            raw_snapshot_srv,
+            raw_snapshot_error_logged,
+            raw_snapshot_retry_frames,
+            "raw-depth"
+          );
+          model_input_snapshot_valid = snapshot_buffer(
+            tensor_in_buf.Get(),
+            model_input_snapshot_buf,
+            model_input_snapshot_srv,
+            model_input_snapshot_error_logged,
+            model_input_snapshot_retry_frames,
+            "model-input"
+          );
+        }
         completed_frame_id = pending_frame_id;
         completed_frame_valid = true;
         has_previous_frame = false;
         if (diagnostics_enabled) {
           throughput_stats_completions++;
         }
+      } else {
+        mark_d3d_post_end(d3d_timer);
       }
-      mark_d3d_post_end(d3d_timer);
 
       // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
       mark_d3d_pre_start(d3d_timer);
@@ -2596,7 +2706,13 @@ namespace models {
       auto map_res = cuda.cuGraphicsMapResources(2, resources, cu_stream);
       if (map_res != 0) {
         BOOST_LOG(error) << "cuGraphicsMapResources failed: " << map_res;
-        return make_result(completed_frame_valid, completed_frame_id);
+        return make_result(
+          completed_frame_valid,
+          completed_frame_id,
+          false,
+          raw_snapshot_valid,
+          model_input_snapshot_valid
+        );
       }
 
       void *d_in = nullptr;
@@ -2659,7 +2775,13 @@ namespace models {
         }
       }
 
-      return make_result(completed_frame_valid, completed_frame_id, enqueued);
+      return make_result(
+        completed_frame_valid,
+        completed_frame_id,
+        enqueued,
+        raw_snapshot_valid,
+        model_input_snapshot_valid
+      );
     }
   };
 
@@ -2679,9 +2801,15 @@ namespace models {
   estimate_result video_depth_estimator::estimate_depth(
     ID3D11ShaderResourceView *input_srv,
     input_color_space color_space,
-    std::uint64_t frame_id
+    std::uint64_t frame_id,
+    bool snapshot_debug_inputs
   ) {
-    return pimpl->estimate(input_srv, color_space, frame_id);
+    return pimpl->estimate(
+      input_srv,
+      color_space,
+      frame_id,
+      snapshot_debug_inputs
+    );
   }
 
   estimate_result video_depth_estimator::finish_pending_depth_for_evaluation(input_color_space color_space) {

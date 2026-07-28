@@ -56,6 +56,15 @@ using asio::ip::udp;
 using namespace std::literals;
 
 namespace stream {
+  bool sbs_debug_dump_request_allowed(
+    bool diagnostics_enabled,
+    int requested_sbs_mode,
+    bool has_session_request_latch
+  ) noexcept {
+    return diagnostics_enabled && requested_sbs_mode == ::video::SBS_AI &&
+           has_session_request_latch;
+  }
+
   namespace control_packet {
     // Gen 7 encrypted control protocol and the extensions used by Artemis.
     constexpr std::uint16_t start = 0x0307;
@@ -610,6 +619,8 @@ namespace stream {
     std::atomic_bool active {true};
     std::atomic_bool pacing_plan_logged {false};
     std::atomic_bool idr_pacing_plan_logged {false};
+    std::shared_ptr<std::atomic<bool>> sbs_debug_dump_pending =
+      std::make_shared<std::atomic<bool>>(false);
     bool awaiting_recovery_idr {false};
 
     std::string ping_payload;
@@ -724,6 +735,9 @@ namespace stream {
     std::string device_uuid;
     std::uint64_t client_policy_generation;
     std::atomic<crypto::PERM> permission;
+    // Runtime request latch, updated by 0x3003 before the encode rebuild completes. Dump 3D is
+    // accepted only while the requesting session is explicitly in Host SBS AI mode.
+    std::atomic<int> requested_sbs_mode {::video::SBS_OFF};
 
     safe::mail_raw_t::event_t<bool> shutdown_event;
     safe::signal_t controlEnd;
@@ -1783,6 +1797,10 @@ namespace stream {
       BOOST_LOG(info) << "type [IDX_SET_SBS_MODE]: client requested host SBS "sv << mode_name
                       << " ("sv << (int) mode << ") for ["sv
                       << session::client_name(*session) << ']';
+      session->requested_sbs_mode.store((int) mode, std::memory_order_release);
+      if (mode != ::video::SBS_AI && session->video->sbs_debug_dump_pending) {
+        session->video->sbs_debug_dump_pending->store(false, std::memory_order_release);
+      }
 
       // Turning SBS off tears down the depth estimator with no replacement, so mark the depth
       // engine idle here (display_vram only ever sets loading/ready). This clears any "loading"
@@ -1959,7 +1977,13 @@ namespace stream {
     });
 
     server->map(control_packet::sbs_debug_dump, [](session_t *session, const std::string_view &) {
-      if (!config::sunshine.diagnostics_enabled) {
+      if (!sbs_debug_dump_request_allowed(
+            config::sunshine.diagnostics_enabled,
+            session->requested_sbs_mode.load(std::memory_order_acquire),
+            (bool) session->video->sbs_debug_dump_pending
+          )) {
+        BOOST_LOG(warning) << "Ignoring Dump 3D request outside Host SBS AI for ["sv
+                           << session::client_name(*session) << ']';
         return;
       }
 
@@ -1967,7 +1991,7 @@ namespace stream {
       // frame's source/depth/SBS images to the configured debug dir (Apollo protocol extension).
       BOOST_LOG(info) << "type [IDX_SBS_DEBUG_DUMP]: client requested SBS debug frame dump for ["sv
                       << session::client_name(*session) << ']';
-      ::video::sbs_debug_dump_pending.store(true, std::memory_order_relaxed);
+      session->video->sbs_debug_dump_pending->store(true, std::memory_order_release);
     });
 
     server->map(control_packet::encrypted, CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + CONTROL_ENCRYPTED_SEQUENCE_SIZE, [server](session_t *session, const std::string_view &payload) {
@@ -3621,6 +3645,12 @@ namespace stream {
       session->video->packet_size = config.packetsize;
       session->video->min_required_fec_packets = config.minRequiredFecPackets;
       session->video->effective_mode = session->config.monitor.effective_mode;
+      session->config.monitor.sbs_debug_dump_pending =
+        session->video->sbs_debug_dump_pending;
+      session->requested_sbs_mode.store(
+        session->config.monitor.sbs_mode,
+        std::memory_order_relaxed
+      );
 
       session->audio = std::make_shared<audio_channel_t>();
       session->audio->packet_duration = config.audio.packetDuration;

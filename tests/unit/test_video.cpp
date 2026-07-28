@@ -394,6 +394,8 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"depth_valid_history_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_forward_coverage_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0"},
+    std::tuple {"sbs_reprojection_ps.hlsl", "mapping_ps", "ps_5_0"},
+    std::tuple {"sbs_reprojection_ps.hlsl", "mask_ps", "ps_5_0"},
   };
   for (const auto &[filename, entrypoint, target] : shaders) {
     const std::filesystem::path shader_path =

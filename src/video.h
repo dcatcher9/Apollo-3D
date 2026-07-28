@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <numeric>
 #include <vector>
@@ -128,11 +129,6 @@ namespace video {
 
   /** Allocate a nonzero renderer generation. Called for every encode-device rebuild/reset. */
   std::uint32_t next_sbs_telemetry_generation() noexcept;
-
-  /* Debug: set true by the 0x3004 "SBS Debug Dump" control message (client button). The next
-     SBS convert() in display_vram consumes it (exchange->false) and dumps one frame's source,
-     depth and SBS-result images to the configured debug dir. */
-  extern std::atomic<bool> sbs_debug_dump_pending;
 
   /* Live stream geometry/rate change requested by the client via the 0x3007 control message.
      Resolution, frame rate and bitrate change without reconnecting: the encode session is torn
@@ -325,6 +321,11 @@ namespace video {
     // APPEND-ONLY. Changes on every active encoder/renderer rebuild so the client can reset stale
     // histories even when the stream geometry and all sampled values happen to be identical.
     std::uint32_t sbs_telemetry_generation = 0;
+
+    // APPEND-ONLY. Session-owned request latch for the explicit Dump 3D control message. Keeping
+    // this out of process-global state prevents a request from a 2D/retiring session being
+    // consumed by a different Host SBS encoder.
+    std::shared_ptr<std::atomic<bool>> sbs_debug_dump_pending;
   };
 
   // Preserve standard NTSC rates instead of approximating them as finite decimal fractions.

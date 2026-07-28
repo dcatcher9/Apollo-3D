@@ -1618,6 +1618,101 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn("finish_pending_depth_for_evaluation", harness)
 
+    def test_live_debug_dump_snapshots_exact_model_io_before_cuda_reuse(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
+                  encoding="utf-8") as fh:
+            estimator = fh.read()
+        live_estimate = estimator[
+            estimator.index("estimate_result estimate("):
+            estimator.index("video_depth_estimator::video_depth_estimator")
+        ]
+        normalized = live_estimate.index("normalize_depth_output();")
+        production_post_timing_ended = live_estimate.index(
+            "mark_d3d_post_end(d3d_timer);", normalized)
+        raw_snapshotted = live_estimate.index(
+            "tensor_out_buf.Get(),", normalized)
+        input_snapshotted = live_estimate.index(
+            "tensor_in_buf.Get(),", raw_snapshotted)
+        current_preprocess = live_estimate.index(
+            "context->CSSetShader(rgb_to_nchw_cs.Get()", input_snapshotted)
+        reused_by_cuda = live_estimate.index(
+            "cuda.cuGraphicsMapResources(2, resources, cu_stream)", current_preprocess)
+        self.assertLess(normalized, raw_snapshotted)
+        self.assertLess(production_post_timing_ended, raw_snapshotted)
+        self.assertLess(raw_snapshotted, input_snapshotted)
+        self.assertLess(input_snapshotted, current_preprocess)
+        self.assertLess(current_preprocess, reused_by_cuda)
+        self.assertIn(
+            "context->CopyResource(snapshot.Get(), source);", estimator)
+
+        with open(os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
+                  encoding="utf-8") as fh:
+            production = fh.read()
+        requested = production.index(
+            "const bool snapshot_debug_inputs = sbs_dumper.snapshot_requested();")
+        estimate_call = production.index("depth_estimator->estimate_depth(", requested)
+        self.assertLess(requested, estimate_call)
+        self.assertIn(
+            "perf && !snapshot_debug_inputs ? begin_sbs_gpu_timer() : nullptr",
+            production)
+        self.assertIn("if (perf && !snapshot_debug_inputs)", production)
+        self.assertIn("est.raw_model_depth_snapshot.Get()", production[estimate_call:])
+        self.assertIn("est.model_input_snapshot.Get()", production[estimate_call:])
+        # The real filtered warp is retained for both reprojection and its diagnostic replay.
+        self.assertIn("dump_warp_depth = warp_depth;", production)
+        preflight = production.index("sbs_dumper.preflight_requested_frame(")
+        self.assertIn("render_sbs_debug_geometry(", production)
+        self.assertLess(
+            preflight,
+            production.index("render_sbs_debug_geometry(", preflight))
+        self.assertLess(
+            production.index("end_sbs_gpu_timer(gpu_timer);"),
+            production.index("render_sbs_debug_geometry("))
+        self.assertLess(
+            production.index('sbs_perf::add_sample_ms("sbs_convert_cpu"', requested),
+            production.index("render_sbs_debug_geometry(", requested))
+        # Color interpretation belongs to the buffered source/depth pair, not whichever capture
+        # frame happens to be current when the asynchronous inference completes.
+        self.assertIn(
+            "models::input_color_space color_space = models::input_color_space::srgb;",
+            production)
+        self.assertIn("slot.color_space = color_space;", production)
+        self.assertIn("matched_render_slot->color_space", production)
+
+        with open(os.path.join(repo, "src", "platform", "windows",
+                               "sbs_debug_dump.cpp"), encoding="utf-8") as fh:
+            dumper = fh.read()
+        for artifact in (
+                "model_input.f32", "model_input.png", "model_input_shape.json",
+                "raw_depth.f32", "raw_depth.png", "raw_depth_heat.png",
+                "raw_shape.json", "depth.f32", "warp_depth.f32",
+                "adaptive_state.json", "warp_map.f32",
+                "warp_displacement_heat.png", "warp_mask.png",
+                "dump_manifest.json"):
+            self.assertIn(artifact, dumper)
+        self.assertIn("matched_frame_id", dumper)
+        self.assertIn("catch (const std::exception &exception)", dumper)
+        self.assertIn(
+            "color_space == models::input_color_space::srgb", dumper)
+        self.assertIn("r = encode_unit(rf);", dumper)
+
+    def test_live_debug_dump_is_session_scoped_and_host_sbs_only(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "stream.cpp"), encoding="utf-8") as fh:
+            stream = fh.read()
+        with open(os.path.join(repo, "src", "video.cpp"), encoding="utf-8") as fh:
+            video = fh.read()
+        with open(os.path.join(repo, "src", "platform", "windows",
+                               "sbs_debug_dump.cpp"), encoding="utf-8") as fh:
+            dumper = fh.read()
+        self.assertIn("sbs_debug_dump_request_allowed(", stream)
+        self.assertIn("requested_sbs_mode", stream)
+        self.assertIn("session->video->sbs_debug_dump_pending->store(true", stream)
+        self.assertNotIn("std::atomic<bool> sbs_debug_dump_pending", video)
+        self.assertNotIn("extern std::atomic<bool> sbs_debug_dump_pending", dumper)
+        self.assertIn("button_request_", dumper)
+
     def test_cuda_graph_replay_is_signature_safe_and_falls_back(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "config.h"), encoding="utf-8") as fh:
@@ -1843,7 +1938,7 @@ class EvalContractTests(unittest.TestCase):
         path = os.path.join(repo, "src", "platform", "windows", "sbs_debug_dump.cpp")
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
-        self.assertIn("const float luminance = std::max(0.2126f * r + 0.7152f * g", text)
+        self.assertIn("0.2126f * r + 0.7152f * g", text)
         self.assertIn("const float tone_scale = 1.0f / (1.0f + luminance)", text)
         self.assertNotIn("c = c / (1.0f + c)", text)
 

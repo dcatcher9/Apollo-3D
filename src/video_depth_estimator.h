@@ -43,6 +43,8 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_frame_state;  ///< {min,max,initialized,frame_state}; frame_state 0 means an all-invalid completion held the prior depth.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask;  ///< Edge-selective EMA snap mask.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Raw model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth_snapshot;  ///< Optional stable copy of the completed frame's raw output for a live Dump 3D request.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> model_input_snapshot;  ///< Optional stable NCHW/ImageNet-normalized input for the same live Dump 3D frame.
     int raw_width = 0;
     int raw_height = 0;
     // A TensorRT result completed and its GPU normalization passes were submitted. The associated
@@ -135,17 +137,25 @@ namespace models {
      * @brief Estimate depth (and the subject-tracking state) for the given RGB frame.
      *
      * @param input_srv D3D11 ShaderResourceView containing the RGB image (usually B8G8R8A8_UNORM or R8G8B8A8_UNORM).
+     * @param snapshot_debug_inputs Copy the completed frame's exact model input and raw output
+     *        before the next asynchronous inference can overwrite them. Intended only for an
+     *        explicit Dump 3D.
      * @return estimate_result; all views are owned by the estimator and overwritten by later calls.
      */
-    estimate_result estimate_depth(ID3D11ShaderResourceView *input_srv, input_color_space color_space = input_color_space::srgb, std::uint64_t frame_id = 0);
+    estimate_result estimate_depth(
+      ID3D11ShaderResourceView *input_srv,
+      input_color_space color_space = input_color_space::srgb,
+      std::uint64_t frame_id = 0,
+      bool snapshot_debug_inputs = false
+    );
 
     /**
      * @brief Finish and consume exactly one inference previously submitted by estimate_depth().
      *
      * It synchronizes the estimator stream, applies normalization/EMA/subject tracking exactly
-         * once, and does not enqueue another inference. The offline evaluator uses this as its
-         * exact current-frame quality path; production remains bounded matched-frame async.
-         */
+     * once, and does not enqueue another inference. The offline evaluator uses this as its
+     * exact current-frame quality path; production remains bounded matched-frame async.
+     */
     estimate_result finish_pending_depth_for_evaluation(input_color_space color_space = input_color_space::srgb);
 
     /**

@@ -8,9 +8,30 @@ images shown on the headset. This is the visual half of the host benchmark; see
 `diagnostics` timing, which the offline harness forces on for benchmark runs.
 
 ## Workflow
-1. Capture frames: tap **Dump 3D** in the XR bar → `E:\ApolloDev\sbs_dump\dump_*/` (needs
-   `APOLLO_SBS_DUMP` set; `run-dev.cmd` already sets it). Grab several across a scene / both
-   modes; each folder has `source.png`, `depth.png`, `sbs.png`, `meta.txt`.
+1. While **Host SBS AI** is active, tap **Dump 3D** in the XR bar →
+   `E:\ApolloDev\sbs_dump\dump_*/` (`APOLLO_SBS_DUMP` selects this developer location;
+   otherwise the host uses `sbs_dump` next to its log). Grab several frames across a scene. Each
+   folder is one atomic, matched-frame package:
+   - `source.png`: the source color frame paired with this depth result.
+   - `model_input.f32`, `model_input.png`, `model_input_shape.json`: the exact
+     ImageNet-normalized NCHW tensor and its inverse-normalized post-tonemap preview.
+   - `raw_depth.f32`, `raw_depth.png`, `raw_depth_heat.png`, `raw_shape.json`: exact model
+     output plus finite-P2/P98 previews.
+   - `depth.f32` / `depth.png` / `depth_heat.png` / `depth_shape.json`: normalized and
+     temporally filtered depth.
+   - `warp_depth.f32` / `warp_depth.png` / `warp_depth_heat.png` /
+     `warp_depth_shape.json`: the actual depth sampled by the SBS reprojection shader; the
+     manifest says whether the 3x3 prefilter was applied.
+   - `adaptive_state.json`: the complete generated-schema adaptive-pop, zero-plane, cut, and
+     depth-health state, including effective normalization bounds.
+   - `warp_map.f32`, `warp_map_shape.json`, `warp_displacement_heat.png`, `warp_mask.png`: exact
+     inverse-warp source coordinates, derived eye-pixel displacement, and pre-fill disocclusion.
+   - `sbs.png`, `dump_manifest.json`, `meta.txt`: the packed result, effective profile/config,
+     texture geometry/formats, artifact contracts, and backwards-compatible summary.
+
+   The mapping/coverage files are explicitly marked unavailable in the manifest only if their
+   dump-only shaders or diagnostic resources could not be created. No partial directory is
+   published as a completed dump.
 2. Score a set and save a baseline **before** your change:
    ```
    python tools/sbsbench/sbsbench.py --glob "E:/ApolloDev/sbs_dump/dump_2026*" --json base.json

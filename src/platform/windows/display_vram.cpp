@@ -610,10 +610,15 @@ namespace platf::dxgi {
           // the estimator. No-op unless runtime diagnostics are on.
           const bool perf = diagnostics_enabled && sbs_perf::enabled();
           const auto perf_t0 = perf ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+          const bool snapshot_debug_inputs = sbs_dumper.snapshot_requested();
 
           // Lazy-create the depth estimator on the first SBS frame.
           ensure_depth_estimator();
-          auto *gpu_timer = perf ? begin_sbs_gpu_timer() : nullptr;
+          // Stable tensor copies are inserted into the same D3D command stream before the current
+          // preprocess. Skip whole-frame performance publication for an explicit dump frame so
+          // diagnostic work cannot appear as a production regression.
+          auto *gpu_timer =
+            perf && !snapshot_debug_inputs ? begin_sbs_gpu_timer() : nullptr;
 
           // Production always uses bounded matched pairing: infer asynchronously from a private
           // color slot, then warp only the slot whose frame identity completed.
@@ -638,10 +643,20 @@ namespace platf::dxgi {
               matched_candidate_slot && depth_estimator->can_accept_frame();
             const bool matched_copy_submitted =
               estimator_ready &&
-              copy_matched_frame(img_ctx.encoder_texture.get(), *matched_candidate_slot, frame_id);
+              copy_matched_frame(
+                img_ctx.encoder_texture.get(),
+                *matched_candidate_slot,
+                frame_id,
+                input_color_space
+              );
             mark_sbs_matched_copy_end(gpu_timer, matched_copy_submitted);
             if (matched_copy_submitted) {
-              est = depth_estimator->estimate_depth(matched_candidate_slot->srv.get(), input_color_space, frame_id);
+              est = depth_estimator->estimate_depth(
+                matched_candidate_slot->srv.get(),
+                input_color_space,
+                frame_id,
+                snapshot_debug_inputs
+              );
               if (est.completed_frame_valid) {
                 matched_render_slot = find_pending_matched_slot(est.completed_frame_id);
                 if (matched_render_slot) {
@@ -700,6 +715,8 @@ namespace platf::dxgi {
           mark_sbs_warp_start(gpu_timer, timing_has_depth_warp);
           ID3D11ShaderResourceView *final_sbs_srv = nullptr;
           ID3D11Texture2D *final_sbs_texture = nullptr;
+          ID3D11ShaderResourceView *dump_warp_depth = nullptr;
+          bool dump_warp_depth_prefiltered = false;
           if (repeat_matched_output) {
             final_sbs_srv = sbs_intermediate_srv.get();
             final_sbs_texture = sbs_intermediate_texture.get();
@@ -718,8 +735,10 @@ namespace platf::dxgi {
             if (est.depth) {
               if (auto *filtered_depth = prefilter_warp_depth(est.depth.Get())) {
                 warp_depth = filtered_depth;
+                dump_warp_depth_prefiltered = true;
               }
             }
+            dump_warp_depth = warp_depth;
 
             // Draw Apollo's occlusion-aware geometry into the shared SBS intermediate.
             device_ctx->OMSetRenderTargets(1, &sbs_intermediate_rtv, nullptr);
@@ -786,21 +805,90 @@ namespace platf::dxgi {
           // on the D3D11 queue and subscription-off schedules no diagnostic copy.
           poll_sbs_telemetry_after_output();
 
-          // Debug frame dump (offline artifact inspection): on the client "Dump 3D" button or a
-          // "dump.trigger" file, save this frame's 2D source, depth map and SBS result. See
-          // sbs_debug_dump.h. File-trigger polling requires diagnostics + APOLLO_SBS_DUMP; the
-          // explicit client button remains available without background filesystem work.
+          // Close the live CPU sample before any requested dump work. A dump performs lazy
+          // shader compilation, blocking GPU readback, PNG/JSON serialization, and filesystem
+          // publication; none of that represents production Host-SBS frame cost.
+          if (perf && !snapshot_debug_inputs) {
+            const auto dt = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - perf_t0
+            )
+                              .count();
+            sbs_perf::add_sample_ms("sbs_convert_cpu", dt);
+            sbs_perf::tick();  // once per SBS frame: periodic p50/p95/max summary
+          }
+
+          // Dump-only geometry repeats the exact completed-frame warp after all production timing
+          // and output work. It is allocated and executed only when both immutable estimator
+          // snapshots prove that this is the requested matched frame.
           if (!repeat_matched_output) {
-            sbs_dumper.maybe_dump(
-              device.get(),
-              device_ctx.get(),
-              render_input_srv,
-              est.depth.Get(),
-              final_sbs_srv,
-              matched_render_slot ? est.depth_frame_state.Get() : nullptr,
-              display->is_hdr(),
-              sbs_config.depth_model
-            );
+            const bool complete_dump_snapshot =
+              matched_render_slot && est.depth && dump_warp_depth && est.subject &&
+              est.depth_frame_state && est.model_input_snapshot &&
+              est.raw_model_depth_snapshot;
+            const bool dump_frame_valid =
+              complete_dump_snapshot &&
+              sbs_dumper.preflight_requested_frame(
+                device.get(),
+                device_ctx.get(),
+                est.depth_frame_state.Get(),
+                est.completed_frame_id
+              );
+            if (dump_frame_valid) {
+              ID3D11Buffer *completed_constants =
+                sbs_reprojection_completed_cbuffer.get();
+              bool geometry_available = false;
+              try {
+                geometry_available = render_sbs_debug_geometry(
+                  render_input_srv,
+                  dump_warp_depth,
+                  est.subject.Get(),
+                  completed_constants
+                );
+              } catch (const std::exception &error) {
+                try {
+                  BOOST_LOG(warning)
+                    << "Dump 3D geometry preparation failed; publishing the core package without mapping/coverage: "
+                    << error.what();
+                } catch (...) {
+                }
+              } catch (...) {
+                try {
+                  BOOST_LOG(warning)
+                    << "Dump 3D geometry preparation failed; publishing the core package without mapping/coverage."sv;
+                } catch (...) {
+                }
+              }
+
+              sbs_debug::frame dump_frame;
+              dump_frame.source = render_input_srv;
+              dump_frame.model_input = est.model_input_snapshot.Get();
+              dump_frame.raw_depth = est.raw_model_depth_snapshot.Get();
+              dump_frame.depth = est.depth.Get();
+              dump_frame.warp_depth = dump_warp_depth;
+              dump_frame.adaptive_state = est.subject.Get();
+              dump_frame.depth_frame_state = est.depth_frame_state.Get();
+              dump_frame.warp_map =
+                geometry_available ? sbs_debug_mapping_srv.Get() : nullptr;
+              dump_frame.warp_mask =
+                geometry_available ? sbs_debug_mask_srv.Get() : nullptr;
+              dump_frame.sbs = final_sbs_srv;
+              dump_frame.model_width = est.raw_width;
+              dump_frame.model_height = est.raw_height;
+              dump_frame.raw_width = est.raw_width;
+              dump_frame.raw_height = est.raw_height;
+              dump_frame.matched_frame_id = est.completed_frame_id;
+              dump_frame.warp_depth_prefilter_applied =
+                dump_warp_depth_prefiltered;
+              dump_frame.cuda_graph_active = est.cuda_graph_active;
+              dump_frame.color_space = matched_render_slot->color_space;
+              dump_frame.depth_model = sbs_config.depth_model;
+              sbs_dumper.maybe_dump(
+                device.get(),
+                device_ctx.get(),
+                dump_frame,
+                sbs_config
+              );
+            }
           }
 
           if (diagnostics_enabled) {
@@ -822,11 +910,6 @@ namespace platf::dxgi {
             }
           }
 
-          if (perf) {
-            auto dt = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - perf_t0).count();
-            sbs_perf::add_sample_ms("sbs_convert_cpu", dt);
-            sbs_perf::tick();  // once per SBS frame: periodic p50/p95/max summary
-          }
         } else {
           if (rgb_present_target) {
             if (!copy_rgb(img_ctx.encoder_texture.get())) {
@@ -918,6 +1001,7 @@ namespace platf::dxgi {
       // A failed build streams flat SBS for the rest of this encode device's life instead of
       // re-kicking a doomed build every frame; a later mode rebuild creates a fresh device.
       if (depth_estimator_failed) {
+        sbs_dumper.cancel_pending_request();
         return false;
       }
 
@@ -932,6 +1016,7 @@ namespace platf::dxgi {
             // the stream); log it, clear the client's "loading" indicator, and stream flat.
             BOOST_LOG(error) << "Host SBS per-stream GPU pipeline initialization failed: "sv << e.what();
             depth_estimator_failed = true;
+            sbs_dumper.cancel_pending_request();
             publish_depth_status(0);
             return false;
           }
@@ -942,6 +1027,7 @@ namespace platf::dxgi {
             BOOST_LOG(error) << "Host SBS per-stream GPU pipeline initialization returned an invalid result; streaming flat SBS."sv;
             depth_estimator.reset();
             depth_estimator_failed = true;
+            sbs_dumper.cancel_pending_request();
             publish_depth_status(0);
           }
           return (bool) depth_estimator;
@@ -959,6 +1045,7 @@ namespace platf::dxgi {
           BOOST_LOG(error) << "Startup TensorRT model preparation failed for '"sv << active.name
                            << "'; streaming flat SBS."sv;
           depth_estimator_failed = true;
+          sbs_dumper.cancel_pending_request();
           publish_depth_status(0);
         } else {
           if (engine_poll_counter++ % 1800 == 0) {  // ~every 20 s at 90 fps
@@ -1044,9 +1131,9 @@ namespace platf::dxgi {
       snapshot.generation = sbs_telemetry_generation;
       snapshot.sequence = next_sbs_telemetry_sequence();
       snapshot.valid_fields = ::video::sbs_telemetry_valid_field::config;
-      snapshot.zero_plane_mode = sbs_config.zero_plane == "subject" ? 1 :
+      snapshot.zero_plane_mode = sbs_config.zero_plane == "subject"    ? 1 :
                                  sbs_config.zero_plane == "background" ? 3 :
-                                                                          2;
+                                                                         2;
       snapshot.pop_floor = static_cast<float>(sbs_config.pop_strength);
       snapshot.pop_ceiling = static_cast<float>(
         std::max(sbs_config.adaptive_pop_max, sbs_config.pop_strength)
@@ -1350,6 +1437,7 @@ namespace platf::dxgi {
       texture2d_t texture;
       shader_res_t srv;
       std::uint64_t frame_id = 0;
+      models::input_color_space color_space = models::input_color_space::srgb;
       std::chrono::steady_clock::time_point captured_at {};
       bool pending = false;
     };
@@ -1372,7 +1460,12 @@ namespace platf::dxgi {
       return nullptr;
     }
 
-    bool copy_matched_frame(ID3D11Texture2D *source, matched_frame_slot_t &slot, std::uint64_t frame_id) {
+    bool copy_matched_frame(
+      ID3D11Texture2D *source,
+      matched_frame_slot_t &slot,
+      std::uint64_t frame_id,
+      models::input_color_space color_space
+    ) {
       if (!source) {
         return false;
       }
@@ -1420,6 +1513,7 @@ namespace platf::dxgi {
 
       device_ctx->CopyResource(slot.texture.get(), source);
       slot.frame_id = frame_id;
+      slot.color_space = color_space;
       if (diagnostics_enabled) {
         slot.captured_at = std::chrono::steady_clock::now();
       }
@@ -1489,6 +1583,176 @@ namespace platf::dxgi {
       return sbs_warp_depth_srv.get();
     }
 
+    bool ensure_sbs_debug_geometry_resources() {
+      if (sbs_debug_geometry_ready) {
+        return true;
+      }
+      if (sbs_debug_geometry_init_attempted || !sbs_intermediate_texture) {
+        return false;
+      }
+      sbs_debug_geometry_init_attempted = true;
+
+      auto mapping_blob = compile_shader(
+        SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl",
+        "mapping_ps",
+        "ps_5_0"
+      );
+      auto mask_blob = compile_shader(
+        SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl",
+        "mask_ps",
+        "ps_5_0"
+      );
+      auto coverage_blob = compile_shader(
+        SUNSHINE_SHADERS_DIR "/sbs_forward_coverage_cs.hlsl",
+        "main",
+        "cs_5_0"
+      );
+      if (!mapping_blob || !mask_blob || !coverage_blob || FAILED(device->CreatePixelShader(mapping_blob->GetBufferPointer(), mapping_blob->GetBufferSize(), nullptr, &sbs_debug_mapping_ps)) || FAILED(device->CreatePixelShader(mask_blob->GetBufferPointer(), mask_blob->GetBufferSize(), nullptr, &sbs_debug_mask_ps)) || FAILED(device->CreateComputeShader(coverage_blob->GetBufferPointer(), coverage_blob->GetBufferSize(), nullptr, &sbs_debug_coverage_cs))) {
+        BOOST_LOG(warning) << "Dump 3D geometry shaders are unavailable; the core dump will "
+                              "record warp mapping/coverage as unavailable."sv;
+        return false;
+      }
+
+      D3D11_TEXTURE2D_DESC desc {};
+      sbs_intermediate_texture->GetDesc(&desc);
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.CPUAccessFlags = 0;
+      desc.MiscFlags = 0;
+      desc.Format = DXGI_FORMAT_R32_FLOAT;
+      desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+      if (FAILED(device->CreateTexture2D(&desc, nullptr, &sbs_debug_mapping_texture)) || FAILED(device->CreateRenderTargetView(sbs_debug_mapping_texture.Get(), nullptr, &sbs_debug_mapping_rtv)) || FAILED(device->CreateShaderResourceView(sbs_debug_mapping_texture.Get(), nullptr, &sbs_debug_mapping_srv))) {
+        BOOST_LOG(warning) << "Dump 3D warp-map resources are unavailable."sv;
+        return false;
+      }
+
+      desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+      if (FAILED(device->CreateTexture2D(&desc, nullptr, &sbs_debug_mask_texture)) || FAILED(device->CreateRenderTargetView(sbs_debug_mask_texture.Get(), nullptr, &sbs_debug_mask_rtv)) || FAILED(device->CreateShaderResourceView(sbs_debug_mask_texture.Get(), nullptr, &sbs_debug_mask_srv))) {
+        BOOST_LOG(warning) << "Dump 3D coverage-mask resources are unavailable."sv;
+        return false;
+      }
+
+      desc.Format = DXGI_FORMAT_R32_UINT;
+      desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+      if (FAILED(device->CreateTexture2D(&desc, nullptr, &sbs_debug_coverage_texture)) || FAILED(device->CreateUnorderedAccessView(sbs_debug_coverage_texture.Get(), nullptr, &sbs_debug_coverage_uav)) || FAILED(device->CreateShaderResourceView(sbs_debug_coverage_texture.Get(), nullptr, &sbs_debug_coverage_srv))) {
+        BOOST_LOG(warning) << "Dump 3D forward-coverage resources are unavailable."sv;
+        return false;
+      }
+
+      sbs_debug_geometry_ready = true;
+      return true;
+    }
+
+    bool render_sbs_debug_geometry(
+      ID3D11ShaderResourceView *source,
+      ID3D11ShaderResourceView *warp_depth,
+      ID3D11ShaderResourceView *subject,
+      ID3D11Buffer *constants
+    ) {
+      if (!source || !warp_depth || !subject || !constants || !ensure_sbs_debug_geometry_resources()) {
+        return false;
+      }
+
+      const UINT clear_coverage[4] = {0, 0, 0, 0};
+      device_ctx->ClearUnorderedAccessViewUint(
+        sbs_debug_coverage_uav.Get(),
+        clear_coverage
+      );
+      device_ctx->CSSetShader(sbs_debug_coverage_cs.Get(), nullptr, 0);
+      ID3D11SamplerState *sampler = sampler_linear.get();
+      device_ctx->CSSetSamplers(0, 1, &sampler);
+      ID3D11ShaderResourceView *coverage_inputs[] = {
+        source,
+        warp_depth,
+        subject,
+      };
+      device_ctx->CSSetShaderResources(
+        0,
+        (UINT) std::size(coverage_inputs),
+        coverage_inputs
+      );
+      device_ctx->CSSetUnorderedAccessViews(
+        0,
+        1,
+        sbs_debug_coverage_uav.GetAddressOf(),
+        nullptr
+      );
+      device_ctx->CSSetConstantBuffers(2, 1, &constants);
+      const UINT packed_width = (UINT) sbs_viewport.Width;
+      const UINT packed_height = (UINT) sbs_viewport.Height;
+      device_ctx->Dispatch(
+        ((packed_width / 2u) + 15u) / 16u,
+        (packed_height + 15u) / 16u,
+        1u
+      );
+      ID3D11UnorderedAccessView *null_uav = nullptr;
+      ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr};
+      device_ctx->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+      device_ctx->CSSetShaderResources(
+        0,
+        (UINT) std::size(null_cs_srvs),
+        null_cs_srvs
+      );
+
+      device_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
+      device_ctx->RSSetViewports(1, &sbs_viewport);
+      device_ctx->OMSetBlendState(blend_disable.get(), nullptr, 0xFFFFFFFFu);
+      device_ctx->PSSetSamplers(0, 1, &sampler);
+      device_ctx->PSSetConstantBuffers(2, 1, &constants);
+
+      device_ctx->OMSetRenderTargets(
+        1,
+        sbs_debug_mapping_rtv.GetAddressOf(),
+        nullptr
+      );
+      device_ctx->PSSetShader(sbs_debug_mapping_ps.Get(), nullptr, 0);
+      ID3D11ShaderResourceView *mapping_inputs[] = {
+        source,
+        warp_depth,
+        subject,
+      };
+      device_ctx->PSSetShaderResources(
+        0,
+        (UINT) std::size(mapping_inputs),
+        mapping_inputs
+      );
+      device_ctx->Draw(3, 0);
+
+      device_ctx->OMSetRenderTargets(
+        1,
+        sbs_debug_mask_rtv.GetAddressOf(),
+        nullptr
+      );
+      device_ctx->PSSetShader(sbs_debug_mask_ps.Get(), nullptr, 0);
+      ID3D11ShaderResourceView *mask_inputs[] = {
+        source,
+        warp_depth,
+        subject,
+        sbs_debug_coverage_srv.Get(),
+      };
+      device_ctx->PSSetShaderResources(
+        0,
+        (UINT) std::size(mask_inputs),
+        mask_inputs
+      );
+      device_ctx->Draw(3, 0);
+
+      ID3D11RenderTargetView *null_rtv = nullptr;
+      ID3D11ShaderResourceView *null_ps_srvs[] = {
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+      };
+      device_ctx->OMSetRenderTargets(1, &null_rtv, nullptr);
+      device_ctx->PSSetShaderResources(
+        0,
+        (UINT) std::size(null_ps_srvs),
+        null_ps_srvs
+      );
+      return true;
+    }
+
     void reset_matched_stats(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
       matched_stats_started = now;
       matched_stats_calls = 0;
@@ -1509,6 +1773,7 @@ namespace platf::dxgi {
       safe::mail_raw_t::event_t<::video::sbs_telemetry_snapshot_t> telemetry_event = {},
       std::shared_ptr<::video::sbs_telemetry_subscription_t> telemetry_subscription = {},
       std::uint32_t telemetry_generation = 0,
+      std::shared_ptr<std::atomic<bool>> sbs_debug_dump_request = {},
       bool rgb_only = false
     ) {
       if (frame_texture) {
@@ -1526,6 +1791,21 @@ namespace platf::dxgi {
       sbs_depth_pipeline_ready_event = std::move(depth_pipeline_ready_event);
       sbs_telemetry_event = std::move(telemetry_event);
       sbs_telemetry_subscription = std::move(telemetry_subscription);
+      sbs_dumper.set_button_request(std::move(sbs_debug_dump_request));
+      sbs_debug_mapping_ps.Reset();
+      sbs_debug_mask_ps.Reset();
+      sbs_debug_coverage_cs.Reset();
+      sbs_debug_mapping_texture.Reset();
+      sbs_debug_mapping_rtv.Reset();
+      sbs_debug_mapping_srv.Reset();
+      sbs_debug_mask_texture.Reset();
+      sbs_debug_mask_rtv.Reset();
+      sbs_debug_mask_srv.Reset();
+      sbs_debug_coverage_texture.Reset();
+      sbs_debug_coverage_uav.Reset();
+      sbs_debug_coverage_srv.Reset();
+      sbs_debug_geometry_init_attempted = false;
+      sbs_debug_geometry_ready = false;
       sbs_telemetry_generation = telemetry_generation;
       sbs_telemetry_sequence = 0;
       sbs_telemetry_last_sampled_frame_id = 0;
@@ -1570,9 +1850,7 @@ namespace platf::dxgi {
   }
       const bool sbs_on = sbs_mode != ::video::SBS_OFF;
       const bool downscaling = display->width > width || display->height > height;
-      if (sbs_on &&
-          display->display_rotation != DXGI_MODE_ROTATION_UNSPECIFIED &&
-          display->display_rotation != DXGI_MODE_ROTATION_IDENTITY) {
+      if (sbs_on && display->display_rotation != DXGI_MODE_ROTATION_UNSPECIFIED && display->display_rotation != DXGI_MODE_ROTATION_IDENTITY) {
         BOOST_LOG(error) << "Host SBS requires an identity-oriented source display. "
                          << "Use an explicit portrait resolution instead of Windows display "
                             "rotation.";
@@ -1834,6 +2112,7 @@ namespace platf::dxgi {
         {},
         {},
         0,
+        {},
         true
       );
     }
@@ -2098,6 +2377,22 @@ namespace platf::dxgi {
     texture2d_t sbs_warp_depth_texture;
     unordered_access_t sbs_warp_depth_uav;
     shader_res_t sbs_warp_depth_srv;
+    // Lazily created only for an explicit Dump 3D. These repeat the exact production warp after
+    // its timing window to export inverse mapping and pre-fill forward-coverage evidence.
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> sbs_debug_mapping_ps;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> sbs_debug_mask_ps;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> sbs_debug_coverage_cs;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> sbs_debug_mapping_texture;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> sbs_debug_mapping_rtv;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sbs_debug_mapping_srv;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> sbs_debug_mask_texture;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> sbs_debug_mask_rtv;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sbs_debug_mask_srv;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> sbs_debug_coverage_texture;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> sbs_debug_coverage_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sbs_debug_coverage_srv;
+    bool sbs_debug_geometry_init_attempted = false;
+    bool sbs_debug_geometry_ready = false;
     bool sbs_intermediate_fp16 = false;
     D3D11_VIEWPORT sbs_viewport;
     std::array<matched_frame_slot_t, 2> matched_frame_slots;
@@ -3427,13 +3722,14 @@ namespace platf::dxgi {
                client_config.width,
                client_config.height,
                client_config.sbs_mode,
-                client_config.sbs_config,
-                client_config.sbs_depth_status_event,
-                client_config.sbs_depth_pipeline_ready_event,
-                client_config.sbs_telemetry_event,
-                client_config.sbs_telemetry_subscription,
-                client_config.sbs_telemetry_generation
-              ) == 0;
+               client_config.sbs_config,
+               client_config.sbs_depth_status_event,
+               client_config.sbs_depth_pipeline_ready_event,
+               client_config.sbs_telemetry_event,
+               client_config.sbs_telemetry_subscription,
+               client_config.sbs_telemetry_generation,
+               client_config.sbs_debug_dump_pending
+             ) == 0;
     }
 
     int convert(platf::img_t &img_base) override {

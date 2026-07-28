@@ -24,6 +24,13 @@ namespace stream {
 
 using namespace std::chrono_literals;
 
+TEST(SbsDebugDumpRequestTest, RequiresDiagnosticsAndRuntimeHostSbsOwnership) {
+  EXPECT_TRUE(stream::sbs_debug_dump_request_allowed(true, video::SBS_AI, true));
+  EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(false, video::SBS_AI, true));
+  EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(true, video::SBS_OFF, true));
+  EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(true, video::SBS_AI, false));
+}
+
 TEST(PlatformLaunchGuardTest, SerializesConcurrentLaunchPreparation) {
   std::future<bool> second;
   {

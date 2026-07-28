@@ -477,6 +477,13 @@ namespace stream {
    */
   [[nodiscard]] video::sbs_telemetry_snapshot_t unavailable_sbs_telemetry_snapshot() noexcept;
 
+  /** Dump 3D is meaningful only for a diagnostics-enabled session currently requesting Host SBS. */
+  [[nodiscard]] bool sbs_debug_dump_request_allowed(
+    bool diagnostics_enabled,
+    int requested_sbs_mode,
+    bool has_session_request_latch
+  ) noexcept;
+
   struct sbs_telemetry_state_t {
     sbs_telemetry_status_e status = sbs_telemetry_status_e::unavailable;
     std::uint16_t request_id = 0;
