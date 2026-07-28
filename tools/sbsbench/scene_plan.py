@@ -18,6 +18,11 @@ import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+if __package__:
+    from .adaptive_state_contract import ANALYSIS_FLAG_BITS
+else:
+    from adaptive_state_contract import ANALYSIS_FLAG_BITS
+
 
 SCENE_PLAN_SCHEMA = 1
 SCENE_PLAN_VERSION = "scene-plan-v1"
@@ -33,12 +38,12 @@ POP_RISK_HIGH = 0.20
 
 # Optional analysis_flags bits.  The planner also accepts identically named boolean fields,
 # allowing a future trace schema to expose the flags without coupling policy to their packing.
-ANALYSIS_APPEARANCE_PROPOSAL = 1 << 0
-ANALYSIS_EXPOSURE_LIKE = 1 << 1
-ANALYSIS_STRUCTURELESS_TRANSITION = 1 << 2
-ANALYSIS_SAME_SCENE_RETURN = 1 << 3
-ANALYSIS_APPEARANCE_VETO = 1 << 4
-ANALYSIS_RELATIVE_GEOMETRY_SPIKE = 1 << 5
+ANALYSIS_APPEARANCE_PROPOSAL = 1 << ANALYSIS_FLAG_BITS["appearance_proposal"]
+ANALYSIS_EXPOSURE_LIKE = 1 << ANALYSIS_FLAG_BITS["exposure_like"]
+ANALYSIS_STRUCTURELESS_TRANSITION = 1 << ANALYSIS_FLAG_BITS["structureless"]
+ANALYSIS_SAME_SCENE_RETURN = 1 << ANALYSIS_FLAG_BITS["same_return"]
+ANALYSIS_APPEARANCE_VETO = 1 << ANALYSIS_FLAG_BITS["veto"]
+ANALYSIS_RELATIVE_GEOMETRY_SPIKE = 1 << ANALYSIS_FLAG_BITS["relative_spike"]
 
 
 class ScenePlanError(ValueError):

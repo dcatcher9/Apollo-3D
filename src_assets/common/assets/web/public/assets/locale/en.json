@@ -172,7 +172,7 @@
     "minimum_fps_target": "Minimum FPS Target",
     "minimum_fps_target_desc": "The lowest effective FPS a stream can reach. Set 0 for automatic.",
     "virtual_display_restart_explorer": "Restore the taskbar after virtual display removal",
-    "virtual_display_restart_explorer_desc": "On by default. Restarts Windows Explorer after final virtual-display removal so taskbar running-app indicators are rebuilt. File Explorer windows may close and may not reopen automatically; active Explorer file operations may be interrupted.",
+    "virtual_display_restart_explorer_desc": "Off by default. Enable this only if Windows loses taskbar running-app indicators after the final virtual display is removed. Sunshine 3D will then restart Explorer after future removals. File Explorer windows may close and may not reopen automatically; active Explorer file operations may be interrupted.",
     "misc": "Miscellaneous options",
     "motion_as_ds4": "Emulate a DS4 gamepad if the client gamepad reports motion sensors are present",
     "motion_as_ds4_desc": "If disabled, motion sensors will not be taken into account during gamepad type selection.",

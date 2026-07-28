@@ -6,6 +6,7 @@
 #include "offline_sbs_worker.h"
 
 #include "crypto.h"
+#include "generated/sbs_adaptive_state_contract.h"
 #include "offline_sbs_contract.h"
 #include "offline_scene_planner.h"
 
@@ -3134,17 +3135,34 @@ namespace offline_sbs {
       std::uint64_t next_sequence_ = 1;
     };
 
+    bool adaptive_trace_flags_valid(
+      const float cut_flags,
+      const std::uint32_t analysis_flags
+    ) {
+      return
+        std::isfinite(cut_flags) &&
+        cut_flags >= 0.0f &&
+        cut_flags <=
+          static_cast<float>(sbs_adaptive_state::known_cut_flag_mask) &&
+        std::trunc(cut_flags) == cut_flags &&
+        (
+          analysis_flags & ~sbs_adaptive_state::known_analysis_flag_mask
+        ) == 0u;
+    }
+
     scene_frame_t parse_trace_frame(
       const nlohmann::json &value,
       const frame_timing_t &timing,
       const rational_t time_base,
       const std::uint64_t cache_bytes
     ) {
-      if (!value.is_object() || value.value("record", "") != "frame" || value.value("frame_id", "") != frame_id(timing.sequence) || value.value("source_index", max_sequence) != timing.sequence - 1 || !value.contains("values") || !value["values"].is_array() || value["values"].size() != 32) {
+      using sbs_adaptive_state::word_e;
+      if (!value.is_object() || value.value("record", "") != "frame" || value.value("frame_id", "") != frame_id(timing.sequence) || value.value("source_index", max_sequence) != timing.sequence - 1 || !value.contains("values") || !value["values"].is_array() || value["values"].size() != sbs_adaptive_state::word_count) {
         throw worker_error("adaptive trace frame identity/schema mismatch");
       }
       const auto &words = value["values"];
-      const auto scalar = [&](const std::size_t index) -> std::optional<float> {
+      const auto scalar = [&](const word_e word) -> std::optional<float> {
+        const auto index = sbs_adaptive_state::index(word);
         if (words[index].is_null()) {
           return std::nullopt;
         }
@@ -3154,7 +3172,8 @@ namespace offline_sbs {
         }
         return result;
       };
-      const auto signed_scalar = [&](const std::size_t index) -> std::optional<float> {
+      const auto signed_scalar = [&](const word_e word) -> std::optional<float> {
+        const auto index = sbs_adaptive_state::index(word);
         if (words[index].is_null()) {
           return std::nullopt;
         }
@@ -3167,22 +3186,43 @@ namespace offline_sbs {
       frame.frame_id = frame_id(timing.sequence);
       frame.depth_updated = value.at("depth_updated").get<bool>();
       frame.hard_cut_pulse = value.value("hard_cut_pulse", false);
-      frame.depth_change_fraction = scalar(13);
-      frame.raw_rgb_change_fraction = scalar(27);
-      frame.structural_change_fraction = scalar(26);
-      frame.current_structural_support_fraction = scalar(28);
-      frame.previous_structural_support_fraction = scalar(29);
-      frame.common_structural_support_fraction = scalar(30);
-      frame.edge_fraction = scalar(24);
-      frame.zero_anchor_candidate_shift_px = signed_scalar(25);
-      frame.production_zero_anchor_shift_px = signed_scalar(8);
-      frame.zero_anchor_valid = words[9].get<float>() > 0.5f;
-      frame.depth_ready = words[21].get<float>() > 0.5f;
-      frame.initialized = words[3].get<float>() > 0.5f;
-      frame.range_collapsed = words[20].get<float>() > 0.5f;
-      frame.valid_depth_fraction = words[14].get<float>();
-      frame.scene_age = words[1].get<float>();
-      frame.analysis_flags = words[31].get<std::uint32_t>();
+      frame.depth_change_fraction = scalar(word_e::current_depth_change_fraction);
+      frame.raw_rgb_change_fraction = scalar(word_e::raw_rgb_change_fraction);
+      frame.structural_change_fraction = scalar(word_e::structural_change_fraction);
+      frame.current_structural_support_fraction =
+        scalar(word_e::current_structural_support_fraction);
+      frame.previous_structural_support_fraction =
+        scalar(word_e::previous_structural_support_fraction);
+      frame.common_structural_support_fraction =
+        scalar(word_e::common_structural_support_fraction);
+      frame.edge_fraction = scalar(word_e::current_edge_fraction);
+      frame.zero_anchor_candidate_shift_px =
+        signed_scalar(word_e::current_zero_anchor_candidate_shift_px);
+      frame.production_zero_anchor_shift_px =
+        signed_scalar(word_e::zero_anchor_shift_px);
+      frame.zero_anchor_valid =
+        words[sbs_adaptive_state::index(word_e::zero_anchor_valid)].get<float>() >
+        0.5f;
+      frame.depth_ready =
+        words[sbs_adaptive_state::index(word_e::depth_ready)].get<float>() > 0.5f;
+      frame.initialized =
+        words[sbs_adaptive_state::index(word_e::initialized)].get<float>() > 0.5f;
+      frame.range_collapsed =
+        words[sbs_adaptive_state::index(word_e::range_collapsed)].get<float>() >
+        0.5f;
+      frame.valid_depth_fraction =
+        words[sbs_adaptive_state::index(word_e::valid_depth_fraction)].get<float>();
+      frame.scene_age =
+        words[sbs_adaptive_state::index(word_e::scene_age)].get<float>();
+      const auto cut_flags_value =
+        words[sbs_adaptive_state::index(word_e::cut_flags)].get<float>();
+      const auto analysis_flags =
+        words[sbs_adaptive_state::index(word_e::analysis_flags)]
+          .get<std::uint32_t>();
+      if (!adaptive_trace_flags_valid(cut_flags_value, analysis_flags)) {
+        throw worker_error("adaptive trace contains invalid or unknown flags");
+      }
+      frame.analysis_flags = analysis_flags;
       frame.pts_seconds = time_base.seconds(timing.pts);
       frame.duration_seconds = time_base.seconds(timing.duration);
       frame.cache_bytes = cache_bytes;
@@ -3210,63 +3250,30 @@ namespace offline_sbs {
           ensure_open(child);
           header = parse_line(read_complete_line(child));
         }
-        if (header.value("record", "") != "header" || header.value("schema", 0) != 3 || !header.contains("fields") || !header["fields"].is_array() || header["fields"].size() != 32) {
-          throw worker_error("adaptive trace header is not schema 3");
+        if (header.value("record", "") != "header" || header.value("schema", 0u) != sbs_adaptive_state::schema_version || !header.contains("fields") || !header["fields"].is_array() || header["fields"].size() != sbs_adaptive_state::word_count) {
+          throw worker_error("adaptive trace header has the wrong schema or word count");
         }
-        static constexpr std::array<std::pair<std::string_view, std::string_view>, 32>
-          expected_fields {{
-            {"subject_recenter_delta", "float32"},
-            {"scene_age", "float32"},
-            {"subject_depth_ema", "float32"},
-            {"initialized", "float32"},
-            {"stretch_lo", "float32"},
-            {"stretch_inv_range", "float32"},
-            {"depth_change_baseline_ema", "float32"},
-            {"adaptive_pop_ratio", "float32"},
-            {"zero_anchor_shift_px", "float32"},
-            {"zero_anchor_valid", "float32"},
-            {"cut_flags", "float32"},
-            {"model_input_history_state", "float32"},
-            {"latched_edge_fraction", "float32"},
-            {"current_depth_change_fraction", "float32"},
-            {"valid_depth_fraction", "float32"},
-            {"effective_raw_range_width", "float32"},
-            {"hard_cut_count", "uint32"},
-            {"external_cut_count", "uint32"},
-            {"empty_raw_count", "uint32"},
-            {"collapsed_raw_count", "uint32"},
-            {"range_collapsed", "float32"},
-            {"depth_ready", "float32"},
-            {"hard_cut_pulse", "float32"},
-            {"reserved", "float32"},
-            {"current_edge_fraction", "float32"},
-            {"current_zero_anchor_candidate_shift_px", "float32"},
-            {"structural_change_fraction", "float32"},
-            {"raw_rgb_change_fraction", "float32"},
-            {"current_structural_support_fraction", "float32"},
-            {"previous_structural_support_fraction", "float32"},
-            {"common_structural_support_fraction", "float32"},
-            {"analysis_flags", "uint32"},
-          }};
-        for (std::size_t index = 0; index < expected_fields.size(); ++index) {
+        for (std::size_t index = 0; index < sbs_adaptive_state::fields.size(); ++index) {
+          const auto &expected = sbs_adaptive_state::fields[index];
           const auto &field = header["fields"][index];
-          if (!field.is_object() || field.value("name", "") != expected_fields[index].first || field.value("type", "") != expected_fields[index].second) {
+          if (!field.is_object() ||
+              field.value("name", "") != expected.name ||
+              field.value("type", "") != expected.json_type) {
             throw worker_error(
-              "adaptive trace schema 3 field layout differs at word " +
+              "adaptive trace field layout differs at word " +
               std::to_string(index)
             );
           }
         }
-        const nlohmann::json expected_flags {
-          {"appearance_proposal", 0},
-          {"exposure_like", 1},
-          {"structureless", 2},
-          {"same_return", 3},
-          {"veto", 4},
-          {"relative_spike", 5},
-        };
-        if (header.value("source", "") != "depth_subject_resolve_cs.SubjectState" || header.value("capture", "") != "every-source-frame-after-estimator-update" || !header.contains("analysis_flag_bits") || header["analysis_flag_bits"] != expected_flags) {
-          throw worker_error("adaptive trace schema 3 attribution differs");
+        nlohmann::json expected_flags = nlohmann::json::object();
+        for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
+          expected_flags[std::string {flag.name}] = flag.bit;
+        }
+        if (header.value("source", "") != sbs_adaptive_state::source ||
+            header.value("capture", "") != sbs_adaptive_state::capture ||
+            !header.contains("analysis_flag_bits") ||
+            header["analysis_flag_bits"] != expected_flags) {
+          throw worker_error("adaptive trace attribution differs");
         }
         return header;
       }
@@ -5331,6 +5338,13 @@ namespace offline_sbs {
   }
 
 #ifdef SUNSHINE_TESTS
+  bool adaptive_trace_flags_valid_for_test(
+    const float cut_flags,
+    const std::uint32_t analysis_flags
+  ) {
+    return adaptive_trace_flags_valid(cut_flags, analysis_flags);
+  }
+
   std::uint64_t retained_timing_frame_limit_for_test() {
     return max_retained_timing_frames;
   }
@@ -7094,8 +7108,18 @@ namespace offline_sbs {
       );
       const auto capabilities = read_json(capabilities_path);
       const auto &native = capabilities.at("native_whole_clip");
-      if (capabilities.value("schema", 0) != 1 || native.value("follow_protocol_schema", 0) != 1 || native.value("adaptive_state_schema", 0) != 3 || native.value("scene_cache_contract_schema", 0) != 1 || !native.value("render_cache_follow", false) || !native.value("render_skips_tensorrt", false) || !native.value("atomic_sbs_publication", false)) {
+      if (capabilities.value("schema", 0) != 1 || native.value("follow_protocol_schema", 0) != 1 || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("scene_cache_contract_schema", 0) != 1 || !native.value("render_cache_follow", false) || !native.value("render_skips_tensorrt", false) || !native.value("atomic_sbs_publication", false)) {
         throw worker_error("native SBS harness lacks the required replay contract");
+      }
+      nlohmann::json expected_analysis_flag_bits = nlohmann::json::object();
+      for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
+        expected_analysis_flag_bits[std::string {flag.name}] = flag.bit;
+      }
+      if (
+        !native.contains("adaptive_analysis_flag_bits") ||
+        native["adaptive_analysis_flag_bits"] != expected_analysis_flag_bits
+      ) {
+        throw worker_error("native SBS harness adaptive flag meanings differ");
       }
 
       const auto analysis_input = work / "analysis-input";

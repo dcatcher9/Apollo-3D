@@ -55,7 +55,9 @@ namespace models {
   };
 
   /**
-   * One nonblocking readback of the append-only diagnostic portion of SubjectState.
+   * One opportunistic, nonblocking readback of the append-only diagnostic portion of
+   * SubjectState. Live samples may be skipped or coalesced while the GPU is busy; absence of a
+   * sample is not evidence that the controller did not update.
    * SubjectState[0..2] remain the production warp contract; diagnostics begin at element 3.
    */
   struct depth_telemetry_sample {
@@ -149,6 +151,8 @@ namespace models {
     /**
      * Poll completed telemetry copies and optionally enqueue one new copy after the caller has
      * submitted the critical warp/output work. Never flushes, waits, or maps an unsignaled slot.
+     * A busy three-slot ring deliberately drops the sampling opportunity rather than delaying
+     * capture, so callers must not compare its sample count one-for-one with offline traces.
      */
     depth_telemetry_poll_result poll_depth_telemetry(
       bool schedule_copy,

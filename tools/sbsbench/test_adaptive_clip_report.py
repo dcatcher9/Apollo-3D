@@ -106,6 +106,7 @@ def frame_record(
         "geometry_low_once": bool(flags & 4),
         "appearance_quiet_once": bool(flags & 8),
         "cut_latched": bool(flags & 16),
+        "appearance_recovery": bool(flags & 32),
         "hard_cut_pulse": pulse,
         "hard_cut_count": hard_cuts,
         "external_cut_count": external_cuts,
@@ -178,6 +179,49 @@ class AdaptiveTraceContractTests(unittest.TestCase):
             write_trace(path, [frame])
             with self.assertRaisesRegex(
                     report.TraceContractError, "hard_cut_count duplicate disagrees"):
+                report.load_trace(path)
+
+    def test_accepts_native_appearance_recovery_and_rejects_a_wrong_duplicate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "adaptive_state.jsonl"
+            recovery = frame_record(0, flags=32)
+            write_trace(path, [recovery])
+            _header, frames = report.load_trace(path)
+            self.assertTrue(frames[0]["appearance_recovery"])
+            output = Path(directory) / "report"
+            report.generate_outputs(
+                path,
+                output,
+                wrapper_timeline([recovery]),
+                "appearance-recovery",
+            )
+            with (output / "frames.csv").open(
+                    newline="", encoding="utf-8") as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertEqual(rows[0]["appearance_recovery"], "1")
+
+            recovery["appearance_recovery"] = False
+            write_trace(path, [recovery])
+            with self.assertRaisesRegex(
+                    report.TraceContractError,
+                    "appearance_recovery duplicate disagrees"):
+                report.load_trace(path)
+
+    def test_rejects_unknown_cut_and_analysis_flag_bits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "adaptive_state.jsonl"
+            unknown_cut = frame_record(0, flags=64)
+            write_trace(path, [unknown_cut])
+            with self.assertRaisesRegex(
+                    report.TraceContractError, "cut_flags.*unknown schema bits"):
+                report.load_trace(path)
+
+            unknown_analysis = frame_record(0)
+            unknown_analysis["values"][31] = 64
+            write_trace(path, [unknown_analysis])
+            with self.assertRaisesRegex(
+                    report.TraceContractError,
+                    "analysis_flags.*unknown schema bits"):
                 report.load_trace(path)
 
     def test_rejects_nonfinite_float_and_wrong_header_layout(self):

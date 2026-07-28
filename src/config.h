@@ -146,6 +146,8 @@ namespace config {
     bool elevated;
   };
 
+  inline constexpr bool default_virtual_display_restart_explorer = false;
+
   struct sunshine_t {
     bool hide_tray_controls;
     bool enable_pairing;

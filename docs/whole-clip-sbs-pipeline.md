@@ -240,6 +240,21 @@ to drain so there is no disk overshoot or child backpressure deadlock. Together 
 keep both managed storage and probe memory bounded without weakening frame-by-frame timeline,
 color, HDR, codec, or stream-copy validation.
 
+### Live versus offline adaptive-state readback
+
+The live Host 3D telemetry shown by a client is intentionally opportunistic. It uses a three-slot
+GPU staging/query ring, never flushes or waits for a result, skips a busy slot, coalesces to the
+newest completed sample, and sends telemetry on an unreliable sequenced channel. Under GPU or
+network load, samples can therefore be missing even though the adaptive controller continued to
+update normally.
+
+Offline evaluation has a different contract: it performs a blocking state read after each
+estimator update and backpressures the next source frame until the worker has consumed that exact
+snapshot. Its adaptive trace is complete for every admitted source frame. Do not compare live and
+offline sample counts or cadence one-for-one, and do not diagnose a controller mismatch from a
+gap in live telemetry. Compare values only at matching sampled frame identities; use the offline
+trace when complete cut/pop/zero-plane history is required.
+
 The scene audit explicitly records that its boundaries are not ground truth and that its selected
 parameters are not proven to be universally optimal. Use the evidence to find suspicious cuts,
 administrative splits, parameter-range saturation, anchor fallbacks, invalid depth, and scenes

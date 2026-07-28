@@ -16,7 +16,12 @@
 #include <boost/token_functions.hpp>
 
 // local includes
+#include "src/config.h"
 #include "src/process.h"
+
+TEST(ProcessTest, ExplorerRepairIsOptInByDefault) {
+  EXPECT_FALSE(config::default_virtual_display_restart_explorer);
+}
 
 TEST(ProcessTest, CalculatesEvenScaledRenderDimensions) {
   EXPECT_EQ(proc::calculate_render_size(5120, 2160, 100), (proc::render_size_t {5120, 2160}));
@@ -101,7 +106,7 @@ TEST(ProcessTest, ExplorerRepairRequiresEveryFinalRetirementProof) {
     true,
     false,
     true
-  )) << "The default-on config must still be suppressible";
+  )) << "The opt-in config must remain suppressible";
   EXPECT_FALSE(proc::explorerRepairAllowedForRetirementForTest(
     true,
     true,

@@ -1,6 +1,8 @@
 #ifndef BESTV2_CURVE_HLSL
 #define BESTV2_CURVE_HLSL
 
+#include "include/sbs_adaptive_state_contract.generated.hlsl"
+
 // Cbuffer-independent Bestv2 shaping primitives shared by the live warp and evaluator coverage.
 //
 // ONE clamp, not two. saturate(saturate(x) + a) is not saturate(x + a): the inner clamp collapses
@@ -18,8 +20,10 @@ float Bestv2WarpDepth(float d, float4 s0, float4 s1, bool shaped, bool stretch_e
     if (!shaped) {
         return d;
     }
-    float x = stretch_enabled ? (d - s1.x) * s1.y : d;
-    return saturate(x + s0.x);
+    float x = stretch_enabled ?
+        (d - SBS_STATE_STRETCH_LO(s1)) * SBS_STATE_STRETCH_INV_RANGE(s1) :
+        d;
+    return saturate(x + SBS_STATE_SUBJECT_RECENTER_DELTA(s0));
 }
 
 // Degree-7 polynomial approximation of Bestv2RawShiftPx over normalized depth [0, 1].

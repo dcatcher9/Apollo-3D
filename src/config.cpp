@@ -134,7 +134,7 @@ namespace config {
     false,  // hide_tray_controls
     true,  // enable_pairing
     true,  // enable_discovery
-    true,  // virtual_display_restart_explorer
+    default_virtual_display_restart_explorer,  // virtual_display_restart_explorer
     "en",  // locale
     2,  // min_log_level
     false,  // diagnostics_enabled

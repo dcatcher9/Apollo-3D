@@ -26,97 +26,48 @@ import statistics
 from pathlib import Path
 from typing import Any, Iterable
 
-
-TRACE_SCHEMA = 3
-TRACE_SOURCE = "depth_subject_resolve_cs.SubjectState"
-TRACE_CAPTURE = "every-source-frame-after-estimator-update"
-
-FIELD_SPECS = (
-    ("subject_recenter_delta", "float32"),
-    ("scene_age", "float32"),
-    ("subject_depth_ema", "float32"),
-    ("initialized", "float32"),
-    ("stretch_lo", "float32"),
-    ("stretch_inv_range", "float32"),
-    ("depth_change_baseline_ema", "float32"),
-    ("adaptive_pop_ratio", "float32"),
-    ("zero_anchor_shift_px", "float32"),
-    ("zero_anchor_valid", "float32"),
-    ("cut_flags", "float32"),
-    ("model_input_history_state", "float32"),
-    ("latched_edge_fraction", "float32"),
-    ("current_depth_change_fraction", "float32"),
-    ("valid_depth_fraction", "float32"),
-    ("effective_raw_range_width", "float32"),
-    ("hard_cut_count", "uint32"),
-    ("external_cut_count", "uint32"),
-    ("empty_raw_count", "uint32"),
-    ("collapsed_raw_count", "uint32"),
-    ("range_collapsed", "float32"),
-    ("depth_ready", "float32"),
-    ("hard_cut_pulse", "float32"),
-    ("reserved", "float32"),
-    ("current_edge_fraction", "float32"),
-    ("current_zero_anchor_candidate_shift_px", "float32"),
-    ("structural_change_fraction", "float32"),
-    ("raw_rgb_change_fraction", "float32"),
-    ("current_structural_support_fraction", "float32"),
-    ("previous_structural_support_fraction", "float32"),
-    ("common_structural_support_fraction", "float32"),
-    ("analysis_flags", "uint32"),
-)
-FIELD_NAMES = tuple(name for name, _kind in FIELD_SPECS)
-FIELD_DESCRIPTORS = tuple(
-    {"name": name, "type": kind} for name, kind in FIELD_SPECS
-)
-ANALYSIS_FLAG_BITS = {
-    "appearance_proposal": 0,
-    "exposure_like": 1,
-    "structureless": 2,
-    "same_return": 3,
-    "veto": 4,
-    "relative_spike": 5,
-}
-
-HEADER_KEYS = {
-    "record", "schema", "source", "capture", "fields",
-    "analysis_flag_bits", "config",
-}
-CONFIG_KEYS = {
-    "model",
-    "profile",
-    "pop_strength",
-    "adaptive_pop",
-    "adaptive_pop_max",
-    "zero_plane",
-    "depth_reuse_interval",
-}
-FRAME_KEYS = {
-    "record",
-    "frame_id",
-    "source_index",
-    "depth_updated",
-    "absolute_effective_pop",
-    "scene_camera_override",
-    "resolved_zero_anchor_shift_px",
-    "geometry_armed",
-    "appearance_armed",
-    "geometry_low_once",
-    "appearance_quiet_once",
-    "cut_latched",
-    "hard_cut_pulse",
-    "hard_cut_count",
-    "external_cut_count",
-    "empty_raw_count",
-    "collapsed_raw_count",
-    "values",
-}
-
-CUT_FLAG_GEOMETRY_ARMED = 1
-CUT_FLAG_APPEARANCE_ARMED = 2
-CUT_FLAG_GEOMETRY_LOW_ONCE = 4
-CUT_FLAG_APPEARANCE_QUIET_ONCE = 8
-CUT_FLAG_LATCHED = 16
+if __package__:
+    from .adaptive_state_contract import (
+        ANALYSIS_FLAG_BITS,
+        CONFIG_KEYS,
+        CUT_FLAG_APPEARANCE_ARMED,
+        CUT_FLAG_APPEARANCE_QUIET_ONCE,
+        CUT_FLAG_APPEARANCE_RECOVERY,
+        CUT_FLAG_GEOMETRY_ARMED,
+        CUT_FLAG_GEOMETRY_LOW_ONCE,
+        CUT_FLAG_LATCHED,
+        FIELD_DESCRIPTORS,
+        FIELD_NAMES,
+        FIELD_SPECS,
+        FRAME_KEYS,
+        HEADER_KEYS,
+        KNOWN_ANALYSIS_FLAG_MASK,
+        KNOWN_CUT_FLAG_MASK,
+        TRACE_CAPTURE,
+        TRACE_SCHEMA,
+        TRACE_SOURCE,
+    )
+else:
+    from adaptive_state_contract import (
+        ANALYSIS_FLAG_BITS,
+        CONFIG_KEYS,
+        CUT_FLAG_APPEARANCE_ARMED,
+        CUT_FLAG_APPEARANCE_QUIET_ONCE,
+        CUT_FLAG_APPEARANCE_RECOVERY,
+        CUT_FLAG_GEOMETRY_ARMED,
+        CUT_FLAG_GEOMETRY_LOW_ONCE,
+        CUT_FLAG_LATCHED,
+        FIELD_DESCRIPTORS,
+        FIELD_NAMES,
+        FIELD_SPECS,
+        FRAME_KEYS,
+        HEADER_KEYS,
+        KNOWN_ANALYSIS_FLAG_MASK,
+        KNOWN_CUT_FLAG_MASK,
+        TRACE_CAPTURE,
+        TRACE_SCHEMA,
+        TRACE_SOURCE,
+    )
 SETTLE_DEPTH_UPDATES = 8
 MIN_CLASSIFIED_SHOTS_FOR_ENDPOINTS = 10
 CUT_BURST_DEPTH_UPDATES = 8
@@ -267,6 +218,7 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
             "geometry_low_once",
             "appearance_quiet_once",
             "cut_latched",
+            "appearance_recovery",
             "hard_cut_pulse",
         )
     }
@@ -284,12 +236,20 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
         raise TraceContractError(
             f"trace cut_flags at line {line_number} must be a non-negative integer-valued float")
     cut_flags = int(round(cut_flags_value))
+    if cut_flags & ~KNOWN_CUT_FLAG_MASK:
+        raise TraceContractError(
+            f"trace cut_flags at line {line_number} contains unknown schema bits")
+    analysis_flags = int(decoded["analysis_flags"])
+    if analysis_flags & ~KNOWN_ANALYSIS_FLAG_MASK:
+        raise TraceContractError(
+            f"trace analysis_flags at line {line_number} contains unknown schema bits")
     expected_bools = {
         "geometry_armed": bool(cut_flags & CUT_FLAG_GEOMETRY_ARMED),
         "appearance_armed": bool(cut_flags & CUT_FLAG_APPEARANCE_ARMED),
         "geometry_low_once": bool(cut_flags & CUT_FLAG_GEOMETRY_LOW_ONCE),
         "appearance_quiet_once": bool(cut_flags & CUT_FLAG_APPEARANCE_QUIET_ONCE),
         "cut_latched": bool(cut_flags & CUT_FLAG_LATCHED),
+        "appearance_recovery": bool(cut_flags & CUT_FLAG_APPEARANCE_RECOVERY),
         "hard_cut_pulse": float(decoded["hard_cut_pulse"]) > 0.5,
     }
     for key, expected in expected_bools.items():
@@ -1127,6 +1087,7 @@ FRAME_CSV_FIELDS = (
     "geometry_low_once",
     "appearance_quiet_once",
     "cut_latched",
+    "appearance_recovery",
     *FIELD_NAMES,
 )
 

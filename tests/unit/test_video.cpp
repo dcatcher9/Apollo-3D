@@ -13,6 +13,7 @@
 #include <iterator>
 #include <src/nvenc/nvenc_base.h>
 #include <src/nvenc/nvenc_config.h>
+#include <src/generated/sbs_adaptive_state_contract.h>
 #include <src/video.h>
 #include <src/video_colorspace.h>
 #include <tuple>
@@ -382,6 +383,40 @@ TEST(DirectxShaderTest, CompilesAllColorShaderVariants) {
   // D3DCompileFromFile does not require a D3D device. This covers BGRA8, FP16 SDR, PQ,
   // planar luma, both chroma sitings, and the HDR cursor shader in one focused check.
   EXPECT_EQ(platf::dxgi::init(), 0);
+}
+
+TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
+  using Microsoft::WRL::ComPtr;
+
+  constexpr std::array shaders {
+    std::tuple {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"depth_subject_resolve_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"depth_valid_history_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_forward_coverage_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0"},
+  };
+  for (const auto &[filename, entrypoint, target] : shaders) {
+    const std::filesystem::path shader_path =
+      std::filesystem::path(SUNSHINE_SHADERS_DIR) / filename;
+    ComPtr<ID3DBlob> shader_blob;
+    ComPtr<ID3DBlob> shader_errors;
+    const auto status = D3DCompileFromFile(
+      shader_path.c_str(),
+      nullptr,
+      D3D_COMPILE_STANDARD_FILE_INCLUDE,
+      entrypoint,
+      target,
+      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+      0,
+      &shader_blob,
+      &shader_errors
+    );
+    EXPECT_TRUE(SUCCEEDED(status))
+      << filename << ": "
+      << (shader_errors ?
+            static_cast<const char *>(shader_errors->GetBufferPointer()) :
+            "no compiler diagnostics");
+  }
 }
 
 TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
@@ -1479,7 +1514,7 @@ TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryAr
   EXPECT_NE(history.find("CurrentDepth[dtid.xy]"), std::string::npos);
   EXPECT_NE(
     history.find(
-      "SubjectState[2].w > 1.5f && SubjectState[2].w < 2.5f"
+      "SBS_STATE_MODEL_INPUT_HISTORY_STATE("
     ),
     std::string::npos
   );
@@ -1686,8 +1721,24 @@ TEST(DirectxShaderSourceTest, HostTelemetryReadbackIsNonblockingAndPreservesTheB
   // The live path extends SubjectState append-only. The first three float4 values are the
   // production warp and benchmark contract, so a telemetry change must never insert fields ahead
   // of them or make the offline harness consume the diagnostic tail.
-  EXPECT_NE(estimator.find("telemetry_state_float_count = 32"), std::string::npos);
-  EXPECT_NE(estimator.find("float init_state[32]"), std::string::npos);
+  EXPECT_EQ(sbs_adaptive_state::word_count, 32u);
+  EXPECT_EQ(sbs_adaptive_state::render_prefix_word_count, 12u);
+  EXPECT_NE(
+    estimator.find("sbs_adaptive_state::word_count"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator.find("sbs_adaptive_state::initial_values"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator.find("sbs_adaptive_state::known_cut_flag_mask"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator.find("sbs_adaptive_state::known_analysis_flag_mask"),
+    std::string::npos
+  );
   EXPECT_NE(harness.find("std::array<float, 12> values"), std::string::npos);
   EXPECT_NE(
     harness.find(
@@ -1695,12 +1746,20 @@ TEST(DirectxShaderSourceTest, HostTelemetryReadbackIsNonblockingAndPreservesTheB
     ),
     std::string::npos
   );
-  const auto prefix_end = resolve.find("SubjectState[2] = s2;");
-  const auto diagnostic_begin = resolve.find("SubjectState[3] = telemetry;");
+  const auto prefix_end = resolve.find(
+    "SubjectState[SBS_STATE_VECTOR_ZERO_ANCHOR_SHIFT_PX] = s2;"
+  );
+  const auto diagnostic_begin = resolve.find(
+    "SubjectState[SBS_STATE_VECTOR_LATCHED_EDGE_FRACTION] = telemetry;"
+  );
   const auto current_diagnostic_end =
-    resolve.find("SubjectState[6] = current_diagnostics;");
+    resolve.find(
+      "SubjectState[SBS_STATE_VECTOR_CURRENT_EDGE_FRACTION] = current_diagnostics;"
+    );
   const auto analysis_diagnostic_end =
-    resolve.find("SubjectState[7] = analysis_diagnostics;");
+    resolve.find(
+      "SubjectState[SBS_STATE_VECTOR_CURRENT_STRUCTURAL_SUPPORT_FRACTION] ="
+    );
   ASSERT_NE(prefix_end, std::string::npos);
   ASSERT_NE(diagnostic_begin, std::string::npos);
   ASSERT_NE(current_diagnostic_end, std::string::npos);
@@ -1760,7 +1819,10 @@ TEST(DirectxShaderSourceTest, HostTelemetryReadbackIsNonblockingAndPreservesTheB
   const auto profile_ready = display.find("if (sample.profile_initialized)");
   const auto edge_ready = display.find("if (sample.edge_fraction >= 0.0f)", profile_ready);
   const auto anchor_ready = display.find("if (sample.anchor_valid)", edge_ready);
-  const auto cut_flags = display.find("constexpr std::uint32_t cut_flag_geometry_armed", anchor_ready);
+  const auto cut_flags = display.find(
+    "sbs_adaptive_state::cut_flag_geometry_armed",
+    anchor_ready
+  );
   ASSERT_NE(profile_ready, std::string::npos);
   ASSERT_NE(edge_ready, std::string::npos);
   ASSERT_NE(anchor_ready, std::string::npos);
@@ -1777,6 +1839,14 @@ TEST(DirectxShaderSourceTest, HostTelemetryReadbackIsNonblockingAndPreservesTheB
     display.find("sbs_telemetry_valid_field::anchor", anchor_ready),
     cut_flags
   );
+  EXPECT_NE(
+    display.find("sbs_adaptive_state::cut_flag_appearance_armed", cut_flags),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    display.find("constexpr std::uint32_t cut_flag_geometry_armed"),
+    std::string::npos
+  );
 }
 
 TEST(DirectxShaderSourceTest, WholeClipReplayKeepsCanonicalStateAndUsesAnOfflineCameraCbuffer) {
@@ -1786,11 +1856,15 @@ TEST(DirectxShaderSourceTest, WholeClipReplayKeepsCanonicalStateAndUsesAnOffline
     read_source_file(shader_dir + "include/sbs_warp_common.hlsl");
   const auto resolve =
     read_source_file(shader_dir + "depth_subject_resolve_cs.hlsl");
+  const auto adaptive_contract_hlsl = read_source_file(
+    shader_dir + "include/sbs_adaptive_state_contract.generated.hlsl"
+  );
   const auto harness =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/sbs_bench_harness.cpp");
 
   ASSERT_FALSE(warp_common.empty());
   ASSERT_FALSE(resolve.empty());
+  ASSERT_FALSE(adaptive_contract_hlsl.empty());
   ASSERT_FALSE(harness.empty());
   EXPECT_NE(
     warp_common.find("#ifdef SBS_SCENE_CAMERA_OVERRIDE"),
@@ -1808,10 +1882,8 @@ TEST(DirectxShaderSourceTest, WholeClipReplayKeepsCanonicalStateAndUsesAnOffline
     warp_common.find("p.anchor_shift_px = scene_zero_anchor_shift_px;"),
     std::string::npos
   );
-  EXPECT_NE(
-    harness.find("using render_state_words_t = std::array<std::uint32_t, 12>"),
-    std::string::npos
-  );
+  EXPECT_EQ(sbs_adaptive_state::render_prefix_word_count, 12u);
+  EXPECT_NE(harness.find("render_prefix_word_count"), std::string::npos);
   EXPECT_NE(
     harness.find("--scene-cache and --render-cache are mutually exclusive"),
     std::string::npos
@@ -1862,28 +1934,22 @@ TEST(DirectxShaderSourceTest, WholeClipReplayKeepsCanonicalStateAndUsesAnOffline
     harness.find("\"absolute_pop_strength\""),
     std::string::npos
   );
-  EXPECT_NE(
-    harness.find("\\\"schema\\\":3"),
-    std::string::npos
+  EXPECT_EQ(sbs_adaptive_state::schema_version, 3u);
+  EXPECT_EQ(
+    sbs_adaptive_state::fields[
+      sbs_adaptive_state::index(
+        sbs_adaptive_state::word_e::current_structural_support_fraction
+      )
+    ].name,
+    "current_structural_support_fraction"
   );
-  for (const auto *field : {
-         "current_structural_support_fraction",
-         "previous_structural_support_fraction",
-         "common_structural_support_fraction",
-         "analysis_flags",
-       }) {
-    EXPECT_NE(harness.find(field), std::string::npos);
-  }
-  for (const auto *assignment : {
-         "\\\"appearance_proposal\\\":0",
-         "\\\"exposure_like\\\":1",
-         "\\\"structureless\\\":2",
-         "\\\"same_return\\\":3",
-         "\\\"veto\\\":4",
-         "\\\"relative_spike\\\":5",
-       }) {
-    EXPECT_NE(harness.find(assignment), std::string::npos);
-  }
+  EXPECT_EQ(
+    sbs_adaptive_state::fields[
+      sbs_adaptive_state::index(sbs_adaptive_state::word_e::analysis_flags)
+    ].json_type,
+    "uint32"
+  );
+  EXPECT_EQ(sbs_adaptive_state::analysis_flag_bits.size(), 6u);
   for (const auto *definition : {
          "#define ANALYSIS_FLAG_APPEARANCE_PROPOSAL 1u",
          "#define ANALYSIS_FLAG_EXPOSURE_LIKE 2u",
@@ -1892,14 +1958,18 @@ TEST(DirectxShaderSourceTest, WholeClipReplayKeepsCanonicalStateAndUsesAnOffline
          "#define ANALYSIS_FLAG_VETO 16u",
          "#define ANALYSIS_FLAG_RELATIVE_SPIKE 32u",
        }) {
-    EXPECT_NE(resolve.find(definition), std::string::npos);
+    EXPECT_NE(adaptive_contract_hlsl.find(definition), std::string::npos);
   }
   EXPECT_NE(
-    resolve.find("analysis_diagnostics.w = (float)analysis_flags"),
+    resolve.find(
+      "SBS_STATE_ANALYSIS_FLAGS(analysis_diagnostics) = (float)analysis_flags"
+    ),
     std::string::npos
   );
   EXPECT_EQ(
-    resolve.find("analysis_diagnostics.w = asfloat(analysis_flags)"),
+    resolve.find(
+      "SBS_STATE_ANALYSIS_FLAGS(analysis_diagnostics) = asfloat(analysis_flags)"
+    ),
     std::string::npos
   );
   EXPECT_NE(

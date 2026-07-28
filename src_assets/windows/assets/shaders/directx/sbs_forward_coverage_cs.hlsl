@@ -27,10 +27,10 @@ void main(uint3 id : SV_DispatchThreadID) {
         return;
     }
     float d = DepthTexture.SampleLevel(LinearSampler, uv, 0);
-    float4 s0 = SubjectState[0];
-    float4 s1 = SubjectState[1];
-    float4 s2 = SubjectState[2];
-    bool shaped = s0.w > 0.5f;
+    float4 s0 = SubjectState[SBS_STATE_VECTOR_SUBJECT_RECENTER_DELTA];
+    float4 s1 = SubjectState[SBS_STATE_VECTOR_STRETCH_LO];
+    float4 s2 = SubjectState[SBS_STATE_VECTOR_ZERO_ANCHOR_SHIFT_PX];
+    bool shaped = SBS_STATE_INITIALIZED(s0) > 0.5f;
     float parallax = 0.0f;
     if (shaped) {
         Bestv2Params params = MakeBestv2Params(

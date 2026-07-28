@@ -50,10 +50,10 @@ float2 Reproject(float2 uv, float eyeSign, bool use_subject_stretch) {
     // from the runtime state, and read the frame-uniform SubjectState once, so the probe loop
     // below issues no per-probe buffer loads (DepthParallax gets s0/s1 as args). The search span is
     // then derived from the same Bestv2Params the mapping uses, so the two cannot disagree.
-    float4 s0 = SubjectState[0];
-    float4 s1 = SubjectState[1];
-    float4 s2 = SubjectState[2];
-    bool shaped = s0.w > 0.5f;
+    float4 s0 = SubjectState[SBS_STATE_VECTOR_SUBJECT_RECENTER_DELTA];
+    float4 s1 = SubjectState[SBS_STATE_VECTOR_STRETCH_LO];
+    float4 s2 = SubjectState[SBS_STATE_VECTOR_ZERO_ANCHOR_SHIFT_PX];
+    bool shaped = SBS_STATE_INITIALIZED(s0) > 0.5f;
     // Bestv2's calibrated bands are SOURCE-COLOR pixel shifts. Normalizing by the smaller
     // inference-depth width amplified Apollo whenever the model texture was downscaled, while
     // Parallax uses the eye/source width. Depth dimensions remain correct for tap offsets.

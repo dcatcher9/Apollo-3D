@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include "generated/sbs_adaptive_state_contract.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -15,12 +17,18 @@ namespace offline_sbs {
   inline constexpr std::size_t max_scene_frame_id_bytes = 64;
   inline constexpr std::size_t default_max_open_scene_frames = 524288;
 
-  inline constexpr std::uint32_t analysis_appearance_proposal = 1u << 0;
-  inline constexpr std::uint32_t analysis_exposure_like = 1u << 1;
-  inline constexpr std::uint32_t analysis_structureless_transition = 1u << 2;
-  inline constexpr std::uint32_t analysis_same_scene_return = 1u << 3;
-  inline constexpr std::uint32_t analysis_appearance_veto = 1u << 4;
-  inline constexpr std::uint32_t analysis_relative_geometry_spike = 1u << 5;
+  inline constexpr std::uint32_t analysis_appearance_proposal =
+    sbs_adaptive_state::analysis_flag_appearance_proposal;
+  inline constexpr std::uint32_t analysis_exposure_like =
+    sbs_adaptive_state::analysis_flag_exposure_like;
+  inline constexpr std::uint32_t analysis_structureless_transition =
+    sbs_adaptive_state::analysis_flag_structureless;
+  inline constexpr std::uint32_t analysis_same_scene_return =
+    sbs_adaptive_state::analysis_flag_same_return;
+  inline constexpr std::uint32_t analysis_appearance_veto =
+    sbs_adaptive_state::analysis_flag_veto;
+  inline constexpr std::uint32_t analysis_relative_geometry_spike =
+    sbs_adaptive_state::analysis_flag_relative_spike;
 
   /**
    * One source-frame sample from the native adaptive trace.

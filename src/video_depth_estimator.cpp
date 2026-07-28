@@ -1,6 +1,7 @@
 #include "video_depth_estimator.h"
 
 #include "cuda_driver_api.h"
+#include "generated/sbs_adaptive_state_contract.h"
 #include "logging.h"
 #include "model_manager.h"
 #include "platform/windows/misc.h"
@@ -930,7 +931,8 @@ namespace models {
     // Subscription-gated, nonblocking telemetry readback. Resources are created lazily only after
     // a client enables the protocol, then a three-slot staging/query ring absorbs GPU latency
     // without ever flushing or waiting on the encode thread.
-    static constexpr std::size_t telemetry_state_float_count = 32;
+    static constexpr std::size_t telemetry_state_float_count =
+      sbs_adaptive_state::word_count;
     struct telemetry_readback_slot {
       Microsoft::WRL::ComPtr<ID3D11Buffer> staging;
       Microsoft::WRL::ComPtr<ID3D11Query> completion;
@@ -1151,42 +1153,51 @@ namespace models {
       std::uint64_t sampled_frame_id,
       depth_telemetry_sample &sample
     ) {
-      const auto scalar = [&](std::size_t index) {
-        return std::bit_cast<float>(words[index]);
+      using sbs_adaptive_state::word_e;
+      const auto scalar = [&](const word_e word) {
+        return std::bit_cast<float>(words[sbs_adaptive_state::index(word)]);
       };
-      constexpr std::array<std::size_t, 24> float_indices {
-        0, 1, 2, 3,
-        4, 5, 6, 7,
-        8, 9, 10, 11,
-        12, 13, 14, 15,
-        20, 21, 22, 23,
-        24, 25, 26, 27,
-      };
-      if (std::any_of(float_indices.begin(), float_indices.end(), [&](std::size_t index) {
-            return !std::isfinite(scalar(index));
-          })) {
-        return false;
+      for (const auto &field : sbs_adaptive_state::fields) {
+        if (
+          field.gpu_encoding != sbs_adaptive_state::gpu_encoding_e::uint_bits &&
+          !std::isfinite(scalar(field.word))
+        ) {
+          return false;
+        }
       }
 
-      const float scene_age = scalar(1);
-      const float cut_flags = scalar(10);
-      if (scene_age < 0.0f || cut_flags < 0.0f) {
+      const float scene_age = scalar(word_e::scene_age);
+      const float cut_flags = scalar(word_e::cut_flags);
+      const float analysis_flags = scalar(word_e::analysis_flags);
+      if (
+        scene_age < 0.0f ||
+        cut_flags < 0.0f ||
+        cut_flags > static_cast<float>(sbs_adaptive_state::known_cut_flag_mask) ||
+        std::trunc(cut_flags) != cut_flags ||
+        analysis_flags < 0.0f ||
+        analysis_flags >
+          static_cast<float>(sbs_adaptive_state::known_analysis_flag_mask) ||
+        std::trunc(analysis_flags) != analysis_flags
+      ) {
         return false;
       }
 
       sample.depth_width = depth_width;
       sample.depth_height = depth_height;
-      sample.adaptive_pop_ratio = std::max(scalar(7), 1.0f);
-      sample.edge_fraction = scalar(12);
-      sample.change_fraction = scalar(13);
-      sample.valid_depth_fraction = scalar(14);
-      sample.effective_range_width = scalar(15);
-      sample.current_edge_fraction = scalar(24);
-      sample.current_zero_anchor_candidate_shift_px = scalar(25);
-      sample.structural_change_fraction = scalar(26);
-      sample.raw_rgb_change_fraction = scalar(27);
-      sample.zero_anchor_shift_px = scalar(8);
-      sample.subject_depth = scalar(2);
+      sample.adaptive_pop_ratio =
+        std::max(scalar(word_e::adaptive_pop_ratio), 1.0f);
+      sample.edge_fraction = scalar(word_e::latched_edge_fraction);
+      sample.change_fraction = scalar(word_e::current_depth_change_fraction);
+      sample.valid_depth_fraction = scalar(word_e::valid_depth_fraction);
+      sample.effective_range_width = scalar(word_e::effective_raw_range_width);
+      sample.current_edge_fraction = scalar(word_e::current_edge_fraction);
+      sample.current_zero_anchor_candidate_shift_px =
+        scalar(word_e::current_zero_anchor_candidate_shift_px);
+      sample.structural_change_fraction =
+        scalar(word_e::structural_change_fraction);
+      sample.raw_rgb_change_fraction = scalar(word_e::raw_rgb_change_fraction);
+      sample.zero_anchor_shift_px = scalar(word_e::zero_anchor_shift_px);
+      sample.subject_depth = scalar(word_e::subject_depth_ema);
       sample.scene_age = static_cast<std::uint32_t>(std::min(
         scene_age,
         static_cast<float>(std::numeric_limits<std::uint32_t>::max())
@@ -1197,16 +1208,20 @@ namespace models {
       ));
       // SubjectState[4] stores counters as uint bits so they remain exact past float's 24-bit
       // integer range. The shader saturates them one value below UINT_MAX.
-      sample.hard_cut_count = words[16];
-      sample.external_cut_count = words[17];
-      sample.empty_raw_count = words[18];
-      sample.collapsed_raw_count = words[19];
+      sample.hard_cut_count =
+        words[sbs_adaptive_state::index(word_e::hard_cut_count)];
+      sample.external_cut_count =
+        words[sbs_adaptive_state::index(word_e::external_cut_count)];
+      sample.empty_raw_count =
+        words[sbs_adaptive_state::index(word_e::empty_raw_count)];
+      sample.collapsed_raw_count =
+        words[sbs_adaptive_state::index(word_e::collapsed_raw_count)];
       sample.sampled_frame_id = sampled_frame_id;
-      sample.profile_initialized = scalar(3) > 0.5f;
-      sample.anchor_valid = scalar(9) > 0.5f;
-      sample.range_collapsed = scalar(20) > 0.5f;
-      sample.depth_ready = scalar(21) > 0.5f;
-      sample.hard_cut_pulse = scalar(22) > 0.5f;
+      sample.profile_initialized = scalar(word_e::initialized) > 0.5f;
+      sample.anchor_valid = scalar(word_e::zero_anchor_valid) > 0.5f;
+      sample.range_collapsed = scalar(word_e::range_collapsed) > 0.5f;
+      sample.depth_ready = scalar(word_e::depth_ready) > 0.5f;
+      sample.hard_cut_pulse = scalar(word_e::hard_cut_pulse) > 0.5f;
       return true;
     }
 
@@ -1824,20 +1839,11 @@ namespace models {
         // [0] subject/recenter, [1] stretch/depth-cut baseline/pop,
         // [2] explicit zero-plane anchor/cut flags. [3..7] are append-only diagnostics and are
         // never consumed by the production warp. Keep [3].x at the unclassified sentinel.
-        float init_state[32] = {
-          0.0f, 0.0f, 0.0f, 0.0f,
-          0.0f, 1.0f, 0.0f, 0.0f,
-          0.0f, 0.0f, 0.0f, 0.0f,
-          -1.0f, 0.0f, 0.0f, 0.0f,
-          0.0f, 0.0f, 0.0f, 0.0f,
-          0.0f, 0.0f, 0.0f, 0.0f,
-          -1.0f, -1.0f, -1.0f, -1.0f,
-          -1.0f, -1.0f, -1.0f, 0.0f,
-        };
+        const auto &init_state = sbs_adaptive_state::initial_values;
         bd.ByteWidth = sizeof(init_state);
         bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
         bd.StructureByteStride = sizeof(float) * 4;
-        D3D11_SUBRESOURCE_DATA sd2 = {init_state, 0, 0};
+        D3D11_SUBRESOURCE_DATA sd2 = {init_state.data(), 0, 0};
         device->CreateBuffer(&bd, &sd2, &subject_buf);
         if (subject_buf) {
           device->CreateUnorderedAccessView(subject_buf.Get(), nullptr, &subject_uav);

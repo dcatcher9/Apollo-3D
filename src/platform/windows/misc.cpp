@@ -423,11 +423,225 @@ namespace platf {
   }
 
   /**
+   * Capture the standard primary token of the active desktop shell for an elevated tray process.
+   *
+   * TokenLinkedToken is not sufficient here. On this system the elevated process receives an
+   * identification-constrained linked handle; using it for impersonation leaves profile access
+   * failing with ERROR_BAD_IMPERSONATION_LEVEL. Explorer already owns the usable standard primary
+   * token. The linked handle remains useful only as an identity witness for that shell token.
+   */
+  HANDLE duplicate_active_shell_standard_token(HANDLE process_token) {
+    const DWORD active_session = WTSGetActiveConsoleSessionId();
+    if (active_session == 0xFFFFFFFF) {
+      BOOST_LOG(error) << "Could not capture the standard user token because no active console "
+                          "session exists."sv;
+      return nullptr;
+    }
+
+    DWORD process_session = 0xFFFFFFFF;
+    DWORD returned = 0;
+    if (
+      !GetTokenInformation(
+        process_token,
+        TokenSessionId,
+        &process_session,
+        sizeof(process_session),
+        &returned
+      ) ||
+      process_session != active_session
+    ) {
+      BOOST_LOG(error) << "The elevated tray process is not in the active console session; "
+                          "refusing to borrow another session's shell token."sv;
+      return nullptr;
+    }
+
+    const auto shell_window = GetShellWindow();
+    DWORD shell_pid = 0;
+    if (shell_window) {
+      GetWindowThreadProcessId(shell_window, &shell_pid);
+    }
+    DWORD shell_session = 0xFFFFFFFF;
+    if (
+      shell_pid == 0 ||
+      !ProcessIdToSessionId(shell_pid, &shell_session) ||
+      shell_session != active_session
+    ) {
+      BOOST_LOG(error) << "Could not identify the active desktop shell for de-elevation."sv;
+      return nullptr;
+    }
+
+    HANDLE shell_process = OpenProcess(
+      PROCESS_QUERY_LIMITED_INFORMATION,
+      FALSE,
+      shell_pid
+    );
+    if (!shell_process) {
+      BOOST_LOG(error) << "Could not open the active desktop shell for de-elevation: "sv
+                       << GetLastError();
+      return nullptr;
+    }
+    auto shell_process_guard = util::fail_guard([&]() {
+      CloseHandle(shell_process);
+    });
+
+    HANDLE shell_token = nullptr;
+    if (!OpenProcessToken(
+          shell_process,
+          TOKEN_QUERY | TOKEN_DUPLICATE,
+          &shell_token
+        )) {
+      BOOST_LOG(error) << "Could not open the active desktop shell token for de-elevation: "sv
+                       << GetLastError();
+      return nullptr;
+    }
+    auto shell_token_guard = util::fail_guard([&]() {
+      CloseHandle(shell_token);
+    });
+
+    TOKEN_ELEVATION shell_elevation {};
+    TOKEN_TYPE shell_type = TokenImpersonation;
+    TOKEN_STATISTICS shell_statistics {};
+    DWORD shell_token_session = 0xFFFFFFFF;
+    TOKEN_LINKED_TOKEN linked {};
+    if (
+      !GetTokenInformation(
+        shell_token,
+        TokenElevation,
+        &shell_elevation,
+        sizeof(shell_elevation),
+        &returned
+      ) ||
+      !GetTokenInformation(
+        shell_token,
+        TokenType,
+        &shell_type,
+        sizeof(shell_type),
+        &returned
+      ) ||
+      !GetTokenInformation(
+        shell_token,
+        TokenStatistics,
+        &shell_statistics,
+        sizeof(shell_statistics),
+        &returned
+      ) ||
+      !GetTokenInformation(
+        shell_token,
+        TokenSessionId,
+        &shell_token_session,
+        sizeof(shell_token_session),
+        &returned
+      ) ||
+      !GetTokenInformation(
+        process_token,
+        TokenLinkedToken,
+        &linked,
+        sizeof(linked),
+        &returned
+      )
+    ) {
+      BOOST_LOG(error) << "Could not validate the active desktop shell token: "sv
+                       << GetLastError();
+      return nullptr;
+    }
+    auto linked_token_guard = util::fail_guard([&]() {
+      CloseHandle(linked.LinkedToken);
+    });
+
+    TOKEN_STATISTICS linked_statistics {};
+    TOKEN_ELEVATION linked_elevation {};
+    DWORD linked_session = 0xFFFFFFFF;
+    if (
+      !GetTokenInformation(
+        linked.LinkedToken,
+        TokenStatistics,
+        &linked_statistics,
+        sizeof(linked_statistics),
+        &returned
+      ) ||
+      !GetTokenInformation(
+        linked.LinkedToken,
+        TokenElevation,
+        &linked_elevation,
+        sizeof(linked_elevation),
+        &returned
+      ) ||
+      !GetTokenInformation(
+        linked.LinkedToken,
+        TokenSessionId,
+        &linked_session,
+        sizeof(linked_session),
+        &returned
+      )
+    ) {
+      BOOST_LOG(error) << "Could not validate the linked standard-user identity: "sv
+                       << GetLastError();
+      return nullptr;
+    }
+
+    const auto shell_user = token_user_information(shell_token);
+    const auto process_user = token_user_information(process_token);
+    const auto linked_user = token_user_information(linked.LinkedToken);
+    if (!shell_user || !process_user || !linked_user) {
+      BOOST_LOG(error) << "Could not identify the active desktop shell account."sv;
+      return nullptr;
+    }
+    const auto shell_token_user =
+      reinterpret_cast<const TOKEN_USER *>(shell_user->data());
+    const auto process_token_user =
+      reinterpret_cast<const TOKEN_USER *>(process_user->data());
+    const auto linked_token_user =
+      reinterpret_cast<const TOKEN_USER *>(linked_user->data());
+    const bool same_user =
+      EqualSid(
+        shell_token_user->User.Sid,
+        process_token_user->User.Sid
+      ) != FALSE &&
+      EqualSid(
+        shell_token_user->User.Sid,
+        linked_token_user->User.Sid
+      ) != FALSE;
+    const bool same_logon =
+      shell_statistics.AuthenticationId.HighPart ==
+        linked_statistics.AuthenticationId.HighPart &&
+      shell_statistics.AuthenticationId.LowPart ==
+        linked_statistics.AuthenticationId.LowPart;
+    if (
+      shell_elevation.TokenIsElevated != 0 ||
+      shell_type != TokenPrimary ||
+      shell_token_session != active_session ||
+      linked_elevation.TokenIsElevated != 0 ||
+      linked_session != active_session ||
+      !same_user ||
+      !same_logon
+    ) {
+      BOOST_LOG(error) << "The active desktop shell is not the matching standard-user logon; "
+                          "refusing de-elevation."sv;
+      return nullptr;
+    }
+
+    HANDLE duplicate = nullptr;
+    if (!DuplicateTokenEx(
+          shell_token,
+          MAXIMUM_ALLOWED,
+          nullptr,
+          SecurityImpersonation,
+          TokenPrimary,
+          &duplicate
+        )) {
+      BOOST_LOG(error) << "Could not duplicate the active standard-user shell token: "sv
+                       << GetLastError();
+      return nullptr;
+    }
+    return duplicate;
+  }
+
+  /**
    * Reject over-the-shoulder elevation and service-account/session mismatches.
    *
-   * The linked token is safe only when the elevated process belongs to the same account
-   * as the active desktop shell. Otherwise "de-elevation" would target the administrator
-   * account rather than the user operating the Web UI.
+   * A standard desktop token is safe to select only when the elevated process belongs to the same
+   * account as the active shell. Otherwise "de-elevation" would target the administrator account
+   * rather than the user operating the Web UI.
    */
   std::optional<bool> current_process_matches_active_standard_user() {
     const DWORD active_session = WTSGetActiveConsoleSessionId();
@@ -526,10 +740,10 @@ namespace platf {
   /**
    * Return a primary standard-user token for the current interactive account.
    *
-   * Sunshine commonly runs elevated from the tray. CreateProcessW() would therefore
-   * silently pass administrative rights to media parsers. For a split-token account,
-   * the linked token is the same user's standard token. A UAC-disabled administrator
-   * has no standard token, so callers that require de-elevation must fail closed.
+   * Sunshine commonly runs elevated from the tray. CreateProcessW() would therefore silently pass
+   * administrative rights to media parsers. For a split-token account, capture the matching active
+   * desktop shell's standard primary token. A UAC-disabled administrator has no standard token, so
+   * callers that require de-elevation must fail closed.
    */
   HANDLE retrieve_current_users_standard_token() {
     const auto active_identity =
@@ -569,19 +783,7 @@ namespace platf {
     }
 
     if (elevation_type == TokenElevationTypeFull) {
-      TOKEN_LINKED_TOKEN linked {};
-      if (!GetTokenInformation(
-            process_token,
-            TokenLinkedToken,
-            &linked,
-            sizeof(linked),
-            &returned
-          )) {
-        BOOST_LOG(error) << "Could not retrieve the current user's standard linked token: "sv
-                         << GetLastError();
-        return nullptr;
-      }
-      return linked.LinkedToken;
+      return duplicate_active_shell_standard_token(process_token);
     }
 
     if (
@@ -1457,6 +1659,37 @@ namespace platf {
         DebugBreak();
       }
     });
+
+    HANDLE thread_token = nullptr;
+    if (!OpenThreadToken(
+          GetCurrentThread(),
+          TOKEN_QUERY,
+          TRUE,
+          &thread_token
+        )) {
+      BOOST_LOG(error) << "Could not validate the installed user impersonation token: "sv
+                       << GetLastError();
+      return std::make_error_code(std::errc::permission_denied);
+    }
+    auto thread_token_guard = util::fail_guard([&]() {
+      CloseHandle(thread_token);
+    });
+    SECURITY_IMPERSONATION_LEVEL impersonation_level = SecurityAnonymous;
+    DWORD returned = 0;
+    if (
+      !GetTokenInformation(
+        thread_token,
+        TokenImpersonationLevel,
+        &impersonation_level,
+        sizeof(impersonation_level),
+        &returned
+      ) ||
+      impersonation_level < SecurityImpersonation
+    ) {
+      BOOST_LOG(error) << "Refusing user callback because Windows installed an insufficient "
+                          "impersonation level."sv;
+      return std::make_error_code(std::errc::permission_denied);
+    }
 
     callback();
     return ec;

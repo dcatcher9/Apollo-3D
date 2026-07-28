@@ -191,6 +191,18 @@ TEST(OfflineSbsWorker, SharesBoundedLinearSceneAuditContract) {
   EXPECT_FALSE(offline_sbs::is_scene_audit_checkpoint(1025));
 }
 
+TEST(OfflineSbsWorker, RejectsUnknownAdaptiveTraceFlagMeanings) {
+  EXPECT_TRUE(offline_sbs::adaptive_trace_flags_valid_for_test(0.0f, 0u));
+  EXPECT_TRUE(offline_sbs::adaptive_trace_flags_valid_for_test(63.0f, 63u));
+  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(64.0f, 0u));
+  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(0.0f, 64u));
+  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(1.5f, 0u));
+  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(
+    std::numeric_limits<float>::quiet_NaN(),
+    0u
+  ));
+}
+
 TEST(OfflineSbsWorker, ParsesNativeSpecAndNeverBuildsPythonCommands) {
   const auto spec = offline_sbs::parse_worker_spec(worker_spec_json());
   EXPECT_EQ(spec.operation, "convert");

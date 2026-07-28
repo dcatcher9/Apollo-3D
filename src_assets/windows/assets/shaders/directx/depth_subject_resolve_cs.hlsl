@@ -27,6 +27,7 @@ RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 bins + seven evi
 
 #include "include/depth_constants.hlsl"
 #include "include/bestv2_curve.hlsl"
+#include "include/sbs_adaptive_state_contract.generated.hlsl"
 
 #define NUM_BINS 256
 
@@ -46,20 +47,6 @@ RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 bins + seven evi
 // ordinal evidence are already quiet. A disjoint or correlated new endpoint remains authoritative
 // during that guard. This asymmetry distinguishes post-cut recovery from startup, where no weak
 // or relative cut path is allowed.
-#define CUT_FLAG_GEOMETRY_ARMED 1u
-#define CUT_FLAG_APPEARANCE_ARMED 2u
-#define CUT_FLAG_GEOMETRY_LOW_ONCE 4u
-#define CUT_FLAG_APPEARANCE_QUIET_ONCE 8u
-#define CUT_FLAG_LATCHED 16u
-#define CUT_FLAG_APPEARANCE_RECOVERY 32u
-
-#define ANALYSIS_FLAG_APPEARANCE_PROPOSAL 1u
-#define ANALYSIS_FLAG_EXPOSURE_LIKE 2u
-#define ANALYSIS_FLAG_STRUCTURELESS 4u
-#define ANALYSIS_FLAG_SAME_RETURN 8u
-#define ANALYSIS_FLAG_VETO 16u
-#define ANALYSIS_FLAG_RELATIVE_SPIKE 32u
-
 // Scene-risk endpoints, calibrated against the MEASURED weighted edge fraction of the committed
 // suites. The three stable-shot synthetic probes used for calibration (fast_motion 0.0001,
 // flat_transition 0.0048, flat_page 0.0087) sit far below the remaining non-probe measurements,
@@ -88,19 +75,27 @@ void main() {
         total += (float)SubjectHist[b];
     }
 
-    float4 s = SubjectState[0];
-    float4 s1 = SubjectState[1];
-    float4 s2 = SubjectState[2];
-    float4 telemetry = SubjectState[3];
-    uint4 health_counters = asuint(SubjectState[4]);
-    float4 telemetry_flags = SubjectState[5];
-    float4 current_diagnostics = float4(-1.0f, -1.0f, -1.0f, -1.0f);
-    float4 analysis_diagnostics = float4(-1.0f, -1.0f, -1.0f, 0.0f);
+    float4 s = SubjectState[SBS_STATE_VECTOR_SUBJECT_RECENTER_DELTA];
+    float4 s1 = SubjectState[SBS_STATE_VECTOR_STRETCH_LO];
+    float4 s2 = SubjectState[SBS_STATE_VECTOR_ZERO_ANCHOR_SHIFT_PX];
+    float4 telemetry = SubjectState[SBS_STATE_VECTOR_LATCHED_EDGE_FRACTION];
+    uint4 health_counters =
+        asuint(SubjectState[SBS_STATE_VECTOR_HARD_CUT_COUNT]);
+    float4 telemetry_flags = SubjectState[SBS_STATE_VECTOR_RANGE_COLLAPSED];
+    float4 current_diagnostics = 0.0f;
+    SBS_STATE_CURRENT_EDGE_FRACTION(current_diagnostics) = -1.0f;
+    SBS_STATE_CURRENT_ZERO_ANCHOR_CANDIDATE_SHIFT_PX(current_diagnostics) = -1.0f;
+    SBS_STATE_STRUCTURAL_CHANGE_FRACTION(current_diagnostics) = -1.0f;
+    SBS_STATE_RAW_RGB_CHANGE_FRACTION(current_diagnostics) = -1.0f;
+    float4 analysis_diagnostics = 0.0f;
+    SBS_STATE_CURRENT_STRUCTURAL_SUPPORT_FRACTION(analysis_diagnostics) = -1.0f;
+    SBS_STATE_PREVIOUS_STRUCTURAL_SUPPORT_FRACTION(analysis_diagnostics) = -1.0f;
+    SBS_STATE_COMMON_STRUCTURAL_SUPPORT_FRACTION(analysis_diagnostics) = -1.0f;
     // One-update values must never look live merely because an invalid frame preserved state.
-    telemetry.y = 0.0f;
-    telemetry_flags.z = 0.0f;
+    SBS_STATE_CURRENT_DEPTH_CHANGE_FRACTION(telemetry) = 0.0f;
+    SBS_STATE_HARD_CUT_PULSE(telemetry_flags) = 0.0f;
     if (total > 0.5f) {
-        float previous_scene_age = s.y;
+        float previous_scene_age = SBS_STATE_SCENE_AGE(s);
         // Weighted 35th percentile from the NEAR side (bin 255 = nearest): the subject is
         // usually among the nearer smooth regions but not the extreme foreground.
         float target = 0.35f * total;
@@ -114,7 +109,7 @@ void main() {
             }
         }
 
-        bool initialized = s.w > 0.5f;
+        bool initialized = SBS_STATE_INITIALIZED(s) > 0.5f;
 
         // Disparity stretch (Bestv2 shape_depth_for_pop): rescale the [lo,hi] percentile band of
         // the (unweighted) depth distribution to full [0,1] so the mid-range uses the whole
@@ -164,22 +159,31 @@ void main() {
         // below 19.7%; 60% is therefore the armed geometry authority. The weaker 25% path requires
         // BOTH broad RGB replacement and ordinal structural change. A flash passes broad RGB but
         // fails ordinal structure; detailed motion can pass ordinal but stays far below broad RGB.
-        bool model_input_history_valid = s2.w > 0.5f;
-        analysis_diagnostics.x = current_structural_support_fraction;
-        analysis_diagnostics.y = model_input_history_valid ?
-                                   previous_structural_support_fraction :
-                                   -1.0f;
-        analysis_diagnostics.z = model_input_history_valid ?
-                                   common_structural_support_fraction :
-                                   -1.0f;
-        current_diagnostics.z = model_input_history_valid ?
-                                  structural_change_fraction :
-                                  -1.0f;
-        current_diagnostics.w = model_input_history_valid ?
-                                  raw_rgb_change_fraction :
-                                  -1.0f;
-        bool model_input_history_gap = s2.w > 1.5f && s2.w < 2.5f;
-        bool low_structure_scene = s2.w > 2.5f;
+        bool model_input_history_valid =
+            SBS_STATE_MODEL_INPUT_HISTORY_STATE(s2) > 0.5f;
+        SBS_STATE_CURRENT_STRUCTURAL_SUPPORT_FRACTION(analysis_diagnostics) =
+            current_structural_support_fraction;
+        SBS_STATE_PREVIOUS_STRUCTURAL_SUPPORT_FRACTION(analysis_diagnostics) =
+            model_input_history_valid ?
+                previous_structural_support_fraction :
+                -1.0f;
+        SBS_STATE_COMMON_STRUCTURAL_SUPPORT_FRACTION(analysis_diagnostics) =
+            model_input_history_valid ?
+                common_structural_support_fraction :
+                -1.0f;
+        SBS_STATE_STRUCTURAL_CHANGE_FRACTION(current_diagnostics) =
+            model_input_history_valid ?
+                structural_change_fraction :
+                -1.0f;
+        SBS_STATE_RAW_RGB_CHANGE_FRACTION(current_diagnostics) =
+            model_input_history_valid ?
+                raw_rgb_change_fraction :
+                -1.0f;
+        bool model_input_history_gap =
+            SBS_STATE_MODEL_INPUT_HISTORY_STATE(s2) > 1.5f &&
+            SBS_STATE_MODEL_INPUT_HISTORY_STATE(s2) < 2.5f;
+        bool low_structure_scene =
+            SBS_STATE_MODEL_INPUT_HISTORY_STATE(s2) > 2.5f;
         bool appearance_proposal =
             model_input_history_valid &&
             raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH &&
@@ -250,7 +254,7 @@ void main() {
             common_structure_representative &&
             raw_rgb_change_fraction < STRUCTURELESS_RETURN_RGB_SAME_MAX &&
             structural_change_fraction < STRUCTURAL_COLOR_EXPOSURE_QUIET;
-        uint cut_flags = (uint)max(s2.z, 0.0f);
+        uint cut_flags = (uint)max(SBS_STATE_CUT_FLAGS(s2), 0.0f);
         bool geometry_armed = (cut_flags & CUT_FLAG_GEOMETRY_ARMED) != 0u;
         bool appearance_armed = (cut_flags & CUT_FLAG_APPEARANCE_ARMED) != 0u;
         bool cut_latched = (cut_flags & CUT_FLAG_LATCHED) != 0u;
@@ -260,7 +264,9 @@ void main() {
             appearance_recovery && quiet_supported_repeat;
         bool appearance_veto =
             base_appearance_veto || appearance_recovery_tail;
-        float depth_change_baseline = initialized ? saturate(s1.z) : change_fraction;
+        float depth_change_baseline = initialized ?
+            saturate(SBS_STATE_DEPTH_CHANGE_BASELINE_EMA(s1)) :
+            change_fraction;
 
         // A relative geometry spike is the no-starvation escape while absolute geometry remains
         // latched high. The EMA is evaluated from the PREVIOUS update, reset to every accepted cut,
@@ -286,7 +292,7 @@ void main() {
             (relative_geometry_spike ? ANALYSIS_FLAG_RELATIVE_SPIKE : 0u);
         // Do not bit-cast small uint masks into IEEE subnormals. GPU FTZ mode
         // legally collapses those bit patterns to zero before readback.
-        analysis_diagnostics.w = (float)analysis_flags;
+        SBS_STATE_ANALYSIS_FLAGS(analysis_diagnostics) = (float)analysis_flags;
         bool shot_cut =
             initialized &&
             ((geometry_armed && !appearance_veto &&
@@ -377,8 +383,12 @@ void main() {
         // which is the direction that actually causes the mapping to breathe.
         if (initialized && !shot_cut && subject_stretch > 0.5f) {
             float hi_live = lo_val + 1.0f / max(inv_range, 1e-4f);
-            float prev_hi = s1.x + 1.0f / max(s1.y, 1e-4f);
-            lo_val = min(lerp(s1.x, lo_val, STRETCH_BAND_EMA), lo_val);
+            float prev_hi =
+                SBS_STATE_STRETCH_LO(s1) +
+                1.0f / max(SBS_STATE_STRETCH_INV_RANGE(s1), 1e-4f);
+            lo_val = min(
+                lerp(SBS_STATE_STRETCH_LO(s1), lo_val, STRETCH_BAND_EMA),
+                lo_val);
             float hi_val = max(lerp(prev_hi, hi_live, STRETCH_BAND_EMA), hi_live);
             inv_range = 1.0f / max(hi_val - lo_val, 1e-4f);
         }
@@ -386,19 +396,26 @@ void main() {
         // Reset temporal subject state on a detected cut. Otherwise the previous
         // scene bleeds into the first frames of the new shot even though pop/zero-plane relatch.
         // Between cuts retain the validated Bestv2 SubjectDepthEMA (new-value weight 0.20).
-        float subj = (!initialized || shot_cut) ? subj_raw : lerp(s.z, subj_raw, 0.20f);
+        float subj = (!initialized || shot_cut) ?
+            subj_raw :
+            lerp(SBS_STATE_SUBJECT_DEPTH_EMA(s), subj_raw, 0.20f);
         float subj_str = saturate((subj - lo_val) * inv_range);
         float delta = (0.5f - subj_str) * subject_recenter;
-        s = float4(delta, 0.0f, subj, 1.0f);
+        SBS_STATE_SUBJECT_RECENTER_DELTA(s) = delta;
+        SBS_STATE_SCENE_AGE(s) = 0.0f;
+        SBS_STATE_SUBJECT_DEPTH_EMA(s) = subj;
+        SBS_STATE_INITIALIZED(s) = 1.0f;
 
         // Depth-edge density predicts warp risk. Between cuts the multiplier remains bit-stable;
         // the base is the floor and the configured ceiling is never exceeded.
-        float pop_ratio = max(s1.w, 1.0f);
-        float latched_edge_fraction = telemetry.x;
+        float pop_ratio = max(SBS_STATE_ADAPTIVE_POP_RATIO(s1), 1.0f);
+        float latched_edge_fraction =
+            SBS_STATE_LATCHED_EDGE_FRACTION(telemetry);
         float current_edge_fraction = ptotal > 0.5f ?
             (float)PlainHist[NUM_BINS] / (ptotal * EDGE_WEIGHT_SCALE) :
             -1.0f;
-        current_diagnostics.x = current_edge_fraction;
+        SBS_STATE_CURRENT_EDGE_FRACTION(current_diagnostics) =
+            current_edge_fraction;
         if (adaptive_pop > 0.5f && ptotal > 0.5f) {
             // PlainHist[NUM_BINS] accumulates 434-reference-texel
             // gradient-magnitude-weighted edges in fixed point (the producer also scales its
@@ -435,7 +452,7 @@ void main() {
         }
         // Keep the detector's settling/cooldown clock even when optional scene-camera controls are
         // disabled; otherwise depth-only cuts can never arm after their eight-update settle time.
-        s.y = scene_age;
+        SBS_STATE_SCENE_AGE(s) = scene_age;
 
         // Explicit artistic zero plane. Resolve the chosen raw anchor through this frame's
         // stretch/recenter/Bestv2 curve and latch the resulting source-pixel shift. Storing the
@@ -448,8 +465,8 @@ void main() {
         // which it does, since this block and the s0 write share the same `total > 0.5f` guard.
         // With no histogram the percentile defaults (median 0.5, background 0.25, lo 0 / range 1)
         // still yield a sane plane, so there is nothing left to branch on.
-        float zero_anchor_shift = s2.x;
-        float zero_valid = s2.y;
+        float zero_anchor_shift = SBS_STATE_ZERO_ANCHOR_SHIFT_PX(s2);
+        float zero_valid = SBS_STATE_ZERO_ANCHOR_VALID(s2);
         {
             float zero_anchor_depth = zero_plane_mode < 1.5f ? subj :
                                       zero_plane_mode < 2.5f ? median_val : background_val;
@@ -461,7 +478,8 @@ void main() {
             zero_anchor_shaped = saturate(zero_anchor_shaped + delta);
             float current_zero_anchor_candidate_shift =
                 Bestv2RawShiftPxFast(zero_anchor_shaped);
-            current_diagnostics.y = current_zero_anchor_candidate_shift;
+            SBS_STATE_CURRENT_ZERO_ANCHOR_CANDIDATE_SHIFT_PX(current_diagnostics) =
+                current_zero_anchor_candidate_shift;
             // Keep RE-RESOLVING the anchor until the depth field settles, then freeze it for the
             // shot. Latching on the cut frame itself is the same defect that was fixed above for
             // the pop classifier: normalization settling perturbs 50-60% of depth texels on the
@@ -480,29 +498,36 @@ void main() {
                 zero_valid = 1.0f;
             }
         }
-        s1 = float4(lo_val, inv_range, depth_change_baseline, pop_ratio);
-        s2 = float4(zero_anchor_shift, zero_valid,
-                    (float)cut_flags,
-                    next_model_input_history_state);
-        telemetry.x = latched_edge_fraction;
-        telemetry.y = change_fraction;
+        SBS_STATE_STRETCH_LO(s1) = lo_val;
+        SBS_STATE_STRETCH_INV_RANGE(s1) = inv_range;
+        SBS_STATE_DEPTH_CHANGE_BASELINE_EMA(s1) = depth_change_baseline;
+        SBS_STATE_ADAPTIVE_POP_RATIO(s1) = pop_ratio;
+        SBS_STATE_ZERO_ANCHOR_SHIFT_PX(s2) = zero_anchor_shift;
+        SBS_STATE_ZERO_ANCHOR_VALID(s2) = zero_valid;
+        SBS_STATE_CUT_FLAGS(s2) = (float)cut_flags;
+        SBS_STATE_MODEL_INPUT_HISTORY_STATE(s2) =
+            next_model_input_history_state;
+        SBS_STATE_LATCHED_EDGE_FRACTION(telemetry) = latched_edge_fraction;
+        SBS_STATE_CURRENT_DEPTH_CHANGE_FRACTION(telemetry) = change_fraction;
         if (shot_cut) {
-            health_counters.x = min(health_counters.x + 1u, 0xfffffffeu);
-            telemetry_flags.z = 1.0f;
+            SBS_STATE_HARD_CUT_COUNT(health_counters) =
+                min(SBS_STATE_HARD_CUT_COUNT(health_counters) + 1u, 0xfffffffeu);
+            SBS_STATE_HARD_CUT_PULSE(telemetry_flags) = 1.0f;
         }
         // depth_valid_history_cs holds only state 2. State 3 advances the persistent-low endpoint
         // while retaining one supported-return authority.
     }
     // total == 0 (uninitialized depth): keep previous state.
 
-    SubjectState[0] = s;
-    SubjectState[1] = s1;
-    SubjectState[2] = s2;
-    SubjectState[3] = telemetry;
-    SubjectState[4] = asfloat(health_counters);
-    SubjectState[5] = telemetry_flags;
-    SubjectState[6] = current_diagnostics;
-    SubjectState[7] = analysis_diagnostics;
+    SubjectState[SBS_STATE_VECTOR_SUBJECT_RECENTER_DELTA] = s;
+    SubjectState[SBS_STATE_VECTOR_STRETCH_LO] = s1;
+    SubjectState[SBS_STATE_VECTOR_ZERO_ANCHOR_SHIFT_PX] = s2;
+    SubjectState[SBS_STATE_VECTOR_LATCHED_EDGE_FRACTION] = telemetry;
+    SubjectState[SBS_STATE_VECTOR_HARD_CUT_COUNT] = asfloat(health_counters);
+    SubjectState[SBS_STATE_VECTOR_RANGE_COLLAPSED] = telemetry_flags;
+    SubjectState[SBS_STATE_VECTOR_CURRENT_EDGE_FRACTION] = current_diagnostics;
+    SubjectState[SBS_STATE_VECTOR_CURRENT_STRUCTURAL_SUPPORT_FRACTION] =
+        analysis_diagnostics;
 
     for (uint rb = 0; rb < NUM_BINS; rb++) {
         SubjectHist[rb] = 0u;

@@ -27,6 +27,7 @@
 #include "misc.h"
 #include "sbs_debug_dump.h"
 #include "src/config.h"
+#include "src/generated/sbs_adaptive_state_contract.h"
 #include "src/logging.h"
 #include "src/model_manager.h"
 #include "src/nvenc/nvenc_config.h"
@@ -1125,12 +1126,14 @@ namespace platf::dxgi {
         snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::anchor_valid;
         snapshot.valid_fields |= ::video::sbs_telemetry_valid_field::anchor;
       }
-      constexpr std::uint32_t cut_flag_geometry_armed = 1u;
-      constexpr std::uint32_t cut_flag_appearance_armed = 2u;
-      if ((sample.cut_flags & cut_flag_geometry_armed) != 0) {
+      if (
+        (sample.cut_flags & sbs_adaptive_state::cut_flag_geometry_armed) != 0
+      ) {
         snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::geometry_armed;
       }
-      if ((sample.cut_flags & cut_flag_appearance_armed) != 0) {
+      if (
+        (sample.cut_flags & sbs_adaptive_state::cut_flag_appearance_armed) != 0
+      ) {
         snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::appearance_armed;
       }
       if (sample.range_collapsed) {

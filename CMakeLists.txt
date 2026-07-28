@@ -79,6 +79,30 @@ include(${CMAKE_MODULE_PATH}/macros/common.cmake)
 # load dependencies
 include(${CMAKE_MODULE_PATH}/dependencies/common.cmake)
 
+# The adaptive-state manifest is the sole editable definition shared by native code, shaders,
+# and Python tooling. Refuse every normal build when either committed generated consumer is
+# stale; otherwise a same-sized field reorder could silently change live or offline telemetry.
+find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+set(SBS_ADAPTIVE_STATE_GENERATOR
+        "${CMAKE_SOURCE_DIR}/tools/sbsbench/generate_adaptive_state_contract.py")
+set(SBS_ADAPTIVE_STATE_MANIFEST
+        "${CMAKE_SOURCE_DIR}/tools/sbsbench/contracts/sbs-adaptive-state-v3.json")
+set(SBS_ADAPTIVE_STATE_CPP
+        "${CMAKE_SOURCE_DIR}/src/generated/sbs_adaptive_state_contract.h")
+set(SBS_ADAPTIVE_STATE_HLSL
+        "${CMAKE_SOURCE_DIR}/src_assets/windows/assets/shaders/directx/include/sbs_adaptive_state_contract.generated.hlsl")
+add_custom_target(verify_sbs_adaptive_state_contract ALL
+        COMMAND "${Python3_EXECUTABLE}" "${SBS_ADAPTIVE_STATE_GENERATOR}" --check
+        DEPENDS
+            "${SBS_ADAPTIVE_STATE_GENERATOR}"
+            "${SBS_ADAPTIVE_STATE_MANIFEST}"
+            "${SBS_ADAPTIVE_STATE_CPP}"
+            "${SBS_ADAPTIVE_STATE_HLSL}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Verifying generated Host SBS adaptive-state contract"
+        VERBATIM)
+list(APPEND SUNSHINE_TARGET_DEPENDENCIES verify_sbs_adaptive_state_contract)
+
 # setup compile definitions
 include(${CMAKE_MODULE_PATH}/compile_definitions/common.cmake)
 

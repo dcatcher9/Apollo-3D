@@ -13,12 +13,16 @@ RWStructuredBuffer<float> PreviousAppearanceOrdinal : register(u1);
 RWTexture2D<float> PreviousReliableDepth : register(u2);
 
 #include "include/depth_constants.hlsl"
+#include "include/sbs_adaptive_state_contract.generated.hlsl"
 
 [numthreads(16, 16, 1)]
 void main(uint3 dtid : SV_DispatchThreadID) {
     if (dtid.x >= target_w || dtid.y >= target_h ||
         MinMaxEma[0].w < 0.5f ||
-        (SubjectState[2].w > 1.5f && SubjectState[2].w < 2.5f))
+        (SBS_STATE_MODEL_INPUT_HISTORY_STATE(
+             SubjectState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) > 1.5f &&
+         SBS_STATE_MODEL_INPUT_HISTORY_STATE(
+             SubjectState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) < 2.5f))
         return;
 
     uint plane = target_w * target_h;

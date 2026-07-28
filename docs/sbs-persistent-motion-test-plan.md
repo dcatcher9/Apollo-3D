@@ -184,8 +184,10 @@ depth model, fixed/adaptive pop, and every zero-plane mode.
 Record one row per depth update with the three evidence fractions, accepted-shot pulse/reason,
 scene age, arm/latch flags, depth-motion baseline, subject-depth raw/EMA, stretch-band bounds,
 adaptive-pop ratio, zero-plane source-pixel shift, and rendered disparity percentiles. Diagnostics
-may use benchmark-only readback. Do not add production `Map`, `GetData`, staging readback, or a
-CPU/GPU synchronization point to the capture loop.
+may use the exact blocking offline readback. Production telemetry may use only its existing
+nonblocking query/staging ring: a `DONOTFLUSH`/`DO_NOT_WAIT` miss must drop that sample rather than
+introduce a CPU/GPU synchronization point in the capture loop. Missing live samples under load
+are expected and must not be compared one-for-one with the complete offline trace.
 
 ## Galaxy XR acceptance
 
@@ -203,4 +205,5 @@ telemetry and headset video. The contract passes when:
   turning one cut's normalization settling into a second pulse; keep the current refractory until
   that false-positive/false-negative boundary has headset evidence;
 - fixed HUD elements remain stable relative to the zero plane;
-- diagnostics introduce no GPU queue stall or production readback.
+- diagnostics introduce no GPU queue stall; production readback remains nonblocking and any
+  skipped live samples are attributed separately from controller behavior.

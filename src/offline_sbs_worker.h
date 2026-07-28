@@ -173,6 +173,10 @@ namespace offline_sbs {
   );
 
 #ifdef SUNSHINE_TESTS
+  bool adaptive_trace_flags_valid_for_test(
+    float cut_flags,
+    std::uint32_t analysis_flags
+  );
   std::uint64_t retained_timing_frame_limit_for_test();
   bool can_retain_timing_frame_for_test(std::uint64_t retained_frames);
   std::uintmax_t stream_inventory_probe_byte_limit_for_test();

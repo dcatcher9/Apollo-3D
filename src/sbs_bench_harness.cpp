@@ -41,6 +41,7 @@
 
   // local includes
   #include "config.h"
+  #include "generated/sbs_adaptive_state_contract.h"
   #include "logging.h"
   #include "sbs_perf.h"
   #include "video.h"
@@ -1151,18 +1152,21 @@ namespace sbs_bench {
       });
     }
 
-    using adaptive_state_words_t = std::array<std::uint32_t, 32>;
-    using render_state_words_t = std::array<std::uint32_t, 12>;
+    using adaptive_state_words_t = sbs_adaptive_state::words_t;
+    using render_state_words_t =
+      std::array<std::uint32_t, sbs_adaptive_state::render_prefix_word_count>;
 
     constexpr float scene_anchor_shift_min = -1.39635933f;
     constexpr float scene_anchor_shift_max = 8.58230571f;
 
     bool valid_adaptive_state_words(const adaptive_state_words_t &words) {
-      for (std::size_t index = 0; index < words.size(); ++index) {
-        if (index >= 16 && index <= 19) {
+      for (const auto &field : sbs_adaptive_state::fields) {
+        if (field.gpu_encoding == sbs_adaptive_state::gpu_encoding_e::uint_bits) {
           continue;
         }
-        if (!std::isfinite(std::bit_cast<float>(words[index]))) {
+        if (!std::isfinite(std::bit_cast<float>(
+              words[sbs_adaptive_state::index(field.word)]
+            ))) {
           return false;
         }
       }
@@ -1821,58 +1825,35 @@ namespace sbs_bench {
       const config::video_t::sbs_t &cfg,
       const int depth_reuse_interval
     ) {
-      out
-        << "{\"record\":\"header\",\"schema\":3,"
-           "\"source\":\"depth_subject_resolve_cs.SubjectState\","
-           "\"capture\":\"every-source-frame-after-estimator-update\","
-           "\"fields\":["
-           "{\"name\":\"subject_recenter_delta\",\"type\":\"float32\"},"
-           "{\"name\":\"scene_age\",\"type\":\"float32\"},"
-           "{\"name\":\"subject_depth_ema\",\"type\":\"float32\"},"
-           "{\"name\":\"initialized\",\"type\":\"float32\"},"
-           "{\"name\":\"stretch_lo\",\"type\":\"float32\"},"
-           "{\"name\":\"stretch_inv_range\",\"type\":\"float32\"},"
-           "{\"name\":\"depth_change_baseline_ema\",\"type\":\"float32\"},"
-           "{\"name\":\"adaptive_pop_ratio\",\"type\":\"float32\"},"
-           "{\"name\":\"zero_anchor_shift_px\",\"type\":\"float32\"},"
-           "{\"name\":\"zero_anchor_valid\",\"type\":\"float32\"},"
-           "{\"name\":\"cut_flags\",\"type\":\"float32\"},"
-           "{\"name\":\"model_input_history_state\",\"type\":\"float32\"},"
-           "{\"name\":\"latched_edge_fraction\",\"type\":\"float32\"},"
-           "{\"name\":\"current_depth_change_fraction\",\"type\":\"float32\"},"
-           "{\"name\":\"valid_depth_fraction\",\"type\":\"float32\"},"
-           "{\"name\":\"effective_raw_range_width\",\"type\":\"float32\"},"
-           "{\"name\":\"hard_cut_count\",\"type\":\"uint32\"},"
-           "{\"name\":\"external_cut_count\",\"type\":\"uint32\"},"
-           "{\"name\":\"empty_raw_count\",\"type\":\"uint32\"},"
-           "{\"name\":\"collapsed_raw_count\",\"type\":\"uint32\"},"
-           "{\"name\":\"range_collapsed\",\"type\":\"float32\"},"
-           "{\"name\":\"depth_ready\",\"type\":\"float32\"},"
-           "{\"name\":\"hard_cut_pulse\",\"type\":\"float32\"},"
-           "{\"name\":\"reserved\",\"type\":\"float32\"},"
-           "{\"name\":\"current_edge_fraction\",\"type\":\"float32\"},"
-           "{\"name\":\"current_zero_anchor_candidate_shift_px\",\"type\":\"float32\"},"
-           "{\"name\":\"structural_change_fraction\",\"type\":\"float32\"},"
-           "{\"name\":\"raw_rgb_change_fraction\",\"type\":\"float32\"},"
-           "{\"name\":\"current_structural_support_fraction\",\"type\":\"float32\"},"
-           "{\"name\":\"previous_structural_support_fraction\",\"type\":\"float32\"},"
-           "{\"name\":\"common_structural_support_fraction\",\"type\":\"float32\"},"
-           "{\"name\":\"analysis_flags\",\"type\":\"uint32\"}],"
-           "\"analysis_flag_bits\":{"
-           "\"appearance_proposal\":0,"
-           "\"exposure_like\":1,"
-           "\"structureless\":2,"
-           "\"same_return\":3,"
-           "\"veto\":4,"
-           "\"relative_spike\":5},"
-           "\"config\":{\"model\":" << json_string(model_name)
-        << ",\"profile\":" << json_string(cfg.profile)
-        << ",\"pop_strength\":" << cfg.pop_strength
-        << ",\"adaptive_pop\":" << (cfg.adaptive_pop ? "true" : "false")
-        << ",\"adaptive_pop_max\":" << cfg.adaptive_pop_max
-        << ",\"zero_plane\":" << json_string(cfg.zero_plane)
-        << ",\"depth_reuse_interval\":" << depth_reuse_interval
-        << "}}\n";
+      nlohmann::json fields = nlohmann::json::array();
+      for (const auto &field : sbs_adaptive_state::fields) {
+        fields.push_back({
+          {"name", field.name},
+          {"type", field.json_type},
+        });
+      }
+      nlohmann::json analysis_flag_bits = nlohmann::json::object();
+      for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
+        analysis_flag_bits[std::string {flag.name}] = flag.bit;
+      }
+      const nlohmann::json header {
+        {"record", "header"},
+        {"schema", sbs_adaptive_state::schema_version},
+        {"source", sbs_adaptive_state::source},
+        {"capture", sbs_adaptive_state::capture},
+        {"fields", std::move(fields)},
+        {"analysis_flag_bits", std::move(analysis_flag_bits)},
+        {"config", {
+          {"model", model_name},
+          {"profile", cfg.profile},
+          {"pop_strength", cfg.pop_strength},
+          {"adaptive_pop", cfg.adaptive_pop},
+          {"adaptive_pop_max", cfg.adaptive_pop_max},
+          {"zero_plane", cfg.zero_plane},
+          {"depth_reuse_interval", depth_reuse_interval},
+        }},
+      };
+      out << header.dump() << '\n';
       out.flush();
       return out.good();
     }
@@ -1886,36 +1867,32 @@ namespace sbs_bench {
       const config::video_t::sbs_t &cfg,
       const scene_plan_entry *scene_camera = nullptr
     ) {
-      const auto scalar = [&](std::size_t index) {
-        return std::bit_cast<float>(words[index]);
+      using sbs_adaptive_state::word_e;
+      const auto scalar = [&](const word_e word) {
+        return std::bit_cast<float>(words[sbs_adaptive_state::index(word)]);
       };
-      const float flags_value = scalar(10);
+      const float flags_value = scalar(word_e::cut_flags);
       if (flags_value < 0.0f ||
-          static_cast<double>(flags_value) >
-            static_cast<double>(std::numeric_limits<std::uint32_t>::max()) ||
+          flags_value >
+            static_cast<float>(sbs_adaptive_state::known_cut_flag_mask) ||
           std::trunc(flags_value) != flags_value) {
         return false;
       }
       const auto cut_flags = static_cast<std::uint32_t>(flags_value);
-      const float analysis_flags_value = scalar(31);
+      const float analysis_flags_value = scalar(word_e::analysis_flags);
       if (
         analysis_flags_value < 0.0f ||
-        analysis_flags_value > 63.0f ||
+        analysis_flags_value >
+          static_cast<float>(sbs_adaptive_state::known_analysis_flag_mask) ||
         std::trunc(analysis_flags_value) != analysis_flags_value
       ) {
         return false;
       }
-      const auto analysis_flags =
-        static_cast<std::uint32_t>(analysis_flags_value);
-      constexpr std::uint32_t geometry_armed = 1u;
-      constexpr std::uint32_t appearance_armed = 2u;
-      constexpr std::uint32_t geometry_low_once = 4u;
-      constexpr std::uint32_t appearance_quiet_once = 8u;
-      constexpr std::uint32_t cut_latched = 16u;
-      constexpr std::uint32_t appearance_recovery = 32u;
-
       const float effective_ratio = cfg.adaptive_pop ?
-                                      std::max(scalar(7), 1.0f) :
+                                      std::max(
+                                        scalar(word_e::adaptive_pop_ratio),
+                                        1.0f
+                                      ) :
                                       1.0f;
       const float absolute_effective_pop = scene_camera ?
         scene_camera->absolute_pop_strength :
@@ -1933,35 +1910,50 @@ namespace sbs_bench {
           << ",\"resolved_zero_anchor_shift_px\":"
           << (scene_camera ?
                 scene_camera->zero_anchor_shift_px :
-                scalar(8))
+                scalar(word_e::zero_anchor_shift_px))
           << ",\"geometry_armed\":"
-          << ((cut_flags & geometry_armed) != 0u ? "true" : "false")
+          << ((cut_flags & sbs_adaptive_state::cut_flag_geometry_armed) != 0u ?
+                "true" : "false")
           << ",\"appearance_armed\":"
-          << ((cut_flags & appearance_armed) != 0u ? "true" : "false")
+          << ((cut_flags & sbs_adaptive_state::cut_flag_appearance_armed) != 0u ?
+                "true" : "false")
           << ",\"geometry_low_once\":"
-          << ((cut_flags & geometry_low_once) != 0u ? "true" : "false")
+          << ((cut_flags & sbs_adaptive_state::cut_flag_geometry_low_once) != 0u ?
+                "true" : "false")
           << ",\"appearance_quiet_once\":"
-          << ((cut_flags & appearance_quiet_once) != 0u ? "true" : "false")
+          << ((cut_flags & sbs_adaptive_state::cut_flag_appearance_quiet_once) != 0u ?
+                "true" : "false")
           << ",\"cut_latched\":"
-          << ((cut_flags & cut_latched) != 0u ? "true" : "false")
+          << ((cut_flags & sbs_adaptive_state::cut_flag_latched) != 0u ?
+                "true" : "false")
           << ",\"appearance_recovery\":"
-          << ((cut_flags & appearance_recovery) != 0u ? "true" : "false")
-          << ",\"hard_cut_pulse\":" << (scalar(22) > 0.5f ? "true" : "false")
-          << ",\"hard_cut_count\":" << words[16]
-          << ",\"external_cut_count\":" << words[17]
-          << ",\"empty_raw_count\":" << words[18]
-          << ",\"collapsed_raw_count\":" << words[19]
+          << ((cut_flags & sbs_adaptive_state::cut_flag_appearance_recovery) != 0u ?
+                "true" : "false")
+          << ",\"hard_cut_pulse\":"
+          << (scalar(word_e::hard_cut_pulse) > 0.5f ? "true" : "false")
+          << ",\"hard_cut_count\":"
+          << words[sbs_adaptive_state::index(word_e::hard_cut_count)]
+          << ",\"external_cut_count\":"
+          << words[sbs_adaptive_state::index(word_e::external_cut_count)]
+          << ",\"empty_raw_count\":"
+          << words[sbs_adaptive_state::index(word_e::empty_raw_count)]
+          << ",\"collapsed_raw_count\":"
+          << words[sbs_adaptive_state::index(word_e::collapsed_raw_count)]
           << ",\"values\":[";
-      for (std::size_t index = 0; index < words.size(); ++index) {
-        if (index != 0) {
+      for (const auto &field : sbs_adaptive_state::fields) {
+        const auto index = sbs_adaptive_state::index(field.word);
+        if (index != 0u) {
           out << ',';
         }
-        if (index >= 16 && index <= 19) {
+        if (field.gpu_encoding == sbs_adaptive_state::gpu_encoding_e::uint_bits) {
           out << words[index];
-        } else if (index == 31) {
-          out << analysis_flags;
+        } else if (
+          field.gpu_encoding ==
+          sbs_adaptive_state::gpu_encoding_e::uint_valued_float
+        ) {
+          out << static_cast<std::uint32_t>(scalar(field.word));
         } else {
-          out << scalar(index);
+          out << scalar(field.word);
         }
       }
       out << "]}\n";
@@ -2421,6 +2413,11 @@ namespace sbs_bench {
       if (!path.parent_path().empty()) {
         fs::create_directories(path.parent_path(), ec);
       }
+      nlohmann::ordered_json adaptive_analysis_flag_bits =
+        nlohmann::ordered_json::object();
+      for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
+        adaptive_analysis_flag_bits[std::string {flag.name}] = flag.bit;
+      }
       nlohmann::ordered_json capabilities = {
         {"schema", 1},
         {"native_whole_clip", {
@@ -2428,15 +2425,8 @@ namespace sbs_bench {
           {"source_formats", {"png", "bmp", "pfm"}},
           {"follow_protocol_schema", 1},
           {"follow_global_first_sequence", true},
-          {"adaptive_state_schema", 3},
-          {"adaptive_analysis_flag_bits", {
-            {"appearance_proposal", 0},
-            {"exposure_like", 1},
-            {"structureless", 2},
-            {"same_return", 3},
-            {"veto", 4},
-            {"relative_spike", 5},
-          }},
+          {"adaptive_state_schema", sbs_adaptive_state::schema_version},
+          {"adaptive_analysis_flag_bits", std::move(adaptive_analysis_flag_bits)},
           {"scene_cache_contract_schema", 1},
           {"scene_cache_packed_sbs_contract", true},
           {"scene_cache_depth", {
@@ -3300,11 +3290,23 @@ namespace sbs_bench {
         // Analysis diagnostics deliberately are not part of the render cache. Keep their
         // unavailable sentinels explicit so a replay trace cannot be mistaken for fresh detector
         // evidence; the separate analysis trace remains authoritative.
-        for (std::size_t index = 12u; index <= 15u; ++index) {
-          words[index] = std::bit_cast<std::uint32_t>(-1.0f);
+        for (
+          std::size_t index = sbs_adaptive_state::render_prefix_word_count;
+          index < words.size();
+          ++index
+        ) {
+          words[index] = std::bit_cast<std::uint32_t>(
+            sbs_adaptive_state::initial_values[index]
+          );
         }
-        for (std::size_t index = 24u; index <= 30u; ++index) {
-          words[index] = std::bit_cast<std::uint32_t>(-1.0f);
+        constexpr std::array replay_unavailable_words {
+          sbs_adaptive_state::word_e::current_depth_change_fraction,
+          sbs_adaptive_state::word_e::valid_depth_fraction,
+          sbs_adaptive_state::word_e::effective_raw_range_width,
+        };
+        for (const auto word : replay_unavailable_words) {
+          words[sbs_adaptive_state::index(word)] =
+            std::bit_cast<std::uint32_t>(-1.0f);
         }
         est.raw_width = static_cast<int>(replay_cache_metadata.depth_width);
         est.raw_height = static_cast<int>(replay_cache_metadata.depth_height);
@@ -4235,8 +4237,9 @@ namespace sbs_bench {
                "\"file\":\"adaptive_state.jsonl\","
                "\"retained_history\":true,"
            )
-        << "\"schema\":3,\"capture\":"
-           "\"every-source-frame-after-estimator-update\",\"frame_count\":"
+        << "\"schema\":" << sbs_adaptive_state::schema_version
+        << ",\"capture\":" << json_string(sbs_adaptive_state::capture)
+        << ",\"frame_count\":"
         << adaptive_state_frame_count << "},\n"
         << "  \"sbs\": {\"enabled\": "
         << (o.artifacts == artifact_mode_e::conversion ? "true" : "false")

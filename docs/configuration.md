@@ -842,16 +842,18 @@ editing the `conf` file in a text editor. Use the examples as reference.
             The repair runs only for final session teardown. It does not run during the reconnect
             grace period, a warm virtual-display replacement, an encoder probe, or local AR-display
             cleanup.
-            @attention{The taskbar briefly closes and restarts. Open File Explorer windows may
+            This option is off by default because Windows does not expose a reliable API for
+            detecting whether its taskbar-button state was lost. Enable it if running applications
+            disappear from the taskbar after a streaming session.
+            @attention{When enabled, the taskbar briefly closes and restarts. Open File Explorer windows may
             close and may not reopen automatically, and active file operations hosted by Explorer
-            may be interrupted. Set this option to `off` if you prefer to restart Explorer
-            manually.}
+            may be interrupted.}
         </td>
     </tr>
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            on
+            off
             @endcode</td>
     </tr>
     <tr>

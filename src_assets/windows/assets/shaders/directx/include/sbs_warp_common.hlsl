@@ -90,10 +90,12 @@ Bestv2Params MakeBestv2Params(float4 s0, float4 s1, float4 s2,
     Bestv2Params p;
     float parallax_width = Bestv2ParallaxWidth(source_width, literal_bestv2);
     // Shot-latched explicit zero plane, resolved unconditionally by depth_subject_resolve_cs.
-    p.anchor_shift_px = s2.x;
+    p.anchor_shift_px = SBS_STATE_ZERO_ANCHOR_SHIFT_PX(s2);
     p.parallax_scale = 0.35f / parallax_width;
     float aspect_scale = Bestv2AspectScale(source_width, source_height, literal_bestv2);
-    float adaptive_ratio = adaptive_pop > 0.5f ? max(s1.w, 1.0f) : 1.0f;
+    float adaptive_ratio = adaptive_pop > 0.5f ?
+        max(SBS_STATE_ADAPTIVE_POP_RATIO(s1), 1.0f) :
+        1.0f;
     float strength = literal_bestv2 > 0.5f ? 1.0f : pop_strength * adaptive_ratio;
 #ifdef SBS_SCENE_CAMERA_OVERRIDE
     if (scene_camera_override_enabled > 0.5f) {

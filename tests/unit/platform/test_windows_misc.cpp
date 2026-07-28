@@ -413,4 +413,92 @@ TEST(UserLocalAppDataTest, MatchesTheCurrentOrLinkedStandardUserProfile) {
     CSTR_EQUAL
   );
 }
+
+TEST(RunAsActiveUserTest, CanInspectTheUserProfileWithUsableImpersonation) {
+  DWORD process_session = 0;
+  ASSERT_TRUE(ProcessIdToSessionId(GetCurrentProcessId(), &process_session));
+  if (process_session != WTSGetActiveConsoleSessionId()) {
+    GTEST_SKIP() << "This contract requires an interactive test process";
+  }
+
+  HANDLE process_token = nullptr;
+  ASSERT_TRUE(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &process_token));
+  auto process_token_guard = util::fail_guard([&]() {
+    CloseHandle(process_token);
+  });
+  TOKEN_ELEVATION process_elevation {};
+  DWORD returned = 0;
+  ASSERT_TRUE(GetTokenInformation(
+    process_token,
+    TokenElevation,
+    &process_elevation,
+    sizeof(process_elevation),
+    &returned
+  ));
+  if (process_elevation.TokenIsElevated == 0) {
+    GTEST_SKIP() << "The impersonation regression requires an elevated tray process";
+  }
+
+  const auto expected_user = platf::active_user_id();
+  if (!expected_user) {
+    GTEST_SKIP() << "Windows did not expose a validated active desktop user";
+  }
+  const auto profile = platf::user_local_appdata();
+  ASSERT_FALSE(profile.empty());
+
+  bool callback_called = false;
+  const auto result = platf::run_as_active_user(
+    [&]() {
+      callback_called = true;
+
+      HANDLE thread_token = nullptr;
+      ASSERT_TRUE(OpenThreadToken(
+        GetCurrentThread(),
+        TOKEN_QUERY,
+        TRUE,
+        &thread_token
+      ));
+      auto thread_token_guard = util::fail_guard([&]() {
+        CloseHandle(thread_token);
+      });
+      SECURITY_IMPERSONATION_LEVEL level = SecurityAnonymous;
+      DWORD returned = 0;
+      ASSERT_TRUE(GetTokenInformation(
+        thread_token,
+        TokenImpersonationLevel,
+        &level,
+        sizeof(level),
+        &returned
+      ));
+      EXPECT_GE(level, SecurityImpersonation);
+
+      TOKEN_ELEVATION elevation {};
+      ASSERT_TRUE(GetTokenInformation(
+        thread_token,
+        TokenElevation,
+        &elevation,
+        sizeof(elevation),
+        &returned
+      ));
+      EXPECT_EQ(elevation.TokenIsElevated, 0u);
+
+      HANDLE profile_handle = CreateFileW(
+        profile.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        nullptr
+      );
+      ASSERT_NE(profile_handle, INVALID_HANDLE_VALUE)
+        << "Win32 error " << GetLastError();
+      CloseHandle(profile_handle);
+    },
+    expected_user
+  );
+
+  EXPECT_FALSE(result);
+  EXPECT_TRUE(callback_called);
+}
 #endif

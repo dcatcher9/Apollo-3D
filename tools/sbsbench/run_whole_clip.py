@@ -41,6 +41,11 @@ from statistics import median
 from typing import Any, Iterable
 from urllib.parse import urlsplit
 
+if __package__:
+    from .adaptive_state_contract import TRACE_SCHEMA as ADAPTIVE_TRACE_SCHEMA
+else:
+    from adaptive_state_contract import TRACE_SCHEMA as ADAPTIVE_TRACE_SCHEMA
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO = SCRIPT_DIR.parent.parent
@@ -50,7 +55,6 @@ MANIFEST_NAME = "conversion_manifest.json"
 TIMELINE_NAME = "timeline.json"
 TRACE_NAME = "adaptive_state.jsonl"
 NATIVE_CONTRACT_NAME = "whole_clip_contract.json"
-ADAPTIVE_TRACE_SCHEMA = 3
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 CODECS = ("hevc_nvenc", "av1_nvenc", "libx265")
 SPOOL_SAFETY_FACTOR = Fraction(5, 4)

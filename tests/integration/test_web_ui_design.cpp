@@ -293,6 +293,27 @@ TEST(WebUiDesign, KeepsTaskbarRepairDirectlyUnderTheTraySetting) {
   );
 }
 
+TEST(WebUiDesign, TaskbarRepairUiMatchesItsOptInNativeDefault) {
+  const auto schema = read_source(web_root / "config.html");
+  const auto locale =
+    read_source(web_root / "public/assets/locale/en.json");
+  const auto documentation =
+    read_source(fs::path(SUNSHINE_SOURCE_DIR) / "docs/configuration.md");
+
+  EXPECT_NE(
+    schema.find("\"virtual_display_restart_explorer\": \"off\""),
+    std::string::npos
+  );
+  EXPECT_NE(locale.find("\"Off by default."), std::string::npos);
+  const auto setting = documentation.find("### virtual_display_restart_explorer");
+  ASSERT_NE(setting, std::string::npos);
+  const auto next_setting = documentation.find("\n## ", setting);
+  ASSERT_NE(next_setting, std::string::npos);
+  const auto section = documentation.substr(setting, next_setting - setting);
+  EXPECT_NE(section.find("<td>Default</td>"), std::string::npos);
+  EXPECT_NE(section.find("\n            off\n"), std::string::npos);
+}
+
 TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   const auto page = read_source(web_root / "offline-conversion.html");
   const auto api = read_source(web_root / "offline-sbs-api.js");
