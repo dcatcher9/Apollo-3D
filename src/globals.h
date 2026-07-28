@@ -50,6 +50,7 @@ namespace mail {
   MAIL(hdr);
   MAIL(sbs_mode);
   MAIL(sbs_depth_status);
+  MAIL(sbs_telemetry);
   MAIL(video_mode);
   MAIL(video_mode_applied);
   MAIL(live_video_mode_ack);

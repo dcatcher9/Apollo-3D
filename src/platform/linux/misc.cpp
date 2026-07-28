@@ -56,6 +56,32 @@ namespace bp = boost::process::v1;
 
 window_system_e window_system;
 
+namespace platf {
+  std::filesystem::path user_local_appdata() {
+    if (const char *xdg_data = std::getenv("XDG_DATA_HOME");
+        xdg_data && *xdg_data) {
+      return fs::path {xdg_data};
+    }
+    if (const char *home = std::getenv("HOME"); home && *home) {
+      return fs::path {home} / ".local" / "share";
+    }
+    return {};
+  }
+
+  std::optional<std::string> active_user_id() {
+    return "uid-" + std::to_string(getuid());
+  }
+
+  std::error_code run_as_active_user(
+    const std::function<void()> &callback,
+    const std::optional<std::string> &expected_user_id
+  ) {
+    (void) callback;
+    (void) expected_user_id;
+    return std::make_error_code(std::errc::operation_not_supported);
+  }
+}  // namespace platf
+
 namespace dyn {
   void *handle(const std::vector<const char *> &libs) {
     void *handle;
@@ -337,6 +363,29 @@ std::string get_local_ip_for_gateway() {
       }
     }
     // clang-format on
+  }
+
+  bp::child run_command_unelevated(
+    bool interactive,
+    const std::string &cmd,
+    boost::filesystem::path &working_dir,
+    const bp::environment &env,
+    FILE *file,
+    std::error_code &ec,
+    bp::group *group,
+    const std::optional<std::string> &expected_user_id
+  ) {
+    (void) interactive;
+    (void) cmd;
+    (void) working_dir;
+    (void) env;
+    (void) file;
+    (void) group;
+    (void) expected_user_id;
+    // Native offline SBS is a Windows/NVIDIA product feature. A Linux service has no
+    // active-user token handoff here; delegating would parse untrusted media as root.
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return bp::child {};
   }
 
   /**

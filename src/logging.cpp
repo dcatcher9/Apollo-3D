@@ -150,18 +150,22 @@ namespace logging {
       deinit();
     }
 
-    // Check if the log file exists and handle backup
-    std::string backup_log_file = log_file + ".backup";
-    if (std::filesystem::exists(log_file)) {
-      try {
-        // If the backup file exists, remove it
-        if (std::filesystem::exists(backup_log_file)) {
-          std::filesystem::remove(backup_log_file);
+    // An empty path intentionally selects console-only logging for short-lived command
+    // processes. In particular, native offline workers and their SBS harness children must
+    // never rotate or append to the live host's log file.
+    if (!log_file.empty()) {
+      std::string backup_log_file = log_file + ".backup";
+      if (std::filesystem::exists(log_file)) {
+        try {
+          // If the backup file exists, remove it
+          if (std::filesystem::exists(backup_log_file)) {
+            std::filesystem::remove(backup_log_file);
+          }
+          // Rename the current log file to the backup name
+          std::filesystem::rename(log_file, backup_log_file);
+        } catch (std::exception &e) {
+          std::cout << "Failed to rotate log file: " << e.what() << std::endl;
         }
-        // Rename the current log file to the backup name
-        std::filesystem::rename(log_file, backup_log_file);
-      } catch (std::exception &e) {
-        std::cout << "Failed to rotate log file: " << e.what() << std::endl;
       }
     }
 
@@ -176,7 +180,9 @@ namespace logging {
     sink->locked_backend()->add_stream(stream);
 #endif
 
-    sink->locked_backend()->add_stream(boost::make_shared<std::ofstream>(log_file));
+    if (!log_file.empty()) {
+      sink->locked_backend()->add_stream(boost::make_shared<std::ofstream>(log_file));
+    }
     sink->set_filter(severity >= min_log_level);
     sink->set_formatter(&formatter);
 

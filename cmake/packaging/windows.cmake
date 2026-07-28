@@ -22,6 +22,18 @@ install(FILES ${VIGEMBUS_INSTALLER}
 install(TARGETS dxgi-info RUNTIME DESTINATION "tools" COMPONENT dxgi)
 install(TARGETS audio-info RUNTIME DESTINATION "tools" COMPONENT audio)
 
+# Optional but required to enable native offline SBS conversion in an installed package.
+if(SUNSHINE_OFFLINE_FFMPEG)
+    install(FILES "${SUNSHINE_OFFLINE_FFMPEG}"
+            DESTINATION "tools"
+            RENAME "ffmpeg.exe"
+            COMPONENT application)
+    install(FILES "${SUNSHINE_OFFLINE_FFPROBE}"
+            DESTINATION "tools"
+            RENAME "ffprobe.exe"
+            COMPONENT application)
+endif()
+
 # Mandatory tools
 install(TARGETS sunshinesvc RUNTIME DESTINATION "tools" COMPONENT application)
 
@@ -69,7 +81,7 @@ cmake_path(CONVERT "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/assets/shaders"
 cmake_path(CONVERT "${CMAKE_BINARY_DIR}/assets/shaders" TO_NATIVE_PATH_LIST shaders_in_build_dest_native)
 execute_process(COMMAND cmd.exe /c mklink /J "${shaders_in_build_dest_native}" "${shaders_in_build_src_native}")
 
-set(CPACK_PACKAGE_ICON "${CMAKE_SOURCE_DIR}\\\\apollo.ico")
+set(CPACK_PACKAGE_ICON "${CMAKE_SOURCE_DIR}\\\\sunshine3d.ico")
 
 # Rename the product in Windows UI without changing the install directory or upgrade identity.
 set(CPACK_NSIS_PACKAGE_NAME "${PROJECT_DISPLAY_NAME}")
@@ -90,7 +102,7 @@ set(CPACK_COMPONENT_APPLICATION_DEPENDS assets)
 
 # service auto-start script
 set(CPACK_COMPONENT_AUTOSTART_DISPLAY_NAME "Launch on Startup")
-set(CPACK_COMPONENT_AUTOSTART_DESCRIPTION "If enabled, launches Apollo automatically on system startup.")
+set(CPACK_COMPONENT_AUTOSTART_DESCRIPTION "If enabled, launches Sunshine 3D automatically on system startup.")
 set(CPACK_COMPONENT_AUTOSTART_GROUP "Core")
 
 # assets

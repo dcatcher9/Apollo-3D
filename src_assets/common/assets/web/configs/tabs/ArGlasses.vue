@@ -64,7 +64,7 @@ onUnmounted(() => {
       <div>
         <h2 id="ar-glasses-heading">Local AR glasses</h2>
         <p class="text-body-secondary mb-0">
-          Apollo XR can present directly to glasses connected as a Windows display. Remote XR streaming
+          Sunshine 3D can present directly to glasses connected as a Windows display. Remote XR streaming
           temporarily takes priority over local presentation.
         </p>
       </div>
@@ -126,7 +126,7 @@ onUnmounted(() => {
           <summary>Technical details</summary>
           <div class="font-monospace small text-body-secondary mt-2">{{ device.id }}</div>
           <div class="small text-body-secondary mt-1">
-            {{ device.autoDetected ? 'Apollo XR recognized this model automatically.' : 'This choice is saved for this monitor model.' }}
+            {{ device.autoDetected ? 'Sunshine 3D recognized this model automatically.' : 'This choice is saved for this monitor model.' }}
           </div>
         </details>
       </article>
@@ -135,157 +135,153 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.ar-glasses-section {
-  --ar-accent: #f4c542;
-}
-
 .ar-glasses-embedded {
-  border-top: 1px solid var(--bs-border-color);
-  padding-top: 2.75rem;
+  border-top: 1px solid var(--apollo-border);
+  padding-top: calc(var(--apollo-space-xl) * 2);
 }
 
 .ar-glasses-heading {
   align-items: end;
   display: flex;
   justify-content: space-between;
-  margin-bottom: 1rem;
+  margin-bottom: var(--apollo-space-lg);
 }
 
 .ar-glasses-heading h2 {
-  font-size: 1.4rem;
+  font-size: var(--apollo-text-title);
   font-weight: 680;
   letter-spacing: -.025em;
   margin: 0;
 }
 
 .ar-glasses-heading p {
-  margin-top: .35rem;
+  margin-top: var(--apollo-space-sm);
   max-width: 46rem;
 }
 
 .ar-device-grid {
   display: grid;
-  gap: 1rem;
+  gap: var(--apollo-space-lg);
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .ar-display-card {
-  background: color-mix(in srgb, var(--bs-body-bg) 86%, var(--bs-secondary-bg));
-  border: 1px solid var(--bs-border-color);
-  border-radius: 1.25rem;
-  padding: 1.25rem;
+  background: var(--apollo-surface);
+  border: 1px solid var(--apollo-border);
+  border-radius: var(--apollo-radius-card);
+  padding: var(--apollo-space-lg);
 }
 
 .ar-display-header {
   align-items: flex-start;
   display: flex;
-  gap: .9rem;
+  gap: var(--apollo-space-md);
 }
 
 .ar-display-icon {
   align-items: center;
-  background: color-mix(in srgb, var(--ar-accent) 16%, transparent);
-  border: 1px solid color-mix(in srgb, var(--ar-accent) 30%, transparent);
-  border-radius: .85rem;
-  color: var(--ar-accent);
+  background: color-mix(in srgb, var(--apollo-accent-deep) 48%, transparent);
+  border: 1px solid color-mix(in srgb, var(--apollo-accent) 30%, transparent);
+  border-radius: var(--apollo-radius-control);
+  color: var(--apollo-accent);
   display: inline-flex;
   flex: 0 0 auto;
-  height: 2.75rem;
+  height: var(--apollo-icon-tile);
   justify-content: center;
-  width: 2.75rem;
+  width: var(--apollo-icon-tile);
 }
 
 .ar-display-header h3 {
-  font-size: 1.05rem;
+  font-size: var(--apollo-text-emphasis);
   font-weight: 680;
-  margin: .15rem 0 .35rem;
+  margin: var(--apollo-space-xs) 0 var(--apollo-space-sm);
 }
 
 .ar-display-state {
   align-items: center;
-  color: var(--bs-secondary-color);
+  color: var(--apollo-text-secondary);
   display: flex;
-  font-size: .82rem;
-  gap: .45rem;
+  font-size: var(--apollo-text-caption);
+  gap: var(--apollo-space-sm);
 }
 
 .ar-status-dot {
-  background: var(--bs-success);
+  background: var(--apollo-status-ok);
   border-radius: 50%;
-  box-shadow: 0 0 0 .24rem color-mix(in srgb, var(--bs-success) 18%, transparent);
+  box-shadow: 0 0 0 var(--apollo-space-xs) color-mix(in srgb, var(--apollo-status-ok) 18%, transparent);
   height: .55rem;
   width: .55rem;
 }
 
 .ar-status-dot.offline {
-  background: var(--bs-secondary-color);
+  background: var(--apollo-text-disabled);
   box-shadow: none;
   opacity: .55;
 }
 
 .ar-mode-guide {
-  border-bottom: 1px solid var(--bs-border-color);
-  border-top: 1px solid var(--bs-border-color);
+  border-bottom: 1px solid var(--apollo-border);
+  border-top: 1px solid var(--apollo-border);
   display: grid;
   grid-template-columns: 1fr 1fr;
-  margin: 1rem 0;
-  padding: .85rem 0;
+  margin: var(--apollo-space-lg) 0;
+  padding: var(--apollo-space-md) 0;
 }
 
 .ar-mode-guide > div {
   display: flex;
   flex-direction: column;
-  gap: .1rem;
+  gap: var(--apollo-space-xs);
 }
 
 .ar-mode-guide > div + div {
-  border-left: 1px solid var(--bs-border-color);
-  padding-left: 1rem;
+  border-left: 1px solid var(--apollo-border);
+  padding-left: var(--apollo-space-lg);
 }
 
 .ar-mode-guide strong {
-  font-size: .88rem;
+  font-size: var(--apollo-text-caption);
 }
 
 .ar-mode-guide span {
-  color: var(--bs-secondary-color);
-  font-size: .78rem;
+  color: var(--apollo-text-secondary);
+  font-size: var(--apollo-text-caption);
 }
 
 .ar-display-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: .6rem;
+  gap: var(--apollo-space-sm);
 }
 
 .ar-display-actions .btn {
   align-items: center;
-  border-radius: .75rem;
+  border-radius: var(--apollo-radius-control);
   display: inline-flex;
-  gap: .45rem;
-  min-height: 42px;
+  gap: var(--apollo-space-sm);
+  min-height: var(--apollo-control-compact);
 }
 
 .ar-technical-details {
-  border-top: 1px solid var(--bs-border-color);
-  margin-top: 1rem;
-  padding-top: .75rem;
+  border-top: 1px solid var(--apollo-border);
+  margin-top: var(--apollo-space-lg);
+  padding-top: var(--apollo-space-md);
 }
 
 .ar-technical-details summary {
-  color: var(--bs-secondary-color);
+  color: var(--apollo-text-secondary);
   cursor: pointer;
-  font-size: .82rem;
+  font-size: var(--apollo-text-caption);
 }
 
 .ar-empty-state {
   align-items: center;
-  border: 1px dashed var(--bs-border-color);
-  border-radius: 1rem;
-  color: var(--bs-secondary-color);
+  border: 1px dashed var(--apollo-border-strong);
+  border-radius: var(--apollo-radius-card);
+  color: var(--apollo-text-secondary);
   display: flex;
-  gap: .65rem;
-  padding: 1.25rem;
+  gap: var(--apollo-space-sm);
+  padding: var(--apollo-space-lg);
 }
 
 @media (max-width: 768px) {

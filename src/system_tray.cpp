@@ -9,17 +9,17 @@
     #define WIN32_LEAN_AND_MEAN
     #include <accctrl.h>
     #include <aclapi.h>
-    #define TRAY_ICON WEB_DIR "images/apollo.ico"
-    #define TRAY_ICON_PLAYING WEB_DIR "images/apollo-playing.ico"
-    #define TRAY_ICON_LOCKED WEB_DIR "images/apollo-locked.ico"
+    #define TRAY_ICON WEB_DIR "images/sunshine3d.ico"
+    #define TRAY_ICON_PLAYING WEB_DIR "images/sunshine3d-playing.ico"
+    #define TRAY_ICON_LOCKED WEB_DIR "images/sunshine3d-locked.ico"
   #elif defined(__linux__) || defined(linux) || defined(__linux)
     #define TRAY_ICON SUNSHINE_TRAY_PREFIX "-tray"
     #define TRAY_ICON_PLAYING SUNSHINE_TRAY_PREFIX "-playing"
     #define TRAY_ICON_LOCKED SUNSHINE_TRAY_PREFIX "-locked"
   #elif defined(__APPLE__) || defined(__MACH__)
-    #define TRAY_ICON WEB_DIR "images/logo-apollo-16.png"
-    #define TRAY_ICON_PLAYING WEB_DIR "images/apollo-playing-16.png"
-    #define TRAY_ICON_LOCKED WEB_DIR "images/apollo-locked-16.png"
+    #define TRAY_ICON WEB_DIR "images/logo-sunshine3d-16.png"
+    #define TRAY_ICON_PLAYING WEB_DIR "images/sunshine3d-playing-16.png"
+    #define TRAY_ICON_LOCKED WEB_DIR "images/sunshine3d-locked-16.png"
     #include <dispatch/dispatch.h>
   #endif
 
@@ -99,7 +99,7 @@ namespace system_tray {
     .menu =
       (struct tray_menu[]) {
         // todo - use boost/locale to translate menu strings
-        {.text = "Open Apollo XR", .cb = tray_open_ui_cb},
+        {.text = "Open Sunshine 3D", .cb = tray_open_ui_cb},
         {.text = "-"},
         // { .text = "-" },
         // { .text = "Donate",
@@ -350,7 +350,7 @@ namespace system_tray {
     snprintf(
       msg,
       std::size(msg),
-      "Is '%s' an AR display? Click to choose in Apollo XR.",
+      "Is '%s' an AR display? Click to choose in Sunshine 3D.",
       display_name.c_str()
     );
     tray.notification_title = "New Monitor Detected";
@@ -431,7 +431,7 @@ namespace system_tray {
       return 1;
     }
 
-    static const std::string title_str = "Open Apollo XR (" + config::nvhttp.sunshine_name + ":" + std::to_string(net::map_port(confighttp::PORT_HTTPS)) + ")";
+    static const std::string title_str = "Open Sunshine 3D (" + config::nvhttp.sunshine_name + ":" + std::to_string(net::map_port(confighttp::PORT_HTTPS)) + ")";
     tray.menu[0].text = title_str.c_str();
 
     if (config::sunshine.hide_tray_controls) {

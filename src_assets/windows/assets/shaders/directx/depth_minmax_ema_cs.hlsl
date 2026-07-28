@@ -6,6 +6,11 @@
 RWStructuredBuffer<float4> MinMaxEma : register(u0);  // [0]={min,max,initialized,frame_state}
 RWByteAddressBuffer        MinMaxRaw : register(u1);  // min bits, max bits, valid count
 RWStructuredBuffer<uint>   Histogram : register(u2);  // permanent P2/P98 histogram from depth_hist_cs
+// Append-only diagnostics. SubjectState[0..2] remain the production warp contract:
+//   [3].zw = valid-depth fraction, effective EMA range width
+//   [4].zw = empty-raw count, collapsed-raw count (stored as uint bits)
+//   [5].xy = current range-collapsed flag, depth-ready flag
+RWStructuredBuffer<float4> DiagnosticState : register(u3);
 
 #include "include/depth_constants.hlsl"
 
@@ -18,6 +23,9 @@ void main() {
     uint valid_count = MinMaxRaw.Load(8);
     bool valid_bounds = valid_count > 0u && !isnan(new_min) && !isinf(new_min) &&
                         !isnan(new_max) && !isinf(new_max) && new_max >= new_min;
+    float4 telemetry = DiagnosticState[3];
+    uint4 health_counters = asuint(DiagnosticState[4]);
+    float4 telemetry_flags = DiagnosticState[5];
 
     // Robust percentile bounds: replace the raw min/max with the permanent P2/P98 percentiles
     // scanned from the 256-bin histogram (depth_hist_cs, binned over the raw range). Outlier
@@ -61,6 +69,17 @@ void main() {
         }
     }
 
+    float collapse_scale = max(1.0f, max(abs(new_min), abs(new_max)));
+    bool range_collapsed = valid_bounds &&
+                           new_max - new_min <= collapse_scale * 1.0e-5f;
+    if (!valid_bounds) {
+        health_counters.z = min(health_counters.z + 1u, 0xfffffffeu);
+    } else if (range_collapsed) {
+        health_counters.w = min(health_counters.w + 1u, 0xfffffffeu);
+    }
+    telemetry.z = (float)valid_count /
+                  (float)max(target_w * target_h, 1u);
+
     float4 s = MinMaxEma[0];
     if (!valid_bounds) {
         // Preserve the last real normalization state and mark this frame as a hold. In particular,
@@ -84,6 +103,12 @@ void main() {
         s.w = 1.0f;
     }
     MinMaxEma[0] = s;
+    telemetry.w = s.z > 0.5f ? max(s.y - s.x, 0.0f) : 0.0f;
+    telemetry_flags.x = range_collapsed ? 1.0f : 0.0f;
+    telemetry_flags.y = s.z > 0.5f ? 1.0f : 0.0f;
+    DiagnosticState[3] = telemetry;
+    DiagnosticState[4] = asfloat(health_counters);
+    DiagnosticState[5] = telemetry_flags;
 
     // Reset accumulator so next frame's InterlockedMin/Max start from the identity.
     MinMaxRaw.Store(0, 0xFFFFFFFFu);

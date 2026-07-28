@@ -150,6 +150,7 @@ namespace config {
     bool hide_tray_controls;
     bool enable_pairing;
     bool enable_discovery;
+    bool virtual_display_restart_explorer;
     std::string locale;
     int min_log_level;
     bool diagnostics_enabled;

@@ -28,6 +28,7 @@ extern "C" {
 // local includes
 #include "config.h"
 #include "globals.h"
+#include "gpu_workload_arbiter.h"
 #include "input.h"
 #include "logging.h"
 #include "network.h"
@@ -596,16 +597,23 @@ namespace rtsp_stream {
       raised_timer.expires_after(config::stream.ping_timeout);
       raised_timer.async_wait([this, launch_session_id](const boost::system::error_code &ec) {
         if (!ec) {
-          std::lock_guard lock(_launch_mutex);
-          auto pending = launch_event.view(0s);
-          if (pending && pending->id == launch_session_id) {
-            auto discarded = launch_event.pop(0s);
-            discarded->revoke_reservation();
-            BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
-          }
+          expire_launch_session(launch_session_id);
         }
       });
       return true;
+    }
+
+    void expire_launch_session(std::uint32_t launch_session_id) {
+      std::lock_guard lock(_launch_mutex);
+      auto pending = launch_event.view(0s);
+      if (pending && pending->id == launch_session_id) {
+        auto discarded = launch_event.pop(0s);
+        discarded->revoke_reservation();
+        // Accepted sockets retain the launch object after it leaves launch_event. Release an
+        // untransferred HTTP lease here so a silent peer cannot block offline work forever.
+        discarded->pending_live_gpu_lease.reset();
+        BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
+      }
     }
 
     /**
@@ -625,7 +633,9 @@ namespace rtsp_stream {
           auto cleared = launch_event.pop();
           // A normal control connection may clear an already claimed launch. Preserve that state
           // for subsequent PLAY, but ensure an unclaimed accepted socket cannot start later.
-          cleared->revoke_pending_reservation();
+          if (cleared->revoke_pending_reservation()) {
+            cleared->pending_live_gpu_lease.reset();
+          }
         }
       }
     }
@@ -636,9 +646,14 @@ namespace rtsp_stream {
       if (launch_event.view(0s)) {
         auto cleared = launch_event.pop(0s);
         cleared->revoke_reservation();
+        cleared->pending_live_gpu_lease.reset();
       }
       if (_claimed_launch_session) {
         _claimed_launch_session->revoke_reservation();
+        // Transfer into start_and_insert() takes the same mutex. If it has not happened yet,
+        // terminal revocation owns and releases this lease; if it has, the field is already empty
+        // and the local/active owner continues excluding offline work through rollback.
+        _claimed_launch_session->pending_live_gpu_lease.reset();
       }
     }
 
@@ -657,6 +672,20 @@ namespace rtsp_stream {
       return true;
     }
 
+    struct claimed_live_gpu_transfer_t {
+      bool reservation_valid;
+      std::optional<gpu_workload::lease_t> lease;
+    };
+
+    claimed_live_gpu_transfer_t take_claimed_live_gpu_lease(launch_session_t &launch_session) {
+      std::lock_guard lock(_launch_mutex);
+      if (_claimed_launch_session.get() != &launch_session ||
+          launch_session.reservation() != launch_reservation_state_e::claimed) {
+        return {false, std::nullopt};
+      }
+      return {true, launch_session.take_live_gpu_lease()};
+    }
+
     void finish_launch_session(launch_session_t &launch_session, bool started) {
       std::lock_guard lock(_launch_mutex);
       if (_claimed_launch_session.get() != &launch_session) {
@@ -665,6 +694,7 @@ namespace rtsp_stream {
 
       if (!started) {
         launch_session.revoke_reservation();
+        launch_session.pending_live_gpu_lease.reset();
         auto pending = launch_event.view(0s);
         if (pending && pending.get() == &launch_session) {
           raised_timer.cancel();
@@ -695,6 +725,7 @@ namespace rtsp_stream {
         stream::session::stop(*session);
         stream::session::join(*session);
         session.reset();
+        _active_gpu_lease.reset();
       }
     }
 
@@ -704,6 +735,7 @@ namespace rtsp_stream {
       auto lg = _active_session.lock();
       if (*_active_session == session) {
         _active_session->reset();
+        _active_gpu_lease.reset();
       }
     }
 
@@ -718,8 +750,15 @@ namespace rtsp_stream {
       if (!apply_current_policy_locked(*session)) {
         return false;
       }
+      auto gpu_lease =
+        gpu_workload::try_acquire(gpu_workload::kind_e::live_stream);
+      if (!gpu_lease) {
+        BOOST_LOG(warning) << "Rejecting streaming session while offline SBS conversion owns the GPU."sv;
+        return false;
+      }
 
       *_active_session = session;
+      _active_gpu_lease = std::move(gpu_lease);
       BOOST_LOG(info) << "New streaming session started"sv;
       return true;
     }
@@ -728,7 +767,8 @@ namespace rtsp_stream {
     /**
      * @brief Starts and registers a session atomically with authorization publication.
      * @return 0 on success, 403 when authorization was revoked, 409 when another stream is active,
-     *         454 when the launch reservation was revoked, or 500 when startup failed.
+     *         423 when offline conversion owns the GPU, 454 when the launch reservation was
+     *         revoked, or 500 when startup failed.
      */
     int start_and_insert(
       const std::shared_ptr<stream::session_t> &session,
@@ -754,6 +794,24 @@ namespace rtsp_stream {
         finish_launch_session(launch_session, false);
         return 403;
       }
+      // The normal HTTP path already reserved this lease before any process/display/GPU work.
+      // Keep a fallback for direct/test callers that construct an RTSP launch reservation without
+      // going through NVHTTP. In the normal path, take_live_gpu_lease() is a no-gap ownership
+      // transfer: the offline workload can never acquire between launch and active registration.
+      auto gpu_transfer = take_claimed_live_gpu_lease(launch_session);
+      if (!gpu_transfer.reservation_valid) {
+        finish_launch_session(launch_session, false);
+        return 454;
+      }
+      auto gpu_lease = std::move(gpu_transfer.lease);
+      if (!gpu_lease) {
+        gpu_lease =
+          gpu_workload::try_acquire(gpu_workload::kind_e::live_stream);
+      }
+      if (!gpu_lease) {
+        finish_launch_session(launch_session, false);
+        return 423;
+      }
       if (stream::session::start(*session)) {
         finish_launch_session(launch_session, false);
         return 500;
@@ -766,6 +824,7 @@ namespace rtsp_stream {
       }
 
       *_active_session = session;
+      _active_gpu_lease = std::move(gpu_lease);
       BOOST_LOG(info) << "New streaming session started"sv;
       finish_launch_session(launch_session, true);
       return 0;
@@ -882,6 +941,7 @@ namespace rtsp_stream {
     std::unordered_map<std::string_view, cmd_func_t> _map_cmd_cb;
 
     sync_util::sync_t<std::shared_ptr<stream::session_t>> _active_session;
+    std::optional<gpu_workload::lease_t> _active_gpu_lease;
     std::mutex _client_policy_mutex;
     std::mutex _launch_mutex;
     std::shared_ptr<launch_session_t> _claimed_launch_session;
@@ -968,6 +1028,20 @@ namespace rtsp_stream {
 
   void finish_launch_session_for_test(launch_session_t &launch_session, bool started) {
     server.finish_launch_session(launch_session, started);
+  }
+
+  std::optional<gpu_workload::lease_t> take_claimed_live_gpu_lease_for_test(
+    launch_session_t &launch_session
+  ) {
+    auto transfer = server.take_claimed_live_gpu_lease(launch_session);
+    if (!transfer.reservation_valid) {
+      return std::nullopt;
+    }
+    return std::move(transfer.lease);
+  }
+
+  void expire_launch_session_for_test(std::uint32_t launch_session_id) {
+    server.expire_launch_session(launch_session_id);
   }
 #endif
 
@@ -1261,6 +1335,8 @@ namespace rtsp_stream {
       if (!(client_features & ML_FF_SESSION_ID_V1)) {
         throw std::invalid_argument("x-ml-general.featureFlags requires SESSION_ID_V1");
       }
+      config.client_supports_sbs_telemetry =
+        (client_features & stream::CLIENT_FEATURE_SBS_TELEMETRY) != 0;
       config.audioQosType = required_int(detail::announce_int_field::audio_qos, "x-nv-aqos.qosTrafficType"sv);
       config.videoQosType = required_int(detail::announce_int_field::video_qos, "x-nv-vqos[0].qosTrafficType"sv);
       const auto encryption_flags = required_int(
@@ -1405,6 +1481,11 @@ namespace rtsp_stream {
     }
     if (start_result == 409) {
       BOOST_LOG(warning) << "Rejecting streaming session because another stream is already active"sv;
+      respond(sock, session, &option, 503, "Service Unavailable", req->sequenceNumber, {});
+      return;
+    }
+    if (start_result == 423) {
+      BOOST_LOG(warning) << "Rejecting streaming session while offline SBS conversion owns the GPU"sv;
       respond(sock, session, &option, 503, "Service Unavailable", req->sequenceNumber, {});
       return;
     }

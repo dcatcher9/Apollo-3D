@@ -7,10 +7,8 @@
   <script type="text/javascript" src="/assets/js/qrcode.min.js"></script>
   <style type="text/css">
     .devices-page {
-      --devices-accent: #f4c542;
-      --devices-accent-hover: #ffd866;
       max-width: 1180px;
-      padding-top: 2.5rem;
+      padding-top: calc(var(--apollo-space-xl) * 1.5);
       padding-bottom: 5rem;
     }
 
@@ -18,126 +16,227 @@
       display: flex;
       align-items: flex-start;
       justify-content: space-between;
-      gap: 1.5rem;
-      margin-bottom: 2rem;
+      gap: var(--apollo-space-xl);
+      margin-bottom: calc(var(--apollo-space-xl) * 1.5);
     }
 
     .devices-eyebrow {
-      color: var(--devices-accent);
-      font-size: .75rem;
-      font-weight: 700;
+      color: var(--apollo-accent);
+      font-size: var(--apollo-text-caption);
+      font-weight: 750;
       letter-spacing: .12em;
-      margin-bottom: .5rem;
+      margin-bottom: var(--apollo-space-sm);
       text-transform: uppercase;
     }
 
     .devices-title {
-      font-size: clamp(2rem, 5vw, 3.25rem);
-      font-weight: 720;
-      letter-spacing: -.045em;
-      line-height: 1;
+      font-size: var(--apollo-text-display);
+      font-weight: 750;
+      letter-spacing: -.025em;
+      line-height: 1.1;
       margin: 0;
     }
 
     .devices-subtitle {
-      color: var(--bs-secondary-color);
-      font-size: 1.05rem;
-      margin: .85rem 0 0;
+      color: var(--apollo-text-secondary);
+      font-size: var(--apollo-text-body);
+      margin: var(--apollo-space-md) 0 0;
       max-width: 42rem;
     }
 
     .devices-page .btn-apollo {
       align-items: center;
-      background: var(--devices-accent);
+      background: var(--apollo-accent);
       border: 0;
-      border-radius: .85rem;
-      color: #17140b;
+      border-radius: var(--apollo-radius-control);
+      color: var(--apollo-on-accent);
       display: inline-flex;
       font-weight: 700;
-      gap: .55rem;
+      gap: var(--apollo-space-sm);
       justify-content: center;
-      min-height: 46px;
-      padding: .7rem 1.1rem;
+      min-height: var(--apollo-control-standard);
+      padding: var(--apollo-space-sm) var(--apollo-space-lg);
     }
 
     .devices-page .btn-apollo:hover,
     .devices-page .btn-apollo:focus-visible {
-      background: var(--devices-accent-hover);
-      color: #17140b;
+      background: var(--apollo-accent-bright);
+      color: var(--apollo-on-accent);
     }
 
     .surface-card {
-      background: color-mix(in srgb, var(--bs-body-bg) 86%, var(--bs-secondary-bg));
-      border: 1px solid var(--bs-border-color);
-      border-radius: 1.25rem;
+      background: var(--apollo-surface);
+      border: 1px solid var(--apollo-border);
+      border-radius: var(--apollo-radius-card);
       overflow: hidden;
     }
 
     .pair-card {
-      margin-bottom: 2.75rem;
+      margin-bottom: calc(var(--apollo-space-xl) * 2);
       padding: clamp(1.25rem, 4vw, 2rem);
       position: relative;
     }
 
-    .pair-layout {
-      align-items: center;
-      display: grid;
-      gap: 2rem;
-      grid-template-columns: minmax(0, 1fr) auto;
+    .pair-intro {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: var(--apollo-space-xl);
+      margin-bottom: var(--apollo-space-xl);
     }
 
-    .pair-copy {
-      max-width: 42rem;
+    .pair-intro-copy {
+      max-width: 46rem;
+    }
+
+    .pair-intro h2 {
+      margin: 0 0 var(--apollo-space-sm);
+      font-size: var(--apollo-text-title);
+      font-weight: 700;
+    }
+
+    .pair-intro p {
+      margin: 0;
+      color: var(--apollo-text-secondary);
+    }
+
+    .pair-method-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(20rem, .65fr);
+      gap: var(--apollo-space-lg);
+    }
+
+    .pair-method-card {
+      display: flex;
+      min-width: 0;
+      min-height: 20rem;
+      padding: var(--apollo-space-lg);
+      flex-direction: column;
+      border: 1px solid var(--apollo-border-strong);
+      border-radius: var(--apollo-radius-card);
+      background: var(--apollo-surface-raised);
+    }
+
+    .pair-method-card.is-active {
+      border-color: var(--apollo-accent);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--apollo-accent) 35%, transparent);
+    }
+
+    .pair-method-card.is-primary {
+      border-color: var(--apollo-accent-deep);
+      background:
+        linear-gradient(145deg, color-mix(in srgb, var(--apollo-accent-deep) 24%, transparent), transparent 62%),
+        var(--apollo-surface-raised);
+    }
+
+    .pair-method-header {
+      display: flex;
+      align-items: flex-start;
+      gap: var(--apollo-space-md);
+      margin-bottom: var(--apollo-space-lg);
+    }
+
+    .pair-method-header h3 {
+      margin: var(--apollo-space-xs) 0;
+      font-size: var(--apollo-text-emphasis);
+      font-weight: 700;
+    }
+
+    .pair-method-header p {
+      margin: 0;
+      color: var(--apollo-text-secondary);
+      font-size: var(--apollo-text-caption);
+      line-height: 1.5;
+    }
+
+    .pair-method-step {
+      display: inline-flex;
+      margin-left: auto;
+      padding: var(--apollo-space-xs) var(--apollo-space-sm);
+      color: var(--apollo-text-disabled);
+      border-radius: var(--apollo-radius-pill);
+      background: var(--apollo-surface-sunken);
+      font-size: var(--apollo-text-caption);
+      font-weight: 650;
+      white-space: nowrap;
     }
 
     .pair-icon,
     .device-icon {
       align-items: center;
-      background: color-mix(in srgb, var(--devices-accent) 16%, transparent);
-      border: 1px solid color-mix(in srgb, var(--devices-accent) 30%, transparent);
-      border-radius: 1rem;
-      color: var(--devices-accent);
+      background: color-mix(in srgb, var(--apollo-accent-deep) 48%, transparent);
+      border: 1px solid color-mix(in srgb, var(--apollo-accent) 30%, transparent);
+      border-radius: var(--apollo-radius-control);
+      color: var(--apollo-accent);
       display: inline-flex;
-      height: 3rem;
+      height: var(--apollo-icon-tile);
       justify-content: center;
-      width: 3rem;
+      width: var(--apollo-icon-tile);
     }
 
-    .pair-card h2,
     .section-heading h2 {
-      font-size: 1.4rem;
+      font-size: var(--apollo-text-title);
       font-weight: 680;
       letter-spacing: -.025em;
     }
 
-    .pair-card h2 {
-      margin: 1rem 0 .5rem;
-    }
-
-    .pair-card p {
-      color: var(--bs-secondary-color);
-      margin-bottom: 1.25rem;
-    }
-
     .pair-security-note {
       align-items: center;
-      color: var(--bs-secondary-color);
+      color: var(--apollo-text-secondary);
       display: flex;
-      font-size: .86rem;
-      gap: .55rem;
-      margin-top: 1rem;
+      font-size: var(--apollo-text-caption);
+      gap: var(--apollo-space-sm);
+      margin-top: var(--apollo-space-lg);
+    }
+
+    .pair-method-action {
+      width: 100%;
+      margin-top: auto;
+    }
+
+    .qr-method-idle {
+      display: flex;
+      min-height: 100%;
+      flex-direction: column;
+    }
+
+    .qr-method-idle .pair-copy {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+    }
+
+    .qr-method-idle h3,
+    .pairing-layout h3 {
+      margin: var(--apollo-space-md) 0 var(--apollo-space-sm);
+      font-size: var(--apollo-text-emphasis);
+      font-weight: 700;
+    }
+
+    .qr-method-idle p,
+    .pairing-layout p {
+      color: var(--apollo-text-secondary);
+      font-size: var(--apollo-text-caption);
+      line-height: 1.5;
+    }
+
+    .qr-method-idle .pair-security-note {
+      margin-bottom: var(--apollo-space-lg);
     }
 
     .pairing-layout {
+      display: flex;
+      min-height: 0;
+      flex: 1;
       align-items: center;
-      display: grid;
-      gap: clamp(1.5rem, 4vw, 3rem);
-      grid-template-columns: auto minmax(0, 1fr);
+      flex-direction: column;
+      gap: var(--apollo-space-md);
+      text-align: center;
     }
 
     .pairing-qr {
       background: #fff;
-      border-radius: 1rem;
+      border-radius: var(--apollo-radius-card);
       box-shadow: 0 .75rem 2.5rem rgba(0, 0, 0, .12);
       padding: .75rem;
     }
@@ -151,20 +250,20 @@
 
     .pairing-state {
       align-items: center;
-      color: var(--bs-success-text-emphasis);
+      color: var(--apollo-status-ok);
       display: flex;
-      font-size: .82rem;
+      font-size: var(--apollo-text-caption);
       font-weight: 700;
-      gap: .5rem;
-      margin-bottom: .65rem;
+      gap: var(--apollo-space-sm);
+      margin-bottom: var(--apollo-space-sm);
       text-transform: uppercase;
     }
 
     .pairing-state-dot,
     .status-dot {
-      background: var(--bs-success);
+      background: var(--apollo-status-ok);
       border-radius: 50%;
-      box-shadow: 0 0 0 .24rem color-mix(in srgb, var(--bs-success) 18%, transparent);
+      box-shadow: 0 0 0 var(--apollo-space-xs) color-mix(in srgb, var(--apollo-status-ok) 18%, transparent);
       display: inline-block;
       height: .55rem;
       width: .55rem;
@@ -173,36 +272,35 @@
     .pairing-actions {
       display: flex;
       flex-wrap: wrap;
-      gap: .75rem;
+      gap: var(--apollo-space-md);
+      justify-content: center;
     }
 
-    .legacy-pairing {
-      border-top: 1px solid var(--bs-border-color);
-      margin-top: 1.5rem;
-      padding-top: .25rem;
+    .pin-pairing-form {
+      display: flex;
+      flex: 1;
+      flex-direction: column;
+      gap: var(--apollo-space-md);
     }
 
-    .legacy-pairing summary,
     .advanced-disclosure > summary,
     .support-disclosure > summary {
       cursor: pointer;
       font-weight: 650;
       list-style: none;
-      padding: 1rem 0;
+      padding: var(--apollo-space-lg) 0;
     }
 
-    .legacy-pairing summary::-webkit-details-marker,
     .advanced-disclosure > summary::-webkit-details-marker,
     .support-disclosure > summary::-webkit-details-marker {
       display: none;
     }
 
-    .legacy-pairing summary::after,
     .advanced-disclosure > summary::after,
     .support-disclosure > summary::after {
       border-bottom: 2px solid currentColor;
       border-right: 2px solid currentColor;
-      color: var(--bs-secondary-color);
+      color: var(--apollo-text-secondary);
       content: '';
       float: right;
       height: .45rem;
@@ -212,24 +310,38 @@
       width: .45rem;
     }
 
-    .legacy-pairing[open] summary::after,
     .advanced-disclosure[open] > summary::after,
     .support-disclosure[open] > summary::after {
       transform: rotate(225deg);
     }
 
-    .legacy-form {
-      display: grid;
-      gap: .75rem;
-      grid-template-columns: minmax(10rem, 1fr) minmax(12rem, 2fr) auto;
-      padding: .25rem 0 1rem;
+    .pin-code-input {
+      min-height: var(--apollo-control-primary);
+      font-size: var(--apollo-text-title);
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-align: center;
+    }
+
+    .pair-method-card.is-primary .pin-code-input:focus {
+      border-color: var(--apollo-accent-bright);
+      box-shadow: 0 0 0 var(--apollo-space-xs) var(--apollo-focus);
+    }
+
+    .pin-device-name {
+      min-height: var(--apollo-control-standard);
+    }
+
+    .pairing-feedback {
+      margin-top: var(--apollo-space-md);
     }
 
     .section-heading {
       align-items: end;
       display: flex;
       justify-content: space-between;
-      margin-bottom: 1rem;
+      margin-bottom: var(--apollo-space-lg);
     }
 
     .section-heading h2 {
@@ -237,13 +349,13 @@
     }
 
     .section-heading p {
-      color: var(--bs-secondary-color);
-      margin: .35rem 0 0;
+      color: var(--apollo-text-secondary);
+      margin: var(--apollo-space-sm) 0 0;
     }
 
     .device-grid {
       display: grid;
-      gap: 1rem;
+      gap: var(--apollo-space-lg);
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
@@ -251,7 +363,7 @@
       display: flex;
       flex-direction: column;
       min-width: 0;
-      padding: 1.25rem;
+      padding: var(--apollo-space-lg);
     }
 
     .device-card.is-editing {
@@ -262,75 +374,78 @@
     .device-card-header {
       align-items: flex-start;
       display: flex;
-      gap: .9rem;
+      gap: var(--apollo-space-md);
     }
 
     .device-icon {
-      border-radius: .85rem;
+      border-radius: var(--apollo-radius-control);
       flex: 0 0 auto;
-      height: 2.75rem;
-      width: 2.75rem;
+      height: var(--apollo-icon-tile);
+      width: var(--apollo-icon-tile);
     }
 
     .device-name {
-      font-size: 1.05rem;
+      font-size: var(--apollo-text-emphasis);
       font-weight: 680;
       line-height: 1.2;
-      margin: .15rem 0 .35rem;
+      margin: var(--apollo-space-xs) 0 var(--apollo-space-sm);
       overflow-wrap: anywhere;
     }
 
     .device-state {
       align-items: center;
-      color: var(--bs-secondary-color);
+      color: var(--apollo-text-secondary);
       display: flex;
-      font-size: .82rem;
-      gap: .45rem;
+      font-size: var(--apollo-text-caption);
+      gap: var(--apollo-space-sm);
     }
 
     .device-state .status-dot.offline {
-      background: var(--bs-secondary-color);
+      background: var(--apollo-text-disabled);
       box-shadow: none;
       opacity: .55;
     }
 
     .device-card-actions {
       display: flex;
-      gap: .35rem;
+      gap: var(--apollo-space-xs);
       margin-left: auto;
     }
 
-    .icon-button {
+    .devices-page .icon-button {
       align-items: center;
-      border-radius: .7rem;
+      border-radius: var(--apollo-radius-control);
       display: inline-flex;
-      height: 2.5rem;
+      flex: 0 0 var(--apollo-control-compact);
+      height: var(--apollo-control-compact);
       justify-content: center;
-      width: 2.5rem;
+      min-width: var(--apollo-control-compact);
+      padding: 0;
+      width: var(--apollo-control-compact);
     }
 
     .device-facts {
-      border-top: 1px solid var(--bs-border-color);
+      border-top: 1px solid var(--apollo-border);
       display: grid;
-      gap: .75rem;
-      margin-top: 1.15rem;
-      padding-top: 1rem;
+      gap: var(--apollo-space-md);
+      margin-top: var(--apollo-space-lg);
+      padding-top: var(--apollo-space-lg);
     }
 
     .device-fact {
       align-items: center;
       display: flex;
-      gap: 1rem;
+      gap: var(--apollo-space-lg);
       justify-content: space-between;
     }
 
     .device-fact-label {
-      color: var(--bs-secondary-color);
-      font-size: .88rem;
+      color: var(--apollo-text-secondary);
+      font-size: var(--apollo-text-caption);
     }
 
     .device-fact-value {
-      font-size: .88rem;
+      font-size: var(--apollo-text-caption);
       font-weight: 650;
       text-align: right;
     }
@@ -338,57 +453,58 @@
     .editor-heading {
       align-items: center;
       display: flex;
-      gap: .75rem;
+      gap: var(--apollo-space-md);
       justify-content: space-between;
-      margin-bottom: 1.5rem;
+      margin-bottom: var(--apollo-space-xl);
     }
 
     .editor-heading h3 {
-      font-size: 1.15rem;
+      font-size: var(--apollo-text-emphasis);
       margin: 0;
     }
 
     .editor-grid {
       display: grid;
-      gap: 1.25rem;
+      gap: var(--apollo-space-lg);
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     }
 
     .editor-section {
-      background: color-mix(in srgb, var(--bs-tertiary-bg) 65%, transparent);
-      border: 1px solid var(--bs-border-color);
-      border-radius: 1rem;
-      padding: 1rem;
+      background: var(--apollo-surface-raised);
+      border: 1px solid var(--apollo-border);
+      border-radius: var(--apollo-radius-card);
+      padding: var(--apollo-space-lg);
     }
 
     .editor-section h4 {
-      font-size: .9rem;
+      font-size: var(--apollo-text-caption);
       font-weight: 700;
-      margin-bottom: .85rem;
+      margin-bottom: var(--apollo-space-md);
     }
 
     .access-options {
       display: grid;
-      gap: .6rem;
+      gap: var(--apollo-space-sm);
     }
 
     .access-option {
-      background: var(--bs-body-bg);
-      border: 1px solid var(--bs-border-color);
-      border-radius: .85rem;
-      color: var(--bs-body-color);
-      padding: .8rem .9rem;
+      background: var(--apollo-surface);
+      border: 1px solid var(--apollo-border-strong);
+      border-radius: var(--apollo-radius-control);
+      color: var(--apollo-text-primary);
+      min-height: var(--apollo-control-standard);
+      padding: var(--apollo-space-md);
       text-align: left;
     }
 
     .access-option:hover {
-      border-color: color-mix(in srgb, var(--devices-accent) 60%, var(--bs-border-color));
+      border-color: var(--apollo-accent);
     }
 
     .access-option.active {
-      background: color-mix(in srgb, var(--devices-accent) 10%, var(--bs-body-bg));
-      border-color: var(--devices-accent);
-      box-shadow: 0 0 0 .16rem color-mix(in srgb, var(--devices-accent) 12%, transparent);
+      background: var(--apollo-accent-deep);
+      border-color: var(--apollo-accent);
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--apollo-accent) 24%, transparent);
     }
 
     .access-option strong,
@@ -397,20 +513,20 @@
     }
 
     .access-option span {
-      color: var(--bs-secondary-color);
-      font-size: .8rem;
-      margin-top: .2rem;
+      color: var(--apollo-text-secondary);
+      font-size: var(--apollo-text-caption);
+      margin-top: var(--apollo-space-xs);
     }
 
     .preference-list {
       display: grid;
-      gap: 1rem;
+      gap: var(--apollo-space-lg);
     }
 
     .preference-row {
       align-items: center;
       display: flex;
-      gap: 1rem;
+      gap: var(--apollo-space-lg);
       justify-content: space-between;
     }
 
@@ -419,38 +535,38 @@
     }
 
     .preference-row small {
-      color: var(--bs-secondary-color);
+      color: var(--apollo-text-secondary);
       display: block;
       margin-top: .2rem;
     }
 
     .advanced-disclosure {
-      border-top: 1px solid var(--bs-border-color);
-      margin-top: 1.25rem;
+      border-top: 1px solid var(--apollo-border);
+      margin-top: var(--apollo-space-lg);
     }
 
     .advanced-panel {
       display: grid;
-      gap: 1.25rem;
-      padding-bottom: .5rem;
+      gap: var(--apollo-space-lg);
+      padding-bottom: var(--apollo-space-sm);
     }
 
     .permission-groups {
       display: grid;
-      gap: 1rem;
+      gap: var(--apollo-space-lg);
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
     .permission-group {
-      background: var(--bs-tertiary-bg);
-      border-radius: .85rem;
-      padding: .9rem;
+      background: var(--apollo-surface-raised);
+      border-radius: var(--apollo-radius-control);
+      padding: var(--apollo-space-md);
     }
 
     .permission-group h5 {
-      font-size: .78rem;
+      font-size: var(--apollo-text-caption);
       letter-spacing: .05em;
-      margin-bottom: .65rem;
+      margin-bottom: var(--apollo-space-sm);
       text-transform: uppercase;
     }
 
@@ -460,47 +576,47 @@
 
     .editor-actions {
       display: flex;
-      gap: .75rem;
+      gap: var(--apollo-space-md);
       justify-content: flex-end;
-      margin-top: 1.25rem;
+      margin-top: var(--apollo-space-lg);
     }
 
     .empty-devices {
       align-items: center;
-      color: var(--bs-secondary-color);
+      color: var(--apollo-text-secondary);
       display: flex;
       flex-direction: column;
-      gap: .75rem;
+      gap: var(--apollo-space-md);
       grid-column: 1 / -1;
       padding: 3rem 1rem;
       text-align: center;
     }
 
     .empty-devices i {
-      font-size: 1.75rem;
+      font-size: var(--apollo-text-display);
       opacity: .55;
     }
 
     .support-disclosure {
-      border-top: 1px solid var(--bs-border-color);
-      margin-top: 1.5rem;
+      border-top: 1px solid var(--apollo-border);
+      margin-top: var(--apollo-space-xl);
     }
 
     .support-disclosure-body {
       align-items: center;
-      background: color-mix(in srgb, var(--bs-danger) 5%, transparent);
-      border: 1px solid color-mix(in srgb, var(--bs-danger) 25%, var(--bs-border-color));
-      border-radius: .85rem;
+      background: color-mix(in srgb, var(--apollo-danger-container) 42%, transparent);
+      border: 1px solid color-mix(in srgb, var(--apollo-danger) 25%, var(--apollo-border));
+      border-radius: var(--apollo-radius-control);
       display: flex;
-      gap: 1rem;
+      gap: var(--apollo-space-lg);
       justify-content: space-between;
-      padding: 1rem;
+      padding: var(--apollo-space-lg);
     }
 
     .support-disclosure-body p {
-      color: var(--bs-secondary-color);
-      font-size: .85rem;
-      margin: .2rem 0 0;
+      color: var(--apollo-text-secondary);
+      font-size: var(--apollo-text-caption);
+      margin: var(--apollo-space-xs) 0 0;
     }
 
     .ar-device-host {
@@ -513,21 +629,15 @@
       }
 
       .devices-page-header,
-      .pair-layout,
-      .pairing-layout,
+      .pair-method-grid,
       .editor-grid,
       .permission-groups {
         grid-template-columns: 1fr;
       }
 
       .devices-page-header,
-      .pair-layout {
-        display: grid;
-      }
-
-      .devices-page-header .btn-apollo,
-      .pair-layout > .btn-apollo {
-        width: 100%;
+      .pair-intro {
+        flex-direction: column;
       }
 
       .pairing-qr {
@@ -535,10 +645,6 @@
       }
 
       .device-grid {
-        grid-template-columns: 1fr;
-      }
-
-      .legacy-form {
         grid-template-columns: 1fr;
       }
 
@@ -564,75 +670,112 @@
   <main id="content" class="container devices-page">
     <header class="devices-page-header">
       <div>
-        <div class="devices-eyebrow">Apollo XR</div>
+        <div class="devices-eyebrow">Sunshine 3D</div>
         <h1 class="devices-title">Devices</h1>
-        <p class="devices-subtitle">Pair Artemis, choose what each device can do, and manage local AR glasses.</p>
+        <p class="devices-subtitle">Pair Moonlight 3D, choose what each device can do, and manage local AR glasses.</p>
       </div>
     </header>
 
     <section class="surface-card pair-card" aria-labelledby="pair-artemis-heading">
-      <div v-if="!pairingActive" class="pair-layout">
-        <div class="pair-copy">
-          <div class="pair-icon"><i class="fa-solid fa-qrcode"></i></div>
-          <h2 id="pair-artemis-heading">Pair Artemis</h2>
-          <p>Connect an Android XR headset or Android-based AR device. Apollo XR creates a secure, single-use pairing link that expires after three minutes.</p>
-          <div v-if="pairedDeviceName" class="alert alert-success mb-0" role="status">
-            <i class="fa-solid fa-circle-check me-2"></i>
-            {{ pairedDeviceName }} is ready to stream.
-          </div>
-          <div v-if="otpMessage" class="alert mb-0" :class="[pairedDeviceName ? 'mt-2' : '', 'alert-' + otpStatus]" role="status">{{ otpMessage }}</div>
-          <div v-if="!pairedDeviceName && !otpMessage" class="pair-security-note">
-            <i class="fa-solid fa-shield-halved"></i>
-            The pairing code is single-use and expires after three minutes.
-          </div>
+      <header class="pair-intro">
+        <div class="pair-intro-copy">
+          <h2 id="pair-artemis-heading">Pair a device</h2>
+          <p>Enter the PIN shown by Moonlight 3D. If the device offers QR pairing instead, create a single-use code.</p>
         </div>
-        <button type="button" class="btn btn-apollo" :disabled="pairingPending" @click="requestOTP">
-          <span v-if="pairingPending" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
-          <i v-else class="fa-solid fa-mobile-screen-button"></i>
-          {{ pairingPending ? 'Preparing…' : (pairedDeviceName ? 'Pair another device' : 'Start pairing') }}
-        </button>
-      </div>
+        <div v-if="pairedDeviceName" class="alert alert-success mb-0" role="status">
+          <i class="fa-solid fa-circle-check me-2"></i>
+          {{ pairedDeviceName }} is ready to stream.
+        </div>
+      </header>
 
-      <div v-else class="pairing-layout">
-        <div id="qrRef" class="pairing-qr" aria-label="Artemis pairing QR code"></div>
-        <div>
-          <div class="pairing-state"><span class="pairing-state-dot"></span> Pairing open · {{ pairingTimeLabel }}</div>
-          <h2 id="pair-artemis-heading">Scan with Artemis</h2>
-          <p>Open Artemis on your headset or glasses and scan this code. The device will appear below as soon as it is paired.</p>
-          <div class="pairing-actions">
-            <a class="btn btn-apollo" :href="deepLink">
-              <i class="fa-solid fa-arrow-up-right-from-square"></i>
-              Open in Artemis
-            </a>
-            <button type="button" class="btn btn-outline-secondary" @click="requestOTP">
-              <i class="fa-solid fa-rotate"></i>
-              New code
+      <div class="pair-method-grid">
+        <article id="PIN" class="pair-method-card is-primary">
+          <header class="pair-method-header">
+            <div class="pair-icon"><i class="fa-solid fa-key"></i></div>
+            <div>
+              <h3>Enter PIN</h3>
+              <p>Use the PIN displayed on your headset or AR device.</p>
+            </div>
+            <span class="pair-method-step">Primary</span>
+          </header>
+          <form class="pin-pairing-form" @submit.prevent="pairWithPin">
+            <div>
+              <label for="pairing-pin" class="form-label">Pairing PIN</label>
+              <input id="pairing-pin" type="text" inputmode="numeric" pattern="\d*" autocomplete="one-time-code"
+                placeholder="0000" v-model.trim="pairingPin" class="form-control pin-code-input" required />
+            </div>
+            <div>
+              <label for="pairing-device-name" class="form-label">{{ $t('pin.device_name') }}</label>
+              <input id="pairing-device-name" type="text" :placeholder="$t('pin.device_name')"
+                v-model.trim="pairingDeviceName" class="form-control pin-device-name" />
+              <div class="form-text">Optional. You can rename the device later.</div>
+            </div>
+            <button class="btn btn-apollo pair-method-action" :disabled="pinPairingPending">
+              <span v-if="pinPairingPending" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+              <i v-else class="fa-solid fa-link"></i>
+              <span>{{ pinPairingPending ? 'Pairing…' : $t('pin.send') }}</span>
+            </button>
+          </form>
+          <div v-if="pinMessage" class="alert pairing-feedback mb-0" :class="'alert-' + pinStatus" role="status">
+            {{ pinMessage }}
+          </div>
+        </article>
+
+        <article class="pair-method-card qr-method-card" :class="{ 'is-active': pairingActive }">
+          <div v-if="!pairingActive" class="qr-method-idle">
+            <div class="pair-copy">
+              <div class="pair-icon"><i class="fa-solid fa-qrcode"></i></div>
+              <h3>Scan QR code</h3>
+              <p>Use this when Moonlight 3D offers camera pairing and can see the host screen.</p>
+              <div v-if="otpMessage" class="alert mb-0"
+                :class="[pairedDeviceName ? 'mt-2' : '', 'alert-' + otpStatus]" role="status">
+                {{ otpMessage }}
+              </div>
+              <div v-if="!pairedDeviceName && !otpMessage" class="pair-security-note">
+                <i class="fa-solid fa-shield-halved"></i>
+                The pairing code is single-use and expires after three minutes.
+              </div>
+            </div>
+            <button type="button" class="btn btn-apollo-quiet pair-method-action" :disabled="pairingPending"
+              @click="requestOTP">
+              <span v-if="pairingPending" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+              <i v-else class="fa-solid fa-mobile-screen-button"></i>
+              {{ pairingPending ? 'Preparing…' : 'Show QR code' }}
             </button>
           </div>
-          <div v-if="otpMessage" class="alert mt-3 mb-0" :class="'alert-' + otpStatus" role="status">{{ otpMessage }}</div>
-        </div>
+
+          <div v-else class="pairing-layout">
+            <div id="qrRef" class="pairing-qr" aria-label="Moonlight 3D pairing QR code"></div>
+            <div>
+              <div class="pairing-state"><span class="pairing-state-dot"></span> QR open · {{ pairingTimeLabel }}</div>
+              <h3>Scan with Moonlight 3D</h3>
+              <p>Open Moonlight 3D on your headset or glasses and scan this code. The device will appear below as
+                soon as it is paired.</p>
+              <div class="pairing-actions">
+                <a class="btn btn-apollo" :href="deepLink">
+                  <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                  Open in Moonlight 3D
+                </a>
+                <button type="button" class="btn btn-outline-secondary" @click="requestOTP">
+                  <i class="fa-solid fa-rotate"></i>
+                  New code
+                </button>
+              </div>
+              <div v-if="otpMessage" class="alert mt-3 mb-0" :class="'alert-' + otpStatus" role="status">
+                {{ otpMessage }}
+              </div>
+            </div>
+          </div>
+        </article>
       </div>
 
-      <details class="legacy-pairing" :open="legacyPairingOpen" @toggle="legacyPairingOpen = $event.target.open">
-        <summary>Pair another way</summary>
-        <p class="small mb-3">Use the PIN shown by Artemis.</p>
-        <form class="legacy-form" @submit.prevent="registerDevice">
-          <input type="text" inputmode="numeric" pattern="\d*" placeholder="PIN" v-model.trim="legacyPin" class="form-control" required aria-label="Pairing PIN" />
-          <input type="text" :placeholder="$t('pin.device_name')" v-model.trim="legacyDeviceName" class="form-control" aria-label="Optional device name" />
-          <button class="btn btn-outline-primary" :disabled="legacyPairingPending">
-            <span v-if="legacyPairingPending" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
-            <span v-else>{{ $t('pin.send') }}</span>
-          </button>
-        </form>
-        <div v-if="legacyMessage" class="alert mb-2" :class="'alert-' + legacyStatus" role="status">{{ legacyMessage }}</div>
-      </details>
     </section>
 
     <section aria-labelledby="remote-devices-heading">
       <div class="section-heading">
         <div>
           <h2 id="remote-devices-heading">Remote XR devices</h2>
-          <p>Paired devices can browse Apollo XR, but only one device can stream at a time.</p>
+          <p>Paired devices can browse Sunshine 3D, but only one device can stream at a time.</p>
         </div>
       </div>
 
@@ -773,7 +916,7 @@
           <i class="fa-solid fa-headset"></i>
           <div>
             <strong>No paired devices</strong>
-            <div class="small mt-1">Pair Artemis to start streaming to Android XR.</div>
+            <div class="small mt-1">Pair Moonlight 3D to start streaming to Android XR.</div>
           </div>
         </div>
       </div>
@@ -899,12 +1042,11 @@
     pairingSecondsRemaining: 180,
     pairingInitialClientIds: [],
     pairedDeviceName: '',
-    legacyPairingOpen: location.hash === '#PIN',
-    legacyPairingPending: false,
-    legacyPin: '',
-    legacyDeviceName: '',
-    legacyMessage: '',
-    legacyStatus: 'info',
+    pinPairingPending: false,
+    pairingPin: '',
+    pairingDeviceName: '',
+    pinMessage: '',
+    pinStatus: 'info',
     permissionGroups,
     clients: [],
     clientsLoaded: false,
@@ -1033,31 +1175,31 @@
           throw new Error(body.message || `HTTP ${response.status}`);
         }
       },
-      async registerDevice() {
-        if (this.legacyPairingPending) return;
-        this.legacyPairingPending = true;
-        this.legacyMessage = '';
+      async pairWithPin() {
+        if (this.pinPairingPending) return;
+        this.pinPairingPending = true;
+        this.pinMessage = '';
 
         try {
           const response = await fetch('./api/pin', {
             credentials: 'include',
             headers: {'Content-Type': 'application/json'},
             method: 'POST',
-            body: JSON.stringify({pin: this.legacyPin, name: this.legacyDeviceName})
+            body: JSON.stringify({pin: this.pairingPin, name: this.pairingDeviceName})
           });
           const body = await response.json().catch(() => ({}));
           if (!response.ok || !body.status) throw new Error(this.i18n.t('pin.pair_failure'));
 
-          this.legacyStatus = 'success';
-          this.legacyMessage = this.i18n.t('pin.pair_success');
-          this.legacyPin = '';
-          this.legacyDeviceName = '';
+          this.pinStatus = 'success';
+          this.pinMessage = this.i18n.t('pin.pair_success');
+          this.pairingPin = '';
+          this.pairingDeviceName = '';
           setTimeout(() => this.refreshClients(), 1000);
         } catch (error) {
-          this.legacyStatus = 'danger';
-          this.legacyMessage = error.message || String(error);
+          this.pinStatus = 'danger';
+          this.pinMessage = error.message || String(error);
         } finally {
-          this.legacyPairingPending = false;
+          this.pinPairingPending = false;
         }
       },
       editClient(client) {
@@ -1211,7 +1353,7 @@
           const response = await fetch('./api/clients/list', {credentials: 'include'});
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const body = await response.json();
-          if (!body.status) throw new Error(body.message || 'Apollo XR did not return a device list.');
+          if (!body.status) throw new Error(body.message || 'Sunshine 3D did not return a device list.');
 
           this.platform = body.platform || this.platform;
           const clients = (body.named_certs || []).map(({

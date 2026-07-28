@@ -253,8 +253,8 @@ fi
 %{_datadir}/applications/*.desktop
 
 # Icons
-%{_datadir}/icons/hicolor/scalable/apps/apollo.svg
-%{_datadir}/icons/hicolor/scalable/status/apollo*.svg
+%{_datadir}/icons/hicolor/scalable/apps/sunshine3d.svg
+%{_datadir}/icons/hicolor/scalable/status/sunshine3d*.svg
 
 # Metainfo
 %{_datadir}/metainfo/*.metainfo.xml

@@ -5,9 +5,11 @@
 #pragma once
 
 // standard includes
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <vector>
@@ -32,6 +34,101 @@ namespace video {
     SBS_AI = 1,  ///< Enable the startup-configured AI pipeline; encoder emits 2W x H.
   };
 
+  /**
+   * Host SBS telemetry is sampled only while a negotiated client subscription is enabled.
+   * The control thread updates this shared latch; the render thread only performs atomic reads.
+   */
+  class sbs_telemetry_subscription_t {
+  public:
+    void update(bool enabled, bool focused, std::uint16_t interval_ms) noexcept {
+      _focused.store(focused, std::memory_order_relaxed);
+      _interval_ms.store(interval_ms, std::memory_order_relaxed);
+      _enabled.store(enabled, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool enabled() const noexcept {
+      return _enabled.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] bool focused() const noexcept {
+      return _focused.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] std::uint16_t interval_ms() const noexcept {
+      return _interval_ms.load(std::memory_order_relaxed);
+    }
+
+  private:
+    std::atomic_bool _enabled {false};
+    std::atomic_bool _focused {false};
+    std::atomic_uint16_t _interval_ms {500};
+  };
+
+  enum class sbs_telemetry_sample_status_e : std::uint8_t {
+    unavailable,
+    ready,
+    failed,
+  };
+
+  namespace sbs_telemetry_valid_field {
+    constexpr std::uint32_t config = 1u << 0;
+    constexpr std::uint32_t effective_pop = 1u << 1;
+    constexpr std::uint32_t edge = 1u << 2;
+    constexpr std::uint32_t change = 1u << 3;
+    constexpr std::uint32_t anchor = 1u << 4;
+    constexpr std::uint32_t subject = 1u << 5;
+    constexpr std::uint32_t valid_fraction = 1u << 6;
+    constexpr std::uint32_t range = 1u << 7;
+    constexpr std::uint32_t scene = 1u << 8;
+    constexpr std::uint32_t cuts = 1u << 9;
+    constexpr std::uint32_t faults = 1u << 10;
+  }  // namespace sbs_telemetry_valid_field
+
+  namespace sbs_telemetry_runtime_flag {
+    constexpr std::uint32_t profile_initialized = 1u << 0;
+    constexpr std::uint32_t adaptive_enabled = 1u << 1;
+    constexpr std::uint32_t pop_classified = 1u << 2;
+    constexpr std::uint32_t anchor_valid = 1u << 3;
+    constexpr std::uint32_t geometry_armed = 1u << 4;
+    constexpr std::uint32_t appearance_armed = 1u << 5;
+    constexpr std::uint32_t range_collapsed = 1u << 6;
+    constexpr std::uint32_t depth_ready = 1u << 7;
+    constexpr std::uint32_t hard_cut_pulse = 1u << 8;
+  }  // namespace sbs_telemetry_runtime_flag
+
+  /**
+   * One renderer-produced Host SBS telemetry sample. This is an internal native structure, not a
+   * wire layout; stream.cpp serializes it field-by-field into the fixed 88-byte protocol body.
+   */
+  struct sbs_telemetry_snapshot_t {
+    sbs_telemetry_sample_status_e status = sbs_telemetry_sample_status_e::unavailable;
+    std::uint32_t generation = 0;
+    std::uint32_t sequence = 0;
+    std::uint32_t valid_fields = 0;
+    std::uint32_t runtime_flags = 0;
+    std::uint16_t depth_width = 0;
+    std::uint16_t depth_height = 0;
+    std::uint8_t zero_plane_mode = 0;
+    float pop_floor = 0.0f;
+    float pop_ceiling = 0.0f;
+    float effective_pop = 0.0f;
+    float edge_fraction = -1.0f;
+    float change_fraction = 0.0f;
+    float zero_anchor_shift_px = 0.0f;
+    float subject_depth = 0.0f;
+    float valid_depth_fraction = 0.0f;
+    float effective_range_width = 0.0f;
+    std::uint32_t scene_age = 0;
+    std::uint32_t hard_cut_count = 0;
+    std::uint32_t external_cut_count = 0;
+    std::uint32_t empty_raw_count = 0;
+    std::uint32_t collapsed_raw_count = 0;
+    std::uint32_t sampled_frame_id = 0;
+  };
+
+  /** Allocate a nonzero renderer generation. Called for every encode-device rebuild/reset. */
+  std::uint32_t next_sbs_telemetry_generation() noexcept;
+
   /* Debug: set true by the 0x3004 "SBS Debug Dump" control message (client button). The next
      SBS convert() in display_vram consumes it (exchange->false) and dumps one frame's source,
      depth and SBS-result images to the configured debug dir. */
@@ -54,6 +151,9 @@ namespace video {
     // Opaque client-generated correlation token. The host never interprets or validates it and
     // never assumes an ordering from it; it exists only to be echoed back in the acknowledgement.
     int request_id;
+    // Host-generated transaction identity. Client request ids are opaque and may be duplicated,
+    // so end-to-end serialization must never use them to match an encoder completion.
+    std::uint64_t transaction_id = 0;
   };
 
   /**
@@ -71,6 +171,12 @@ namespace video {
     int bitrate;
   };
 
+  /** Coherent bitrate/cadence pair consumed by the packet sender. */
+  struct effective_video_pacing_t {
+    int bitrate;
+    int framerate_millihz;
+  };
+
   /**
    * Latest effective mode, published by the encode loop and readable by any thread.
    *
@@ -80,12 +186,17 @@ namespace video {
   class effective_video_mode_publisher_t {
   public:
     explicit effective_video_mode_publisher_t(const effective_video_mode_t &initial):
-        _mode {initial} {
+        _mode {initial},
+        _pacing {pack_pacing(initial)} {
     }
 
     void publish(const effective_video_mode_t &mode) {
       std::lock_guard lock {_mutex};
       _mode = mode;
+      // Publish the pair only after `_mode` has been replaced, while retaining the mutex through
+      // the release store. A refusal can therefore never observe a new effective mode paired with
+      // the previous send cadence.
+      _pacing.store(pack_pacing(mode), std::memory_order_release);
     }
 
     [[nodiscard]] effective_video_mode_t current() const {
@@ -93,9 +204,44 @@ namespace video {
       return _mode;
     }
 
+    [[nodiscard]] effective_video_pacing_t pacing() const noexcept {
+      const auto packed = _pacing.load(std::memory_order_acquire);
+      return {
+        static_cast<int>(static_cast<std::uint32_t>(packed >> 32)),
+        static_cast<int>(static_cast<std::uint32_t>(packed)),
+      };
+    }
+
   private:
+    [[nodiscard]] static std::uint64_t pack_pacing(
+      const effective_video_mode_t &mode
+    ) noexcept {
+      const auto bitrate = static_cast<std::uint32_t>(std::max(0, mode.bitrate));
+      const auto framerate_millihz = static_cast<std::uint32_t>(
+        std::clamp<std::int64_t>(
+          static_cast<std::int64_t>(mode.framerateX100) * 10,
+          0,
+          std::numeric_limits<std::uint32_t>::max()
+        )
+      );
+      return (static_cast<std::uint64_t>(bitrate) << 32) | framerate_millihz;
+    }
+
     mutable std::mutex _mutex;
     effective_video_mode_t _mode;
+    std::atomic<std::uint64_t> _pacing;
+  };
+
+  struct video_mode_request_ref_t {
+    int request_id;
+    std::uint64_t transaction_id;
+  };
+
+  /** Base desktop geometry/cadence that must accompany an effective encoder mode. */
+  struct desktop_video_mode_t {
+    int width;
+    int height;
+    int framerate_millihz;
   };
 
   /**
@@ -106,11 +252,15 @@ namespace video {
   struct video_mode_applied_t {
     // Every request this encode session answers. More than one when a client's requests were
     // collapsed: the newest is honoured and the rest are reported as not applied.
-    std::vector<int> request_ids;
+    std::vector<video_mode_request_ref_t> requests;
     // False when the requests were superseded, or when the mode had to be rolled back because the
     // encoder refused it. `mode` then describes what is running instead.
     bool applied;
     effective_video_mode_t mode;
+    // The encode loop can clamp an output independently of the virtual desktop, so this records
+    // the last proven base desktop contract. A failed geometry transaction restores this exact
+    // mode before the stream worker admits another request.
+    desktop_video_mode_t desktop_mode;
   };
 
   /* Encoding configuration requested by remote client */
@@ -164,6 +314,17 @@ namespace video {
     // APPEND-ONLY. Session-shared view of the mode the encode loop is actually running. The
     // control stream reads it to tell a client what is in effect when its live request is refused.
     std::shared_ptr<effective_video_mode_publisher_t> effective_mode;
+
+    // APPEND-ONLY. Coalesced render-thread -> control-thread Host SBS telemetry publication.
+    safe::mail_raw_t::event_t<sbs_telemetry_snapshot_t> sbs_telemetry_event;
+
+    // APPEND-ONLY. Subscription latch shared by the control and active render threads. Disabled by
+    // default, so ordinary Host SBS pays no staging-copy/query/readback cost.
+    std::shared_ptr<sbs_telemetry_subscription_t> sbs_telemetry_subscription;
+
+    // APPEND-ONLY. Changes on every active encoder/renderer rebuild so the client can reset stale
+    // histories even when the stream geometry and all sampled values happen to be identical.
+    std::uint32_t sbs_telemetry_generation = 0;
   };
 
   // Preserve standard NTSC rates instead of approximating them as finite decimal fractions.

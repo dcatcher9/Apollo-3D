@@ -8,6 +8,7 @@ const primaryItems = [
   { id: 'overview', label: 'Overview', href: './', icon: 'fa-house' },
   { id: 'devices', label: 'Devices', href: './pin', icon: 'fa-vr-cardboard' },
   { id: 'library', label: 'Library', href: './apps', icon: 'fa-table-cells-large' },
+  { id: 'conversion', label: 'Convert', href: './offline-conversion', icon: 'fa-film' },
   { id: 'settings', label: 'Settings', href: './config', icon: 'fa-sliders' },
 ]
 
@@ -17,6 +18,7 @@ const currentPage = computed(() => {
   if (!page || page === 'index') return 'overview'
   if (page === 'pin') return 'devices'
   if (page === 'apps') return 'library'
+  if (page === 'offline-conversion') return 'conversion'
   if (page === 'config') return 'settings'
   if (page === 'troubleshooting') return 'help'
   return ''
@@ -30,19 +32,19 @@ onMounted(async () => {
       version.value = config.version || ''
     }
   } catch (error) {
-    console.debug('Apollo XR version is unavailable', error)
+    console.debug('Sunshine 3D version is unavailable', error)
   }
 })
 </script>
 
 <template>
-  <aside class="apollo-sidebar" aria-label="Apollo XR navigation">
-    <a class="apollo-brand" href="./" aria-label="Apollo XR overview">
+  <aside class="apollo-sidebar" aria-label="Sunshine 3D navigation">
+    <a class="apollo-brand" href="./" aria-label="Sunshine 3D overview">
       <span class="apollo-brand-mark">
-        <img src="/images/logo-apollo-45.png" alt="">
+        <img src="/images/logo-sunshine3d-45.png" alt="">
       </span>
       <span class="apollo-brand-copy">
-        <strong>Apollo XR</strong>
+        <strong>Sunshine 3D</strong>
         <small>Host</small>
       </span>
     </a>
@@ -70,14 +72,14 @@ onMounted(async () => {
         <span>Help &amp; Logs</span>
       </a>
       <ThemeToggle />
-      <p v-if="version" class="apollo-version">Apollo XR {{ version }}</p>
+      <p v-if="version" class="apollo-version">Sunshine 3D {{ version }}</p>
     </div>
   </aside>
 
   <header class="apollo-mobile-header">
-    <a class="apollo-mobile-brand" href="./" aria-label="Apollo XR overview">
-      <img src="/images/logo-apollo-45.png" alt="">
-      <strong>Apollo XR</strong>
+    <a class="apollo-mobile-brand" href="./" aria-label="Sunshine 3D overview">
+      <img src="/images/logo-sunshine3d-45.png" alt="">
+      <strong>Sunshine 3D</strong>
     </a>
     <div class="apollo-mobile-actions">
       <a class="apollo-mobile-utility" href="./troubleshooting#logs" aria-label="Open debug log" title="Debug log">

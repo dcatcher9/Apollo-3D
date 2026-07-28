@@ -60,7 +60,7 @@ namespace nvenc {
       constexpr uint32_t required_version = (NVENCAPI_MAJOR_VERSION << 4) | NVENCAPI_MINOR_VERSION;
       if (max_supported_version < required_version) {
         BOOST_LOG(error) << "NvEnc: NVIDIA driver supports API " << (max_supported_version >> 4) << '.' << (max_supported_version & 0xF)
-                         << ", but Apollo requires API " << NVENCAPI_MAJOR_VERSION << '.' << NVENCAPI_MINOR_VERSION;
+                         << ", but Sunshine 3D requires API " << NVENCAPI_MAJOR_VERSION << '.' << NVENCAPI_MINOR_VERSION;
         return unload_library();
       }
 

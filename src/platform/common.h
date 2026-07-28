@@ -257,6 +257,8 @@ namespace platf {
 
     constexpr caps_t pen_touch = 0x01;  // Pen and touch events
     constexpr caps_t controller_touch = 0x02;  // Controller touch events
+    // Sunshine 3D encrypted Host-SBS telemetry extension (0x3009/0x300A).
+    constexpr caps_t sbs_telemetry = 0x40000000;
   };  // namespace platform_caps
 
   struct gamepad_state_t {
@@ -526,6 +528,30 @@ namespace platf {
 
   std::filesystem::path appdata();
 
+  /**
+   * Return the active interactive user's writable LocalAppData directory.
+   *
+   * Unlike appdata(), this remains writable by de-elevated children when Sunshine itself
+   * runs as SYSTEM. An empty path means no interactive user profile is available.
+   */
+  std::filesystem::path user_local_appdata();
+
+  /**
+   * Return a stable identifier for the interactive user whose writable data root is
+   * returned by user_local_appdata(). On Windows this is the account SID.
+   */
+  std::optional<std::string> active_user_id();
+
+  /**
+   * Execute filesystem work using the active interactive user's token when the host is
+   * running as SYSTEM or elevated. An already-standard process executes directly after
+   * its account/session identity is matched to the active shell.
+   */
+  std::error_code run_as_active_user(
+    const std::function<void()> &callback,
+    const std::optional<std::string> &expected_user_id = std::nullopt
+  );
+
   std::string get_mac_address(const std::string_view &address);
 
   std::string get_local_ip_for_gateway();
@@ -559,6 +585,23 @@ namespace platf {
   bool needs_encoder_reenumeration();
 
   boost::process::v1::child run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const boost::process::v1::environment &env, FILE *file, std::error_code &ec, boost::process::v1::group *group);
+
+  /**
+   * Launch a process with the active interactive user's standard token.
+   *
+   * Unlike run_command(false, ...), this never inherits an elevated Sunshine token on
+   * Windows. It fails closed when no standard interactive token is available.
+   */
+  boost::process::v1::child run_command_unelevated(
+    bool interactive,
+    const std::string &cmd,
+    boost::filesystem::path &working_dir,
+    const boost::process::v1::environment &env,
+    FILE *file,
+    std::error_code &ec,
+    boost::process::v1::group *group,
+    const std::optional<std::string> &expected_user_id = std::nullopt
+  );
 
   enum class thread_priority_e : int {
     low,  ///< Low priority

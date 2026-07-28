@@ -67,4 +67,5 @@ sbs_changes.txt
 /assets/
 /build_out.txt
 /run_cmake.sh
+/.offline-sbs-smoke/
 .claude/settings.local.json

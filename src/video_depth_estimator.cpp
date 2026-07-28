@@ -9,12 +9,15 @@
 #include "utility.h"
 
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <d3dcompiler.h>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -924,6 +927,21 @@ namespace models {
     float adaptive_pop_max_ratio;
     float zero_plane_mode;  // 1 subject, 2 median depth, 3 far/mid-background
 
+    // Subscription-gated, nonblocking telemetry readback. Resources are created lazily only after
+    // a client enables the protocol, then a three-slot staging/query ring absorbs GPU latency
+    // without ever flushing or waiting on the encode thread.
+    static constexpr std::size_t telemetry_state_float_count = 32;
+    struct telemetry_readback_slot {
+      Microsoft::WRL::ComPtr<ID3D11Buffer> staging;
+      Microsoft::WRL::ComPtr<ID3D11Query> completion;
+      bool pending = false;
+      std::uint64_t sampled_frame_id = 0;
+    };
+    std::array<telemetry_readback_slot, 3> telemetry_readback_slots;
+    std::size_t telemetry_readback_next = 0;
+    bool telemetry_readback_ready = false;
+    bool telemetry_readback_init_failed = false;
+
     // Throughput telemetry for the permanent stream-cadence matched-frame pipeline.
     float measured_fps = 0.0f;
     std::chrono::steady_clock::time_point last_call_time {};
@@ -1082,6 +1100,211 @@ namespace models {
       context->End(slot->pre_end.Get());
       context->End(slot->disjoint.Get());
       slot->pending = true;
+    }
+
+    bool ensure_telemetry_readback() {
+      if (telemetry_readback_ready) {
+        return true;
+      }
+      if (telemetry_readback_init_failed || !subject_buf) {
+        return false;
+      }
+
+      D3D11_BUFFER_DESC source_desc {};
+      subject_buf->GetDesc(&source_desc);
+      if (source_desc.ByteWidth < telemetry_state_float_count * sizeof(float)) {
+        BOOST_LOG(error) << "Host SBS telemetry source is smaller than its append-only state contract.";
+        telemetry_readback_init_failed = true;
+        return false;
+      }
+
+      D3D11_BUFFER_DESC staging_desc = source_desc;
+      staging_desc.Usage = D3D11_USAGE_STAGING;
+      staging_desc.BindFlags = 0;
+      staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      staging_desc.MiscFlags = 0;
+
+      D3D11_QUERY_DESC query_desc {D3D11_QUERY_EVENT, 0};
+      for (auto &slot : telemetry_readback_slots) {
+        if (FAILED(device->CreateBuffer(&staging_desc, nullptr, &slot.staging)) ||
+            FAILED(device->CreateQuery(&query_desc, &slot.completion))) {
+          for (auto &created : telemetry_readback_slots) {
+            created.staging.Reset();
+            created.completion.Reset();
+            created.pending = false;
+          }
+          BOOST_LOG(error) << "Host SBS telemetry staging/query ring initialization failed.";
+          // Device/resource pressure can be transient. The render caller rate-limits attempts to
+          // the requested telemetry cadence, so leave this retryable without creating a hot loop.
+          return false;
+        }
+      }
+
+      telemetry_readback_ready = true;
+      return true;
+    }
+
+    static bool decode_telemetry_words(
+      const std::array<std::uint32_t, telemetry_state_float_count> &words,
+      int depth_width,
+      int depth_height,
+      std::uint64_t sampled_frame_id,
+      depth_telemetry_sample &sample
+    ) {
+      const auto scalar = [&](std::size_t index) {
+        return std::bit_cast<float>(words[index]);
+      };
+      constexpr std::array<std::size_t, 24> float_indices {
+        0, 1, 2, 3,
+        4, 5, 6, 7,
+        8, 9, 10, 11,
+        12, 13, 14, 15,
+        20, 21, 22, 23,
+        24, 25, 26, 27,
+      };
+      if (std::any_of(float_indices.begin(), float_indices.end(), [&](std::size_t index) {
+            return !std::isfinite(scalar(index));
+          })) {
+        return false;
+      }
+
+      const float scene_age = scalar(1);
+      const float cut_flags = scalar(10);
+      if (scene_age < 0.0f || cut_flags < 0.0f) {
+        return false;
+      }
+
+      sample.depth_width = depth_width;
+      sample.depth_height = depth_height;
+      sample.adaptive_pop_ratio = std::max(scalar(7), 1.0f);
+      sample.edge_fraction = scalar(12);
+      sample.change_fraction = scalar(13);
+      sample.valid_depth_fraction = scalar(14);
+      sample.effective_range_width = scalar(15);
+      sample.current_edge_fraction = scalar(24);
+      sample.current_zero_anchor_candidate_shift_px = scalar(25);
+      sample.structural_change_fraction = scalar(26);
+      sample.raw_rgb_change_fraction = scalar(27);
+      sample.zero_anchor_shift_px = scalar(8);
+      sample.subject_depth = scalar(2);
+      sample.scene_age = static_cast<std::uint32_t>(std::min(
+        scene_age,
+        static_cast<float>(std::numeric_limits<std::uint32_t>::max())
+      ));
+      sample.cut_flags = static_cast<std::uint32_t>(std::min(
+        cut_flags,
+        static_cast<float>(std::numeric_limits<std::uint32_t>::max())
+      ));
+      // SubjectState[4] stores counters as uint bits so they remain exact past float's 24-bit
+      // integer range. The shader saturates them one value below UINT_MAX.
+      sample.hard_cut_count = words[16];
+      sample.external_cut_count = words[17];
+      sample.empty_raw_count = words[18];
+      sample.collapsed_raw_count = words[19];
+      sample.sampled_frame_id = sampled_frame_id;
+      sample.profile_initialized = scalar(3) > 0.5f;
+      sample.anchor_valid = scalar(9) > 0.5f;
+      sample.range_collapsed = scalar(20) > 0.5f;
+      sample.depth_ready = scalar(21) > 0.5f;
+      sample.hard_cut_pulse = scalar(22) > 0.5f;
+      return true;
+    }
+
+    depth_telemetry_poll_result poll_depth_telemetry(
+      bool schedule_copy,
+      std::uint64_t sampled_frame_id
+    ) {
+      depth_telemetry_poll_result result;
+      if (!telemetry_readback_ready && schedule_copy && !ensure_telemetry_readback()) {
+        result.failed = true;
+        return result;
+      }
+      if (!telemetry_readback_ready) {
+        return result;
+      }
+
+      std::uint64_t newest_frame_id = 0;
+      for (auto &slot : telemetry_readback_slots) {
+        if (!slot.pending) {
+          continue;
+        }
+
+        BOOL complete = FALSE;
+        const auto query_status = context->GetData(
+          slot.completion.Get(),
+          &complete,
+          sizeof(complete),
+          D3D11_ASYNC_GETDATA_DONOTFLUSH
+        );
+        if (query_status == S_FALSE || (SUCCEEDED(query_status) && !complete)) {
+          continue;
+        }
+        if (FAILED(query_status)) {
+          slot.pending = false;
+          result.failed = true;
+          continue;
+        }
+
+        D3D11_MAPPED_SUBRESOURCE mapped {};
+        const auto map_status = context->Map(
+          slot.staging.Get(),
+          0,
+          D3D11_MAP_READ,
+          D3D11_MAP_FLAG_DO_NOT_WAIT,
+          &mapped
+        );
+        if (map_status == DXGI_ERROR_WAS_STILL_DRAWING) {
+          continue;
+        }
+        slot.pending = false;
+        if (FAILED(map_status) || !mapped.pData) {
+          result.failed = true;
+          continue;
+        }
+
+        std::array<std::uint32_t, telemetry_state_float_count> words {};
+        std::memcpy(words.data(), mapped.pData, sizeof(words));
+        context->Unmap(slot.staging.Get(), 0);
+
+        depth_telemetry_sample decoded;
+        if (!decode_telemetry_words(
+              words,
+              target_w,
+              target_h,
+              slot.sampled_frame_id,
+              decoded
+            )) {
+          result.failed = true;
+          continue;
+        }
+        if (!result.sample || slot.sampled_frame_id >= newest_frame_id) {
+          newest_frame_id = slot.sampled_frame_id;
+          result.sample = decoded;
+        }
+      }
+
+      if (schedule_copy) {
+        for (std::size_t offset = 0; offset < telemetry_readback_slots.size(); ++offset) {
+          const auto index =
+            (telemetry_readback_next + offset) % telemetry_readback_slots.size();
+          auto &slot = telemetry_readback_slots[index];
+          if (slot.pending) {
+            continue;
+          }
+          // The caller invokes this only after submitting the SBS warp and encoder/local-output
+          // draw. D3D11 command ordering therefore puts this low-priority diagnostic copy behind
+          // every frame-critical consumer of SubjectState.
+          context->CopyResource(slot.staging.Get(), subject_buf.Get());
+          context->End(slot.completion.Get());
+          slot.pending = true;
+          slot.sampled_frame_id = sampled_frame_id;
+          telemetry_readback_next = (index + 1) % telemetry_readback_slots.size();
+          result.copy_scheduled = true;
+          break;
+        }
+      }
+
+      return result;
     }
 
     void perf_try_resolve(perf_evt_ring &r, int slot, cuda_driver_api &cuda) {
@@ -1286,7 +1509,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_hist_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_plain_buf;  // 256 bins + seven evidence counters
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_plain_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;  // three float4 elements; see depth_subject_resolve_cs
+    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;  // seven float4 elements; first three are the warp contract
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject_srv;
 
@@ -1389,7 +1612,7 @@ namespace models {
         auto &slot = g_engines[engine_key];
 
         if (!validate_engine_io_locked(engine, slot)) {
-          BOOST_LOG(error) << "Depth engine I/O contract is incompatible with Apollo; streaming flat SBS.";
+          BOOST_LOG(error) << "Depth engine I/O contract is incompatible with Sunshine 3D; streaming flat SBS.";
           if (exec_context) {
             slot.context_pool.push_back(exec_context);
             exec_context = nullptr;
@@ -1599,8 +1822,18 @@ namespace models {
         }
 
         // [0] subject/recenter, [1] stretch/depth-cut baseline/pop,
-        // [2] explicit zero-plane anchor/cut flags.
-        float init_state[12] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        // [2] explicit zero-plane anchor/cut flags. [3..7] are append-only diagnostics and are
+        // never consumed by the production warp. Keep [3].x at the unclassified sentinel.
+        float init_state[32] = {
+          0.0f, 0.0f, 0.0f, 0.0f,
+          0.0f, 1.0f, 0.0f, 0.0f,
+          0.0f, 0.0f, 0.0f, 0.0f,
+          -1.0f, 0.0f, 0.0f, 0.0f,
+          0.0f, 0.0f, 0.0f, 0.0f,
+          0.0f, 0.0f, 0.0f, 0.0f,
+          -1.0f, -1.0f, -1.0f, -1.0f,
+          -1.0f, -1.0f, -1.0f, 0.0f,
+        };
         bd.ByteWidth = sizeof(init_state);
         bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
         bd.StructureByteStride = sizeof(float) * 4;
@@ -1851,12 +2084,17 @@ namespace models {
 
         // Pass B: fold into the EMA'd bounds and reset the accumulators (1 thread).
         context->CSSetShader(depth_minmax_ema_cs.Get(), nullptr, 0);
-        ID3D11UnorderedAccessView *ema_uavs[3] = {minmax_ema_uav.Get(), minmax_raw_uav.Get(), hist_uav.Get()};
-        context->CSSetUnorderedAccessViews(0, 3, ema_uavs, nullptr);
+        ID3D11UnorderedAccessView *ema_uavs[4] = {
+          minmax_ema_uav.Get(),
+          minmax_raw_uav.Get(),
+          hist_uav.Get(),
+          subject_uav.Get(),
+        };
+        context->CSSetUnorderedAccessViews(0, 4, ema_uavs, nullptr);
         context->Dispatch(1, 1, 1);
 
-        ID3D11UnorderedAccessView *null_uav2[3] = {nullptr, nullptr, nullptr};
-        context->CSSetUnorderedAccessViews(0, 3, null_uav2, nullptr);
+        ID3D11UnorderedAccessView *null_uav2[4] = {nullptr, nullptr, nullptr, nullptr};
+        context->CSSetUnorderedAccessViews(0, 4, null_uav2, nullptr);
       }
 
       // Snapshot the complete previous depth before any thread writes the new result.
@@ -2442,5 +2680,17 @@ namespace models {
 
   estimate_result video_depth_estimator::finish_pending_depth_for_evaluation(input_color_space color_space) {
     return pimpl->finish_pending(color_space);
+  }
+
+  depth_telemetry_poll_result video_depth_estimator::poll_depth_telemetry(
+    bool schedule_copy,
+    std::uint64_t sampled_frame_id
+  ) {
+    if (!pimpl) {
+      depth_telemetry_poll_result result;
+      result.failed = schedule_copy;
+      return result;
+    }
+    return pimpl->poll_depth_telemetry(schedule_copy, sampled_frame_id);
   }
 }  // namespace models

@@ -3,6 +3,7 @@
  * @brief Miscellaneous definitions for Windows.
  */
 // standard includes
+#include <array>
 #include <csignal>
 #include <filesystem>
 #include <iomanip>
@@ -37,6 +38,7 @@
 #include <WS2tcpip.h>
 #include <WtsApi32.h>
 #include <sddl.h>
+#include <ShlObj.h>
 // clang-format on
 
 // Boost overrides NTDDI_VERSION, so we re-override it here
@@ -78,6 +80,10 @@ extern "C" {
 namespace {
 
   std::atomic<bool> used_nt_set_timer_resolution = false;
+  std::mutex command_resolution_mutex;
+  std::mutex active_identity_cache_mutex;
+  std::mutex explorer_restart_mutex;
+  std::optional<DWORD> approved_active_identity_session;
   std::mutex mouse_keys_mutex;
   platf::detail::mouse_keys_controller_t mouse_keys_controller;
   std::chrono::steady_clock::time_point mouse_keys_retry_after;
@@ -112,6 +118,13 @@ using namespace std::literals;
 
 namespace platf {
   using adapteraddrs_t = util::c_ptr<IP_ADAPTER_ADDRESSES>;
+
+  bool is_running_as_system();
+
+  std::error_code impersonate_current_user(
+    HANDLE user_token,
+    std::function<void()> callback
+  );
 
   HANDLE qos_handle = nullptr;
 
@@ -371,6 +384,881 @@ namespace platf {
     return userToken;
   }
 
+  std::optional<std::vector<std::byte>> token_user_information(
+    HANDLE token
+  ) {
+    DWORD bytes = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &bytes);
+    if (bytes == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+      return std::nullopt;
+    }
+    std::vector<std::byte> buffer(bytes);
+    if (!GetTokenInformation(
+          token,
+          TokenUser,
+          buffer.data(),
+          static_cast<DWORD>(buffer.size()),
+          &bytes
+        )) {
+      return std::nullopt;
+    }
+    return buffer;
+  }
+
+  std::optional<std::string> token_user_id(HANDLE token) {
+    const auto buffer = token_user_information(token);
+    if (!buffer) {
+      return std::nullopt;
+    }
+    const auto token_user =
+      reinterpret_cast<const TOKEN_USER *>(buffer->data());
+    LPWSTR sid_text = nullptr;
+    if (!ConvertSidToStringSidW(token_user->User.Sid, &sid_text) || !sid_text) {
+      return std::nullopt;
+    }
+    auto sid_guard = util::fail_guard([&]() {
+      LocalFree(sid_text);
+    });
+    return to_utf8(sid_text);
+  }
+
+  /**
+   * Reject over-the-shoulder elevation and service-account/session mismatches.
+   *
+   * The linked token is safe only when the elevated process belongs to the same account
+   * as the active desktop shell. Otherwise "de-elevation" would target the administrator
+   * account rather than the user operating the Web UI.
+   */
+  std::optional<bool> current_process_matches_active_standard_user() {
+    const DWORD active_session = WTSGetActiveConsoleSessionId();
+    if (active_session == 0xFFFFFFFF) {
+      return std::nullopt;
+    }
+    {
+      std::lock_guard cache_lock {active_identity_cache_mutex};
+      if (
+        approved_active_identity_session &&
+        *approved_active_identity_session == active_session
+      ) {
+        return true;
+      }
+    }
+
+    const auto shell_window = GetShellWindow();
+    if (!shell_window) {
+      return std::nullopt;
+    }
+    DWORD shell_pid = 0;
+    GetWindowThreadProcessId(shell_window, &shell_pid);
+    if (shell_pid == 0) {
+      return std::nullopt;
+    }
+    DWORD shell_session = 0;
+    if (
+      !ProcessIdToSessionId(shell_pid, &shell_session) ||
+      shell_session != active_session
+    ) {
+      return false;
+    }
+
+    HANDLE shell_process = OpenProcess(
+      PROCESS_QUERY_LIMITED_INFORMATION,
+      FALSE,
+      shell_pid
+    );
+    if (!shell_process) {
+      return std::nullopt;
+    }
+    auto shell_process_guard = util::fail_guard([&]() {
+      CloseHandle(shell_process);
+    });
+    HANDLE shell_token = nullptr;
+    if (!OpenProcessToken(shell_process, TOKEN_QUERY, &shell_token)) {
+      return std::nullopt;
+    }
+    auto shell_token_guard = util::fail_guard([&]() {
+      CloseHandle(shell_token);
+    });
+    TOKEN_ELEVATION shell_elevation {};
+    DWORD returned = 0;
+    if (!GetTokenInformation(
+          shell_token,
+          TokenElevation,
+          &shell_elevation,
+          sizeof(shell_elevation),
+          &returned
+        )) {
+      return std::nullopt;
+    }
+    if (shell_elevation.TokenIsElevated != 0) {
+      // A UAC-disabled administrator has no lower-integrity interactive token.
+      return false;
+    }
+
+    HANDLE process_token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &process_token)) {
+      return std::nullopt;
+    }
+    auto process_token_guard = util::fail_guard([&]() {
+      CloseHandle(process_token);
+    });
+    const auto shell_user = token_user_information(shell_token);
+    const auto process_user = token_user_information(process_token);
+    if (!shell_user || !process_user) {
+      return std::nullopt;
+    }
+    const auto shell_token_user =
+      reinterpret_cast<const TOKEN_USER *>(shell_user->data());
+    const auto process_token_user =
+      reinterpret_cast<const TOKEN_USER *>(process_user->data());
+    const bool matches =
+      EqualSid(
+        shell_token_user->User.Sid,
+        process_token_user->User.Sid
+      ) != FALSE;
+    if (matches) {
+      std::lock_guard cache_lock {active_identity_cache_mutex};
+      approved_active_identity_session = active_session;
+    }
+    return matches;
+  }
+
+  /**
+   * Return a primary standard-user token for the current interactive account.
+   *
+   * Sunshine commonly runs elevated from the tray. CreateProcessW() would therefore
+   * silently pass administrative rights to media parsers. For a split-token account,
+   * the linked token is the same user's standard token. A UAC-disabled administrator
+   * has no standard token, so callers that require de-elevation must fail closed.
+   */
+  HANDLE retrieve_current_users_standard_token() {
+    const auto active_identity =
+      current_process_matches_active_standard_user();
+    if (!active_identity || !*active_identity) {
+      BOOST_LOG(error)
+        << "The elevated process account does not match the active standard-user shell; "sv
+           "refusing cross-account media access."sv;
+      return nullptr;
+    }
+    HANDLE process_token = nullptr;
+    if (!OpenProcessToken(
+          GetCurrentProcess(),
+          TOKEN_QUERY | TOKEN_DUPLICATE,
+          &process_token
+        )) {
+      BOOST_LOG(error) << "Could not open the current process token for de-elevation: "sv
+                       << GetLastError();
+      return nullptr;
+    }
+    auto process_token_guard = util::fail_guard([&]() {
+      CloseHandle(process_token);
+    });
+
+    TOKEN_ELEVATION_TYPE elevation_type {};
+    DWORD returned = 0;
+    if (!GetTokenInformation(
+          process_token,
+          TokenElevationType,
+          &elevation_type,
+          sizeof(elevation_type),
+          &returned
+        )) {
+      BOOST_LOG(error) << "Could not inspect the current process elevation type: "sv
+                       << GetLastError();
+      return nullptr;
+    }
+
+    if (elevation_type == TokenElevationTypeFull) {
+      TOKEN_LINKED_TOKEN linked {};
+      if (!GetTokenInformation(
+            process_token,
+            TokenLinkedToken,
+            &linked,
+            sizeof(linked),
+            &returned
+          )) {
+        BOOST_LOG(error) << "Could not retrieve the current user's standard linked token: "sv
+                         << GetLastError();
+        return nullptr;
+      }
+      return linked.LinkedToken;
+    }
+
+    if (
+      elevation_type == TokenElevationTypeDefault &&
+      IsUserAdmin(process_token)
+    ) {
+      BOOST_LOG(error)
+        << "Cannot launch an untrusted media worker safely because this administrator "sv
+           "account has no UAC standard token."sv;
+      return nullptr;
+    }
+
+    HANDLE duplicate = nullptr;
+    if (!DuplicateTokenEx(
+          process_token,
+          MAXIMUM_ALLOWED,
+          nullptr,
+          SecurityImpersonation,
+          TokenPrimary,
+          &duplicate
+        )) {
+      BOOST_LOG(error) << "Could not duplicate the current standard-user token: "sv
+                       << GetLastError();
+      return nullptr;
+    }
+    return duplicate;
+  }
+
+  std::optional<bool> current_process_token_is_elevated() {
+    HANDLE process_token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &process_token)) {
+      return std::nullopt;
+    }
+    auto token_guard = util::fail_guard([&]() {
+      CloseHandle(process_token);
+    });
+    TOKEN_ELEVATION elevation {};
+    DWORD returned = 0;
+    if (!GetTokenInformation(
+          process_token,
+          TokenElevation,
+          &elevation,
+          sizeof(elevation),
+          &returned
+        )) {
+      return std::nullopt;
+    }
+    return elevation.TokenIsElevated != 0;
+  }
+
+  namespace {
+    constexpr DWORD invalid_console_session = 0xFFFFFFFF;
+    constexpr auto explorer_auto_restart_grace = std::chrono::milliseconds(3000);
+    constexpr auto explorer_fallback_start_grace = std::chrono::milliseconds(8000);
+
+    const char *explorerRestartResultLabel(explorer_restart_result_e result) {
+      switch (result) {
+        case explorer_restart_result_e::restarted_automatically:
+          return "Windows restarted Explorer automatically";
+        case explorer_restart_result_e::relaunched:
+          return "a replacement Explorer reached taskbar readiness";
+        case explorer_restart_result_e::skipped_no_shell:
+          return "no active Explorer shell was available";
+        case explorer_restart_result_e::skipped_identity:
+          return "the active shell identity could not be verified";
+        case explorer_restart_result_e::preflight_failed:
+          return "Explorer restart preflight failed";
+        case explorer_restart_result_e::terminate_failed:
+          return "the verified Explorer process could not be terminated";
+        case explorer_restart_result_e::exit_timeout:
+          return "the verified Explorer process did not exit before the timeout";
+        case explorer_restart_result_e::relaunch_failed:
+          return "Explorer did not restart automatically and the fallback launch failed";
+        case explorer_restart_result_e::replacement_timeout:
+          return "a replacement Explorer taskbar was not confirmed before the timeout";
+      }
+      return "unknown Explorer restart result";
+    }
+
+    bool samePathCaseInsensitive(
+      const std::wstring_view lhs,
+      const std::wstring_view rhs
+    ) {
+      return CompareStringOrdinal(
+               lhs.data(),
+               static_cast<int>(lhs.size()),
+               rhs.data(),
+               static_cast<int>(rhs.size()),
+               TRUE
+             ) == CSTR_EQUAL;
+    }
+
+    std::optional<std::wstring> processImagePath(HANDLE process) {
+      std::array<wchar_t, 32768> path {};
+      DWORD path_length = static_cast<DWORD>(path.size());
+      if (!QueryFullProcessImageNameW(
+            process,
+            0,
+            path.data(),
+            &path_length
+          )) {
+        return std::nullopt;
+      }
+      return std::wstring {path.data(), path_length};
+    }
+
+    bool tokenBelongsToSession(HANDLE token, DWORD expected_session) {
+      DWORD token_session = invalid_console_session;
+      DWORD returned = 0;
+      return GetTokenInformation(
+               token,
+               TokenSessionId,
+               &token_session,
+               sizeof(token_session),
+               &returned
+             ) &&
+             token_session == expected_session;
+    }
+
+    std::optional<LUID> tokenAuthenticationId(HANDLE token) {
+      TOKEN_STATISTICS statistics {};
+      DWORD returned = 0;
+      if (!GetTokenInformation(
+            token,
+            TokenStatistics,
+            &statistics,
+            sizeof(statistics),
+            &returned
+          )) {
+        return std::nullopt;
+      }
+      return statistics.AuthenticationId;
+    }
+
+    bool sameLuid(const LUID &lhs, const LUID &rhs) {
+      return lhs.HighPart == rhs.HighPart &&
+             lhs.LowPart == rhs.LowPart;
+    }
+
+    bool currentProcessUserMatchesToken(HANDLE other_token) {
+      HANDLE process_token = nullptr;
+      if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &process_token)) {
+        return false;
+      }
+      auto process_token_guard = util::fail_guard([&]() {
+        CloseHandle(process_token);
+      });
+      const auto process_user = token_user_id(process_token);
+      const auto other_user = token_user_id(other_token);
+      return process_user &&
+             other_user &&
+             *process_user == *other_user;
+    }
+
+    class explorer_restart_operations_t {
+    public:
+      explorer_restart_operations_t() = default;
+      explorer_restart_operations_t(const explorer_restart_operations_t &) = delete;
+      explorer_restart_operations_t &operator=(const explorer_restart_operations_t &) = delete;
+
+      ~explorer_restart_operations_t() {
+        if (environment_) {
+          DestroyEnvironmentBlock(environment_);
+        }
+        if (user_token_) {
+          CloseHandle(user_token_);
+        }
+        if (shell_process_) {
+          CloseHandle(shell_process_);
+        }
+      }
+
+      std::optional<explorer_restart_result_e> preflight() {
+        active_session_ = WTSGetActiveConsoleSessionId();
+        if (active_session_ == invalid_console_session) {
+          BOOST_LOG(warning) << "Skipping Explorer taskbar repair because no active console "
+                                "session exists."sv;
+          return explorer_restart_result_e::skipped_no_shell;
+        }
+
+        const auto shell_window = GetShellWindow();
+        const auto tray_window = FindWindowW(L"Shell_TrayWnd", nullptr);
+        DWORD tray_pid = 0;
+        if (shell_window) {
+          GetWindowThreadProcessId(shell_window, &shell_pid_);
+        }
+        if (tray_window) {
+          GetWindowThreadProcessId(tray_window, &tray_pid);
+        }
+        if (!shell_window || shell_pid_ == 0) {
+          BOOST_LOG(warning) << "Skipping Explorer taskbar repair because Windows did not expose "
+                                "an active desktop shell."sv;
+          return explorer_restart_result_e::skipped_no_shell;
+        }
+        // Shell_TrayWnd may itself be missing while the taskbar is damaged. When present it is
+        // useful corroboration, but the path/session/token-validated GetShellWindow owner remains
+        // authoritative.
+        if ((tray_pid != 0 && shell_pid_ != tray_pid) ||
+            !shellPidBelongsToOriginalSession(shell_pid_)) {
+          BOOST_LOG(error) << "Skipping Explorer taskbar repair because the desktop shell and "
+                              "taskbar evidence conflict in the active console session."sv;
+          return explorer_restart_result_e::skipped_identity;
+        }
+
+        shell_process_ = OpenProcess(
+          PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+          FALSE,
+          shell_pid_
+        );
+        if (!shell_process_) {
+          BOOST_LOG(error) << "Could not open the active Explorer shell for taskbar repair: "
+                           << GetLastError();
+          return explorer_restart_result_e::preflight_failed;
+        }
+
+        std::array<wchar_t, MAX_PATH + 1> windows_directory {};
+        const auto windows_length = GetWindowsDirectoryW(
+          windows_directory.data(),
+          static_cast<UINT>(windows_directory.size())
+        );
+        if (windows_length == 0 || windows_length >= windows_directory.size()) {
+          BOOST_LOG(error) << "Could not resolve the Windows directory before restarting Explorer: "
+                           << GetLastError();
+          return explorer_restart_result_e::preflight_failed;
+        }
+        working_directory_ = std::wstring {
+          windows_directory.data(),
+          windows_length
+        };
+        explorer_path_ =
+          (std::filesystem::path {working_directory_} / L"explorer.exe").wstring();
+        const auto observed_path = processImagePath(shell_process_);
+        if (!observed_path || !samePathCaseInsensitive(*observed_path, explorer_path_)) {
+          BOOST_LOG(error) << "Skipping Explorer taskbar repair because the active shell image "
+                              "is not the Windows Explorer executable."sv;
+          return explorer_restart_result_e::skipped_identity;
+        }
+
+        HANDLE shell_token = nullptr;
+        if (!OpenProcessToken(
+              shell_process_,
+              TOKEN_QUERY | TOKEN_DUPLICATE,
+              &shell_token
+            )) {
+          BOOST_LOG(error) << "Could not inspect the active Explorer shell token: "
+                           << GetLastError();
+          return explorer_restart_result_e::preflight_failed;
+        }
+        auto shell_token_guard = util::fail_guard([&]() {
+          CloseHandle(shell_token);
+        });
+        TOKEN_ELEVATION shell_elevation {};
+        DWORD returned = 0;
+        if (!GetTokenInformation(
+              shell_token,
+              TokenElevation,
+              &shell_elevation,
+              sizeof(shell_elevation),
+              &returned
+            ) ||
+            !tokenBelongsToSession(shell_token, active_session_)) {
+          BOOST_LOG(error) << "Skipping Explorer taskbar repair because the shell does not use "
+                              "the expected token in the active console session."sv;
+          return explorer_restart_result_e::skipped_identity;
+        }
+        shell_elevated_ = shell_elevation.TokenIsElevated != 0;
+        const auto shell_user = token_user_id(shell_token);
+        const auto shell_authentication = tokenAuthenticationId(shell_token);
+        if (!shell_user || !shell_authentication) {
+          BOOST_LOG(error) << "Could not identify the active Explorer shell logon."sv;
+          return explorer_restart_result_e::preflight_failed;
+        }
+        if (!is_running_as_system() &&
+            !currentProcessUserMatchesToken(shell_token)) {
+          BOOST_LOG(error) << "Skipping Explorer taskbar repair because Sunshine 3D does not "
+                              "belong to the active shell's user account."sv;
+          return explorer_restart_result_e::skipped_identity;
+        }
+
+        // Duplicate the exact validated shell token. This preserves standard UAC sessions and
+        // deliberately also supports UAC-disabled administrators whose Explorer is elevated.
+        if (!DuplicateTokenEx(
+              shell_token,
+              MAXIMUM_ALLOWED,
+              nullptr,
+              SecurityImpersonation,
+              TokenPrimary,
+              &user_token_
+            )) {
+          BOOST_LOG(error) << "Could not capture the active Explorer token before restarting it: "
+                           << GetLastError();
+          return explorer_restart_result_e::preflight_failed;
+        }
+        user_id_ = token_user_id(user_token_).value_or(std::string {});
+        authentication_id_ = tokenAuthenticationId(user_token_);
+        if (user_id_.empty() ||
+            user_id_ != *shell_user ||
+            !authentication_id_ ||
+            !sameLuid(*authentication_id_, *shell_authentication) ||
+            !tokenBelongsToSession(user_token_, active_session_)) {
+          BOOST_LOG(error) << "Skipping Explorer taskbar repair because the captured fallback "
+                              "token does not match the active shell."sv;
+          return explorer_restart_result_e::skipped_identity;
+        }
+        if (!CreateEnvironmentBlock(&environment_, user_token_, FALSE)) {
+          BOOST_LOG(error) << "Could not capture the active user's environment before restarting "
+                              "Explorer: " << GetLastError();
+          return explorer_restart_result_e::preflight_failed;
+        }
+
+        // Close the last PID-reuse/session-switch window before the controller is allowed to kill.
+        if (!currentWindowsIdentifyShell(shell_pid_)) {
+          BOOST_LOG(warning) << "Skipping Explorer taskbar repair because the active shell changed "
+                                "during preflight."sv;
+          return explorer_restart_result_e::skipped_identity;
+        }
+        return std::nullopt;
+      }
+
+      bool terminate_exact_shell() {
+        if (!shell_process_ || !currentWindowsIdentifyShell(shell_pid_)) {
+          return false;
+        }
+        if (WaitForSingleObject(shell_process_, 0) == WAIT_OBJECT_0) {
+          return true;
+        }
+        if (!TerminateProcess(shell_process_, ERROR_PROCESS_ABORTED)) {
+          const auto terminate_error = GetLastError();
+          if (WaitForSingleObject(shell_process_, 0) == WAIT_OBJECT_0) {
+            return true;
+          }
+          BOOST_LOG(error) << "Could not terminate the verified Explorer shell (PID "
+                           << shell_pid_ << "): " << terminate_error;
+          return false;
+        }
+        BOOST_LOG(info) << "Restarting the active user's Explorer shell (PID "
+                        << shell_pid_ << ") after confirmed virtual-display removal."sv;
+        return true;
+      }
+
+      bool wait_for_old_shell_exit() {
+        return shell_process_ &&
+               WaitForSingleObject(shell_process_, 5000) == WAIT_OBJECT_0;
+      }
+
+      bool wait_for_replacement(bool after_fallback_launch) {
+        const auto timeout = after_fallback_launch ?
+                               explorer_fallback_start_grace :
+                               explorer_auto_restart_grace;
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (true) {
+          if (replacementShellPresent(true)) {
+            return true;
+          }
+          const auto now = std::chrono::steady_clock::now();
+          if (now >= deadline) {
+            return false;
+          }
+          std::this_thread::sleep_for(
+            std::min<std::chrono::steady_clock::duration>(100ms, deadline - now)
+          );
+        }
+      }
+
+      bool replacement_present_now() const {
+        return replacementShellPresent(false);
+      }
+
+      bool launch_captured_shell() {
+        if (!user_token_ || !environment_ || explorer_path_.empty()) {
+          return false;
+        }
+        if (WTSGetActiveConsoleSessionId() != active_session_) {
+          BOOST_LOG(warning) << "Refusing to relaunch Explorer because the active console session "
+                                "changed during taskbar repair."sv;
+          return false;
+        }
+        // Close the remaining AutoRestartShell race after the controller's explicit recheck.
+        if (replacementShellPresent(false)) {
+          return true;
+        }
+
+        STARTUPINFOW startup_info {};
+        startup_info.cb = sizeof(startup_info);
+        wchar_t interactive_desktop[] = L"winsta0\\default";
+        startup_info.lpDesktop = interactive_desktop;
+        PROCESS_INFORMATION process_info {};
+        const DWORD creation_flags =
+          CREATE_UNICODE_ENVIRONMENT | CREATE_BREAKAWAY_FROM_JOB;
+        if (!CreateProcessAsUserW(
+              user_token_,
+              explorer_path_.c_str(),
+              nullptr,
+              nullptr,
+              nullptr,
+              FALSE,
+              creation_flags,
+              environment_,
+              working_directory_.c_str(),
+              &startup_info,
+              &process_info
+            )) {
+          BOOST_LOG(error) << "Could not launch the Explorer fallback in the active user's "
+                              "desktop session: " << GetLastError();
+          return false;
+        }
+        CloseHandle(process_info.hThread);
+        CloseHandle(process_info.hProcess);
+        BOOST_LOG(info) << "Windows did not auto-restart Explorer; launched one fallback with "
+                           "the captured shell token."sv;
+        return true;
+      }
+
+    private:
+      bool shellPidBelongsToOriginalSession(DWORD pid) const {
+        DWORD process_session = invalid_console_session;
+        return pid != 0 &&
+               ProcessIdToSessionId(pid, &process_session) &&
+               process_session == active_session_;
+      }
+
+      bool currentWindowsIdentifyShell(DWORD expected_pid) const {
+        if (WTSGetActiveConsoleSessionId() != active_session_) {
+          return false;
+        }
+        const auto shell_window = GetShellWindow();
+        const auto tray_window = FindWindowW(L"Shell_TrayWnd", nullptr);
+        DWORD current_shell_pid = 0;
+        DWORD current_tray_pid = 0;
+        if (shell_window) {
+          GetWindowThreadProcessId(shell_window, &current_shell_pid);
+        }
+        if (tray_window) {
+          GetWindowThreadProcessId(tray_window, &current_tray_pid);
+        }
+        return current_shell_pid == expected_pid &&
+               (current_tray_pid == 0 || current_tray_pid == expected_pid) &&
+               shellPidBelongsToOriginalSession(expected_pid);
+      }
+
+      bool replacementShellPresent(bool require_taskbar) const {
+        if (WTSGetActiveConsoleSessionId() != active_session_) {
+          return false;
+        }
+        const auto shell_window = GetShellWindow();
+        const auto tray_window = FindWindowW(L"Shell_TrayWnd", nullptr);
+        DWORD replacement_pid = 0;
+        DWORD tray_pid = 0;
+        if (shell_window) {
+          GetWindowThreadProcessId(shell_window, &replacement_pid);
+        }
+        if (tray_window) {
+          GetWindowThreadProcessId(tray_window, &tray_pid);
+        }
+        if (replacement_pid == 0 ||
+            replacement_pid == shell_pid_ ||
+            (require_taskbar ?
+               replacement_pid != tray_pid :
+               (tray_pid != 0 && replacement_pid != tray_pid)) ||
+            !shellPidBelongsToOriginalSession(replacement_pid)) {
+          return false;
+        }
+
+        HANDLE replacement_process = OpenProcess(
+          PROCESS_QUERY_LIMITED_INFORMATION,
+          FALSE,
+          replacement_pid
+        );
+        if (!replacement_process) {
+          return false;
+        }
+        auto process_guard = util::fail_guard([&]() {
+          CloseHandle(replacement_process);
+        });
+        const auto observed_path = processImagePath(replacement_process);
+        if (!observed_path || !samePathCaseInsensitive(*observed_path, explorer_path_)) {
+          return false;
+        }
+
+        HANDLE replacement_token = nullptr;
+        if (!OpenProcessToken(replacement_process, TOKEN_QUERY, &replacement_token)) {
+          return false;
+        }
+        auto token_guard = util::fail_guard([&]() {
+          CloseHandle(replacement_token);
+        });
+        TOKEN_ELEVATION replacement_elevation {};
+        DWORD returned = 0;
+        const auto replacement_authentication =
+          tokenAuthenticationId(replacement_token);
+        return GetTokenInformation(
+                 replacement_token,
+                 TokenElevation,
+                 &replacement_elevation,
+                 sizeof(replacement_elevation),
+                 &returned
+               ) &&
+               (replacement_elevation.TokenIsElevated != 0) == shell_elevated_ &&
+               replacement_authentication &&
+               authentication_id_ &&
+               sameLuid(*replacement_authentication, *authentication_id_) &&
+               tokenBelongsToSession(replacement_token, active_session_) &&
+               token_user_id(replacement_token) == std::optional<std::string> {user_id_};
+      }
+
+      DWORD active_session_ = invalid_console_session;
+      DWORD shell_pid_ = 0;
+      HANDLE shell_process_ = nullptr;
+      HANDLE user_token_ = nullptr;
+      PVOID environment_ = nullptr;
+      std::wstring explorer_path_;
+      std::wstring working_directory_;
+      std::string user_id_;
+      std::optional<LUID> authentication_id_;
+      bool shell_elevated_ = false;
+    };
+  }  // namespace
+
+  explorer_restart_result_e restart_active_user_explorer() {
+    std::lock_guard restart_lock {explorer_restart_mutex};
+    explorer_restart_operations_t operations;
+    const auto result = detail::run_explorer_restart(operations);
+    switch (result) {
+      case explorer_restart_result_e::restarted_automatically:
+      case explorer_restart_result_e::relaunched:
+        BOOST_LOG(info) << "Explorer taskbar repair completed: "
+                        << explorerRestartResultLabel(result) << '.';
+        break;
+      default:
+        BOOST_LOG(warning) << "Explorer taskbar repair was not confirmed: "
+                           << explorerRestartResultLabel(result) << '.';
+        break;
+    }
+    return result;
+  }
+
+  std::filesystem::path user_local_appdata() {
+    HANDLE user_token = nullptr;
+    if (is_running_as_system()) {
+      user_token = retrieve_users_token(false);
+      if (!user_token) {
+        return {};
+      }
+    } else {
+      const auto active_identity =
+        current_process_matches_active_standard_user();
+      if (!active_identity || !*active_identity) {
+        return {};
+      }
+      const auto elevated = current_process_token_is_elevated();
+      if (!elevated) {
+        return {};
+      }
+      if (*elevated) {
+        // Resolve the profile root with the same linked standard-user token
+        // that run_as_active_user() and run_command_unelevated() use. Passing
+        // nullptr here would make SHGetKnownFolderPath inspect the elevated
+        // process token even though every later workspace access is performed
+        // while impersonating the linked token.
+        user_token = retrieve_current_users_standard_token();
+        if (!user_token) {
+          return {};
+        }
+      }
+    }
+    auto token_guard = util::fail_guard([&]() {
+      if (user_token) {
+        CloseHandle(user_token);
+      }
+    });
+
+    PWSTR value = nullptr;
+    const auto result = SHGetKnownFolderPath(
+      FOLDERID_LocalAppData,
+      KF_FLAG_DEFAULT,
+      user_token,
+      &value
+    );
+    if (FAILED(result) || !value) {
+      return {};
+    }
+    auto value_guard = util::fail_guard([&]() {
+      CoTaskMemFree(value);
+    });
+    return std::filesystem::path {value};
+  }
+
+  std::optional<std::string> active_user_id() {
+    HANDLE user_token = nullptr;
+    if (is_running_as_system()) {
+      user_token = retrieve_users_token(false);
+    } else {
+      const auto active_identity =
+        current_process_matches_active_standard_user();
+      if (
+        !active_identity ||
+        !*active_identity ||
+        !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &user_token)
+      ) {
+        user_token = nullptr;
+      }
+    }
+    if (!user_token) {
+      BOOST_LOG(warning)
+        << "Could not identify the active user for offline job isolation."sv;
+      return std::nullopt;
+    }
+    auto token_guard = util::fail_guard([&]() {
+      CloseHandle(user_token);
+    });
+
+    return token_user_id(user_token);
+  }
+
+  std::error_code run_as_active_user(
+    const std::function<void()> &callback,
+    const std::optional<std::string> &expected_user_id
+  ) {
+    // Offline media state is intentionally user-writable. Even a tray-launched host
+    // normally runs elevated, so direct callbacks would turn every path race/reparse
+    // into an administrative filesystem operation. Always perform these accesses with
+    // the same standard token used by the de-elevated worker.
+    const bool running_as_system = is_running_as_system();
+    if (!running_as_system) {
+      const auto active_identity =
+        current_process_matches_active_standard_user();
+      if (!active_identity || !*active_identity) {
+        return std::make_error_code(std::errc::permission_denied);
+      }
+      const auto elevated = current_process_token_is_elevated();
+      if (!elevated) {
+        return std::make_error_code(std::errc::permission_denied);
+      }
+      if (!*elevated) {
+        if (expected_user_id) {
+          HANDLE process_token = nullptr;
+          if (
+            !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &process_token)
+          ) {
+            return std::make_error_code(std::errc::permission_denied);
+          }
+          auto process_token_guard = util::fail_guard([&]() {
+            CloseHandle(process_token);
+          });
+          const auto observed_user_id = token_user_id(process_token);
+          if (
+            !observed_user_id ||
+            *observed_user_id != *expected_user_id
+          ) {
+            return std::make_error_code(std::errc::permission_denied);
+          }
+        }
+        callback();
+        return {};
+      }
+    }
+    HANDLE user_token = running_as_system ?
+                          retrieve_users_token(false) :
+                          retrieve_current_users_standard_token();
+    if (!user_token) {
+      return std::make_error_code(std::errc::permission_denied);
+    }
+    auto token_guard = util::fail_guard([&]() {
+      CloseHandle(user_token);
+    });
+    if (expected_user_id) {
+      const auto observed_user_id = token_user_id(user_token);
+      if (
+        !observed_user_id ||
+        *observed_user_id != *expected_user_id
+      ) {
+        return std::make_error_code(std::errc::permission_denied);
+      }
+    }
+    return impersonate_current_user(user_token, callback);
+  }
+
   bool merge_user_environment_block(bp::environment &env, HANDLE shell_token) {
     // Get the target user's environment block
     PVOID env_block;
@@ -396,7 +1284,10 @@ namespace platf {
 
       // For the PATH variable, we will merge the values together
       if (boost::iequals(env_name, "PATH")) {
-        env[env_name] = env_val + ";" + env[env_name].to_string();
+        const auto existing_path = env[env_name].to_string();
+        env[env_name] = existing_path.empty() ?
+                          env_val :
+                          env_val + ";" + existing_path;
       } else {
         // Other variables will be superseded by those in the user's environment block
         env[env_name] = env_val;
@@ -555,19 +1446,19 @@ namespace platf {
       return ec;
     }
 
-    // Execute the callback function while impersonating the user
+    // Always end impersonation, including when the callback throws. Continuing a host thread
+    // under the interactive user's token after an exception would corrupt every later access
+    // check performed by that thread.
+    auto revert_guard = util::fail_guard([]() {
+      if (!RevertToSelf()) {
+        const auto winerror = GetLastError();
+        BOOST_LOG(fatal) << "Failed to revert to self after impersonation: "sv
+                         << winerror;
+        DebugBreak();
+      }
+    });
+
     callback();
-
-    // End impersonation of the logged on user. If this fails (which is extremely unlikely),
-    // we will be running with an unknown user token. The only safe thing to do in that case
-    // is terminate ourselves.
-    if (!RevertToSelf()) {
-      auto winerror = GetLastError();
-      // Log the failure of reverting to self and its error code
-      BOOST_LOG(fatal) << "Failed to revert to self after impersonation: "sv << winerror;
-      DebugBreak();
-    }
-
     return ec;
   }
 
@@ -590,23 +1481,68 @@ namespace platf {
       ec = std::make_error_code(std::errc::not_enough_memory);
       return startup_info;
     }
+    const auto fail_attribute_setup = [&](const DWORD windows_error) {
+      free_proc_thread_attr_list(startup_info.lpAttributeList);
+      startup_info.lpAttributeList = nullptr;
+      ec = std::error_code {
+        static_cast<int>(windows_error),
+        std::system_category(),
+      };
+    };
 
     if (file) {
       // If a file was provided, get its handle and use it as the standard output and error for the new process
       HANDLE log_file_handle = (HANDLE) _get_osfhandle(_fileno(file));
+      HANDLE inheritable_log_handle = INVALID_HANDLE_VALUE;
+      if (
+        log_file_handle == INVALID_HANDLE_VALUE ||
+        !DuplicateHandle(
+          GetCurrentProcess(),
+          log_file_handle,
+          GetCurrentProcess(),
+          &inheritable_log_handle,
+          0,
+          TRUE,
+          DUPLICATE_SAME_ACCESS
+        )
+      ) {
+        fail_attribute_setup(
+          log_file_handle == INVALID_HANDLE_VALUE ?
+            ERROR_INVALID_HANDLE :
+            GetLastError()
+        );
+        return startup_info;
+      }
 
       // Populate std handles if the caller gave us a log file to use
       startup_info.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
       startup_info.StartupInfo.hStdInput = nullptr;
-      startup_info.StartupInfo.hStdOutput = log_file_handle;
-      startup_info.StartupInfo.hStdError = log_file_handle;
+      startup_info.StartupInfo.hStdOutput = inheritable_log_handle;
+      startup_info.StartupInfo.hStdError = inheritable_log_handle;
 
       // Allow the log file handle to be inherited by the child process (without inheriting all of
       // our inheritable handles, such as our own log file handle created by SunshineSvc).
       //
       // Note: The value we point to here must be valid for the lifetime of the attribute list,
       // so we need to point into the STARTUPINFO instead of our log_file_variable on the stack.
-      UpdateProcThreadAttribute(startup_info.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &startup_info.StartupInfo.hStdOutput, sizeof(startup_info.StartupInfo.hStdOutput), nullptr, nullptr);
+      if (
+        !UpdateProcThreadAttribute(
+          startup_info.lpAttributeList,
+          0,
+          PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+          &startup_info.StartupInfo.hStdOutput,
+          sizeof(startup_info.StartupInfo.hStdOutput),
+          nullptr,
+          nullptr
+        )
+      ) {
+        const auto windows_error = GetLastError();
+        CloseHandle(inheritable_log_handle);
+        startup_info.StartupInfo.hStdOutput = nullptr;
+        startup_info.StartupInfo.hStdError = nullptr;
+        fail_attribute_setup(windows_error);
+        return startup_info;
+      }
     }
 
     if (job) {
@@ -614,7 +1550,18 @@ namespace platf {
       //
       // Note: The value we point to here must be valid for the lifetime of the attribute list,
       // so we take a HANDLE* instead of just a HANDLE to use the caller's stack storage.
-      UpdateProcThreadAttribute(startup_info.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, job, sizeof(*job), nullptr, nullptr);
+      if (!UpdateProcThreadAttribute(
+            startup_info.lpAttributeList,
+            0,
+            PROC_THREAD_ATTRIBUTE_JOB_LIST,
+            job,
+            sizeof(*job),
+            nullptr,
+            nullptr
+          )) {
+        fail_attribute_setup(GetLastError());
+        return startup_info;
+      }
     }
 
     return startup_info;
@@ -953,7 +1900,24 @@ namespace platf {
    * @param group A pointer to a `bp::group` object to which the new process should belong (may be `nullptr`).
    * @return A `bp::child` object representing the new process, or an empty `bp::child` object if the launch fails.
    */
-  bp::child run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const bp::environment &env, FILE *file, std::error_code &ec, bp::group *group) {
+  namespace {
+    bp::child run_command_impl(
+      bool elevated,
+      bool force_unelevated,
+      bool interactive,
+      const std::string &cmd,
+      boost::filesystem::path &working_dir,
+      const bp::environment &env,
+      FILE *file,
+      std::error_code &ec,
+      bp::group *group,
+      const std::optional<std::string> &expected_user_id
+    ) {
+    // resolve_command_string() historically relies on a temporary process-global PATH.
+    // Serialize the complete mutation/restore interval so concurrent probes or app
+    // launches cannot observe or restore another launch's intermediate value.
+    std::lock_guard command_resolution_lock {command_resolution_mutex};
+
     // This parameter is an output. A stale error from a previous command must not suppress a
     // later launch while startup structures are being created.
     ec.clear();
@@ -961,12 +1925,28 @@ namespace platf {
     std::wstring start_dir = from_utf8(working_dir.string());
     HANDLE job = group ? group->native_handle() : nullptr;
     STARTUPINFOEXW startup_info = create_startup_info(file, job ? &job : nullptr, ec);
-    PROCESS_INFORMATION process_info;
+    PROCESS_INFORMATION process_info {};
+    auto inherited_log_close = util::fail_guard([&]() {
+      if (
+        file &&
+        startup_info.StartupInfo.hStdOutput &&
+        startup_info.StartupInfo.hStdOutput != INVALID_HANDLE_VALUE
+      ) {
+        CloseHandle(startup_info.StartupInfo.hStdOutput);
+      }
+    });
 
     // Clone the environment to create a local copy. Boost.Process (bp) shares the environment with all spawned processes.
     // Since we're going to modify the 'env' variable by merging user-specific environment variables into it,
     // we make a clone to prevent side effects to the shared environment.
     bp::environment cloned_env = env;
+    if (force_unelevated) {
+      // Crossing from an elevated/service process into the standard-user media sandbox is a
+      // security boundary. Do not leak parent-only variables (credentials, service paths, or
+      // injected configuration); merge_user_environment_block() below reconstructs the child's
+      // environment solely from the selected standard token.
+      cloned_env.clear();
+    }
 
     if (ec) {
       // In the event that startup_info failed, return a blank child process.
@@ -978,7 +1958,15 @@ namespace platf {
       free_proc_thread_attr_list(list);
     });
 
-    DWORD creation_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_BREAKAWAY_FROM_JOB;
+    DWORD creation_flags =
+      EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+    // Ordinary launched applications retain the historical attempt to escape a parent
+    // service job. A caller-supplied group uses PROC_THREAD_ATTRIBUTE_JOB_LIST for atomic
+    // assignment to that explicit job, so requesting breakaway at the same time is both
+    // contradictory and rejected when the parent job disallows it.
+    if (!group) {
+      creation_flags |= CREATE_BREAKAWAY_FROM_JOB;
+    }
 
     // Create a new console for interactive processes and use no console for non-interactive processes
     creation_flags |= interactive ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW;
@@ -998,7 +1986,11 @@ namespace platf {
 
     // Temporarily prepend the specified working directory to PATH to ensure CreateProcess()
     // will (preferentially) find binaries that reside in the working directory.
-    sunshine_wenv[path_var_name].assign(start_dir + L";" + old_path_val);
+    sunshine_wenv[path_var_name].assign(
+      force_unelevated ?
+        start_dir :
+        start_dir + L";" + old_path_val
+    );
 
     // Restore the old PATH value for our process when we're done here
     auto restore_path = util::fail_guard([&]() {
@@ -1009,14 +2001,45 @@ namespace platf {
       }
     });
 
-    BOOL ret;
-    if (is_running_as_system()) {
-      // Duplicate the current user's token
-      HANDLE user_token = retrieve_users_token(elevated);
+    const bool running_as_system = is_running_as_system();
+    bool launch_with_user_token = running_as_system;
+    if (force_unelevated && !running_as_system) {
+      const auto active_identity =
+        current_process_matches_active_standard_user();
+      if (!active_identity || !*active_identity) {
+        ec = std::make_error_code(std::errc::permission_denied);
+        return bp::child();
+      }
+      const auto elevated = current_process_token_is_elevated();
+      if (!elevated) {
+        ec = std::make_error_code(std::errc::permission_denied);
+        return bp::child();
+      }
+      launch_with_user_token = *elevated;
+    }
+
+    BOOL ret = FALSE;
+    if (launch_with_user_token) {
+      // A service uses the active console user's token. An elevated tray process must
+      // explicitly select its linked standard token instead of inheriting elevation.
+      HANDLE user_token = running_as_system ?
+                            retrieve_users_token(force_unelevated ? false : elevated) :
+                            retrieve_current_users_standard_token();
       if (!user_token) {
         // Fail the launch rather than risking launching with Sunshine's permissions unmodified.
         ec = std::make_error_code(std::errc::permission_denied);
         return bp::child();
+      }
+      if (expected_user_id) {
+        const auto observed_user_id = token_user_id(user_token);
+        if (
+          !observed_user_id ||
+          *observed_user_id != *expected_user_id
+        ) {
+          ec = std::make_error_code(std::errc::permission_denied);
+          CloseHandle(user_token);
+          return bp::child();
+        }
       }
 
       // Use RAII to ensure the shell token is closed when we're done with it
@@ -1049,6 +2072,16 @@ namespace platf {
       auto token_close = util::fail_guard([process_token]() {
         CloseHandle(process_token);
       });
+      if (expected_user_id) {
+        const auto observed_user_id = token_user_id(process_token);
+        if (
+          !observed_user_id ||
+          *observed_user_id != *expected_user_id
+        ) {
+          ec = std::make_error_code(std::errc::permission_denied);
+          return bp::child();
+        }
+      }
 
       // Populate env with user-specific environment variables
       if (!merge_user_environment_block(cloned_env, process_token)) {
@@ -1063,6 +2096,46 @@ namespace platf {
 
     // Use the results of the launch to create a bp::child object
     return create_boost_child_from_results(ret, cmd, ec, process_info);
+  }
+  }  // namespace
+
+  bp::child run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const bp::environment &env, FILE *file, std::error_code &ec, bp::group *group) {
+    return run_command_impl(
+      elevated,
+      false,
+      interactive,
+      cmd,
+      working_dir,
+      env,
+      file,
+      ec,
+      group,
+      std::nullopt
+    );
+  }
+
+  bp::child run_command_unelevated(
+    bool interactive,
+    const std::string &cmd,
+    boost::filesystem::path &working_dir,
+    const bp::environment &env,
+    FILE *file,
+    std::error_code &ec,
+    bp::group *group,
+    const std::optional<std::string> &expected_user_id
+  ) {
+    return run_command_impl(
+      false,
+      true,
+      interactive,
+      cmd,
+      working_dir,
+      env,
+      file,
+      ec,
+      group,
+      expected_user_id
+    );
   }
 
   /**
@@ -1237,7 +2310,7 @@ namespace platf {
     mouse_keys_retry_after = operation_failed ? now + 30s : std::chrono::steady_clock::time_point {};
 
     if (enabled) {
-      BOOST_LOG(info) << "A mouse was not detected. Apollo enabled Mouse Keys while streaming to keep the remote cursor visible."sv;
+      BOOST_LOG(info) << "A mouse was not detected. Sunshine 3D enabled Mouse Keys while streaming to keep the remote cursor visible."sv;
     }
   }
 

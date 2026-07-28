@@ -9,11 +9,20 @@
 //                       model-input history state:
 //                         0 empty, 1 normal advance, 2 one-update hold,
 //                         3 persistent-low endpoint (advance + return authority) }
+// Append-only telemetry; the production warp never reads these elements:
+//   SubjectState[3] = { settle-latched edge fraction, current depth-change fraction,
+//                       valid-depth fraction, effective raw-range width }
+//   SubjectState[4] = uint-bit counters { hard cuts, external cuts, empty raw, collapsed raw }
+//   SubjectState[5] = { current range-collapsed flag, depth-ready flag, hard-cut pulse, reserved }
+//   SubjectState[6] = { current edge fraction, current zero-anchor candidate shift in source px,
+//                       structural-change fraction, raw-RGB-change fraction }
+//   SubjectState[7] = { current/previous/common structural support fractions,
+//                       analysis flag bitmask stored as an exact uint-valued float }
 // The reprojection then evaluates the permanent Bestv2 pixel-calibrated field.
 // Resets the histogram for the next frame's accumulation.
 
 RWStructuredBuffer<uint>   SubjectHist  : register(u0);  // 256 weighted bins (subject estimate)
-RWStructuredBuffer<float4> SubjectState : register(u1);  // [0..2], see header above
+RWStructuredBuffer<float4> SubjectState : register(u1);  // [0..7], see header above
 RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 bins + seven evidence counters
 
 #include "include/depth_constants.hlsl"
@@ -31,13 +40,25 @@ RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 bins + seven evi
 // Geometry rearms after two low-depth updates; appearance rearms after two updates without the
 // qualified broad-RGB + ordinal proposal. CUT_FLAG_LATCHED is a permanent "has accepted a cut"
 // phase marker for this estimator lifetime: independent branch rearm deliberately never clears
-// it. That asymmetry distinguishes post-cut recovery from startup, where no weak or relative cut
-// path is allowed.
+// it. CUT_FLAG_APPEARANCE_RECOVERY marks the first update after a photometric veto. Geometry is
+// blocked only if that update is a quiet, well-supported repeat of the same endpoint: neural-depth
+// normalization can remain unsettled one update after a flash has returned even though RGB and
+// ordinal evidence are already quiet. A disjoint or correlated new endpoint remains authoritative
+// during that guard. This asymmetry distinguishes post-cut recovery from startup, where no weak
+// or relative cut path is allowed.
 #define CUT_FLAG_GEOMETRY_ARMED 1u
 #define CUT_FLAG_APPEARANCE_ARMED 2u
 #define CUT_FLAG_GEOMETRY_LOW_ONCE 4u
 #define CUT_FLAG_APPEARANCE_QUIET_ONCE 8u
 #define CUT_FLAG_LATCHED 16u
+#define CUT_FLAG_APPEARANCE_RECOVERY 32u
+
+#define ANALYSIS_FLAG_APPEARANCE_PROPOSAL 1u
+#define ANALYSIS_FLAG_EXPOSURE_LIKE 2u
+#define ANALYSIS_FLAG_STRUCTURELESS 4u
+#define ANALYSIS_FLAG_SAME_RETURN 8u
+#define ANALYSIS_FLAG_VETO 16u
+#define ANALYSIS_FLAG_RELATIVE_SPIKE 32u
 
 // Scene-risk endpoints, calibrated against the MEASURED weighted edge fraction of the committed
 // suites. The three stable-shot synthetic probes used for calibration (fast_motion 0.0001,
@@ -70,6 +91,14 @@ void main() {
     float4 s = SubjectState[0];
     float4 s1 = SubjectState[1];
     float4 s2 = SubjectState[2];
+    float4 telemetry = SubjectState[3];
+    uint4 health_counters = asuint(SubjectState[4]);
+    float4 telemetry_flags = SubjectState[5];
+    float4 current_diagnostics = float4(-1.0f, -1.0f, -1.0f, -1.0f);
+    float4 analysis_diagnostics = float4(-1.0f, -1.0f, -1.0f, 0.0f);
+    // One-update values must never look live merely because an invalid frame preserved state.
+    telemetry.y = 0.0f;
+    telemetry_flags.z = 0.0f;
     if (total > 0.5f) {
         float previous_scene_age = s.y;
         // Weighted 35th percentile from the NEAR side (bin 255 = nearest): the subject is
@@ -136,6 +165,19 @@ void main() {
         // BOTH broad RGB replacement and ordinal structural change. A flash passes broad RGB but
         // fails ordinal structure; detailed motion can pass ordinal but stays far below broad RGB.
         bool model_input_history_valid = s2.w > 0.5f;
+        analysis_diagnostics.x = current_structural_support_fraction;
+        analysis_diagnostics.y = model_input_history_valid ?
+                                   previous_structural_support_fraction :
+                                   -1.0f;
+        analysis_diagnostics.z = model_input_history_valid ?
+                                   common_structural_support_fraction :
+                                   -1.0f;
+        current_diagnostics.z = model_input_history_valid ?
+                                  structural_change_fraction :
+                                  -1.0f;
+        current_diagnostics.w = model_input_history_valid ?
+                                  raw_rgb_change_fraction :
+                                  -1.0f;
         bool model_input_history_gap = s2.w > 1.5f && s2.w < 2.5f;
         bool low_structure_scene = s2.w > 2.5f;
         bool appearance_proposal =
@@ -148,6 +190,12 @@ void main() {
             previous_structural_support_fraction >= STRUCTURAL_COLOR_MIN_SUPPORT;
         bool common_structure_reliable =
             common_structural_support_fraction >= STRUCTURAL_COLOR_MIN_SUPPORT;
+        bool common_structure_representative =
+            common_structure_reliable &&
+            common_structural_support_fraction >=
+                STRUCTURAL_COLOR_EXPOSURE_MIN_COMMON_RATIO *
+                min(current_structural_support_fraction,
+                    previous_structural_support_fraction);
         bool broad_rgb_transition =
             model_input_history_valid &&
             raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH;
@@ -158,7 +206,7 @@ void main() {
             broad_rgb_transition &&
             current_structure_reliable &&
             previous_structure_reliable &&
-            common_structure_reliable &&
+            common_structure_representative &&
             structural_change_fraction < STRUCTURAL_COLOR_EXPOSURE_QUIET;
         // A transition from reliable structure into a structureless frame is intentionally
         // deferred and the last reliable appearance/depth history is retained below. Raw RGB
@@ -189,14 +237,29 @@ void main() {
             current_structure_reliable &&
             raw_rgb_change_fraction < STRUCTURELESS_RETURN_RGB_SAME_MAX &&
             structural_change_fraction < STRUCTURAL_COLOR_EXPOSURE_QUIET;
-        bool appearance_veto =
+        bool base_appearance_veto =
             exposure_like_transition ||
             structureless_transition ||
             same_scene_gap_return;
+        bool photometric_recovery_veto =
+            exposure_like_transition || same_scene_gap_return;
+        bool quiet_supported_repeat =
+            model_input_history_valid &&
+            current_structure_reliable &&
+            previous_structure_reliable &&
+            common_structure_representative &&
+            raw_rgb_change_fraction < STRUCTURELESS_RETURN_RGB_SAME_MAX &&
+            structural_change_fraction < STRUCTURAL_COLOR_EXPOSURE_QUIET;
         uint cut_flags = (uint)max(s2.z, 0.0f);
         bool geometry_armed = (cut_flags & CUT_FLAG_GEOMETRY_ARMED) != 0u;
         bool appearance_armed = (cut_flags & CUT_FLAG_APPEARANCE_ARMED) != 0u;
         bool cut_latched = (cut_flags & CUT_FLAG_LATCHED) != 0u;
+        bool appearance_recovery =
+            (cut_flags & CUT_FLAG_APPEARANCE_RECOVERY) != 0u;
+        bool appearance_recovery_tail =
+            appearance_recovery && quiet_supported_repeat;
+        bool appearance_veto =
+            base_appearance_veto || appearance_recovery_tail;
         float depth_change_baseline = initialized ? saturate(s1.z) : change_fraction;
 
         // A relative geometry spike is the no-starvation escape while absolute geometry remains
@@ -213,6 +276,17 @@ void main() {
             (change_fraction >= depth_change_baseline + DEPTH_CUT_RELATIVE_MARGIN ||
              change_fraction >=
                  depth_change_baseline * DEPTH_CUT_RELATIVE_MULTIPLIER);
+        uint analysis_flags =
+            (appearance_proposal ? ANALYSIS_FLAG_APPEARANCE_PROPOSAL : 0u) |
+            (exposure_like_transition ? ANALYSIS_FLAG_EXPOSURE_LIKE : 0u) |
+            ((structureless_transition || persistent_structureless_transition) ?
+                ANALYSIS_FLAG_STRUCTURELESS : 0u) |
+            (same_scene_gap_return ? ANALYSIS_FLAG_SAME_RETURN : 0u) |
+            (appearance_veto ? ANALYSIS_FLAG_VETO : 0u) |
+            (relative_geometry_spike ? ANALYSIS_FLAG_RELATIVE_SPIKE : 0u);
+        // Do not bit-cast small uint masks into IEEE subnormals. GPU FTZ mode
+        // legally collapses those bit patterns to zero before readback.
+        analysis_diagnostics.w = (float)analysis_flags;
         bool shot_cut =
             initialized &&
             ((geometry_armed && !appearance_veto &&
@@ -235,7 +309,7 @@ void main() {
             // The structureless frame has no trustworthy geometry. Its comparison to the
             // preserved endpoint must not pull the relative-cut baseline upward and hide the
             // supported A-vs-B return that resolves the deferred transition.
-            if (!structureless_transition) {
+            if (!structureless_transition && !appearance_recovery_tail) {
                 depth_change_baseline =
                     lerp(depth_change_baseline, change_fraction, DEPTH_CUT_BASELINE_ALPHA);
             }
@@ -270,6 +344,13 @@ void main() {
                         cut_flags &= ~CUT_FLAG_APPEARANCE_QUIET_ONCE;
                     }
                 }
+            }
+            if (photometric_recovery_veto) {
+                cut_flags |= CUT_FLAG_APPEARANCE_RECOVERY;
+            } else {
+                // `appearance_recovery` above was read from the previous update, so the first
+                // quiet update remains guarded and only arms geometry again for the next frame.
+                cut_flags &= ~CUT_FLAG_APPEARANCE_RECOVERY;
             }
         }
         float next_model_input_history_state =
@@ -313,6 +394,11 @@ void main() {
         // Depth-edge density predicts warp risk. Between cuts the multiplier remains bit-stable;
         // the base is the floor and the configured ceiling is never exceeded.
         float pop_ratio = max(s1.w, 1.0f);
+        float latched_edge_fraction = telemetry.x;
+        float current_edge_fraction = ptotal > 0.5f ?
+            (float)PlainHist[NUM_BINS] / (ptotal * EDGE_WEIGHT_SCALE) :
+            -1.0f;
+        current_diagnostics.x = current_edge_fraction;
         if (adaptive_pop > 0.5f && ptotal > 0.5f) {
             // PlainHist[NUM_BINS] accumulates 434-reference-texel
             // gradient-magnitude-weighted edges in fixed point (the producer also scales its
@@ -321,7 +407,6 @@ void main() {
             // identical to the historical count at the 434 grid and proportionally larger when
             // edges are more violent. The POP_RISK_LOW/HIGH endpoints below remain tied to their
             // measured 434-short-side calibration.
-            float edge_fraction = (float)PlainHist[NUM_BINS] / (ptotal * EDGE_WEIGHT_SCALE);
             if (!initialized || shot_cut) {
                 // Classify on a SETTLED depth field, never on the cut frame. Normalization
                 // settling changes 50-60% of depth texels on the first few frames (see the cut
@@ -332,17 +417,21 @@ void main() {
                 // cross-row shear in the suite. Hold the conservative floor until it settles:
                 // when the risk is not yet measurable, do not grant the bonus.
                 pop_ratio = 1.0f;
+                latched_edge_fraction = -1.0f;
             } else if (scene_age == POP_CLASSIFY_SETTLE_FRAMES) {
                 // One classification per shot, on the first settled field, then bit-stable until
                 // the next cut. Equality rather than >= keeps that single-shot latch exact.
                 // Full extra pop for low-complexity depth fields (<= POP_RISK_LOW weighted
                 // edge fraction), fading to the floor by POP_RISK_HIGH. The classification decides
                 // only where the configured gain is useful, not what the endpoints are.
-                float confidence = 1.0f - smoothstep(POP_RISK_LOW, POP_RISK_HIGH, edge_fraction);
+                float confidence = 1.0f - smoothstep(
+                    POP_RISK_LOW, POP_RISK_HIGH, current_edge_fraction);
                 pop_ratio = lerp(1.0f, max(adaptive_pop_max_ratio, 1.0f), confidence);
+                latched_edge_fraction = current_edge_fraction;
             }
         } else {
             pop_ratio = 1.0f;
+            latched_edge_fraction = -1.0f;
         }
         // Keep the detector's settling/cooldown clock even when optional scene-camera controls are
         // disabled; otherwise depth-only cuts can never arm after their eight-update settle time.
@@ -362,6 +451,17 @@ void main() {
         float zero_anchor_shift = s2.x;
         float zero_valid = s2.y;
         {
+            float zero_anchor_depth = zero_plane_mode < 1.5f ? subj :
+                                      zero_plane_mode < 2.5f ? median_val : background_val;
+            // Evaluate the current candidate every valid update even when the shot latch is
+            // frozen. Offline two-sided boundary refinement can then aggregate the same exact
+            // stretch/recenter/Bestv2 mapping without duplicating it outside the shader.
+            float zero_anchor_shaped = subject_stretch > 0.5f ?
+                (zero_anchor_depth - lo_val) * inv_range : zero_anchor_depth;
+            zero_anchor_shaped = saturate(zero_anchor_shaped + delta);
+            float current_zero_anchor_candidate_shift =
+                Bestv2RawShiftPxFast(zero_anchor_shaped);
+            current_diagnostics.y = current_zero_anchor_candidate_shift;
             // Keep RE-RESOLVING the anchor until the depth field settles, then freeze it for the
             // shot. Latching on the cut frame itself is the same defect that was fixed above for
             // the pop classifier: normalization settling perturbs 50-60% of depth texels on the
@@ -376,14 +476,7 @@ void main() {
             // normalization swim across cuts) regressed 4.90 -> 8.19 on static_jitter_p95.
             if (!initialized || shot_cut || zero_valid < 0.5f ||
                 scene_age == POP_CLASSIFY_SETTLE_FRAMES) {
-                float zero_anchor_depth = zero_plane_mode < 1.5f ? subj :
-                                          zero_plane_mode < 2.5f ? median_val : background_val;
-                // Must shape identically to Bestv2WarpDepth, or the anchor stops describing the
-                // plane the warp actually renders: one soft clamp over the recentred band value.
-                float zero_anchor_shaped = subject_stretch > 0.5f ?
-                    (zero_anchor_depth - lo_val) * inv_range : zero_anchor_depth;
-                zero_anchor_shaped = saturate(zero_anchor_shaped + delta);
-                zero_anchor_shift = Bestv2RawShiftPxFast(zero_anchor_shaped);
+                zero_anchor_shift = current_zero_anchor_candidate_shift;
                 zero_valid = 1.0f;
             }
         }
@@ -391,6 +484,12 @@ void main() {
         s2 = float4(zero_anchor_shift, zero_valid,
                     (float)cut_flags,
                     next_model_input_history_state);
+        telemetry.x = latched_edge_fraction;
+        telemetry.y = change_fraction;
+        if (shot_cut) {
+            health_counters.x = min(health_counters.x + 1u, 0xfffffffeu);
+            telemetry_flags.z = 1.0f;
+        }
         // depth_valid_history_cs holds only state 2. State 3 advances the persistent-low endpoint
         // while retaining one supported-return authority.
     }
@@ -399,6 +498,11 @@ void main() {
     SubjectState[0] = s;
     SubjectState[1] = s1;
     SubjectState[2] = s2;
+    SubjectState[3] = telemetry;
+    SubjectState[4] = asfloat(health_counters);
+    SubjectState[5] = telemetry_flags;
+    SubjectState[6] = current_diagnostics;
+    SubjectState[7] = analysis_diagnostics;
 
     for (uint rb = 0; rb < NUM_BINS; rb++) {
         SubjectHist[rb] = 0u;

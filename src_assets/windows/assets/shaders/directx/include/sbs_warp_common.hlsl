@@ -49,6 +49,18 @@ cbuffer Constants : register(b2) {
     float preserve_previous_on_invalid;
 };
 
+#ifdef SBS_SCENE_CAMERA_OVERRIDE
+// Offline whole-clip replay only. Production builds do not define this macro and retain the
+// original b2/SubjectState binding contract. The audited scene plan owns absolute camera values;
+// canonical SubjectState remains byte-for-byte identical to the analysis pass.
+cbuffer SceneCameraConstants : register(b3) {
+    float scene_absolute_pop_strength;
+    float scene_zero_anchor_shift_px;
+    float scene_camera_override_enabled;
+    float scene_camera_reserved;
+};
+#endif
+
 // Map one eye's output UV into the mono source. Letterbox/pillarbox is applied independently in
 // each eye, preventing a packed-frame viewport offset from becoming a false stereo disparity.
 bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {
@@ -83,6 +95,12 @@ Bestv2Params MakeBestv2Params(float4 s0, float4 s1, float4 s2,
     float aspect_scale = Bestv2AspectScale(source_width, source_height, literal_bestv2);
     float adaptive_ratio = adaptive_pop > 0.5f ? max(s1.w, 1.0f) : 1.0f;
     float strength = literal_bestv2 > 0.5f ? 1.0f : pop_strength * adaptive_ratio;
+#ifdef SBS_SCENE_CAMERA_OVERRIDE
+    if (scene_camera_override_enabled > 0.5f) {
+        p.anchor_shift_px = scene_zero_anchor_shift_px;
+        strength = scene_absolute_pop_strength;
+    }
+#endif
     p.output_scale = strength * aspect_scale;
     return p;
 }

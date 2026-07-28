@@ -8,6 +8,7 @@
 
 // standard includes
 #include <algorithm>
+#include <charconv>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -35,6 +36,7 @@
 #include "logging.h"
 #include "network.h"
 #include "nvhttp.h"
+#include "offline_sbs_job.h"
 #include "platform/common.h"
 #include "process.h"
 #include "rtsp.h"
@@ -56,6 +58,55 @@ namespace confighttp {
   using args_t = SimpleWeb::CaseInsensitiveMultimap;
   using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Response>;
   using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Request>;
+
+  bounded_content_length_e validate_bounded_content_length(
+    std::optional<std::string_view> value,
+    const std::size_t maximum
+  ) {
+    if (!value) {
+      return bounded_content_length_e::absent_or_within_limit;
+    }
+
+    auto text = *value;
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) {
+      text.remove_prefix(1);
+    }
+    while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) {
+      text.remove_suffix(1);
+    }
+    if (text.empty()) {
+      return bounded_content_length_e::invalid;
+    }
+
+    std::size_t length = 0;
+    const auto parsed = std::from_chars(
+      text.data(),
+      text.data() + text.size(),
+      length
+    );
+    if (parsed.ec != std::errc {} || parsed.ptr != text.data() + text.size()) {
+      return bounded_content_length_e::invalid;
+    }
+    return length > maximum ?
+             bounded_content_length_e::exceeds_limit :
+             bounded_content_length_e::absent_or_within_limit;
+  }
+
+  std::size_t request_content_length_limit(
+    const std::string_view method,
+    const std::string_view path
+  ) {
+    if (
+      method == "POST" &&
+      (
+        path == "/api/offline-sbs/jobs" ||
+        path.starts_with("/api/offline-sbs/jobs/")
+      )
+    ) {
+      return OFFLINE_SBS_REQUEST_MAX_BYTES;
+    }
+    return WEB_UI_REQUEST_STREAM_MAX_BYTES;
+  }
 
   // Keep the base enum for client operations.
   enum class op_e {
@@ -106,6 +157,21 @@ namespace confighttp {
     headers.emplace("X-Frame-Options", "DENY");
     headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
     response->write(output_tree.dump(), headers);
+  }
+
+  void send_json_response(
+    resp_https_t response,
+    SimpleWeb::StatusCode status,
+    const nlohmann::json &body
+  ) {
+    const SimpleWeb::CaseInsensitiveMultimap headers {
+      {"Content-Type", "application/json"},
+      {"Cache-Control", "no-store"},
+      {"X-Content-Type-Options", "nosniff"},
+      {"X-Frame-Options", "DENY"},
+      {"Content-Security-Policy", "frame-ancestors 'none';"}
+    };
+    response->write(status, body.dump(), headers);
   }
 
   /**
@@ -375,7 +441,65 @@ namespace confighttp {
       return false;
     }
     return true;
+  }
 
+  bool validateOfflineSbsRequestSize(
+    resp_https_t response,
+    req_https_t request
+  ) {
+    const auto content_length = get_single_request_header(
+      request,
+      "Content-Length"
+    );
+    if (!content_length.unique) {
+      bad_request(
+        response,
+        request,
+        "Offline conversion request has duplicate Content-Length headers"
+      );
+      return false;
+    }
+
+    switch (validate_bounded_content_length(
+      content_length.value,
+      OFFLINE_SBS_REQUEST_MAX_BYTES
+    )) {
+      case bounded_content_length_e::invalid:
+        bad_request(
+          response,
+          request,
+          "Offline conversion request has an invalid Content-Length"
+        );
+        return false;
+      case bounded_content_length_e::exceeds_limit:
+        send_json_response(
+          response,
+          SimpleWeb::StatusCode::client_error_payload_too_large,
+          {
+            {"status", false},
+            {"error_code", "invalid_request"},
+            {"error", "Offline conversion request exceeds the 64 KiB limit"},
+          }
+        );
+        return false;
+      case bounded_content_length_e::absent_or_within_limit:
+        break;
+    }
+
+    // This independently bounds chunked requests and catches a mismatched/omitted
+    // Content-Length before copying or parsing the JSON document.
+    if (request->content.size() > OFFLINE_SBS_REQUEST_MAX_BYTES) {
+      send_json_response(
+        response,
+        SimpleWeb::StatusCode::client_error_payload_too_large,
+        {
+          {"status", false},
+          {"error_code", "invalid_request"},
+          {"error", "Offline conversion request exceeds the 64 KiB limit"},
+        }
+      );
+      return false;
+    }
     return true;
   }
 
@@ -505,6 +629,7 @@ namespace confighttp {
     std::string content = file_handler::read_file(WEB_DIR "login.html");
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
+    headers.emplace("Cache-Control", "no-store");
     headers.emplace("X-Frame-Options", "DENY");
     headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
     response->write(content, headers);
@@ -555,6 +680,23 @@ namespace confighttp {
     response->write(content, headers);
   }
 
+  void getOfflineConversionPage(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request, true)) {
+      return;
+    }
+
+    print_req(request);
+    const std::string content =
+      file_handler::read_file(WEB_DIR "offline-conversion.html");
+    const SimpleWeb::CaseInsensitiveMultimap headers {
+      {"Content-Type", "text/html; charset=utf-8"},
+      {"Cache-Control", "no-store"},
+      {"X-Frame-Options", "DENY"},
+      {"Content-Security-Policy", "frame-ancestors 'none';"}
+    };
+    response->write(content, headers);
+  }
+
   /**
    * @brief Get the favicon image.
    * @param response The HTTP response object.
@@ -563,7 +705,7 @@ namespace confighttp {
   void getFaviconImage(resp_https_t response, req_https_t request) {
     print_req(request);
 
-    std::ifstream in(WEB_DIR "images/apollo.ico", std::ios::binary);
+    std::ifstream in(WEB_DIR "images/sunshine3d.ico", std::ios::binary);
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "image/x-icon");
     headers.emplace("X-Frame-Options", "DENY");
@@ -572,17 +714,17 @@ namespace confighttp {
   }
 
   /**
-   * @brief Get the Apollo logo image.
+   * @brief Get the Sunshine 3D logo image.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
    *
    * @todo combine function with getFaviconImage and possibly getNodeModules
    * @todo use mime_types map
    */
-  void getApolloLogoImage(resp_https_t response, req_https_t request) {
+  void getProductLogoImage(resp_https_t response, req_https_t request) {
     print_req(request);
 
-    std::ifstream in(WEB_DIR "images/logo-apollo-45.png", std::ios::binary);
+    std::ifstream in(WEB_DIR "images/logo-sunshine3d-45.png", std::ios::binary);
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "image/png");
     headers.emplace("X-Frame-Options", "DENY");
@@ -1582,6 +1724,284 @@ namespace confighttp {
     }
   }
 
+  SimpleWeb::StatusCode offline_reply_status(
+    const offline_sbs::service_reply_t &reply,
+    SimpleWeb::StatusCode success
+  ) {
+    if (reply.ok) {
+      return success;
+    }
+    switch (reply.code) {
+      case offline_sbs::error_code_e::invalid_request:
+        return SimpleWeb::StatusCode::client_error_bad_request;
+      case offline_sbs::error_code_e::not_found:
+        return SimpleWeb::StatusCode::client_error_not_found;
+      case offline_sbs::error_code_e::busy:
+      case offline_sbs::error_code_e::conflict:
+        return SimpleWeb::StatusCode::client_error_conflict;
+      case offline_sbs::error_code_e::not_initialized:
+      case offline_sbs::error_code_e::unavailable:
+        return SimpleWeb::StatusCode::server_error_service_unavailable;
+      case offline_sbs::error_code_e::io_error:
+        return SimpleWeb::StatusCode::server_error_internal_server_error;
+      case offline_sbs::error_code_e::none:
+        return SimpleWeb::StatusCode::server_error_internal_server_error;
+    }
+    return SimpleWeb::StatusCode::server_error_internal_server_error;
+  }
+
+  void getOfflineSbsCapabilities(
+    resp_https_t response,
+    req_https_t request
+  ) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    const auto capabilities = offline_sbs::capabilities();
+    const bool available = capabilities.value("available", false);
+    send_json_response(
+      response,
+      available ?
+        SimpleWeb::StatusCode::success_ok :
+        SimpleWeb::StatusCode::server_error_service_unavailable,
+      {
+        {"status", available},
+        {"capabilities", capabilities},
+        {"error", available ?
+                    nlohmann::json(nullptr) :
+                    nlohmann::json(capabilities.value(
+                      "error",
+                      "offline SBS job manager is unavailable"
+                    ))},
+      }
+    );
+  }
+
+  void listOfflineSbsJobs(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    const auto capabilities = offline_sbs::capabilities();
+    if (!capabilities.value("available", false)) {
+      send_json_response(
+        response,
+        SimpleWeb::StatusCode::server_error_service_unavailable,
+        {
+          {"status", false},
+          {"jobs", nlohmann::json::array()},
+          {"capabilities", capabilities},
+          {"error", capabilities.value(
+            "error",
+            "offline SBS job manager is unavailable"
+          )},
+        }
+      );
+      return;
+    }
+
+    auto jobs = nlohmann::json::array();
+    for (const auto &job : offline_sbs::list()) {
+      jobs.push_back(job.json());
+    }
+    send_json_response(
+      response,
+      SimpleWeb::StatusCode::success_ok,
+      {
+        {"status", true},
+        {"jobs", std::move(jobs)},
+        {"capabilities", capabilities},
+        {"error", nullptr},
+      }
+    );
+  }
+
+  void createOfflineSbsJob(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) ||
+        !validateContentType(response, request, "application/json") ||
+        !validateOfflineSbsRequestSize(response, request)) {
+      return;
+    }
+    try {
+      std::stringstream content;
+      content << request->content.rdbuf();
+      const auto serialized = content.str();
+      const auto input = nlohmann::json::parse(serialized);
+      if (!input.is_object()) {
+        bad_request(response, request, "Offline conversion request must be an object");
+        return;
+      }
+      static const std::set<std::string> allowed {
+        "input_path",
+        "operation",
+        "output_name",
+        "codec",
+        "scene_cache_max_bytes",
+        "cache_budget_policy",
+      };
+      for (const auto &[name, value] : input.items()) {
+        if (!allowed.contains(name)) {
+          bad_request(
+            response,
+            request,
+            "Unknown offline conversion field: " + name
+          );
+          return;
+        }
+      }
+      if (!input.contains("input_path") || !input["input_path"].is_string()) {
+        bad_request(response, request, "input_path must be a string");
+        return;
+      }
+
+      offline_sbs::create_request_t create;
+      create.input_path =
+        fs::path(input["input_path"].get<std::string>());
+      const auto operation = input.value("operation", std::string {"convert"});
+      if (operation == "convert") {
+        create.operation = offline_sbs::operation_e::convert;
+      } else if (operation == "evaluate") {
+        create.operation = offline_sbs::operation_e::evaluate;
+      } else {
+        bad_request(response, request, "operation must be convert or evaluate");
+        return;
+      }
+      if (input.contains("output_name")) {
+        if (!input["output_name"].is_string()) {
+          bad_request(response, request, "output_name must be a string");
+          return;
+        }
+        create.output_name = input["output_name"].get<std::string>();
+      }
+      if (input.contains("codec")) {
+        if (!input["codec"].is_string()) {
+          bad_request(response, request, "codec must be a string");
+          return;
+        }
+        create.codec = input["codec"].get<std::string>();
+      }
+      if (input.contains("scene_cache_max_bytes")) {
+        if (!input["scene_cache_max_bytes"].is_number_unsigned() &&
+            !input["scene_cache_max_bytes"].is_number_integer()) {
+          bad_request(
+            response,
+            request,
+            "scene_cache_max_bytes must be an integer"
+          );
+          return;
+        }
+        const auto cache_bytes =
+          input["scene_cache_max_bytes"].get<std::int64_t>();
+        if (cache_bytes <= 0) {
+          bad_request(
+            response,
+            request,
+            "scene_cache_max_bytes must be positive"
+          );
+          return;
+        }
+        create.scene_cache_max_bytes =
+          static_cast<std::uint64_t>(cache_bytes);
+      }
+      const auto budget_policy =
+        input.value("cache_budget_policy", std::string {"fail"});
+      if (budget_policy == "fail") {
+        create.cache_budget_policy =
+          offline_sbs::cache_budget_policy_e::fail;
+      } else if (budget_policy == "split") {
+        create.cache_budget_policy =
+          offline_sbs::cache_budget_policy_e::split;
+      } else {
+        bad_request(
+          response,
+          request,
+          "cache_budget_policy must be fail or split"
+        );
+        return;
+      }
+
+      const auto reply = offline_sbs::create(create);
+      send_json_response(
+        response,
+        offline_reply_status(
+          reply,
+          SimpleWeb::StatusCode::success_created
+        ),
+        reply.json()
+      );
+    } catch (const std::exception &error) {
+      bad_request(response, request, error.what());
+    }
+  }
+
+  void getOfflineSbsJob(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    const auto reply = offline_sbs::get(request->path_match[1].str());
+    send_json_response(
+      response,
+      offline_reply_status(reply, SimpleWeb::StatusCode::success_ok),
+      reply.json()
+    );
+  }
+
+  void getOfflineSbsSceneAudit(
+    resp_https_t response,
+    req_https_t request
+  ) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    const auto job_id = request->path_match[1].str();
+    const auto reply = offline_sbs::scene_audit(job_id);
+    if (!reply.ok) {
+      const offline_sbs::service_reply_t status_reply {
+        .ok = false,
+        .code = reply.code,
+        .error = reply.error,
+      };
+      send_json_response(
+        response,
+        offline_reply_status(
+          status_reply,
+          SimpleWeb::StatusCode::success_ok
+        ),
+        reply.json()
+      );
+      return;
+    }
+
+    // The route restricts job_id to hexadecimal UUID characters, so it is safe in
+    // this quoted attachment filename. The body is the complete manager-validated
+    // artifact rather than a client-supplied filesystem path.
+    const SimpleWeb::CaseInsensitiveMultimap headers {
+      {"Content-Type", "application/json"},
+      {"Content-Disposition",
+       "attachment; filename=\"scene-audit-" + job_id + ".json\""},
+      {"Cache-Control", "no-store"},
+      {"X-Content-Type-Options", "nosniff"},
+      {"X-Frame-Options", "DENY"},
+      {"Content-Security-Policy", "frame-ancestors 'none';"}
+    };
+    response->write(
+      SimpleWeb::StatusCode::success_ok,
+      reply.audit.dump(2),
+      headers
+    );
+  }
+
+  void cancelOfflineSbsJob(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    const auto reply = offline_sbs::cancel(request->path_match[1].str());
+    send_json_response(
+      response,
+      offline_reply_status(reply, SimpleWeb::StatusCode::success_accepted),
+      reply.json()
+    );
+  }
+
   /**
    * @brief Start the HTTPS server.
    */
@@ -1611,6 +2031,7 @@ namespace confighttp {
     server.resource["^/welcome/?$"]["GET"] = getWelcomePage;
     server.resource["^/login/?$"]["GET"] = getLoginPage;
     server.resource["^/troubleshooting/?$"]["GET"] = getTroubleshootingPage;
+    server.resource["^/offline-conversion/?$"]["GET"] = getOfflineConversionPage;
     server.resource["^/api/login"]["POST"] = login;
     server.resource["^/api/pin$"]["POST"] = savePin;
     server.resource["^/api/otp$"]["POST"] = getOTP;
@@ -1620,6 +2041,16 @@ namespace confighttp {
     server.resource["^/api/apps/delete$"]["POST"] = deleteApp;
     server.resource["^/api/apps/close$"]["POST"] = closeApp;
     server.resource["^/api/logs$"]["GET"] = getLogs;
+    server.resource["^/api/offline-sbs/capabilities$"]["GET"] =
+      getOfflineSbsCapabilities;
+    server.resource["^/api/offline-sbs/jobs$"]["GET"] = listOfflineSbsJobs;
+    server.resource["^/api/offline-sbs/jobs$"]["POST"] = createOfflineSbsJob;
+    server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)/cancel$"]["POST"] =
+      cancelOfflineSbsJob;
+    server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)/scene-audit$"]["GET"] =
+      getOfflineSbsSceneAudit;
+    server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)$"]["GET"] =
+      getOfflineSbsJob;
     server.resource["^/api/config$"]["GET"] = getConfig;
     server.resource["^/api/config$"]["POST"] = saveConfig;
 #ifdef _WIN32
@@ -1636,10 +2067,20 @@ namespace confighttp {
     server.resource["^/api/clients/unpair$"]["POST"] = unpair;
     server.resource["^/api/clients/disconnect$"]["POST"] = disconnect;
     server.resource["^/api/covers/upload$"]["POST"] = uploadCover;
+    server.resource["^/images/sunshine3d.ico$"]["GET"] = getFaviconImage;
+    server.resource["^/images/logo-sunshine3d-45.png$"]["GET"] = getProductLogoImage;
+    // Preserve the old asset routes for cached pages during in-place upgrades.
     server.resource["^/images/apollo.ico$"]["GET"] = getFaviconImage;
-    server.resource["^/images/logo-apollo-45.png$"]["GET"] = getApolloLogoImage;
+    server.resource["^/images/logo-apollo-45.png$"]["GET"] = getProductLogoImage;
     server.resource["^/assets\\/.+$"]["GET"] = getNodeModules;
     server.config.reuse_address = true;
+    // The finite global ceiling preserves existing app/config/cover payloads. The header-time
+    // selector applies the stricter 64 KiB offline contract before declared-body transfer or
+    // cumulative chunk acceptance, including on a keep-alive connection.
+    server.config.max_request_streambuf_size = WEB_UI_REQUEST_STREAM_MAX_BYTES;
+    server.config.request_content_length_limit = [](const auto &request) {
+      return request_content_length_limit(request.method, request.path);
+    };
     const auto bind_address = net::get_bind_address(address_family);
     if (!bind_address) {
       BOOST_LOG(fatal) << "Configuration UI refused invalid bind_address ["sv << config::sunshine.bind_address << ']';

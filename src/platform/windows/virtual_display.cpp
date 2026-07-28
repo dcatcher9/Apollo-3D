@@ -804,7 +804,7 @@ bool startPingThread(std::function<void()> failCb) {
   if (watchdogOut.Timeout < 10) {
     printf(
       "[SUDOVDA] Warning: watchdog timeout is only %d seconds. "
-      "Install or configure Apollo XR's recommended 30-second timeout to prevent "
+      "Install or configure Sunshine 3D's recommended 30-second timeout to prevent "
       "the retained virtual display from being removed during GPU initialization.\n",
       watchdogOut.Timeout
     );

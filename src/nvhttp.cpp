@@ -54,7 +54,7 @@ using namespace std::literals;
 
 namespace nvhttp {
 
-  static constexpr std::string_view EMPTY_PROPERTY_TREE_ERROR_MSG = "Property tree is empty. Control flow was probably interrupted by an unexpected C++ exception. This is an Apollo bug; the client will report malformed XML (missing root element)."sv;
+  static constexpr std::string_view EMPTY_PROPERTY_TREE_ERROR_MSG = "Property tree is empty. Control flow was probably interrupted by an unexpected C++ exception. This is a Sunshine 3D bug; the client will report malformed XML (missing root element)."sv;
 
   namespace fs = std::filesystem;
   namespace pt = boost::property_tree;
@@ -1534,6 +1534,19 @@ namespace nvhttp {
       return;
     }
 
+    // Reserve live GPU ownership before proc.execute() performs encoder probing or mutates the
+    // virtual display. RTSP transfers this exact lease into its active slot, so offline admission
+    // cannot race into the HTTP-to-RTSP handshake window.
+    if (!launch_session->reserve_live_gpu()) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Offline SBS conversion is currently using the GPU");
+      return;
+    }
+    auto unpublished_gpu_guard = util::fail_guard([&]() {
+      launch_session->release_unpublished_live_gpu();
+    });
+
     auto err = proc::proc.execute(*app_iter, launch_session, true);
     if (err) {
       tree.put("root.<xmlattr>.status_code", err);
@@ -1551,6 +1564,7 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "Another streaming handshake is already pending");
       return;
     }
+    unpublished_gpu_guard.disable();
     platform_launch.commit();
 
     tree.put("root.<xmlattr>.status_code", 200);
@@ -1689,6 +1703,18 @@ namespace nvhttp {
       return;
     }
 
+    // Claim GPU ownership before the retained-session probe/reconfiguration below. The same lease
+    // survives publication and is moved into RTSP's active slot without an admission gap.
+    if (!launch_session->reserve_live_gpu()) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Offline SBS conversion is currently using the GPU");
+      return;
+    }
+    auto unpublished_gpu_guard = util::fail_guard([&]() {
+      launch_session->release_unpublished_live_gpu();
+    });
+
     if (!process_status.virtual_display) {
       // Probe before mutating the retained display contract. A probe failure must leave the warm
       // process exactly as it was so the client can retry or explicitly terminate it.
@@ -1740,6 +1766,7 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "Another streaming handshake is already pending");
       return;
     }
+    unpublished_gpu_guard.disable();
 #ifdef _WIN32
     remote_virtual_display_guard.disable();
 #endif

@@ -6,6 +6,7 @@
 #include <d3d11.h>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <wrl/client.h>
 
@@ -51,6 +52,46 @@ namespace models {
     std::uint64_t completed_frame_id = 0;  ///< Caller-provided identity of that completed result.
     bool inference_enqueued = false;  ///< This call submitted inference for the supplied input frame.
     bool cuda_graph_active = false;  ///< TensorRT enqueue is currently replaying a captured graph.
+  };
+
+  /**
+   * One nonblocking readback of the append-only diagnostic portion of SubjectState.
+   * SubjectState[0..2] remain the production warp contract; diagnostics begin at element 3.
+   */
+  struct depth_telemetry_sample {
+    int depth_width = 0;
+    int depth_height = 0;
+    float adaptive_pop_ratio = 1.0f;
+    float edge_fraction = -1.0f;
+    float change_fraction = 0.0f;
+    float zero_anchor_shift_px = 0.0f;
+    float subject_depth = 0.0f;
+    float valid_depth_fraction = 0.0f;
+    float effective_range_width = 0.0f;
+    // Append-only current-frame evidence. These remain independent of the shot-latched controls
+    // above so offline/live diagnostics can validate a boundary with two-sided evidence.
+    float current_edge_fraction = -1.0f;
+    float current_zero_anchor_candidate_shift_px = -1.0f;
+    float structural_change_fraction = -1.0f;
+    float raw_rgb_change_fraction = -1.0f;
+    std::uint32_t scene_age = 0;
+    std::uint32_t cut_flags = 0;
+    std::uint32_t hard_cut_count = 0;
+    std::uint32_t external_cut_count = 0;
+    std::uint32_t empty_raw_count = 0;
+    std::uint32_t collapsed_raw_count = 0;
+    std::uint64_t sampled_frame_id = 0;
+    bool profile_initialized = false;
+    bool anchor_valid = false;
+    bool range_collapsed = false;
+    bool depth_ready = false;
+    bool hard_cut_pulse = false;
+  };
+
+  struct depth_telemetry_poll_result {
+    std::optional<depth_telemetry_sample> sample;
+    bool copy_scheduled = false;
+    bool failed = false;
   };
 
   class video_depth_estimator {
@@ -104,6 +145,15 @@ namespace models {
          * exact current-frame quality path; production remains bounded matched-frame async.
          */
     estimate_result finish_pending_depth_for_evaluation(input_color_space color_space = input_color_space::srgb);
+
+    /**
+     * Poll completed telemetry copies and optionally enqueue one new copy after the caller has
+     * submitted the critical warp/output work. Never flushes, waits, or maps an unsignaled slot.
+     */
+    depth_telemetry_poll_result poll_depth_telemetry(
+      bool schedule_copy,
+      std::uint64_t sampled_frame_id
+    );
 
   private:
     struct impl;

@@ -6,31 +6,34 @@
 </head>
 
 <body id="app" v-cloak>
-  <main role="main" style="max-width: 1200px; margin: 1em auto">
-    <div class="d-flex justify-content-center">
-      <div class="card p-2">
-        <header>
-          <h1 class="mb-0">
-            <img src="/images/logo-apollo-45.png" height="45" alt="">
-            {{ $t('welcome.greeting') }}
-          </h1>
+  <main class="apollo-auth-page" role="main">
+    <section class="apollo-auth-shell is-compact" aria-labelledby="login-title">
+      <div class="apollo-auth-card">
+        <header class="apollo-auth-brand">
+          <span class="apollo-auth-mark">
+            <img src="/images/logo-sunshine3d-45.png" alt="">
+          </span>
+          <div>
+            <p class="apollo-eyebrow">Sunshine 3D host</p>
+            <h1 id="login-title">{{ $t('welcome.greeting') }}</h1>
+          </div>
         </header>
-        <form @submit.prevent="login" class="mt-4">
-          <div class="mb-2">
+        <form class="apollo-auth-form" @submit.prevent="login">
+          <div>
             <label for="usernameInput" class="form-label">{{ $t('_common.username') }}</label>
             <input type="text" class="form-control" id="usernameInput" autocomplete="username"
               v-model="passwordData.username" required autofocus/>
           </div>
-          <div class="mb-2">
+          <div>
             <label for="passwordInput" class="form-label">{{ $t('_common.password') }}</label>
-            <input type="password" class="form-control" id="passwordInput" autocomplete="password"
+            <input type="password" class="form-control" id="passwordInput" autocomplete="current-password"
               v-model="passwordData.password" required />
           </div>
-          <div class="mb-3 form-check">
+          <div class="form-check">
             <label for="rememberUsername" class="form-check-label">Remember username</label>
             <input type="checkbox" class="form-check-input" id="rememberUsername" v-model="rememberUsername"/>
           </div>
-          <button type="submit" class="btn btn-primary w-100 mb-2" v-bind:disabled="loading">
+          <button type="submit" class="btn btn-apollo-primary w-100" v-bind:disabled="loading">
             {{ $t('welcome.login') }}
           </button>
           <div class="alert alert-danger" v-if="error"><b>{{ $t('_common.error') }}</b> {{error}}</div>
@@ -39,7 +42,7 @@
           </div>
         </form>
       </div>
-    </div>
+    </section>
   </main>
 </body>
 
@@ -56,7 +59,6 @@
       const success = ref(false);
       const loading = ref(false);
       const rememberUsername = ref(false);
-
       const data = {
         error,
         success,
@@ -68,7 +70,7 @@
         }
       }
 
-      // Older Apollo XR versions could store a plaintext password in localStorage. Migrate only
+      // Older Sunshine 3D versions could store a plaintext password in localStorage. Migrate only
       // the username and remove the legacy value as soon as this page is loaded.
       const legacyLogin = localStorage.getItem('login')
       if (legacyLogin) {

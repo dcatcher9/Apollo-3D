@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -645,6 +646,7 @@ namespace platf::dxgi {
                 if (matched_render_slot) {
                   matched_render_slot->pending = false;
                   render_input_srv = matched_render_slot->srv.get();
+                  sbs_telemetry_last_sampled_frame_id = est.completed_frame_id;
                   if (diagnostics_enabled) {
                     const double age_ms = std::chrono::duration<double, std::milli>(
                                             std::chrono::steady_clock::now() - matched_render_slot->captured_at
@@ -778,6 +780,10 @@ namespace platf::dxgi {
             draw(final_sbs_srv, out_Y_or_YUV_viewport, out_UV_viewport, input_is_linear);
           }
           end_sbs_gpu_timer(gpu_timer);
+          // Telemetry is deliberately submitted after the production warp/output work. The
+          // estimator uses a nonblocking staging/query ring, so this can neither flush nor wait
+          // on the D3D11 queue and subscription-off schedules no diagnostic copy.
+          poll_sbs_telemetry_after_output();
 
           // Debug frame dump (offline artifact inspection): on the client "Dump 3D" button or a
           // "dump.trigger" file, save this frame's 2D source, depth map and SBS result. See
@@ -1020,6 +1026,165 @@ namespace platf::dxgi {
       sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);
       sbs_params[7] = 1.0f;
       sbs_reprojection_completed_cbuffer = make_buffer(device.get(), sbs_params);
+    }
+
+    std::uint32_t next_sbs_telemetry_sequence() {
+      if (++sbs_telemetry_sequence == 0) {
+        ++sbs_telemetry_sequence;
+      }
+      return sbs_telemetry_sequence;
+    }
+
+    ::video::sbs_telemetry_snapshot_t base_sbs_telemetry_snapshot(
+      ::video::sbs_telemetry_sample_status_e status
+    ) {
+      ::video::sbs_telemetry_snapshot_t snapshot;
+      snapshot.status = status;
+      snapshot.generation = sbs_telemetry_generation;
+      snapshot.sequence = next_sbs_telemetry_sequence();
+      snapshot.valid_fields = ::video::sbs_telemetry_valid_field::config;
+      snapshot.zero_plane_mode = sbs_config.zero_plane == "subject" ? 1 :
+                                 sbs_config.zero_plane == "background" ? 3 :
+                                                                          2;
+      snapshot.pop_floor = static_cast<float>(sbs_config.pop_strength);
+      snapshot.pop_ceiling = static_cast<float>(
+        std::max(sbs_config.adaptive_pop_max, sbs_config.pop_strength)
+      );
+      snapshot.effective_pop = snapshot.pop_floor;
+      if (sbs_config.adaptive_pop) {
+        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::adaptive_enabled;
+      }
+      return snapshot;
+    }
+
+    void publish_sbs_telemetry_failure() {
+      if (sbs_telemetry_event) {
+        sbs_telemetry_event->raise(base_sbs_telemetry_snapshot(
+          ::video::sbs_telemetry_sample_status_e::failed
+        ));
+      }
+    }
+
+    void publish_sbs_telemetry_sample(const models::depth_telemetry_sample &sample) {
+      if (!sbs_telemetry_event) {
+        return;
+      }
+
+      auto snapshot = base_sbs_telemetry_snapshot(
+        ::video::sbs_telemetry_sample_status_e::ready
+      );
+      snapshot.valid_fields =
+        ::video::sbs_telemetry_valid_field::config |
+        ::video::sbs_telemetry_valid_field::effective_pop |
+        ::video::sbs_telemetry_valid_field::change |
+        ::video::sbs_telemetry_valid_field::valid_fraction |
+        ::video::sbs_telemetry_valid_field::range |
+        ::video::sbs_telemetry_valid_field::cuts |
+        ::video::sbs_telemetry_valid_field::faults;
+      snapshot.depth_width = static_cast<std::uint16_t>(std::clamp(
+        sample.depth_width,
+        0,
+        static_cast<int>(std::numeric_limits<std::uint16_t>::max())
+      ));
+      snapshot.depth_height = static_cast<std::uint16_t>(std::clamp(
+        sample.depth_height,
+        0,
+        static_cast<int>(std::numeric_limits<std::uint16_t>::max())
+      ));
+      const float max_ratio = snapshot.pop_floor > 0.0f ?
+                                snapshot.pop_ceiling / snapshot.pop_floor :
+                                1.0f;
+      const float effective_ratio = sbs_config.adaptive_pop ?
+                                      std::clamp(sample.adaptive_pop_ratio, 1.0f, max_ratio) :
+                                      1.0f;
+      snapshot.effective_pop = snapshot.pop_floor * effective_ratio;
+      snapshot.edge_fraction = sample.edge_fraction;
+      snapshot.change_fraction = sample.change_fraction;
+      snapshot.zero_anchor_shift_px = sample.zero_anchor_shift_px;
+      snapshot.subject_depth = sample.subject_depth;
+      snapshot.valid_depth_fraction = sample.valid_depth_fraction;
+      snapshot.effective_range_width = sample.effective_range_width;
+      snapshot.scene_age = sample.scene_age;
+      snapshot.hard_cut_count = sample.hard_cut_count;
+      snapshot.external_cut_count = sample.external_cut_count;
+      snapshot.empty_raw_count = sample.empty_raw_count;
+      snapshot.collapsed_raw_count = sample.collapsed_raw_count;
+      snapshot.sampled_frame_id = static_cast<std::uint32_t>(sample.sampled_frame_id);
+
+      if (sample.profile_initialized) {
+        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::profile_initialized;
+        snapshot.valid_fields |=
+          ::video::sbs_telemetry_valid_field::subject |
+          ::video::sbs_telemetry_valid_field::scene;
+      }
+      if (sample.edge_fraction >= 0.0f) {
+        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::pop_classified;
+        snapshot.valid_fields |= ::video::sbs_telemetry_valid_field::edge;
+      }
+      if (sample.anchor_valid) {
+        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::anchor_valid;
+        snapshot.valid_fields |= ::video::sbs_telemetry_valid_field::anchor;
+      }
+      constexpr std::uint32_t cut_flag_geometry_armed = 1u;
+      constexpr std::uint32_t cut_flag_appearance_armed = 2u;
+      if ((sample.cut_flags & cut_flag_geometry_armed) != 0) {
+        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::geometry_armed;
+      }
+      if ((sample.cut_flags & cut_flag_appearance_armed) != 0) {
+        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::appearance_armed;
+      }
+      if (sample.range_collapsed) {
+        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::range_collapsed;
+      }
+      if (sample.depth_ready) {
+        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::depth_ready;
+      }
+      const bool unseen_cut =
+        sbs_telemetry_has_sample &&
+        sample.hard_cut_count != sbs_telemetry_last_hard_cut_count;
+      if (sample.hard_cut_pulse || unseen_cut) {
+        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::hard_cut_pulse;
+      }
+      sbs_telemetry_last_hard_cut_count = sample.hard_cut_count;
+      sbs_telemetry_has_sample = true;
+      sbs_telemetry_event->raise(std::move(snapshot));
+    }
+
+    void poll_sbs_telemetry_after_output() {
+      if (!depth_estimator || !sbs_telemetry_subscription || !sbs_telemetry_event) {
+        return;
+      }
+
+      const bool enabled = sbs_telemetry_subscription->enabled();
+      const auto now = std::chrono::steady_clock::now();
+      const auto interval = std::chrono::milliseconds(
+        std::max<std::uint16_t>(sbs_telemetry_subscription->interval_ms(), 1)
+      );
+      const bool due =
+        enabled &&
+        (sbs_telemetry_last_copy.time_since_epoch().count() == 0 ||
+         now - sbs_telemetry_last_copy >= interval);
+      auto result = depth_estimator->poll_depth_telemetry(
+        due,
+        sbs_telemetry_last_sampled_frame_id
+      );
+      // A failed lazy allocation/query creation is also an attempt. Advancing the cadence here
+      // prevents a permanent device error from publishing a fresh failed sequence every render
+      // frame, while still retrying (and therefore recovering) at the requested interval.
+      if (result.copy_scheduled || (due && result.failed)) {
+        sbs_telemetry_last_copy = now;
+      }
+      // Unsubscribe immediately stops publication and new copies. Polling with schedule_copy=false
+      // only retires a copy that was already in flight; it never creates additional GPU work.
+      if (!enabled) {
+        return;
+      }
+      if (result.failed) {
+        publish_sbs_telemetry_failure();
+      }
+      if (result.sample) {
+        publish_sbs_telemetry_sample(*result.sample);
+      }
     }
 
     struct sbs_gpu_timer_slot_t {
@@ -1338,6 +1503,9 @@ namespace platf::dxgi {
       const config::video_t::sbs_t &profile = {},
       safe::mail_raw_t::event_t<int> depth_status_event = {},
       std::shared_ptr<safe::event_t<bool>> depth_pipeline_ready_event = {},
+      safe::mail_raw_t::event_t<::video::sbs_telemetry_snapshot_t> telemetry_event = {},
+      std::shared_ptr<::video::sbs_telemetry_subscription_t> telemetry_subscription = {},
+      std::uint32_t telemetry_generation = 0,
       bool rgb_only = false
     ) {
       if (frame_texture) {
@@ -1353,6 +1521,14 @@ namespace platf::dxgi {
       diagnostics_enabled = config::sunshine.diagnostics_enabled;
       sbs_depth_status_event = std::move(depth_status_event);
       sbs_depth_pipeline_ready_event = std::move(depth_pipeline_ready_event);
+      sbs_telemetry_event = std::move(telemetry_event);
+      sbs_telemetry_subscription = std::move(telemetry_subscription);
+      sbs_telemetry_generation = telemetry_generation;
+      sbs_telemetry_sequence = 0;
+      sbs_telemetry_last_sampled_frame_id = 0;
+      sbs_telemetry_last_hard_cut_count = 0;
+      sbs_telemetry_has_sample = false;
+      sbs_telemetry_last_copy = {};
       matched_frame_slots = {};
       sbs_frame_sequence = 0;
       matched_output_valid = false;
@@ -1538,11 +1714,11 @@ namespace platf::dxgi {
         }
 
         if (sbs_config.adaptive_pop) {
-          BOOST_LOG(info) << "Host SBS warp: Apollo occlusion-aware probe, scene-latched pop "
+          BOOST_LOG(info) << "Host SBS warp: Sunshine 3D occlusion-aware probe, scene-latched pop "
                           << sbs_config.pop_strength << "-"
                           << std::max(sbs_config.adaptive_pop_max, sbs_config.pop_strength) << ".";
         } else {
-          BOOST_LOG(info) << "Host SBS warp: Apollo occlusion-aware probe, fixed pop "
+          BOOST_LOG(info) << "Host SBS warp: Sunshine 3D occlusion-aware probe, fixed pop "
                           << sbs_config.pop_strength << ".";
         }
 
@@ -1652,6 +1828,9 @@ namespace platf::dxgi {
         profile,
         {},
         {},
+        {},
+        {},
+        0,
         true
       );
     }
@@ -1897,6 +2076,14 @@ namespace platf::dxgi {
     bool diagnostics_enabled = false;  ///< Cached once per device; the disabled hot path only branches.
     safe::mail_raw_t::event_t<int> sbs_depth_status_event;
     std::shared_ptr<safe::event_t<bool>> sbs_depth_pipeline_ready_event;
+    safe::mail_raw_t::event_t<::video::sbs_telemetry_snapshot_t> sbs_telemetry_event;
+    std::shared_ptr<::video::sbs_telemetry_subscription_t> sbs_telemetry_subscription;
+    std::uint32_t sbs_telemetry_generation = 0;
+    std::uint32_t sbs_telemetry_sequence = 0;
+    std::uint64_t sbs_telemetry_last_sampled_frame_id = 0;
+    std::uint32_t sbs_telemetry_last_hard_cut_count = 0;
+    bool sbs_telemetry_has_sample = false;
+    std::chrono::steady_clock::time_point sbs_telemetry_last_copy {};
     vs_t sbs_reprojection_vs;
     ps_t sbs_reprojection_ps;
     cs_t sbs_depth_prefilter_cs;
@@ -2742,7 +2929,7 @@ namespace platf::dxgi {
       HWND created_window = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         local_presenter_window_class,
-        L"Apollo Local SBS AI",
+        L"Sunshine 3D Local SBS AI",
         WS_POPUP,
         target_rect.left,
         target_rect.top,
@@ -3237,10 +3424,13 @@ namespace platf::dxgi {
                client_config.width,
                client_config.height,
                client_config.sbs_mode,
-               client_config.sbs_config,
-               client_config.sbs_depth_status_event,
-               client_config.sbs_depth_pipeline_ready_event
-             ) == 0;
+                client_config.sbs_config,
+                client_config.sbs_depth_status_event,
+                client_config.sbs_depth_pipeline_ready_event,
+                client_config.sbs_telemetry_event,
+                client_config.sbs_telemetry_subscription,
+                client_config.sbs_telemetry_generation
+              ) == 0;
     }
 
     int convert(platf::img_t &img_base) override {
@@ -4010,7 +4200,7 @@ namespace platf::dxgi {
     }
 
     if (adapter_desc.VendorId != 0x10de) {
-      BOOST_LOG(error) << "Apollo requires an NVIDIA display adapter; detected vendor ID "
+      BOOST_LOG(error) << "Sunshine 3D requires an NVIDIA display adapter; detected vendor ID "
                        << util::hex(adapter_desc.VendorId).to_string_view();
       return false;
     }

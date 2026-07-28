@@ -15,6 +15,19 @@ set_target_properties(sunshine PROPERTIES CXX_STANDARD 23
         VERSION ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR})
 
+if(SUNSHINE_OFFLINE_FFMPEG)
+    add_custom_command(TARGET sunshine POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E make_directory
+                    "$<TARGET_FILE_DIR:sunshine>/tools"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${SUNSHINE_OFFLINE_FFMPEG}"
+                    "$<TARGET_FILE_DIR:sunshine>/tools/ffmpeg.exe"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${SUNSHINE_OFFLINE_FFPROBE}"
+                    "$<TARGET_FILE_DIR:sunshine>/tools/ffprobe.exe"
+            COMMENT "Copying approved offline-conversion media tools")
+endif()
+
 target_compile_options(sunshine PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
 
 #WebUI build

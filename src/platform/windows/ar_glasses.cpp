@@ -3,6 +3,7 @@
 #include "display.h"
 #include "misc.h"
 #include "src/config.h"
+#include "src/gpu_workload_arbiter.h"
 #include "src/logging.h"
 #include "src/process.h"
 #include "src/system_tray.h"
@@ -1132,7 +1133,7 @@ namespace ar_glasses {
           if (persist_devices_locked()) {
             device_persistence_dirty = false;
             device_persistence_retry_after = {};
-            BOOST_LOG(info) << "Removed Apollo's internal virtual desktop from the AR display decision list."sv;
+            BOOST_LOG(info) << "Removed Sunshine 3D's internal virtual desktop from the AR display decision list."sv;
           } else {
             device_persistence_retry_after = std::chrono::steady_clock::now() + 2s;
           }
@@ -2438,7 +2439,7 @@ namespace ar_glasses {
         // Apollo confirmed. A user or Windows change owns this layout; retire the stale evidence,
         // but do not start another session until that retirement is durable.
         BOOST_LOG(warning) << "Retiring stale local-AR topology recovery state because the current "sv
-                              "display layout no longer matches an Apollo-owned rectangle."sv;
+                              "display layout no longer matches a Sunshine 3D-owned rectangle."sv;
         if (!clear_topology_recovery(recovery->device_path)) {
           BOOST_LOG(error) << "Could not durably retire stale AR topology recovery state."sv;
           return false;
@@ -2619,7 +2620,9 @@ namespace ar_glasses {
 
     class local_session_t {
     public:
-      local_session_t() = default;
+      explicit local_session_t(gpu_workload::lease_t live_gpu_lease):
+          live_gpu_lease_(std::move(live_gpu_lease)) {
+      }
 
       void initialize(const target_state_t &target, std::stop_token controller_stop_token) {
         original_target_rect_ = target.rect;
@@ -2641,7 +2644,7 @@ namespace ar_glasses {
         }
         if (target.hdr.known && !target.hdr.supported) {
           BOOST_LOG(info) << "The AR display currently advertises SDR only. If the glasses have an "sv
-                          << "internal HDR10 mode, enable it in the glasses menu; Apollo will detect "sv
+                          << "internal HDR10 mode, enable it in the glasses menu; Sunshine 3D will detect "sv
                           << "the updated capability."sv;
         }
 
@@ -3188,7 +3191,7 @@ namespace ar_glasses {
           if (!recovery_complete) {
             if (pre_removal_topology && !pre_removal_topology->apollo_owned) {
               BOOST_LOG(warning) << "Could not reapply the pre-removal user-owned AR rectangle after "sv
-                                    "SudoVDA retirement; no Apollo ownership is claimed for that position."sv;
+                                    "SudoVDA retirement; no Sunshine 3D ownership is claimed for that position."sv;
             } else {
               BOOST_LOG(warning) << "Could not complete local-AR topology recovery during teardown; "sv
                                     "the durable record is retained for the next stable observation."sv;
@@ -3369,6 +3372,10 @@ namespace ar_glasses {
       }
 
       GUID display_guid_ {};
+      // Hold the live-workload reservation across presenter restarts and topology
+      // transitions. Otherwise an offline TensorRT job can be admitted while the
+      // local AR presenter is paused for a mode change.
+      gpu_workload::lease_t live_gpu_lease_;
       SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT virtual_display_identity_ {};
       RECT original_target_rect_ {};
       LUID target_adapter_id_ {};
@@ -3478,6 +3485,14 @@ namespace ar_glasses {
         std::stop_callback controller_stop_callback(stop_token, [&construction_stop]() {
           construction_stop.request_stop();
         });
+        auto live_gpu_lease =
+          gpu_workload::try_acquire(gpu_workload::kind_e::live_stream);
+        if (!live_gpu_lease) {
+          BOOST_LOG(info)
+            << "Local AR presentation is waiting for the active offline SBS GPU job."sv;
+          schedule_failure_retry();
+          return;
+        }
         const auto handoff = proc::proc.prepare_local_ar_handoff(construction_stop);
         if (handoff != proc::local_ar_handoff_e::ready) {
           if (!deferred_for_remote_) {
@@ -3502,7 +3517,8 @@ namespace ar_glasses {
           return;
         }
 
-        auto candidate = std::make_unique<local_session_t>();
+        auto candidate =
+          std::make_unique<local_session_t>(std::move(*live_gpu_lease));
         candidate->initialize(target, construction_stop.get_token());
         bool rejected_for_remote = false;
         {

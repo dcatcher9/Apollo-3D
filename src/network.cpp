@@ -234,6 +234,6 @@ namespace net {
       }
     }
 
-    return !instancename.empty() ? instancename : PROJECT_NAME;
+    return !instancename.empty() ? instancename : PROJECT_DISPLAY_NAME;
   }
 }  // namespace net

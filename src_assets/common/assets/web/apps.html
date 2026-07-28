@@ -12,45 +12,45 @@
         .library-header {
           align-items: flex-end;
           display: flex;
-          gap: 1.5rem;
+          gap: var(--apollo-space-xl);
           justify-content: space-between;
-          margin: 2.25rem 0 1.5rem;
+          margin: calc(var(--apollo-space-xl) * 1.5) 0 var(--apollo-space-xl);
         }
 
         .library-eyebrow {
-          color: var(--bs-primary);
-          font-size: .75rem;
-          font-weight: 700;
+          color: var(--apollo-accent);
+          font-size: var(--apollo-text-caption);
+          font-weight: 750;
           letter-spacing: .12em;
-          margin-bottom: .45rem;
+          margin-bottom: var(--apollo-space-sm);
           text-transform: uppercase;
         }
 
         .library-title {
-          font-size: clamp(2rem, 4vw, 3rem);
-          font-weight: 700;
-          letter-spacing: -.04em;
-          line-height: 1;
+          font-size: var(--apollo-text-display);
+          font-weight: 750;
+          letter-spacing: -.025em;
+          line-height: 1.1;
           margin: 0;
         }
 
         .library-subtitle {
-          color: var(--bs-secondary-color);
-          margin: .75rem 0 0;
+          color: var(--apollo-text-secondary);
+          margin: var(--apollo-space-md) 0 0;
           max-width: 44rem;
         }
 
         .library-toolbar {
           align-items: center;
-          background: color-mix(in srgb, var(--bs-body-bg) 92%, var(--bs-primary) 8%);
-          border: 1px solid var(--bs-border-color-translucent);
-          border-radius: 1rem;
+          background: color-mix(in srgb, var(--apollo-surface-raised) 94%, transparent);
+          border: 1px solid var(--apollo-border-strong);
+          border-radius: var(--apollo-radius-card);
           display: flex;
-          gap: .75rem;
-          margin-bottom: 1.5rem;
-          padding: .75rem;
+          gap: var(--apollo-space-md);
+          margin-bottom: var(--apollo-space-xl);
+          padding: var(--apollo-space-md);
           position: sticky;
-          top: .75rem;
+          top: var(--apollo-space-md);
           z-index: 20;
         }
 
@@ -61,7 +61,7 @@
         }
 
         .library-search > i {
-          color: var(--bs-secondary-color);
+          color: var(--apollo-text-secondary);
           left: .95rem;
           pointer-events: none;
           position: absolute;
@@ -70,33 +70,33 @@
         }
 
         .library-search .form-control {
-          background: var(--bs-body-bg);
+          background: var(--apollo-surface);
           border-color: transparent;
-          border-radius: .75rem;
+          border-radius: var(--apollo-radius-control);
           padding-left: 2.65rem;
         }
 
         .library-search .form-control:focus {
-          border-color: var(--bs-primary);
-          box-shadow: 0 0 0 .2rem color-mix(in srgb, var(--bs-primary) 20%, transparent);
+          border-color: var(--apollo-accent);
+          box-shadow: 0 0 0 var(--apollo-space-xs) var(--apollo-focus);
         }
 
         .library-count {
-          color: var(--bs-secondary-color);
-          font-size: .875rem;
+          color: var(--apollo-text-secondary);
+          font-size: var(--apollo-text-caption);
           white-space: nowrap;
         }
 
         .library-grid {
           display: grid;
-          gap: 1rem;
+          gap: var(--apollo-space-lg);
           grid-template-columns: repeat(auto-fill, minmax(205px, 1fr));
         }
 
         .app-card {
-          background: var(--bs-tertiary-bg);
-          border: 1px solid var(--bs-border-color-translucent);
-          border-radius: 1rem;
+          background: var(--apollo-surface);
+          border: 1px solid var(--apollo-border);
+          border-radius: var(--apollo-radius-card);
           display: flex;
           flex-direction: column;
           min-width: 0;
@@ -106,19 +106,19 @@
         }
 
         .app-card:hover {
-          border-color: color-mix(in srgb, var(--bs-primary) 45%, var(--bs-border-color));
-          box-shadow: 0 .75rem 2rem rgba(0, 0, 0, .12);
+          border-color: var(--apollo-accent-deep);
+          box-shadow: var(--apollo-shadow);
           transform: translateY(-2px);
         }
 
         .app-card.is-active {
-          border-color: var(--bs-success);
-          box-shadow: 0 0 0 1px var(--bs-success);
+          border-color: var(--apollo-accent);
+          box-shadow: 0 0 0 1px var(--apollo-accent);
         }
 
         .app-card.dragover {
-          border-color: var(--bs-primary);
-          box-shadow: 0 0 0 2px var(--bs-primary);
+          border-color: var(--apollo-accent-bright);
+          box-shadow: 0 0 0 2px var(--apollo-accent);
           transform: translateY(-4px) scale(1.01);
         }
 
@@ -174,24 +174,24 @@
           backdrop-filter: blur(10px);
           background: rgba(12, 16, 19, .75);
           border: 1px solid rgba(255, 255, 255, .12);
-          border-radius: 999px;
+          border-radius: var(--apollo-radius-pill);
           color: #fff;
           display: inline-flex;
-          font-size: .7rem;
+          font-size: var(--apollo-text-caption);
           font-weight: 650;
           gap: .35rem;
           padding: .35rem .55rem;
         }
 
         .app-status-badge.running i {
-          color: var(--bs-success);
+          color: var(--apollo-status-ok);
         }
 
         .app-card-grip {
           align-items: center;
           background: rgba(12, 16, 19, .72);
           border: 1px solid rgba(255, 255, 255, .12);
-          border-radius: .6rem;
+          border-radius: var(--apollo-radius-control);
           color: rgba(255, 255, 255, .8);
           cursor: grab;
           display: flex;
@@ -212,12 +212,12 @@
           display: flex;
           flex: 1;
           flex-direction: column;
-          gap: .75rem;
-          padding: 1rem;
+          gap: var(--apollo-space-md);
+          padding: var(--apollo-space-lg);
         }
 
         .app-card-title {
-          font-size: 1rem;
+          font-size: var(--apollo-text-body);
           font-weight: 650;
           line-height: 1.3;
           margin: 0;
@@ -227,8 +227,8 @@
         }
 
         .app-card-meta {
-          color: var(--bs-secondary-color);
-          font-size: .78rem;
+          color: var(--apollo-text-secondary);
+          font-size: var(--apollo-text-caption);
           min-height: 1.2rem;
           overflow: hidden;
           text-overflow: ellipsis;
@@ -238,7 +238,7 @@
         .app-actions {
           align-items: stretch;
           display: flex;
-          gap: .5rem;
+          gap: var(--apollo-space-sm);
           margin-top: auto;
         }
 
@@ -250,42 +250,42 @@
         .add-app-card {
           align-items: center;
           background: transparent;
-          border: 1px dashed color-mix(in srgb, var(--bs-primary) 60%, var(--bs-border-color));
-          border-radius: 1rem;
-          color: var(--bs-secondary-color);
+          border: 1px dashed var(--apollo-accent-deep);
+          border-radius: var(--apollo-radius-card);
+          color: var(--apollo-text-secondary);
           display: flex;
           flex-direction: column;
           justify-content: center;
           min-height: 21rem;
-          padding: 2rem;
+          padding: calc(var(--apollo-space-xl) * 1.5);
           transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
         }
 
         .add-app-card:hover,
         .add-app-card:focus-visible {
-          background: color-mix(in srgb, var(--bs-primary) 8%, transparent);
-          border-color: var(--bs-primary);
-          color: var(--bs-emphasis-color);
+          background: color-mix(in srgb, var(--apollo-accent-deep) 28%, transparent);
+          border-color: var(--apollo-accent);
+          color: var(--apollo-text-primary);
         }
 
         .add-app-icon {
           align-items: center;
-          background: color-mix(in srgb, var(--bs-primary) 14%, transparent);
-          border-radius: 999px;
-          color: var(--bs-primary);
+          background: color-mix(in srgb, var(--apollo-accent-deep) 48%, transparent);
+          border-radius: var(--apollo-radius-pill);
+          color: var(--apollo-accent);
           display: flex;
-          font-size: 1.15rem;
+          font-size: var(--apollo-text-emphasis);
           height: 3.25rem;
           justify-content: center;
-          margin-bottom: .9rem;
+          margin-bottom: var(--apollo-space-md);
           width: 3.25rem;
         }
 
         .library-empty {
           align-items: center;
-          border: 1px dashed var(--bs-border-color);
-          border-radius: 1rem;
-          color: var(--bs-secondary-color);
+          border: 1px dashed var(--apollo-border-strong);
+          border-radius: var(--apollo-radius-card);
+          color: var(--apollo-text-secondary);
           display: flex;
           flex-direction: column;
           grid-column: 1 / -1;
@@ -296,9 +296,9 @@
         }
 
         .library-drop-tail {
-          border: 2px dashed var(--bs-primary);
-          border-radius: 1rem;
-          color: var(--bs-primary);
+          border: 2px dashed var(--apollo-accent);
+          border-radius: var(--apollo-radius-card);
+          color: var(--apollo-accent);
           display: grid;
           min-height: 21rem;
           place-content: center;
@@ -307,22 +307,22 @@
         .editor-header {
           align-items: center;
           display: flex;
-          gap: 1rem;
+          gap: var(--apollo-space-lg);
           justify-content: space-between;
-          margin: 2rem 0 1.25rem;
+          margin: calc(var(--apollo-space-xl) * 1.5) 0 var(--apollo-space-lg);
         }
 
         .editor-title-wrap {
           align-items: center;
           display: flex;
-          gap: .85rem;
+          gap: var(--apollo-space-md);
           min-width: 0;
         }
 
         .editor-title {
-          font-size: clamp(1.65rem, 3vw, 2.25rem);
-          font-weight: 700;
-          letter-spacing: -.03em;
+          font-size: var(--apollo-text-title);
+          font-weight: 750;
+          letter-spacing: -.025em;
           margin: 0;
           overflow: hidden;
           text-overflow: ellipsis;
@@ -330,18 +330,18 @@
         }
 
         .editor-card {
-          background: var(--bs-tertiary-bg);
-          border: 1px solid var(--bs-border-color-translucent);
-          border-radius: 1rem;
-          margin-bottom: 1rem;
+          background: var(--apollo-surface);
+          border: 1px solid var(--apollo-border);
+          border-radius: var(--apollo-radius-card);
+          margin-bottom: var(--apollo-space-lg);
           overflow: visible;
           padding: clamp(1rem, 3vw, 1.75rem);
         }
 
         .editor-section-title {
-          font-size: 1.1rem;
+          font-size: var(--apollo-text-emphasis);
           font-weight: 650;
-          margin-bottom: 1.25rem;
+          margin-bottom: var(--apollo-space-lg);
         }
 
         .editor-cover-preview {
@@ -350,8 +350,8 @@
           background:
             radial-gradient(circle at 80% 15%, color-mix(in srgb, var(--edit-accent) 55%, transparent), transparent 34%),
             linear-gradient(145deg, color-mix(in srgb, var(--edit-accent) 28%, #111 72%), #111 68%);
-          border: 1px solid var(--bs-border-color-translucent);
-          border-radius: .9rem;
+          border: 1px solid var(--apollo-border);
+          border-radius: var(--apollo-radius-card);
           color: #fff;
           display: flex;
           justify-content: center;
@@ -410,10 +410,10 @@
         }
 
         .advanced-panel {
-          background: var(--bs-tertiary-bg);
-          border: 1px solid var(--bs-border-color-translucent);
-          border-radius: 1rem;
-          margin-bottom: 1rem;
+          background: var(--apollo-surface);
+          border: 1px solid var(--apollo-border);
+          border-radius: var(--apollo-radius-card);
+          margin-bottom: var(--apollo-space-lg);
           overflow: hidden;
         }
 
@@ -421,9 +421,9 @@
           align-items: center;
           cursor: pointer;
           display: flex;
-          gap: .8rem;
+          gap: var(--apollo-space-md);
           list-style: none;
-          padding: 1.15rem 1.35rem;
+          padding: var(--apollo-space-lg);
           user-select: none;
         }
 
@@ -434,7 +434,7 @@
         .advanced-panel > summary::after {
           content: "\f078";
           font-family: "Font Awesome 6 Free";
-          font-size: .75rem;
+          font-size: var(--apollo-text-caption);
           font-weight: 900;
           margin-left: auto;
           transition: transform 160ms ease;
@@ -446,9 +446,9 @@
 
         .advanced-summary-icon {
           align-items: center;
-          background: color-mix(in srgb, var(--bs-primary) 12%, transparent);
-          border-radius: .7rem;
-          color: var(--bs-primary);
+          background: color-mix(in srgb, var(--apollo-accent-deep) 48%, transparent);
+          border-radius: var(--apollo-radius-control);
+          color: var(--apollo-accent);
           display: flex;
           height: 2.4rem;
           justify-content: center;
@@ -456,29 +456,29 @@
         }
 
         .advanced-content {
-          border-top: 1px solid var(--bs-border-color-translucent);
+          border-top: 1px solid var(--apollo-border);
           padding: clamp(1rem, 3vw, 1.75rem);
         }
 
         .nested-details {
-          border: 1px solid var(--bs-border-color-translucent);
-          border-radius: .75rem;
-          margin-top: 1.5rem;
+          border: 1px solid var(--apollo-border);
+          border-radius: var(--apollo-radius-control);
+          margin-top: var(--apollo-space-xl);
         }
 
         .nested-details > summary {
           cursor: pointer;
           font-weight: 600;
-          padding: 1rem;
+          padding: var(--apollo-space-lg);
         }
 
         .nested-details-content {
-          border-top: 1px solid var(--bs-border-color-translucent);
-          padding: 1rem;
+          border-top: 1px solid var(--apollo-border);
+          padding: var(--apollo-space-lg);
         }
 
         .env-table {
-          font-size: .86rem;
+          font-size: var(--apollo-text-caption);
           margin: 0;
           width: 100%;
         }
@@ -492,16 +492,16 @@
         .editor-actions {
           align-items: center;
           backdrop-filter: blur(14px);
-          background: color-mix(in srgb, var(--bs-body-bg) 88%, transparent);
-          border: 1px solid var(--bs-border-color-translucent);
-          border-radius: 1rem;
-          bottom: 1rem;
+          background: color-mix(in srgb, var(--apollo-surface-raised) 92%, transparent);
+          border: 1px solid var(--apollo-border-strong);
+          border-radius: var(--apollo-radius-card);
+          bottom: var(--apollo-space-lg);
           box-shadow: 0 .5rem 2rem rgba(0, 0, 0, .15);
           display: flex;
-          gap: .65rem;
+          gap: var(--apollo-space-sm);
           justify-content: flex-end;
-          margin-top: 1rem;
-          padding: .75rem;
+          margin-top: var(--apollo-space-lg);
+          padding: var(--apollo-space-md);
           position: sticky;
           z-index: 20;
         }
@@ -581,10 +581,10 @@
     <template v-if="!showEditForm">
       <header class="library-header">
         <div>
-          <div class="library-eyebrow">Artemis library</div>
+          <div class="library-eyebrow">Moonlight 3D library</div>
           <h1 class="library-title">{{ $t('apps.applications_title') }}</h1>
           <p class="library-subtitle">
-            Choose what appears in Artemis and arrange your app library.
+            Choose what appears in Moonlight 3D and arrange your app library.
           </p>
         </div>
         <button type="button" class="btn btn-primary btn-lg" @click="newApp" :disabled="actionDisabled">
@@ -627,7 +627,7 @@
       </section>
 
       <p class="small text-body-secondary mb-3" v-if="!searchQuery && reorderableAppCount > 1">
-        <i class="fas fa-grip-vertical me-1"></i>Drag cards to change their order in Artemis.
+        <i class="fas fa-grip-vertical me-1"></i>Drag cards to change their order in Moonlight 3D.
       </p>
 
       <section class="library-grid" aria-live="polite">
@@ -738,7 +738,7 @@
         >
           <span class="add-app-icon"><i class="fas fa-plus"></i></span>
           <strong>{{ $t('apps.add_new') }}</strong>
-          <span class="small mt-1">Add another app to Artemis</span>
+          <span class="small mt-1">Add another app to Moonlight 3D</span>
         </button>
 
         <div class="library-empty" v-if="filteredApps.length === 0 && searchQuery">
@@ -786,7 +786,7 @@
                 <img v-if="editCoverPreview" :src="editCoverPreview" :alt="editForm.name" />
                 <span class="app-cover-letter" v-else>{{ appInitial(editForm) }}</span>
               </div>
-              <p class="form-text text-center mb-0 mt-2">Artwork shown in Artemis</p>
+              <p class="form-text text-center mb-0 mt-2">Artwork shown in Moonlight 3D</p>
             </div>
             <div class="col-md-8 col-lg-9">
               <div class="mb-3">
@@ -1298,7 +1298,7 @@
       },
       appAccent(app) {
         const palette = ["#f8b400", "#ff7a45", "#8b7cf6", "#27b3a2", "#4c8dff", "#e45c92"];
-        const name = app?.name?.toString() || "Apollo XR";
+        const name = app?.name?.toString() || "Sunshine 3D";
         let hash = 0;
         for (let i = 0; i < name.length; i += 1) {
           hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
@@ -1330,8 +1330,8 @@
       },
       exportLauncherFile(app) {
         const link = document.createElement('a');
-        const fileContent = `# Artemis app entry
-# Exported by Apollo XR
+        const fileContent = `# Moonlight 3D app entry
+# Exported by Sunshine 3D
 # https://github.com/ClassicOldSong/Apollo
 
 [host_uuid] ${this.hostUUID}

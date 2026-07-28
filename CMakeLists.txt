@@ -2,24 +2,51 @@ cmake_minimum_required(VERSION 3.20)
 # `cmake_path(CONVERT ... TO_NATIVE_PATH_LIST ...)` requires 3.20
 
 project(Apollo VERSION 0.0.0
-        DESCRIPTION "Apollo XR host for Artemis"
+        DESCRIPTION "Sunshine 3D host for Moonlight 3D"
         HOMEPAGE_URL "https://github.com/ClassicOldSong/Apollo")
 
 # User-facing product name. Keep PROJECT_NAME as "Apollo" for upgrade, package-path,
 # service, and executable compatibility.
-set(PROJECT_DISPLAY_NAME "Apollo XR")
+set(PROJECT_DISPLAY_NAME "Sunshine 3D")
 
 if(NOT WIN32)
-    message(FATAL_ERROR "Apollo XR host supports Windows with native NVIDIA NVENC only")
+    message(FATAL_ERROR "Sunshine 3D supports Windows with native NVIDIA NVENC only")
 endif()
 
 set(PROJECT_LICENSE "GPL-3.0-only")
 
+# Native offline conversion intentionally does not search PATH. Official/package builds can
+# provide one audited matching pair here; they will be copied beside Sunshine under tools/.
+set(SUNSHINE_OFFLINE_FFMPEG "" CACHE FILEPATH
+        "Absolute path to the approved ffmpeg.exe bundled for offline SBS conversion")
+set(SUNSHINE_OFFLINE_FFPROBE "" CACHE FILEPATH
+        "Absolute path to the matching approved ffprobe.exe bundled for offline SBS conversion")
+if((SUNSHINE_OFFLINE_FFMPEG AND NOT SUNSHINE_OFFLINE_FFPROBE) OR
+   (SUNSHINE_OFFLINE_FFPROBE AND NOT SUNSHINE_OFFLINE_FFMPEG))
+    message(FATAL_ERROR
+            "SUNSHINE_OFFLINE_FFMPEG and SUNSHINE_OFFLINE_FFPROBE must be supplied together")
+endif()
+if(SUNSHINE_OFFLINE_FFMPEG)
+    foreach(media_tool IN ITEMS SUNSHINE_OFFLINE_FFMPEG SUNSHINE_OFFLINE_FFPROBE)
+        if(NOT IS_ABSOLUTE "${${media_tool}}" OR NOT EXISTS "${${media_tool}}")
+            message(FATAL_ERROR "${media_tool} must name an existing absolute file")
+        endif()
+    endforeach()
+    if(NOT SUNSHINE_OFFLINE_FFMPEG MATCHES "[/\\\\]ffmpeg\\.exe$" OR
+       NOT SUNSHINE_OFFLINE_FFPROBE MATCHES "[/\\\\]ffprobe\\.exe$")
+        message(FATAL_ERROR "Offline media tools must retain the names ffmpeg.exe and ffprobe.exe")
+    endif()
+else()
+    message(STATUS
+            "Offline SBS conversion media tools are not bundled in this build; "
+            "install ffmpeg.exe and ffprobe.exe under the Sunshine tools directory to enable it")
+endif()
+
 set(PROJECT_FQDN "dev.lizardbyte.app.Sunshine")
 
-set(PROJECT_BRIEF_DESCRIPTION "GameStream host for Artemis")  # must be <= 35 characters
+set(PROJECT_BRIEF_DESCRIPTION "3D streaming host for Moonlight 3D")  # must be <= 35 characters
 
-set(PROJECT_LONG_DESCRIPTION "Windows XR streaming host for modern Artemis clients. Apollo XR uses native NVIDIA \
+set(PROJECT_LONG_DESCRIPTION "Windows XR streaming host for Moonlight 3D. Sunshine 3D uses native NVIDIA \
 NVENC for H.264, HEVC, and AV1 video, with HDR and host-side stereoscopic conversion support. A web UI provides \
 configuration and device pairing.")
 

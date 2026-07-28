@@ -20,6 +20,8 @@
 #include "logging.h"
 #include "main.h"
 #include "nvhttp.h"
+#include "offline_sbs_job.h"
+#include "offline_sbs_worker.h"
 #include "process.h"
 #include "sbs_bench_harness.h"
 #include "stream.h"
@@ -56,6 +58,9 @@ std::map<std::string_view, std::function<int(const char *name, int argc, char **
    }},
   {"help"sv, [](const char *name, int argc, char **argv) {
      return args::help(name);
+   }},
+  {"offline-sbs-worker"sv, [](const char *name, int argc, char **argv) {
+     return offline_sbs::run(argc, argv);
    }},
   {"sbs-bench"sv, [](const char *name, int argc, char **argv) {
      return sbs_bench::run(argc, argv);
@@ -167,7 +172,13 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
-  auto log_deinit_guard = logging::init(config::sunshine.min_log_level, config::sunshine.log_file);
+  // Command processes inherit the host config but write to caller-owned stdout/stderr logs.
+  // Opening the configured host log here would rotate or concurrently append to the live
+  // Sunshine process's file.
+  const auto command_log_file =
+    config::sunshine.cmd.name.empty() ? config::sunshine.log_file : std::string {};
+  auto log_deinit_guard =
+    logging::init(config::sunshine.min_log_level, command_log_file);
   if (!log_deinit_guard) {
     BOOST_LOG(error) << "Logging failed to initialize"sv;
   }
@@ -175,7 +186,7 @@ int main(int argc, char *argv[]) {
   // logging can begin at this point
   // if anything is logged prior to this point, it will appear in stdout, but not in the log viewer in the UI
   // the version should be printed to the log before anything else
-  BOOST_LOG(info) << PROJECT_NAME << " version: " << PROJECT_VERSION << " commit: " << PROJECT_VERSION_COMMIT;
+  BOOST_LOG(info) << PROJECT_DISPLAY_NAME << " version: " << PROJECT_VERSION << " commit: " << PROJECT_VERSION_COMMIT;
   BOOST_LOG(info) << "Runtime performance diagnostics: "sv
                   << (config::sunshine.diagnostics_enabled ? "enabled"sv : "disabled"sv);
 
@@ -533,12 +544,30 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(fatal) << "HTTP interface failed to initialize"sv;
 
 #ifdef _WIN32
-    BOOST_LOG(fatal) << "To relaunch Apollo successfully, use the shortcut in the Start Menu. Do not run sunshine.exe manually."sv;
+    BOOST_LOG(fatal) << "To relaunch Sunshine 3D successfully, use the shortcut in the Start Menu. Do not run sunshine.exe manually."sv;
     std::this_thread::sleep_for(10s);
 #endif
 
     return -1;
   }
+
+  // Media-tool and NVENC capability probes are optional and can take several seconds on
+  // a cold driver/toolchain. They must not delay pairing, mDNS, RTSP, or the configuration
+  // UI. The process-global offline facade remains unavailable until this task commits a
+  // fully initialized service.
+  auto offline_sbs_initialization = std::async(std::launch::async, []() {
+    std::string error;
+    if (!offline_sbs::initialize(
+          offline_sbs::default_service_config(),
+          error
+        )) {
+      BOOST_LOG(warning)
+        << "Offline SBS conversion is unavailable: "sv << error;
+    }
+  });
+  auto offline_sbs_shutdown_guard = util::fail_guard([]() {
+    offline_sbs::shutdown();
+  });
 
   std::unique_ptr<platf::deinit_t> mDNS;
   auto sync_mDNS = std::async(std::launch::async, [&mDNS]() {
@@ -578,6 +607,10 @@ int main(int argc, char *argv[]) {
   httpThread.join();
   configThread.join();
   rtspThread.join();
+
+  offline_sbs::shutdown();
+  offline_sbs_initialization.wait();
+  offline_sbs_shutdown_guard.disable();
 
   // A recent disconnect may have left Windows streaming state warm for fast reconnect. Flush it
   // synchronously before stopping the task pool so timer resolution, WLAN, and input state are

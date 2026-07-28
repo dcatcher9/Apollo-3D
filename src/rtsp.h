@@ -12,9 +12,11 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 // local includes
 #include "crypto.h"
+#include "gpu_workload_arbiter.h"
 #include "thread_safe.h"
 
 #ifdef _WIN32
@@ -124,9 +126,9 @@ namespace rtsp_stream {
       reservation_state.store(launch_reservation_state_e::revoked, std::memory_order_release);
     }
 
-    void revoke_pending_reservation() {
+    [[nodiscard]] bool revoke_pending_reservation() {
       auto expected = launch_reservation_state_e::pending;
-      reservation_state.compare_exchange_strong(
+      return reservation_state.compare_exchange_strong(
         expected,
         launch_reservation_state_e::revoked,
         std::memory_order_acq_rel,
@@ -138,6 +140,41 @@ namespace rtsp_stream {
       return reservation_state.load(std::memory_order_acquire);
     }
 
+    /**
+     * Reserve the live GPU workload before HTTP launch/resume mutates process or display state.
+     *
+     * The HTTP launch path and RTSP claim path are already serialized by the launch reservation
+     * contract, so this movable lease needs no independent lock. It is held here until RTSP
+     * transfers the exact same lease into the active-session slot, closing the admission gap in
+     * which offline conversion could otherwise start after launch-time GPU work had begun.
+     */
+    [[nodiscard]] bool reserve_live_gpu() {
+      if (pending_live_gpu_lease) {
+        return true;
+      }
+      pending_live_gpu_lease =
+        gpu_workload::try_acquire(gpu_workload::kind_e::live_stream);
+      return pending_live_gpu_lease.has_value();
+    }
+
+    [[nodiscard]] std::optional<gpu_workload::lease_t> take_live_gpu_lease() {
+      auto lease = std::move(pending_live_gpu_lease);
+      pending_live_gpu_lease.reset();
+      return lease;
+    }
+
+    /**
+     * Release an HTTP-side reservation that was never published to RTSP.
+     *
+     * A newly launched process retains this launch object, so relying on shared_ptr destruction
+     * after a rejected publication can otherwise pin GPU ownership for the lifetime of the app.
+     * This is only called while the HTTP launch mutex still excludes RTSP claim/transfer.
+     */
+    void release_unpublished_live_gpu() {
+      pending_live_gpu_lease.reset();
+    }
+
+    std::optional<gpu_workload::lease_t> pending_live_gpu_lease;
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;
     uint32_t rtsp_iv_counter = 0;
 
@@ -208,6 +245,10 @@ namespace rtsp_stream {
   void remove_session_for_test(const std::shared_ptr<stream::session_t> &session);
   bool claim_launch_session_for_test(launch_session_t &launch_session);
   void finish_launch_session_for_test(launch_session_t &launch_session, bool started);
+  std::optional<gpu_workload::lease_t> take_claimed_live_gpu_lease_for_test(
+    launch_session_t &launch_session
+  );
+  void expire_launch_session_for_test(std::uint32_t launch_session_id);
 #endif
 
   /** Terminate the pending or active remote streaming session. */

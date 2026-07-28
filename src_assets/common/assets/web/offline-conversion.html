@@ -1,0 +1,1672 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="auto">
+
+<head>
+  <%- header %>
+</head>
+
+<body id="app" class="apollo-app-shell" v-cloak>
+  <Navbar></Navbar>
+
+  <main id="content" class="container apollo-page offline-conversion-page">
+    <header class="apollo-page-header">
+      <div>
+        <p class="apollo-eyebrow">Offline Host SBS</p>
+        <h1>Offline 3D Conversion</h1>
+        <p class="apollo-page-intro">
+          Analyze one video with scene-level lookahead, or convert it with a bounded open-scene
+          cache. Conversion writes compressed video; neither mode materializes a full PNG clip.
+        </p>
+      </div>
+      <span
+        v-if="selectedJob"
+        class="apollo-state-pill"
+        :class="`is-${jobTone(selectedJob)}`"
+        role="status">
+        <span class="apollo-state-dot" aria-hidden="true"></span>
+        {{ statusLabel(selectedJob) }}
+      </span>
+    </header>
+
+    <section class="offline-limit-grid" aria-label="Conversion requirements">
+      <article class="offline-limit-card">
+        <span class="offline-limit-icon" aria-hidden="true">
+          <i class="fa-brands fa-windows"></i>
+        </span>
+        <div>
+          <strong>Windows and NVIDIA only</strong>
+          <p>Version 1 requires the native Windows D3D11, TensorRT, and NVENC pipeline.</p>
+        </div>
+      </article>
+      <article class="offline-limit-card">
+        <span class="offline-limit-icon" aria-hidden="true">
+          <i class="fa-solid fa-sun"></i>
+        </span>
+        <div>
+          <strong>Static HDR is supported</strong>
+          <p>
+            Static PQ and HLG input stays on the 10-bit HEVC or AV1 path. Dolby Vision and dynamic
+            HDR10+ metadata fail closed until their metadata can be preserved correctly.
+          </p>
+        </div>
+      </article>
+    </section>
+
+    <div
+      v-if="apiError"
+      class="apollo-notice is-danger"
+      role="alert"
+      aria-live="polite">
+      <span class="apollo-notice-icon" aria-hidden="true">
+        <i class="fa-solid fa-circle-exclamation"></i>
+      </span>
+      <div>
+        <strong>Offline job manager is unavailable</strong>
+        <p>{{ apiError }}</p>
+      </div>
+      <button class="btn btn-apollo-quiet" type="button" @click="loadJobs(false)">
+        Try again
+      </button>
+    </div>
+
+    <div
+      v-if="pollWarning && !apiError"
+      class="apollo-notice is-warning"
+      role="status"
+      aria-live="polite">
+      <span class="apollo-notice-icon" aria-hidden="true">
+        <i class="fa-solid fa-clock-rotate-left"></i>
+      </span>
+      <div>
+        <strong>Live updates are delayed</strong>
+        <p>
+          The displayed job data may be stale. Sunshine 3D is retrying automatically:
+          {{ pollWarning }}
+        </p>
+      </div>
+      <button class="btn btn-apollo-quiet" type="button" @click="loadJobs(false)">
+        Refresh now
+      </button>
+    </div>
+
+    <div
+      v-if="liveStreamActive"
+      class="apollo-notice is-warning"
+      role="status"
+      aria-live="polite">
+      <span class="apollo-notice-icon" aria-hidden="true">
+        <i class="fa-solid fa-display"></i>
+      </span>
+      <div>
+        <strong>End the current stream before starting an offline job</strong>
+        <p>
+          Normal Sunshine 3D streaming continues unchanged. The host prevents offline conversion
+          from sharing its GPU until the current Moonlight session ends.
+        </p>
+      </div>
+    </div>
+
+    <div
+      v-if="actionError"
+      class="apollo-notice is-danger"
+      role="alert"
+      aria-live="assertive">
+      <span class="apollo-notice-icon" aria-hidden="true">
+        <i class="fa-solid fa-triangle-exclamation"></i>
+      </span>
+      <div>
+        <strong>The job action did not finish</strong>
+        <p>{{ actionError }}</p>
+      </div>
+      <button
+        class="offline-notice-dismiss"
+        type="button"
+        aria-label="Dismiss job error"
+        @click="actionError = ''">
+        <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+      </button>
+    </div>
+
+    <div class="offline-workspace">
+      <section class="offline-panel" aria-labelledby="new-job-title">
+        <div class="offline-panel-heading">
+          <div>
+            <p class="apollo-kicker">New job</p>
+            <h2 id="new-job-title">
+              {{ form.operation === 'evaluate' ? 'Analysis settings' : 'Conversion settings' }}
+            </h2>
+          </div>
+          <span class="offline-panel-step">1</span>
+        </div>
+
+        <form class="offline-job-form" @submit.prevent="startJob">
+          <fieldset>
+            <legend class="form-label">Job type</legend>
+            <div class="offline-codec-grid">
+              <label
+                class="offline-codec-option"
+                :class="{ selected: form.operation === 'convert' }"
+                for="offlineOperationConvert">
+                <input
+                  id="offlineOperationConvert"
+                  v-model="form.operation"
+                  type="radio"
+                  value="convert">
+                <span class="offline-codec-copy">
+                  <strong>Convert video</strong>
+                  <small>Analyze each scene, then encode a side-by-side 3D video</small>
+                </span>
+                <span class="badge text-bg-primary">Recommended</span>
+              </label>
+              <label
+                class="offline-codec-option"
+                :class="{ selected: form.operation === 'evaluate' }"
+                for="offlineOperationEvaluate">
+                <input
+                  id="offlineOperationEvaluate"
+                  v-model="form.operation"
+                  type="radio"
+                  value="evaluate">
+                <span class="offline-codec-copy">
+                  <strong>Analyze only</strong>
+                  <small>Inspect scene cuts and adaptive parameters without encoding video</small>
+                </span>
+              </label>
+            </div>
+          </fieldset>
+
+          <div>
+            <label class="form-label" for="offlineInputPath">Input path</label>
+            <input
+              id="offlineInputPath"
+              v-model.trim="form.inputPath"
+              class="form-control monospace"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="D:\Media\movie.mkv"
+              aria-describedby="offlineInputPathHelp"
+              required>
+            <div id="offlineInputPathHelp" class="form-text">
+              An absolute host path to one non-empty regular video file.
+            </div>
+          </div>
+
+          <div v-if="form.operation === 'convert'">
+            <label class="form-label" for="offlineOutputName">Output file name</label>
+            <input
+              id="offlineOutputName"
+              v-model.trim="form.outputName"
+              class="form-control monospace"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="movie-3d.mkv"
+              pattern="[^\\/]+\.(?:mkv|mp4)"
+              aria-describedby="offlineOutputNameHelp"
+              required>
+            <div id="offlineOutputNameHelp" class="form-text">
+              A basename ending in <span class="monospace">.mkv</span> or
+              <span class="monospace">.mp4</span>. The built-in job manager confines output to its
+              managed <span class="monospace">offline-sbs\exports</span> directory.
+            </div>
+          </div>
+
+          <fieldset
+            v-if="form.operation === 'convert'"
+            aria-describedby="offlineCodecHelp">
+            <legend class="form-label">Video codec</legend>
+            <div class="offline-codec-grid">
+              <label
+                class="offline-codec-option"
+                :class="{
+                  selected: form.codec === 'hevc_nvenc',
+                  disabled: !codecAvailable('hevc_nvenc'),
+                }"
+                :aria-disabled="!codecAvailable('hevc_nvenc')"
+                for="offlineCodecH265">
+                <input
+                  id="offlineCodecH265"
+                  v-model="form.codec"
+                  type="radio"
+                  value="hevc_nvenc"
+                  :disabled="!codecAvailable('hevc_nvenc')">
+                <span class="offline-codec-copy">
+                  <strong>H.265 / HEVC</strong>
+                  <small v-if="codecAvailable('hevc_nvenc')">
+                    Default · 10-bit for HDR · hardware preflight runs when the job starts
+                  </small>
+                  <small v-else>Not included in the packaged FFmpeg</small>
+                </span>
+                <span class="badge text-bg-primary">Recommended</span>
+              </label>
+              <label
+                class="offline-codec-option"
+                :class="{
+                  selected: form.codec === 'av1_nvenc',
+                  disabled: !codecAvailable('av1_nvenc'),
+                }"
+                :aria-disabled="!codecAvailable('av1_nvenc')"
+                for="offlineCodecAv1">
+                <input
+                  id="offlineCodecAv1"
+                  v-model="form.codec"
+                  type="radio"
+                  value="av1_nvenc"
+                  :disabled="!codecAvailable('av1_nvenc')">
+                <span class="offline-codec-copy">
+                  <strong>AV1</strong>
+                  <small v-if="codecAvailable('av1_nvenc')">
+                    Optional · 10-bit for HDR · hardware preflight runs when the job starts
+                  </small>
+                  <small v-else>Not included in the packaged FFmpeg</small>
+                </span>
+              </label>
+            </div>
+            <div id="offlineCodecHelp" class="form-text">
+              Static HDR uses 10-bit output; SDR uses 8-bit output. The selected NVENC path is
+              verified only after the offline job owns the GPU. Stop live streaming before
+              conversion; startup never probes NVENC.
+            </div>
+          </fieldset>
+
+          <div v-if="form.operation === 'convert'" class="offline-form-row">
+            <div>
+              <label class="form-label" for="offlineCacheBudget">Open-scene cache</label>
+              <div class="input-group">
+                <input
+                  id="offlineCacheBudget"
+                  v-model.number="form.sceneCacheGiB"
+                  class="form-control"
+                  type="number"
+                  min="1"
+                  max="64"
+                  step="1"
+                  aria-describedby="offlineCacheBudgetHelp"
+                  required>
+                <span class="input-group-text">GiB</span>
+              </div>
+              <div id="offlineCacheBudgetHelp" class="form-text">
+                Stores processed depth and render state until a scene is committed.
+              </div>
+            </div>
+
+            <div>
+              <label class="form-label" for="offlineBudgetPolicy">If the cache fills</label>
+              <select
+                id="offlineBudgetPolicy"
+                v-model="form.cacheBudgetPolicy"
+                class="form-select"
+                aria-describedby="offlineBudgetPolicyHelp">
+                <option value="fail">Stop safely (recommended)</option>
+                <option value="split">Administrative split</option>
+              </select>
+              <div id="offlineBudgetPolicyHelp" class="form-text">
+                Fail preserves scene semantics. Split bounds storage but is explicitly non-semantic.
+              </div>
+            </div>
+          </div>
+
+          <div
+            v-if="form.operation === 'convert' && form.cacheBudgetPolicy === 'split'"
+            class="offline-policy-warning"
+            role="note">
+            <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i>
+            <p>
+              Administrative splitting can divide one detected scene into multiple render
+              segments. Use it only when a larger cache is not possible.
+            </p>
+          </div>
+
+          <div class="offline-form-actions">
+            <p>
+              Live streaming and offline conversion are mutually exclusive. End the current
+              stream before starting a job; Sunshine 3D also blocks new streams until it finishes.
+            </p>
+            <button
+              class="btn btn-apollo-primary"
+              type="submit"
+              :disabled="!canStart">
+              <i
+                class="fa-solid"
+                :class="startBusy ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'"
+                aria-hidden="true"></i>
+              {{
+                startBusy ?
+                  'Starting…' :
+                  (form.operation === 'evaluate' ? 'Start analysis' : 'Start conversion')
+              }}
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section class="offline-panel" aria-labelledby="job-progress-title">
+        <div class="offline-panel-heading">
+          <div>
+            <p class="apollo-kicker">Native job</p>
+            <h2 id="job-progress-title">Progress</h2>
+          </div>
+          <button
+            class="apollo-refresh-button"
+            type="button"
+            :disabled="refreshing"
+            aria-label="Refresh offline jobs"
+            @click="loadJobs(false)">
+            <i
+              class="fa-solid fa-rotate"
+              :class="{ 'fa-spin': refreshing }"
+              aria-hidden="true"></i>
+            <span>Refresh</span>
+          </button>
+        </div>
+
+        <div v-if="jobs.length > 1" class="offline-job-selector">
+          <label class="form-label" for="offlineSelectedJob">Job</label>
+          <select
+            id="offlineSelectedJob"
+            v-model="selectedJobId"
+            class="form-select">
+            <option
+              v-for="job in jobs"
+              :key="jobId(job)"
+              :value="jobId(job)">
+              {{ jobOption(job) }}
+            </option>
+          </select>
+        </div>
+
+        <article v-if="selectedJob" class="offline-progress-card">
+          <div class="offline-progress-topline">
+            <div>
+              <span class="offline-status-label" :class="`is-${jobTone(selectedJob)}`">
+                <span class="apollo-state-dot" aria-hidden="true"></span>
+                {{ statusLabel(selectedJob) }}
+              </span>
+              <h3>{{ phaseLabel(selectedJob) }}</h3>
+            </div>
+            <strong>{{ progressPercent(selectedJob) }}%</strong>
+          </div>
+
+          <div
+            class="progress offline-progress"
+            role="progressbar"
+            :aria-label="jobProgressLabel(selectedJob)"
+            :aria-valuenow="progressPercent(selectedJob)"
+            aria-valuemin="0"
+            aria-valuemax="100">
+            <div
+              class="progress-bar"
+              :class="{ 'progress-bar-striped progress-bar-animated': isActive(selectedJob) }"
+              :style="{ width: `${progressPercent(selectedJob)}%` }"></div>
+          </div>
+
+          <dl class="offline-job-facts">
+            <div>
+              <dt>Frames</dt>
+              <dd>{{ frameProgress(selectedJob) }}</dd>
+            </div>
+            <div>
+              <dt>Current scene</dt>
+              <dd>{{ currentSceneLabel(selectedJob) }}</dd>
+            </div>
+            <div>
+              <dt>Codec</dt>
+              <dd>
+                {{
+                  jobSettings(selectedJob).operation === 'evaluate' ?
+                    'Not encoded' :
+                    codecLabel(jobSettings(selectedJob).codec)
+                }}
+              </dd>
+            </div>
+            <div v-if="jobSettings(selectedJob).operation === 'convert'">
+              <dt>Cache policy</dt>
+              <dd>{{ policyLabel(jobSettings(selectedJob).cache_budget_policy) }}</dd>
+            </div>
+          </dl>
+
+          <div class="offline-path-summary">
+            <span>
+              {{ jobSettings(selectedJob).operation === 'evaluate' ? 'Result' : 'Output' }}
+            </span>
+            <code>
+              {{
+                jobSettings(selectedJob).operation === 'evaluate' ?
+                  'Analysis only — no video output' :
+                  (
+                    jobSettings(selectedJob).output_path ||
+                    `Managed export: ${jobSettings(selectedJob).output_name || 'pending'}`
+                  )
+              }}
+            </code>
+          </div>
+
+          <div
+            v-if="jobError(selectedJob)"
+            class="offline-job-error"
+            role="alert">
+            <i class="fa-solid fa-circle-exclamation" aria-hidden="true"></i>
+            <p>{{ jobError(selectedJob) }}</p>
+          </div>
+
+          <div v-if="isInterrupted(selectedJob)" class="offline-recovery-card">
+            <div>
+              <span class="offline-recovery-icon" aria-hidden="true">
+                <i class="fa-solid fa-plug-circle-xmark"></i>
+              </span>
+              <div>
+                <strong>Interrupted — not resumable in version 1</strong>
+                <p>
+                  The Sunshine 3D job manager stopped before a verified checkpoint could be committed.
+                  Restart creates a new job with the same immutable settings.
+                </p>
+              </div>
+            </div>
+            <dl>
+              <div>
+                <dt>Retained artifacts</dt>
+                <dd>{{ retainedArtifactsLabel(selectedJob) }}</dd>
+              </div>
+              <div>
+                <dt>Cleanup</dt>
+                <dd>{{ cleanupLabel(selectedJob) }}</dd>
+              </div>
+            </dl>
+            <button
+              class="btn btn-apollo-quiet"
+              type="button"
+              :disabled="startBusy || activeJobExists"
+              @click="restartJob(selectedJob)">
+              <i class="fa-solid fa-rotate-right" aria-hidden="true"></i>
+              Restart with same settings
+            </button>
+          </div>
+
+          <div class="offline-progress-actions">
+            <small class="monospace">Job {{ jobId(selectedJob) }}</small>
+            <button
+              v-if="isCancelable(selectedJob)"
+              class="btn btn-apollo-danger"
+              type="button"
+              :disabled="cancelBusy"
+              @click="cancelJob(selectedJob)">
+              <i
+                class="fa-solid"
+                :class="cancelBusy ? 'fa-spinner fa-spin' : 'fa-stop'"
+                aria-hidden="true"></i>
+              {{ cancelBusy ? 'Canceling…' : 'Cancel job' }}
+            </button>
+          </div>
+        </article>
+
+        <article v-else class="offline-empty-state">
+          <span class="apollo-empty-icon" aria-hidden="true">
+            <i class="fa-solid fa-film"></i>
+          </span>
+          <div>
+            <h3>No offline jobs yet</h3>
+            <p>Choose a job type and source, then complete the settings shown for that job.</p>
+          </div>
+        </article>
+      </section>
+    </div>
+
+    <section class="apollo-section" aria-labelledby="scene-decisions-title">
+      <div class="apollo-section-heading">
+        <div>
+          <p class="apollo-kicker">Auditable lookahead</p>
+          <h2 id="scene-decisions-title">Recent scene decisions</h2>
+        </div>
+        <div v-if="selectedJob" class="offline-audit-actions">
+          <span v-if="sceneTotal !== null" class="offline-decision-count">
+            {{ sceneTotal }} {{ sceneTotal === 1 ? 'scene' : 'scenes' }} total
+            <template v-if="sceneDecisions.length">
+              &middot; latest {{ sceneDecisions.length }} shown
+            </template>
+          </span>
+          <button
+            v-if="sceneAuditAvailable"
+            class="btn btn-apollo-quiet"
+            type="button"
+            :disabled="auditBusy"
+            @click="downloadSceneAudit">
+            <i
+              class="fa-solid"
+              :class="auditBusy ? 'fa-spinner fa-spin' : 'fa-download'"
+              aria-hidden="true"></i>
+            {{
+              auditBusy ?
+                'Preparing audit...' :
+                (sceneAuditPartial ? 'Download retained audit' : 'Download full audit')
+            }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="sceneDecisions.length" class="offline-scene-table-wrap">
+        <table class="table offline-scene-table">
+          <thead>
+            <tr>
+              <th scope="col">Scene</th>
+              <th scope="col">Source frames</th>
+              <th scope="col">Boundary decision</th>
+              <th scope="col">Pop</th>
+              <th scope="col">Zero plane</th>
+              <th scope="col">Audit</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(scene, index) in sceneDecisions" :key="sceneKey(scene, index)">
+              <td><strong>#{{ scene.scene_id || index + 1 }}</strong></td>
+              <td class="monospace">{{ sceneRange(scene) }}</td>
+              <td>
+                <span class="offline-decision-label">
+                  {{ decisionLabel(scene.boundary?.decision || scene.decision) }}
+                </span>
+              </td>
+              <td>{{ popLabel(scene.absolute_pop_strength ?? scene.render?.absolute_pop_strength) }}</td>
+              <td>{{ anchorLabel(scene.zero_anchor_shift_px ?? scene.render?.zero_anchor_shift_px) }}</td>
+              <td>
+                <span
+                  v-for="flag in sceneFlags(scene)"
+                  :key="flag"
+                  class="badge rounded-pill offline-audit-badge">
+                  {{ flag }}
+                </span>
+                <span v-if="!sceneFlags(scene).length" class="offline-muted">Committed</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <article v-else class="offline-scene-empty">
+        <span aria-hidden="true"><i class="fa-solid fa-code-branch"></i></span>
+        <div>
+          <h3>Waiting for a finalized scene</h3>
+          <p>
+            Proposed cuts remain provisional through bounded lookahead. A row appears only after
+            the boundary and scene-wide camera parameters are committed.
+          </p>
+        </div>
+      </article>
+    </section>
+  </main>
+</body>
+
+<script type="module">
+  import { createApp } from 'vue'
+  import { initApp } from './init'
+  import Navbar from './Navbar.vue'
+  import {
+    OfflineSbsApiError,
+    cancelOfflineSbsJob,
+    createOfflineSbsJob,
+    downloadOfflineSbsSceneAudit,
+    getOfflineSbsJob,
+    getOfflineSbsOverview,
+  } from './offline-sbs-api'
+
+  const ACTIVE_STATUSES = new Set([
+    'queued',
+    'starting',
+    'analyzing',
+    'rendering',
+    'encoding',
+    'running',
+    'publishing',
+    'canceling',
+  ])
+  const INTERRUPTED_STATUSES = new Set(['interrupted', 'abandoned', 'orphaned'])
+  const GIB = 1024 * 1024 * 1024
+  let overviewAbortController = null
+  let detailAbortController = null
+
+  function normalizedStatus(job) {
+    return String(job?.status || job?.state || 'unknown').trim().toLowerCase()
+  }
+
+  function finiteNumber(...values) {
+    for (const value of values) {
+      const number = Number(value)
+      if (Number.isFinite(number)) return number
+    }
+    return null
+  }
+
+  const app = createApp({
+    components: { Navbar },
+    data() {
+      return {
+        form: {
+          operation: 'convert',
+          inputPath: '',
+          outputName: '',
+          codec: 'hevc_nvenc',
+          sceneCacheGiB: 8,
+          cacheBudgetPolicy: 'fail',
+        },
+        capabilities: {},
+        jobs: [],
+        selectedJobId: '',
+        selectedJobDetail: null,
+        apiError: '',
+        pollWarning: '',
+        actionError: '',
+        initialLoading: true,
+        refreshing: false,
+        startBusy: false,
+        cancelBusy: false,
+        auditBusy: false,
+        refreshTimer: null,
+        overviewRequestSerial: 0,
+        detailRequestSerial: 0,
+      }
+    },
+    computed: {
+      selectedJobSummary() {
+        return this.jobs.find(job => this.jobId(job) === this.selectedJobId) || null
+      },
+      selectedJob() {
+        const summary = this.selectedJobSummary
+        const detail = this.selectedJobDetail
+        if (!detail || this.jobId(detail) !== this.selectedJobId) return summary
+        if (!summary) return detail
+
+        const progress = {
+          ...(detail.progress || {}),
+          ...(summary.progress || {}),
+        }
+        if (Array.isArray(detail.progress?.scene_decisions)) {
+          progress.scene_decisions = detail.progress.scene_decisions
+        }
+        return {
+          ...detail,
+          ...summary,
+          progress,
+          scene_decisions: detail.scene_decisions,
+          worker_result: detail.worker_result,
+        }
+      },
+      activeJobExists() {
+        return this.jobs.some(job => this.isActive(job))
+      },
+      supportedCodecs() {
+        return Array.isArray(this.capabilities?.codecs) ?
+          this.capabilities.codecs.map(codec => String(codec).toLowerCase()) :
+          []
+      },
+      liveStreamActive() {
+        return this.capabilities?.live_stream_active === true
+      },
+      canStart() {
+        const budget = Number(this.form.sceneCacheGiB)
+        const outputName = this.form.outputName.trim()
+        const operationValid = (
+          this.form.operation === 'convert' ||
+          this.form.operation === 'evaluate'
+        )
+        const outputNameValid = (
+          this.form.operation === 'evaluate' ||
+          (
+            !/[\\/]/.test(outputName) &&
+            /\.(?:mkv|mp4)$/i.test(outputName)
+          )
+        )
+        const cacheSettingsValid = (
+          this.form.operation === 'evaluate' ||
+          (
+            Number.isInteger(budget) &&
+            budget >= 1 &&
+            budget <= 64
+          )
+        )
+        return (
+          !this.startBusy &&
+          !this.activeJobExists &&
+          !this.liveStreamActive &&
+          Boolean(this.form.inputPath.trim()) &&
+          operationValid &&
+          outputNameValid &&
+          (
+            this.form.operation === 'evaluate' ||
+            this.codecAvailable(this.form.codec)
+          ) &&
+          cacheSettingsValid
+        )
+      },
+      sceneDecisions() {
+        const job = this.selectedJob
+        if (!job) return []
+        if (Array.isArray(job.progress?.scene_decisions)) {
+          return job.progress.scene_decisions
+        }
+        if (Array.isArray(job.scene_decisions)) return job.scene_decisions
+        if (Array.isArray(job.scenes)) return job.scenes
+        if (Array.isArray(job.scene_plan?.scenes)) return job.scene_plan.scenes
+        if (Array.isArray(job.worker_result?.scene_decisions)) {
+          return job.worker_result.scene_decisions
+        }
+        if (Array.isArray(job.worker_result?.scenes)) return job.worker_result.scenes
+        return []
+      },
+      sceneTotal() {
+        if (!this.selectedJob) return null
+        const total = finiteNumber(
+          this.selectedJob?.progress?.scene_count,
+          this.selectedJob?.worker_result?.scene_count,
+          this.selectedJob?.scene_count,
+        )
+        return total === null ?
+          this.sceneDecisions.length :
+          Math.max(0, Math.trunc(total))
+      },
+      sceneAuditAvailable() {
+        const status = normalizedStatus(this.selectedJob)
+        return (
+          this.sceneTotal > 0 &&
+          [
+            'complete',
+            'completed',
+            'failed',
+            'canceled',
+            'cancelled',
+            'interrupted',
+          ].includes(status)
+        )
+      },
+      sceneAuditPartial() {
+        const status = normalizedStatus(this.selectedJob)
+        return status !== 'complete' && status !== 'completed'
+      },
+    },
+    async mounted() {
+      await this.loadJobs(false)
+      this.refreshTimer = window.setInterval(() => this.loadJobs(true), 2000)
+    },
+    beforeUnmount() {
+      if (this.refreshTimer) window.clearInterval(this.refreshTimer)
+      overviewAbortController?.abort()
+      detailAbortController?.abort()
+      this.overviewRequestSerial += 1
+      this.detailRequestSerial += 1
+    },
+    watch: {
+      selectedJobId(jobId) {
+        this.selectedJobDetail = null
+        detailAbortController?.abort()
+        if (jobId) {
+          this.loadSelectedJob(jobId, false)
+        } else {
+          this.detailRequestSerial += 1
+        }
+      },
+    },
+    methods: {
+      jobId(job) {
+        return String(job?.id ?? job?.job_id ?? '')
+      },
+      isActive(job) {
+        return ACTIVE_STATUSES.has(normalizedStatus(job))
+      },
+      isInterrupted(job) {
+        return INTERRUPTED_STATUSES.has(normalizedStatus(job))
+      },
+      isCancelable(job) {
+        const status = normalizedStatus(job)
+        return ACTIVE_STATUSES.has(status) &&
+               status !== 'canceling' &&
+               status !== 'publishing'
+      },
+      codecAvailable(codec) {
+        return this.supportedCodecs.includes(String(codec).toLowerCase())
+      },
+      jobTone(job) {
+        const status = normalizedStatus(job)
+        if (status === 'completed' || status === 'complete') return 'success'
+        if (status === 'failed') return 'danger'
+        if (INTERRUPTED_STATUSES.has(status) || status === 'canceled') return 'warning'
+        if (ACTIVE_STATUSES.has(status)) return 'active'
+        return 'neutral'
+      },
+      statusLabel(job) {
+        const status = normalizedStatus(job)
+        const labels = {
+          queued: 'Queued',
+          starting: 'Starting',
+          analyzing: 'Analyzing',
+          rendering: 'Rendering',
+          encoding: 'Encoding',
+          running: 'Running',
+          publishing: 'Publishing',
+          canceling: 'Canceling',
+          canceled: 'Canceled',
+          completed: 'Completed',
+          complete: 'Completed',
+          failed: 'Failed',
+          interrupted: 'Interrupted',
+          abandoned: 'Interrupted',
+          orphaned: 'Interrupted',
+        }
+        return labels[status] || 'Unknown'
+      },
+      phaseLabel(job) {
+        const phase = job?.phase_label || job?.progress?.phase_label || job?.progress?.phase
+        return phase ? this.decisionLabel(phase) : this.statusLabel(job)
+      },
+      progressPercent(job) {
+        const processed = finiteNumber(
+          job?.processed_frames,
+          job?.progress?.processed_frames,
+          job?.progress?.current,
+        )
+        const total = finiteNumber(
+          job?.total_frames,
+          job?.progress?.total_frames,
+          job?.progress?.total,
+        )
+        let percent = finiteNumber(job?.progress_percent, job?.progress?.percent)
+        if (percent === null && processed !== null && total > 0) {
+          percent = processed / total * 100
+        }
+        if (normalizedStatus(job) === 'completed' || normalizedStatus(job) === 'complete') {
+          percent = 100
+        }
+        return Math.round(Math.min(Math.max(percent ?? 0, 0), 100))
+      },
+      frameProgress(job) {
+        const processed = finiteNumber(
+          job?.processed_frames,
+          job?.progress?.processed_frames,
+          job?.progress?.current,
+        )
+        const total = finiteNumber(
+          job?.total_frames,
+          job?.progress?.total_frames,
+          job?.progress?.total,
+        )
+        if (processed === null && total === null) return 'Waiting for analysis'
+        if (total === null || total <= 0) return `${Math.max(processed ?? 0, 0)} processed`
+        return `${Math.max(processed ?? 0, 0)} / ${total}`
+      },
+      currentSceneLabel(job) {
+        const current =
+          job?.current_scene ??
+          job?.progress?.current_scene ??
+          job?.current_scene_id
+        if (current && typeof current === 'object') {
+          const id = current.scene_id ?? current.id
+          const start = current.start_sequence
+          return id ? `#${id}${start ? ` · starts at ${start}` : ''}` : 'Resolving'
+        }
+        if (current !== null && current !== undefined && current !== '') {
+          return `#${current}`
+        }
+        const committedScenes = finiteNumber(job?.progress?.scene_count)
+        if (this.isActive(job) && committedScenes !== null) {
+          return committedScenes > 0 ?
+            `Resolving after #${committedScenes}` :
+            'Resolving first scene'
+        }
+        return this.isActive(job) ? 'Detecting' : '—'
+      },
+      jobSettings(job) {
+        const settings = job?.settings || job?.request || {}
+        const outputPath = settings.output_path ?? job?.output_path ?? ''
+        const resolvedOutputName = outputPath
+          .replaceAll('\\', '/')
+          .split('/')
+          .pop()
+        return {
+          input_path: settings.input_path ?? job?.input_path ?? '',
+          operation: settings.operation ?? job?.operation ?? 'convert',
+          output_name:
+            settings.output_name ??
+            job?.output_name ??
+            resolvedOutputName ??
+            '',
+          output_path: outputPath,
+          codec:
+            settings.codec ??
+            job?.codec ??
+            'hevc_nvenc',
+          scene_cache_max_bytes:
+            finiteNumber(
+              settings.scene_cache_max_bytes,
+              job?.scene_cache_max_bytes,
+            ),
+          cache_budget_policy:
+            settings.cache_budget_policy ??
+            job?.cache_budget_policy ??
+            'fail',
+        }
+      },
+      immutableSettings(job) {
+        const settings = this.jobSettings(job)
+        const operation = settings.operation === 'evaluate' ? 'evaluate' : 'convert'
+        if (
+          !settings.input_path ||
+          (operation === 'convert' && !settings.output_name)
+        ) {
+          return null
+        }
+        const immutable = {
+          input_path: settings.input_path,
+          operation,
+        }
+        if (operation === 'convert') {
+          immutable.output_name = settings.output_name
+          immutable.codec = settings.codec
+          immutable.scene_cache_max_bytes =
+            settings.scene_cache_max_bytes ?? Math.round(this.form.sceneCacheGiB * GIB)
+          immutable.cache_budget_policy = settings.cache_budget_policy
+        }
+        return immutable
+      },
+      codecLabel(codec) {
+        return String(codec || '').toLowerCase().includes('av1') ?
+          'AV1 (10-bit for HDR)' :
+          'H.265 / HEVC (10-bit for HDR)'
+      },
+      jobProgressLabel(job) {
+        return this.jobSettings(job).operation === 'evaluate' ?
+          'Offline analysis progress' :
+          'Offline conversion progress'
+      },
+      policyLabel(policy) {
+        return policy === 'split' ? 'Administrative split' : 'Stop safely'
+      },
+      jobError(job) {
+        return job?.error?.message || job?.error || job?.failure_reason || ''
+      },
+      retainedArtifactsLabel(job) {
+        const retained =
+          job?.recovery?.retained_artifacts ??
+          job?.retained_artifacts
+        if (retained === true) return 'Retained for inspection'
+        if (retained === false) return 'None'
+        if (Array.isArray(retained)) return `${retained.length} paths retained`
+        return retained || 'Reported by the built-in job manager'
+      },
+      cleanupLabel(job) {
+        return (
+          job?.recovery?.cleanup_message ||
+          job?.cleanup?.message ||
+          'Wait for the built-in job manager to mark retained paths safe to remove.'
+        )
+      },
+      jobOption(job) {
+        const settings = this.jobSettings(job)
+        const name = settings.input_path.replaceAll('\\', '/').split('/').pop()
+        return `${this.statusLabel(job)} · ${name || this.jobId(job)}`
+      },
+      async loadJobs(silent = false) {
+        // Timer ticks never starve a slow in-flight request. Explicit refreshes and
+        // post-action reloads do supersede it, and serial checks reject stale replies.
+        if (silent && this.refreshing) return
+        overviewAbortController?.abort()
+        const controller = new AbortController()
+        overviewAbortController = controller
+        const requestSerial = ++this.overviewRequestSerial
+        this.refreshing = true
+        try {
+          const overview = await getOfflineSbsOverview({
+            signal: controller.signal,
+          })
+          if (requestSerial !== this.overviewRequestSerial) return
+          const jobs = overview.jobs
+          this.capabilities = overview.capabilities
+          this.jobs = jobs
+          if (!this.codecAvailable(this.form.codec) && this.supportedCodecs.length) {
+            this.form.codec = this.supportedCodecs[0]
+          }
+          const selectionStillExists = jobs.some(
+            job => this.jobId(job) === this.selectedJobId,
+          )
+          let selectionChanged = false
+          if (!selectionStillExists) {
+            const preferred = jobs.find(job => this.isActive(job)) || jobs[0]
+            const preferredId = preferred ? this.jobId(preferred) : ''
+            selectionChanged = preferredId !== this.selectedJobId
+            this.selectedJobId = preferredId
+          }
+          this.apiError = ''
+          this.pollWarning = ''
+          if (!selectionChanged && this.selectedJobId) {
+            await this.loadSelectedJob(this.selectedJobId, silent)
+          }
+        } catch (error) {
+          if (error?.name === 'AbortError') return
+          if (requestSerial === this.overviewRequestSerial) {
+            const message = this.apiMessage(error)
+            if (silent && this.jobs.length) {
+              this.pollWarning = message
+            } else {
+              this.pollWarning = ''
+              this.apiError = message
+            }
+          }
+        } finally {
+          if (requestSerial === this.overviewRequestSerial) {
+            this.initialLoading = false
+            this.refreshing = false
+          }
+        }
+      },
+      async loadSelectedJob(jobId, silent = true) {
+        const expectedId = String(jobId || '')
+        if (!expectedId) return
+
+        detailAbortController?.abort()
+        const controller = new AbortController()
+        detailAbortController = controller
+        const requestSerial = ++this.detailRequestSerial
+        try {
+          const detail = await getOfflineSbsJob(expectedId, {
+            signal: controller.signal,
+          })
+          if (
+            requestSerial !== this.detailRequestSerial ||
+            expectedId !== this.selectedJobId
+          ) {
+            return
+          }
+          if (!detail || this.jobId(detail) !== expectedId) {
+            throw new OfflineSbsApiError(
+              'The offline job manager returned the wrong job detail.',
+            )
+          }
+          this.selectedJobDetail = detail
+          this.apiError = ''
+          this.pollWarning = ''
+        } catch (error) {
+          if (error?.name === 'AbortError') return
+          if (
+            requestSerial === this.detailRequestSerial &&
+            expectedId === this.selectedJobId
+          ) {
+            if (silent) {
+              this.pollWarning = this.apiMessage(error)
+            } else {
+              this.selectedJobDetail = null
+              this.pollWarning = ''
+              this.apiError = this.apiMessage(error)
+            }
+          }
+        }
+      },
+      apiMessage(error) {
+        if (error instanceof OfflineSbsApiError && error.status === 404) {
+          return 'This build does not expose the built-in /api/offline-sbs/jobs job manager.'
+        }
+        return error?.message || 'The built-in offline job manager could not be reached.'
+      },
+      requestFromForm() {
+        const request = {
+          input_path: this.form.inputPath.trim(),
+          operation: this.form.operation,
+        }
+        if (this.form.operation === 'convert') {
+          request.output_name = this.form.outputName.trim()
+          request.codec = this.form.codec
+          request.scene_cache_max_bytes =
+            Math.round(Number(this.form.sceneCacheGiB) * GIB)
+          request.cache_budget_policy = this.form.cacheBudgetPolicy
+        }
+        return request
+      },
+      async createJob(settings) {
+        this.actionError = ''
+        this.startBusy = true
+        try {
+          const response = await createOfflineSbsJob(settings)
+          const created = response?.job || response
+          const createdId = this.jobId(created)
+          if (createdId) this.selectedJobId = createdId
+          await this.loadJobs(false)
+        } catch (error) {
+          this.actionError = this.apiMessage(error)
+        } finally {
+          this.startBusy = false
+        }
+      },
+      async startJob() {
+        if (!this.canStart) return
+        await this.createJob(this.requestFromForm())
+      },
+      async restartJob(job) {
+        const settings = this.immutableSettings(job)
+        if (!settings) {
+          this.actionError = 'The interrupted job did not retain a complete immutable settings record.'
+          return
+        }
+        await this.createJob(settings)
+      },
+      async cancelJob(job) {
+        const id = this.jobId(job)
+        if (!id || !window.confirm('Cancel this offline job? Completed scene output remains subject to the native cleanup contract.')) {
+          return
+        }
+        this.actionError = ''
+        this.cancelBusy = true
+        try {
+          await cancelOfflineSbsJob(id)
+          await this.loadJobs(false)
+        } catch (error) {
+          this.actionError = this.apiMessage(error)
+        } finally {
+          this.cancelBusy = false
+        }
+      },
+      async downloadSceneAudit() {
+        const id = this.jobId(this.selectedJob)
+        if (!id || this.auditBusy) return
+        this.actionError = ''
+        this.auditBusy = true
+        try {
+          const blob = await downloadOfflineSbsSceneAudit(id)
+          const url = URL.createObjectURL(blob)
+          const link = document.createElement('a')
+          link.href = url
+          link.download =
+            `sunshine3d-scene-audit-${id.replace(/[^0-9A-Fa-f-]/g, '')}.json`
+          document.body.appendChild(link)
+          link.click()
+          link.remove()
+          window.setTimeout(() => URL.revokeObjectURL(url), 0)
+        } catch (error) {
+          this.actionError = this.apiMessage(error)
+        } finally {
+          this.auditBusy = false
+        }
+      },
+      sceneKey(scene, index) {
+        return `${scene.scene_id ?? index}-${scene.start_sequence ?? index}`
+      },
+      sceneRange(scene) {
+        const start = Number(scene.start_sequence)
+        const endExclusive = Number(scene.end_sequence_exclusive)
+        if (!Number.isFinite(start) || !Number.isFinite(endExclusive)) return 'Pending'
+        return `${start}–${Math.max(start, endExclusive - 1)}`
+      },
+      decisionLabel(decision) {
+        if (!decision) return 'Committed'
+        return String(decision)
+          .replaceAll('_', ' ')
+          .replace(/\b\w/g, character => character.toUpperCase())
+      },
+      popLabel(value) {
+        const number = Number(value)
+        return Number.isFinite(number) ? `${number.toFixed(2)}×` : '—'
+      },
+      anchorLabel(value) {
+        const number = Number(value)
+        return Number.isFinite(number) ? `${number.toFixed(2)} px` : '—'
+      },
+      sceneFlags(scene) {
+        const flags = []
+        const boundary = scene.boundary || {}
+        const decision = String(boundary.decision || scene.decision || '')
+        if (decision.includes('moved')) flags.push('Moved')
+        if (decision.includes('merged')) flags.push('Merged')
+        if (boundary.truncated || scene.truncated) flags.push('Truncated')
+        if (boundary.budget_forced || scene.budget_forced) flags.push('Budget split')
+        if (boundary.semantic_cut === false && boundary.budget_forced) {
+          flags.push('Non-semantic')
+        }
+        return flags
+      },
+    },
+  })
+
+  const pageStyles = document.getElementById('offlineConversionStyles')
+  if (pageStyles) document.head.appendChild(pageStyles)
+  initApp(app)
+</script>
+
+<style id="offlineConversionStyles">
+  .offline-limit-grid,
+  .offline-workspace,
+  .offline-form-row,
+  .offline-codec-grid {
+    display: grid;
+    gap: var(--apollo-space-lg);
+  }
+
+  .offline-limit-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .offline-limit-card {
+    display: flex;
+    min-height: var(--apollo-control-primary);
+    padding: var(--apollo-space-lg);
+    align-items: flex-start;
+    gap: var(--apollo-space-md);
+    border: 1px solid var(--apollo-border-panel);
+    border-radius: var(--apollo-radius-card);
+    background: var(--apollo-surface);
+  }
+
+  .offline-limit-card.is-warning {
+    border-color: color-mix(in srgb, var(--apollo-status-warn) 34%, var(--apollo-border));
+    background: color-mix(in srgb, var(--apollo-status-warn) 7%, var(--apollo-surface));
+  }
+
+  .offline-limit-icon,
+  .offline-recovery-icon {
+    display: grid;
+    width: var(--apollo-control-compact);
+    min-width: var(--apollo-control-compact);
+    height: var(--apollo-control-compact);
+    color: var(--apollo-accent);
+    place-items: center;
+    border-radius: var(--apollo-radius-control);
+    background: color-mix(in srgb, var(--apollo-accent) 12%, transparent);
+  }
+
+  .offline-limit-card.is-warning .offline-limit-icon {
+    color: var(--apollo-status-warn);
+    background: color-mix(in srgb, var(--apollo-status-warn) 13%, transparent);
+  }
+
+  .offline-limit-card strong,
+  .offline-limit-card p {
+    display: block;
+  }
+
+  .offline-limit-card p {
+    margin: var(--apollo-space-xs) 0 0;
+    color: var(--apollo-text-secondary);
+    line-height: 1.5;
+  }
+
+  .offline-workspace {
+    margin-top: calc(var(--apollo-space-xl) + var(--apollo-space-md));
+    grid-template-columns: minmax(0, 1.08fr) minmax(340px, 0.92fr);
+    align-items: start;
+  }
+
+  .offline-panel {
+    padding: var(--apollo-space-xl);
+    border: 1px solid var(--apollo-border-panel);
+    border-radius: var(--apollo-radius-card);
+    background: var(--apollo-surface-raised);
+    box-shadow: var(--apollo-shadow-card);
+  }
+
+  .offline-panel-heading,
+  .offline-progress-topline,
+  .offline-progress-actions,
+  .offline-form-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--apollo-space-lg);
+  }
+
+  .offline-panel-heading {
+    margin-bottom: var(--apollo-space-xl);
+  }
+
+  .offline-panel-heading h2,
+  .offline-progress-topline h3,
+  .offline-empty-state h3,
+  .offline-scene-empty h3 {
+    margin-bottom: 0;
+  }
+
+  .offline-panel-step {
+    display: grid;
+    width: var(--apollo-control-compact);
+    height: var(--apollo-control-compact);
+    color: var(--apollo-on-accent);
+    place-items: center;
+    border-radius: var(--apollo-radius-pill);
+    background: var(--apollo-accent);
+    font-weight: 750;
+  }
+
+  .offline-job-form {
+    display: grid;
+    gap: var(--apollo-space-xl);
+  }
+
+  .offline-codec-grid,
+  .offline-form-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .offline-codec-option {
+    display: grid;
+    min-height: var(--apollo-control-primary);
+    padding: var(--apollo-space-md);
+    align-items: center;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: var(--apollo-space-md);
+    cursor: pointer;
+    border: 1px solid var(--apollo-border);
+    border-radius: var(--apollo-radius-control);
+    background: var(--apollo-surface);
+    transition: border-color 160ms ease, background-color 160ms ease;
+  }
+
+  .offline-codec-option:hover {
+    border-color: var(--apollo-border-strong);
+    background: var(--apollo-surface-raised);
+  }
+
+  .offline-codec-option.selected {
+    border-color: var(--apollo-accent);
+    background: color-mix(in srgb, var(--apollo-accent) 9%, var(--apollo-surface));
+  }
+
+  .offline-codec-option.disabled,
+  .offline-codec-option.disabled:hover {
+    cursor: not-allowed;
+    opacity: 0.58;
+    border-color: var(--apollo-border);
+    background: var(--apollo-surface-muted);
+  }
+
+  .offline-codec-option input {
+    accent-color: var(--apollo-accent);
+  }
+
+  .offline-codec-copy {
+    min-width: 0;
+  }
+
+  .offline-codec-copy strong,
+  .offline-codec-copy small {
+    display: block;
+  }
+
+  .offline-codec-copy small {
+    margin-top: var(--apollo-space-xs);
+    color: var(--apollo-text-secondary);
+  }
+
+  .offline-codec-option > .badge {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .offline-policy-warning,
+  .offline-job-error {
+    display: flex;
+    padding: var(--apollo-space-md);
+    align-items: flex-start;
+    gap: var(--apollo-space-sm);
+    color: var(--apollo-status-warn);
+    border: 1px solid color-mix(in srgb, var(--apollo-status-warn) 30%, transparent);
+    border-radius: var(--apollo-radius-control);
+    background: color-mix(in srgb, var(--apollo-status-warn) 8%, transparent);
+  }
+
+  .offline-policy-warning p,
+  .offline-job-error p {
+    margin-bottom: 0;
+    color: var(--apollo-text-secondary);
+  }
+
+  .offline-job-error {
+    margin-top: var(--apollo-space-lg);
+    color: var(--apollo-danger);
+    border-color: color-mix(in srgb, var(--apollo-danger) 30%, transparent);
+    background: color-mix(in srgb, var(--apollo-danger) 8%, transparent);
+  }
+
+  .offline-form-actions {
+    padding-top: var(--apollo-space-lg);
+    border-top: 1px solid var(--apollo-border);
+  }
+
+  .offline-form-actions p {
+    max-width: 520px;
+    margin-bottom: 0;
+    color: var(--apollo-text-secondary);
+  }
+
+  .offline-form-actions .btn {
+    flex: 0 0 auto;
+  }
+
+  .offline-notice-dismiss {
+    width: var(--apollo-control-compact);
+    height: var(--apollo-control-compact);
+    color: var(--apollo-text-secondary);
+    border: 0;
+    border-radius: var(--apollo-radius-control);
+    background: transparent;
+  }
+
+  .offline-job-selector {
+    margin-bottom: var(--apollo-space-lg);
+  }
+
+  .offline-progress-card {
+    padding: var(--apollo-space-lg);
+    border: 1px solid var(--apollo-border);
+    border-radius: var(--apollo-radius-card);
+    background: var(--apollo-surface);
+  }
+
+  .offline-status-label,
+  .offline-decision-count {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--apollo-space-sm);
+    color: var(--apollo-text-secondary);
+  }
+
+  .offline-audit-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--apollo-space-md);
+    flex-wrap: wrap;
+  }
+
+  .offline-status-label.is-active {
+    color: var(--apollo-accent);
+  }
+
+  .offline-status-label.is-success {
+    color: var(--apollo-status-ok);
+  }
+
+  .offline-status-label.is-warning {
+    color: var(--apollo-status-warn);
+  }
+
+  .offline-status-label.is-danger {
+    color: var(--apollo-danger);
+  }
+
+  .offline-progress-topline h3 {
+    margin-top: var(--apollo-space-xs);
+  }
+
+  .offline-progress {
+    height: var(--apollo-space-md);
+    margin: var(--apollo-space-lg) 0;
+    border-radius: var(--apollo-radius-pill);
+  }
+
+  .offline-job-facts,
+  .offline-recovery-card dl {
+    display: grid;
+    margin: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--apollo-space-lg);
+  }
+
+  .offline-job-facts div,
+  .offline-recovery-card dl div {
+    min-width: 0;
+  }
+
+  .offline-job-facts dt,
+  .offline-recovery-card dt,
+  .offline-path-summary span {
+    color: var(--apollo-text-secondary);
+    font-weight: 560;
+  }
+
+  .offline-job-facts dd,
+  .offline-recovery-card dd {
+    margin: var(--apollo-space-xs) 0 0;
+    color: var(--apollo-text-primary);
+    font-weight: 700;
+  }
+
+  .offline-path-summary {
+    display: grid;
+    margin-top: var(--apollo-space-lg);
+    padding: var(--apollo-space-md);
+    gap: var(--apollo-space-xs);
+    border-radius: var(--apollo-radius-control);
+    background: var(--apollo-surface-sunken);
+  }
+
+  .offline-path-summary code {
+    overflow-wrap: anywhere;
+    color: var(--apollo-text-primary);
+  }
+
+  .offline-recovery-card {
+    display: grid;
+    margin-top: var(--apollo-space-lg);
+    padding: var(--apollo-space-lg);
+    gap: var(--apollo-space-lg);
+    border: 1px solid color-mix(in srgb, var(--apollo-status-warn) 34%, transparent);
+    border-radius: var(--apollo-radius-card);
+    background: color-mix(in srgb, var(--apollo-status-warn) 7%, var(--apollo-surface));
+  }
+
+  .offline-recovery-card > div {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--apollo-space-md);
+  }
+
+  .offline-recovery-card p {
+    margin: var(--apollo-space-xs) 0 0;
+    color: var(--apollo-text-secondary);
+  }
+
+  .offline-progress-actions {
+    margin-top: var(--apollo-space-lg);
+    padding-top: var(--apollo-space-lg);
+    border-top: 1px solid var(--apollo-border);
+  }
+
+  .offline-progress-actions small {
+    overflow: hidden;
+    color: var(--apollo-text-disabled);
+    text-overflow: ellipsis;
+  }
+
+  .offline-empty-state,
+  .offline-scene-empty {
+    display: flex;
+    min-height: 180px;
+    padding: var(--apollo-space-xl);
+    align-items: center;
+    justify-content: center;
+    gap: var(--apollo-space-lg);
+    text-align: left;
+    border: 1px dashed var(--apollo-border);
+    border-radius: var(--apollo-radius-card);
+    background: var(--apollo-surface);
+  }
+
+  .offline-empty-state p,
+  .offline-scene-empty p {
+    margin: var(--apollo-space-xs) 0 0;
+    color: var(--apollo-text-secondary);
+  }
+
+  .offline-scene-table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--apollo-border-panel);
+    border-radius: var(--apollo-radius-card);
+    background: var(--apollo-surface-raised);
+    box-shadow: var(--apollo-shadow-card);
+  }
+
+  .offline-scene-table {
+    min-width: 840px;
+    margin-bottom: 0;
+    vertical-align: middle;
+  }
+
+  .offline-scene-table th,
+  .offline-scene-table td {
+    padding: var(--apollo-space-md) var(--apollo-space-lg);
+  }
+
+  .offline-decision-label {
+    text-transform: none;
+  }
+
+  .offline-audit-badge {
+    margin: var(--apollo-space-xs);
+    color: var(--apollo-text-primary);
+    border: 1px solid var(--apollo-border);
+    background: var(--apollo-surface);
+  }
+
+  .offline-muted {
+    color: var(--apollo-text-disabled);
+  }
+
+  .offline-scene-empty > span {
+    display: grid;
+    width: var(--apollo-icon-tile);
+    height: var(--apollo-icon-tile);
+    color: var(--apollo-accent);
+    place-items: center;
+    border-radius: var(--apollo-radius-control);
+    background: color-mix(in srgb, var(--apollo-accent) 12%, transparent);
+  }
+
+  /* The permanent host navigation rail reduces the usable page width by roughly
+     340 px. Collapse the outer split before either panel squeezes its own
+     two-column controls into unreadable word stacks. */
+  @media (max-width: 1599.98px) {
+    .offline-workspace {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 699.98px) {
+    .offline-limit-grid,
+    .offline-codec-grid,
+    .offline-form-row,
+    .offline-job-facts,
+    .offline-recovery-card dl {
+      grid-template-columns: 1fr;
+    }
+
+    .offline-panel {
+      padding: var(--apollo-space-lg);
+    }
+
+    .offline-form-actions,
+    .offline-progress-actions {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .offline-form-actions .btn,
+    .offline-progress-actions .btn {
+      width: 100%;
+      justify-content: center;
+    }
+  }
+</style>
+
+</html>

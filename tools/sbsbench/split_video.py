@@ -23,15 +23,26 @@ import subprocess
 import sys
 
 
-def ffmpeg_exe():
+def resolve_ffmpeg():
+    """Return the shared FFmpeg executable or raise a caller-friendly error."""
     exe = shutil.which("ffmpeg")
     if exe:
         return exe
     try:
         import imageio_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        sys.exit("no ffmpeg found (install imageio-ffmpeg: python -m pip install imageio-ffmpeg)")
+    except Exception as exc:
+        raise RuntimeError(
+            "no ffmpeg found (install imageio-ffmpeg: "
+            "python -m pip install imageio-ffmpeg)") from exc
+
+
+def ffmpeg_exe():
+    """Backward-compatible command-line wrapper around :func:`resolve_ffmpeg`."""
+    try:
+        return resolve_ffmpeg()
+    except RuntimeError as exc:
+        sys.exit(str(exc))
 
 
 def main():

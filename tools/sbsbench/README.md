@@ -23,6 +23,33 @@ images shown on the headset. This is the visual half of the host benchmark; see
 
 Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 
+## Production conversion versus the developer whole-clip wrapper
+
+Sunshine 3D's production **Convert** page is backed by an in-process native C++ job manager and an
+isolated `sunshine.exe` child worker. It uses bounded scene lookahead, whole-scene adaptive-pop and
+zero-plane decisions, a bounded depth/state cache, NVENC H.265 or AV1 output, and no Python
+runtime or separate Windows Service. See
+[Offline Host 3D conversion](../../docs/whole-clip-sbs-pipeline.md) for its media contract,
+scene-cache policies, HDR support, and packaging requirements.
+
+`run_whole_clip.py` is a **developer reference/evaluation wrapper**, not the application runtime.
+It keeps one native Host SBS estimator alive across an uninterrupted video so adaptive pop,
+zero-plane, subject history, and scene-cut state can be inspected without artificial estimator
+resets. It may use developer-installed Python/media dependencies and lossless raster
+intermediates:
+
+```powershell
+python tools/sbsbench/run_whole_clip.py D:\video\movie.mkv `
+  --out E:\ApolloDev\whole_clip\movie `
+  --sbs-video E:\ApolloDev\whole_clip\movie\movie-sbs.mkv `
+  --codec hevc_nvenc
+```
+
+The wrapper's `libx265`, executable overrides, and retention switches are experiments for
+developers. They do not imply a production CPU fallback or allow the Web UI to run arbitrary
+executables. Production accepts only trusted installation-local FFmpeg/FFprobe (or a trusted
+host-side absolute override) and NVIDIA `hevc_nvenc` or `av1_nvenc`.
+
 ### Comparing two eval runs — use `compare_runs.py`, not an ad-hoc mean
 
 ```

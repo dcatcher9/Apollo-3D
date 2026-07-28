@@ -7,30 +7,30 @@
         .help-page {
           width: min(100% - 2rem, 1180px);
           margin: 0 auto;
-          padding: 2.25rem 0 5rem;
+          padding: calc(var(--apollo-space-xl) * 1.5) 0 5rem;
         }
 
         .help-header {
-          margin-bottom: 1.6rem;
+          margin-bottom: var(--apollo-space-xl);
         }
 
         .help-header h1 {
-          margin: 0.15rem 0 0.35rem;
-          font-size: clamp(1.8rem, 4vw, 2.45rem);
-          font-weight: 780;
-          letter-spacing: -0.035em;
+          margin: var(--apollo-space-xs) 0 var(--apollo-space-sm);
+          font-size: var(--apollo-text-display);
+          font-weight: 750;
+          letter-spacing: -0.025em;
         }
 
         .help-header p {
           max-width: 48rem;
           margin: 0;
-          color: var(--apollo-text-muted);
+          color: var(--apollo-text-secondary);
         }
 
         .page-eyebrow {
-          color: var(--apollo-text-muted);
-          font-size: 0.72rem;
-          font-weight: 800;
+          color: var(--apollo-text-secondary);
+          font-size: var(--apollo-text-caption);
+          font-weight: 750;
           letter-spacing: 0.1em;
           text-transform: uppercase;
         }
@@ -38,40 +38,40 @@
         .health-strip {
           display: grid;
           grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 0.85rem;
-          margin-bottom: 1.35rem;
+          gap: var(--apollo-space-md);
+          margin-bottom: var(--apollo-space-lg);
         }
 
         .health-item {
           display: flex;
           align-items: center;
-          gap: 0.8rem;
+          gap: var(--apollo-space-md);
           min-width: 0;
-          padding: 0.9rem 1rem;
+          padding: var(--apollo-space-md) var(--apollo-space-lg);
           border: 1px solid var(--apollo-border);
-          border-radius: 1rem;
+          border-radius: var(--apollo-radius-card);
           background: var(--apollo-surface);
         }
 
         .health-icon {
           display: grid;
           flex: 0 0 auto;
-          width: 2.25rem;
-          height: 2.25rem;
+          width: var(--apollo-icon-inline);
+          height: var(--apollo-icon-inline);
           place-items: center;
-          border-radius: 0.72rem;
-          color: #138a55;
-          background: color-mix(in srgb, #16a365 13%, transparent);
+          border-radius: var(--apollo-radius-control);
+          color: var(--apollo-status-ok);
+          background: color-mix(in srgb, var(--apollo-status-ok) 13%, transparent);
         }
 
         .health-icon.idle {
-          color: var(--apollo-text-muted);
-          background: var(--apollo-surface-muted);
+          color: var(--apollo-text-disabled);
+          background: var(--apollo-surface-raised);
         }
 
         .health-icon.warning {
-          color: #a96600;
-          background: color-mix(in srgb, #e59a16 15%, transparent);
+          color: var(--apollo-status-warn);
+          background: color-mix(in srgb, var(--apollo-status-warn) 15%, transparent);
         }
 
         .health-item > div:last-child {
@@ -80,61 +80,61 @@
         }
 
         .health-item span {
-          color: var(--apollo-text-muted);
-          font-size: 0.72rem;
+          color: var(--apollo-text-secondary);
+          font-size: var(--apollo-text-caption);
         }
 
         .health-item strong {
           overflow: hidden;
-          font-size: 0.9rem;
+          font-size: var(--apollo-text-body);
           text-overflow: ellipsis;
           white-space: nowrap;
         }
 
         .section-heading {
-          margin: 1.75rem 0 0.8rem;
-          font-size: 1rem;
+          margin: calc(var(--apollo-space-xl) * 1.5) 0 var(--apollo-space-md);
+          font-size: var(--apollo-text-body);
           font-weight: 750;
         }
 
         .recovery-grid {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 1rem;
+          gap: var(--apollo-space-lg);
         }
 
         .recovery-card {
           display: flex;
           min-height: 13rem;
           flex-direction: column;
-          padding: 1.25rem;
+          padding: var(--apollo-space-lg);
           border: 1px solid var(--apollo-border);
-          border-radius: 1.15rem;
+          border-radius: var(--apollo-radius-card);
           background: var(--apollo-surface);
           box-shadow: 0 8px 28px rgba(15, 23, 42, 0.04);
         }
 
         .recovery-card-icon {
           display: grid;
-          width: 2.5rem;
-          height: 2.5rem;
-          margin-bottom: 1rem;
+          width: var(--apollo-icon-inline);
+          height: var(--apollo-icon-inline);
+          margin-bottom: var(--apollo-space-lg);
           place-items: center;
-          border-radius: 0.8rem;
-          color: var(--apollo-accent-hover);
-          background: color-mix(in srgb, var(--apollo-accent) 12%, transparent);
+          border-radius: var(--apollo-radius-control);
+          color: var(--apollo-accent);
+          background: color-mix(in srgb, var(--apollo-accent-deep) 48%, transparent);
         }
 
         .recovery-card h2 {
           margin: 0;
-          font-size: 1.08rem;
+          font-size: var(--apollo-text-emphasis);
           font-weight: 740;
         }
 
         .recovery-card p {
-          margin: 0.45rem 0 1rem;
-          color: var(--apollo-text-muted);
-          font-size: 0.88rem;
+          margin: var(--apollo-space-sm) 0 var(--apollo-space-lg);
+          color: var(--apollo-text-secondary);
+          font-size: var(--apollo-text-caption);
         }
 
         .recovery-card .btn {
@@ -143,25 +143,25 @@
         }
 
         .inline-result {
-          margin: 0 0 0.8rem;
-          padding: 0.55rem 0.7rem;
-          border-radius: 0.65rem;
-          font-size: 0.8rem;
+          margin: 0 0 var(--apollo-space-md);
+          padding: var(--apollo-space-sm);
+          border-radius: var(--apollo-radius-control);
+          font-size: var(--apollo-text-caption);
         }
 
         .details-card {
           overflow: hidden;
-          margin-top: 1rem;
+          margin-top: var(--apollo-space-lg);
           border: 1px solid var(--apollo-border);
-          border-radius: 1.15rem;
+          border-radius: var(--apollo-radius-card);
           background: var(--apollo-surface);
         }
 
         .details-card summary {
           display: flex;
           align-items: center;
-          gap: 0.75rem;
-          padding: 1.05rem 1.2rem;
+          gap: var(--apollo-space-md);
+          padding: var(--apollo-space-lg);
           cursor: pointer;
           font-weight: 720;
           list-style: none;
@@ -172,13 +172,13 @@
         }
 
         .details-card summary > i {
-          color: var(--apollo-accent-hover);
+          color: var(--apollo-accent);
         }
 
         .details-card summary::after {
           margin-left: auto;
           font-family: "Font Awesome 5 Free";
-          font-size: 0.75rem;
+          font-size: var(--apollo-text-caption);
           font-weight: 900;
           content: "\f078";
           transition: transform 150ms ease;
@@ -189,7 +189,7 @@
         }
 
         .details-content {
-          padding: 0 1.2rem 1.2rem;
+          padding: 0 var(--apollo-space-lg) var(--apollo-space-lg);
           border-top: 1px solid var(--apollo-border);
         }
 
@@ -197,39 +197,39 @@
           display: flex;
           align-items: center;
           justify-content: space-between;
-          gap: 0.75rem;
-          padding: 1rem 0;
+          gap: var(--apollo-space-md);
+          padding: var(--apollo-space-lg) 0;
         }
 
         .log-card-heading {
           display: flex;
           align-items: flex-start;
           justify-content: space-between;
-          gap: 1rem;
-          padding: 1.2rem;
+          gap: var(--apollo-space-lg);
+          padding: var(--apollo-space-lg);
         }
 
         .log-card-heading h2 {
           margin: 0;
-          font-size: 1.08rem;
+          font-size: var(--apollo-text-emphasis);
           font-weight: 740;
         }
 
         .log-card-heading p {
-          margin: 0.3rem 0 0;
-          color: var(--apollo-text-muted);
-          font-size: 0.84rem;
+          margin: var(--apollo-space-xs) 0 0;
+          color: var(--apollo-text-secondary);
+          font-size: var(--apollo-text-caption);
         }
 
         .log-live-state {
           display: inline-flex;
           align-items: center;
-          gap: 0.45rem;
-          padding: 0.35rem 0.65rem;
-          color: #138a55;
-          border-radius: 999px;
-          background: color-mix(in srgb, #16a365 13%, transparent);
-          font-size: 0.72rem;
+          gap: var(--apollo-space-sm);
+          padding: var(--apollo-space-xs) var(--apollo-space-sm);
+          color: var(--apollo-status-ok);
+          border-radius: var(--apollo-radius-pill);
+          background: color-mix(in srgb, var(--apollo-status-ok) 13%, transparent);
+          font-size: var(--apollo-text-caption);
           font-weight: 720;
           white-space: nowrap;
         }
@@ -244,13 +244,13 @@
 
         .log-tools p {
           margin: 0;
-          color: var(--apollo-text-muted);
-          font-size: 0.84rem;
+          color: var(--apollo-text-secondary);
+          font-size: var(--apollo-text-caption);
         }
 
         .log-actions {
           display: flex;
-          gap: 0.5rem;
+          gap: var(--apollo-space-sm);
         }
 
         .log-actions .form-control {
@@ -261,12 +261,12 @@
           max-height: 28rem;
           min-height: 15rem;
           overflow: auto;
-          padding: 1rem;
-          border-radius: 0.8rem;
+          padding: var(--apollo-space-lg);
+          border-radius: var(--apollo-radius-control);
           color: #d9e1ee;
           background: #10141b;
           font-family: monospace;
-          font-size: 0.78rem;
+          font-size: var(--apollo-text-caption);
           line-height: 1.5;
           white-space: pre;
         }
@@ -274,26 +274,26 @@
         .advanced-actions {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 1rem;
-          padding-top: 1rem;
+          gap: var(--apollo-space-lg);
+          padding-top: var(--apollo-space-lg);
         }
 
         .advanced-action {
-          padding: 1rem;
+          padding: var(--apollo-space-lg);
           border: 1px solid var(--apollo-border);
-          border-radius: 0.9rem;
+          border-radius: var(--apollo-radius-card);
         }
 
         .advanced-action h3 {
           margin: 0;
-          font-size: 0.95rem;
+          font-size: var(--apollo-text-body);
           font-weight: 720;
         }
 
         .advanced-action p {
-          margin: 0.35rem 0 0.85rem;
-          color: var(--apollo-text-muted);
-          font-size: 0.82rem;
+          margin: var(--apollo-space-sm) 0 var(--apollo-space-md);
+          color: var(--apollo-text-secondary);
+          font-size: var(--apollo-text-caption);
         }
 
         @media (max-width: 760px) {
@@ -330,10 +330,10 @@
     <header class="help-header">
       <span class="page-eyebrow">Support</span>
       <h1>Help &amp; debug log</h1>
-      <p>Check Apollo XR's health, inspect the live debug log, or recover the single active session.</p>
+      <p>Check Sunshine 3D's health, inspect the live debug log, or recover the single active session.</p>
     </header>
 
-    <section class="health-strip" aria-label="Apollo XR health">
+    <section class="health-strip" aria-label="Sunshine 3D health">
       <div class="health-item">
         <div class="health-icon"><i class="fas fa-check"></i></div>
         <div><span>Host service</span><strong>Running</strong></div>
@@ -368,7 +368,7 @@
 
       <article class="recovery-card" id="restart">
         <div class="recovery-card-icon"><i class="fas fa-redo-alt"></i></div>
-        <h2>Restart Apollo XR</h2>
+        <h2>Restart Sunshine 3D</h2>
         <p>{{ $t('troubleshooting.restart_apollo_desc') }}</p>
         <div class="inline-result alert-success" v-if="serverRestarting">
           {{ $t('troubleshooting.restart_apollo_success') }}

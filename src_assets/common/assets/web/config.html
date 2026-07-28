@@ -7,34 +7,34 @@
       .settings-page {
         width: min(100% - 2rem, 1360px);
         margin: 0 auto;
-        padding: 2.25rem 0 7rem;
+        padding: calc(var(--apollo-space-xl) * 1.5) 0 7rem;
       }
 
       .settings-page-header {
         display: flex;
         align-items: flex-end;
         justify-content: space-between;
-        gap: 2rem;
-        margin-bottom: 1.6rem;
+        gap: var(--apollo-space-xl);
+        margin-bottom: var(--apollo-space-xl);
       }
 
       .settings-page-header h1 {
-        margin: 0.15rem 0 0.35rem;
-        font-size: clamp(1.8rem, 4vw, 2.45rem);
-        font-weight: 780;
-        letter-spacing: -0.035em;
+        margin: var(--apollo-space-xs) 0 var(--apollo-space-sm);
+        font-size: var(--apollo-text-display);
+        font-weight: 750;
+        letter-spacing: -0.025em;
       }
 
       .settings-page-header p {
         max-width: 48rem;
         margin: 0;
-        color: var(--apollo-text-muted);
+        color: var(--apollo-text-secondary);
       }
 
       .page-eyebrow {
-        color: var(--apollo-text-muted);
-        font-size: 0.72rem;
-        font-weight: 800;
+        color: var(--apollo-text-secondary);
+        font-size: var(--apollo-text-caption);
+        font-weight: 750;
         letter-spacing: 0.1em;
         text-transform: uppercase;
       }
@@ -43,43 +43,44 @@
         display: grid;
         grid-template-columns: 15.5rem minmax(0, 1fr);
         align-items: start;
-        gap: 1.25rem;
+        gap: var(--apollo-space-lg);
       }
 
       .settings-nav {
         position: sticky;
-        top: 1.25rem;
+        top: var(--apollo-space-lg);
         overflow: hidden;
-        padding: 0.55rem;
+        padding: var(--apollo-space-sm);
         border: 1px solid var(--apollo-border);
-        border-radius: 1.15rem;
+        border-radius: var(--apollo-radius-card);
         background: var(--apollo-surface);
-        box-shadow: 0 8px 30px rgba(15, 23, 42, 0.045);
+        box-shadow: var(--apollo-shadow);
       }
 
       .settings-nav-button {
         display: flex;
         width: 100%;
         align-items: center;
-        gap: 0.75rem;
-        padding: 0.7rem 0.75rem;
+        min-height: var(--apollo-control-compact);
+        gap: var(--apollo-space-md);
+        padding: var(--apollo-space-sm) var(--apollo-space-md);
         border: 0;
-        border-radius: 0.75rem;
-        color: var(--apollo-text);
+        border-radius: var(--apollo-radius-control);
+        color: var(--apollo-text-primary);
         background: transparent;
-        font-size: 0.88rem;
+        font-size: var(--apollo-text-body);
         font-weight: 650;
         text-align: left;
         transition: background-color 120ms ease, color 120ms ease;
       }
 
       .settings-nav-button:hover {
-        background: var(--apollo-surface-muted);
+        background: var(--apollo-surface-raised);
       }
 
       .settings-nav-button.active {
-        color: var(--apollo-accent-hover);
-        background: color-mix(in srgb, var(--apollo-accent) 12%, transparent);
+        color: var(--apollo-accent-bright);
+        background: var(--apollo-accent-deep);
       }
 
       .settings-nav-button i:first-child {
@@ -91,7 +92,7 @@
 
       .settings-nav-button .chevron {
         margin-left: auto;
-        font-size: 0.72rem;
+        font-size: var(--apollo-text-caption);
         transition: transform 160ms ease;
       }
 
@@ -100,54 +101,54 @@
       }
 
       .settings-nav-label {
-        padding: 1rem 0.75rem 0.35rem;
-        color: var(--apollo-text-muted);
-        font-size: 0.66rem;
-        font-weight: 800;
+        padding: var(--apollo-space-lg) var(--apollo-space-md) var(--apollo-space-sm);
+        color: var(--apollo-text-disabled);
+        font-size: var(--apollo-text-caption);
+        font-weight: 750;
         letter-spacing: 0.08em;
         text-transform: uppercase;
       }
 
       .settings-advanced-list {
         display: grid;
-        gap: 0.12rem;
-        padding-top: 0.15rem;
+        gap: var(--apollo-space-xs);
+        padding-top: var(--apollo-space-xs);
       }
 
       .settings-advanced-list .settings-nav-button {
-        padding-left: 1rem;
-        font-size: 0.82rem;
+        padding-left: var(--apollo-space-lg);
+        font-size: var(--apollo-text-caption);
         font-weight: 580;
       }
 
       .settings-panel {
         min-width: 0;
-        padding: 1.25rem;
+        padding: var(--apollo-space-lg);
         border: 1px solid var(--apollo-border);
-        border-radius: 1.25rem;
-        background: color-mix(in srgb, var(--apollo-surface-muted) 52%, var(--apollo-surface));
+        border-radius: var(--apollo-radius-card);
+        background: var(--apollo-surface-sunken);
       }
 
       .settings-panel-header {
         display: flex;
         align-items: flex-start;
         justify-content: space-between;
-        gap: 1rem;
-        padding: 0.35rem 0.3rem 1.15rem;
-        margin-bottom: 1rem;
+        gap: var(--apollo-space-lg);
+        padding: var(--apollo-space-sm) var(--apollo-space-xs) var(--apollo-space-lg);
+        margin-bottom: var(--apollo-space-lg);
         border-bottom: 1px solid var(--apollo-border);
       }
 
       .settings-panel-header h2 {
         margin: 0;
-        font-size: 1.25rem;
+        font-size: var(--apollo-text-title);
         font-weight: 750;
       }
 
       .settings-panel-header p {
-        margin: 0.25rem 0 0;
-        color: var(--apollo-text-muted);
-        font-size: 0.87rem;
+        margin: var(--apollo-space-xs) 0 0;
+        color: var(--apollo-text-secondary);
+        font-size: var(--apollo-text-caption);
       }
 
       .config-page {
@@ -162,17 +163,17 @@
       .settings-savebar {
         position: fixed;
         z-index: 1020;
-        right: max(1rem, calc((100vw - 1360px) / 2));
-        bottom: 1rem;
+        right: max(var(--apollo-space-lg), calc((100vw - 1360px) / 2));
+        bottom: var(--apollo-space-lg);
         display: flex;
         align-items: center;
-        gap: 0.8rem;
+        gap: var(--apollo-space-md);
         max-width: calc(100vw - 2rem);
-        padding: 0.65rem 0.7rem 0.65rem 1rem;
-        border: 1px solid var(--apollo-border);
-        border-radius: 1rem;
-        background: color-mix(in srgb, var(--apollo-surface) 92%, transparent);
-        box-shadow: 0 14px 44px rgba(15, 23, 42, 0.18);
+        padding: var(--apollo-space-sm) var(--apollo-space-sm) var(--apollo-space-sm) var(--apollo-space-lg);
+        border: 1px solid var(--apollo-border-strong);
+        border-radius: var(--apollo-radius-card);
+        background: color-mix(in srgb, var(--apollo-surface-raised) 92%, transparent);
+        box-shadow: var(--apollo-shadow);
         backdrop-filter: blur(18px);
       }
 
@@ -182,19 +183,19 @@
       }
 
       .save-state strong {
-        font-size: 0.82rem;
+        font-size: var(--apollo-text-caption);
       }
 
       .save-state span {
-        color: var(--apollo-text-muted);
-        font-size: 0.72rem;
+        color: var(--apollo-text-secondary);
+        font-size: var(--apollo-text-caption);
       }
 
       .settings-loading {
         display: grid;
         min-height: 22rem;
         place-items: center;
-        color: var(--apollo-text-muted);
+        color: var(--apollo-text-secondary);
       }
 
       @media (max-width: 900px) {
@@ -220,7 +221,7 @@
       @media (max-width: 600px) {
         .settings-page {
           width: min(100% - 1rem, 1360px);
-          padding-top: 1.25rem;
+          padding-top: var(--apollo-space-lg);
         }
 
         .settings-page-header {
@@ -229,8 +230,8 @@
         }
 
         .settings-panel {
-          padding: 0.75rem;
-          border-radius: 1rem;
+          padding: var(--apollo-space-md);
+          border-radius: var(--apollo-radius-card);
         }
 
         .settings-advanced-list {
@@ -252,9 +253,9 @@
 
         .settings-savebar .btn-apollo-primary,
         .settings-savebar .btn-apollo-quiet {
-          padding-right: 0.7rem;
-          padding-left: 0.7rem;
-          font-size: 0.78rem;
+          padding-right: var(--apollo-space-sm);
+          padding-left: var(--apollo-space-sm);
+          font-size: var(--apollo-text-caption);
         }
       }
     </style>
@@ -317,6 +318,7 @@
         <essentials
           v-if="currentTab === 'essential'"
           :config="config"
+          :platform="platform"
           :vdisplay="vdisplayStatus"
         ></essentials>
 
@@ -367,7 +369,7 @@
 
     <div v-if="config" class="settings-savebar" role="status">
       <div class="save-state">
-        <strong v-if="restarted">Apollo XR is restarting</strong>
+        <strong v-if="restarted">Sunshine 3D is restarting</strong>
         <strong v-else-if="saved">Settings saved</strong>
         <strong v-else-if="dirty">Unsaved changes</strong>
         <strong v-else>Settings are current</strong>
@@ -425,6 +427,7 @@
         advancedOpen: false,
         config: null,
         currentTab: "essential",
+        platform: "",
         vdisplayStatus: "1",
         global_prep_cmd: [],
         tabs: [ // TODO: Move the options to each Component instead, encapsulate.
@@ -479,6 +482,7 @@
               "output_name": "",
               "max_bitrate": 0,
               "minimum_fps_target": 0,
+              "virtual_display_restart_explorer": "on",
             },
           },
           {
@@ -551,6 +555,7 @@
         .then((r) => r.json())
         .then((r) => {
           this.config = r;
+          this.platform = r.platform || "";
 
           // remove values we don't want in the config file
           delete this.config.platform;

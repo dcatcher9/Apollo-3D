@@ -32,6 +32,41 @@ namespace video {
   // Debug frame-dump request flag (declared in video.h); set by the 0x3004 control message
   // handler in stream.cpp, consumed by display_vram's SBS convert().
   std::atomic<bool> sbs_debug_dump_pending {false};
+  namespace {
+    std::atomic_uint32_t sbs_telemetry_generation_counter {0};
+
+    sbs_telemetry_snapshot_t make_unavailable_sbs_telemetry_snapshot(
+      std::uint32_t generation,
+      const config::video_t::sbs_t &profile
+    ) {
+      sbs_telemetry_snapshot_t snapshot;
+      snapshot.status = sbs_telemetry_sample_status_e::unavailable;
+      snapshot.generation = generation;
+      snapshot.valid_fields = sbs_telemetry_valid_field::config;
+      snapshot.runtime_flags = profile.adaptive_pop ?
+                                 sbs_telemetry_runtime_flag::adaptive_enabled :
+                                 0u;
+      snapshot.zero_plane_mode = profile.zero_plane == "subject" ? 1 :
+                                 profile.zero_plane == "background" ? 3 :
+                                                                       2;
+      snapshot.pop_floor = static_cast<float>(profile.pop_strength);
+      snapshot.pop_ceiling =
+        static_cast<float>(std::max(profile.adaptive_pop_max, profile.pop_strength));
+      snapshot.effective_pop = snapshot.pop_floor;
+      return snapshot;
+    }
+  }  // namespace
+
+  std::uint32_t next_sbs_telemetry_generation() noexcept {
+    // Zero is reserved for "no renderer has existed yet". Skip it on the theoretical wrap.
+    for (;;) {
+      const auto generation =
+        sbs_telemetry_generation_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+      if (generation != 0) {
+        return generation;
+      }
+    }
+  }
 
   bool hdr_stream_negotiation_is_coherent(bool launch_hdr, int dynamic_range) noexcept {
     return launch_hdr == (dynamic_range > 0);
@@ -737,21 +772,16 @@ namespace video {
     platf::refresh_mouse_keys();
   }
 
-  bool encode_run(
+  void encode_run(
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
     img_event_t images,
     config_t config,
     std::shared_ptr<platf::display_t> disp,
-    std::unique_ptr<platf::nvenc_encode_device_t> encode_device,
+    std::unique_ptr<nvenc_encode_session_t> session,
     safe::signal_t &reinit_event,
     std::shared_ptr<void> channel_data
   ) {
-    auto session = make_encode_session(config, std::move(encode_device));
-    if (!session) {
-      return false;
-    }
-
     // As a workaround for NVENC hangs and to generally speed up encoder reinit,
     // we will complete the encoder teardown in a separate thread if supported.
     // This will move expensive processing off the encoder thread to allow us
@@ -797,7 +827,7 @@ namespace video {
       // in a separate scope.
       auto dummy_img = disp->alloc_img();
       if (!dummy_img || disp->dummy_img(dummy_img.get()) || session->convert(*dummy_img)) {
-        return true;
+        return;
       }
     }
 
@@ -973,7 +1003,6 @@ namespace video {
       session->request_normal_frame();
       refresh_mouse_keys_if_due(next_mouse_keys_refresh);
     }
-    return true;
   }
 
   input::touch_port_t make_port(platf::display_t *display, const config_t &config) {
@@ -1096,6 +1125,8 @@ namespace video {
     // width; when SBS is on we double it so the encoder emits a 2W x H side-by-side frame.
     auto sbs_mode_event = mail->event<int>(mail::sbs_mode);
     auto sbs_depth_status_event = mail->event<int>(mail::sbs_depth_status);
+    auto sbs_telemetry_event =
+      mail->event<sbs_telemetry_snapshot_t>(mail::sbs_telemetry);
     // Live client-requested geometry/rate/bitrate change (0x3007 control message). It rewrites
     // `config`, which every derived value below is rebuilt from on each iteration. This is a queue
     // rather than a single-slot event: every request owes the client an acknowledgement, so a
@@ -1109,12 +1140,11 @@ namespace video {
     std::optional<video_mode_change_t> proven_video_mode;
     bool config_from_live_video_mode = false;
     // Every live request owes the client exactly one answer, and only this loop knows the geometry
-    // that actually gets installed. `active_ack_request_id` is the newest request still waiting for
-    // an encode session; anything it overrode moves to `superseded_ack_request_ids` and is reported
-    // as not applied, together with the mode that ended up running instead.
+    // that actually gets installed. The host-generated transaction id (unlike the opaque client
+    // request id) lets the serialized stream worker match this completion unambiguously.
     auto video_mode_applied_queue = mail->queue<video_mode_applied_t>(mail::video_mode_applied);
-    std::optional<int> active_ack_request_id;
-    std::vector<int> superseded_ack_request_ids;
+    std::optional<video_mode_request_ref_t> active_ack_request;
+    std::vector<video_mode_request_ref_t> superseded_ack_requests;
 
     // Encoding takes place on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
@@ -1133,10 +1163,13 @@ namespace video {
           config.bitrate = mode->bitrate;
           capture_thread_ctx.live_video_mode = std::optional<video_mode_change_t> {*mode};
           config_from_live_video_mode = true;
-          if (active_ack_request_id) {
-            superseded_ack_request_ids.push_back(*active_ack_request_id);
+          if (active_ack_request) {
+            superseded_ack_requests.push_back(*active_ack_request);
           }
-          active_ack_request_id = mode->request_id;
+          active_ack_request = video_mode_request_ref_t {
+            mode->request_id,
+            mode->transaction_id,
+          };
           BOOST_LOG(info) << "Applying live video mode "sv << config.width << 'x' << config.height
                           << '@' << (config.framerateX100 > 0 ? config.framerateX100 / 100.0 : (double) config.framerate)
                           << "Hz, "sv << config.bitrate << "kbps"sv;
@@ -1182,6 +1215,15 @@ namespace video {
       session_config.sbs_depth_pipeline_ready_event =
         std::make_shared<safe::event_t<bool>>();
       session_config.sbs_config = config::video.sbs;
+      session_config.sbs_telemetry_event = sbs_telemetry_event;
+      session_config.sbs_telemetry_generation = next_sbs_telemetry_generation();
+      // Invalidate the previous renderer's state before any encoder/GPU initialization work. This
+      // is CPU-only and does not activate telemetry sampling; the render path remains completely
+      // dormant until the client's subscription latch is enabled.
+      sbs_telemetry_event->raise(make_unavailable_sbs_telemetry_snapshot(
+        session_config.sbs_telemetry_generation,
+        session_config.sbs_config
+      ));
       int runtime_max_width = nvenc::max_encode_width_for_codec(session_config.videoFormat).value_or(0);
       if (current_sbs_mode != SBS_OFF) {
         const auto dimensions = host_sbs_output_dimensions(
@@ -1267,9 +1309,9 @@ namespace video {
         config_from_live_video_mode = false;
         // The request never made it into an encode session, so it must not be reported as applied.
         // It is answered once the fallback session comes up and its real mode is known.
-        if (active_ack_request_id) {
-          superseded_ack_request_ids.push_back(*active_ack_request_id);
-          active_ack_request_id.reset();
+        if (active_ack_request) {
+          superseded_ack_requests.push_back(*active_ack_request);
+          active_ack_request.reset();
         }
         return true;
       };
@@ -1284,8 +1326,23 @@ namespace video {
         }
         return;
       }
+      auto encode_session = make_encode_session(
+        session_config,
+        std::move(encode_device)
+      );
+      if (!encode_session) {
+        if (recover_failed_sbs_session()) {
+          continue;
+        }
+        if (revert_failed_live_video_mode()) {
+          continue;
+        }
+        return;
+      }
 
-      // The requested geometry produced a real encoder, so it is now the safe fallback.
+      // The requested geometry produced a fully initialized encoder, so it is now the safe
+      // fallback. Pacing publication and the worker completion must remain below this point:
+      // make_encode_device() alone has not yet called init_encoder() and can still fail here.
       proven_video_mode = video_mode_change_t {
         config.width,
         config.height,
@@ -1293,7 +1350,8 @@ namespace video {
         config.framerateX100,
         config.encodingFramerate,
         config.bitrate,
-        active_ack_request_id.value_or(0),
+        active_ack_request ? active_ack_request->request_id : 0,
+        active_ack_request ? active_ack_request->transaction_id : 0,
       };
       config_from_live_video_mode = false;
 
@@ -1309,26 +1367,35 @@ namespace video {
         session_config.bitrate,
       };
       if (config.effective_mode) {
+        // This is also the packet sender's pacing publication. It must remain after successful
+        // encoder creation: a speculative request that fails never changes effective cadence.
         config.effective_mode->publish(effective_mode);
       }
+      const desktop_video_mode_t desktop_mode {
+        config.width,
+        config.height,
+        config.encodingFramerate,
+      };
 
       // Answer the live requests this session resolves. Superseded ones are reported as not
       // applied so the client can drop them and resynchronize on the mode that is really running.
-      if (!superseded_ack_request_ids.empty()) {
+      if (!superseded_ack_requests.empty()) {
         video_mode_applied_queue->raise(video_mode_applied_t {
-          std::move(superseded_ack_request_ids),
+          std::move(superseded_ack_requests),
           false,
           effective_mode,
+          desktop_mode,
         });
-        superseded_ack_request_ids.clear();
+        superseded_ack_requests.clear();
       }
-      if (active_ack_request_id) {
+      if (active_ack_request) {
         video_mode_applied_queue->raise(video_mode_applied_t {
-          {*active_ack_request_id},
+          {*active_ack_request},
           true,
           effective_mode,
+          desktop_mode,
         });
-        active_ack_request_id.reset();
+        active_ack_request.reset();
       }
 
       // absolute mouse coordinates require that the dimensions of the screen are known
@@ -1349,22 +1416,16 @@ namespace video {
       }
       hdr_event->raise(std::move(hdr_info));
 
-      const bool encode_session_created = encode_run(
+      encode_run(
         frame_nr,
         mail,
         images,
         session_config,
         display,
-        std::move(encode_device),
+        std::move(encode_session),
         capture_thread_ctx.reinit_event,
         channel_data
       );
-      if (!encode_session_created) {
-        if (recover_failed_sbs_session()) {
-          continue;
-        }
-        return;
-      }
     }
   }
 

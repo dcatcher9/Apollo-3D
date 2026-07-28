@@ -25,8 +25,8 @@ const config = ref(props.config)
 
 <style scoped>
 .ms-item {
-  background-color: var(--bs-dark-bg-subtle);
-  font-size: 12px;
+  background-color: var(--apollo-surface-raised);
+  font-size: var(--apollo-text-caption);
   font-weight: bold;
 }
 </style>

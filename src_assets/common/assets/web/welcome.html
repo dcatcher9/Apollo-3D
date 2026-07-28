@@ -6,36 +6,39 @@
 </head>
 
 <body id="app" v-cloak>
-  <main role="main" style="max-width: 1200px; margin: 1em auto">
-    <div class="d-flex gap-4">
-      <div class="card p-2">
-        <header>
-          <h1 class="mb-0">
-            <img src="./images/logo-apollo-45.png" height="45" alt="">
-            {{ $t('welcome.greeting') }}
-          </h1>
+  <main class="apollo-auth-page" role="main">
+    <section class="apollo-auth-shell" aria-labelledby="welcome-title">
+      <div class="apollo-auth-card">
+        <header class="apollo-auth-brand">
+          <span class="apollo-auth-mark">
+            <img src="./images/logo-sunshine3d-45.png" alt="">
+          </span>
+          <div>
+            <p class="apollo-eyebrow">Sunshine 3D host</p>
+            <h1 id="welcome-title">{{ $t('welcome.greeting') }}</h1>
+          </div>
         </header>
-        <p class="my-2 align-self-start">{{ $t('welcome.create_creds') }}</p>
+        <p class="apollo-auth-copy">{{ $t('welcome.create_creds') }}</p>
         <div class="alert alert-warning">
           {{ $t('welcome.create_creds_alert') }}
         </div>
-        <form @submit.prevent="save">
-          <div class="mb-2">
+        <form class="apollo-auth-form" @submit.prevent="save">
+          <div>
             <label for="usernameInput" class="form-label">{{ $t('_common.username') }}</label>
             <input type="text" class="form-control" id="usernameInput" autocomplete="username"
               v-model="passwordData.newUsername" />
           </div>
-          <div class="mb-2">
+          <div>
             <label for="passwordInput" class="form-label">{{ $t('_common.password') }}</label>
             <input type="password" class="form-control" id="passwordInput" autocomplete="new-password"
               v-model="passwordData.newPassword" required />
           </div>
-          <div class="mb-2">
+          <div>
             <label for="confirmPasswordInput" class="form-label">{{ $t('welcome.confirm_password') }}</label>
             <input type="password" class="form-control" id="confirmPasswordInput" autocomplete="new-password"
               v-model="passwordData.confirmNewPassword" required />
           </div>
-          <button type="submit" class="btn btn-primary w-100 mb-2" v-bind:disabled="loading">
+          <button type="submit" class="btn btn-apollo-primary w-100" v-bind:disabled="loading">
             {{ $t('welcome.login') }}
           </button>
           <div class="alert alert-danger" v-if="error"><b>{{ $t('_common.error') }}</b> {{error}}</div>
@@ -44,10 +47,10 @@
           </div>
         </form>
       </div>
-      <div>
+      <aside class="apollo-resource-stack" aria-label="Resources">
         <Resource-Card></Resource-Card>
-      </div>
-    </div>
+      </aside>
+    </section>
   </main>
 </body>
 
@@ -55,18 +58,20 @@
   import { createApp } from "vue"
   import ResourceCard from './ResourceCard.vue'
   import { initApp } from './init'
+  import { loadAutoTheme } from './theme'
 
   let app = createApp({
     components: {
       ResourceCard
     },
     data() {
+      loadAutoTheme()
       return {
         error: null,
         success: false,
         loading: false,
         passwordData: {
-          newUsername: "apollo",
+          newUsername: "sunshine3d",
           newPassword: "",
           confirmNewPassword: "",
         },

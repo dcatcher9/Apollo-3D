@@ -134,6 +134,7 @@ namespace config {
     false,  // hide_tray_controls
     true,  // enable_pairing
     true,  // enable_discovery
+    true,  // virtual_display_restart_explorer
     "en",  // locale
     2,  // min_log_level
     false,  // diagnostics_enabled
@@ -787,6 +788,11 @@ namespace config {
     bool_f(vars, "hide_tray_controls", sunshine.hide_tray_controls);
     bool_f(vars, "enable_pairing", sunshine.enable_pairing);
     bool_f(vars, "enable_discovery", sunshine.enable_discovery);
+    bool_f(
+      vars,
+      "virtual_display_restart_explorer",
+      sunshine.virtual_display_restart_explorer
+    );
     bool_f(vars, "forward_rumble", input.forward_rumble);
 
     int port = sunshine.port;
@@ -976,7 +982,7 @@ namespace config {
     // so that service instance will do the work instead.
 
     if (!config_loaded && !shortcut_launch) {
-      BOOST_LOG(fatal) << "To relaunch Apollo successfully, use the shortcut in the Start Menu. Do not run sunshine.exe manually."sv;
+      BOOST_LOG(fatal) << "To relaunch Sunshine 3D successfully, use the shortcut in the Start Menu. Do not run sunshine.exe manually."sv;
       std::this_thread::sleep_for(10s);
 #else
     if (!config_loaded) {

@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
+#include <string_view>
 #include <utility>
 
 // lib includes
@@ -279,6 +281,70 @@ namespace stream {
            framerate_x100 <= LIVE_VIDEO_MODE_FRAMERATE_X100_MAX;
   }
 
+  namespace detail {
+    /**
+     * Transaction gate for live 0x3007 mode requests.
+     *
+     * The control thread may replace a request that is still pending, but once the worker begins
+     * one transaction no later request may begin until the matching encoder completion and any
+     * desktop rollback have finished. Tokens are host-generated because client request ids are
+     * opaque and may repeat.
+     */
+    class live_video_mode_serial_gate_t {
+    public:
+      struct submission_t {
+        std::uint64_t transaction_id;
+        std::optional<std::uint64_t> superseded_transaction_id;
+      };
+
+      [[nodiscard]] submission_t submit() noexcept {
+        ++_last_transaction_id;
+        if (_last_transaction_id == 0) {
+          ++_last_transaction_id;
+        }
+        const auto superseded = std::exchange(_pending_transaction_id, _last_transaction_id);
+        return {_last_transaction_id, superseded};
+      }
+
+      [[nodiscard]] bool can_begin() const noexcept {
+        return !_active_transaction_id && _pending_transaction_id.has_value();
+      }
+
+      [[nodiscard]] std::optional<std::uint64_t> begin_next() noexcept {
+        if (!can_begin()) {
+          return std::nullopt;
+        }
+        _active_transaction_id = std::exchange(_pending_transaction_id, std::nullopt);
+        return _active_transaction_id;
+      }
+
+      [[nodiscard]] bool accepts_completion(std::uint64_t transaction_id) const noexcept {
+        return _active_transaction_id == transaction_id;
+      }
+
+      [[nodiscard]] bool finish(std::uint64_t transaction_id) noexcept {
+        if (!accepts_completion(transaction_id)) {
+          return false;
+        }
+        _active_transaction_id.reset();
+        return true;
+      }
+
+      void cancel_pending() noexcept {
+        _pending_transaction_id.reset();
+      }
+
+      [[nodiscard]] std::optional<std::uint64_t> active() const noexcept {
+        return _active_transaction_id;
+      }
+
+    private:
+      std::uint64_t _last_transaction_id = 0;
+      std::optional<std::uint64_t> _pending_transaction_id;
+      std::optional<std::uint64_t> _active_transaction_id;
+    };
+  }  // namespace detail
+
   /**
    * Host->client outcome of a live 0x3007 video-mode request, carried by the 0x3008
    * acknowledgement. Exactly one acknowledgement is produced per accepted control message, so a
@@ -342,6 +408,87 @@ namespace stream {
     std::uint8_t (&out)[LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE]
   );
 
+  // Artemis host-SBS telemetry control extension:
+  //   0x3009 client -> host subscription (8-byte body)
+  //   0x300A host -> client state        (88-byte body)
+  //
+  // All values below are wire-visible. Keep their numbering and sizes append-only and in sync
+  // with moonlight-common-c's Limelight.h.
+  constexpr std::uint8_t SBS_TELEMETRY_VERSION = 1;
+  constexpr std::size_t SBS_TELEMETRY_SUBSCRIPTION_PAYLOAD_SIZE = 8;
+  constexpr std::size_t SBS_TELEMETRY_STATE_PAYLOAD_SIZE = 88;
+  constexpr std::uint16_t SBS_TELEMETRY_INTERVAL_MIN_MS = 100;
+  constexpr std::uint16_t SBS_TELEMETRY_INTERVAL_MAX_MS = 2000;
+  constexpr std::uint16_t SBS_TELEMETRY_INTERVAL_BACKGROUND_MS = 500;
+  constexpr std::uint16_t SBS_TELEMETRY_INTERVAL_FOCUSED_MS = 100;
+  constexpr std::uint8_t SBS_TELEMETRY_SUBSCRIBE_ENABLED = 1u << 0;
+  constexpr std::uint8_t SBS_TELEMETRY_SUBSCRIBE_FOCUSED = 1u << 1;
+  constexpr std::uint32_t CLIENT_FEATURE_SBS_TELEMETRY = 0x04;
+
+  enum class sbs_telemetry_status_e : std::uint8_t {
+    ok = 0,
+    unavailable = 1,
+    unsupported_version = 2,
+    failed = 3,
+  };
+
+  enum class sbs_telemetry_subscription_decode_e {
+    ok,
+    unsupported_version,
+    invalid,
+  };
+
+  struct sbs_telemetry_subscription_request_t {
+    std::uint8_t flags = 0;
+    std::uint16_t request_id = 0;
+    std::uint16_t interval_ms = 0;
+
+    [[nodiscard]] bool enabled() const noexcept {
+      return (flags & SBS_TELEMETRY_SUBSCRIBE_ENABLED) != 0;
+    }
+
+    [[nodiscard]] bool focused() const noexcept {
+      return (flags & SBS_TELEMETRY_SUBSCRIBE_FOCUSED) != 0;
+    }
+  };
+
+  /**
+   * Decode an exact subscription body. An exact-size unsupported-version body still exposes its
+   * request id so the caller can return status 2; other malformed inputs return `invalid`.
+   */
+  [[nodiscard]] sbs_telemetry_subscription_decode_e decode_sbs_telemetry_subscription_payload(
+    std::string_view payload,
+    sbs_telemetry_subscription_request_t &request
+  );
+
+  /** Resolve interval 0 to the focused/background default and clamp every enabled cadence. */
+  [[nodiscard]] std::uint16_t effective_sbs_telemetry_interval_ms(
+    const sbs_telemetry_subscription_request_t &request
+  ) noexcept;
+
+  /** Explicitly bridge the private renderer state enum to the fixed public wire enum. */
+  [[nodiscard]] sbs_telemetry_status_e sbs_telemetry_wire_status(
+    video::sbs_telemetry_sample_status_e status
+  ) noexcept;
+
+  /**
+   * Truthful pre-render fallback. Until the renderer publishes an authoritative snapshot, no
+   * generation or configuration field is valid.
+   */
+  [[nodiscard]] video::sbs_telemetry_snapshot_t unavailable_sbs_telemetry_snapshot() noexcept;
+
+  struct sbs_telemetry_state_t {
+    sbs_telemetry_status_e status = sbs_telemetry_status_e::unavailable;
+    std::uint16_t request_id = 0;
+    video::sbs_telemetry_snapshot_t snapshot;
+  };
+
+  /** Serialize the exact 88-byte little-endian state body; rejects non-finite float fields. */
+  [[nodiscard]] bool encode_sbs_telemetry_state_payload(
+    const sbs_telemetry_state_t &state,
+    std::uint8_t (&out)[SBS_TELEMETRY_STATE_PAYLOAD_SIZE]
+  );
+
   struct session_t;
 
   struct config_t {
@@ -352,6 +499,7 @@ namespace stream {
     int minRequiredFecPackets;
     int audioQosType;
     int videoQosType;
+    bool client_supports_sbs_telemetry = false;
   };
 
   namespace session {

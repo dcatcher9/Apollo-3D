@@ -14,6 +14,7 @@
 
 // standard includes
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <stop_token>
@@ -63,6 +64,11 @@ namespace proc {
   bool virtualDisplayRetirementHandoffMarksSessionForTest(
     bool hasBoundDisplay,
     bool retiringBoundDisplay
+  );
+  bool explorerRepairAllowedForRetirementForTest(
+    bool finalTeardown,
+    bool restartEnabled,
+    bool activeDesktopRemovalDebt
   );
   #endif
 #endif
@@ -198,13 +204,20 @@ namespace proc {
      * @param width Requested desktop width in pixels.
      * @param height Requested desktop height in pixels.
      * @param fps_millihz Requested refresh rate in millihertz, matching launch_session_t::fps.
+     * @param expected_launch_session_id Session identity captured with the control request. A
+     * stale worker must never resize a replacement session's desktop.
      */
-    live_video_mode_result_e apply_live_video_mode(int width, int height, int fps_millihz);
+    live_video_mode_result_e apply_live_video_mode(
+      int width,
+      int height,
+      int fps_millihz,
+      std::uint32_t expected_launch_session_id
+    );
     /**
-     * Non-blocking hint for the control thread: would `apply_live_video_mode` have real work to do?
-     * A bitrate-only or frame-rate-only change never touches the Windows topology, so the caller
-     * can rebuild the encoder straight away instead of paying for a worker dispatch. This never
-     * waits on the process lock; a transition already in flight conservatively answers "yes".
+     * Non-blocking hint for the serialized live-mode worker: would `apply_live_video_mode` have
+     * real topology work to do? A bitrate-only or frame-rate-only change skips DisplayConfig but
+     * remains ordered behind any active encoder transaction. This never waits on the process lock;
+     * a transition already in flight conservatively answers "yes".
      */
     bool live_video_mode_needs_display_change(int width, int height) const;
     /** Adopt the remote streaming session's virtual-display lease before platform startup. */
@@ -221,6 +234,13 @@ namespace proc {
      * Active or connecting remote sessions are never terminated.
      */
     local_ar_handoff_e prepare_local_ar_handoff(const std::stop_source &construction_stop);
+    /**
+     * Give an orderly host shutdown one final bounded chance to finish deferred monitor removal
+     * and the optional Explorer repair before the retirement workers are stopped.
+     */
+    static bool drain_retired_virtual_display_for_shutdown(
+      std::chrono::milliseconds timeout
+    );
 #endif
 
   private:
@@ -258,7 +278,9 @@ namespace proc {
       const std::wstring &gdi_name,
       bool was_published,
       std::chrono::milliseconds timeout,
-      bool deactivate_desktop
+      bool deactivate_desktop,
+      bool final_teardown,
+      bool restart_explorer_after_removal
     );
     static bool prepare_retired_virtual_display_for_removal(std::chrono::milliseconds timeout);
     static void schedule_retired_virtual_display_cleanup();
@@ -268,7 +290,10 @@ namespace proc {
       VDISPLAY::creation_result_t created_display,
       bool enable_hdr
     );
-    static bool wait_for_retired_virtual_display(std::chrono::milliseconds timeout);
+    static bool wait_for_retired_virtual_display(
+      std::chrono::milliseconds timeout,
+      bool wait_for_explorer_repair = true
+    );
     void start_hdr_worker(bool enable_hdr);
     bool request_hdr_state(bool enable_hdr, std::chrono::milliseconds timeout);
     void stop_hdr_worker();

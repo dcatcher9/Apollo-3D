@@ -51,17 +51,17 @@ TEST(ProcessTest, LiveVideoModeIsRefusedWithoutAVirtualDisplay) {
 
   // An idle host owns no desktop it may resize, so the change can only come from a fresh launch.
   EXPECT_EQ(
-    process.apply_live_video_mode(1920, 1080, 60000),
+    process.apply_live_video_mode(1920, 1080, 60000, 1),
     proc::live_video_mode_result_e::needs_reconnect
   );
 
   // Nonsense geometry never reaches the Windows topology.
   EXPECT_EQ(
-    process.apply_live_video_mode(0, 1080, 60000),
+    process.apply_live_video_mode(0, 1080, 60000, 1),
     proc::live_video_mode_result_e::needs_reconnect
   );
   EXPECT_EQ(
-    process.apply_live_video_mode(1920, 1080, 0),
+    process.apply_live_video_mode(1920, 1080, 0, 1),
     proc::live_video_mode_result_e::needs_reconnect
   );
 
@@ -83,6 +83,30 @@ TEST(ProcessTest, RetirementHandoffMarksOnlyTheBoundDisplayOrAnUnboundCandidate)
   EXPECT_TRUE(proc::virtualDisplayRetirementHandoffMarksSessionForTest(false, true));
   EXPECT_TRUE(proc::virtualDisplayRetirementHandoffMarksSessionForTest(true, true));
   EXPECT_FALSE(proc::virtualDisplayRetirementHandoffMarksSessionForTest(true, false));
+}
+
+TEST(ProcessTest, ExplorerRepairRequiresEveryFinalRetirementProof) {
+  EXPECT_TRUE(proc::explorerRepairAllowedForRetirementForTest(
+    true,
+    true,
+    true
+  ));
+
+  EXPECT_FALSE(proc::explorerRepairAllowedForRetirementForTest(
+    false,
+    true,
+    true
+  )) << "Warm retirement must retain debt without restarting Explorer";
+  EXPECT_FALSE(proc::explorerRepairAllowedForRetirementForTest(
+    true,
+    false,
+    true
+  )) << "The default-on config must still be suppressible";
+  EXPECT_FALSE(proc::explorerRepairAllowedForRetirementForTest(
+    true,
+    true,
+    false
+  )) << "Cleanup of a path that was never active creates no repair debt";
 }
 #endif
 

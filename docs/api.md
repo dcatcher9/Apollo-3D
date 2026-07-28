@@ -2,11 +2,12 @@
 
 Apollo has a RESTful configuration API which is used by the Web UI.
 
-Unless otherwise specified, authentication is required for all API calls. Authenticate with
-`POST /api/login`, then send the returned `auth` cookie on later requests. Unsafe methods also
-require browser source metadata that exactly matches the HTTPS request host and port. The examples
-below include the required `Origin` header for non-browser clients. Reverse proxies must preserve
-the original `Host` value.
+Requests from this PC or an allowed trusted local network use the Web UI's local trust boundary
+and do not require a credential sign-in. When WAN Web UI access is explicitly enabled, authenticate
+with `POST /api/login`, then send the returned `auth` cookie on later WAN requests. Unsafe methods
+always require browser source metadata that exactly matches the HTTPS request host and port. The
+examples below include the required `Origin` header for non-browser clients. Reverse proxies must
+preserve the original `Host` value.
 
 @htmlonly
 <script src="api.js"></script>

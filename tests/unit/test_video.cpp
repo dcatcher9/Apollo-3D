@@ -143,6 +143,7 @@ namespace {
   constexpr unsigned cut_flag_geometry_low_once = 4u;
   constexpr unsigned cut_flag_appearance_quiet_once = 8u;
   constexpr unsigned cut_flag_latched = 16u;
+  constexpr unsigned cut_flag_appearance_recovery = 32u;
   constexpr unsigned cut_flags_ready =
     cut_flag_geometry_armed | cut_flag_appearance_armed;
 
@@ -183,6 +184,13 @@ namespace {
       previous_structural_support_fraction >= 0.01f;
     const bool common_structure_reliable =
       common_structural_support_fraction >= 0.01f;
+    const bool common_structure_representative =
+      common_structure_reliable &&
+      common_structural_support_fraction >=
+        0.50f * std::min(
+          current_structural_support_fraction,
+          previous_structural_support_fraction
+        );
     const bool broad_rgb_transition =
       model_input_history_valid &&
       raw_rgb_change_fraction >= 0.70f;
@@ -190,7 +198,7 @@ namespace {
       broad_rgb_transition &&
       current_structure_reliable &&
       previous_structure_reliable &&
-      common_structure_reliable &&
+      common_structure_representative &&
       structural_change_fraction < 0.01f;
     const bool structureless_candidate =
       model_input_history_valid &&
@@ -207,15 +215,30 @@ namespace {
       current_structure_reliable &&
       raw_rgb_change_fraction < 0.01f &&
       structural_change_fraction < 0.01f;
-    const bool appearance_veto =
+    const bool base_appearance_veto =
       exposure_like_transition ||
       structureless_transition ||
       same_scene_gap_return;
+    const bool photometric_recovery_veto =
+      exposure_like_transition || same_scene_gap_return;
+    const bool quiet_supported_repeat =
+      model_input_history_valid &&
+      current_structure_reliable &&
+      previous_structure_reliable &&
+      common_structure_representative &&
+      raw_rgb_change_fraction < 0.01f &&
+      structural_change_fraction < 0.01f;
     const bool geometry_armed =
       (state.cut_flags & cut_flag_geometry_armed) != 0u;
     const bool appearance_armed =
       (state.cut_flags & cut_flag_appearance_armed) != 0u;
     const bool cut_latched = (state.cut_flags & cut_flag_latched) != 0u;
+    const bool appearance_recovery =
+      (state.cut_flags & cut_flag_appearance_recovery) != 0u;
+    const bool appearance_recovery_tail =
+      appearance_recovery && quiet_supported_repeat;
+    const bool appearance_veto =
+      base_appearance_veto || appearance_recovery_tail;
     state.depth_change_baseline =
       std::clamp(state.depth_change_baseline, 0.0f, 1.0f);
     const bool relative_geometry_spike =
@@ -244,7 +267,7 @@ namespace {
       state.cut_flags = cut_flag_latched;
       state.depth_change_baseline = depth_change_fraction;
     } else {
-      if (!structureless_transition) {
+      if (!structureless_transition && !appearance_recovery_tail) {
         state.depth_change_baseline +=
           (depth_change_fraction - state.depth_change_baseline) * 0.125f;
       }
@@ -277,6 +300,11 @@ namespace {
             state.cut_flags &= ~cut_flag_appearance_quiet_once;
           }
         }
+      }
+      if (photometric_recovery_veto) {
+        state.cut_flags |= cut_flag_appearance_recovery;
+      } else {
+        state.cut_flags &= ~cut_flag_appearance_recovery;
       }
     }
     state.model_input_history_state =
@@ -889,6 +917,62 @@ TEST(HostSbsSceneCutTest, OrdinalEvidenceRejectsMonotoneExposureButDetectsConten
   EXPECT_FLOAT_EQ(black_evidence.common_support_fraction, 0.0f);
 }
 
+TEST(EffectiveVideoModePublisherTests, PublishesOnlyCoherentProvenPacingPairs) {
+  video::effective_video_mode_publisher_t publisher {{1920, 1080, 6000, 20000}};
+
+  auto pacing = publisher.pacing();
+  EXPECT_EQ(pacing.bitrate, 20000);
+  EXPECT_EQ(pacing.framerate_millihz, 60000);
+
+  // Constructing a speculative request cannot affect packet pacing. Production performs the same
+  // separation by publishing only after make_encode_device() returns a real encoder.
+  const video::effective_video_mode_t unproven {3840, 2160, 9000, 50000};
+  pacing = publisher.pacing();
+  EXPECT_EQ(pacing.bitrate, 20000);
+  EXPECT_EQ(pacing.framerate_millihz, 60000);
+
+  publisher.publish(unproven);
+  pacing = publisher.pacing();
+  EXPECT_EQ(pacing.bitrate, 50000);
+  EXPECT_EQ(pacing.framerate_millihz, 90000);
+  const auto effective = publisher.current();
+  EXPECT_EQ(effective.width, 3840);
+  EXPECT_EQ(effective.height, 2160);
+  EXPECT_EQ(effective.framerateX100, 9000);
+  EXPECT_EQ(effective.bitrate, pacing.bitrate);
+
+  // Fractional cadence is retained exactly as millihertz in the sender snapshot.
+  publisher.publish({1920, 1080, 2997, 17000});
+  pacing = publisher.pacing();
+  EXPECT_EQ(pacing.bitrate, 17000);
+  EXPECT_EQ(pacing.framerate_millihz, 29970);
+}
+
+TEST(EffectiveVideoModePublisherTests, ProductionPublishesAfterEncoderInitialization) {
+  const auto source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
+  ASSERT_FALSE(source.empty());
+
+  const auto capture_begin = source.find("void capture_async(");
+  const auto encoder_init = source.find(
+    "auto encode_session = make_encode_session(",
+    capture_begin
+  );
+  const auto effective_publish = source.find(
+    "config.effective_mode->publish(effective_mode);",
+    encoder_init
+  );
+  const auto completion_publish = source.find(
+    "video_mode_applied_queue->raise(video_mode_applied_t",
+    effective_publish
+  );
+  ASSERT_NE(capture_begin, std::string::npos);
+  ASSERT_NE(encoder_init, std::string::npos);
+  ASSERT_NE(effective_publish, std::string::npos);
+  ASSERT_NE(completion_publish, std::string::npos);
+  EXPECT_LT(encoder_init, effective_publish);
+  EXPECT_LT(effective_publish, completion_publish);
+}
+
 TEST(HostSbsSceneCutTest, AppearanceFusionRejectsExposureAndHonorsExactBounds) {
   // The exposure fixture clears the broad RGB gate but not the ordinal gate. The
   // exposure-like relation also vetoes a coincident neural-depth jump on the geometry arm.
@@ -920,7 +1004,10 @@ TEST(HostSbsSceneCutTest, ExposureLikeTransitionVetoesAbsoluteAndRelativeDepthAu
   shot_cut_state_t absolute;
   absolute.cut_flags = cut_flags_ready;
   EXPECT_FALSE(advance_shot_cut(absolute, 0.95f, 0.70f, 0.009f));
-  EXPECT_EQ(absolute.cut_flags, cut_flags_ready);
+  EXPECT_EQ(
+    absolute.cut_flags,
+    cut_flags_ready | cut_flag_appearance_recovery
+  );
 
   shot_cut_state_t relative;
   relative.cut_flags = cut_flag_latched;
@@ -942,6 +1029,76 @@ TEST(HostSbsSceneCutTest, ExposureLikeTransitionVetoesAbsoluteAndRelativeDepthAu
   // Structural evidence at the exact entry boundary is a qualified cut, not exposure-like.
   shot_cut_state_t structural_cut;
   EXPECT_TRUE(advance_shot_cut(structural_cut, 0.60f, 0.70f, 0.03f));
+}
+
+TEST(HostSbsSceneCutTest, ExposureRecoveryBlocksOnlyTheDelayedGeometryUpdate) {
+  shot_cut_state_t state;
+
+  // These are the retained SDR smoke measurements. A->flash and flash->A
+  // preserve more than 92% of the smaller endpoint's structural support, so
+  // both are exposure-like and refresh the bounded recovery guard.
+  EXPECT_FALSE(advance_shot_cut(
+    state,
+    0.810272932f,
+    1.0f,
+    0.000182216f,
+    0.123987697f,
+    0.169116467f,
+    0.115342572f
+  ));
+  EXPECT_NE(state.cut_flags & cut_flag_appearance_recovery, 0u);
+  EXPECT_FALSE(advance_shot_cut(
+    state,
+    0.999979794f,
+    1.0f,
+    0.000182216f,
+    0.169116467f,
+    0.123987697f,
+    0.115342572f
+  ));
+  EXPECT_NE(state.cut_flags & cut_flag_appearance_recovery, 0u);
+
+  // Neural-depth normalization can still jump on the first visually quiet
+  // update. Consume exactly that delayed geometry-only spike.
+  const auto baseline_before_recovery = state.depth_change_baseline;
+  EXPECT_FALSE(advance_shot_cut(
+    state,
+    0.776198566f,
+    0.0f,
+    0.0f,
+    0.169116467f,
+    0.169116467f,
+    0.169116467f
+  ));
+  EXPECT_EQ(state.cut_flags & cut_flag_appearance_recovery, 0u);
+  EXPECT_FLOAT_EQ(state.depth_change_baseline, baseline_before_recovery);
+
+  // The real A->B cut has individually structured endpoints but only 13%
+  // representative overlap. It is not an exposure relation even though its
+  // aggregate ordinal-flip fraction is below the quiet threshold.
+  EXPECT_TRUE(advance_shot_cut(
+    state,
+    0.827988386f,
+    0.998319566f,
+    0.008665371f,
+    0.160147399f,
+    0.169116467f,
+    0.020610625f
+  ));
+
+  // A disjoint-support real endpoint is never delayed by the recovery guard,
+  // even when its aggregate structural flip fraction remains exposure-quiet.
+  shot_cut_state_t immediate_cut;
+  EXPECT_FALSE(advance_shot_cut(immediate_cut, 0.83f, 0.99f, 0.005f));
+  EXPECT_TRUE(advance_shot_cut(
+    immediate_cut,
+    0.60f,
+    0.99f,
+    0.008f,
+    0.16f,
+    0.17f,
+    0.02f
+  ));
 }
 
 TEST(HostSbsSceneCutTest, StructurelessGapBridgesSaturatedFlashAndFindsDifferentReturn) {
@@ -1097,9 +1254,33 @@ TEST(HostSbsSceneCutTest, ExposureClassificationRequiresExactStructuralSupportFl
     0.95f,
     0.70f,
     0.0f,
-    0.90f,
-    0.90f,
+    0.01f,
+    0.01f,
     0.01f
+  ));
+}
+
+TEST(HostSbsSceneCutTest, ExposureClassificationRequiresRepresentativeCommonSupport) {
+  shot_cut_state_t below_ratio;
+  EXPECT_TRUE(advance_shot_cut(
+    below_ratio,
+    0.60f,
+    0.70f,
+    0.0f,
+    0.90f,
+    0.90f,
+    0.449f
+  ));
+
+  shot_cut_state_t exact_ratio;
+  EXPECT_FALSE(advance_shot_cut(
+    exact_ratio,
+    0.95f,
+    0.70f,
+    0.0f,
+    0.90f,
+    0.90f,
+    0.45f
   ));
 }
 
@@ -1294,6 +1475,9 @@ TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryAr
   EXPECT_EQ(histogram.find("CurrentModelLuma"), std::string::npos);
   EXPECT_NE(resolve.find("appearance_proposal"), std::string::npos);
   EXPECT_NE(resolve.find("exposure_like_transition"), std::string::npos);
+  EXPECT_NE(resolve.find("common_structure_representative"), std::string::npos);
+  EXPECT_NE(resolve.find("appearance_recovery_tail"), std::string::npos);
+  EXPECT_NE(resolve.find("CUT_FLAG_APPEARANCE_RECOVERY"), std::string::npos);
   EXPECT_NE(resolve.find("structureless_transition"), std::string::npos);
   EXPECT_NE(resolve.find("same_scene_gap_return"), std::string::npos);
   EXPECT_NE(
@@ -1341,6 +1525,12 @@ TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryAr
   EXPECT_NE(constants.find("#define RAW_RGB_PIXEL_DELTA 0.20f"), std::string::npos);
   EXPECT_NE(constants.find("#define RAW_RGB_CUT_HIGH 0.70f"), std::string::npos);
   EXPECT_NE(constants.find("#define STRUCTURAL_COLOR_MIN_SUPPORT 0.01f"), std::string::npos);
+  EXPECT_NE(
+    constants.find(
+      "#define STRUCTURAL_COLOR_EXPOSURE_MIN_COMMON_RATIO 0.50f"
+    ),
+    std::string::npos
+  );
   EXPECT_NE(constants.find("#define STRUCTURAL_COLOR_CUT_HIGH 0.03f"), std::string::npos);
   EXPECT_NE(
     constants.find("#define STRUCTURELESS_RETURN_RGB_SAME_MAX 0.01f"),
@@ -1437,6 +1627,275 @@ TEST(DirectxShaderSourceTest, HostAdaptivePopUsesResolvedReferenceGridGradients)
     std::string::npos
   );
   EXPECT_NE(resolve.find("434-reference-texel"), std::string::npos);
+}
+
+TEST(DirectxShaderSourceTest, HostTelemetryReadbackIsNonblockingAndPreservesTheBenchmarkPrefix) {
+  const std::string shader_dir =
+    SUNSHINE_SOURCE_DIR "/src_assets/windows/assets/shaders/directx/";
+  const auto resolve = read_source_file(shader_dir + "depth_subject_resolve_cs.hlsl");
+  const auto reprojection = read_source_file(shader_dir + "sbs_reprojection_ps.hlsl");
+  const auto estimator =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
+  const auto display =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  const auto harness =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/sbs_bench_harness.cpp");
+
+  ASSERT_FALSE(resolve.empty());
+  ASSERT_FALSE(reprojection.empty());
+  ASSERT_FALSE(estimator.empty());
+  ASSERT_FALSE(display.empty());
+  ASSERT_FALSE(harness.empty());
+
+  // The live path extends SubjectState append-only. The first three float4 values are the
+  // production warp and benchmark contract, so a telemetry change must never insert fields ahead
+  // of them or make the offline harness consume the diagnostic tail.
+  EXPECT_NE(estimator.find("telemetry_state_float_count = 32"), std::string::npos);
+  EXPECT_NE(estimator.find("float init_state[32]"), std::string::npos);
+  EXPECT_NE(harness.find("std::array<float, 12> values"), std::string::npos);
+  EXPECT_NE(
+    harness.find(
+      "std::memcpy(values.data(), mapped.pData, values.size() * sizeof(float))"
+    ),
+    std::string::npos
+  );
+  const auto prefix_end = resolve.find("SubjectState[2] = s2;");
+  const auto diagnostic_begin = resolve.find("SubjectState[3] = telemetry;");
+  const auto current_diagnostic_end =
+    resolve.find("SubjectState[6] = current_diagnostics;");
+  const auto analysis_diagnostic_end =
+    resolve.find("SubjectState[7] = analysis_diagnostics;");
+  ASSERT_NE(prefix_end, std::string::npos);
+  ASSERT_NE(diagnostic_begin, std::string::npos);
+  ASSERT_NE(current_diagnostic_end, std::string::npos);
+  ASSERT_NE(analysis_diagnostic_end, std::string::npos);
+  EXPECT_LT(prefix_end, diagnostic_begin);
+  EXPECT_LT(diagnostic_begin, current_diagnostic_end);
+  EXPECT_LT(current_diagnostic_end, analysis_diagnostic_end);
+  EXPECT_EQ(reprojection.find("SubjectState[3]"), std::string::npos);
+  EXPECT_EQ(reprojection.find("SubjectState[6]"), std::string::npos);
+  EXPECT_EQ(reprojection.find("SubjectState[7]"), std::string::npos);
+
+  // Scope negative assertions to the telemetry implementation. The same source also contains a
+  // deliberately bounded teardown drain for GPU timers, which is allowed to flush/sleep after the
+  // live encode path has ended.
+  const auto readback_begin = estimator.find("bool ensure_telemetry_readback()");
+  const auto readback_end = estimator.find("void perf_try_resolve", readback_begin);
+  ASSERT_NE(readback_begin, std::string::npos);
+  ASSERT_NE(readback_end, std::string::npos);
+  const auto readback = estimator.substr(readback_begin, readback_end - readback_begin);
+
+  EXPECT_NE(
+    estimator.find("std::array<telemetry_readback_slot, 3> telemetry_readback_slots"),
+    std::string::npos
+  );
+  EXPECT_NE(readback.find("D3D11_USAGE_STAGING"), std::string::npos);
+  EXPECT_NE(readback.find("D3D11_CPU_ACCESS_READ"), std::string::npos);
+  EXPECT_NE(readback.find("D3D11_QUERY_EVENT"), std::string::npos);
+  const auto readiness_query =
+    readback.find("D3D11_ASYNC_GETDATA_DONOTFLUSH");
+  const auto nonblocking_map =
+    readback.find("D3D11_MAP_FLAG_DO_NOT_WAIT");
+  ASSERT_NE(readiness_query, std::string::npos);
+  ASSERT_NE(nonblocking_map, std::string::npos);
+  EXPECT_LT(readiness_query, nonblocking_map);
+  EXPECT_NE(readback.find("DXGI_ERROR_WAS_STILL_DRAWING"), std::string::npos);
+  EXPECT_NE(readback.find("if (slot.pending)"), std::string::npos);
+  EXPECT_NE(readback.find("result.copy_scheduled = true"), std::string::npos);
+  EXPECT_EQ(readback.find("Flush("), std::string::npos);
+  EXPECT_EQ(readback.find("sleep_for"), std::string::npos);
+  EXPECT_EQ(readback.find("while ("), std::string::npos);
+
+  // Subscription-off may retire an already submitted slot but cannot enqueue another copy, and
+  // the diagnostic work is ordered after the production output rather than ahead of it.
+  EXPECT_NE(display.find("const bool due =\n        enabled &&"), std::string::npos);
+  EXPECT_NE(
+    display.find("depth_estimator->poll_depth_telemetry(\n        due,"),
+    std::string::npos
+  );
+  const auto output_end = display.find("end_sbs_gpu_timer(gpu_timer);");
+  const auto telemetry_poll = display.find("poll_sbs_telemetry_after_output();", output_end);
+  ASSERT_NE(output_end, std::string::npos);
+  ASSERT_NE(telemetry_poll, std::string::npos);
+  EXPECT_LT(output_end, telemetry_poll);
+
+  // Readiness bits must agree with the runtime flags. Otherwise the shared client history records
+  // sentinel/uninitialized values as real chart samples (notably anchor=0 and subject=0).
+  const auto profile_ready = display.find("if (sample.profile_initialized)");
+  const auto edge_ready = display.find("if (sample.edge_fraction >= 0.0f)", profile_ready);
+  const auto anchor_ready = display.find("if (sample.anchor_valid)", edge_ready);
+  const auto cut_flags = display.find("constexpr std::uint32_t cut_flag_geometry_armed", anchor_ready);
+  ASSERT_NE(profile_ready, std::string::npos);
+  ASSERT_NE(edge_ready, std::string::npos);
+  ASSERT_NE(anchor_ready, std::string::npos);
+  ASSERT_NE(cut_flags, std::string::npos);
+  EXPECT_LT(
+    display.find("sbs_telemetry_valid_field::subject", profile_ready),
+    edge_ready
+  );
+  EXPECT_LT(
+    display.find("sbs_telemetry_valid_field::edge", edge_ready),
+    anchor_ready
+  );
+  EXPECT_LT(
+    display.find("sbs_telemetry_valid_field::anchor", anchor_ready),
+    cut_flags
+  );
+}
+
+TEST(DirectxShaderSourceTest, WholeClipReplayKeepsCanonicalStateAndUsesAnOfflineCameraCbuffer) {
+  const std::string shader_dir =
+    SUNSHINE_SOURCE_DIR "/src_assets/windows/assets/shaders/directx/";
+  const auto warp_common =
+    read_source_file(shader_dir + "include/sbs_warp_common.hlsl");
+  const auto resolve =
+    read_source_file(shader_dir + "depth_subject_resolve_cs.hlsl");
+  const auto harness =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/sbs_bench_harness.cpp");
+
+  ASSERT_FALSE(warp_common.empty());
+  ASSERT_FALSE(resolve.empty());
+  ASSERT_FALSE(harness.empty());
+  EXPECT_NE(
+    warp_common.find("#ifdef SBS_SCENE_CAMERA_OVERRIDE"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    warp_common.find("SceneCameraConstants : register(b3)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    warp_common.find("strength = scene_absolute_pop_strength;"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    warp_common.find("p.anchor_shift_px = scene_zero_anchor_shift_px;"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("using render_state_words_t = std::array<std::uint32_t, 12>"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("--scene-cache and --render-cache are mutually exclusive"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("--render-cache requires conversion artifacts and --scene-plan"),
+    std::string::npos
+  );
+  EXPECT_NE(harness.find("atomic_replace_attempts = 50"), std::string::npos);
+  EXPECT_NE(harness.find("ERROR_SHARING_VIOLATION"), std::string::npos);
+  EXPECT_NE(harness.find("ERROR_LOCK_VIOLATION"), std::string::npos);
+  EXPECT_NE(
+    harness.find("\"state\", {\n          {\"schema\", 1}"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("{\"word_count\", render_state_words_t {}.size()}"),
+    std::string::npos
+  );
+  for (const auto *packed_field : {
+         "packed_sbs",
+         "output_sbs_width",
+         "output_sbs_height",
+         "output_frame_format",
+         "output_file_extension",
+       }) {
+    EXPECT_NE(harness.find(packed_field), std::string::npos);
+  }
+  EXPECT_NE(
+    harness.find("if (!replay_mode) {\n      estimator = std::make_unique"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find(
+      "const auto *warp_macros = replay_mode ? scene_camera_macros : nullptr"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("\"frame_%010d.depth.r32f\""),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("\"frame_%010d.state.u32\""),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("\"absolute_pop_strength\""),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("\\\"schema\\\":3"),
+    std::string::npos
+  );
+  for (const auto *field : {
+         "current_structural_support_fraction",
+         "previous_structural_support_fraction",
+         "common_structural_support_fraction",
+         "analysis_flags",
+       }) {
+    EXPECT_NE(harness.find(field), std::string::npos);
+  }
+  for (const auto *assignment : {
+         "\\\"appearance_proposal\\\":0",
+         "\\\"exposure_like\\\":1",
+         "\\\"structureless\\\":2",
+         "\\\"same_return\\\":3",
+         "\\\"veto\\\":4",
+         "\\\"relative_spike\\\":5",
+       }) {
+    EXPECT_NE(harness.find(assignment), std::string::npos);
+  }
+  for (const auto *definition : {
+         "#define ANALYSIS_FLAG_APPEARANCE_PROPOSAL 1u",
+         "#define ANALYSIS_FLAG_EXPOSURE_LIKE 2u",
+         "#define ANALYSIS_FLAG_STRUCTURELESS 4u",
+         "#define ANALYSIS_FLAG_SAME_RETURN 8u",
+         "#define ANALYSIS_FLAG_VETO 16u",
+         "#define ANALYSIS_FLAG_RELATIVE_SPIKE 32u",
+       }) {
+    EXPECT_NE(resolve.find(definition), std::string::npos);
+  }
+  EXPECT_NE(
+    resolve.find("analysis_diagnostics.w = (float)analysis_flags"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    resolve.find("analysis_diagnostics.w = asfloat(analysis_flags)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find(
+      "replay_mode ? replay_first_sequence + fi : fi + 1u"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("tensorrt_enqueue_count"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("depth_inference_enabled"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("scheduled_depth_update_count"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("\"scene-cache-contract-schema-1:R32_FLOAT\""),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    harness.find("words[7] = std::bit_cast<std::uint32_t>"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    harness.find("words[8] = std::bit_cast<std::uint32_t>"),
+    std::string::npos
+  );
 }
 
 TEST(ColorTransferTest, CompositeSrgbToBt709MatchesReferencePipeline) {
@@ -1701,6 +2160,58 @@ INSTANTIATE_TEST_SUITE_P(
     std::make_tuple(9498, video::rational_t {4749, 50})
   )
 );
+
+TEST(HostSbsTelemetryTest, WireVisibleBitAssignmentsAreFrozen) {
+  // stream.cpp serializes these masks and the client mirrors them. New flags are append-only:
+  // renumbering an existing bit silently changes a running client's interpretation.
+  EXPECT_EQ(platf::platform_caps::sbs_telemetry, 0x40000000u);
+  EXPECT_EQ(video::sbs_telemetry_valid_field::config, 1u << 0);
+  EXPECT_EQ(video::sbs_telemetry_valid_field::effective_pop, 1u << 1);
+  EXPECT_EQ(video::sbs_telemetry_valid_field::edge, 1u << 2);
+  EXPECT_EQ(video::sbs_telemetry_valid_field::change, 1u << 3);
+  EXPECT_EQ(video::sbs_telemetry_valid_field::anchor, 1u << 4);
+  EXPECT_EQ(video::sbs_telemetry_valid_field::subject, 1u << 5);
+  EXPECT_EQ(video::sbs_telemetry_valid_field::valid_fraction, 1u << 6);
+  EXPECT_EQ(video::sbs_telemetry_valid_field::range, 1u << 7);
+  EXPECT_EQ(video::sbs_telemetry_valid_field::scene, 1u << 8);
+  EXPECT_EQ(video::sbs_telemetry_valid_field::cuts, 1u << 9);
+  EXPECT_EQ(video::sbs_telemetry_valid_field::faults, 1u << 10);
+
+  EXPECT_EQ(video::sbs_telemetry_runtime_flag::profile_initialized, 1u << 0);
+  EXPECT_EQ(video::sbs_telemetry_runtime_flag::adaptive_enabled, 1u << 1);
+  EXPECT_EQ(video::sbs_telemetry_runtime_flag::pop_classified, 1u << 2);
+  EXPECT_EQ(video::sbs_telemetry_runtime_flag::anchor_valid, 1u << 3);
+  EXPECT_EQ(video::sbs_telemetry_runtime_flag::geometry_armed, 1u << 4);
+  EXPECT_EQ(video::sbs_telemetry_runtime_flag::appearance_armed, 1u << 5);
+  EXPECT_EQ(video::sbs_telemetry_runtime_flag::range_collapsed, 1u << 6);
+  EXPECT_EQ(video::sbs_telemetry_runtime_flag::depth_ready, 1u << 7);
+  EXPECT_EQ(video::sbs_telemetry_runtime_flag::hard_cut_pulse, 1u << 8);
+}
+
+TEST(HostSbsTelemetryTest, SubscriptionLatchIsDisabledUntilExplicitlyEnabled) {
+  video::sbs_telemetry_subscription_t subscription;
+  EXPECT_FALSE(subscription.enabled());
+  EXPECT_FALSE(subscription.focused());
+  EXPECT_EQ(subscription.interval_ms(), 500);
+
+  subscription.update(true, true, 125);
+  EXPECT_TRUE(subscription.enabled());
+  EXPECT_TRUE(subscription.focused());
+  EXPECT_EQ(subscription.interval_ms(), 125);
+
+  subscription.update(false, false, 750);
+  EXPECT_FALSE(subscription.enabled());
+  EXPECT_FALSE(subscription.focused());
+  EXPECT_EQ(subscription.interval_ms(), 750);
+}
+
+TEST(HostSbsTelemetryTest, RendererGenerationsAreNonzeroAndAdvance) {
+  const auto first = video::next_sbs_telemetry_generation();
+  const auto second = video::next_sbs_telemetry_generation();
+  EXPECT_NE(first, 0u);
+  EXPECT_NE(second, 0u);
+  EXPECT_NE(first, second);
+}
 
 TEST(HostSbsDimensionsTest, KeepsFourKPerEyeForHevcAndAv1) {
   for (const int video_format : {1, 2}) {

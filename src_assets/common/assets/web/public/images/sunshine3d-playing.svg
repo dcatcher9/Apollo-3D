@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="52 52 920 920" role="img" aria-label="Sunshine 3D">
+  <g fill="none" stroke="#E0B020" stroke-width="52" stroke-linecap="round">
+    <path d="M512 160V236"/>
+    <path d="M286 222L344 280"/>
+    <path d="M738 222L680 280"/>
+    <path d="M170 414H250"/>
+    <path d="M854 414H774"/>
+  </g>
+  <circle cx="512" cy="424" r="180" fill="#E0B020"/>
+  <path d="M188 704C342 582 682 582 836 704" fill="none" stroke="#D7E5FF" stroke-width="104" stroke-linecap="round"/>
+  <path d="M164 810C338 650 686 650 860 810" fill="none" stroke="#8AB4F8" stroke-width="112" stroke-linecap="round"/>
+  <circle cx="798" cy="798" r="120" fill="#5CD65C"/>
+  <path d="M766 740V856L862 798Z" fill="#0C0F14"/>
+</svg>

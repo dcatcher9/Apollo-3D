@@ -1248,7 +1248,8 @@ class EvalContractTests(unittest.TestCase):
             depth_constants = fh.read()
         self.assertIn("change_fraction >= DEPTH_CUT_HIGH", adaptive)
         self.assertIn("scene_age >= POP_CLASSIFY_SETTLE_FRAMES", adaptive)
-        self.assertIn("smoothstep(POP_RISK_LOW, POP_RISK_HIGH, edge_fraction)", adaptive)
+        self.assertIn(
+            "POP_RISK_LOW, POP_RISK_HIGH, current_edge_fraction", adaptive)
         self.assertIn("#define POP_RISK_LOW 0.04f", adaptive)
         self.assertIn("#define POP_RISK_HIGH 0.20f", adaptive)
         self.assertNotIn("lerp(pop_ratio, target_ratio", adaptive)
@@ -1527,6 +1528,30 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "stream.cpp"), encoding="utf-8") as fh:
             stream = fh.read()
         self.assertNotIn("SBS_PRESENTATION_FIXED_HEIGHT", stream)
+
+    def test_native_offline_adaptive_trace_transport_is_bounded(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
+                  encoding="utf-8") as fh:
+            harness = fh.read()
+        self.assertIn('a == "--bounded-adaptive-state"', harness)
+        self.assertIn('\\"transport\\":\\"atomic-latest-v1\\"', harness)
+        self.assertIn('\\"retained_history\\":false', harness)
+        whole_contract = harness[harness.index(
+            'std::ofstream contract(fs::path(o.out) / "whole_clip_contract.json")'):]
+        self.assertNotIn('<< "  \\"subject_state\\":', whole_contract)
+
+        with open(os.path.join(repo, "src", "offline_sbs_worker.cpp"),
+                  encoding="utf-8") as fh:
+            worker = fh.read()
+        self.assertGreaterEqual(worker.count('"--bounded-adaptive-state"'), 2)
+        self.assertIn("trace_tail_t trace(analysis_output, true)", worker)
+        self.assertIn(
+            'read_snapshot(child, "adaptive_state_frame.json")',
+            worker)
+        self.assertIn(
+            'remove_file_checked(snapshot)',
+            worker)
 
     def test_depth_reuse_cadence_is_explicit_and_machine_verified(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

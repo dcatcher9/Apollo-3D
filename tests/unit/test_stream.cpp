@@ -3,6 +3,8 @@
  * @brief Test src/stream.*
  */
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -308,6 +310,59 @@ TEST(ControlPayloadValidationTests, EnforcesLiveVideoModeFrameRateBounds) {
   EXPECT_FALSE(stream::is_valid_live_video_mode_framerate_x100(stream::LIVE_VIDEO_MODE_FRAMERATE_X100_MAX + 1));
 }
 
+TEST(LiveVideoModeSerialGateTests, CoalescesOnlyPendingRequestsAndWaitsThroughCompletion) {
+  stream::detail::live_video_mode_serial_gate_t gate;
+
+  const auto first = gate.submit();
+  ASSERT_NE(first.transaction_id, 0U);
+  EXPECT_FALSE(first.superseded_transaction_id);
+
+  // The first request has not begun, so a newer request can replace it without performing either
+  // display or encoder work.
+  const auto second = gate.submit();
+  EXPECT_EQ(second.superseded_transaction_id, first.transaction_id);
+  ASSERT_TRUE(gate.can_begin());
+  ASSERT_EQ(gate.begin_next(), second.transaction_id);
+  EXPECT_EQ(gate.active(), second.transaction_id);
+
+  // Once B begins, C remains pending. A stale completion (including one correlated by a duplicate
+  // client request id in production) cannot release B or let C overtake it.
+  const auto third = gate.submit();
+  EXPECT_FALSE(third.superseded_transaction_id);
+  EXPECT_FALSE(gate.can_begin());
+  EXPECT_FALSE(gate.finish(first.transaction_id));
+  EXPECT_EQ(gate.active(), second.transaction_id);
+
+  // Merely observing B's encoder completion is not enough: the worker retains the gate while it
+  // restores a rejected desktop. `finish()` is called only after that rollback attempt ends.
+  EXPECT_TRUE(gate.accepts_completion(second.transaction_id));
+  EXPECT_FALSE(gate.can_begin());
+  EXPECT_TRUE(gate.finish(second.transaction_id));
+  ASSERT_TRUE(gate.can_begin());
+  EXPECT_EQ(gate.begin_next(), third.transaction_id);
+  EXPECT_TRUE(gate.finish(third.transaction_id));
+  EXPECT_FALSE(gate.active());
+}
+
+TEST(LiveVideoModeSerialGateTests, CoalescesAQueuedBurstBehindAnActiveTransaction) {
+  stream::detail::live_video_mode_serial_gate_t gate;
+
+  const auto active = gate.submit();
+  ASSERT_EQ(gate.begin_next(), active.transaction_id);
+  const auto pending_a = gate.submit();
+  const auto pending_b = gate.submit();
+  const auto pending_c = gate.submit();
+
+  EXPECT_FALSE(pending_a.superseded_transaction_id);
+  EXPECT_EQ(pending_b.superseded_transaction_id, pending_a.transaction_id);
+  EXPECT_EQ(pending_c.superseded_transaction_id, pending_b.transaction_id);
+  EXPECT_FALSE(gate.can_begin());
+
+  ASSERT_TRUE(gate.finish(active.transaction_id));
+  ASSERT_EQ(gate.begin_next(), pending_c.transaction_id);
+  EXPECT_TRUE(gate.finish(pending_c.transaction_id));
+}
+
 TEST(LiveVideoModeAckTests, MapsEveryDisplayOutcomeToItsWireStatus) {
   // A desktop that already presented the geometry still delivers the mode the client asked for,
   // so it must read as success and not as a reason to reconnect.
@@ -391,7 +446,12 @@ TEST(LiveVideoModeAckTests, ReportsAClampedApplyAsAppliedWithTheClampedMode) {
 
   // The encode loop reports the BASE per-eye geometry, before SBS doubling.
   const video::effective_video_mode_t effective {packed.width / 2, packed.height, 6000, 38000};
-  const video::video_mode_applied_t report {{7}, true, effective};
+  const video::video_mode_applied_t report {
+    {{7, 41}},
+    true,
+    effective,
+    {5120, 2160, 60000},
+  };
 
   const auto status = report.applied ?
                         stream::live_video_mode_ack_e::applied :
@@ -399,7 +459,7 @@ TEST(LiveVideoModeAckTests, ReportsAClampedApplyAsAppliedWithTheClampedMode) {
   EXPECT_EQ(status, stream::live_video_mode_ack_e::applied);
 
   const stream::live_video_mode_ack_t ack {
-    report.request_ids.front(),
+    report.requests.front().request_id,
     status,
     report.mode.width,
     report.mode.height,
@@ -409,6 +469,9 @@ TEST(LiveVideoModeAckTests, ReportsAClampedApplyAsAppliedWithTheClampedMode) {
   EXPECT_NE(ack.applied_width, 5120);
   EXPECT_EQ(ack.applied_width, 4096);
   EXPECT_EQ(ack.applied_height, 1728);
+  EXPECT_EQ(report.desktop_mode.width, 5120);
+  EXPECT_EQ(report.desktop_mode.height, 2160);
+  EXPECT_EQ(report.desktop_mode.framerate_millihz, 60000);
 
   std::uint8_t payload[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] {};
   ASSERT_TRUE(stream::encode_live_video_mode_ack_payload(ack, payload));
@@ -522,4 +585,285 @@ TEST(LiveVideoModeAckTests, RefusalsReportTheModeStillInEffect) {
   ASSERT_TRUE(stream::encode_live_video_mode_ack_payload(ack, payload));
   EXPECT_EQ(static_cast<int>(payload[0]) | (static_cast<int>(payload[1]) << 8), 42);
   EXPECT_EQ(static_cast<int>(payload[4]) | (static_cast<int>(payload[5]) << 8), 2560);
+}
+
+TEST(SbsTelemetryWireTests, VersionSizesFlagsAndStatusesAreFrozen) {
+  EXPECT_EQ(stream::SBS_TELEMETRY_VERSION, 1);
+  EXPECT_EQ(stream::SBS_TELEMETRY_SUBSCRIPTION_PAYLOAD_SIZE, 8);
+  EXPECT_EQ(stream::SBS_TELEMETRY_STATE_PAYLOAD_SIZE, 88);
+  EXPECT_EQ(stream::SBS_TELEMETRY_SUBSCRIBE_ENABLED, 1u << 0);
+  EXPECT_EQ(stream::SBS_TELEMETRY_SUBSCRIBE_FOCUSED, 1u << 1);
+  EXPECT_EQ(stream::CLIENT_FEATURE_SBS_TELEMETRY, 0x04u);
+
+  // These are public protocol values, not the renderer's private sample-state enum.
+  EXPECT_EQ(static_cast<std::uint8_t>(stream::sbs_telemetry_status_e::ok), 0);
+  EXPECT_EQ(static_cast<std::uint8_t>(stream::sbs_telemetry_status_e::unavailable), 1);
+  EXPECT_EQ(static_cast<std::uint8_t>(stream::sbs_telemetry_status_e::unsupported_version), 2);
+  EXPECT_EQ(static_cast<std::uint8_t>(stream::sbs_telemetry_status_e::failed), 3);
+}
+
+TEST(SbsTelemetryWireTests, DecodesTheExactLittleEndianSubscriptionBody) {
+  const std::array<std::uint8_t, stream::SBS_TELEMETRY_SUBSCRIPTION_PAYLOAD_SIZE> payload {
+    stream::SBS_TELEMETRY_VERSION,
+    stream::SBS_TELEMETRY_SUBSCRIBE_ENABLED | stream::SBS_TELEMETRY_SUBSCRIBE_FOCUSED,
+    0xEF,
+    0xBE,
+    0xFA,
+    0x00,
+    0x00,
+    0x00,
+  };
+  stream::sbs_telemetry_subscription_request_t request;
+  const auto result = stream::decode_sbs_telemetry_subscription_payload(
+    std::string_view {reinterpret_cast<const char *>(payload.data()), payload.size()},
+    request
+  );
+
+  EXPECT_EQ(result, stream::sbs_telemetry_subscription_decode_e::ok);
+  EXPECT_TRUE(request.enabled());
+  EXPECT_TRUE(request.focused());
+  EXPECT_EQ(request.request_id, 0xBEEF);
+  EXPECT_EQ(request.interval_ms, 250);
+}
+
+TEST(SbsTelemetryWireTests, RejectsEverySubscriptionBodyThatIsNotExactlyEightBytes) {
+  std::array<std::uint8_t, stream::SBS_TELEMETRY_SUBSCRIPTION_PAYLOAD_SIZE + 1> payload {};
+  payload[0] = stream::SBS_TELEMETRY_VERSION;
+  stream::sbs_telemetry_subscription_request_t request {
+    stream::SBS_TELEMETRY_SUBSCRIBE_ENABLED,
+    0xBEEF,
+    250,
+  };
+
+  EXPECT_EQ(
+    stream::decode_sbs_telemetry_subscription_payload(
+      std::string_view {reinterpret_cast<const char *>(payload.data()), payload.size() - 2},
+      request
+    ),
+    stream::sbs_telemetry_subscription_decode_e::invalid
+  );
+  EXPECT_EQ(request.flags, 0);
+  EXPECT_EQ(request.request_id, 0);
+  EXPECT_EQ(request.interval_ms, 0);
+
+  EXPECT_EQ(
+    stream::decode_sbs_telemetry_subscription_payload(
+      std::string_view {reinterpret_cast<const char *>(payload.data()), payload.size()},
+      request
+    ),
+    stream::sbs_telemetry_subscription_decode_e::invalid
+  );
+  EXPECT_EQ(request.flags, 0);
+  EXPECT_EQ(request.request_id, 0);
+  EXPECT_EQ(request.interval_ms, 0);
+}
+
+TEST(SbsTelemetryWireTests, ReportsUnsupportedVersionAndPreservesItsCorrelationId) {
+  const std::array<std::uint8_t, stream::SBS_TELEMETRY_SUBSCRIPTION_PAYLOAD_SIZE> payload {
+    static_cast<std::uint8_t>(stream::SBS_TELEMETRY_VERSION + 1),
+    stream::SBS_TELEMETRY_SUBSCRIBE_ENABLED,
+    0xEF,
+    0xBE,
+    0xFA,
+    0x00,
+    0x00,
+    0x00,
+  };
+  stream::sbs_telemetry_subscription_request_t request;
+  EXPECT_EQ(
+    stream::decode_sbs_telemetry_subscription_payload(
+      std::string_view {reinterpret_cast<const char *>(payload.data()), payload.size()},
+      request
+    ),
+    stream::sbs_telemetry_subscription_decode_e::unsupported_version
+  );
+  EXPECT_EQ(request.request_id, 0xBEEF);
+  EXPECT_EQ(request.interval_ms, 250);
+}
+
+TEST(SbsTelemetryWireTests, RejectsUnknownSubscriptionFlagsAndNonzeroReservedBytes) {
+  std::array<std::uint8_t, stream::SBS_TELEMETRY_SUBSCRIPTION_PAYLOAD_SIZE> payload {
+    stream::SBS_TELEMETRY_VERSION,
+    0x80,
+    0xEF,
+    0xBE,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+  };
+  stream::sbs_telemetry_subscription_request_t request;
+  const auto decode = [&](const auto &body) {
+    return stream::decode_sbs_telemetry_subscription_payload(
+      std::string_view {reinterpret_cast<const char *>(body.data()), body.size()},
+      request
+    );
+  };
+
+  EXPECT_EQ(decode(payload), stream::sbs_telemetry_subscription_decode_e::invalid);
+  payload[1] = 0;
+  payload[6] = 1;
+  EXPECT_EQ(decode(payload), stream::sbs_telemetry_subscription_decode_e::invalid);
+  payload[6] = 0;
+  payload[7] = 1;
+  EXPECT_EQ(decode(payload), stream::sbs_telemetry_subscription_decode_e::invalid);
+}
+
+TEST(SbsTelemetryWireTests, DefaultsAndClampsTheRequestedSamplingInterval) {
+  stream::sbs_telemetry_subscription_request_t request;
+  EXPECT_EQ(
+    stream::effective_sbs_telemetry_interval_ms(request),
+    stream::SBS_TELEMETRY_INTERVAL_BACKGROUND_MS
+  );
+
+  request.flags = stream::SBS_TELEMETRY_SUBSCRIBE_FOCUSED;
+  EXPECT_EQ(
+    stream::effective_sbs_telemetry_interval_ms(request),
+    stream::SBS_TELEMETRY_INTERVAL_FOCUSED_MS
+  );
+
+  request.interval_ms = stream::SBS_TELEMETRY_INTERVAL_MIN_MS - 1;
+  EXPECT_EQ(
+    stream::effective_sbs_telemetry_interval_ms(request),
+    stream::SBS_TELEMETRY_INTERVAL_MIN_MS
+  );
+  request.interval_ms = stream::SBS_TELEMETRY_INTERVAL_MIN_MS;
+  EXPECT_EQ(
+    stream::effective_sbs_telemetry_interval_ms(request),
+    stream::SBS_TELEMETRY_INTERVAL_MIN_MS
+  );
+  request.interval_ms = 250;
+  EXPECT_EQ(stream::effective_sbs_telemetry_interval_ms(request), 250);
+  request.interval_ms = stream::SBS_TELEMETRY_INTERVAL_MAX_MS;
+  EXPECT_EQ(
+    stream::effective_sbs_telemetry_interval_ms(request),
+    stream::SBS_TELEMETRY_INTERVAL_MAX_MS
+  );
+  request.interval_ms = stream::SBS_TELEMETRY_INTERVAL_MAX_MS + 1;
+  EXPECT_EQ(
+    stream::effective_sbs_telemetry_interval_ms(request),
+    stream::SBS_TELEMETRY_INTERVAL_MAX_MS
+  );
+  request.interval_ms = std::numeric_limits<std::uint16_t>::max();
+  EXPECT_EQ(
+    stream::effective_sbs_telemetry_interval_ms(request),
+    stream::SBS_TELEMETRY_INTERVAL_MAX_MS
+  );
+}
+
+TEST(SbsTelemetryWireTests, ExplicitlyMapsRendererStatusToTheWireStatus) {
+  EXPECT_EQ(
+    stream::sbs_telemetry_wire_status(video::sbs_telemetry_sample_status_e::ready),
+    stream::sbs_telemetry_status_e::ok
+  );
+  EXPECT_EQ(
+    stream::sbs_telemetry_wire_status(video::sbs_telemetry_sample_status_e::unavailable),
+    stream::sbs_telemetry_status_e::unavailable
+  );
+  EXPECT_EQ(
+    stream::sbs_telemetry_wire_status(video::sbs_telemetry_sample_status_e::failed),
+    stream::sbs_telemetry_status_e::failed
+  );
+  EXPECT_EQ(
+    stream::sbs_telemetry_wire_status(
+      static_cast<video::sbs_telemetry_sample_status_e>(0xFF)
+    ),
+    stream::sbs_telemetry_status_e::failed
+  );
+}
+
+TEST(SbsTelemetryWireTests, PreRendererFallbackDoesNotFabricateConfigOrGeneration) {
+  const auto snapshot = stream::unavailable_sbs_telemetry_snapshot();
+
+  EXPECT_EQ(
+    snapshot.status,
+    video::sbs_telemetry_sample_status_e::unavailable
+  );
+  EXPECT_EQ(snapshot.generation, 0u);
+  EXPECT_EQ(snapshot.sequence, 0u);
+  EXPECT_EQ(snapshot.valid_fields, 0u);
+  EXPECT_EQ(snapshot.runtime_flags, 0u);
+  EXPECT_EQ(snapshot.depth_width, 0u);
+  EXPECT_EQ(snapshot.depth_height, 0u);
+  EXPECT_EQ(snapshot.zero_plane_mode, 0u);
+  EXPECT_FLOAT_EQ(snapshot.pop_floor, 0.0f);
+  EXPECT_FLOAT_EQ(snapshot.pop_ceiling, 0.0f);
+  EXPECT_FLOAT_EQ(snapshot.effective_pop, 0.0f);
+}
+
+TEST(SbsTelemetryWireTests, EncodesEveryStateFieldAtItsFrozenLittleEndianOffset) {
+  stream::sbs_telemetry_state_t state;
+  state.status = stream::sbs_telemetry_status_e::unsupported_version;
+  state.request_id = 0xBEEF;
+  state.snapshot.generation = 0x11223344;
+  state.snapshot.sequence = 0x55667788;
+  state.snapshot.valid_fields = 0xA1B2C3D4;
+  state.snapshot.runtime_flags = 0x10203040;
+  state.snapshot.depth_width = 770;
+  state.snapshot.depth_height = 434;
+  state.snapshot.zero_plane_mode = 3;
+  state.snapshot.pop_floor = 1.2f;
+  state.snapshot.pop_ceiling = 2.0f;
+  state.snapshot.effective_pop = 1.5f;
+  state.snapshot.edge_fraction = 0.125f;
+  state.snapshot.change_fraction = 0.25f;
+  state.snapshot.zero_anchor_shift_px = -2.5f;
+  state.snapshot.subject_depth = 0.5f;
+  state.snapshot.valid_depth_fraction = 0.75f;
+  state.snapshot.effective_range_width = 0.0625f;
+  state.snapshot.scene_age = 0x01020304;
+  state.snapshot.hard_cut_count = 0x11121314;
+  state.snapshot.external_cut_count = 0x21222324;
+  state.snapshot.empty_raw_count = 0x31323334;
+  state.snapshot.collapsed_raw_count = 0x41424344;
+  state.snapshot.sampled_frame_id = 0xDEADBEEF;
+
+  const std::array<std::uint8_t, stream::SBS_TELEMETRY_STATE_PAYLOAD_SIZE> expected {
+    0x01, 0x02, 0xEF, 0xBE,
+    0x44, 0x33, 0x22, 0x11,
+    0x88, 0x77, 0x66, 0x55,
+    0xD4, 0xC3, 0xB2, 0xA1,
+    0x40, 0x30, 0x20, 0x10,
+    0x02, 0x03, 0xB2, 0x01,
+    0x03, 0x00, 0x00, 0x00,
+    0x9A, 0x99, 0x99, 0x3F,
+    0x00, 0x00, 0x00, 0x40,
+    0x00, 0x00, 0xC0, 0x3F,
+    0x00, 0x00, 0x00, 0x3E,
+    0x00, 0x00, 0x80, 0x3E,
+    0x00, 0x00, 0x20, 0xC0,
+    0x00, 0x00, 0x00, 0x3F,
+    0x00, 0x00, 0x40, 0x3F,
+    0x00, 0x00, 0x80, 0x3D,
+    0x04, 0x03, 0x02, 0x01,
+    0x14, 0x13, 0x12, 0x11,
+    0x24, 0x23, 0x22, 0x21,
+    0x34, 0x33, 0x32, 0x31,
+    0x44, 0x43, 0x42, 0x41,
+    0xEF, 0xBE, 0xAD, 0xDE,
+  };
+  std::uint8_t encoded[stream::SBS_TELEMETRY_STATE_PAYLOAD_SIZE] {};
+
+  ASSERT_TRUE(stream::encode_sbs_telemetry_state_payload(state, encoded));
+  EXPECT_TRUE(std::equal(expected.begin(), expected.end(), encoded));
+}
+
+TEST(SbsTelemetryWireTests, FailedEncodeLeavesTheCallerBufferUntouched) {
+  stream::sbs_telemetry_state_t state;
+  state.status = stream::sbs_telemetry_status_e::ok;
+  std::uint8_t encoded[stream::SBS_TELEMETRY_STATE_PAYLOAD_SIZE];
+  std::fill(std::begin(encoded), std::end(encoded), 0xA5);
+
+  state.snapshot.edge_fraction = std::numeric_limits<float>::quiet_NaN();
+  EXPECT_FALSE(stream::encode_sbs_telemetry_state_payload(state, encoded));
+  EXPECT_TRUE(std::all_of(std::begin(encoded), std::end(encoded), [](std::uint8_t byte) {
+    return byte == 0xA5;
+  }));
+
+  state.snapshot.edge_fraction = 0.0f;
+  state.status = static_cast<stream::sbs_telemetry_status_e>(0xFF);
+  EXPECT_FALSE(stream::encode_sbs_telemetry_state_payload(state, encoded));
+  EXPECT_TRUE(std::all_of(std::begin(encoded), std::end(encoded), [](std::uint8_t byte) {
+    return byte == 0xA5;
+  }));
 }

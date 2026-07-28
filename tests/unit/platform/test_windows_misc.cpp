@@ -5,9 +5,56 @@
 #include "../../tests_common.h"
 
 #ifdef _WIN32
+  #include <algorithm>
+  #include <optional>
+  #include <string>
+  #include <vector>
+
   #include <src/platform/windows/misc.h>
+  #include <ShlObj.h>
 
 namespace {
+  struct fake_explorer_restart_operations_t {
+    std::optional<platf::explorer_restart_result_e> preflight_failure;
+    bool terminate_succeeds = true;
+    bool exit_succeeds = true;
+    bool automatic_replacement = false;
+    bool replacement_before_launch = false;
+    bool launch_succeeds = true;
+    bool fallback_replacement = true;
+    std::vector<std::string> calls;
+
+    std::optional<platf::explorer_restart_result_e> preflight() {
+      calls.emplace_back("preflight");
+      return preflight_failure;
+    }
+
+    bool terminate_exact_shell() {
+      calls.emplace_back("terminate");
+      return terminate_succeeds;
+    }
+
+    bool wait_for_old_shell_exit() {
+      calls.emplace_back("wait-exit");
+      return exit_succeeds;
+    }
+
+    bool wait_for_replacement(bool after_fallback_launch) {
+      calls.emplace_back(after_fallback_launch ? "wait-fallback" : "wait-auto");
+      return after_fallback_launch ? fallback_replacement : automatic_replacement;
+    }
+
+    bool replacement_present_now() {
+      calls.emplace_back("check-before-launch");
+      return replacement_before_launch;
+    }
+
+    bool launch_captured_shell() {
+      calls.emplace_back("launch");
+      return launch_succeeds;
+    }
+  };
+
   MOUSEKEYS sample_mouse_keys_state() {
     MOUSEKEYS state {};
     state.cbSize = sizeof(state);
@@ -28,6 +75,131 @@ namespace {
     EXPECT_EQ(actual.dwReserved2, expected.dwReserved2);
   }
 }  // namespace
+
+TEST(ExplorerRestartControllerTest, AcceptsWindowsAutomaticRestartWithoutLaunchingAgain) {
+  fake_explorer_restart_operations_t operations;
+  operations.automatic_replacement = true;
+
+  EXPECT_EQ(
+    platf::detail::run_explorer_restart(operations),
+    platf::explorer_restart_result_e::restarted_automatically
+  );
+  EXPECT_EQ(
+    operations.calls,
+    (std::vector<std::string> {
+      "preflight",
+      "terminate",
+      "wait-exit",
+      "wait-auto",
+    })
+  );
+}
+
+TEST(ExplorerRestartControllerTest, LaunchesExactlyOneFallbackAfterAutoRestartTimeout) {
+  fake_explorer_restart_operations_t operations;
+
+  EXPECT_EQ(
+    platf::detail::run_explorer_restart(operations),
+    platf::explorer_restart_result_e::relaunched
+  );
+  EXPECT_EQ(
+    operations.calls,
+    (std::vector<std::string> {
+      "preflight",
+      "terminate",
+      "wait-exit",
+      "wait-auto",
+      "check-before-launch",
+      "launch",
+      "wait-fallback",
+    })
+  );
+  EXPECT_EQ(
+    std::ranges::count(operations.calls, "launch"),
+    1
+  );
+}
+
+TEST(ExplorerRestartControllerTest, CoalescesALateAutomaticRestartBeforeFallbackLaunch) {
+  fake_explorer_restart_operations_t operations;
+  operations.replacement_before_launch = true;
+
+  EXPECT_EQ(
+    platf::detail::run_explorer_restart(operations),
+    platf::explorer_restart_result_e::restarted_automatically
+  );
+  EXPECT_EQ(
+    operations.calls,
+    (std::vector<std::string> {
+      "preflight",
+      "terminate",
+      "wait-exit",
+      "wait-auto",
+      "check-before-launch",
+      "wait-fallback",
+    })
+  );
+  EXPECT_EQ(std::ranges::count(operations.calls, "launch"), 0);
+}
+
+TEST(ExplorerRestartControllerTest, NeverLaunchesWhenPreflightKillOrExitFails) {
+  {
+    fake_explorer_restart_operations_t operations;
+    operations.preflight_failure =
+      platf::explorer_restart_result_e::skipped_identity;
+    EXPECT_EQ(
+      platf::detail::run_explorer_restart(operations),
+      platf::explorer_restart_result_e::skipped_identity
+    );
+    EXPECT_EQ(operations.calls, (std::vector<std::string> {"preflight"}));
+  }
+  {
+    fake_explorer_restart_operations_t operations;
+    operations.terminate_succeeds = false;
+    EXPECT_EQ(
+      platf::detail::run_explorer_restart(operations),
+      platf::explorer_restart_result_e::terminate_failed
+    );
+    EXPECT_EQ(
+      operations.calls,
+      (std::vector<std::string> {"preflight", "terminate"})
+    );
+  }
+  {
+    fake_explorer_restart_operations_t operations;
+    operations.exit_succeeds = false;
+    EXPECT_EQ(
+      platf::detail::run_explorer_restart(operations),
+      platf::explorer_restart_result_e::exit_timeout
+    );
+    EXPECT_EQ(
+      operations.calls,
+      (std::vector<std::string> {"preflight", "terminate", "wait-exit"})
+    );
+  }
+}
+
+TEST(ExplorerRestartControllerTest, ReportsFallbackLaunchAndReplacementFailures) {
+  {
+    fake_explorer_restart_operations_t operations;
+    operations.launch_succeeds = false;
+    EXPECT_EQ(
+      platf::detail::run_explorer_restart(operations),
+      platf::explorer_restart_result_e::relaunch_failed
+    );
+    EXPECT_EQ(operations.calls.back(), "launch");
+  }
+  {
+    fake_explorer_restart_operations_t operations;
+    operations.fallback_replacement = false;
+    EXPECT_EQ(
+      platf::detail::run_explorer_restart(operations),
+      platf::explorer_restart_result_e::replacement_timeout
+    );
+    EXPECT_EQ(operations.calls.back(), "wait-fallback");
+    EXPECT_EQ(std::ranges::count(operations.calls, "launch"), 1);
+  }
+}
 
 TEST(MouseKeysControllerTest, EnablesOnceAndRestoresTheExactPreviousState) {
   platf::detail::mouse_keys_controller_t controller;
@@ -154,5 +326,91 @@ TEST(MouseKeysControllerTest, RetriesAfterQueryOrEnableFailures) {
     }
   ));
   EXPECT_TRUE(controller.enabled_by_host());
+}
+
+TEST(UserLocalAppDataTest, MatchesTheCurrentOrLinkedStandardUserProfile) {
+  DWORD process_session = 0;
+  ASSERT_TRUE(ProcessIdToSessionId(GetCurrentProcessId(), &process_session));
+  if (process_session != WTSGetActiveConsoleSessionId()) {
+    GTEST_SKIP() << "This contract requires an interactive test process";
+  }
+
+  HANDLE process_token = nullptr;
+  ASSERT_TRUE(OpenProcessToken(
+    GetCurrentProcess(),
+    TOKEN_QUERY,
+    &process_token
+  ));
+  auto process_token_guard = util::fail_guard([&]() {
+    CloseHandle(process_token);
+  });
+
+  TOKEN_ELEVATION_TYPE elevation_type {};
+  DWORD returned = 0;
+  ASSERT_TRUE(GetTokenInformation(
+    process_token,
+    TokenElevationType,
+    &elevation_type,
+    sizeof(elevation_type),
+    &returned
+  ));
+  TOKEN_ELEVATION elevation {};
+  ASSERT_TRUE(GetTokenInformation(
+    process_token,
+    TokenElevation,
+    &elevation,
+    sizeof(elevation),
+    &returned
+  ));
+  if (
+    elevation_type == TokenElevationTypeDefault &&
+    elevation.TokenIsElevated != 0
+  ) {
+    GTEST_SKIP()
+      << "A UAC-disabled administrator intentionally has no standard token";
+  }
+
+  HANDLE profile_token = nullptr;
+  if (elevation_type == TokenElevationTypeFull) {
+    TOKEN_LINKED_TOKEN linked {};
+    ASSERT_TRUE(GetTokenInformation(
+      process_token,
+      TokenLinkedToken,
+      &linked,
+      sizeof(linked),
+      &returned
+    ));
+    profile_token = linked.LinkedToken;
+  }
+  auto profile_token_guard = util::fail_guard([&]() {
+    if (profile_token) {
+      CloseHandle(profile_token);
+    }
+  });
+
+  PWSTR expected_value = nullptr;
+  ASSERT_TRUE(SUCCEEDED(SHGetKnownFolderPath(
+    FOLDERID_LocalAppData,
+    KF_FLAG_DEFAULT,
+    profile_token,
+    &expected_value
+  )));
+  ASSERT_NE(expected_value, nullptr);
+  auto expected_value_guard = util::fail_guard([&]() {
+    CoTaskMemFree(expected_value);
+  });
+
+  const auto actual = platf::user_local_appdata();
+  ASSERT_FALSE(actual.empty());
+  EXPECT_EQ(
+    CompareStringOrdinal(
+      actual.c_str(),
+      -1,
+      expected_value,
+      -1,
+      TRUE
+    ),
+    CSTR_EQUAL
+  );
 }
 #endif

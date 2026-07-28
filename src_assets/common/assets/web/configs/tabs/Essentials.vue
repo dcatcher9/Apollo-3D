@@ -1,10 +1,16 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, inject } from 'vue'
+
+const $t = inject('i18n').t
 
 const props = defineProps({
   config: {
     type: Object,
     required: true,
+  },
+  platform: {
+    type: String,
+    default: '',
   },
   vdisplay: {
     type: [String, Number],
@@ -17,7 +23,7 @@ const resumeWindows = [0, 30000, 60000, 300000]
 const driverState = computed(() => {
   const states = {
     0: { label: 'Ready', tone: 'success', detail: 'Virtual display is available for XR sessions.' },
-    1: { label: 'Checking', tone: 'neutral', detail: 'Apollo XR has not reported virtual display health yet.' },
+    1: { label: 'Checking', tone: 'neutral', detail: 'Sunshine 3D has not reported virtual display health yet.' },
     '-1': { label: 'Not initialized', tone: 'warning', detail: 'The virtual display driver is not initialized.' },
     '-2': { label: 'Update required', tone: 'danger', detail: 'The installed virtual display driver is incompatible.' },
     '-3': { label: 'Needs attention', tone: 'danger', detail: 'The virtual display watchdog is not responding.' },
@@ -35,11 +41,15 @@ const webAccess = computed(() => {
 
 function isEnabled(key) {
   const value = props.config[key]
-  return value === true || value === 1 || value === '1' || value === 'enabled' || value === 'true'
+  return value === true || value === 1 || value === '1' || value === 'enabled' || value === 'on' || value === 'true'
 }
 
 function setEnabled(key, event) {
   props.config[key] = event.target.checked ? 'enabled' : 'disabled'
+}
+
+function setOnOff(key, event) {
+  props.config[key] = event.target.checked ? 'on' : 'off'
 }
 </script>
 
@@ -51,21 +61,21 @@ function setEnabled(key, event) {
         <div>
           <p class="settings-eyebrow">Identity</p>
           <h2>This PC</h2>
-          <p>How Apollo XR appears to your XR headset and other devices.</p>
+          <p>How Sunshine 3D appears to your XR headset and other devices.</p>
         </div>
       </div>
 
       <label class="simple-field" for="host-name">
         <span>Computer name</span>
-        <input id="host-name" v-model="config.sunshine_name" class="form-control" type="text" placeholder="Apollo XR" />
+        <input id="host-name" v-model="config.sunshine_name" class="form-control" type="text" placeholder="Sunshine 3D" />
       </label>
 
       <div class="simple-toggle-row">
         <div>
-          <strong>Show Apollo XR on the local network</strong>
-          <span>Lets Artemis find this PC automatically.</span>
+          <strong>Show Sunshine 3D on the local network</strong>
+          <span>Lets Moonlight 3D find this PC automatically.</span>
         </div>
-        <label class="form-switch" aria-label="Show Apollo XR on the local network">
+        <label class="form-switch" aria-label="Show Sunshine 3D on the local network">
           <input
             class="form-check-input"
             type="checkbox"
@@ -78,7 +88,7 @@ function setEnabled(key, event) {
       <div class="simple-toggle-row">
         <div>
           <strong>Allow new devices to pair</strong>
-          <span>Turn this off when you do not want Apollo XR to accept pairing requests.</span>
+          <span>Turn this off when you do not want Sunshine 3D to accept pairing requests.</span>
         </div>
         <label class="form-switch" aria-label="Allow new devices to pair">
           <input
@@ -155,15 +165,29 @@ function setEnabled(key, event) {
     <section class="settings-card settings-card-wide tray-setting">
       <div class="simple-toggle-row flush">
         <div>
-          <strong>Keep Apollo XR in the system tray</strong>
+          <strong>Keep Sunshine 3D in the system tray</strong>
           <span>Recommended for quick access and everyday background use.</span>
         </div>
-        <label class="form-switch" aria-label="Keep Apollo XR in the system tray">
+        <label class="form-switch" aria-label="Keep Sunshine 3D in the system tray">
           <input
             class="form-check-input"
             type="checkbox"
             :checked="isEnabled('system_tray')"
             @change="setEnabled('system_tray', $event)"
+          />
+        </label>
+      </div>
+      <div v-if="platform === 'windows'" class="simple-toggle-row tray-taskbar-repair">
+        <div>
+          <strong>{{ $t('config.virtual_display_restart_explorer') }}</strong>
+          <span>{{ $t('config.virtual_display_restart_explorer_desc') }}</span>
+        </div>
+        <label class="form-switch" :aria-label="$t('config.virtual_display_restart_explorer')">
+          <input
+            class="form-check-input"
+            type="checkbox"
+            :checked="isEnabled('virtual_display_restart_explorer')"
+            @change="setOnOff('virtual_display_restart_explorer', $event)"
           />
         </label>
       </div>
@@ -175,16 +199,16 @@ function setEnabled(key, event) {
 .essentials-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1rem;
+  gap: var(--apollo-space-lg);
 }
 
 .settings-card {
   min-width: 0;
-  padding: 1.25rem;
+  padding: var(--apollo-space-lg);
   border: 1px solid var(--apollo-border);
-  border-radius: 1.1rem;
+  border-radius: var(--apollo-radius-card);
   background: var(--apollo-surface);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  box-shadow: var(--apollo-shadow-card);
 }
 
 .settings-card-wide {
@@ -194,8 +218,8 @@ function setEnabled(key, event) {
 .settings-card-heading {
   display: flex;
   align-items: flex-start;
-  gap: 0.85rem;
-  margin-bottom: 1.2rem;
+  gap: var(--apollo-space-md);
+  margin-bottom: var(--apollo-space-lg);
 }
 
 .settings-card-heading.compact {
@@ -204,40 +228,40 @@ function setEnabled(key, event) {
 
 .settings-card-heading h2 {
   margin: 0;
-  font-size: 1.05rem;
+  font-size: var(--apollo-text-emphasis);
   font-weight: 700;
 }
 
 .settings-card-heading p:not(.settings-eyebrow) {
-  margin: 0.25rem 0 0;
-  color: var(--apollo-text-muted);
-  font-size: 0.9rem;
+  margin: var(--apollo-space-xs) 0 0;
+  color: var(--apollo-text-secondary);
+  font-size: var(--apollo-text-caption);
 }
 
 .settings-icon {
   display: grid;
   flex: 0 0 auto;
-  width: 2.35rem;
-  height: 2.35rem;
+  width: var(--apollo-icon-inline);
+  height: var(--apollo-icon-inline);
   place-items: center;
-  border-radius: 0.8rem;
-  color: var(--apollo-accent-hover);
-  background: color-mix(in srgb, var(--apollo-accent) 12%, transparent);
+  border-radius: var(--apollo-radius-control);
+  color: var(--apollo-accent);
+  background: color-mix(in srgb, var(--apollo-accent-deep) 48%, transparent);
 }
 
 .settings-eyebrow {
-  margin: 0 0 0.15rem;
-  color: var(--apollo-text-muted);
-  font-size: 0.7rem;
-  font-weight: 800;
+  margin: 0 0 var(--apollo-space-xs);
+  color: var(--apollo-text-disabled);
+  font-size: var(--apollo-text-caption);
+  font-weight: 750;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
 .simple-field {
   display: grid;
-  gap: 0.45rem;
-  margin-top: 1rem;
+  gap: var(--apollo-space-sm);
+  margin-top: var(--apollo-space-lg);
   font-weight: 650;
 }
 
@@ -249,8 +273,8 @@ function setEnabled(key, event) {
 .simple-field small,
 .simple-toggle-row span,
 .card-note {
-  color: var(--apollo-text-muted);
-  font-size: 0.84rem;
+  color: var(--apollo-text-secondary);
+  font-size: var(--apollo-text-caption);
   font-weight: 400;
 }
 
@@ -258,9 +282,9 @@ function setEnabled(key, event) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1.25rem;
-  padding-top: 1rem;
-  margin-top: 1rem;
+  gap: var(--apollo-space-lg);
+  padding-top: var(--apollo-space-lg);
+  margin-top: var(--apollo-space-lg);
   border-top: 1px solid var(--apollo-border);
 }
 
@@ -272,7 +296,7 @@ function setEnabled(key, event) {
 
 .simple-toggle-row > div {
   display: grid;
-  gap: 0.18rem;
+  gap: var(--apollo-space-xs);
 }
 
 .form-switch {
@@ -291,27 +315,27 @@ function setEnabled(key, event) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.9rem 1rem;
-  border-radius: 0.9rem;
-  background: var(--apollo-surface-muted);
+  padding: var(--apollo-space-md) var(--apollo-space-lg);
+  border-radius: var(--apollo-radius-control);
+  background: var(--apollo-surface-raised);
 }
 
 .status-summary > div {
   display: grid;
-  gap: 0.15rem;
+  gap: var(--apollo-space-xs);
 }
 
 .status-summary span {
-  color: var(--apollo-text-muted);
-  font-size: 0.78rem;
+  color: var(--apollo-text-secondary);
+  font-size: var(--apollo-text-caption);
 }
 
 .status-summary i {
-  color: var(--apollo-accent-hover);
+  color: var(--apollo-accent);
 }
 
 .card-note {
-  margin: 0.9rem 0;
+  margin: var(--apollo-space-md) 0;
 }
 
 .driver-note {
@@ -321,27 +345,27 @@ function setEnabled(key, event) {
 .quiet-link {
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
-  font-size: 0.86rem;
+  gap: var(--apollo-space-sm);
+  font-size: var(--apollo-text-caption);
   font-weight: 700;
   text-decoration: none;
 }
 
 .quiet-link i {
-  font-size: 0.72rem;
+  font-size: var(--apollo-text-caption);
 }
 
 .status-pill {
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: var(--apollo-space-sm);
   margin-left: auto;
-  padding: 0.35rem 0.65rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
+  padding: var(--apollo-space-xs) var(--apollo-space-sm);
+  border-radius: var(--apollo-radius-pill);
+  font-size: var(--apollo-text-caption);
   font-weight: 750;
   white-space: nowrap;
-  background: var(--apollo-surface-muted);
+  background: var(--apollo-surface-raised);
 }
 
 .status-dot {
@@ -352,13 +376,13 @@ function setEnabled(key, event) {
 }
 
 .status-success {
-  color: #138a55;
-  background: color-mix(in srgb, #16a365 13%, transparent);
+  color: var(--apollo-status-ok);
+  background: color-mix(in srgb, var(--apollo-status-ok) 13%, transparent);
 }
 
 .status-warning {
-  color: #a96600;
-  background: color-mix(in srgb, #e59a16 15%, transparent);
+  color: var(--apollo-status-warn);
+  background: color-mix(in srgb, var(--apollo-status-warn) 15%, transparent);
 }
 
 .status-danger {
@@ -367,8 +391,14 @@ function setEnabled(key, event) {
 }
 
 .tray-setting {
-  padding-top: 1rem;
-  padding-bottom: 1rem;
+  padding-top: var(--apollo-space-lg);
+  padding-bottom: var(--apollo-space-lg);
+}
+
+.tray-taskbar-repair {
+  border-top: 1px solid var(--apollo-border);
+  margin-top: var(--apollo-space-md);
+  padding-top: var(--apollo-space-md);
 }
 
 @media (max-width: 760px) {

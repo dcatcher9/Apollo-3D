@@ -5,6 +5,10 @@
 
 // standard includes
 #include <algorithm>
+#include <array>
+#include <bit>
+#include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <fstream>
 #include <future>
@@ -73,6 +77,8 @@ namespace stream {
     // 0x3005 is retired (Set Depth Model); older clients may still emit it, so it is not reused.
     constexpr std::uint16_t set_video_mode = 0x3007;
     constexpr std::uint16_t live_video_mode_ack = 0x3008;
+    constexpr std::uint16_t sbs_telemetry_subscription = 0x3009;
+    constexpr std::uint16_t sbs_telemetry_state = 0x300A;
   }  // namespace control_packet
 
   enum class socket_e : int {
@@ -241,6 +247,12 @@ namespace stream {
     std::uint8_t body[LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE];
   };
 
+  struct control_sbs_telemetry_state_t {
+    control_header_v2 header;
+
+    std::uint8_t body[SBS_TELEMETRY_STATE_PAYLOAD_SIZE];
+  };
+
 #pragma pack(pop)
 
   typedef struct control_encrypted_t {
@@ -314,6 +326,140 @@ namespace stream {
     out[11] = static_cast<std::uint8_t>((bitrate >> 8) & 0xFF);
     out[12] = static_cast<std::uint8_t>((bitrate >> 16) & 0xFF);
     out[13] = static_cast<std::uint8_t>((bitrate >> 24) & 0xFF);
+    return true;
+  }
+
+  sbs_telemetry_subscription_decode_e decode_sbs_telemetry_subscription_payload(
+    std::string_view payload,
+    sbs_telemetry_subscription_request_t &request
+  ) {
+    request = {};
+    if (payload.size() != SBS_TELEMETRY_SUBSCRIPTION_PAYLOAD_SIZE) {
+      return sbs_telemetry_subscription_decode_e::invalid;
+    }
+
+    const auto *bytes = reinterpret_cast<const std::uint8_t *>(payload.data());
+    request.flags = bytes[1];
+    request.request_id =
+      static_cast<std::uint16_t>(bytes[2]) |
+      static_cast<std::uint16_t>(bytes[3] << 8);
+    request.interval_ms =
+      static_cast<std::uint16_t>(bytes[4]) |
+      static_cast<std::uint16_t>(bytes[5] << 8);
+    if (bytes[0] != SBS_TELEMETRY_VERSION) {
+      return sbs_telemetry_subscription_decode_e::unsupported_version;
+    }
+
+    const std::uint16_t reserved =
+      static_cast<std::uint16_t>(bytes[6]) |
+      static_cast<std::uint16_t>(bytes[7] << 8);
+    constexpr std::uint8_t known_flags =
+      SBS_TELEMETRY_SUBSCRIBE_ENABLED | SBS_TELEMETRY_SUBSCRIBE_FOCUSED;
+    if (reserved != 0 || (request.flags & ~known_flags) != 0) {
+      return sbs_telemetry_subscription_decode_e::invalid;
+    }
+
+    return sbs_telemetry_subscription_decode_e::ok;
+  }
+
+  std::uint16_t effective_sbs_telemetry_interval_ms(
+    const sbs_telemetry_subscription_request_t &request
+  ) noexcept {
+    if (request.interval_ms == 0) {
+      return request.focused() ?
+               SBS_TELEMETRY_INTERVAL_FOCUSED_MS :
+               SBS_TELEMETRY_INTERVAL_BACKGROUND_MS;
+    }
+    return std::clamp(
+      request.interval_ms,
+      SBS_TELEMETRY_INTERVAL_MIN_MS,
+      SBS_TELEMETRY_INTERVAL_MAX_MS
+    );
+  }
+
+  sbs_telemetry_status_e sbs_telemetry_wire_status(
+    video::sbs_telemetry_sample_status_e status
+  ) noexcept {
+    switch (status) {
+      case video::sbs_telemetry_sample_status_e::ready:
+        return sbs_telemetry_status_e::ok;
+      case video::sbs_telemetry_sample_status_e::unavailable:
+        return sbs_telemetry_status_e::unavailable;
+      case video::sbs_telemetry_sample_status_e::failed:
+        return sbs_telemetry_status_e::failed;
+    }
+    return sbs_telemetry_status_e::failed;
+  }
+
+  bool encode_sbs_telemetry_state_payload(
+    const sbs_telemetry_state_t &state,
+    std::uint8_t (&out)[SBS_TELEMETRY_STATE_PAYLOAD_SIZE]
+  ) {
+    const auto status = static_cast<std::uint8_t>(state.status);
+    if (status > static_cast<std::uint8_t>(sbs_telemetry_status_e::failed)) {
+      return false;
+    }
+
+    const auto &snapshot = state.snapshot;
+    const std::array<float, 9> float_fields {
+      snapshot.pop_floor,
+      snapshot.pop_ceiling,
+      snapshot.effective_pop,
+      snapshot.edge_fraction,
+      snapshot.change_fraction,
+      snapshot.zero_anchor_shift_px,
+      snapshot.subject_depth,
+      snapshot.valid_depth_fraction,
+      snapshot.effective_range_width,
+    };
+    if (std::any_of(float_fields.begin(), float_fields.end(), [](float value) {
+          return !std::isfinite(value);
+        })) {
+      return false;
+    }
+
+    std::array<std::uint8_t, SBS_TELEMETRY_STATE_PAYLOAD_SIZE> encoded {};
+    const auto write_u16 = [&](std::size_t offset, std::uint16_t value) {
+      encoded[offset] = static_cast<std::uint8_t>(value & 0xffu);
+      encoded[offset + 1] = static_cast<std::uint8_t>((value >> 8) & 0xffu);
+    };
+    const auto write_u32 = [&](std::size_t offset, std::uint32_t value) {
+      encoded[offset] = static_cast<std::uint8_t>(value & 0xffu);
+      encoded[offset + 1] = static_cast<std::uint8_t>((value >> 8) & 0xffu);
+      encoded[offset + 2] = static_cast<std::uint8_t>((value >> 16) & 0xffu);
+      encoded[offset + 3] = static_cast<std::uint8_t>((value >> 24) & 0xffu);
+    };
+    const auto write_f32 = [&](std::size_t offset, float value) {
+      write_u32(offset, std::bit_cast<std::uint32_t>(value));
+    };
+
+    encoded[0] = SBS_TELEMETRY_VERSION;
+    encoded[1] = status;
+    write_u16(2, state.request_id);
+    write_u32(4, snapshot.generation);
+    write_u32(8, snapshot.sequence);
+    write_u32(12, snapshot.valid_fields);
+    write_u32(16, snapshot.runtime_flags);
+    write_u16(20, snapshot.depth_width);
+    write_u16(22, snapshot.depth_height);
+    encoded[24] = snapshot.zero_plane_mode;
+    // encoded[25..27] remain reserved zero.
+    write_f32(28, snapshot.pop_floor);
+    write_f32(32, snapshot.pop_ceiling);
+    write_f32(36, snapshot.effective_pop);
+    write_f32(40, snapshot.edge_fraction);
+    write_f32(44, snapshot.change_fraction);
+    write_f32(48, snapshot.zero_anchor_shift_px);
+    write_f32(52, snapshot.subject_depth);
+    write_f32(56, snapshot.valid_depth_fraction);
+    write_f32(60, snapshot.effective_range_width);
+    write_u32(64, snapshot.scene_age);
+    write_u32(68, snapshot.hard_cut_count);
+    write_u32(72, snapshot.external_cut_count);
+    write_u32(76, snapshot.empty_raw_count);
+    write_u32(80, snapshot.collapsed_raw_count);
+    write_u32(84, snapshot.sampled_frame_id);
+    std::copy(encoded.begin(), encoded.end(), out);
     return true;
   }
 
@@ -404,6 +550,21 @@ namespace stream {
       return 0;
     }
 
+    int send_unreliable_sequenced(const std::string_view &payload, net::peer_t peer) {
+      // ENet packets without RELIABLE or UNSEQUENCED use unreliable-sequenced delivery. Moonlight
+      // reserves channel 1 for urgent IDR/reference-frame traffic; its server-control lane is 8.
+      // Use that only when it was actually negotiated, with channel 0 as the legacy fallback.
+      constexpr enet_uint8 server_control_channel = 0x08;
+      const enet_uint8 channel =
+        peer->channelCount > server_control_channel ? server_control_channel : 0;
+      auto packet = enet_packet_create(payload.data(), payload.size(), 0);
+      if (enet_peer_send(peer, channel, packet)) {
+        enet_packet_destroy(packet);
+        return -1;
+      }
+      return 0;
+    }
+
     void flush() {
       enet_host_flush(_host.get());
     }
@@ -441,10 +602,10 @@ namespace stream {
   struct video_channel_t {
     int packet_size;
     int min_required_fec_packets;
-    // Written by the control thread on a live 0x3007 mode change, read per frame by
-    // videoBroadcastThread when it rebuilds the pacing plan.
-    std::atomic_int encoded_bitrate_kbps;
-    std::atomic_int framerate_millihz;
+    // Published by the encode loop only after a real encoder exists. The packed bitrate/cadence
+    // snapshot prevents the packet sender from pacing a rolled-back request or observing a torn
+    // pair across a live 0x3007 transition.
+    std::shared_ptr<video::effective_video_mode_publisher_t> effective_mode;
     boost::asio::ip::address local_address;
     std::atomic_bool active {true};
     std::atomic_bool pacing_plan_logged {false};
@@ -476,6 +637,45 @@ namespace stream {
     util::buffer_t<uint8_t *> shard_ptrs;
     audio_fec_packet_t fec_packet;
     std::unique_ptr<platf::deinit_t> qos;
+  };
+
+  // Everything needed to finish or reject one asynchronous live display-mode request. These
+  // values deliberately do not retain session_t: the session owns and joins the worker instead.
+  struct live_video_mode_request_t {
+    safe::mail_t mail;
+    std::shared_ptr<video_channel_t> video;
+    // What the encode loop is really running. A refused request is answered with this, so the
+    // client learns the mode still in effect instead of getting its rejected request back.
+    std::shared_ptr<video::effective_video_mode_publisher_t> effective_mode;
+    video::video_mode_change_t change;
+    std::uint32_t launch_session_id;
+    std::string client_name;
+  };
+
+  struct live_video_mode_worker_t {
+    std::mutex mutex;
+    std::condition_variable wake;
+    bool stopping = false;
+    // Only the most recent request that has not begun matters; a burst collapses to one display
+    // transition. Once begun, the serial gate retains exclusive ownership through encoder
+    // confirmation and any required desktop rollback.
+    std::optional<live_video_mode_request_t> pending;
+    std::optional<video::video_mode_applied_t> completion;
+    detail::live_video_mode_serial_gate_t serial_gate;
+    std::thread thread;
+
+    ~live_video_mode_worker_t() {
+      {
+        std::lock_guard lock(mutex);
+        stopping = true;
+        pending.reset();
+        serial_gate.cancel_pending();
+      }
+      wake.notify_all();
+      if (thread.joinable()) {
+        thread.join();
+      }
+    }
   };
 
   struct session_t {
@@ -511,6 +711,10 @@ namespace stream {
       // session lifetime so worker/encode-thread replies cannot disappear between raise() and
       // the control thread's next drain.
       safe::mail_raw_t::queue_t<live_video_mode_ack_t> live_video_mode_ack_queue;
+      safe::mail_raw_t::event_t<video::sbs_telemetry_snapshot_t> sbs_telemetry_event;
+      std::optional<video::sbs_telemetry_snapshot_t> latest_sbs_telemetry;
+      std::shared_ptr<video::sbs_telemetry_subscription_t> sbs_telemetry_subscription;
+      std::chrono::steady_clock::time_point last_sbs_telemetry_periodic {};
       int last_depth_phase = -1;  // last depth-engine phase pushed to this client (see IDX_DEPTH_STATUS)
     } control;
 
@@ -533,23 +737,13 @@ namespace stream {
     std::mutex stop_mutex;
     std::atomic_bool graceful_stop_requested {false};
     std::atomic<session::state_e> state;
+
+    // Keep this last: member destruction runs in reverse declaration order, so its defensive
+    // destructor joins before any mail/video state captured by the worker can be destroyed.
+    live_video_mode_worker_t live_video_mode_worker;
   };
 
   namespace {
-    // A live 0x3007 change can require resizing the session's virtual desktop, which is seconds of
-    // Windows topology work. The control thread also carries client input and must never block for
-    // that, so the change is handed to a short-lived worker. Everything the worker needs is owned
-    // by shared_ptr, so it stays valid even if the session ends while the resize is in flight.
-    struct live_video_mode_request_t {
-      safe::mail_t mail;
-      std::shared_ptr<video_channel_t> video;
-      // What the encode loop is really running. A refused request is answered with this, so the
-      // client learns the mode still in effect instead of getting its rejected request back.
-      std::shared_ptr<video::effective_video_mode_publisher_t> effective_mode;
-      video::video_mode_change_t change;
-      std::string client_name;
-    };
-
     /**
      * Queue one acknowledgement for the control thread to encrypt and send.
      *
@@ -592,40 +786,83 @@ namespace stream {
       );
     }
 
-    std::mutex live_video_mode_mutex;
-    bool live_video_mode_worker_running = false;
-    // Only the most recent request matters; a burst collapses to one display transition.
-    std::optional<live_video_mode_request_t> live_video_mode_pending;
-
-    /**
-     * Hand the new mode to the video pipeline. The send pacer derives its plan from these values
-     * every frame, so they must land before the new geometry reaches the encoder, and the log
-     * latches are re-armed so the recalculated plan is reported once.
-     */
+    /** Hand one serialized request to the encode loop. */
     void commit_live_video_mode(const live_video_mode_request_t &request) {
-      request.video->encoded_bitrate_kbps.store(request.change.bitrate, std::memory_order_relaxed);
-      request.video->framerate_millihz.store(request.change.encodingFramerate, std::memory_order_relaxed);
-      request.video->pacing_plan_logged.store(false, std::memory_order_release);
-      request.video->idr_pacing_plan_logged.store(false, std::memory_order_release);
-      // A queue, not a single-slot event: two requests arriving inside one frame both owe the
-      // client an answer, so the earlier one must not be overwritten before the encode loop sees it.
+      // Do not publish pacing here. The requested encoder may fail, so video.cpp publishes the
+      // coherent effective bitrate/cadence pair only after init_encoder() succeeds.
       request.mail->queue<video::video_mode_change_t>(mail::video_mode)->raise(request.change);
     }
 
     /**
-     * Resize the virtual desktop first, then rebuild the encoder, so the encoder is created into
-     * an already-correct desktop size instead of aspect-fitting the old one into the new frame.
+     * Deliver an encoder completion to the one matching in-flight transaction.
+     *
+     * Client request ids cannot be used here because they are opaque and may repeat. The internal
+     * token also prevents a delayed completion from releasing a newer transaction.
      */
-    void dispatch_live_video_mode(live_video_mode_request_t request) {
+    void complete_live_video_mode(
+      session_t &session,
+      video::video_mode_applied_t completion
+    ) {
+      auto &state = session.live_video_mode_worker;
+      bool accepted = false;
+      {
+        std::lock_guard lock(state.mutex);
+        if (!state.stopping && !state.completion) {
+          const auto matching_request = std::find_if(
+            completion.requests.begin(),
+            completion.requests.end(),
+            [&](const video::video_mode_request_ref_t &request) {
+              return state.serial_gate.accepts_completion(request.transaction_id);
+            }
+          );
+          if (matching_request != completion.requests.end()) {
+            state.completion = std::move(completion);
+            accepted = true;
+          }
+        }
+      }
+      if (accepted) {
+        state.wake.notify_one();
+      } else {
+        BOOST_LOG(warning) << "Ignoring a stale or duplicate live video-mode encoder completion."sv;
+      }
+    }
+
+    /**
+     * Serialize a live request through display apply, encoder creation and (on failure) display
+     * rollback. Only an unstarted pending request may be coalesced.
+     */
+    void dispatch_live_video_mode(session_t &session, live_video_mode_request_t request) {
+      auto &worker_state = session.live_video_mode_worker;
       std::optional<live_video_mode_request_t> superseded;
+      std::optional<live_video_mode_request_t> rejected;
       bool start_worker = false;
       {
-        std::lock_guard lock(live_video_mode_mutex);
-        superseded = std::exchange(live_video_mode_pending, std::move(request));
-        if (!live_video_mode_worker_running) {
-          live_video_mode_worker_running = true;
+        std::lock_guard lock(worker_state.mutex);
+        if (worker_state.stopping) {
+          rejected = std::move(request);
+        } else {
+          const auto submission = worker_state.serial_gate.submit();
+          request.change.transaction_id = submission.transaction_id;
+          superseded = std::exchange(worker_state.pending, std::move(request));
+          if (static_cast<bool>(superseded) !=
+              static_cast<bool>(submission.superseded_transaction_id)) {
+            BOOST_LOG(error) << "Live video-mode pending queue lost synchronization with its transaction gate."sv;
+          }
+        }
+        if (!worker_state.stopping && !worker_state.thread.joinable()) {
           start_worker = true;
         }
+      }
+
+      if (rejected) {
+        reject_live_video_mode(
+          rejected->mail,
+          rejected->effective_mode,
+          rejected->change.request_id,
+          live_video_mode_ack_e::failed
+        );
+        return;
       }
 
       // A queued request that a newer one displaced was never applied, so it is answered as a
@@ -641,43 +878,86 @@ namespace stream {
       }
 
       if (!start_worker) {
+        worker_state.wake.notify_one();
         return;
       }
 
-      std::thread worker([]() {
+      // Publish the joinable thread while holding the same lock used by stop/join. Otherwise a
+      // concurrent disconnect could observe "no worker", return from join(), and let session_t
+      // die just before this lambda captured it.
+      std::lock_guard worker_lock(worker_state.mutex);
+      if (worker_state.stopping || worker_state.thread.joinable()) {
+        return;
+      }
+      worker_state.thread = std::thread([&session]() {
+        auto &state = session.live_video_mode_worker;
         while (true) {
           std::optional<live_video_mode_request_t> job;
+          std::uint64_t transaction_id = 0;
           {
-            std::lock_guard lock(live_video_mode_mutex);
-            if (!live_video_mode_pending) {
-              live_video_mode_worker_running = false;
+            std::unique_lock lock(state.mutex);
+            state.wake.wait(lock, [&]() {
+              return state.stopping || state.serial_gate.can_begin();
+            });
+            if (state.stopping) {
+              state.pending.reset();
+              state.serial_gate.cancel_pending();
               return;
             }
-            job = std::move(live_video_mode_pending);
-            live_video_mode_pending.reset();
+            const auto next_transaction = state.serial_gate.begin_next();
+            job = std::move(state.pending);
+            state.pending.reset();
+            if (!next_transaction || !job ||
+                job->change.transaction_id != *next_transaction) {
+              BOOST_LOG(error) << "Live video-mode worker found a transaction/payload mismatch."sv;
+              if (next_transaction) {
+                (void) state.serial_gate.finish(*next_transaction);
+              }
+              continue;
+            }
+            transaction_id = *next_transaction;
           }
 
           // The session can end while a display transition is in flight. Never resize a desktop
           // for a stream that is already gone. The acknowledgement is dropped with it; the client
           // is disconnected at that point and its own timeout covers the missing reply.
           if (job->mail->event<bool>(mail::shutdown)->peek()) {
+            std::lock_guard lock(state.mutex);
+            (void) state.serial_gate.finish(transaction_id);
             continue;
           }
 
-          const auto result = proc::proc.apply_live_video_mode(
-            job->change.width,
-            job->change.height,
-            job->change.encodingFramerate
-          );
+          auto result = proc::live_video_mode_result_e::unchanged;
+          if (proc::proc.live_video_mode_needs_display_change(
+                job->change.width,
+                job->change.height
+              )) {
+            result = proc::proc.apply_live_video_mode(
+              job->change.width,
+              job->change.height,
+              job->change.encodingFramerate,
+              job->launch_session_id
+            );
+          }
+          const bool display_changed =
+            result == proc::live_video_mode_result_e::applied;
 
+          {
+            std::lock_guard lock(state.mutex);
+            if (state.stopping) {
+              return;
+            }
+          }
           switch (result) {
             case proc::live_video_mode_result_e::applied:
             case proc::live_video_mode_result_e::unchanged:
               if (job->mail->event<bool>(mail::shutdown)->peek()) {
+                std::lock_guard lock(state.mutex);
+                (void) state.serial_gate.finish(transaction_id);
                 continue;
               }
-              // The desktop is ready; the encode loop installs the mode and answers the client
-              // itself, because only it knows the geometry that ends up running.
+              // The desktop is ready. Keep the transaction active until the encode loop proves
+              // which mode exists and, on failure, the worker restores the prior desktop.
               commit_live_video_mode(*job);
               break;
             case proc::live_video_mode_result_e::needs_reconnect:
@@ -690,6 +970,10 @@ namespace stream {
                 job->change.request_id,
                 live_video_mode_ack_status(result)
               );
+              {
+                std::lock_guard lock(state.mutex);
+                (void) state.serial_gate.finish(transaction_id);
+              }
               break;
             case proc::live_video_mode_result_e::failed:
               BOOST_LOG(warning) << "type [IDX_SET_VIDEO_MODE]: the desktop could not be resized to "sv
@@ -701,11 +985,109 @@ namespace stream {
                 job->change.request_id,
                 live_video_mode_ack_status(result)
               );
+              {
+                std::lock_guard lock(state.mutex);
+                (void) state.serial_gate.finish(transaction_id);
+              }
               break;
+          }
+
+          if (result != proc::live_video_mode_result_e::applied &&
+              result != proc::live_video_mode_result_e::unchanged) {
+            continue;
+          }
+
+          std::optional<video::video_mode_applied_t> completion;
+          {
+            std::unique_lock lock(state.mutex);
+            state.wake.wait(lock, [&]() {
+              return state.stopping || state.completion.has_value();
+            });
+            if (state.stopping) {
+              return;
+            }
+            completion = std::move(state.completion);
+            state.completion.reset();
+          }
+
+          const auto matching_request = std::find_if(
+            completion->requests.begin(),
+            completion->requests.end(),
+            [&](const video::video_mode_request_ref_t &request) {
+              return request.transaction_id == transaction_id;
+            }
+          );
+          if (matching_request == completion->requests.end()) {
+            BOOST_LOG(error) << "Live video-mode completion lost its active transaction."sv;
+          } else if (matching_request->request_id != job->change.request_id) {
+            BOOST_LOG(error) << "Live video-mode completion matched a token but not its client request id."sv;
+          }
+
+          if (!completion->applied && display_changed) {
+            BOOST_LOG(warning) << "Restoring the last encodable virtual desktop mode "
+                               << completion->desktop_mode.width << 'x'
+                               << completion->desktop_mode.height << " after the encoder rejected "
+                               << job->change.width << 'x' << job->change.height << '.';
+            const auto rollback_result = proc::proc.apply_live_video_mode(
+              completion->desktop_mode.width,
+              completion->desktop_mode.height,
+              completion->desktop_mode.framerate_millihz,
+              job->launch_session_id
+            );
+            if (rollback_result != proc::live_video_mode_result_e::applied &&
+                rollback_result != proc::live_video_mode_result_e::unchanged) {
+              BOOST_LOG(error) << "The virtual desktop could not be restored after a live encoder "
+                                  "rollback; a later request may require reconnecting."sv;
+            }
+          }
+
+          // Re-arm diagnostics only after the effective pacing pair is known. Resetting at request
+          // enqueue lets the old encoder consume the latch before the new encoder is proven.
+          job->video->pacing_plan_logged.store(false, std::memory_order_release);
+          job->video->idr_pacing_plan_logged.store(false, std::memory_order_release);
+          queue_live_video_mode_ack(
+            job->mail,
+            live_video_mode_ack_t {
+              job->change.request_id,
+              completion->applied ?
+                live_video_mode_ack_e::applied :
+                live_video_mode_ack_e::failed,
+              completion->mode.width,
+              completion->mode.height,
+              completion->mode.framerateX100,
+              completion->mode.bitrate,
+            }
+          );
+
+          {
+            std::lock_guard lock(state.mutex);
+            if (!state.serial_gate.finish(transaction_id)) {
+              BOOST_LOG(error) << "Live video-mode transaction gate rejected its active completion."sv;
+            }
           }
         }
       });
-      worker.detach();
+      worker_state.wake.notify_one();
+    }
+
+    void stop_live_video_mode_worker(session_t &session) {
+      auto &worker = session.live_video_mode_worker;
+      {
+        std::lock_guard lock(worker.mutex);
+        worker.stopping = true;
+        worker.pending.reset();
+        worker.serial_gate.cancel_pending();
+      }
+      worker.wake.notify_all();
+    }
+
+    void join_live_video_mode_worker(session_t &session) {
+      stop_live_video_mode_worker(session);
+      auto &thread = session.live_video_mode_worker.thread;
+      if (thread.joinable()) {
+        BOOST_LOG(debug) << "Waiting for live video-mode worker to end..."sv;
+        thread.join();
+      }
     }
   }  // namespace
 
@@ -1257,6 +1639,97 @@ namespace stream {
     return 0;
   }
 
+  video::sbs_telemetry_snapshot_t unavailable_sbs_telemetry_snapshot() noexcept {
+    video::sbs_telemetry_snapshot_t snapshot;
+    snapshot.status = video::sbs_telemetry_sample_status_e::unavailable;
+    return snapshot;
+  }
+
+  void drain_sbs_telemetry(session_t &session) {
+    auto &event = session.control.sbs_telemetry_event;
+    while (event->peek()) {
+      if (auto snapshot = event->pop(0ms)) {
+        session.control.latest_sbs_telemetry = std::move(*snapshot);
+      }
+    }
+  }
+
+  int send_sbs_telemetry_state(
+    session_t *session,
+    const video::sbs_telemetry_snapshot_t &snapshot,
+    sbs_telemetry_status_e status,
+    std::uint16_t request_id,
+    bool reliable
+  ) {
+    if (!session->control.peer) {
+      return -1;
+    }
+
+    control_sbs_telemetry_state_t plaintext {};
+    plaintext.header.type = control_packet::sbs_telemetry_state;
+    plaintext.header.payloadLength =
+      sizeof(control_sbs_telemetry_state_t) - sizeof(control_header_v2);
+    if (!encode_sbs_telemetry_state_payload(
+          sbs_telemetry_state_t {status, request_id, snapshot},
+          plaintext.body
+        )) {
+      BOOST_LOG(error) << "Refusing to send non-finite SBS telemetry state"sv;
+      return -1;
+    }
+
+    std::array<
+      std::uint8_t,
+      sizeof(control_encrypted_t) +
+        crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) +
+        crypto::cipher::tag_size>
+      encrypted_payload;
+    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
+    if (payload.empty()) {
+      return -1;
+    }
+
+    const int result = reliable ?
+                         session->broadcast_ref->control_server.send(
+                           payload,
+                           session->control.peer
+                         ) :
+                         session->broadcast_ref->control_server.send_unreliable_sequenced(
+                           payload,
+                           session->control.peer
+                         );
+    if (result != 0) {
+      return -1;
+    }
+    if (request_id != 0) {
+      BOOST_LOG(debug) << "Sent SBS telemetry reply: request="sv << request_id
+                       << " status="sv << static_cast<int>(status)
+                       << " generation="sv << snapshot.generation
+                       << " sequence="sv << snapshot.sequence;
+    }
+    return 0;
+  }
+
+  int answer_sbs_telemetry_request(
+    session_t *session,
+    std::uint16_t request_id,
+    std::optional<sbs_telemetry_status_e> status_override = std::nullopt
+  ) {
+    drain_sbs_telemetry(*session);
+    const auto snapshot = session->control.latest_sbs_telemetry.value_or(
+      unavailable_sbs_telemetry_snapshot()
+    );
+    const auto status = status_override.value_or(
+      sbs_telemetry_wire_status(snapshot.status)
+    );
+    return send_sbs_telemetry_state(
+      session,
+      snapshot,
+      status,
+      request_id,
+      true
+    );
+  }
+
   void send_termination(control_server_t &server, session_t &session) {
     if (!session.control.peer) {
       return;
@@ -1325,6 +1798,74 @@ namespace stream {
       session->video->pacing_plan_logged.store(false, std::memory_order_release);
       session->video->idr_pacing_plan_logged.store(false, std::memory_order_release);
       session->mail->event<int>(mail::sbs_mode)->raise((int) mode);
+    });
+
+    server->map(control_packet::sbs_telemetry_subscription, [](session_t *session, const std::string_view &payload) {
+      if (!session->config.client_supports_sbs_telemetry) {
+        BOOST_LOG(warning) << "Ignoring SBS telemetry subscription from a client that did not "
+                              "advertise ML_FF_SBS_TELEMETRY"sv;
+        return;
+      }
+      sbs_telemetry_subscription_request_t request;
+      const auto decoded = decode_sbs_telemetry_subscription_payload(payload, request);
+      if (decoded == sbs_telemetry_subscription_decode_e::unsupported_version) {
+        BOOST_LOG(warning) << "SBS telemetry subscription uses unsupported version "sv
+                           << static_cast<unsigned>(
+                                static_cast<std::uint8_t>(payload.front())
+                              );
+        if (request.request_id != 0) {
+          answer_sbs_telemetry_request(
+            session,
+            request.request_id,
+            sbs_telemetry_status_e::unsupported_version
+          );
+        }
+        return;
+      }
+      if (decoded == sbs_telemetry_subscription_decode_e::invalid) {
+        BOOST_LOG(warning) << "Dropping malformed SBS telemetry subscription with "sv
+                           << payload.size() << " bytes"sv;
+        // Exact bodies expose their request id through the decoder. For a wrong-size body, the
+        // id is still recoverable when offsets 2..3 exist; otherwise there is no safe correlation
+        // token with which to answer status 3.
+        std::uint16_t request_id = request.request_id;
+        if (payload.size() != SBS_TELEMETRY_SUBSCRIPTION_PAYLOAD_SIZE &&
+            payload.size() >= 4) {
+          const auto *bytes =
+            reinterpret_cast<const std::uint8_t *>(payload.data());
+          request_id =
+            static_cast<std::uint16_t>(bytes[2]) |
+            static_cast<std::uint16_t>(bytes[3] << 8);
+        }
+        if (request_id != 0) {
+          answer_sbs_telemetry_request(
+            session,
+            request_id,
+            sbs_telemetry_status_e::failed
+          );
+        }
+        return;
+      }
+
+      const auto interval_ms = effective_sbs_telemetry_interval_ms(request);
+      session->control.sbs_telemetry_subscription->update(
+        request.enabled(),
+        request.focused(),
+        interval_ms
+      );
+      // The release-store in update() disables render-thread copies before this handler returns.
+      // Reset periodic scheduling so a new subscription never inherits the old cadence.
+      session->control.last_sbs_telemetry_periodic =
+        request.enabled() && request.request_id == 0 ?
+          std::chrono::steady_clock::time_point {} :
+          std::chrono::steady_clock::now();
+      BOOST_LOG(debug) << "SBS telemetry subscription: enabled="sv << request.enabled()
+                       << " focused="sv << request.focused()
+                       << " interval="sv << interval_ms
+                       << "ms request="sv << request.request_id;
+      if (request.request_id != 0) {
+        answer_sbs_telemetry_request(session, request.request_id);
+      }
     });
 
     server->map(control_packet::set_video_mode, sizeof(control_set_video_mode_t), [](session_t *session, const std::string_view &payload) {
@@ -1407,21 +1948,14 @@ namespace stream {
         session->video,
         session->config.monitor.effective_mode,
         change,
+        session->launch_session_id,
         session::client_name(*session),
       };
 
-      // Fast path: a bitrate-only or frame-rate-only change leaves the desktop alone, so the
-      // encoder can be rebuilt from this thread without any Windows topology work. The encode loop
-      // answers the client once it knows what it actually installed.
-      if (!proc::proc.live_video_mode_needs_display_change(width, height)) {
-        commit_live_video_mode(mode_request);
-        return;
-      }
-
-      // Otherwise the virtual desktop has to be resized first. That is far too slow for the
-      // control thread, which also carries input, so hand it to the worker; it raises
-      // mail::video_mode only once the new desktop mode is verified.
-      dispatch_live_video_mode(std::move(mode_request));
+      // Every request, including a same-geometry bitrate/cadence change, uses the same serial
+      // worker. Otherwise a fast-path request can overtake a geometry transition and the older
+      // worker can enqueue its encoder rebuild second, reversing client order.
+      dispatch_live_video_mode(*session, std::move(mode_request));
     });
 
     server->map(control_packet::sbs_debug_dump, [](session_t *session, const std::string_view &) {
@@ -1527,10 +2061,15 @@ namespace stream {
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
+      auto iteration_timeout = 150ms;
       {
         auto slot_lock = server->_session.lock();
         auto *session = server->_session->session;
         if (session && !shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
+          if (session->control.sbs_telemetry_subscription->enabled()) {
+            iteration_timeout =
+              session->control.sbs_telemetry_subscription->focused() ? 50ms : 100ms;
+          }
           if (std::chrono::steady_clock::now() > session->pingTimeout) {
             const auto identity = server->_session->peer ?
                                     platf::from_sockaddr((sockaddr *) &server->_session->peer->address.address) :
@@ -1543,6 +2082,11 @@ namespace stream {
           }
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
+            session->control.sbs_telemetry_subscription->update(
+              false,
+              false,
+              SBS_TELEMETRY_INTERVAL_BACKGROUND_MS
+            );
             // Outgoing control encryption and ENet calls remain on this thread. External
             // shutdown callers only publish the stop mode and wake capture workers.
             if (session->graceful_stop_requested.load(std::memory_order_relaxed)) {
@@ -1583,28 +2127,45 @@ namespace stream {
               session->control.last_depth_phase = *depth_phase;
             }
 
-            // Turn the encode loop's reports into acknowledgements. Only it knows the geometry it
-            // really installed, which can differ from the request when an oversized width is
-            // capped, so it is the only component that can answer an applied request truthfully.
+            // Renderer samples arrive through a single-slot event: collapse any burst to the
+            // newest completed GPU readback, then periodically send that immutable sample with
+            // request_id=0. Request replies are sent synchronously in the 0x3009 handler above
+            // and remain reliable; these periodic updates are unreliable-sequenced.
+            drain_sbs_telemetry(*session);
+            const auto &telemetry_subscription =
+              *session->control.sbs_telemetry_subscription;
+            if (telemetry_subscription.enabled()) {
+              const auto now = std::chrono::steady_clock::now();
+              const auto interval =
+                std::chrono::milliseconds(telemetry_subscription.interval_ms());
+              const bool due =
+                session->control.last_sbs_telemetry_periodic.time_since_epoch().count() == 0 ||
+                now - session->control.last_sbs_telemetry_periodic >= interval;
+              if (due) {
+                const auto snapshot =
+                  session->control.latest_sbs_telemetry.value_or(
+                    unavailable_sbs_telemetry_snapshot()
+                  );
+                send_sbs_telemetry_state(
+                  session,
+                  snapshot,
+                  sbs_telemetry_wire_status(snapshot.status),
+                  0,
+                  false
+                );
+                // A failed ENet enqueue is still an attempt. Rate-limit it to the negotiated
+                // cadence rather than retrying every control-loop wake; normal teardown owns a
+                // persistently failed peer.
+                session->control.last_sbs_telemetry_periodic = now;
+              }
+            }
+
+            // Release the matching serialized live-mode transaction. The worker sends the plain
+            // acknowledgement only after any failed-encoder desktop rollback has finished.
             auto video_mode_applied_queue = session->mail->queue<video::video_mode_applied_t>(mail::video_mode_applied);
             while (video_mode_applied_queue->peek()) {
               if (auto applied = video_mode_applied_queue->pop(0ms)) {
-                const auto status = applied->applied ?
-                                      live_video_mode_ack_e::applied :
-                                      live_video_mode_ack_e::failed;
-                for (const auto request_id : applied->request_ids) {
-                  queue_live_video_mode_ack(
-                    session->mail,
-                    live_video_mode_ack_t {
-                      request_id,
-                      status,
-                      applied->mode.width,
-                      applied->mode.height,
-                      applied->mode.framerateX100,
-                      applied->mode.bitrate,
-                    }
-                  );
-                }
+                complete_live_video_mode(*session, std::move(*applied));
               }
             }
 
@@ -1622,12 +2183,17 @@ namespace stream {
         }
       }
 
-      server->iterate(150ms);
+      server->iterate(iteration_timeout);
     }
 
     // Detach the raw registration before its owning RTSP session can be destroyed.
     auto slot_lock = server->_session.lock();
     if (auto *session = server->_session->session) {
+      session->control.sbs_telemetry_subscription->update(
+        false,
+        false,
+        SBS_TELEMETRY_INTERVAL_BACKGROUND_MS
+      );
       send_termination(*server, *session);
       session->shutdown_event->raise(true);
       session->controlEnd.raise(true);
@@ -1760,6 +2326,9 @@ namespace stream {
       if (!channel || !channel->active.load(std::memory_order_acquire)) {
         continue;
       }
+      const auto effective_pacing = channel->effective_mode ?
+                                      channel->effective_mode->pacing() :
+                                      video::effective_video_pacing_t {0, 0};
 
       auto request_recovery_idr = [&](std::string_view reason) {
         if (!channel->awaiting_recovery_idr) {
@@ -1771,7 +2340,7 @@ namespace stream {
 
       const auto encoded_packet_age = std::chrono::steady_clock::now() - packet->encoded_timestamp;
       const auto max_encoded_packet_age = std::chrono::nanoseconds {
-        video_packet_max_queue_age_ns(channel->framerate_millihz)
+        video_packet_max_queue_age_ns(effective_pacing.framerate_millihz)
       };
       if (encoded_packet_age > max_encoded_packet_age) {
         request_recovery_idr("encoded packet exceeded the host backlog age limit"sv);
@@ -1896,8 +2465,8 @@ namespace stream {
           );
         }
         const auto pacing_plan = make_video_pacing_plan(
-          channel->encoded_bitrate_kbps,
-          channel->framerate_millihz,
+          effective_pacing.bitrate,
+          effective_pacing.framerate_millihz,
           estimated_data_packets,
           estimated_wire_packets,
           payload_blocksize,
@@ -2838,10 +3407,18 @@ namespace stream {
 
       session.video->active.store(false, std::memory_order_release);
       session.audio->active.store(false, std::memory_order_release);
+      if (session.control.sbs_telemetry_subscription) {
+        session.control.sbs_telemetry_subscription->update(
+          false,
+          false,
+          SBS_TELEMETRY_INTERVAL_BACKGROUND_MS
+        );
+      }
       session.startup_ready.stop();
       session.control_ready.stop();
       session.graceful_stop_requested.store(graceful, std::memory_order_relaxed);
       session.state.store(state_e::STOPPING, std::memory_order_release);
+      stop_live_video_mode_worker(session);
       return true;
     }
 
@@ -2876,6 +3453,23 @@ namespace stream {
     }
 
     void join(session_t &session) {
+      // A live desktop resize owns process/display state and can outlive the control thread.
+      // Reap it before arming the NVENC hang watchdog and before releasing the active-session
+      // slot, so a successor can never overlap stale work from this launch.
+      auto mode_worker_hang_task = []() {
+        BOOST_LOG(fatal) << "Hang detected! Live video-mode worker failed to terminate in 30 seconds."sv;
+        logging::log_flush();
+        lifetime::debug_trap();
+      };
+      auto mode_worker_force_kill =
+        task_pool.pushDelayed(mode_worker_hang_task, 30s).task_id;
+      auto mode_worker_watchdog = util::fail_guard([&mode_worker_force_kill]() {
+        task_pool.cancel(mode_worker_force_kill);
+      });
+      join_live_video_mode_worker(session);
+      task_pool.cancel(mode_worker_force_kill);
+      mode_worker_watchdog.disable();
+
       // Current Nvidia drivers have a bug where NVENC can deadlock the encoder thread with hardware-accelerated
       // GPU scheduling enabled. If this happens, we will terminate ourselves and the service can restart.
       // The alternative is that Sunshine can never start another session until it's manually restarted.
@@ -3020,14 +3614,13 @@ namespace stream {
           config.monitor.bitrate,
         }
       );
+      session->config.monitor.sbs_telemetry_subscription =
+        std::make_shared<video::sbs_telemetry_subscription_t>();
 
       session->video = std::make_shared<video_channel_t>();
       session->video->packet_size = config.packetsize;
       session->video->min_required_fec_packets = config.minRequiredFecPackets;
-      session->video->encoded_bitrate_kbps = config.monitor.bitrate;
-      session->video->framerate_millihz = config.monitor.encodingFramerate > 0 ?
-                                            config.monitor.encodingFramerate :
-                                            config.monitor.framerate * 1000;
+      session->video->effective_mode = session->config.monitor.effective_mode;
 
       session->audio = std::make_shared<audio_channel_t>();
       session->audio->packet_duration = config.audio.packetDuration;
@@ -3039,6 +3632,10 @@ namespace stream {
         mail::live_video_mode_ack,
         LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT
       );
+      session->control.sbs_telemetry_event =
+        mail->event<video::sbs_telemetry_snapshot_t>(mail::sbs_telemetry);
+      session->control.sbs_telemetry_subscription =
+        session->config.monitor.sbs_telemetry_subscription;
       session->control.cipher = crypto::cipher::gcm_t {
         launch_session.gcm_key,
         false

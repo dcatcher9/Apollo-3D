@@ -829,6 +829,42 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### virtual_display_restart_explorer
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            On Windows, restart the active user's Explorer shell after Sunshine 3D has removed
+            the streaming session's virtual display and confirmed that the exact driver monitor
+            is gone. This rebuilds taskbar running-app indicators that Windows can otherwise lose
+            during virtual-monitor removal.
+            The repair runs only for final session teardown. It does not run during the reconnect
+            grace period, a warm virtual-display replacement, an encoder probe, or local AR-display
+            cleanup.
+            @attention{The taskbar briefly closes and restarts. Open File Explorer windows may
+            close and may not reopen automatically, and active file operations hosted by Explorer
+            may be interrupted. Set this option to `off` if you prefer to restart Explorer
+            manually.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            on
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="2">Choices</td>
+        <td>on</td>
+        <td>Repair Explorer after confirmed final virtual-display removal.</td>
+    </tr>
+    <tr>
+        <td>off</td>
+        <td>Leave Explorer running and do not repair the taskbar automatically.</td>
+    </tr>
+</table>
+
 ## Network
 
 ### address_family

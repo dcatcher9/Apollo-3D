@@ -7,6 +7,7 @@
 // standard includes
 #include <chrono>
 #include <functional>
+#include <optional>
 #include <string_view>
 #include <utility>
 
@@ -15,7 +16,54 @@
 #include <winnt.h>
 
 namespace platf {
+  enum class explorer_restart_result_e {
+    restarted_automatically,
+    relaunched,
+    skipped_no_shell,
+    skipped_identity,
+    preflight_failed,
+    terminate_failed,
+    exit_timeout,
+    relaunch_failed,
+    replacement_timeout,
+  };
+
   namespace detail {
+    /**
+     * Coordinate one bounded Explorer restart without embedding Win32 side effects in the policy.
+     *
+     * Production supplies exact-PID/token operations. Unit tests supply fakes, so no automated
+     * test can accidentally terminate the developer's real shell.
+     */
+    template<class Operations>
+    explorer_restart_result_e run_explorer_restart(Operations &operations) {
+      if (const auto preflight_failure = operations.preflight()) {
+        return *preflight_failure;
+      }
+      if (!operations.terminate_exact_shell()) {
+        return explorer_restart_result_e::terminate_failed;
+      }
+      if (!operations.wait_for_old_shell_exit()) {
+        return explorer_restart_result_e::exit_timeout;
+      }
+      if (operations.wait_for_replacement(false)) {
+        return explorer_restart_result_e::restarted_automatically;
+      }
+      // AutoRestartShell can appear exactly as its grace period expires. Recheck immediately
+      // before spawning so the fallback never becomes an unwanted File Explorer window.
+      if (operations.replacement_present_now()) {
+        return operations.wait_for_replacement(true) ?
+                 explorer_restart_result_e::restarted_automatically :
+                 explorer_restart_result_e::replacement_timeout;
+      }
+      if (!operations.launch_captured_shell()) {
+        return explorer_restart_result_e::relaunch_failed;
+      }
+      return operations.wait_for_replacement(true) ?
+               explorer_restart_result_e::relaunched :
+               explorer_restart_result_e::replacement_timeout;
+    }
+
     class mouse_keys_controller_t {
     public:
       template<class Getter, class Setter>
@@ -70,6 +118,15 @@ namespace platf {
       MOUSEKEYS previous_state_ {};
     };
   }  // namespace detail
+
+  /**
+   * Restart the exact Explorer shell belonging to the active interactive Windows user.
+   *
+   * This is a bounded, best-effort taskbar repair. It validates the shell's session, account,
+   * and executable path before terminating only that PID, then gives AutoRestartShell a chance
+   * to recover before launching one fallback with the captured shell token.
+   */
+  explorer_restart_result_e restart_active_user_explorer();
 
   void print_status(const std::string_view &prefix, HRESULT status);
   HDESK syncThreadDesktop();

@@ -74,6 +74,12 @@ float DepthReferenceTexelScale() {
 #define STRUCTURAL_ORDINAL_MIN_COMMON 4u
 #define STRUCTURAL_ORDINAL_MIN_FLIPS 2u
 #define STRUCTURAL_COLOR_MIN_SUPPORT 0.01f
+// An exposure relation must preserve where ordinal evidence exists, not merely leave both
+// endpoints structured in different places. Measured A->flash->A transitions retain about 92%
+// common support; the deterministic SDR/PQ semantic cut retains only 13%/21%. Requiring half of
+// the smaller endpoint's support prevents a visually different scene with quiet aggregate flips
+// from vetoing authoritative geometry.
+#define STRUCTURAL_COLOR_EXPOSURE_MIN_COMMON_RATIO 0.50f
 #define STRUCTURAL_COLOR_EXPOSURE_QUIET 0.01f
 #define STRUCTURAL_COLOR_CUT_HIGH 0.03f
 // Fraction of model texels allowed to differ by RAW_RGB_PIXEL_DELTA while still calling a

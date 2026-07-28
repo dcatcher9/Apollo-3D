@@ -202,6 +202,7 @@ TEST(RtspLaunchReservationTest, ExplicitTeardownClearsPendingHandshake) {
   auto first = make_modern_launch_session(201, "first");
   auto replacement = make_modern_launch_session(202, "replacement");
 
+  ASSERT_TRUE(first->reserve_live_gpu());
   ASSERT_TRUE(rtsp_stream::launch_session_raise(first));
   // Keep a reference just as an already accepted RTSP socket does. The production teardown
   // entry point must invalidate that accepted reservation as well as emptying the pending queue.
@@ -210,8 +211,25 @@ TEST(RtspLaunchReservationTest, ExplicitTeardownClearsPendingHandshake) {
   rtsp_stream::terminate_session();
   EXPECT_EQ(accepted->reservation(), rtsp_stream::launch_reservation_state_e::revoked);
   EXPECT_FALSE(accepted->try_claim_reservation());
+  EXPECT_FALSE(gpu_workload::live_stream_active());
+  EXPECT_TRUE(gpu_workload::try_acquire(gpu_workload::kind_e::offline_sbs))
+    << "A retained accepted socket must not retain a revoked pending launch's GPU lease";
   EXPECT_TRUE(rtsp_stream::launch_session_raise(replacement));
   rtsp_stream::launch_session_clear(replacement->id);
+}
+
+TEST(RtspLaunchReservationTest, TimeoutReleasesLeaseRetainedByAcceptedSocket) {
+  auto launch = make_modern_launch_session(203, "expired");
+  ASSERT_TRUE(launch->reserve_live_gpu());
+  ASSERT_TRUE(rtsp_stream::launch_session_raise(launch));
+  const auto accepted = launch;
+
+  rtsp_stream::expire_launch_session_for_test(launch->id);
+  EXPECT_EQ(accepted->reservation(), rtsp_stream::launch_reservation_state_e::revoked);
+  EXPECT_FALSE(gpu_workload::live_stream_active());
+  EXPECT_TRUE(gpu_workload::try_acquire(gpu_workload::kind_e::offline_sbs))
+    << "A timed-out reservation must release its lease even while a socket retains it";
+  EXPECT_TRUE(rtsp_stream::launch_session_available());
 }
 
 TEST(RtspLaunchReservationTest, ReservationCanBeClaimedOnlyOnce) {
@@ -239,14 +257,37 @@ TEST(RtspLaunchReservationTest, ReservationCanBeClaimedOnlyOnce) {
 TEST(RtspLaunchReservationTest, TeardownRevokesClaimedStartupBeforeReplacement) {
   auto launch = make_modern_launch_session(401, "claimed-before-teardown");
 
+  ASSERT_TRUE(launch->reserve_live_gpu());
   ASSERT_TRUE(rtsp_stream::launch_session_raise(launch));
   ASSERT_TRUE(rtsp_stream::claim_launch_session_for_test(*launch));
   rtsp_stream::terminate_session();
   EXPECT_EQ(launch->reservation(), rtsp_stream::launch_reservation_state_e::revoked);
   EXPECT_FALSE(rtsp_stream::launch_session_available());
+  EXPECT_FALSE(gpu_workload::live_stream_active());
 
   // The startup path observes revocation, rolls back, and releases the claimed slot.
   rtsp_stream::finish_launch_session_for_test(*launch, false);
+  EXPECT_TRUE(rtsp_stream::launch_session_available());
+}
+
+TEST(RtspLaunchReservationTest, TransferredClaimedLeaseSurvivesConcurrentRevocation) {
+  auto launch = make_modern_launch_session(402, "claimed-and-transferred");
+
+  ASSERT_TRUE(launch->reserve_live_gpu());
+  ASSERT_TRUE(rtsp_stream::launch_session_raise(launch));
+  ASSERT_TRUE(rtsp_stream::claim_launch_session_for_test(*launch));
+  auto startup_lease = rtsp_stream::take_claimed_live_gpu_lease_for_test(*launch);
+  ASSERT_TRUE(startup_lease);
+
+  rtsp_stream::terminate_session();
+  EXPECT_EQ(launch->reservation(), rtsp_stream::launch_reservation_state_e::revoked);
+  EXPECT_TRUE(gpu_workload::live_stream_active());
+  EXPECT_FALSE(gpu_workload::try_acquire(gpu_workload::kind_e::offline_sbs))
+    << "Revocation must not open a gap after ownership moved into startup";
+
+  rtsp_stream::finish_launch_session_for_test(*launch, false);
+  startup_lease.reset();
+  EXPECT_FALSE(gpu_workload::live_stream_active());
   EXPECT_TRUE(rtsp_stream::launch_session_available());
 }
 
