@@ -35,6 +35,7 @@
 
 // local includes
 #include "src/generated/sbs_adaptive_state_contract.h"
+#include "src/generated/sbs_scene_controller_contract.h"
 #include "src/logging.h"
 #include "src/video_depth_estimator.h"
 
@@ -1099,6 +1100,775 @@ namespace platf::sbs_debug {
       return write_json(dir / "adaptive_state.json", adaptive_summary);
     }
 
+    struct scene_controller_dump_result {
+      bool authoritative_output_valid = false;
+      std::uint32_t gpu_backend_generation = 0;
+      std::uint32_t gpu_roi_generation = 0;
+      nlohmann::json summary = nlohmann::json::object();
+    };
+
+    nlohmann::json finite_float_json(const float value) {
+      return std::isfinite(value) ? nlohmann::json(value) :
+                                    nlohmann::json(nullptr);
+    }
+
+    nlohmann::json scalar_stats_json(
+      const std::vector<float> &values
+    ) {
+      const scalar_stats stats = calculate_scalar_stats(values);
+      nlohmann::json result {
+        {"sample_count", values.size()},
+        {"finite_count", stats.finite_count},
+      };
+      if (stats.finite_count != 0) {
+        result["minimum"] = stats.minimum;
+        result["maximum"] = stats.maximum;
+        result["preview_low_p02"] = stats.preview_low;
+        result["preview_high_p98"] = stats.preview_high;
+      }
+      return result;
+    }
+
+    template<std::size_t Count>
+    nlohmann::json string_array_json(
+      const std::array<std::string_view, Count> &names
+    ) {
+      nlohmann::json result = nlohmann::json::array();
+      for (const auto name : names) {
+        result.push_back(std::string(name));
+      }
+      return result;
+    }
+
+    template<std::size_t Count>
+    nlohmann::json named_float_values_json(
+      const std::vector<float> &values,
+      const std::array<std::string_view, Count> &names
+    ) {
+      nlohmann::json result = nlohmann::json::object();
+      if (values.size() != Count) {
+        return result;
+      }
+      for (std::size_t index = 0; index < Count; ++index) {
+        result[std::string(names[index])] =
+          finite_float_json(values[index]);
+      }
+      return result;
+    }
+
+    template<typename Bits>
+    nlohmann::json decode_named_bits(
+      const std::uint32_t value,
+      const Bits &bits
+    ) {
+      nlohmann::json decoded = nlohmann::json::object();
+      for (const auto &bit : bits) {
+        decoded[std::string(bit.name)] = (value & bit.mask) != 0u;
+      }
+      return decoded;
+    }
+
+    bool write_scene_tensor(
+      const std::filesystem::path &dir,
+      const std::string_view tensor_name,
+      const std::string_view filename,
+      const std::vector<float> &values,
+      const std::size_t channel_count,
+      const std::size_t samples_per_channel,
+      nlohmann::json shape,
+      nlohmann::json channels,
+      const std::string_view stage,
+      nlohmann::json &tensor_manifest
+    ) {
+      if (
+        channel_count == 0 || samples_per_channel == 0 ||
+        channel_count > SIZE_MAX / samples_per_channel ||
+        values.size() != channel_count * samples_per_channel
+      ) {
+        return false;
+      }
+      if (
+        !write_bytes(
+          dir / std::string(filename),
+          values.data(),
+          values.size() * sizeof(float)
+        )
+      ) {
+        return false;
+      }
+
+      nlohmann::json channel_stats = nlohmann::json::array();
+      for (std::size_t channel = 0; channel < channel_count; ++channel) {
+        const auto begin =
+          values.begin() + static_cast<std::ptrdiff_t>(
+                             channel * samples_per_channel
+                           );
+        std::vector<float> channel_values(
+          begin,
+          begin + static_cast<std::ptrdiff_t>(samples_per_channel)
+        );
+        auto stats = scalar_stats_json(channel_values);
+        stats["index"] = channel;
+        if (channels.is_array() && channel < channels.size()) {
+          stats["name"] = channels[channel];
+        }
+        channel_stats.push_back(std::move(stats));
+      }
+
+      const std::string layout =
+        shape.is_array() && shape.size() == 4u ? "NCHW" : "row-major";
+      tensor_manifest[std::string(tensor_name)] = {
+        {"file", std::string(filename)},
+        {"dtype", "float32-le"},
+        {"layout", layout},
+        {"shape", std::move(shape)},
+        {"channels", std::move(channels)},
+        {"stage", std::string(stage)},
+        {"statistics", scalar_stats_json(values)},
+        {"channel_statistics", std::move(channel_stats)},
+      };
+      return true;
+    }
+
+    bool write_scene_rgb_preview(
+      const std::filesystem::path &path,
+      const std::vector<float> &values
+    ) {
+      constexpr std::size_t canvas =
+        sbs_scene_controller::appearance_canvas_size;
+      constexpr std::size_t plane = canvas * canvas;
+      if (values.size() != 3u * plane) {
+        return false;
+      }
+      std::vector<std::uint8_t> rgb(3u * plane);
+      for (std::size_t index = 0; index < plane; ++index) {
+        const float red = values[index];
+        const float green = values[index + plane];
+        const float blue = values[index + 2u * plane];
+        if (
+          !std::isfinite(red) || !std::isfinite(green) ||
+          !std::isfinite(blue)
+        ) {
+          rgb[index * 3u + 0u] = 255u;
+          rgb[index * 3u + 1u] = 0u;
+          rgb[index * 3u + 2u] = 255u;
+          continue;
+        }
+        // scene_rgb is already display-referred sRGB code, not linear light.
+        rgb[index * 3u + 0u] = encode_unit(red);
+        rgb[index * 3u + 1u] = encode_unit(green);
+        rgb[index * 3u + 2u] = encode_unit(blue);
+      }
+      return write_png(
+        path,
+        static_cast<std::uint32_t>(canvas),
+        static_cast<std::uint32_t>(canvas),
+        rgb
+      );
+    }
+
+    const char *scene_encoding_name(
+      const sbs_scene_controller::gpu_encoding_e encoding
+    ) {
+      switch (encoding) {
+        case sbs_scene_controller::gpu_encoding_e::float_value:
+          return "float_value";
+        case sbs_scene_controller::gpu_encoding_e::uint_bits:
+          return "uint_bits";
+        case sbs_scene_controller::gpu_encoding_e::uint_valued_float:
+          return "uint_valued_float";
+      }
+      return "unknown";
+    }
+
+    bool dump_scene_controller(
+      ID3D11Device *device,
+      ID3D11DeviceContext *ctx,
+      const frame &completed,
+      const std::filesystem::path &dir,
+      scene_controller_dump_result &result
+    ) {
+      using namespace sbs_scene_controller;
+
+      const std::array<ID3D11ShaderResourceView *, 9> resources {{
+        completed.scene_controller_scene_rgb,
+        completed.scene_controller_analysis_grid,
+        completed.scene_controller_dense_output,
+        completed.scene_controller_global_output,
+        completed.scene_controller_layout_history,
+        completed.scene_controller_depth_history,
+        completed.scene_controller_hidden_output,
+        completed.scene_controller_meta,
+        completed.scene_controller_rule_state,
+      }};
+      if (
+        !completed.scene_controller_snapshot_available ||
+        completed.scene_controller_frame_id != completed.matched_frame_id ||
+        std::any_of(
+          resources.begin(),
+          resources.end(),
+          [](const auto *resource) {
+            return resource == nullptr;
+          }
+        )
+      ) {
+        return false;
+      }
+
+      constexpr std::size_t appearance_pixels =
+        appearance_canvas_size * appearance_canvas_size;
+      constexpr std::size_t analysis_pixels =
+        analysis_canvas_size * analysis_canvas_size;
+      constexpr std::size_t recurrent_pixels =
+        recurrent_canvas_size * recurrent_canvas_size;
+      std::vector<float> scene_rgb;
+      std::vector<float> analysis_grid;
+      std::vector<float> dense_output;
+      std::vector<float> global_output;
+      std::vector<float> layout_history;
+      std::vector<float> depth_history;
+      std::vector<float> hidden_output;
+      std::vector<float> meta;
+      std::vector<std::uint8_t> rule_state_bytes;
+      if (
+        !read_float_buffer(
+          device,
+          ctx,
+          completed.scene_controller_scene_rgb,
+          3u * appearance_pixels,
+          scene_rgb
+        ) ||
+        !read_float_buffer(
+          device,
+          ctx,
+          completed.scene_controller_analysis_grid,
+          analysis_grid_channel_count * analysis_pixels,
+          analysis_grid
+        ) ||
+        !read_float_buffer(
+          device,
+          ctx,
+          completed.scene_controller_dense_output,
+          dense_out_channel_count * analysis_pixels,
+          dense_output
+        ) ||
+        !read_float_buffer(
+          device,
+          ctx,
+          completed.scene_controller_global_output,
+          global_out_word_count,
+          global_output
+        ) ||
+        !read_float_buffer(
+          device,
+          ctx,
+          completed.scene_controller_layout_history,
+          layout_history_channel_count * analysis_pixels,
+          layout_history
+        ) ||
+        !read_float_buffer(
+          device,
+          ctx,
+          completed.scene_controller_depth_history,
+          depth_history_channel_count * analysis_pixels,
+          depth_history
+        ) ||
+        !read_float_buffer(
+          device,
+          ctx,
+          completed.scene_controller_hidden_output,
+          hidden_channel_count * recurrent_pixels,
+          hidden_output
+        ) ||
+        !read_float_buffer(
+          device,
+          ctx,
+          completed.scene_controller_meta,
+          meta_word_count,
+          meta
+        ) ||
+        !read_buffer(
+          device,
+          ctx,
+          completed.scene_controller_rule_state,
+          rule_state_word_count * sizeof(std::uint32_t),
+          rule_state_bytes
+        )
+      ) {
+        return false;
+      }
+
+      std::array<std::uint32_t, rule_state_word_count> rule_words {};
+      std::memcpy(
+        rule_words.data(),
+        rule_state_bytes.data(),
+        rule_state_bytes.size()
+      );
+      std::array<float, rule_state_word_count> rule_scalars {};
+      std::array<bool, rule_state_word_count> rule_scalar_valid {};
+      bool encodings_valid = true;
+      nlohmann::json rule_fields = nlohmann::json::array();
+      nlohmann::json rule_values = nlohmann::json::array();
+      nlohmann::json rule_named_values = nlohmann::json::object();
+      for (const auto &descriptor : rule_state_fields) {
+        const std::size_t word_index = index(descriptor.word);
+        const std::uint32_t raw_word = rule_words[word_index];
+        bool valid_encoding = true;
+        nlohmann::json value;
+        if (descriptor.gpu_encoding == gpu_encoding_e::uint_bits) {
+          value = raw_word;
+        } else {
+          const float scalar = std::bit_cast<float>(raw_word);
+          rule_scalars[word_index] = scalar;
+          rule_scalar_valid[word_index] = std::isfinite(scalar);
+          valid_encoding = rule_scalar_valid[word_index];
+          if (
+            valid_encoding &&
+            descriptor.gpu_encoding ==
+              gpu_encoding_e::uint_valued_float
+          ) {
+            valid_encoding =
+              scalar >= 0.0f &&
+              static_cast<double>(scalar) <=
+                static_cast<double>(
+                  std::numeric_limits<std::uint32_t>::max()
+                ) &&
+              std::trunc(scalar) == scalar;
+          }
+          if (!valid_encoding) {
+            value = nullptr;
+          } else if (
+            descriptor.gpu_encoding ==
+            gpu_encoding_e::uint_valued_float
+          ) {
+            value = static_cast<std::uint32_t>(scalar);
+          } else {
+            value = scalar;
+          }
+        }
+        encodings_valid = encodings_valid && valid_encoding;
+        rule_values.push_back(value);
+        rule_named_values[std::string(descriptor.name)] = value;
+        rule_fields.push_back({
+          {"index", word_index},
+          {"name", std::string(descriptor.name)},
+          {"json_type", std::string(descriptor.json_type)},
+          {"gpu_encoding", scene_encoding_name(descriptor.gpu_encoding)},
+          {"required_zero", descriptor.required_zero},
+          {"valid_encoding", valid_encoding},
+          {"raw_word", raw_word},
+          {"value", std::move(value)},
+        });
+      }
+
+      const auto state_scalar = [&](const rule_state_word_e word) {
+        const auto word_index = index(word);
+        return rule_scalar_valid[word_index] ?
+                 rule_scalars[word_index] :
+                 std::numeric_limits<float>::quiet_NaN();
+      };
+      const auto state_uint = [&](const rule_state_word_e word) {
+        return rule_words[index(word)];
+      };
+      const auto float_flag = [](const float value) {
+        return std::isfinite(value) && value > 0.5f;
+      };
+
+      const float global_valid_value =
+        global_output[static_cast<std::size_t>(
+          global_out_word_e::backend_output_valid
+        )];
+      const bool global_output_valid = float_flag(global_valid_value);
+      const bool rule_output_valid =
+        float_flag(state_scalar(rule_state_word_e::output_valid));
+      const float rule_schema =
+        state_scalar(rule_state_word_e::schema_version);
+      const bool schema_valid =
+        std::isfinite(rule_schema) &&
+        rule_schema == static_cast<float>(schema_version);
+      result.gpu_backend_generation =
+        state_uint(rule_state_word_e::backend_generation);
+      result.gpu_roi_generation =
+        state_uint(rule_state_word_e::roi_generation);
+      const bool backend_generation_valid =
+        result.gpu_backend_generation ==
+        completed.scene_controller_backend_generation;
+
+      bool reserved_zero = true;
+      for (
+        std::size_t word =
+          static_cast<std::size_t>(global_out_word_e::reserved_35);
+        word <= static_cast<std::size_t>(
+                  global_out_word_e::reserved_40
+                );
+        ++word
+      ) {
+        reserved_zero =
+          reserved_zero && std::isfinite(global_output[word]) &&
+          global_output[word] == 0.0f;
+      }
+      for (
+        std::size_t word =
+          static_cast<std::size_t>(meta_word_e::reserved_28);
+        word <= static_cast<std::size_t>(meta_word_e::reserved_31);
+        ++word
+      ) {
+        reserved_zero =
+          reserved_zero && std::isfinite(meta[word]) &&
+          meta[word] == 0.0f;
+      }
+      for (const auto &descriptor : rule_state_fields) {
+        if (descriptor.required_zero) {
+          const auto word = index(descriptor.word);
+          reserved_zero =
+            reserved_zero && rule_scalar_valid[word] &&
+            rule_scalars[word] == 0.0f;
+        }
+      }
+
+      result.authoritative_output_valid =
+        global_output_valid && rule_output_valid && schema_valid &&
+        backend_generation_valid && encodings_valid && reserved_zero;
+
+      const std::uint32_t state_flags =
+        state_uint(rule_state_word_e::state_flags);
+      const std::uint32_t reset_flags =
+        state_uint(rule_state_word_e::reset_flags);
+      const std::uint32_t promotion_flags =
+        state_uint(rule_state_word_e::promotion_flags);
+      const std::uint32_t history_flags =
+        state_uint(rule_state_word_e::history_flags);
+      const std::uint32_t diagnostic_flags =
+        state_uint(rule_state_word_e::diagnostic_flags);
+      const nlohmann::json validation {
+        {"producer_snapshot_available",
+         completed.scene_controller_snapshot_available},
+        {"frame_identity_valid",
+         completed.scene_controller_frame_id ==
+           completed.matched_frame_id},
+        {"global_output_valid", global_output_valid},
+        {"rule_state_output_valid", rule_output_valid},
+        {"schema_valid", schema_valid},
+        {"backend_generation_valid", backend_generation_valid},
+        {"encodings_valid", encodings_valid},
+        {"reserved_words_zero", reserved_zero},
+        {"authoritative_output_valid",
+         result.authoritative_output_valid},
+      };
+
+      nlohmann::json controller_state {
+        {"schema", schema_version},
+        {"rule_revision", std::string(rule_revision)},
+        {"ordered_abi_hash", std::string(ordered_abi_hash)},
+        {"capture", "one matched, completed Host-SBS scene-controller update"},
+        {"sidecar", {
+                      {"source_frame_id",
+                       completed.scene_controller_frame_id},
+                      {"completed_depth_frame_id",
+                       completed.matched_frame_id},
+                      {"roi_frame_id", completed.matched_frame_id},
+                      {"roi_generation_gpu_state",
+                       result.gpu_roi_generation},
+                      {"backend_generation_reported_by_producer",
+                       completed.scene_controller_backend_generation},
+                      {"backend_generation_gpu_state",
+                       result.gpu_backend_generation},
+                      {"shadow", completed.scene_controller_shadow},
+                    }},
+        {"validation", validation},
+        {"global_out", {
+                         {"values", global_output},
+                         {"named_values",
+                          named_float_values_json(
+                            global_output,
+                            global_out_names
+                          )},
+                       }},
+        {"meta", {
+                   {"values", meta},
+                   {"named_values",
+                    named_float_values_json(meta, meta_names)},
+                 }},
+        {"rule_state", {
+                         {"stage", "post-resolve committed rule state"},
+                         {"fields", std::move(rule_fields)},
+                         {"values", std::move(rule_values)},
+                         {"named_values", std::move(rule_named_values)},
+                         {"decoded_flags", {
+                                             {"state_flags", {
+                                                {"value", state_flags},
+                                                {"bits", decode_named_bits(
+                                                  state_flags,
+                                                  state_flags_bits
+                                                )},
+                                              }},
+                                             {"reset_flags", {
+                                                {"value", reset_flags},
+                                                {"bits", decode_named_bits(
+                                                  reset_flags,
+                                                  reset_flags_bits
+                                                )},
+                                              }},
+                                             {"promotion_flags", {
+                                                {"value", promotion_flags},
+                                                {"bits", decode_named_bits(
+                                                  promotion_flags,
+                                                  promotion_flags_bits
+                                                )},
+                                              }},
+                                             {"history_flags", {
+                                                {"value", history_flags},
+                                                {"bits", decode_named_bits(
+                                                  history_flags,
+                                                  history_flags_bits
+                                                )},
+                                              }},
+                                             {"diagnostic_flags", {
+                                                {"value", diagnostic_flags},
+                                                {"bits", decode_named_bits(
+                                                  diagnostic_flags,
+                                                  diagnostic_flags_bits
+                                                )},
+                                              }},
+                                           }},
+                       }},
+      };
+
+      const auto controller_dir = dir / "scene_controller";
+      std::error_code error;
+      if (
+        !std::filesystem::create_directories(controller_dir, error) &&
+        error
+      ) {
+        return false;
+      }
+      const auto cleanup = [&]() {
+        std::error_code cleanup_error;
+        std::filesystem::remove_all(controller_dir, cleanup_error);
+      };
+
+      nlohmann::json tensors = nlohmann::json::object();
+      constexpr std::array<std::string_view, 3> rgb_names {{
+        "red",
+        "green",
+        "blue",
+      }};
+      const bool files_written =
+        write_scene_tensor(
+          controller_dir,
+          "scene_rgb",
+          "scene_rgb.f32",
+          scene_rgb,
+          3u,
+          appearance_pixels,
+          {1u, 3u, appearance_canvas_size, appearance_canvas_size},
+          string_array_json(rgb_names),
+          "matched display-referred, exact-area scene input",
+          tensors
+        ) &&
+        write_scene_rgb_preview(
+          controller_dir / "scene_rgb.png",
+          scene_rgb
+        ) &&
+        write_scene_tensor(
+          controller_dir,
+          "analysis_grid",
+          "analysis_grid.f32",
+          analysis_grid,
+          analysis_grid_channel_count,
+          analysis_pixels,
+          {
+            1u,
+            analysis_grid_channel_count,
+            analysis_canvas_size,
+            analysis_canvas_size,
+          },
+          string_array_json(analysis_grid_names),
+          "matched deterministic scene-analysis input",
+          tensors
+        ) &&
+        write_scene_tensor(
+          controller_dir,
+          "dense_out",
+          "dense_out.f32",
+          dense_output,
+          dense_out_channel_count,
+          analysis_pixels,
+          {
+            1u,
+            dense_out_channel_count,
+            analysis_canvas_size,
+            analysis_canvas_size,
+          },
+          string_array_json(dense_out_names),
+          "matched dense rule evidence output",
+          tensors
+        ) &&
+        write_scene_tensor(
+          controller_dir,
+          "global_out",
+          "global_out.f32",
+          global_output,
+          global_out_word_count,
+          1u,
+          {1u, global_out_word_count},
+          string_array_json(global_out_names),
+          "matched global rule evidence output",
+          tensors
+        ) &&
+        write_scene_tensor(
+          controller_dir,
+          "layout_history_post",
+          "layout_history_post.f32",
+          layout_history,
+          layout_history_channel_count,
+          analysis_pixels,
+          {
+            1u,
+            layout_history_channel_count,
+            analysis_canvas_size,
+            analysis_canvas_size,
+          },
+          string_array_json(layout_history_names),
+          "post-resolve promoted layout history; not the pre-resolve input bank",
+          tensors
+        ) &&
+        write_scene_tensor(
+          controller_dir,
+          "depth_history_post",
+          "depth_history_post.f32",
+          depth_history,
+          depth_history_channel_count,
+          analysis_pixels,
+          {
+            1u,
+            depth_history_channel_count,
+            analysis_canvas_size,
+            analysis_canvas_size,
+          },
+          string_array_json(depth_history_names),
+          "post-resolve promoted depth history; not the pre-resolve input bank",
+          tensors
+        ) &&
+        write_scene_tensor(
+          controller_dir,
+          "hidden_out",
+          "hidden_out.f32",
+          hidden_output,
+          hidden_channel_count,
+          recurrent_pixels,
+          {
+            1u,
+            hidden_channel_count,
+            recurrent_canvas_size,
+            recurrent_canvas_size,
+          },
+          nlohmann::json::array(),
+          "matched recurrent output; rules_v1 defines this tensor as zero",
+          tensors
+        ) &&
+        write_scene_tensor(
+          controller_dir,
+          "meta",
+          "meta.f32",
+          meta,
+          meta_word_count,
+          1u,
+          {1u, meta_word_count},
+          string_array_json(meta_names),
+          "matched controller metadata",
+          tensors
+        ) &&
+        write_bytes(
+          controller_dir / "rule_state.words",
+          rule_state_bytes.data(),
+          rule_state_bytes.size()
+        ) &&
+        write_json(
+          controller_dir / "tensor_manifest.json",
+          {
+            {"schema", schema_version},
+            {"rule_revision", std::string(rule_revision)},
+            {"ordered_abi_hash", std::string(ordered_abi_hash)},
+            {"capture", "matched scene-controller tensors"},
+            {"endianness", "little"},
+            {"rule_state", {
+                              {"file", "rule_state.words"},
+                              {"stage", "post-resolve committed rule state"},
+                              {"word_count", rule_state_word_count},
+                              {"word_bytes", sizeof(std::uint32_t)},
+                              {"field_contract", "state.json fields"},
+                            }},
+            {"tensors", tensors},
+          }
+        ) &&
+        write_json(controller_dir / "state.json", controller_state);
+      if (!files_written) {
+        cleanup();
+        return false;
+      }
+
+      result.summary = {
+        {"status", "captured"},
+        {"schema", schema_version},
+        {"rule_revision", std::string(rule_revision)},
+        {"ordered_abi_hash", std::string(ordered_abi_hash)},
+        {"frame_id", completed.scene_controller_frame_id},
+        {"shadow", completed.scene_controller_shadow},
+        {"gpu_backend_generation", result.gpu_backend_generation},
+        {"gpu_roi_generation", result.gpu_roi_generation},
+        {"authoritative_output_valid",
+         result.authoritative_output_valid},
+        {"state_kind",
+         finite_float_json(
+           state_scalar(rule_state_word_e::state_kind)
+         )},
+        {"committed_roi", {
+                            finite_float_json(
+                              state_scalar(
+                                rule_state_word_e::committed_roi_x0
+                              )
+                            ),
+                            finite_float_json(
+                              state_scalar(
+                                rule_state_word_e::committed_roi_y0
+                              )
+                            ),
+                            finite_float_json(
+                              state_scalar(
+                                rule_state_word_e::committed_roi_x1
+                              )
+                            ),
+                            finite_float_json(
+                              state_scalar(
+                                rule_state_word_e::committed_roi_y1
+                              )
+                            ),
+                          }},
+        {"layout_decision",
+         finite_float_json(
+           state_scalar(rule_state_word_e::layout_decision)
+         )},
+        {"event_decision",
+         finite_float_json(
+           state_scalar(rule_state_word_e::event_decision)
+         )},
+        {"pop_strength",
+         finite_float_json(
+           state_scalar(rule_state_word_e::pop_strength)
+         )},
+        {"zero_plane_decision",
+         finite_float_json(
+           state_scalar(rule_state_word_e::zero_plane_decision)
+         )},
+        {"rejection_reason",
+         finite_float_json(
+           state_scalar(rule_state_word_e::rejection_reason)
+         )},
+      };
+      return true;
+    }
+
     bool dump_warp_map(
       const texture_snapshot &mapping,
       const std::uint32_t source_width,
@@ -1285,6 +2055,8 @@ namespace platf::sbs_debug {
         {"depth_model_url", cfg.depth_model_url},
         {"max_encode_width", cfg.max_encode_width},
         {"cuda_graph", cfg.cuda_graph},
+        {"scene_controller",
+         std::string(config::to_string(cfg.scene_controller))},
       };
     }
 
@@ -1648,6 +2420,60 @@ namespace platf::sbs_debug {
           break;
         }
 
+        const bool scene_controller_configured =
+          cfg.scene_controller != config::sbs_scene_controller_e::off;
+        scene_controller_dump_result scene_controller;
+        bool scene_controller_available = false;
+        if (scene_controller_configured) {
+          try {
+            scene_controller_available = dump_scene_controller(
+              device,
+              ctx,
+              completed,
+              paths.temporary,
+              scene_controller
+            );
+          } catch (const std::exception &exception) {
+            std::error_code cleanup_error;
+            std::filesystem::remove_all(
+              paths.temporary / "scene_controller",
+              cleanup_error
+            );
+            BOOST_LOG(warning)
+              << "SBS debug dump: optional scene-controller package threw: "
+              << exception.what();
+          } catch (...) {
+            std::error_code cleanup_error;
+            std::filesystem::remove_all(
+              paths.temporary / "scene_controller",
+              cleanup_error
+            );
+            BOOST_LOG(warning)
+              << "SBS debug dump: optional scene-controller package threw an "
+                 "unknown exception.";
+          }
+          if (!scene_controller_available) {
+            scene_controller.summary = {
+              {"status", "unavailable"},
+              {"configured_backend",
+               std::string(config::to_string(cfg.scene_controller))},
+              {"reason",
+               completed.scene_controller_snapshot_available ?
+                 "matched controller resources could not be read or written" :
+                 "no matched completed controller output"},
+            };
+            BOOST_LOG(warning)
+              << "SBS debug dump: optional scene-controller package is unavailable; "
+                 "publishing the core dump without it.";
+          }
+        } else {
+          scene_controller.summary = {
+            {"status", "disabled"},
+            {"configured_backend",
+             std::string(config::to_string(cfg.scene_controller))},
+          };
+        }
+
         const bool warp_map_available = completed.warp_map != nullptr;
         const bool warp_mask_available = completed.warp_mask != nullptr;
         warp_map_dump_stats warp_map_stats;
@@ -1800,6 +2626,82 @@ namespace platf::sbs_debug {
           "adaptive controller state",
           "Generated schema-v3 typed state, decoded flags, counters, and normalization float4."
         );
+        artifacts["scene_controller/scene_rgb.f32"] = artifact_description(
+          scene_controller_available,
+          false,
+          "scene-controller matched appearance input",
+          "Exact float32-le NCHW scene_rgb tensor on the aspect-preserving 256-square canvas."
+        );
+        artifacts["scene_controller/scene_rgb.png"] = artifact_description(
+          scene_controller_available,
+          false,
+          "scene-controller matched appearance preview",
+          "Direct preview of display-referred sRGB scene_rgb; invalid values are magenta."
+        );
+        artifacts["scene_controller/analysis_grid.f32"] = artifact_description(
+          scene_controller_available,
+          false,
+          "scene-controller matched analysis input",
+          "Exact float32-le analysis_grid tensor with generated ABI channel names."
+        );
+        artifacts["scene_controller/dense_out.f32"] = artifact_description(
+          scene_controller_available,
+          false,
+          "scene-controller dense evidence output",
+          "Exact dense layout, mask, motion, and event evidence for the matched frame."
+        );
+        artifacts["scene_controller/global_out.f32"] = artifact_description(
+          scene_controller_available,
+          false,
+          "scene-controller global evidence output",
+          "Exact generated-schema layout/event/pop/zero-plane logits, confidences, and validity."
+        );
+        artifacts["scene_controller/layout_history_post.f32"] =
+          artifact_description(
+            scene_controller_available,
+            false,
+            "scene-controller promoted layout history",
+            "Post-resolve layout history; this is not the pre-resolve input bank."
+          );
+        artifacts["scene_controller/depth_history_post.f32"] =
+          artifact_description(
+            scene_controller_available,
+            false,
+            "scene-controller promoted depth history",
+            "Post-resolve depth history; this is not the pre-resolve input bank."
+          );
+        artifacts["scene_controller/hidden_out.f32"] = artifact_description(
+          scene_controller_available,
+          false,
+          "scene-controller recurrent output",
+          "Exact hidden_out tensor; rules_v1 defines it as zero while preserving the future model ABI."
+        );
+        artifacts["scene_controller/meta.f32"] = artifact_description(
+          scene_controller_available,
+          false,
+          "scene-controller matched metadata",
+          "Exact float32-le generated-schema metadata words."
+        );
+        artifacts["scene_controller/rule_state.words"] =
+          artifact_description(
+            scene_controller_available,
+            false,
+            "scene-controller committed rule state",
+            "Exact little-endian mixed-encoding 32-bit words after the matched resolve."
+          );
+        artifacts["scene_controller/tensor_manifest.json"] =
+          artifact_description(
+            scene_controller_available,
+            false,
+            "scene-controller tensor contract",
+            "Shapes, generated channel names, stages, finite statistics, ABI hash, and rule revision."
+          );
+        artifacts["scene_controller/state.json"] = artifact_description(
+          scene_controller_available,
+          false,
+          "scene-controller decoded state",
+          "Generated typed fields, named values, flags, sidecars, and authoritative GPU validity checks."
+        );
         artifacts["warp_map.f32"] = artifact_description(
           warp_map_available,
           false,
@@ -1933,6 +2835,7 @@ namespace platf::sbs_debug {
                                      {"preview_high_p98", raw_stats.preview_high},
                                    }},
           {"adaptive_summary", adaptive["decoded"]},
+          {"scene_controller", scene_controller.summary},
           {"config", config_json(cfg, completed.depth_model)},
           {"artifacts", std::move(artifacts)},
         };
@@ -1970,6 +2873,19 @@ namespace platf::sbs_debug {
              << (completed.cuda_graph_active ? "true" : "false") << '\n'
              << "warp_depth_prefilter_applied="
              << (completed.warp_depth_prefilter_applied ? "true" : "false") << '\n'
+             << "scene_controller_backend="
+             << config::to_string(cfg.scene_controller) << '\n'
+             << "scene_controller_available="
+             << (scene_controller_available ? "true" : "false") << '\n'
+             << "scene_controller_frame_id="
+             << completed.scene_controller_frame_id << '\n'
+             << "scene_controller_authoritative_output_valid="
+             << (scene_controller.authoritative_output_valid ? "true" : "false")
+             << '\n'
+             << "scene_controller_gpu_backend_generation="
+             << scene_controller.gpu_backend_generation << '\n'
+             << "scene_controller_gpu_roi_generation="
+             << scene_controller.gpu_roi_generation << '\n'
              << "warp_map_available=" << (warp_map_available ? "true" : "false")
              << '\n'
              << "warp_mask_available=" << (warp_mask_available ? "true" : "false")

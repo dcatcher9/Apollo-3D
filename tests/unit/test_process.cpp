@@ -23,6 +23,22 @@ TEST(ProcessTest, ExplorerRepairIsOptInByDefault) {
   EXPECT_FALSE(config::default_virtual_display_restart_explorer);
 }
 
+TEST(ConfigTest, HostSbsSceneControllerHasStrictDefaultOffContract) {
+  using enum config::sbs_scene_controller_e;
+
+  EXPECT_EQ(config::video_t::sbs_t {}.scene_controller, off);
+  EXPECT_EQ(config::parse_sbs_scene_controller("off"), off);
+  EXPECT_EQ(config::parse_sbs_scene_controller("shadow_rules"), shadow_rules);
+
+  EXPECT_FALSE(config::parse_sbs_scene_controller(""));
+  EXPECT_FALSE(config::parse_sbs_scene_controller("model"));
+  EXPECT_FALSE(config::parse_sbs_scene_controller("rules"));
+  EXPECT_FALSE(config::parse_sbs_scene_controller("RULES"));
+
+  EXPECT_EQ(config::to_string(off), "off");
+  EXPECT_EQ(config::to_string(shadow_rules), "shadow_rules");
+}
+
 TEST(ProcessTest, CalculatesEvenScaledRenderDimensions) {
   EXPECT_EQ(proc::calculate_render_size(5120, 2160, 100), (proc::render_size_t {5120, 2160}));
   EXPECT_EQ(proc::calculate_render_size(3552, 3840, 125), (proc::render_size_t {4440, 4800}));

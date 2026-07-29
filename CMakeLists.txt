@@ -103,6 +103,32 @@ add_custom_target(verify_sbs_adaptive_state_contract ALL
         VERBATIM)
 list(APPEND SUNSHINE_TARGET_DEPENDENCIES verify_sbs_adaptive_state_contract)
 
+# The Scene Controller manifest likewise owns its tensor, channel, metadata, and GPU rule-state
+# ABI. Its ordered SHA-256 digest is generated into both consumers, so a same-sized reorder or
+# changed field meaning cannot pass an ordinary build.
+set(SBS_SCENE_CONTROLLER_GENERATOR
+        "${CMAKE_SOURCE_DIR}/tools/sbsbench/generate_scene_controller_contract.py")
+set(SBS_SCENE_CONTROLLER_LOADER
+        "${CMAKE_SOURCE_DIR}/tools/sbsbench/scene_controller_contract.py")
+set(SBS_SCENE_CONTROLLER_MANIFEST
+        "${CMAKE_SOURCE_DIR}/tools/sbsbench/contracts/sbs-scene-controller-v1.json")
+set(SBS_SCENE_CONTROLLER_CPP
+        "${CMAKE_SOURCE_DIR}/src/generated/sbs_scene_controller_contract.h")
+set(SBS_SCENE_CONTROLLER_HLSL
+        "${CMAKE_SOURCE_DIR}/src_assets/windows/assets/shaders/directx/include/sbs_scene_controller_contract.generated.hlsl")
+add_custom_target(verify_sbs_scene_controller_contract ALL
+        COMMAND "${Python3_EXECUTABLE}" "${SBS_SCENE_CONTROLLER_GENERATOR}" --check
+        DEPENDS
+            "${SBS_SCENE_CONTROLLER_GENERATOR}"
+            "${SBS_SCENE_CONTROLLER_LOADER}"
+            "${SBS_SCENE_CONTROLLER_MANIFEST}"
+            "${SBS_SCENE_CONTROLLER_CPP}"
+            "${SBS_SCENE_CONTROLLER_HLSL}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Verifying generated Host SBS Scene Controller contract"
+        VERBATIM)
+list(APPEND SUNSHINE_TARGET_DEPENDENCIES verify_sbs_scene_controller_contract)
+
 # setup compile definitions
 include(${CMAKE_MODULE_PATH}/compile_definitions/common.cmake)
 

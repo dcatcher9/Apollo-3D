@@ -36,6 +36,11 @@ list(APPEND TEST_DEFINITIONS SUNSHINE_TEST_BIN_DIR="${CMAKE_CURRENT_BINARY_DIR}"
 file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS
         ${CMAKE_SOURCE_DIR}/tests/*.h
         ${CMAKE_SOURCE_DIR}/tests/*.cpp)
+list(APPEND TEST_SOURCES
+        "${CMAKE_SOURCE_DIR}/src/sbs_roi_feature_detector.cpp"
+        "${CMAKE_SOURCE_DIR}/src/sbs_roi_feature_detector.h"
+        "${CMAKE_SOURCE_DIR}/src/sbs_roi_tracker.cpp"
+        "${CMAKE_SOURCE_DIR}/src/sbs_roi_tracker.h")
 
 set(SUNSHINE_SOURCES
         ${SUNSHINE_TARGET_FILES})

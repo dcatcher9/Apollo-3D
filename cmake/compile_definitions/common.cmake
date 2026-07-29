@@ -95,6 +95,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/video_depth_estimator.h"
         "${CMAKE_SOURCE_DIR}/src/sbs_perf.cpp"
         "${CMAKE_SOURCE_DIR}/src/sbs_perf.h"
+        "${CMAKE_SOURCE_DIR}/src/sbs_scene_controller_gpu.cpp"
+        "${CMAKE_SOURCE_DIR}/src/sbs_scene_controller_gpu.h"
         "${CMAKE_SOURCE_DIR}/src/sbs_bench_harness.cpp"
         "${CMAKE_SOURCE_DIR}/src/sbs_bench_harness.h"
         "${CMAKE_SOURCE_DIR}/src/offline_scene_planner.cpp"

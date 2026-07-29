@@ -867,6 +867,36 @@ namespace platf::dxgi {
               dump_frame.warp_depth = dump_warp_depth;
               dump_frame.adaptive_state = est.subject.Get();
               dump_frame.depth_frame_state = est.depth_frame_state.Get();
+              const bool matched_scene_controller =
+                est.scene_controller_snapshot_available &&
+                est.scene_controller_frame_id == est.completed_frame_id;
+              if (matched_scene_controller) {
+                dump_frame.scene_controller_scene_rgb =
+                  est.scene_controller_scene_rgb.Get();
+                dump_frame.scene_controller_analysis_grid =
+                  est.scene_controller_analysis_grid.Get();
+                dump_frame.scene_controller_dense_output =
+                  est.scene_controller_dense_output.Get();
+                dump_frame.scene_controller_global_output =
+                  est.scene_controller_global_output.Get();
+                dump_frame.scene_controller_layout_history =
+                  est.scene_controller_layout_history.Get();
+                dump_frame.scene_controller_depth_history =
+                  est.scene_controller_depth_history.Get();
+                dump_frame.scene_controller_hidden_output =
+                  est.scene_controller_hidden_output.Get();
+                dump_frame.scene_controller_meta =
+                  est.scene_controller_meta.Get();
+                dump_frame.scene_controller_rule_state =
+                  est.scene_controller_rule_state.Get();
+                dump_frame.scene_controller_frame_id =
+                  est.scene_controller_frame_id;
+                dump_frame.scene_controller_backend_generation =
+                  est.scene_controller_backend_generation;
+                dump_frame.scene_controller_snapshot_available = true;
+                dump_frame.scene_controller_shadow =
+                  est.scene_controller_shadow;
+              }
               dump_frame.warp_map =
                 geometry_available ? sbs_debug_mapping_srv.Get() : nullptr;
               dump_frame.warp_mask =

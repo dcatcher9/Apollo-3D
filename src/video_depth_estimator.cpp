@@ -7,6 +7,7 @@
 #include "platform/windows/misc.h"
 #include "platform/windows/utils.h"
 #include "sbs_perf.h"
+#include "sbs_scene_controller_gpu.h"
 #include "utility.h"
 
 #include <array>
@@ -926,6 +927,7 @@ namespace models {
     bool adaptive_pop;
     float adaptive_pop_max_ratio;
     float zero_plane_mode;  // 1 subject, 2 median depth, 3 far/mid-background
+    std::unique_ptr<sbs_scene_controller_gpu> scene_controller;
 
     // Subscription-gated, nonblocking telemetry readback. Resources are created lazily only after
     // a client enables the protocol, then a three-slot staging/query ring absorbs GPU latency
@@ -1555,6 +1557,7 @@ namespace models {
     bool has_previous_frame = false;
     std::uint64_t pending_frame_id = 0;
     bool stream_error_logged = false;
+    bool scene_controller_error_logged = false;
     bool readiness_preflighted = false;  // can_accept_frame() already counted/queried this source opportunity
     bool depth_context_pooled = false;  // context reused from the pool (modules already loaded -> skip warmup)
     bool context_warmed = false;  // only warmed contexts may return to context_pool
@@ -1877,6 +1880,22 @@ namespace models {
         return;
       }
 
+      if (cfg.scene_controller != config::sbs_scene_controller_e::off) {
+        scene_controller = std::make_unique<sbs_scene_controller_gpu>(
+          device,
+          context,
+          assets_dir,
+          cfg.scene_controller,
+          cfg
+        );
+        if (!scene_controller->valid()) {
+          BOOST_LOG(warning)
+            << "Host SBS scene controller is unavailable; continuing with the unchanged "
+               "full-frame depth controller.";
+          scene_controller.reset();
+        }
+      }
+
       // Constant buffers are created in ensure_cbuffers() once the model resolution is
       // known: every field is fixed for the session, so they are built once (immutable)
       // instead of being re-mapped on the encode thread every frame.
@@ -1998,6 +2017,23 @@ namespace models {
       r.completed_frame_id = completed_frame_id;
       r.inference_enqueued = inference_enqueued;
       r.cuda_graph_active = inference_graph_exec != nullptr && !graph_capture_failed;
+      if (scene_controller) {
+        const auto controller = scene_controller->snapshot();
+        r.scene_controller_scene_rgb = controller.scene_rgb;
+        r.scene_controller_analysis_grid = controller.analysis_grid;
+        r.scene_controller_dense_output = controller.dense_output;
+        r.scene_controller_global_output = controller.global_output;
+        r.scene_controller_layout_history = controller.layout_history;
+        r.scene_controller_depth_history = controller.depth_history;
+        r.scene_controller_hidden_output = controller.hidden_output;
+        r.scene_controller_meta = controller.meta;
+        r.scene_controller_rule_state = controller.rule_state;
+        r.scene_controller_frame_id = controller.source_frame_id;
+        r.scene_controller_backend_generation = controller.backend_generation;
+        r.scene_controller_snapshot_available =
+          controller.snapshot_available;
+        r.scene_controller_shadow = controller.shadow;
+      }
       return r;
     }
 
@@ -2255,6 +2291,29 @@ namespace models {
         ID3D11UnorderedAccessView *null_uavs2[3] = {nullptr, nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 3, null_uavs2, nullptr);
 
+        // rules_v1 must consume the completed frame HERE. tensor_in/appearance/depth still own
+        // pending_frame_id, and the reliable history below has not yet advanced. Running after
+        // estimate_depth() returns would pair the rules with the newly preprocessed source frame.
+        if (
+          scene_controller &&
+          !scene_controller->resolve_completed(
+            pending_frame_id,
+            tensor_in_srv.Get(),
+            tensor_out_srv.Get(),
+            depth_srv.Get(),
+            minmax_ema_srv.Get(),
+            subject_srv.Get(),
+            target_w,
+            target_h
+          ) &&
+          !scene_controller_error_logged
+        ) {
+          BOOST_LOG(warning)
+            << "Host SBS scene-controller rejected a completed matched frame; "
+               "shadow output is invalid and the full-frame render remains authoritative.";
+          scene_controller_error_logged = true;
+        }
+
         // tensor_in_buf, appearance_ordinal_buf and depth_tex still own the matched inputs/result
         // for this completed inference. Advance the complete appearance/depth tuple only when the
         // resolve pass selects state 1 or 3. State 2 retains the last structurally reliable tuple
@@ -2380,6 +2439,7 @@ namespace models {
       std::uint64_t completed_frame_id = 0;
       bool raw_snapshot_valid = false;
       bool model_input_snapshot_valid = false;
+      bool scene_controller_prepared = false;
 
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid()) {
@@ -2696,6 +2756,19 @@ namespace models {
       context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
       context->CSSetShaderResources(0, 1, &null_srv);
       end_d3d_perf(d3d_timer);
+      if (scene_controller) {
+        scene_controller_prepared = scene_controller->prepare_scene(
+          input_srv,
+          color_space,
+          frame_id
+        );
+        if (!scene_controller_prepared && !scene_controller_error_logged) {
+          BOOST_LOG(warning)
+            << "Host SBS scene-controller could not retain the matched source frame; "
+               "shadow state will hold and the full-frame render remains authoritative.";
+          scene_controller_error_logged = true;
+        }
+      }
       // No explicit Flush: cuGraphicsMapResources() below already guarantees the
       // preceding D3D11 compute work completes before the CUDA stream reads the buffer.
       // Force-flushing every frame only prevents the driver from interleaving other GPU
@@ -2706,6 +2779,9 @@ namespace models {
       auto map_res = cuda.cuGraphicsMapResources(2, resources, cu_stream);
       if (map_res != 0) {
         BOOST_LOG(error) << "cuGraphicsMapResources failed: " << map_res;
+        if (scene_controller && scene_controller_prepared) {
+          scene_controller->discard_prepared(frame_id);
+        }
         return make_result(
           completed_frame_valid,
           completed_frame_id,
@@ -2770,9 +2846,14 @@ namespace models {
       has_previous_frame = enqueued;
       if (enqueued) {
         pending_frame_id = frame_id;
+        if (scene_controller && scene_controller_prepared) {
+          scene_controller->mark_enqueued(frame_id);
+        }
         if (diagnostics_enabled) {
           throughput_stats_enqueues++;
         }
+      } else if (scene_controller && scene_controller_prepared) {
+        scene_controller->discard_prepared(frame_id);
       }
 
       return make_result(

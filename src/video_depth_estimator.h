@@ -45,6 +45,17 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Raw model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth_snapshot;  ///< Optional stable copy of the completed frame's raw output for a live Dump 3D request.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> model_input_snapshot;  ///< Optional stable NCHW/ImageNet-normalized input for the same live Dump 3D frame.
+    // GPU-only Scene Controller ABI v1 views. In shadow_rules these are diagnostics and cannot
+    // influence the rendered SBS output. They remain frame-owned by scene_controller_frame_id.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_scene_rgb;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_analysis_grid;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_dense_output;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_global_output;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_layout_history;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_depth_history;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_hidden_output;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_meta;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_rule_state;
     int raw_width = 0;
     int raw_height = 0;
     // A TensorRT result completed and its GPU normalization passes were submitted. The associated
@@ -54,6 +65,10 @@ namespace models {
     std::uint64_t completed_frame_id = 0;  ///< Caller-provided identity of that completed result.
     bool inference_enqueued = false;  ///< This call submitted inference for the supplied input frame.
     bool cuda_graph_active = false;  ///< TensorRT enqueue is currently replaying a captured graph.
+    std::uint64_t scene_controller_frame_id = 0;
+    std::uint32_t scene_controller_backend_generation = 0;
+    bool scene_controller_snapshot_available = false;
+    bool scene_controller_shadow = false;
   };
 
   /**

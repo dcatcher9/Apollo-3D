@@ -314,6 +314,57 @@ TEST(WebUiDesign, TaskbarRepairUiMatchesItsOptInNativeDefault) {
   EXPECT_NE(section.find("\n            off\n"), std::string::npos);
 }
 
+TEST(WebUiDesign, HostSbsSceneControllerExposesOnlyImplementedBackends) {
+  const auto advanced =
+    read_source(web_root / "configs/tabs/Advanced.vue");
+  const auto schema = read_source(web_root / "config.html");
+  const auto locale =
+    read_source(web_root / "public/assets/locale/en.json");
+  const auto documentation =
+    read_source(fs::path(SUNSHINE_SOURCE_DIR) / "docs/configuration.md");
+
+  const auto select_begin = advanced.find(
+    "<select id=\"sbs_scene_controller\""
+  );
+  ASSERT_NE(select_begin, std::string::npos);
+  const auto select_end = advanced.find("</select>", select_begin);
+  ASSERT_NE(select_end, std::string::npos);
+  const auto select =
+    advanced.substr(select_begin, select_end - select_begin);
+
+  static const std::regex option_pattern(
+    R"OPTION(<option value="([^"]+)")OPTION"
+  );
+  std::vector<std::string> values;
+  for (std::sregex_iterator it(select.begin(), select.end(), option_pattern), end;
+       it != end;
+       ++it) {
+    values.push_back((*it)[1].str());
+  }
+  EXPECT_EQ(
+    values,
+    (std::vector<std::string> {"off", "shadow_rules"})
+  );
+
+  EXPECT_NE(
+    schema.find("\"sbs_scene_controller\": \"off\""),
+    std::string::npos
+  );
+  EXPECT_NE(
+    locale.find("Shadow rules records diagnostics but never changes rendered output."),
+    std::string::npos
+  );
+  EXPECT_EQ(locale.find("\"sbs_scene_controller_rules\""), std::string::npos);
+
+  const auto setting = documentation.find("### sbs_scene_controller");
+  ASSERT_NE(setting, std::string::npos);
+  const auto next_setting = documentation.find("\n## ", setting);
+  ASSERT_NE(next_setting, std::string::npos);
+  const auto section = documentation.substr(setting, next_setting - setting);
+  EXPECT_NE(section.find("<code>shadow_rules</code>"), std::string::npos);
+  EXPECT_NE(section.find("<code>off</code>"), std::string::npos);
+}
+
 TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   const auto page = read_source(web_root / "offline-conversion.html");
   const auto api = read_source(web_root / "offline-sbs-api.js");

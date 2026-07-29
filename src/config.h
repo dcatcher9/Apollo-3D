@@ -9,6 +9,7 @@
 #include <chrono>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -29,6 +30,20 @@ namespace config {
   /// Built-in depth-model roster.
   const std::vector<depth_model_info> &depth_model_registry();
 
+  /// GPU-only Host SBS scene-controller backend.
+  enum class sbs_scene_controller_e {
+    off,
+    shadow_rules,
+  };
+
+  /// Parse the exact public configuration spelling of a Host SBS scene controller.
+  [[nodiscard]] std::optional<sbs_scene_controller_e> parse_sbs_scene_controller(
+    std::string_view value
+  );
+
+  /// Return the exact public configuration spelling of a Host SBS scene controller.
+  [[nodiscard]] std::string_view to_string(sbs_scene_controller_e value);
+
   struct video_t {
     nvenc::nvenc_config nv;
     bool nv_realtime_hags;
@@ -46,6 +61,7 @@ namespace config {
     // are applied on top. Profiles are configuration presets only; they are not switched live.
     struct sbs_t {
       std::string profile = "apollo";  ///< Startup quality preset. Custom names use sbs_3d_profile_<name>_<parameter> keys.
+      sbs_scene_controller_e scene_controller = sbs_scene_controller_e::off;  ///< Optional GPU scene/ROI controller. Shadow mode cannot alter rendered output.
       double pop_strength = 1.20;  ///< Production stereo-parallax multiplier (0.25-2). Literal reference runs bypass production scaling in the offline harness.
       bool adaptive_pop = true;  ///< Select pop once per scene from depth-edge risk, then hold it constant until a hard cut.
       double adaptive_pop_max = 2.00;  ///< Validated absolute ceiling for adaptive pop (pop_strength-2). Values below pop_strength clamp to the floor. The 1.20-2.00 band gives the controller a 1.67 ratio, so the scene classifier dominates quality; its risk statistic is gradient-magnitude weighted and its endpoints are calibrated to measured content (see depth_subject_resolve_cs). The former 1.25-1.30 band was a 1.04 ratio, below the noise floor of every metric that could judge it.

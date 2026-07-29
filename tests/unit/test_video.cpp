@@ -14,6 +14,7 @@
 #include <src/nvenc/nvenc_base.h>
 #include <src/nvenc/nvenc_config.h>
 #include <src/generated/sbs_adaptive_state_contract.h>
+#include <src/generated/sbs_scene_controller_contract.h>
 #include <src/video.h>
 #include <src/video_colorspace.h>
 #include <tuple>
@@ -22,6 +23,7 @@
 #ifdef _WIN32
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <src/platform/windows/sbs_debug_dump.h>
 #include <wrl/client.h>
 
 namespace platf::dxgi {
@@ -392,6 +394,12 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_subject_resolve_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_valid_history_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_scene_prepare_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_scene_features_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_scene_rules_evidence_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_scene_rules_reduce_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_scene_rules_resolve_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_scene_history_commit_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_forward_coverage_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_ps.hlsl", "mapping_ps", "ps_5_0"},
@@ -791,6 +799,67 @@ TEST(DirectxShaderSourceTest, ConvertsEveryChromaTapBeforeAveraging) {
   EXPECT_EQ(shader.find("CONVERT_CHROMA_PER_TAP"), std::string::npos);
 }
 
+#ifdef _WIN32
+TEST(SbsDebugDumpContractTest, SceneControllerPackageIsMatchedAndOptional) {
+  platf::sbs_debug::frame frame;
+  EXPECT_EQ(frame.scene_controller_scene_rgb, nullptr);
+  EXPECT_EQ(frame.scene_controller_analysis_grid, nullptr);
+  EXPECT_EQ(frame.scene_controller_dense_output, nullptr);
+  EXPECT_EQ(frame.scene_controller_global_output, nullptr);
+  EXPECT_EQ(frame.scene_controller_layout_history, nullptr);
+  EXPECT_EQ(frame.scene_controller_depth_history, nullptr);
+  EXPECT_EQ(frame.scene_controller_hidden_output, nullptr);
+  EXPECT_EQ(frame.scene_controller_meta, nullptr);
+  EXPECT_EQ(frame.scene_controller_rule_state, nullptr);
+  EXPECT_FALSE(frame.scene_controller_snapshot_available);
+
+  EXPECT_EQ(sbs_scene_controller::schema_version, 1u);
+  EXPECT_EQ(sbs_scene_controller::analysis_grid_channel_count, 10u);
+  EXPECT_EQ(sbs_scene_controller::dense_out_channel_count, 14u);
+  EXPECT_EQ(sbs_scene_controller::global_out_word_count, 41u);
+  EXPECT_EQ(sbs_scene_controller::rule_state_word_count, 64u);
+
+  const auto display =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  const auto dumper =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp");
+  ASSERT_FALSE(display.empty());
+  ASSERT_FALSE(dumper.empty());
+  EXPECT_NE(
+    display.find("est.scene_controller_snapshot_available &&"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find(
+      "est.scene_controller_frame_id == est.completed_frame_id"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dumper.find(
+      "post-resolve promoted layout history; not the pre-resolve input bank"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dumper.find(
+      "post-resolve promoted depth history; not the pre-resolve input bank"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dumper.find(
+      "optional scene-controller package is unavailable"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dumper.find("global_out_word_e::reserved_40"),
+    std::string::npos
+  );
+}
+#endif
+
 TEST(DirectxShaderSourceTest, HostSbsKeepsFramePairingAndProbeCapsAndRejectsRotation) {
   const std::string shader_dir =
     SUNSHINE_SOURCE_DIR "/src_assets/windows/assets/shaders/directx/";
@@ -830,11 +899,14 @@ TEST(DirectxShaderSourceTest, HostSbsKeepsFramePairingAndProbeCapsAndRejectsRota
   EXPECT_FALSE(preserves_previous(0.0f, 0.0f));  // first/repeated invalid: live flat color
   EXPECT_FALSE(preserves_previous(1.0f, 1.0f));  // first valid: matched color + depth
   EXPECT_TRUE(preserves_previous(1.0f, 0.0f));  // later invalid: hold matched pair
-  EXPECT_NE(display.find("est.depth_frame_state.Get()"), std::string::npos);
-  EXPECT_NE(
-    display.find("matched_render_slot ? est.depth_frame_state.Get() : nullptr"),
-    std::string::npos
-  );
+  const auto unmatched_reset = display.find("if (!matched_render_slot) {");
+  const auto estimator_clear = display.find("est = {};", unmatched_reset);
+  const auto frame_state_bind =
+    display.find("est.depth_frame_state.Get()", estimator_clear);
+  ASSERT_NE(unmatched_reset, std::string::npos);
+  ASSERT_NE(estimator_clear, std::string::npos);
+  ASSERT_NE(frame_state_bind, std::string::npos);
+  EXPECT_LT(estimator_clear, frame_state_bind);
 
   // The cap is in total samples: one initial lookup plus at most max_probes - 1 loop samples.
   EXPECT_NE(common.find("int max_intervals = max(max_probes - 1, 1);"), std::string::npos);
@@ -1805,11 +1877,18 @@ TEST(DirectxShaderSourceTest, HostTelemetryReadbackIsNonblockingAndPreservesTheB
 
   // Subscription-off may retire an already submitted slot but cannot enqueue another copy, and
   // the diagnostic work is ordered after the production output rather than ahead of it.
-  EXPECT_NE(display.find("const bool due =\n        enabled &&"), std::string::npos);
-  EXPECT_NE(
-    display.find("depth_estimator->poll_depth_telemetry(\n        due,"),
-    std::string::npos
-  );
+  const auto due_gate = display.find("const bool due =");
+  const auto enabled_gate = display.find("enabled &&", due_gate);
+  const auto telemetry_call =
+    display.find("depth_estimator->poll_depth_telemetry(", enabled_gate);
+  const auto due_argument = display.find("due,", telemetry_call);
+  ASSERT_NE(due_gate, std::string::npos);
+  ASSERT_NE(enabled_gate, std::string::npos);
+  ASSERT_NE(telemetry_call, std::string::npos);
+  ASSERT_NE(due_argument, std::string::npos);
+  EXPECT_LT(due_gate, enabled_gate);
+  EXPECT_LT(enabled_gate, telemetry_call);
+  EXPECT_LT(telemetry_call, due_argument);
   const auto output_end = display.find("end_sbs_gpu_timer(gpu_timer);");
   const auto telemetry_poll = display.find("poll_sbs_telemetry_after_output();", output_end);
   ASSERT_NE(output_end, std::string::npos);
