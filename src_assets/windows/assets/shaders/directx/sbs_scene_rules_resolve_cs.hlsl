@@ -101,6 +101,11 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         controller_reset ?
             0u :
             PreviousStateUint(SBS_SCENE_RULE_STATE_WORD_UPDATE_COUNT);
+    uint last_external_cut_count =
+        controller_reset ?
+            0u :
+            PreviousStateUint(
+                SBS_SCENE_RULE_STATE_WORD_LAST_EXTERNAL_CUT_COUNT);
 
     bool evidence_valid =
         EvidenceGlobal[
@@ -173,6 +178,12 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
                 resolved_bits.y = held_promotion_flags;
                 resolved_bits.z = held_history_flags;
                 resolved_bits.w = held_diagnostic_flags;
+            }
+            if (vector_index ==
+                SBS_SCENE_RULE_STATE_VECTOR_LAST_EXTERNAL_CUT_COUNT) {
+                resolved_bits[
+                    SBS_SCENE_RULE_STATE_WORD_LAST_EXTERNAL_CUT_COUNT &
+                    3u] = last_external_cut_count;
             }
             NextRuleState[vector_index] = resolved_bits;
         }
@@ -610,18 +621,11 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             (float)SBS_SCENE_REJECTION_REASON_AMBIGUOUS :
             (float)SBS_SCENE_REJECTION_REASON_NONE;
     if (!decisions_frozen) {
-        float current_external_cut_count =
+        uint current_external_cut_count = asuint(
             SBS_STATE_EXTERNAL_CUT_COUNT(
-                AdaptiveState[SBS_STATE_VECTOR_EXTERNAL_CUT_COUNT]);
-        if (isfinite(current_external_cut_count)) {
-            state[
-                SBS_SCENE_RULE_STATE_WORD_LAST_EXTERNAL_CUT_COUNT] =
-                max(
-                    StateWord(
-                        state,
-                        SBS_SCENE_RULE_STATE_WORD_LAST_EXTERNAL_CUT_COUNT),
-                    current_external_cut_count);
-        }
+                AdaptiveState[SBS_STATE_VECTOR_EXTERNAL_CUT_COUNT]));
+        last_external_cut_count =
+            max(last_external_cut_count, current_external_cut_count);
     }
     if (!evidence_valid) {
         promotion_flags &=
@@ -714,6 +718,12 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             resolved_bits.y = promotion_flags;
             resolved_bits.z = history_flags;
             resolved_bits.w = diagnostic_flags;
+        }
+        if (vector_index ==
+            SBS_SCENE_RULE_STATE_VECTOR_LAST_EXTERNAL_CUT_COUNT) {
+            resolved_bits[
+                SBS_SCENE_RULE_STATE_WORD_LAST_EXTERNAL_CUT_COUNT &
+                3u] = last_external_cut_count;
         }
         NextRuleState[vector_index] = resolved_bits;
     }

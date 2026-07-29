@@ -17,7 +17,7 @@ import scene_controller_contract as contract  # noqa: E402
 class SceneControllerContractTests(unittest.TestCase):
     def test_schema_version_pins_the_complete_contract(self):
         expected_digest_by_schema = {
-            1: "bf62f184f787207aab6b5f59269a3126b0fb1890648cdcb5631bbd5d67c4a570",
+            1: "e5d10b79eb1748fff9b1f4b8da7f83af068aca7da2fe2e4652235ac83780bf7c",
         }
         canonical = json.dumps(
             contract.CONTRACT,
@@ -86,7 +86,6 @@ class SceneControllerContractTests(unittest.TestCase):
         self.assertEqual(contract.INPUT_NAMES, (
             "scene_rgb",
             "analysis_grid",
-            "roi_rgb_tensor",
             "roi_depth_raw",
             "layout_history",
             "depth_history",
@@ -117,9 +116,10 @@ class SceneControllerContractTests(unittest.TestCase):
             "reserved_2",
             "reserved_3",
         ))
+        self.assertEqual(contract.CONTRACT["rule_state"][-4]["type"], "uint32")
         self.assertEqual(
             contract.CONTRACT["rule_state"][-4]["gpu_encoding"],
-            "uint_valued_float",
+            "uint_bits",
         )
         for field in contract.CONTRACT["rule_state"][-3:]:
             self.assertTrue(field["required_zero"])

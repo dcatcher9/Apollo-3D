@@ -397,7 +397,17 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"sbs_scene_prepare_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_scene_features_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_scene_rules_evidence_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_scene_rules_columns_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_scene_rules_plan_columns_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_scene_rules_rows_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_scene_rules_plan_rows_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_scene_rules_candidates_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_scene_rules_reduce_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {
+      "sbs_scene_rules_reduce_serial_reference_cs.hlsl",
+      "main",
+      "cs_5_0"
+    },
     std::tuple {"sbs_scene_rules_resolve_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_scene_history_commit_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_forward_coverage_cs.hlsl", "main", "cs_5_0"},
@@ -427,6 +437,85 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
             static_cast<const char *>(shader_errors->GetBufferPointer()) :
             "no compiler diagnostics");
   }
+}
+
+TEST(
+  DepthEstimatorTimingSourceTest,
+  SceneControllerTelemetrySharesTheEstimatorDisjointScope
+) {
+  const auto estimator =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
+  const auto controller =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/sbs_scene_controller_gpu.cpp");
+  ASSERT_FALSE(estimator.empty());
+  ASSERT_FALSE(controller.empty());
+
+  const auto count_occurrences =
+    [](const std::string &source, const std::string_view needle) {
+      std::size_t count = 0;
+      std::size_t cursor = 0;
+      while ((cursor = source.find(needle, cursor)) != std::string::npos) {
+        ++count;
+        cursor += needle.size();
+      }
+      return count;
+    };
+  EXPECT_EQ(
+    count_occurrences(
+      estimator,
+      "context->Begin(slot.disjoint.Get())"
+    ),
+    1u
+  );
+  EXPECT_EQ(
+    count_occurrences(
+      estimator,
+      "context->End(slot->disjoint.Get())"
+    ),
+    1u
+  );
+  EXPECT_NE(estimator.find("\"scene_prepare_gpu\""), std::string::npos);
+  EXPECT_NE(estimator.find("\"scene_rules_gpu\""), std::string::npos);
+
+  const auto pre_end = estimator.find("mark_d3d_pre_end(d3d_timer);");
+  const auto prepare_start =
+    estimator.find("mark_d3d_scene_prepare_start(d3d_timer);", pre_end);
+  const auto prepare_call =
+    estimator.find("scene_controller->prepare_scene(", prepare_start);
+  const auto prepare_end =
+    estimator.find("mark_d3d_scene_prepare_end(", prepare_call);
+  const auto scope_end = estimator.find("end_d3d_perf(d3d_timer);", prepare_end);
+  ASSERT_NE(pre_end, std::string::npos);
+  ASSERT_NE(prepare_start, std::string::npos);
+  ASSERT_NE(prepare_call, std::string::npos);
+  ASSERT_NE(prepare_end, std::string::npos);
+  ASSERT_NE(scope_end, std::string::npos);
+  EXPECT_LT(pre_end, prepare_start);
+  EXPECT_LT(prepare_start, prepare_call);
+  EXPECT_LT(prepare_call, prepare_end);
+  EXPECT_LT(prepare_end, scope_end);
+
+  const auto rules_start =
+    estimator.find("mark_d3d_scene_rules_start(d3d_timer);");
+  const auto resolve_call =
+    estimator.find("scene_controller->resolve_completed(", rules_start);
+  const auto rules_end =
+    estimator.find("mark_d3d_scene_rules_end(", resolve_call);
+  ASSERT_NE(rules_start, std::string::npos);
+  ASSERT_NE(resolve_call, std::string::npos);
+  ASSERT_NE(rules_end, std::string::npos);
+  EXPECT_LT(rules_start, resolve_call);
+  EXPECT_LT(resolve_call, rules_end);
+
+  const auto test_guard = controller.rfind(
+    "#ifdef SUNSHINE_TESTS",
+    controller.find("D3D11_QUERY_TIMESTAMP_DISJOINT")
+  );
+  ASSERT_NE(test_guard, std::string::npos);
+  EXPECT_LT(
+    test_guard,
+    controller.find("D3D11_QUERY_TIMESTAMP_DISJOINT")
+  );
 }
 
 TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {

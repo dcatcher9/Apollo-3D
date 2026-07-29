@@ -30,6 +30,10 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> hidden_output;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> meta;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> rule_state;
+#ifdef SUNSHINE_TESTS
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>
+      rule_evidence_for_testing;
+#endif
     std::uint64_t source_frame_id = 0;
     std::uint32_t backend_generation = 0;
     bool snapshot_available = false;
@@ -49,6 +53,11 @@ namespace models {
       const std::filesystem::path &assets_dir,
       config::sbs_scene_controller_e backend,
       const config::video_t::sbs_t &sbs_config
+#ifdef SUNSHINE_TESTS
+      ,
+      bool use_serial_reducer_reference_for_testing = false,
+      bool enable_isolated_timing_for_testing = false
+#endif
     );
     ~sbs_scene_controller_gpu();
 
@@ -74,11 +83,11 @@ namespace models {
 
     /**
      * Consume the completed matched depth result. Must run before the legacy appearance/depth
-     * histories advance, while tensor/depth inputs still belong to source_frame_id.
+     * histories advance, while the retained scene and depth inputs still belong to
+     * source_frame_id.
      */
     bool resolve_completed(
       std::uint64_t source_frame_id,
-      ID3D11ShaderResourceView *roi_rgb_tensor,
       ID3D11ShaderResourceView *raw_depth,
       ID3D11ShaderResourceView *normalized_depth,
       ID3D11ShaderResourceView *depth_frame_state,
@@ -88,6 +97,11 @@ namespace models {
     );
 
     [[nodiscard]] scene_controller_gpu_snapshot snapshot() const;
+
+#ifdef SUNSHINE_TESTS
+    void set_next_reset_flags_for_testing(std::uint32_t reset_flags);
+    void set_next_elapsed_seconds_for_testing(float elapsed_seconds);
+#endif
 
   private:
     struct impl;

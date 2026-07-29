@@ -10,16 +10,16 @@
 namespace sbs_scene_controller {
   inline constexpr std::uint32_t schema_version = 1u;
   inline constexpr std::string_view rule_revision = "rules_v1";
-  inline constexpr std::string_view ordered_abi_hash = "f993ea2ca343de0ea7a7337cab31f150d3f9c52c62725a4cc31189f385b0c73b";
+  inline constexpr std::string_view ordered_abi_hash = "e405c8452d74ff77c37cb096c15bd764555b6b7c509bf3651d10836958e82fde";
   inline constexpr std::array<std::uint32_t, 8> ordered_abi_hash_words {{
-    0xf993ea2cu,
-    0xa343de0eu,
-    0xa7a7337cu,
-    0xab31f150u,
-    0xd3f9c52cu,
-    0x62725a4cu,
-    0xc31189f3u,
-    0x85b0c73bu,
+    0xe405c845u,
+    0x2d74ff77u,
+    0xc37cb096u,
+    0xc15bd764u,
+    0x555b6b7cu,
+    0x509bf365u,
+    0x1d108369u,
+    0x58e82fdeu,
   }};
 
   inline constexpr std::size_t appearance_canvas_size = 256u;
@@ -55,24 +55,22 @@ namespace sbs_scene_controller {
   enum class input_tensor_e : std::size_t {
     scene_rgb = 0u,
     analysis_grid = 1u,
-    roi_rgb_tensor = 2u,
-    roi_depth_raw = 3u,
-    layout_history = 4u,
-    depth_history = 5u,
-    hidden_in = 6u,
-    meta = 7u,
-    count = 8u,
+    roi_depth_raw = 2u,
+    layout_history = 3u,
+    depth_history = 4u,
+    hidden_in = 5u,
+    meta = 6u,
+    count = 7u,
   };
 
-  inline constexpr std::array<tensor_descriptor_t, 8> input_tensors {{
+  inline constexpr std::array<tensor_descriptor_t, 7> input_tensors {{
     {0u, "scene_rgb", "float32", 4u, {{1, 3, 256, 256}}},
     {1u, "analysis_grid", "float32", 4u, {{1, 10, 128, 128}}},
-    {2u, "roi_rgb_tensor", "float32", 4u, {{1, 3, -1, -2}}},
-    {3u, "roi_depth_raw", "float32", 4u, {{1, 1, -1, -2}}},
-    {4u, "layout_history", "float32", 4u, {{1, 12, 128, 128}}},
-    {5u, "depth_history", "float32", 4u, {{1, 10, 128, 128}}},
-    {6u, "hidden_in", "float32", 4u, {{1, 24, 32, 32}}},
-    {7u, "meta", "float32", 2u, {{1, 32, 1, 1}}},
+    {2u, "roi_depth_raw", "float32", 4u, {{1, 1, -1, -2}}},
+    {3u, "layout_history", "float32", 4u, {{1, 12, 128, 128}}},
+    {4u, "depth_history", "float32", 4u, {{1, 10, 128, 128}}},
+    {5u, "hidden_in", "float32", 4u, {{1, 24, 32, 32}}},
+    {6u, "meta", "float32", 2u, {{1, 32, 1, 1}}},
   }};
 
   enum class output_tensor_e : std::size_t {
@@ -510,7 +508,7 @@ namespace sbs_scene_controller {
     {rule_state_word_e::promotion_flags, "promotion_flags", "uint32", gpu_encoding_e::uint_bits, 0.0f, false},
     {rule_state_word_e::history_flags, "history_flags", "uint32", gpu_encoding_e::uint_bits, 0.0f, false},
     {rule_state_word_e::diagnostic_flags, "diagnostic_flags", "uint32", gpu_encoding_e::uint_bits, 0.0f, false},
-    {rule_state_word_e::last_external_cut_count, "last_external_cut_count", "float32", gpu_encoding_e::uint_valued_float, 0.0f, false},
+    {rule_state_word_e::last_external_cut_count, "last_external_cut_count", "uint32", gpu_encoding_e::uint_bits, 0.0f, false},
     {rule_state_word_e::reserved_1, "reserved_1", "float32", gpu_encoding_e::float_value, 0.0f, true},
     {rule_state_word_e::reserved_2, "reserved_2", "float32", gpu_encoding_e::float_value, 0.0f, true},
     {rule_state_word_e::reserved_3, "reserved_3", "float32", gpu_encoding_e::float_value, 0.0f, true},

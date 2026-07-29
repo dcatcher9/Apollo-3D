@@ -144,7 +144,6 @@ channel excludes padding from all reductions and losses.
 | --- | --- | --- |
 | `scene_rgb` | FP32 `[1,3,256,256]` | Current full-frame, display-referred, tone-mapped, exact-area RGB on the aspect-preserving canvas. |
 | `analysis_grid` | FP32 `[1,10,128,128]` | Current deterministic appearance, activity, coverage, and coordinate features. |
-| `roi_rgb_tensor` | FP32 `[1,3,Hd,Wd]` | Alias of the exact DA-V2 `pixel_values` tensor for the current ROI. |
 | `roi_depth_raw` | FP32 `[1,1,Hd,Wd]` | Alias of DA-V2 `predicted_depth`; dynamic and affine-ambiguous. |
 | `layout_history` | FP32 `[1,12,128,128]` | Full-frame deterministic temporal history. |
 | `depth_history` | FP32 `[1,10,128,128]` | ROI-local deterministic depth history, resampled into the fixed canvas with ROI aspect retained in `meta`. |
@@ -170,7 +169,7 @@ projected into the shared outputs; they are not extra SbsSceneNet inputs.
 | 3 | dense multidirectional edge/texture evidence |
 | 4 | chroma/saturation magnitude |
 | 5 | temporal-activity occupancy, not change magnitude |
-| 6 | current DA ROI coverage |
+| 6 | committed DA ROI coverage; full-frame until an ROI lock is held |
 | 7 | normalized viewport x coordinate |
 | 8 | normalized viewport y coordinate |
 | 9 | decayed click/tap interaction heatmap; zero when unavailable |
@@ -476,7 +475,7 @@ Full-frame appearance branch
   LR-ASPP context, C64
 
 ROI depth/detail branch
-  roi_rgb_tensor + sanitized roi_depth_raw
+  sanitized roi_depth_raw
   masked mean/std affine normalization + clip
   bilinear resize into ROI-local 128x128 canvas
   concat depth_history
@@ -641,22 +640,38 @@ bounded no-starvation escape, and attribution rules remain authoritative.
 
 ## Latency and resource budget
 
-These are design targets, not measured claims. They must be replaced with warm production
-measurements from the exported engine.
+The `rules_v1` values below include an isolated warm RTX 5080 measurement. `model_v1` values remain
+design targets until an exported engine is benchmarked.
 
 ### `rules_v1`
 
-| Work | RTX 5080 P95 target |
-| --- | ---: |
-| full-frame feature preparation | 0.02-0.08 ms |
-| rule evidence and reductions | 0.03-0.15 ms |
-| shared resolver and history update | 0.01-0.05 ms |
-| total incremental GPU cost | no more than 0.25 ms |
+| Work | RTX 5080 P95 target | Isolated P95 |
+| --- | ---: | ---: |
+| full-frame feature preparation | 0.02-0.08 ms | 0.045216 ms |
+| rule evidence | included below | 0.006880 ms |
+| six-pass rule reduction | less than 0.50 ms | 0.183232 ms |
+| shared resolver and history update | 0.01-0.05 ms | 0.006976 ms |
+| evidence + reduction + resolver/history | no more than 0.25 ms | 0.196576 ms |
 
 Expected incremental VRAM is 4-8 MiB with FP32 ping-pong state and diagnostics disabled.
-The current bounded reducer is a single-lane reference implementation. Its `scene_prepare_gpu`
-and `scene_rules_gpu` timings must be measured on the RTX 5080 before any active mode is exposed;
-the targets above are not evidence that the serial reducer already meets them.
+The production reducer uses a fixed 24 KiB scratch buffer and six ordered compute passes: parallel
+column/global-row summaries, serial column planning, parallel per-region row summaries, serial row
+planning, parallel bounded-candidate evaluation, and serial final selection. The former single-lane
+reducer remains a test-only equivalence oracle and is never dispatched by production.
+
+The isolated 4K test ran 640 serialized controller updates on the RTX 5080; each reported rolling
+window contains the latest 512 samples. Its workload cycles checker transitions, content
+acquisition, vertical scroll, and split/multi-candidate scenes. The six-pass reduction lowered P95
+from the measured single-lane 5.93 ms baseline to 0.183232 ms (about 32.4x faster, a 96.9%
+reduction).
+
+Production publishes `scene_prepare_gpu` and `scene_rules_gpu` from timestamp pairs inside the
+depth estimator's existing single frame-level disjoint scope. `scene_rules_gpu` is a sub-interval
+of `depth_postprocess_gpu`, so those metrics must not be added. Detailed
+`scene_rules_evidence_gpu`, `scene_rules_reduce_gpu`, and `scene_rules_resolve_history_gpu`
+intervals are available only in the explicitly isolated test benchmark. Controller-local
+disjoint queries are otherwise disabled, including ordinary test construction, so they cannot
+nest the estimator scope.
 
 ### `model_v1`
 
@@ -687,10 +702,10 @@ Additional targets:
 The current rule implementation's fixed tensors total approximately 7.0 MiB: matched scene RGB
 ping-pong 1.5, scene ordinal ping-pong 0.5, analysis ping-pong 1.25, layout-history ping-pong 1.5,
 depth-history ping-pong 1.25, dense output 0.875, learned-hidden placeholder 0.094, and negligible
-global/meta/rule-state buffers. DA input/output are existing aliases. A future 1.0-1.8M-parameter
-FP16 network adds about 1.9-3.4 MiB of weights, leaving the remainder of the 16 MiB limit for
-activations and TensorRT scratch. The builder must enforce the limit; it is not an estimate-only
-goal.
+global/meta/rule-state buffers. DA raw/normalized depth are existing resources; `rules_v1` does
+not bind the DA RGB input tensor. A future 1.0-1.8M-parameter FP16 network adds about 1.9-3.4 MiB
+of weights, leaving the remainder of the 16 MiB limit for activations and TensorRT scratch. The
+builder must enforce the limit; it is not an estimate-only goal.
 
 ## Data collection
 

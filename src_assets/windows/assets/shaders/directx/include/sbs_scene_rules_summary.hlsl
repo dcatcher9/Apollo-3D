@@ -1,0 +1,157 @@
+#ifndef SBS_SCENE_RULES_SUMMARY_HLSL
+#define SBS_SCENE_RULES_SUMMARY_HLSL
+
+// Private fixed-layout scratch shared by the six production rule-reduction passes. This is not
+// part of the public controller ABI and never leaves the GPU.
+#define SBS_RULE_SUMMARY_FLOAT_COUNT 6144u
+
+#define SBS_RULE_COLUMN_COUNT 128u
+#define SBS_RULE_COLUMN_STRIDE 4u
+#define SBS_RULE_COLUMN_BASE 0u
+#define SBS_RULE_COLUMN_VIEWPORT_VALID 0u
+#define SBS_RULE_COLUMN_GUTTER 1u
+#define SBS_RULE_COLUMN_VIDEO_SUPPORT 2u
+#define SBS_RULE_COLUMN_VIDEO_WEIGHT 3u
+
+#define SBS_RULE_PLAN_BASE \
+    (SBS_RULE_COLUMN_BASE + SBS_RULE_COLUMN_COUNT * SBS_RULE_COLUMN_STRIDE)
+#define SBS_RULE_PLAN_INPUT_VALID 0u
+#define SBS_RULE_PLAN_VIEWPORT_FIRST_X 1u
+#define SBS_RULE_PLAN_VIEWPORT_END_X 2u
+#define SBS_RULE_PLAN_VALID_CELLS 3u
+#define SBS_RULE_PLAN_DEPTH_COVERAGE 4u
+#define SBS_RULE_PLAN_DEPTH_CONFIDENCE 5u
+#define SBS_RULE_PLAN_SCROLL_WEIGHT 6u
+#define SBS_RULE_PLAN_SCROLL_SIGNED 7u
+#define SBS_RULE_PLAN_SCROLL_SUPPORT 8u
+#define SBS_RULE_PLAN_GUTTER_START 9u
+#define SBS_RULE_PLAN_GUTTER_END 10u
+#define SBS_RULE_PLAN_SPLIT 11u
+#define SBS_RULE_PLAN_REGION_COUNT 12u
+#define SBS_RULE_PLAN_VIDEO_AMBIGUOUS 13u
+
+#define SBS_RULE_REGION_BASE 32u
+#define SBS_RULE_REGION_STRIDE 32u
+#define SBS_RULE_REGION_ACTIVE 0u
+#define SBS_RULE_REGION_FIRST_X 1u
+#define SBS_RULE_REGION_END_X 2u
+#define SBS_RULE_REGION_CONTENT_MIN_X 3u
+#define SBS_RULE_REGION_CONTENT_MIN_Y 4u
+#define SBS_RULE_REGION_CONTENT_MAX_X 5u
+#define SBS_RULE_REGION_CONTENT_MAX_Y 6u
+#define SBS_RULE_REGION_CONTENT_SCORE 7u
+#define SBS_RULE_REGION_CONTENT_COVERAGE 8u
+#define SBS_RULE_REGION_UNSAFE_FRACTION 9u
+#define SBS_RULE_REGION_COLUMN_RUN_COUNT 10u
+#define SBS_RULE_REGION_COLUMN_OVERFLOW 11u
+#define SBS_RULE_REGION_COLUMN_START_0 12u
+#define SBS_RULE_REGION_COLUMN_END_0 16u
+#define SBS_RULE_REGION_ROW_RUN_COUNT 20u
+#define SBS_RULE_REGION_ROW_OVERFLOW 21u
+#define SBS_RULE_REGION_ROW_START_0 22u
+#define SBS_RULE_REGION_ROW_END_0 26u
+#define SBS_RULE_REGION_CANDIDATE_FIRST 30u
+#define SBS_RULE_REGION_CANDIDATE_COUNT 31u
+
+#define SBS_RULE_GLOBAL_ROW_BASE \
+    (SBS_RULE_PLAN_BASE + SBS_RULE_REGION_BASE + 2u * SBS_RULE_REGION_STRIDE)
+#define SBS_RULE_GLOBAL_ROW_COUNT 128u
+#define SBS_RULE_GLOBAL_ROW_STRIDE 7u
+#define SBS_RULE_GLOBAL_ROW_MAIN_VALID 0u
+#define SBS_RULE_GLOBAL_ROW_REQUIRED_INVALID 1u
+#define SBS_RULE_GLOBAL_ROW_DEPTH_COVERAGE 2u
+#define SBS_RULE_GLOBAL_ROW_DEPTH_CONFIDENCE 3u
+#define SBS_RULE_GLOBAL_ROW_SCROLL_WEIGHT 4u
+#define SBS_RULE_GLOBAL_ROW_SCROLL_SIGNED 5u
+#define SBS_RULE_GLOBAL_ROW_SCROLL_SUPPORT 6u
+
+#define SBS_RULE_ROW_BASE \
+    (SBS_RULE_GLOBAL_ROW_BASE + \
+     SBS_RULE_GLOBAL_ROW_COUNT * SBS_RULE_GLOBAL_ROW_STRIDE)
+#define SBS_RULE_ROW_REGION_COUNT 2u
+#define SBS_RULE_ROW_COUNT 128u
+#define SBS_RULE_ROW_STRIDE 11u
+#define SBS_RULE_ROW_VALID 0u
+#define SBS_RULE_ROW_VIDEO_SUPPORT 1u
+#define SBS_RULE_ROW_VIDEO_WEIGHT 2u
+#define SBS_RULE_ROW_CONTENT_SUM 3u
+#define SBS_RULE_ROW_UNSAFE_SUM 4u
+#define SBS_RULE_ROW_PHOTO_SUM 5u
+#define SBS_RULE_ROW_CONTENT_CELLS 6u
+#define SBS_RULE_ROW_CONTENT_MIN_X 7u
+#define SBS_RULE_ROW_CONTENT_MIN_Y 8u
+#define SBS_RULE_ROW_CONTENT_MAX_X 9u
+#define SBS_RULE_ROW_CONTENT_MAX_Y 10u
+
+#define SBS_RULE_CANDIDATE_MAX 32u
+#define SBS_RULE_CANDIDATE_DESC_BASE \
+    (SBS_RULE_ROW_BASE + \
+     SBS_RULE_ROW_REGION_COUNT * SBS_RULE_ROW_COUNT * SBS_RULE_ROW_STRIDE)
+#define SBS_RULE_CANDIDATE_DESC_STRIDE 8u
+#define SBS_RULE_CANDIDATE_ACTIVE 0u
+#define SBS_RULE_CANDIDATE_FIRST_X 1u
+#define SBS_RULE_CANDIDATE_END_X 2u
+#define SBS_RULE_CANDIDATE_FIRST_Y 3u
+#define SBS_RULE_CANDIDATE_END_Y 4u
+#define SBS_RULE_CANDIDATE_REGION 5u
+
+#define SBS_RULE_CANDIDATE_RESULT_BASE \
+    (SBS_RULE_CANDIDATE_DESC_BASE + \
+     SBS_RULE_CANDIDATE_MAX * SBS_RULE_CANDIDATE_DESC_STRIDE)
+#define SBS_RULE_CANDIDATE_RESULT_STRIDE 8u
+#define SBS_RULE_CANDIDATE_SCORE 0u
+#define SBS_RULE_CANDIDATE_MIN_X 1u
+#define SBS_RULE_CANDIDATE_MIN_Y 2u
+#define SBS_RULE_CANDIDATE_MAX_X 3u
+#define SBS_RULE_CANDIDATE_MAX_Y 4u
+#define SBS_RULE_CANDIDATE_COVERAGE 5u
+
+uint SbsRuleColumnIndex(uint column, uint field) {
+    return SBS_RULE_COLUMN_BASE + column * SBS_RULE_COLUMN_STRIDE + field;
+}
+
+uint SbsRulePlanIndex(uint field) {
+    return SBS_RULE_PLAN_BASE + field;
+}
+
+uint SbsRuleRegionIndex(uint region, uint field) {
+    return SBS_RULE_PLAN_BASE + SBS_RULE_REGION_BASE +
+           region * SBS_RULE_REGION_STRIDE + field;
+}
+
+uint SbsRuleRowIndex(uint region, uint row, uint field) {
+    return SBS_RULE_ROW_BASE +
+           (region * SBS_RULE_ROW_COUNT + row) * SBS_RULE_ROW_STRIDE + field;
+}
+
+uint SbsRuleGlobalRowIndex(uint row, uint field) {
+    return SBS_RULE_GLOBAL_ROW_BASE +
+           row * SBS_RULE_GLOBAL_ROW_STRIDE + field;
+}
+
+uint SbsRuleCandidateDescIndex(uint candidate, uint field) {
+    return SBS_RULE_CANDIDATE_DESC_BASE +
+           candidate * SBS_RULE_CANDIDATE_DESC_STRIDE + field;
+}
+
+uint SbsRuleCandidateResultIndex(uint candidate, uint field) {
+    return SBS_RULE_CANDIDATE_RESULT_BASE +
+           candidate * SBS_RULE_CANDIDATE_RESULT_STRIDE + field;
+}
+
+void SbsRuleStoreUint(
+    RWStructuredBuffer<float> summary,
+    uint index,
+    uint value)
+{
+    summary[index] = (float)value;
+}
+
+uint SbsRuleLoadUint(
+    RWStructuredBuffer<float> summary,
+    uint index)
+{
+    return (uint)round(summary[index]);
+}
+
+#endif

@@ -57,6 +57,36 @@ uint EffectiveResetFlags() {
     return flags;
 }
 
+float CurrentRoiCoverage(float2 viewport_uv) {
+    const uint roi_invalidating_resets =
+        SBS_SCENE_RESET_FLAGS_LAYOUT |
+        SBS_SCENE_RESET_FLAGS_GEOMETRY |
+        SBS_SCENE_RESET_FLAGS_BACKEND |
+        SBS_SCENE_RESET_FLAGS_DISPLAY_OR_HDR;
+    if ((EffectiveResetFlags() & roi_invalidating_resets) != 0u) {
+        return 1.0f;
+    }
+    uint state_flags = PreviousRuleStateUint(
+        SBS_SCENE_RULE_STATE_WORD_STATE_FLAGS);
+    if ((state_flags & SBS_SCENE_STATE_FLAGS_ROI_LOCKED) == 0u) {
+        return 1.0f;
+    }
+
+    float4 committed_roi = float4(
+        PreviousRuleStateWord(
+            SBS_SCENE_RULE_STATE_WORD_COMMITTED_ROI_X0),
+        PreviousRuleStateWord(
+            SBS_SCENE_RULE_STATE_WORD_COMMITTED_ROI_Y0),
+        PreviousRuleStateWord(
+            SBS_SCENE_RULE_STATE_WORD_COMMITTED_ROI_X1),
+        PreviousRuleStateWord(
+            SBS_SCENE_RULE_STATE_WORD_COMMITTED_ROI_Y1));
+    bool covered =
+        all(viewport_uv >= committed_roi.xy) &&
+        all(viewport_uv < committed_roi.zw);
+    return covered ? 1.0f : 0.0f;
+}
+
 uint CensusOrdinal(int2 center, out uint reliable_comparisons) {
     static const int2 offsets[8] = {
         int2(-2, 0), int2(2, 0), int2(0, -2), int2(0, 2),
@@ -198,7 +228,8 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         SBS_SCENE_ANALYSIS_GRID_TEMPORAL_ACTIVITY_OCCUPANCY, cell)] =
         activity;
     AnalysisGrid[SceneAnalysisIndex(
-        SBS_SCENE_ANALYSIS_GRID_CURRENT_ROI_COVERAGE, cell)] = 1.0f;
+        SBS_SCENE_ANALYSIS_GRID_CURRENT_ROI_COVERAGE, cell)] =
+        CurrentRoiCoverage(viewport_uv);
     AnalysisGrid[SceneAnalysisIndex(
         SBS_SCENE_ANALYSIS_GRID_VIEWPORT_X, cell)] = viewport_uv.x;
     AnalysisGrid[SceneAnalysisIndex(

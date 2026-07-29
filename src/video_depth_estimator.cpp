@@ -982,9 +982,18 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11Query> post_end;
       Microsoft::WRL::ComPtr<ID3D11Query> pre_start;
       Microsoft::WRL::ComPtr<ID3D11Query> pre_end;
+      Microsoft::WRL::ComPtr<ID3D11Query> scene_rules_start;
+      Microsoft::WRL::ComPtr<ID3D11Query> scene_rules_end;
+      Microsoft::WRL::ComPtr<ID3D11Query> scene_prepare_start;
+      Microsoft::WRL::ComPtr<ID3D11Query> scene_prepare_end;
       bool pending = false;
       bool has_post = false;
       bool has_pre = false;
+      bool has_scene_rules = false;
+      bool has_scene_prepare = false;
+      bool scene_rules_issued = false;
+      bool scene_prepare_issued = false;
+      bool pre_ended = false;
       std::uint64_t perf_generation = 0;
     };
 
@@ -1004,7 +1013,16 @@ namespace models {
           return;
         }
         desc.Query = D3D11_QUERY_TIMESTAMP;
-        if (FAILED(device->CreateQuery(&desc, &slot.post_start)) || FAILED(device->CreateQuery(&desc, &slot.post_end)) || FAILED(device->CreateQuery(&desc, &slot.pre_start)) || FAILED(device->CreateQuery(&desc, &slot.pre_end))) {
+        if (
+          FAILED(device->CreateQuery(&desc, &slot.post_start)) ||
+          FAILED(device->CreateQuery(&desc, &slot.post_end)) ||
+          FAILED(device->CreateQuery(&desc, &slot.pre_start)) ||
+          FAILED(device->CreateQuery(&desc, &slot.pre_end)) ||
+          FAILED(device->CreateQuery(&desc, &slot.scene_rules_start)) ||
+          FAILED(device->CreateQuery(&desc, &slot.scene_rules_end)) ||
+          FAILED(device->CreateQuery(&desc, &slot.scene_prepare_start)) ||
+          FAILED(device->CreateQuery(&desc, &slot.scene_prepare_end))
+        ) {
           BOOST_LOG(warning) << "Depth D3D11 timing unavailable: could not create timestamp queries.";
           return;
         }
@@ -1039,23 +1057,95 @@ namespace models {
         UINT64 post_end = 0;
         UINT64 pre_start = 0;
         UINT64 pre_end = 0;
+        UINT64 scene_rules_start = 0;
+        UINT64 scene_rules_end = 0;
+        UINT64 scene_prepare_start = 0;
+        UINT64 scene_prepare_end = 0;
         const auto post_start_status = context->GetData(slot.post_start.Get(), &post_start, sizeof(post_start), 0);
         const auto post_end_status = context->GetData(slot.post_end.Get(), &post_end, sizeof(post_end), 0);
         const auto pre_start_status = context->GetData(slot.pre_start.Get(), &pre_start, sizeof(pre_start), 0);
         const auto pre_end_status = context->GetData(slot.pre_end.Get(), &pre_end, sizeof(pre_end), 0);
-        if (SUCCEEDED(post_start_status) && SUCCEEDED(post_end_status) && SUCCEEDED(pre_start_status) && SUCCEEDED(pre_end_status) && !timing.Disjoint && timing.Frequency > 0 && post_end >= post_start && pre_start >= post_end && pre_end >= pre_start) {
+        const auto scene_rules_start_status = context->GetData(
+          slot.scene_rules_start.Get(),
+          &scene_rules_start,
+          sizeof(scene_rules_start),
+          0
+        );
+        const auto scene_rules_end_status = context->GetData(
+          slot.scene_rules_end.Get(),
+          &scene_rules_end,
+          sizeof(scene_rules_end),
+          0
+        );
+        const auto scene_prepare_start_status = context->GetData(
+          slot.scene_prepare_start.Get(),
+          &scene_prepare_start,
+          sizeof(scene_prepare_start),
+          0
+        );
+        const auto scene_prepare_end_status = context->GetData(
+          slot.scene_prepare_end.Get(),
+          &scene_prepare_end,
+          sizeof(scene_prepare_end),
+          0
+        );
+        if (
+          SUCCEEDED(post_start_status) &&
+          SUCCEEDED(post_end_status) &&
+          SUCCEEDED(pre_start_status) &&
+          SUCCEEDED(pre_end_status) &&
+          SUCCEEDED(scene_rules_start_status) &&
+          SUCCEEDED(scene_rules_end_status) &&
+          SUCCEEDED(scene_prepare_start_status) &&
+          SUCCEEDED(scene_prepare_end_status) &&
+          !timing.Disjoint &&
+          timing.Frequency > 0
+        ) {
           const double to_ms = 1000.0 / static_cast<double>(timing.Frequency);
-          if (slot.has_post) {
+          const bool frame_intervals_ordered =
+            post_end >= post_start &&
+            pre_start >= post_end &&
+            pre_end >= pre_start;
+          if (slot.has_post && frame_intervals_ordered) {
             sbs_perf::add_sample_ms_if_current(
               "depth_postprocess_gpu",
               static_cast<double>(post_end - post_start) * to_ms,
               slot.perf_generation
             );
           }
-          if (slot.has_pre) {
+          if (slot.has_pre && frame_intervals_ordered) {
             sbs_perf::add_sample_ms_if_current(
               "depth_preprocess_gpu",
               static_cast<double>(pre_end - pre_start) * to_ms,
+              slot.perf_generation
+            );
+          }
+          if (
+            slot.has_scene_rules &&
+            scene_rules_end >= scene_rules_start &&
+            scene_rules_start >= post_start &&
+            scene_rules_end <= post_end &&
+            frame_intervals_ordered
+          ) {
+            sbs_perf::add_sample_ms_if_current(
+              "scene_rules_gpu",
+              static_cast<double>(
+                scene_rules_end - scene_rules_start
+              ) * to_ms,
+              slot.perf_generation
+            );
+          }
+          if (
+            slot.has_scene_prepare &&
+            scene_prepare_end >= scene_prepare_start &&
+            scene_prepare_start >= pre_end &&
+            frame_intervals_ordered
+          ) {
+            sbs_perf::add_sample_ms_if_current(
+              "scene_prepare_gpu",
+              static_cast<double>(
+                scene_prepare_end - scene_prepare_start
+              ) * to_ms,
               slot.perf_generation
             );
           }
@@ -1078,6 +1168,11 @@ namespace models {
         d3d_perf_next = (index + 1) % d3d_perf_slots.size();
         slot.has_post = has_post;
         slot.has_pre = has_pre;
+        slot.has_scene_rules = false;
+        slot.has_scene_prepare = false;
+        slot.scene_rules_issued = false;
+        slot.scene_prepare_issued = false;
+        slot.pre_ended = false;
         slot.perf_generation = sbs_perf::generation();
         context->Begin(slot.disjoint.Get());
         context->End(slot.post_start.Get());
@@ -1098,11 +1193,60 @@ namespace models {
       }
     }
 
+    void mark_d3d_pre_end(d3d_perf_slot *slot) {
+      if (slot && !slot->pre_ended) {
+        context->End(slot->pre_end.Get());
+        slot->pre_ended = true;
+      }
+    }
+
+    void mark_d3d_scene_rules_start(d3d_perf_slot *slot) {
+      if (slot) {
+        slot->scene_rules_issued = true;
+        context->End(slot->scene_rules_start.Get());
+      }
+    }
+
+    void mark_d3d_scene_rules_end(
+      d3d_perf_slot *slot,
+      const bool succeeded
+    ) {
+      if (slot) {
+        context->End(slot->scene_rules_end.Get());
+        slot->has_scene_rules = succeeded;
+      }
+    }
+
+    void mark_d3d_scene_prepare_start(d3d_perf_slot *slot) {
+      if (slot) {
+        slot->scene_prepare_issued = true;
+        context->End(slot->scene_prepare_start.Get());
+      }
+    }
+
+    void mark_d3d_scene_prepare_end(
+      d3d_perf_slot *slot,
+      const bool succeeded
+    ) {
+      if (slot) {
+        context->End(slot->scene_prepare_end.Get());
+        slot->has_scene_prepare = succeeded;
+      }
+    }
+
     void end_d3d_perf(d3d_perf_slot *slot) {
       if (!slot) {
         return;
       }
-      context->End(slot->pre_end.Get());
+      mark_d3d_pre_end(slot);
+      if (!slot->scene_rules_issued) {
+        context->End(slot->scene_rules_start.Get());
+        context->End(slot->scene_rules_end.Get());
+      }
+      if (!slot->scene_prepare_issued) {
+        context->End(slot->scene_prepare_start.Get());
+        context->End(slot->scene_prepare_end.Get());
+      }
       context->End(slot->disjoint.Get());
       slot->pending = true;
     }
@@ -2108,7 +2252,7 @@ namespace models {
         return {};
       }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
-      normalize_depth_output();
+      normalize_depth_output(d3d_timer);
       mark_d3d_post_end(d3d_timer);
       mark_d3d_pre_start(d3d_timer);
       end_d3d_perf(d3d_timer);
@@ -2161,7 +2305,7 @@ namespace models {
     // Normalize the finished raw disparity in tensor_out_buf into depth_tex: the scale
     // passes (min/max reduction, permanent percentile histogram, EMA fold) followed by the
     // mapping/temporal-EMA pass. GPU-resident throughout, no CPU readback.
-    void normalize_depth_output() {
+    void normalize_depth_output(d3d_perf_slot *d3d_timer = nullptr) {
       // 3a. Per-frame scale (GPU-resident; no CPU readback). Depth Anything V2's
       // relative output is affine-invariant, so this is required for a stable parallax scale.
       if (depth_minmax_cs && depth_minmax_ema_cs && minmax_raw_uav && minmax_ema_uav) {
@@ -2291,27 +2435,32 @@ namespace models {
         ID3D11UnorderedAccessView *null_uavs2[3] = {nullptr, nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 3, null_uavs2, nullptr);
 
-        // rules_v1 must consume the completed frame HERE. tensor_in/appearance/depth still own
-        // pending_frame_id, and the reliable history below has not yet advanced. Running after
-        // estimate_depth() returns would pair the rules with the newly preprocessed source frame.
-        if (
-          scene_controller &&
-          !scene_controller->resolve_completed(
+        // rules_v1 must consume the completed frame HERE. Its retained scene/analysis buffers and
+        // the depth resources still own pending_frame_id, and the reliable history below has not
+        // yet advanced. Running after estimate_depth() returns would pair the rules with the newly
+        // preprocessed source frame.
+        if (scene_controller) {
+          mark_d3d_scene_rules_start(d3d_timer);
+          const bool controller_resolved =
+            scene_controller->resolve_completed(
             pending_frame_id,
-            tensor_in_srv.Get(),
             tensor_out_srv.Get(),
             depth_srv.Get(),
             minmax_ema_srv.Get(),
             subject_srv.Get(),
             target_w,
             target_h
-          ) &&
-          !scene_controller_error_logged
-        ) {
-          BOOST_LOG(warning)
-            << "Host SBS scene-controller rejected a completed matched frame; "
-               "shadow output is invalid and the full-frame render remains authoritative.";
-          scene_controller_error_logged = true;
+          );
+          mark_d3d_scene_rules_end(
+            d3d_timer,
+            controller_resolved
+          );
+          if (!controller_resolved && !scene_controller_error_logged) {
+            BOOST_LOG(warning)
+              << "Host SBS scene-controller rejected a completed matched frame; "
+                 "shadow output is invalid and the full-frame render remains authoritative.";
+            scene_controller_error_logged = true;
+          }
         }
 
         // tensor_in_buf, appearance_ordinal_buf and depth_tex still own the matched inputs/result
@@ -2702,7 +2851,7 @@ namespace models {
       // (fully unmapped from CUDA), so consuming it here never blocks the encode thread. The
       // caller uses completed_frame_id to select the color slot that produced this exact result.
       if (has_previous_frame) {
-        normalize_depth_output();
+        normalize_depth_output(d3d_timer);
         // Production post-process timing ends at the normalized depth result. The two stable
         // Dump 3D copies below are explicit diagnostic work and must not contaminate live
         // depth_postprocess_gpu samples.
@@ -2755,12 +2904,17 @@ namespace models {
       ID3D11ShaderResourceView *null_srv = nullptr;
       context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
       context->CSSetShaderResources(0, 1, &null_srv);
-      end_d3d_perf(d3d_timer);
+      mark_d3d_pre_end(d3d_timer);
       if (scene_controller) {
+        mark_d3d_scene_prepare_start(d3d_timer);
         scene_controller_prepared = scene_controller->prepare_scene(
           input_srv,
           color_space,
           frame_id
+        );
+        mark_d3d_scene_prepare_end(
+          d3d_timer,
+          scene_controller_prepared
         );
         if (!scene_controller_prepared && !scene_controller_error_logged) {
           BOOST_LOG(warning)
@@ -2769,6 +2923,7 @@ namespace models {
           scene_controller_error_logged = true;
         }
       }
+      end_d3d_perf(d3d_timer);
       // No explicit Flush: cuGraphicsMapResources() below already guarantees the
       // preceding D3D11 compute work completes before the CUDA stream reads the buffer.
       // Force-flushing every frame only prevents the driver from interleaving other GPU

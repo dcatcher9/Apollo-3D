@@ -211,10 +211,34 @@ namespace models {
     std::chrono::steady_clock::time_point prepared_at {};
     std::chrono::steady_clock::time_point last_enqueued_at {};
     static constexpr std::uint32_t backend_generation = 1;
+    static constexpr std::size_t rule_summary_float_count = 6144;
+    static constexpr std::size_t rule_summary_required_float_count =
+      128u * 4u +        // column summaries
+      32u + 2u * 32u +  // global plan and two region plans
+      128u * 7u +       // row-major global summaries
+      2u * 128u * 11u + // per-region row summaries
+      32u * 8u +        // candidate descriptors
+      32u * 8u;         // candidate results
+    static_assert(
+      rule_summary_required_float_count <= rule_summary_float_count
+    );
+#ifdef SUNSHINE_TESTS
+    bool use_serial_reducer_reference_for_testing = false;
+    bool enable_isolated_timing_for_testing = false;
+    bool reset_override_pending_for_testing = false;
+    std::uint32_t reset_flags_override_for_testing = 0;
+    bool elapsed_override_pending_for_testing = false;
+    float elapsed_seconds_override_for_testing = 0.0f;
+#endif
 
     ComPtr<ID3D11ComputeShader> prepare_cs;
     ComPtr<ID3D11ComputeShader> features_cs;
     ComPtr<ID3D11ComputeShader> evidence_cs;
+    ComPtr<ID3D11ComputeShader> reduce_columns_cs;
+    ComPtr<ID3D11ComputeShader> reduce_plan_columns_cs;
+    ComPtr<ID3D11ComputeShader> reduce_rows_cs;
+    ComPtr<ID3D11ComputeShader> reduce_plan_rows_cs;
+    ComPtr<ID3D11ComputeShader> reduce_candidates_cs;
     ComPtr<ID3D11ComputeShader> reduce_cs;
     ComPtr<ID3D11ComputeShader> resolve_cs;
     ComPtr<ID3D11ComputeShader> history_commit_cs;
@@ -226,6 +250,7 @@ namespace models {
     std::array<gpu_float_buffer_t, 2> layout_history;
     std::array<gpu_float_buffer_t, 2> depth_history;
     gpu_float_buffer_t dense_output;
+    gpu_float_buffer_t rule_summary;
     gpu_float_buffer_t evidence_global;
     gpu_float_buffer_t global_output;
     gpu_float_buffer_t meta;
@@ -241,6 +266,7 @@ namespace models {
     std::array<ComPtr<ID3D11Buffer>, constant_buffer_ring_size> constant_buffers;
     std::size_t next_constant_buffer = 0;
 
+#ifdef SUNSHINE_TESTS
     struct timing_slot_t {
       ComPtr<ID3D11Query> disjoint;
       ComPtr<ID3D11Query> start;
@@ -254,8 +280,23 @@ namespace models {
       bool ready = false;
       const char *stage = nullptr;
     };
+    struct rules_timing_slot_t {
+      ComPtr<ID3D11Query> disjoint;
+      ComPtr<ID3D11Query> start;
+      ComPtr<ID3D11Query> evidence_end;
+      ComPtr<ID3D11Query> reduce_end;
+      ComPtr<ID3D11Query> end;
+      bool pending = false;
+      std::uint64_t perf_generation = 0;
+    };
+    struct rules_timing_ring_t {
+      std::array<rules_timing_slot_t, 8> slots;
+      std::size_t next = 0;
+      bool ready = false;
+    };
     timing_ring_t prepare_timing;
-    timing_ring_t rules_timing;
+    rules_timing_ring_t rules_timing;
+#endif
 
     impl(
       ComPtr<ID3D11Device> d,
@@ -263,6 +304,11 @@ namespace models {
       const std::filesystem::path &assets_dir,
       config::sbs_scene_controller_e selected_backend,
       const config::video_t::sbs_t &sbs_config
+#ifdef SUNSHINE_TESTS
+      ,
+      bool serial_reducer_reference,
+      bool isolated_timing
+#endif
     ):
         device(std::move(d)),
         context(std::move(c)),
@@ -280,7 +326,13 @@ namespace models {
           sbs_config.zero_plane == "subject" ? 1.0f :
           sbs_config.zero_plane == "background" ? 3.0f :
                                                    2.0f
-        ) {
+        )
+#ifdef SUNSHINE_TESTS
+        ,
+        use_serial_reducer_reference_for_testing(serial_reducer_reference),
+        enable_isolated_timing_for_testing(isolated_timing)
+#endif
+    {
       if (backend == config::sbs_scene_controller_e::off) {
         initialized = true;
         return;
@@ -303,11 +355,44 @@ namespace models {
                    &target
                  ));
         };
+      bool reducer_shaders_ready = true;
+#ifdef SUNSHINE_TESTS
+      if (use_serial_reducer_reference_for_testing) {
+        reducer_shaders_ready = create_shader(
+          "sbs_scene_rules_reduce_serial_reference_cs.hlsl",
+          reduce_cs
+        );
+      } else
+#endif
+      {
+        reducer_shaders_ready =
+          create_shader(
+            "sbs_scene_rules_columns_cs.hlsl",
+            reduce_columns_cs
+          ) &&
+          create_shader(
+            "sbs_scene_rules_plan_columns_cs.hlsl",
+            reduce_plan_columns_cs
+          ) &&
+          create_shader(
+            "sbs_scene_rules_rows_cs.hlsl",
+            reduce_rows_cs
+          ) &&
+          create_shader(
+            "sbs_scene_rules_plan_rows_cs.hlsl",
+            reduce_plan_rows_cs
+          ) &&
+          create_shader(
+            "sbs_scene_rules_candidates_cs.hlsl",
+            reduce_candidates_cs
+          ) &&
+          create_shader("sbs_scene_rules_reduce_cs.hlsl", reduce_cs);
+      }
       if (
         !create_shader("sbs_scene_prepare_cs.hlsl", prepare_cs) ||
         !create_shader("sbs_scene_features_cs.hlsl", features_cs) ||
         !create_shader("sbs_scene_rules_evidence_cs.hlsl", evidence_cs) ||
-        !create_shader("sbs_scene_rules_reduce_cs.hlsl", reduce_cs) ||
+        !reducer_shaders_ready ||
         !create_shader("sbs_scene_rules_resolve_cs.hlsl", resolve_cs) ||
         !create_shader(
           "sbs_scene_history_commit_cs.hlsl",
@@ -404,6 +489,11 @@ namespace models {
         ) &&
         create_float_buffer(
           device.Get(),
+          rule_summary_float_count,
+          rule_summary
+        ) &&
+        create_float_buffer(
+          device.Get(),
           sbs_scene_controller::global_out_word_count,
           evidence_global
         ) &&
@@ -457,6 +547,7 @@ namespace models {
              &depth_history[0],
              &depth_history[1],
              &dense_output,
+             &rule_summary,
              &evidence_global,
              &global_output,
              &meta,
@@ -484,8 +575,12 @@ namespace models {
         }
       }
 
-      initialize_timing(prepare_timing, "scene_prepare_gpu");
-      initialize_timing(rules_timing, "scene_rules_gpu");
+#ifdef SUNSHINE_TESTS
+      if (enable_isolated_timing_for_testing) {
+        initialize_timing(prepare_timing, "scene_prepare_gpu");
+        initialize_rules_timing();
+      }
+#endif
       initialized = true;
       BOOST_LOG(info)
         << "Host SBS GPU scene controller enabled in shadow_rules mode (ABI "
@@ -501,6 +596,7 @@ namespace models {
       return initialized;
     }
 
+#ifdef SUNSHINE_TESTS
     void initialize_timing(timing_ring_t &ring, const char *stage) {
       ring.stage = stage;
       if (!config::sunshine.diagnostics_enabled) {
@@ -608,6 +704,163 @@ namespace models {
       slot->pending = true;
     }
 
+    void initialize_rules_timing() {
+      if (!config::sunshine.diagnostics_enabled) {
+        return;
+      }
+      for (auto &slot : rules_timing.slots) {
+        D3D11_QUERY_DESC descriptor {
+          D3D11_QUERY_TIMESTAMP_DISJOINT,
+          0,
+        };
+        if (FAILED(device->CreateQuery(&descriptor, &slot.disjoint))) {
+          return;
+        }
+        descriptor.Query = D3D11_QUERY_TIMESTAMP;
+        if (
+          FAILED(device->CreateQuery(&descriptor, &slot.start)) ||
+          FAILED(device->CreateQuery(&descriptor, &slot.evidence_end)) ||
+          FAILED(device->CreateQuery(&descriptor, &slot.reduce_end)) ||
+          FAILED(device->CreateQuery(&descriptor, &slot.end))
+        ) {
+          return;
+        }
+      }
+      rules_timing.ready = true;
+    }
+
+    void resolve_rules_timing() {
+      if (!rules_timing.ready) {
+        return;
+      }
+      for (auto &slot : rules_timing.slots) {
+        if (!slot.pending) {
+          continue;
+        }
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint {};
+        const auto disjoint_status = context->GetData(
+          slot.disjoint.Get(),
+          &disjoint,
+          sizeof(disjoint),
+          D3D11_ASYNC_GETDATA_DONOTFLUSH
+        );
+        if (disjoint_status == S_FALSE) {
+          continue;
+        }
+        if (FAILED(disjoint_status)) {
+          slot.pending = false;
+          continue;
+        }
+
+        std::array<UINT64, 4> ticks {};
+        const std::array<ID3D11Query *, 4> queries {
+          slot.start.Get(),
+          slot.evidence_end.Get(),
+          slot.reduce_end.Get(),
+          slot.end.Get(),
+        };
+        bool pending_query = false;
+        bool failed_query = false;
+        for (std::size_t index = 0; index < queries.size(); ++index) {
+          const auto status = context->GetData(
+            queries[index],
+            &ticks[index],
+            sizeof(ticks[index]),
+            D3D11_ASYNC_GETDATA_DONOTFLUSH
+          );
+          pending_query = pending_query || status == S_FALSE;
+          failed_query = failed_query || FAILED(status);
+        }
+        if (pending_query) {
+          continue;
+        }
+        if (failed_query) {
+          slot.pending = false;
+          continue;
+        }
+
+        if (
+          !disjoint.Disjoint && disjoint.Frequency != 0 &&
+          ticks[0] <= ticks[1] && ticks[1] <= ticks[2] &&
+          ticks[2] <= ticks[3]
+        ) {
+          const auto milliseconds =
+            [&](const UINT64 start, const UINT64 end) {
+              return static_cast<double>(end - start) * 1000.0 /
+                     static_cast<double>(disjoint.Frequency);
+            };
+          sbs_perf::add_sample_ms_if_current(
+            "scene_rules_evidence_gpu",
+            milliseconds(ticks[0], ticks[1]),
+            slot.perf_generation
+          );
+          sbs_perf::add_sample_ms_if_current(
+            "scene_rules_reduce_gpu",
+            milliseconds(ticks[1], ticks[2]),
+            slot.perf_generation
+          );
+          sbs_perf::add_sample_ms_if_current(
+            "scene_rules_resolve_history_gpu",
+            milliseconds(ticks[2], ticks[3]),
+            slot.perf_generation
+          );
+          sbs_perf::add_sample_ms_if_current(
+            "scene_rules_gpu",
+            milliseconds(ticks[0], ticks[3]),
+            slot.perf_generation
+          );
+        }
+        slot.pending = false;
+      }
+    }
+
+    rules_timing_slot_t *begin_rules_timing() {
+      resolve_rules_timing();
+      if (!rules_timing.ready) {
+        return nullptr;
+      }
+      for (
+        std::size_t offset = 0;
+        offset < rules_timing.slots.size();
+        ++offset
+      ) {
+        const std::size_t index =
+          (rules_timing.next + offset) % rules_timing.slots.size();
+        auto &slot = rules_timing.slots[index];
+        if (slot.pending) {
+          continue;
+        }
+        rules_timing.next = (index + 1) % rules_timing.slots.size();
+        slot.perf_generation = sbs_perf::generation();
+        context->Begin(slot.disjoint.Get());
+        context->End(slot.start.Get());
+        return &slot;
+      }
+      return nullptr;
+    }
+
+    void mark_rules_evidence_end(rules_timing_slot_t *slot) {
+      if (slot) {
+        context->End(slot->evidence_end.Get());
+      }
+    }
+
+    void mark_rules_reduce_end(rules_timing_slot_t *slot) {
+      if (slot) {
+        context->End(slot->reduce_end.Get());
+      }
+    }
+
+    void end_rules_timing(rules_timing_slot_t *slot) {
+      if (!slot) {
+        return;
+      }
+      context->End(slot->end.Get());
+      context->End(slot->disjoint.Get());
+      slot->pending = true;
+    }
+#endif
+
     ID3D11Buffer *upload_constants(const scene_constants_t &values) {
       auto &buffer = constant_buffers[next_constant_buffer];
       next_constant_buffer =
@@ -686,6 +939,12 @@ namespace models {
             0.0f,
             1.0f
           );
+#ifdef SUNSHINE_TESTS
+      if (elapsed_override_pending_for_testing) {
+        prepared_elapsed_seconds = elapsed_seconds_override_for_testing;
+        elapsed_override_pending_for_testing = false;
+      }
+#endif
       prepared_color_space = color_space;
       prepared_frame_id = source_frame_id;
       source_width = descriptor.Width;
@@ -707,6 +966,12 @@ namespace models {
           sbs_scene_controller::reset_flags_geometry |
           sbs_scene_controller::reset_flags_display_or_hdr;
       }
+#ifdef SUNSHINE_TESTS
+      if (reset_override_pending_for_testing) {
+        prepared_reset_flags = reset_flags_override_for_testing;
+        reset_override_pending_for_testing = false;
+      }
+#endif
       prepared_scene_bank = snapshot_available ?
                               1u - completed_scene_bank :
                               (pending ? 1u - pending_scene_bank : 0u);
@@ -717,7 +982,9 @@ namespace models {
         return false;
       }
 
+#ifdef SUNSHINE_TESTS
       auto *timer = begin_timing(prepare_timing);
+#endif
       context->CSSetShader(prepare_cs.Get(), nullptr, 0);
       context->CSSetConstantBuffers(0, 1, &constant_buffer);
       context->CSSetShaderResources(0, 1, &input);
@@ -769,7 +1036,9 @@ namespace models {
         nullptr
       );
       context->CSSetShader(nullptr, nullptr, 0);
+#ifdef SUNSHINE_TESTS
       end_timing(timer);
+#endif
       prepared = true;
       return true;
     }
@@ -805,7 +1074,6 @@ namespace models {
 
     bool resolve(
       std::uint64_t source_frame_id,
-      ID3D11ShaderResourceView *roi_rgb_tensor,
       ID3D11ShaderResourceView *raw_depth,
       ID3D11ShaderResourceView *normalized_depth,
       ID3D11ShaderResourceView *depth_frame_state,
@@ -818,8 +1086,7 @@ namespace models {
       }
       if (
         !initialized || !pending || pending_frame_id != source_frame_id ||
-        !roi_rgb_tensor || !raw_depth || !normalized_depth ||
-        !depth_frame_state ||
+        !raw_depth || !normalized_depth || !depth_frame_state ||
         !adaptive_state || depth_width <= 0 || depth_height <= 0
       ) {
         snapshot_available = false;
@@ -842,11 +1109,13 @@ namespace models {
 
       const std::size_t next_history_bank = 1u - current_history_bank;
       const std::size_t next_state_bank = 1u - current_state_bank;
-      auto *timer = begin_timing(rules_timing);
+#ifdef SUNSHINE_TESTS
+      auto *timer = begin_rules_timing();
+#endif
 
       context->CSSetShader(evidence_cs.Get(), nullptr, 0);
       context->CSSetConstantBuffers(0, 1, &constant_buffer);
-      ID3D11ShaderResourceView *evidence_inputs[9] = {
+      ID3D11ShaderResourceView *evidence_inputs[8] = {
         analysis_grid[pending_scene_bank].srv.Get(),
         layout_history[current_history_bank].srv.Get(),
         normalized_depth,
@@ -854,7 +1123,6 @@ namespace models {
         depth_frame_state,
         rule_state[current_state_bank].srv.Get(),
         raw_depth,
-        roi_rgb_tensor,
         adaptive_state,
       };
       ID3D11UnorderedAccessView *evidence_outputs[4] = {
@@ -863,23 +1131,25 @@ namespace models {
         depth_history[next_history_bank].uav.Get(),
         meta.uav.Get(),
       };
-      context->CSSetShaderResources(0, 9, evidence_inputs);
+      context->CSSetShaderResources(0, 8, evidence_inputs);
       context->CSSetUnorderedAccessViews(0, 4, evidence_outputs, nullptr);
       constexpr UINT analysis_groups =
         (sbs_scene_controller::analysis_canvas_size + 15u) / 16u;
       context->Dispatch(analysis_groups, analysis_groups, 1);
 
-      ID3D11ShaderResourceView *null_evidence_inputs[9] = {};
+      ID3D11ShaderResourceView *null_evidence_inputs[8] = {};
       ID3D11UnorderedAccessView *null_evidence_outputs[4] = {};
-      context->CSSetShaderResources(0, 9, null_evidence_inputs);
+      context->CSSetShaderResources(0, 8, null_evidence_inputs);
       context->CSSetUnorderedAccessViews(
         0,
         4,
         null_evidence_outputs,
         nullptr
       );
+#ifdef SUNSHINE_TESTS
+      mark_rules_evidence_end(timer);
+#endif
 
-      context->CSSetShader(reduce_cs.Get(), nullptr, 0);
       ID3D11ShaderResourceView *reduce_inputs[7] = {
         analysis_grid[pending_scene_bank].srv.Get(),
         dense_output.srv.Get(),
@@ -890,23 +1160,75 @@ namespace models {
         rule_state[current_state_bank].srv.Get(),
       };
       context->CSSetShaderResources(0, 7, reduce_inputs);
-      context->CSSetUnorderedAccessViews(
-        0,
-        1,
-        evidence_global.uav.GetAddressOf(),
-        nullptr
-      );
-      context->Dispatch(1, 1, 1);
+#ifdef SUNSHINE_TESTS
+      if (use_serial_reducer_reference_for_testing) {
+        context->CSSetShader(reduce_cs.Get(), nullptr, 0);
+        context->CSSetUnorderedAccessViews(
+          0,
+          1,
+          evidence_global.uav.GetAddressOf(),
+          nullptr
+        );
+        context->Dispatch(1, 1, 1);
+        ID3D11UnorderedAccessView *null_reference_output[1] = {};
+        context->CSSetUnorderedAccessViews(
+          0,
+          1,
+          null_reference_output,
+          nullptr
+        );
+      } else
+#endif
+      {
+        const auto dispatch_summary_pass =
+          [&](ID3D11ComputeShader *shader, UINT groups) {
+            context->CSSetShader(shader, nullptr, 0);
+            ID3D11UnorderedAccessView *outputs[2] = {
+              rule_summary.uav.Get(),
+              nullptr,
+            };
+            context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
+            context->Dispatch(groups, 1, 1);
+            ID3D11UnorderedAccessView *null_outputs[2] = {};
+            context->CSSetUnorderedAccessViews(
+              0,
+              2,
+              null_outputs,
+              nullptr
+            );
+          };
+        dispatch_summary_pass(reduce_columns_cs.Get(), 1);
+        dispatch_summary_pass(reduce_plan_columns_cs.Get(), 1);
+        dispatch_summary_pass(reduce_rows_cs.Get(), 2);
+        dispatch_summary_pass(reduce_plan_rows_cs.Get(), 1);
+        dispatch_summary_pass(reduce_candidates_cs.Get(), 32);
+
+        context->CSSetShader(reduce_cs.Get(), nullptr, 0);
+        ID3D11UnorderedAccessView *final_outputs[2] = {
+          rule_summary.uav.Get(),
+          evidence_global.uav.Get(),
+        };
+        context->CSSetUnorderedAccessViews(
+          0,
+          2,
+          final_outputs,
+          nullptr
+        );
+        context->Dispatch(1, 1, 1);
+        ID3D11UnorderedAccessView *null_final_outputs[2] = {};
+        context->CSSetUnorderedAccessViews(
+          0,
+          2,
+          null_final_outputs,
+          nullptr
+        );
+      }
 
       ID3D11ShaderResourceView *null_reduce_inputs[7] = {};
-      ID3D11UnorderedAccessView *null_reduce_output[1] = {};
       context->CSSetShaderResources(0, 7, null_reduce_inputs);
-      context->CSSetUnorderedAccessViews(
-        0,
-        1,
-        null_reduce_output,
-        nullptr
-      );
+#ifdef SUNSHINE_TESTS
+      mark_rules_reduce_end(timer);
+#endif
 
       context->CSSetShader(resolve_cs.Get(), nullptr, 0);
       ID3D11ShaderResourceView *resolve_inputs[4] = {
@@ -970,7 +1292,9 @@ namespace models {
         nullptr
       );
       context->CSSetShader(nullptr, nullptr, 0);
-      end_timing(timer);
+#ifdef SUNSHINE_TESTS
+      end_rules_timing(timer);
+#endif
 
       current_history_bank = next_history_bank;
       current_state_bank = next_state_bank;
@@ -999,6 +1323,9 @@ namespace models {
       result.hidden_output = hidden_output.srv;
       result.meta = meta.srv;
       result.rule_state = rule_state[current_state_bank].srv;
+#ifdef SUNSHINE_TESTS
+      result.rule_evidence_for_testing = evidence_global.srv;
+#endif
       result.source_frame_id = completed_frame_id;
       result.backend_generation = backend_generation;
       result.snapshot_available = snapshot_available;
@@ -1013,6 +1340,11 @@ namespace models {
     const std::filesystem::path &assets_dir,
     config::sbs_scene_controller_e backend,
     const config::video_t::sbs_t &sbs_config
+#ifdef SUNSHINE_TESTS
+    ,
+    bool use_serial_reducer_reference_for_testing,
+    bool enable_isolated_timing_for_testing
+#endif
   ):
       pimpl_(std::make_unique<impl>(
         std::move(device),
@@ -1020,6 +1352,11 @@ namespace models {
         assets_dir,
         backend,
         sbs_config
+#ifdef SUNSHINE_TESTS
+        ,
+        use_serial_reducer_reference_for_testing,
+        enable_isolated_timing_for_testing
+#endif
       )) {}
 
   sbs_scene_controller_gpu::~sbs_scene_controller_gpu() = default;
@@ -1059,7 +1396,6 @@ namespace models {
 
   bool sbs_scene_controller_gpu::resolve_completed(
     std::uint64_t source_frame_id,
-    ID3D11ShaderResourceView *roi_rgb_tensor,
     ID3D11ShaderResourceView *raw_depth,
     ID3D11ShaderResourceView *normalized_depth,
     ID3D11ShaderResourceView *depth_frame_state,
@@ -1070,7 +1406,6 @@ namespace models {
     return pimpl_ &&
            pimpl_->resolve(
              source_frame_id,
-             roi_rgb_tensor,
              raw_depth,
              normalized_depth,
              depth_frame_state,
@@ -1084,4 +1419,25 @@ namespace models {
     return pimpl_ ? pimpl_->make_snapshot() :
                     scene_controller_gpu_snapshot {};
   }
+
+#ifdef SUNSHINE_TESTS
+  void sbs_scene_controller_gpu::set_next_reset_flags_for_testing(
+    std::uint32_t reset_flags
+  ) {
+    if (pimpl_) {
+      pimpl_->reset_flags_override_for_testing = reset_flags;
+      pimpl_->reset_override_pending_for_testing = true;
+    }
+  }
+
+  void sbs_scene_controller_gpu::set_next_elapsed_seconds_for_testing(
+    float elapsed_seconds
+  ) {
+    if (pimpl_) {
+      pimpl_->elapsed_seconds_override_for_testing =
+        std::clamp(elapsed_seconds, 0.0f, 1.0f);
+      pimpl_->elapsed_override_pending_for_testing = true;
+    }
+  }
+#endif
 }  // namespace models

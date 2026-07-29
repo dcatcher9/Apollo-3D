@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "sbs_scene_controller",
   "rule_revision": "rules_v1",
-  "ordered_abi_hash": "f993ea2ca343de0ea7a7337cab31f150d3f9c52c62725a4cc31189f385b0c73b",
+  "ordered_abi_hash": "e405c8452d74ff77c37cb096c15bd764555b6b7c509bf3651d10836958e82fde",
   "abi_hash_algorithm": "sha256-canonical-json-without-ordered_abi_hash",
   "dimensions": [
     {"name": "appearance_canvas_size", "value": 256},
@@ -25,12 +25,11 @@
   "inputs": [
     {"index": 0, "name": "scene_rgb", "type": "float32", "shape": [1, 3, 256, 256]},
     {"index": 1, "name": "analysis_grid", "type": "float32", "shape": [1, 10, 128, 128]},
-    {"index": 2, "name": "roi_rgb_tensor", "type": "float32", "shape": [1, 3, "Hd", "Wd"]},
-    {"index": 3, "name": "roi_depth_raw", "type": "float32", "shape": [1, 1, "Hd", "Wd"]},
-    {"index": 4, "name": "layout_history", "type": "float32", "shape": [1, 12, 128, 128]},
-    {"index": 5, "name": "depth_history", "type": "float32", "shape": [1, 10, 128, 128]},
-    {"index": 6, "name": "hidden_in", "type": "float32", "shape": [1, 24, 32, 32]},
-    {"index": 7, "name": "meta", "type": "float32", "shape": [1, 32]}
+    {"index": 2, "name": "roi_depth_raw", "type": "float32", "shape": [1, 1, "Hd", "Wd"]},
+    {"index": 3, "name": "layout_history", "type": "float32", "shape": [1, 12, 128, 128]},
+    {"index": 4, "name": "depth_history", "type": "float32", "shape": [1, 10, 128, 128]},
+    {"index": 5, "name": "hidden_in", "type": "float32", "shape": [1, 24, 32, 32]},
+    {"index": 6, "name": "meta", "type": "float32", "shape": [1, 32]}
   ],
   "outputs": [
     {"index": 0, "name": "dense_out", "type": "float32", "shape": [1, 14, 128, 128]},
@@ -238,7 +237,7 @@
     {"index": 57, "name": "promotion_flags", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0.0},
     {"index": 58, "name": "history_flags", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0.0},
     {"index": 59, "name": "diagnostic_flags", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0.0},
-    {"index": 60, "name": "last_external_cut_count", "type": "float32", "gpu_encoding": "uint_valued_float", "initial": 0.0},
+    {"index": 60, "name": "last_external_cut_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0.0},
     {"index": 61, "name": "reserved_1", "type": "float32", "gpu_encoding": "float", "initial": 0.0, "required_zero": true},
     {"index": 62, "name": "reserved_2", "type": "float32", "gpu_encoding": "float", "initial": 0.0, "required_zero": true},
     {"index": 63, "name": "reserved_3", "type": "float32", "gpu_encoding": "float", "initial": 0.0, "required_zero": true}

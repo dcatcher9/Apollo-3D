@@ -5,8 +5,7 @@ StructuredBuffer<float> PreviousDepthHistory : register(t3);
 StructuredBuffer<float4> DepthFrameState : register(t4);
 StructuredBuffer<uint4> PreviousRuleState : register(t5);
 StructuredBuffer<float> RawDepth : register(t6);
-StructuredBuffer<float> RoiRgbTensor : register(t7);
-StructuredBuffer<float4> AdaptiveState : register(t8);
+StructuredBuffer<float4> AdaptiveState : register(t7);
 
 RWStructuredBuffer<float> DenseOutput : register(u0);
 RWStructuredBuffer<float> NextLayoutHistory : register(u1);
@@ -78,22 +77,6 @@ float LoadRawDepth(float2 viewport_uv, out bool valid) {
     float value = RawDepth[pixel.y * dimensions.x + pixel.x];
     valid = !isnan(value) && !isinf(value) && value >= 0.0f;
     return valid ? value : 0.0f;
-}
-
-bool RoiRgbTensorValid(float2 viewport_uv) {
-    uint2 dimensions = uint2(
-        max(scene_depth_width, 1u),
-        max(scene_depth_height, 1u));
-    uint2 pixel = min(
-        uint2(saturate(viewport_uv) * float2(dimensions)),
-        dimensions - 1u);
-    uint plane = dimensions.x * dimensions.y;
-    uint index = pixel.y * dimensions.x + pixel.x;
-    float3 value = float3(
-        RoiRgbTensor[index],
-        RoiRgbTensor[index + plane],
-        RoiRgbTensor[index + 2u * plane]);
-    return !any(isnan(value)) && !any(isinf(value));
 }
 
 float LoadCurrentSignature(int2 cell) {
@@ -181,16 +164,15 @@ void WriteMeta(bool depth_resources_ready) {
         abs(scene_zero_plane_mode - 2.0f) < 0.5f ? 1.0f : 0.0f;
     Meta[SBS_SCENE_META_ZERO_PLANE_BACKGROUND_ALLOWED] =
         scene_zero_plane_mode > 2.5f ? 1.0f : 0.0f;
-    float current_external_cut_count =
+    uint current_external_cut_count = asuint(
         SBS_STATE_EXTERNAL_CUT_COUNT(
-            AdaptiveState[SBS_STATE_VECTOR_EXTERNAL_CUT_COUNT]);
-    float previous_external_cut_count =
-        RuleStateWord(
+            AdaptiveState[SBS_STATE_VECTOR_EXTERNAL_CUT_COUNT]));
+    uint previous_external_cut_count =
+        RuleStateUint(
             SBS_SCENE_RULE_STATE_WORD_LAST_EXTERNAL_CUT_COUNT);
     Meta[SBS_SCENE_META_EXTERNAL_CUT_REQUEST] =
-        isfinite(current_external_cut_count) &&
-        current_external_cut_count >
-            previous_external_cut_count + 0.5f ?
+        effective_reset_flags == 0u &&
+        current_external_cut_count > previous_external_cut_count ?
                 1.0f :
                 0.0f;
     Meta[SBS_SCENE_META_SCENE_AGE] = saturate(
@@ -220,7 +202,6 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         1.0f.xx);
     bool raw_depth_valid = false;
     LoadRawDepth(viewport_uv, raw_depth_valid);
-    bool roi_rgb_valid = RoiRgbTensorValid(viewport_uv);
     bool normalized_depth_valid =
         NormalizedDepthValid(viewport_uv) &&
         NormalizedDepthValid(viewport_uv + float2(depth_texel.x, 0.0f)) &&
@@ -228,8 +209,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         NormalizedDepthValid(viewport_uv + float2(0.0f, depth_texel.y)) &&
         NormalizedDepthValid(viewport_uv - float2(0.0f, depth_texel.y));
     bool depth_valid =
-        viewport_valid && raw_depth_valid && roi_rgb_valid &&
-        normalized_depth_valid &&
+        viewport_valid && raw_depth_valid && normalized_depth_valid &&
         frame_state > 0.5f &&
         scene_depth_width > 0u && scene_depth_height > 0u;
 
