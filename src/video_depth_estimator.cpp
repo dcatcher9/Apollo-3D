@@ -1700,7 +1700,13 @@ namespace models {
     CUgraphicsResource cuda_out_res = nullptr;
     bool has_previous_frame = false;
     std::uint64_t pending_frame_id = 0;
+    bool disable_after_pending_drop = false;
+    // The two identities keep the just-completed GPU bank owned while the next accepted
+    // inference uses the other bank. Coordinates, ROI generation, flags, and reset debt never
+    // become CPU authority.
+    frame_roi_transform_buffer roi_transform_slots;
     bool stream_error_logged = false;
+    bool roi_transform_error_logged = false;
     bool scene_controller_error_logged = false;
     bool readiness_preflighted = false;  // can_accept_frame() already counted/queried this source opportunity
     bool depth_context_pooled = false;  // context reused from the pool (modules already loaded -> skip warmup)
@@ -2141,7 +2147,9 @@ namespace models {
       std::uint64_t completed_frame_id = 0,
       bool inference_enqueued = false,
       bool raw_snapshot_valid = false,
-      bool model_input_snapshot_valid = false
+      bool model_input_snapshot_valid = false,
+      bool completion_dropped = false,
+      std::uint64_t dropped_frame_id = 0
     ) {
       estimate_result r;
       r.depth = output_srv();
@@ -2161,6 +2169,20 @@ namespace models {
       r.completed_frame_id = completed_frame_id;
       r.inference_enqueued = inference_enqueued;
       r.cuda_graph_active = inference_graph_exec != nullptr && !graph_capture_failed;
+      r.completion_dropped = completion_dropped;
+      r.dropped_frame_id = dropped_frame_id;
+      if (completed_frame_valid) {
+        if (const auto *transform =
+              roi_transform_slots.completed_for(completed_frame_id)) {
+          r.completed_roi_transform_identity = *transform;
+        }
+      }
+      if (inference_enqueued) {
+        if (const auto *transform =
+              roi_transform_slots.pending_for(pending_frame_id)) {
+          r.enqueued_roi_transform_identity = *transform;
+        }
+      }
       if (scene_controller) {
         const auto controller = scene_controller->snapshot();
         r.scene_controller_scene_rgb = controller.scene_rgb;
@@ -2179,6 +2201,61 @@ namespace models {
         r.scene_controller_shadow = controller.shadow;
       }
       return r;
+    }
+
+    /**
+     * Promote the exact pending ROI ownership before any normalization/history shader can consume
+     * the raw output. Returning nullopt is a hard fail-closed decision for that completion.
+     */
+    std::optional<frame_roi_transform_identity> claim_roi_completion(
+      std::uint64_t source_frame_id
+    ) {
+      const auto *pending = roi_transform_slots.pending_for(source_frame_id);
+      if (!pending) {
+        return std::nullopt;
+      }
+      const auto identity = *pending;
+      if (!roi_transform_slots.complete(identity)) {
+        return std::nullopt;
+      }
+      return identity;
+    }
+
+    void drop_roi_completion(
+      std::uint64_t source_frame_id,
+      std::string_view reason
+    ) {
+      if (!roi_transform_slots.drop_in_flight(source_frame_id)) {
+        // A corrupt/missing state must not retain a bank and starve every later submission.
+        roi_transform_slots.abandon_in_flight();
+      }
+      if (!roi_transform_error_logged) {
+        BOOST_LOG(error)
+          << "Depth estimator dropped frame " << source_frame_id
+          << " before normalization because " << reason
+          << "; the last valid depth remains authoritative.";
+        roi_transform_error_logged = true;
+      }
+    }
+
+    std::optional<std::uint64_t> abandon_pending_after_cuda_error(
+      std::string_view reason
+    ) {
+      std::optional<std::uint64_t> dropped;
+      if (has_previous_frame) {
+        dropped = pending_frame_id;
+      }
+      roi_transform_slots.abandon_in_flight();
+      has_previous_frame = false;
+      disable_after_pending_drop = false;
+      valid = false;
+      if (!stream_error_logged) {
+        BOOST_LOG(error)
+          << "Depth estimator abandoned its pending inference after " << reason
+          << "; the estimator is disabled for this session.";
+        stream_error_logged = true;
+      }
+      return dropped;
     }
 
     bool snapshot_buffer(
@@ -2237,12 +2314,40 @@ namespace models {
         return make_result();
       }
       if (cuda_ctx) {
-        cuda.cuCtxSetCurrent(cuda_ctx);
+        const auto set_current = cuda.cuCtxSetCurrent(cuda_ctx);
+        if (set_current != CUDA_SUCCESS) {
+          BOOST_LOG(error)
+            << "cuCtxSetCurrent failed while finishing depth: "
+            << set_current;
+          const auto dropped =
+            abandon_pending_after_cuda_error(
+              "cuCtxSetCurrent failed while finishing depth"
+            );
+          return make_result(
+            false,
+            0,
+            false,
+            false,
+            false,
+            dropped.has_value(),
+            dropped.value_or(0)
+          );
+        }
       }
       CUresult sync = cuda.cuStreamSynchronize(cu_stream);
       if (sync != CUDA_SUCCESS) {
         BOOST_LOG(error) << "Depth synchronization failed: " << sync;
-        return make_result();
+        const auto dropped =
+          abandon_pending_after_cuda_error("cuStreamSynchronize failed");
+        return make_result(
+          false,
+          0,
+          false,
+          false,
+          false,
+          dropped.has_value(),
+          dropped.value_or(0)
+        );
       }
       if (diagnostics_enabled) {
         perf_drain(perf_depth);
@@ -2251,12 +2356,36 @@ namespace models {
       if (!cbuffer) {
         return {};
       }
+      const auto completed_frame_id = pending_frame_id;
+      const bool explicitly_orphaned =
+        roi_transform_slots.orphaned_for(completed_frame_id);
+      const auto completed_roi_identity =
+        claim_roi_completion(completed_frame_id);
+      if (!completed_roi_identity) {
+        drop_roi_completion(
+          completed_frame_id,
+          "its exact pending ROI-transform identity was absent or mismatched"
+        );
+        has_previous_frame = false;
+        if (disable_after_pending_drop || !explicitly_orphaned) {
+          disable_after_pending_drop = false;
+          valid = false;
+        }
+        return make_result(
+          false,
+          0,
+          false,
+          false,
+          false,
+          true,
+          completed_frame_id
+        );
+      }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
       normalize_depth_output(d3d_timer);
       mark_d3d_post_end(d3d_timer);
       mark_d3d_pre_start(d3d_timer);
       end_d3d_perf(d3d_timer);
-      const auto completed_frame_id = pending_frame_id;
       has_previous_frame = false;  // the output buffer has been consumed; never fold it twice
       return make_result(true, completed_frame_id);
     }
@@ -2545,10 +2674,9 @@ namespace models {
         return false;
       }
       if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
-        if (!stream_error_logged) {
-          BOOST_LOG(error) << "cuCtxSetCurrent failed during depth readiness preflight.";
-          stream_error_logged = true;
-        }
+        abandon_pending_after_cuda_error(
+          "cuCtxSetCurrent failed during depth readiness preflight"
+        );
         return false;
       }
 
@@ -2564,10 +2692,11 @@ namespace models {
         return false;
       }
       if (query != CUDA_SUCCESS) {
-        if (!stream_error_logged) {
-          BOOST_LOG(error) << "cuStreamQuery failed during depth readiness preflight: " << query;
-          stream_error_logged = true;
-        }
+        BOOST_LOG(error)
+          << "cuStreamQuery failed during depth readiness preflight: " << query;
+        abandon_pending_after_cuda_error(
+          "cuStreamQuery returned a terminal error during readiness preflight"
+        );
         readiness_preflighted = false;
         return false;
       }
@@ -2586,6 +2715,8 @@ namespace models {
       }
       bool completed_frame_valid = false;
       std::uint64_t completed_frame_id = 0;
+      bool completion_dropped = false;
+      std::uint64_t dropped_frame_id = 0;
       bool raw_snapshot_valid = false;
       bool model_input_snapshot_valid = false;
       bool scene_controller_prepared = false;
@@ -2597,7 +2728,25 @@ namespace models {
       }
 
       if (cuda_ctx) {
-        cuda.cuCtxSetCurrent(cuda_ctx);
+        const auto set_current = cuda.cuCtxSetCurrent(cuda_ctx);
+        if (set_current != CUDA_SUCCESS) {
+          BOOST_LOG(error)
+            << "cuCtxSetCurrent failed during depth estimation: "
+            << set_current;
+          const auto dropped =
+            abandon_pending_after_cuda_error(
+              "cuCtxSetCurrent failed during depth estimation"
+            );
+          return make_result(
+            false,
+            0,
+            false,
+            false,
+            false,
+            dropped.has_value(),
+            dropped.value_or(0)
+          );
+        }
       }
 
       // Production preflights before its expensive full-resolution color copy. The evaluator and
@@ -2628,7 +2777,19 @@ namespace models {
           stream_error_logged = true;
         }
         if (q != CUDA_SUCCESS) {
-          return make_result();
+          const auto dropped =
+            abandon_pending_after_cuda_error(
+              "cuStreamQuery returned a terminal error"
+            );
+          return make_result(
+            false,
+            0,
+            false,
+            false,
+            false,
+            dropped.has_value(),
+            dropped.value_or(0)
+          );
         }
       }
 
@@ -2843,14 +3004,40 @@ namespace models {
         return {};
       }
 
+      std::optional<frame_roi_transform_identity> completed_roi_identity;
+      if (has_previous_frame) {
+        completed_frame_id = pending_frame_id;
+        const bool explicitly_orphaned =
+          roi_transform_slots.orphaned_for(completed_frame_id);
+        completed_roi_identity =
+          claim_roi_completion(completed_frame_id);
+        if (!completed_roi_identity) {
+          drop_roi_completion(
+            completed_frame_id,
+            "its exact pending ROI-transform identity was absent or mismatched"
+          );
+          completion_dropped = true;
+          dropped_frame_id = completed_frame_id;
+          // A known post-accept orphan can recover after being drained. Any other ownership
+          // mismatch is internal corruption, so stop before reusing either bank.
+          disable_after_pending_drop =
+            disable_after_pending_drop || !explicitly_orphaned;
+        }
+        // The raw output is consumed exactly once whether it is normalized or dropped.
+        has_previous_frame = false;
+      }
+
       auto *d3d_timer = diagnostics_enabled ?
-                          begin_d3d_perf(has_previous_frame, true) :
+                          begin_d3d_perf(
+                            completed_roi_identity.has_value(),
+                            true
+                          ) :
                           nullptr;
 
       // tensor_out_buf holds the finished raw disparity from the previous asynchronous submit
       // (fully unmapped from CUDA), so consuming it here never blocks the encode thread. The
       // caller uses completed_frame_id to select the color slot that produced this exact result.
-      if (has_previous_frame) {
+      if (completed_roi_identity) {
         normalize_depth_output(d3d_timer);
         // Production post-process timing ends at the normalized depth result. The two stable
         // Dump 3D copies below are explicit diagnostic work and must not contaminate live
@@ -2876,15 +3063,83 @@ namespace models {
             "model-input"
           );
         }
-        completed_frame_id = pending_frame_id;
         completed_frame_valid = true;
-        has_previous_frame = false;
         if (diagnostics_enabled) {
           throughput_stats_completions++;
         }
       } else {
         mark_d3d_post_end(d3d_timer);
       }
+
+      if (completion_dropped && disable_after_pending_drop) {
+        disable_after_pending_drop = false;
+        valid = false;
+        mark_d3d_pre_start(d3d_timer);
+        end_d3d_perf(d3d_timer);
+        return make_result(
+          false,
+          0,
+          false,
+          false,
+          false,
+          true,
+          dropped_frame_id
+        );
+      }
+
+      // ROI geometry/generation will be written into the selected GPU bank by the controller.
+      // Reserve the bank and its monotonic version before dispatch so GPU contents can carry the
+      // exact accepted-enqueue identity. A failed submission rolls this reservation back without
+      // touching the previously completed bank.
+      std::uint32_t roi_backend_generation = 0;
+      if (scene_controller) {
+        roi_backend_generation =
+          scene_controller->snapshot().backend_generation;
+      }
+      std::optional<frame_roi_transform_identity> reserved_roi_transform;
+      if (const auto writable_bank = roi_transform_slots.writable_bank()) {
+        reserved_roi_transform = roi_transform_slots.reserve(
+          make_frame_roi_transform_identity(
+            frame_id,
+            input_desc.Width,
+            input_desc.Height,
+            static_cast<std::uint32_t>(target_w),
+            static_cast<std::uint32_t>(target_h),
+            roi_backend_generation,
+            *writable_bank
+          )
+        );
+      }
+      if (!reserved_roi_transform) {
+        if (!roi_transform_error_logged) {
+          BOOST_LOG(error)
+            << "Depth estimator could not reserve a frame-owned ROI transform bank for frame "
+            << frame_id << "; inference was not submitted.";
+          roi_transform_error_logged = true;
+        }
+        mark_d3d_pre_start(d3d_timer);
+        end_d3d_perf(d3d_timer);
+        return make_result(
+          completed_frame_valid,
+          completed_frame_id,
+          false,
+          raw_snapshot_valid,
+          model_input_snapshot_valid,
+          completion_dropped,
+          dropped_frame_id
+        );
+      }
+      const auto rollback_roi_reservation = [&]() {
+        if (!roi_transform_slots.rollback_reserved(*reserved_roi_transform)) {
+          roi_transform_slots.abandon_in_flight();
+          if (!roi_transform_error_logged) {
+            BOOST_LOG(error)
+              << "Depth estimator could not roll back the unaccepted ROI transform for frame "
+              << frame_id << "; all in-flight ROI ownership was discarded.";
+            roi_transform_error_logged = true;
+          }
+        }
+      };
 
       // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
       mark_d3d_pre_start(d3d_timer);
@@ -2934,6 +3189,7 @@ namespace models {
       auto map_res = cuda.cuGraphicsMapResources(2, resources, cu_stream);
       if (map_res != 0) {
         BOOST_LOG(error) << "cuGraphicsMapResources failed: " << map_res;
+        rollback_roi_reservation();
         if (scene_controller && scene_controller_prepared) {
           scene_controller->discard_prepared(frame_id);
         }
@@ -2942,7 +3198,9 @@ namespace models {
           completed_frame_id,
           false,
           raw_snapshot_valid,
-          model_input_snapshot_valid
+          model_input_snapshot_valid,
+          completion_dropped,
+          dropped_frame_id
         );
       }
 
@@ -2973,6 +3231,17 @@ namespace models {
         bindings_ok = bindings_ok &&
                       exec_context->setTensorAddress("pixel_values", (void *) d_in) &&
                       exec_context->setTensorAddress("predicted_depth", (void *) d_out);
+        // The versioned ownership reservation was made before GPU preprocessing. Verify that exact
+        // reservation is still live before TensorRT can accept work for its bank.
+        const bool roi_transform_ready =
+          roi_transform_slots.is_reserved(*reserved_roi_transform);
+        if (!roi_transform_ready && !roi_transform_error_logged) {
+          BOOST_LOG(error)
+            << "Depth estimator has no valid frame-owned ROI transform slot for frame "
+            << frame_id << "; inference was not submitted.";
+          roi_transform_error_logged = true;
+        }
+        bindings_ok = bindings_ok && roi_transform_ready;
         if (bindings_ok) {
           // Serialize TensorRT async enqueue to avoid driver-level concurrent execution faults
           std::lock_guard<std::mutex> lock(*trt_mutex);
@@ -2992,17 +3261,52 @@ namespace models {
         }
       }
 
-      auto unmap_res = cuda.cuGraphicsUnmapResources(2, resources, cu_stream);
-      if (unmap_res != CUDA_SUCCESS) {
+      const bool inference_accepted = enqueued;
+      const auto unmap_res =
+        cuda.cuGraphicsUnmapResources(2, resources, cu_stream);
+      const bool unmap_succeeded = unmap_res == CUDA_SUCCESS;
+      if (!unmap_succeeded) {
         BOOST_LOG(error) << "cuGraphicsUnmapResources failed: " << unmap_res;
-        enqueued = false;
       }
 
-      has_previous_frame = enqueued;
-      if (enqueued) {
+      bool roi_ownership_pending = false;
+      if (inference_accepted && unmap_succeeded) {
+        roi_ownership_pending =
+          roi_transform_slots.commit_reserved_enqueued(
+            *reserved_roi_transform
+          );
+        if (!roi_ownership_pending) {
+          // TensorRT accepted the work, so it cannot be rolled back. Preserve only its frame
+          // identity and drop the eventual output before normalization.
+          roi_transform_slots.orphan_reserved_enqueued(frame_id);
+          if (!roi_transform_error_logged) {
+            BOOST_LOG(error)
+              << "Depth estimator could not transition the accepted ROI reservation for frame "
+              << frame_id << "; its output will be consumed and dropped.";
+            roi_transform_error_logged = true;
+          }
+        }
+      } else if (inference_accepted) {
+        // The CUDA work may still execute even though interop unmap failed. Do not claim a valid
+        // GPU transform; consume/drop it if the stream reaches completion, then disable this
+        // estimator before either interop resource can be reused.
+        roi_transform_slots.orphan_reserved_enqueued(frame_id);
+        disable_after_pending_drop = true;
+      } else {
+        rollback_roi_reservation();
+      }
+
+      has_previous_frame = inference_accepted;
+      if (inference_accepted) {
         pending_frame_id = frame_id;
-        if (scene_controller && scene_controller_prepared) {
+        if (
+          roi_ownership_pending &&
+          scene_controller &&
+          scene_controller_prepared
+        ) {
           scene_controller->mark_enqueued(frame_id);
+        } else if (scene_controller && scene_controller_prepared) {
+          scene_controller->discard_prepared(frame_id);
         }
         if (diagnostics_enabled) {
           throughput_stats_enqueues++;
@@ -3014,9 +3318,11 @@ namespace models {
       return make_result(
         completed_frame_valid,
         completed_frame_id,
-        enqueued,
+        inference_accepted,
         raw_snapshot_valid,
-        model_input_snapshot_valid
+        model_input_snapshot_valid,
+        completion_dropped,
+        dropped_frame_id
       );
     }
   };

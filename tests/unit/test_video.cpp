@@ -15,6 +15,7 @@
 #include <src/nvenc/nvenc_config.h>
 #include <src/generated/sbs_adaptive_state_contract.h>
 #include <src/generated/sbs_scene_controller_contract.h>
+#include <src/sbs_frame_roi_transform.h>
 #include <src/video.h>
 #include <src/video_colorspace.h>
 #include <tuple>
@@ -379,6 +380,299 @@ namespace {
     );
   }
 }  // namespace
+
+TEST(FrameRoiTransformTest, CandidateContainsOwnershipOnly) {
+  const auto candidate = models::make_frame_roi_transform_identity(
+    41,
+    3840,
+    2160,
+    770,
+    434,
+    3,
+    0
+  );
+
+  EXPECT_TRUE(candidate.is_valid_candidate());
+  EXPECT_FALSE(candidate.is_committed());
+  EXPECT_EQ(candidate.transform_version, 0u);
+  EXPECT_EQ(candidate.source_frame_id, 41u);
+  EXPECT_EQ(candidate.backend_generation, 3u);
+  EXPECT_EQ(candidate.gpu_bank_index, 0u);
+
+  auto invalid = candidate;
+  invalid.source_width = 0;
+  EXPECT_FALSE(invalid.is_valid_candidate());
+  invalid = candidate;
+  invalid.model_width = 768;
+  EXPECT_FALSE(invalid.is_valid_candidate());
+  invalid = candidate;
+  invalid.gpu_bank_index = models::frame_roi_transform_bank_count;
+  EXPECT_FALSE(invalid.is_valid_candidate());
+}
+
+TEST(FrameRoiTransformTest, TwoSlotsPreserveCompletedAndPendingFrameOwnership) {
+  models::frame_roi_transform_buffer transforms;
+  ASSERT_EQ(transforms.writable_bank(), 0u);
+  const auto frame_0_candidate = models::make_frame_roi_transform_identity(
+    0,
+    1920,
+    1080,
+    770,
+    434,
+    1,
+    *transforms.writable_bank()
+  );
+
+  // Frame ID zero is a valid identity. Reserving assigns its version before GPU dispatch but
+  // changes neither completed nor pending ownership.
+  const auto frame_0 = transforms.reserve(frame_0_candidate);
+  ASSERT_TRUE(frame_0.has_value());
+  EXPECT_TRUE(frame_0->is_committed());
+  EXPECT_EQ(frame_0->source_frame_id, 0u);
+  EXPECT_EQ(frame_0->transform_version, 1u);
+  EXPECT_TRUE(transforms.is_reserved(*frame_0));
+  EXPECT_TRUE(transforms.has_reserved());
+  EXPECT_FALSE(transforms.has_pending());
+  EXPECT_EQ(transforms.pending_for(0), nullptr);
+  EXPECT_EQ(transforms.completed_for(0), nullptr);
+  EXPECT_FALSE(transforms.writable_bank().has_value());
+
+  ASSERT_TRUE(transforms.commit_reserved_enqueued(*frame_0));
+  EXPECT_FALSE(transforms.has_reserved());
+  ASSERT_TRUE(transforms.has_pending());
+  const auto *pending_0 = transforms.pending_for(0);
+  ASSERT_NE(pending_0, nullptr);
+  EXPECT_EQ(pending_0->transform_version, 1u);
+  EXPECT_EQ(transforms.pending_bank(), 0u);
+  ASSERT_TRUE(transforms.complete(*pending_0));
+  const auto *completed_0 = transforms.completed_for(0);
+  ASSERT_NE(completed_0, nullptr);
+  EXPECT_EQ(completed_0->source_frame_id, 0u);
+  EXPECT_EQ(transforms.completed_bank(), 0u);
+  EXPECT_FALSE(transforms.has_pending());
+
+  ASSERT_EQ(transforms.writable_bank(), 1u);
+  const auto frame_1 = transforms.reserve(
+    models::make_frame_roi_transform_identity(
+      1,
+      1920,
+      1080,
+      756,
+      448,
+      2,
+      *transforms.writable_bank()
+    )
+  );
+  ASSERT_TRUE(frame_1.has_value());
+  EXPECT_EQ(frame_1->transform_version, 2u);
+  EXPECT_EQ(frame_1->backend_generation, 2u);
+  EXPECT_EQ(frame_1->gpu_bank_index, 1u);
+  EXPECT_EQ(frame_1->model_width, 756u);
+  EXPECT_EQ(frame_1->model_height, 448u);
+  // The prior completed slot survives both reservation and the next accepted inference.
+  ASSERT_NE(transforms.completed_for(0), nullptr);
+  ASSERT_TRUE(transforms.commit_reserved_enqueued(*frame_1));
+  ASSERT_NE(transforms.completed_for(0), nullptr);
+  ASSERT_NE(transforms.pending_for(1), nullptr);
+  ASSERT_TRUE(transforms.complete(*transforms.pending_for(1)));
+  EXPECT_EQ(transforms.completed_for(0), nullptr);
+  ASSERT_NE(transforms.completed_for(1), nullptr);
+  EXPECT_EQ(transforms.completed_for(1)->transform_version, 2u);
+}
+
+TEST(FrameRoiTransformTest, RejectedSubmissionRollsBackWithoutReusingVersion) {
+  models::frame_roi_transform_buffer transforms;
+  auto rejected = transforms.reserve(
+    models::make_frame_roi_transform_identity(
+      7,
+      1920,
+      1080,
+      770,
+      434,
+      1,
+      *transforms.writable_bank()
+    )
+  );
+  ASSERT_TRUE(rejected.has_value());
+  ASSERT_EQ(rejected->transform_version, 1u);
+  ASSERT_TRUE(transforms.rollback_reserved(*rejected));
+  EXPECT_FALSE(transforms.has_reserved());
+  EXPECT_FALSE(transforms.has_pending());
+  ASSERT_EQ(transforms.writable_bank(), rejected->gpu_bank_index);
+
+  const auto accepted = transforms.reserve(
+    models::make_frame_roi_transform_identity(
+      8,
+      1920,
+      1080,
+      770,
+      434,
+      1,
+      *transforms.writable_bank()
+    )
+  );
+  ASSERT_TRUE(accepted.has_value());
+  // A rejected version is never recycled onto possibly stale GPU contents.
+  EXPECT_EQ(accepted->transform_version, 2u);
+  ASSERT_TRUE(transforms.commit_reserved_enqueued(*accepted));
+  ASSERT_TRUE(transforms.complete(*transforms.pending_for(8)));
+  EXPECT_NE(transforms.completed_for(8), nullptr);
+}
+
+TEST(FrameRoiTransformTest, AcceptedOwnershipFailureBecomesExplicitDroppedOrphan) {
+  models::frame_roi_transform_buffer transforms;
+  auto first = transforms.reserve(
+    models::make_frame_roi_transform_identity(
+      20,
+      1920,
+      1080,
+      770,
+      434,
+      1,
+      *transforms.writable_bank()
+    )
+  );
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(transforms.commit_reserved_enqueued(*first));
+  ASSERT_TRUE(transforms.complete(*transforms.pending_for(20)));
+
+  const auto orphan = transforms.reserve(
+    models::make_frame_roi_transform_identity(
+      0,
+      1920,
+      1080,
+      770,
+      434,
+      2,
+      *transforms.writable_bank()
+    )
+  );
+  ASSERT_TRUE(orphan.has_value());
+  transforms.orphan_reserved_enqueued(0);
+  EXPECT_FALSE(transforms.has_reserved());
+  EXPECT_FALSE(transforms.has_pending());
+  EXPECT_TRUE(transforms.has_orphaned());
+  EXPECT_TRUE(transforms.orphaned_for(0));
+  EXPECT_FALSE(transforms.writable_bank().has_value());
+  // Orphaning never disturbs the last completed bank.
+  EXPECT_NE(transforms.completed_for(20), nullptr);
+  EXPECT_FALSE(transforms.drop_in_flight(1));
+  ASSERT_TRUE(transforms.drop_in_flight(0));
+  EXPECT_FALSE(transforms.has_orphaned());
+  EXPECT_TRUE(transforms.writable_bank().has_value());
+  EXPECT_NE(transforms.completed_for(20), nullptr);
+}
+
+TEST(FrameRoiTransformTest, MismatchedIdentityCannotTransitionOrComplete) {
+  models::frame_roi_transform_buffer transforms;
+  const auto reserved = transforms.reserve(
+    models::make_frame_roi_transform_identity(
+      100,
+      1920,
+      1080,
+      770,
+      434,
+      4,
+      *transforms.writable_bank()
+    )
+  );
+  ASSERT_TRUE(reserved.has_value());
+  auto wrong_generation = *reserved;
+  ++wrong_generation.backend_generation;
+  EXPECT_FALSE(transforms.commit_reserved_enqueued(wrong_generation));
+  EXPECT_FALSE(transforms.rollback_reserved(wrong_generation));
+  EXPECT_TRUE(transforms.is_reserved(*reserved));
+
+  ASSERT_TRUE(transforms.commit_reserved_enqueued(*reserved));
+  auto wrong_version = *reserved;
+  ++wrong_version.transform_version;
+  EXPECT_FALSE(transforms.complete(wrong_version));
+  EXPECT_NE(transforms.pending_for(100), nullptr);
+  ASSERT_TRUE(transforms.drop_in_flight(100));
+  EXPECT_FALSE(transforms.has_pending());
+}
+
+TEST(FrameRoiTransformTest, TerminalAbandonPreservesOnlyLastCompletedBank) {
+  models::frame_roi_transform_buffer transforms;
+  const auto completed = transforms.reserve(
+    models::make_frame_roi_transform_identity(
+      30,
+      1920,
+      1080,
+      770,
+      434,
+      1,
+      *transforms.writable_bank()
+    )
+  );
+  ASSERT_TRUE(completed.has_value());
+  ASSERT_TRUE(transforms.commit_reserved_enqueued(*completed));
+  ASSERT_TRUE(transforms.complete(*transforms.pending_for(30)));
+
+  const auto pending = transforms.reserve(
+    models::make_frame_roi_transform_identity(
+      31,
+      1920,
+      1080,
+      770,
+      434,
+      2,
+      *transforms.writable_bank()
+    )
+  );
+  ASSERT_TRUE(pending.has_value());
+  ASSERT_TRUE(transforms.commit_reserved_enqueued(*pending));
+  transforms.abandon_in_flight();
+  EXPECT_FALSE(transforms.has_reserved());
+  EXPECT_FALSE(transforms.has_pending());
+  EXPECT_FALSE(transforms.has_orphaned());
+  EXPECT_EQ(transforms.pending_for(31), nullptr);
+  EXPECT_NE(transforms.completed_for(30), nullptr);
+  EXPECT_TRUE(transforms.writable_bank().has_value());
+}
+
+TEST(FrameRoiTransformTest, PreparingAnotherCandidateCannotOverwriteCompleted) {
+  models::frame_roi_transform_buffer transforms;
+  const auto first = transforms.reserve(
+    models::make_frame_roi_transform_identity(
+      100,
+      1920,
+      1080,
+      770,
+      434,
+      1,
+      *transforms.writable_bank()
+    )
+  );
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(transforms.commit_reserved_enqueued(*first));
+  ASSERT_TRUE(transforms.complete(*transforms.pending_for(100)));
+
+  const auto next = transforms.reserve(
+    models::make_frame_roi_transform_identity(
+      101,
+      1920,
+      1080,
+      770,
+      434,
+      2,
+      *transforms.writable_bank()
+    )
+  );
+  ASSERT_TRUE(next.has_value());
+  EXPECT_NE(next->gpu_bank_index, first->gpu_bank_index);
+  EXPECT_NE(transforms.completed_for(100), nullptr);
+  EXPECT_FALSE(transforms.reserve(models::make_frame_roi_transform_identity(
+    102,
+    1920,
+    1080,
+    770,
+    434,
+    2,
+    0
+  )).has_value());
+  EXPECT_NE(transforms.completed_for(100), nullptr);
+}
 
 #ifdef _WIN32
 TEST(DirectxShaderTest, CompilesAllColorShaderVariants) {

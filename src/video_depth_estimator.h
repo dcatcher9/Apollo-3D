@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config.h"
+#include "sbs_frame_roi_transform.h"
 
 #include <cstdint>
 #include <d3d11.h>
@@ -65,6 +66,17 @@ namespace models {
     std::uint64_t completed_frame_id = 0;  ///< Caller-provided identity of that completed result.
     bool inference_enqueued = false;  ///< This call submitted inference for the supplied input frame.
     bool cuda_graph_active = false;  ///< TensorRT enqueue is currently replaying a captured graph.
+    // Exact inference-transform ownership. ROI geometry/generation remains in the paired GPU
+    // bank; these identities only bind that bank to a frame, model shape, backend, and accepted
+    // enqueue version. An identity is present only when its source_frame_id matches the
+    // corresponding completed/enqueued frame.
+    std::optional<frame_roi_transform_identity> completed_roi_transform_identity;
+    std::optional<frame_roi_transform_identity> enqueued_roi_transform_identity;
+    // An accepted inference was consumed without normalization because exact ROI-transform
+    // ownership could not be proven. Callers use this identity to retire its matched color slot
+    // while repeating the last valid SBS output.
+    bool completion_dropped = false;
+    std::uint64_t dropped_frame_id = 0;
     std::uint64_t scene_controller_frame_id = 0;
     std::uint32_t scene_controller_backend_generation = 0;
     bool scene_controller_snapshot_available = false;
