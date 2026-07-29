@@ -9,6 +9,7 @@
 #include "generated/sbs_adaptive_state_contract.h"
 #include "offline_sbs_contract.h"
 #include "offline_scene_planner.h"
+#include "sbs_scene_cache_contract.h"
 
 #include <algorithm>
 #include <array>
@@ -87,6 +88,74 @@ namespace offline_sbs {
     public:
       using std::runtime_error::runtime_error;
     };
+
+    bool native_replay_capabilities_valid(
+      const nlohmann::json &capabilities
+    ) noexcept {
+      try {
+        const auto &native = capabilities.at("native_whole_clip");
+        const auto &depth = native.at("scene_cache_depth");
+        const auto &metadata = native.at("scene_cache_frame_metadata");
+        const auto &state = native.at("scene_cache_state");
+        const auto &scene_plan = native.at("scene_plan");
+        const auto &inference =
+          native.at("whole_clip_inference_attestation");
+        nlohmann::json expected_analysis_flag_bits =
+          nlohmann::json::object();
+        for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
+          expected_analysis_flag_bits[std::string {flag.name}] = flag.bit;
+        }
+        return
+          capabilities.at("schema").get<std::uint32_t>() == 1u &&
+          native.at("follow_protocol_schema").get<std::uint32_t>() == 1u &&
+          native.at("follow_global_first_sequence").get<bool>() &&
+          native.at("adaptive_state_schema").get<std::uint32_t>() ==
+            sbs_adaptive_state::schema_version &&
+          native.at("adaptive_analysis_flag_bits") ==
+            expected_analysis_flag_bits &&
+          native.at("scene_cache_contract_schema").get<std::uint32_t>() ==
+            sbs_scene_cache::contract_schema &&
+          native.at("scene_cache_packed_sbs_contract").get<bool>() &&
+          depth.at("dtype").get<std::string>() == "float32-le" &&
+          depth.at("layout").get<std::string>() == "row-major" &&
+          depth.at("dxgi_format").get<std::string>() == "R32_FLOAT" &&
+          depth.at("dimensions").get<std::string>() ==
+            "per-frame-metadata" &&
+          depth.at("bytes_per_frame").is_null() &&
+          metadata.at("schema").get<std::uint32_t>() ==
+            sbs_scene_cache::frame_metadata_schema &&
+          metadata.at("word_count").get<std::uint32_t>() ==
+            sbs_scene_cache::frame_metadata_word_count &&
+          metadata.at("roi_transform_word_offset").get<std::uint32_t>() ==
+            sbs_scene_cache::roi_transform_word_offset &&
+          metadata.at("roi_transform_word_count").get<std::uint32_t>() ==
+            sbs_scene_cache::roi_transform_word_count &&
+          metadata.at("roi_transform_contract_schema").get<std::uint32_t>() ==
+            models::frame_roi_transform_contract_version &&
+          state.at("schema").get<std::uint32_t>() ==
+            sbs_scene_cache::cached_state_schema &&
+          state.at("subject_word_count").get<std::size_t>() ==
+            sbs_adaptive_state::render_prefix_word_count &&
+          state.at("depth_frame_state_word_count").get<std::size_t>() ==
+            sbs_scene_cache::depth_frame_state_word_count &&
+          state.at("word_count").get<std::size_t>() ==
+            sbs_scene_cache::cached_state_word_count &&
+          state.at("dtype").get<std::string>() == "uint32-le" &&
+          scene_plan.at("schema").get<std::uint32_t>() == 1u &&
+          scene_plan.at("version").get<std::string>() == "scene-plan-v1" &&
+          scene_plan.at("one_scene_per_replay").get<bool>() &&
+          scene_plan.at("absolute_pop_strength").get<bool>() &&
+          scene_plan.at("source_pixel_zero_anchor").get<bool>() &&
+          native.at("render_cache_follow").get<bool>() &&
+          native.at("render_skips_tensorrt").get<bool>() &&
+          inference.at("depth_inference_enabled").get<bool>() &&
+          inference.at("scheduled_depth_update_count").get<bool>() &&
+          inference.at("tensorrt_enqueue_count").get<bool>() &&
+          native.at("atomic_sbs_publication").get<bool>();
+      } catch (...) {
+        return false;
+      }
+    }
 
     constexpr bool can_retain_another_timing_frame(
       const std::uint64_t retained_frames
@@ -3154,7 +3223,8 @@ namespace offline_sbs {
       const nlohmann::json &value,
       const frame_timing_t &timing,
       const rational_t time_base,
-      const std::uint64_t cache_bytes
+      const std::uint64_t cache_bytes,
+      const bool requires_previous_packed_frame
     ) {
       using sbs_adaptive_state::word_e;
       if (!value.is_object() || value.value("record", "") != "frame" || value.value("frame_id", "") != frame_id(timing.sequence) || value.value("source_index", max_sequence) != timing.sequence - 1 || !value.contains("values") || !value["values"].is_array() || value["values"].size() != sbs_adaptive_state::word_count) {
@@ -3214,6 +3284,8 @@ namespace offline_sbs {
         words[sbs_adaptive_state::index(word_e::valid_depth_fraction)].get<float>();
       frame.scene_age =
         words[sbs_adaptive_state::index(word_e::scene_age)].get<float>();
+      frame.requires_previous_packed_frame =
+        requires_previous_packed_frame;
       const auto cut_flags_value =
         words[sbs_adaptive_state::index(word_e::cut_flags)].get<float>();
       const auto analysis_flags =
@@ -3415,6 +3487,8 @@ namespace offline_sbs {
       std::uint64_t processed_count = 0;
       std::uint64_t depth_bytes = 0;
       std::uint64_t state_bytes = 0;
+      std::uint64_t metadata_bytes = 0;
+      bool requires_previous_packed_frame = false;
       std::uint32_t source_width = 0;
       std::uint32_t source_height = 0;
       std::uint32_t sbs_width = 0;
@@ -3422,6 +3496,12 @@ namespace offline_sbs {
       std::string extension;
       nlohmann::json value;
     };
+
+    bool depth_frame_requires_previous(
+      const sbs_scene_cache::cached_state_words_t &state
+    ) {
+      return sbs_scene_cache::cached_state_requires_previous(state);
+    }
 
     cache_contract_t parse_cache_contract(
       const fs::path &cache_directory,
@@ -3431,17 +3511,20 @@ namespace offline_sbs {
       const auto value = read_json(
         cache_directory / "scene_cache_contract.json"
       );
-      if (value.value("schema", 0) != 1 || value.value("status", "") != "running" || value.value("first_sequence", 0) != 1 || value.value("processed_count", 0ull) != sequence || !value.value("atomic_frame_publication", false)) {
+      if (value.value("schema", 0u) != sbs_scene_cache::contract_schema || value.value("status", "") != "running" || value.value("first_sequence", 0) != 1 || value.value("processed_count", 0ull) != sequence || !value.value("atomic_frame_publication", false)) {
         throw worker_error("running scene-cache sequence contract mismatch");
       }
       const auto &source = value.at("source");
       const auto &depth = value.at("depth");
+      const auto &frame_metadata = value.at("frame_metadata");
       const auto &state = value.at("state");
       const auto &packed = value.at("packed_sbs");
+      const auto &render_config = value.at("render_config");
       cache_contract_t result;
       result.processed_count = sequence;
-      result.depth_bytes = depth.at("bytes_per_frame").get<std::uint64_t>();
       result.state_bytes = state.at("bytes_per_frame").get<std::uint64_t>();
+      result.metadata_bytes =
+        frame_metadata.at("bytes_per_frame").get<std::uint64_t>();
       result.source_width = source.at("width").get<std::uint32_t>();
       result.source_height = source.at("height").get<std::uint32_t>();
       result.sbs_width = packed.at("width").get<std::uint32_t>();
@@ -3452,15 +3535,50 @@ namespace offline_sbs {
         media.color == media_color_e::sdr ?
           "sRGB-BMP-WIC" :
           "linear-scRGB-f32-pfm";
-      if (result.source_width != media.width || result.source_height != media.height || source.at("frame_format").get<std::string>() != expected_frame_format || result.sbs_width == 0 || result.sbs_height == 0 || result.sbs_width % 2 != 0 || packed.at("eye_width").get<std::uint32_t>() * 2 != result.sbs_width || packed.at("eye_height").get<std::uint32_t>() != result.sbs_height || result.extension != (media.color == media_color_e::sdr ? "png" : "pfm") || depth.at("dtype").get<std::string>() != "float32-le" || depth.at("dxgi_format").get<std::string>() != "R32_FLOAT" || state.at("schema").get<int>() != 1 || state.at("word_count").get<int>() != 12 || result.state_bytes != 48) {
+      const auto depth_reuse_interval =
+        render_config.at("depth_reuse_interval").get<std::uint32_t>();
+      if (result.source_width != media.width || result.source_height != media.height || source.at("frame_format").get<std::string>() != expected_frame_format || result.sbs_width == 0 || result.sbs_height == 0 || result.sbs_width % 2 != 0 || packed.at("eye_width").get<std::uint32_t>() * 2 != result.sbs_width || packed.at("eye_height").get<std::uint32_t>() != result.sbs_height || result.extension != (media.color == media_color_e::sdr ? "png" : "pfm") || depth.at("dtype").get<std::string>() != "float32-le" || depth.at("dxgi_format").get<std::string>() != "R32_FLOAT" || depth.at("dimensions").get<std::string>() != "per-frame-metadata" || !depth.at("bytes_per_frame").is_null() || depth.at("bytes_per_sample").get<std::uint32_t>() != sizeof(float) || frame_metadata.at("schema").get<std::uint32_t>() != sbs_scene_cache::frame_metadata_schema || frame_metadata.at("magic").get<std::uint32_t>() != sbs_scene_cache::frame_metadata_magic || frame_metadata.at("word_count").get<std::uint32_t>() != sbs_scene_cache::frame_metadata_word_count || result.metadata_bytes != sizeof(sbs_scene_cache::frame_metadata_t) || state.at("schema").get<std::uint32_t>() != sbs_scene_cache::cached_state_schema || state.at("subject_word_count").get<std::size_t>() != sbs_adaptive_state::render_prefix_word_count || state.at("depth_frame_state_word_count").get<std::size_t>() != sbs_scene_cache::depth_frame_state_word_count || state.at("word_count").get<std::size_t>() != sbs_scene_cache::cached_state_word_count || result.state_bytes != sizeof(sbs_scene_cache::cached_state_words_t) || depth_reuse_interval < 1u || depth_reuse_interval > 8u) {
         throw worker_error("scene-cache media/layout contract mismatch");
       }
       const auto stem = "frame_" + frame_id(sequence);
       const auto depth_path = cache_directory / (stem + ".depth.r32f");
       const auto state_path = cache_directory / (stem + ".state.u32");
+      const auto metadata_path = cache_directory / (stem + ".meta.u32");
+      sbs_scene_cache::cached_state_words_t cached_state {};
+      sbs_scene_cache::frame_metadata_t metadata {};
       std::error_code ec;
-      if (!fs::is_regular_file(depth_path, ec) || ec || fs::file_size(depth_path, ec) != result.depth_bytes || ec || !fs::is_regular_file(state_path, ec) || ec || fs::file_size(state_path, ec) != result.state_bytes || ec) {
-        throw worker_error("scene-cache ACK lacks its exact depth/state pair");
+      std::ifstream state_stream(state_path, std::ios::binary);
+      std::ifstream metadata_stream(metadata_path, std::ios::binary);
+      if (!state_stream ||
+          !state_stream.read(
+            reinterpret_cast<char *>(cached_state.data()),
+            sizeof(cached_state)
+          ) ||
+          state_stream.peek() != std::char_traits<char>::eof() ||
+          !metadata_stream ||
+          !metadata_stream.read(
+            reinterpret_cast<char *>(&metadata),
+            sizeof(metadata)
+          ) ||
+          metadata_stream.peek() != std::char_traits<char>::eof() ||
+          !sbs_scene_cache::valid_frame_metadata_for_state(
+            metadata,
+            cached_state,
+            sequence,
+            result.source_width,
+            result.source_height,
+            depth_reuse_interval
+          )) {
+        throw worker_error(
+          "scene-cache ACK has invalid cached state or frame metadata"
+        );
+      }
+      result.depth_bytes =
+        sbs_scene_cache::depth_payload_bytes(metadata);
+      result.requires_previous_packed_frame =
+        depth_frame_requires_previous(cached_state);
+      if (!fs::is_regular_file(depth_path, ec) || ec || fs::file_size(depth_path, ec) != result.depth_bytes || ec || !fs::is_regular_file(state_path, ec) || ec || fs::file_size(state_path, ec) != result.state_bytes || ec || !fs::is_regular_file(metadata_path, ec) || ec || fs::file_size(metadata_path, ec) != result.metadata_bytes || ec) {
+        throw worker_error("scene-cache ACK lacks its exact depth/state/metadata triplet");
       }
       return result;
     }
@@ -3469,7 +3587,7 @@ namespace offline_sbs {
       return {
         {"schema", 1},
         {"version", "scene-plan-v1"},
-        {"cache_contract_schema", 1},
+        {"cache_contract_schema", sbs_scene_cache::contract_schema},
         {"scenes", nlohmann::json::array({
                      {
                        {"start_sequence", scene.start_sequence},
@@ -3605,6 +3723,7 @@ namespace offline_sbs {
         const auto stem = "frame_" + frame_id(sequence);
         remove_file_checked(cache / (stem + ".depth.r32f"));
         remove_file_checked(cache / (stem + ".state.u32"));
+        remove_file_checked(cache / (stem + ".meta.u32"));
       }
     }
 
@@ -5154,7 +5273,9 @@ namespace offline_sbs {
       const fs::path &cache,
       const std::uint32_t expected_sbs_width,
       const std::uint32_t expected_sbs_height,
-      const std::uint64_t live_cache_bytes
+      const std::uint64_t live_cache_bytes,
+      const std::uint64_t source_raster_reservation_bytes,
+      const std::uint64_t sbs_raster_reservation_bytes
     ) {
       const std::string output_extension =
         media.color == media_color_e::sdr ? "png" : "pfm";
@@ -5163,6 +5284,22 @@ namespace offline_sbs {
       const auto input = work / "render-input" / scene_name;
       const auto output = work / "render-output" / scene_name;
       const auto plan = work / "scene-plans" / (scene_name + ".json");
+      const auto live_raster_reservation = checked_byte_sum(
+        source_raster_reservation_bytes,
+        sbs_raster_reservation_bytes,
+        "replay live-raster reservation"
+      );
+      if (
+        source_raster_reservation_bytes == 0u ||
+        sbs_raster_reservation_bytes == 0u ||
+        live_raster_reservation > spec.scene_cache_hard_cap_bytes ||
+        live_cache_bytes >
+          spec.scene_cache_hard_cap_bytes - live_raster_reservation
+      ) {
+        throw worker_error(
+          "scene cache plus reserved replay rasters exceeds the hard cap"
+        );
+      }
       std::error_code ec;
       fs::create_directories(input, ec);
       fs::create_directories(output, ec);
@@ -5232,9 +5369,16 @@ namespace offline_sbs {
             static_cast<std::uint64_t>(source_bytes);
           const auto sbs_size =
             static_cast<std::uint64_t>(sbs_bytes);
-          if (source_size > spec.scene_cache_hard_cap_bytes || sbs_size > spec.scene_cache_hard_cap_bytes - source_size || live_cache_bytes > spec.scene_cache_hard_cap_bytes - source_size - sbs_size) {
+          if (
+            source_size != source_raster_reservation_bytes ||
+            sbs_size > sbs_raster_reservation_bytes ||
+            source_size > spec.scene_cache_hard_cap_bytes ||
+            sbs_size > spec.scene_cache_hard_cap_bytes - source_size ||
+            live_cache_bytes >
+              spec.scene_cache_hard_cap_bytes - source_size - sbs_size
+          ) {
             throw worker_error(
-              "scene cache plus live replay rasters exceeded the hard cap"
+              "live replay raster violated its preflight storage reservation"
             );
           }
           peak_live_raster_bytes = std::max(
@@ -5338,6 +5482,23 @@ namespace offline_sbs {
   }
 
 #ifdef SUNSHINE_TESTS
+  bool native_replay_capabilities_valid_for_test(
+    const nlohmann::json &capabilities
+  ) {
+    return native_replay_capabilities_valid(capabilities);
+  }
+
+  bool depth_frame_requires_previous_for_test(
+    const float initialized,
+    const float frame_state
+  ) {
+    sbs_scene_cache::cached_state_words_t state {};
+    const auto offset = sbs_adaptive_state::render_prefix_word_count;
+    state[offset + 2u] = std::bit_cast<std::uint32_t>(initialized);
+    state[offset + 3u] = std::bit_cast<std::uint32_t>(frame_state);
+    return depth_frame_requires_previous(state);
+  }
+
   bool adaptive_trace_flags_valid_for_test(
     const float cut_flags,
     const std::uint32_t analysis_flags
@@ -6782,25 +6943,129 @@ namespace offline_sbs {
 
   std::uint64_t analysis_open_cache_limit(
     const std::uint64_t hard_cap_bytes,
-    const std::uint64_t source_raster_bytes,
-    const std::uint64_t depth_state_pair_bytes
+    const std::uint64_t live_raster_reservation_bytes,
+    const std::uint64_t reserved_cache_triplet_bytes
   ) {
-    if (hard_cap_bytes == 0 || source_raster_bytes == 0 || depth_state_pair_bytes == 0 || source_raster_bytes >= hard_cap_bytes) {
+    if (hard_cap_bytes == 0 || live_raster_reservation_bytes == 0 || reserved_cache_triplet_bytes == 0 || live_raster_reservation_bytes >= hard_cap_bytes) {
       throw worker_error("analysis storage budget has an invalid byte contract");
     }
-    const auto after_source = hard_cap_bytes - source_raster_bytes;
-    if (depth_state_pair_bytes > after_source) {
+    const auto after_rasters =
+      hard_cap_bytes - live_raster_reservation_bytes;
+    if (reserved_cache_triplet_bytes > after_rasters) {
       throw worker_error(
-        "analysis hard cap cannot hold the live source raster and depth/state pair"
+        "analysis hard cap cannot hold the reserved replay rasters and cache triplet"
       );
     }
-    const auto open_cache_limit = after_source - depth_state_pair_bytes;
-    if (open_cache_limit < depth_state_pair_bytes) {
+    const auto open_cache_limit =
+      after_rasters - reserved_cache_triplet_bytes;
+    if (open_cache_limit < reserved_cache_triplet_bytes) {
       throw worker_error(
-        "analysis hard cap cannot reserve the next exact depth/state pair"
+        "analysis hard cap cannot reserve the next maximum cache triplet"
       );
     }
     return open_cache_limit;
+  }
+
+  std::uint64_t analysis_source_raster_reservation_bytes(
+    const media_color_e color,
+    const std::uint32_t width,
+    const std::uint32_t height
+  ) {
+    if (width == 0u || height == 0u) {
+      throw worker_error("analysis source raster has invalid dimensions");
+    }
+    const auto pixels =
+      static_cast<std::uint64_t>(width) * height;
+    if (color == media_color_e::sdr) {
+      if (
+        pixels >
+          (std::numeric_limits<std::uint32_t>::max() - 54ull) / 4ull
+      ) {
+        throw worker_error(
+          "analysis source is too large for the BMP follow contract"
+        );
+      }
+      return pixels * 4ull + 54ull;
+    }
+    constexpr std::uint64_t max_pfm_header_bytes = 16ull + 128ull + 64ull;
+    if (
+      pixels >
+        (std::numeric_limits<std::uint64_t>::max() -
+         max_pfm_header_bytes) /
+          12ull
+    ) {
+      throw worker_error("HDR analysis source raster byte count overflows");
+    }
+    return pixels * 12ull + max_pfm_header_bytes;
+  }
+
+  std::uint64_t replay_sbs_raster_reservation_bytes(
+    const media_color_e color,
+    const std::uint32_t width,
+    const std::uint32_t height
+  ) {
+    if (width == 0u || height == 0u) {
+      throw worker_error("replay SBS raster has invalid dimensions");
+    }
+    const auto pixels =
+      static_cast<std::uint64_t>(width) * height;
+    if (color == media_color_e::sdr) {
+      if (pixels > std::numeric_limits<std::uint64_t>::max() / 4u) {
+        throw worker_error("SDR replay SBS raster byte count overflows");
+      }
+      const auto raw_bgra_bytes = pixels * 4u;
+      // A deflate stream is bounded just above its uncompressed scanlines. Keep an
+      // additional 12.5% plus 1 MiB for PNG filters/chunks and WIC container overhead.
+      return checked_byte_sum(
+        checked_byte_sum(
+          raw_bgra_bytes,
+          raw_bgra_bytes / 8u,
+          "SDR replay SBS reservation"
+        ),
+        1ull * 1024ull * 1024ull,
+        "SDR replay SBS reservation"
+      );
+    }
+    if (pixels > (std::numeric_limits<std::uint64_t>::max() - 64u) / 12u) {
+      throw worker_error("HDR replay SBS raster byte count overflows");
+    }
+    // save_pfm() writes exactly three little-endian float32 channels plus a
+    // short dimensions/scale header. Sixty-four bytes bounds every uint32 dimension.
+    return pixels * 12u + 64u;
+  }
+
+  std::uint64_t analysis_max_cache_triplet_bytes(
+    const std::uint32_t source_width,
+    const std::uint32_t source_height
+  ) {
+    const auto aligned_extent = [](const std::uint32_t source_extent) {
+      constexpr auto patch = models::frame_roi_model_patch_size;
+      const auto bounded = std::min(
+        source_extent,
+        sbs_scene_cache::max_depth_dimension
+      );
+      return bounded - bounded % patch;
+    };
+    const auto max_width = aligned_extent(source_width);
+    const auto max_height = aligned_extent(source_height);
+    if (max_width == 0u || max_height == 0u) {
+      throw worker_error(
+        "source raster cannot hold a valid scene-cache depth shape"
+      );
+    }
+    const auto max_depth_bytes =
+      static_cast<std::uint64_t>(max_width) *
+      static_cast<std::uint64_t>(max_height) *
+      sizeof(float);
+    return checked_byte_sum(
+      checked_byte_sum(
+        max_depth_bytes,
+        sizeof(sbs_scene_cache::cached_state_words_t),
+        "maximum scene-cache depth/state pair"
+      ),
+      sizeof(sbs_scene_cache::frame_metadata_t),
+      "maximum scene-cache triplet"
+    );
   }
 
   void validate_avexpr_timeline_exactness(const media_contract_t &media) {
@@ -7107,19 +7372,8 @@ namespace offline_sbs {
         work / "logs" / "native-capabilities.log"
       );
       const auto capabilities = read_json(capabilities_path);
-      const auto &native = capabilities.at("native_whole_clip");
-      if (capabilities.value("schema", 0) != 1 || native.value("follow_protocol_schema", 0) != 1 || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("scene_cache_contract_schema", 0) != 1 || !native.value("render_cache_follow", false) || !native.value("render_skips_tensorrt", false) || !native.value("atomic_sbs_publication", false)) {
+      if (!native_replay_capabilities_valid(capabilities)) {
         throw worker_error("native SBS harness lacks the required replay contract");
-      }
-      nlohmann::json expected_analysis_flag_bits = nlohmann::json::object();
-      for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
-        expected_analysis_flag_bits[std::string {flag.name}] = flag.bit;
-      }
-      if (
-        !native.contains("adaptive_analysis_flag_bits") ||
-        native["adaptive_analysis_flag_bits"] != expected_analysis_flag_bits
-      ) {
-        throw worker_error("native SBS harness adaptive flag meanings differ");
       }
 
       const auto analysis_input = work / "analysis-input";
@@ -7136,6 +7390,34 @@ namespace offline_sbs {
       }
       if (ec) {
         throw worker_error("cannot create analysis directories");
+      }
+      const auto analysis_source_raster_reservation =
+        analysis_source_raster_reservation_bytes(
+          media.color,
+          media.width,
+          media.height
+        );
+      if (
+        analysis_source_raster_reservation >
+        spec.scene_cache_hard_cap_bytes
+      ) {
+        throw worker_error(
+          "analysis source raster reservation exceeds the hard cap"
+        );
+      }
+      std::optional<std::uint64_t> reserved_triplet_bytes;
+      if (spec.operation == "convert") {
+        reserved_triplet_bytes =
+          analysis_max_cache_triplet_bytes(media.width, media.height);
+        if (
+          *reserved_triplet_bytes >
+            spec.scene_cache_hard_cap_bytes -
+              analysis_source_raster_reservation
+        ) {
+          throw worker_error(
+            "analysis source and first cache triplet reservations exceed the hard cap"
+          );
+        }
       }
       streaming_decoder_t analysis_decoder {
         spec,
@@ -7185,7 +7467,7 @@ namespace offline_sbs {
       std::uint64_t peak_live_raster_bytes = 0;
       std::uint64_t peak_cache_plus_raster_bytes = 0;
       std::optional<std::uint64_t> analysis_source_raster_bytes;
-      std::optional<std::uint64_t> pair_bytes;
+      std::optional<std::uint64_t> replay_sbs_raster_reservation;
       std::uint32_t sbs_width = 0;
       std::uint32_t sbs_height = 0;
       std::vector<scene_plan_t> scenes;
@@ -7312,7 +7594,11 @@ namespace offline_sbs {
           scenes.push_back(scene);
           account_contract_records();
           if (spec.operation == "convert") {
-            if (!render_decoder || !sbs_width || !sbs_height) {
+            if (
+              !render_decoder || !sbs_width || !sbs_height ||
+              !analysis_source_raster_bytes ||
+              !replay_sbs_raster_reservation
+            ) {
               throw worker_error("scene replay began before cache geometry");
             }
             publish_progress(
@@ -7343,7 +7629,9 @@ namespace offline_sbs {
               cache,
               sbs_width,
               sbs_height,
-              live_cache_bytes
+              live_cache_bytes,
+              *analysis_source_raster_bytes,
+              *replay_sbs_raster_reservation
             );
             peak_live_raster_bytes = std::max(
               peak_live_raster_bytes,
@@ -7428,9 +7716,13 @@ namespace offline_sbs {
               "fixed-resolution analysis source raster size changed mid-clip"
             );
           }
-          if (current_source_raster_bytes > spec.scene_cache_hard_cap_bytes) {
+          if (
+            current_source_raster_bytes >
+              analysis_source_raster_reservation ||
+            current_source_raster_bytes > spec.scene_cache_hard_cap_bytes
+          ) {
             throw worker_error(
-              "live analysis source raster exceeds the hard cap"
+              "live analysis source raster exceeds its preflight reservation"
             );
           }
           peak_live_raster_bytes = std::max(
@@ -7453,6 +7745,7 @@ namespace offline_sbs {
             }
           }
           std::uint64_t current_pair_bytes = 0;
+          bool current_requires_previous_packed_frame = false;
           if (spec.operation == "convert") {
             const auto contract = parse_cache_contract(
               cache,
@@ -7464,18 +7757,50 @@ namespace offline_sbs {
               contract.state_bytes,
               "depth/state pair"
             );
-            if (!pair_bytes) {
-              pair_bytes = current_pair_bytes;
+            current_pair_bytes = checked_byte_sum(
+              current_pair_bytes,
+              contract.metadata_bytes,
+              "depth/state/metadata triplet"
+            );
+            current_requires_previous_packed_frame =
+              contract.requires_previous_packed_frame;
+            if (!reserved_triplet_bytes) {
+              throw worker_error(
+                "scene-cache triplet reservation was not preflighted"
+              );
+            }
+            if (!replay_sbs_raster_reservation) {
+              if (current_pair_bytes > *reserved_triplet_bytes) {
+                throw worker_error(
+                  "scene-cache triplet exceeds its source-shape upper bound"
+                );
+              }
               sbs_width = contract.sbs_width;
               sbs_height = contract.sbs_height;
+              replay_sbs_raster_reservation =
+                replay_sbs_raster_reservation_bytes(
+                  media.color,
+                  sbs_width,
+                  sbs_height
+              );
+              const auto replay_live_raster_reservation = checked_byte_sum(
+                analysis_source_raster_reservation,
+                *replay_sbs_raster_reservation,
+                "replay source/SBS reservation"
+              );
               initialize_planner(analysis_open_cache_limit(
                 spec.scene_cache_hard_cap_bytes,
-                current_source_raster_bytes,
-                current_pair_bytes
+                replay_live_raster_reservation,
+                *reserved_triplet_bytes
               ));
-            } else if (*pair_bytes != current_pair_bytes || sbs_width != contract.sbs_width || sbs_height != contract.sbs_height) {
+            } else if (sbs_width != contract.sbs_width || sbs_height != contract.sbs_height) {
               throw worker_error(
-                "fixed-resolution scene-cache pair/geometry changed mid-clip"
+                "fixed-output scene-cache geometry changed mid-clip"
+              );
+            }
+            if (current_pair_bytes > *reserved_triplet_bytes) {
+              throw worker_error(
+                "scene-cache triplet exceeds its source-shape upper bound"
               );
             }
             const auto after_source =
@@ -7511,7 +7836,8 @@ namespace offline_sbs {
             trace_value,
             timing,
             media.time_base,
-            current_pair_bytes
+            current_pair_bytes,
+            current_requires_previous_packed_frame
           ));
           account_contract_records();
           render_scenes(finalized);

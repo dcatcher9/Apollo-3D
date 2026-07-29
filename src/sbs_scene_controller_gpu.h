@@ -84,7 +84,9 @@ namespace models {
     /**
      * Consume the completed matched depth result. Must run before the legacy appearance/depth
      * histories advance, while the retained scene and depth inputs still belong to
-     * source_frame_id.
+     * source_frame_id. frame_roi_transform must be the exact GPU transform retained with that
+     * completed inference; the explicit all-zero eight-vector resource selects legacy full-frame
+     * sampling.
      */
     bool resolve_completed(
       std::uint64_t source_frame_id,
@@ -93,7 +95,8 @@ namespace models {
       ID3D11ShaderResourceView *depth_frame_state,
       ID3D11ShaderResourceView *adaptive_state,
       int depth_width,
-      int depth_height
+      int depth_height,
+      ID3D11ShaderResourceView *frame_roi_transform
     );
 
     [[nodiscard]] scene_controller_gpu_snapshot snapshot() const;

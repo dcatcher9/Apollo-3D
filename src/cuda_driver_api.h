@@ -110,7 +110,23 @@ struct cuda_driver_api {
     PFN_cuEventDestroy cuEventDestroy = nullptr;
 
     bool is_valid() const {
-        return cuInit && cuMemAlloc && cuGraphicsD3D11RegisterResource;
+        // This is the minimum contract used by video_depth_estimator, not merely proof that
+        // nvcuda.dll loaded. Keeping the check complete prevents a partially resolved driver API
+        // from becoming a null function-pointer call in warmup, stream teardown, or D3D interop.
+        return cuInit &&
+               cuDeviceGet &&
+               cuCtxSetCurrent &&
+               cuMemAlloc &&
+               cuMemFree &&
+               cuStreamCreate &&
+               cuStreamDestroy &&
+               cuStreamSynchronize &&
+               cuStreamQuery &&
+               cuGraphicsD3D11RegisterResource &&
+               cuGraphicsMapResources &&
+               cuGraphicsUnmapResources &&
+               cuGraphicsResourceGetMappedPointer &&
+               cuGraphicsUnregisterResource;
     }
 
     static cuda_driver_api& get() {

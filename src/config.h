@@ -71,7 +71,7 @@ namespace config {
       double ema_edge_gradient = 0.02;
       double ema_edge_strength = 0.25;  ///< Edge-selective EMA blend toward current depth inside the mask.
       int depth_short_side = 432;  ///< Depth map short-side resolution, clamped to the frame's native short side. At 16:9 this maps to about 768x432, matching the VisionDepth3D reference input.
-      double depth_max_aspect = 4.0;  ///< Aspect-ratio cap (long side <= short * this). Bounds worst-case inference cost on ultrawide.
+      double depth_max_aspect = 4.0;  ///< Inference-area budget envelope for wide/tall inputs. Full-frame tensors retain source aspect by lowering their short side; active ROI tensors are capped to this aspect.
       double minmax_ema = 0.18;  ///< Temporal EMA blend for the normalized disparity min/max (0-1). Lower = steadier depth scale, higher = adapts faster.
       double subject_recenter = 0.35;  ///< How strongly the depth field is shifted to put the tracked subject at mid-depth before the band mapping (0-1).
       bool subject_stretch = true;  ///< Bestv2 shape_depth_for_pop stretch: rescale the permanent P5/P95 band to [0,1].

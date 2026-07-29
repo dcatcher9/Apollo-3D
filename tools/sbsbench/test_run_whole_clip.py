@@ -2,9 +2,11 @@
 """Focused unit tests for the continuous whole-clip orchestrator."""
 
 import argparse
+import copy
 import json
 import os
 import subprocess
+import struct
 import sys
 import tempfile
 import time
@@ -202,6 +204,62 @@ class WholeClipTimelineTests(unittest.TestCase):
 
 
 class WholeClipNativeContractTests(unittest.TestCase):
+    @staticmethod
+    def _capabilities(*, state_schema=whole.SCENE_CACHE_STATE_SCHEMA,
+                      state_words=whole.SCENE_CACHE_STATE_WORDS):
+        return {
+            "schema": 1,
+            "native_whole_clip": {
+                "artifact_modes": ["adaptive", "conversion"],
+                "source_formats": ["png", "bmp", "pfm"],
+                "follow_protocol_schema": 1,
+                "follow_global_first_sequence": True,
+                "adaptive_state_schema": whole.ADAPTIVE_TRACE_SCHEMA,
+                "scene_cache_contract_schema":
+                    whole.SCENE_CACHE_CONTRACT_SCHEMA,
+                "scene_cache_packed_sbs_contract": True,
+                "scene_cache_depth": {
+                    "dtype": "float32-le",
+                    "layout": "row-major",
+                    "dxgi_format": "R32_FLOAT",
+                    "dimensions": "per-frame-metadata",
+                    "bytes_per_frame": None,
+                },
+                "scene_cache_frame_metadata": {
+                    "schema": whole.SCENE_CACHE_METADATA_SCHEMA,
+                    "word_count": whole.SCENE_CACHE_METADATA_WORDS,
+                    "roi_transform_word_offset":
+                        whole.SCENE_CACHE_METADATA_ROI_OFFSET,
+                    "roi_transform_word_count": whole.SCENE_CACHE_ROI_WORDS,
+                    "roi_transform_contract_schema":
+                        whole.FRAME_ROI_TRANSFORM_SCHEMA,
+                },
+                "scene_cache_state": {
+                    "schema": state_schema,
+                    "subject_word_count": whole.SCENE_CACHE_SUBJECT_WORDS,
+                    "depth_frame_state_word_count":
+                        whole.SCENE_CACHE_DEPTH_FRAME_STATE_WORDS,
+                    "word_count": state_words,
+                    "dtype": "uint32-le",
+                },
+                "scene_plan": {
+                    "schema": 1,
+                    "version": "scene-plan-v1",
+                    "one_scene_per_replay": True,
+                    "absolute_pop_strength": True,
+                    "source_pixel_zero_anchor": True,
+                },
+                "render_cache_follow": True,
+                "render_skips_tensorrt": True,
+                "whole_clip_inference_attestation": {
+                    "depth_inference_enabled": True,
+                    "scheduled_depth_update_count": True,
+                    "tensorrt_enqueue_count": True,
+                },
+                "atomic_sbs_publication": True,
+            },
+        }
+
     def _write_contract(self, root, mode="conversion", count=2):
         (root / whole.TRACE_NAME).write_text(
             '{"schema":2,"frame_id":"00001"}\n', encoding="utf-8")
@@ -209,6 +267,11 @@ class WholeClipNativeContractTests(unittest.TestCase):
             "schema": 1,
             "artifact_mode": mode,
             "source_frame_count": count,
+            "inference_mode": "single-pass-tensorrt",
+            "depth_inference_enabled": True,
+            "scheduled_depth_update_count": count,
+            "tensorrt_enqueue_count": count,
+            "depth_reuse_interval": 1,
             "adaptive_state": {
                 "file": whole.TRACE_NAME,
                 "schema": whole.ADAPTIVE_TRACE_SCHEMA,
@@ -254,51 +317,675 @@ class WholeClipNativeContractTests(unittest.TestCase):
                 (root / f"sbs_{frame_id}.png").write_bytes(b"x")
             whole.validate_native_outputs(root, timeline, "conversion")
 
+    def test_native_inference_attestation_rejects_analysis_and_replay_drift(self):
+        timeline = {
+            "frame_count": 2,
+            "frames": [{"frame_id": "00001"}, {"frame_id": "00002"}],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_contract(root)
+            (root / "sbs_00001.png").write_bytes(b"x")
+            (root / "sbs_00002.png").write_bytes(b"x")
+            contract_path = root / whole.NATIVE_CONTRACT_NAME
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            contract["tensorrt_enqueue_count"] = 1
+            contract_path.write_text(
+                json.dumps(contract), encoding="utf-8")
+            with self.assertRaisesRegex(
+                    whole.WholeClipError,
+                    "analysis inference attestation"):
+                whole.validate_native_outputs(
+                    root, timeline, "conversion")
+
+        replay_contract = {
+            "inference_mode": "scene-cache-replay",
+            "depth_inference_enabled": False,
+            "scheduled_depth_update_count": 0,
+            "tensorrt_enqueue_count": 0,
+        }
+        whole._validate_native_inference_attestation(
+            replay_contract,
+            replay=True,
+            source_frame_count=2,
+        )
+        replay_contract["depth_inference_enabled"] = True
+        with self.assertRaisesRegex(
+                whole.WholeClipError,
+                "scene replay inference attestation"):
+            whole._validate_native_inference_attestation(
+                replay_contract,
+                replay=True,
+                source_frame_count=2,
+            )
+
+    def test_capability_gate_requires_schema_2_sixteen_word_cache_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "capabilities.json"
+
+            def publish_capabilities(command, _cwd, _log_path):
+                Path(command[-1]).write_text(
+                    json.dumps(self._capabilities()), encoding="utf-8")
+
+            with mock.patch.object(
+                    whole, "run_logged_command",
+                    side_effect=publish_capabilities):
+                result = whole.query_native_capabilities(
+                    root / "sunshine.exe",
+                    root,
+                    output,
+                    root / "capabilities.log",
+                )
+            state = result["value"]["native_whole_clip"]["scene_cache_state"]
+            self.assertEqual(state["schema"], 2)
+            self.assertEqual(state["word_count"], 16)
+            self.assertEqual(state["dtype"], "uint32-le")
+
+            def publish_stale_capabilities(command, _cwd, _log_path):
+                Path(command[-1]).write_text(
+                    json.dumps(self._capabilities(
+                        state_schema=1, state_words=12)),
+                    encoding="utf-8",
+                )
+
+            with mock.patch.object(
+                    whole, "run_logged_command",
+                    side_effect=publish_stale_capabilities):
+                with self.assertRaisesRegex(
+                        whole.WholeClipError, "required bounded scene replay"):
+                    whole.query_native_capabilities(
+                        root / "sunshine.exe",
+                        root,
+                        output,
+                        root / "capabilities.log",
+                    )
+
+            def publish_wrong_depth_capabilities(command, _cwd, _log_path):
+                value = self._capabilities()
+                value["native_whole_clip"]["scene_cache_depth"]["dtype"] = "float16"
+                Path(command[-1]).write_text(
+                    json.dumps(value), encoding="utf-8")
+
+            with mock.patch.object(
+                    whole, "run_logged_command",
+                    side_effect=publish_wrong_depth_capabilities):
+                with self.assertRaisesRegex(
+                        whole.WholeClipError, "required bounded scene replay"):
+                    whole.query_native_capabilities(
+                        root / "sunshine.exe",
+                        root,
+                        output,
+                        root / "capabilities.log",
+                    )
+
+            def publish_wrong_roi_schema(command, _cwd, _log_path):
+                value = self._capabilities()
+                value["native_whole_clip"]["scene_cache_frame_metadata"][
+                    "roi_transform_contract_schema"] += 1
+                Path(command[-1]).write_text(
+                    json.dumps(value), encoding="utf-8")
+
+            with mock.patch.object(
+                    whole, "run_logged_command",
+                    side_effect=publish_wrong_roi_schema):
+                with self.assertRaisesRegex(
+                        whole.WholeClipError, "required bounded scene replay"):
+                    whole.query_native_capabilities(
+                        root / "sunshine.exe",
+                        root,
+                        output,
+                        root / "capabilities.log",
+                    )
+
+            def publish_missing_inference_capability(
+                    command, _cwd, _log_path):
+                value = self._capabilities()
+                value["native_whole_clip"][
+                    "whole_clip_inference_attestation"
+                ]["tensorrt_enqueue_count"] = False
+                Path(command[-1]).write_text(
+                    json.dumps(value), encoding="utf-8")
+
+            with mock.patch.object(
+                    whole, "run_logged_command",
+                    side_effect=publish_missing_inference_capability):
+                with self.assertRaisesRegex(
+                        whole.WholeClipError,
+                        "required bounded scene replay"):
+                    whole.query_native_capabilities(
+                        root / "sunshine.exe",
+                        root,
+                        output,
+                        root / "capabilities.log",
+                    )
+
 
 class WholeClipSceneCacheTests(unittest.TestCase):
+    @staticmethod
+    def _float_word(value: float) -> int:
+        return struct.unpack("<I", struct.pack("<f", value))[0]
+
+    @classmethod
+    def _full_frame_transform(
+        cls,
+        *,
+        sequence: int,
+        source_width: int,
+        source_height: int,
+        model_width: int,
+        model_height: int,
+    ) -> list[int]:
+        retained = sequence - 1
+        words = [0] * whole.SCENE_CACHE_ROI_WORDS
+        words[0] = whole.FRAME_ROI_TRANSFORM_SCHEMA
+        words[1] = (1 << 0) | (1 << 1)
+        words[2:4] = [retained & 0xffffffff, retained >> 32]
+        words[6:10] = [
+            source_width,
+            source_height,
+            model_width,
+            model_height,
+        ]
+        words[10] = model_width * model_height
+        full_rect = [
+            cls._float_word(0.0),
+            cls._float_word(0.0),
+            cls._float_word(1.0),
+            cls._float_word(1.0),
+        ]
+        words[12:16] = full_rect
+        words[16:20] = full_rect
+        words[20:24] = [0, 0, model_width, model_height]
+        words[28:30] = [sequence, 0]
+        words[30] = sequence % whole.FRAME_ROI_TRANSFORM_BANK_COUNT
+        return words
+
+    @classmethod
+    def _write_triplet(
+        cls,
+        root: Path,
+        *,
+        sequence: int = 1,
+        source_width: int = 14,
+        source_height: int = 14,
+        width: int = 14,
+        height: int = 14,
+        depth_bytes: bytes | None = None,
+        metadata_mutator=None,
+        state_mutator=None,
+    ) -> None:
+        words = [0] * whole.SCENE_CACHE_METADATA_WORDS
+        words[0:4] = [
+            whole.SCENE_CACHE_METADATA_MAGIC,
+            whole.SCENE_CACHE_METADATA_SCHEMA,
+            whole.SCENE_CACHE_METADATA_WORDS,
+            whole.SCENE_CACHE_METADATA_ROI_OFFSET,
+        ]
+        words[4:8] = [width, height, width * height, 4]
+        words[8:10] = [sequence, 0]
+        retained = sequence - 1
+        words[10:12] = [retained & 0xffffffff, retained >> 32]
+        words[12:16] = [source_width, source_height, width, height]
+        words[whole.SCENE_CACHE_METADATA_ROI_OFFSET:] = (
+            cls._full_frame_transform(
+                sequence=sequence,
+                source_width=source_width,
+                source_height=source_height,
+                model_width=width,
+                model_height=height,
+            )
+        )
+        if metadata_mutator is not None:
+            metadata_mutator(words)
+        stem = f"frame_{sequence:010d}"
+        (root / f"{stem}.meta.u32").write_bytes(
+            struct.pack(f"<{len(words)}I", *words))
+        if depth_bytes is None:
+            depth_bytes = b"d" * (width * height * 4)
+        (root / f"{stem}.depth.r32f").write_bytes(depth_bytes)
+        state_words = [cls._float_word(0.0)] * whole.SCENE_CACHE_STATE_WORDS
+        state_words[whole.SCENE_CACHE_SUBJECT_WORDS + 2] = cls._float_word(1.0)
+        state_words[whole.SCENE_CACHE_SUBJECT_WORDS + 3] = cls._float_word(1.0)
+        if state_mutator is not None:
+            state_mutator(state_words)
+        (root / f"{stem}.state.u32").write_bytes(
+            struct.pack(f"<{len(state_words)}I", *state_words))
+
+    @staticmethod
+    def _contract(*, processed_count=1, source_width=14,
+                  source_height=14) -> dict:
+        return {
+            "schema": whole.SCENE_CACHE_CONTRACT_SCHEMA,
+            "status": "running",
+            "first_sequence": 1,
+            "processed_count": processed_count,
+            "atomic_frame_publication": True,
+            "source": {
+                "width": source_width,
+                "height": source_height,
+            },
+            "render_config": {
+                "depth_reuse_interval": 1,
+            },
+            "depth": {
+                "dimensions": "per-frame-metadata",
+                "dtype": "float32-le",
+                "dxgi_format": "R32_FLOAT",
+                "bytes_per_frame": None,
+                "bytes_per_sample": 4,
+            },
+            "frame_metadata": {
+                "schema": whole.SCENE_CACHE_METADATA_SCHEMA,
+                "magic": whole.SCENE_CACHE_METADATA_MAGIC,
+                "word_count": whole.SCENE_CACHE_METADATA_WORDS,
+                "bytes_per_frame": whole.SCENE_CACHE_METADATA_BYTES,
+                "roi_transform_word_offset":
+                    whole.SCENE_CACHE_METADATA_ROI_OFFSET,
+                "roi_transform_word_count": whole.SCENE_CACHE_ROI_WORDS,
+                "roi_transform_contract_schema":
+                    whole.FRAME_ROI_TRANSFORM_SCHEMA,
+            },
+            "state": {
+                "schema": whole.SCENE_CACHE_STATE_SCHEMA,
+                "subject_word_count": whole.SCENE_CACHE_SUBJECT_WORDS,
+                "depth_frame_state_word_count":
+                    whole.SCENE_CACHE_DEPTH_FRAME_STATE_WORDS,
+                "word_count": whole.SCENE_CACHE_STATE_WORDS,
+                "bytes_per_frame": whole.SCENE_CACHE_STATE_WORDS * 4,
+            },
+        }
+
     def test_ledger_enforces_pressure_force_block_and_exact_release(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            ledger = whole.SceneCacheLedger(root, 1000)
-            contract = {
-                "schema": 1,
-                "processed_count": 1,
-                "depth": {"bytes_per_frame": 752},
-                "state": {"bytes_per_frame": 48},
-            }
+            ledger = whole.SceneCacheLedger(root, 1200)
+            contract = self._contract()
             depth = root / "frame_0000000001.depth.r32f"
             state = root / "frame_0000000001.state.u32"
-            depth.write_bytes(b"d" * 752)
-            state.write_bytes(b"s" * 48)
-            self.assertEqual(ledger.acknowledge_pair(1, contract), 800)
+            metadata = root / "frame_0000000001.meta.u32"
+            self._write_triplet(root)
+            self.assertEqual(ledger.acknowledge_pair(1, contract), 1040)
             self.assertEqual(ledger.pressure_state(), "pressure")
             self.assertEqual(ledger.pressure_state(100), "force-finalize")
             self.assertEqual(ledger.pressure_state(200), "blocked")
             ledger.record_forced_segment(1, 2)
             released = ledger.release_through(2)
 
-        self.assertEqual(released, {"pairs": 1, "bytes": 800})
+        self.assertEqual(released, {"pairs": 1, "bytes": 1040})
         self.assertEqual(ledger.current_bytes, 0)
-        self.assertEqual(ledger.high_water_bytes, 800)
+        self.assertEqual(ledger.high_water_bytes, 1040)
         self.assertFalse(depth.exists())
         self.assertFalse(state.exists())
+        self.assertFalse(metadata.exists())
         self.assertFalse(
             ledger.snapshot()["forced_segments"][0]["semantic_boundary"])
+
+    def test_preflight_reserves_largest_dynamic_triplet_before_publish(self):
+        maximum = whole.scene_cache_max_triplet_bytes(3840, 2160)
+        self.assertEqual(
+            maximum,
+            1036 * 1036 * 4 +
+            whole.SCENE_CACHE_STATE_WORDS * 4 +
+            whole.SCENE_CACHE_METADATA_BYTES,
+        )
+        self.assertEqual(
+            whole.scene_cache_max_triplet_bytes(1920, 1080),
+            maximum,
+        )
+        self.assertEqual(
+            whole.preflight_scene_cache_hard_cap(
+                3840, 2160, maximum * 10),
+            maximum,
+        )
+        with self.assertRaisesRegex(
+                whole.WholeClipError, "before native publication"):
+            whole.preflight_scene_cache_hard_cap(
+                3840, 2160, maximum * 10 - 1)
+        with self.assertRaisesRegex(
+                whole.WholeClipError, "valid scene-cache depth shape"):
+            whole.scene_cache_max_triplet_bytes(13, 1080)
 
     def test_ledger_rejects_contract_size_mismatch_before_accounting(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            (root / "frame_0000000001.depth.r32f").write_bytes(b"d")
-            (root / "frame_0000000001.state.u32").write_bytes(b"s" * 48)
+            self._write_triplet(
+                root, depth_bytes=b"d")
             ledger = whole.SceneCacheLedger(root, 1000)
             with self.assertRaisesRegex(whole.WholeClipError, "size mismatch"):
-                ledger.acknowledge_pair(1, {
-                    "schema": 1,
-                    "processed_count": 1,
-                    "depth": {"bytes_per_frame": 2},
-                    "state": {"bytes_per_frame": 48},
-                })
+                ledger.acknowledge_pair(1, self._contract())
             self.assertEqual(ledger.current_bytes, 0)
+
+    def test_ledger_accepts_variable_schema_2_triplet_sizes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ledger = whole.SceneCacheLedger(root, 100_000)
+            self._write_triplet(
+                root,
+                sequence=1,
+                source_width=56,
+                source_height=28,
+                width=28,
+                height=14,
+            )
+            first_bytes = ledger.acknowledge_pair(
+                1,
+                self._contract(
+                    processed_count=1,
+                    source_width=56,
+                    source_height=28,
+                ),
+            )
+            self._write_triplet(
+                root,
+                sequence=2,
+                source_width=56,
+                source_height=28,
+                width=56,
+                height=28,
+            )
+            second_bytes = ledger.acknowledge_pair(
+                2,
+                self._contract(
+                    processed_count=2,
+                    source_width=56,
+                    source_height=28,
+                ),
+            )
+
+            self.assertEqual(first_bytes, 28 * 14 * 4 + 64 + 192)
+            self.assertEqual(second_bytes, 56 * 28 * 4 + 64 + 192)
+            self.assertNotEqual(first_bytes, second_bytes)
+            self.assertEqual(
+                ledger.release_through(3),
+                {"pairs": 2, "bytes": first_bytes + second_bytes},
+            )
+
+    def test_ledger_rejects_corrupt_state_and_schema_2_frame_identity(self):
+        cases = (
+            (
+                "state",
+                {},
+                lambda state: state.__setitem__(
+                    whole.SCENE_CACHE_SUBJECT_WORDS + 3,
+                    self._float_word(0.5),
+                ),
+                "invalid validity flags",
+            ),
+            (
+                "source",
+                {"metadata_mutator":
+                    lambda words: words.__setitem__(12, words[12] + 1)},
+                None,
+                "source identity",
+            ),
+            (
+                "retained",
+                {"metadata_mutator":
+                    lambda words: words.__setitem__(10, 1)},
+                None,
+                "retained source identity",
+            ),
+            (
+                "transform",
+                {"metadata_mutator":
+                    lambda words: words.__setitem__(
+                        whole.SCENE_CACHE_METADATA_ROI_OFFSET + 1,
+                        1 << 0,
+                    )},
+                None,
+                "ROI transform",
+            ),
+        )
+        for name, triplet_options, state_mutator, message in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self._write_triplet(
+                    root,
+                    state_mutator=state_mutator,
+                    **triplet_options,
+                )
+                ledger = whole.SceneCacheLedger(root, 10_000)
+                with self.assertRaisesRegex(whole.WholeClipError, message):
+                    ledger.acknowledge_pair(1, self._contract())
+                self.assertEqual(ledger.current_bytes, 0)
+
+    def test_ledger_rejects_consistently_stale_reused_depth_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_triplet(root, sequence=5)
+            contract = self._contract(processed_count=5)
+            contract["render_config"]["depth_reuse_interval"] = 4
+            ledger = whole.SceneCacheLedger(root, 10_000)
+            self.assertEqual(
+                ledger.acknowledge_pair(5, contract),
+                14 * 14 * 4 + 64 + 192,
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def make_consistently_stale(words):
+                words[10:12] = [0, 0]
+                offset = whole.SCENE_CACHE_METADATA_ROI_OFFSET
+                words[offset + 2:offset + 4] = [0, 0]
+
+            self._write_triplet(
+                root,
+                sequence=5,
+                metadata_mutator=make_consistently_stale,
+            )
+            contract = self._contract(processed_count=5)
+            contract["render_config"]["depth_reuse_interval"] = 4
+            ledger = whole.SceneCacheLedger(root, 10_000)
+            with self.assertRaisesRegex(
+                    whole.WholeClipError, "retained source identity"):
+                ledger.acknowledge_pair(5, contract)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def make_retained_previous(words):
+                words[10:12] = [0, 0]
+                offset = whole.SCENE_CACHE_METADATA_ROI_OFFSET
+                words[offset + 2:offset + 4] = [0, 0]
+
+            self._write_triplet(
+                root,
+                sequence=5,
+                metadata_mutator=make_retained_previous,
+                state_mutator=lambda state: state.__setitem__(
+                    whole.SCENE_CACHE_SUBJECT_WORDS + 3,
+                    self._float_word(0.0),
+                ),
+            )
+            contract = self._contract(processed_count=5)
+            contract["render_config"]["depth_reuse_interval"] = 4
+            ledger = whole.SceneCacheLedger(root, 10_000)
+            self.assertEqual(
+                ledger.acknowledge_pair(5, contract),
+                14 * 14 * 4 + 64 + 192,
+            )
+            self.assertTrue(
+                ledger.requires_previous_packed_frame(5))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def make_non_cadence_previous(words):
+                words[10:12] = [1, 0]
+                offset = whole.SCENE_CACHE_METADATA_ROI_OFFSET
+                words[offset + 2:offset + 4] = [1, 0]
+
+            self._write_triplet(
+                root,
+                sequence=5,
+                metadata_mutator=make_non_cadence_previous,
+                state_mutator=lambda state: state.__setitem__(
+                    whole.SCENE_CACHE_SUBJECT_WORDS + 3,
+                    self._float_word(0.0),
+                ),
+            )
+            contract = self._contract(processed_count=5)
+            contract["render_config"]["depth_reuse_interval"] = 4
+            ledger = whole.SceneCacheLedger(root, 10_000)
+            with self.assertRaisesRegex(
+                    whole.WholeClipError, "retained source identity"):
+                ledger.acknowledge_pair(5, contract)
+
+    def test_ledger_accepts_first_valid_and_reports_preserve_previous_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_triplet(
+                root,
+                state_mutator=lambda state: state.__setitem__(
+                    whole.SCENE_CACHE_SUBJECT_WORDS + 3,
+                    self._float_word(2.0),
+                ),
+            )
+            ledger = whole.SceneCacheLedger(root, 10_000)
+            ledger.acknowledge_pair(1, self._contract())
+            self.assertFalse(ledger.requires_previous_packed_frame(1))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def retain_first_frame(words):
+                words[10:12] = [0, 0]
+                offset = whole.SCENE_CACHE_METADATA_ROI_OFFSET
+                words[offset + 2:offset + 4] = [0, 0]
+
+            self._write_triplet(
+                root,
+                sequence=2,
+                metadata_mutator=retain_first_frame,
+                state_mutator=lambda state: state.__setitem__(
+                    whole.SCENE_CACHE_SUBJECT_WORDS + 3,
+                    self._float_word(0.0),
+                ),
+            )
+            ledger = whole.SceneCacheLedger(root, 10_000)
+            ledger.acknowledge_pair(
+                2,
+                self._contract(processed_count=2),
+            )
+            self.assertTrue(ledger.requires_previous_packed_frame(2))
+
+    def test_ledger_rejects_each_invalid_cached_state_field(self):
+        invalid_fields = (
+            (
+                "subject initialized",
+                whole.ADAPTIVE_INITIALIZED_WORD,
+                0.5,
+            ),
+            (
+                "zero anchor valid",
+                whole.ADAPTIVE_ZERO_ANCHOR_VALID_WORD,
+                0.5,
+            ),
+            (
+                "cut flags fractional",
+                whole.ADAPTIVE_CUT_FLAGS_WORD,
+                0.5,
+            ),
+            (
+                "cut flags unknown",
+                whole.ADAPTIVE_CUT_FLAGS_WORD,
+                float(whole.ADAPTIVE_KNOWN_CUT_FLAG_MASK + 1),
+            ),
+            (
+                "history state",
+                whole.ADAPTIVE_MODEL_INPUT_HISTORY_STATE_WORD,
+                4.0,
+            ),
+        )
+        for name, index, value in invalid_fields:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self._write_triplet(
+                    root,
+                    state_mutator=lambda state, index=index, value=value:
+                        state.__setitem__(index, self._float_word(value)),
+                )
+                ledger = whole.SceneCacheLedger(root, 10_000)
+                with self.assertRaisesRegex(
+                        whole.WholeClipError, "invalid validity flags"):
+                    ledger.acknowledge_pair(1, self._contract())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def invalid_first_valid(state):
+                state[whole.SCENE_CACHE_SUBJECT_WORDS + 2] = (
+                    self._float_word(0.0))
+                state[whole.SCENE_CACHE_SUBJECT_WORDS + 3] = (
+                    self._float_word(2.0))
+
+            self._write_triplet(root, state_mutator=invalid_first_valid)
+            ledger = whole.SceneCacheLedger(root, 10_000)
+            with self.assertRaisesRegex(
+                    whole.WholeClipError, "invalid validity flags"):
+                ledger.acknowledge_pair(1, self._contract())
+
+    def test_ledger_rejects_unsafe_depth_dimensions_before_file_accounting(self):
+        cases = (
+            ("engine maximum", 1050, 1050, 1050, 1050),
+            ("source bounds", 28, 28, 42, 28),
+            ("patch alignment", 28, 28, 15, 14),
+        )
+        for name, source_width, source_height, width, height in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self._write_triplet(
+                    root,
+                    source_width=source_width,
+                    source_height=source_height,
+                    width=width,
+                    height=height,
+                    depth_bytes=b"",
+                )
+                ledger = whole.SceneCacheLedger(root, 10_000_000)
+                with self.assertRaisesRegex(
+                        whole.WholeClipError, "depth identity"):
+                    ledger.acknowledge_pair(
+                        1,
+                        self._contract(
+                            source_width=source_width,
+                            source_height=source_height,
+                        ),
+                    )
+                self.assertEqual(ledger.current_bytes, 0)
+
+    def test_ledger_requires_exact_running_ack_contract(self):
+        mutations = (
+            ("stale count", lambda value: value.__setitem__("processed_count", 0)),
+            ("ahead count", lambda value: value.__setitem__("processed_count", 2)),
+            ("terminal", lambda value: value.__setitem__("status", "complete")),
+            ("wrong first", lambda value: value.__setitem__("first_sequence", 2)),
+            (
+                "non-atomic",
+                lambda value: value.__setitem__("atomic_frame_publication", False),
+            ),
+            (
+                "depth dtype",
+                lambda value: value["depth"].__setitem__("dtype", "float16-le"),
+            ),
+            (
+                "depth format",
+                lambda value: value["depth"].__setitem__(
+                    "dxgi_format", "R16_FLOAT"),
+            ),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self._write_triplet(root)
+                contract = copy.deepcopy(self._contract())
+                mutate(contract)
+                ledger = whole.SceneCacheLedger(root, 10_000)
+                with self.assertRaises(whole.WholeClipError):
+                    ledger.acknowledge_pair(1, contract)
+                self.assertEqual(ledger.current_bytes, 0)
 
     def test_trace_tail_uses_the_same_incremental_contract_and_ack_identity(self):
         import test_adaptive_clip_report as fixtures

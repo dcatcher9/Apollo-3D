@@ -55,6 +55,10 @@ namespace offline_sbs {
     bool depth_ready = false;
     bool initialized = false;
     bool range_collapsed = true;
+    // A separately launched replay has no packed target from the preceding
+    // scene. Such a frame may stay inside a scene, but it cannot safely begin
+    // one because the live shader would preserve the preceding packed frame.
+    bool requires_previous_packed_frame = false;
     float valid_depth_fraction = 0.0f;
     float scene_age = -1.0f;
     std::uint32_t analysis_flags = 0;

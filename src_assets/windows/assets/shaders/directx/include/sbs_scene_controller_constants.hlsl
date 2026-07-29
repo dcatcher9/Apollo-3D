@@ -3,7 +3,7 @@
 
 #include "include/sbs_scene_controller_contract.generated.hlsl"
 
-// The 96-byte upload-ring element in sbs_scene_controller_gpu.cpp. The buffer is deliberately
+// The 112-byte upload-ring element in sbs_scene_controller_gpu.cpp. The buffer is deliberately
 // separate from the depth constants: scene preparation and completed-depth resolution can be
 // queued back-to-back without rewriting a constant buffer that an earlier dispatch still owns.
 cbuffer SceneControllerConstants : register(b0) {
@@ -26,6 +26,11 @@ cbuffer SceneControllerConstants : register(b0) {
     float scene_challenger_seconds;
     float scene_release_seconds;
     float scene_scroll_enter_seconds;
+
+    uint scene_source_frame_id_low;
+    uint scene_source_frame_id_high;
+    uint scene_identity_reserved_0;
+    uint scene_identity_reserved_1;
 
     uint4 scene_ordered_abi_hash_words_0;
     uint4 scene_ordered_abi_hash_words_1;

@@ -2,11 +2,14 @@
 
 #include "cuda_driver_api.h"
 #include "generated/sbs_adaptive_state_contract.h"
+#include "generated/sbs_scene_controller_contract.h"
 #include "logging.h"
 #include "model_manager.h"
 #include "platform/windows/misc.h"
 #include "platform/windows/utils.h"
 #include "sbs_perf.h"
+#include "sbs_roi_shape_request_gpu.h"
+#include "sbs_roi_shape_transition.h"
 #include "sbs_scene_controller_gpu.h"
 #include "utility.h"
 
@@ -290,16 +293,25 @@ static std::size_t allocated_context_count(const engine_slot &slot) {
 // repeated failures bounded by kMaxContextsPerEngine.
 static void quarantine_execution_context_locked(
   const std::string &engine_key,
-  nvinfer1::IExecutionContext *&context
+  nvinfer1::IExecutionContext *&context,
+  const bool was_warmed = false
 ) {
   if (!context) {
     return;
   }
   auto &slot = g_engines[engine_key];
-  if (slot.context_count > 0) {
-    --slot.context_count;
-  }
-  ++slot.quarantined_context_count;
+  const auto accounting =
+    models::sbs_trt_context_accounting_after_quarantine(
+      {
+        slot.context_count,
+        slot.warmed_context_count,
+        slot.quarantined_context_count,
+      },
+      was_warmed
+    );
+  slot.context_count = accounting.usable;
+  slot.warmed_context_count = accounting.warmed;
+  slot.quarantined_context_count = accounting.quarantined;
   context = nullptr;
   g_trt_context_available.notify_all();
 }
@@ -335,39 +347,6 @@ static nvinfer1::Dims make_input_dims(int h, int w) {
   d.d[2] = h;
   d.d[3] = w;
   return d;
-}
-
-// Round x to the nearest positive multiple of `patch` (the model's spatial patch size; 14 for the
-// Depth Anything family). Model input dims must be patch-aligned or TensorRT rejects the shape.
-static int round_to_patch(float x, int patch = 14) {
-  return std::max(patch, (int) std::round(x / patch) * patch);
-}
-
-// Pick the largest patch-aligned short side that fits both native/profile limits, deriving the
-// long side from the source aspect instead of rounding/capping both axes independently. Independent
-// rounding turned 5120x2160 into 1008x420 (2.400:1); this returns 994x420 (2.367:1), keeping the
-// model grid much closer to the 2.370:1 source without wasting a meaningful amount of inference.
-static std::pair<int, int> aspect_aligned_dims(float aspect, int short_side, int max_w, int max_h, int patch = 14) {
-  aspect = std::max(aspect, 1e-6f);
-  max_w = std::max(patch, (max_w / patch) * patch);
-  max_h = std::max(patch, (max_h / patch) * patch);
-  const int requested_short = round_to_patch((float) short_side, patch);
-  if (aspect >= 1.0f) {
-    for (int h = std::min(requested_short, max_h); h >= patch; h -= patch) {
-      const int w = round_to_patch((float) h * aspect, patch);
-      if (w <= max_w) {
-        return {w, h};
-      }
-    }
-  } else {
-    for (int w = std::min(requested_short, max_w); w >= patch; w -= patch) {
-      const int h = round_to_patch((float) w / aspect, patch);
-      if (h <= max_h) {
-        return {w, h};
-      }
-    }
-  }
-  return {patch, patch};
 }
 
 // Ensure the shared runtime exists, deserialize the compatible engine into its global slot if not
@@ -477,10 +456,10 @@ static bool warmup_execution_context(
   CUcontext cuda_ctx,
   nvinfer1::IExecutionContext *exec_context
 ) {
-  if (!exec_context || !cuda.is_valid()) {
+  if (!exec_context || !cuda_ctx || !cuda.is_valid()) {
     return false;
   }
-  if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
+  if (cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
     return false;
   }
 
@@ -488,9 +467,6 @@ static bool warmup_execution_context(
   if (cuda.cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS || !stream) {
     return false;
   }
-  auto destroy_stream = util::fail_guard([&]() {
-    cuda.cuStreamDestroy(stream);
-  });
 
   constexpr int h = models::depth_engine_opt_height;
   constexpr int w = models::depth_engine_opt_width;
@@ -498,33 +474,70 @@ static bool warmup_execution_context(
   const size_t out_elems = (size_t) h * w;
   CUdeviceptr d_in = 0;
   CUdeviceptr d_out = 0;
-  if (cuda.cuMemAlloc(&d_in, in_elems * sizeof(float)) != CUDA_SUCCESS) {
-    return false;
-  }
-  auto free_input = util::fail_guard([&]() {
-    cuda.cuMemFree(d_in);
-  });
-  if (cuda.cuMemAlloc(&d_out, out_elems * sizeof(float)) != CUDA_SUCCESS) {
-    return false;
-  }
-  auto free_output = util::fail_guard([&]() {
-    cuda.cuMemFree(d_out);
-  });
-
+  const bool input_allocated =
+    cuda.cuMemAlloc(
+      &d_in,
+      in_elems * sizeof(float)
+    ) == CUDA_SUCCESS;
+  const bool output_allocated =
+    input_allocated &&
+    cuda.cuMemAlloc(
+      &d_out,
+      out_elems * sizeof(float)
+    ) == CUDA_SUCCESS;
   const auto input_dims = make_input_dims(h, w);
-  const bool bound = exec_context->setInputShape("pixel_values", input_dims) &&
-                     exec_context->setTensorAddress("pixel_values", (void *) d_in) &&
-                     exec_context->setTensorAddress("predicted_depth", (void *) d_out);
+  const bool bound =
+    output_allocated &&
+    exec_context->setInputShape("pixel_values", input_dims) &&
+    exec_context->setTensorAddress("pixel_values", (void *) d_in) &&
+    exec_context->setTensorAddress("predicted_depth", (void *) d_out);
   bool enqueued = false;
   if (bound) {
     std::lock_guard<std::mutex> lock(g_trt_mutex);
     enqueued = exec_context->enqueueV3(stream);
   }
-  const bool synchronized = enqueued && cuda.cuStreamSynchronize &&
-                            cuda.cuStreamSynchronize(stream) == CUDA_SUCCESS;
+
+  // Re-select the owning context and prove the stream idle before issuing any cleanup call. A
+  // failed enqueue may still have submitted partial work. If selection or synchronization fails,
+  // intentionally retain the bounded warmup allocations/stream until process exit; the caller
+  // quarantines this TensorRT context, and speculative cleanup would be less safe than the leak.
+  const bool context_selected =
+    cuda.cuCtxSetCurrent(cuda_ctx) == CUDA_SUCCESS;
+  const bool synchronized =
+    context_selected &&
+    cuda.cuStreamSynchronize(stream) == CUDA_SUCCESS;
+  if (
+    models::sbs_cuda_resource_cleanup_policy(
+      context_selected,
+      synchronized
+    ) != models::sbs_cuda_resource_cleanup_disposition::release
+  ) {
+    BOOST_LOG(error)
+      << "Depth model startup warmup could not prove its CUDA stream idle; "
+         "retaining terminal warmup handles until process exit.";
+    return false;
+  }
+
+  bool cleanup_succeeded = true;
+  if (d_out != 0) {
+    cleanup_succeeded =
+      cuda.cuMemFree(d_out) == CUDA_SUCCESS &&
+      cleanup_succeeded;
+  }
+  if (d_in != 0) {
+    cleanup_succeeded =
+      cuda.cuMemFree(d_in) == CUDA_SUCCESS &&
+      cleanup_succeeded;
+  }
+  cleanup_succeeded =
+    cuda.cuStreamDestroy(stream) == CUDA_SUCCESS &&
+    cleanup_succeeded;
+  const bool succeeded =
+    input_allocated && output_allocated && bound &&
+    enqueued && synchronized && cleanup_succeeded;
   BOOST_LOG(info) << "Depth model startup warmup complete (" << w << 'x' << h
-                  << (synchronized ? ")." : "); execution failed.");
-  return synchronized;
+                  << (succeeded ? ")." : "); execution or cleanup failed.");
+  return succeeded;
 }
 
 namespace models {
@@ -919,6 +932,8 @@ namespace models {
     CUdeviceptr graph_output = 0;
     int graph_width = 0;
     int graph_height = 0;
+    int configured_input_width = 0;
+    int configured_input_height = 0;
     bool graph_signature_warmed = false;
     bool graph_capture_failed = false;
     bool valid = false;  // all mandatory engine, shader, and session resources are ready
@@ -927,7 +942,12 @@ namespace models {
     bool adaptive_pop;
     float adaptive_pop_max_ratio;
     float zero_plane_mode;  // 1 subject, 2 median depth, 3 far/mid-background
+    // Active rules remain deliberately unexposed. Keeping the complete owned-transform path behind
+    // one runtime gate lets WARP/tests exercise it without allowing `shadow_rules` to affect output.
+    bool active_roi_authority = false;
     std::unique_ptr<sbs_scene_controller_gpu> scene_controller;
+    std::unique_ptr<sbs_roi_shape_request_gpu> roi_shape_request_gpu;
+    std::optional<sbs_roi_shape_request> newest_roi_shape_request;
 
     // Subscription-gated, nonblocking telemetry readback. Resources are created lazily only after
     // a client enables the protocol, then a three-slot staging/query ring absorbs GPU latency
@@ -1627,6 +1647,18 @@ namespace models {
     // Caching
     int target_w = 0;
     int target_h = 0;
+    int canonical_target_w = 0;
+    int canonical_target_h = 0;
+    int requested_target_w = 0;
+    int requested_target_h = 0;
+    std::optional<sbs_roi_shape_request> pending_roi_shape_transition;
+    // Active mode freezes controller advancement only after a delayed request proposes a
+    // destructive tensor-shape change. Same-shape requests remain GPU-validated by ROI generation
+    // and committed geometry without inserting a readback bubble into ordinary inference.
+    sbs_roi_shape_confirmation_guard roi_shape_confirmation;
+    bool roi_canonical_recovery_requested = false;
+    std::uint32_t applied_roi_shape_request_id = 0;
+    unsigned shape_resource_allocation_failures = 0;
     UINT reduce_groups = 0;  // threadgroups for the min/max reduction (groups * 256 = total threads)
     int cb_color_mode = -1;  // input_color_space baked into constant buffers
 
@@ -1639,8 +1671,35 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_subject_hist_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_subject_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_valid_history_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> frame_roi_transform_cs;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> linear_sampler;
     Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
+
+    struct gpu_uint4_buffer {
+      Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
+      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+      Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+    };
+
+    // The all-zero transform is the explicit legacy ABI. It is bound in off/shadow mode so every
+    // added shader slot is deterministic and no stale D3D11 binding can accidentally activate an
+    // ROI. Active rollout uses the frame-owned banks only after the shape/identity handshake.
+    gpu_uint4_buffer zero_roi_transform;
+    gpu_uint4_buffer zero_scene_rule_state;
+    std::array<
+      gpu_uint4_buffer,
+      frame_roi_transform_bank_count
+    > frame_roi_transform_gpu;
+    std::array<
+      gpu_uint4_buffer,
+      frame_roi_transform_bank_count
+    > depth_surface_transform_gpu;
+    gpu_uint4_buffer reliable_roi_transform_gpu;
+    std::uint32_t current_depth_surface_transform_bank = 0;
+    std::array<
+      Microsoft::WRL::ComPtr<ID3D11Buffer>,
+      frame_roi_transform_bank_count
+    > frame_roi_builder_cbuffers;
 
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_in_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_in_uav;
@@ -1667,7 +1726,7 @@ namespace models {
     unsigned model_input_snapshot_retry_frames = 0;
 
     // GPU-resident min/max for per-frame disparity normalization (no CPU readback).
-    Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_raw_buf;  // min bits, max bits, valid count
+    Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_raw_buf;  // min bits, max bits, valid count, accepted-focus count
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> minmax_raw_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_ema_buf;  // float4 {min,max,initialized,frame_state}
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> minmax_ema_uav;
@@ -1695,11 +1754,19 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> ema_motion_mask_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ema_motion_mask_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask_srv;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_reliable_validity_tex;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_reliable_validity_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_reliable_validity_srv;
 
     CUgraphicsResource cuda_in_res = nullptr;
     CUgraphicsResource cuda_out_res = nullptr;
     bool has_previous_frame = false;
     std::uint64_t pending_frame_id = 0;
+    // Off/shadow mode does not allocate, dispatch, map, or lifecycle-track the experimental GPU
+    // transform banks. This CPU-only record preserves exact matched-frame provenance for the
+    // scene controller while every depth shader binds the immutable all-zero legacy transform.
+    std::optional<frame_roi_transform_identity>
+      pending_legacy_frame_identity;
     bool disable_after_pending_drop = false;
     // The two identities keep the just-completed GPU bank owned while the next accepted
     // inference uses the other bank. Coordinates, ROI generation, flags, and reset debt never
@@ -1708,9 +1775,24 @@ namespace models {
     bool stream_error_logged = false;
     bool roi_transform_error_logged = false;
     bool scene_controller_error_logged = false;
+    bool roi_shape_request_error_logged = false;
     bool readiness_preflighted = false;  // can_accept_frame() already counted/queried this source opportunity
     bool depth_context_pooled = false;  // context reused from the pool (modules already loaded -> skip warmup)
     bool context_warmed = false;  // only warmed contexts may return to context_pool
+    // Any terminal TensorRT/CUDA failure poisons this execution context. It remains allocated
+    // because deleting the MSVC-owned object from MinGW corrupts the heap, but must never be
+    // handed to a later stream as a known-good warmed context.
+    bool context_reusable = true;
+
+    void observe_context_event(
+      const sbs_trt_context_event event
+    ) {
+      context_reusable =
+        sbs_trt_context_reusable_after(
+          context_reusable,
+          event
+        );
+    }
 
     bool compile_shader(const std::filesystem::path &path, Microsoft::WRL::ComPtr<ID3D11ComputeShader> &out_cs) {
       auto bytecode = depth_shader_bytecode(path);
@@ -1718,6 +1800,327 @@ namespace models {
         return false;
       }
       return SUCCEEDED(device->CreateComputeShader(bytecode->data(), bytecode->size(), nullptr, &out_cs));
+    }
+
+    bool create_roi_transform_buffer(
+      gpu_uint4_buffer &out,
+      bool writable,
+      std::size_t vector_count = frame_roi_transform_vector_count
+    ) {
+      if (
+        vector_count == 0 ||
+        vector_count >
+          std::numeric_limits<UINT>::max() /
+            (sizeof(std::uint32_t) * 4u)
+      ) {
+        return false;
+      }
+      std::vector<std::uint32_t> zeros(vector_count * 4u, 0u);
+      D3D11_BUFFER_DESC desc {};
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.ByteWidth = static_cast<UINT>(
+        zeros.size() * sizeof(zeros.front())
+      );
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE |
+                       (writable ? D3D11_BIND_UNORDERED_ACCESS : 0u);
+      desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+      desc.StructureByteStride = sizeof(std::uint32_t) * 4u;
+      D3D11_SUBRESOURCE_DATA initial {zeros.data(), 0, 0};
+      if (
+        FAILED(device->CreateBuffer(&desc, &initial, &out.buffer)) ||
+        FAILED(device->CreateShaderResourceView(
+          out.buffer.Get(),
+          nullptr,
+          &out.srv
+        )) ||
+        (writable &&
+         FAILED(device->CreateUnorderedAccessView(
+           out.buffer.Get(),
+           nullptr,
+           &out.uav
+         )))
+      ) {
+        out = {};
+        return false;
+      }
+      return true;
+    }
+
+    bool create_frame_roi_builder_cbuffer(
+      Microsoft::WRL::ComPtr<ID3D11Buffer> &out
+    ) {
+      D3D11_BUFFER_DESC desc {};
+      desc.ByteWidth = sizeof(frame_roi_builder_constants);
+      desc.Usage = D3D11_USAGE_DYNAMIC;
+      desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+      return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &out));
+    }
+
+    [[nodiscard]] std::optional<sbs_roi_shape_request_gpu_submission>
+    make_roi_shape_submission(
+      const scene_controller_gpu_snapshot &controller,
+      std::uint32_t source_width,
+      std::uint32_t source_height
+    ) const {
+      if (
+        !roi_shape_request_gpu ||
+        canonical_target_w <= 0 ||
+        canonical_target_h <= 0 ||
+        source_width == 0u ||
+        source_height == 0u
+      ) {
+        return std::nullopt;
+      }
+
+      sbs_roi_shape_request_gpu_submission submission;
+      submission.rule_state =
+        controller.snapshot_available ?
+          controller.rule_state.Get() :
+          nullptr;
+      submission.source_frame_id =
+        controller.source_frame_id;
+      submission.source_width = source_width;
+      submission.source_height = source_height;
+      submission.canonical_model_width =
+        static_cast<std::uint32_t>(canonical_target_w);
+      submission.canonical_model_height =
+        static_cast<std::uint32_t>(canonical_target_h);
+      submission.target_pixel_budget =
+        submission.canonical_model_width *
+        submission.canonical_model_height;
+      submission.profile_max_width = std::min(
+        sbs_roi_shape_request_engine_max_dimension,
+        source_width
+      );
+      submission.profile_max_height = std::min(
+        sbs_roi_shape_request_engine_max_dimension,
+        source_height
+      );
+      submission.expected_backend_generation =
+        controller.backend_generation;
+      submission.quiet_halo_cells = 2.0f;
+      submission.analysis_canvas_size =
+        static_cast<std::uint32_t>(
+          sbs_scene_controller::analysis_canvas_size
+        );
+      submission.max_model_aspect = max_aspect;
+      submission.active_rules =
+        active_roi_authority ? 1u : 0u;
+      return submission;
+    }
+
+    [[nodiscard]] bool roi_shape_request_matches_submission(
+      const sbs_roi_shape_request &request,
+      const sbs_roi_shape_request_gpu_submission &submission
+    ) const {
+      const sbs_roi_shape_request_limits limits {
+        submission.canonical_model_width,
+        submission.canonical_model_height,
+        submission.profile_max_width,
+        submission.profile_max_height,
+        submission.max_model_aspect,
+      };
+      if (
+        request.shape[0] != submission.source_width ||
+        request.shape[1] != submission.source_height ||
+        !sbs_roi_shape_request_valid(request, limits)
+      ) {
+        return false;
+      }
+
+      if (
+        sbs_roi_shape_has_flag(
+          request,
+          sbs_roi_shape_request_flag::active_roi
+        )
+      ) {
+        return submission.expected_backend_generation != 0u &&
+               request.identity[0] ==
+                 submission.expected_backend_generation;
+      }
+
+      // A helper-generated canonical fallback carries the exact staging-slot source/frame
+      // provenance but may intentionally have backend zero when the controller SRV is absent or
+      // malformed. It can only reduce authority, never authorize a crop.
+      return sbs_roi_shape_has_flag(
+               request,
+               sbs_roi_shape_request_flag::full_frame
+             ) &&
+             sbs_roi_shape_has_flag(
+               request,
+               sbs_roi_shape_request_flag::fallback
+             );
+    }
+
+    /**
+     * Write the exact GPU transform paired with a reserved inference bank.
+     *
+     * Shadow mode deliberately emits a canonical full-frame record and continues binding the
+     * explicit all-zero legacy ABI to preprocessing/postprocessing/rendering. This still exercises
+     * the real frame/version/bank ownership path without allowing a controller decision to alter
+     * output. Active rollout will populate the shape-request expectation and switch consumers only
+     * after the dynamic-shape transition gate is complete.
+     */
+    bool dispatch_frame_roi_transform(
+      const frame_roi_transform_identity &identity
+    ) {
+      if (
+        !identity.is_committed() ||
+        identity.gpu_bank_index >= frame_roi_transform_gpu.size() ||
+        !frame_roi_transform_cs ||
+        !frame_roi_transform_gpu[identity.gpu_bank_index].uav ||
+        !frame_roi_builder_cbuffers[identity.gpu_bank_index] ||
+        !zero_scene_rule_state.srv ||
+        !zero_roi_transform.srv
+      ) {
+        return false;
+      }
+
+      frame_roi_builder_constants constants {};
+      constants.source_width = identity.source_width;
+      constants.source_height = identity.source_height;
+      constants.model_width = identity.model_width;
+      constants.model_height = identity.model_height;
+      constants.source_frame_id_low =
+        static_cast<std::uint32_t>(identity.source_frame_id);
+      constants.source_frame_id_high =
+        static_cast<std::uint32_t>(identity.source_frame_id >> 32u);
+      constants.active_rules =
+        active_roi_authority ? 1u : 0u;
+      constants.expected_backend_generation = identity.backend_generation;
+      constants.transform_version_low =
+        static_cast<std::uint32_t>(identity.transform_version);
+      constants.transform_version_high =
+        static_cast<std::uint32_t>(identity.transform_version >> 32u);
+      constants.gpu_bank_identity = identity.gpu_bank_index;
+      constants.lifecycle_reserved = 1u;
+      constants.quiet_halo_cells = 2.0f;
+      constants.feather_cells = 2.0f;
+      constants.min_focus_cells = 4.0f;
+      constants.analysis_canvas_size =
+        static_cast<std::uint32_t>(
+          sbs_scene_controller::analysis_canvas_size
+        );
+
+      ID3D11ShaderResourceView *rule_state =
+        zero_scene_rule_state.srv.Get();
+      if (active_roi_authority && scene_controller) {
+        const auto snapshot = scene_controller->snapshot();
+        if (
+          snapshot.snapshot_available &&
+          snapshot.backend_generation ==
+            identity.backend_generation &&
+          snapshot.rule_state
+        ) {
+          rule_state = snapshot.rule_state.Get();
+        }
+      }
+
+      if (
+        active_roi_authority &&
+        newest_roi_shape_request
+      ) {
+        const auto &request = *newest_roi_shape_request;
+        const sbs_roi_shape_request_limits limits {
+          static_cast<std::uint32_t>(canonical_target_w),
+          static_cast<std::uint32_t>(canonical_target_h),
+          std::min(
+            sbs_roi_shape_request_engine_max_dimension,
+            identity.source_width
+          ),
+          std::min(
+            sbs_roi_shape_request_engine_max_dimension,
+            identity.source_height
+          ),
+          max_aspect,
+        };
+        const bool exact_shape_owner =
+          request.identity[0] ==
+            identity.backend_generation &&
+          request.shape[0] == identity.source_width &&
+          request.shape[1] == identity.source_height &&
+          request.shape[2] == identity.model_width &&
+          request.shape[3] == identity.model_height;
+        const bool authorizes_active_roi =
+          sbs_roi_shape_has_flag(
+            request,
+            sbs_roi_shape_request_flag::active_roi
+          ) &&
+          !sbs_roi_shape_has_flag(
+            request,
+            sbs_roi_shape_request_flag::fallback
+          ) &&
+          request.header[2] ==
+            static_cast<std::uint32_t>(
+              sbs_roi_shape_request_reason::none
+            );
+        if (
+          exact_shape_owner &&
+          authorizes_active_roi &&
+          sbs_roi_shape_request_valid(request, limits)
+        ) {
+          constants.expected_request_authority =
+            (request.header[1] & 0xFFFFu) |
+            ((request.header[2] & 0xFFFFu) << 16u);
+          constants.expected_roi_generation =
+            request.identity[1];
+          constants.shape_request_id =
+            request.header[3];
+          constants.expected_rule_update_count =
+            request.identity[2];
+          constants.expected_committed_roi_bits =
+            request.committed_roi_bits;
+        }
+      }
+
+      auto *builder_cbuffer =
+        frame_roi_builder_cbuffers[identity.gpu_bank_index].Get();
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      const auto map_result = context->Map(
+        builder_cbuffer,
+        0,
+        D3D11_MAP_WRITE_DISCARD,
+        0,
+        &mapped
+      );
+      if (FAILED(map_result)) {
+        return false;
+      }
+      if (!mapped.pData) {
+        context->Unmap(builder_cbuffer, 0);
+        return false;
+      }
+      std::memcpy(
+        mapped.pData,
+        &constants,
+        sizeof(constants)
+      );
+      context->Unmap(builder_cbuffer, 0);
+
+      context->CSSetShader(frame_roi_transform_cs.Get(), nullptr, 0);
+      context->CSSetConstantBuffers(0, 1, &builder_cbuffer);
+      ID3D11ShaderResourceView *builder_srvs[2] = {
+        rule_state,
+        active_roi_authority ?
+          depth_surface_transform_gpu[
+            current_depth_surface_transform_bank
+          ].srv.Get() :
+          zero_roi_transform.srv.Get(),
+      };
+      context->CSSetShaderResources(0, 2, builder_srvs);
+      auto *builder_uav =
+        frame_roi_transform_gpu[identity.gpu_bank_index].uav.Get();
+      context->CSSetUnorderedAccessViews(0, 1, &builder_uav, nullptr);
+      context->Dispatch(1, 1, 1);
+
+      ID3D11UnorderedAccessView *null_uav = nullptr;
+      ID3D11ShaderResourceView *null_srvs[2] = {nullptr, nullptr};
+      ID3D11Buffer *null_cbuffer = nullptr;
+      context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+      context->CSSetShaderResources(0, 2, null_srvs);
+      context->CSSetConstantBuffers(0, 1, &null_cbuffer);
+      return true;
     }
 
     impl(Microsoft::WRL::ComPtr<ID3D11Device> d, Microsoft::WRL::ComPtr<ID3D11DeviceContext> c, const std::filesystem::path &assets_dir, const config::video_t::sbs_t &cfg, const config::depth_model_info &model):
@@ -1755,9 +2158,18 @@ namespace models {
       if (cuda.is_valid() && ensure_cuda_initialized(cuda)) {
         if (cuda_device_for_d3d(cuda, device.Get(), cuda_device)) {
           cuda_ctx = primary_context(cuda, cuda_device);
-          if (cuda_ctx) {
-            cuda.cuCtxSetCurrent(cuda_ctx);
-            cuda.cuStreamCreate(&cu_stream, CU_STREAM_NON_BLOCKING);
+          if (
+            cuda_ctx &&
+            cuda.cuCtxSetCurrent(cuda_ctx) == CUDA_SUCCESS
+          ) {
+            if (
+              cuda.cuStreamCreate(
+                &cu_stream,
+                CU_STREAM_NON_BLOCKING
+              ) != CUDA_SUCCESS
+            ) {
+              cu_stream = nullptr;
+            }
           }
         }
       }
@@ -1914,13 +2326,54 @@ namespace models {
         BOOST_LOG(error) << "Depth estimator failed: required Bestv2 shader initialization failed.";
         return;
       }
+      bool roi_transform_resources_ok =
+        create_roi_transform_buffer(zero_roi_transform, false);
+      if (active_roi_authority) {
+        roi_transform_resources_ok =
+          compile_shader(
+            assets_dir / "shaders" / "directx" /
+              "sbs_frame_roi_transform_cs.hlsl",
+            frame_roi_transform_cs
+          ) &&
+          create_roi_transform_buffer(
+            zero_scene_rule_state,
+            false,
+            sbs_scene_controller::rule_state_vector_count
+          ) &&
+          create_roi_transform_buffer(
+            reliable_roi_transform_gpu,
+            true
+          ) &&
+          roi_transform_resources_ok;
+        for (auto &bank : frame_roi_transform_gpu) {
+          roi_transform_resources_ok =
+            create_roi_transform_buffer(bank, true) &&
+            roi_transform_resources_ok;
+        }
+        for (auto &bank : depth_surface_transform_gpu) {
+          roi_transform_resources_ok =
+            create_roi_transform_buffer(bank, true) &&
+            roi_transform_resources_ok;
+        }
+        for (auto &cbuffer : frame_roi_builder_cbuffers) {
+          roi_transform_resources_ok =
+            create_frame_roi_builder_cbuffer(cbuffer) &&
+            roi_transform_resources_ok;
+        }
+      }
+      if (!roi_transform_resources_ok) {
+        BOOST_LOG(error)
+          << "Depth estimator failed: could not allocate the GPU ROI-transform contract.";
+        return;
+      }
       BOOST_LOG(info) << "Permanent Bestv2 subject shaping enabled (recenter " << subject_recenter << ").";
       BOOST_LOG(info) << "SBS zero-plane mode: " << cfg.zero_plane
                       << (zero_plane_mode > 0.5f ? " (shot-latched experimental anchor)." : ".");
       // Min/max reduction accumulator, pre-seeded to the reduction identity
-      // {min = 0xFFFFFFFF, max = 0, valid = 0}. depth_minmax_ema_cs resets it after each frame.
+      // {min = 0xFFFFFFFF, max = 0, valid = 0, accepted = 0}.
+      // depth_minmax_ema_cs resets all four words after each frame.
       {
-        uint32_t init_raw[3] = {0xFFFFFFFFu, 0u, 0u};
+        uint32_t init_raw[4] = {0xFFFFFFFFu, 0u, 0u, 0u};
         D3D11_BUFFER_DESC bd = {};
         bd.Usage = D3D11_USAGE_DEFAULT;
         bd.ByteWidth = sizeof(init_raw);
@@ -1933,7 +2386,7 @@ namespace models {
         uav.Format = DXGI_FORMAT_R32_TYPELESS;
         uav.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
         uav.Buffer.FirstElement = 0;
-        uav.Buffer.NumElements = 3;
+        uav.Buffer.NumElements = 4;
         uav.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
         device->CreateUnorderedAccessView(minmax_raw_buf.Get(), &uav, &minmax_raw_uav);
       }
@@ -2024,7 +2477,7 @@ namespace models {
               depth_subject_hist_cs && depth_subject_resolve_cs && depth_valid_history_cs &&
               minmax_raw_uav && minmax_ema_uav && minmax_ema_srv && hist_uav &&
               subject_hist_uav && subject_plain_uav && subject_uav && subject_srv &&
-              linear_sampler;
+              zero_roi_transform.srv && linear_sampler;
       if (!valid) {
         BOOST_LOG(error) << "Depth estimator failed: required engine or Bestv2 GPU resource initialization failed.";
         return;
@@ -2043,6 +2496,20 @@ namespace models {
             << "Host SBS scene controller is unavailable; continuing with the unchanged "
                "full-frame depth controller.";
           scene_controller.reset();
+        }
+        if (scene_controller) {
+          roi_shape_request_gpu =
+            std::make_unique<sbs_roi_shape_request_gpu>(
+              device,
+              context,
+              assets_dir
+            );
+          if (!roi_shape_request_gpu->valid()) {
+            BOOST_LOG(warning)
+              << "Host SBS ROI shape-request readback is unavailable; "
+                 "shadow rendering remains unchanged.";
+            roi_shape_request_gpu.reset();
+          }
         }
       }
 
@@ -2103,22 +2570,95 @@ namespace models {
 
     ~impl() {
       auto &cuda = cuda_driver_api::get();
-      if (cuda.is_valid() && cuda_ctx) {
-        cuda.cuCtxSetCurrent(cuda_ctx);
+      bool context_selected = false;
+      bool stream_idle = cu_stream == nullptr;
+      if (
+        cuda.is_valid() && cuda_ctx && cuda.cuCtxSetCurrent &&
+        cuda.cuCtxSetCurrent(cuda_ctx) == CUDA_SUCCESS
+      ) {
+        context_selected = true;
+        if (cu_stream && cuda.cuStreamSynchronize) {
+          stream_idle =
+            cuda.cuStreamSynchronize(cu_stream) == CUDA_SUCCESS;
+        }
+      }
+
+      if (!context_selected) {
+        observe_context_event(
+          sbs_trt_context_event::cuda_context_failure
+        );
+      } else if (!stream_idle) {
+        // A missing synchronize entry point is equivalent to a failed synchronization: neither
+        // case proves that TensorRT and D3D interop have stopped using their backing resources.
+        observe_context_event(
+          sbs_trt_context_event::cuda_stream_failure
+        );
+      }
+
+      const auto cleanup_disposition =
+        sbs_cuda_resource_cleanup_policy(
+          context_selected,
+          stream_idle
+        );
+      if (
+        cleanup_disposition ==
+        sbs_cuda_resource_cleanup_disposition::release
+      ) {
         if (cu_stream) {
-          if (cuda.cuStreamSynchronize) {
-            cuda.cuStreamSynchronize(cu_stream);
-          }
           destroy_inference_graph(cuda);
-          cuda.cuStreamDestroy(cu_stream);
+          if (
+            !cuda.cuStreamDestroy ||
+            cuda.cuStreamDestroy(cu_stream) != CUDA_SUCCESS
+          ) {
+            observe_context_event(
+              sbs_trt_context_event::cuda_stream_failure
+            );
+          }
         }
-        if (cuda_in_res) {
-          cuda.cuGraphicsUnregisterResource(cuda_in_res);
+        if (
+          cuda_in_res &&
+          (
+            !cuda.cuGraphicsUnregisterResource ||
+            cuda.cuGraphicsUnregisterResource(cuda_in_res) !=
+              CUDA_SUCCESS
+          )
+        ) {
+          // Do not release a D3D resource still owned by an untracked CUDA registration. This is
+          // a terminal error path; intentionally retain one COM reference until process exit.
+          tensor_in_buf.Detach();
+          observe_context_event(
+            sbs_trt_context_event::cuda_interop_failure
+          );
+        } else {
+          cuda_in_res = nullptr;
         }
-        if (cuda_out_res) {
-          cuda.cuGraphicsUnregisterResource(cuda_out_res);
+        if (
+          cuda_out_res &&
+          (
+            !cuda.cuGraphicsUnregisterResource ||
+            cuda.cuGraphicsUnregisterResource(cuda_out_res) !=
+              CUDA_SUCCESS
+          )
+        ) {
+          tensor_out_buf.Detach();
+          observe_context_event(
+            sbs_trt_context_event::cuda_interop_failure
+          );
+        } else {
+          cuda_out_res = nullptr;
         }
         perf_destroy_events();  // free the timing events while cuda_ctx is still current
+      } else {
+        // Do not issue any context-bound CUDA call under an unknown current context or against a
+        // stream whose idleness is unproven. The process owns these handles until exit. Retain the
+        // backing COM references too, because pending/registered CUDA work may still reference
+        // them after this C++ object is gone.
+        if (cuda_in_res) {
+          tensor_in_buf.Detach();
+        }
+        if (cuda_out_res) {
+          tensor_out_buf.Detach();
+        }
       }
 
       // Return only a successfully warmed context to the reusable pool. Construction can fail
@@ -2127,12 +2667,21 @@ namespace models {
       // Contexts cannot be destroyed safely across the DLL boundary, so quarantine them instead.
       std::lock_guard<std::mutex> lock(g_trt_mutex);
       if (exec_context) {
-        if (context_warmed) {
+        if (
+          sbs_trt_context_pool_disposition(
+            context_warmed,
+            context_reusable
+          ) == sbs_trt_context_disposition::reuse
+        ) {
           g_engines[engine_key].context_pool.push_back(exec_context);
           exec_context = nullptr;
           g_trt_context_available.notify_all();
         } else {
-          quarantine_execution_context_locked(engine_key, exec_context);
+          quarantine_execution_context_locked(
+            engine_key,
+            exec_context,
+            context_warmed
+          );
         }
       }
       // TRT runtime/engines are cached globally, do not destroy them here.
@@ -2153,6 +2702,12 @@ namespace models {
     ) {
       estimate_result r;
       r.depth = output_srv();
+      r.depth_roi_transform =
+        active_roi_authority ?
+          depth_surface_transform_gpu[
+            current_depth_surface_transform_bank
+          ].srv :
+          zero_roi_transform.srv;
       r.subject = subject_srv;
       r.depth_frame_state = minmax_ema_srv;
       r.ema_motion_mask = ema_motion_mask_srv;
@@ -2207,9 +2762,22 @@ namespace models {
      * Promote the exact pending ROI ownership before any normalization/history shader can consume
      * the raw output. Returning nullopt is a hard fail-closed decision for that completion.
      */
-    std::optional<frame_roi_transform_identity> claim_roi_completion(
+    std::optional<frame_roi_transform_identity> claim_depth_completion(
       std::uint64_t source_frame_id
     ) {
+      if (!active_roi_authority) {
+        if (
+          !pending_legacy_frame_identity ||
+          pending_legacy_frame_identity->source_frame_id !=
+            source_frame_id
+        ) {
+          return std::nullopt;
+        }
+        const auto identity = *pending_legacy_frame_identity;
+        pending_legacy_frame_identity.reset();
+        return identity;
+      }
+
       const auto *pending = roi_transform_slots.pending_for(source_frame_id);
       if (!pending) {
         return std::nullopt;
@@ -2221,13 +2789,17 @@ namespace models {
       return identity;
     }
 
-    void drop_roi_completion(
+    void drop_depth_completion(
       std::uint64_t source_frame_id,
       std::string_view reason
     ) {
-      if (!roi_transform_slots.drop_in_flight(source_frame_id)) {
-        // A corrupt/missing state must not retain a bank and starve every later submission.
-        roi_transform_slots.abandon_in_flight();
+      if (active_roi_authority) {
+        if (!roi_transform_slots.drop_in_flight(source_frame_id)) {
+          // A corrupt/missing state must not retain a bank and starve every later submission.
+          roi_transform_slots.abandon_in_flight();
+        }
+      } else {
+        pending_legacy_frame_identity.reset();
       }
       if (!roi_transform_error_logged) {
         BOOST_LOG(error)
@@ -2239,16 +2811,20 @@ namespace models {
     }
 
     std::optional<std::uint64_t> abandon_pending_after_cuda_error(
-      std::string_view reason
+      std::string_view reason,
+      const sbs_trt_context_event event =
+        sbs_trt_context_event::cuda_stream_failure
     ) {
       std::optional<std::uint64_t> dropped;
       if (has_previous_frame) {
         dropped = pending_frame_id;
       }
       roi_transform_slots.abandon_in_flight();
+      pending_legacy_frame_identity.reset();
       has_previous_frame = false;
       disable_after_pending_drop = false;
       valid = false;
+      observe_context_event(event);
       if (!stream_error_logged) {
         BOOST_LOG(error)
           << "Depth estimator abandoned its pending inference after " << reason
@@ -2306,11 +2882,207 @@ namespace models {
       return true;
     }
 
+    /**
+     * Retire every shape-dependent resource while the TensorRT stream is known idle.
+     *
+     * The caller invokes this only on the capture opportunity after the old-shape completion was
+     * rendered. The display therefore repeats its already materialized SBS texture while this
+     * method tears down interop and the following allocation block builds the requested shape.
+     */
+    bool unregister_cuda_interop_resource(
+      cuda_driver_api &cuda,
+      CUgraphicsResource &resource,
+      const char *label
+    ) {
+      if (!resource) {
+        return true;
+      }
+      const auto status =
+        cuda.cuGraphicsUnregisterResource(resource);
+      if (status == CUDA_SUCCESS) {
+        resource = nullptr;
+        return true;
+      }
+      BOOST_LOG(error)
+        << "Depth estimator could not unregister the " << label
+        << " CUDA interop resource: " << status;
+      // Preserve the handle and its backing COM resource. Replacing the D3D allocation while
+      // CUDA still owns an untracked registration can fault the device; the caller must disable
+      // this estimator instead.
+      return false;
+    }
+
+    bool release_shape_resources_for_rebuild(
+      cuda_driver_api &cuda
+    ) {
+      if (
+        has_previous_frame ||
+        roi_transform_slots.has_pending() ||
+        roi_transform_slots.has_reserved() ||
+        roi_transform_slots.has_orphaned()
+      ) {
+        return false;
+      }
+
+      destroy_inference_graph(cuda);
+      graph_input = 0;
+      graph_output = 0;
+      graph_width = 0;
+      graph_height = 0;
+      configured_input_width = 0;
+      configured_input_height = 0;
+
+      const bool input_released =
+        unregister_cuda_interop_resource(
+          cuda,
+          cuda_in_res,
+          "old ROI input"
+        );
+      const bool output_released =
+        unregister_cuda_interop_resource(
+          cuda,
+          cuda_out_res,
+          "old ROI output"
+        );
+      const bool interop_released =
+        input_released && output_released;
+      if (!interop_released) {
+        valid = false;
+        observe_context_event(
+          sbs_trt_context_event::cuda_interop_failure
+        );
+        return false;
+      }
+
+      tensor_in_uav.Reset();
+      tensor_in_srv.Reset();
+      tensor_in_buf.Reset();
+      tensor_previous_input_uav.Reset();
+      tensor_previous_input_srv.Reset();
+      tensor_previous_input_buf.Reset();
+      appearance_ordinal_uav.Reset();
+      appearance_ordinal_srv.Reset();
+      appearance_ordinal_buf.Reset();
+      previous_appearance_ordinal_uav.Reset();
+      previous_appearance_ordinal_srv.Reset();
+      previous_appearance_ordinal_buf.Reset();
+      tensor_out_srv.Reset();
+      tensor_out_buf.Reset();
+      raw_snapshot_srv.Reset();
+      raw_snapshot_buf.Reset();
+      model_input_snapshot_srv.Reset();
+      model_input_snapshot_buf.Reset();
+      depth_uav.Reset();
+      depth_srv.Reset();
+      depth_tex.Reset();
+      depth_previous_srv.Reset();
+      depth_previous_tex.Reset();
+      depth_cut_history_uav.Reset();
+      depth_cut_history_srv.Reset();
+      depth_cut_history_tex.Reset();
+      ema_motion_mask_uav.Reset();
+      ema_motion_mask_srv.Reset();
+      ema_motion_mask_tex.Reset();
+      depth_reliable_validity_uav.Reset();
+      depth_reliable_validity_srv.Reset();
+      depth_reliable_validity_tex.Reset();
+
+      cbuffer.Reset();
+      cb_color_mode = -1;
+      reduce_groups = 0u;
+      target_w = 0;
+      target_h = 0;
+      raw_snapshot_retry_frames = 0u;
+      model_input_snapshot_retry_frames = 0u;
+      current_depth_surface_transform_bank = 0u;
+      pending_legacy_frame_identity.reset();
+      roi_transform_slots.reset_for_resource_rebuild();
+
+      const UINT clear_uint[4] = {0u, 0u, 0u, 0u};
+      for (auto &bank : frame_roi_transform_gpu) {
+        context->ClearUnorderedAccessViewUint(
+          bank.uav.Get(),
+          clear_uint
+        );
+      }
+      for (auto &bank : depth_surface_transform_gpu) {
+        context->ClearUnorderedAccessViewUint(
+          bank.uav.Get(),
+          clear_uint
+        );
+      }
+      context->ClearUnorderedAccessViewUint(
+        reliable_roi_transform_gpu.uav.Get(),
+        clear_uint
+      );
+
+      const std::array<std::uint32_t, 4> raw_identity {
+        0xFFFFFFFFu,
+        0u,
+        0u,
+        0u,
+      };
+      context->UpdateSubresource(
+        minmax_raw_buf.Get(),
+        0,
+        nullptr,
+        raw_identity.data(),
+        0,
+        0
+      );
+      const std::array<float, 4> zero_ema {};
+      context->UpdateSubresource(
+        minmax_ema_buf.Get(),
+        0,
+        nullptr,
+        zero_ema.data(),
+        0,
+        0
+      );
+      context->ClearUnorderedAccessViewUint(
+        hist_uav.Get(),
+        clear_uint
+      );
+      context->ClearUnorderedAccessViewUint(
+        subject_hist_uav.Get(),
+        clear_uint
+      );
+      context->ClearUnorderedAccessViewUint(
+        subject_plain_uav.Get(),
+        clear_uint
+      );
+      context->UpdateSubresource(
+        subject_buf.Get(),
+        0,
+        nullptr,
+        sbs_adaptive_state::initial_values.data(),
+        0,
+        0
+      );
+      return true;
+    }
+
     // estimate() has already submitted one inference. Wait for that exact inference, consume it
     // once, and deliberately do NOT enqueue a duplicate. This is the synchronous quality oracle.
     estimate_result finish_pending(input_color_space color_space) {
       auto &cuda = cuda_driver_api::get();
       if (!has_previous_frame || !cu_stream || !cuda.cuStreamSynchronize) {
+        if (has_previous_frame && (!cu_stream || !cuda.cuStreamSynchronize)) {
+          const auto dropped =
+            abandon_pending_after_cuda_error(
+              "the CUDA stream synchronization contract is unavailable",
+              sbs_trt_context_event::cuda_stream_failure
+            );
+          return make_result(
+            false,
+            0,
+            false,
+            false,
+            false,
+            dropped.has_value(),
+            dropped.value_or(0)
+          );
+        }
         return make_result();
       }
       if (cuda_ctx) {
@@ -2321,7 +3093,8 @@ namespace models {
             << set_current;
           const auto dropped =
             abandon_pending_after_cuda_error(
-              "cuCtxSetCurrent failed while finishing depth"
+              "cuCtxSetCurrent failed while finishing depth",
+              sbs_trt_context_event::cuda_context_failure
             );
           return make_result(
             false,
@@ -2358,11 +3131,12 @@ namespace models {
       }
       const auto completed_frame_id = pending_frame_id;
       const bool explicitly_orphaned =
+        active_roi_authority &&
         roi_transform_slots.orphaned_for(completed_frame_id);
       const auto completed_roi_identity =
-        claim_roi_completion(completed_frame_id);
+        claim_depth_completion(completed_frame_id);
       if (!completed_roi_identity) {
-        drop_roi_completion(
+        drop_depth_completion(
           completed_frame_id,
           "its exact pending ROI-transform identity was absent or mismatched"
         );
@@ -2382,7 +3156,7 @@ namespace models {
         );
       }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
-      normalize_depth_output(d3d_timer);
+      normalize_depth_output(*completed_roi_identity, d3d_timer);
       mark_d3d_post_end(d3d_timer);
       mark_d3d_pre_start(d3d_timer);
       end_d3d_perf(d3d_timer);
@@ -2434,39 +3208,86 @@ namespace models {
     // Normalize the finished raw disparity in tensor_out_buf into depth_tex: the scale
     // passes (min/max reduction, permanent percentile histogram, EMA fold) followed by the
     // mapping/temporal-EMA pass. GPU-resident throughout, no CPU readback.
-    void normalize_depth_output(d3d_perf_slot *d3d_timer = nullptr) {
+    void normalize_depth_output(
+      const frame_roi_transform_identity &completed_roi_identity,
+      d3d_perf_slot *d3d_timer = nullptr
+    ) {
+      const auto completed_bank =
+        completed_roi_identity.gpu_bank_index;
+      const bool owned_transform_ready =
+        active_roi_authority &&
+        completed_bank < frame_roi_transform_gpu.size() &&
+        frame_roi_transform_gpu[completed_bank].srv &&
+        depth_surface_transform_gpu[
+          current_depth_surface_transform_bank
+        ].srv &&
+        reliable_roi_transform_gpu.srv;
+      // `shadow_rules` binds the explicit all-zero legacy ABI everywhere. Active rollout switches
+      // this tuple atomically: current accepted-frame transform, transform paired with the retained
+      // depth surface, and transform paired with the structurally reliable cut-history endpoint.
+      ID3D11ShaderResourceView *current_transform =
+        owned_transform_ready ?
+          frame_roi_transform_gpu[completed_bank].srv.Get() :
+          zero_roi_transform.srv.Get();
+      ID3D11ShaderResourceView *previous_surface_transform =
+        owned_transform_ready ?
+          depth_surface_transform_gpu[
+            current_depth_surface_transform_bank
+          ].srv.Get() :
+          zero_roi_transform.srv.Get();
+      ID3D11ShaderResourceView *reliable_transform =
+        owned_transform_ready ?
+          reliable_roi_transform_gpu.srv.Get() :
+          zero_roi_transform.srv.Get();
+      ID3D11ShaderResourceView *null_transform_srvs[2] = {
+        nullptr,
+        nullptr
+      };
+
       // 3a. Per-frame scale (GPU-resident; no CPU readback). Depth Anything V2's
       // relative output is affine-invariant, so this is required for a stable parallax scale.
       if (depth_minmax_cs && depth_minmax_ema_cs && minmax_raw_uav && minmax_ema_uav) {
         // Pass A: parallel reduction of the raw disparity -> min/max (uint bits).
         context->CSSetShader(depth_minmax_cs.Get(), nullptr, 0);
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        context->CSSetShaderResources(0, 1, tensor_out_srv.GetAddressOf());
+        ID3D11ShaderResourceView *minmax_srvs[2] = {
+          tensor_out_srv.Get(),
+          current_transform
+        };
+        context->CSSetShaderResources(0, 2, minmax_srvs);
         context->CSSetUnorderedAccessViews(0, 1, minmax_raw_uav.GetAddressOf(), nullptr);
         context->Dispatch(reduce_groups, 1, 1);
 
         ID3D11UnorderedAccessView *null_uav1 = nullptr;
-        ID3D11ShaderResourceView *null_srv1 = nullptr;
         context->CSSetUnorderedAccessViews(0, 1, &null_uav1, nullptr);
-        context->CSSetShaderResources(0, 1, &null_srv1);
+        context->CSSetShaderResources(0, 2, null_transform_srvs);
 
         // Pass A2 (percentile mode): 256-bin histogram over the raw range, so pass B
         // can replace the outlier-sensitive min/max with robust percentile bounds.
         if (depth_hist_cs && hist_uav) {
           context->CSSetShader(depth_hist_cs.Get(), nullptr, 0);
           context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-          context->CSSetShaderResources(0, 1, tensor_out_srv.GetAddressOf());
+          ID3D11ShaderResourceView *hist_srvs[2] = {
+            tensor_out_srv.Get(),
+            current_transform
+          };
+          context->CSSetShaderResources(0, 2, hist_srvs);
           ID3D11UnorderedAccessView *hist_uavs[2] = {hist_uav.Get(), minmax_raw_uav.Get()};
           context->CSSetUnorderedAccessViews(0, 2, hist_uavs, nullptr);
           context->Dispatch(reduce_groups, 1, 1);
 
           ID3D11UnorderedAccessView *null_uavs_h[2] = {nullptr, nullptr};
           context->CSSetUnorderedAccessViews(0, 2, null_uavs_h, nullptr);
-          context->CSSetShaderResources(0, 1, &null_srv1);
+          context->CSSetShaderResources(0, 2, null_transform_srvs);
         }
 
         // Pass B: fold into the EMA'd bounds and reset the accumulators (1 thread).
         context->CSSetShader(depth_minmax_ema_cs.Get(), nullptr, 0);
+        ID3D11ShaderResourceView *ema_fold_srvs[2] = {
+          current_transform,
+          previous_surface_transform
+        };
+        context->CSSetShaderResources(0, 2, ema_fold_srvs);
         ID3D11UnorderedAccessView *ema_uavs[4] = {
           minmax_ema_uav.Get(),
           minmax_raw_uav.Get(),
@@ -2478,6 +3299,7 @@ namespace models {
 
         ID3D11UnorderedAccessView *null_uav2[4] = {nullptr, nullptr, nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 4, null_uav2, nullptr);
+        context->CSSetShaderResources(0, 2, null_transform_srvs);
       }
 
       // Snapshot the complete previous depth before any thread writes the new result.
@@ -2487,18 +3309,26 @@ namespace models {
       if (ema_edge_change > 0.0f && ema_edge_gradient > 0.0f) {
         context->CSSetShader(depth_ema_motion_cs.Get(), nullptr, 0);
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        ID3D11ShaderResourceView *mask_srvs[3] = {
+        ID3D11ShaderResourceView *mask_srvs[5] = {
           tensor_out_srv.Get(),
           minmax_ema_srv.Get(),
-          depth_previous_srv.Get()
+          depth_previous_srv.Get(),
+          current_transform,
+          previous_surface_transform
         };
-        context->CSSetShaderResources(0, 3, mask_srvs);
+        context->CSSetShaderResources(0, 5, mask_srvs);
         context->CSSetUnorderedAccessViews(0, 1, ema_motion_mask_uav.GetAddressOf(), nullptr);
         context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
         ID3D11UnorderedAccessView *null_mask_uav = nullptr;
-        ID3D11ShaderResourceView *null_mask_srvs[3] = {nullptr, nullptr, nullptr};
+        ID3D11ShaderResourceView *null_mask_srvs[5] = {
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr
+        };
         context->CSSetUnorderedAccessViews(0, 1, &null_mask_uav, nullptr);
-        context->CSSetShaderResources(0, 3, null_mask_srvs);
+        context->CSSetShaderResources(0, 5, null_mask_srvs);
       } else {
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_mask);
       }
@@ -2508,44 +3338,74 @@ namespace models {
       // first valid frame snap and makes an all-invalid frame hold entirely on the GPU.
       context->CSSetShader(buffer_to_tex_cs.Get(), nullptr, 0);
       context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-      ID3D11ShaderResourceView *bt_srvs[4] = {
+      ID3D11ShaderResourceView *bt_srvs[6] = {
         tensor_out_srv.Get(),
         minmax_ema_srv.Get(),
         depth_previous_srv.Get(),
-        ema_motion_mask_srv.Get()
+        ema_motion_mask_srv.Get(),
+        current_transform,
+        previous_surface_transform
       };
-      context->CSSetShaderResources(0, 4, bt_srvs);
-      context->CSSetUnorderedAccessViews(0, 1, depth_uav.GetAddressOf(), nullptr);
+      context->CSSetShaderResources(0, 6, bt_srvs);
+      ID3D11UnorderedAccessView *bt_uavs[2] = {
+        depth_uav.Get(),
+        owned_transform_ready ?
+          depth_surface_transform_gpu[
+            current_depth_surface_transform_bank ^ 1u
+          ].uav.Get() :
+          nullptr
+      };
+      context->CSSetUnorderedAccessViews(0, 2, bt_uavs, nullptr);
 
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
       ID3D11UnorderedAccessView *null_uav2[2] = {nullptr, nullptr};
-      ID3D11ShaderResourceView *null_srvs[4] = {nullptr, nullptr, nullptr, nullptr};
-      context->CSSetUnorderedAccessViews(0, 1, null_uav2, nullptr);
-      context->CSSetShaderResources(0, 4, null_srvs);
+      ID3D11ShaderResourceView *null_bt_srvs[6] = {
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr
+      };
+      context->CSSetUnorderedAccessViews(0, 2, null_uav2, nullptr);
+      context->CSSetShaderResources(0, 6, null_bt_srvs);
+      if (owned_transform_ready) {
+        // buffer_to_tex copies either the valid current transform or the retained previous
+        // transform into the next bank in the same dispatch that writes/holds depth_tex.
+        current_depth_surface_transform_bank ^= 1u;
+      }
 
       // 3s. Subject tracking: weighted depth histogram over the freshly-normalized
       // depth, then a 1-thread resolve into the subject state the reprojection reads.
       {
         context->CSSetShader(depth_subject_hist_cs.Get(), nullptr, 0);
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        ID3D11ShaderResourceView *subject_srvs[7] = {
+        ID3D11ShaderResourceView *subject_srvs[11] = {
           depth_srv.Get(),
           depth_cut_history_srv.Get(),
           tensor_in_srv.Get(),
           tensor_previous_input_srv.Get(),
           minmax_ema_srv.Get(),
           appearance_ordinal_srv.Get(),
-          previous_appearance_ordinal_srv.Get()
+          previous_appearance_ordinal_srv.Get(),
+          current_transform,
+          reliable_transform,
+          tensor_out_srv.Get(),
+          depth_reliable_validity_srv.Get()
         };
-        context->CSSetShaderResources(0, 7, subject_srvs);
+        context->CSSetShaderResources(0, 11, subject_srvs);
         ID3D11UnorderedAccessView *hist_uavs[2] = {subject_hist_uav.Get(), subject_plain_uav.Get()};
         context->CSSetUnorderedAccessViews(0, 2, hist_uavs, nullptr);
         context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
         ID3D11UnorderedAccessView *null_uavs_h2[2] = {nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 2, null_uavs_h2, nullptr);
-        ID3D11ShaderResourceView *null_subject_srvs[7] = {
+        ID3D11ShaderResourceView *null_subject_srvs[11] = {
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
           nullptr,
           nullptr,
           nullptr,
@@ -2554,15 +3414,21 @@ namespace models {
           nullptr,
           nullptr
         };
-        context->CSSetShaderResources(0, 7, null_subject_srvs);
+        context->CSSetShaderResources(0, 11, null_subject_srvs);
 
         context->CSSetShader(depth_subject_resolve_cs.Get(), nullptr, 0);
+        ID3D11ShaderResourceView *subject_resolve_srvs[2] = {
+          current_transform,
+          reliable_transform
+        };
+        context->CSSetShaderResources(0, 2, subject_resolve_srvs);
         ID3D11UnorderedAccessView *subj_uavs[3] = {subject_hist_uav.Get(), subject_uav.Get(), subject_plain_uav.Get()};
         context->CSSetUnorderedAccessViews(0, 3, subj_uavs, nullptr);
         context->Dispatch(1, 1, 1);
 
         ID3D11UnorderedAccessView *null_uavs2[3] = {nullptr, nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 3, null_uavs2, nullptr);
+        context->CSSetShaderResources(0, 2, null_transform_srvs);
 
         // rules_v1 must consume the completed frame HERE. Its retained scene/analysis buffers and
         // the depth resources still own pending_frame_id, and the reliable history below has not
@@ -2578,8 +3444,119 @@ namespace models {
             minmax_ema_srv.Get(),
             subject_srv.Get(),
             target_w,
-            target_h
+            target_h,
+            current_transform
           );
+          if (controller_resolved && roi_shape_request_gpu) {
+            const auto controller_snapshot =
+              scene_controller->snapshot();
+            const bool exact_controller_owner =
+              controller_snapshot.snapshot_available &&
+              controller_snapshot.source_frame_id ==
+                completed_roi_identity.source_frame_id &&
+              controller_snapshot.backend_generation ==
+                completed_roi_identity.backend_generation;
+            if (exact_controller_owner) {
+              const auto submission =
+                make_roi_shape_submission(
+                  controller_snapshot,
+                  completed_roi_identity.source_width,
+                  completed_roi_identity.source_height
+                );
+              if (!submission) {
+                if (active_roi_authority) {
+                  roi_canonical_recovery_requested = true;
+                }
+              } else {
+                const auto shape_result =
+                  roi_shape_request_gpu->submit(*submission);
+                bool confirm_destructive_shape_change = false;
+
+                // Poll completion and current scheduling are orthogonal. A valid older readback
+                // remains evidence even if this call's new dispatch/view/device operation failed.
+                if (
+                  shape_result.fresh_sample &&
+                  shape_result.request &&
+                  roi_shape_request_matches_submission(
+                    *shape_result.request,
+                    *submission
+                  )
+                ) {
+                  if (!active_roi_authority) {
+                    newest_roi_shape_request =
+                      *shape_result.request;
+                  } else {
+                    const auto &request =
+                      *shape_result.request;
+                    newest_roi_shape_request = request;
+                    switch (sbs_roi_shape_sample_transition(
+                      shape_result.completed_source_frame_id,
+                      controller_snapshot.source_frame_id,
+                      request.shape[2],
+                      request.shape[3],
+                      static_cast<std::uint32_t>(target_w),
+                      static_cast<std::uint32_t>(target_h)
+                    )) {
+                      case sbs_roi_shape_sample_action::
+                          continue_current_shape:
+                        // The builder still requires the same ROI generation/geometry before this
+                        // delayed request can activate a crop, so no CPU confirmation is needed.
+                        break;
+                      case sbs_roi_shape_sample_action::
+                          apply_exact_shape_change:
+                        pending_roi_shape_transition = request;
+                        break;
+                      case sbs_roi_shape_sample_action::
+                          confirm_shape_change:
+                        confirm_destructive_shape_change = true;
+                        break;
+                    }
+                  }
+                }
+
+                if (
+                  active_roi_authority &&
+                  confirm_destructive_shape_change
+                ) {
+                  // Freeze only when a delayed request proposes destructive tensor teardown. The
+                  // exact current controller frame must independently confirm that shape.
+                  if (!roi_shape_confirmation.begin(
+                        controller_snapshot.source_frame_id,
+                        completed_roi_identity.source_width,
+                        completed_roi_identity.source_height,
+                        shape_result.copy_scheduled
+                      )) {
+                    roi_canonical_recovery_requested = true;
+                  }
+                }
+
+                if (
+                  shape_result.failed &&
+                  !roi_shape_request_error_logged
+                ) {
+                  BOOST_LOG(warning)
+                    << "Host SBS ROI shape-request sampling encountered an infrastructure "
+                       "failure; a valid completed sample, if present, was retained.";
+                  roi_shape_request_error_logged = true;
+                }
+              }
+            } else if (!roi_shape_request_error_logged) {
+              BOOST_LOG(warning)
+                << "Host SBS ROI shape-request sampling rejected a "
+                   "controller/depth ownership mismatch; shadow rendering remains unchanged.";
+              roi_shape_request_error_logged = true;
+              if (active_roi_authority) {
+                roi_canonical_recovery_requested = true;
+              }
+            }
+          }
+          if (
+            controller_resolved &&
+            active_roi_authority &&
+            !roi_shape_request_gpu
+          ) {
+            roi_canonical_recovery_requested = true;
+          }
           mark_d3d_scene_rules_end(
             d3d_timer,
             controller_resolved
@@ -2590,6 +3567,9 @@ namespace models {
                  "shadow output is invalid and the full-frame render remains authoritative.";
             scene_controller_error_logged = true;
           }
+          if (!controller_resolved && active_roi_authority) {
+            roi_canonical_recovery_requested = true;
+          }
         }
 
         // tensor_in_buf, appearance_ordinal_buf and depth_tex still own the matched inputs/result
@@ -2599,31 +3579,43 @@ namespace models {
         // rather than the empty slate. State 3 advances an accepted persistent-low endpoint.
         context->CSSetShader(depth_valid_history_cs.Get(), nullptr, 0);
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        ID3D11ShaderResourceView *history_srvs[5] = {
+        ID3D11ShaderResourceView *history_srvs[7] = {
           minmax_ema_srv.Get(),
           tensor_in_srv.Get(),
           appearance_ordinal_srv.Get(),
           subject_srv.Get(),
-          depth_srv.Get()
+          depth_srv.Get(),
+          tensor_out_srv.Get(),
+          current_transform
         };
-        ID3D11UnorderedAccessView *history_uavs[3] = {
+        ID3D11UnorderedAccessView *history_uavs[5] = {
           tensor_previous_input_uav.Get(),
           previous_appearance_ordinal_uav.Get(),
-          depth_cut_history_uav.Get()
+          depth_cut_history_uav.Get(),
+          reliable_roi_transform_gpu.uav.Get(),
+          depth_reliable_validity_uav.Get()
         };
-        context->CSSetShaderResources(0, 5, history_srvs);
-        context->CSSetUnorderedAccessViews(0, 3, history_uavs, nullptr);
+        context->CSSetShaderResources(0, 7, history_srvs);
+        context->CSSetUnorderedAccessViews(0, 5, history_uavs, nullptr);
         context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
-        ID3D11ShaderResourceView *null_history_srvs[5] = {
+        ID3D11ShaderResourceView *null_history_srvs[7] = {
+          nullptr,
+          nullptr,
           nullptr,
           nullptr,
           nullptr,
           nullptr,
           nullptr
         };
-        ID3D11UnorderedAccessView *null_history_uavs[3] = {nullptr, nullptr, nullptr};
-        context->CSSetShaderResources(0, 5, null_history_srvs);
-        context->CSSetUnorderedAccessViews(0, 3, null_history_uavs, nullptr);
+        ID3D11UnorderedAccessView *null_history_uavs[5] = {
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr
+        };
+        context->CSSetShaderResources(0, 7, null_history_srvs);
+        context->CSSetUnorderedAccessViews(0, 5, null_history_uavs, nullptr);
       }
     }
 
@@ -2671,11 +3663,24 @@ namespace models {
       }
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid() || !cu_stream || !cuda.cuStreamQuery) {
+        valid = false;
+        observe_context_event(
+          !cuda.is_valid() ?
+            sbs_trt_context_event::cuda_context_failure :
+            sbs_trt_context_event::cuda_stream_failure
+        );
         return false;
       }
-      if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
+      if (
+        cuda_ctx &&
+        (
+          !cuda.cuCtxSetCurrent ||
+          cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS
+        )
+      ) {
         abandon_pending_after_cuda_error(
-          "cuCtxSetCurrent failed during depth readiness preflight"
+          "cuCtxSetCurrent failed during depth readiness preflight",
+          sbs_trt_context_event::cuda_context_failure
         );
         return false;
       }
@@ -2724,18 +3729,25 @@ namespace models {
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid()) {
         BOOST_LOG(error) << "CUDA Driver API is not available.";
+        valid = false;
+        observe_context_event(
+          sbs_trt_context_event::cuda_context_failure
+        );
         return {};
       }
 
       if (cuda_ctx) {
-        const auto set_current = cuda.cuCtxSetCurrent(cuda_ctx);
+        const auto set_current = cuda.cuCtxSetCurrent ?
+                                   cuda.cuCtxSetCurrent(cuda_ctx) :
+                                   static_cast<CUresult>(-1);
         if (set_current != CUDA_SUCCESS) {
           BOOST_LOG(error)
             << "cuCtxSetCurrent failed during depth estimation: "
             << set_current;
           const auto dropped =
             abandon_pending_after_cuda_error(
-              "cuCtxSetCurrent failed during depth estimation"
+              "cuCtxSetCurrent failed during depth estimation",
+              sbs_trt_context_event::cuda_context_failure
             );
           return make_result(
             false,
@@ -2801,6 +3813,177 @@ namespace models {
         input_tex->GetDesc(&input_desc);
       }
 
+      if (
+        active_roi_authority &&
+        roi_shape_confirmation.awaiting() &&
+        !has_previous_frame
+      ) {
+        const auto controller =
+          scene_controller ?
+            scene_controller->snapshot() :
+            scene_controller_gpu_snapshot {};
+        const bool frozen_owner_matches =
+          controller.snapshot_available &&
+          controller.source_frame_id ==
+            roi_shape_confirmation.source_frame_id() &&
+          input_desc.Width ==
+            roi_shape_confirmation.source_width() &&
+          input_desc.Height ==
+            roi_shape_confirmation.source_height();
+        const auto submission =
+          frozen_owner_matches ?
+            make_roi_shape_submission(
+              controller,
+              roi_shape_confirmation.source_width(),
+              roi_shape_confirmation.source_height()
+            ) :
+            std::nullopt;
+
+        if (!submission) {
+          roi_canonical_recovery_requested = true;
+        } else {
+          const auto shape_result =
+            roi_shape_confirmation.copy_scheduled() ?
+              roi_shape_request_gpu->poll() :
+              roi_shape_request_gpu->submit(*submission);
+          const bool sample_valid =
+            shape_result.fresh_sample &&
+            shape_result.request &&
+            roi_shape_request_matches_submission(
+              *shape_result.request,
+              *submission
+            );
+          const auto confirmation =
+            roi_shape_confirmation.observe(
+              shape_result.copy_scheduled,
+              shape_result.fresh_sample,
+              shape_result.completed_source_frame_id,
+              sample_valid
+            );
+          if (
+            confirmation ==
+              sbs_roi_shape_confirmation_result::confirmed
+          ) {
+            const auto request = *shape_result.request;
+            newest_roi_shape_request = request;
+            if (
+              request.shape[2] !=
+                static_cast<std::uint32_t>(target_w) ||
+              request.shape[3] !=
+                static_cast<std::uint32_t>(target_h)
+            ) {
+              pending_roi_shape_transition = request;
+            }
+          } else if (
+            confirmation ==
+              sbs_roi_shape_confirmation_result::recover_canonical
+          ) {
+            BOOST_LOG(error)
+              << "Host SBS ROI shape request did not confirm within "
+              << sbs_roi_shape_confirmation_guard::
+                   max_capture_opportunities
+              << " capture opportunities; returning to canonical full-frame depth.";
+            roi_canonical_recovery_requested = true;
+          } else {
+            // No inference is submitted while validation is outstanding. The controller
+            // snapshot is frozen, so any eventual exact-frame completion proves the rule state
+            // that authorizes the transition rather than a merely similar older request.
+            return make_result();
+          }
+        }
+      }
+
+      if (
+        sbs_roi_canonical_recovery_requires_rebuild(
+          active_roi_authority,
+          roi_canonical_recovery_requested
+        ) &&
+        !has_previous_frame
+      ) {
+        roi_shape_confirmation.reset();
+        pending_roi_shape_transition.reset();
+        newest_roi_shape_request.reset();
+        // Crop-coordinate histories are shape-dependent even when the ROI happens to use the
+        // canonical tensor dimensions. Always rebuild before withdrawing authority.
+        if (!release_shape_resources_for_rebuild(cuda)) {
+          valid = false;
+          return {};
+        }
+        requested_target_w = canonical_target_w;
+        requested_target_h = canonical_target_h;
+        // Disable crop authority before the canonical enqueue. The explicit all-zero transform
+        // then selects the validated legacy path, and future controller/helper failures cannot
+        // strand an ROI-specific tensor shape.
+        active_roi_authority = false;
+        roi_canonical_recovery_requested = false;
+        applied_roi_shape_request_id = 0u;
+        BOOST_LOG(error)
+          << "Host SBS active ROI authority was disabled for this stream; "
+             "canonical full-frame depth remains available.";
+      }
+
+      if (
+        active_roi_authority &&
+        pending_roi_shape_transition &&
+        !has_previous_frame
+      ) {
+        const auto request =
+          *pending_roi_shape_transition;
+        const sbs_roi_shape_request_limits limits {
+          static_cast<std::uint32_t>(canonical_target_w),
+          static_cast<std::uint32_t>(canonical_target_h),
+          std::min(
+            sbs_roi_shape_request_engine_max_dimension,
+            input_desc.Width
+          ),
+          std::min(
+            sbs_roi_shape_request_engine_max_dimension,
+            input_desc.Height
+          ),
+          max_aspect,
+        };
+        const bool current_source_matches =
+          request.shape[0] == input_desc.Width &&
+          request.shape[1] == input_desc.Height;
+        const bool request_valid =
+          current_source_matches &&
+          sbs_roi_shape_request_valid(request, limits);
+        if (!request_valid) {
+          pending_roi_shape_transition.reset();
+          newest_roi_shape_request.reset();
+          if (!roi_shape_request_error_logged) {
+            BOOST_LOG(warning)
+              << "Host SBS discarded an obsolete ROI shape request after "
+                 "the source/session geometry changed.";
+            roi_shape_request_error_logged = true;
+          }
+        } else if (
+          request.shape[2] ==
+            static_cast<std::uint32_t>(target_w) &&
+          request.shape[3] ==
+            static_cast<std::uint32_t>(target_h)
+        ) {
+          applied_roi_shape_request_id = request.header[3];
+          pending_roi_shape_transition.reset();
+        } else if (
+          release_shape_resources_for_rebuild(cuda)
+        ) {
+          requested_target_w =
+            static_cast<int>(request.shape[2]);
+          requested_target_h =
+            static_cast<int>(request.shape[3]);
+          applied_roi_shape_request_id = request.header[3];
+          pending_roi_shape_transition.reset();
+          BOOST_LOG(info)
+            << "Host SBS applying ROI model-shape transition "
+            << requested_target_w << 'x' << requested_target_h
+            << " for request " << request.header[3] << '.';
+        } else {
+          valid = false;
+          return {};
+        }
+      }
+
       if (target_w == 0 || target_h == 0) {
         // The capture surface can report a 0x0 descriptor mid HDR/mode transition or
         // before the first real frame. Deriving the model resolution from that yields a
@@ -2809,20 +3992,54 @@ namespace models {
         if (input_desc.Width == 0 || input_desc.Height == 0) {
           return {};
         }
-        float aspect_ratio = (float) input_desc.Width / (float) input_desc.Height;
-        // Keep the patch-aligned tensor as close as possible to source aspect while respecting
-        // the TensorRT profile, configured aspect cap, and native size.
-        int max_w = std::min(models::depth_engine_max_dim, (int) input_desc.Width);
-        int max_h = std::min(models::depth_engine_max_dim, (int) input_desc.Height);
-        const float fitted_aspect = aspect_ratio >= 1.0f ? std::min(aspect_ratio, max_aspect) : 1.0f / std::min(1.0f / aspect_ratio, max_aspect);
-        const auto fitted_dims = aspect_aligned_dims(
-          fitted_aspect,
-          depth_short_side,
-          max_w,
-          max_h
-        );
-        target_w = fitted_dims.first;
-        target_h = fitted_dims.second;
+        if (
+          canonical_target_w == 0 ||
+          canonical_target_h == 0
+        ) {
+          float aspect_ratio =
+            (float) input_desc.Width /
+            (float) input_desc.Height;
+          // Keep the patch-aligned tensor as close as possible to source aspect while respecting
+          // the TensorRT profile, configured inference-area budget, and native size.
+          int max_w = std::min(
+            models::depth_engine_max_dim,
+            (int) input_desc.Width
+          );
+          int max_h = std::min(
+            models::depth_engine_max_dim,
+            (int) input_desc.Height
+          );
+          // `depth_max_aspect` is a pixel-budget envelope, not permission to squeeze the source
+          // into a different tensor geometry. Wider/taller sources reduce the requested short
+          // side by sqrt(cap/actual), preserving source aspect with no more inference pixels than
+          // the former clamped-aspect shape.
+          const auto fitted_dims =
+            sbs_roi_full_frame_model_shape(
+              aspect_ratio,
+              static_cast<float>(depth_short_side),
+              max_aspect,
+              static_cast<std::uint32_t>(max_w),
+              static_cast<std::uint32_t>(max_h)
+            );
+          if (fitted_dims[0] == 0u || fitted_dims[1] == 0u) {
+            BOOST_LOG(error)
+              << "Depth estimator cannot represent source aspect "
+              << aspect_ratio
+              << " with a patch-aligned full-frame tensor; streaming flat SBS.";
+            valid = false;
+            return {};
+          }
+          canonical_target_w = static_cast<int>(fitted_dims[0]);
+          canonical_target_h = static_cast<int>(fitted_dims[1]);
+        }
+        target_w =
+          requested_target_w > 0 ?
+            requested_target_w :
+            canonical_target_w;
+        target_h =
+          requested_target_h > 0 ?
+            requested_target_h :
+            canonical_target_h;
 
         // Threads for the min/max reduction; grid-stride handles any element count.
         int elems = target_w * target_h;
@@ -2830,14 +4047,25 @@ namespace models {
 
         BOOST_LOG(info) << "Depth Estimator dynamic resolution set to " << target_w << "x" << target_h;
 
-        if (cuda_in_res) {
-          cuda.cuGraphicsUnregisterResource(cuda_in_res);
+        const bool stale_input_released =
+          unregister_cuda_interop_resource(
+            cuda,
+            cuda_in_res,
+            "stale input"
+          );
+        const bool stale_output_released =
+          unregister_cuda_interop_resource(
+            cuda,
+            cuda_out_res,
+            "stale output"
+          );
+        if (!stale_input_released || !stale_output_released) {
+          valid = false;
+          observe_context_event(
+            sbs_trt_context_event::cuda_interop_failure
+          );
+          return {};
         }
-        if (cuda_out_res) {
-          cuda.cuGraphicsUnregisterResource(cuda_out_res);
-        }
-        cuda_in_res = nullptr;
-        cuda_out_res = nullptr;
 
         D3D11_BUFFER_DESC buf_desc = {};
         buf_desc.Usage = D3D11_USAGE_DEFAULT;
@@ -2965,36 +4193,105 @@ namespace models {
         resources_ok = resources_ok &&
                        SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &ema_motion_mask_tex)) &&
                        SUCCEEDED(device->CreateUnorderedAccessView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_uav)) &&
-                       SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_srv));
+                       SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_srv)) &&
+                       SUCCEEDED(device->CreateTexture2D(
+                         &mask_desc,
+                         nullptr,
+                         &depth_reliable_validity_tex
+                       )) &&
+                       SUCCEEDED(device->CreateUnorderedAccessView(
+                         depth_reliable_validity_tex.Get(),
+                         nullptr,
+                         &depth_reliable_validity_uav
+                       )) &&
+                       SUCCEEDED(device->CreateShaderResourceView(
+                         depth_reliable_validity_tex.Get(),
+                         nullptr,
+                         &depth_reliable_validity_srv
+                       ));
 
         if (!resources_ok) {
           BOOST_LOG(error) << "Depth estimator D3D11 resource creation failed; retrying on a later frame.";
           target_w = target_h = 0;
+          ++shape_resource_allocation_failures;
+          if (shape_resource_allocation_failures >= 3u) {
+            if (
+              active_roi_authority &&
+              (
+                requested_target_w != canonical_target_w ||
+                requested_target_h != canonical_target_h
+              )
+            ) {
+              roi_canonical_recovery_requested = true;
+            } else {
+              valid = false;
+            }
+          }
           return {};
         }
 
         // Clear depth so the range->pixel EMA initializes from a known value.
         const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        context->ClearUnorderedAccessViewFloat(
+          tensor_previous_input_uav.Get(),
+          clear_color
+        );
+        context->ClearUnorderedAccessViewFloat(
+          previous_appearance_ordinal_uav.Get(),
+          clear_color
+        );
         context->ClearUnorderedAccessViewFloat(depth_uav.Get(), clear_color);
         context->ClearUnorderedAccessViewFloat(depth_cut_history_uav.Get(), clear_color);
         const UINT clear_uint[4] = {0u, 0u, 0u, 0u};
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_uint);
+        context->ClearUnorderedAccessViewUint(
+          depth_reliable_validity_uav.Get(),
+          clear_uint
+        );
 
         auto res1 = cuda.cuGraphicsD3D11RegisterResource(&cuda_in_res, tensor_in_buf.Get(), 0);
         auto res2 = cuda.cuGraphicsD3D11RegisterResource(&cuda_out_res, tensor_out_buf.Get(), 0);
         if (res1 != 0 || res2 != 0) {
           BOOST_LOG(error) << "cuGraphicsD3D11RegisterResource failed: " << res1 << ", " << res2;
-          if (cuda_in_res) {
-            cuda.cuGraphicsUnregisterResource(cuda_in_res);
-          }
-          if (cuda_out_res) {
-            cuda.cuGraphicsUnregisterResource(cuda_out_res);
-          }
-          cuda_in_res = nullptr;
-          cuda_out_res = nullptr;
+          const bool input_cleanup =
+            unregister_cuda_interop_resource(
+              cuda,
+              cuda_in_res,
+              "partially registered input"
+            );
+          const bool output_cleanup =
+            unregister_cuda_interop_resource(
+              cuda,
+              cuda_out_res,
+              "partially registered output"
+            );
           target_w = target_h = 0;
+          if (!input_cleanup || !output_cleanup) {
+            valid = false;
+            observe_context_event(
+              sbs_trt_context_event::cuda_interop_failure
+            );
+          } else {
+            ++shape_resource_allocation_failures;
+            if (shape_resource_allocation_failures >= 3u) {
+              if (
+                active_roi_authority &&
+                (
+                  requested_target_w != canonical_target_w ||
+                  requested_target_h != canonical_target_h
+                )
+              ) {
+                roi_canonical_recovery_requested = true;
+              } else {
+                valid = false;
+              }
+            }
+          }
           return {};
         }
+        shape_resource_allocation_failures = 0u;
+        requested_target_w = 0;
+        requested_target_h = 0;
       }
 
       // Shared constants for buffer_to_tex_cs, the min/max passes and rgb_to_nchw_cs.
@@ -3008,11 +4305,12 @@ namespace models {
       if (has_previous_frame) {
         completed_frame_id = pending_frame_id;
         const bool explicitly_orphaned =
+          active_roi_authority &&
           roi_transform_slots.orphaned_for(completed_frame_id);
         completed_roi_identity =
-          claim_roi_completion(completed_frame_id);
+          claim_depth_completion(completed_frame_id);
         if (!completed_roi_identity) {
-          drop_roi_completion(
+          drop_depth_completion(
             completed_frame_id,
             "its exact pending ROI-transform identity was absent or mismatched"
           );
@@ -3038,7 +4336,7 @@ namespace models {
       // (fully unmapped from CUDA), so consuming it here never blocks the encode thread. The
       // caller uses completed_frame_id to select the color slot that produced this exact result.
       if (completed_roi_identity) {
-        normalize_depth_output(d3d_timer);
+        normalize_depth_output(*completed_roi_identity, d3d_timer);
         // Production post-process timing ends at the normalized depth result. The two stable
         // Dump 3D copies below are explicit diagnostic work and must not contaminate live
         // depth_postprocess_gpu samples.
@@ -3087,30 +4385,66 @@ namespace models {
         );
       }
 
-      // ROI geometry/generation will be written into the selected GPU bank by the controller.
-      // Reserve the bank and its monotonic version before dispatch so GPU contents can carry the
-      // exact accepted-enqueue identity. A failed submission rolls this reservation back without
-      // touching the previously completed bank.
+      if (
+        active_roi_authority &&
+        (
+          pending_roi_shape_transition ||
+          roi_shape_confirmation.awaiting() ||
+          roi_canonical_recovery_requested
+        )
+      ) {
+        // This call has just materialized the completion that owns the returned color slot.
+        // Return it unchanged and skip the current enqueue while an exact-frame request is
+        // confirmed, a shape transition is applied, or canonical recovery disables authority.
+        mark_d3d_pre_start(d3d_timer);
+        end_d3d_perf(d3d_timer);
+        return make_result(
+          completed_frame_valid,
+          completed_frame_id,
+          false,
+          raw_snapshot_valid,
+          model_input_snapshot_valid,
+          completion_dropped,
+          dropped_frame_id
+        );
+      }
+
+      // Active ROI geometry/generation is written into a selected GPU bank by the controller.
+      // Off/shadow mode keeps only a CPU provenance record and binds the immutable zero transform;
+      // it never depends on this experimental dispatch or its dynamic cbuffer Map.
       std::uint32_t roi_backend_generation = 0;
       if (scene_controller) {
         roi_backend_generation =
           scene_controller->snapshot().backend_generation;
       }
       std::optional<frame_roi_transform_identity> reserved_roi_transform;
-      if (const auto writable_bank = roi_transform_slots.writable_bank()) {
-        reserved_roi_transform = roi_transform_slots.reserve(
-          make_frame_roi_transform_identity(
-            frame_id,
-            input_desc.Width,
-            input_desc.Height,
-            static_cast<std::uint32_t>(target_w),
-            static_cast<std::uint32_t>(target_h),
-            roi_backend_generation,
-            *writable_bank
-          )
-        );
+      frame_roi_transform_identity legacy_frame_identity;
+      legacy_frame_identity.source_frame_id = frame_id;
+      legacy_frame_identity.backend_generation =
+        roi_backend_generation;
+      legacy_frame_identity.source_width = input_desc.Width;
+      legacy_frame_identity.source_height = input_desc.Height;
+      legacy_frame_identity.model_width =
+        static_cast<std::uint32_t>(target_w);
+      legacy_frame_identity.model_height =
+        static_cast<std::uint32_t>(target_h);
+      if (active_roi_authority) {
+        if (const auto writable_bank =
+              roi_transform_slots.writable_bank()) {
+          reserved_roi_transform = roi_transform_slots.reserve(
+            make_frame_roi_transform_identity(
+              frame_id,
+              input_desc.Width,
+              input_desc.Height,
+              static_cast<std::uint32_t>(target_w),
+              static_cast<std::uint32_t>(target_h),
+              roi_backend_generation,
+              *writable_bank
+            )
+          );
+        }
       }
-      if (!reserved_roi_transform) {
+      if (active_roi_authority && !reserved_roi_transform) {
         if (!roi_transform_error_logged) {
           BOOST_LOG(error)
             << "Depth estimator could not reserve a frame-owned ROI transform bank for frame "
@@ -3130,6 +4464,9 @@ namespace models {
         );
       }
       const auto rollback_roi_reservation = [&]() {
+        if (!active_roi_authority || !reserved_roi_transform) {
+          return;
+        }
         if (!roi_transform_slots.rollback_reserved(*reserved_roi_transform)) {
           roi_transform_slots.abandon_in_flight();
           if (!roi_transform_error_logged) {
@@ -3141,11 +4478,43 @@ namespace models {
         }
       };
 
+      if (
+        active_roi_authority &&
+        !dispatch_frame_roi_transform(*reserved_roi_transform)
+      ) {
+        if (!roi_transform_error_logged) {
+          BOOST_LOG(error)
+            << "Depth estimator could not build the GPU ROI transform for frame "
+            << frame_id << "; inference was not submitted.";
+          roi_transform_error_logged = true;
+        }
+        rollback_roi_reservation();
+        mark_d3d_pre_start(d3d_timer);
+        end_d3d_perf(d3d_timer);
+        return make_result(
+          completed_frame_valid,
+          completed_frame_id,
+          false,
+          raw_snapshot_valid,
+          model_input_snapshot_valid,
+          completion_dropped,
+          dropped_frame_id
+        );
+      }
+
       // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
       mark_d3d_pre_start(d3d_timer);
       context->CSSetShader(rgb_to_nchw_cs.Get(), nullptr, 0);
       context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-      context->CSSetShaderResources(0, 1, &input_srv);
+      ID3D11ShaderResourceView *preprocess_srvs[2] = {
+        input_srv,
+        active_roi_authority ?
+          frame_roi_transform_gpu[
+            reserved_roi_transform->gpu_bank_index
+          ].srv.Get() :
+          zero_roi_transform.srv.Get()
+      };
+      context->CSSetShaderResources(0, 2, preprocess_srvs);
       ID3D11UnorderedAccessView *preprocess_uavs[2] = {
         tensor_in_uav.Get(),
         appearance_ordinal_uav.Get()
@@ -3156,9 +4525,12 @@ namespace models {
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
       ID3D11UnorderedAccessView *null_uavs[2] = {nullptr, nullptr};
-      ID3D11ShaderResourceView *null_srv = nullptr;
+      ID3D11ShaderResourceView *null_preprocess_srvs[2] = {
+        nullptr,
+        nullptr
+      };
       context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
-      context->CSSetShaderResources(0, 1, &null_srv);
+      context->CSSetShaderResources(0, 2, null_preprocess_srvs);
       mark_d3d_pre_end(d3d_timer);
       if (scene_controller) {
         mark_d3d_scene_prepare_start(d3d_timer);
@@ -3189,6 +4561,10 @@ namespace models {
       auto map_res = cuda.cuGraphicsMapResources(2, resources, cu_stream);
       if (map_res != 0) {
         BOOST_LOG(error) << "cuGraphicsMapResources failed: " << map_res;
+        valid = false;
+        observe_context_event(
+          sbs_trt_context_event::cuda_interop_failure
+        );
         rollback_roi_reservation();
         if (scene_controller && scene_controller_prepared) {
           scene_controller->discard_prepared(frame_id);
@@ -3218,23 +4594,59 @@ namespace models {
       );
 
       bool enqueued = false;
-      if (in_ptr_res != CUDA_SUCCESS || out_ptr_res != CUDA_SUCCESS || !d_in || !d_out) {
+      bool input_shape_rejected = false;
+      bool tensor_address_rejected = false;
+      const bool mapped_pointer_rejected =
+        in_ptr_res != CUDA_SUCCESS ||
+        out_ptr_res != CUDA_SUCCESS ||
+        !d_in || !d_out;
+      if (mapped_pointer_rejected) {
         BOOST_LOG(error) << "Failed to get mapped pointer for TensorRT: "
                          << in_ptr_res << ", " << out_ptr_res;
+        valid = false;
+        observe_context_event(
+          sbs_trt_context_event::cuda_interop_failure
+        );
       } else {
-        nvinfer1::Dims in_dims = make_input_dims(target_h, target_w);
-        bool bindings_ok = exec_context->setInputShape("pixel_values", in_dims);
-        if (!bindings_ok) {
-          BOOST_LOG(error) << "TensorRT setInputShape failed for " << target_w << "x" << target_h
-                           << " (outside the engine's optimization profile?)";
+        bool bindings_ok = true;
+        if (
+          configured_input_width != target_w ||
+          configured_input_height != target_h
+        ) {
+          nvinfer1::Dims in_dims = make_input_dims(target_h, target_w);
+          bindings_ok = exec_context->setInputShape("pixel_values", in_dims);
+          if (!bindings_ok) {
+            input_shape_rejected = true;
+            BOOST_LOG(error) << "TensorRT setInputShape failed for " << target_w << "x" << target_h
+                             << " (outside the engine's optimization profile? request "
+                             << applied_roi_shape_request_id << ')';
+          } else {
+            configured_input_width = target_w;
+            configured_input_height = target_h;
+          }
         }
-        bindings_ok = bindings_ok &&
-                      exec_context->setTensorAddress("pixel_values", (void *) d_in) &&
-                      exec_context->setTensorAddress("predicted_depth", (void *) d_out);
-        // The versioned ownership reservation was made before GPU preprocessing. Verify that exact
-        // reservation is still live before TensorRT can accept work for its bank.
+        if (bindings_ok) {
+          tensor_address_rejected =
+            !exec_context->setTensorAddress("pixel_values", (void *) d_in) ||
+            !exec_context->setTensorAddress("predicted_depth", (void *) d_out);
+          bindings_ok = !tensor_address_rejected;
+          if (tensor_address_rejected && !stream_error_logged) {
+            BOOST_LOG(error)
+              << "TensorRT rejected an input/output tensor address; "
+                 "retiring this execution context.";
+            stream_error_logged = true;
+          }
+        }
+        // Active inference requires the exact versioned GPU-bank reservation. Off/shadow uses the
+        // immutable legacy transform and therefore has no experimental ownership dependency.
         const bool roi_transform_ready =
-          roi_transform_slots.is_reserved(*reserved_roi_transform);
+          !active_roi_authority ||
+          (
+            reserved_roi_transform &&
+            roi_transform_slots.is_reserved(
+              *reserved_roi_transform
+            )
+          );
         if (!roi_transform_ready && !roi_transform_error_logged) {
           BOOST_LOG(error)
             << "Depth estimator has no valid frame-owned ROI transform slot for frame "
@@ -3252,8 +4664,14 @@ namespace models {
             cuda
           );
           if (!enqueued) {
+            observe_context_event(
+              sbs_trt_context_event::enqueue_rejection
+            );
+            valid = false;
             if (!stream_error_logged) {
-              BOOST_LOG(error) << "TensorRT enqueueV3 failed; retaining the last valid depth.";
+              BOOST_LOG(error)
+                << "TensorRT enqueueV3 failed; retiring this execution context "
+                   "and retaining the last valid depth.";
               stream_error_logged = true;
             }
           }
@@ -3267,18 +4685,79 @@ namespace models {
       const bool unmap_succeeded = unmap_res == CUDA_SUCCESS;
       if (!unmap_succeeded) {
         BOOST_LOG(error) << "cuGraphicsUnmapResources failed: " << unmap_res;
+        observe_context_event(
+          sbs_trt_context_event::cuda_interop_failure
+        );
+        valid = false;
+      }
+
+      if (input_shape_rejected) {
+        const auto failure_action =
+          sbs_roi_shape_binding_failure(
+            active_roi_authority,
+            static_cast<std::uint32_t>(
+              std::max(target_w, 0)
+            ),
+            static_cast<std::uint32_t>(
+              std::max(target_h, 0)
+            ),
+            static_cast<std::uint32_t>(
+              std::max(canonical_target_w, 0)
+            ),
+            static_cast<std::uint32_t>(
+              std::max(canonical_target_h, 0)
+            )
+          );
+        if (
+          failure_action ==
+            sbs_roi_shape_binding_failure_action::
+              recover_canonical
+        ) {
+          observe_context_event(
+            sbs_trt_context_event::
+              recoverable_dynamic_shape_rejection
+          );
+          // The current resources represent a shape TensorRT refused. The next idle call tears
+          // them down, restores canonical dimensions, and disables ROI authority for this stream.
+          roi_canonical_recovery_requested = true;
+        } else {
+          // Failure of the canonical shape means no safe depth configuration remains. The display
+          // observes !is_valid(), retires this estimator, and continues advancing flat SBS color.
+          valid = false;
+          observe_context_event(
+            sbs_trt_context_event::canonical_shape_rejection
+          );
+        }
+      }
+
+      if (tensor_address_rejected) {
+        valid = false;
+        observe_context_event(
+          sbs_trt_context_event::tensor_address_rejection
+        );
       }
 
       bool roi_ownership_pending = false;
       if (inference_accepted && unmap_succeeded) {
-        roi_ownership_pending =
-          roi_transform_slots.commit_reserved_enqueued(
-            *reserved_roi_transform
-          );
+        if (active_roi_authority) {
+          roi_ownership_pending =
+            reserved_roi_transform &&
+            roi_transform_slots.commit_reserved_enqueued(
+              *reserved_roi_transform
+            );
+        } else {
+          pending_legacy_frame_identity =
+            legacy_frame_identity;
+          roi_ownership_pending = true;
+        }
         if (!roi_ownership_pending) {
           // TensorRT accepted the work, so it cannot be rolled back. Preserve only its frame
           // identity and drop the eventual output before normalization.
-          roi_transform_slots.orphan_reserved_enqueued(frame_id);
+          if (active_roi_authority) {
+            roi_transform_slots.orphan_reserved_enqueued(frame_id);
+          } else {
+            pending_legacy_frame_identity.reset();
+          }
           if (!roi_transform_error_logged) {
             BOOST_LOG(error)
               << "Depth estimator could not transition the accepted ROI reservation for frame "
@@ -3290,7 +4769,11 @@ namespace models {
         // The CUDA work may still execute even though interop unmap failed. Do not claim a valid
         // GPU transform; consume/drop it if the stream reaches completion, then disable this
         // estimator before either interop resource can be reused.
-        roi_transform_slots.orphan_reserved_enqueued(frame_id);
+        if (active_roi_authority) {
+          roi_transform_slots.orphan_reserved_enqueued(frame_id);
+        } else {
+          pending_legacy_frame_identity.reset();
+        }
         disable_after_pending_drop = true;
       } else {
         rollback_roi_reservation();

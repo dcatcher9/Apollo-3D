@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <d3dcompiler.h>
 #include <limits>
 #include <map>
@@ -173,9 +174,21 @@ namespace {
     float release_seconds = 60.0f;
     float scroll_enter_seconds = 0.05f;
 
+    std::uint32_t source_frame_id_low = 0;
+    std::uint32_t source_frame_id_high = 0;
+    std::uint32_t identity_reserved_0 = 0;
+    std::uint32_t identity_reserved_1 = 0;
+
     std::array<std::uint32_t, 8> ordered_abi_hash_words {};
   };
-  static_assert(sizeof(scene_constants_t) == 96);
+  static_assert(sizeof(scene_constants_t) == 112);
+  static_assert(alignof(scene_constants_t) == 16);
+  static_assert(offsetof(scene_constants_t, source_width) == 0);
+  static_assert(offsetof(scene_constants_t, color_mode) == 16);
+  static_assert(offsetof(scene_constants_t, elapsed_seconds) == 32);
+  static_assert(offsetof(scene_constants_t, acquire_seconds) == 48);
+  static_assert(offsetof(scene_constants_t, source_frame_id_low) == 64);
+  static_assert(offsetof(scene_constants_t, ordered_abi_hash_words) == 80);
 }  // namespace
 
 namespace models {
@@ -899,6 +912,12 @@ namespace models {
       values.pop_floor = pop_floor;
       values.pop_ceiling = pop_ceiling;
       values.zero_plane_mode = zero_plane_mode;
+      const std::uint64_t source_frame_id =
+        pending ? pending_frame_id : prepared_frame_id;
+      values.source_frame_id_low =
+        static_cast<std::uint32_t>(source_frame_id);
+      values.source_frame_id_high =
+        static_cast<std::uint32_t>(source_frame_id >> 32u);
       values.ordered_abi_hash_words =
         sbs_scene_controller::ordered_abi_hash_words;
       return values;
@@ -1079,7 +1098,8 @@ namespace models {
       ID3D11ShaderResourceView *depth_frame_state,
       ID3D11ShaderResourceView *adaptive_state,
       int depth_width,
-      int depth_height
+      int depth_height,
+      ID3D11ShaderResourceView *frame_roi_transform
     ) {
       if (!is_enabled()) {
         return true;
@@ -1087,7 +1107,8 @@ namespace models {
       if (
         !initialized || !pending || pending_frame_id != source_frame_id ||
         !raw_depth || !normalized_depth || !depth_frame_state ||
-        !adaptive_state || depth_width <= 0 || depth_height <= 0
+        !adaptive_state || !frame_roi_transform ||
+        depth_width <= 0 || depth_height <= 0
       ) {
         snapshot_available = false;
         if (pending && pending_frame_id == source_frame_id) {
@@ -1115,7 +1136,7 @@ namespace models {
 
       context->CSSetShader(evidence_cs.Get(), nullptr, 0);
       context->CSSetConstantBuffers(0, 1, &constant_buffer);
-      ID3D11ShaderResourceView *evidence_inputs[8] = {
+      ID3D11ShaderResourceView *evidence_inputs[9] = {
         analysis_grid[pending_scene_bank].srv.Get(),
         layout_history[current_history_bank].srv.Get(),
         normalized_depth,
@@ -1124,6 +1145,7 @@ namespace models {
         rule_state[current_state_bank].srv.Get(),
         raw_depth,
         adaptive_state,
+        frame_roi_transform,
       };
       ID3D11UnorderedAccessView *evidence_outputs[4] = {
         dense_output.uav.Get(),
@@ -1131,15 +1153,15 @@ namespace models {
         depth_history[next_history_bank].uav.Get(),
         meta.uav.Get(),
       };
-      context->CSSetShaderResources(0, 8, evidence_inputs);
+      context->CSSetShaderResources(0, 9, evidence_inputs);
       context->CSSetUnorderedAccessViews(0, 4, evidence_outputs, nullptr);
       constexpr UINT analysis_groups =
         (sbs_scene_controller::analysis_canvas_size + 15u) / 16u;
       context->Dispatch(analysis_groups, analysis_groups, 1);
 
-      ID3D11ShaderResourceView *null_evidence_inputs[8] = {};
+      ID3D11ShaderResourceView *null_evidence_inputs[9] = {};
       ID3D11UnorderedAccessView *null_evidence_outputs[4] = {};
-      context->CSSetShaderResources(0, 8, null_evidence_inputs);
+      context->CSSetShaderResources(0, 9, null_evidence_inputs);
       context->CSSetUnorderedAccessViews(
         0,
         4,
@@ -1401,7 +1423,8 @@ namespace models {
     ID3D11ShaderResourceView *depth_frame_state,
     ID3D11ShaderResourceView *adaptive_state,
     int depth_width,
-    int depth_height
+    int depth_height,
+    ID3D11ShaderResourceView *frame_roi_transform
   ) {
     return pimpl_ &&
            pimpl_->resolve(
@@ -1411,7 +1434,8 @@ namespace models {
              depth_frame_state,
              adaptive_state,
              depth_width,
-             depth_height
+             depth_height,
+             frame_roi_transform
            );
   }
 

@@ -41,6 +41,9 @@ namespace platf::sbs_debug {
     ID3D11ShaderResourceView *warp_depth = nullptr;
     ID3D11ShaderResourceView *adaptive_state = nullptr;
     ID3D11ShaderResourceView *depth_frame_state = nullptr;
+    // Exact eight-uint4 transform sampled by preprocessing, normalization, scene evidence, and
+    // reprojection for matched_frame_id. The dump serializes both raw words and decoded geometry.
+    ID3D11ShaderResourceView *depth_roi_transform = nullptr;
     // Optional, exact-frame GPU Scene Controller ABI v1 tensors. These are populated only when
     // the controller reports a completed output for matched_frame_id. They must never become a
     // prerequisite for the core Host-SBS dump because the controller defaults to off.

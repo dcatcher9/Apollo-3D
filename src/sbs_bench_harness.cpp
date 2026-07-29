@@ -25,8 +25,10 @@
   #include <limits>
   #include <locale>
   #include <memory>
+  #include <new>
   #include <optional>
   #include <sstream>
+  #include <stdexcept>
   #include <string>
   #include <string_view>
   #include <thread>
@@ -44,6 +46,7 @@
   #include "generated/sbs_adaptive_state_contract.h"
   #include "logging.h"
   #include "sbs_perf.h"
+  #include "sbs_scene_cache_contract.h"
   #include "video.h"
   #include "video_depth_estimator.h"
 
@@ -1155,6 +1158,9 @@ namespace sbs_bench {
     using adaptive_state_words_t = sbs_adaptive_state::words_t;
     using render_state_words_t =
       std::array<std::uint32_t, sbs_adaptive_state::render_prefix_word_count>;
+    using cached_state_words_t = sbs_scene_cache::cached_state_words_t;
+    using frame_metadata_t = sbs_scene_cache::frame_metadata_t;
+    using roi_transform_words_t = sbs_scene_cache::roi_transform_words_t;
 
     constexpr float scene_anchor_shift_min = -1.39635933f;
     constexpr float scene_anchor_shift_max = 8.58230571f;
@@ -1180,8 +1186,6 @@ namespace sbs_bench {
     struct scene_cache_metadata {
       UINT source_width = 0;
       UINT source_height = 0;
-      UINT depth_width = 0;
-      UINT depth_height = 0;
       std::string input_frame_format;
       std::string input_texture_format;
       std::string input_color_space;
@@ -1273,7 +1277,7 @@ namespace sbs_bench {
                                       std::string_view status,
                                       std::size_t processed_count) {
       nlohmann::ordered_json contract = {
-        {"schema", 1},
+        {"schema", sbs_scene_cache::contract_schema},
         {"status", status},
         {"source", {
           {"width", metadata.source_width},
@@ -1283,25 +1287,45 @@ namespace sbs_bench {
           {"color_space", metadata.input_color_space},
         }},
         {"depth", {
-          {"width", metadata.depth_width},
-          {"height", metadata.depth_height},
+          {"dimensions", "per-frame-metadata"},
           {"dxgi_format", "R32_FLOAT"},
           {"dtype", "float32-le"},
           {"layout", "row-major"},
           {"row_order", "top-down"},
           {"file_pattern", "frame_%010d.depth.r32f"},
-          {"bytes_per_frame",
-           static_cast<std::uint64_t>(metadata.depth_width) *
-             metadata.depth_height * sizeof(float)},
+          {"bytes_per_sample", sizeof(float)},
+          {"bytes_per_frame", nullptr},
+        }},
+        {"frame_metadata", {
+          {"schema", sbs_scene_cache::frame_metadata_schema},
+          {"magic", sbs_scene_cache::frame_metadata_magic},
+          {"word_count", sbs_scene_cache::frame_metadata_word_count},
+          {"dtype", "uint32-le"},
+          {"layout", "raw-word-order"},
+          {"file_pattern", "frame_%010d.meta.u32"},
+          {"bytes_per_frame", sizeof(frame_metadata_t)},
+          {"depth_dimensions_words", {4, 5}},
+          {"cache_sequence_words", {8, 9}},
+          {"retained_source_frame_id_words", {10, 11}},
+          {"roi_transform_word_offset",
+           sbs_scene_cache::roi_transform_word_offset},
+          {"roi_transform_word_count",
+           sbs_scene_cache::roi_transform_word_count},
+          {"roi_transform_contract_schema",
+           models::frame_roi_transform_contract_version},
         }},
         {"state", {
-          {"schema", 1},
-          {"source", "depth_subject_resolve_cs.SubjectState[0..2]"},
-          {"word_count", render_state_words_t {}.size()},
+          {"schema", sbs_scene_cache::cached_state_schema},
+          {"source",
+           "depth_subject_resolve_cs.SubjectState[0..2]+DepthFrameState[0]"},
+          {"subject_word_count", render_state_words_t {}.size()},
+          {"depth_frame_state_word_count",
+           sbs_scene_cache::depth_frame_state_word_count},
+          {"word_count", cached_state_words_t {}.size()},
           {"dtype", "uint32-le"},
           {"layout", "raw-word-order"},
           {"file_pattern", "frame_%010d.state.u32"},
-          {"bytes_per_frame", sizeof(render_state_words_t)},
+          {"bytes_per_frame", sizeof(cached_state_words_t)},
         }},
         {"render_config", {
           {"model", metadata.model_name},
@@ -1369,6 +1393,144 @@ namespace sbs_bench {
                static_cast<char *>(data),
                static_cast<std::streamsize>(size)
              ));
+    }
+
+    template<std::size_t WordCount>
+    bool read_structured_words(
+      ID3D11Device *dev,
+      ID3D11DeviceContext *ctx,
+      ID3D11ShaderResourceView *srv,
+      ComPtr<ID3D11Buffer> &stage_cache,
+      std::array<std::uint32_t, WordCount> &words
+    ) {
+      if (!srv) {
+        return false;
+      }
+      ComPtr<ID3D11Resource> resource;
+      srv->GetResource(&resource);
+      ComPtr<ID3D11Buffer> buffer;
+      if (FAILED(resource.As(&buffer))) {
+        return false;
+      }
+      D3D11_BUFFER_DESC desc {};
+      buffer->GetDesc(&desc);
+      if (
+        desc.ByteWidth < words.size() * sizeof(std::uint32_t) ||
+        desc.StructureByteStride != 4u * sizeof(std::uint32_t)
+      ) {
+        return false;
+      }
+      bool recreate = !stage_cache;
+      if (!recreate) {
+        D3D11_BUFFER_DESC current {};
+        stage_cache->GetDesc(&current);
+        recreate = current.ByteWidth != desc.ByteWidth;
+      }
+      if (recreate) {
+        auto stage_desc = desc;
+        stage_desc.Usage = D3D11_USAGE_STAGING;
+        stage_desc.BindFlags = 0;
+        stage_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stage_desc.MiscFlags = 0;
+        stage_cache.Reset();
+        if (FAILED(dev->CreateBuffer(&stage_desc, nullptr, &stage_cache))) {
+          return false;
+        }
+      }
+      ctx->CopyResource(stage_cache.Get(), buffer.Get());
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return false;
+      }
+      std::memcpy(words.data(), mapped.pData, words.size() * sizeof(words[0]));
+      ctx->Unmap(stage_cache.Get(), 0);
+      return true;
+    }
+
+    bool make_scene_cache_frame_metadata(
+      ID3D11Device *dev,
+      ID3D11DeviceContext *ctx,
+      ID3D11ShaderResourceView *transform_srv,
+      ComPtr<ID3D11Buffer> &transform_stage,
+      const std::uint64_t sequence,
+      const UINT source_width,
+      const UINT source_height,
+      const UINT depth_width,
+      const UINT depth_height,
+      const std::uint32_t depth_reuse_interval,
+      frame_metadata_t &metadata
+    ) {
+      roi_transform_words_t transform {};
+      if (
+        !read_structured_words(
+          dev,
+          ctx,
+          transform_srv,
+          transform_stage,
+          transform
+        )
+      ) {
+        return false;
+      }
+      const std::uint64_t pixels =
+        static_cast<std::uint64_t>(depth_width) * depth_height;
+      if (
+        sequence == 0u ||
+        pixels == 0u ||
+        pixels > std::numeric_limits<std::uint32_t>::max()
+      ) {
+        return false;
+      }
+
+      metadata = {};
+      metadata.depth = {
+        depth_width,
+        depth_height,
+        static_cast<std::uint32_t>(pixels),
+        sizeof(float),
+      };
+      sbs_scene_cache::split_u64(
+        sequence,
+        metadata.sequence[0],
+        metadata.sequence[1]
+      );
+      const auto retained_frame_id =
+        sbs_scene_cache::transform_is_unbound_zero(transform) ?
+          sbs_scene_cache::unbound_source_frame_id :
+          sbs_scene_cache::join_u64(transform[2u], transform[3u]);
+      sbs_scene_cache::split_u64(
+        retained_frame_id,
+        metadata.sequence[2],
+        metadata.sequence[3]
+      );
+      metadata.identity = {
+        source_width,
+        source_height,
+        depth_width,
+        depth_height,
+      };
+      metadata.roi_transform = transform;
+      return sbs_scene_cache::valid_frame_metadata(
+        metadata,
+        sequence,
+        source_width,
+        source_height,
+        depth_reuse_interval
+      );
+    }
+
+    bool cache_frame_metadata_atomically(
+      const frame_metadata_t &metadata,
+      const fs::path &path
+    ) {
+      static_assert(std::endian::native == std::endian::little);
+      return publish_file_atomically(path, [&](const fs::path &temporary_path) {
+        return write_bytes_durably(
+          temporary_path,
+          &metadata,
+          sizeof(metadata)
+        );
+      });
     }
 
     bool cache_depth_texture_atomically(
@@ -1450,14 +1612,48 @@ namespace sbs_bench {
              });
     }
 
-    bool cache_render_state_atomically(const adaptive_state_words_t &words,
-                                       const fs::path &path) {
+    bool cache_render_state_atomically(
+      ID3D11Device *dev,
+      ID3D11DeviceContext *ctx,
+      const adaptive_state_words_t &words,
+      ID3D11ShaderResourceView *depth_frame_state,
+      ComPtr<ID3D11Buffer> &depth_frame_state_stage,
+      const fs::path &path
+    ) {
       static_assert(std::endian::native == std::endian::little);
       if (!valid_adaptive_state_words(words)) {
         return false;
       }
-      render_state_words_t render_words {};
-      std::copy_n(words.begin(), render_words.size(), render_words.begin());
+      cached_state_words_t render_words {};
+      std::copy_n(
+        words.begin(),
+        sbs_adaptive_state::render_prefix_word_count,
+        render_words.begin()
+      );
+      std::array<
+        std::uint32_t,
+        sbs_scene_cache::depth_frame_state_word_count
+      > frame_state {};
+      if (
+        !read_structured_words(
+          dev,
+          ctx,
+          depth_frame_state,
+          depth_frame_state_stage,
+          frame_state
+        )
+      ) {
+        return false;
+      }
+      std::copy(
+        frame_state.begin(),
+        frame_state.end(),
+        render_words.begin() +
+          sbs_adaptive_state::render_prefix_word_count
+      );
+      if (!sbs_scene_cache::valid_cached_state(render_words)) {
+        return false;
+      }
       return publish_file_atomically(path, [&](const fs::path &temporary_path) {
         return write_bytes_durably(
           temporary_path,
@@ -1473,12 +1669,26 @@ namespace sbs_bench {
                                  UINT height,
                                  ComPtr<ID3D11Texture2D> &texture,
                                  ComPtr<ID3D11ShaderResourceView> &srv) {
-      if (!width || !height ||
-          static_cast<std::uint64_t>(width) * height >
-            std::numeric_limits<std::size_t>::max() / sizeof(float)) {
+      if (
+        !width ||
+        !height ||
+        width > sbs_scene_cache::max_depth_dimension ||
+        height > sbs_scene_cache::max_depth_dimension ||
+        width % models::frame_roi_model_patch_size != 0u ||
+        height % models::frame_roi_model_patch_size != 0u ||
+        static_cast<std::uint64_t>(width) * height >
+          std::numeric_limits<std::size_t>::max() / sizeof(float)
+      ) {
         return false;
       }
-      std::vector<float> values(static_cast<std::size_t>(width) * height);
+      std::vector<float> values;
+      try {
+        values.resize(static_cast<std::size_t>(width) * height);
+      } catch (const std::bad_alloc &) {
+        return false;
+      } catch (const std::length_error &) {
+        return false;
+      }
       if (!read_exact_file(
             path,
             values.data(),
@@ -1500,37 +1710,88 @@ namespace sbs_bench {
       desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
       D3D11_SUBRESOURCE_DATA initial = {
         values.data(),
-        width * sizeof(float),
+        static_cast<UINT>(width * sizeof(float)),
         0
       };
       return SUCCEEDED(dev->CreateTexture2D(&desc, &initial, &texture)) &&
              SUCCEEDED(dev->CreateShaderResourceView(texture.Get(), nullptr, &srv));
     }
 
-    bool create_cached_state_srv(ID3D11Device *dev,
-                                 const render_state_words_t &words,
-                                 ComPtr<ID3D11Buffer> &buffer,
-                                 ComPtr<ID3D11ShaderResourceView> &srv) {
-      if (!std::all_of(words.begin(), words.end(), [](std::uint32_t word) {
-            return std::isfinite(std::bit_cast<float>(word));
-          })) {
+    bool create_structured_words_srv(
+      ID3D11Device *dev,
+      const std::uint32_t *words,
+      const std::size_t word_count,
+      ComPtr<ID3D11Buffer> &buffer,
+      ComPtr<ID3D11ShaderResourceView> &srv
+    ) {
+      if (
+        !words ||
+        word_count == 0u ||
+        word_count % 4u != 0u ||
+        word_count >
+          std::numeric_limits<UINT>::max() / sizeof(std::uint32_t)
+      ) {
         return false;
       }
       D3D11_BUFFER_DESC desc {};
-      desc.ByteWidth = sizeof(words);
+      desc.ByteWidth =
+        static_cast<UINT>(word_count * sizeof(std::uint32_t));
       desc.Usage = D3D11_USAGE_IMMUTABLE;
       desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
       desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
       desc.StructureByteStride = 4 * sizeof(float);
-      D3D11_SUBRESOURCE_DATA initial = {words.data(), 0, 0};
+      D3D11_SUBRESOURCE_DATA initial = {words, 0, 0};
       D3D11_SHADER_RESOURCE_VIEW_DESC view {};
       view.Format = DXGI_FORMAT_UNKNOWN;
       view.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
       view.Buffer.FirstElement = 0;
       view.Buffer.NumElements =
-        static_cast<UINT>(words.size() / 4u);
+        static_cast<UINT>(word_count / 4u);
       return SUCCEEDED(dev->CreateBuffer(&desc, &initial, &buffer)) &&
              SUCCEEDED(dev->CreateShaderResourceView(buffer.Get(), &view, &srv));
+    }
+
+    bool create_cached_state_srvs(
+      ID3D11Device *dev,
+      const cached_state_words_t &words,
+      ComPtr<ID3D11Buffer> &subject_buffer,
+      ComPtr<ID3D11ShaderResourceView> &subject_srv,
+      ComPtr<ID3D11Buffer> &depth_frame_state_buffer,
+      ComPtr<ID3D11ShaderResourceView> &depth_frame_state_srv
+    ) {
+      if (!sbs_scene_cache::valid_cached_state(words)) {
+        return false;
+      }
+      return create_structured_words_srv(
+               dev,
+               words.data(),
+               sbs_adaptive_state::render_prefix_word_count,
+               subject_buffer,
+               subject_srv
+             ) &&
+             create_structured_words_srv(
+               dev,
+               words.data() +
+                 sbs_adaptive_state::render_prefix_word_count,
+               sbs_scene_cache::depth_frame_state_word_count,
+               depth_frame_state_buffer,
+               depth_frame_state_srv
+             );
+    }
+
+    bool create_cached_roi_transform_srv(
+      ID3D11Device *dev,
+      const frame_metadata_t &metadata,
+      ComPtr<ID3D11Buffer> &buffer,
+      ComPtr<ID3D11ShaderResourceView> &srv
+    ) {
+      return create_structured_words_srv(
+        dev,
+        metadata.roi_transform.data(),
+        metadata.roi_transform.size(),
+        buffer,
+        srv
+      );
     }
 
     struct scene_plan_entry {
@@ -1547,11 +1808,12 @@ namespace sbs_bench {
         std::ifstream stream(directory / "scene_cache_contract.json");
         nlohmann::json value;
         if (!stream || !(stream >> value) || !value.is_object() ||
-            value.at("schema").get<int>() != 1 ||
+            value.at("schema").get<std::uint32_t>() !=
+              sbs_scene_cache::contract_schema ||
             (value.at("status").get<std::string>() != "running" &&
              value.at("status").get<std::string>() != "complete") ||
             !value.at("processed_count").is_number_integer()) {
-          error = "scene cache contract is not a running/complete schema-1 contract";
+          error = "scene cache contract is not a running/complete schema-2 contract";
           return false;
         }
         const std::string status = value.at("status").get<std::string>();
@@ -1581,6 +1843,7 @@ namespace sbs_bench {
         }
         const auto &source = value.at("source");
         const auto &depth = value.at("depth");
+        const auto &frame_metadata = value.at("frame_metadata");
         const auto &state = value.at("state");
         const auto &render = value.at("render_config");
         const auto &packed = value.at("packed_sbs");
@@ -1589,8 +1852,6 @@ namespace sbs_bench {
         metadata.input_frame_format = source.at("frame_format").get<std::string>();
         metadata.input_texture_format = source.at("texture_format").get<std::string>();
         metadata.input_color_space = source.at("color_space").get<std::string>();
-        metadata.depth_width = depth.at("width").get<UINT>();
-        metadata.depth_height = depth.at("height").get<UINT>();
         metadata.model_name = render.at("model").get<std::string>();
         metadata.model_url = render.at("model_url").get<std::string>();
         metadata.pop_strength = render.at("pop_strength").get<double>();
@@ -1622,27 +1883,54 @@ namespace sbs_bench {
         metadata.frame_count =
           frame_count > 0 ? static_cast<std::size_t>(frame_count) : 0u;
 
-        const std::uint64_t depth_bytes =
-          static_cast<std::uint64_t>(metadata.depth_width) *
-          metadata.depth_height * sizeof(float);
         if (!metadata.source_width || !metadata.source_height ||
-            !metadata.depth_width || !metadata.depth_height ||
+            depth.at("dimensions").get<std::string>() !=
+              "per-frame-metadata" ||
             depth.at("dxgi_format").get<std::string>() != "R32_FLOAT" ||
             depth.at("dtype").get<std::string>() != "float32-le" ||
             depth.at("layout").get<std::string>() != "row-major" ||
             depth.at("row_order").get<std::string>() != "top-down" ||
             depth.at("file_pattern").get<std::string>() !=
               "frame_%010d.depth.r32f" ||
-            depth.at("bytes_per_frame").get<std::uint64_t>() != depth_bytes ||
-            state.at("schema").get<int>() != 1 ||
-            state.at("word_count").get<std::size_t>() !=
+            depth.at("bytes_per_sample").get<std::size_t>() !=
+              sizeof(float) ||
+            !depth.at("bytes_per_frame").is_null() ||
+            frame_metadata.at("schema").get<std::uint32_t>() !=
+              sbs_scene_cache::frame_metadata_schema ||
+            frame_metadata.at("magic").get<std::uint32_t>() !=
+              sbs_scene_cache::frame_metadata_magic ||
+            frame_metadata.at("word_count").get<std::uint32_t>() !=
+              sbs_scene_cache::frame_metadata_word_count ||
+            frame_metadata.at("dtype").get<std::string>() != "uint32-le" ||
+            frame_metadata.at("layout").get<std::string>() !=
+              "raw-word-order" ||
+            frame_metadata.at("file_pattern").get<std::string>() !=
+              "frame_%010d.meta.u32" ||
+            frame_metadata.at("bytes_per_frame").get<std::size_t>() !=
+              sizeof(frame_metadata_t) ||
+            frame_metadata.at("roi_transform_word_offset")
+                .get<std::uint32_t>() !=
+              sbs_scene_cache::roi_transform_word_offset ||
+            frame_metadata.at("roi_transform_word_count")
+                .get<std::uint32_t>() !=
+              sbs_scene_cache::roi_transform_word_count ||
+            frame_metadata.at("roi_transform_contract_schema")
+                .get<std::uint32_t>() !=
+              models::frame_roi_transform_contract_version ||
+            state.at("schema").get<std::uint32_t>() !=
+              sbs_scene_cache::cached_state_schema ||
+            state.at("subject_word_count").get<std::size_t>() !=
               render_state_words_t {}.size() ||
+            state.at("depth_frame_state_word_count").get<std::size_t>() !=
+              sbs_scene_cache::depth_frame_state_word_count ||
+            state.at("word_count").get<std::size_t>() !=
+              cached_state_words_t {}.size() ||
             state.at("dtype").get<std::string>() != "uint32-le" ||
             state.at("layout").get<std::string>() != "raw-word-order" ||
             state.at("file_pattern").get<std::string>() !=
               "frame_%010d.state.u32" ||
             state.at("bytes_per_frame").get<std::size_t>() !=
-              sizeof(render_state_words_t) ||
+              sizeof(cached_state_words_t) ||
             !(metadata.pop_strength >= 0.25 &&
               metadata.pop_strength <= 2.0) ||
             !(metadata.adaptive_pop_max >= metadata.pop_strength &&
@@ -1687,9 +1975,6 @@ namespace sbs_bench {
         error = "requested scene range is not durably available in the cache";
         return false;
       }
-      const std::uint64_t depth_size =
-        static_cast<std::uint64_t>(metadata.depth_width) *
-        metadata.depth_height * sizeof(float);
       std::error_code ec;
       for (std::size_t sequence = start_sequence;
            sequence < end_sequence_exclusive;
@@ -1697,11 +1982,35 @@ namespace sbs_bench {
         const std::string stem = scene_cache_frame_stem(sequence);
         const fs::path depth = directory / (stem + ".depth.r32f");
         const fs::path state = directory / (stem + ".state.u32");
-        if (!fs::is_regular_file(depth, ec) || ec ||
-            fs::file_size(depth, ec) != depth_size || ec ||
+        const fs::path frame_metadata_path =
+          directory / (stem + ".meta.u32");
+        frame_metadata_t frame_metadata {};
+        cached_state_words_t render_words {};
+        if (!read_exact_file(
+              frame_metadata_path,
+              &frame_metadata,
+              sizeof(frame_metadata)
+            ) ||
+            !read_exact_file(
+              state,
+              render_words.data(),
+              sizeof(render_words)
+            ) ||
+            !sbs_scene_cache::valid_scene_replay_frame(
+              frame_metadata,
+              render_words,
+              sequence,
+              start_sequence,
+              metadata.source_width,
+              metadata.source_height,
+              static_cast<std::uint32_t>(metadata.depth_reuse_interval)
+            ) ||
+            !fs::is_regular_file(depth, ec) || ec ||
+            fs::file_size(depth, ec) !=
+              sbs_scene_cache::depth_payload_bytes(frame_metadata) || ec ||
             !fs::is_regular_file(state, ec) || ec ||
-            fs::file_size(state, ec) != sizeof(render_state_words_t) || ec) {
-          error = "scene cache is missing or has a wrong-sized pair for global sequence " +
+            fs::file_size(state, ec) != sizeof(cached_state_words_t) || ec) {
+          error = "scene cache is missing or has a wrong-sized frame triplet for global sequence " +
                   std::to_string(sequence);
           return false;
         }
@@ -1718,7 +2027,8 @@ namespace sbs_bench {
         if (!stream || !(stream >> value) || !value.is_object() ||
             value.at("schema").get<int>() != 1 ||
             value.at("version").get<std::string>() != "scene-plan-v1" ||
-            value.at("cache_contract_schema").get<int>() != 1 ||
+            value.at("cache_contract_schema").get<std::uint32_t>() !=
+              sbs_scene_cache::contract_schema ||
             !value.at("scenes").is_array() ||
             value.at("scenes").size() != 1u) {
           error = "scene plan is not a scene-plan-v1 schema-1 document";
@@ -2427,16 +2737,32 @@ namespace sbs_bench {
           {"follow_global_first_sequence", true},
           {"adaptive_state_schema", sbs_adaptive_state::schema_version},
           {"adaptive_analysis_flag_bits", std::move(adaptive_analysis_flag_bits)},
-          {"scene_cache_contract_schema", 1},
+          {"scene_cache_contract_schema",
+           sbs_scene_cache::contract_schema},
           {"scene_cache_packed_sbs_contract", true},
           {"scene_cache_depth", {
             {"dtype", "float32-le"},
             {"layout", "row-major"},
             {"dxgi_format", "R32_FLOAT"},
+            {"dimensions", "per-frame-metadata"},
+            {"bytes_per_frame", nullptr},
+          }},
+          {"scene_cache_frame_metadata", {
+            {"schema", sbs_scene_cache::frame_metadata_schema},
+            {"word_count", sbs_scene_cache::frame_metadata_word_count},
+            {"roi_transform_word_offset",
+             sbs_scene_cache::roi_transform_word_offset},
+            {"roi_transform_word_count",
+             sbs_scene_cache::roi_transform_word_count},
+            {"roi_transform_contract_schema",
+             models::frame_roi_transform_contract_version},
           }},
           {"scene_cache_state", {
-            {"schema", 1},
-            {"word_count", render_state_words_t {}.size()},
+            {"schema", sbs_scene_cache::cached_state_schema},
+            {"subject_word_count", render_state_words_t {}.size()},
+            {"depth_frame_state_word_count",
+             sbs_scene_cache::depth_frame_state_word_count},
+            {"word_count", cached_state_words_t {}.size()},
             {"dtype", "uint32-le"},
           }},
           {"scene_plan", {
@@ -2868,7 +3194,7 @@ namespace sbs_bench {
     }
 
     // Built after the first source frame reveals the source/output aspect relationship.
-    ComPtr<ID3D11Buffer> repro_cb;
+    ComPtr<ID3D11Buffer> repro_cb, repro_completed_cb;
 
     // ---- estimator ----
     // Cache replay is deliberately a pure D3D render pass: do not even construct the estimator,
@@ -2897,7 +3223,7 @@ namespace sbs_bench {
     ComPtr<ID3D11ShaderResourceView> coverage_srv;
     D3D11_VIEWPORT vp = {};
     UINT sbs_w = 0, sbs_h = 0;
-    ComPtr<ID3D11Texture2D> depth_stage;  // dump_depth staging cache (depth size is constant)
+    ComPtr<ID3D11Texture2D> depth_stage;
     ComPtr<ID3D11Texture2D> warp_depth_tex;
     ComPtr<ID3D11UnorderedAccessView> warp_depth_uav;
     ComPtr<ID3D11ShaderResourceView> warp_depth_srv;
@@ -2905,6 +3231,8 @@ namespace sbs_bench {
     ComPtr<ID3D11Buffer> raw_depth_stage;
     ComPtr<ID3D11Buffer> subject_state_stage;
     ComPtr<ID3D11Texture2D> scene_cache_depth_stage;
+    ComPtr<ID3D11Buffer> scene_cache_transform_stage;
+    ComPtr<ID3D11Buffer> scene_cache_depth_frame_state_stage;
     // Evaluation keeps the legacy subject_state.json contract used by the bounded clip
     // scorer. Whole-clip follow/conversion already emits the superset adaptive-state
     // transport (JSONL for standalone tooling, atomic latest-record snapshots for the native
@@ -2924,6 +3252,7 @@ namespace sbs_bench {
     models::estimate_result est;
     bool cuda_graph_captured = false;
     bool have_depth_result = false;
+    bool packed_target_valid = false;
     std::size_t tensorrt_enqueue_count = 0;
     bool scene_cache_contract_started = false;
     scene_cache_metadata scene_cache_metadata_value;
@@ -3114,9 +3443,10 @@ namespace sbs_bench {
         const float eye_aspect = (float) eye_w / (float) eye_h;
         const float content_scale_x = eye_aspect > aspect ? aspect / eye_aspect : 1.0f;
         const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
-        // Slot-for-slot mirror of the b2 `Constants` cbuffer in sbs_warp_common.hlsl; see the
-        // Slot 7 is the production invalid-completion draw guard. The synchronous evaluator has
-        // no previous packed target to preserve, so it always leaves the guard disabled.
+        // Slot-for-slot mirror of the b2 `Constants` cbuffer in sbs_warp_common.hlsl. Keep both
+        // live variants: the first draw must establish the packed target, while every later
+        // completed draw preserves that target when DepthFrameState marks an all-invalid model
+        // completion.
         float repro_params[8] = {
           sbs_cfg.subject_stretch ? 1.0f : 0.0f,
           content_scale_x,
@@ -3128,6 +3458,13 @@ namespace sbs_bench {
           0.0f  // preserve_previous_on_invalid
         };
         repro_cb = const_buffer(dev.Get(), repro_params);
+        repro_params[7] = 1.0f;
+        repro_completed_cb = const_buffer(dev.Get(), repro_params);
+        if (!repro_cb || !repro_completed_cb) {
+          BOOST_LOG(error)
+            << "sbs-bench: cannot create SBS reprojection constants";
+          return 6;
+        }
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = sbs_w;
         td.Height = sbs_h;
@@ -3236,24 +3573,48 @@ namespace sbs_bench {
       const scene_plan_entry *active_scene_camera = nullptr;
       ComPtr<ID3D11Texture2D> cached_depth_texture;
       ComPtr<ID3D11Buffer> cached_state_buffer;
+      ComPtr<ID3D11Buffer> cached_depth_frame_state_buffer;
+      ComPtr<ID3D11Buffer> cached_roi_transform_buffer;
       if (replay_mode) {
         const std::size_t sequence = global_sequence;
         const std::string cache_stem = scene_cache_frame_stem(sequence);
-        render_state_words_t render_words {};
+        cached_state_words_t render_words {};
+        frame_metadata_t frame_metadata {};
         if (!read_exact_file(
               fs::path(o.render_cache) / (cache_stem + ".state.u32"),
               render_words.data(),
               sizeof(render_words)
             ) ||
+            !read_exact_file(
+              fs::path(o.render_cache) / (cache_stem + ".meta.u32"),
+              &frame_metadata,
+              sizeof(frame_metadata)
+            ) ||
+            !sbs_scene_cache::valid_frame_metadata_for_state(
+              frame_metadata,
+              render_words,
+              sequence,
+              replay_cache_metadata.source_width,
+              replay_cache_metadata.source_height,
+              static_cast<std::uint32_t>(
+                replay_cache_metadata.depth_reuse_interval
+              )
+            ) ||
             !create_cached_depth_srv(
               dev.Get(),
               fs::path(o.render_cache) / (cache_stem + ".depth.r32f"),
-              replay_cache_metadata.depth_width,
-              replay_cache_metadata.depth_height,
+              frame_metadata.depth[0u],
+              frame_metadata.depth[1u],
               cached_depth_texture,
               est.depth
+            ) ||
+            !create_cached_roi_transform_srv(
+              dev.Get(),
+              frame_metadata,
+              cached_roi_transform_buffer,
+              est.depth_roi_transform
             )) {
-          BOOST_LOG(error) << "sbs-bench: invalid cached depth/state pair for global sequence "
+          BOOST_LOG(error) << "sbs-bench: invalid cached depth/state/metadata triplet for global sequence "
                            << sequence;
           return 6;
         }
@@ -3272,19 +3633,21 @@ namespace sbs_bench {
         }
         const auto &scene = scene_plan[scene_plan_index];
         active_scene_camera = &scene;
-        if (!create_cached_state_srv(
+        if (!create_cached_state_srvs(
               dev.Get(),
               render_words,
               cached_state_buffer,
-              est.subject
+              est.subject,
+              cached_depth_frame_state_buffer,
+              est.depth_frame_state
             )) {
-          BOOST_LOG(error) << "sbs-bench: cannot create cached SubjectState for sequence "
+          BOOST_LOG(error) << "sbs-bench: cannot create cached render state for sequence "
                            << sequence;
           return 6;
         }
-        std::copy(
+        std::copy_n(
           render_words.begin(),
-          render_words.end(),
+          sbs_adaptive_state::render_prefix_word_count,
           words.begin()
         );
         // Analysis diagnostics deliberately are not part of the render cache. Keep their
@@ -3308,8 +3671,8 @@ namespace sbs_bench {
           words[sbs_adaptive_state::index(word)] =
             std::bit_cast<std::uint32_t>(-1.0f);
         }
-        est.raw_width = static_cast<int>(replay_cache_metadata.depth_width);
-        est.raw_height = static_cast<int>(replay_cache_metadata.depth_height);
+        est.raw_width = static_cast<int>(frame_metadata.depth[0u]);
+        est.raw_height = static_cast<int>(frame_metadata.depth[1u]);
         have_depth_result = true;
       } else {
         if (depth_updated) {
@@ -3390,8 +3753,6 @@ namespace sbs_bench {
             }
             scene_cache_metadata_value.source_width = source_width;
             scene_cache_metadata_value.source_height = source_height;
-            scene_cache_metadata_value.depth_width = depth_desc.Width;
-            scene_cache_metadata_value.depth_height = depth_desc.Height;
             scene_cache_metadata_value.input_frame_format =
               discovered_input_frame_format;
             scene_cache_metadata_value.input_texture_format =
@@ -3456,20 +3817,42 @@ namespace sbs_bench {
           }
           const std::size_t sequence = fi + 1u;
           const std::string cache_stem = scene_cache_frame_stem(sequence);
-          if (!cache_depth_texture_atomically(
+          frame_metadata_t frame_metadata {};
+          if (!make_scene_cache_frame_metadata(
+                dev.Get(),
+                ctx.Get(),
+                est.depth_roi_transform.Get(),
+                scene_cache_transform_stage,
+                sequence,
+                source_width,
+                source_height,
+                depth_desc.Width,
+                depth_desc.Height,
+                static_cast<std::uint32_t>(effective_depth_every),
+                frame_metadata
+              ) ||
+              !cache_depth_texture_atomically(
                 dev.Get(),
                 ctx.Get(),
                 est.depth.Get(),
                 fs::path(o.scene_cache) / (cache_stem + ".depth.r32f"),
                 scene_cache_depth_stage,
-                scene_cache_metadata_value.depth_width,
-                scene_cache_metadata_value.depth_height
+                depth_desc.Width,
+                depth_desc.Height
               ) ||
               !cache_render_state_atomically(
+                dev.Get(),
+                ctx.Get(),
                 words,
+                est.depth_frame_state.Get(),
+                scene_cache_depth_frame_state_stage,
                 fs::path(o.scene_cache) / (cache_stem + ".state.u32")
+              ) ||
+              !cache_frame_metadata_atomically(
+                frame_metadata,
+                fs::path(o.scene_cache) / (cache_stem + ".meta.u32")
               )) {
-            BOOST_LOG(error) << "sbs-bench: cannot durably publish scene cache pair "
+            BOOST_LOG(error) << "sbs-bench: cannot durably publish scene cache triplet "
                              << sequence;
             return 6;
           }
@@ -3508,7 +3891,7 @@ namespace sbs_bench {
               fi + 1u
             )) {
           BOOST_LOG(error)
-            << "sbs-bench: cannot acknowledge traced scene cache pair "
+            << "sbs-bench: cannot acknowledge traced scene cache triplet "
             << (fi + 1u);
           return 6;
         }
@@ -3572,6 +3955,10 @@ namespace sbs_bench {
 
       // Composite (mirrors display_vram::convert()'s SBS block): probe reprojection.
       const auto comp_t0 = std::chrono::steady_clock::now();
+      ID3D11Buffer *active_repro_cb =
+        packed_target_valid && est.depth_frame_state ?
+          repro_completed_cb.Get() :
+          repro_cb.Get();
       const bool time_warp = warp_disjoint && warp_start && warp_end;
       if (time_warp) {
         ctx->Begin(warp_disjoint.Get());
@@ -3625,18 +4012,36 @@ namespace sbs_bench {
         ctx->ClearUnorderedAccessViewUint(coverage_view, clear_winner);
         ctx->CSSetShader(shader, nullptr, 0);
         ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
-        ID3D11ShaderResourceView *cs_srvs[] = {in_srv.Get(), warp_depth, est.subject.Get()};
-        ctx->CSSetShaderResources(0, 3, cs_srvs);
+        ID3D11ShaderResourceView *cs_srvs[] = {
+          in_srv.Get(),
+          warp_depth,
+          est.subject.Get(),
+          nullptr,
+          nullptr,
+          est.depth_roi_transform.Get(),
+        };
+        ctx->CSSetShaderResources(0, (UINT) std::size(cs_srvs), cs_srvs);
         ctx->CSSetUnorderedAccessViews(0, 1, &coverage_view, nullptr);
-        ctx->CSSetConstantBuffers(2, 1, repro_cb.GetAddressOf());
+        ctx->CSSetConstantBuffers(2, 1, &active_repro_cb);
         if (scene_camera_cb) {
           ctx->CSSetConstantBuffers(3, 1, scene_camera_cb.GetAddressOf());
         }
         ctx->Dispatch(((sbs_w / 2u) + 15u) / 16u, (sbs_h + 15u) / 16u, 1u);
         ID3D11UnorderedAccessView *null_uav[] = {nullptr};
-        ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr};
+        ID3D11ShaderResourceView *null_cs_srvs[] = {
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
+        };
         ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
-        ctx->CSSetShaderResources(0, 3, null_cs_srvs);
+        ctx->CSSetShaderResources(
+          0,
+          (UINT) std::size(null_cs_srvs),
+          null_cs_srvs
+        );
       };
       ctx->OMSetRenderTargets(1, sbs_rtv.GetAddressOf(), nullptr);
       ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -3645,19 +4050,34 @@ namespace sbs_bench {
       ctx->RSSetViewports(1, &vp);
       ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
 
-      ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), warp_depth, est.subject.Get()};
-      ctx->PSSetShaderResources(0, 3, srvs);
-      ID3D11Buffer *cb = repro_cb.Get();
+      ID3D11ShaderResourceView *srvs[] = {
+        in_srv.Get(),
+        warp_depth,
+        est.subject.Get(),
+        nullptr,
+        est.depth_frame_state.Get(),
+        est.depth_roi_transform.Get(),
+      };
+      ctx->PSSetShaderResources(0, (UINT) std::size(srvs), srvs);
+      ID3D11Buffer *cb = active_repro_cb;
       ctx->PSSetConstantBuffers(2, 1, &cb);
       if (scene_camera_cb) {
         ctx->PSSetConstantBuffers(3, 1, scene_camera_cb.GetAddressOf());
       }
       ctx->Draw(3, 0);
+      packed_target_valid = true;
 
       ID3D11RenderTargetView *null_rtv[] = {nullptr};
       ctx->OMSetRenderTargets(1, null_rtv, nullptr);
-      ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr, nullptr};
-      ctx->PSSetShaderResources(0, 3, null_srv);
+      ID3D11ShaderResourceView *null_srv[] = {
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+      };
+      ctx->PSSetShaderResources(0, (UINT) std::size(null_srv), null_srv);
       ID3D11Texture2D *final_sbs_tex = sbs_tex.Get();
       if (time_warp) {
         ctx->End(warp_end.Get());
@@ -3697,13 +4117,23 @@ namespace sbs_bench {
           in_srv.Get(),
           warp_depth,
           est.subject.Get(),
-          est.depth ? coverage_srv.Get() : nullptr
+          est.depth ? coverage_srv.Get() : nullptr,
+          est.depth_frame_state.Get(),
+          est.depth_roi_transform.Get(),
         };
-        ctx->PSSetShaderResources(0, 4, mask_srvs);
+        ctx->PSSetShaderResources(
+          0,
+          (UINT) std::size(mask_srvs),
+          mask_srvs
+        );
         ctx->PSSetConstantBuffers(2, 1, &cb);
         ctx->Draw(3, 0);
         ctx->OMSetRenderTargets(1, null_rtv, nullptr);
-        ctx->PSSetShaderResources(0, 4, null_srv);
+        ctx->PSSetShaderResources(
+          0,
+          (UINT) std::size(null_srv),
+          null_srv
+        );
 
         // Offline-only exact inverse-warp mapping. This deliberately repeats the production
         // Reproject path after timing has ended: metric labels receive the shader's actual sampled
@@ -3716,13 +4146,24 @@ namespace sbs_bench {
         ID3D11ShaderResourceView *mapping_srvs[] = {
           in_srv.Get(),
           warp_depth,
-          est.subject.Get()
+          est.subject.Get(),
+          nullptr,
+          est.depth_frame_state.Get(),
+          est.depth_roi_transform.Get(),
         };
-        ctx->PSSetShaderResources(0, 3, mapping_srvs);
+        ctx->PSSetShaderResources(
+          0,
+          (UINT) std::size(mapping_srvs),
+          mapping_srvs
+        );
         ctx->PSSetConstantBuffers(2, 1, &cb);
         ctx->Draw(3, 0);
         ctx->OMSetRenderTargets(1, null_rtv, nullptr);
-        ctx->PSSetShaderResources(0, 3, null_srv);
+        ctx->PSSetShaderResources(
+          0,
+          (UINT) std::size(null_srv),
+          null_srv
+        );
 
         char mapping_name[64];
         snprintf(mapping_name, sizeof(mapping_name), "warp_map_%s.f32", output_id.c_str());
@@ -4069,12 +4510,12 @@ namespace sbs_bench {
         << "  \"tensorrt_enqueue_count\": " << tensorrt_enqueue_count << ",\n"
         << "  \"depth_provenance\": "
         << json_string(replay_mode ?
-                         "scene-cache-contract-schema-1:R32_FLOAT" :
+                         "scene-cache-contract-schema-2:per-frame-R32_FLOAT" :
                          "video_depth_estimator")
         << ",\n"
         << "  \"subject_state_provenance\": "
         << json_string(replay_mode ?
-                         "scene-cache-contract-schema-1:canonical-12-words" :
+                         "scene-cache-contract-schema-2:subject-plus-depth-frame-state" :
                          "depth_subject_resolve_cs")
         << ",\n"
         << "  \"model\": " << json_string(model.name) << ",\n"
@@ -4200,7 +4641,10 @@ namespace sbs_bench {
         << "    \"scene_cache_replay\": "
         << (replay_mode ? "true" : "false") << ",\n"
         << "    \"scene_cache_contract_schema\": "
-        << ((!o.scene_cache.empty() || replay_mode) ? "1" : "null") << ",\n"
+        << ((!o.scene_cache.empty() || replay_mode) ?
+              std::to_string(sbs_scene_cache::contract_schema) :
+              "null")
+        << ",\n"
         << "    \"scene_plan_schema\": "
         << (replay_mode ? "1" : "null") << ",\n"
         << "    \"scene_plan_version\": "

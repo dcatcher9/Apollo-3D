@@ -6,18 +6,24 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <optional>
+#include <sstream>
 #include <src/nvenc/nvenc_base.h>
 #include <src/nvenc/nvenc_config.h>
 #include <src/generated/sbs_adaptive_state_contract.h>
 #include <src/generated/sbs_scene_controller_contract.h>
 #include <src/sbs_frame_roi_transform.h>
+#include <src/sbs_roi_shape_request.h>
+#include <src/sbs_scene_cache_contract.h>
 #include <src/video.h>
 #include <src/video_colorspace.h>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -131,6 +137,41 @@ namespace {
       static_cast<float>(previous_supported) / denominator,
       static_cast<float>(common_supported) / denominator,
     };
+  }
+
+  std::optional<std::uint32_t> read_hlsl_uint_define(
+    const std::string &source,
+    const std::string_view expected_name
+  ) {
+    std::istringstream lines(source);
+    std::string line;
+    while (std::getline(lines, line)) {
+      std::istringstream fields(line);
+      std::string directive;
+      std::string name;
+      std::string token;
+      if (
+        !(fields >> directive >> name >> token) ||
+        directive != "#define" ||
+        name != expected_name
+      ) {
+        continue;
+      }
+      if (!token.empty() && (token.back() == 'u' || token.back() == 'U')) {
+        token.pop_back();
+      }
+      std::uint32_t value = 0u;
+      const auto parsed =
+        std::from_chars(token.data(), token.data() + token.size(), value);
+      if (
+        parsed.ec != std::errc {} ||
+        parsed.ptr != token.data() + token.size()
+      ) {
+        return std::nullopt;
+      }
+      return value;
+    }
+    return std::nullopt;
   }
 
   float structural_change_fraction(
@@ -674,6 +715,488 @@ TEST(FrameRoiTransformTest, PreparingAnotherCandidateCannotOverwriteCompleted) {
   EXPECT_NE(transforms.completed_for(100), nullptr);
 }
 
+TEST(
+  FrameRoiTransformTest,
+  ResourceRebuildRetiresEveryBankWithoutReusingVersion
+) {
+  models::frame_roi_transform_buffer transforms;
+  auto first = transforms.reserve(
+    models::make_frame_roi_transform_identity(
+      90u,
+      3840u,
+      2160u,
+      770u,
+      434u,
+      7u,
+      0u
+    )
+  );
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(transforms.commit_reserved_enqueued(*first));
+  ASSERT_TRUE(transforms.complete(*first));
+  const auto first_version = first->transform_version;
+
+  transforms.reset_for_resource_rebuild();
+  EXPECT_FALSE(transforms.completed_bank().has_value());
+  EXPECT_FALSE(transforms.pending_bank().has_value());
+  EXPECT_FALSE(transforms.reserved_bank().has_value());
+  ASSERT_TRUE(transforms.writable_bank().has_value());
+  EXPECT_EQ(*transforms.writable_bank(), 0u);
+
+  auto second = transforms.reserve(
+    models::make_frame_roi_transform_identity(
+      91u,
+      3840u,
+      2160u,
+      574u,
+      574u,
+      7u,
+      0u
+    )
+  );
+  ASSERT_TRUE(second.has_value());
+  EXPECT_GT(second->transform_version, first_version);
+}
+
+TEST(SbsSceneCacheContractTest, AcceptsDynamicAspectTransitionsWithExactIdentity) {
+  const auto make_metadata = [](
+    const std::uint64_t sequence,
+    const std::uint64_t retained_frame,
+    const std::uint32_t model_width,
+    const std::uint32_t model_height,
+    const float crop_width,
+    const float crop_height
+  ) {
+    sbs_scene_cache::frame_metadata_t metadata;
+    metadata.depth = {
+      model_width,
+      model_height,
+      model_width * model_height,
+      sizeof(float),
+    };
+    sbs_scene_cache::split_u64(
+      sequence,
+      metadata.sequence[0],
+      metadata.sequence[1]
+    );
+    sbs_scene_cache::split_u64(
+      retained_frame,
+      metadata.sequence[2],
+      metadata.sequence[3]
+    );
+    metadata.identity = {3840u, 2160u, model_width, model_height};
+    auto &words = metadata.roi_transform;
+    words[0] = models::frame_roi_transform_contract_version;
+    words[1] = (1u << 0u) | (1u << 2u);
+    sbs_scene_cache::split_u64(retained_frame, words[2], words[3]);
+    words[4] = 1u;
+    words[5] = 1u;
+    words[6] = 3840u;
+    words[7] = 2160u;
+    words[8] = model_width;
+    words[9] = model_height;
+    words[10] = model_width * model_height;
+    words[11] = 1u;
+    const std::array<float, 4> crop {0.0f, 0.0f, crop_width, crop_height};
+    for (std::size_t index = 0; index < crop.size(); ++index) {
+      words[12u + index] = std::bit_cast<std::uint32_t>(crop[index]);
+      words[16u + index] = std::bit_cast<std::uint32_t>(crop[index]);
+    }
+    words[20] = 0u;
+    words[21] = 0u;
+    words[22] = model_width;
+    words[23] = model_height;
+    words[28] = static_cast<std::uint32_t>(sequence);
+    words[30] = static_cast<std::uint32_t>(sequence & 1u);
+    return metadata;
+  };
+  const auto make_canonical = [](const std::uint64_t sequence) {
+    sbs_scene_cache::frame_metadata_t metadata;
+    metadata.depth = {770u, 434u, 770u * 434u, sizeof(float)};
+    sbs_scene_cache::split_u64(
+      sequence,
+      metadata.sequence[0],
+      metadata.sequence[1]
+    );
+    sbs_scene_cache::split_u64(
+      sbs_scene_cache::unbound_source_frame_id,
+      metadata.sequence[2],
+      metadata.sequence[3]
+    );
+    metadata.identity = {3840u, 2160u, 770u, 434u};
+    return metadata;
+  };
+
+  const auto canonical_start = make_canonical(1u);
+  const auto square = make_metadata(
+    2u,
+    1u,
+    434u,
+    434u,
+    0.28125f,
+    0.5f
+  );
+  const auto portrait = make_metadata(
+    3u,
+    2u,
+    434u,
+    770u,
+    (434.0f / 770.0f) * (2160.0f / 3840.0f),
+    1.0f
+  );
+  const auto canonical_end = make_canonical(4u);
+  EXPECT_TRUE(sbs_scene_cache::valid_frame_metadata(
+    canonical_start, 1u, 3840u, 2160u, 1u
+  ));
+  EXPECT_TRUE(sbs_scene_cache::valid_frame_metadata(
+    square, 2u, 3840u, 2160u, 1u
+  ));
+  EXPECT_TRUE(sbs_scene_cache::valid_frame_metadata(
+    portrait, 3u, 3840u, 2160u, 1u
+  ));
+  EXPECT_TRUE(sbs_scene_cache::valid_frame_metadata(
+    canonical_end, 4u, 3840u, 2160u, 1u
+  ));
+
+  auto mismatched = square;
+  mismatched.sequence[2] = 0u;
+  EXPECT_FALSE(sbs_scene_cache::valid_frame_metadata(
+    mismatched, 2u, 3840u, 2160u, 1u
+  ));
+
+  const auto exact_reuse = make_metadata(
+    5u,
+    4u,
+    434u,
+    434u,
+    0.28125f,
+    0.5f
+  );
+  EXPECT_TRUE(sbs_scene_cache::valid_frame_metadata(
+    exact_reuse, 5u, 3840u, 2160u, 4u
+  ));
+  sbs_scene_cache::cached_state_words_t valid_state {};
+  const auto depth_state_offset =
+    sbs_adaptive_state::render_prefix_word_count;
+  valid_state[depth_state_offset + 2u] =
+    std::bit_cast<std::uint32_t>(1.0f);
+  valid_state[depth_state_offset + 3u] =
+    std::bit_cast<std::uint32_t>(1.0f);
+  EXPECT_TRUE(sbs_scene_cache::valid_frame_metadata_for_state(
+    exact_reuse, valid_state, 5u, 3840u, 2160u, 4u
+  ));
+  const auto consistently_stale_reuse = make_metadata(
+    5u,
+    0u,
+    434u,
+    434u,
+    0.28125f,
+    0.5f
+  );
+  EXPECT_TRUE(sbs_scene_cache::valid_frame_metadata(
+    consistently_stale_reuse, 5u, 3840u, 2160u, 4u
+  ));
+  EXPECT_FALSE(sbs_scene_cache::valid_frame_metadata_for_state(
+    consistently_stale_reuse,
+    valid_state,
+    5u,
+    3840u,
+    2160u,
+    4u
+  ));
+  auto preserve_previous_state = valid_state;
+  preserve_previous_state[depth_state_offset + 3u] =
+    std::bit_cast<std::uint32_t>(0.0f);
+  EXPECT_TRUE(sbs_scene_cache::valid_frame_metadata_for_state(
+    consistently_stale_reuse,
+    preserve_previous_state,
+    5u,
+    3840u,
+    2160u,
+    4u
+  ));
+  EXPECT_FALSE(sbs_scene_cache::valid_scene_replay_frame(
+    consistently_stale_reuse,
+    preserve_previous_state,
+    5u,
+    5u,
+    3840u,
+    2160u,
+    4u
+  ));
+  EXPECT_TRUE(sbs_scene_cache::valid_scene_replay_frame(
+    consistently_stale_reuse,
+    preserve_previous_state,
+    5u,
+    4u,
+    3840u,
+    2160u,
+    4u
+  ));
+  EXPECT_TRUE(sbs_scene_cache::valid_scene_replay_frame(
+    exact_reuse,
+    valid_state,
+    5u,
+    5u,
+    3840u,
+    2160u,
+    4u
+  ));
+  const auto non_cadence_reuse = make_metadata(
+    5u,
+    1u,
+    434u,
+    434u,
+    0.28125f,
+    0.5f
+  );
+  EXPECT_FALSE(sbs_scene_cache::valid_frame_metadata(
+    non_cadence_reuse, 5u, 3840u, 2160u, 4u
+  ));
+}
+
+TEST(SbsSceneCacheContractTest, RequiresDepthValidityStateForReplay) {
+  sbs_scene_cache::cached_state_words_t state {};
+  state[sbs_adaptive_state::render_prefix_word_count + 2u] =
+    std::bit_cast<std::uint32_t>(1.0f);
+  state[sbs_adaptive_state::render_prefix_word_count + 3u] =
+    std::bit_cast<std::uint32_t>(0.0f);
+  EXPECT_TRUE(sbs_scene_cache::valid_cached_state(state));
+  state[sbs_adaptive_state::render_prefix_word_count + 3u] =
+    std::bit_cast<std::uint32_t>(1.0f);
+  EXPECT_TRUE(sbs_scene_cache::valid_cached_state(state));
+  state[sbs_adaptive_state::render_prefix_word_count + 3u] =
+    std::bit_cast<std::uint32_t>(2.0f);
+  EXPECT_TRUE(sbs_scene_cache::valid_cached_state(state));
+  state[sbs_adaptive_state::render_prefix_word_count + 2u] =
+    std::bit_cast<std::uint32_t>(0.0f);
+  EXPECT_FALSE(sbs_scene_cache::valid_cached_state(state));
+  state[sbs_adaptive_state::render_prefix_word_count + 2u] =
+    std::bit_cast<std::uint32_t>(1.0f);
+  state[sbs_adaptive_state::render_prefix_word_count + 3u] =
+    std::bit_cast<std::uint32_t>(0.5f);
+  EXPECT_FALSE(sbs_scene_cache::valid_cached_state(state));
+
+  state[sbs_adaptive_state::render_prefix_word_count + 3u] =
+    std::bit_cast<std::uint32_t>(1.0f);
+  state[sbs_adaptive_state::index(sbs_adaptive_state::word_e::cut_flags)] =
+    std::bit_cast<std::uint32_t>(0.5f);
+  EXPECT_FALSE(sbs_scene_cache::valid_cached_state(state));
+  state[sbs_adaptive_state::index(sbs_adaptive_state::word_e::cut_flags)] =
+    std::bit_cast<std::uint32_t>(0.0f);
+  state[sbs_adaptive_state::index(
+    sbs_adaptive_state::word_e::model_input_history_state
+  )] = std::bit_cast<std::uint32_t>(4.0f);
+  EXPECT_FALSE(sbs_scene_cache::valid_cached_state(state));
+}
+
+TEST(SbsSceneCacheContractTest, RejectsUnsafeReplayDepthDimensions) {
+  const auto make_unbound = [](
+    const std::uint32_t source_width,
+    const std::uint32_t source_height,
+    const std::uint32_t model_width,
+    const std::uint32_t model_height
+  ) {
+    sbs_scene_cache::frame_metadata_t metadata;
+    metadata.depth = {
+      model_width,
+      model_height,
+      model_width * model_height,
+      sizeof(float),
+    };
+    sbs_scene_cache::split_u64(
+      1u,
+      metadata.sequence[0],
+      metadata.sequence[1]
+    );
+    sbs_scene_cache::split_u64(
+      sbs_scene_cache::unbound_source_frame_id,
+      metadata.sequence[2],
+      metadata.sequence[3]
+    );
+    metadata.identity = {
+      source_width,
+      source_height,
+      model_width,
+      model_height,
+    };
+    return metadata;
+  };
+
+  const auto over_engine_limit =
+    make_unbound(3840u, 2160u, 1050u, 588u);
+  EXPECT_FALSE(sbs_scene_cache::valid_frame_metadata(
+    over_engine_limit,
+    1u,
+    3840u,
+    2160u,
+    1u
+  ));
+
+  const auto larger_than_source =
+    make_unbound(1000u, 1000u, 1008u, 1008u);
+  EXPECT_FALSE(sbs_scene_cache::valid_frame_metadata(
+    larger_than_source,
+    1u,
+    1000u,
+    1000u,
+    1u
+  ));
+
+  const auto not_patch_aligned =
+    make_unbound(1920u, 1080u, 768u, 432u);
+  EXPECT_FALSE(sbs_scene_cache::valid_frame_metadata(
+    not_patch_aligned,
+    1u,
+    1920u,
+    1080u,
+    1u
+  ));
+}
+
+TEST(SbsRoiShapeRequestTest, ValidatesExactTupleAndDelayedStableRuleUpdate) {
+  models::sbs_roi_shape_request request;
+  request.header = {
+    models::sbs_roi_shape_request_schema_version,
+    models::sbs_roi_shape_flag_bits(
+      models::sbs_roi_shape_request_flag::valid
+    ) |
+      models::sbs_roi_shape_flag_bits(
+        models::sbs_roi_shape_request_flag::active_roi
+      ),
+    static_cast<std::uint32_t>(
+      models::sbs_roi_shape_request_reason::none
+    ),
+    0u,
+  };
+  request.identity = {
+    7u,
+    3u,
+    42u,
+    models::sbs_roi_shape_controller_schema_float_bits,
+  };
+  request.shape = {3840u, 2160u, 770u, 434u};
+  request.committed_roi_bits = {
+    0x3E000000u,
+    0x3E800000u,
+    0x3F600000u,
+    0x3F400000u,
+  };
+  request.header[3] = models::sbs_roi_shape_request_id(request);
+
+  const models::sbs_roi_shape_request_limits limits {
+    770u,
+    434u,
+    1036u,
+    1036u,
+    4.0f,
+  };
+  EXPECT_TRUE(models::sbs_roi_shape_request_valid(request, limits));
+  EXPECT_TRUE(models::sbs_roi_shape_current_rule_matches(
+    request,
+    7u,
+    3u,
+    43u,
+    3840u,
+    2160u,
+    request.committed_roi_bits
+  ));
+  EXPECT_FALSE(models::sbs_roi_shape_current_rule_matches(
+    request,
+    7u,
+    3u,
+    41u,
+    3840u,
+    2160u,
+    request.committed_roi_bits
+  ));
+  EXPECT_FALSE(models::sbs_roi_shape_current_rule_matches(
+    request,
+    7u,
+    4u,
+    43u,
+    3840u,
+    2160u,
+    request.committed_roi_bits
+  ));
+
+  auto changed_bits = request.committed_roi_bits;
+  changed_bits[0] ^= 1u;
+  EXPECT_FALSE(models::sbs_roi_shape_current_rule_matches(
+    request,
+    7u,
+    3u,
+    43u,
+    3840u,
+    2160u,
+    changed_bits
+  ));
+
+  auto newer_same_roi = request;
+  newer_same_roi.identity[2] = 43u;
+  newer_same_roi.shape[2] = 756u;
+  newer_same_roi.shape[3] = 448u;
+  newer_same_roi.header[3] =
+    models::sbs_roi_shape_request_id(newer_same_roi);
+  EXPECT_EQ(
+    models::sbs_roi_shape_classify(request, newer_same_roi),
+    models::sbs_roi_shape_request_relation::same_rule_different_policy
+  );
+
+  auto corrupted = request;
+  corrupted.shape[2] = 756u;
+  EXPECT_FALSE(models::sbs_roi_shape_request_valid(corrupted, limits));
+}
+
+TEST(SbsRoiShapeRequestTest, FallbackIsCanonicalAndCannotMasqueradeAsActive) {
+  models::sbs_roi_shape_request fallback;
+  fallback.header = {
+    models::sbs_roi_shape_request_schema_version,
+    models::sbs_roi_shape_flag_bits(
+      models::sbs_roi_shape_request_flag::valid
+    ) |
+      models::sbs_roi_shape_flag_bits(
+        models::sbs_roi_shape_request_flag::full_frame
+      ) |
+      models::sbs_roi_shape_flag_bits(
+        models::sbs_roi_shape_request_flag::fallback
+      ),
+    static_cast<std::uint32_t>(
+      models::sbs_roi_shape_request_reason::inactive
+    ),
+    0u,
+  };
+  fallback.shape = {3840u, 2160u, 770u, 434u};
+  fallback.header[3] = models::sbs_roi_shape_request_id(fallback);
+  const models::sbs_roi_shape_request_limits limits {
+    770u,
+    434u,
+    1036u,
+    1036u,
+    4.0f,
+  };
+  EXPECT_TRUE(models::sbs_roi_shape_request_valid(fallback, limits));
+
+  auto active_without_identity = fallback;
+  active_without_identity.header[1] =
+    models::sbs_roi_shape_flag_bits(
+      models::sbs_roi_shape_request_flag::valid
+    ) |
+    models::sbs_roi_shape_flag_bits(
+      models::sbs_roi_shape_request_flag::active_roi
+    );
+  active_without_identity.header[2] =
+    static_cast<std::uint32_t>(
+      models::sbs_roi_shape_request_reason::none
+    );
+  active_without_identity.header[3] =
+    models::sbs_roi_shape_request_id(active_without_identity);
+  EXPECT_FALSE(models::sbs_roi_shape_request_valid(
+    active_without_identity,
+    limits
+  ));
+}
+
 #ifdef _WIN32
 TEST(DirectxShaderTest, CompilesAllColorShaderVariants) {
   // D3DCompileFromFile does not require a D3D device. This covers BGRA8, FP16 SDR, PQ,
@@ -685,9 +1208,17 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
   using Microsoft::WRL::ComPtr;
 
   constexpr std::array shaders {
+    std::tuple {"rgb_to_nchw_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"depth_minmax_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"depth_hist_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"depth_ema_motion_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"buffer_to_tex_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"depth_subject_hist_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_subject_resolve_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_valid_history_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_frame_roi_transform_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"sbs_roi_shape_request_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_scene_prepare_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_scene_features_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_scene_rules_evidence_cs.hlsl", "main", "cs_5_0"},
@@ -873,6 +1404,36 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
   ComPtr<ID3D11SamplerState> sampler;
   ASSERT_TRUE(SUCCEEDED(device->CreateSamplerState(&sampler_desc, &sampler)));
 
+  std::array<
+    std::uint32_t,
+    models::frame_roi_transform_vector_count * 4u
+  > zero_transform_words {};
+  D3D11_BUFFER_DESC zero_transform_desc {};
+  zero_transform_desc.ByteWidth = sizeof(zero_transform_words);
+  zero_transform_desc.Usage = D3D11_USAGE_IMMUTABLE;
+  zero_transform_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  zero_transform_desc.MiscFlags =
+    D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+  zero_transform_desc.StructureByteStride =
+    sizeof(std::uint32_t) * 4u;
+  D3D11_SUBRESOURCE_DATA zero_transform_data {
+    zero_transform_words.data(),
+    0,
+    0,
+  };
+  ComPtr<ID3D11Buffer> zero_transform_buffer;
+  ComPtr<ID3D11ShaderResourceView> zero_transform_srv;
+  ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(
+    &zero_transform_desc,
+    &zero_transform_data,
+    &zero_transform_buffer
+  )));
+  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
+    zero_transform_buffer.Get(),
+    nullptr,
+    &zero_transform_srv
+  )));
+
   using rgba_pixel_t = std::array<float, 4>;
   const auto run_case = [&](
                           UINT source_width,
@@ -964,7 +1525,10 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
       return false;
     }
 
-    ID3D11ShaderResourceView *input_srvs[] = {input_srv.Get()};
+    ID3D11ShaderResourceView *input_srvs[] = {
+      input_srv.Get(),
+      zero_transform_srv.Get()
+    };
     ID3D11UnorderedAccessView *output_uavs[] = {
       model_uav.Get(),
       appearance_uav.Get()
@@ -972,7 +1536,7 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     ID3D11Buffer *constant_buffers[] = {constant_buffer.Get()};
     ID3D11SamplerState *samplers[] = {sampler.Get()};
     context->CSSetShader(shader.Get(), nullptr, 0);
-    context->CSSetShaderResources(0, 1, input_srvs);
+    context->CSSetShaderResources(0, 2, input_srvs);
     context->CSSetUnorderedAccessViews(0, 2, output_uavs, nullptr);
     context->CSSetConstantBuffers(0, 1, constant_buffers);
     context->CSSetSamplers(0, 1, samplers);
@@ -982,9 +1546,9 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
       1u
     );
 
-    ID3D11ShaderResourceView *null_srvs[] = {nullptr};
+    ID3D11ShaderResourceView *null_srvs[] = {nullptr, nullptr};
     ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr};
-    context->CSSetShaderResources(0, 1, null_srvs);
+    context->CSSetShaderResources(0, 2, null_srvs);
     context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
 
     const auto read_buffer = [&](
@@ -1076,36 +1640,39 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
   }
 
   {
-    std::vector<rgba_pixel_t> source_pixels {
-      rgba_pixel_t {0.0f, 0.0f, 0.0f, 1.0f},
-      rgba_pixel_t {0.3f, 0.3f, 0.3f, 1.0f},
-      rgba_pixel_t {0.6f, 0.6f, 0.6f, 1.0f}
-    };
+    std::vector<rgba_pixel_t> source_pixels;
+    for (int row = 0; row < 3; ++row) {
+      source_pixels.push_back({0.0f, 0.0f, 0.0f, 1.0f});
+      source_pixels.push_back({0.3f, 0.3f, 0.3f, 1.0f});
+      source_pixels.push_back({0.6f, 0.6f, 0.6f, 1.0f});
+    }
     std::vector<float> model_output;
     std::vector<float> appearance_ordinal;
     ASSERT_TRUE(run_case(
       3,
-      1,
+      3,
       2,
-      1,
+      2,
       source_pixels,
       model_output,
       appearance_ordinal
     ));
-    ASSERT_EQ(model_output.size(), 6u);
-    ASSERT_EQ(appearance_ordinal.size(), 2u);
+    ASSERT_EQ(model_output.size(), 12u);
+    ASSERT_EQ(appearance_ordinal.size(), 4u);
     constexpr std::array expected_model_values {0.1f, 0.5f};
-    for (UINT target_index = 0; target_index < 2u; ++target_index) {
+    for (UINT target_index = 0; target_index < 4u; ++target_index) {
       for (UINT channel = 0; channel < 3u; ++channel) {
         EXPECT_NEAR(
-          reconstructed_channel(model_output, 2, target_index, channel),
-          expected_model_values[target_index],
+          reconstructed_channel(model_output, 4, target_index, channel),
+          expected_model_values[target_index % 2u],
           2e-6f
         );
       }
     }
     EXPECT_FLOAT_EQ(appearance_ordinal[0], 0.0f);
     EXPECT_FLOAT_EQ(appearance_ordinal[1], 0.6f);
+    EXPECT_FLOAT_EQ(appearance_ordinal[2], 0.0f);
+    EXPECT_FLOAT_EQ(appearance_ordinal[3], 0.6f);
   }
 }
 #endif
@@ -1182,6 +1749,181 @@ TEST(DirectxShaderSourceTest, ConvertsEveryChromaTapBeforeAveraging) {
   EXPECT_EQ(shader.find("CONVERT_CHROMA_PER_TAP"), std::string::npos);
 }
 
+TEST(SbsFrameRoiTransformContractTest, FallbackReasonsMatchTheHlslAbi) {
+  using reason_e = models::frame_roi_fallback_reason;
+  struct expected_reason_t {
+    reason_e reason;
+    std::uint32_t value;
+    std::string_view name;
+    std::string_view hlsl_symbol;
+  };
+  constexpr std::array expected {
+    expected_reason_t {
+      reason_e::none,
+      0u,
+      "none",
+      "SBS_FRAME_ROI_FALLBACK_NONE"
+    },
+    expected_reason_t {
+      reason_e::inactive,
+      1u,
+      "inactive",
+      "SBS_FRAME_ROI_FALLBACK_INACTIVE"
+    },
+    expected_reason_t {
+      reason_e::controller_invalid,
+      2u,
+      "controller_invalid",
+      "SBS_FRAME_ROI_FALLBACK_CONTROLLER_INVALID"
+    },
+    expected_reason_t {
+      reason_e::no_locked_roi,
+      3u,
+      "no_locked_roi",
+      "SBS_FRAME_ROI_FALLBACK_NO_LOCKED_ROI"
+    },
+    expected_reason_t {
+      reason_e::malformed_roi,
+      4u,
+      "malformed_roi",
+      "SBS_FRAME_ROI_FALLBACK_MALFORMED_ROI"
+    },
+    expected_reason_t {
+      reason_e::roi_too_small,
+      5u,
+      "roi_too_small",
+      "SBS_FRAME_ROI_FALLBACK_ROI_TOO_SMALL"
+    },
+    expected_reason_t {
+      reason_e::aspect_envelope_impossible,
+      6u,
+      "aspect_envelope_impossible",
+      "SBS_FRAME_ROI_FALLBACK_ASPECT_ENVELOPE_IMPOSSIBLE"
+    },
+    expected_reason_t {
+      reason_e::empty_focus,
+      7u,
+      "empty_focus",
+      "SBS_FRAME_ROI_FALLBACK_EMPTY_FOCUS"
+    },
+    expected_reason_t {
+      reason_e::shape_request_mismatch,
+      8u,
+      "shape_request_mismatch",
+      "SBS_FRAME_ROI_FALLBACK_SHAPE_REQUEST_MISMATCH"
+    },
+    expected_reason_t {
+      reason_e::full_frame_shape_mismatch,
+      9u,
+      "full_frame_shape_mismatch",
+      "SBS_FRAME_ROI_FALLBACK_FULL_FRAME_SHAPE_MISMATCH"
+    },
+    expected_reason_t {
+      reason_e::invalid_dimensions,
+      10u,
+      "invalid_dimensions",
+      "SBS_FRAME_ROI_FALLBACK_INVALID_DIMENSIONS"
+    },
+  };
+
+  const auto hlsl = read_source_file(
+    SUNSHINE_SOURCE_DIR
+    "/src_assets/windows/assets/shaders/directx/include/"
+    "sbs_frame_roi_transform.hlsl"
+  );
+  ASSERT_FALSE(hlsl.empty());
+  ASSERT_EQ(
+    models::frame_roi_fallback_reason_contract.size(),
+    expected.size()
+  );
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    const auto &actual =
+      models::frame_roi_fallback_reason_contract[index];
+    EXPECT_EQ(actual.reason, expected[index].reason) << index;
+    EXPECT_EQ(
+      models::frame_roi_fallback_reason_value(actual.reason),
+      expected[index].value
+    ) << index;
+    EXPECT_EQ(actual.name, expected[index].name) << index;
+    EXPECT_EQ(
+      models::frame_roi_fallback_reason_name(expected[index].value),
+      expected[index].name
+    ) << index;
+
+    const auto hlsl_value =
+      read_hlsl_uint_define(hlsl, expected[index].hlsl_symbol);
+    ASSERT_TRUE(hlsl_value.has_value())
+      << expected[index].hlsl_symbol;
+    EXPECT_EQ(*hlsl_value, expected[index].value)
+      << expected[index].hlsl_symbol;
+  }
+  EXPECT_EQ(
+    models::frame_roi_fallback_reason_name(
+      static_cast<std::uint32_t>(expected.size())
+    ),
+    "unknown"
+  );
+
+  const auto vector_count =
+    read_hlsl_uint_define(hlsl, "SBS_FRAME_ROI_VECTOR_COUNT");
+  const auto diagnostics_vector =
+    read_hlsl_uint_define(
+      hlsl,
+      "SBS_FRAME_ROI_VECTOR_DIAGNOSTICS"
+    );
+  ASSERT_TRUE(vector_count.has_value());
+  ASSERT_TRUE(diagnostics_vector.has_value());
+  EXPECT_EQ(
+    *vector_count,
+    models::frame_roi_transform_vector_count
+  );
+  EXPECT_EQ(
+    *diagnostics_vector,
+    models::frame_roi_transform_diagnostics_vector_index
+  );
+  EXPECT_EQ(
+    models::frame_roi_transform_fallback_reason_word_index,
+    *diagnostics_vector *
+        models::frame_roi_transform_words_per_vector +
+      models::frame_roi_transform_fallback_reason_component_index
+  );
+  EXPECT_EQ(
+    models::frame_roi_transform_fallback_reason_component_index,
+    3u
+  );
+
+  models::frame_roi_transform_words_t words {};
+  for (const auto &entry : expected) {
+    words = {};
+    words[
+      models::frame_roi_transform_fallback_reason_word_index
+    ] = entry.value;
+    EXPECT_EQ(
+      models::frame_roi_fallback_reason_from_words(words),
+      entry.value
+    ) << entry.name;
+    EXPECT_EQ(
+      models::frame_roi_fallback_reason_name_from_words(words),
+      entry.name
+    ) << entry.name;
+  }
+  words = {};
+  words[
+    models::frame_roi_transform_fallback_reason_word_index - 1u
+  ] = static_cast<std::uint32_t>(reason_e::invalid_dimensions);
+  EXPECT_EQ(
+    models::frame_roi_fallback_reason_from_words(words),
+    static_cast<std::uint32_t>(reason_e::none)
+  );
+  words[
+    models::frame_roi_transform_fallback_reason_word_index
+  ] = static_cast<std::uint32_t>(expected.size());
+  EXPECT_EQ(
+    models::frame_roi_fallback_reason_name_from_words(words),
+    "unknown"
+  );
+}
+
 #ifdef _WIN32
 TEST(SbsDebugDumpContractTest, SceneControllerPackageIsMatchedAndOptional) {
   platf::sbs_debug::frame frame;
@@ -1194,6 +1936,7 @@ TEST(SbsDebugDumpContractTest, SceneControllerPackageIsMatchedAndOptional) {
   EXPECT_EQ(frame.scene_controller_hidden_output, nullptr);
   EXPECT_EQ(frame.scene_controller_meta, nullptr);
   EXPECT_EQ(frame.scene_controller_rule_state, nullptr);
+  EXPECT_EQ(frame.depth_roi_transform, nullptr);
   EXPECT_FALSE(frame.scene_controller_snapshot_available);
 
   EXPECT_EQ(sbs_scene_controller::schema_version, 1u);
@@ -1238,6 +1981,24 @@ TEST(SbsDebugDumpContractTest, SceneControllerPackageIsMatchedAndOptional) {
   );
   EXPECT_NE(
     dumper.find("global_out_word_e::reserved_40"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find(
+      "dump_frame.depth_roi_transform ="
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dumper.find("roi_transform.words"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dumper.find("accepted_model_bounds_half_open"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dumper.find("contract_valid_for_matched_frame"),
     std::string::npos
   );
 }
@@ -1290,6 +2051,26 @@ TEST(DirectxShaderSourceTest, HostSbsKeepsFramePairingAndProbeCapsAndRejectsRota
   ASSERT_NE(estimator_clear, std::string::npos);
   ASSERT_NE(frame_state_bind, std::string::npos);
   EXPECT_LT(estimator_clear, frame_state_bind);
+
+  // A fail-closed estimator completion still releases the exact matched color slot that
+  // TensorRT consumed. It must not leave the bounded two-slot ring permanently occupied.
+  const auto dropped_completion =
+    display.find("if (est.completion_dropped)");
+  const auto dropped_lookup = display.find(
+    "find_pending_matched_slot(est.dropped_frame_id)",
+    dropped_completion
+  );
+  const auto dropped_release =
+    display.find("dropped_slot->pending = false;", dropped_lookup);
+  const auto valid_completion =
+    display.find("if (est.completed_frame_valid)", dropped_release);
+  ASSERT_NE(dropped_completion, std::string::npos);
+  ASSERT_NE(dropped_lookup, std::string::npos);
+  ASSERT_NE(dropped_release, std::string::npos);
+  ASSERT_NE(valid_completion, std::string::npos);
+  EXPECT_LT(dropped_completion, dropped_lookup);
+  EXPECT_LT(dropped_lookup, dropped_release);
+  EXPECT_LT(dropped_release, valid_completion);
 
   // The cap is in total samples: one initial lookup plus at most max_probes - 1 loop samples.
   EXPECT_NE(common.find("int max_intervals = max(max_probes - 1, 1);"), std::string::npos);
@@ -1942,14 +2723,17 @@ TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryAr
   EXPECT_NE(histogram.find("PreviousAppearanceOrdinal"), std::string::npos);
   const auto footprint_filter = preprocess.find("float4 SampleModelFootprint");
   const auto footprint_sample =
-    preprocess.find("float4 pixel = SampleModelFootprint");
+    preprocess.find("pixel = SampleModelFootprint");
   const auto footprint_load =
     preprocess.find("InputTexture.Load(int3(source_x, source_y, 0))");
   const auto ordinal_point_load =
     preprocess.find(
       "float3 capture_rgb = InputTexture.Load(int3(source_point, 0)).rgb"
     );
-  const auto ordinal_write = preprocess.find("OutputAppearanceOrdinal[base_idx]");
+  const auto ordinal_write = preprocess.find(
+    "OutputAppearanceOrdinal[base_idx]",
+    ordinal_point_load
+  );
   const auto tone_map = preprocess.find("DepthColorToSrgb(pixel.rgb, color_mode)");
   ASSERT_NE(footprint_filter, std::string::npos);
   ASSERT_NE(footprint_sample, std::string::npos);
@@ -1977,8 +2761,8 @@ TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryAr
   );
   EXPECT_NE(estimator.find("depth_cut_history_srv.Get()"), std::string::npos);
   EXPECT_NE(estimator.find("depth_cut_history_uav.Get()"), std::string::npos);
-  EXPECT_NE(estimator.find("ID3D11ShaderResourceView *history_srvs[5]"), std::string::npos);
-  EXPECT_NE(estimator.find("ID3D11UnorderedAccessView *history_uavs[3]"), std::string::npos);
+  EXPECT_NE(estimator.find("ID3D11ShaderResourceView *history_srvs[7]"), std::string::npos);
+  EXPECT_NE(estimator.find("ID3D11UnorderedAccessView *history_uavs[5]"), std::string::npos);
   EXPECT_NE(histogram.find("RAW_RGB_PIXEL_DELTA"), std::string::npos);
   EXPECT_NE(histogram.find("PlainHist[NUM_BINS + 3]"), std::string::npos);
   EXPECT_NE(histogram.find("PlainHist[NUM_BINS + 4]"), std::string::npos);
@@ -2360,11 +3144,13 @@ TEST(DirectxShaderSourceTest, WholeClipReplayKeepsCanonicalStateAndUsesAnOffline
   EXPECT_NE(harness.find("ERROR_SHARING_VIOLATION"), std::string::npos);
   EXPECT_NE(harness.find("ERROR_LOCK_VIOLATION"), std::string::npos);
   EXPECT_NE(
-    harness.find("\"state\", {\n          {\"schema\", 1}"),
+    harness.find(
+      "{\"schema\", sbs_scene_cache::cached_state_schema}"
+    ),
     std::string::npos
   );
   EXPECT_NE(
-    harness.find("{\"word_count\", render_state_words_t {}.size()}"),
+    harness.find("{\"word_count\", cached_state_words_t {}.size()}"),
     std::string::npos
   );
   for (const auto *packed_field : {
@@ -2392,6 +3178,10 @@ TEST(DirectxShaderSourceTest, WholeClipReplayKeepsCanonicalStateAndUsesAnOffline
   );
   EXPECT_NE(
     harness.find("\"frame_%010d.state.u32\""),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("\"frame_%010d.meta.u32\""),
     std::string::npos
   );
   EXPECT_NE(
@@ -2455,7 +3245,7 @@ TEST(DirectxShaderSourceTest, WholeClipReplayKeepsCanonicalStateAndUsesAnOffline
     std::string::npos
   );
   EXPECT_NE(
-    harness.find("\"scene-cache-contract-schema-1:R32_FLOAT\""),
+    harness.find("\"scene-cache-contract-schema-2:per-frame-R32_FLOAT\""),
     std::string::npos
   );
   EXPECT_EQ(

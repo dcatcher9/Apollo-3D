@@ -657,6 +657,32 @@ namespace platf::dxgi {
                 frame_id,
                 snapshot_debug_inputs
               );
+              if (est.completion_dropped) {
+                // The estimator consumed this accepted inference without allowing its raw output
+                // to touch normalization/history because exact ROI-transform ownership could not
+                // be proven. TensorRT no longer owns the matched color texture, so retire only
+                // that frame's slot while repeating the last complete SBS pair.
+                if (auto *dropped_slot =
+                      find_pending_matched_slot(est.dropped_frame_id)) {
+                  dropped_slot->pending = false;
+                } else {
+                  const auto error_now = std::chrono::steady_clock::now();
+                  if (
+                    matched_unknown_frame_error_last.time_since_epoch().count() == 0 ||
+                    error_now - matched_unknown_frame_error_last >=
+                      std::chrono::seconds(30)
+                  ) {
+                    BOOST_LOG(error)
+                      << "Matched depth dropped unknown frame "sv
+                      << est.dropped_frame_id
+                      << "; the last complete SBS output remains authoritative."sv;
+                    matched_unknown_frame_error_last = error_now;
+                    matched_unknown_frame_errors_suppressed = 0;
+                  } else {
+                    ++matched_unknown_frame_errors_suppressed;
+                  }
+                }
+              }
               if (est.completed_frame_valid) {
                 matched_render_slot = find_pending_matched_slot(est.completed_frame_id);
                 if (matched_render_slot) {
@@ -754,6 +780,7 @@ namespace platf::dxgi {
               est.subject.Get(),
               nullptr,
               est.depth_frame_state.Get(),
+              est.depth_roi_transform.Get(),
             };
             device_ctx->PSSetShaderResources(0, (UINT) std::size(srvs), srvs);
             ID3D11Buffer *sbs_cb[] = {
@@ -770,6 +797,7 @@ namespace platf::dxgi {
 
             // Clear shader resources
             ID3D11ShaderResourceView *null_srvs[] = {
+              nullptr,
               nullptr,
               nullptr,
               nullptr,
@@ -823,6 +851,7 @@ namespace platf::dxgi {
           if (!repeat_matched_output) {
             const bool complete_dump_snapshot =
               matched_render_slot && est.depth && dump_warp_depth && est.subject &&
+              est.depth_roi_transform &&
               est.depth_frame_state && est.model_input_snapshot &&
               est.raw_model_depth_snapshot;
             const bool dump_frame_valid =
@@ -842,6 +871,7 @@ namespace platf::dxgi {
                   render_input_srv,
                   dump_warp_depth,
                   est.subject.Get(),
+                  est.depth_roi_transform.Get(),
                   completed_constants
                 );
               } catch (const std::exception &error) {
@@ -867,6 +897,8 @@ namespace platf::dxgi {
               dump_frame.warp_depth = dump_warp_depth;
               dump_frame.adaptive_state = est.subject.Get();
               dump_frame.depth_frame_state = est.depth_frame_state.Get();
+              dump_frame.depth_roi_transform =
+                est.depth_roi_transform.Get();
               const bool matched_scene_controller =
                 est.scene_controller_snapshot_available &&
                 est.scene_controller_frame_id == est.completed_frame_id;
@@ -1025,7 +1057,23 @@ namespace platf::dxgi {
     // that warm context and creates only device/session resources on a background thread.
     bool ensure_depth_estimator() {
       if (depth_estimator) {
-        return true;
+        if (depth_estimator->is_valid()) {
+          return true;
+        }
+
+        // A terminal interop/ownership failure must not freeze the last matched SBS texture.
+        // Retire the estimator and its private color ownership atomically, then the ordinary
+        // no-depth branch below renders the current source as flat SBS for every later frame.
+        BOOST_LOG(error)
+          << "Host SBS depth pipeline became invalid; retiring it and continuing with "
+             "current-frame flat SBS."sv;
+        depth_estimator.reset();
+        depth_estimator_failed = true;
+        matched_frame_slots = {};
+        matched_output_valid = false;
+        sbs_dumper.cancel_pending_request();
+        publish_depth_status(0);
+        return false;
       }
 
       // A failed build streams flat SBS for the rest of this encode device's life instead of
@@ -1676,9 +1724,17 @@ namespace platf::dxgi {
       ID3D11ShaderResourceView *source,
       ID3D11ShaderResourceView *warp_depth,
       ID3D11ShaderResourceView *subject,
+      ID3D11ShaderResourceView *depth_roi_transform,
       ID3D11Buffer *constants
     ) {
-      if (!source || !warp_depth || !subject || !constants || !ensure_sbs_debug_geometry_resources()) {
+      if (
+        !source ||
+        !warp_depth ||
+        !subject ||
+        !depth_roi_transform ||
+        !constants ||
+        !ensure_sbs_debug_geometry_resources()
+      ) {
         return false;
       }
 
@@ -1694,6 +1750,9 @@ namespace platf::dxgi {
         source,
         warp_depth,
         subject,
+        nullptr,
+        nullptr,
+        depth_roi_transform,
       };
       device_ctx->CSSetShaderResources(
         0,
@@ -1715,7 +1774,14 @@ namespace platf::dxgi {
         1u
       );
       ID3D11UnorderedAccessView *null_uav = nullptr;
-      ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr};
+      ID3D11ShaderResourceView *null_cs_srvs[] = {
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr
+      };
       device_ctx->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
       device_ctx->CSSetShaderResources(
         0,
@@ -1740,6 +1806,9 @@ namespace platf::dxgi {
         source,
         warp_depth,
         subject,
+        nullptr,
+        nullptr,
+        depth_roi_transform,
       };
       device_ctx->PSSetShaderResources(
         0,
@@ -1759,6 +1828,8 @@ namespace platf::dxgi {
         warp_depth,
         subject,
         sbs_debug_coverage_srv.Get(),
+        nullptr,
+        depth_roi_transform,
       };
       device_ctx->PSSetShaderResources(
         0,
@@ -1769,6 +1840,8 @@ namespace platf::dxgi {
 
       ID3D11RenderTargetView *null_rtv = nullptr;
       ID3D11ShaderResourceView *null_ps_srvs[] = {
+        nullptr,
+        nullptr,
         nullptr,
         nullptr,
         nullptr,

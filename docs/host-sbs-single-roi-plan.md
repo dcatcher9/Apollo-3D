@@ -28,7 +28,9 @@ The implementation in this change deliberately exposes only `off` and `shadow_ru
 `off` as the default. `shadow_rules` runs the real GPU tensors, resolver, history, and dump path,
 but it has no connection to crop, normalization, warp, pop, or zero-plane authority. Active
 `rules` remains unavailable until ROI-masked event reduction, adversarial captures, and the
-4K90 performance gate pass.
+4K90 performance gate pass. Off/shadow inference binds one immutable all-zero legacy transform;
+it does not allocate, dispatch, map, or lifecycle-track the active transform banks, so an
+experimental builder failure cannot disable ordinary Host SBS.
 
 Changing backend during a stream requires an explicit controller-state reset. The two backends
 share state layouts, but learned hidden features are not meaningful to the rule backend.
@@ -119,7 +121,7 @@ encoded in an FP32 model input.
 
 ### Canonical spatial canvas
 
-All full-frame controller tensors use a fixed square canvas:
+Controller resources use fixed maximum capacities:
 
 ```text
 appearance canvas: 256 x 256
@@ -127,26 +129,27 @@ analysis canvas:   128 x 128
 recurrent canvas:   32 x 32
 ```
 
-The source viewport is aspect-preserving and centered in that canvas:
+The active controller extent is rectangular and aspect-preserving:
 
-- 16:9 landscape occupies `256x144` / `128x72`;
-- 9:16 portrait occupies `144x256` / `72x128`;
-- ultrawide and other supported ratios are letterboxed similarly; and
-- padding is invalid, never black content and never zero depth.
+- 16:9 landscape dispatches `256x144` / `128x72`;
+- 9:16 portrait dispatches `144x256` / `72x128`; and
+- ultrawide and other supported ratios derive the corresponding short side once per stream
+  geometry.
 
 This does not rotate or anisotropically stretch the user's screen. It gives landscape, portrait,
-and ultrawide streams one fixed TensorRT shape and one recurrent-state layout. The validity
-channel excludes padding from all reductions and losses.
+and ultrawide streams reusable maximum-size GPU allocations. Texels outside the logical extent
+are neither written nor sampled and are not model input, history, black content, zero depth, or
+padding. The logical dimensions and validity channel bound every dispatch and reduction.
 
 ### Inputs
 
 | Tensor | Type and shape | Meaning |
 | --- | --- | --- |
-| `scene_rgb` | FP32 `[1,3,256,256]` | Current full-frame, display-referred, tone-mapped, exact-area RGB on the aspect-preserving canvas. |
-| `analysis_grid` | FP32 `[1,10,128,128]` | Current deterministic appearance, activity, coverage, and coordinate features. |
+| `scene_rgb` | FP32 capacity `[1,3,256,256]` | Current full-frame, display-referred, tone-mapped, exact-area RGB in the active rectangular extent. |
+| `analysis_grid` | FP32 capacity `[1,10,128,128]` | Current deterministic appearance, activity, coverage, and coordinate features in the active rectangular extent. |
 | `roi_depth_raw` | FP32 `[1,1,Hd,Wd]` | Alias of DA-V2 `predicted_depth`; dynamic and affine-ambiguous. |
-| `layout_history` | FP32 `[1,12,128,128]` | Full-frame deterministic temporal history. |
-| `depth_history` | FP32 `[1,10,128,128]` | ROI-local deterministic depth history, resampled into the fixed canvas with ROI aspect retained in `meta`. |
+| `layout_history` | FP32 capacity `[1,12,128,128]` | Full-frame deterministic temporal history over the active rectangular extent. |
+| `depth_history` | FP32 capacity `[1,10,128,128]` | ROI-local deterministic depth history over the active rectangular extent, with ROI geometry retained in `meta`. |
 | `hidden_in` | FP32 `[1,24,32,32]` | Learned recurrent state. `rules_v1` requires it to be zero. |
 | `meta` | FP32 `[1,32]` | Timing, ROI, reset, source, and configuration scalars. |
 
@@ -344,18 +347,45 @@ Aspect ratio matters. The ROI-to-model transform must:
 
 - preserve the source rectangle's aspect ratio;
 - choose `Hd` and `Wd` as multiples of DA-V2's 14-pixel patch size;
-- select the closest patch-aligned ratio within the TensorRT profile and configured maximum
+- hold approximately the configured full-frame pixel budget rather than holding the full-frame
+  aspect: the default `770x434` budget is about 334k pixels, so representative shapes are roughly
+  `770x434` for 16:9, `434x770` for 9:16, and `574x574` for 1:1;
+- select the closest patch-aligned shape inside the TensorRT dynamic profile, configured maximum
+  aspect, source-crop dimensions, and pixel budget;
+- expand the exact source ROI minimally until its enclosing inference crop exactly matches
+  `Wd/Hd`;
+- shift that enclosing crop back inside the source at frame edges, without changing its size or
   aspect;
-- expand the source envelope minimally through its quiet halo so its ratio exactly matches
-  `Wd/Hd`, or letterbox when that expansion is unsafe;
+- feed only real source pixels to DA-V2, with no letterbox, pillarbox, synthetic border, or
+  replicated padding;
 - use exact-area downsampling over the corresponding source footprint; and
 - never stretch a wide ROI into a square or a portrait ROI into landscape.
 
-Usually the nearest patch-aligned ratio needs only a sub-cell halo adjustment, so no padding is
-needed. If an extreme ROI cannot fit the profile, Apollo may expand it only through quiet
-non-excluded space, otherwise letterbox it with an explicit validity mask. If neither is safe, it
-falls back to full-frame inference. It must not cross a stable gutter merely to obtain a
-convenient tensor aspect.
+The inference crop normally differs from the exact focus only by its quiet halo and patch-rounding
+error. It may include a small amount of real browser context, which is excluded later by the exact
+focus mask. If an aspect-matched enclosing crop cannot fit the source, Apollo falls back to the
+unchanged full-frame path. It never manufactures pixels to force a crop to fit.
+
+Model shape changes only when a newly confirmed request differs from the active dimensions, never
+for ordinary sub-cell tracking motion. TensorRT shape selection is a host API, so the GPU publishes
+one tiny shape request. Apollo copies it to a three-slot staging ring and polls completion
+asynchronously; no RGB, depth, mask, or history leaves the GPU. Before a destructive transition,
+the controller is frozen and the request must return with the exact controller source-frame
+provenance. Older ring completions cannot authorize teardown. Confirmation is bounded to 12
+capture opportunities; timeout, controller ownership failure, or a rejected noncanonical
+`setInputShape` returns the stream to canonical full-frame depth and disables active authority for
+that stream.
+
+The current rules implementation performs a serialized shape rebuild: after the old matched result
+has been rendered, it unregisters the idle CUDA interop resources, releases shape-dependent D3D
+buffers/history, allocates the confirmed shape, calls `setInputShape`, and warms/recaptures the CUDA
+Graph. Rendering retains the previous matched SBS pair during this bounded transition. A graph is
+never replayed with dimensions or mapped addresses different from its capture tuple. This is
+intentionally more conservative than a multi-shape resource cache, but it repays allocation,
+registration, state seeding, and graph capture on each actual dimension change. Active rollout
+therefore remains blocked on measured alternating landscape/square/portrait transition latency,
+4K90 cadence, and a 30-minute no-growth soak. A bounded per-shape cache is a later optimization if
+those measurements are not acceptable.
 
 DA-V2 predicts depth for the complete rectangle, including holes and UI lying inside its bounds.
 After inference, the original irregular mask may suppress only high-confidence chrome/ad/exterior

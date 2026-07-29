@@ -24,6 +24,7 @@ def sample(
     ready: float = 1.0,
     flags: int = 0,
     depth_updated: bool = True,
+    requires_previous: bool = False,
 ) -> dict:
     return {
         "frame_id": f"{index + 1:010d}",
@@ -46,6 +47,7 @@ def sample(
         "previous_structural_support_fraction": 0.5,
         "common_structural_support_fraction": 0.5,
         "analysis_flags": flags,
+        "requires_previous_packed_frame": requires_previous,
     }
 
 
@@ -333,6 +335,90 @@ class StreamingScenePlannerTests(unittest.TestCase):
         tail = planner.finish()[0]
         self.assertEqual(tail["semantic_scene_id"], 1)
 
+    def test_semantic_boundary_moves_past_preserve_previous_frame(self):
+        planner = planning.StreamingScenePlanner(config(
+            lookbehind_depth_updates=0,
+            lookahead_depth_updates=2,
+        ))
+        scenes = []
+        for index in range(5):
+            scenes.extend(planner.feed(sample(
+                index,
+                pulse=index == 2,
+                depth=0.90 if index == 2 else 0.80 if index == 3 else 0.05,
+                requires_previous=index == 2,
+            )))
+
+        self.assertEqual(len(scenes), 1)
+        self.assertEqual(scenes[0]["end_sequence_exclusive"], 4)
+        self.assertEqual(scenes[0]["boundary"]["final_sequence"], 4)
+        self.assertEqual(
+            scenes[0]["boundary"]["decision"],
+            "moved_to_correlated_evidence",
+        )
+
+    def test_admin_split_retains_invalid_tail_behind_safe_start(self):
+        planner = planning.StreamingScenePlanner(config(
+            minimum_scene_frames=1,
+            max_open_cache_bytes=100,
+            budget_policy="split",
+        ))
+        self.assertEqual(
+            planner.feed(sample(0), frame_cache_bytes=40), [])
+        self.assertEqual(
+            planner.feed(sample(1), frame_cache_bytes=40), [])
+        scenes = planner.feed(
+            sample(2, requires_previous=True), frame_cache_bytes=40)
+
+        self.assertEqual(len(scenes), 1)
+        self.assertEqual(
+            (scenes[0]["start_sequence"], scenes[0]["end_sequence_exclusive"]),
+            (1, 2),
+        )
+        self.assertEqual(planner.open_start_sequence, 2)
+        self.assertEqual(planner.open_cache_bytes, 80)
+        tail = planner.finish()[0]
+        self.assertEqual(
+            (tail["start_sequence"], tail["end_sequence_exclusive"]),
+            (2, 4),
+        )
+
+    def test_admin_split_fails_without_replay_safe_boundary(self):
+        planner = planning.StreamingScenePlanner(config(
+            minimum_scene_frames=1,
+            max_open_cache_bytes=100,
+            budget_policy="split",
+        ))
+        planner.feed(sample(0), frame_cache_bytes=60)
+        with self.assertRaises(planning.SceneCacheBudgetExceeded):
+            planner.feed(
+                sample(1, requires_previous=True),
+                frame_cache_bytes=60,
+            )
+        self.assertEqual(planner.open_start_sequence, 1)
+
+    def test_clip_cannot_begin_with_preserve_previous_state(self):
+        planner = planning.StreamingScenePlanner(config(
+            minimum_scene_frames=1))
+        planner.feed(sample(0, requires_previous=True))
+        with self.assertRaisesRegex(
+                planning.ScenePlanError, "cannot begin with preserve-previous"):
+            planner.finish()
+
+    def test_admin_split_does_not_create_undersized_safe_prefix(self):
+        planner = planning.StreamingScenePlanner(config(
+            minimum_scene_frames=2,
+            max_open_cache_bytes=100,
+            budget_policy="split",
+        ))
+        planner.feed(sample(0), frame_cache_bytes=40)
+        planner.feed(sample(1), frame_cache_bytes=40)
+        with self.assertRaises(planning.SceneCacheBudgetExceeded):
+            planner.feed(
+                sample(2, requires_previous=True),
+                frame_cache_bytes=40,
+            )
+
     def test_opt_in_budget_split_fails_while_proposal_is_unresolved(self):
         planner = planning.StreamingScenePlanner(config(
             minimum_scene_frames=1,
@@ -430,7 +516,7 @@ class StreamingScenePlannerTests(unittest.TestCase):
         document = planning.native_scene_plan_document(scene)
         self.assertEqual(document["schema"], 1)
         self.assertEqual(document["version"], "scene-plan-v1")
-        self.assertEqual(document["cache_contract_schema"], 1)
+        self.assertEqual(document["cache_contract_schema"], 2)
         self.assertEqual(len(document["scenes"]), 1)
         self.assertEqual(
             document["scenes"][0]["absolute_pop_strength"],

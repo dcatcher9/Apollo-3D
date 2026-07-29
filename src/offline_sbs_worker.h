@@ -120,13 +120,44 @@ namespace offline_sbs {
   );
 
   /**
-   * Return the maximum scene-cache ledger that still leaves exact space for the live
-   * analysis source raster and the next depth/state pair.
+   * Return the maximum scene-cache ledger that still leaves exact space for
+   * the reserved live replay rasters and the next cache triplet.
    */
   std::uint64_t analysis_open_cache_limit(
     std::uint64_t hard_cap_bytes,
-    std::uint64_t source_raster_bytes,
-    std::uint64_t depth_state_pair_bytes
+    std::uint64_t live_raster_reservation_bytes,
+    std::uint64_t reserved_cache_triplet_bytes
+  );
+
+  /**
+   * Reserve the source raster before either FFmpeg decoder is launched.
+   * SDR is the exact fixed-size BMP contract; HDR includes the exact RGB-float
+   * payload and the maximum accepted PFM header.
+   */
+  std::uint64_t analysis_source_raster_reservation_bytes(
+    media_color_e color,
+    std::uint32_t width,
+    std::uint32_t height
+  );
+
+  /**
+   * Conservatively reserve one atomic SBS replay artifact before the harness starts.
+   * SDR covers the bounded WIC PNG stream; HDR covers the exact RGB-float PFM payload.
+   */
+  std::uint64_t replay_sbs_raster_reservation_bytes(
+    media_color_e color,
+    std::uint32_t width,
+    std::uint32_t height
+  );
+
+  /**
+   * Return the largest valid variable-sized depth/state/metadata triplet for
+   * this source raster. Reserving this bound, rather than frame 1's size,
+   * keeps later ROI shape changes inside the same exact hard cap.
+   */
+  std::uint64_t analysis_max_cache_triplet_bytes(
+    std::uint32_t source_width,
+    std::uint32_t source_height
   );
 
   /**
@@ -173,6 +204,15 @@ namespace offline_sbs {
   );
 
 #ifdef SUNSHINE_TESTS
+  bool native_replay_capabilities_valid_for_test(
+    const nlohmann::json &capabilities
+  );
+
+  bool depth_frame_requires_previous_for_test(
+    float initialized,
+    float frame_state
+  );
+
   bool adaptive_trace_flags_valid_for_test(
     float cut_flags,
     std::uint32_t analysis_flags

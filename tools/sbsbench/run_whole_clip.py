@@ -30,6 +30,7 @@ import os
 import re
 import secrets
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -60,6 +61,28 @@ CODECS = ("hevc_nvenc", "av1_nvenc", "libx265")
 SPOOL_SAFETY_FACTOR = Fraction(5, 4)
 SPOOL_FIXED_RESERVE_BYTES = 256 * 1024 * 1024
 DEFAULT_SCENE_CACHE_MAX_BYTES = 4 * 1024 * 1024 * 1024
+SCENE_CACHE_CONTRACT_SCHEMA = 2
+SCENE_CACHE_METADATA_MAGIC = 0x32434253
+SCENE_CACHE_METADATA_SCHEMA = 1
+SCENE_CACHE_METADATA_WORDS = 48
+SCENE_CACHE_METADATA_BYTES = SCENE_CACHE_METADATA_WORDS * 4
+SCENE_CACHE_METADATA_ROI_OFFSET = 16
+SCENE_CACHE_ROI_WORDS = 32
+SCENE_CACHE_STATE_SCHEMA = 2
+SCENE_CACHE_SUBJECT_WORDS = 12
+SCENE_CACHE_DEPTH_FRAME_STATE_WORDS = 4
+SCENE_CACHE_STATE_WORDS = 16
+SCENE_CACHE_MAX_DEPTH_DIMENSION = 1036
+FRAME_ROI_TRANSFORM_SCHEMA = 1
+FRAME_ROI_TRANSFORM_PATCH_SIZE = 14
+FRAME_ROI_TRANSFORM_BANK_COUNT = 2
+ADAPTIVE_INITIALIZED_WORD = 3
+ADAPTIVE_ZERO_ANCHOR_VALID_WORD = 9
+ADAPTIVE_CUT_FLAGS_WORD = 10
+ADAPTIVE_MODEL_INPUT_HISTORY_STATE_WORD = 11
+ADAPTIVE_KNOWN_CUT_FLAG_MASK = 63
+UINT32_MAX = (1 << 32) - 1
+UINT64_MAX = (1 << 64) - 1
 RESERVED_NATIVE_OPTIONS = {
     "--artifacts",
     "--frames",
@@ -843,6 +866,347 @@ def wait_for_progress(
         time.sleep(min(0.02, remaining))
 
 
+def _float_from_word(word: int) -> float:
+    return struct.unpack("<f", struct.pack("<I", word))[0]
+
+
+def _join_u64_words(low: int, high: int) -> int:
+    return low | (high << 32)
+
+
+def _finite_roi_rect(
+    words: tuple[int, ...],
+    offset: int,
+) -> tuple[float, float, float, float] | None:
+    rect = tuple(_float_from_word(words[offset + index]) for index in range(4))
+    x0, y0, x1, y1 = rect
+    if (
+        not all(math.isfinite(value) for value in rect) or
+        x0 < 0.0 or y0 < 0.0 or
+        x1 > 1.0 or y1 > 1.0 or
+        x1 <= x0 or y1 <= y0
+    ):
+        return None
+    return rect
+
+
+def _accepted_roi_axis(value: float, extent: int) -> int:
+    return min(max(math.ceil(value * extent - 0.5), 0), extent)
+
+
+def _roi_physical_aspect_matches(
+    crop: tuple[float, float, float, float],
+    source_width: int,
+    source_height: int,
+    model_width: int,
+    model_height: int,
+    tolerance: float,
+) -> bool:
+    crop_width = (crop[2] - crop[0]) * source_width
+    crop_height = (crop[3] - crop[1]) * source_height
+    left = crop_width * model_height
+    right = crop_height * model_width
+    scale = max(abs(left), abs(right), 1.0)
+    return (
+        math.isfinite(left) and math.isfinite(right) and
+        abs(left - right) <= scale * tolerance
+    )
+
+
+def _validate_roi_transform(
+    words: tuple[int, ...],
+    *,
+    expected_source_frame_id: int,
+    source_width: int,
+    source_height: int,
+    model_width: int,
+    model_height: int,
+    sequence: int,
+) -> None:
+    valid_flag = 1 << 0
+    full_frame_flag = 1 << 1
+    active_roi_flag = 1 << 2
+    reset_debt_flag = 1 << 3
+    known_flags = (
+        valid_flag | full_frame_flag | active_roi_flag | reset_debt_flag)
+    flags = words[1]
+    full_frame = bool(flags & full_frame_flag)
+    active_roi = bool(flags & active_roi_flag)
+    transform_version = _join_u64_words(words[28], words[29])
+    source_frame_id = _join_u64_words(words[2], words[3])
+    focus = _finite_roi_rect(words, 12)
+    crop = _finite_roi_rect(words, 16)
+    if (
+        words[0] != FRAME_ROI_TRANSFORM_SCHEMA or
+        not flags & valid_flag or
+        flags & ~known_flags or
+        full_frame == active_roi or
+        source_frame_id != expected_source_frame_id or
+        words[6] != source_width or words[7] != source_height or
+        words[8] != model_width or words[9] != model_height or
+        model_width <= 0 or model_height <= 0 or
+        model_width > SCENE_CACHE_MAX_DEPTH_DIMENSION or
+        model_height > SCENE_CACHE_MAX_DEPTH_DIMENSION or
+        model_width > source_width or model_height > source_height or
+        model_width % FRAME_ROI_TRANSFORM_PATCH_SIZE != 0 or
+        model_height % FRAME_ROI_TRANSFORM_PATCH_SIZE != 0 or
+        transform_version == 0 or
+        words[30] >= FRAME_ROI_TRANSFORM_BANK_COUNT or
+        focus is None or crop is None
+    ):
+        raise WholeClipError(
+            f"scene cache metadata {sequence} ROI transform mismatch")
+    assert focus is not None and crop is not None
+    if not (
+        focus[0] >= crop[0] and focus[1] >= crop[1] and
+        focus[2] <= crop[2] and focus[3] <= crop[3]
+    ):
+        raise WholeClipError(
+            f"scene cache metadata {sequence} ROI transform mismatch")
+
+    feathers = tuple(_float_from_word(words[index]) for index in range(24, 28))
+    if any(not math.isfinite(value) or value < 0.0 for value in feathers):
+        raise WholeClipError(
+            f"scene cache metadata {sequence} ROI transform mismatch")
+
+    crop_width = crop[2] - crop[0]
+    crop_height = crop[3] - crop[1]
+    accepted = (
+        _accepted_roi_axis((focus[0] - crop[0]) / crop_width, model_width),
+        _accepted_roi_axis((focus[1] - crop[1]) / crop_height, model_height),
+        _accepted_roi_axis((focus[2] - crop[0]) / crop_width, model_width),
+        _accepted_roi_axis((focus[3] - crop[1]) / crop_height, model_height),
+    )
+    x0, y0, x1, y1 = accepted
+    accepted_count = (x1 - x0) * (y1 - y0)
+    if (
+        x1 <= x0 or y1 <= y0 or
+        tuple(words[20:24]) != accepted or
+        words[10] != accepted_count
+    ):
+        raise WholeClipError(
+            f"scene cache metadata {sequence} ROI transform mismatch")
+
+    if full_frame:
+        full_rect_words = (0, 0, 0x3F800000, 0x3F800000)
+        if (
+            tuple(words[12:16]) != full_rect_words or
+            tuple(words[16:20]) != full_rect_words or
+            accepted != (0, 0, model_width, model_height) or
+            words[10] != model_width * model_height or
+            any(value != 0.0 for value in feathers) or
+            not _roi_physical_aspect_matches(
+                crop,
+                source_width,
+                source_height,
+                model_width,
+                model_height,
+                0.02,
+            )
+        ):
+            raise WholeClipError(
+                f"scene cache metadata {sequence} ROI transform mismatch")
+        return
+
+    focus_width = focus[2] - focus[0]
+    focus_height = focus[3] - focus[1]
+    if (
+        words[4] == 0 or words[5] == 0 or words[11] == 0 or
+        feathers[0] > 0.25 * focus_width or
+        feathers[2] > 0.25 * focus_width or
+        feathers[1] > 0.25 * focus_height or
+        feathers[3] > 0.25 * focus_height or
+        not _roi_physical_aspect_matches(
+            crop,
+            source_width,
+            source_height,
+            model_width,
+            model_height,
+            0.0001,
+        )
+    ):
+        raise WholeClipError(
+            f"scene cache metadata {sequence} ROI transform mismatch")
+
+
+def _validate_frame_metadata(
+    words: tuple[int, ...],
+    *,
+    sequence: int,
+    source_width: int,
+    source_height: int,
+    depth_reuse_interval: int,
+    requires_previous: bool,
+) -> int:
+    expected_header = (
+        SCENE_CACHE_METADATA_MAGIC,
+        SCENE_CACHE_METADATA_SCHEMA,
+        SCENE_CACHE_METADATA_WORDS,
+        SCENE_CACHE_METADATA_ROI_OFFSET,
+    )
+    if tuple(words[0:4]) != expected_header:
+        raise WholeClipError(
+            f"scene cache metadata {sequence} header mismatch")
+    depth_width, depth_height, depth_pixels, bytes_per_sample = words[4:8]
+    pixels = depth_width * depth_height
+    if (
+        depth_width <= 0 or depth_height <= 0 or
+        depth_width > SCENE_CACHE_MAX_DEPTH_DIMENSION or
+        depth_height > SCENE_CACHE_MAX_DEPTH_DIMENSION or
+        depth_width > source_width or depth_height > source_height or
+        depth_width % FRAME_ROI_TRANSFORM_PATCH_SIZE != 0 or
+        depth_height % FRAME_ROI_TRANSFORM_PATCH_SIZE != 0 or
+        pixels > UINT32_MAX or depth_pixels != pixels or
+        bytes_per_sample != 4 or
+        _join_u64_words(words[8], words[9]) != sequence
+    ):
+        raise WholeClipError(
+            f"scene cache metadata {sequence} depth identity mismatch")
+    if tuple(words[12:16]) != (
+        source_width,
+        source_height,
+        depth_width,
+        depth_height,
+    ):
+        raise WholeClipError(
+            f"scene cache metadata {sequence} source identity mismatch")
+
+    if (
+        not isinstance(depth_reuse_interval, int) or
+        isinstance(depth_reuse_interval, bool) or
+        not 1 <= depth_reuse_interval <= 8
+    ):
+        raise WholeClipError(
+            "scene cache depth reuse interval is invalid")
+    retained_source_frame_id = _join_u64_words(words[10], words[11])
+    transform = tuple(words[SCENE_CACHE_METADATA_ROI_OFFSET:])
+    if all(word == 0 for word in transform):
+        left = source_width * depth_height
+        right = source_height * depth_width
+        scale = max(abs(left), abs(right), 1.0)
+        if (
+            retained_source_frame_id != UINT64_MAX or
+            abs(left - right) > scale * 0.02
+        ):
+            raise WholeClipError(
+                f"scene cache metadata {sequence} retained source identity mismatch")
+    else:
+        expected_retained_source_frame_id = (
+            ((sequence - 1) // depth_reuse_interval) *
+            depth_reuse_interval
+        )
+        cadence_aligned = (
+            retained_source_frame_id <= expected_retained_source_frame_id and
+            retained_source_frame_id % depth_reuse_interval == 0
+        )
+        state_matches_retained_identity = (
+            retained_source_frame_id < expected_retained_source_frame_id
+            if requires_previous else
+            retained_source_frame_id == expected_retained_source_frame_id
+        )
+        if not cadence_aligned or not state_matches_retained_identity:
+            raise WholeClipError(
+                f"scene cache metadata {sequence} retained source identity mismatch")
+        _validate_roi_transform(
+            transform,
+            expected_source_frame_id=retained_source_frame_id,
+            source_width=source_width,
+            source_height=source_height,
+            model_width=depth_width,
+            model_height=depth_height,
+            sequence=sequence,
+        )
+    return depth_pixels * bytes_per_sample
+
+
+def _validate_cached_state(payload: bytes, sequence: int) -> bool:
+    words = struct.unpack(f"<{SCENE_CACHE_STATE_WORDS}I", payload)
+    values = tuple(_float_from_word(word) for word in words)
+    if not all(math.isfinite(value) for value in values):
+        raise WholeClipError(
+            f"scene cache state {sequence} contains a non-finite value")
+    subject_initialized = values[ADAPTIVE_INITIALIZED_WORD]
+    zero_anchor_valid = values[ADAPTIVE_ZERO_ANCHOR_VALID_WORD]
+    cut_flags = values[ADAPTIVE_CUT_FLAGS_WORD]
+    history_state = values[ADAPTIVE_MODEL_INPUT_HISTORY_STATE_WORD]
+    initialized = values[SCENE_CACHE_SUBJECT_WORDS + 2]
+    frame_state = values[SCENE_CACHE_SUBJECT_WORDS + 3]
+    frame_state_valid = (
+        frame_state == 0.0 or
+        (
+            initialized == 1.0 and
+            frame_state in (1.0, 2.0)
+        )
+    )
+    if (
+        subject_initialized not in (0.0, 1.0) or
+        zero_anchor_valid not in (0.0, 1.0) or
+        not 0.0 <= cut_flags <= ADAPTIVE_KNOWN_CUT_FLAG_MASK or
+        math.trunc(cut_flags) != cut_flags or
+        not 0.0 <= history_state <= 3.0 or
+        math.trunc(history_state) != history_state or
+        initialized not in (0.0, 1.0) or
+        not frame_state_valid
+    ):
+        raise WholeClipError(
+            f"scene cache state {sequence} has invalid validity flags")
+    return initialized == 1.0 and frame_state == 0.0
+
+
+def scene_cache_max_triplet_bytes(
+    source_width: int,
+    source_height: int,
+) -> int:
+    """Bound every dynamic schema-2 depth/state/metadata publication."""
+    for name, value in (
+        ("width", source_width),
+        ("height", source_height),
+    ):
+        if (
+            not isinstance(value, int) or isinstance(value, bool) or
+            not 1 <= value <= UINT32_MAX
+        ):
+            raise WholeClipError(
+                f"scene-cache source {name} is invalid")
+    max_width = min(
+        source_width, SCENE_CACHE_MAX_DEPTH_DIMENSION)
+    max_height = min(
+        source_height, SCENE_CACHE_MAX_DEPTH_DIMENSION)
+    max_width -= max_width % FRAME_ROI_TRANSFORM_PATCH_SIZE
+    max_height -= max_height % FRAME_ROI_TRANSFORM_PATCH_SIZE
+    if max_width <= 0 or max_height <= 0:
+        raise WholeClipError(
+            "source raster cannot hold a valid scene-cache depth shape")
+    return (
+        max_width * max_height * 4 +
+        SCENE_CACHE_STATE_WORDS * 4 +
+        SCENE_CACHE_METADATA_BYTES
+    )
+
+
+def preflight_scene_cache_hard_cap(
+    source_width: int,
+    source_height: int,
+    hard_cap_bytes: int,
+) -> int:
+    """Reject a cap before the native producer can publish its first triplet."""
+    if (
+        not isinstance(hard_cap_bytes, int) or
+        isinstance(hard_cap_bytes, bool) or
+        hard_cap_bytes <= 0
+    ):
+        raise WholeClipError(
+            "scene-cache max bytes must be a positive integer")
+    maximum_triplet = scene_cache_max_triplet_bytes(
+        source_width, source_height)
+    if maximum_triplet > hard_cap_bytes // 10:
+        raise WholeClipError(
+            "scene-cache budget must hold at least ten maximum-sized "
+            "depth/state/metadata triplets before native publication: "
+            f"maximum_pair={maximum_triplet}, cap={hard_cap_bytes}")
+    return maximum_triplet
+
+
 class SceneCacheLedger:
     """Track only native-attested depth/state pairs and enforce a hard byte budget."""
 
@@ -859,7 +1223,7 @@ class SceneCacheLedger:
         self.max_bytes = max_bytes
         self.current_bytes = 0
         self.high_water_bytes = 0
-        self._pairs: dict[int, tuple[Path, Path, int]] = {}
+        self._pairs: dict[int, tuple[Path, Path, Path, int, bool]] = {}
         self.forced_segments: list[dict[str, Any]] = []
 
     def acknowledge_pair(
@@ -871,48 +1235,135 @@ class SceneCacheLedger:
             raise WholeClipError(f"scene cache pair {sequence} was already acknowledged")
         if sequence <= 0:
             raise WholeClipError("scene cache sequence must be positive")
-        if contract.get("schema") != 1:
-            raise WholeClipError("scene cache contract schema is not 1")
+        if (
+            contract.get("schema") != SCENE_CACHE_CONTRACT_SCHEMA or
+            contract.get("status") != "running" or
+            contract.get("first_sequence") != 1 or
+            contract.get("atomic_frame_publication") is not True
+        ):
+            raise WholeClipError(
+                "scene cache running publication contract is invalid")
         processed_count = contract.get("processed_count")
         if (
             not isinstance(processed_count, int) or
             isinstance(processed_count, bool) or
-            processed_count < sequence
+            processed_count != sequence
         ):
             raise WholeClipError(
-                "scene cache contract does not acknowledge the requested sequence")
+                "scene cache contract does not exactly acknowledge the requested sequence")
         try:
-            depth_bytes = int(contract["depth"]["bytes_per_frame"])
+            source_width = contract["source"]["width"]
+            source_height = contract["source"]["height"]
+            depth_reuse_interval = contract[
+                "render_config"]["depth_reuse_interval"]
             state_bytes = int(contract["state"]["bytes_per_frame"])
+            metadata_bytes = int(
+                contract["frame_metadata"]["bytes_per_frame"])
         except (KeyError, TypeError, ValueError) as exc:
             raise WholeClipError(
-                "scene cache contract lacks exact per-frame byte sizes") from exc
-        if depth_bytes <= 0 or state_bytes <= 0:
-            raise WholeClipError("scene cache per-frame byte sizes must be positive")
+                "scene cache contract lacks exact source/state/metadata layout") from exc
+        if (
+            not isinstance(source_width, int) or isinstance(source_width, bool) or
+            not isinstance(source_height, int) or isinstance(source_height, bool) or
+            not 1 <= source_width <= UINT32_MAX or
+            not 1 <= source_height <= UINT32_MAX
+        ):
+            raise WholeClipError("scene cache contract source dimensions are invalid")
+        state_contract = contract.get("state", {})
+        metadata_contract = contract.get("frame_metadata", {})
+        if (
+            contract.get("depth", {}).get("dimensions") != "per-frame-metadata" or
+            contract.get("depth", {}).get("dtype") != "float32-le" or
+            contract.get("depth", {}).get("dxgi_format") != "R32_FLOAT" or
+            contract.get("depth", {}).get("bytes_per_frame") is not None or
+            contract.get("depth", {}).get("bytes_per_sample") != 4 or
+            metadata_contract.get("schema") != SCENE_CACHE_METADATA_SCHEMA or
+            metadata_contract.get("magic") != SCENE_CACHE_METADATA_MAGIC or
+            metadata_contract.get("word_count") != SCENE_CACHE_METADATA_WORDS or
+            metadata_contract.get("roi_transform_word_offset") !=
+                SCENE_CACHE_METADATA_ROI_OFFSET or
+            metadata_contract.get("roi_transform_word_count") !=
+                SCENE_CACHE_ROI_WORDS or
+            metadata_contract.get("roi_transform_contract_schema") !=
+                FRAME_ROI_TRANSFORM_SCHEMA or
+            state_contract.get("schema") != SCENE_CACHE_STATE_SCHEMA or
+            state_contract.get("subject_word_count") !=
+                SCENE_CACHE_SUBJECT_WORDS or
+            state_contract.get("depth_frame_state_word_count") !=
+                SCENE_CACHE_DEPTH_FRAME_STATE_WORDS or
+            state_contract.get("word_count") != SCENE_CACHE_STATE_WORDS or
+            state_bytes != SCENE_CACHE_STATE_WORDS * 4 or
+            metadata_bytes != SCENE_CACHE_METADATA_BYTES
+        ):
+            raise WholeClipError("scene cache schema-2 layout is invalid")
         stem = f"frame_{sequence:010d}"
         depth = self.directory / f"{stem}.depth.r32f"
         state = self.directory / f"{stem}.state.u32"
+        metadata = self.directory / f"{stem}.meta.u32"
         try:
             actual_depth = depth.stat().st_size
             actual_state = state.stat().st_size
+            actual_metadata = metadata.stat().st_size
+            metadata_payload = metadata.read_bytes()
+            state_payload = state.read_bytes()
         except OSError as exc:
             raise WholeClipError(
-                f"scene cache ACK {sequence} is missing its depth/state pair") from exc
-        if actual_depth != depth_bytes or actual_state != state_bytes:
+                f"scene cache ACK {sequence} is missing its frame triplet") from exc
+        if (
+            actual_metadata != metadata_bytes or
+            len(metadata_payload) != metadata_bytes
+        ):
             raise WholeClipError(
-                f"scene cache pair {sequence} size mismatch: "
-                f"depth={actual_depth}/{depth_bytes}, "
+                f"scene cache metadata {sequence} size mismatch")
+        metadata_words = struct.unpack(
+            f"<{SCENE_CACHE_METADATA_WORDS}I", metadata_payload)
+        if (
+            actual_state != state_bytes or
+            len(state_payload) != state_bytes
+        ):
+            raise WholeClipError(
+                f"scene cache triplet {sequence} size mismatch: "
                 f"state={actual_state}/{state_bytes}")
-        pair_bytes = actual_depth + actual_state
+        requires_previous = _validate_cached_state(state_payload, sequence)
+        expected_depth = _validate_frame_metadata(
+            metadata_words,
+            sequence=sequence,
+            source_width=source_width,
+            source_height=source_height,
+            depth_reuse_interval=depth_reuse_interval,
+            requires_previous=requires_previous,
+        )
+        if (
+            actual_depth != expected_depth or
+            actual_state != state_bytes
+        ):
+            raise WholeClipError(
+                f"scene cache triplet {sequence} size mismatch: "
+                f"depth={actual_depth}/{expected_depth}, "
+                f"state={actual_state}/{state_bytes}")
+        pair_bytes = actual_depth + actual_state + actual_metadata
         projected = self.current_bytes + pair_bytes
         if projected > self.max_bytes:
             raise WholeClipError(
                 "scene cache exceeded its hard byte budget before replay release: "
                 f"{projected} > {self.max_bytes}")
-        self._pairs[sequence] = (depth, state, pair_bytes)
+        self._pairs[sequence] = (
+            depth,
+            state,
+            metadata,
+            pair_bytes,
+            requires_previous,
+        )
         self.current_bytes = projected
         self.high_water_bytes = max(self.high_water_bytes, projected)
         return pair_bytes
+
+    def requires_previous_packed_frame(self, sequence: int) -> bool:
+        pair = self._pairs.get(sequence)
+        if pair is None:
+            raise WholeClipError(
+                f"scene cache pair {sequence} was not acknowledged")
+        return pair[4]
 
     def pressure_state(self, next_pair_bytes: int = 0) -> str:
         if next_pair_bytes < 0:
@@ -957,10 +1408,12 @@ class SceneCacheLedger:
         )
         removed_bytes = 0
         for sequence in sequences:
-            depth, state, pair_bytes = self._pairs[sequence]
+            depth, state, metadata, pair_bytes, _requires_previous = (
+                self._pairs[sequence])
             try:
                 depth.unlink()
                 state.unlink()
+                metadata.unlink()
             except OSError as exc:
                 raise WholeClipError(
                     f"cannot release rendered scene-cache pair {sequence}: {exc}") from exc
@@ -1756,9 +2209,47 @@ def query_native_capabilities(
         ("native_whole_clip", "follow_protocol_schema"): 1,
         ("native_whole_clip", "follow_global_first_sequence"): True,
         ("native_whole_clip", "adaptive_state_schema"): ADAPTIVE_TRACE_SCHEMA,
-        ("native_whole_clip", "scene_cache_contract_schema"): 1,
-        ("native_whole_clip", "scene_cache_state", "schema"): 1,
-        ("native_whole_clip", "scene_cache_state", "word_count"): 12,
+        ("native_whole_clip", "scene_cache_contract_schema"):
+            SCENE_CACHE_CONTRACT_SCHEMA,
+        ("native_whole_clip", "scene_cache_packed_sbs_contract"): True,
+        ("native_whole_clip", "scene_cache_depth", "dtype"): "float32-le",
+        ("native_whole_clip", "scene_cache_depth", "layout"): "row-major",
+        ("native_whole_clip", "scene_cache_depth", "dxgi_format"):
+            "R32_FLOAT",
+        ("native_whole_clip", "scene_cache_depth", "dimensions"):
+            "per-frame-metadata",
+        ("native_whole_clip", "scene_cache_depth", "bytes_per_frame"): None,
+        ("native_whole_clip", "scene_cache_frame_metadata", "schema"):
+            SCENE_CACHE_METADATA_SCHEMA,
+        ("native_whole_clip", "scene_cache_frame_metadata", "word_count"):
+            SCENE_CACHE_METADATA_WORDS,
+        (
+            "native_whole_clip",
+            "scene_cache_frame_metadata",
+            "roi_transform_word_offset",
+        ): SCENE_CACHE_METADATA_ROI_OFFSET,
+        (
+            "native_whole_clip",
+            "scene_cache_frame_metadata",
+            "roi_transform_word_count",
+        ): SCENE_CACHE_ROI_WORDS,
+        (
+            "native_whole_clip",
+            "scene_cache_frame_metadata",
+            "roi_transform_contract_schema",
+        ): FRAME_ROI_TRANSFORM_SCHEMA,
+        ("native_whole_clip", "scene_cache_state", "schema"):
+            SCENE_CACHE_STATE_SCHEMA,
+        ("native_whole_clip", "scene_cache_state", "subject_word_count"):
+            SCENE_CACHE_SUBJECT_WORDS,
+        (
+            "native_whole_clip",
+            "scene_cache_state",
+            "depth_frame_state_word_count",
+        ): SCENE_CACHE_DEPTH_FRAME_STATE_WORDS,
+        ("native_whole_clip", "scene_cache_state", "word_count"):
+            SCENE_CACHE_STATE_WORDS,
+        ("native_whole_clip", "scene_cache_state", "dtype"): "uint32-le",
         ("native_whole_clip", "scene_plan", "schema"): 1,
         ("native_whole_clip", "scene_plan", "version"): "scene-plan-v1",
         ("native_whole_clip", "scene_plan", "one_scene_per_replay"): True,
@@ -1766,6 +2257,21 @@ def query_native_capabilities(
         ("native_whole_clip", "scene_plan", "source_pixel_zero_anchor"): True,
         ("native_whole_clip", "render_cache_follow"): True,
         ("native_whole_clip", "render_skips_tensorrt"): True,
+        (
+            "native_whole_clip",
+            "whole_clip_inference_attestation",
+            "depth_inference_enabled",
+        ): True,
+        (
+            "native_whole_clip",
+            "whole_clip_inference_attestation",
+            "scheduled_depth_update_count",
+        ): True,
+        (
+            "native_whole_clip",
+            "whole_clip_inference_attestation",
+            "tensorrt_enqueue_count",
+        ): True,
         ("native_whole_clip", "atomic_sbs_publication"): True,
     }
     mismatches = {}
@@ -2366,6 +2872,11 @@ def validate_native_outputs(
         raise WholeClipError(
             "whole-clip contract source count mismatch: "
             f"{contract.get('source_frame_count')!r} != {expected_count}")
+    _validate_native_inference_attestation(
+        contract,
+        replay=False,
+        source_frame_count=expected_count,
+    )
     adaptive_contract = contract.get("adaptive_state")
     if not isinstance(adaptive_contract, dict):
         raise WholeClipError("whole-clip contract lacks the adaptive-state descriptor")
@@ -2399,6 +2910,56 @@ def validate_native_outputs(
     elif sbs_contract.get("enabled") or sbs_contract.get("frame_count") != 0:
         raise WholeClipError("adaptive-only contract unexpectedly attests SBS frames")
     return contract
+
+
+def _validate_native_inference_attestation(
+    contract: dict[str, Any],
+    *,
+    replay: bool,
+    source_frame_count: int,
+) -> None:
+    if (
+        not isinstance(source_frame_count, int) or
+        isinstance(source_frame_count, bool) or
+        source_frame_count <= 0
+    ):
+        raise WholeClipError(
+            "native inference attestation requires a positive source count")
+    if replay:
+        expected = {
+            "inference_mode": "scene-cache-replay",
+            "depth_inference_enabled": False,
+            "scheduled_depth_update_count": 0,
+            "tensorrt_enqueue_count": 0,
+        }
+    else:
+        depth_reuse_interval = contract.get("depth_reuse_interval")
+        if (
+            not isinstance(depth_reuse_interval, int) or
+            isinstance(depth_reuse_interval, bool) or
+            not 1 <= depth_reuse_interval <= 8
+        ):
+            raise WholeClipError(
+                "native analysis inference attestation has an invalid depth reuse interval")
+        scheduled_count = (
+            source_frame_count + depth_reuse_interval - 1
+        ) // depth_reuse_interval
+        expected = {
+            "inference_mode": "single-pass-tensorrt",
+            "depth_inference_enabled": True,
+            "scheduled_depth_update_count": scheduled_count,
+            "tensorrt_enqueue_count": scheduled_count,
+        }
+    mismatches = {
+        key: {"expected": wanted, "actual": contract.get(key)}
+        for key, wanted in expected.items()
+        if contract.get(key) != wanted
+    }
+    if mismatches:
+        mode = "scene replay" if replay else "analysis"
+        raise WholeClipError(
+            f"native {mode} inference attestation mismatch: " +
+            json.dumps(mismatches, sort_keys=True))
 
 
 def _concat_quote(path: Path) -> str:
@@ -2814,6 +3375,17 @@ def render_cached_scene(
             for key, wanted in contract_expected.items()
             if native_contract.get(key) != wanted
         }
+        try:
+            _validate_native_inference_attestation(
+                native_contract,
+                replay=True,
+                source_frame_count=count,
+            )
+        except WholeClipError as exc:
+            contract_mismatches["inference_attestation"] = {
+                "expected": "zero-inference exact scene-cache replay",
+                "actual": str(exc),
+            }
         resolved_runtime = native_contract.get("resolved_runtime")
         expected_runtime = {
             "scene_cache_replay": True,
@@ -2931,6 +3503,8 @@ def run_streaming_scene_pipeline(
     conf: Path,
     build_dir: Path,
     timeline: dict[str, Any],
+    source_width: int,
+    source_height: int,
     analysis_producer: Any,
     render_producer: Any | None,
     output_dir: Path,
@@ -2970,6 +3544,12 @@ def run_streaming_scene_pipeline(
         render_producer.extension != analysis_producer.extension
     ):
         raise WholeClipError("analysis/render producer color formats differ")
+    if conversion:
+        preflight_scene_cache_hard_cap(
+            source_width,
+            source_height,
+            cache_max_bytes,
+        )
 
     analysis_input = work_dir / "analysis-input"
     analysis_input.mkdir()
@@ -3007,7 +3587,6 @@ def run_streaming_scene_pipeline(
     concat_path = work_dir / "sbs-http.ffconcat"
     analysis_terminal = False
     rendered_until = 1
-    single_pair_bytes: int | None = None
     sbs_dimensions: tuple[int, int] | None = None
 
     def ensure_encoder() -> tuple[SbsFrameHttpBridge, LoggedSubprocess]:
@@ -3128,6 +3707,9 @@ def run_streaming_scene_pipeline(
                 )
                 pair_bytes = ledger.acknowledge_pair(
                     sequence, cache_contract)
+                trace_frame["requires_previous_packed_frame"] = (
+                    ledger.requires_previous_packed_frame(sequence)
+                )
                 current_sbs_dimensions = validate_packed_sbs_contract(
                     cache_contract, analysis_producer.extension)
                 if sbs_dimensions is None:
@@ -3135,16 +3717,12 @@ def run_streaming_scene_pipeline(
                 elif current_sbs_dimensions != sbs_dimensions:
                     raise WholeClipError(
                         "scene-cache SBS geometry changed during the clip")
-                if single_pair_bytes is None:
-                    single_pair_bytes = pair_bytes
-                    if single_pair_bytes * 10 > cache_max_bytes:
-                        raise WholeClipError(
-                            "scene-cache budget must hold at least ten depth/state pairs "
-                            "so the 90% semantic limit cannot cross the 100% hard cap: "
-                            f"pair={single_pair_bytes}, cap={cache_max_bytes}")
-                elif pair_bytes != single_pair_bytes:
+                if pair_bytes * 10 > cache_max_bytes:
                     raise WholeClipError(
-                        "scene-cache pair size changed during a fixed-resolution clip")
+                        "scene-cache budget must hold at least ten maximum-sized "
+                        "depth/state/metadata triplets so the 90% semantic limit "
+                        "cannot cross the 100% hard cap: "
+                        f"pair={pair_bytes}, cap={cache_max_bytes}")
             analysis_path.unlink()
 
             if planner is None:
@@ -4104,6 +4682,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             conversion=output_video is not None,
             source_size_bytes=source_size,
         )
+        if output_video:
+            manifest["scene_cache"]["maximum_triplet_bytes"] = (
+                preflight_scene_cache_hard_cap(
+                    width,
+                    height,
+                    cache_max_bytes,
+                )
+            )
         if source_video is not None:
             assert ffmpeg is not None
             analysis_producer = VideoFollowFrameDecoder(
@@ -4146,6 +4732,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             conf=conf,
             build_dir=build_dir,
             timeline=timeline,
+            source_width=width,
+            source_height=height,
             analysis_producer=analysis_producer,
             render_producer=render_producer,
             output_dir=output_dir,

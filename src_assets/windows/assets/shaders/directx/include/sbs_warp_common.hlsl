@@ -2,6 +2,11 @@
 #define SBS_WARP_COMMON_HLSL
 
 #include "include/bestv2_curve.hlsl"
+#include "include/sbs_frame_roi_transform.hlsl"
+
+#define SBS_WARP_ROI_MODE_INERT 0u
+#define SBS_WARP_ROI_MODE_LEGACY 1u
+#define SBS_WARP_ROI_MODE_ACTIVE 2u
 
 // The validated core clips and Bestv2-derived profile were calibrated at 854 source pixels wide.
 // The reference preset expresses disparity as literal render pixels, which becomes imperceptible on a 5120px
@@ -75,6 +80,86 @@ bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {
     return true;
 }
 
+// Classify the transform retained with the depth surface being sampled. An all-zero resource is
+// the explicit compatibility contract for callers that have not wired ROI ownership yet. A
+// canonical full-frame record also takes the historical mapping, but only while its exact source
+// and model identities still match the bound textures. Every other stale or malformed record is
+// inert; it must not reinterpret an ROI-shaped depth surface as a stretched full frame.
+uint SbsWarpRoiMode(
+    SbsFrameRoiTransformData transform,
+    uint2 source_dimensions,
+    uint2 depth_dimensions)
+{
+    if (FrameRoiDataUnboundZero(transform)) {
+        // Compatibility is safe only for the canonical full-frame tensor geometry. A missing or
+        // stale t5 binding must never reinterpret a square/portrait ROI tensor as full-screen
+        // depth and stretch it over the source.
+        return
+            all(source_dimensions > 0u.xx) &&
+            all(depth_dimensions > 0u.xx) &&
+            FrameRoiPhysicalAspectMatches(
+                float4(0.0f, 0.0f, 1.0f, 1.0f),
+                source_dimensions,
+                depth_dimensions,
+                SBS_FRAME_ROI_LEGACY_ASPECT_REL_TOLERANCE) ?
+                SBS_WARP_ROI_MODE_LEGACY :
+                SBS_WARP_ROI_MODE_INERT;
+    }
+    if (
+        !FrameRoiDataValid(transform) ||
+        any(FrameRoiDataSourceDimensions(transform) != source_dimensions) ||
+        any(FrameRoiDataModelDimensions(transform) != depth_dimensions)
+    ) {
+        return SBS_WARP_ROI_MODE_INERT;
+    }
+    uint flags = FrameRoiDataFlags(transform);
+    if ((flags & SBS_FRAME_ROI_FLAG_FULL_FRAME) != 0u) {
+        return SBS_WARP_ROI_MODE_LEGACY;
+    }
+    return (flags & SBS_FRAME_ROI_FLAG_ACTIVE_ROI) != 0u ?
+        SBS_WARP_ROI_MODE_ACTIVE :
+        SBS_WARP_ROI_MODE_INERT;
+}
+
+// Map one real source point into the retained ROI depth surface. The caller has already selected
+// ACTIVE mode, so the transform has been fully validated once; avoiding the public validating
+// wrappers here keeps their schema/rectangle checks out of every backward-search probe.
+//
+// `false` is the exact-focus identity region: callers use zero parallax and must not invent a
+// neutral depth value for occlusion ordering.
+bool SbsWarpActiveSourceToDepthUv(
+    SbsFrameRoiTransformData transform,
+    float2 source_uv,
+    uint2 depth_dimensions,
+    out float2 depth_uv,
+    out float feather_weight)
+{
+    float4 focus = FrameRoiDataFocus(transform);
+    if (!FrameRoiPointInsideRect(source_uv, focus)) {
+        depth_uv = 0.0f.xx;
+        feather_weight = 0.0f;
+        return false;
+    }
+
+    float4 crop = FrameRoiDataCrop(transform);
+    depth_uv = (source_uv - crop.xy) / (crop.zw - crop.xy);
+    float2 half_texel =
+        0.5f / max(float2(depth_dimensions), 1.0f.xx);
+    depth_uv = clamp(depth_uv, half_texel, 1.0f.xx - half_texel);
+
+    float4 feather = FrameRoiDataFeather(transform);
+    float left =
+        FrameRoiFeatherRamp(source_uv.x - focus.x, feather.x);
+    float top =
+        FrameRoiFeatherRamp(source_uv.y - focus.y, feather.y);
+    float right =
+        FrameRoiFeatherRamp(focus.z - source_uv.x, feather.z);
+    float bottom =
+        FrameRoiFeatherRamp(focus.w - source_uv.y, feather.w);
+    feather_weight = min(min(left, right), min(top, bottom));
+    return true;
+}
+
 // Loop-invariant values for the production warp. Keeping the original
 // operation groups here avoids recomputing source geometry and the resolved anchor for
 // every search probe while retaining the same Bestv2 field.
@@ -117,6 +202,22 @@ float DepthParallax(float d, float4 s0, float4 s1, Bestv2Params p,
     // strength > 17.36, while config.cpp validates BOTH pop_strength and adaptive_pop_max into
     // [0.25, 2.0]. 8.7x margin, enforced rather than incidental.
     return parallax * p.output_scale;
+}
+
+float SbsWarpActiveParallax(
+    float depth,
+    float feather_weight,
+    float4 s0,
+    float4 s1,
+    Bestv2Params params,
+    bool use_subject_stretch)
+{
+    return DepthParallax(
+        depth,
+        s0,
+        s1,
+        params,
+        use_subject_stretch) * feather_weight;
 }
 
 // Probe SPACING is what the historical calibration actually pinned; the step count was only ever

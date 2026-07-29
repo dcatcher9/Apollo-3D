@@ -37,6 +37,7 @@
 #include "src/generated/sbs_adaptive_state_contract.h"
 #include "src/generated/sbs_scene_controller_contract.h"
 #include "src/logging.h"
+#include "src/sbs_scene_cache_contract.h"
 #include "src/video_depth_estimator.h"
 
 namespace platf::sbs_debug {
@@ -1110,6 +1111,142 @@ namespace platf::sbs_debug {
     nlohmann::json finite_float_json(const float value) {
       return std::isfinite(value) ? nlohmann::json(value) :
                                     nlohmann::json(nullptr);
+    }
+
+    struct roi_transform_dump_result {
+      bool unbound_zero = false;
+      bool contract_valid = false;
+      nlohmann::json summary = nlohmann::json::object();
+    };
+
+    bool dump_roi_transform(
+      ID3D11Device *device,
+      ID3D11DeviceContext *ctx,
+      ID3D11ShaderResourceView *srv,
+      const frame &completed,
+      const std::uint32_t source_width,
+      const std::uint32_t source_height,
+      const std::filesystem::path &dir,
+      roi_transform_dump_result &result
+    ) {
+      std::vector<std::uint8_t> bytes;
+      if (
+        !read_buffer(
+          device,
+          ctx,
+          srv,
+          sbs_scene_cache::roi_transform_word_count *
+            sizeof(std::uint32_t),
+          bytes
+        )
+      ) {
+        return false;
+      }
+      sbs_scene_cache::roi_transform_words_t words {};
+      std::memcpy(words.data(), bytes.data(), bytes.size());
+      if (
+        !write_bytes(
+          dir / "roi_transform.words",
+          words.data(),
+          sizeof(words)
+        )
+      ) {
+        return false;
+      }
+
+      const auto join_u64 = [](const std::uint32_t low,
+                               const std::uint32_t high) {
+        return static_cast<std::uint64_t>(low) |
+               (static_cast<std::uint64_t>(high) << 32u);
+      };
+      const auto float4_json = [&](const std::size_t offset) {
+        nlohmann::json value = nlohmann::json::array();
+        for (std::size_t index = 0; index < 4u; ++index) {
+          value.push_back(
+            finite_float_json(
+              std::bit_cast<float>(words[offset + index])
+            )
+          );
+        }
+        return value;
+      };
+      const auto uint4_json = [&](const std::size_t offset) {
+        return nlohmann::json::array({
+          words[offset + 0u],
+          words[offset + 1u],
+          words[offset + 2u],
+          words[offset + 3u],
+        });
+      };
+
+      result.unbound_zero =
+        sbs_scene_cache::transform_is_unbound_zero(words);
+      result.contract_valid =
+        result.unbound_zero ||
+        sbs_scene_cache::valid_roi_transform(
+          words,
+          completed.matched_frame_id,
+          source_width,
+          source_height,
+          static_cast<std::uint32_t>(completed.model_width),
+          static_cast<std::uint32_t>(completed.model_height)
+        );
+
+      nlohmann::json vectors = nlohmann::json::array();
+      for (
+        std::size_t vector = 0;
+        vector < models::frame_roi_transform_vector_count;
+        ++vector
+      ) {
+        vectors.push_back(uint4_json(vector * 4u));
+      }
+      const std::uint32_t flags = words[1u];
+      const std::uint32_t fallback_reason =
+        models::frame_roi_fallback_reason_from_words(words);
+      result.summary = {
+        {"schema", 1},
+        {"gpu_contract_schema", words[0u]},
+        {"gpu_vector_count", models::frame_roi_transform_vector_count},
+        {"capture", "exact StructuredBuffer<uint4> sampled by the matched Host-SBS frame"},
+        {"unbound_zero_legacy_transform", result.unbound_zero},
+        {"contract_valid_for_matched_frame", result.contract_valid},
+        {"matched_frame_id", completed.matched_frame_id},
+        {"raw_vectors_uint4", std::move(vectors)},
+        {"identity", {
+                       {"flags", flags},
+                       {"decoded_flags", {
+                                           {"valid", (flags & (1u << 0u)) != 0u},
+                                           {"full_frame", (flags & (1u << 1u)) != 0u},
+                                           {"active_roi", (flags & (1u << 2u)) != 0u},
+                                           {"reset_debt", (flags & (1u << 3u)) != 0u},
+                                         }},
+                       {"source_frame_id", join_u64(words[2u], words[3u])},
+                       {"roi_generation", words[4u]},
+                       {"backend_generation", words[5u]},
+                       {"source_width", words[6u]},
+                       {"source_height", words[7u]},
+                       {"model_width", words[8u]},
+                       {"model_height", words[9u]},
+                       {"accepted_focus_pixel_count", words[10u]},
+                       {"shape_request_id", words[11u]},
+                       {"transform_version", join_u64(words[28u], words[29u])},
+                       {"gpu_bank_identity", words[30u]},
+                       {"fallback_reason", fallback_reason},
+                       {
+                         "fallback_reason_name",
+                         models::frame_roi_fallback_reason_name_from_words(
+                           words
+                         )
+                       },
+                     }},
+        {"geometry", {
+                       {"focus_source_uv", float4_json(12u)},
+                       {"crop_source_uv", float4_json(16u)},
+                       {"accepted_model_bounds_half_open", uint4_json(20u)},
+                       {"feather_source_uv_inward", float4_json(24u)},
+                     }},
+      };
+      return write_json(dir / "roi_transform.json", result.summary);
     }
 
     nlohmann::json scalar_stats_json(
@@ -2273,7 +2410,8 @@ namespace platf::sbs_debug {
       !device || !ctx || !completed.source || !completed.model_input ||
       !completed.raw_depth || !completed.depth || !completed.warp_depth ||
       !completed.adaptive_state || !completed.depth_frame_state ||
-      !completed.sbs || completed.model_width <= 0 ||
+      !completed.depth_roi_transform || !completed.sbs ||
+      completed.model_width <= 0 ||
       completed.model_height <= 0 || completed.raw_width <= 0 ||
       completed.raw_height <= 0
     ) {
@@ -2415,6 +2553,22 @@ namespace platf::sbs_debug {
             cfg,
             paths.temporary,
             adaptive
+          )
+        ) {
+          break;
+        }
+
+        roi_transform_dump_result roi_transform;
+        if (
+          !dump_roi_transform(
+            device,
+            ctx,
+            completed.depth_roi_transform,
+            completed,
+            source.desc.Width,
+            source.desc.Height,
+            paths.temporary,
+            roi_transform
           )
         ) {
           break;
@@ -2626,6 +2780,18 @@ namespace platf::sbs_debug {
           "adaptive controller state",
           "Generated schema-v3 typed state, decoded flags, counters, and normalization float4."
         );
+        artifacts["roi_transform.words"] = artifact_description(
+          true,
+          true,
+          "exact frame-owned ROI transform",
+          "Eight little-endian uint4 vectors exactly as sampled by every ROI-aware Host-SBS stage."
+        );
+        artifacts["roi_transform.json"] = artifact_description(
+          true,
+          true,
+          "decoded frame-owned ROI transform",
+          "Raw vectors plus matched identity, flags, focus/crop rectangles, accepted model bounds, feathering, and fallback reason."
+        );
         artifacts["scene_controller/scene_rgb.f32"] = artifact_description(
           scene_controller_available,
           false,
@@ -2835,6 +3001,7 @@ namespace platf::sbs_debug {
                                      {"preview_high_p98", raw_stats.preview_high},
                                    }},
           {"adaptive_summary", adaptive["decoded"]},
+          {"roi_transform", roi_transform.summary},
           {"scene_controller", scene_controller.summary},
           {"config", config_json(cfg, completed.depth_model)},
           {"artifacts", std::move(artifacts)},
@@ -2869,6 +3036,10 @@ namespace platf::sbs_debug {
              << "normalization_effective_upper=" << normalization.upper << '\n'
              << "normalization_initialized=" << normalization.initialized << '\n'
              << "normalization_frame_state=" << normalization.frame_state << '\n'
+             << "roi_transform_unbound_zero="
+             << (roi_transform.unbound_zero ? "true" : "false") << '\n'
+             << "roi_transform_contract_valid="
+             << (roi_transform.contract_valid ? "true" : "false") << '\n'
              << "cuda_graph_active="
              << (completed.cuda_graph_active ? "true" : "false") << '\n'
              << "warp_depth_prefilter_applied="

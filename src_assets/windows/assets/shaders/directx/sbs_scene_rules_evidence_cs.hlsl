@@ -6,6 +6,7 @@ StructuredBuffer<float4> DepthFrameState : register(t4);
 StructuredBuffer<uint4> PreviousRuleState : register(t5);
 StructuredBuffer<float> RawDepth : register(t6);
 StructuredBuffer<float4> AdaptiveState : register(t7);
+StructuredBuffer<uint4> FrameRoiTransform : register(t8);
 
 RWStructuredBuffer<float> DenseOutput : register(u0);
 RWStructuredBuffer<float> NextLayoutHistory : register(u1);
@@ -14,6 +15,7 @@ RWStructuredBuffer<float> Meta : register(u3);
 
 #include "include/sbs_scene_controller_constants.hlsl"
 #include "include/sbs_adaptive_state_contract.generated.hlsl"
+#include "include/sbs_frame_roi_transform.hlsl"
 
 float Analysis(uint channel, uint2 cell) {
     return AnalysisGrid[SceneAnalysisIndex(channel, cell)];
@@ -45,38 +47,153 @@ uint EffectiveResetFlags() {
     return flags;
 }
 
-float LoadDepth(float2 viewport_uv) {
+float LoadDepth(float2 depth_uv) {
     uint2 dimensions = uint2(
         max(scene_depth_width, 1u),
         max(scene_depth_height, 1u));
     uint2 pixel = min(
-        uint2(saturate(viewport_uv) * float2(dimensions)),
+        uint2(saturate(depth_uv) * float2(dimensions)),
         dimensions - 1u);
     float value = NormalizedDepth.Load(int3(pixel, 0));
     return (isnan(value) || isinf(value)) ? 0.0f : saturate(value);
 }
 
-bool NormalizedDepthValid(float2 viewport_uv) {
+bool NormalizedDepthValid(float2 depth_uv) {
     uint2 dimensions = uint2(
         max(scene_depth_width, 1u),
         max(scene_depth_height, 1u));
     uint2 pixel = min(
-        uint2(saturate(viewport_uv) * float2(dimensions)),
+        uint2(saturate(depth_uv) * float2(dimensions)),
         dimensions - 1u);
     float value = NormalizedDepth.Load(int3(pixel, 0));
     return !isnan(value) && !isinf(value);
 }
 
-float LoadRawDepth(float2 viewport_uv, out bool valid) {
+float LoadRawDepth(float2 depth_uv, out bool valid) {
     uint2 dimensions = uint2(
         max(scene_depth_width, 1u),
         max(scene_depth_height, 1u));
     uint2 pixel = min(
-        uint2(saturate(viewport_uv) * float2(dimensions)),
+        uint2(saturate(depth_uv) * float2(dimensions)),
         dimensions - 1u);
     float value = RawDepth[pixel.y * dimensions.x + pixel.x];
     valid = !isnan(value) && !isinf(value) && value >= 0.0f;
     return valid ? value : 0.0f;
+}
+
+bool ResolveFrameDepthTransform(
+    out SbsFrameRoiTransformData transform,
+    out bool explicit_legacy)
+{
+    transform = FrameRoiDecode(
+        0u.xxxx,
+        0u.xxxx,
+        0u.xxxx,
+        0u.xxxx,
+        0u.xxxx,
+        0u.xxxx,
+        0u.xxxx,
+        0u.xxxx);
+    explicit_legacy = false;
+
+    uint transform_vectors = 0u;
+    uint transform_stride = 0u;
+    FrameRoiTransform.GetDimensions(
+        transform_vectors,
+        transform_stride);
+    if (transform_vectors < SBS_FRAME_ROI_VECTOR_COUNT) {
+        return false;
+    }
+    transform = FrameRoiTransformLoad();
+
+    bool exact_resource_shape =
+        transform_vectors == SBS_FRAME_ROI_VECTOR_COUNT &&
+        transform_stride == 16u;
+    explicit_legacy =
+        exact_resource_shape &&
+        FrameRoiDataUnboundZero(transform);
+    if (explicit_legacy) {
+        // The all-zero eight-vector resource is the original full-frame ABI. Keep its UV and
+        // resource-validity behavior byte-for-byte; only nonzero owned transforms opt into the
+        // stricter identity and ROI checks below.
+        return true;
+    }
+
+    uint normalized_width = 0u;
+    uint normalized_height = 0u;
+    NormalizedDepth.GetDimensions(
+        normalized_width,
+        normalized_height);
+    uint raw_elements = 0u;
+    uint raw_stride = 0u;
+    RawDepth.GetDimensions(raw_elements, raw_stride);
+    bool model_pixel_count_safe =
+        scene_depth_width > 0u &&
+        scene_depth_height > 0u &&
+        scene_depth_width <=
+            0xffffffffu / max(scene_depth_height, 1u);
+    bool resources_match_model =
+        model_pixel_count_safe &&
+        normalized_width == scene_depth_width &&
+        normalized_height == scene_depth_height &&
+        raw_stride == 4u &&
+        raw_elements == scene_depth_width * scene_depth_height;
+
+    return
+        exact_resource_shape &&
+        resources_match_model &&
+        FrameRoiDataValid(transform) &&
+        all(FrameRoiDataSourceFrameId(transform) ==
+            uint2(
+                scene_source_frame_id_low,
+                scene_source_frame_id_high)) &&
+        FrameRoiDataBackendGeneration(transform) ==
+            scene_backend_generation &&
+        all(FrameRoiDataSourceDimensions(transform) ==
+            uint2(scene_source_width, scene_source_height)) &&
+        all(FrameRoiDataModelDimensions(transform) ==
+            uint2(scene_depth_width, scene_depth_height));
+}
+
+bool SourceToDepthUv(
+    SbsFrameRoiTransformData transform,
+    bool explicit_legacy,
+    float2 source_uv,
+    out float2 depth_uv)
+{
+    if (explicit_legacy) {
+        depth_uv = source_uv;
+        return true;
+    }
+    if (!FrameRoiDataSourceInsideFocus(transform, source_uv) ||
+        !FrameRoiDataSourceToModelUv(
+            transform,
+            source_uv,
+            depth_uv)) {
+        depth_uv = 0.0f.xx;
+        return false;
+    }
+    uint2 dimensions = uint2(scene_depth_width, scene_depth_height);
+    uint2 pixel = min(
+        uint2(saturate(depth_uv) * float2(dimensions)),
+        dimensions - 1u);
+    return FrameRoiDataAcceptedModelPixel(transform, pixel);
+}
+
+bool DepthUvAccepted(
+    SbsFrameRoiTransformData transform,
+    bool explicit_legacy,
+    float2 depth_uv)
+{
+    if (explicit_legacy) {
+        return true;
+    }
+    if (any(depth_uv < 0.0f.xx) || any(depth_uv >= 1.0f.xx)) {
+        return false;
+    }
+    uint2 dimensions = uint2(scene_depth_width, scene_depth_height);
+    uint2 pixel = uint2(depth_uv * float2(dimensions));
+    return FrameRoiDataAcceptedModelPixel(transform, pixel);
 }
 
 float LoadCurrentSignature(int2 cell) {
@@ -197,17 +314,53 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float2 viewport_uv = float2(
         Analysis(SBS_SCENE_ANALYSIS_GRID_VIEWPORT_X, cell),
         Analysis(SBS_SCENE_ANALYSIS_GRID_VIEWPORT_Y, cell));
+    SbsFrameRoiTransformData frame_roi_transform;
+    bool explicit_legacy_transform = false;
+    bool frame_depth_transform_valid = ResolveFrameDepthTransform(
+        frame_roi_transform,
+        explicit_legacy_transform);
+    float2 depth_uv = viewport_uv;
+    bool depth_location_valid =
+        frame_depth_transform_valid &&
+        SourceToDepthUv(
+            frame_roi_transform,
+            explicit_legacy_transform,
+            viewport_uv,
+            depth_uv);
     float2 depth_texel = 1.0f / max(
         float2(scene_depth_width, scene_depth_height),
         1.0f.xx);
     bool raw_depth_valid = false;
-    LoadRawDepth(viewport_uv, raw_depth_valid);
+    if (depth_location_valid) {
+        LoadRawDepth(depth_uv, raw_depth_valid);
+    }
     bool normalized_depth_valid =
-        NormalizedDepthValid(viewport_uv) &&
-        NormalizedDepthValid(viewport_uv + float2(depth_texel.x, 0.0f)) &&
-        NormalizedDepthValid(viewport_uv - float2(depth_texel.x, 0.0f)) &&
-        NormalizedDepthValid(viewport_uv + float2(0.0f, depth_texel.y)) &&
-        NormalizedDepthValid(viewport_uv - float2(0.0f, depth_texel.y));
+        depth_location_valid &&
+        DepthUvAccepted(
+            frame_roi_transform,
+            explicit_legacy_transform,
+            depth_uv) &&
+        DepthUvAccepted(
+            frame_roi_transform,
+            explicit_legacy_transform,
+            depth_uv + float2(depth_texel.x, 0.0f)) &&
+        DepthUvAccepted(
+            frame_roi_transform,
+            explicit_legacy_transform,
+            depth_uv - float2(depth_texel.x, 0.0f)) &&
+        DepthUvAccepted(
+            frame_roi_transform,
+            explicit_legacy_transform,
+            depth_uv + float2(0.0f, depth_texel.y)) &&
+        DepthUvAccepted(
+            frame_roi_transform,
+            explicit_legacy_transform,
+            depth_uv - float2(0.0f, depth_texel.y)) &&
+        NormalizedDepthValid(depth_uv) &&
+        NormalizedDepthValid(depth_uv + float2(depth_texel.x, 0.0f)) &&
+        NormalizedDepthValid(depth_uv - float2(depth_texel.x, 0.0f)) &&
+        NormalizedDepthValid(depth_uv + float2(0.0f, depth_texel.y)) &&
+        NormalizedDepthValid(depth_uv - float2(0.0f, depth_texel.y));
     bool depth_valid =
         viewport_valid && raw_depth_valid && normalized_depth_valid &&
         frame_state > 0.5f &&
@@ -244,8 +397,18 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     bool layout_history_valid =
         scene_history_valid != 0u &&
         (effective_reset_flags & SBS_SCENE_RESET_FLAGS_LAYOUT) == 0u;
+    // Normalized depth is only comparable while both frames use the same normalization
+    // geometry. A newly accepted ROI carries reset debt until its first valid depth promotes the
+    // matching transform, and MinMaxEma.frame_state == 2 marks that same direct reseed even for
+    // the explicit legacy/full-frame path. Rebase the depth histories on this frame, but never
+    // interpret its new normalization coordinates as scene structure.
+    bool depth_geometry_reseed =
+        frame_state > 1.5f ||
+        (!explicit_legacy_transform &&
+         FrameRoiDataResetDebt(frame_roi_transform));
     bool depth_history_valid =
         scene_history_valid != 0u &&
+        !depth_geometry_reseed &&
         (effective_reset_flags &
             (SBS_SCENE_RESET_FLAGS_DEPTH_SHOT |
              SBS_SCENE_RESET_FLAGS_GEOMETRY |
@@ -337,16 +500,16 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float vertical_motion =
         motion_confidence > 0.10f ? (float)best_shift / 3.0f : 0.0f;
 
-    float depth = depth_valid ? LoadDepth(viewport_uv) :
+    float depth = depth_valid ? LoadDepth(depth_uv) :
         DepthHistory(SBS_SCENE_DEPTH_HISTORY_LAST_NORMALIZED_DEPTH, cell);
     float2 depth_dxdy = 0.0f;
     if (depth_valid) {
         depth_dxdy.x = abs(
-            LoadDepth(viewport_uv + float2(depth_texel.x, 0.0f)) -
-            LoadDepth(viewport_uv - float2(depth_texel.x, 0.0f)));
+            LoadDepth(depth_uv + float2(depth_texel.x, 0.0f)) -
+            LoadDepth(depth_uv - float2(depth_texel.x, 0.0f)));
         depth_dxdy.y = abs(
-            LoadDepth(viewport_uv + float2(0.0f, depth_texel.y)) -
-            LoadDepth(viewport_uv - float2(0.0f, depth_texel.y)));
+            LoadDepth(depth_uv + float2(0.0f, depth_texel.y)) -
+            LoadDepth(depth_uv - float2(0.0f, depth_texel.y)));
     }
     float previous_depth =
         DepthHistory(SBS_SCENE_DEPTH_HISTORY_LAST_NORMALIZED_DEPTH, cell);
@@ -628,6 +791,8 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     }
 
     if (cell.x == 0u && cell.y == 0u) {
-        WriteMeta(frame_state > 0.5f);
+        WriteMeta(
+            frame_state > 0.5f &&
+            frame_depth_transform_valid);
     }
 }

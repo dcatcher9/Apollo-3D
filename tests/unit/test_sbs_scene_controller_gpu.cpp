@@ -23,6 +23,7 @@
   #include <nlohmann/json.hpp>
   #include <src/generated/sbs_adaptive_state_contract.h>
   #include <src/generated/sbs_scene_controller_contract.h>
+  #include <src/sbs_frame_roi_transform.h>
   #include <src/sbs_perf.h>
   #include <src/sbs_scene_controller_gpu.h>
   #include <string_view>
@@ -102,6 +103,64 @@ namespace {
       &result.uav
     )));
     return result;
+  }
+
+  using frame_roi_transform_words_t = std::array<
+    std::array<std::uint32_t, 4>,
+    models::frame_roi_transform_vector_count
+  >;
+
+  frame_roi_transform_words_t make_active_frame_roi_transform(
+    const std::uint64_t source_frame_id,
+    const std::uint32_t source_width,
+    const std::uint32_t source_height,
+    const std::uint32_t model_width,
+    const std::uint32_t model_height,
+    const std::array<float, 4> &focus,
+    const std::array<float, 4> &crop
+  ) {
+    constexpr std::uint32_t valid_flag = 1u << 0u;
+    constexpr std::uint32_t active_roi_flag = 1u << 2u;
+    frame_roi_transform_words_t words {};
+    words[0] = {
+      models::frame_roi_transform_contract_version,
+      valid_flag | active_roi_flag,
+      static_cast<std::uint32_t>(source_frame_id),
+      static_cast<std::uint32_t>(source_frame_id >> 32u),
+    };
+    words[1] = {
+      1u,
+      1u,
+      source_width,
+      source_height,
+    };
+    words[2] = {
+      model_width,
+      model_height,
+      model_width * model_height,
+      1u,
+    };
+    for (std::size_t component = 0; component < 4u; ++component) {
+      words[3][component] = std::bit_cast<std::uint32_t>(
+        focus[component]
+      );
+      words[4][component] = std::bit_cast<std::uint32_t>(
+        crop[component]
+      );
+    }
+    words[5] = {
+      0u,
+      0u,
+      model_width,
+      model_height,
+    };
+    words[7] = {
+      1u,
+      0u,
+      0u,
+      0u,
+    };
+    return words;
   }
 
   ComPtr<ID3D11Buffer> make_constant_buffer(
@@ -464,6 +523,46 @@ namespace {
           0.2f + 0.6f * static_cast<float>(x) /
                    static_cast<float>(width - 1u);
       }
+    }
+
+    D3D11_TEXTURE2D_DESC descriptor {};
+    descriptor.Width = width;
+    descriptor.Height = height;
+    descriptor.MipLevels = 1;
+    descriptor.ArraySize = 1;
+    descriptor.Format = DXGI_FORMAT_R32_FLOAT;
+    descriptor.SampleDesc.Count = 1;
+    descriptor.Usage = D3D11_USAGE_DEFAULT;
+    descriptor.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA initial {
+      depth.data(),
+      static_cast<UINT>(width * sizeof(float)),
+      0,
+    };
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11ShaderResourceView> view;
+    EXPECT_TRUE(SUCCEEDED(device->CreateTexture2D(
+      &descriptor,
+      &initial,
+      &texture
+    )));
+    EXPECT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
+      texture.Get(),
+      nullptr,
+      &view
+    )));
+    return view;
+  }
+
+  ComPtr<ID3D11ShaderResourceView> make_depth_view(
+    ID3D11Device *device,
+    const UINT width,
+    const UINT height,
+    const std::vector<float> &depth
+  ) {
+    EXPECT_EQ(depth.size(), static_cast<std::size_t>(width) * height);
+    if (depth.size() != static_cast<std::size_t>(width) * height) {
+      return {};
     }
 
     D3D11_TEXTURE2D_DESC descriptor {};
@@ -932,7 +1031,7 @@ namespace {
         0.0f,
         1.0f,
         1.0f,
-        2.0f,
+        1.0f,
       };
       frame_state_buffer = make_structured_buffer(
         device.Get(),
@@ -947,6 +1046,17 @@ namespace {
       );
       ASSERT_TRUE(frame_state_buffer.srv);
       ASSERT_TRUE(adaptive_buffer.srv);
+      const std::array<
+        std::array<std::uint32_t, 4>,
+        models::frame_roi_transform_vector_count
+      > zero_transform {};
+      frame_roi_transform_buffer = make_structured_buffer(
+        device.Get(),
+        zero_transform.data(),
+        sizeof(zero_transform),
+        sizeof(zero_transform[0])
+      );
+      ASSERT_TRUE(frame_roi_transform_buffer.srv);
 
       config::video_t::sbs_t sbs;
       sbs.scene_controller =
@@ -1007,7 +1117,8 @@ namespace {
         frame_state_buffer.srv.Get(),
         adaptive_buffer.srv.Get(),
         depth_width,
-        depth_height
+        depth_height,
+        frame_roi_transform_buffer.srv.Get()
       );
     }
 
@@ -1044,6 +1155,7 @@ namespace {
     structured_buffer_t raw_depth_buffer;
     structured_buffer_t frame_state_buffer;
     structured_buffer_t adaptive_buffer;
+    structured_buffer_t frame_roi_transform_buffer;
     std::unique_ptr<models::sbs_scene_controller_gpu> controller;
   };
 }  // namespace
@@ -1077,7 +1189,8 @@ TEST_F(
     frame_state_buffer.srv.Get(),
     adaptive_buffer.srv.Get(),
     depth_width,
-    depth_height
+    depth_height,
+    frame_roi_transform_buffer.srv.Get()
   ));
   EXPECT_FALSE(controller->snapshot().snapshot_available);
 
@@ -1088,12 +1201,547 @@ TEST_F(
     frame_state_buffer.srv.Get(),
     adaptive_buffer.srv.Get(),
     depth_width,
-    depth_height
+    depth_height,
+    frame_roi_transform_buffer.srv.Get()
   ));
   const auto snapshot = controller->snapshot();
   EXPECT_EQ(snapshot.source_frame_id, frame_id);
   expect_canonical_viewport(read_analysis(snapshot), 0, 28, 128, 72);
   expect_snapshot_abi_invariants(device.Get(), context.Get(), snapshot);
+}
+
+TEST_F(
+  SbsSceneControllerGpu,
+  OffsetOwnedRoiMapsFullFrameEvidenceIntoTheMatchedModelLocation
+) {
+  constexpr UINT source_width = 280u;
+  constexpr UINT source_height = 280u;
+  constexpr UINT model_width = 28u;
+  constexpr UINT model_height = 28u;
+  constexpr std::uint64_t frame_id = 0x12345678000001F5ull;
+  constexpr std::array<float, 4> roi {
+    0.125f,
+    0.25f,
+    0.625f,
+    0.75f,
+  };
+
+  const auto source = make_source_view(
+    device.Get(),
+    source_width,
+    source_height
+  );
+  ASSERT_TRUE(source);
+  std::vector<float> normalized_depth(
+    model_width * model_height,
+    0.1f
+  );
+  for (UINT y = 0u; y < model_height; ++y) {
+    normalized_depth[y * model_width + 21u] = 0.9f;
+  }
+  const auto normalized = make_depth_view(
+    device.Get(),
+    model_width,
+    model_height,
+    normalized_depth
+  );
+  std::vector<float> raw_depth(
+    model_width * model_height,
+    0.5f
+  );
+  const auto raw = make_structured_buffer(
+    device.Get(),
+    raw_depth.data(),
+    static_cast<UINT>(raw_depth.size() * sizeof(float)),
+    sizeof(float)
+  );
+  const auto adaptive = make_adaptive_state_buffer(
+    device.Get(),
+    0u,
+    1.0f
+  );
+  const auto transform_words = make_active_frame_roi_transform(
+    frame_id,
+    source_width,
+    source_height,
+    model_width,
+    model_height,
+    roi,
+    roi
+  );
+  const auto transform = make_structured_buffer(
+    device.Get(),
+    transform_words.data(),
+    sizeof(transform_words),
+    sizeof(transform_words[0])
+  );
+  ASSERT_TRUE(normalized);
+  ASSERT_TRUE(raw.srv);
+  ASSERT_TRUE(adaptive.srv);
+  ASSERT_TRUE(transform.srv);
+
+  ASSERT_TRUE(controller->prepare_scene(
+    source.Get(),
+    models::input_color_space::srgb,
+    frame_id
+  ));
+  controller->mark_enqueued(frame_id);
+  ASSERT_TRUE(controller->resolve_completed(
+    frame_id,
+    raw.srv.Get(),
+    normalized.Get(),
+    frame_state_buffer.srv.Get(),
+    adaptive.srv.Get(),
+    model_width,
+    model_height,
+    transform.srv.Get()
+  ));
+
+  constexpr std::size_t canvas =
+    sbs_scene_controller::analysis_canvas_size;
+  constexpr std::size_t plane = canvas * canvas;
+  const auto depth_history = read_buffer<float>(
+    device.Get(),
+    context.Get(),
+    controller->snapshot().depth_history.Get(),
+    sbs_scene_controller::depth_history_channel_count * plane
+  );
+  const auto history_index =
+    [](const sbs_scene_controller::depth_history_channel_e channel,
+       const std::size_t x,
+       const std::size_t y) {
+      return static_cast<std::size_t>(channel) * plane +
+             y * canvas + x;
+    };
+  const auto last =
+    sbs_scene_controller::depth_history_channel_e::last_normalized_depth;
+
+  // Source cell (64,64) maps through the offset crop to model column 21. A legacy direct
+  // full-frame lookup would sample model column 14 and return 0.1 instead.
+  EXPECT_FLOAT_EQ(depth_history[history_index(last, 64u, 64u)], 0.9f);
+  // The model hotspot's old direct full-frame source position is outside the accepted ROI.
+  EXPECT_FLOAT_EQ(depth_history[history_index(last, 96u, 64u)], 0.0f);
+  EXPECT_FLOAT_EQ(depth_history[history_index(last, 112u, 64u)], 0.0f);
+}
+
+TEST_F(
+  SbsSceneControllerGpu,
+  GeometryReseedRebasesDepthHistoryWithoutEmittingStructuralCutEvidence
+) {
+  constexpr UINT source_width = 320u;
+  constexpr UINT source_height = 180u;
+  constexpr std::size_t canvas =
+    sbs_scene_controller::analysis_canvas_size;
+  constexpr std::size_t plane = canvas * canvas;
+  constexpr std::array<float, 4> full_frame {
+    0.0f,
+    0.0f,
+    1.0f,
+    1.0f,
+  };
+
+  const auto set_depth = [&](const float value) {
+    depth_view = make_depth_view(
+      device.Get(),
+      depth_width,
+      depth_height,
+      std::vector<float>(depth_width * depth_height, value)
+    );
+    ASSERT_TRUE(depth_view);
+  };
+  const auto set_frame_state = [&](const float state) {
+    const std::array<float, 4> values {
+      0.0f,
+      1.0f,
+      1.0f,
+      state,
+    };
+    frame_state_buffer = make_structured_buffer(
+      device.Get(),
+      values.data(),
+      sizeof(values),
+      sizeof(values)
+    );
+    ASSERT_TRUE(frame_state_buffer.srv);
+  };
+  const auto set_active_transform =
+    [&](const std::uint64_t frame_id, const bool reset_debt) {
+      auto words = make_active_frame_roi_transform(
+        frame_id,
+        source_width,
+        source_height,
+        depth_width,
+        depth_height,
+        full_frame,
+        full_frame
+      );
+      if (reset_debt) {
+        words[0][1] |= 1u << 3u;
+      }
+      frame_roi_transform_buffer = make_structured_buffer(
+        device.Get(),
+        words.data(),
+        sizeof(words),
+        sizeof(words[0])
+      );
+      ASSERT_TRUE(frame_roi_transform_buffer.srv);
+    };
+  const auto set_legacy_transform = [&]() {
+    const frame_roi_transform_words_t words {};
+    frame_roi_transform_buffer = make_structured_buffer(
+      device.Get(),
+      words.data(),
+      sizeof(words),
+      sizeof(words[0])
+    );
+    ASSERT_TRUE(frame_roi_transform_buffer.srv);
+  };
+  const auto channel_max =
+    [&](const models::scene_controller_gpu_snapshot &snapshot,
+        const sbs_scene_controller::dense_out_channel_e channel) {
+      const auto dense = read_buffer<float>(
+        device.Get(),
+        context.Get(),
+        snapshot.dense_output.Get(),
+        sbs_scene_controller::dense_out_channel_count * plane
+      );
+      const auto first =
+        dense.begin() +
+        static_cast<std::size_t>(channel) * plane;
+      return *std::max_element(first, first + plane);
+    };
+  const auto activity_max =
+    [&](const models::scene_controller_gpu_snapshot &snapshot) {
+      const auto analysis = read_analysis(snapshot);
+      const auto first =
+        analysis.begin() +
+        static_cast<std::size_t>(
+          sbs_scene_controller::analysis_grid_channel_e::
+            temporal_activity_occupancy
+        ) * plane;
+      return *std::max_element(first, first + plane);
+    };
+
+  set_frame_state(1.0f);
+  set_depth(0.1f);
+  set_active_transform(200u, false);
+  ASSERT_TRUE(run_frame(source_width, source_height, 200u, 0u));
+
+  // A transform reset-debt completion may have a completely different normalized range. It must
+  // seed the new history rather than compare 0.9 against the previous geometry's 0.1.
+  set_depth(0.9f);
+  set_active_transform(201u, true);
+  ASSERT_TRUE(run_frame(source_width, source_height, 201u, 1u));
+  const auto debt_snapshot = controller->snapshot();
+  EXPECT_GT(activity_max(debt_snapshot), 0.0f);
+  EXPECT_FLOAT_EQ(
+    channel_max(
+      debt_snapshot,
+      sbs_scene_controller::dense_out_channel_e::
+        structural_content_cut_support
+    ),
+    0.0f
+  );
+
+  // The frame-state reseed marker is the equivalent contract for legacy/full-frame geometry.
+  set_frame_state(2.0f);
+  set_depth(0.2f);
+  set_legacy_transform();
+  ASSERT_TRUE(run_frame(source_width, source_height, 202u, 0u));
+  const auto state_snapshot = controller->snapshot();
+  EXPECT_GT(activity_max(state_snapshot), 0.0f);
+  EXPECT_FLOAT_EQ(
+    channel_max(
+      state_snapshot,
+      sbs_scene_controller::dense_out_channel_e::
+        structural_content_cut_support
+    ),
+    0.0f
+  );
+
+  // Abstention is one frame only. The reseeded 0.2 history becomes comparable again once
+  // frame_state returns to the ordinary valid value.
+  set_frame_state(1.0f);
+  set_depth(0.8f);
+  ASSERT_TRUE(run_frame(source_width, source_height, 203u, 1u));
+  const auto recovered_snapshot = controller->snapshot();
+  EXPECT_GT(
+    channel_max(
+      recovered_snapshot,
+      sbs_scene_controller::dense_out_channel_e::
+        structural_content_cut_support
+    ),
+    0.0f
+  );
+}
+
+TEST_F(
+  SbsSceneControllerGpu,
+  StaleAndMalformedOwnedTransformsAbstainAndRetainDepthHistory
+) {
+  constexpr UINT source_width = 280u;
+  constexpr UINT source_height = 280u;
+  constexpr UINT model_width = 28u;
+  constexpr UINT model_height = 28u;
+  constexpr std::uint64_t baseline_frame_id = 0x8765432100000259ull;
+  constexpr std::array<float, 4> roi {
+    0.125f,
+    0.25f,
+    0.625f,
+    0.75f,
+  };
+  constexpr std::size_t canvas =
+    sbs_scene_controller::analysis_canvas_size;
+  constexpr std::size_t plane = canvas * canvas;
+  constexpr std::size_t depth_value_channels =
+    static_cast<std::size_t>(
+      sbs_scene_controller::depth_history_channel_e::
+        valid_depth_confidence
+    );
+
+  const auto source = make_source_view(
+    device.Get(),
+    source_width,
+    source_height
+  );
+  ASSERT_TRUE(source);
+  std::vector<float> baseline_values(
+    model_width * model_height,
+    0.37f
+  );
+  std::vector<float> replacement_values(
+    model_width * model_height,
+    0.91f
+  );
+  const auto baseline_depth = make_depth_view(
+    device.Get(),
+    model_width,
+    model_height,
+    baseline_values
+  );
+  const auto replacement_depth = make_depth_view(
+    device.Get(),
+    model_width,
+    model_height,
+    replacement_values
+  );
+  std::vector<float> raw_depth(
+    model_width * model_height,
+    0.5f
+  );
+  const auto raw = make_structured_buffer(
+    device.Get(),
+    raw_depth.data(),
+    static_cast<UINT>(raw_depth.size() * sizeof(float)),
+    sizeof(float)
+  );
+  const auto adaptive = make_adaptive_state_buffer(
+    device.Get(),
+    0u,
+    1.0f
+  );
+  ASSERT_TRUE(baseline_depth);
+  ASSERT_TRUE(replacement_depth);
+  ASSERT_TRUE(raw.srv);
+  ASSERT_TRUE(adaptive.srv);
+
+  const auto resolve =
+    [&](const std::uint64_t frame_id,
+        ID3D11ShaderResourceView *depth,
+        ID3D11ShaderResourceView *transform) {
+      if (!controller->prepare_scene(
+            source.Get(),
+            models::input_color_space::srgb,
+            frame_id
+          )) {
+        return false;
+      }
+      controller->mark_enqueued(frame_id);
+      return controller->resolve_completed(
+        frame_id,
+        raw.srv.Get(),
+        depth,
+        frame_state_buffer.srv.Get(),
+        adaptive.srv.Get(),
+        model_width,
+        model_height,
+        transform
+      );
+    };
+
+  ASSERT_TRUE(resolve(
+    baseline_frame_id,
+    baseline_depth.Get(),
+    frame_roi_transform_buffer.srv.Get()
+  ));
+  const auto baseline = read_buffer<float>(
+    device.Get(),
+    context.Get(),
+    controller->snapshot().depth_history.Get(),
+    sbs_scene_controller::depth_history_channel_count * plane
+  );
+
+  auto stale_words = make_active_frame_roi_transform(
+    baseline_frame_id,
+    source_width,
+    source_height,
+    model_width,
+    model_height,
+    roi,
+    roi
+  );
+  const auto stale = make_structured_buffer(
+    device.Get(),
+    stale_words.data(),
+    sizeof(stale_words),
+    sizeof(stale_words[0])
+  );
+  ASSERT_TRUE(stale.srv);
+  ASSERT_TRUE(resolve(
+    baseline_frame_id + 1u,
+    replacement_depth.Get(),
+    stale.srv.Get()
+  ));
+  const auto stale_result = read_buffer<float>(
+    device.Get(),
+    context.Get(),
+    controller->snapshot().depth_history.Get(),
+    sbs_scene_controller::depth_history_channel_count * plane
+  );
+
+  auto malformed_words = make_active_frame_roi_transform(
+    baseline_frame_id + 2u,
+    source_width,
+    source_height,
+    model_width,
+    model_height,
+    roi,
+    roi
+  );
+  malformed_words[0][0] =
+    models::frame_roi_transform_contract_version + 1u;
+  const auto malformed = make_structured_buffer(
+    device.Get(),
+    malformed_words.data(),
+    sizeof(malformed_words),
+    sizeof(malformed_words[0])
+  );
+  ASSERT_TRUE(malformed.srv);
+  ASSERT_TRUE(resolve(
+    baseline_frame_id + 2u,
+    replacement_depth.Get(),
+    malformed.srv.Get()
+  ));
+  const auto malformed_result = read_buffer<float>(
+    device.Get(),
+    context.Get(),
+    controller->snapshot().depth_history.Get(),
+    sbs_scene_controller::depth_history_channel_count * plane
+  );
+
+  auto wrong_source_words = make_active_frame_roi_transform(
+    baseline_frame_id + 3u,
+    source_width * 2u,
+    source_height * 2u,
+    model_width,
+    model_height,
+    roi,
+    roi
+  );
+  const auto wrong_source = make_structured_buffer(
+    device.Get(),
+    wrong_source_words.data(),
+    sizeof(wrong_source_words),
+    sizeof(wrong_source_words[0])
+  );
+  ASSERT_TRUE(wrong_source.srv);
+  ASSERT_TRUE(resolve(
+    baseline_frame_id + 3u,
+    replacement_depth.Get(),
+    wrong_source.srv.Get()
+  ));
+  const auto wrong_source_result = read_buffer<float>(
+    device.Get(),
+    context.Get(),
+    controller->snapshot().depth_history.Get(),
+    sbs_scene_controller::depth_history_channel_count * plane
+  );
+
+  constexpr std::array<float, 4> wide_roi {
+    0.125f,
+    0.25f,
+    0.625f,
+    0.50f,
+  };
+  auto wrong_model_words = make_active_frame_roi_transform(
+    baseline_frame_id + 4u,
+    source_width,
+    source_height,
+    model_width * 2u,
+    model_height,
+    wide_roi,
+    wide_roi
+  );
+  const auto wrong_model = make_structured_buffer(
+    device.Get(),
+    wrong_model_words.data(),
+    sizeof(wrong_model_words),
+    sizeof(wrong_model_words[0])
+  );
+  ASSERT_TRUE(wrong_model.srv);
+  ASSERT_TRUE(resolve(
+    baseline_frame_id + 4u,
+    replacement_depth.Get(),
+    wrong_model.srv.Get()
+  ));
+  const auto wrong_model_result = read_buffer<float>(
+    device.Get(),
+    context.Get(),
+    controller->snapshot().depth_history.Get(),
+    sbs_scene_controller::depth_history_channel_count * plane
+  );
+
+  // Geometry-bearing history remains exact. Validity confidence/age are intentionally the only
+  // channels allowed to degrade when current depth abstains.
+  for (std::size_t channel = 0u;
+       channel < depth_value_channels;
+       ++channel) {
+    const auto first = baseline.begin() + channel * plane;
+    const auto last = first + plane;
+    EXPECT_TRUE(std::equal(
+      first,
+      last,
+      stale_result.begin() + channel * plane
+    )) << "stale transform changed depth channel " << channel;
+    EXPECT_TRUE(std::equal(
+      first,
+      last,
+      malformed_result.begin() + channel * plane
+    )) << "malformed transform changed depth channel " << channel;
+    EXPECT_TRUE(std::equal(
+      first,
+      last,
+      wrong_source_result.begin() + channel * plane
+    )) << "wrong-source transform changed depth channel " << channel;
+    EXPECT_TRUE(std::equal(
+      first,
+      last,
+      wrong_model_result.begin() + channel * plane
+    )) << "wrong-model transform changed depth channel " << channel;
+  }
+
+  const auto meta = read_buffer<float>(
+    device.Get(),
+    context.Get(),
+    controller->snapshot().meta.Get(),
+    sbs_scene_controller::meta_word_count
+  );
+  EXPECT_FLOAT_EQ(
+    meta[static_cast<std::size_t>(
+      sbs_scene_controller::meta_word_e::depth_input_valid
+    )],
+    0.0f
+  );
 }
 
 TEST_F(
@@ -1341,7 +1989,8 @@ TEST_F(
     frame_state_buffer.srv.Get(),
     adaptive_buffer.srv.Get(),
     depth_width,
-    depth_height
+    depth_height,
+    frame_roi_transform_buffer.srv.Get()
   ));
   const auto next_snapshot = controller->snapshot();
   EXPECT_EQ(next_snapshot.source_frame_id, pending_frame_id);
@@ -2509,7 +3158,8 @@ TEST_F(
           frame_state_buffer.srv.Get(),
           adaptive_buffer.srv.Get(),
           depth_width,
-          depth_height
+          depth_height,
+          frame_roi_transform_buffer.srv.Get()
         );
       };
     ASSERT_TRUE(run(parallel));
@@ -2623,7 +3273,8 @@ TEST_F(
           frame_state_buffer.srv.Get(),
           adaptive_buffer.srv.Get(),
           depth_width,
-          depth_height
+          depth_height,
+          frame_roi_transform_buffer.srv.Get()
         );
       };
     ASSERT_TRUE(run(parallel));
@@ -2714,10 +3365,14 @@ TEST_F(
     float challenger_seconds = 0.30f;
     float release_seconds = 60.0f;
     float scroll_enter_seconds = 0.05f;
+    std::uint32_t source_frame_id_low = 0u;
+    std::uint32_t source_frame_id_high = 0u;
+    std::uint32_t identity_reserved_0 = 0u;
+    std::uint32_t identity_reserved_1 = 0u;
     std::array<std::uint32_t, 8> ordered_abi_hash_words =
       sbs_scene_controller::ordered_abi_hash_words;
   };
-  static_assert(sizeof(scene_constants_t) == 96u);
+  static_assert(sizeof(scene_constants_t) == 112u);
 
   struct axis_run_t {
     std::uint32_t first;
@@ -3387,7 +4042,7 @@ TEST(
     0.0f,
     1.0f,
     1.0f,
-    2.0f,
+    1.0f,
   };
   const auto frame_state_buffer = make_structured_buffer(
     device.Get(),
@@ -3400,9 +4055,20 @@ TEST(
     0u,
     1.0f
   );
+  const std::array<
+    std::array<std::uint32_t, 4>,
+    models::frame_roi_transform_vector_count
+  > zero_transform {};
+  const auto frame_roi_transform_buffer = make_structured_buffer(
+    device.Get(),
+    zero_transform.data(),
+    sizeof(zero_transform),
+    sizeof(zero_transform[0])
+  );
   ASSERT_TRUE(raw_depth_buffer.srv);
   ASSERT_TRUE(frame_state_buffer.srv);
   ASSERT_TRUE(adaptive_state.srv);
+  ASSERT_TRUE(frame_roi_transform_buffer.srv);
 
   config::video_t::sbs_t sbs;
   sbs.scene_controller =
@@ -3444,7 +4110,8 @@ TEST(
       frame_state_buffer.srv.Get(),
       adaptive_state.srv.Get(),
       depth_width,
-      depth_height
+      depth_height,
+      frame_roi_transform_buffer.srv.Get()
     ));
 
     // Explicitly serialize this opt-in benchmark so each timestamp interval measures one

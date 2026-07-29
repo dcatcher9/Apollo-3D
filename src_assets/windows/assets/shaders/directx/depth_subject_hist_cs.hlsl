@@ -14,9 +14,14 @@ StructuredBuffer<float>  PreviousModelInput : register(t3);
 StructuredBuffer<float4> MinMaxEma : register(t4);  // w = current-frame validity
 StructuredBuffer<float>  CurrentAppearanceOrdinal : register(t5);  // pre-tone-map point maxRGB
 StructuredBuffer<float>  PreviousAppearanceOrdinal : register(t6);
+StructuredBuffer<uint4>  FrameRoiTransform : register(t7);
+StructuredBuffer<uint4>  PreviousFrameRoiTransform : register(t8);
+StructuredBuffer<float>  CurrentRawDepth : register(t9);
+Texture2D<uint>           PreviousReliableValidity : register(t10);
 
 // Shared depth-pass cbuffer (only target_w/target_h are used here).
 #include "include/depth_constants.hlsl"
+#include "include/sbs_frame_roi_transform.hlsl"
 
 #define NUM_BINS 256
 #define STRUCTURE_TILE_WIDTH 18
@@ -56,9 +61,188 @@ float3 PreviousModelColor(uint2 p) {
         PreviousModelInput[idx + 2u * plane] * 0.225f + 0.406f);
 }
 
+SbsFrameRoiTransformData LoadPreviousFrameRoiTransform() {
+    return SBS_FRAME_ROI_DECODE_RESOURCE(
+        PreviousFrameRoiTransform);
+}
+
+bool TryTargetPlane(out uint plane) {
+    plane = 0u;
+    if (target_w == 0u ||
+        target_h == 0u ||
+        target_w > 0xffffffffu / target_h) {
+        return false;
+    }
+    plane = target_w * target_h;
+    return true;
+}
+
+bool FrameRoiAcceptedBoundsContains(
+    uint4 bounds,
+    uint2 pixel)
+{
+    return all(pixel >= bounds.xy) &&
+           all(pixel < bounds.zw);
+}
+
 [numthreads(16, 16, 1)]
 void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
           uint3 gid : SV_GroupID) {
+    SbsFrameRoiTransformData current_transform =
+        FrameRoiTransformLoad();
+    SbsFrameRoiTransformData previous_transform =
+        LoadPreviousFrameRoiTransform();
+
+    uint depth_width;
+    uint depth_height;
+    DepthTexture.GetDimensions(depth_width, depth_height);
+    uint subject_hist_count;
+    uint subject_hist_stride;
+    SubjectHist.GetDimensions(
+        subject_hist_count,
+        subject_hist_stride);
+    uint plain_hist_count;
+    uint plain_hist_stride;
+    PlainHist.GetDimensions(
+        plain_hist_count,
+        plain_hist_stride);
+    uint previous_depth_width;
+    uint previous_depth_height;
+    PreviousDepth.GetDimensions(
+        previous_depth_width,
+        previous_depth_height);
+    uint current_model_count;
+    uint current_model_stride;
+    CurrentModelInput.GetDimensions(
+        current_model_count,
+        current_model_stride);
+    uint previous_model_count;
+    uint previous_model_stride;
+    PreviousModelInput.GetDimensions(
+        previous_model_count,
+        previous_model_stride);
+    uint minmax_count;
+    uint minmax_stride;
+    MinMaxEma.GetDimensions(
+        minmax_count,
+        minmax_stride);
+    uint current_ordinal_count;
+    uint current_ordinal_stride;
+    CurrentAppearanceOrdinal.GetDimensions(
+        current_ordinal_count,
+        current_ordinal_stride);
+    uint previous_ordinal_count;
+    uint previous_ordinal_stride;
+    PreviousAppearanceOrdinal.GetDimensions(
+        previous_ordinal_count,
+        previous_ordinal_stride);
+    uint current_transform_vectors;
+    uint current_transform_stride;
+    FrameRoiTransform.GetDimensions(
+        current_transform_vectors,
+        current_transform_stride);
+    uint previous_transform_vectors;
+    uint previous_transform_stride;
+    PreviousFrameRoiTransform.GetDimensions(
+        previous_transform_vectors,
+        previous_transform_stride);
+    uint current_raw_count;
+    uint current_raw_stride;
+    CurrentRawDepth.GetDimensions(
+        current_raw_count,
+        current_raw_stride);
+    uint previous_validity_width;
+    uint previous_validity_height;
+    PreviousReliableValidity.GetDimensions(
+        previous_validity_width,
+        previous_validity_height);
+
+    uint plane;
+    bool target_plane_safe =
+        TryTargetPlane(plane);
+    bool current_unbound =
+        FrameRoiDataUnboundZero(current_transform);
+    bool previous_unbound =
+        FrameRoiDataUnboundZero(previous_transform);
+    bool legacy_unbound_pair =
+        current_unbound &&
+        previous_unbound;
+    bool current_transform_valid =
+        current_transform_vectors >= SBS_FRAME_ROI_VECTOR_COUNT &&
+        current_transform_stride == 16u &&
+        FrameRoiDataValid(current_transform);
+    bool previous_transform_valid =
+        previous_transform_vectors >= SBS_FRAME_ROI_VECTOR_COUNT &&
+        previous_transform_stride == 16u &&
+        FrameRoiDataValid(previous_transform);
+    bool transform_dimensions_match =
+        current_transform_valid &&
+        all(FrameRoiDataModelDimensions(current_transform) ==
+            uint2(target_w, target_h));
+    bool current_transform_usable =
+        legacy_unbound_pair ||
+        transform_dimensions_match;
+    bool current_canonical_full_frame =
+        legacy_unbound_pair ||
+        (transform_dimensions_match &&
+         FrameRoiDataCanonicalFullFrame(current_transform));
+    bool current_active_roi =
+        transform_dimensions_match &&
+        FrameRoiDataActive(current_transform);
+    bool same_transform_geometry =
+        legacy_unbound_pair ||
+        (transform_dimensions_match &&
+         previous_transform_valid &&
+         !FrameRoiDataGeometryReseedRequired(
+             current_transform,
+             previous_transform));
+    bool previous_canonical_full_frame =
+        legacy_unbound_pair ||
+        (previous_transform_valid &&
+         FrameRoiDataCanonicalFullFrame(previous_transform));
+    uint4 current_accepted_bounds =
+        current_transform_valid ?
+        FrameRoiDataAcceptedModelBounds(current_transform) :
+        0u.xxxx;
+    uint4 previous_accepted_bounds =
+        previous_transform_valid ?
+        FrameRoiDataAcceptedModelBounds(previous_transform) :
+        0u.xxxx;
+    bool histogram_outputs_safe =
+        subject_hist_count >= NUM_BINS &&
+        subject_hist_stride == 4u &&
+        plain_hist_count >= NUM_BINS + 7u &&
+        plain_hist_stride == 4u;
+    bool current_resources_safe =
+        target_plane_safe &&
+        current_transform_usable &&
+        histogram_outputs_safe &&
+        depth_width >= target_w &&
+        depth_height >= target_h &&
+        current_model_stride == 4u &&
+        plane <= current_model_count / 3u &&
+        current_ordinal_stride == 4u &&
+        current_ordinal_count >= plane &&
+        minmax_count >= 1u &&
+        minmax_stride == 16u &&
+        (!current_active_roi ||
+         (current_raw_stride == 4u &&
+          current_raw_count >= plane));
+    bool previous_tuple_resources_safe =
+        target_plane_safe &&
+        previous_depth_width >= target_w &&
+        previous_depth_height >= target_h &&
+        previous_model_stride == 4u &&
+        plane <= previous_model_count / 3u &&
+        previous_ordinal_stride == 4u &&
+        previous_ordinal_count >= plane &&
+        (legacy_unbound_pair ||
+         (previous_validity_width >= target_w &&
+          previous_validity_height >= target_h));
+    bool previous_tuple_readable =
+        same_transform_geometry &&
+        previous_tuple_resources_safe;
+
     uint lin = tid.y * 16 + tid.x;  // 256 threads/group: one shared bin each
     g_hist[lin] = 0u;
     g_plain[lin] = 0u;
@@ -75,26 +259,132 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
     // Cooperatively load the 18x18 ordinal tile. The final 68 halo samples are handled by the
     // first 68 threads' second loop iteration; clamping exactly matches the depth-gradient rule.
     for (uint tile_idx = lin; tile_idx < STRUCTURE_TILE_TEXELS; tile_idx += 256u) {
-        uint tile_x = tile_idx % STRUCTURE_TILE_WIDTH;
-        uint tile_y = tile_idx / STRUCTURE_TILE_WIDTH;
-        int source_x = clamp((int)(gid.x * 16u + tile_x) - 1, 0, (int)target_w - 1);
-        int source_y = clamp((int)(gid.y * 16u + tile_y) - 1, 0, (int)target_h - 1);
-        uint source_index = (uint)source_y * target_w + (uint)source_x;
+        float current_ordinal = 0.0f;
+        float previous_ordinal = 0.0f;
+        if (target_plane_safe) {
+            uint tile_x =
+                tile_idx % STRUCTURE_TILE_WIDTH;
+            uint tile_y =
+                tile_idx / STRUCTURE_TILE_WIDTH;
+            int source_x = clamp(
+                (int)(gid.x * 16u + tile_x) - 1,
+                0,
+                (int)target_w - 1);
+            int source_y = clamp(
+                (int)(gid.y * 16u + tile_y) - 1,
+                0,
+                (int)target_h - 1);
+            uint source_index =
+                (uint)source_y * target_w +
+                (uint)source_x;
+            if (current_resources_safe) {
+                current_ordinal =
+                    CurrentAppearanceOrdinal[source_index];
+            }
+            if (previous_tuple_readable) {
+                previous_ordinal =
+                    PreviousAppearanceOrdinal[source_index];
+            }
+        }
         g_current_appearance_ordinal[tile_idx] =
-            CurrentAppearanceOrdinal[source_index];
+            current_ordinal;
         g_previous_appearance_ordinal[tile_idx] =
-            PreviousAppearanceOrdinal[source_index];
+            previous_ordinal;
     }
     GroupMemoryBarrierWithGroupSync();
 
-    if (dtid.x < target_w && dtid.y < target_h && MinMaxEma[0].w > 0.5f) {
-        float d = DepthTexture[dtid.xy];
+    bool current_pixel_accepted =
+        current_resources_safe &&
+        dtid.x < target_w &&
+        dtid.y < target_h &&
+        (current_canonical_full_frame ||
+         FrameRoiAcceptedBoundsContains(
+             current_accepted_bounds,
+             dtid.xy));
+    uint current_index =
+        dtid.y * target_w + dtid.x;
+    float current_raw = -1.0f;
+    float current_normalized = 0.0f;
+    if (current_pixel_accepted) {
+        if (current_active_roi) {
+            current_raw =
+                CurrentRawDepth[current_index];
+        }
+        current_normalized = DepthTexture[dtid.xy];
+    }
+    bool current_pixel_valid =
+        current_pixel_accepted &&
+        (current_canonical_full_frame ||
+         (!isnan(current_raw) &&
+          !isinf(current_raw) &&
+          current_raw >= 0.0f &&
+          !isnan(current_normalized) &&
+          !isinf(current_normalized)));
 
-        // Forward-difference gradient (clamped at the far edges).
+    if (current_pixel_valid && MinMaxEma[0].w > 0.5f) {
+        float d = current_normalized;
+
+        // Forward-difference gradient (clamped at the far edges). The focus boundary is a
+        // controller boundary, not a scene silhouette, so a neighbor outside exact focus reuses
+        // the center value and contributes zero gradient.
         uint xn = min(dtid.x + 1, target_w - 1);
         uint yn = min(dtid.y + 1, target_h - 1);
-        float gx = DepthTexture[uint2(xn, dtid.y)] - d;
-        float gy = DepthTexture[uint2(dtid.x, yn)] - d;
+        uint2 x_neighbor = uint2(xn, dtid.y);
+        uint2 y_neighbor = uint2(dtid.x, yn);
+        bool x_neighbor_accepted =
+            current_canonical_full_frame ||
+            FrameRoiAcceptedBoundsContains(
+                current_accepted_bounds,
+                x_neighbor);
+        bool y_neighbor_accepted =
+            current_canonical_full_frame ||
+            FrameRoiAcceptedBoundsContains(
+                current_accepted_bounds,
+                y_neighbor);
+        uint x_neighbor_index =
+            x_neighbor.y * target_w + x_neighbor.x;
+        uint y_neighbor_index =
+            y_neighbor.y * target_w + y_neighbor.x;
+        float x_neighbor_raw = -1.0f;
+        float y_neighbor_raw = -1.0f;
+        if (current_active_roi &&
+            x_neighbor_accepted) {
+            x_neighbor_raw =
+                CurrentRawDepth[x_neighbor_index];
+        }
+        if (current_active_roi &&
+            y_neighbor_accepted) {
+            y_neighbor_raw =
+                CurrentRawDepth[y_neighbor_index];
+        }
+        float x_neighbor_depth =
+            x_neighbor_accepted ?
+            DepthTexture[x_neighbor] :
+            d;
+        float y_neighbor_depth =
+            y_neighbor_accepted ?
+            DepthTexture[y_neighbor] :
+            d;
+        if (!current_canonical_full_frame) {
+            x_neighbor_accepted =
+                x_neighbor_accepted &&
+                !isnan(x_neighbor_raw) &&
+                !isinf(x_neighbor_raw) &&
+                x_neighbor_raw >= 0.0f &&
+                !isnan(x_neighbor_depth) &&
+                !isinf(x_neighbor_depth);
+            y_neighbor_accepted =
+                y_neighbor_accepted &&
+                !isnan(y_neighbor_raw) &&
+                !isinf(y_neighbor_raw) &&
+                y_neighbor_raw >= 0.0f &&
+                !isnan(y_neighbor_depth) &&
+                !isinf(y_neighbor_depth);
+        }
+        float gx =
+            (x_neighbor_accepted ? x_neighbor_depth : d) - d;
+        float gy =
+            (y_neighbor_accepted ? y_neighbor_depth : d) - d;
         float grad = sqrt(gx * gx + gy * gy);
         // Express every spatial-gradient threshold on the 434-short-side calibration grid.
         // The scale comes from target_w/target_h, which are the resolved TensorRT dimensions
@@ -116,7 +406,16 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
                 EDGE_WEIGHT_MAX * reference_texel_scale);
             InterlockedAdd(g_edge_count, (uint)(weight * EDGE_WEIGHT_SCALE + 0.5f));
         }
-        if (abs(d - PreviousDepth[dtid.xy]) >= 0.05f) {
+        bool previous_center_accepted =
+            previous_tuple_readable &&
+            (legacy_unbound_pair ||
+             PreviousReliableValidity[dtid.xy] != 0u) &&
+            (previous_canonical_full_frame ||
+             FrameRoiAcceptedBoundsContains(
+                 previous_accepted_bounds,
+                 dtid.xy));
+        if (previous_center_accepted &&
+            abs(d - PreviousDepth[dtid.xy]) >= 0.05f) {
             InterlockedAdd(g_change_count, 1u);
         }
 
@@ -128,15 +427,22 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
         // outside that exposure model. Depth geometry is still the shot-reset authority.
         uint tile_center = (tid.y + 1u) * STRUCTURE_TILE_WIDTH + tid.x + 1u;
         float3 current_color = CurrentModelColor(dtid.xy);
-        float3 previous_color = PreviousModelColor(dtid.xy);
+        float3 previous_color =
+            previous_center_accepted ?
+            PreviousModelColor(dtid.xy) :
+            current_color;
         float3 raw_rgb_delta = abs(current_color - previous_color);
-        if (max(raw_rgb_delta.r, max(raw_rgb_delta.g, raw_rgb_delta.b)) >=
+        if (previous_center_accepted &&
+            max(raw_rgb_delta.r, max(raw_rgb_delta.g, raw_rgb_delta.b)) >=
             RAW_RGB_PIXEL_DELTA) {
             InterlockedAdd(g_raw_rgb_change_count, 1u);
         }
 
         float current_samples[5];
         float previous_samples[5];
+        bool current_stencil_valid = true;
+        bool previous_stencil_valid =
+            previous_tuple_readable;
         [unroll]
         for (int sample_index = 0; sample_index < 5; ++sample_index) {
             int2 offset = STRUCTURE_ORDINAL_OFFSETS[sample_index];
@@ -146,6 +452,45 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
                 g_current_appearance_ordinal[tile_index];
             previous_samples[sample_index] =
                 g_previous_appearance_ordinal[tile_index];
+            int2 sample_pixel = clamp(
+                int2(dtid.xy) + offset,
+                int2(0, 0),
+                int2((int)target_w - 1, (int)target_h - 1));
+            if (!current_canonical_full_frame &&
+                !FrameRoiAcceptedBoundsContains(
+                    current_accepted_bounds,
+                    (uint2)sample_pixel)) {
+                current_stencil_valid = false;
+            }
+            uint sample_index_linear =
+                (uint)sample_pixel.y * target_w +
+                (uint)sample_pixel.x;
+            float sample_raw = -1.0f;
+            if (current_active_roi) {
+                sample_raw =
+                    CurrentRawDepth[sample_index_linear];
+            }
+            if (current_active_roi &&
+                (isnan(sample_raw) ||
+                 isinf(sample_raw) ||
+                 sample_raw < 0.0f)) {
+                current_stencil_valid = false;
+            }
+            if (!previous_tuple_readable) {
+                previous_stencil_valid = false;
+            } else {
+                if (!legacy_unbound_pair &&
+                    PreviousReliableValidity[
+                        (uint2)sample_pixel] == 0u) {
+                    previous_stencil_valid = false;
+                }
+                if (!previous_canonical_full_frame &&
+                    !FrameRoiAcceptedBoundsContains(
+                        previous_accepted_bounds,
+                        (uint2)sample_pixel)) {
+                    previous_stencil_valid = false;
+                }
+            }
         }
         uint current_comparisons = 0u;
         uint previous_comparisons = 0u;
@@ -158,8 +503,10 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
                 float current_delta = current_samples[first] - current_samples[second];
                 float previous_delta = previous_samples[first] - previous_samples[second];
                 bool current_reliable =
+                    current_stencil_valid &&
                     abs(current_delta) >= STRUCTURAL_ORDINAL_CONTRAST_FLOOR;
                 bool previous_reliable =
+                    previous_stencil_valid &&
                     abs(previous_delta) >= STRUCTURAL_ORDINAL_CONTRAST_FLOOR;
                 current_comparisons += current_reliable ? 1u : 0u;
                 previous_comparisons += previous_reliable ? 1u : 0u;
@@ -196,9 +543,31 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
         float smooth_w =
             1.0f - 1.0f / (1.0f + exp(-10.0f * (reference_grad - 0.025f)));
 
-        // Center Gaussian in [-1,1] frame coords (Bestv2 sigmas: y 0.55, x 0.70).
-        float nx = (float)dtid.x / (float)max(target_w - 1, 1u) * 2.0f - 1.0f;
-        float ny = (float)dtid.y / (float)max(target_h - 1, 1u) * 2.0f - 1.0f;
+        // Center Gaussian in [-1,1] focus coordinates (Bestv2 sigmas: y 0.55, x 0.70).
+        // Keep the exact historical arithmetic for canonical full-frame operation.
+        float nx;
+        float ny;
+        if (current_canonical_full_frame) {
+            nx = (float)dtid.x / (float)max(target_w - 1, 1u) * 2.0f - 1.0f;
+            ny = (float)dtid.y / (float)max(target_h - 1, 1u) * 2.0f - 1.0f;
+        } else {
+            float2 model_uv =
+                (float2(dtid.xy) + 0.5f) /
+                float2(target_w, target_h);
+            float2 source_uv;
+            FrameRoiDataModelToSourceUv(
+                current_transform,
+                model_uv,
+                source_uv);
+            float4 focus =
+                FrameRoiDataFocus(current_transform);
+            float2 focus_uv =
+                saturate(
+                    (source_uv - focus.xy) /
+                    max(focus.zw - focus.xy, 1e-8f.xx));
+            nx = focus_uv.x * 2.0f - 1.0f;
+            ny = focus_uv.y * 2.0f - 1.0f;
+        }
         float center_w = exp(-0.5f * ((ny / 0.55f) * (ny / 0.55f) + (nx / 0.70f) * (nx / 0.70f)));
 
         float w = center_w * smooth_w;
@@ -208,13 +577,16 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
     }
 
     GroupMemoryBarrierWithGroupSync();
-    if (g_hist[lin] > 0u) {
+    if (histogram_outputs_safe &&
+        g_hist[lin] > 0u) {
         InterlockedAdd(SubjectHist[lin], g_hist[lin]);
     }
-    if (g_plain[lin] > 0u) {
+    if (histogram_outputs_safe &&
+        g_plain[lin] > 0u) {
         InterlockedAdd(PlainHist[lin], g_plain[lin]);
     }
-    if (lin == 0u) {
+    if (histogram_outputs_safe &&
+        lin == 0u) {
         InterlockedAdd(PlainHist[NUM_BINS], g_edge_count);
         InterlockedAdd(PlainHist[NUM_BINS + 1], g_change_count);
         InterlockedAdd(PlainHist[NUM_BINS + 2], g_structural_change_count);

@@ -14,13 +14,200 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string_view>
+#include <type_traits>
 
 namespace models {
   inline constexpr std::uint32_t frame_roi_transform_contract_version = 1;
   inline constexpr std::uint32_t frame_roi_model_patch_size = 14;
+  inline constexpr std::uint32_t frame_roi_transform_vector_count = 8;
   inline constexpr std::uint32_t frame_roi_transform_bank_count = 2;
+  inline constexpr std::uint32_t frame_roi_transform_words_per_vector = 4;
+  inline constexpr std::uint32_t
+    frame_roi_transform_diagnostics_vector_index = 7;
+  inline constexpr std::uint32_t
+    frame_roi_transform_fallback_reason_component_index = 3;
+  inline constexpr std::uint32_t
+    frame_roi_transform_fallback_reason_word_index =
+      frame_roi_transform_diagnostics_vector_index *
+        frame_roi_transform_words_per_vector +
+      frame_roi_transform_fallback_reason_component_index;
+  using frame_roi_transform_words_t = std::array<
+    std::uint32_t,
+    frame_roi_transform_vector_count *
+      frame_roi_transform_words_per_vector
+  >;
   inline constexpr std::uint32_t invalid_frame_roi_transform_bank =
     std::numeric_limits<std::uint32_t>::max();
+
+  static_assert(
+    frame_roi_transform_diagnostics_vector_index + 1u ==
+      frame_roi_transform_vector_count
+  );
+  static_assert(frame_roi_transform_fallback_reason_word_index == 31u);
+
+  /**
+   * Diagnostics.w values in the eight-uint4 FrameRoiTransform GPU ABI.
+   *
+   * Keep the explicit values synchronized with the
+   * SBS_FRAME_ROI_FALLBACK_* definitions in sbs_frame_roi_transform.hlsl.
+   */
+  enum class frame_roi_fallback_reason : std::uint32_t {
+    none = 0u,
+    inactive = 1u,
+    controller_invalid = 2u,
+    no_locked_roi = 3u,
+    malformed_roi = 4u,
+    roi_too_small = 5u,
+    aspect_envelope_impossible = 6u,
+    empty_focus = 7u,
+    shape_request_mismatch = 8u,
+    full_frame_shape_mismatch = 9u,
+    invalid_dimensions = 10u,
+  };
+
+  struct frame_roi_fallback_reason_descriptor {
+    frame_roi_fallback_reason reason;
+    std::string_view name;
+  };
+
+  inline constexpr std::array<
+    frame_roi_fallback_reason_descriptor,
+    11
+  > frame_roi_fallback_reason_contract {{
+    {frame_roi_fallback_reason::none, "none"},
+    {frame_roi_fallback_reason::inactive, "inactive"},
+    {
+      frame_roi_fallback_reason::controller_invalid,
+      "controller_invalid"
+    },
+    {frame_roi_fallback_reason::no_locked_roi, "no_locked_roi"},
+    {frame_roi_fallback_reason::malformed_roi, "malformed_roi"},
+    {frame_roi_fallback_reason::roi_too_small, "roi_too_small"},
+    {
+      frame_roi_fallback_reason::aspect_envelope_impossible,
+      "aspect_envelope_impossible"
+    },
+    {frame_roi_fallback_reason::empty_focus, "empty_focus"},
+    {
+      frame_roi_fallback_reason::shape_request_mismatch,
+      "shape_request_mismatch"
+    },
+    {
+      frame_roi_fallback_reason::full_frame_shape_mismatch,
+      "full_frame_shape_mismatch"
+    },
+    {
+      frame_roi_fallback_reason::invalid_dimensions,
+      "invalid_dimensions"
+    },
+  }};
+
+  [[nodiscard]] constexpr std::uint32_t frame_roi_fallback_reason_value(
+    const frame_roi_fallback_reason reason
+  ) {
+    return static_cast<std::uint32_t>(reason);
+  }
+
+  [[nodiscard]] constexpr bool frame_roi_fallback_reason_contract_ordered() {
+    for (
+      std::size_t index = 0;
+      index < frame_roi_fallback_reason_contract.size();
+      ++index
+    ) {
+      if (
+        frame_roi_fallback_reason_value(
+          frame_roi_fallback_reason_contract[index].reason
+        ) != index
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static_assert(frame_roi_fallback_reason_contract_ordered());
+
+  [[nodiscard]] constexpr std::string_view frame_roi_fallback_reason_name(
+    const std::uint32_t value
+  ) {
+    if (value >= frame_roi_fallback_reason_contract.size()) {
+      return "unknown";
+    }
+    return frame_roi_fallback_reason_contract[value].name;
+  }
+
+  [[nodiscard]] constexpr std::uint32_t
+  frame_roi_fallback_reason_from_words(
+    const frame_roi_transform_words_t &words
+  ) {
+    return words[frame_roi_transform_fallback_reason_word_index];
+  }
+
+  [[nodiscard]] constexpr std::string_view
+  frame_roi_fallback_reason_name_from_words(
+    const frame_roi_transform_words_t &words
+  ) {
+    return frame_roi_fallback_reason_name(
+      frame_roi_fallback_reason_from_words(words)
+    );
+  }
+
+  /** Exact 96-byte upload record consumed by sbs_frame_roi_transform_cs.hlsl. */
+  struct alignas(16) frame_roi_builder_constants {
+    std::uint32_t source_width = 0;
+    std::uint32_t source_height = 0;
+    std::uint32_t model_width = 0;
+    std::uint32_t model_height = 0;
+
+    std::uint32_t source_frame_id_low = 0;
+    std::uint32_t source_frame_id_high = 0;
+    std::uint32_t active_rules = 0;
+    std::uint32_t expected_backend_generation = 0;
+
+    std::uint32_t transform_version_low = 0;
+    std::uint32_t transform_version_high = 0;
+    std::uint32_t gpu_bank_identity = invalid_frame_roi_transform_bank;
+    std::uint32_t lifecycle_reserved = 0;
+
+    float quiet_halo_cells = 0.0f;
+    float feather_cells = 0.0f;
+    float min_focus_cells = 0.0f;
+    // Low 16 bits: exact shape-request flags. High 16 bits: exact reason. Zero never authorizes
+    // an active crop, so a fallback request cannot be turned active by reusing its hash fields.
+    std::uint32_t expected_request_authority = 0u;
+
+    std::uint32_t analysis_canvas_size = 0;
+    std::uint32_t expected_roi_generation = 0;
+    std::uint32_t shape_request_id = 0;
+    std::uint32_t expected_rule_update_count = 0;
+
+    std::array<std::uint32_t, 4> expected_committed_roi_bits {};
+  };
+
+  static_assert(sizeof(frame_roi_builder_constants) == 96u);
+  static_assert(alignof(frame_roi_builder_constants) == 16u);
+  static_assert(std::is_standard_layout_v<frame_roi_builder_constants>);
+  static_assert(std::is_trivially_copyable_v<frame_roi_builder_constants>);
+  static_assert(
+    offsetof(frame_roi_builder_constants, source_width) == 0u
+  );
+  static_assert(
+    offsetof(frame_roi_builder_constants, source_frame_id_low) == 16u
+  );
+  static_assert(
+    offsetof(frame_roi_builder_constants, transform_version_low) == 32u
+  );
+  static_assert(
+    offsetof(frame_roi_builder_constants, quiet_halo_cells) == 48u
+  );
+  static_assert(
+    offsetof(frame_roi_builder_constants, analysis_canvas_size) == 64u
+  );
+  static_assert(
+    offsetof(frame_roi_builder_constants, expected_committed_roi_bits) ==
+      80u
+  );
 
   struct frame_roi_transform_identity {
     std::uint32_t contract_version = frame_roi_transform_contract_version;
@@ -236,6 +423,21 @@ namespace models {
       reserved_bank_.reset();
       pending_bank_.reset();
       orphaned_frame_id_.reset();
+    }
+
+    /**
+     * Retire every CPU-owned bank before shape-dependent GPU resources are rebuilt.
+     *
+     * The monotonic transform version deliberately survives the reset: stale commands or captures
+     * from the old resource generation must never regain an identity reused by the new geometry.
+     */
+    void reset_for_resource_rebuild() {
+      slots_ = {};
+      reserved_bank_.reset();
+      pending_bank_.reset();
+      completed_bank_.reset();
+      orphaned_frame_id_.reset();
+      next_write_bank_ = 0u;
     }
 
     [[nodiscard]] std::optional<std::uint32_t> reserved_bank() const {

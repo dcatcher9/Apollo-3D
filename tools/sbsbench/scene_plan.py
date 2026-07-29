@@ -26,7 +26,7 @@ else:
 
 SCENE_PLAN_SCHEMA = 1
 SCENE_PLAN_VERSION = "scene-plan-v1"
-CACHE_CONTRACT_SCHEMA = 1
+CACHE_CONTRACT_SCHEMA = 2
 
 DEPTH_CUT_HIGH = 0.60
 DEPTH_CUT_CORROBORATE = 0.25
@@ -355,7 +355,14 @@ class StreamingScenePlanner:
         for name in ("depth_updated", "hard_cut_pulse"):
             if not isinstance(frame.get(name), bool):
                 raise ScenePlanError(f"scene planner {name} must be boolean")
-        return dict(frame)
+        requires_previous = frame.get(
+            "requires_previous_packed_frame", False)
+        if not isinstance(requires_previous, bool):
+            raise ScenePlanError(
+                "scene planner requires_previous_packed_frame must be boolean")
+        normalized = dict(frame)
+        normalized["requires_previous_packed_frame"] = requires_previous
+        return normalized
 
     def _add_proposal(self, frame: Mapping[str, Any]) -> None:
         index = int(frame["source_index"])
@@ -434,6 +441,8 @@ class StreamingScenePlanner:
             source_index = int(frame["source_index"])
             ordinal = int(frame["_planner_depth_update_ordinal"])
             if not frame["depth_updated"]:
+                continue
+            if frame["requires_previous_packed_frame"]:
                 continue
             if ordinal < left_ordinal or ordinal > right_ordinal:
                 continue
@@ -540,6 +549,19 @@ class StreamingScenePlanner:
                 )
                 for proposal in cluster.proposal_indices
             )
+            safe_legal_proposals = [
+                proposal for proposal in cluster.proposal_indices
+                if (
+                    proposal >= minimum_boundary and
+                    len(self._frames) - (proposal - open_start) >=
+                        self.config.minimum_scene_frames and
+                    any(
+                        int(frame["source_index"]) == proposal and
+                        not frame["requires_previous_packed_frame"]
+                        for frame in self._frames
+                    )
+                )
+            ]
             if proposal_evidence_available:
                 self._boundary_revisions.append(copy.deepcopy({
                     "proposal_sequences": [
@@ -548,10 +570,17 @@ class StreamingScenePlanner:
                     "proposal_frame_ids": list(cluster.proposal_frame_ids),
                     "final_sequence": None,
                     "accepted": False,
-                    "decision": "rejected_unsupported_proposal",
+                    "decision": (
+                        "rejected_unsupported_proposal"
+                        if safe_legal_proposals else
+                        "rejected_minimum_scene_length"
+                    ),
                     "reason": (
                         "exported schema-3 evidence supported neither geometry, "
                         "appearance, nor the relative-geometry escape"
+                        if safe_legal_proposals else
+                        "the proposed boundary could not leave replay-safe legal "
+                        "scene prefixes on both sides"
                     ),
                     "truncated": eof,
                     "budget_forced": False,
@@ -563,7 +592,16 @@ class StreamingScenePlanner:
             # the current scene and let the next distinct proposal decide.
             legal_proposals = [
                 proposal for proposal in cluster.proposal_indices
-                if proposal >= minimum_boundary
+                if (
+                    proposal >= minimum_boundary and
+                    len(self._frames) - (proposal - open_start) >=
+                        self.config.minimum_scene_frames and
+                    any(
+                        int(frame["source_index"]) == proposal and
+                        not frame["requires_previous_packed_frame"]
+                        for frame in self._frames
+                    )
+                )
             ]
             if not legal_proposals:
                 self._boundary_revisions.append(copy.deepcopy({
@@ -721,8 +759,28 @@ class StreamingScenePlanner:
                 open_start_sequence=self.open_start_sequence,
                 current_sequence=self._next_source_index,
             )
+        # A separately launched replay has no preceding packed target. Retain an invalid
+        # preserve-previous tail behind a safe first frame, and only select a suffix that fits.
+        prefix_count = None
+        retained_bytes = 0
+        for index in range(len(self._frames) - 1, 0, -1):
+            retained_bytes += int(
+                self._frames[index]["_planner_cache_bytes"])
+            if (
+                index >= self.config.minimum_scene_frames and
+                not self._frames[index]["requires_previous_packed_frame"] and
+                retained_bytes <= limit
+            ):
+                prefix_count = index
+                break
+        if prefix_count is None:
+            raise SceneCacheBudgetExceeded(
+                limit_bytes=limit,
+                live_bytes=self._open_cache_bytes,
+                open_start_sequence=self.open_start_sequence,
+                current_sequence=self._next_source_index,
+            )
         # Administrative splitting is explicit and does not increment the semantic-scene id.
-        prefix_count = len(self._frames) - 1
         boundary_index = int(self._frames[prefix_count]["source_index"])
         boundary = {
             "proposal_sequences": [],
@@ -761,6 +819,9 @@ class StreamingScenePlanner:
     ) -> dict[str, Any]:
         if prefix_count <= 0 or prefix_count > len(self._frames):
             raise ScenePlanError("finalized scene prefix is empty or out of range")
+        if self._frames[0]["requires_previous_packed_frame"]:
+            raise ScenePlanError(
+                "a separately replayed scene cannot begin with preserve-previous state")
         scene_frames = self._frames[:prefix_count]
         del self._frames[:prefix_count]
         released_bytes = sum(

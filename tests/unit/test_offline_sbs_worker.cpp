@@ -5,7 +5,9 @@
 
 #include "src/offline_sbs_worker.h"
 #include "src/crypto.h"
+#include "src/generated/sbs_adaptive_state_contract.h"
 #include "src/offline_sbs_contract.h"
+#include "src/sbs_scene_cache_contract.h"
 
 #include <algorithm>
 #include <chrono>
@@ -78,6 +80,65 @@ namespace {
                     {"scene_plan_contract", "scene-plan-v1"},
                   }},
       {"python_dependency", false},
+    };
+  }
+
+  nlohmann::json native_replay_capabilities() {
+    nlohmann::json analysis_flag_bits = nlohmann::json::object();
+    for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
+      analysis_flag_bits[std::string {flag.name}] = flag.bit;
+    }
+    return {
+      {"schema", 1},
+      {"native_whole_clip", {
+        {"follow_protocol_schema", 1},
+        {"follow_global_first_sequence", true},
+        {"adaptive_state_schema", sbs_adaptive_state::schema_version},
+        {"adaptive_analysis_flag_bits", std::move(analysis_flag_bits)},
+        {"scene_cache_contract_schema", sbs_scene_cache::contract_schema},
+        {"scene_cache_packed_sbs_contract", true},
+        {"scene_cache_depth", {
+          {"dtype", "float32-le"},
+          {"layout", "row-major"},
+          {"dxgi_format", "R32_FLOAT"},
+          {"dimensions", "per-frame-metadata"},
+          {"bytes_per_frame", nullptr},
+        }},
+        {"scene_cache_frame_metadata", {
+          {"schema", sbs_scene_cache::frame_metadata_schema},
+          {"word_count", sbs_scene_cache::frame_metadata_word_count},
+          {"roi_transform_word_offset",
+           sbs_scene_cache::roi_transform_word_offset},
+          {"roi_transform_word_count",
+           sbs_scene_cache::roi_transform_word_count},
+          {"roi_transform_contract_schema",
+           models::frame_roi_transform_contract_version},
+        }},
+        {"scene_cache_state", {
+          {"schema", sbs_scene_cache::cached_state_schema},
+          {"subject_word_count",
+           sbs_adaptive_state::render_prefix_word_count},
+          {"depth_frame_state_word_count",
+           sbs_scene_cache::depth_frame_state_word_count},
+          {"word_count", sbs_scene_cache::cached_state_word_count},
+          {"dtype", "uint32-le"},
+        }},
+        {"scene_plan", {
+          {"schema", 1},
+          {"version", "scene-plan-v1"},
+          {"one_scene_per_replay", true},
+          {"absolute_pop_strength", true},
+          {"source_pixel_zero_anchor", true},
+        }},
+        {"render_cache_follow", true},
+        {"render_skips_tensorrt", true},
+        {"whole_clip_inference_attestation", {
+          {"depth_inference_enabled", true},
+          {"scheduled_depth_update_count", true},
+          {"tensorrt_enqueue_count", true},
+        }},
+        {"atomic_sbs_publication", true},
+      }},
     };
   }
 
@@ -201,6 +262,47 @@ TEST(OfflineSbsWorker, RejectsUnknownAdaptiveTraceFlagMeanings) {
     std::numeric_limits<float>::quiet_NaN(),
     0u
   ));
+}
+
+TEST(OfflineSbsWorker, RejectsEveryNestedReplayCapabilityDrift) {
+  const auto valid = native_replay_capabilities();
+  ASSERT_TRUE(
+    offline_sbs::native_replay_capabilities_valid_for_test(valid)
+  );
+
+  for (const auto &mutation : {
+         std::vector<std::string> {
+           "scene_cache_depth", "dxgi_format"
+         },
+         std::vector<std::string> {
+           "scene_cache_frame_metadata", "roi_transform_word_offset"
+         },
+         std::vector<std::string> {
+           "scene_cache_frame_metadata", "roi_transform_contract_schema"
+         },
+         std::vector<std::string> {
+           "scene_cache_state", "word_count"
+         },
+         std::vector<std::string> {
+           "scene_plan", "source_pixel_zero_anchor"
+         },
+         std::vector<std::string> {
+           "whole_clip_inference_attestation", "tensorrt_enqueue_count"
+         },
+       }) {
+    auto drifted = valid;
+    auto &leaf = drifted["native_whole_clip"][mutation[0]][mutation[1]];
+    if (leaf.is_boolean()) {
+      leaf = !leaf.get<bool>();
+    } else if (leaf.is_number_unsigned() || leaf.is_number_integer()) {
+      leaf = leaf.get<std::int64_t>() + 1;
+    } else {
+      leaf = "drifted";
+    }
+    EXPECT_FALSE(
+      offline_sbs::native_replay_capabilities_valid_for_test(drifted)
+    ) << mutation[0] << '.' << mutation[1];
+  }
 }
 
 TEST(OfflineSbsWorker, ParsesNativeSpecAndNeverBuildsPythonCommands) {
@@ -968,6 +1070,122 @@ TEST(OfflineSbsWorker, ReservesExactAnalysisRasterAndNextCachePair) {
   EXPECT_THROW(
     offline_sbs::analysis_open_cache_limit(1000, 0, 100),
     std::runtime_error
+  );
+}
+
+TEST(OfflineSbsWorker, ReservesLargestDynamicSceneCacheTriplet) {
+  const auto bounded =
+    offline_sbs::analysis_max_cache_triplet_bytes(1920, 1080);
+  const auto larger_source =
+    offline_sbs::analysis_max_cache_triplet_bytes(3840, 2160);
+  const auto smaller_source =
+    offline_sbs::analysis_max_cache_triplet_bytes(640, 360);
+
+  EXPECT_EQ(bounded, larger_source);
+  EXPECT_LT(smaller_source, bounded);
+  EXPECT_GT(bounded, 770ull * 434ull * sizeof(float));
+  EXPECT_THROW(
+    offline_sbs::analysis_max_cache_triplet_bytes(13, 1080),
+    std::runtime_error
+  );
+
+  constexpr std::uint64_t live_raster_reservation_bytes =
+    8ull * 1024ull * 1024ull;
+  const auto hard_cap = live_raster_reservation_bytes + bounded * 3u;
+  const auto open_limit = offline_sbs::analysis_open_cache_limit(
+    hard_cap,
+    live_raster_reservation_bytes,
+    bounded
+  );
+  EXPECT_EQ(open_limit, bounded * 2u);
+}
+
+TEST(OfflineSbsWorker, ReservesReplaySbsBeforeLaunchingTheHarness) {
+  const auto sdr = offline_sbs::replay_sbs_raster_reservation_bytes(
+    offline_sbs::media_color_e::sdr,
+    3840u,
+    1080u
+  );
+  const auto hdr = offline_sbs::replay_sbs_raster_reservation_bytes(
+    offline_sbs::media_color_e::hdr_pq,
+    3840u,
+    1080u
+  );
+  EXPECT_GT(sdr, 3840ull * 1080ull * 4ull);
+  EXPECT_EQ(hdr, 3840ull * 1080ull * 12ull + 64ull);
+
+  constexpr std::uint64_t source = 16ull * 1024ull * 1024ull;
+  constexpr std::uint64_t triplet = 4ull * 1024ull * 1024ull;
+  const auto hard_cap = source + sdr + triplet * 3u;
+  EXPECT_EQ(
+    offline_sbs::analysis_open_cache_limit(
+      hard_cap,
+      source + sdr,
+      triplet
+    ),
+    triplet * 2u
+  );
+  EXPECT_THROW(
+    offline_sbs::analysis_open_cache_limit(
+      source + sdr + triplet,
+      source + sdr,
+      triplet
+    ),
+    std::runtime_error
+  );
+  EXPECT_THROW(
+    offline_sbs::replay_sbs_raster_reservation_bytes(
+      offline_sbs::media_color_e::sdr,
+      0u,
+      1080u
+    ),
+    std::runtime_error
+  );
+}
+
+TEST(OfflineSbsWorker, ReservesFirstAnalysisArtifactsBeforeDecoderLaunch) {
+  const auto sdr = offline_sbs::analysis_source_raster_reservation_bytes(
+    offline_sbs::media_color_e::sdr,
+    1920u,
+    1080u
+  );
+  const auto hdr = offline_sbs::analysis_source_raster_reservation_bytes(
+    offline_sbs::media_color_e::hdr_pq,
+    1920u,
+    1080u
+  );
+  EXPECT_EQ(sdr, 1920ull * 1080ull * 4ull + 54ull);
+  EXPECT_EQ(
+    hdr,
+    1920ull * 1080ull * 12ull + 16ull + 128ull + 64ull
+  );
+  EXPECT_THROW(
+    offline_sbs::analysis_source_raster_reservation_bytes(
+      offline_sbs::media_color_e::sdr,
+      0u,
+      1080u
+    ),
+    std::runtime_error
+  );
+  EXPECT_THROW(
+    offline_sbs::analysis_source_raster_reservation_bytes(
+      offline_sbs::media_color_e::sdr,
+      std::numeric_limits<std::uint32_t>::max(),
+      std::numeric_limits<std::uint32_t>::max()
+    ),
+    std::runtime_error
+  );
+}
+
+TEST(OfflineSbsWorker, IdentifiesPreservePreviousDepthFrameState) {
+  EXPECT_FALSE(
+    offline_sbs::depth_frame_requires_previous_for_test(0.0f, 0.0f)
+  );
+  EXPECT_FALSE(
+    offline_sbs::depth_frame_requires_previous_for_test(1.0f, 1.0f)
+  );
+  EXPECT_TRUE(
+    offline_sbs::depth_frame_requires_previous_for_test(1.0f, 0.0f)
   );
 }
 

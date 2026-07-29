@@ -1077,7 +1077,9 @@ class EvalContractTests(unittest.TestCase):
             estimator = fh.read()
         self.assertIn("cuda_device_for_configured_adapter", estimator)
         self.assertIn("if (!warmup_execution_context", estimator)
-        self.assertIn("const bool synchronized = enqueued", estimator)
+        self.assertIn("const bool synchronized =", estimator)
+        self.assertIn("sbs_cuda_resource_cleanup_policy(", estimator)
+        self.assertIn("enqueued && synchronized && cleanup_succeeded", estimator)
 
     def test_relative_cli_paths_are_resolved_before_subprocess_cwd(self):
         args = argparse.Namespace(build_dir="cmake-build-relwithdebinfo", conf="bench.conf",
@@ -1167,7 +1169,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("LeftColorTexture.GetDimensions(sourceWidth, sourceHeight)", text)
         self.assertIn("Bestv2ProbeSpacing((float)sourceWidth, (float)depthWidth)", text)
         self.assertIn("s0, s1, s2, (float)sourceWidth, (float)sourceHeight", text)
-        self.assertEqual(text.count("DepthParallax("), 2)
+        self.assertEqual(text.count("eyeSign * DepthParallax("), 2)
+        self.assertIn("SampleActiveRoiDepthParallax(", text)
         self.assertNotIn("Bestv2SearchRadius((float)dw)", text)
         # The window is sized from the frame's own resolved parallax, not from source geometry
         # and a global worst case.
@@ -1274,7 +1277,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("CUT_FLAG_APPEARANCE_ARMED", adaptive)
         self.assertNotIn("cut_state = -2.0f", adaptive)
         self.assertNotIn("scene_age >= 2.0f", adaptive)
-        self.assertIn("(!initialized || shot_cut) ? subj_raw", adaptive)
+        self.assertIn("float subj = (!initialized || shot_cut) ?", adaptive)
+        self.assertIn("subj_raw :", adaptive)
         self.assertIn("CurrentModelColor", cut_evidence)
         self.assertIn("PreviousModelColor", cut_evidence)
         self.assertIn("CurrentAppearanceOrdinal", cut_evidence)
@@ -1303,7 +1307,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("bool shot_cut =", adaptive)
         self.assertIn("initialized &&", adaptive)
         self.assertNotIn("scene_control && initialized", adaptive)
-        self.assertIn("s.y = scene_age;", adaptive)
+        self.assertIn("SBS_STATE_SCENE_AGE(s) = scene_age;", adaptive)
 
     def test_depth_runtime_seeds_history_and_sanitizes_nonfinite_model_output(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1337,9 +1341,13 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(shader_dir, "buffer_to_tex_cs.hlsl"),
                   encoding="utf-8") as fh:
             mapper = fh.read()
-        self.assertIn("OutputTexture[DTid.xy] = PreviousDepth[DTid.xy]", mapper)
-        self.assertIn("scale.w < 0.5f", mapper)
-        self.assertIn("scale.w > 1.5f ? 1.0f : ema_alpha", mapper)
+        self.assertIn("legacy_scale.w < 0.5f", mapper)
+        self.assertIn("legacy_scale.w > 1.5f ?", mapper)
+        self.assertIn("PreviousDepth[DTid.xy]", mapper)
+        self.assertIn("if (!promote_current)", mapper)
+        self.assertIn("CopyPreviousTransformToNext()", mapper)
+        self.assertIn("scale.w > 1.5f ||", mapper)
+        self.assertIn("!same_surface_geometry", mapper)
         with open(os.path.join(shader_dir, "depth_ema_motion_cs.hlsl"),
                   encoding="utf-8") as fh:
             motion = fh.read()
@@ -1347,7 +1355,8 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(shader_dir, "depth_valid_history_cs.hlsl"),
                   encoding="utf-8") as fh:
             history = fh.read()
-        self.assertIn("MinMaxEma[0].w < 0.5f", history)
+        self.assertIn("MinMaxEma[0].w >= 0.5f", history)
+        self.assertIn("!hold_history", history)
         self.assertIn("PreviousModelInput[idx + 2u * plane]", history)
 
     def test_failed_tensorrt_warmups_are_quarantined_and_not_advertised(self):
@@ -1358,7 +1367,9 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("quarantine_execution_context_locked(engine_key, exec_context)", estimator)
         self.assertIn("quarantined_context_count", estimator)
         self.assertIn("warmed_context_count", estimator)
-        self.assertIn("if (context_warmed)", estimator)
+        self.assertIn("context_warmed,", estimator)
+        self.assertIn("sbs_trt_context_pool_disposition(", estimator)
+        self.assertIn("context_reusable", estimator)
         self.assertIn('model.name + ".active-engine.json"', estimator)
         self.assertIn('{"onnx_sha256", artifact.source_sha256}', estimator)
 
@@ -1582,7 +1593,18 @@ class EvalContractTests(unittest.TestCase):
                                "directx", "include", "sbs_warp_common.hlsl"),
                   encoding="utf-8") as fh:
             common = fh.read()
-        self.assertIn("p.anchor_shift_px = s2.x;", common)
+        self.assertIn(
+            "p.anchor_shift_px = SBS_STATE_ZERO_ANCHOR_SHIFT_PX(s2);",
+            common)
+        with open(os.path.join(
+                repo, "src_assets", "windows", "assets", "shaders",
+                "directx", "include",
+                "sbs_adaptive_state_contract.generated.hlsl"),
+                encoding="utf-8") as fh:
+            generated_contract = fh.read()
+        self.assertIn(
+            "#define SBS_STATE_ZERO_ANCHOR_SHIFT_PX(value) ((value).x)",
+            generated_contract)
         # `legacy` is removed, so there is no non-explicit plane left to bias for.
         self.assertNotIn("convergence_bias", common)
         self.assertNotIn("explicit_zero_plane", common)
@@ -1627,7 +1649,8 @@ class EvalContractTests(unittest.TestCase):
             estimator.index("estimate_result estimate("):
             estimator.index("video_depth_estimator::video_depth_estimator")
         ]
-        normalized = live_estimate.index("normalize_depth_output();")
+        normalized = live_estimate.index(
+            "normalize_depth_output(*completed_roi_identity, d3d_timer);")
         production_post_timing_ended = live_estimate.index(
             "mark_d3d_post_end(d3d_timer);", normalized)
         raw_snapshotted = live_estimate.index(
@@ -1757,7 +1780,9 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("PreviousDepth", mask_shader)
         self.assertIn("ema_edge_change", mask_shader)
         self.assertNotIn("ema_edge_dilation", mask_shader)
-        self.assertIn("MotionMask[DTid.xy] = IsMovingEdge", mask_shader)
+        assignment = mask_shader.index("MotionMask[DTid.xy] =")
+        moving_edge = mask_shader.index("IsMovingEdge(", assignment)
+        self.assertLess(assignment, moving_edge)
         with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
                   encoding="utf-8") as fh:
             estimator = fh.read()
@@ -1892,10 +1917,13 @@ class EvalContractTests(unittest.TestCase):
                 text = fh.read()
                 self.assertIn('include/depth_color.hlsl', text)
                 self.assertIn("DepthColorToSrgb", text)
-                footprint = text.find("float4 pixel = SampleModelFootprint")
+                full_footprint = text.find("pixel = SampleModelFootprint")
+                roi_footprint = text.find("pixel = SampleRoiModelFootprint")
                 transform = text.find("DepthColorToSrgb(pixel.rgb, color_mode)")
-                self.assertGreaterEqual(footprint, 0)
-                self.assertGreater(transform, footprint)
+                self.assertGreaterEqual(full_footprint, 0)
+                self.assertGreaterEqual(roi_footprint, 0)
+                self.assertGreater(transform, full_footprint)
+                self.assertGreater(transform, roi_footprint)
 
     def test_hdr_warp_stays_linear_fp16_until_pq_conversion(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
