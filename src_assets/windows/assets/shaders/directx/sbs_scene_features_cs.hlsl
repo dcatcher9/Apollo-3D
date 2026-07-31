@@ -5,6 +5,7 @@ StructuredBuffer<uint4> PreviousRuleState : register(t3);
 RWStructuredBuffer<float> AnalysisGrid : register(u0);
 
 #include "include/sbs_scene_controller_constants.hlsl"
+#include "include/sbs_scene_rule_state.hlsl"
 
 uint2 ClampAppearancePixel(int2 pixel) {
     uint2 viewport_origin;
@@ -37,78 +38,35 @@ float Luminance(float3 rgb) {
     return dot(rgb, float3(0.2126f, 0.7152f, 0.0722f));
 }
 
-float PreviousRuleStateWord(uint word) {
-    uint4 value = PreviousRuleState[word / 4u];
-    return asfloat(value[word & 3u]);
-}
-
-uint PreviousRuleStateUint(uint word) {
-    uint4 value = PreviousRuleState[word / 4u];
-    return value[word & 3u];
-}
-
-uint EffectiveResetFlags() {
-    uint flags = scene_reset_flags;
-    if (PreviousRuleStateWord(
-            SBS_SCENE_RULE_STATE_WORD_OUTPUT_VALID) <= 0.5f) {
-        flags |= PreviousRuleStateUint(
-            SBS_SCENE_RULE_STATE_WORD_RESET_FLAGS);
-    }
-    return flags;
+float ChromaMagnitude(float3 rgb) {
+    return
+        max(rgb.r, max(rgb.g, rgb.b)) -
+        min(rgb.r, min(rgb.g, rgb.b));
 }
 
 float CurrentRoiCoverage(float2 viewport_uv) {
-    const uint roi_invalidating_resets =
-        SBS_SCENE_RESET_FLAGS_LAYOUT |
-        SBS_SCENE_RESET_FLAGS_GEOMETRY |
-        SBS_SCENE_RESET_FLAGS_BACKEND |
-        SBS_SCENE_RESET_FLAGS_DISPLAY_OR_HDR;
-    if ((EffectiveResetFlags() & roi_invalidating_resets) != 0u) {
+    if (!SbsRulePreviousTargetsUsable()) {
         return 1.0f;
     }
-    uint state_flags = PreviousRuleStateUint(
+    uint state_flags = SbsRulePreviousStateUint(
         SBS_SCENE_RULE_STATE_WORD_STATE_FLAGS);
     if ((state_flags & SBS_SCENE_STATE_FLAGS_ROI_LOCKED) == 0u) {
         return 1.0f;
     }
 
     float4 committed_roi = float4(
-        PreviousRuleStateWord(
+        SbsRulePreviousStateWord(
             SBS_SCENE_RULE_STATE_WORD_COMMITTED_ROI_X0),
-        PreviousRuleStateWord(
+        SbsRulePreviousStateWord(
             SBS_SCENE_RULE_STATE_WORD_COMMITTED_ROI_Y0),
-        PreviousRuleStateWord(
+        SbsRulePreviousStateWord(
             SBS_SCENE_RULE_STATE_WORD_COMMITTED_ROI_X1),
-        PreviousRuleStateWord(
+        SbsRulePreviousStateWord(
             SBS_SCENE_RULE_STATE_WORD_COMMITTED_ROI_Y1));
     bool covered =
         all(viewport_uv >= committed_roi.xy) &&
         all(viewport_uv < committed_roi.zw);
     return covered ? 1.0f : 0.0f;
-}
-
-uint CensusOrdinal(int2 center, out uint reliable_comparisons) {
-    static const int2 offsets[8] = {
-        int2(-2, 0), int2(2, 0), int2(0, -2), int2(0, 2),
-        int2(-2, -2), int2(2, -2), int2(-2, 2), int2(2, 2)
-    };
-    float center_value = LoadOrdinal(center);
-    uint signature = 0u;
-    reliable_comparisons = 0u;
-    [unroll]
-    for (uint index = 0u; index < 8u; ++index) {
-        float neighbor = LoadOrdinal(center + offsets[index]);
-        float contrast = abs(center_value - neighbor);
-        float floor_value =
-            max(1e-5f, 0.005f * max(abs(center_value), abs(neighbor)));
-        if (contrast >= floor_value) {
-            reliable_comparisons += 1u;
-            if (center_value > neighbor) {
-                signature |= 1u << index;
-            }
-        }
-    }
-    return signature;
 }
 
 [numthreads(16, 16, 1)]
@@ -121,13 +79,13 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint2 cell = dispatch_id.xy;
     float2 viewport_uv;
     bool valid = SceneViewportUv(cell, canvas, viewport_uv);
-    [unroll]
-    for (uint channel = 0u;
-         channel < SBS_SCENE_ANALYSIS_GRID_CHANNEL_COUNT;
-         ++channel) {
-        AnalysisGrid[SceneAnalysisIndex(channel, cell)] = 0.0f;
-    }
     if (!valid) {
+        [unroll]
+        for (uint channel = 0u;
+             channel < SBS_SCENE_ANALYSIS_GRID_CHANNEL_COUNT;
+             ++channel) {
+            AnalysisGrid[SceneAnalysisIndex(channel, cell)] = 0.0f;
+        }
         return;
     }
 
@@ -148,37 +106,43 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         int2(-2, 0), int2(2, 0), int2(0, -2), int2(0, 2),
         int2(-2, -2), int2(2, -2), int2(-2, 2), int2(2, 2)
     };
+    float3 neighborhood_rgb[9];
+    float neighborhood_ordinal[9];
     [unroll]
     for (uint index = 0u; index < 9u; ++index) {
-        float3 rgb = LoadSceneRgb(center + validity_neighborhood[index]);
-        float ordinal =
+        neighborhood_rgb[index] =
+            LoadSceneRgb(center + validity_neighborhood[index]);
+        neighborhood_ordinal[index] =
             LoadOrdinal(center + validity_neighborhood[index]);
         source_finite =
             source_finite &&
-            !any(isnan(rgb)) && !any(isinf(rgb)) &&
-            !isnan(ordinal) && !isinf(ordinal);
+            !any(isnan(neighborhood_rgb[index])) &&
+            !any(isinf(neighborhood_rgb[index])) &&
+            !isnan(neighborhood_ordinal[index]) &&
+            !isinf(neighborhood_ordinal[index]);
     }
     if (!source_finite) {
         // A negative validity sentinel survives the finite evidence pass and makes the global
         // resolver abstain. It is distinct from ordinary letterbox padding (exact zero).
+        [unroll]
+        for (uint channel = 0u;
+             channel < SBS_SCENE_ANALYSIS_GRID_CHANNEL_COUNT;
+             ++channel) {
+            AnalysisGrid[SceneAnalysisIndex(channel, cell)] = 0.0f;
+        }
         AnalysisGrid[SceneAnalysisIndex(
             SBS_SCENE_ANALYSIS_GRID_VIEWPORT_VALID, cell)] = -1.0f;
         return;
     }
-    float3 center_rgb = LoadSceneRgb(center);
+    float3 center_rgb = neighborhood_rgb[0];
     float center_luma = Luminance(center_rgb);
-    static const int2 neighborhood[8] = {
-        int2(-2, 0), int2(2, 0), int2(0, -2), int2(0, 2),
-        int2(-2, -2), int2(2, -2), int2(-2, 2), int2(2, 2)
-    };
     float sum = center_luma;
     float sum_sq = center_luma * center_luma;
     float edge_sum = 0.0f;
     float edge_max = 0.0f;
     [unroll]
     for (uint index = 0u; index < 8u; ++index) {
-        float neighbor_luma = Luminance(
-            LoadSceneRgb(center + neighborhood[index]));
+        float neighbor_luma = Luminance(neighborhood_rgb[index + 1u]);
         sum += neighbor_luma;
         sum_sq += neighbor_luma * neighbor_luma;
         float edge = abs(center_luma - neighbor_luma);
@@ -190,17 +154,49 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float texture_evidence = saturate(
         2.5f * sqrt(variance) + 1.5f * edge_sum / 8.0f +
         0.5f * edge_max);
-    float chroma =
-        max(center_rgb.r, max(center_rgb.g, center_rgb.b)) -
-        min(center_rgb.r, min(center_rgb.g, center_rgb.b));
+    // Static-media chroma must be spatially sustained. A colored text stroke
+    // has a saturated center and high neighborhood variance, but most nearby
+    // samples are the neutral page behind it. Keep the third-lowest of the
+    // existing nine samples (the lower quartile) so one or two neutral media
+    // details do not erase a real image while thin UI/text cannot become a
+    // photographic bridge. This adds no texture reads.
+    float chroma_lowest = 1.0f;
+    float chroma_second = 1.0f;
+    float chroma_third = 1.0f;
+    [unroll]
+    for (uint index = 0u; index < 9u; ++index) {
+        float carry = ChromaMagnitude(neighborhood_rgb[index]);
+        float prior = chroma_lowest;
+        chroma_lowest = min(prior, carry);
+        carry = max(prior, carry);
+        prior = chroma_second;
+        chroma_second = min(prior, carry);
+        carry = max(prior, carry);
+        chroma_third = min(chroma_third, carry);
+    }
+    float chroma = chroma_third;
 
     uint reliable = 0u;
-    uint signature = CensusOrdinal(center, reliable);
+    uint signature = 0u;
+    float center_ordinal = neighborhood_ordinal[0];
+    [unroll]
+    for (uint index = 0u; index < 8u; ++index) {
+        float neighbor_ordinal = neighborhood_ordinal[index + 1u];
+        float contrast = abs(center_ordinal - neighbor_ordinal);
+        float floor_value = max(
+            1e-5f,
+            0.005f * max(abs(center_ordinal), abs(neighbor_ordinal)));
+        if (contrast >= floor_value) {
+            reliable += 1u;
+            if (center_ordinal > neighbor_ordinal) {
+                signature |= 1u << index;
+            }
+        }
+    }
     float signature_value = (float)signature / 255.0f;
     float activity = 0.0f;
-    uint effective_reset_flags = EffectiveResetFlags();
     if (scene_history_valid != 0u &&
-        (effective_reset_flags & SBS_SCENE_RESET_FLAGS_LAYOUT) == 0u &&
+        SbsRulePreviousTargetsUsable() &&
         reliable >= 4u) {
         uint previous_signature = (uint)round(saturate(
             PreviousLayoutHistory[SceneAnalysisIndex(

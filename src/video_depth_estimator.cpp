@@ -1735,7 +1735,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> hist_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_hist_buf;  // 256 weighted bins for subject tracking
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_hist_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_plain_buf;  // 256 bins + seven evidence counters
+    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_plain_buf;  // 256 bins + nine evidence counters
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_plain_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;  // seven float4 elements; first three are the warp contract
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_uav;
@@ -2426,8 +2426,8 @@ namespace models {
       }
 
       // Subject tracking: weighted histogram (256 uint bins), plain histogram plus depth-edge,
-      // depth-change, ordinal-structure, broad-RGB-change, and three structure-support counters
-      // (263 uints), and
+      // depth-change, ordinal-structure, broad-RGB-change, three structure-support counters, and
+      // capture-domain brightness rise/fall counters (265 uints), and
       // three-float4 state.
       {
         uint32_t init_hist[256] = {};
@@ -2442,7 +2442,7 @@ namespace models {
         if (subject_hist_buf) {
           device->CreateUnorderedAccessView(subject_hist_buf.Get(), nullptr, &subject_hist_uav);
         }
-        uint32_t init_plain[263] = {};
+        uint32_t init_plain[265] = {};
         bd.ByteWidth = sizeof(init_plain);
         D3D11_SUBRESOURCE_DATA plain_sd = {init_plain, 0, 0};
         device->CreateBuffer(&bd, &plain_sd, &subject_plain_buf);
@@ -2749,6 +2749,7 @@ namespace models {
         r.scene_controller_hidden_output = controller.hidden_output;
         r.scene_controller_meta = controller.meta;
         r.scene_controller_rule_state = controller.rule_state;
+        r.scene_controller_rule_summary = controller.rule_summary;
         r.scene_controller_frame_id = controller.source_frame_id;
         r.scene_controller_backend_generation = controller.backend_generation;
         r.scene_controller_snapshot_available =
@@ -4839,6 +4840,17 @@ namespace models {
 
   estimate_result video_depth_estimator::finish_pending_depth_for_evaluation(input_color_space color_space) {
     return pimpl->finish_pending(color_space);
+  }
+
+  bool video_depth_estimator::
+    set_next_scene_controller_elapsed_seconds_for_evaluation(
+      const float elapsed_seconds
+    ) {
+    return
+      pimpl && pimpl->scene_controller &&
+      pimpl->scene_controller->set_next_elapsed_seconds_for_evaluation(
+        elapsed_seconds
+      );
   }
 
   depth_telemetry_poll_result video_depth_estimator::poll_depth_telemetry(

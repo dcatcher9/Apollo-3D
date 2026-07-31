@@ -278,7 +278,8 @@ def render_cpp(contract: dict[str, Any]) -> str:
             "  }",
             "",
             "  static_assert(rule_state_word_count % 4u == 0u);",
-            "  static_assert(rule_state_vector_count == 16u);",
+            f"  static_assert(rule_state_vector_count == "
+            f"{dimensions['rule_state_word_count'] // 4}u);",
             "  static_assert(rule_state_layout_matches_indices());",
             f"  static_assert(analysis_grid_names.size() == analysis_grid_channel_count);",
             f"  static_assert(layout_history_names.size() == layout_history_channel_count);",

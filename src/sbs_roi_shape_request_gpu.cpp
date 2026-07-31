@@ -90,7 +90,6 @@ namespace models {
       const sbs_roi_shape_request_gpu_submission &submission
     ) {
       if (
-        submission.source_frame_id == 0u ||
         submission.source_width == 0u ||
         submission.source_height == 0u ||
         !sbs_roi_shape_patch_aligned(

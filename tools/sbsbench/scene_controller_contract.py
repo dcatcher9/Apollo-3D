@@ -215,6 +215,14 @@ def validate_contract(
             or len(set(numeric_values)) != len(numeric_values)
         ):
             raise RuntimeError(f"scene-controller enum {enum_name} values must be unique uints")
+    if enums.get("state_kind") != {
+        "full_frame": 0,
+        "video": 1,
+        "content": 2,
+    }:
+        raise RuntimeError(
+            "scene-controller state_kind must contain only retained geometry states"
+        )
 
     flag_bits = contract.get("flag_bits")
     if not isinstance(flag_bits, dict) or not flag_bits:

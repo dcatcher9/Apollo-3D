@@ -12,10 +12,23 @@ RWStructuredBuffer<float> DenseOutput : register(u0);
 RWStructuredBuffer<float> NextLayoutHistory : register(u1);
 RWStructuredBuffer<float> NextDepthHistory : register(u2);
 RWStructuredBuffer<float> Meta : register(u3);
+RWStructuredBuffer<float> RuleSummary : register(u4);
 
 #include "include/sbs_scene_controller_constants.hlsl"
 #include "include/sbs_adaptive_state_contract.generated.hlsl"
 #include "include/sbs_frame_roi_transform.hlsl"
+#include "include/sbs_scene_rule_state.hlsl"
+#include "include/sbs_scene_rules_summary.hlsl"
+#include "include/sbs_scene_rules_media.hlsl"
+
+groupshared float4 RoiEventGroupSums[
+    SBS_RULE_EVIDENCE_GROUP_THREAD_COUNT];
+groupshared float4 ScrollVoteGroupSumsY[
+    SBS_RULE_EVIDENCE_GROUP_THREAD_COUNT];
+groupshared float4 ScrollVoteGroupSumsX[
+    SBS_RULE_EVIDENCE_GROUP_THREAD_COUNT];
+groupshared float2 FreshActivityGroupSums[
+    SBS_RULE_EVIDENCE_GROUP_THREAD_COUNT];
 
 float Analysis(uint channel, uint2 cell) {
     return AnalysisGrid[SceneAnalysisIndex(channel, cell)];
@@ -29,25 +42,7 @@ float DepthHistory(uint channel, uint2 cell) {
     return PreviousDepthHistory[SceneAnalysisIndex(channel, cell)];
 }
 
-float RuleStateWord(uint word) {
-    uint4 value = PreviousRuleState[word / 4u];
-    return asfloat(value[word & 3u]);
-}
-
-uint RuleStateUint(uint word) {
-    uint4 value = PreviousRuleState[word / 4u];
-    return value[word & 3u];
-}
-
-uint EffectiveResetFlags() {
-    uint flags = scene_reset_flags;
-    if (RuleStateWord(SBS_SCENE_RULE_STATE_WORD_OUTPUT_VALID) <= 0.5f) {
-        flags |= RuleStateUint(SBS_SCENE_RULE_STATE_WORD_RESET_FLAGS);
-    }
-    return flags;
-}
-
-float LoadDepth(float2 depth_uv) {
+float LoadNormalizedDepth(float2 depth_uv, out bool valid) {
     uint2 dimensions = uint2(
         max(scene_depth_width, 1u),
         max(scene_depth_height, 1u));
@@ -55,18 +50,8 @@ float LoadDepth(float2 depth_uv) {
         uint2(saturate(depth_uv) * float2(dimensions)),
         dimensions - 1u);
     float value = NormalizedDepth.Load(int3(pixel, 0));
-    return (isnan(value) || isinf(value)) ? 0.0f : saturate(value);
-}
-
-bool NormalizedDepthValid(float2 depth_uv) {
-    uint2 dimensions = uint2(
-        max(scene_depth_width, 1u),
-        max(scene_depth_height, 1u));
-    uint2 pixel = min(
-        uint2(saturate(depth_uv) * float2(dimensions)),
-        dimensions - 1u);
-    float value = NormalizedDepth.Load(int3(pixel, 0));
-    return !isnan(value) && !isinf(value);
+    valid = !isnan(value) && !isinf(value);
+    return valid ? saturate(value) : 0.0f;
 }
 
 float LoadRawDepth(float2 depth_uv, out bool valid) {
@@ -210,26 +195,31 @@ float LoadPreviousSignature(uint2 cell) {
         cell);
 }
 
-void WriteMeta(bool depth_resources_ready) {
+void WriteMeta(
+    bool depth_resources_ready,
+    bool roi_generation_changed)
+{
     [unroll]
     for (uint word = 0u; word < SBS_SCENE_META_WORD_COUNT; ++word) {
         Meta[word] = 0.0f;
     }
 
-    float state_kind = RuleStateWord(
+    float state_kind = SbsRulePreviousStateWord(
         SBS_SCENE_RULE_STATE_WORD_STATE_KIND);
+    const uint state_flags = SbsRulePreviousStateUint(
+        SBS_SCENE_RULE_STATE_WORD_STATE_FLAGS);
     Meta[SBS_SCENE_META_ELAPSED_SECONDS] =
         max(scene_elapsed_seconds, 0.0f);
     Meta[SBS_SCENE_META_SOURCE_ASPECT_RATIO] =
         (float)max(scene_source_width, 1u) /
         (float)max(scene_source_height, 1u);
-    Meta[SBS_SCENE_META_ROI_X0] = RuleStateWord(
+    Meta[SBS_SCENE_META_ROI_X0] = SbsRulePreviousStateWord(
         SBS_SCENE_RULE_STATE_WORD_COMMITTED_ROI_X0);
-    Meta[SBS_SCENE_META_ROI_Y0] = RuleStateWord(
+    Meta[SBS_SCENE_META_ROI_Y0] = SbsRulePreviousStateWord(
         SBS_SCENE_RULE_STATE_WORD_COMMITTED_ROI_Y0);
-    Meta[SBS_SCENE_META_ROI_X1] = RuleStateWord(
+    Meta[SBS_SCENE_META_ROI_X1] = SbsRulePreviousStateWord(
         SBS_SCENE_RULE_STATE_WORD_COMMITTED_ROI_X1);
-    Meta[SBS_SCENE_META_ROI_Y1] = RuleStateWord(
+    Meta[SBS_SCENE_META_ROI_Y1] = SbsRulePreviousStateWord(
         SBS_SCENE_RULE_STATE_WORD_COMMITTED_ROI_Y1);
     Meta[SBS_SCENE_META_STATE_FULL_FRAME] =
         state_kind < 0.5f ? 1.0f : 0.0f;
@@ -237,8 +227,6 @@ void WriteMeta(bool depth_resources_ready) {
         abs(state_kind - 1.0f) < 0.5f ? 1.0f : 0.0f;
     Meta[SBS_SCENE_META_STATE_CONTENT] =
         abs(state_kind - 2.0f) < 0.5f ? 1.0f : 0.0f;
-    Meta[SBS_SCENE_META_STATE_SCROLL_HOLD] =
-        abs(state_kind - 3.0f) < 0.5f ? 1.0f : 0.0f;
     float valid_depth_fraction =
         SBS_STATE_VALID_DEPTH_FRACTION(
             AdaptiveState[SBS_STATE_VECTOR_VALID_DEPTH_FRACTION]);
@@ -248,8 +236,9 @@ void WriteMeta(bool depth_resources_ready) {
         valid_depth_fraction > 0.05f ?
             1.0f :
             0.0f;
-    Meta[SBS_SCENE_META_ROI_GENERATION_CHANGED] = 0.0f;
-    uint effective_reset_flags = EffectiveResetFlags();
+    Meta[SBS_SCENE_META_ROI_GENERATION_CHANGED] =
+        roi_generation_changed ? 1.0f : 0.0f;
+    uint effective_reset_flags = SbsRuleEffectiveResetFlags();
     Meta[SBS_SCENE_META_LAYOUT_RESET_REQUESTED] =
         (effective_reset_flags & SBS_SCENE_RESET_FLAGS_LAYOUT) != 0u ?
             1.0f :
@@ -259,7 +248,9 @@ void WriteMeta(bool depth_resources_ready) {
             1.0f :
             0.0f;
     Meta[SBS_SCENE_META_SCROLL_HOLD_ACTIVE] =
-        Meta[SBS_SCENE_META_STATE_SCROLL_HOLD];
+        (state_flags & SBS_SCENE_STATE_FLAGS_SCROLL_HOLD_ACTIVE) != 0u ?
+            1.0f :
+            0.0f;
     Meta[SBS_SCENE_META_HDR_SCRGB_SOURCE] =
         scene_color_mode == 2u ? 1.0f : 0.0f;
     uint adaptive_analysis_flags =
@@ -285,7 +276,7 @@ void WriteMeta(bool depth_resources_ready) {
         SBS_STATE_EXTERNAL_CUT_COUNT(
             AdaptiveState[SBS_STATE_VECTOR_EXTERNAL_CUT_COUNT]));
     uint previous_external_cut_count =
-        RuleStateUint(
+        SbsRulePreviousStateUint(
             SBS_SCENE_RULE_STATE_WORD_LAST_EXTERNAL_CUT_COUNT);
     Meta[SBS_SCENE_META_EXTERNAL_CUT_REQUEST] =
         effective_reset_flags == 0u &&
@@ -293,23 +284,36 @@ void WriteMeta(bool depth_resources_ready) {
                 1.0f :
                 0.0f;
     Meta[SBS_SCENE_META_SCENE_AGE] = saturate(
-        RuleStateWord(SBS_SCENE_RULE_STATE_WORD_SCENE_AGE_S) / 10.0f);
+        SbsRulePreviousStateWord(
+            SBS_SCENE_RULE_STATE_WORD_SCENE_AGE_S) / 10.0f);
     Meta[SBS_SCENE_META_SECONDS_SINCE_INTERACTION] = 1.0f;
     Meta[SBS_SCENE_META_SOURCE_COLOR_MODE] = (float)scene_color_mode;
     Meta[SBS_SCENE_META_PREVIOUS_BACKEND_OUTPUT_VALID] =
-        RuleStateWord(SBS_SCENE_RULE_STATE_WORD_OUTPUT_VALID);
-    // Reserved meta[28..31] remain exactly zero.
+        SbsRulePreviousStateWord(
+            SBS_SCENE_RULE_STATE_WORD_OUTPUT_VALID);
+    // Reserved meta[9, 28..31] remain exactly zero.
 }
 
-[numthreads(16, 16, 1)]
-void main(uint3 dispatch_id : SV_DispatchThreadID) {
+[numthreads(
+    SBS_RULE_EVIDENCE_GROUP_SIZE,
+    SBS_RULE_EVIDENCE_GROUP_SIZE,
+    1)]
+void main(
+    uint3 dispatch_id : SV_DispatchThreadID,
+    uint3 group_thread_id : SV_GroupThreadID,
+    uint3 group_id : SV_GroupID) {
     const uint canvas = SBS_SCENE_ANALYSIS_CANVAS_SIZE;
-    if (dispatch_id.x >= canvas || dispatch_id.y >= canvas) {
-        return;
-    }
     uint2 cell = dispatch_id.xy;
+    uint2 viewport_origin;
+    uint2 viewport_size;
+    SceneViewport(canvas, viewport_origin, viewport_size);
+    const int2 viewport_first = int2(viewport_origin);
+    const int2 viewport_end = int2(viewport_origin + viewport_size);
+    const float viewport_flag = Analysis(
+        SBS_SCENE_ANALYSIS_GRID_VIEWPORT_VALID,
+        cell);
     bool viewport_valid =
-        Analysis(SBS_SCENE_ANALYSIS_GRID_VIEWPORT_VALID, cell) > 0.5f;
+        isfinite(viewport_flag) && viewport_flag > 0.5f;
     float frame_state = DepthFrameState[0].w;
     float2 viewport_uv = float2(
         Analysis(SBS_SCENE_ANALYSIS_GRID_VIEWPORT_X, cell),
@@ -334,7 +338,9 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     if (depth_location_valid) {
         LoadRawDepth(depth_uv, raw_depth_valid);
     }
-    bool normalized_depth_valid =
+    const float2 depth_offset_x = float2(depth_texel.x, 0.0f);
+    const float2 depth_offset_y = float2(0.0f, depth_texel.y);
+    bool normalized_depth_region_accepted =
         depth_location_valid &&
         DepthUvAccepted(
             frame_roi_transform,
@@ -343,24 +349,50 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         DepthUvAccepted(
             frame_roi_transform,
             explicit_legacy_transform,
-            depth_uv + float2(depth_texel.x, 0.0f)) &&
+            depth_uv + depth_offset_x) &&
         DepthUvAccepted(
             frame_roi_transform,
             explicit_legacy_transform,
-            depth_uv - float2(depth_texel.x, 0.0f)) &&
+            depth_uv - depth_offset_x) &&
         DepthUvAccepted(
             frame_roi_transform,
             explicit_legacy_transform,
-            depth_uv + float2(0.0f, depth_texel.y)) &&
+            depth_uv + depth_offset_y) &&
         DepthUvAccepted(
             frame_roi_transform,
             explicit_legacy_transform,
-            depth_uv - float2(0.0f, depth_texel.y)) &&
-        NormalizedDepthValid(depth_uv) &&
-        NormalizedDepthValid(depth_uv + float2(depth_texel.x, 0.0f)) &&
-        NormalizedDepthValid(depth_uv - float2(depth_texel.x, 0.0f)) &&
-        NormalizedDepthValid(depth_uv + float2(0.0f, depth_texel.y)) &&
-        NormalizedDepthValid(depth_uv - float2(0.0f, depth_texel.y));
+            depth_uv - depth_offset_y);
+    float depth_center = 0.0f;
+    float depth_left = 0.0f;
+    float depth_right = 0.0f;
+    float depth_up = 0.0f;
+    float depth_down = 0.0f;
+    bool depth_center_valid = false;
+    bool depth_left_valid = false;
+    bool depth_right_valid = false;
+    bool depth_up_valid = false;
+    bool depth_down_valid = false;
+    if (normalized_depth_region_accepted) {
+        depth_center = LoadNormalizedDepth(depth_uv, depth_center_valid);
+        depth_left = LoadNormalizedDepth(
+            depth_uv - depth_offset_x,
+            depth_left_valid);
+        depth_right = LoadNormalizedDepth(
+            depth_uv + depth_offset_x,
+            depth_right_valid);
+        depth_up = LoadNormalizedDepth(
+            depth_uv - depth_offset_y,
+            depth_up_valid);
+        depth_down = LoadNormalizedDepth(
+            depth_uv + depth_offset_y,
+            depth_down_valid);
+    }
+    bool normalized_depth_valid =
+        depth_center_valid &&
+        depth_left_valid &&
+        depth_right_valid &&
+        depth_up_valid &&
+        depth_down_valid;
     bool depth_valid =
         viewport_valid && raw_depth_valid && normalized_depth_valid &&
         frame_state > 0.5f &&
@@ -393,10 +425,20 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             0.20f * chroma) :
         0.0f;
 
-    uint effective_reset_flags = EffectiveResetFlags();
+    uint effective_reset_flags = SbsRuleEffectiveResetFlags();
     bool layout_history_valid =
         scene_history_valid != 0u &&
-        (effective_reset_flags & SBS_SCENE_RESET_FLAGS_LAYOUT) == 0u;
+        SbsRulePreviousTargetsUsable();
+    const bool previous_scroll_hold_active =
+        layout_history_valid &&
+        (SbsRulePreviousStateUint(
+             SBS_SCENE_RULE_STATE_WORD_STATE_FLAGS) &
+         SBS_SCENE_STATE_FLAGS_SCROLL_HOLD_ACTIVE) != 0u;
+    // Keep the ordinal endpoint valid so continuing page translation remains
+    // observable, but never blend semantic/spatial attribution from before a
+    // scroll into the candidate that may be promoted on release.
+    const bool semantic_layout_history_valid =
+        layout_history_valid && !previous_scroll_hold_active;
     // Normalized depth is only comparable while both frames use the same normalization
     // geometry. A newly accepted ROI carries reset debt until its first valid depth promotes the
     // matching transform, and MinMaxEma.frame_state == 2 marks that same direct reseed even for
@@ -414,7 +456,16 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
              SBS_SCENE_RESET_FLAGS_GEOMETRY |
              SBS_SCENE_RESET_FLAGS_BACKEND |
              SBS_SCENE_RESET_FLAGS_DISPLAY_OR_HDR)) == 0u;
+    const float previous_depth_valid_confidence = saturate(
+        DepthHistory(
+            SBS_SCENE_DEPTH_HISTORY_VALID_DEPTH_CONFIDENCE,
+            cell));
+    const bool depth_history_comparable =
+        depth_history_valid &&
+        !previous_scroll_hold_active &&
+        previous_depth_valid_confidence >= 0.5f;
     float fast_alpha = SceneEmaAlpha(scene_elapsed_seconds, 0.12f);
+    float activity_alpha = SceneEmaAlpha(scene_elapsed_seconds, 0.50f);
     float slow_alpha = SceneEmaAlpha(scene_elapsed_seconds, 1.00f);
     float dwell_alpha = SceneEmaAlpha(scene_elapsed_seconds, 0.60f);
     float previous_fast = LayoutHistory(
@@ -430,22 +481,22 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         SBS_SCENE_LAYOUT_HISTORY_CHROMA_EMA,
         cell);
     float fast_activity =
-        layout_history_valid ?
+        semantic_layout_history_valid ?
             lerp(previous_fast, activity, fast_alpha) :
             activity;
     float slow_activity =
-        layout_history_valid ?
-            lerp(previous_slow, activity, slow_alpha) :
+        semantic_layout_history_valid ?
+            lerp(previous_slow, activity, activity_alpha) :
             activity;
     float photo_ema =
-        layout_history_valid ?
+        semantic_layout_history_valid ?
             lerp(previous_photo, photographic, slow_alpha) :
             photographic;
     float chroma_ema =
-        layout_history_valid ?
+        semantic_layout_history_valid ?
             lerp(previous_chroma, chroma, slow_alpha) :
             chroma;
-    float prior_dwell = layout_history_valid ?
+    float prior_dwell = semantic_layout_history_valid ?
         LayoutHistory(
             SBS_SCENE_LAYOUT_HISTORY_STABLE_OCCUPANCY_DWELL,
             cell) :
@@ -454,71 +505,98 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     float dwell = viewport_valid ?
         lerp(prior_dwell, occupied, dwell_alpha) :
         0.0f;
+    if (previous_scroll_hold_active) {
+        // Page translation is not playback occupancy. Keep the luminance
+        // signature advancing so scroll remains observable, but erase the
+        // activity/dwell history that would otherwise turn a translated page
+        // into a full-frame VIDEO proposal after the hold releases.
+        fast_activity = 0.0f;
+        slow_activity = 0.0f;
+        dwell = 0.0f;
+    }
 
-    float best_mismatch = 9.0f;
-    float second_mismatch = 9.0f;
-    int best_shift = 0;
-    uint valid_shift_count = 0u;
-    if (viewport_valid && layout_history_valid) {
-        uint current_signature = (uint)round(saturate(
+    float scroll_shift_costs_x[7];
+    float scroll_shift_costs_y[7];
+    [unroll]
+    for (uint shift_index = 0u; shift_index < 7u; ++shift_index) {
+        scroll_shift_costs_x[shift_index] = 0.0f;
+        scroll_shift_costs_y[shift_index] = 0.0f;
+    }
+    const bool scroll_search_eligible =
+        viewport_valid &&
+        layout_history_valid &&
+        texture_evidence >= SBS_RULE_SCROLL_MIN_TEXTURE;
+    float4 previous_video_bounds;
+    const bool previous_video_target =
+        SbsRulePreviousVideoTarget(previous_video_bounds);
+    const bool inside_previous_video_target =
+        previous_video_target &&
+        all(viewport_uv >= previous_video_bounds.xy) &&
+        all(viewport_uv <= previous_video_bounds.zw);
+    // Scroll is a frame-level safety overlay, not a per-cell classifier. Only cells with a
+    // complete seven-position comparison contribute to the global X/Y translation fit. Player
+    // interiors are excluded using the previous accepted target, so ordinary motion inside a
+    // video cannot freeze its own ROI while coherent page motion outside it still can.
+    const bool horizontal_scroll_observable =
+        scroll_search_eligible &&
+        !inside_previous_video_target &&
+        int(cell.x) >= viewport_first.x + 3 &&
+        int(cell.x) + 3 < viewport_end.x;
+    const bool vertical_scroll_observable =
+        scroll_search_eligible &&
+        !inside_previous_video_target &&
+        int(cell.y) >= viewport_first.y + 3 &&
+        int(cell.y) + 3 < viewport_end.y;
+    if (horizontal_scroll_observable || vertical_scroll_observable) {
+        const uint current_signature = (uint)round(saturate(
             LoadCurrentSignature(int2(cell))) * 255.0f);
         [unroll]
         for (int shift = -3; shift <= 3; ++shift) {
-            int2 shifted_cell = int2(cell) + int2(0, shift);
-            if (any(shifted_cell < 0) ||
-                any(shifted_cell >=
-                    (int)SBS_SCENE_ANALYSIS_CANVAS_SIZE)) {
-                continue;
+            if (horizontal_scroll_observable) {
+                const int2 shifted_cell_x =
+                    int2(cell) + int2(shift, 0);
+                const uint previous_signature_x =
+                    (uint)round(saturate(
+                        LoadPreviousSignature(
+                            uint2(shifted_cell_x))) *
+                        255.0f);
+                const float mismatch_x =
+                    (float)countbits(
+                        current_signature ^ previous_signature_x);
+                scroll_shift_costs_x[shift + 3] = mismatch_x;
             }
-            float2 shifted_uv;
-            if (!SceneViewportUv(
-                    uint2(shifted_cell),
-                    SBS_SCENE_ANALYSIS_CANVAS_SIZE,
-                    shifted_uv)) {
-                continue;
-            }
-            uint previous_signature = (uint)round(saturate(
-                LoadPreviousSignature(uint2(shifted_cell))) *
-                255.0f);
-            float mismatch =
-                (float)countbits(current_signature ^ previous_signature);
-            valid_shift_count += 1u;
-            if (mismatch < best_mismatch) {
-                second_mismatch = best_mismatch;
-                best_mismatch = mismatch;
-                best_shift = shift;
-            } else if (mismatch < second_mismatch) {
-                second_mismatch = mismatch;
+
+            if (vertical_scroll_observable) {
+                const int2 shifted_cell_y =
+                    int2(cell) + int2(0, shift);
+                const uint previous_signature_y =
+                    (uint)round(saturate(
+                        LoadPreviousSignature(
+                            uint2(shifted_cell_y))) *
+                        255.0f);
+                const float mismatch_y =
+                    (float)countbits(
+                        current_signature ^ previous_signature_y);
+                scroll_shift_costs_y[shift + 3] = mismatch_y;
             }
         }
     }
-    float motion_confidence =
-        viewport_valid && layout_history_valid &&
-        valid_shift_count >= 2u ?
-            saturate((second_mismatch - best_mismatch) / 4.0f) :
-            0.0f;
-    float vertical_motion =
-        motion_confidence > 0.10f ? (float)best_shift / 3.0f : 0.0f;
 
-    float depth = depth_valid ? LoadDepth(depth_uv) :
+    float depth = depth_valid ? depth_center :
         DepthHistory(SBS_SCENE_DEPTH_HISTORY_LAST_NORMALIZED_DEPTH, cell);
     float2 depth_dxdy = 0.0f;
     if (depth_valid) {
-        depth_dxdy.x = abs(
-            LoadDepth(depth_uv + float2(depth_texel.x, 0.0f)) -
-            LoadDepth(depth_uv - float2(depth_texel.x, 0.0f)));
-        depth_dxdy.y = abs(
-            LoadDepth(depth_uv + float2(0.0f, depth_texel.y)) -
-            LoadDepth(depth_uv - float2(0.0f, depth_texel.y)));
+        depth_dxdy.x = abs(depth_right - depth_left);
+        depth_dxdy.y = abs(depth_down - depth_up);
     }
     float previous_depth =
         DepthHistory(SBS_SCENE_DEPTH_HISTORY_LAST_NORMALIZED_DEPTH, cell);
     float depth_change =
-        depth_valid && depth_history_valid ?
+        depth_valid && depth_history_comparable ?
             abs(depth - previous_depth) :
             0.0f;
     float depth_fast = depth_valid ?
-        (depth_history_valid ?
+        (depth_history_comparable ?
             lerp(
                 DepthHistory(
                     SBS_SCENE_DEPTH_HISTORY_FAST_DEPTH_EMA,
@@ -528,7 +606,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             depth) :
         DepthHistory(SBS_SCENE_DEPTH_HISTORY_FAST_DEPTH_EMA, cell);
     float depth_slow = depth_valid ?
-        (depth_history_valid ?
+        (depth_history_comparable ?
             lerp(
                 DepthHistory(
                     SBS_SCENE_DEPTH_HISTORY_SLOW_DEPTH_EMA,
@@ -538,7 +616,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             depth) :
         DepthHistory(SBS_SCENE_DEPTH_HISTORY_SLOW_DEPTH_EMA, cell);
     float depth_variance = depth_valid ?
-        (depth_history_valid ? lerp(
+        (depth_history_comparable ? lerp(
             DepthHistory(
                 SBS_SCENE_DEPTH_HISTORY_DEPTH_VARIANCE_EMA,
                 cell),
@@ -546,7 +624,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             slow_alpha) : 0.0f) :
         DepthHistory(SBS_SCENE_DEPTH_HISTORY_DEPTH_VARIANCE_EMA, cell);
     float depth_change_ema = depth_valid ?
-        (depth_history_valid ? lerp(
+        (depth_history_comparable ? lerp(
             DepthHistory(
                 SBS_SCENE_DEPTH_HISTORY_ABSOLUTE_DEPTH_CHANGE_EMA,
                 cell),
@@ -556,74 +634,217 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             SBS_SCENE_DEPTH_HISTORY_ABSOLUTE_DEPTH_CHANGE_EMA,
             cell);
     float depth_valid_confidence = depth_valid ?
-        (depth_history_valid ? lerp(
-            DepthHistory(
-                SBS_SCENE_DEPTH_HISTORY_VALID_DEPTH_CONFIDENCE,
-                cell),
+        (depth_history_comparable ? lerp(
+            previous_depth_valid_confidence,
             1.0f,
             fast_alpha) : 1.0f) :
-        (depth_history_valid ? lerp(
-            DepthHistory(
-                SBS_SCENE_DEPTH_HISTORY_VALID_DEPTH_CONFIDENCE,
-                cell),
+        (depth_history_comparable ? lerp(
+            previous_depth_valid_confidence,
             0.0f,
             slow_alpha) : 0.0f);
 
-    float edge_attached = viewport_valid &&
-        (viewport_uv.x < 0.14f || viewport_uv.x > 0.86f ||
-         viewport_uv.y < 0.10f) ? 1.0f : 0.0f;
     float stable_gutter = viewport_valid ?
         saturate(
             (0.18f - photo_ema) * 4.0f +
             (0.10f - slow_activity) * 3.0f) :
         0.0f;
-    float chrome =
-        edge_attached * saturate(texture_evidence - 0.10f) *
-        saturate(1.0f - 1.5f * photo_ema);
-    float exterior_competitor =
-        edge_attached *
-        saturate(0.65f * fast_activity + 0.35f * photo_ema) *
-        saturate(1.1f - dwell);
+    // UI-like texture and short-lived competing activity are deliberately geometry-neutral.
+    // A left/right/top browser-band prior made identical media depend on orientation and treated
+    // the bottom edge differently. These are soft semantic cues only: persistent photographic
+    // support can overcome them at every location, including all four viewport edges.
+    float ui_like =
+        (viewport_valid ? 1.0f : 0.0f) *
+        saturate(texture_evidence - 0.10f) *
+        saturate((0.45f - photo_ema) * 2.0f) *
+        saturate(0.40f + 0.60f * (1.0f - slow_activity));
+    const float transient_activity =
+        saturate((fast_activity - slow_activity) * 2.0f);
+    float transient_competitor =
+        (viewport_valid ? 1.0f : 0.0f) *
+        transient_activity *
+        saturate(1.0f - dwell) *
+        saturate(0.25f + 0.75f * ui_like);
+    bool static_media_inputs_valid;
+    const float static_media_weight = SbsRuleStaticMediaWeight(
+        viewport_flag,
+        transient_competitor,
+        ui_like,
+        variance,
+        chroma,
+        photo_ema,
+        chroma_ema,
+        static_media_inputs_valid);
+    // Playing video often changes only a small fraction of its pixels on any one capture
+    // (especially after screen-recording cadence conversion).  The old fast-EMA threshold
+    // therefore saw the moving subject but never the stable player envelope.  Treat the slow
+    // activity EMA as temporal occupancy: infrequent changes accumulate across the panel while
+    // static browser chrome remains dark.  Photographic support still has to corroborate every
+    // cell, and the reducer still requires a coherent two-axis run before it can propose an ROI.
+    // This lane remains an intentionally heuristic temporal proposal; unlike the static-media
+    // lane below, it is not the authoritative scalar classifier for a reducer mass.
+    float temporal_video_occupancy =
+        saturate((slow_activity - 0.0025f) * 120.0f);
     float video_evidence =
         viewport_valid *
-        saturate((fast_activity - 0.05f) * 2.5f) *
-        saturate((photo_ema - 0.05f) * 2.0f) *
-        saturate(0.35f + dwell) *
-        (1.0f - 0.75f * exterior_competitor);
-    float content_evidence =
+        temporal_video_occupancy *
+        saturate((photo_ema - 0.04f) * 4.0f) *
+        saturate(0.45f + dwell) *
+        (1.0f - 0.75f * transient_competitor);
+    // Focus-boundary diagnostics may remain permissive; they do not own static ROI mass.
+    float static_focus_heuristic =
         viewport_valid *
         saturate((photo_ema - 0.16f) * 2.2f) *
         saturate(0.25f + dwell) *
-        (1.0f - 0.80f * chrome);
-    float focus = max(video_evidence, content_evidence);
+        (1.0f - 0.80f * ui_like);
+    float focus = max(video_evidence, static_focus_heuristic);
     float focus_boundary = saturate(texture_evidence * focus);
-    float scroll_support =
-        motion_confidence * saturate(abs(vertical_motion) * 1.5f) *
-        saturate(1.0f - video_evidence);
+    float structural_cut_support =
+        depth_valid ? saturate(depth_change * 3.0f) * activity : 0.0f;
+    float exposure_only_support =
+        depth_valid ? saturate(activity - depth_change) : 0.0f;
+    float roi_coverage = Analysis(
+        SBS_SCENE_ANALYSIS_GRID_CURRENT_ROI_COVERAGE,
+        cell);
+    float roi_depth_weight =
+        isfinite(roi_coverage) && roi_coverage > 0.5f ?
+            saturate(depth_valid_confidence) :
+            0.0f;
+    // A large negative group sum is a compact corruption sentinel. The plan pass converts it
+    // back into required-invalid evidence before any controller decision is allowed.
+    float roi_cell_weight =
+        !isfinite(roi_coverage) ? -65536.0f :
+        roi_coverage > 0.5f ? 1.0f :
+        0.0f;
     float depth_reference_texel_scale =
         (float)min(scene_depth_width, scene_depth_height) / 434.0f;
     depth_dxdy *= depth_reference_texel_scale;
 
+    const uint group_lane =
+        group_thread_id.y * SBS_RULE_EVIDENCE_GROUP_SIZE +
+        group_thread_id.x;
+    RoiEventGroupSums[group_lane] = float4(
+        roi_cell_weight,
+        roi_depth_weight,
+        saturate(structural_cut_support) * roi_depth_weight,
+        saturate(exposure_only_support) * roi_depth_weight);
+    ScrollVoteGroupSumsY[group_lane] = float4(
+        SbsRuleClassifyScrollVote(
+            vertical_scroll_observable,
+            scroll_shift_costs_y[0],
+            scroll_shift_costs_y[1],
+            scroll_shift_costs_y[2],
+            scroll_shift_costs_y[3],
+            scroll_shift_costs_y[4],
+            scroll_shift_costs_y[5],
+            scroll_shift_costs_y[6]),
+        0.0f);
+    ScrollVoteGroupSumsX[group_lane] = float4(
+        SbsRuleClassifyScrollVote(
+            horizontal_scroll_observable,
+            scroll_shift_costs_x[0],
+            scroll_shift_costs_x[1],
+            scroll_shift_costs_x[2],
+            scroll_shift_costs_x[3],
+            scroll_shift_costs_x[4],
+            scroll_shift_costs_x[5],
+            scroll_shift_costs_x[6]),
+        0.0f);
+    // The slow activity EMA owns envelope discovery and retention, but it cannot prove that a
+    // provisional player is still moving. Preserve current ordinal activity only where the
+    // canonical, photographic temporal classifier also has support. Raw repaint activity must
+    // never bypass that classifier and turn animated text or browser chrome into VIDEO.
+    const float classified_fresh_activity =
+        SbsRuleTemporalMass(video_evidence) > 0.0f ?
+            activity :
+            0.0f;
+    FreshActivityGroupSums[group_lane] = float2(
+        classified_fresh_activity,
+        inside_previous_video_target ?
+            classified_fresh_activity :
+            0.0f);
+    GroupMemoryBarrierWithGroupSync();
     [unroll]
-    for (uint channel = 0u;
-         channel < SBS_SCENE_DENSE_OUT_CHANNEL_COUNT;
-         ++channel) {
-        DenseOutput[SceneAnalysisIndex(channel, cell)] = 0.0f;
+    for (uint stride = SBS_RULE_EVIDENCE_GROUP_THREAD_COUNT / 2u;
+         stride > 0u;
+         stride >>= 1u) {
+        if (group_lane < stride) {
+            RoiEventGroupSums[group_lane] +=
+                RoiEventGroupSums[group_lane + stride];
+            ScrollVoteGroupSumsY[group_lane] +=
+                ScrollVoteGroupSumsY[group_lane + stride];
+            ScrollVoteGroupSumsX[group_lane] +=
+                ScrollVoteGroupSumsX[group_lane + stride];
+            FreshActivityGroupSums[group_lane] +=
+                FreshActivityGroupSums[group_lane + stride];
+        }
+        GroupMemoryBarrierWithGroupSync();
     }
+    if (group_lane == 0u) {
+        const uint group_index =
+            group_id.y * SBS_RULE_EVIDENCE_GROUPS_PER_AXIS +
+            group_id.x;
+        const float4 group_sum = RoiEventGroupSums[0];
+        const float3 scroll_y = ScrollVoteGroupSumsY[0].xyz;
+        const float3 scroll_x = ScrollVoteGroupSumsX[0].xyz;
+        const float2 fresh_activity = FreshActivityGroupSums[0];
+        RuleSummary[SbsRuleEventGroupIndex(
+            group_index,
+            SBS_RULE_EVENT_GROUP_ROI_CELLS)] = group_sum.x;
+        RuleSummary[SbsRuleEventGroupIndex(
+            group_index,
+            SBS_RULE_EVENT_GROUP_DEPTH_WEIGHT)] = group_sum.y;
+        RuleSummary[SbsRuleEventGroupIndex(
+            group_index,
+            SBS_RULE_EVENT_GROUP_ROI_STRUCTURAL_WEIGHT)] = group_sum.z;
+        RuleSummary[SbsRuleEventGroupIndex(
+            group_index,
+            SBS_RULE_EVENT_GROUP_ROI_EXPOSURE_WEIGHT)] = group_sum.w;
+        RuleSummary[SbsRuleEventGroupIndex(
+            group_index,
+            SBS_RULE_EVENT_GROUP_SCROLL_Y_WEIGHT)] = scroll_y.x;
+        RuleSummary[SbsRuleEventGroupIndex(
+            group_index,
+            SBS_RULE_EVENT_GROUP_SCROLL_Y_SIGNED)] = scroll_y.y;
+        RuleSummary[SbsRuleEventGroupIndex(
+            group_index,
+            SBS_RULE_EVENT_GROUP_SCROLL_Y_SUPPORT)] = scroll_y.z;
+        RuleSummary[SbsRuleEventGroupIndex(
+            group_index,
+            SBS_RULE_EVENT_GROUP_SCROLL_X_WEIGHT)] = scroll_x.x;
+        RuleSummary[SbsRuleEventGroupIndex(
+            group_index,
+            SBS_RULE_EVENT_GROUP_SCROLL_X_SIGNED)] = scroll_x.y;
+        RuleSummary[SbsRuleEventGroupIndex(
+            group_index,
+            SBS_RULE_EVENT_GROUP_SCROLL_X_SUPPORT)] = scroll_x.z;
+        RuleSummary[SbsRuleEventGroupIndex(
+            group_index,
+            SBS_RULE_EVENT_GROUP_FRESH_ACTIVITY_MASS)] =
+            fresh_activity.x;
+        RuleSummary[SbsRuleEventGroupIndex(
+            group_index,
+            SBS_RULE_EVENT_GROUP_FRESH_ACTIVITY_INSIDE_PREVIOUS_TARGET)] =
+            fresh_activity.y;
+        if (group_index == 0u) {
+            RuleSummary[SBS_RULE_EVENT_SOURCE_MARKER] =
+                SBS_RULE_EVENT_SOURCE_PREAGGREGATED;
+        }
+    }
+
     DenseOutput[SceneAnalysisIndex(
         SBS_SCENE_DENSE_OUT_UNKNOWN_BACKGROUND, cell)] =
-        viewport_valid ? saturate(1.0f - max(focus, chrome)) : 1.0f;
+        viewport_valid ? saturate(1.0f - max(focus, ui_like)) : 1.0f;
     DenseOutput[SceneAnalysisIndex(
         SBS_SCENE_DENSE_OUT_PRIMARY_PLAYING_VIDEO, cell)] =
         video_evidence;
     DenseOutput[SceneAnalysisIndex(
         SBS_SCENE_DENSE_OUT_PHOTOGRAPHIC_CONTENT_COLLAGE, cell)] =
-        content_evidence;
+        static_media_inputs_valid ? static_media_weight : -1.0f;
     DenseOutput[SceneAnalysisIndex(
-        SBS_SCENE_DENSE_OUT_BROWSER_SYSTEM_CHROME, cell)] = chrome;
+        SBS_SCENE_DENSE_OUT_BROWSER_SYSTEM_CHROME, cell)] = ui_like;
     DenseOutput[SceneAnalysisIndex(
         SBS_SCENE_DENSE_OUT_ADVERTISEMENT_COMPETITOR_UNSAFE, cell)] =
-        exterior_competitor;
+        transient_competitor;
     DenseOutput[SceneAnalysisIndex(
         SBS_SCENE_DENSE_OUT_FOCUS_BOUNDARY, cell)] = focus_boundary;
     DenseOutput[SceneAnalysisIndex(
@@ -634,20 +855,22 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             saturate(0.6f * depth + 2.0f * max(depth_dxdy.x, depth_dxdy.y)) :
             0.0f;
     DenseOutput[SceneAnalysisIndex(
-        SBS_SCENE_DENSE_OUT_LOCAL_MOTION_X, cell)] = 0.0f;
+        SBS_SCENE_DENSE_OUT_LOCAL_MOTION_X, cell)] =
+        0.0f;
     DenseOutput[SceneAnalysisIndex(
-        SBS_SCENE_DENSE_OUT_LOCAL_MOTION_Y, cell)] = vertical_motion;
+        SBS_SCENE_DENSE_OUT_LOCAL_MOTION_Y, cell)] =
+        0.0f;
     DenseOutput[SceneAnalysisIndex(
         SBS_SCENE_DENSE_OUT_LOCAL_MOTION_CONFIDENCE, cell)] =
-        motion_confidence;
+        0.0f;
     DenseOutput[SceneAnalysisIndex(
         SBS_SCENE_DENSE_OUT_STRUCTURAL_CONTENT_CUT_SUPPORT, cell)] =
-        saturate(depth_change * 3.0f) * activity;
+        structural_cut_support;
     DenseOutput[SceneAnalysisIndex(
         SBS_SCENE_DENSE_OUT_EXPOSURE_ONLY_CHANGE_SUPPORT, cell)] =
-        saturate(activity - depth_change);
+        exposure_only_support;
     DenseOutput[SceneAnalysisIndex(
-        SBS_SCENE_DENSE_OUT_SCROLL_SUPPORT, cell)] = scroll_support;
+        SBS_SCENE_DENSE_OUT_SCROLL_SUPPORT, cell)] = 0.0f;
 
     NextLayoutHistory[SceneAnalysisIndex(
         SBS_SCENE_LAYOUT_HISTORY_PREVIOUS_LUMINANCE_ORDINAL, cell)] =
@@ -664,17 +887,19 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     NextLayoutHistory[SceneAnalysisIndex(
         SBS_SCENE_LAYOUT_HISTORY_CHROMA_EMA, cell)] = chroma_ema;
     NextLayoutHistory[SceneAnalysisIndex(
-        SBS_SCENE_LAYOUT_HISTORY_HORIZONTAL_MOTION, cell)] = 0.0f;
+        SBS_SCENE_LAYOUT_HISTORY_HORIZONTAL_MOTION, cell)] =
+        0.0f;
     NextLayoutHistory[SceneAnalysisIndex(
-        SBS_SCENE_LAYOUT_HISTORY_VERTICAL_MOTION, cell)] = vertical_motion;
+        SBS_SCENE_LAYOUT_HISTORY_VERTICAL_MOTION, cell)] =
+        0.0f;
     NextLayoutHistory[SceneAnalysisIndex(
         SBS_SCENE_LAYOUT_HISTORY_MOTION_CONFIDENCE, cell)] =
-        motion_confidence;
+        0.0f;
     NextLayoutHistory[SceneAnalysisIndex(
         SBS_SCENE_LAYOUT_HISTORY_STABLE_OCCUPANCY_DWELL, cell)] = dwell;
     NextLayoutHistory[SceneAnalysisIndex(
         SBS_SCENE_LAYOUT_HISTORY_ACCEPTED_FOCUS_EVIDENCE_EMA, cell)] =
-        layout_history_valid ?
+        semantic_layout_history_valid ?
             lerp(
                 LayoutHistory(
                     SBS_SCENE_LAYOUT_HISTORY_ACCEPTED_FOCUS_EVIDENCE_EMA,
@@ -684,22 +909,24 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
             focus;
     NextLayoutHistory[SceneAnalysisIndex(
         SBS_SCENE_LAYOUT_HISTORY_EXCLUSION_UI_AD_EVIDENCE_EMA, cell)] =
-        layout_history_valid ?
+        semantic_layout_history_valid ?
             lerp(
                 LayoutHistory(
                     SBS_SCENE_LAYOUT_HISTORY_EXCLUSION_UI_AD_EVIDENCE_EMA,
                     cell),
-                max(chrome, exterior_competitor),
+                max(ui_like, transient_competitor),
                 slow_alpha) :
-            max(chrome, exterior_competitor);
+            max(ui_like, transient_competitor);
     NextLayoutHistory[SceneAnalysisIndex(
         SBS_SCENE_LAYOUT_HISTORY_SECONDS_SINCE_VALID_LAYOUT, cell)] =
         viewport_valid ? 0.0f :
-            min(
-                LayoutHistory(
-                    SBS_SCENE_LAYOUT_HISTORY_SECONDS_SINCE_VALID_LAYOUT,
-                    cell) + max(scene_elapsed_seconds, 0.0f),
-                10.0f);
+            semantic_layout_history_valid ?
+                min(
+                    LayoutHistory(
+                        SBS_SCENE_LAYOUT_HISTORY_SECONDS_SINCE_VALID_LAYOUT,
+                        cell) + max(scene_elapsed_seconds, 0.0f),
+                    10.0f) :
+                0.0f;
 
     NextDepthHistory[SceneAnalysisIndex(
         SBS_SCENE_DEPTH_HISTORY_LAST_NORMALIZED_DEPTH, cell)] =
@@ -710,7 +937,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         SBS_SCENE_DEPTH_HISTORY_SLOW_DEPTH_EMA, cell)] = depth_slow;
     NextDepthHistory[SceneAnalysisIndex(
         SBS_SCENE_DEPTH_HISTORY_SETTLED_SHOT_REFERENCE_DEPTH, cell)] =
-        depth_history_valid ?
+        depth_history_comparable ?
             DepthHistory(
                 SBS_SCENE_DEPTH_HISTORY_SETTLED_SHOT_REFERENCE_DEPTH,
                 cell) :
@@ -723,7 +950,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     NextDepthHistory[SceneAnalysisIndex(
         SBS_SCENE_DEPTH_HISTORY_HORIZONTAL_DEPTH_GRADIENT_EMA, cell)] =
         depth_valid ?
-            (depth_history_valid ? lerp(
+            (depth_history_comparable ? lerp(
                 DepthHistory(
                     SBS_SCENE_DEPTH_HISTORY_HORIZONTAL_DEPTH_GRADIENT_EMA,
                     cell),
@@ -735,7 +962,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     NextDepthHistory[SceneAnalysisIndex(
         SBS_SCENE_DEPTH_HISTORY_VERTICAL_DEPTH_GRADIENT_EMA, cell)] =
         depth_valid ?
-            (depth_history_valid ? lerp(
+            (depth_history_comparable ? lerp(
                 DepthHistory(
                     SBS_SCENE_DEPTH_HISTORY_VERTICAL_DEPTH_GRADIENT_EMA,
                     cell),
@@ -760,7 +987,10 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     // A negative sentinel lets the single reduction lane fail closed without rescanning every
     // channel. Missing depth is not numerical corruption: its confidence/history age already
     // degrades locally while appearance/layout evidence remains usable.
-    bool outputs_finite = true;
+    // Viewport coordinates are consumed by target containment and scroll attribution but are not
+    // reproduced in DenseOutput. Fold them into the same fail-closed sentinel so the production
+    // reducer and the serial oracle reject identical malformed inputs.
+    bool outputs_finite = all(isfinite(viewport_uv));
     [loop]
     for (uint channel = 0u;
          channel < SBS_SCENE_DENSE_OUT_CHANNEL_COUNT;
@@ -793,6 +1023,9 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     if (cell.x == 0u && cell.y == 0u) {
         WriteMeta(
             frame_state > 0.5f &&
-            frame_depth_transform_valid);
+                frame_depth_transform_valid,
+            frame_depth_transform_valid &&
+                !explicit_legacy_transform &&
+                FrameRoiDataResetDebt(frame_roi_transform));
     }
 }

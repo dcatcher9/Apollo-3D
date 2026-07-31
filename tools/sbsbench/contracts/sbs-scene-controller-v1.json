@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "sbs_scene_controller",
   "rule_revision": "rules_v1",
-  "ordered_abi_hash": "e405c8452d74ff77c37cb096c15bd764555b6b7c509bf3651d10836958e82fde",
+  "ordered_abi_hash": "33aef26ac76731bf1dcfdc06892af0e638eafb1dcae088cfde688cb76938b290",
   "abi_hash_algorithm": "sha256-canonical-json-without-ordered_abi_hash",
   "dimensions": [
     {"name": "appearance_canvas_size", "value": 256},
@@ -16,7 +16,7 @@
     {"name": "meta_word_count", "value": 32},
     {"name": "hidden_channel_count", "value": 24},
     {"name": "pop_action_count", "value": 9},
-    {"name": "rule_state_word_count", "value": 64}
+    {"name": "rule_state_word_count", "value": 68}
   ],
   "dynamic_dimensions": {
     "Hd": "current patch-aligned Depth Anything V2 tensor height",
@@ -93,7 +93,7 @@
     {"index": 6, "name": "state_full_frame"},
     {"index": 7, "name": "state_video"},
     {"index": 8, "name": "state_content"},
-    {"index": 9, "name": "state_scroll_hold"},
+    {"index": 9, "name": "reserved_9", "required_zero": true},
     {"index": 10, "name": "depth_input_valid"},
     {"index": 11, "name": "roi_generation_changed"},
     {"index": 12, "name": "layout_reset_requested"},
@@ -238,16 +238,19 @@
     {"index": 58, "name": "history_flags", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0.0},
     {"index": 59, "name": "diagnostic_flags", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0.0},
     {"index": 60, "name": "last_external_cut_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0.0},
-    {"index": 61, "name": "reserved_1", "type": "float32", "gpu_encoding": "float", "initial": 0.0, "required_zero": true},
-    {"index": 62, "name": "reserved_2", "type": "float32", "gpu_encoding": "float", "initial": 0.0, "required_zero": true},
-    {"index": 63, "name": "reserved_3", "type": "float32", "gpu_encoding": "float", "initial": 0.0, "required_zero": true}
+    {"index": 61, "name": "roi_structural_cut_support", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 62, "name": "roi_exposure_only_support", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 63, "name": "roi_event_depth_coverage", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 64, "name": "last_detector_cut_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0.0},
+    {"index": 65, "name": "reserved_65", "type": "float32", "gpu_encoding": "float", "initial": 0.0, "required_zero": true},
+    {"index": 66, "name": "reserved_66", "type": "float32", "gpu_encoding": "float", "initial": 0.0, "required_zero": true},
+    {"index": 67, "name": "reserved_67", "type": "float32", "gpu_encoding": "float", "initial": 0.0, "required_zero": true}
   ],
   "enums": {
     "state_kind": {
       "full_frame": 0,
       "video": 1,
-      "content": 2,
-      "scroll_hold": 3
+      "content": 2
     },
     "layout_decision": {
       "no_target": 0,
@@ -292,7 +295,9 @@
       "cut_accepted_ever": 4,
       "layout_history_valid": 5,
       "depth_history_valid": 6,
-      "fallback_active": 7
+      "fallback_active": 7,
+      "temporal_lockout_active": 8,
+      "detector_cut_pending": 9
     },
     "reset_flags": {
       "layout": 0,

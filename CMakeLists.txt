@@ -86,7 +86,7 @@ find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 set(SBS_ADAPTIVE_STATE_GENERATOR
         "${CMAKE_SOURCE_DIR}/tools/sbsbench/generate_adaptive_state_contract.py")
 set(SBS_ADAPTIVE_STATE_MANIFEST
-        "${CMAKE_SOURCE_DIR}/tools/sbsbench/contracts/sbs-adaptive-state-v3.json")
+        "${CMAKE_SOURCE_DIR}/tools/sbsbench/contracts/sbs-adaptive-state-v4.json")
 set(SBS_ADAPTIVE_STATE_CPP
         "${CMAKE_SOURCE_DIR}/src/generated/sbs_adaptive_state_contract.h")
 set(SBS_ADAPTIVE_STATE_HLSL

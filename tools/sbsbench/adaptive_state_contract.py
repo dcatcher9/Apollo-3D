@@ -16,7 +16,7 @@ from typing import Any
 CONTRACT_PATH = (
     Path(__file__).resolve().parent
     / "contracts"
-    / "sbs-adaptive-state-v3.json"
+    / "sbs-adaptive-state-v4.json"
 )
 
 
@@ -98,3 +98,6 @@ CUT_FLAG_GEOMETRY_LOW_ONCE = flag_mask(CUT_FLAG_BITS, "geometry_low_once")
 CUT_FLAG_APPEARANCE_QUIET_ONCE = flag_mask(CUT_FLAG_BITS, "appearance_quiet_once")
 CUT_FLAG_LATCHED = flag_mask(CUT_FLAG_BITS, "latched")
 CUT_FLAG_APPEARANCE_RECOVERY = flag_mask(CUT_FLAG_BITS, "appearance_recovery")
+CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING = flag_mask(
+    CUT_FLAG_BITS, "geometry_confirmation_pending"
+)

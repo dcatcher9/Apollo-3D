@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "browser-scene-shadow-gate-v1",
+  "analysis_canvas_size": 128,
+  "event_tolerance_updates": 1,
+  "max_acquisition_ms": 800.0,
+  "max_inactive_frames_after_acquisition": 0,
+  "max_roi_jitter_analysis_cells_p95": 1.0,
+  "max_unsafe_pixels": 0,
+  "min_active_layout_accuracy": 1.0,
+  "min_roi_iou_median": 0.9,
+  "min_roi_iou_p05": 0.82,
+  "min_target_coverage_p05": 0.95
+}

@@ -10,16 +10,16 @@
 namespace sbs_scene_controller {
   inline constexpr std::uint32_t schema_version = 1u;
   inline constexpr std::string_view rule_revision = "rules_v1";
-  inline constexpr std::string_view ordered_abi_hash = "e405c8452d74ff77c37cb096c15bd764555b6b7c509bf3651d10836958e82fde";
+  inline constexpr std::string_view ordered_abi_hash = "33aef26ac76731bf1dcfdc06892af0e638eafb1dcae088cfde688cb76938b290";
   inline constexpr std::array<std::uint32_t, 8> ordered_abi_hash_words {{
-    0xe405c845u,
-    0x2d74ff77u,
-    0xc37cb096u,
-    0xc15bd764u,
-    0x555b6b7cu,
-    0x509bf365u,
-    0x1d108369u,
-    0x58e82fdeu,
+    0x33aef26au,
+    0xc76731bfu,
+    0x1dcfdc06u,
+    0x892af0e6u,
+    0x38eafb1du,
+    0xcae088cfu,
+    0xde688cb7u,
+    0x6938b290u,
   }};
 
   inline constexpr std::size_t appearance_canvas_size = 256u;
@@ -33,7 +33,7 @@ namespace sbs_scene_controller {
   inline constexpr std::size_t meta_word_count = 32u;
   inline constexpr std::size_t hidden_channel_count = 24u;
   inline constexpr std::size_t pop_action_count = 9u;
-  inline constexpr std::size_t rule_state_word_count = 64u;
+  inline constexpr std::size_t rule_state_word_count = 68u;
   inline constexpr std::size_t rule_state_vector_count = rule_state_word_count / 4u;
   inline constexpr std::int32_t dynamic_hd = -1;
   inline constexpr std::int32_t dynamic_wd = -2;
@@ -181,7 +181,7 @@ namespace sbs_scene_controller {
     state_full_frame = 6u,
     state_video = 7u,
     state_content = 8u,
-    state_scroll_hold = 9u,
+    reserved_9 = 9u,
     depth_input_valid = 10u,
     roi_generation_changed = 11u,
     layout_reset_requested = 12u,
@@ -217,7 +217,7 @@ namespace sbs_scene_controller {
     "state_full_frame",
     "state_video",
     "state_content",
-    "state_scroll_hold",
+    "reserved_9",
     "depth_input_valid",
     "roi_generation_changed",
     "layout_reset_requested",
@@ -428,10 +428,14 @@ namespace sbs_scene_controller {
     history_flags = 58u,
     diagnostic_flags = 59u,
     last_external_cut_count = 60u,
-    reserved_1 = 61u,
-    reserved_2 = 62u,
-    reserved_3 = 63u,
-    count = 64u,
+    roi_structural_cut_support = 61u,
+    roi_exposure_only_support = 62u,
+    roi_event_depth_coverage = 63u,
+    last_detector_cut_count = 64u,
+    reserved_65 = 65u,
+    reserved_66 = 66u,
+    reserved_67 = 67u,
+    count = 68u,
   };
 
   constexpr std::size_t index(const rule_state_word_e word) {
@@ -447,7 +451,7 @@ namespace sbs_scene_controller {
     bool required_zero;
   };
 
-  inline constexpr std::array<rule_state_field_descriptor_t, 64> rule_state_fields {{
+  inline constexpr std::array<rule_state_field_descriptor_t, 68> rule_state_fields {{
     {rule_state_word_e::schema_version, "schema_version", "float32", gpu_encoding_e::uint_valued_float, 1.0f, false},
     {rule_state_word_e::state_kind, "state_kind", "float32", gpu_encoding_e::uint_valued_float, 0.0f, false},
     {rule_state_word_e::output_valid, "output_valid", "float32", gpu_encoding_e::float_value, 0.0f, false},
@@ -509,9 +513,13 @@ namespace sbs_scene_controller {
     {rule_state_word_e::history_flags, "history_flags", "uint32", gpu_encoding_e::uint_bits, 0.0f, false},
     {rule_state_word_e::diagnostic_flags, "diagnostic_flags", "uint32", gpu_encoding_e::uint_bits, 0.0f, false},
     {rule_state_word_e::last_external_cut_count, "last_external_cut_count", "uint32", gpu_encoding_e::uint_bits, 0.0f, false},
-    {rule_state_word_e::reserved_1, "reserved_1", "float32", gpu_encoding_e::float_value, 0.0f, true},
-    {rule_state_word_e::reserved_2, "reserved_2", "float32", gpu_encoding_e::float_value, 0.0f, true},
-    {rule_state_word_e::reserved_3, "reserved_3", "float32", gpu_encoding_e::float_value, 0.0f, true},
+    {rule_state_word_e::roi_structural_cut_support, "roi_structural_cut_support", "float32", gpu_encoding_e::float_value, 0.0f, false},
+    {rule_state_word_e::roi_exposure_only_support, "roi_exposure_only_support", "float32", gpu_encoding_e::float_value, 0.0f, false},
+    {rule_state_word_e::roi_event_depth_coverage, "roi_event_depth_coverage", "float32", gpu_encoding_e::float_value, 0.0f, false},
+    {rule_state_word_e::last_detector_cut_count, "last_detector_cut_count", "uint32", gpu_encoding_e::uint_bits, 0.0f, false},
+    {rule_state_word_e::reserved_65, "reserved_65", "float32", gpu_encoding_e::float_value, 0.0f, true},
+    {rule_state_word_e::reserved_66, "reserved_66", "float32", gpu_encoding_e::float_value, 0.0f, true},
+    {rule_state_word_e::reserved_67, "reserved_67", "float32", gpu_encoding_e::float_value, 0.0f, true},
   }};
 
   inline constexpr std::array<float, rule_state_word_count> initial_values {{
@@ -566,6 +574,10 @@ namespace sbs_scene_controller {
     3.0f,
     0.0f,
     1.0f,
+    0.0f,
+    0.0f,
+    0.0f,
+    0.0f,
     0.0f,
     0.0f,
     0.0f,
@@ -646,13 +658,16 @@ namespace sbs_scene_controller {
     0x00000000u,
     0x00000000u,
     0x00000000u,
+    0x00000000u,
+    0x00000000u,
+    0x00000000u,
+    0x00000000u,
   }};
 
   enum class state_kind_e : std::uint32_t {
     full_frame = 0u,
     video = 1u,
     content = 2u,
-    scroll_hold = 3u,
   };
 
   enum class layout_decision_e : std::uint32_t {
@@ -706,7 +721,9 @@ namespace sbs_scene_controller {
   inline constexpr std::uint32_t state_flags_layout_history_valid = 1u << 5u;
   inline constexpr std::uint32_t state_flags_depth_history_valid = 1u << 6u;
   inline constexpr std::uint32_t state_flags_fallback_active = 1u << 7u;
-  inline constexpr std::array<named_bit_t, 8> state_flags_bits {{
+  inline constexpr std::uint32_t state_flags_temporal_lockout_active = 1u << 8u;
+  inline constexpr std::uint32_t state_flags_detector_cut_pending = 1u << 9u;
+  inline constexpr std::array<named_bit_t, 10> state_flags_bits {{
     {"initialized", 0u, state_flags_initialized},
     {"roi_locked", 1u, state_flags_roi_locked},
     {"scroll_hold_active", 2u, state_flags_scroll_hold_active},
@@ -715,6 +732,8 @@ namespace sbs_scene_controller {
     {"layout_history_valid", 5u, state_flags_layout_history_valid},
     {"depth_history_valid", 6u, state_flags_depth_history_valid},
     {"fallback_active", 7u, state_flags_fallback_active},
+    {"temporal_lockout_active", 8u, state_flags_temporal_lockout_active},
+    {"detector_cut_pending", 9u, state_flags_detector_cut_pending},
   }};
 
   inline constexpr std::uint32_t reset_flags_layout = 1u << 0u;
@@ -781,7 +800,7 @@ namespace sbs_scene_controller {
   }
 
   static_assert(rule_state_word_count % 4u == 0u);
-  static_assert(rule_state_vector_count == 16u);
+  static_assert(rule_state_vector_count == 17u);
   static_assert(rule_state_layout_matches_indices());
   static_assert(analysis_grid_names.size() == analysis_grid_channel_count);
   static_assert(layout_history_names.size() == layout_history_channel_count);

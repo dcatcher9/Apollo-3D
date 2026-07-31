@@ -16,6 +16,10 @@
 namespace offline_sbs {
   inline constexpr std::size_t max_scene_frame_id_bytes = 64;
   inline constexpr std::size_t default_max_open_scene_frames = 524288;
+  // Keep this named C++ policy in lockstep with the production shader's
+  // STRUCTURAL_GEOMETRY_CUT_FLOOR. HLSL and C++ cannot consume one common
+  // declaration without introducing a generated cross-language contract.
+  inline constexpr float structural_geometry_cut_floor = 0.005f;
 
   inline constexpr std::uint32_t analysis_appearance_proposal =
     sbs_adaptive_state::analysis_flag_appearance_proposal;
@@ -29,13 +33,20 @@ namespace offline_sbs {
     sbs_adaptive_state::analysis_flag_veto;
   inline constexpr std::uint32_t analysis_relative_geometry_spike =
     sbs_adaptive_state::analysis_flag_relative_spike;
+  inline constexpr std::uint32_t analysis_geometry_confirmation_candidate =
+    sbs_adaptive_state::analysis_flag_geometry_confirmation_candidate;
 
   /**
    * One source-frame sample from the native adaptive trace.
    *
    * `sequence` is one-based and contiguous. Metrics which were not exported must
    * remain std::nullopt; a missing diagnostic is deliberately different from a
-   * measured zero.
+   * measured zero. The structureless analysis bit alone does not distinguish
+   * the first held low-structure update from its persistent successor. The
+   * planner therefore recognizes the live structureless geometry exception
+   * only when the producer's geometry-candidate bit or causal hard-cut pulse is
+   * also present. A trace missing those diagnostics can retain its own proposal
+   * conservatively, but cannot prove or relocate that held endpoint offline.
    */
   struct scene_frame_t {
     std::uint64_t sequence = 0;

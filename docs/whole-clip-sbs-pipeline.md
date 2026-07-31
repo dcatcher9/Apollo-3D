@@ -255,6 +255,17 @@ offline sample counts or cadence one-for-one, and do not diagnose a controller m
 gap in live telemetry. Compare values only at matching sampled frame identities; use the offline
 trace when complete cut/pop/zero-plane history is required.
 
+Ordinary depth-only boundary refinement uses the same `0.005` exposure-invariant structural-change
+floor as the live resolver. A persistent structureless transition is the explicit exception: the
+offline planner accepts that bypass only when the trace also carries the producer's
+geometry-candidate bit or the causal hard-cut pulse. The structureless bit by itself is ambiguous
+because it labels both the first low-detail update, whose endpoint is deliberately held, and the
+persistent successor. Consequently, an older or partial trace missing structural/candidate
+diagnostics can preserve its own non-vetoed causal proposal as an audited fallback, but it cannot
+prove or relocate the held endpoint with full live-detector parity. Missing raw-RGB magnitude
+alone does not downgrade a boundary whose depth and exposure-invariant structural evidence are
+complete; raw RGB is neither the geometry gate nor a substitute for it.
+
 The scene audit explicitly records that its boundaries are not ground truth and that its selected
 parameters are not proven to be universally optimal. Use the evidence to find suspicious cuts,
 administrative splits, parameter-range saturation, anchor fallbacks, invalid depth, and scenes

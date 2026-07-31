@@ -388,7 +388,22 @@ namespace {
       first.completed_sequence
     );
     EXPECT_EQ(second.completed_source_frame_id, 102u);
+    // A proven paused player keeps exactly this state shape: update_count advances while the
+    // ROI lock, generation, and committed rectangle remain unchanged. The downstream request
+    // must therefore continue using ROI-shaped inference rather than silently falling back.
+    EXPECT_TRUE(models::sbs_roi_shape_has_flag(
+      *second.request,
+      models::sbs_roi_shape_request_flag::active_roi
+    ));
+    EXPECT_FALSE(models::sbs_roi_shape_has_flag(
+      *second.request,
+      models::sbs_roi_shape_request_flag::full_frame
+    ));
+    EXPECT_EQ(second.request->identity[1], 3u);
     EXPECT_EQ(second.request->identity[2], 43u);
+    EXPECT_EQ(second.request->committed_roi_bits, roi_bits(second_rule));
+    EXPECT_EQ(second.request->shape[2], first.request->shape[2]);
+    EXPECT_EQ(second.request->shape[3], first.request->shape[3]);
   }
 
   TEST_F(
@@ -727,15 +742,28 @@ namespace {
 
   TEST_F(
     SbsRoiShapeRequestGpuHelperTest,
-    ZeroSourceFrameProvenanceFailsBeforeScheduling
+    ZeroBasedSourceFrameIdentityPublishesCanonicalFallback
   ) {
-    const auto result = helper_->submit(
+    const auto submitted = helper_->submit(
       submission(nullptr, 3840u, 2160u, 7u, 0u)
     );
-    EXPECT_TRUE(result.failed);
-    EXPECT_FALSE(result.copy_scheduled);
-    EXPECT_FALSE(result.fresh_sample);
-    EXPECT_FALSE(result.request.has_value());
+    EXPECT_FALSE(submitted.failed);
+    EXPECT_TRUE(submitted.copy_scheduled);
+    EXPECT_FALSE(submitted.fresh_sample);
+    EXPECT_FALSE(submitted.request.has_value());
+
+    const auto completed = await_fresh_after(*helper_, 0u);
+    ASSERT_TRUE(completed.request.has_value());
+    EXPECT_FALSE(completed.failed);
+    EXPECT_EQ(completed.completed_source_frame_id, 0u);
+    EXPECT_TRUE(models::sbs_roi_shape_has_flag(
+      *completed.request,
+      models::sbs_roi_shape_request_flag::full_frame
+    ));
+    EXPECT_TRUE(models::sbs_roi_shape_has_flag(
+      *completed.request,
+      models::sbs_roi_shape_request_flag::fallback
+    ));
   }
 }  // namespace
 

@@ -24,9 +24,11 @@
   #include <iomanip>
   #include <limits>
   #include <locale>
+  #include <map>
   #include <memory>
   #include <new>
   #include <optional>
+  #include <set>
   #include <sstream>
   #include <stdexcept>
   #include <string>
@@ -40,10 +42,13 @@
   #include <wincodec.h>
   #include <wrl/client.h>
   #include <nlohmann/json.hpp>
+  #include <openssl/evp.h>
 
   // local includes
   #include "config.h"
   #include "generated/sbs_adaptive_state_contract.h"
+  #include "generated/sbs_scene_controller_contract.h"
+  #include "../src_assets/windows/assets/shaders/directx/include/sbs_scene_rules_summary_layout.shared.h"
   #include "logging.h"
   #include "sbs_perf.h"
   #include "sbs_scene_cache_contract.h"
@@ -116,6 +121,19 @@ namespace sbs_bench {
       }
       escaped.push_back('"');
       return escaped;
+    }
+
+    std::string json_finite_double(const double value) {
+      if (!std::isfinite(value)) {
+        return "null";
+      }
+      std::ostringstream text;
+      text.imbue(std::locale::classic());
+      text
+        << std::showpoint
+        << std::setprecision(std::numeric_limits<double>::max_digits10)
+        << value;
+      return text.str();
     }
 
     uint16_t float_to_half(float value) {
@@ -1156,6 +1174,18 @@ namespace sbs_bench {
     }
 
     using adaptive_state_words_t = sbs_adaptive_state::words_t;
+    using scene_controller_global_words_t =
+      std::array<
+        std::uint32_t,
+        sbs_scene_controller::global_out_word_count
+      >;
+    using scene_controller_rule_words_t =
+      std::array<
+        std::uint32_t,
+        sbs_scene_controller::rule_state_word_count
+      >;
+    using scene_controller_rule_summary_words_t =
+      std::array<std::uint32_t, SBS_RULE_SUMMARY_FLOAT_COUNT>;
     using render_state_words_t =
       std::array<std::uint32_t, sbs_adaptive_state::render_prefix_word_count>;
     using cached_state_words_t = sbs_scene_cache::cached_state_words_t;
@@ -1164,6 +1194,437 @@ namespace sbs_bench {
 
     constexpr float scene_anchor_shift_min = -1.39635933f;
     constexpr float scene_anchor_shift_max = 8.58230571f;
+    constexpr std::uint32_t scene_controller_trace_schema = 1u;
+    constexpr std::string_view scene_controller_trace_source =
+      "video_depth_estimator.scene_controller_snapshot";
+    constexpr std::string_view scene_controller_trace_capture =
+      "every-source-frame-after-estimator-update";
+    constexpr std::string_view scene_controller_trace_name =
+      "scene_controller.jsonl";
+    constexpr std::uint32_t scene_controller_source_time_schema = 2u;
+    constexpr std::string_view scene_controller_source_time_clock =
+      "source-presentation-timeline-v2";
+    constexpr std::size_t scene_controller_source_time_max_line_bytes =
+      256u;
+
+    struct scene_controller_source_time_t {
+      std::ifstream stream;
+      std::string file_sha256;
+      std::size_t frame_count = 0;
+      std::size_t consumed_frame_count = 0;
+      std::int64_t time_base_num = 0;
+      std::int64_t time_base_den = 0;
+      std::int64_t previous_pts_ticks = 0;
+      bool has_previous_pts = false;
+      double total_elapsed_seconds = 0.0;
+      std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> digest {
+        nullptr,
+        &EVP_MD_CTX_free,
+      };
+    };
+
+    bool exact_json_object_keys(
+      const nlohmann::json &value,
+      const std::initializer_list<const char *> keys
+    ) {
+      return
+        value.is_object() &&
+        value.size() == keys.size() &&
+        std::all_of(keys.begin(), keys.end(), [&](const char *key) {
+          return value.contains(key);
+        });
+    }
+
+    bool read_bounded_jsonl_line(
+      std::istream &stream,
+      std::string &line,
+      std::string &error,
+      EVP_MD_CTX *digest
+    ) {
+      line.clear();
+      for (;;) {
+        const int next = stream.get();
+        if (next == std::char_traits<char>::eof()) {
+          if (stream.bad()) {
+            error = "cannot read source-time JSONL record";
+          } else if (!line.empty()) {
+            error = "source-time JSONL record is not LF-terminated";
+          } else {
+            error = "source-time JSONL ended before the next record";
+          }
+          return false;
+        }
+        if (next == '\n') {
+          static constexpr char newline = '\n';
+          if (
+            digest &&
+            (
+              EVP_DigestUpdate(
+                digest,
+                line.data(),
+                line.size()
+              ) != 1 ||
+              EVP_DigestUpdate(digest, &newline, 1u) != 1
+            )
+          ) {
+            error = "cannot hash source-time JSONL record";
+            return false;
+          }
+          if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+          }
+          if (line.empty()) {
+            error = "source-time JSONL contains an empty record";
+            return false;
+          }
+          return true;
+        }
+        if (
+          line.size() + 2u >
+          scene_controller_source_time_max_line_bytes
+        ) {
+          error = "source-time JSONL record exceeds its bounded size";
+          return false;
+        }
+        line.push_back(static_cast<char>(next));
+      }
+    }
+
+    bool parse_json_line_strict(
+      const std::string &line,
+      nlohmann::json &value,
+      std::string &error
+    ) {
+      std::map<int, std::set<std::string>> object_keys;
+      bool invalid_callback_depth = false;
+      std::optional<std::string> duplicate_key;
+      const auto callback =
+        [&](const int depth,
+            const nlohmann::json::parse_event_t event,
+            nlohmann::json &parsed) {
+          switch (event) {
+            case nlohmann::json::parse_event_t::object_start:
+              object_keys[depth].clear();
+              break;
+            case nlohmann::json::parse_event_t::key: {
+              if (
+                depth <= 0 || !parsed.is_string() ||
+                !object_keys.contains(depth - 1)
+              ) {
+                invalid_callback_depth = true;
+                break;
+              }
+              const auto &key = parsed.get_ref<const std::string &>();
+              if (
+                !object_keys[depth - 1].insert(key).second &&
+                !duplicate_key
+              ) {
+                duplicate_key = key;
+              }
+              break;
+            }
+            case nlohmann::json::parse_event_t::object_end:
+              object_keys.erase(depth);
+              break;
+            default:
+              break;
+          }
+          return true;
+        };
+      try {
+        value = nlohmann::json::parse(line, callback);
+        if (invalid_callback_depth) {
+          error = "source-time JSONL has invalid object nesting";
+          return false;
+        }
+        if (duplicate_key) {
+          error =
+            "source-time JSONL contains duplicate key '" +
+            *duplicate_key + "'";
+          return false;
+        }
+        return true;
+      } catch (const std::exception &exception) {
+        error =
+          std::string {"malformed source-time JSONL record: "} +
+          exception.what();
+        return false;
+      }
+    }
+
+    bool exact_signed_integer(
+      const nlohmann::json &value,
+      std::int64_t &result
+    ) {
+      try {
+        if (!value.is_number_integer()) {
+          return false;
+        }
+        if (value.is_number_unsigned()) {
+          const auto unsigned_value = value.get<std::uint64_t>();
+          if (
+            unsigned_value >
+            static_cast<std::uint64_t>(
+              std::numeric_limits<std::int64_t>::max()
+            )
+          ) {
+            return false;
+          }
+          result = static_cast<std::int64_t>(unsigned_value);
+          return true;
+        }
+        result = value.get<std::int64_t>();
+        return true;
+      } catch (...) {
+        return false;
+      }
+    }
+
+    bool read_scene_controller_source_time(
+      const fs::path &path,
+      const std::size_t expected_frame_count,
+      scene_controller_source_time_t &result,
+      std::string &error
+    ) {
+      try {
+        scene_controller_source_time_t parsed;
+        parsed.digest.reset(EVP_MD_CTX_new());
+        if (
+          !parsed.digest ||
+          EVP_DigestInit_ex(
+            parsed.digest.get(),
+            EVP_sha256(),
+            nullptr
+          ) != 1
+        ) {
+          error = "cannot initialize source-time JSONL SHA-256";
+          return false;
+        }
+        parsed.stream.open(path, std::ios::binary);
+        if (!parsed.stream) {
+          error = "cannot open source-time JSONL";
+          return false;
+        }
+        std::string line;
+        nlohmann::json value;
+        if (
+          !read_bounded_jsonl_line(
+            parsed.stream,
+            line,
+            error,
+            parsed.digest.get()
+          ) ||
+          !parse_json_line_strict(line, value, error)
+        ) {
+          return false;
+        }
+        if (
+          !exact_json_object_keys(value, {
+            "record",
+            "schema",
+            "clock",
+            "frame_count",
+            "time_base",
+          }) ||
+          !value.at("record").is_string() ||
+          value.at("record").get<std::string>() != "header" ||
+          !value.at("schema").is_number_unsigned() ||
+          value.at("schema").get<std::uint32_t>() !=
+            scene_controller_source_time_schema ||
+          !value.at("clock").is_string() ||
+          value.at("clock").get<std::string>() !=
+            scene_controller_source_time_clock ||
+          !value.at("frame_count").is_number_unsigned() ||
+          !value.at("time_base").is_object()
+        ) {
+          error =
+            "header is not an exact source-presentation-timeline-v2 contract";
+          return false;
+        }
+        const auto frame_count_u64 =
+          value.at("frame_count").get<std::uint64_t>();
+        if (
+          frame_count_u64 == 0u ||
+          frame_count_u64 > follow_max_sequence ||
+          frame_count_u64 >
+            static_cast<std::uint64_t>(
+              std::numeric_limits<std::size_t>::max()
+            ) ||
+          frame_count_u64 != expected_frame_count
+        ) {
+          error =
+            "header frame_count must match the positive bounded source count";
+          return false;
+        }
+        const auto &time_base = value.at("time_base");
+        if (
+          !exact_json_object_keys(time_base, {"num", "den"}) ||
+          !exact_signed_integer(
+            time_base.at("num"),
+            parsed.time_base_num
+          ) ||
+          !exact_signed_integer(
+            time_base.at("den"),
+            parsed.time_base_den
+          ) ||
+          parsed.time_base_num <= 0 ||
+          parsed.time_base_den <= 0
+        ) {
+          error = "time_base must contain exact positive integer num/den";
+          return false;
+        }
+        parsed.frame_count = static_cast<std::size_t>(frame_count_u64);
+        result = std::move(parsed);
+        return true;
+      } catch (const std::exception &exception) {
+        error = std::string {"malformed source-time contract: "} +
+                exception.what();
+        return false;
+      }
+    }
+
+    bool read_scene_controller_source_time_frame(
+      scene_controller_source_time_t &source_time,
+      const std::string_view expected_frame_id,
+      double &elapsed_seconds,
+      std::string &error
+    ) {
+      try {
+        if (
+          source_time.consumed_frame_count >= source_time.frame_count
+        ) {
+          error = "source-time JSONL has more source frames than declared";
+          return false;
+        }
+        std::string line;
+        nlohmann::json value;
+        if (
+          !read_bounded_jsonl_line(
+            source_time.stream,
+            line,
+            error,
+            source_time.digest.get()
+          ) ||
+          !parse_json_line_strict(line, value, error)
+        ) {
+          return false;
+        }
+        const auto index = source_time.consumed_frame_count;
+        std::int64_t pts_ticks = 0;
+        std::int64_t duration_ticks = 0;
+        if (
+          !exact_json_object_keys(value, {
+            "record",
+            "source_index",
+            "frame_id",
+            "pts_ticks",
+            "duration_ticks",
+          }) ||
+          !value.at("record").is_string() ||
+          value.at("record").get<std::string>() != "frame" ||
+          !value.at("source_index").is_number_unsigned() ||
+          value.at("source_index").get<std::uint64_t>() != index ||
+          !value.at("frame_id").is_string() ||
+          value.at("frame_id").get<std::string>() != expected_frame_id ||
+          !exact_signed_integer(value.at("pts_ticks"), pts_ticks) ||
+          !exact_signed_integer(
+            value.at("duration_ticks"),
+            duration_ticks
+          ) ||
+          duration_ticks <= 0
+        ) {
+          error =
+            "source-time frame is not an exact contiguous timeline record";
+          return false;
+        }
+
+        std::int64_t delta_ticks = 0;
+        if (source_time.has_previous_pts) {
+          if (pts_ticks <= source_time.previous_pts_ticks) {
+            error = "source-time PTS must increase strictly";
+            return false;
+          }
+          if (
+            source_time.previous_pts_ticks < 0 &&
+            pts_ticks >
+              std::numeric_limits<std::int64_t>::max() +
+                source_time.previous_pts_ticks
+          ) {
+            error = "source-time presentation delta exceeds int64";
+            return false;
+          }
+          delta_ticks = pts_ticks - source_time.previous_pts_ticks;
+        }
+        elapsed_seconds =
+          static_cast<double>(delta_ticks) *
+          static_cast<double>(source_time.time_base_num) /
+          static_cast<double>(source_time.time_base_den);
+        if (
+          !std::isfinite(elapsed_seconds) ||
+          elapsed_seconds < 0.0
+        ) {
+          error = "source-time presentation delta is not finite";
+          return false;
+        }
+        source_time.total_elapsed_seconds += elapsed_seconds;
+        if (!std::isfinite(source_time.total_elapsed_seconds)) {
+          error = "source-time presentation duration overflowed";
+          return false;
+        }
+        source_time.previous_pts_ticks = pts_ticks;
+        source_time.has_previous_pts = true;
+        ++source_time.consumed_frame_count;
+        return true;
+      } catch (const std::exception &exception) {
+        error = std::string {"malformed source-time frame: "} +
+                exception.what();
+        return false;
+      }
+    }
+
+    bool finish_scene_controller_source_time(
+      scene_controller_source_time_t &source_time,
+      std::string &error
+    ) {
+      if (
+        source_time.consumed_frame_count != source_time.frame_count
+      ) {
+        error = "source-time JSONL ended before every source frame";
+        return false;
+      }
+      const int trailing = source_time.stream.get();
+      if (trailing != std::char_traits<char>::eof()) {
+        error = "source-time JSONL contains trailing records or bytes";
+        return false;
+      }
+      if (source_time.stream.bad()) {
+        error = "cannot read the source-time JSONL tail";
+        return false;
+      }
+      std::array<unsigned char, EVP_MAX_MD_SIZE> digest {};
+      unsigned int digest_size = 0;
+      if (
+        !source_time.digest ||
+        EVP_DigestFinal_ex(
+          source_time.digest.get(),
+          digest.data(),
+          &digest_size
+        ) != 1 ||
+        digest_size != 32u
+      ) {
+        error = "cannot finalize the consumed source-time JSONL SHA-256";
+        return false;
+      }
+      static constexpr char digits[] = "0123456789abcdef";
+      source_time.file_sha256.assign(digest_size * 2u, '\0');
+      for (std::size_t index = 0; index < digest_size; ++index) {
+        source_time.file_sha256[index * 2u] =
+          digits[digest[index] >> 4u];
+        source_time.file_sha256[index * 2u + 1u] =
+          digits[digest[index] & 0x0fu];
+      }
+      return true;
+    }
 
     bool valid_adaptive_state_words(const adaptive_state_words_t &words) {
       for (const auto &field : sbs_adaptive_state::fields) {
@@ -1458,6 +1919,7 @@ namespace sbs_bench {
       const UINT depth_width,
       const UINT depth_height,
       const std::uint32_t depth_reuse_interval,
+      const bool allow_forced_current,
       frame_metadata_t &metadata
     ) {
       roi_transform_words_t transform {};
@@ -1515,7 +1977,8 @@ namespace sbs_bench {
         sequence,
         source_width,
         source_height,
-        depth_reuse_interval
+        depth_reuse_interval,
+        allow_forced_current
       );
     }
 
@@ -2003,7 +2466,8 @@ namespace sbs_bench {
               start_sequence,
               metadata.source_width,
               metadata.source_height,
-              static_cast<std::uint32_t>(metadata.depth_reuse_interval)
+              static_cast<std::uint32_t>(metadata.depth_reuse_interval),
+              sequence == metadata.processed_count
             ) ||
             !fs::is_regular_file(depth, ec) || ec ||
             fs::file_size(depth, ec) !=
@@ -2129,6 +2593,262 @@ namespace sbs_bench {
       return valid_adaptive_state_words(words);
     }
 
+    template<std::size_t WordCount>
+    bool read_scene_controller_buffer(
+      ID3D11Device *dev,
+      ID3D11DeviceContext *ctx,
+      ID3D11ShaderResourceView *srv,
+      UINT expected_structure_stride,
+      ComPtr<ID3D11Buffer> &stage_cache,
+      std::array<std::uint32_t, WordCount> &words
+    ) {
+      if (!dev || !ctx || !srv || expected_structure_stride == 0u) {
+        return false;
+      }
+      ComPtr<ID3D11Resource> resource;
+      srv->GetResource(&resource);
+      ComPtr<ID3D11Buffer> buffer;
+      if (FAILED(resource.As(&buffer))) {
+        return false;
+      }
+      D3D11_BUFFER_DESC desc {};
+      buffer->GetDesc(&desc);
+      if (
+        desc.ByteWidth != words.size() * sizeof(std::uint32_t) ||
+        desc.StructureByteStride != expected_structure_stride ||
+        (desc.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED) == 0u
+      ) {
+        return false;
+      }
+      bool recreate = !stage_cache;
+      if (!recreate) {
+        D3D11_BUFFER_DESC stage_desc {};
+        stage_cache->GetDesc(&stage_desc);
+        recreate = stage_desc.ByteWidth != desc.ByteWidth;
+      }
+      if (recreate) {
+        D3D11_BUFFER_DESC stage_desc = desc;
+        stage_desc.Usage = D3D11_USAGE_STAGING;
+        stage_desc.BindFlags = 0u;
+        stage_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stage_desc.MiscFlags = 0u;
+        stage_cache.Reset();
+        if (FAILED(dev->CreateBuffer(&stage_desc, nullptr, &stage_cache))) {
+          return false;
+        }
+      }
+      ctx->CopyResource(stage_cache.Get(), buffer.Get());
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return false;
+      }
+      std::memcpy(
+        words.data(),
+        mapped.pData,
+        words.size() * sizeof(std::uint32_t)
+      );
+      ctx->Unmap(stage_cache.Get(), 0);
+      return true;
+    }
+
+    bool valid_scene_controller_global_words(
+      const scene_controller_global_words_t &words
+    ) {
+      for (std::size_t index = 0; index < words.size(); ++index) {
+        const float value = std::bit_cast<float>(words[index]);
+        if (!std::isfinite(value)) {
+          return false;
+        }
+        const auto &field =
+          sbs_scene_controller::global_out_names[index];
+        if (
+          field.starts_with("reserved_") &&
+          value != 0.0f
+        ) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    bool valid_scene_controller_rule_words(
+      const scene_controller_rule_words_t &words
+    ) {
+      for (const auto &field : sbs_scene_controller::rule_state_fields) {
+        const auto index = sbs_scene_controller::index(field.word);
+        if (
+          field.gpu_encoding ==
+          sbs_scene_controller::gpu_encoding_e::uint_bits
+        ) {
+          if (field.required_zero && words[index] != 0u) {
+            return false;
+          }
+          continue;
+        }
+        const float value = std::bit_cast<float>(words[index]);
+        if (!std::isfinite(value) || (field.required_zero && value != 0.0f)) {
+          return false;
+        }
+        if (
+          field.gpu_encoding ==
+            sbs_scene_controller::gpu_encoding_e::uint_valued_float &&
+          (
+            value < 0.0f ||
+            static_cast<double>(value) >
+              static_cast<double>(
+                std::numeric_limits<std::uint32_t>::max()
+              ) ||
+            std::trunc(value) != value
+          )
+        ) {
+          return false;
+        }
+      }
+      const float schema = std::bit_cast<float>(
+        words[sbs_scene_controller::index(
+          sbs_scene_controller::rule_state_word_e::schema_version
+        )]
+      );
+      return schema ==
+             static_cast<float>(sbs_scene_controller::schema_version);
+    }
+
+    std::string_view scene_controller_encoding_name(
+      const sbs_scene_controller::gpu_encoding_e encoding
+    ) {
+      switch (encoding) {
+        case sbs_scene_controller::gpu_encoding_e::float_value:
+          return "float";
+        case sbs_scene_controller::gpu_encoding_e::uint_bits:
+          return "uint_bits";
+        case sbs_scene_controller::gpu_encoding_e::uint_valued_float:
+          return "uint_valued_float";
+      }
+      return {};
+    }
+
+    bool write_scene_controller_header(
+      std::ostream &out,
+      const std::string_view model_name,
+      const int depth_reuse_interval
+    ) {
+      nlohmann::ordered_json global_out_fields =
+        nlohmann::ordered_json::array();
+      for (const auto name : sbs_scene_controller::global_out_names) {
+        global_out_fields.push_back({
+          {"name", name},
+          {"type", "float32"},
+        });
+      }
+      nlohmann::ordered_json rule_state_fields =
+        nlohmann::ordered_json::array();
+      for (const auto &field : sbs_scene_controller::rule_state_fields) {
+        rule_state_fields.push_back({
+          {"name", field.name},
+          {"type", field.json_type},
+          {"gpu_encoding",
+           scene_controller_encoding_name(field.gpu_encoding)},
+        });
+      }
+      const nlohmann::ordered_json header {
+        {"record", "header"},
+        {"trace_schema", scene_controller_trace_schema},
+        {"source", scene_controller_trace_source},
+        {"capture", scene_controller_trace_capture},
+        {"backend", "shadow_rules"},
+        {"controller_schema", sbs_scene_controller::schema_version},
+        {"rule_revision", sbs_scene_controller::rule_revision},
+        {"ordered_abi_hash", sbs_scene_controller::ordered_abi_hash},
+        {"global_out_fields", std::move(global_out_fields)},
+        {"rule_state_fields", std::move(rule_state_fields)},
+        {"config", {
+          {"model", model_name},
+          {"depth_reuse_interval", depth_reuse_interval},
+          {"active_roi_authority", false},
+        }},
+      };
+      out << header.dump() << '\n';
+      out.flush();
+      return out.good();
+    }
+
+    bool write_scene_controller_frame(
+      std::ostream &out,
+      const std::string_view frame_id,
+      const std::size_t source_index,
+      const bool depth_updated,
+      const models::estimate_result &estimate,
+      const scene_controller_global_words_t *global_words,
+      const scene_controller_rule_words_t *rule_words
+    ) {
+      const bool available = estimate.scene_controller_snapshot_available;
+      if (!available) {
+        return false;
+      }
+      if (available != (global_words != nullptr) ||
+          available != (rule_words != nullptr)) {
+        return false;
+      }
+
+      nlohmann::ordered_json global_out = nullptr;
+      nlohmann::ordered_json rule_state = nullptr;
+      if (available) {
+        if (
+          !estimate.completed_frame_valid ||
+          estimate.scene_controller_frame_id != estimate.completed_frame_id ||
+          estimate.scene_controller_backend_generation == 0u ||
+          !estimate.scene_controller_shadow ||
+          !valid_scene_controller_global_words(*global_words) ||
+          !valid_scene_controller_rule_words(*rule_words) ||
+          (*rule_words)[sbs_scene_controller::index(
+            sbs_scene_controller::rule_state_word_e::backend_generation
+          )] != estimate.scene_controller_backend_generation
+        ) {
+          return false;
+        }
+        global_out = nlohmann::ordered_json::array();
+        for (const auto word : *global_words) {
+          global_out.push_back(std::bit_cast<float>(word));
+        }
+        rule_state = nlohmann::ordered_json::array();
+        for (const auto &field : sbs_scene_controller::rule_state_fields) {
+          const auto index = sbs_scene_controller::index(field.word);
+          if (
+            field.gpu_encoding ==
+            sbs_scene_controller::gpu_encoding_e::uint_bits
+          ) {
+            rule_state.push_back((*rule_words)[index]);
+          } else {
+            rule_state.push_back(std::bit_cast<float>((*rule_words)[index]));
+          }
+        }
+      }
+
+      nlohmann::ordered_json frame {
+        {"record", "frame"},
+        {"frame_id", frame_id},
+        {"source_index", source_index},
+        {"depth_updated", depth_updated},
+        {"snapshot_available", available},
+        {"controller_frame_id",
+         available ?
+           nlohmann::ordered_json(estimate.scene_controller_frame_id) :
+           nlohmann::ordered_json(nullptr)},
+        {"backend_generation",
+         available ?
+           nlohmann::ordered_json(
+             estimate.scene_controller_backend_generation
+           ) :
+           nlohmann::ordered_json(nullptr)},
+        {"shadow", estimate.scene_controller_shadow},
+        {"global_out", std::move(global_out)},
+        {"rule_state", std::move(rule_state)},
+      };
+      out << frame.dump() << '\n';
+      out.flush();
+      return out.good();
+    }
+
     bool write_adaptive_state_header(
       std::ostream &out,
       const std::string_view model_name,
@@ -2238,6 +2958,10 @@ namespace sbs_bench {
                 "true" : "false")
           << ",\"appearance_recovery\":"
           << ((cut_flags & sbs_adaptive_state::cut_flag_appearance_recovery) != 0u ?
+                "true" : "false")
+          << ",\"geometry_confirmation_pending\":"
+          << ((cut_flags &
+               sbs_adaptive_state::cut_flag_geometry_confirmation_pending) != 0u ?
                 "true" : "false")
           << ",\"hard_cut_pulse\":"
           << (scalar(word_e::hard_cut_pulse) > 0.5f ? "true" : "false")
@@ -2425,6 +3149,8 @@ namespace sbs_bench {
     struct opts {
       std::string frames, out, model, depth_override_root, capabilities;
       std::string scene_cache, render_cache, scene_plan;
+      std::string scene_controller;  // empty = inherit; otherwise off or shadow_rules
+      std::string scene_controller_source_time;
       artifact_mode_e artifacts = artifact_mode_e::evaluation;
       bool follow = false;
       // Offline worker transport: publish one atomic header and one replace-in-place frame
@@ -2512,6 +3238,19 @@ namespace sbs_bench {
           }
         } else if (a == "--model") {
           o.model = next("--model");
+        } else if (a == "--scene-controller") {
+          o.scene_controller = next("--scene-controller");
+          if (
+            o.scene_controller != "off" &&
+            o.scene_controller != "shadow_rules"
+          ) {
+            BOOST_LOG(error)
+              << "sbs-bench: --scene-controller must be off or shadow_rules";
+            return false;
+          }
+        } else if (a == "--scene-controller-source-time") {
+          o.scene_controller_source_time =
+            next("--scene-controller-source-time");
         } else if (a == "--eye-w") {
           o.eye_w = std::stoi(next("--eye-w"));
         } else if (a == "--eye-h") {
@@ -2734,11 +3473,28 @@ namespace sbs_bench {
           {"artifact_modes", {"adaptive", "conversion"}},
           {"source_formats", {"png", "bmp", "pfm"}},
           {"follow_protocol_schema", 1},
-          {"follow_global_first_sequence", true},
-          {"adaptive_state_schema", sbs_adaptive_state::schema_version},
-          {"adaptive_analysis_flag_bits", std::move(adaptive_analysis_flag_bits)},
-          {"scene_cache_contract_schema",
-           sbs_scene_cache::contract_schema},
+           {"follow_global_first_sequence", true},
+           {"adaptive_state_schema", sbs_adaptive_state::schema_version},
+           {"adaptive_analysis_flag_bits", std::move(adaptive_analysis_flag_bits)},
+          {"scene_controller_trace", {
+            {"trace_schema", scene_controller_trace_schema},
+            {"controller_schema", sbs_scene_controller::schema_version},
+            {"rule_revision", sbs_scene_controller::rule_revision},
+            {"ordered_abi_hash", sbs_scene_controller::ordered_abi_hash},
+            {"backends", {"off", "shadow_rules"}},
+            {"active_roi_authority", false},
+            {"source_time_override", scene_controller_source_time_clock},
+            {"file", scene_controller_trace_name},
+            {"transports", {"jsonl-v1", "atomic-latest-v1"}},
+            {"atomic_header_file", "scene_controller_header.json"},
+            {"atomic_frame_file", "scene_controller_frame.json"},
+            {"global_out_word_count",
+             sbs_scene_controller::global_out_word_count},
+            {"rule_state_word_count",
+             sbs_scene_controller::rule_state_word_count},
+          }},
+           {"scene_cache_contract_schema",
+            sbs_scene_cache::contract_schema},
           {"scene_cache_packed_sbs_contract", true},
           {"scene_cache_depth", {
             {"dtype", "float32-le"},
@@ -2950,11 +3706,26 @@ namespace sbs_bench {
     if (o.cuda_graph >= 0) {
       sbs_cfg.cuda_graph = (o.cuda_graph != 0);
     }
+    if (!o.scene_controller.empty()) {
+      const auto parsed =
+        config::parse_sbs_scene_controller(o.scene_controller);
+      if (!parsed) {
+        BOOST_LOG(error)
+          << "sbs-bench: invalid explicit scene-controller backend";
+        return 2;
+      }
+      sbs_cfg.scene_controller = *parsed;
+    }
     config::sunshine.diagnostics_enabled = true;  // benchmark processes always measure
     sbs_perf::set_enabled(true);
     sbs_perf::reset();
     auto model = pick_model(o);
     const bool replay_mode = !o.render_cache.empty();
+    if (replay_mode) {
+      // Scene-cache replay is an attested zero-inference render pass. It has no estimator and
+      // therefore cannot produce a fresh controller snapshot, regardless of the loaded config.
+      sbs_cfg.scene_controller = config::sbs_scene_controller_e::off;
+    }
     const bool whole_clip_mode = o.artifacts != artifact_mode_e::evaluation;
     const bool hdr_texture_input = pfm_input || o.simulate_hdr;
     const std::string discovered_input_frame_format =
@@ -3069,11 +3840,72 @@ namespace sbs_bench {
     }
     std::ofstream adaptive_state_stream;
     std::size_t adaptive_state_frame_count = 0;
+    std::ofstream scene_controller_stream;
+    std::size_t scene_controller_frame_count = 0;
+    const bool scene_controller_trace_enabled =
+      whole_clip_mode &&
+      !replay_mode &&
+      sbs_cfg.scene_controller ==
+        config::sbs_scene_controller_e::shadow_rules;
+    const fs::path scene_controller_trace_path =
+      fs::path(o.out) / scene_controller_trace_name;
+    const fs::path scene_controller_header_path =
+      fs::path(o.out) / "scene_controller_header.json";
+    const fs::path scene_controller_frame_path =
+      fs::path(o.out) / "scene_controller_frame.json";
     const fs::path adaptive_state_header_path =
       fs::path(o.out) / "adaptive_state_header.json";
     const fs::path adaptive_state_frame_path =
       fs::path(o.out) / "adaptive_state_frame.json";
+    scene_controller_source_time_t scene_controller_source_time;
+    if (scene_controller_trace_enabled) {
+      if (o.scene_controller_source_time.empty()) {
+        BOOST_LOG(error)
+          << "sbs-bench: shadow scene-controller traces require "
+             "--scene-controller-source-time so dwell uses source time";
+        return 2;
+      }
+      const std::size_t expected_source_time_count =
+        o.follow ? o.follow_count : frames.size();
+      std::string source_time_error;
+      if (
+        expected_source_time_count == 0u ||
+        !read_scene_controller_source_time(
+          o.scene_controller_source_time,
+          expected_source_time_count,
+          scene_controller_source_time,
+          source_time_error
+        )
+      ) {
+        BOOST_LOG(error)
+          << "sbs-bench: invalid scene-controller source-time contract"
+          << (source_time_error.empty() ?
+                "" :
+                ": " + source_time_error);
+        return 2;
+      }
+    } else if (!o.scene_controller_source_time.empty()) {
+      BOOST_LOG(error)
+        << "sbs-bench: --scene-controller-source-time requires a whole-clip "
+           "shadow_rules analysis pass";
+      return 2;
+    }
     if (whole_clip_mode) {
+      {
+        std::error_code cleanup_error;
+        fs::remove(scene_controller_trace_path, cleanup_error);
+        if (!cleanup_error) {
+          fs::remove(scene_controller_header_path, cleanup_error);
+        }
+        if (!cleanup_error) {
+          fs::remove(scene_controller_frame_path, cleanup_error);
+        }
+        if (cleanup_error) {
+          BOOST_LOG(error)
+            << "sbs-bench: cannot remove stale scene-controller trace artifacts";
+          return 6;
+        }
+      }
       if (o.bounded_adaptive_state) {
         std::error_code cleanup_error;
         fs::remove(adaptive_state_header_path, cleanup_error);
@@ -3111,6 +3943,43 @@ namespace sbs_bench {
           BOOST_LOG(error)
             << "sbs-bench: failed writing adaptive_state.jsonl header";
           return 6;
+        }
+      }
+      if (scene_controller_trace_enabled) {
+        if (o.bounded_adaptive_state) {
+          if (!publish_adaptive_state_snapshot(
+                scene_controller_header_path,
+                [&](std::ostream &out) {
+                  return write_scene_controller_header(
+                    out,
+                    model.name,
+                    effective_depth_every
+                  );
+                }
+              )) {
+            BOOST_LOG(error)
+              << "sbs-bench: failed publishing bounded scene-controller header";
+            return 6;
+          }
+        } else {
+          scene_controller_stream.open(scene_controller_trace_path);
+          if (!scene_controller_stream) {
+            BOOST_LOG(error)
+              << "sbs-bench: cannot create " << scene_controller_trace_name;
+            return 6;
+          }
+          scene_controller_stream.imbue(std::locale::classic());
+          scene_controller_stream
+            << std::setprecision(std::numeric_limits<float>::max_digits10);
+          if (!write_scene_controller_header(
+                scene_controller_stream,
+                model.name,
+                effective_depth_every
+              )) {
+            BOOST_LOG(error)
+              << "sbs-bench: failed writing scene-controller trace header";
+            return 6;
+          }
         }
       }
     }
@@ -3230,6 +4099,9 @@ namespace sbs_bench {
     ComPtr<ID3D11Texture2D> ema_mask_stage;
     ComPtr<ID3D11Buffer> raw_depth_stage;
     ComPtr<ID3D11Buffer> subject_state_stage;
+    ComPtr<ID3D11Buffer> scene_controller_global_stage;
+    ComPtr<ID3D11Buffer> scene_controller_rule_stage;
+    ComPtr<ID3D11Buffer> scene_controller_rule_summary_stage;
     ComPtr<ID3D11Texture2D> scene_cache_depth_stage;
     ComPtr<ID3D11Buffer> scene_cache_transform_stage;
     ComPtr<ID3D11Buffer> scene_cache_depth_frame_state_stage;
@@ -3289,6 +4161,7 @@ namespace sbs_bench {
       }
     }
     std::size_t processed_frame_count = 0;
+    double scene_controller_elapsed_accumulator = 0.0;
     for (size_t fi = 0;; fi++) {
       const std::size_t global_sequence =
         replay_mode ? replay_first_sequence + fi : fi + 1u;
@@ -3366,6 +4239,31 @@ namespace sbs_bench {
       const std::string output_id =
         replay_mode ? follow_frame_id(global_sequence) :
                       frame_id(current_frame, fi);
+      if (scene_controller_trace_enabled) {
+        double source_elapsed_seconds = 0.0;
+        std::string source_time_error;
+        if (!read_scene_controller_source_time_frame(
+              scene_controller_source_time,
+              output_id,
+              source_elapsed_seconds,
+              source_time_error
+            )) {
+          BOOST_LOG(error)
+            << "sbs-bench: source-time identity does not match source frame "
+            << output_id
+            << (source_time_error.empty() ?
+                  "" :
+                  ": " + source_time_error);
+          return 6;
+        }
+        scene_controller_elapsed_accumulator +=
+          source_elapsed_seconds;
+        if (!std::isfinite(scene_controller_elapsed_accumulator)) {
+          BOOST_LOG(error)
+            << "sbs-bench: accumulated source presentation time overflowed";
+          return 6;
+        }
+      }
 
       // Input texture + SRV.
       D3D11_TEXTURE2D_DESC id = {};
@@ -3568,7 +4466,11 @@ namespace sbs_bench {
         ((global_sequence - 1u) %
           static_cast<std::size_t>(effective_depth_every)) == 0u :
         (!have_depth_result ||
-         (fi % static_cast<std::size_t>(effective_depth_every)) == 0u);
+         (fi % static_cast<std::size_t>(effective_depth_every)) == 0u ||
+         (
+           scene_controller_trace_enabled &&
+           fi + 1u == scene_controller_source_time.frame_count
+         ));
       adaptive_state_words_t words {};
       const scene_plan_entry *active_scene_camera = nullptr;
       ComPtr<ID3D11Texture2D> cached_depth_texture;
@@ -3598,7 +4500,8 @@ namespace sbs_bench {
               replay_cache_metadata.source_height,
               static_cast<std::uint32_t>(
                 replay_cache_metadata.depth_reuse_interval
-              )
+              ),
+              sequence == replay_cache_metadata.processed_count
             ) ||
             !create_cached_depth_srv(
               dev.Get(),
@@ -3676,6 +4579,21 @@ namespace sbs_bench {
         have_depth_result = true;
       } else {
         if (depth_updated) {
+          if (
+            scene_controller_trace_enabled &&
+            !estimator->
+              set_next_scene_controller_elapsed_seconds_for_evaluation(
+                static_cast<float>(
+                  scene_controller_elapsed_accumulator
+                )
+              )
+          ) {
+            BOOST_LOG(error)
+              << "sbs-bench: cannot bind source presentation time to "
+                 "scene-controller update "
+              << output_id;
+            return 6;
+          }
           estimator->estimate_depth(
             in_srv.Get(),
             input_color,
@@ -3695,6 +4613,7 @@ namespace sbs_bench {
           cuda_graph_captured = cuda_graph_captured || est.cuda_graph_active;
           ++tensorrt_enqueue_count;
           have_depth_result = true;
+          scene_controller_elapsed_accumulator = 0.0;
         } else {
           // Match the live stream between depth ticks: color advances while all depth-derived
           // geometry remains the last completed result. The views remain owned by the estimator
@@ -3829,6 +4748,8 @@ namespace sbs_bench {
                 depth_desc.Width,
                 depth_desc.Height,
                 static_cast<std::uint32_t>(effective_depth_every),
+                scene_controller_trace_enabled &&
+                  sequence == scene_controller_source_time.frame_count,
                 frame_metadata
               ) ||
               !cache_depth_texture_atomically(
@@ -3883,6 +4804,218 @@ namespace sbs_bench {
           return 6;
         }
         ++adaptive_state_frame_count;
+        if (scene_controller_trace_enabled) {
+          scene_controller_global_words_t global_words {};
+          scene_controller_rule_words_t rule_words {};
+          scene_controller_rule_summary_words_t rule_summary_words {};
+          const scene_controller_global_words_t *global_words_ptr = nullptr;
+          const scene_controller_rule_words_t *rule_words_ptr = nullptr;
+          if (est.scene_controller_snapshot_available) {
+            if (
+              !read_scene_controller_buffer(
+                dev.Get(),
+                ctx.Get(),
+                est.scene_controller_global_output.Get(),
+                sizeof(float),
+                scene_controller_global_stage,
+                global_words
+              ) ||
+              !read_scene_controller_buffer(
+                dev.Get(),
+                ctx.Get(),
+                est.scene_controller_rule_state.Get(),
+                4u * sizeof(float),
+                scene_controller_rule_stage,
+                rule_words
+              ) ||
+              !read_scene_controller_buffer(
+                dev.Get(),
+                ctx.Get(),
+                est.scene_controller_rule_summary.Get(),
+                sizeof(float),
+                scene_controller_rule_summary_stage,
+                rule_summary_words
+              )
+            ) {
+              BOOST_LOG(error)
+                << "sbs-bench: cannot read scene-controller snapshot for frame "
+                << output_id;
+              return 6;
+            }
+            global_words_ptr = &global_words;
+            rule_words_ptr = &rule_words;
+
+            const auto summary_float =
+              [&](const std::size_t index) {
+                return std::bit_cast<float>(rule_summary_words[index]);
+              };
+            std::array<float, 3> scroll_votes_y {};
+            std::array<float, 3> scroll_votes_x {};
+            for (std::size_t group = 0u;
+                 group < SBS_RULE_SUMMARY_EVENT_GROUP_COUNT;
+                 ++group) {
+              for (std::size_t field = 0u; field < 3u; ++field) {
+                scroll_votes_y[field] += summary_float(
+                  SBS_RULE_SUMMARY_EVENT_GROUP_BASE +
+                  group * SBS_RULE_SUMMARY_EVENT_GROUP_STRIDE +
+                  SBS_RULE_SUMMARY_EVENT_GROUP_SCROLL_Y_WEIGHT +
+                  field);
+                scroll_votes_x[field] += summary_float(
+                  SBS_RULE_SUMMARY_EVENT_GROUP_BASE +
+                  group * SBS_RULE_SUMMARY_EVENT_GROUP_STRIDE +
+                  SBS_RULE_SUMMARY_EVENT_GROUP_SCROLL_X_WEIGHT +
+                  field);
+              }
+            }
+            std::ostringstream debug;
+            debug.imbue(std::locale::classic());
+            debug << "sbs-bench: rule-debug frame=" << (fi + 1u)
+                  << " plan_fresh="
+                  << summary_float(
+                       SBS_RULE_SUMMARY_PLAN_BASE +
+                       SBS_RULE_SUMMARY_PLAN_FRESH_ACTIVITY_MASS)
+                  << " plan_prev_inside="
+                  << summary_float(
+                       SBS_RULE_SUMMARY_PLAN_BASE +
+                       SBS_RULE_SUMMARY_PLAN_FRESH_ACTIVITY_INSIDE_PREVIOUS_TARGET)
+                  << " scroll=["
+                  << summary_float(
+                       SBS_RULE_SUMMARY_PLAN_BASE +
+                       SBS_RULE_SUMMARY_PLAN_GLOBAL_SCROLL_WEIGHT)
+                  << ','
+                  << summary_float(
+                       SBS_RULE_SUMMARY_PLAN_BASE +
+                       SBS_RULE_SUMMARY_PLAN_GLOBAL_SCROLL_SIGNED)
+                  << ','
+                  << summary_float(
+                       SBS_RULE_SUMMARY_PLAN_BASE +
+                       SBS_RULE_SUMMARY_PLAN_GLOBAL_SCROLL_SUPPORT)
+                  << ','
+                  << summary_float(
+                       SBS_RULE_SUMMARY_PLAN_BASE +
+                       SBS_RULE_SUMMARY_PLAN_GLOBAL_HORIZONTAL_SCROLL_WEIGHT)
+                  << ','
+                  << summary_float(
+                       SBS_RULE_SUMMARY_PLAN_BASE +
+                       SBS_RULE_SUMMARY_PLAN_GLOBAL_HORIZONTAL_SCROLL_SIGNED)
+                  << ','
+                  << summary_float(
+                       SBS_RULE_SUMMARY_PLAN_BASE +
+                       SBS_RULE_SUMMARY_PLAN_GLOBAL_HORIZONTAL_SCROLL_SUPPORT)
+                  << "] scroll_votes_y=[";
+            for (std::size_t field = 0u; field < scroll_votes_y.size(); ++field) {
+              if (field != 0u) {
+                debug << ',';
+              }
+              debug << scroll_votes_y[field];
+            }
+            debug << "] scroll_votes_x=[";
+            for (std::size_t field = 0u; field < scroll_votes_x.size(); ++field) {
+              if (field != 0u) {
+                debug << ',';
+              }
+              debug << scroll_votes_x[field];
+            }
+            debug << ']'
+                  << " attr=[";
+            for (std::size_t index = 0u;
+                 index < SBS_RULE_SUMMARY_ATTRIBUTION_META_FLOAT_COUNT;
+                 ++index) {
+              if (index != 0u) {
+                debug << ',';
+              }
+              debug << summary_float(
+                SBS_RULE_SUMMARY_ATTRIBUTION_META_BASE + index);
+            }
+            debug << "] probe=[";
+            for (std::size_t index = 0u;
+                 index < SBS_RULE_SUMMARY_TEMPORAL_PROBE_FLOAT_COUNT;
+                 ++index) {
+              if (index != 0u) {
+                debug << ',';
+              }
+              debug << summary_float(
+                SBS_RULE_SUMMARY_TEMPORAL_PROBE_BASE + index);
+            }
+            debug << ']';
+            if (fi == 0u) {
+              constexpr std::size_t column_gutter_mass_field = 3u;
+              constexpr std::size_t temporal_row_gutter_mass_field = 2u;
+              debug << " media_columns=[";
+              for (std::size_t column = 0u;
+                   column < SBS_RULE_SUMMARY_COLUMN_COUNT;
+                   ++column) {
+                if (column != 0u) {
+                  debug << ',';
+                }
+                debug << summary_float(
+                  SBS_RULE_SUMMARY_COLUMN_BASE +
+                  column * SBS_RULE_SUMMARY_COLUMN_STRIDE);
+              }
+              debug << "] media_rows=[";
+              for (std::size_t row = 0u;
+                   row < SBS_RULE_SUMMARY_MEDIA_ROW_COUNT;
+                   ++row) {
+                if (row != 0u) {
+                  debug << ',';
+                }
+                debug << summary_float(
+                  SBS_RULE_SUMMARY_MEDIA_ROW_BASE + row);
+              }
+              debug << "] gutter_columns=[";
+              for (std::size_t column = 0u;
+                   column < SBS_RULE_SUMMARY_COLUMN_COUNT;
+                   ++column) {
+                if (column != 0u) {
+                  debug << ',';
+                }
+                debug << summary_float(
+                  SBS_RULE_SUMMARY_COLUMN_BASE +
+                  column * SBS_RULE_SUMMARY_COLUMN_STRIDE +
+                  column_gutter_mass_field);
+              }
+              debug << "] gutter_rows=[";
+              for (std::size_t row = 0u;
+                   row < SBS_RULE_SUMMARY_TEMPORAL_ROW_COUNT;
+                   ++row) {
+                if (row != 0u) {
+                  debug << ',';
+                }
+                debug << summary_float(
+                  SBS_RULE_SUMMARY_TEMPORAL_ROW_BASE +
+                  row * SBS_RULE_SUMMARY_TEMPORAL_ROW_STRIDE +
+                  temporal_row_gutter_mass_field);
+              }
+              debug << ']';
+            }
+            BOOST_LOG(info) << debug.str();
+          }
+          const auto write_controller_frame = [&](std::ostream &out) {
+            return write_scene_controller_frame(
+              out,
+              output_id,
+              replay_mode ? global_sequence - 1u : fi,
+              depth_updated,
+              est,
+              global_words_ptr,
+              rule_words_ptr
+            );
+          };
+          const bool controller_frame_written =
+            o.bounded_adaptive_state ?
+              publish_adaptive_state_snapshot(
+                scene_controller_frame_path,
+                write_controller_frame
+              ) :
+              write_controller_frame(scene_controller_stream);
+          if (!controller_frame_written) {
+            BOOST_LOG(error)
+              << "sbs-bench: invalid or unwritable scene-controller snapshot for frame "
+              << output_id;
+            return 6;
+          }
+          ++scene_controller_frame_count;
+        }
         if (!o.scene_cache.empty() &&
             !publish_scene_cache_contract(
               o.scene_cache,
@@ -4307,6 +5440,23 @@ namespace sbs_bench {
     }
     const std::size_t completed_frame_count =
       o.follow ? processed_frame_count : frames.size();
+    if (scene_controller_trace_enabled) {
+      std::string source_time_error;
+      if (
+        scene_controller_elapsed_accumulator != 0.0 ||
+        !finish_scene_controller_source_time(
+          scene_controller_source_time,
+          source_time_error
+        )
+      ) {
+        BOOST_LOG(error)
+          << "sbs-bench: source-time contract was not consumed exactly"
+          << (source_time_error.empty() ?
+                "" :
+                ": " + source_time_error);
+        return 6;
+      }
+    }
     if (!o.scene_cache.empty()) {
       if (!scene_cache_contract_started ||
           completed_frame_count == 0u) {
@@ -4410,6 +5560,46 @@ namespace sbs_bench {
       }
       if (!o.bounded_adaptive_state) {
         adaptive_state_stream.close();
+      }
+      if (scene_controller_trace_enabled) {
+        if (scene_controller_frame_count != completed_frame_count) {
+          BOOST_LOG(error)
+            << "sbs-bench: scene-controller trace is incomplete";
+          return 8;
+        }
+        if (o.bounded_adaptive_state) {
+          if (
+            !fs::is_regular_file(scene_controller_header_path) ||
+            !fs::is_regular_file(scene_controller_frame_path) ||
+            fs::exists(scene_controller_trace_path)
+          ) {
+            BOOST_LOG(error)
+              << "sbs-bench: bounded scene-controller snapshots are incomplete";
+            return 8;
+          }
+        } else {
+          scene_controller_stream.flush();
+          if (!scene_controller_stream.good()) {
+            BOOST_LOG(error)
+              << "sbs-bench: failed flushing scene-controller trace";
+            return 8;
+          }
+          scene_controller_stream.close();
+          if (!scene_controller_stream.good()) {
+            BOOST_LOG(error)
+              << "sbs-bench: failed closing scene-controller trace";
+            return 8;
+          }
+        }
+      } else if (
+        scene_controller_frame_count != 0u ||
+        fs::exists(scene_controller_trace_path) ||
+        fs::exists(scene_controller_header_path) ||
+        fs::exists(scene_controller_frame_path)
+      ) {
+        BOOST_LOG(error)
+          << "sbs-bench: disabled scene controller produced a trace";
+        return 8;
       }
       if (o.artifacts == artifact_mode_e::conversion &&
           written != static_cast<int>(completed_frame_count)) {
@@ -4553,6 +5743,9 @@ namespace sbs_bench {
         << (cuda_graph_captured ? "true" : "false") << ",\n"
         << "    \"literal_bestv2\": "
         << (o.literal_bestv2 ? "true" : "false") << ",\n"
+        << "    \"scene_controller\": "
+        << json_string(config::to_string(sbs_cfg.scene_controller)) << ",\n"
+        << "    \"scene_controller_active_roi_authority\": false,\n"
         << "    \"simulate_hdr\": " << (o.simulate_hdr ? "true" : "false") << ",\n"
         << "    \"hdr_scale\": " << o.hdr_scale << ",\n"
         << "    \"input_color_space\": "
@@ -4685,6 +5878,78 @@ namespace sbs_bench {
         << ",\"capture\":" << json_string(sbs_adaptive_state::capture)
         << ",\"frame_count\":"
         << adaptive_state_frame_count << "},\n"
+        << "  \"scene_controller_source_time\": {"
+        << "\"enabled\":"
+        << (scene_controller_trace_enabled ? "true" : "false")
+        << ",\"schema\":"
+        << (scene_controller_trace_enabled ?
+              std::to_string(scene_controller_source_time_schema) :
+              "null")
+        << ",\"clock\":"
+        << (scene_controller_trace_enabled ?
+              json_string(scene_controller_source_time_clock) :
+              "null")
+        << ",\"file_sha256\":"
+        << (scene_controller_trace_enabled ?
+              json_string(scene_controller_source_time.file_sha256) :
+              "null")
+        << ",\"frame_count\":"
+        << (scene_controller_trace_enabled ?
+              scene_controller_source_time.consumed_frame_count :
+              0u)
+        << ",\"total_elapsed_seconds\":"
+        << (scene_controller_trace_enabled ?
+              json_finite_double(
+                scene_controller_source_time.total_elapsed_seconds
+              ) :
+              "0.0")
+        << "},\n"
+        << "  \"scene_controller\": {"
+        << "\"enabled\":"
+        << (scene_controller_trace_enabled ? "true" : "false")
+        << ",\"backend\":"
+        << json_string(config::to_string(sbs_cfg.scene_controller))
+        << ",\"active_roi_authority\":false"
+        << ",\"transport\":"
+        << (scene_controller_trace_enabled ?
+              json_string(
+                o.bounded_adaptive_state ?
+                  "atomic-latest-v1" :
+                  "jsonl-v1"
+              ) :
+              "null")
+        << ",\"file\":"
+        << (scene_controller_trace_enabled &&
+              !o.bounded_adaptive_state ?
+              json_string(scene_controller_trace_name) :
+              "null")
+        << ",\"header_file\":"
+        << (scene_controller_trace_enabled &&
+              o.bounded_adaptive_state ?
+              json_string("scene_controller_header.json") :
+              "null")
+        << ",\"frame_file\":"
+        << (scene_controller_trace_enabled &&
+              o.bounded_adaptive_state ?
+              json_string("scene_controller_frame.json") :
+              "null")
+        << ",\"retained_history\":"
+        << (scene_controller_trace_enabled &&
+              !o.bounded_adaptive_state ?
+              "true" :
+              "false")
+        << ",\"trace_schema\":"
+        << (scene_controller_trace_enabled ?
+              std::to_string(scene_controller_trace_schema) :
+              "null")
+        << ",\"controller_schema\":"
+        << sbs_scene_controller::schema_version
+        << ",\"rule_revision\":"
+        << json_string(sbs_scene_controller::rule_revision)
+        << ",\"ordered_abi_hash\":"
+        << json_string(sbs_scene_controller::ordered_abi_hash)
+        << ",\"frame_count\":" << scene_controller_frame_count
+        << "},\n"
         << "  \"sbs\": {\"enabled\": "
         << (o.artifacts == artifact_mode_e::conversion ? "true" : "false")
         << ", \"file_pattern\": "
@@ -4740,6 +6005,48 @@ namespace sbs_bench {
     BOOST_LOG(info) << "sbs-bench: wrote " << written << " SBS frames + sbs_perf.json to " << o.out;
     return o.artifacts == artifact_mode_e::adaptive || written > 0 ? 0 : 8;
   }
+
+#ifdef SUNSHINE_TESTS
+  bool validate_scene_controller_source_time_for_test(
+    const fs::path &path,
+    const std::vector<std::string> &expected_frame_ids,
+    source_time_validation_result &result,
+    std::string &error
+  ) {
+    scene_controller_source_time_t source_time;
+    if (
+      expected_frame_ids.empty() ||
+      !read_scene_controller_source_time(
+        path,
+        expected_frame_ids.size(),
+        source_time,
+        error
+      )
+    ) {
+      return false;
+    }
+    for (const auto &frame_id : expected_frame_ids) {
+      double elapsed_seconds = 0.0;
+      if (!read_scene_controller_source_time_frame(
+            source_time,
+            frame_id,
+            elapsed_seconds,
+            error
+          )) {
+        return false;
+      }
+    }
+    if (!finish_scene_controller_source_time(source_time, error)) {
+      return false;
+    }
+    result = {
+      .frame_count = source_time.consumed_frame_count,
+      .total_elapsed_seconds = source_time.total_elapsed_seconds,
+      .file_sha256 = source_time.file_sha256,
+    };
+    return true;
+  }
+#endif
 
 }  // namespace sbs_bench
 

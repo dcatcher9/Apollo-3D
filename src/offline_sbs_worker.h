@@ -207,6 +207,34 @@ namespace offline_sbs {
   bool native_replay_capabilities_valid_for_test(
     const nlohmann::json &capabilities
   );
+  bool native_replay_capabilities_json_valid_for_test(
+    std::string_view capabilities_json
+  );
+  nlohmann::json write_scene_controller_source_time_contract_for_test(
+    const std::filesystem::path &result_directory,
+    const media_contract_t &media
+  );
+  bool scene_controller_source_time_attestation_valid_for_test(
+    const nlohmann::json &actual,
+    const nlohmann::json &expected
+  );
+  std::uint64_t scene_controller_source_time_max_artifact_bytes_for_test();
+  void validate_scene_controller_transport_for_test(
+    const nlohmann::json &contract,
+    const std::filesystem::path &output,
+    std::string_view expected_backend,
+    std::uint64_t expected_frame_count,
+    std::uint64_t expected_first_sequence
+  );
+  void validate_scene_controller_frame_for_test(
+    const nlohmann::json &frame,
+    std::uint64_t source_index,
+    std::uint64_t expected_sequence,
+    std::uint64_t expected_frame_count,
+    std::uint64_t depth_reuse_interval,
+    std::optional<std::uint64_t> previous_controller_frame_id = std::nullopt,
+    std::optional<std::uint32_t> previous_backend_generation = std::nullopt
+  );
 
   bool depth_frame_requires_previous_for_test(
     float initialized,

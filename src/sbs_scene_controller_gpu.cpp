@@ -8,12 +8,15 @@
 #include "generated/sbs_scene_controller_contract.h"
 #include "logging.h"
 #include "sbs_perf.h"
+#include "../src_assets/windows/assets/shaders/directx/include/sbs_scene_rules_summary_layout.shared.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <d3dcompiler.h>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -24,25 +27,123 @@
 namespace {
   using Microsoft::WRL::ComPtr;
 
+  static_assert(
+    sbs_scene_controller::analysis_canvas_size ==
+    SBS_RULE_SUMMARY_COLUMN_COUNT
+  );
+  static_assert(
+    sbs_scene_controller::analysis_canvas_size %
+      SBS_RULE_EVIDENCE_GROUP_SIZE ==
+    0u
+  );
+  static_assert(
+    SBS_RULE_SUMMARY_EVENT_GROUP_COUNT ==
+    SBS_RULE_EVIDENCE_GROUPS_PER_AXIS *
+      SBS_RULE_EVIDENCE_GROUPS_PER_AXIS
+  );
+  static_assert(
+    (SBS_RULE_EVIDENCE_GROUP_THREAD_COUNT &
+     (SBS_RULE_EVIDENCE_GROUP_THREAD_COUNT - 1u)) == 0u
+  );
+
   struct shader_cache_entry_t {
-    std::filesystem::file_time_type modified;
+    std::uint64_t source_fingerprint = 0;
     std::shared_ptr<const std::vector<std::uint8_t>> bytecode;
   };
 
   std::mutex scene_shader_cache_mutex;
   std::map<std::filesystem::path, shader_cache_entry_t> scene_shader_cache;
 
+  std::uint64_t scene_shader_source_fingerprint(
+    const std::filesystem::path &path,
+    std::error_code &ec
+  ) {
+    constexpr std::uint64_t fnv_offset = 14695981039346656037ull;
+    constexpr std::uint64_t fnv_prime = 1099511628211ull;
+    std::uint64_t fingerprint = fnv_offset;
+    const auto hash_bytes =
+      [&](const auto *data, std::size_t size) {
+        const auto *bytes =
+          reinterpret_cast<const unsigned char *>(data);
+        for (std::size_t index = 0; index < size; ++index) {
+          fingerprint ^= bytes[index];
+          fingerprint *= fnv_prime;
+        }
+      };
+    const auto hash_file =
+      [&](const std::filesystem::path &file) {
+        const auto relative =
+          file.lexically_relative(path.parent_path()).generic_string();
+        hash_bytes(relative.data(), relative.size());
+        const unsigned char separator = 0;
+        hash_bytes(&separator, 1);
+
+        std::ifstream stream(file, std::ios::binary);
+        if (!stream) {
+          ec = std::make_error_code(std::errc::io_error);
+          return false;
+        }
+        std::array<char, 4096> block {};
+        while (stream) {
+          stream.read(block.data(), block.size());
+          const auto count = stream.gcount();
+          if (count > 0) {
+            hash_bytes(block.data(), static_cast<std::size_t>(count));
+          }
+        }
+        if (!stream.eof()) {
+          ec = std::make_error_code(std::errc::io_error);
+          return false;
+        }
+        return true;
+      };
+
+    std::vector<std::filesystem::path> sources {path};
+    const auto include_root = path.parent_path() / "include";
+    std::error_code walk_error;
+    for (
+      std::filesystem::recursive_directory_iterator iterator(
+        include_root,
+        std::filesystem::directory_options::skip_permission_denied,
+        walk_error
+      ),
+      end;
+      !walk_error && iterator != end;
+      iterator.increment(walk_error)
+    ) {
+      std::error_code type_error;
+      if (iterator->is_regular_file(type_error) && !type_error) {
+        sources.push_back(iterator->path());
+      } else if (type_error) {
+        walk_error = type_error;
+      }
+    }
+    if (walk_error) {
+      ec = walk_error;
+      return 0;
+    }
+    std::sort(sources.begin() + 1, sources.end());
+    for (const auto &source : sources) {
+      if (!hash_file(source)) {
+        return 0;
+      }
+    }
+    ec.clear();
+    return fingerprint;
+  }
+
   std::shared_ptr<const std::vector<std::uint8_t>> compile_scene_shader(
     const std::filesystem::path &path
   ) {
     std::error_code ec;
-    const auto modified = std::filesystem::last_write_time(path, ec);
+    const auto source_fingerprint =
+      scene_shader_source_fingerprint(path, ec);
     {
       std::lock_guard lock(scene_shader_cache_mutex);
       const auto found = scene_shader_cache.find(path);
       if (
         found != scene_shader_cache.end() && !ec &&
-        found->second.modified == modified
+        found->second.source_fingerprint == source_fingerprint
       ) {
         return found->second.bytecode;
       }
@@ -84,7 +185,7 @@ namespace {
       std::lock_guard lock(scene_shader_cache_mutex);
       scene_shader_cache.insert_or_assign(
         path,
-        shader_cache_entry_t {modified, bytecode}
+        shader_cache_entry_t {source_fingerprint, bytecode}
       );
     }
     return bytecode;
@@ -223,35 +324,22 @@ namespace models {
     float pending_elapsed_seconds = 0.0f;
     std::chrono::steady_clock::time_point prepared_at {};
     std::chrono::steady_clock::time_point last_enqueued_at {};
+    bool elapsed_override_pending_for_evaluation = false;
+    float elapsed_seconds_override_for_evaluation = 0.0f;
     static constexpr std::uint32_t backend_generation = 1;
-    static constexpr std::size_t rule_summary_float_count = 6144;
-    static constexpr std::size_t rule_summary_required_float_count =
-      128u * 4u +        // column summaries
-      32u + 2u * 32u +  // global plan and two region plans
-      128u * 7u +       // row-major global summaries
-      2u * 128u * 11u + // per-region row summaries
-      32u * 8u +        // candidate descriptors
-      32u * 8u;         // candidate results
-    static_assert(
-      rule_summary_required_float_count <= rule_summary_float_count
-    );
+    static constexpr std::size_t rule_summary_float_count =
+      SBS_RULE_SUMMARY_FLOAT_COUNT;
 #ifdef SUNSHINE_TESTS
     bool use_serial_reducer_reference_for_testing = false;
     bool enable_isolated_timing_for_testing = false;
     bool reset_override_pending_for_testing = false;
     std::uint32_t reset_flags_override_for_testing = 0;
-    bool elapsed_override_pending_for_testing = false;
-    float elapsed_seconds_override_for_testing = 0.0f;
 #endif
 
     ComPtr<ID3D11ComputeShader> prepare_cs;
     ComPtr<ID3D11ComputeShader> features_cs;
     ComPtr<ID3D11ComputeShader> evidence_cs;
     ComPtr<ID3D11ComputeShader> reduce_columns_cs;
-    ComPtr<ID3D11ComputeShader> reduce_plan_columns_cs;
-    ComPtr<ID3D11ComputeShader> reduce_rows_cs;
-    ComPtr<ID3D11ComputeShader> reduce_plan_rows_cs;
-    ComPtr<ID3D11ComputeShader> reduce_candidates_cs;
     ComPtr<ID3D11ComputeShader> reduce_cs;
     ComPtr<ID3D11ComputeShader> resolve_cs;
     ComPtr<ID3D11ComputeShader> history_commit_cs;
@@ -382,22 +470,6 @@ namespace models {
           create_shader(
             "sbs_scene_rules_columns_cs.hlsl",
             reduce_columns_cs
-          ) &&
-          create_shader(
-            "sbs_scene_rules_plan_columns_cs.hlsl",
-            reduce_plan_columns_cs
-          ) &&
-          create_shader(
-            "sbs_scene_rules_rows_cs.hlsl",
-            reduce_rows_cs
-          ) &&
-          create_shader(
-            "sbs_scene_rules_plan_rows_cs.hlsl",
-            reduce_plan_rows_cs
-          ) &&
-          create_shader(
-            "sbs_scene_rules_candidates_cs.hlsl",
-            reduce_candidates_cs
           ) &&
           create_shader("sbs_scene_rules_reduce_cs.hlsl", reduce_cs);
       }
@@ -951,19 +1023,16 @@ namespace models {
       prepared_elapsed_seconds =
         last_enqueued_at.time_since_epoch().count() == 0 ?
           0.0f :
-          std::clamp(
+          std::max(
             std::chrono::duration<float>(
               prepared_at - last_enqueued_at
             ).count(),
-            0.0f,
-            1.0f
+            0.0f
           );
-#ifdef SUNSHINE_TESTS
-      if (elapsed_override_pending_for_testing) {
-        prepared_elapsed_seconds = elapsed_seconds_override_for_testing;
-        elapsed_override_pending_for_testing = false;
+      if (elapsed_override_pending_for_evaluation) {
+        prepared_elapsed_seconds = elapsed_seconds_override_for_evaluation;
+        elapsed_override_pending_for_evaluation = false;
       }
-#endif
       prepared_color_space = color_space;
       prepared_frame_id = source_frame_id;
       source_width = descriptor.Width;
@@ -1147,24 +1216,27 @@ namespace models {
         adaptive_state,
         frame_roi_transform,
       };
-      ID3D11UnorderedAccessView *evidence_outputs[4] = {
+      ID3D11UnorderedAccessView *evidence_outputs[5] = {
         dense_output.uav.Get(),
         layout_history[next_history_bank].uav.Get(),
         depth_history[next_history_bank].uav.Get(),
         meta.uav.Get(),
+        rule_summary.uav.Get(),
       };
       context->CSSetShaderResources(0, 9, evidence_inputs);
-      context->CSSetUnorderedAccessViews(0, 4, evidence_outputs, nullptr);
+      context->CSSetUnorderedAccessViews(0, 5, evidence_outputs, nullptr);
       constexpr UINT analysis_groups =
-        (sbs_scene_controller::analysis_canvas_size + 15u) / 16u;
+        (sbs_scene_controller::analysis_canvas_size +
+         SBS_RULE_EVIDENCE_GROUP_SIZE - 1u) /
+        SBS_RULE_EVIDENCE_GROUP_SIZE;
       context->Dispatch(analysis_groups, analysis_groups, 1);
 
       ID3D11ShaderResourceView *null_evidence_inputs[9] = {};
-      ID3D11UnorderedAccessView *null_evidence_outputs[4] = {};
+      ID3D11UnorderedAccessView *null_evidence_outputs[5] = {};
       context->CSSetShaderResources(0, 9, null_evidence_inputs);
       context->CSSetUnorderedAccessViews(
         0,
-        4,
+        5,
         null_evidence_outputs,
         nullptr
       );
@@ -1172,58 +1244,70 @@ namespace models {
       mark_rules_evidence_end(timer);
 #endif
 
-      ID3D11ShaderResourceView *reduce_inputs[7] = {
-        analysis_grid[pending_scene_bank].srv.Get(),
-        dense_output.srv.Get(),
-        layout_history[next_history_bank].srv.Get(),
-        depth_history[next_history_bank].srv.Get(),
-        adaptive_state,
-        meta.srv.Get(),
-        rule_state[current_state_bank].srv.Get(),
-      };
-      context->CSSetShaderResources(0, 7, reduce_inputs);
 #ifdef SUNSHINE_TESTS
       if (use_serial_reducer_reference_for_testing) {
+        // The serial oracle independently rebuilds every reduction from the source grids, so it
+        // alone needs the pre-update layout history and freshly written depth history at t2/t3.
+        ID3D11ShaderResourceView *reference_reduce_inputs[7] = {
+          analysis_grid[pending_scene_bank].srv.Get(),
+          dense_output.srv.Get(),
+          layout_history[current_history_bank].srv.Get(),
+          depth_history[next_history_bank].srv.Get(),
+          adaptive_state,
+          meta.srv.Get(),
+          rule_state[current_state_bank].srv.Get(),
+        };
+        context->CSSetShaderResources(0, 7, reference_reduce_inputs);
         context->CSSetShader(reduce_cs.Get(), nullptr, 0);
-        context->CSSetUnorderedAccessViews(
-          0,
-          1,
-          evidence_global.uav.GetAddressOf(),
-          nullptr
-        );
+        ID3D11UnorderedAccessView *reference_outputs[2] = {
+          evidence_global.uav.Get(),
+          rule_summary.uav.Get(),
+        };
+        context->CSSetUnorderedAccessViews(0, 2, reference_outputs, nullptr);
         context->Dispatch(1, 1, 1);
-        ID3D11UnorderedAccessView *null_reference_output[1] = {};
+        ID3D11UnorderedAccessView *null_reference_output[2] = {};
         context->CSSetUnorderedAccessViews(
           0,
-          1,
+          2,
           null_reference_output,
           nullptr
         );
       } else
 #endif
       {
-        const auto dispatch_summary_pass =
-          [&](ID3D11ComputeShader *shader, UINT groups) {
-            context->CSSetShader(shader, nullptr, 0);
-            ID3D11UnorderedAccessView *outputs[2] = {
-              rule_summary.uav.Get(),
-              nullptr,
-            };
-            context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
-            context->Dispatch(groups, 1, 1);
-            ID3D11UnorderedAccessView *null_outputs[2] = {};
-            context->CSSetUnorderedAccessViews(
-              0,
-              2,
-              null_outputs,
-              nullptr
-            );
-          };
-        dispatch_summary_pass(reduce_columns_cs.Get(), 1);
-        dispatch_summary_pass(reduce_plan_columns_cs.Get(), 1);
-        dispatch_summary_pass(reduce_rows_cs.Get(), 2);
-        dispatch_summary_pass(reduce_plan_rows_cs.Get(), 1);
-        dispatch_summary_pass(reduce_candidates_cs.Get(), 32);
+        // Production projections consume t0/t1 and the scalar finalizer
+        // consumes t4/t5/t6. Keep the later register numbers intact, but do
+        // not bind history resources that neither pass reads (especially the
+        // just-written depth history at t3).
+        ID3D11ShaderResourceView *production_reduce_inputs[7] = {
+          analysis_grid[pending_scene_bank].srv.Get(),
+          dense_output.srv.Get(),
+          nullptr,
+          nullptr,
+          adaptive_state,
+          meta.srv.Get(),
+          rule_state[current_state_bank].srv.Get(),
+        };
+        context->CSSetShaderResources(0, 7, production_reduce_inputs);
+        context->CSSetShader(reduce_columns_cs.Get(), nullptr, 0);
+        ID3D11UnorderedAccessView *projection_outputs[2] = {
+          rule_summary.uav.Get(),
+          nullptr,
+        };
+        context->CSSetUnorderedAccessViews(
+          0,
+          2,
+          projection_outputs,
+          nullptr
+        );
+        context->Dispatch(1, 1, 1);
+        ID3D11UnorderedAccessView *null_projection_outputs[2] = {};
+        context->CSSetUnorderedAccessViews(
+          0,
+          2,
+          null_projection_outputs,
+          nullptr
+        );
 
         context->CSSetShader(reduce_cs.Get(), nullptr, 0);
         ID3D11UnorderedAccessView *final_outputs[2] = {
@@ -1253,23 +1337,24 @@ namespace models {
 #endif
 
       context->CSSetShader(resolve_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *resolve_inputs[4] = {
+      ID3D11ShaderResourceView *resolve_inputs[5] = {
         evidence_global.srv.Get(),
         rule_state[current_state_bank].srv.Get(),
         meta.srv.Get(),
         adaptive_state,
+        rule_summary.srv.Get(),
       };
       ID3D11UnorderedAccessView *resolve_outputs[2] = {
         global_output.uav.Get(),
         rule_state[next_state_bank].uav.Get(),
       };
-      context->CSSetShaderResources(0, 4, resolve_inputs);
+      context->CSSetShaderResources(0, 5, resolve_inputs);
       context->CSSetUnorderedAccessViews(0, 2, resolve_outputs, nullptr);
       context->Dispatch(1, 1, 1);
 
-      ID3D11ShaderResourceView *null_resolve_inputs[4] = {};
+      ID3D11ShaderResourceView *null_resolve_inputs[5] = {};
       ID3D11UnorderedAccessView *null_resolve_outputs[2] = {};
-      context->CSSetShaderResources(0, 4, null_resolve_inputs);
+      context->CSSetShaderResources(0, 5, null_resolve_inputs);
       context->CSSetUnorderedAccessViews(
         0,
         2,
@@ -1345,6 +1430,7 @@ namespace models {
       result.hidden_output = hidden_output.srv;
       result.meta = meta.srv;
       result.rule_state = rule_state[current_state_bank].srv;
+      result.rule_summary = rule_summary.srv;
 #ifdef SUNSHINE_TESTS
       result.rule_evidence_for_testing = evidence_global.srv;
 #endif
@@ -1444,6 +1530,23 @@ namespace models {
                     scene_controller_gpu_snapshot {};
   }
 
+  bool sbs_scene_controller_gpu::set_next_elapsed_seconds_for_evaluation(
+    const float elapsed_seconds
+  ) {
+    if (
+      !pimpl_ || !std::isfinite(elapsed_seconds) ||
+      elapsed_seconds < 0.0f
+    ) {
+      return false;
+    }
+    // Source-presentation time is an offline oracle. Live production uses the
+    // complete elapsed time between accepted captured-stream submissions too;
+    // neither path infers or consults an embedded video's cadence.
+    pimpl_->elapsed_seconds_override_for_evaluation = elapsed_seconds;
+    pimpl_->elapsed_override_pending_for_evaluation = true;
+    return true;
+  }
+
 #ifdef SUNSHINE_TESTS
   void sbs_scene_controller_gpu::set_next_reset_flags_for_testing(
     std::uint32_t reset_flags
@@ -1457,11 +1560,9 @@ namespace models {
   void sbs_scene_controller_gpu::set_next_elapsed_seconds_for_testing(
     float elapsed_seconds
   ) {
-    if (pimpl_) {
-      pimpl_->elapsed_seconds_override_for_testing =
-        std::clamp(elapsed_seconds, 0.0f, 1.0f);
-      pimpl_->elapsed_override_pending_for_testing = true;
-    }
+    (void) set_next_elapsed_seconds_for_evaluation(
+      std::max(elapsed_seconds, 0.0f)
+    );
   }
 #endif
 }  // namespace models

@@ -20,6 +20,7 @@ class AdaptiveStateContractTests(unittest.TestCase):
         # reviewed golden digest instead of silently redefining schema 3.
         expected_digest_by_schema = {
             3: "4fb65e50c9ad7039c9b6407f2e772a30052a0dea06499fd3b49b260336c1c4d1",
+            4: "8b4de0656dfe0beb398adb4534d9a2cb2d115ec5ab38cfeb7c80b5c3f118e20a",
         }
         canonical = json.dumps(
             contract.CONTRACT, sort_keys=True, separators=(",", ":")
@@ -62,13 +63,19 @@ class AdaptiveStateContractTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_manifest_is_exact_and_carries_recovery_state(self):
-        self.assertEqual(contract.TRACE_SCHEMA, 3)
+    def test_manifest_is_exact_and_carries_confirmation_state(self):
+        self.assertEqual(contract.TRACE_SCHEMA, 4)
         self.assertEqual(len(contract.FIELD_SPECS), 32)
         self.assertEqual(contract.FIELD_SPECS[10], ("cut_flags", "float32"))
+        self.assertEqual(
+            contract.FIELD_SPECS[23],
+            ("appearance_change_baseline_ema", "float32"),
+        )
         self.assertEqual(contract.FIELD_SPECS[31], ("analysis_flags", "uint32"))
         self.assertEqual(contract.CUT_FLAG_APPEARANCE_RECOVERY, 32)
+        self.assertEqual(contract.CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING, 64)
         self.assertIn("appearance_recovery", contract.FRAME_KEYS)
+        self.assertIn("geometry_confirmation_pending", contract.FRAME_KEYS)
 
 
 if __name__ == "__main__":

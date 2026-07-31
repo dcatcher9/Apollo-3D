@@ -27,8 +27,9 @@ sbs_scene_controller = off | rules | model | shadow_rules | shadow_model
 The implementation in this change deliberately exposes only `off` and `shadow_rules`, with
 `off` as the default. `shadow_rules` runs the real GPU tensors, resolver, history, and dump path,
 but it has no connection to crop, normalization, warp, pop, or zero-plane authority. Active
-`rules` remains unavailable until ROI-masked event reduction, adversarial captures, and the
-4K90 performance gate pass. Off/shadow inference binds one immutable all-zero legacy transform;
+`rules` remains unavailable until the remaining adversarial and 4K90 soak gates pass and active
+rollout is explicitly approved.
+Off/shadow inference binds one immutable all-zero legacy transform;
 it does not allocate, dispatch, map, or lifecycle-track the active transform banks, so an
 experimental builder failure cannot disable ordinary Host SBS.
 
@@ -100,6 +101,11 @@ flowchart LR
 The selected ROI from frame `N` can affect DA-V2 only on the next accepted frame. Rendering frame
 `N` always uses the ROI metadata stored with frame `N`; it never samples the tracker's newest
 rectangle.
+
+Every duration in this design is measured on the accepted captured-stream presentation timeline.
+The synthetic recipe's `fps_num/fps_den` is that stream cadence, not the frame rate of a video
+embedded in a browser page. For example, a 30 FPS player presented by a 90 Hz stream still advances
+controller wall time by about 1/90 second per accepted stream submission.
 
 ## Shared Scene Controller ABI v1
 
@@ -226,7 +232,8 @@ normalized depth and would poison gradients, cuts, pop risk, and recurrence.
 | 0 | elapsed seconds since the last accepted controller update |
 | 1 | source aspect ratio |
 | 2..5 | normalized ROI `x0,y0,x1,y1` |
-| 6..9 | one-hot current state: `full_frame,video,content,scroll_hold` |
+| 6..8 | one-hot retained geometry state: `full_frame,video,content` |
+| 9 | reserved; required zero |
 | 10 | current depth input valid |
 | 11 | ROI generation changed |
 | 12 | layout reset requested |
@@ -252,7 +259,7 @@ integer metadata beside the tensor.
 
 | Tensor | Type and shape | Meaning |
 | --- | --- | --- |
-| `dense_out` | FP32 `[1,14,128,128]` | Full-frame semantic, local event, and motion evidence. |
+| `dense_out` | FP32 `[1,14,128,128]` | Full-frame heuristic, local event, and motion evidence. These are observable rule inputs, not ground-truth semantic labels. |
 | `global_out` | FP32 `[1,41]` | Layout, event, pop, zero-plane, confidence, scroll, and validity evidence. |
 | `hidden_out` | FP32 `[1,24,32,32]` | Learned recurrent state; `rules_v1` writes zero. |
 
@@ -261,12 +268,12 @@ integer metadata beside the tensor.
 | Index | Evidence |
 | ---: | --- |
 | 0 | unknown/background |
-| 1 | primary playing video |
-| 2 | accepted photographic content/collage |
-| 3 | browser/system chrome |
-| 4 | advertisement, competitor, or unsafe exterior |
+| 1 | canonical photo-gated playing-video evidence; raw activity is used only as liveness masked by this lane |
+| 2 | exact positive static-media weight consumed by the authoritative media hull |
+| 3 | geometry-neutral UI/chrome-like evidence |
+| 4 | geometry-neutral transient competitor/unsafe evidence |
 | 5 | focus boundary |
-| 6 | stable gutter |
+| 6 | geometry-neutral quiet-divider evidence; used only to bound/corroborate a temporal player seed, never to split the static media hull |
 | 7 | subject/saliency |
 | 8 | local motion x |
 | 9 | local motion y |
@@ -286,7 +293,19 @@ integer metadata beside the tensor.
 | 25..30 | confidence: `ROI,mask,event,pop,zero,OOD` |
 | 31..33 | global scroll x, y, and confidence |
 | 34 | backend output valid |
-| 35..39 | reserved; required zero |
+| 35..40 | resolver-private scratch; required zero in the published output |
+
+The committed 68-word rule state uses words 61..63 for
+`roi_structural_cut_support`, `roi_exposure_only_support`, and
+`roi_event_depth_coverage`. They are schema-hashed FP32 values, not untyped reserved lanes, so
+offline traces can calibrate the ROI corroboration thresholds without changing live authority.
+Word 60 stores the last consumed external-cut count and word 64 stores the last consumed adaptive
+detector-cut count as exact `uint32` bits. Words 65..67 are required-zero expansion lanes. The
+detector count and `detector_cut_pending` state flag make a corroborated detector cut durable
+across invalid or scroll-frozen updates; a valid unfrozen ROI rejection consumes the count so it
+cannot attach to unrelated future activity. If the independently owned adaptive state is rebuilt
+and either exact counter decreases, the resolver immediately starts a new counter epoch so the
+next increment remains observable.
 
 The nine pop actions span the current configuration:
 
@@ -324,24 +343,23 @@ Cut, pop, subject, and zero-plane reductions are masked by the frame-owned ROI a
 mask. Full-frame appearance may discover a challenger, but activity in a sidebar or outside the
 committed ROI cannot relatch shot state.
 
-The reducer may accept a disconnected focus mask, but it produces only one rectangular DA-V2
-inference envelope. It requires a unique target with enough support and excludes high-confidence
-chrome/ad cells. If the mask is sparse, fragmented, tied, or would cross a stable gutter, it
-abstains to full frame.
+The shared ABI can carry a richer focus mask for a future learned backend, but deterministic rules
+accept only one unambiguous rectangular target. They do not solve disconnected masks, select among
+independent islands, or infer a missing edge. Those cases abstain.
 
-## Irregular focus mask versus rectangular DA-V2 input
+## Rectangular DA-V2 input
 
 DA-V2 cannot run directly on an irregular shape. Its input is one dense rectangular NCHW tensor.
-The controller therefore keeps two different objects:
+The controller keeps two different objects:
 
 1. **Focus/exclusion mask**: arbitrary, possibly disconnected, at `128x128`.
 2. **Inference envelope**: one source-space rectangle derived from the accepted mask and used by
    DA-V2 on the next accepted frame.
 
-The reducer takes the tight supported bounds of the unique accepted component or content cluster,
-adds a small quiet halo, and rejects high-confidence excluded cells. Widely separated islands that
-would make the bounding box mostly UI/ad are ambiguous and must abstain; one rectangular inference
-does not magically allocate independent model resolution to each island.
+For `rules_v1`, the accepted focus is already one dense rectangle. A small halo and patch-alignment
+expansion may enlarge only the inference envelope. If forming that envelope would require choosing
+between disconnected regions, inventing a missing boundary, or including a material unsafe
+competitor, the controller uses full-frame inference.
 
 Aspect ratio matters. The ROI-to-model transform must:
 
@@ -387,12 +405,8 @@ therefore remains blocked on measured alternating landscape/square/portrait tran
 4K90 cadence, and a 30-minute no-growth soak. A bounded per-shape cache is a later optimization if
 those measurements are not acceptable.
 
-DA-V2 predicts depth for the complete rectangle, including holes and UI lying inside its bounds.
-After inference, the original irregular mask may suppress only high-confidence chrome/ad/exterior
-and may feather across quiet boundaries. A hard irregular binary cut would create visible stereo
-cardboard edges, so uncertain interior pixels retain rectangular-ROI depth. The focus mask does
-not alter the RGB fed into DA-V2: blacking or blurring excluded pixels before inference would add
-artificial boundaries and create an out-of-distribution input.
+DA-V2 predicts depth for the complete rectangle. The focus mask never blacks or blurs RGB before
+inference; doing so would add artificial boundaries and create an out-of-distribution input.
 
 ## Backend 1: deterministic GPU rules
 
@@ -411,61 +425,145 @@ Rules are not expected to solve every semantic ambiguity. They must prefer abste
 sidebar/ad selection. A rule ROI must not become the default merely because it improves one
 hand-selected grid page.
 
-### Rule passes
+### State machine and simple rule policy
 
-`rules_v1` is a small set of bounded HLSL compute passes:
+The geometry state machine has exactly three states:
 
-1. **Feature pass**
-   - exact-area full-frame downsample;
-   - exposure-invariant luminance ordinal;
-   - local variance, multidirectional texture, and chroma;
-   - temporal-activity occupancy;
-   - depth validity, masked mean/std normalization, gradients, and change;
-   - elapsed-time EMAs.
-2. **Layout evidence pass**
-   - persistent photographic regions;
-   - large coherent motion for a playing-video candidate;
-   - static dense clusters for a collage;
-   - stable gutters and edge-attached thin UI;
-   - independently animated, small sidebar/ad penalties;
-   - recent interaction as a tie-breaker only.
-3. **Reduction pass**
-   - row/column support histograms;
-   - bounded row/column support runs and conservative candidate bounds on the fixed grid;
-   - largest and second-largest candidate evidence;
-   - winner margin, coverage, ambiguity, and OOD;
-   - scroll vector and confidence.
-4. **Existing-controller projection**
-   - translate current geometry-correlated cut, adaptive-pop risk, and zero-plane evidence into the
-     common logits;
-   - do not weaken existing hard bounds or latches.
-5. **Shared resolver/history pass**
-   - resolve an action, write diagnostics, and promote state only after identity checks.
+| State | Meaning |
+| --- | --- |
+| `FULL_FRAME` | No safe unique rectangle is committed. This is the initial state and every ambiguous case returns here. |
+| `VIDEO` | One rectangle was proven by recurring motion and may be retained through a pause. |
+| `CONTENT` | One simple, dense static media envelope was proven. |
 
-The CPU files `src/sbs_roi_feature_detector.*` and `src/sbs_roi_tracker.*` are test-only reference
-oracles and fixture generators. They are not linked into the Sunshine 3D production binary. GPU
-fixture tests compare rule evidence and state transitions against the oracle within declared
-floating-point tolerances.
+`layout_decision` records the current evidence proposal and may briefly say `VIDEO` or `CONTENT`
+while a candidate is still serving its dwell. It is diagnostic, not crop authority. Only
+`state_kind` plus a locked committed ROI changes sampling; therefore an ambiguous clip passes
+only while it remains `FULL_FRAME`, even if useful provisional proposals appear and clear.
 
-### Rule applicability
+Scroll is not a fourth state. `scroll_hold_active` and `scroll_hold_s` are orthogonal overlay
+fields. Coherent same-direction translation must persist for 0.05 seconds on the captured-stream
+presentation clock before it enters the overlay. This takes the same physical time at 72 FPS,
+90 FPS, or across dropped inference opportunities; embedded video cadence is never an input.
+While the overlay is active, committed geometry, depth-shot, pop, and zero-plane decisions freeze;
+the retained state and ROI generation do not change. Every uncommitted acquisition or challenger
+is cleared on entry and remains canonical throughout the hold, including in `FULL_FRAME`. After
+the 0.12-second quiet release tail, one decision-frozen update promotes current depth to replace
+the pre-scroll bank; this prevents the translated page from being mistaken for a scene cut.
+Acquisition restarts from empty evidence and must satisfy a fresh 0.20-second dwell.
 
-A primary-video candidate requires:
+`rules_v1` deliberately uses one conservative decision chain:
 
-- meaningful viewport area;
-- sustained interior activity or a retained locked-player history;
-- photographic/texture evidence;
-- separation from sidebar candidates by a stable gutter; and
-- a decisive area/evidence margin, unless recent interaction breaks a close tie.
+1. Validate the current viewport, frame identity, and history.
+2. Detect coherent whole-page translation. During scroll, do not acquire or replace an ROI.
+3. Look for one exposure-invariant moving rectangle with four closed sides. Geometry comes only
+   from the canonical photo-gated temporal evidence; raw ordinal changes are masked by that
+   evidence for liveness and can never create a VIDEO rectangle by themselves. The temporal seed
+   must be stable over time and clearly dominate every separated moving competitor. Each seed axis
+   may expand through contiguous static-media support measured only inside the opposite seed span,
+   so a static player border is recovered without an unrelated sidebar stretching it.
+4. If that seed is only a small part of one larger, simple media hull, keep the enclosing hull as
+   `CONTENT` instead of claiming the moving inset reveals an exact player boundary. This is the
+   safe mixed image-plus-video/collage result and never crops out the surrounding media.
+5. If there is no moving winner, look for one dense, continuous static-media envelope, such as a
+   straightforward image or thumbnail grid. A cold static envelope can become `CONTENT`, but never
+   `VIDEO`; only observed playback history grants video/pause authority.
+6. Canonicalize a near-full envelope to `FULL_FRAME`; otherwise commit `VIDEO` or `CONTENT` only
+   after dwell.
+7. On invalid, weak, disconnected, competing, or semantically unknowable evidence, select
+   `FULL_FRAME`.
 
-The lock survives quiet shots, pauses, subtitles, controls, and continuing sidebar animation.
-Equal videos, PiP with no dominant target, and genuinely ambiguous multi-window layouts abstain.
+The implementation needs only a small set of shared calibration families: minimum usable
+evidence, rectangle fill, competitor dominance, temporal dwell, and near-full identity margin.
+Thresholds within one family derive from one shared constant. Independent fallback ladders,
+three-side rescue, cross-axis rectangle pairing, special sidebar scoring, row/column-count
+priors, and semantic guesses from shape are intentionally excluded.
 
-A content/collage candidate uses persistent photographic density, two-dimensional cluster support,
-scroll history, and exclusion evidence. It may surround multiple thumbnails, but it remains one
-ROI. The diagnostic dump
-`dump_20260728_121337_57928_18c689fbeeefc81c_0` should initially resolve near the complete-card
-envelope `(846,525)-(3090,1761)`, with a small aspect-preserving halo. This is a fixture, not a
-hard-coded special case.
+The GPU path stays bounded: the feature pass writes activity, media weight, quiet-boundary,
+translation, depth, and event evidence; one parallel reducer forms projections and totals; one
+scalar finalizer produces at most one moving candidate and one static envelope; and the shared
+resolver applies dwell and state policy. Per-cell scroll voters require a common direction and at
+least 12% support among observable textured cells. This is intentionally not 12% of the viewport:
+it keeps sparse browser pages detectable, while a cold coherent camera pan remains a conservative
+FULL_FRAME case. Production HLSL and the test-only serial HLSL mirror use the same inputs and
+constants. There is no independent CPU detector or tracker.
+
+### Supported and intentionally unsupported scenes
+
+The rule backend is required to handle:
+
+- one ordinary stable playing video, including a smaller animated sidebar when the player is
+  clearly dominant;
+- a playback-proven video that pauses and later resumes in the same rectangle;
+- one playback-proven player that relocates once, retains its incumbent during a 0.75-second
+  challenger dwell, and then accepts the stable destination;
+- a brief separated relocation challenger that never completes dwell, for which the incumbent is
+  retained without a generation change;
+- one simple dense static image/collage/grid with a clear enclosing rectangle;
+- one clear cold-static player-shaped envelope as `CONTENT`, never as `VIDEO`;
+- near-fullscreen media, which uses identity/full-frame;
+- retention through page scroll, clearing uncommitted acquisition/challenger state on confirmed
+  entry,
+  and fresh post-scroll acquisition after the release tail plus dwell; and
+- existing scene-cut, adaptive-pop, zero-plane, validity, and safety contracts.
+
+The following cases are explicitly `FULL_FRAME`/abstention for the rule backend:
+
+- comparable independently isolated videos or an animated sidebar with no dominant player, unless
+  one simple `CONTENT` hull safely encloses every media region without dropping content;
+- cross-axis, corner, or otherwise disjoint motion that has no unique rectangle;
+- sparse evidence that would require a three-side boundary rescue;
+- partial, clipped, or irregular players;
+- a cold static region when no single dense envelope is distinguishable from competing activity;
+- a candidate while scroll hold or its release tail is active;
+- a relocation challenger that remains ambiguous after the incumbent is lost;
+- grayscale static media that cannot be distinguished reliably from dense text/chrome; and
+- any other case that needs application, DOM, accessibility, audio, or semantic-model context.
+
+These scenes remain in the locked synthetic suite with exact abstention segments. Abstention is a
+tested result, not missing coverage. A future learned backend may solve them, but deterministic
+rules must not grow special cases to do so.
+
+A committed `VIDEO` retains its exact rectangle through quiet frames because playback history is
+the additional information that makes a pause solvable. A cold static rectangle has no such video
+authority, but one unambiguous dense envelope may still be classified as `CONTENT`. A stable
+relocation keeps the old ROI and generation until the new dominant rectangle completes the
+0.75-second challenger dwell; the locked test accepts that commit only in its explicit frame 59-61
+window. A challenger that disappears before dwell leaves the incumbent unchanged.
+
+Before a temporal target is committed, acquisition and challenger records tolerate at most
+0.20 seconds without matching fresh activity. Quiet accepted stream updates do not advance dwell;
+if matching evidence returns within that bound, the accumulated stream-time gap is charged exactly
+once. Ambiguity, competing static evidence, page scroll, or a longer gap clears the provisional
+record. This single cadence allowance covers ordinary 24/30 FPS browser video presented in a
+72/90 Hz stream without adding a duplicate-frame or embedded-video-FPS state machine.
+
+The existing cut, pop, and zero-plane controller remains separate from ROI classification. ROI
+simplification does not weaken hard disparity bounds, event attribution, scene-cut rearm, matched
+frame identity, or invalid-output hold.
+
+### Previous real-capture calibration
+
+The earlier `simplified-v38` rule set produced these normalized rectangles on the four provided
+captures:
+
+- `Browsing_bing.mp4`: changing page content produced three dwell-qualified content hulls; the
+  final hull was `(0.188,0.333)-(0.805,1.000)`;
+- `Browsing_bili.mp4`: one content hull stayed stable at
+  `(0.211,0.133)-(0.813,0.981)`;
+- `Video_and_Image.mp4`: eight dwell-qualified content hulls followed the changing mixed layout
+  while keeping the right edge at or left of `0.656`, excluding the sidebar; and
+- `Video_in_browser.mp4`: static evidence first selected the broad page-content hull, then
+  recurring motion committed the exact player rectangle
+  `(0.016,0.152)-(0.727,0.657)` at source index 115 (frame ID 116) and held it for the remaining
+  212 frames.
+
+All 1,140 source frames produced valid controller snapshots. The detector-pending flag returned to
+zero in every final state; cut-counter deltas were either accepted, reset, or rejected against
+same-frame ROI evidence rather than surviving into unrelated content.
+
+These measurements predate the conservative supported/abstention policy above. They are preserved
+as comparison evidence, not validation of the current rules. The four real captures and the full
+17-scenario synthetic suite must be rerun before active authority is considered.
 
 ## Backend 2: SbsSceneNet-v1
 
@@ -627,6 +725,12 @@ Graphs for this case. Because ping-pong state changes pointer signatures, captur
 History is double-buffered. The write bank is never made current until all identity and validity
 checks pass.
 
+Every rule shader consumes the same `sbs_scene_rule_state.hlsl` predicates for word access,
+backend/schema identity, effective reset debt, target usability, and cumulative-counter validity.
+A non-finite previous `output_valid` is invalid and carries reset debt fail-closed. Counter
+identity deliberately remains separate from target usability: geometry/layout reset debt cannot
+discard an external or detector cut that has not yet been consumed.
+
 | Event | Layout history | Depth history | Learned hidden | ROI lock | Pop/zero latch |
 | --- | --- | --- | --- | --- | --- |
 | valid matched completion | promote | promote | promote for model | update by resolver | update only per shot policy |
@@ -636,7 +740,7 @@ checks pass.
 | hard content cut in stable ROI | preserve stable layout | clear | clear shot-dependent cells | preserve | clear and reclassify |
 | ROI geometry/generation change | preserve only known same layout | clear | clear | commit new generation | geometry reset, not cut |
 | tab/display/HDR geometry replacement | clear | clear | clear | clear | clear |
-| scroll hold | freeze semantic/layout state; update only termination evidence | freeze | freeze | retain incumbent | fade disparity to zero |
+| scroll-hold overlay | retain geometry kind; freeze semantic/layout promotion and update only termination evidence | freeze | freeze | retain incumbent without creating a lock | fade disparity to zero |
 | invalid depth | may advance appearance evidence | retain values, decay validity, age by `dt` | promote only if output contract says depth-independent | conservative | hold |
 | backend change | clear backend-dependent channels | preserve only raw compatible history | clear | re-acquire | preserve only if explicitly validated |
 
@@ -661,39 +765,76 @@ Content event and layout event remain different:
 - a flash/exposure event requires geometry corroboration before a content cut;
 - a changed ROI increments `roi_generation` and issues a geometry reset, not a hard cut;
 - stale depth/controller output from an old generation is discarded before state promotion;
+- page-wide scroll or exposure-change evidence blocks every new ROI/acquisition/challenger
+  geometry decision for that update;
 - scrolling frames do not update shot depth, pop, or zero-plane histories;
+- a cumulative external-cut request survives invalid or scrolling frames and produces exactly one
+  attributed hard-cut/shot reset on the first valid unfrozen update (a simultaneous geometry reset
+  takes precedence because it already clears the dependent state);
+- the adaptive detector's cumulative cut count likewise survives invalid or scrolling frames, but
+  a valid unfrozen cut outside a locked ROI is consumed as a rejection and cannot fire later;
 - cut evidence and ROI evidence use separate hysteresis; and
 - telemetry reports detector cuts, external cut requests, `cutArmed`, and ROI resets separately.
 
 The learned event head supplies evidence only. The existing deterministic cooldown, rearm,
 bounded no-starvation escape, and attribution rules remain authoritative.
 
+`rules_v1` preserves the legacy full-frame event classification until a prior committed ROI is
+locked. After lock, the global adaptive hard-cut pulse is only accepted when valid-depth-weighted
+structural support also exists inside that prior ROI. Exposure remains an intentionally global
+photometric event and veto: a quiet or excluded ROI cannot suppress a valid frame-wide exposure
+classification. ROI-local appearance-without-geometry support is still recorded as diagnostic
+attribution, not authority. The current challenger never gets to mask its own hard cut, and
+page-wide scroll aggregation remains separate. The hard-cut threshold is a shadow-only
+calibration value; raw structural/exposure support and depth coverage are recorded for every
+available controller update.
+
+A hard cut inside the current target therefore preserves the ROI geometry while resetting
+shot-dependent depth/pop/zero-plane state. Conversely, a committed ROI replacement advances the
+ROI generation and resets geometry/depth history without pretending that the replacement was a
+content cut.
+
 ## Latency and resource budget
 
-The `rules_v1` values below include an isolated warm RTX 5080 measurement. `model_v1` values remain
-design targets until an exported engine is benchmarked.
+The targets below remain release gates. Current measurements for the simplified one-hull
+`rules_v1` implementation are recorded below; `model_v1` values remain design targets until an
+exported engine exists. Passing the isolated rule budget does not by itself satisfy the
+adversarial/4K90 soak gates or enable active authority.
 
 ### `rules_v1`
 
-| Work | RTX 5080 P95 target | Isolated P95 |
-| --- | ---: | ---: |
-| full-frame feature preparation | 0.02-0.08 ms | 0.045216 ms |
-| rule evidence | included below | 0.006880 ms |
-| six-pass rule reduction | less than 0.50 ms | 0.183232 ms |
-| shared resolver and history update | 0.01-0.05 ms | 0.006976 ms |
-| evidence + reduction + resolver/history | no more than 0.25 ms | 0.196576 ms |
+| Work | RTX 5080 P95 target |
+| --- | ---: |
+| full-frame feature preparation | 0.02-0.08 ms |
+| rule evidence | included below |
+| two-dispatch rule reduction | less than 0.20 ms |
+| shared resolver and history update | 0.01-0.05 ms |
+| evidence + reduction + resolver/history | no more than 0.25 ms |
 
 Expected incremental VRAM is 4-8 MiB with FP32 ping-pong state and diagnostics disabled.
-The production reducer uses a fixed 24 KiB scratch buffer and six ordered compute passes: parallel
-column/global-row summaries, serial column planning, parallel per-region row summaries, serial row
-planning, parallel bounded-candidate evaluation, and serial final selection. The former single-lane
-reducer remains a test-only equivalence oracle and is never dispatched by production.
+The production reducer uses an exactly shared 1,983-float (7.75 KiB) scratch buffer and two
+ordered D3D11 dispatches:
 
-The isolated 4K test ran 640 serialized controller updates on the RTX 5080; each reported rolling
-window contains the latest 512 samples. Its workload cycles checker transitions, content
-acquisition, vertical scroll, and split/multi-candidate scenes. The six-pass reduction lowered P95
-from the measured single-lane 5.93 ms baseline to 0.183232 ms (about 32.4x faster, a 96.9%
-reduction).
+1. one parallel workgroup builds both axis projections, expands the temporal seed through
+   opposite-axis-conditioned static media, and forms the fixed 4x4 rectangular-coherence summary
+   from canonical dense evidence; and
+2. one scalar workgroup validates input and coherence, finalizes the media hull/temporal
+   rectangle, selects direct precedence `temporal -> static -> none`, and writes common evidence.
+
+Per-ROI structural/exposure sums and the per-cell horizontal/vertical scroll-direction votes
+are reduced inside the already-required evidence dispatch, so they add no standalone pass.
+There is no
+candidate-evaluation dispatch, conformance fallback,
+second-region scratch, or repeated connected-component loop. The former single-lane reducer
+remains a test-only equivalence oracle, is compiled only in test builds, and is excluded from the
+installed asset tree.
+The final isolated 4K hardware test measured `scene_prepare_gpu` at 0.0341/0.0386 ms P50/P95 and
+the complete `scene_rules_gpu` interval at 0.1441/0.1462 ms. Within that interval, evidence
+measured 0.0095/0.0097 ms, reduction 0.1295/0.1314 ms, and resolver plus history
+0.0051/0.0055 ms. The final browser-video whole-clip run under normal pipeline conditions measured
+`scene_rules_gpu` at 0.26/0.27 ms P50/P95. The implementation adds no CPU readback or GPU
+synchronization to the live rule path; these measurements do not change the shadow-only authority
+gate.
 
 Production publishes `scene_prepare_gpu` and `scene_rules_gpu` from timestamp pairs inside the
 depth estimator's existing single frame-level disjoint scope. `scene_rules_gpu` is a sub-interval
@@ -750,7 +891,7 @@ Generate browser-like scenes with exact pixel IDs for:
 - collage/cards/thumbnails;
 - browser and system chrome;
 - sidebar and advertisement;
-- stable gutter;
+- whitespace/divider regions;
 - unrelated application/window;
 - ambiguous competing target;
 - subject/saliency; and
@@ -769,6 +910,19 @@ Randomize:
 
 The compositor writes exact cut, exposure, scroll, geometry-reset, and target-instance timelines.
 It stores a deterministic recipe plus compressed source assets, not rendered PNG sequences.
+
+The first locked implementation is now
+`tools/sbsbench/browser_scene_compositor.py`, backed by
+`tools/sbsbench/datasets/browser_synth_v1.json`. Its 17 recipes explicitly partition the
+supported clear-target cases from full-frame abstention cases; unsupported scenes keep exact
+empty target masks rather than disappearing from coverage. It keeps only recipes in Git,
+materializes a deterministic compressed NPZ by default, and emits lossless `frame_*.png` files
+only when `--emit-frames` is explicitly requested for a disposable native-harness workspace. The
+generated metadata binds the recipe and RGB tensor hashes. `scene_controller_eval.py` then authenticates the
+pixels and scores the strict shadow trace against exact target/exclusion masks and event
+timelines. `run_whole_clip.py` discovers this contract automatically and fails closed under the
+versioned `browser_scene_thresholds_v1.json` policy. Ordinary media without the contract remains
+unaffected.
 
 ### 2. Real browser captures
 
@@ -857,7 +1011,7 @@ from chronological raw inputs during every training rollout.
 
 - semantic mask: background, primary video, accepted content, chrome, ad/unsafe exterior;
 - target instance and explicit selected instance;
-- focus boundary and stable gutter;
+- focus boundary;
 - subject/saliency;
 - ambiguity/abstain; and
 - ignore/occlusion.
@@ -900,8 +1054,8 @@ auxiliary label, but comfort and presentation preference require headset review.
 
 ### Stage A: spatial pretraining
 
-Train dense semantic, focus, boundary, gutter, and exclusion heads on independent synthetic and
-real frames. Start the Fast-SCNN-style trunk from scratch. Compare one MobileNetV3 ImageNet
+Train dense semantic, focus, boundary, and exclusion heads on independent synthetic and real
+frames. Start the Fast-SCNN-style trunk from scratch. Compare one MobileNetV3 ImageNet
 initialization ablation for the RGB branch; retain it only if locked real-page precision improves
 without breaking latency.
 
@@ -1033,14 +1187,14 @@ Logs, telemetry, the stats pane, and Dump 3D should expose:
 - backend, ABI hash, model/calibration hash, and shadow/active state;
 - source/depth/ROI frame IDs and ROI generation;
 - current/committed ROI, mask, halo, kind, confidence, age, and rejection reason;
-- largest/second candidate evidence and winner margin;
+- retained media mass, hull density, temporal fill/containment, and provisional-probe age;
 - layout/event/pop/zero logits before and after calibration;
 - `cutArmed`, external cut requests, cut cause, and geometry-reset cause;
 - scroll vector, confidence, and hold state;
 - current valid-depth fraction and history ages;
 - controller GPU time, enqueue time, busy drops, stale discards, and output age;
 - rule/model disagreement and OOD;
-- source overlay, focus/exclusion masks, activity, texture, gutter, current raw depth, normalized
+- source overlay, focus/exclusion masks, activity, media weight, current raw depth, normalized
   depth, and every history channel; and
 - exact reset/promotion decisions.
 
@@ -1055,12 +1209,16 @@ samples are not misdiagnosed as controller behavior.
 2. **Done:** allocate fixed full-frame, history, output, and matched-slot metadata resources.
 3. **Done:** implement GPU feature/history passes, exact uint state transport, reset debt,
    selective scroll history, and WARP reset/promotion tests.
-4. **Done in shadow:** implement `rules_v1` behind `shadow_rules`, with a test-only CPU oracle,
+4. **Done in shadow:** implement `rules_v1` behind `shadow_rules`, with an exact test-only HLSL oracle,
    strict invalid-output hold, partial-depth handling, and Dump 3D artifacts.
-5. Wire active ROI generation, next-frame crop, exact-flat exterior, ROI-masked event reduction,
-   and whole-clip benchmark traces. The common resolver and diagnostics are already present.
+5. **Done behind the inactive authority gate:** wire active ROI generation, next-frame crop, and
+   exact-flat exterior. **Done in shadow:** mask event corroboration by the prior committed ROI
+   and emit a strict schema/hash-bound whole-clip controller trace. Active authority remains
+   deliberately unreachable.
 6. Run rules in active opt-in mode only after adversarial ROI and 4K90 performance gates pass.
-7. Add opt-in capture, the deterministic compositor, dataset manifests, and label tools.
+7. **In progress:** the deterministic browser compositor, locked recipe manifest, exact dense/
+   event labels, and fail-closed shadow evaluator are done. Add opt-in real capture, privacy
+   scrubbing, chunked dataset manifests, and human correction tools next.
 8. Train/export/calibrate SbsSceneNet-v1 and validate ONNX/TensorRT parity.
 9. Run `shadow_model` against active rules and mine disagreements.
 10. Roll out `model` as opt-in, then default only after all locked and headset gates pass.

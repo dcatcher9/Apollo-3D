@@ -30,6 +30,9 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> hidden_output;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> meta;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> rule_state;
+    // Private reducer scratch. Offline diagnostics may map this snapshot; live rendering never
+    // consumes it on the CPU.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> rule_summary;
 #ifdef SUNSHINE_TESTS
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>
       rule_evidence_for_testing;
@@ -100,6 +103,17 @@ namespace models {
     );
 
     [[nodiscard]] scene_controller_gpu_snapshot snapshot() const;
+
+    /**
+     * Override the wall-clock delta consumed by the next prepared scene.
+     *
+     * The offline whole-clip evaluator uses exact stream-presentation deltas so
+     * dwell and release decisions do not depend on workstation load. This is a
+     * one-shot diagnostic input: production never calls it and therefore keeps
+     * using elapsed time between accepted live stream submissions. Embedded
+     * video cadence is never an input to the controller.
+     */
+    bool set_next_elapsed_seconds_for_evaluation(float elapsed_seconds);
 
 #ifdef SUNSHINE_TESTS
     void set_next_reset_flags_for_testing(std::uint32_t reset_flags);

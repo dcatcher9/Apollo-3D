@@ -2,11 +2,12 @@
 // valid depth sample and whose resolve pass selected history advance. State 2 holds the last
 // structurally reliable color/ordinal/depth tuple for one black or fully clipped update, allowing
 // an immediate supported return to be compared with the last visible scene. State 3 advances a
-// persistent-low endpoint, so persistent content cannot remain vetoed indefinitely.
+// persistent-low endpoint, so persistent content cannot remain vetoed indefinitely. State 4
+// holds a geometry-only candidate's pre-change endpoint for one confirmation update.
 StructuredBuffer<float4> MinMaxEma : register(t0);  // w = current-frame validity
 StructuredBuffer<float> CurrentModelInput : register(t1);
 StructuredBuffer<float> CurrentAppearanceOrdinal : register(t2);
-StructuredBuffer<float4> SubjectState : register(t3);  // [2].w: 0 empty, 1 advance, 2 hold, 3 low
+StructuredBuffer<float4> SubjectState : register(t3);  // [2].w: 0 empty, 1 advance, 2/4 hold, 3 low
 Texture2D<float> CurrentDepth : register(t4);
 StructuredBuffer<float> CurrentRawDepth : register(t5);
 StructuredBuffer<uint4> FrameRoiTransform : register(t6);
@@ -111,8 +112,10 @@ void main(uint3 dtid : SV_DispatchThreadID) {
             SubjectState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) :
         0.0f;
     bool hold_history =
-        history_state > 1.5f &&
-        history_state < 2.5f;
+        (history_state > 1.5f &&
+         history_state < 2.5f) ||
+        (history_state > 3.5f &&
+         history_state < 4.5f);
     bool promote_history =
         state_resources_safe &&
         MinMaxEma[0].w >= 0.5f &&
@@ -191,7 +194,8 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 
     // One lane promotes the exact eight-vector transform with the NCHW/ordinal/depth tuple.
     // D3D11 makes the completed dispatch visible as a unit to later passes; an invalid completion
-    // or one-update history hold writes neither the tuple nor its ownership metadata.
+    // or one-update structureless/geometry-confirmation hold writes neither the tuple nor its
+    // ownership metadata.
     if (dtid.x == 0u && dtid.y == 0u &&
         promote_active_history) {
         [unroll]

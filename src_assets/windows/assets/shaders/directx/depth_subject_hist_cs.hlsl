@@ -7,7 +7,7 @@
 
 Texture2D<float>         DepthTexture : register(t0);  // normalized depth, high = near
 RWStructuredBuffer<uint> SubjectHist  : register(u0);  // 256 bins, weight in 1/1024 units
-RWStructuredBuffer<uint> PlainHist    : register(u1);  // bins + cut-evidence counts
+RWStructuredBuffer<uint> PlainHist    : register(u1);  // bins + nine cut-evidence counts
 Texture2D<float>         PreviousDepth : register(t1);  // last structurally reliable endpoint
 StructuredBuffer<float>  CurrentModelInput : register(t2);  // completed frame, NCHW ImageNet
 StructuredBuffer<float>  PreviousModelInput : register(t3);
@@ -39,6 +39,8 @@ groupshared uint g_raw_rgb_change_count;
 groupshared uint g_current_structural_support_count;
 groupshared uint g_previous_structural_support_count;
 groupshared uint g_common_structural_support_count;
+groupshared uint g_brightness_rise_count;
+groupshared uint g_brightness_fall_count;
 // A 16x16 group plus a one-pixel halo of the pre-tone-map point-sampled ordinal signal.
 groupshared float g_current_appearance_ordinal[STRUCTURE_TILE_TEXELS];
 groupshared float g_previous_appearance_ordinal[STRUCTURE_TILE_TEXELS];
@@ -211,7 +213,7 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
     bool histogram_outputs_safe =
         subject_hist_count >= NUM_BINS &&
         subject_hist_stride == 4u &&
-        plain_hist_count >= NUM_BINS + 7u &&
+        plain_hist_count >= NUM_BINS + 9u &&
         plain_hist_stride == 4u;
     bool current_resources_safe =
         target_plane_safe &&
@@ -254,6 +256,8 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
         g_current_structural_support_count = 0u;
         g_previous_structural_support_count = 0u;
         g_common_structural_support_count = 0u;
+        g_brightness_rise_count = 0u;
+        g_brightness_fall_count = 0u;
     }
 
     // Cooperatively load the 18x18 ordinal tile. The final 68 halo samples are handled by the
@@ -432,10 +436,24 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
             PreviousModelColor(dtid.xy) :
             current_color;
         float3 raw_rgb_delta = abs(current_color - previous_color);
-        if (previous_center_accepted &&
+        bool broad_rgb_changed =
+            previous_center_accepted &&
             max(raw_rgb_delta.r, max(raw_rgb_delta.g, raw_rgb_delta.b)) >=
-            RAW_RGB_PIXEL_DELTA) {
+                RAW_RGB_PIXEL_DELTA;
+        if (broad_rgb_changed) {
             InterlockedAdd(g_raw_rgb_change_count, 1u);
+            // Classify direction on the point-sampled capture-domain maxRGB signal, not the
+            // display/model color used by the broad-change gate. A global gain moves almost every
+            // accepted texel in one direction; semantic replacement generally mixes signs.
+            float current_ordinal =
+                g_current_appearance_ordinal[tile_center];
+            float previous_ordinal =
+                g_previous_appearance_ordinal[tile_center];
+            if (current_ordinal > previous_ordinal) {
+                InterlockedAdd(g_brightness_rise_count, 1u);
+            } else if (current_ordinal < previous_ordinal) {
+                InterlockedAdd(g_brightness_fall_count, 1u);
+            }
         }
 
         float current_samples[5];
@@ -594,5 +612,7 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
         InterlockedAdd(PlainHist[NUM_BINS + 4], g_current_structural_support_count);
         InterlockedAdd(PlainHist[NUM_BINS + 5], g_previous_structural_support_count);
         InterlockedAdd(PlainHist[NUM_BINS + 6], g_common_structural_support_count);
+        InterlockedAdd(PlainHist[NUM_BINS + 7], g_brightness_rise_count);
+        InterlockedAdd(PlainHist[NUM_BINS + 8], g_brightness_fall_count);
     }
 }

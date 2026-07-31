@@ -30,9 +30,6 @@ CACHE_CONTRACT_SCHEMA = 2
 
 DEPTH_CUT_HIGH = 0.60
 DEPTH_CUT_CORROBORATE = 0.25
-RAW_RGB_CUT_HIGH = 0.70
-STRUCTURAL_COLOR_CUT_HIGH = 0.03
-STRUCTURAL_COLOR_MIN_SUPPORT = 0.01
 POP_RISK_LOW = 0.04
 POP_RISK_HIGH = 0.20
 
@@ -184,19 +181,13 @@ def _smoothstep(low: float, high: float, value: float) -> float:
 def _appearance_qualified(frame: Mapping[str, Any]) -> bool:
     if _flag(frame, "appearance_veto", ANALYSIS_APPEARANCE_VETO):
         return False
-    for name in (
-        "current_structural_support_fraction",
-        "previous_structural_support_fraction",
-        "common_structural_support_fraction",
-    ):
-        if name in frame and _finite(frame.get(name)) < STRUCTURAL_COLOR_MIN_SUPPORT:
-            return False
+    producer_appearance = _flag(
+        frame, "appearance_proposal", ANALYSIS_APPEARANCE_PROPOSAL
+    )
     return (
         _finite(frame.get("current_depth_change_fraction")) >=
         DEPTH_CUT_CORROBORATE and
-        _finite(frame.get("raw_rgb_change_fraction")) >= RAW_RGB_CUT_HIGH and
-        _finite(frame.get("structural_change_fraction")) >=
-        STRUCTURAL_COLOR_CUT_HIGH
+        producer_appearance
     )
 
 
@@ -209,15 +200,14 @@ def _geometry_qualified(frame: Mapping[str, Any]) -> bool:
 
 def _evidence_score(frame: Mapping[str, Any]) -> float:
     depth = max(_finite(frame.get("current_depth_change_fraction"), 0.0), 0.0)
-    raw = max(_finite(frame.get("raw_rgb_change_fraction"), 0.0), 0.0)
-    structural = max(
-        _finite(frame.get("structural_change_fraction"), 0.0), 0.0
-    )
     geometry = depth / DEPTH_CUT_HIGH
-    appearance = min(
-        depth / DEPTH_CUT_CORROBORATE,
-        raw / RAW_RGB_CUT_HIGH,
-        structural / STRUCTURAL_COLOR_CUT_HIGH,
+    producer_appearance = _flag(
+        frame, "appearance_proposal", ANALYSIS_APPEARANCE_PROPOSAL
+    )
+    appearance = (
+        depth / DEPTH_CUT_CORROBORATE
+        if producer_appearance else
+        0.0
     )
     return max(geometry, appearance)
 
@@ -576,7 +566,7 @@ class StreamingScenePlanner:
                         "rejected_minimum_scene_length"
                     ),
                     "reason": (
-                        "exported schema-3 evidence supported neither geometry, "
+                        "exported adaptive evidence supported neither geometry, "
                         "appearance, nor the relative-geometry escape"
                         if safe_legal_proposals else
                         "the proposed boundary could not leave replay-safe legal "

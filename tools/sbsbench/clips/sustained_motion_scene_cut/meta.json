@@ -1,20 +1,21 @@
 {
   "name": "sustained_motion_scene_cut",
-  "description": "A setup cut latches shot state; broad persistent horizontal motion prevents either proposal arm from rearming, then a real scene cut must use the relative-depth escape.",
+  "description": "A setup cut latches shot state; broad persistent horizontal motion prevents either proposal arm from rearming, then a real scene cut must survive one held-endpoint update before the relative-depth escape pulses.",
   "evaluation_role": "conformance-only",
   "shot_state_contract": {
     "kind": "latched-motion-hard-cut",
     "monitor_from_frame": 2,
     "expected_pulse_frames": [
       11,
-      27
+      28
     ],
     "setup_pulse_frame": 11,
     "persistent_motion_frames": [
       11,
-      26
+      27
     ],
-    "escape_pulse_frame": 27,
+    "escape_candidate_frame": 27,
+    "escape_pulse_frame": 28,
     "source_base_frame_by_frame": [
       1,
       1,

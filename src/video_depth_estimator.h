@@ -58,6 +58,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_hidden_output;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_meta;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_rule_state;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_rule_summary;
     int raw_width = 0;
     int raw_height = 0;
     // A TensorRT result completed and its GPU normalization passes were submitted. The associated
@@ -185,6 +186,15 @@ namespace models {
      * exact current-frame quality path; production remains bounded matched-frame async.
      */
     estimate_result finish_pending_depth_for_evaluation(input_color_space color_space = input_color_space::srgb);
+
+    /**
+     * Supply the exact source-presentation delta for the next offline
+     * scene-controller update. Returns false when the controller is unavailable
+     * or the value is invalid. Live capture does not call this method.
+     */
+    bool set_next_scene_controller_elapsed_seconds_for_evaluation(
+      float elapsed_seconds
+    );
 
     /**
      * Poll completed telemetry copies and optionally enqueue one new copy after the caller has

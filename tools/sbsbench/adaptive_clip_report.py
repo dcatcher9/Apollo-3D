@@ -34,6 +34,7 @@ if __package__:
         CUT_FLAG_APPEARANCE_QUIET_ONCE,
         CUT_FLAG_APPEARANCE_RECOVERY,
         CUT_FLAG_GEOMETRY_ARMED,
+        CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING,
         CUT_FLAG_GEOMETRY_LOW_ONCE,
         CUT_FLAG_LATCHED,
         FIELD_DESCRIPTORS,
@@ -55,6 +56,7 @@ else:
         CUT_FLAG_APPEARANCE_QUIET_ONCE,
         CUT_FLAG_APPEARANCE_RECOVERY,
         CUT_FLAG_GEOMETRY_ARMED,
+        CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING,
         CUT_FLAG_GEOMETRY_LOW_ONCE,
         CUT_FLAG_LATCHED,
         FIELD_DESCRIPTORS,
@@ -75,6 +77,8 @@ LONG_DISARMED_SECONDS = 2.0
 LONG_DISARMED_SOURCE_FRAMES = 60
 ANCHOR_DRIFT_EPSILON_PX = 1e-5
 POP_DRIFT_EPSILON = 1e-6
+UINT64_MAX = (1 << 64) - 1
+_UINT64_MAX_DECIMAL = str(UINT64_MAX)
 
 
 class TraceContractError(ValueError):
@@ -108,6 +112,28 @@ def _uint32(value: Any, description: str) -> int:
             not 0 <= value <= 0xFFFFFFFF):
         raise TraceContractError(f"{description} must be a uint32 JSON integer")
     return value
+
+
+def _frame_id_value(value: Any, description: str) -> int:
+    """Parse the unsigned 64-bit identity while ignoring decimal zero-padding."""
+    if (
+        not isinstance(value, str) or
+        not value or
+        any(character < "0" or character > "9" for character in value)
+    ):
+        raise TraceContractError(
+            f"{description} must be an ASCII decimal string")
+    significant = value.lstrip("0") or "0"
+    if (
+        len(significant) > len(_UINT64_MAX_DECIMAL) or
+        (
+            len(significant) == len(_UINT64_MAX_DECIMAL) and
+            significant > _UINT64_MAX_DECIMAL
+        )
+    ):
+        raise TraceContractError(
+            f"{description} exceeds the uint64 range")
+    return int(significant)
 
 
 def _boolean(value: Any, description: str) -> bool:
@@ -179,9 +205,7 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
         raise TraceContractError(
             f"trace record at line {line_number} must have record='frame'")
     frame_id = payload["frame_id"]
-    if not isinstance(frame_id, str) or not frame_id.isdigit():
-        raise TraceContractError(
-            f"trace frame_id at line {line_number} must be a decimal string")
+    _frame_id_value(frame_id, f"trace frame_id at line {line_number}")
     source_index = payload["source_index"]
     if (not isinstance(source_index, int) or isinstance(source_index, bool) or
             source_index < 0):
@@ -219,6 +243,7 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
             "appearance_quiet_once",
             "cut_latched",
             "appearance_recovery",
+            "geometry_confirmation_pending",
             "hard_cut_pulse",
         )
     }
@@ -250,6 +275,9 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
         "appearance_quiet_once": bool(cut_flags & CUT_FLAG_APPEARANCE_QUIET_ONCE),
         "cut_latched": bool(cut_flags & CUT_FLAG_LATCHED),
         "appearance_recovery": bool(cut_flags & CUT_FLAG_APPEARANCE_RECOVERY),
+        "geometry_confirmation_pending": bool(
+            cut_flags & CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING
+        ),
         "hard_cut_pulse": float(decoded["hard_cut_pulse"]) > 0.5,
     }
     for key, expected in expected_bools.items():
@@ -300,8 +328,11 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
         "absolute_effective_pop": absolute_pop,
         "scene_camera_override": scene_camera_override,
         "resolved_zero_anchor_shift_px": resolved_zero_anchor,
-        **derived_bools,
         **decoded,
+        # The positional ABI stores these flags as float32, but downstream policy consumes the
+        # independently authenticated JSON booleans. Keep the typed values authoritative after
+        # expanding decoded fields with overlapping names such as hard_cut_pulse.
+        **derived_bools,
     }
 
 
@@ -318,7 +349,7 @@ class IncrementalTraceDecoder:
         self.header: dict[str, Any] | None = None
         self.frame_count = 0
         self.line_number = 0
-        self._seen_ids: set[str] = set()
+        self._seen_ids: set[int] = set()
         self._previous_numeric_id: int | None = None
         self._finalized = False
 
@@ -343,10 +374,11 @@ class IncrementalTraceDecoder:
         frame = _validate_frame(
             payload, self.line_number, self.header["config"])
         frame_id = frame["frame_id"]
-        if frame_id in self._seen_ids:
+        numeric_id = _frame_id_value(
+            frame_id, f"trace frame_id at line {self.line_number}")
+        if numeric_id in self._seen_ids:
             raise TraceContractError(
                 f"duplicate trace frame_id {frame_id} at line {self.line_number}")
-        numeric_id = int(frame_id)
         if (
             self._previous_numeric_id is not None and
             numeric_id <= self._previous_numeric_id
@@ -358,7 +390,7 @@ class IncrementalTraceDecoder:
             raise TraceContractError(
                 f"trace source_index at line {self.line_number} is "
                 f"{frame['source_index']}; expected contiguous index {self.frame_count}")
-        self._seen_ids.add(frame_id)
+        self._seen_ids.add(numeric_id)
         self._previous_numeric_id = numeric_id
         self.frame_count += 1
         return frame
@@ -424,7 +456,9 @@ def join_timeline(
 
     The wrapper supplies source-video PTS records.  Direct callers may pass a list containing
     ``frame_id`` or zero-based ``index`` plus ``pts_seconds``/``pts_time`` and an optional
-    ``duration_seconds``/``duration_time``.  With no timeline, frame index is the explicit clock.
+    ``duration_seconds``/``duration_time``. Decimal frame IDs are uint64 identities; transport-
+    specific leading-zero widths do not affect a match. With no timeline, frame index is the
+    explicit clock.
     """
     if timeline is None:
         rows = [
@@ -444,7 +478,7 @@ def join_timeline(
         }
 
     timing_rows, metadata = _timeline_frames(timeline)
-    by_id: dict[str, dict[str, Any]] = {}
+    by_id: dict[int, dict[str, Any]] = {}
     by_index: dict[int, dict[str, Any]] = {}
     for position, row in enumerate(timing_rows):
         if not isinstance(row, dict):
@@ -452,10 +486,12 @@ def join_timeline(
         frame_id = row.get("frame_id")
         index = row.get("index")
         if frame_id is not None:
-            if not isinstance(frame_id, str) or not frame_id.isdigit() or frame_id in by_id:
+            numeric_frame_id = _frame_id_value(
+                frame_id, f"timeline frame {position} frame_id")
+            if numeric_frame_id in by_id:
                 raise TraceContractError(
                     f"timeline frame {position} has invalid/duplicate frame_id")
-            by_id[frame_id] = row
+            by_id[numeric_frame_id] = row
         if index is not None:
             if (not isinstance(index, int) or isinstance(index, bool) or index < 0 or
                     index in by_index):
@@ -471,7 +507,11 @@ def join_timeline(
     raw_pts: list[float] = []
     raw_durations: list[float | None] = []
     for frame in frames:
-        timing_by_id = by_id.get(frame["frame_id"])
+        trace_numeric_id = _frame_id_value(
+            frame["frame_id"],
+            f"trace frame_id at source_index={frame['source_index']}",
+        )
+        timing_by_id = by_id.get(trace_numeric_id)
         timing_by_index = by_index.get(frame["source_index"])
         if (timing_by_id is not None and timing_by_index is not None and
                 timing_by_id is not timing_by_index):
@@ -482,7 +522,13 @@ def join_timeline(
         if timing is None:
             raise TraceContractError(
                 f"timeline has no record for trace frame {frame['frame_id']}")
-        if ("frame_id" in timing and timing["frame_id"] != frame["frame_id"]):
+        if (
+            "frame_id" in timing and
+            _frame_id_value(
+                timing["frame_id"],
+                f"timeline frame_id for source_index={frame['source_index']}",
+            ) != trace_numeric_id
+        ):
             raise TraceContractError(
                 f"timeline frame_id {timing['frame_id']!r} disagrees with trace frame "
                 f"{frame['frame_id']!r} at source_index={frame['source_index']}")
@@ -1088,6 +1134,7 @@ FRAME_CSV_FIELDS = (
     "appearance_quiet_once",
     "cut_latched",
     "appearance_recovery",
+    "geometry_confirmation_pending",
     *FIELD_NAMES,
 )
 

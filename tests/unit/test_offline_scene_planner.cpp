@@ -131,6 +131,274 @@ TEST(OfflineScenePlanner, StrongerLookbehindGeometryCanMoveBoundary) {
   EXPECT_EQ(scenes.front().boundary.revision_source_frames, -1);
 }
 
+TEST(OfflineScenePlanner, StructuralFloorKeepsV61CutAndRejectsV60FalsePairs) {
+  auto config = planner_config();
+  config.lookahead_depth_updates = 4;
+  offline_sbs::scene_planner_t planner(config);
+  std::vector<offline_sbs::scene_plan_t> scenes;
+  for (std::uint64_t sequence = 1; sequence <= 70; ++sequence) {
+    auto frame = sample(sequence);
+    switch (sequence) {
+      case 19:
+        frame.depth_change_fraction = 0.759617f;
+        frame.structural_change_fraction = 0.028952f;
+        break;
+      case 20:
+        frame.hard_cut_pulse = true;
+        frame.depth_change_fraction = 0.802154f;
+        frame.structural_change_fraction = 0.028183f;
+        break;
+      case 24:
+        // This later, larger depth spike moved the v61 offline boundary before
+        // structural-floor parity. It is ordinary content, below the live
+        // floor, and must not displace the causal f19/f20 cut.
+        frame.depth_change_fraction = 0.888000f;
+        frame.structural_change_fraction = 0.003320f;
+        frame.analysis_flags =
+          offline_sbs::analysis_relative_geometry_spike;
+        break;
+      case 35:
+        frame.depth_change_fraction = 0.771218f;
+        frame.structural_change_fraction = 0.001680f;
+        frame.analysis_flags =
+          offline_sbs::analysis_relative_geometry_spike;
+        break;
+      case 36:
+        frame.hard_cut_pulse = true;
+        frame.depth_change_fraction = 0.674158f;
+        frame.structural_change_fraction = 0.001721f;
+        frame.analysis_flags =
+          offline_sbs::analysis_relative_geometry_spike;
+        break;
+      case 53:
+        frame.depth_change_fraction = 0.999555f;
+        frame.structural_change_fraction = 0.003705f;
+        frame.analysis_flags =
+          offline_sbs::analysis_relative_geometry_spike;
+        break;
+      case 54:
+        frame.hard_cut_pulse = true;
+        frame.depth_change_fraction = 0.999980f;
+        // Missing unrelated appearance telemetry must not override a measured
+        // ordinary-geometry structural failure.
+        frame.raw_rgb_change_fraction.reset();
+        frame.structural_change_fraction = 0.003968f;
+        frame.analysis_flags =
+          offline_sbs::analysis_relative_geometry_spike;
+        break;
+      case 62:
+        frame.depth_change_fraction = 0.984168f;
+        frame.structural_change_fraction = 0.000587f;
+        frame.analysis_flags =
+          offline_sbs::analysis_relative_geometry_spike;
+        break;
+      case 63:
+        frame.hard_cut_pulse = true;
+        frame.depth_change_fraction = 0.994027f;
+        frame.structural_change_fraction = 0.000931f;
+        frame.analysis_flags =
+          offline_sbs::analysis_relative_geometry_spike;
+        break;
+      default:
+        break;
+    }
+    auto emitted = planner.feed(std::move(frame));
+    scenes.insert(
+      scenes.end(),
+      std::make_move_iterator(emitted.begin()),
+      std::make_move_iterator(emitted.end())
+    );
+  }
+  auto tail = planner.finish();
+  scenes.insert(
+    scenes.end(),
+    std::make_move_iterator(tail.begin()),
+    std::make_move_iterator(tail.end())
+  );
+
+  ASSERT_EQ(scenes.size(), 2u);
+  EXPECT_EQ(scenes.front().end_sequence_exclusive, 20u);
+  EXPECT_EQ(scenes.back().start_sequence, 20u);
+
+  const auto &audit = planner.boundary_audit();
+  ASSERT_EQ(audit.size(), 4u);
+  ASSERT_TRUE(audit[0].final_sequence);
+  EXPECT_EQ(*audit[0].final_sequence, 20u);
+  EXPECT_EQ(audit[0].decision, offline_sbs::boundary_decision_e::confirmed);
+  EXPECT_TRUE(audit[0].selected_geometry_qualified);
+  ASSERT_TRUE(audit[0].selected_structural_change_fraction);
+  EXPECT_NEAR(
+    *audit[0].selected_structural_change_fraction,
+    0.028183f,
+    1e-6f
+  );
+
+  const std::uint64_t rejected_proposals[] {36u, 54u, 63u};
+  for (std::size_t index = 0; index < std::size(rejected_proposals); ++index) {
+    const auto &rejected = audit[index + 1u];
+    EXPECT_EQ(
+      rejected.proposal_sequences,
+      (std::vector<std::uint64_t> {rejected_proposals[index]})
+    );
+    EXPECT_FALSE(rejected.accepted);
+    EXPECT_FALSE(rejected.final_sequence);
+    EXPECT_EQ(rejected.candidate_count, 0u);
+    EXPECT_EQ(
+      rejected.decision,
+      offline_sbs::boundary_decision_e::rejected_unsupported_proposal
+    );
+  }
+}
+
+TEST(OfflineScenePlanner, PersistentStructurelessPulseKeepsHeldEndpoint) {
+  auto config = planner_config();
+  offline_sbs::scene_planner_t planner(config);
+  std::vector<offline_sbs::scene_plan_t> scenes;
+  for (std::uint64_t sequence = 1; sequence <= 8; ++sequence) {
+    auto frame = sample(sequence);
+    if (sequence == 3) {
+      frame.depth_change_fraction = 0.90f;
+      frame.structural_change_fraction = 0.0f;
+      frame.analysis_flags = offline_sbs::analysis_structureless_transition;
+    } else if (sequence == 4) {
+      frame.hard_cut_pulse = true;
+      frame.depth_change_fraction = 0.70f;
+      frame.structural_change_fraction = 0.0f;
+      frame.analysis_flags =
+        offline_sbs::analysis_structureless_transition |
+        offline_sbs::analysis_geometry_confirmation_candidate;
+    }
+    auto emitted = planner.feed(std::move(frame));
+    scenes.insert(
+      scenes.end(),
+      std::make_move_iterator(emitted.begin()),
+      std::make_move_iterator(emitted.end())
+    );
+  }
+
+  ASSERT_EQ(scenes.size(), 1u);
+  EXPECT_EQ(scenes.front().end_sequence_exclusive, 4u);
+  EXPECT_EQ(scenes.front().boundary.candidate_count, 1u);
+  EXPECT_TRUE(scenes.front().boundary.selected_geometry_qualified);
+  EXPECT_EQ(
+    scenes.front().boundary.decision,
+    offline_sbs::boundary_decision_e::confirmed
+  );
+}
+
+TEST(OfflineScenePlanner, MissingStructuralTraceCannotRelocateCausalProposal) {
+  auto config = planner_config();
+  offline_sbs::scene_planner_t planner(config);
+  std::vector<offline_sbs::scene_plan_t> scenes;
+  for (std::uint64_t sequence = 1; sequence <= 8; ++sequence) {
+    auto frame = sample(sequence);
+    if (sequence == 3) {
+      frame.depth_change_fraction = 0.95f;
+      frame.structural_change_fraction.reset();
+    } else if (sequence == 4) {
+      frame.hard_cut_pulse = true;
+      frame.depth_change_fraction = 0.70f;
+      frame.structural_change_fraction.reset();
+    }
+    auto emitted = planner.feed(std::move(frame));
+    scenes.insert(
+      scenes.end(),
+      std::make_move_iterator(emitted.begin()),
+      std::make_move_iterator(emitted.end())
+    );
+  }
+
+  ASSERT_EQ(scenes.size(), 1u);
+  EXPECT_EQ(scenes.front().end_sequence_exclusive, 4u);
+  EXPECT_EQ(scenes.front().boundary.candidate_count, 1u);
+  EXPECT_FALSE(scenes.front().boundary.selected_geometry_qualified);
+  EXPECT_EQ(
+    scenes.front().boundary.decision,
+    offline_sbs::boundary_decision_e::confirmed_causal_fallback
+  );
+  EXPECT_NE(
+    scenes.front().boundary.reason.find("complete live-detector parity"),
+    std::string::npos
+  );
+}
+
+TEST(OfflineScenePlanner, MissingRawRgbDoesNotDowngradeCompleteGeometryEvidence) {
+  auto config = planner_config();
+  offline_sbs::scene_planner_t planner(config);
+  std::vector<offline_sbs::scene_plan_t> scenes;
+  for (std::uint64_t sequence = 1; sequence <= 8; ++sequence) {
+    auto frame = sample(sequence);
+    if (sequence == 3) {
+      frame.depth_change_fraction = 0.95f;
+      frame.raw_rgb_change_fraction.reset();
+      frame.structural_change_fraction = 0.02f;
+    } else if (sequence == 4) {
+      frame.hard_cut_pulse = true;
+      frame.depth_change_fraction = 0.70f;
+      frame.raw_rgb_change_fraction.reset();
+      frame.structural_change_fraction = 0.02f;
+    }
+    auto emitted = planner.feed(std::move(frame));
+    scenes.insert(
+      scenes.end(),
+      std::make_move_iterator(emitted.begin()),
+      std::make_move_iterator(emitted.end())
+    );
+  }
+
+  ASSERT_EQ(scenes.size(), 1u);
+  EXPECT_EQ(scenes.front().end_sequence_exclusive, 3u);
+  EXPECT_TRUE(scenes.front().boundary.selected_geometry_qualified);
+  EXPECT_TRUE(scenes.front().boundary.selected_evidence_score);
+  EXPECT_EQ(
+    scenes.front().boundary.decision,
+    offline_sbs::boundary_decision_e::moved_to_correlated_evidence
+  );
+}
+
+TEST(OfflineScenePlanner, ProducerLocalizedAppearanceCanMoveBoundary) {
+  const auto run = [](bool producer_qualified) {
+    auto config = planner_config();
+    offline_sbs::scene_planner_t planner(config);
+    std::vector<offline_sbs::scene_plan_t> scenes;
+    for (std::uint64_t sequence = 1; sequence <= 8; ++sequence) {
+      auto frame = sample(sequence);
+      if (sequence == 3) {
+        frame.depth_change_fraction = 0.3864f;
+        frame.raw_rgb_change_fraction = 0.2019f;
+        frame.structural_change_fraction = 0.0396f;
+        if (producer_qualified) {
+          frame.analysis_flags = offline_sbs::analysis_appearance_proposal;
+        }
+      } else if (sequence == 4) {
+        frame.hard_cut_pulse = true;
+        frame.depth_change_fraction = 0.61f;
+      }
+      auto emitted = planner.feed(std::move(frame));
+      scenes.insert(
+        scenes.end(),
+        std::make_move_iterator(emitted.begin()),
+        std::make_move_iterator(emitted.end())
+      );
+    }
+    return scenes;
+  };
+
+  const auto qualified = run(true);
+  ASSERT_EQ(qualified.size(), 1u);
+  EXPECT_EQ(qualified.front().end_sequence_exclusive, 3u);
+  EXPECT_TRUE(qualified.front().boundary.selected_appearance_qualified);
+  EXPECT_EQ(
+    qualified.front().boundary.decision,
+    offline_sbs::boundary_decision_e::moved_to_correlated_evidence
+  );
+
+  const auto unqualified = run(false);
+  ASSERT_EQ(unqualified.size(), 1u);
+  EXPECT_EQ(unqualified.front().end_sequence_exclusive, 4u);
+  EXPECT_FALSE(unqualified.front().boundary.selected_appearance_qualified);
+}
+
 TEST(OfflineScenePlanner, OverlappingProposalWindowsMergeBeforeCommit) {
   auto config = planner_config();
   config.duplicate_pulse_distance_updates = 0;
@@ -176,6 +444,7 @@ TEST(OfflineScenePlanner, SupportedFlashReturnRejectsProvisionalCut) {
     );
     if (sequence == 4) {
       frame.analysis_flags =
+        offline_sbs::analysis_appearance_proposal |
         offline_sbs::analysis_exposure_like |
         offline_sbs::analysis_appearance_veto;
     } else if (sequence == 6) {
@@ -216,6 +485,7 @@ TEST(OfflineScenePlanner, FlashLookaheadUsesSourceTimeAcrossFrameRates) {
       frame.duration_seconds = 1.0 / frames_per_second;
       if (pulse) {
         frame.analysis_flags =
+          offline_sbs::analysis_appearance_proposal |
           offline_sbs::analysis_exposure_like |
           offline_sbs::analysis_appearance_veto;
         proposed = true;
@@ -851,6 +1121,7 @@ TEST(OfflineScenePlanner, FlashReturnDoesNotHideLaterGeometry) {
       frame.raw_rgb_change_fraction = 0.95f;
       frame.structural_change_fraction = 0.0f;
       frame.analysis_flags =
+        offline_sbs::analysis_appearance_proposal |
         offline_sbs::analysis_exposure_like |
         offline_sbs::analysis_appearance_veto;
     } else if (sequence == 5) {
@@ -881,7 +1152,9 @@ TEST(OfflineScenePlanner, MixedClusterFallsBackOnlyToIncompleteNonVetoedPulse) {
   for (std::uint64_t sequence = 1; sequence <= 12; ++sequence) {
     auto frame = sample(sequence, sequence == 4 || sequence == 8);
     if (sequence == 8) {
+      frame.depth_change_fraction = 0.70f;
       frame.raw_rgb_change_fraction.reset();
+      frame.structural_change_fraction.reset();
     }
     auto emitted = planner.feed(std::move(frame));
     scenes.insert(

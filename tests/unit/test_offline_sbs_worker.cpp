@@ -6,6 +6,7 @@
 #include "src/offline_sbs_worker.h"
 #include "src/crypto.h"
 #include "src/generated/sbs_adaptive_state_contract.h"
+#include "src/generated/sbs_scene_controller_contract.h"
 #include "src/offline_sbs_contract.h"
 #include "src/sbs_scene_cache_contract.h"
 
@@ -14,7 +15,9 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <limits>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -45,6 +48,14 @@ namespace {
       }
     }
     return false;
+  }
+
+  std::string read_source_file(const fs::path &path) {
+    std::ifstream input(path, std::ios::binary);
+    return {
+      std::istreambuf_iterator<char> {input},
+      std::istreambuf_iterator<char> {}
+    };
   }
 
   nlohmann::json worker_spec_json() {
@@ -95,6 +106,23 @@ namespace {
         {"follow_global_first_sequence", true},
         {"adaptive_state_schema", sbs_adaptive_state::schema_version},
         {"adaptive_analysis_flag_bits", std::move(analysis_flag_bits)},
+        {"scene_controller_trace", {
+          {"trace_schema", 1u},
+          {"controller_schema", sbs_scene_controller::schema_version},
+          {"rule_revision", sbs_scene_controller::rule_revision},
+          {"ordered_abi_hash", sbs_scene_controller::ordered_abi_hash},
+          {"backends", {"off", "shadow_rules"}},
+          {"active_roi_authority", false},
+          {"source_time_override", "source-presentation-timeline-v2"},
+          {"file", "scene_controller.jsonl"},
+          {"transports", {"jsonl-v1", "atomic-latest-v1"}},
+          {"atomic_header_file", "scene_controller_header.json"},
+          {"atomic_frame_file", "scene_controller_frame.json"},
+          {"global_out_word_count",
+           sbs_scene_controller::global_out_word_count},
+          {"rule_state_word_count",
+           sbs_scene_controller::rule_state_word_count},
+        }},
         {"scene_cache_contract_schema", sbs_scene_cache::contract_schema},
         {"scene_cache_packed_sbs_contract", true},
         {"scene_cache_depth", {
@@ -252,11 +280,374 @@ TEST(OfflineSbsWorker, SharesBoundedLinearSceneAuditContract) {
   EXPECT_FALSE(offline_sbs::is_scene_audit_checkpoint(1025));
 }
 
+TEST(OfflineSbsWorker, SelectsSceneControllerBackendForAnalysisAndReplay) {
+  const auto source = read_source_file(
+    fs::path(SUNSHINE_SOURCE_DIR) / "src" / "offline_sbs_worker.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+
+  const std::string analysis_selection =
+    "\"--bounded-adaptive-state\",\n"
+    "        \"--scene-controller\",\n"
+    "        \"shadow_rules\",";
+  const std::string replay_selection =
+    "\"--bounded-adaptive-state\",\n"
+    "        \"--scene-controller\",\n"
+    "        \"off\",\n"
+    "        \"--render-cache\",";
+  EXPECT_NE(source.find(analysis_selection), std::string::npos);
+  EXPECT_NE(source.find(replay_selection), std::string::npos);
+  EXPECT_NE(
+    source.find("\"--scene-controller-source-time\""),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("scene-controller-timeline.jsonl"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("write_scene_controller_source_time_contract("),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("{\"scene_controller_source_time\", {"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("{\"disk_reservation_bytes\","),
+    std::string::npos
+  );
+
+  std::size_t selection_count = 0;
+  for (
+    auto offset = source.find("\"--scene-controller\"");
+    offset != std::string::npos;
+    offset = source.find("\"--scene-controller\"", offset + 1)
+  ) {
+    ++selection_count;
+  }
+  EXPECT_EQ(selection_count, 2u);
+  EXPECT_NE(
+    source.find(
+      "scene_controller_trace.read_frame(analysis, timing.sequence)"
+    ),
+    std::string::npos
+  ) << "The worker must consume every atomic controller snapshot before "
+       "publishing the next source frame";
+  EXPECT_NE(
+    source.find("\"scene-controller-jsonl-gzip-v1\""),
+    std::string::npos
+  ) << "Whole-clip controller history must remain durable with bounded memory";
+
+  const auto prepared = source.find("prepared_ = true;");
+  const auto renamed = source.find("final_renamed_ = true;", prepared);
+  const auto summary = source.find(
+    "write_json_atomic(summary_path_, prepared_result_);",
+    renamed
+  );
+  const auto publish = source.find(
+    "scene_controller_trace.publish();",
+    summary
+  );
+  const auto result_commit = source.find(
+    "write_json_atomic_bounded(\n"
+    "        spec.result_path,",
+    publish
+  );
+  const auto committed = source.find(
+    "scene_controller_trace.commit();",
+    result_commit
+  );
+  ASSERT_NE(prepared, std::string::npos);
+  ASSERT_NE(renamed, std::string::npos);
+  ASSERT_NE(summary, std::string::npos);
+  ASSERT_NE(publish, std::string::npos);
+  ASSERT_NE(result_commit, std::string::npos);
+  ASSERT_NE(committed, std::string::npos);
+  EXPECT_LT(prepared, renamed);
+  EXPECT_LT(renamed, summary);
+  EXPECT_LT(summary, publish);
+  EXPECT_LT(publish, result_commit);
+  EXPECT_LT(result_commit, committed)
+    << "The trace pair must remain rollback-owned until result.json commits";
+  EXPECT_NE(
+    source.find("fs::remove(final_path_, ignored);"),
+    std::string::npos
+  ) << "A failed summary publication must roll back its renamed gzip";
+  EXPECT_NE(
+    source.find("fs::remove(summary_path_, ignored);"),
+    std::string::npos
+  ) << "Any later failed job must also roll back its prepared trace summary";
+}
+
+TEST(OfflineSbsWorker, ValidatesBoundedSceneControllerEvidenceAndDisabledReplay) {
+  const auto root =
+    fs::temp_directory_path() /
+    (
+      "sunshine3d-scene-controller-" +
+      std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()
+      )
+    );
+  fs::create_directories(root);
+  const auto cleanup = [&]() {
+    std::error_code ignored;
+    fs::remove_all(root, ignored);
+  };
+  const auto write_json = [&](const fs::path &path, const nlohmann::json &value) {
+    std::ofstream output(path, std::ios::binary);
+    output << value.dump() << '\n';
+  };
+
+  nlohmann::json global_fields = nlohmann::json::array();
+  for (const auto name : sbs_scene_controller::global_out_names) {
+    global_fields.push_back({{"name", name}, {"type", "float32"}});
+  }
+  nlohmann::json rule_fields = nlohmann::json::array();
+  nlohmann::json rule_state = nlohmann::json::array();
+  for (const auto &field : sbs_scene_controller::rule_state_fields) {
+    std::string encoding;
+    switch (field.gpu_encoding) {
+      case sbs_scene_controller::gpu_encoding_e::float_value:
+        encoding = "float";
+        break;
+      case sbs_scene_controller::gpu_encoding_e::uint_bits:
+        encoding = "uint_bits";
+        break;
+      case sbs_scene_controller::gpu_encoding_e::uint_valued_float:
+        encoding = "uint_valued_float";
+        break;
+    }
+    rule_fields.push_back({
+      {"name", field.name},
+      {"type", field.json_type},
+      {"gpu_encoding", encoding},
+    });
+    rule_state.push_back(
+      field.gpu_encoding ==
+        sbs_scene_controller::gpu_encoding_e::uint_bits ?
+        nlohmann::json(0u) :
+        nlohmann::json(0.0)
+    );
+  }
+  rule_state[sbs_scene_controller::index(
+    sbs_scene_controller::rule_state_word_e::schema_version
+  )] = static_cast<double>(sbs_scene_controller::schema_version);
+  rule_state[sbs_scene_controller::index(
+    sbs_scene_controller::rule_state_word_e::backend_generation
+  )] = 7u;
+
+  nlohmann::json contract {
+    {"model", "test-model"},
+    {"depth_reuse_interval", 2u},
+    {"scene_controller", {
+      {"enabled", true},
+      {"backend", "shadow_rules"},
+      {"active_roi_authority", false},
+      {"transport", "atomic-latest-v1"},
+      {"file", nullptr},
+      {"header_file", "scene_controller_header.json"},
+      {"frame_file", "scene_controller_frame.json"},
+      {"retained_history", false},
+      {"trace_schema", 1u},
+      {"controller_schema", sbs_scene_controller::schema_version},
+      {"rule_revision", sbs_scene_controller::rule_revision},
+      {"ordered_abi_hash", sbs_scene_controller::ordered_abi_hash},
+      {"frame_count", 4u},
+    }},
+  };
+  const nlohmann::json header {
+    {"record", "header"},
+    {"trace_schema", 1u},
+    {"source", "video_depth_estimator.scene_controller_snapshot"},
+    {"capture", "every-source-frame-after-estimator-update"},
+    {"backend", "shadow_rules"},
+    {"controller_schema", sbs_scene_controller::schema_version},
+    {"rule_revision", sbs_scene_controller::rule_revision},
+    {"ordered_abi_hash", sbs_scene_controller::ordered_abi_hash},
+    {"global_out_fields", std::move(global_fields)},
+    {"rule_state_fields", std::move(rule_fields)},
+    {"config", {
+      {"model", "test-model"},
+      {"depth_reuse_interval", 2u},
+      {"active_roi_authority", false},
+    }},
+  };
+  nlohmann::json frame {
+    {"record", "frame"},
+    {"frame_id", "0000000004"},
+    {"source_index", 3u},
+    {"depth_updated", true},
+    {"snapshot_available", true},
+    {"controller_frame_id", 3u},
+    {"backend_generation", 7u},
+    {"shadow", true},
+    {"global_out", nlohmann::json::array()},
+    {"rule_state", std::move(rule_state)},
+  };
+  for (
+    std::size_t index = 0;
+    index < sbs_scene_controller::global_out_word_count;
+    ++index
+  ) {
+    frame["global_out"].push_back(0.0);
+  }
+  write_json(root / "scene_controller_header.json", header);
+  write_json(root / "scene_controller_frame.json", frame);
+
+  EXPECT_NO_THROW(
+    offline_sbs::validate_scene_controller_transport_for_test(
+      contract,
+      root,
+      "shadow_rules",
+      4u,
+      1u
+    )
+  );
+  EXPECT_NO_THROW(
+    offline_sbs::validate_scene_controller_frame_for_test(
+      frame,
+      3u,
+      4u,
+      4u,
+      2u
+    )
+  );
+  auto held_nonterminal = frame;
+  held_nonterminal["depth_updated"] = false;
+  held_nonterminal["controller_frame_id"] = 2u;
+  EXPECT_NO_THROW(
+    offline_sbs::validate_scene_controller_frame_for_test(
+      held_nonterminal,
+      3u,
+      4u,
+      5u,
+      2u
+    )
+  );
+  auto unavailable = frame;
+  unavailable["snapshot_available"] = false;
+  unavailable["controller_frame_id"] = nullptr;
+  unavailable["backend_generation"] = nullptr;
+  unavailable["global_out"] = nullptr;
+  unavailable["rule_state"] = nullptr;
+  EXPECT_THROW(
+    offline_sbs::validate_scene_controller_frame_for_test(
+      unavailable,
+      3u,
+      4u,
+      4u,
+      2u
+    ),
+    std::runtime_error
+  );
+  EXPECT_THROW(
+    offline_sbs::validate_scene_controller_frame_for_test(
+      frame,
+      3u,
+      4u,
+      4u,
+      2u,
+      2u,
+      8u
+    ),
+    std::runtime_error
+  ) << "A held controller identity cannot silently change generation";
+  contract["scene_controller"]["active_roi_authority"] = 0;
+  EXPECT_THROW(
+    offline_sbs::validate_scene_controller_transport_for_test(
+      contract,
+      root,
+      "shadow_rules",
+      4u,
+      1u
+    ),
+    std::runtime_error
+  );
+  contract["scene_controller"]["active_roi_authority"] = false;
+  contract["scene_controller"]["trace_schema"] = 1.0;
+  EXPECT_THROW(
+    offline_sbs::validate_scene_controller_transport_for_test(
+      contract,
+      root,
+      "shadow_rules",
+      4u,
+      1u
+    ),
+    std::runtime_error
+  );
+  contract["scene_controller"]["trace_schema"] = 1u;
+
+  {
+    std::ofstream duplicate_header(
+      root / "scene_controller_header.json",
+      std::ios::binary
+    );
+    duplicate_header
+      << "{\"trace_schema\":1,"
+      << header.dump().substr(1)
+      << '\n';
+  }
+  EXPECT_THROW(
+    offline_sbs::validate_scene_controller_transport_for_test(
+      contract,
+      root,
+      "shadow_rules",
+      4u,
+      1u
+    ),
+    std::runtime_error
+  );
+  write_json(root / "scene_controller_header.json", header);
+
+  frame["source_index"] = 2u;
+  write_json(root / "scene_controller_frame.json", frame);
+  EXPECT_THROW(
+    offline_sbs::validate_scene_controller_transport_for_test(
+      contract,
+      root,
+      "shadow_rules",
+      4u,
+      1u
+    ),
+    std::runtime_error
+  );
+
+  std::error_code ignored;
+  fs::remove(root / "scene_controller_header.json", ignored);
+  fs::remove(root / "scene_controller_frame.json", ignored);
+  contract["scene_controller"] = {
+    {"enabled", false},
+    {"backend", "off"},
+    {"active_roi_authority", false},
+    {"transport", nullptr},
+    {"file", nullptr},
+    {"header_file", nullptr},
+    {"frame_file", nullptr},
+    {"retained_history", false},
+    {"trace_schema", nullptr},
+    {"controller_schema", sbs_scene_controller::schema_version},
+    {"rule_revision", sbs_scene_controller::rule_revision},
+    {"ordered_abi_hash", sbs_scene_controller::ordered_abi_hash},
+    {"frame_count", 0u},
+  };
+  EXPECT_NO_THROW(
+    offline_sbs::validate_scene_controller_transport_for_test(
+      contract,
+      root,
+      "off",
+      4u,
+      1u
+    )
+  );
+  cleanup();
+}
+
 TEST(OfflineSbsWorker, RejectsUnknownAdaptiveTraceFlagMeanings) {
   EXPECT_TRUE(offline_sbs::adaptive_trace_flags_valid_for_test(0.0f, 0u));
-  EXPECT_TRUE(offline_sbs::adaptive_trace_flags_valid_for_test(63.0f, 63u));
-  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(64.0f, 0u));
-  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(0.0f, 64u));
+  EXPECT_TRUE(offline_sbs::adaptive_trace_flags_valid_for_test(127.0f, 255u));
+  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(128.0f, 0u));
+  EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(0.0f, 256u));
   EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(1.5f, 0u));
   EXPECT_FALSE(offline_sbs::adaptive_trace_flags_valid_for_test(
     std::numeric_limits<float>::quiet_NaN(),
@@ -268,6 +659,11 @@ TEST(OfflineSbsWorker, RejectsEveryNestedReplayCapabilityDrift) {
   const auto valid = native_replay_capabilities();
   ASSERT_TRUE(
     offline_sbs::native_replay_capabilities_valid_for_test(valid)
+  );
+  ASSERT_TRUE(
+    offline_sbs::native_replay_capabilities_json_valid_for_test(
+      valid.dump()
+    )
   );
 
   for (const auto &mutation : {
@@ -282,6 +678,12 @@ TEST(OfflineSbsWorker, RejectsEveryNestedReplayCapabilityDrift) {
          },
          std::vector<std::string> {
            "scene_cache_state", "word_count"
+         },
+         std::vector<std::string> {
+           "scene_controller_trace", "ordered_abi_hash"
+         },
+         std::vector<std::string> {
+           "scene_controller_trace", "source_time_override"
          },
          std::vector<std::string> {
            "scene_plan", "source_pixel_zero_anchor"
@@ -303,6 +705,188 @@ TEST(OfflineSbsWorker, RejectsEveryNestedReplayCapabilityDrift) {
       offline_sbs::native_replay_capabilities_valid_for_test(drifted)
     ) << mutation[0] << '.' << mutation[1];
   }
+
+  for (const auto &mutation : {
+         std::vector<std::string> {"schema"},
+         std::vector<std::string> {
+           "native_whole_clip", "follow_protocol_schema"
+         },
+         std::vector<std::string> {
+           "native_whole_clip", "scene_controller_trace", "trace_schema"
+         },
+       }) {
+    auto wrong_type = valid;
+    nlohmann::json *leaf = &wrong_type;
+    for (const auto &component : mutation) {
+      leaf = &leaf->at(component);
+    }
+    *leaf = 1.0;
+    EXPECT_FALSE(
+      offline_sbs::native_replay_capabilities_valid_for_test(wrong_type)
+    ) << mutation.back() << " must remain a JSON integer";
+  }
+
+  auto numeric_boolean = valid;
+  numeric_boolean["native_whole_clip"]["scene_controller_trace"]
+                 ["active_roi_authority"] = 0;
+  EXPECT_FALSE(
+    offline_sbs::native_replay_capabilities_valid_for_test(
+      numeric_boolean
+    )
+  );
+  numeric_boolean = valid;
+  numeric_boolean["native_whole_clip"]
+                 ["whole_clip_inference_attestation"]
+                 ["tensorrt_enqueue_count"] = 1;
+  EXPECT_FALSE(
+    offline_sbs::native_replay_capabilities_valid_for_test(
+      numeric_boolean
+    )
+  );
+
+  auto duplicate_root_key = valid.dump();
+  duplicate_root_key.insert(1, R"("\u0073chema":1,)");
+  EXPECT_FALSE(
+    offline_sbs::native_replay_capabilities_json_valid_for_test(
+      duplicate_root_key
+    )
+  ) << "Escaped and literal spellings of the same key must be duplicates";
+}
+
+TEST(OfflineSbsWorker, WritesBoundedDurableSceneControllerTimelineJsonl) {
+  const auto media = offline_sbs::parse_ffprobe_contract(sdr_probe());
+  const auto root =
+    fs::temp_directory_path() /
+    (
+      "sunshine-source-time-" +
+      std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()
+      )
+    );
+  ASSERT_TRUE(fs::create_directories(root));
+  const auto artifact =
+    offline_sbs::write_scene_controller_source_time_contract_for_test(
+      root,
+      media
+    );
+  const fs::path path =
+    artifact.at("path").get<std::string>();
+  ASSERT_TRUE(fs::is_regular_file(path));
+  const auto bytes = read_source_file(path);
+  EXPECT_EQ(artifact.at("file_bytes"), bytes.size());
+  EXPECT_EQ(artifact.at("disk_reservation_bytes"), bytes.size());
+  EXPECT_EQ(artifact.at("file_sha256"), sha256_hex(bytes));
+  EXPECT_EQ(artifact.at("schema"), 2u);
+  EXPECT_EQ(
+    artifact.at("clock"),
+    "source-presentation-timeline-v2"
+  );
+  EXPECT_EQ(artifact.at("frame_count"), 3u);
+  EXPECT_DOUBLE_EQ(
+    artifact.at("total_elapsed_seconds").get<double>(),
+    0.095
+  );
+
+  std::vector<nlohmann::json> records;
+  std::istringstream input(bytes);
+  for (std::string line; std::getline(input, line);) {
+    ASSERT_FALSE(line.empty());
+    ASSERT_LE(line.size() + 1u, 256u);
+    records.push_back(nlohmann::json::parse(line));
+  }
+  ASSERT_EQ(records.size(), 4u);
+  const auto &header = records.front();
+  EXPECT_EQ(
+    std::set<std::string>({
+      "record",
+      "schema",
+      "clock",
+      "frame_count",
+      "time_base",
+    }),
+    [&] {
+      std::set<std::string> keys;
+      for (const auto &[key, _value] : header.items()) {
+        keys.insert(key);
+      }
+      return keys;
+    }()
+  );
+  EXPECT_EQ(header.at("record"), "header");
+  EXPECT_EQ(header.at("schema"), 2u);
+  EXPECT_EQ(
+    header.at("clock"),
+    "source-presentation-timeline-v2"
+  );
+  EXPECT_EQ(header.at("frame_count"), 3u);
+  EXPECT_EQ(header.at("time_base").at("num"), 1);
+  EXPECT_EQ(header.at("time_base").at("den"), 1000);
+  EXPECT_EQ(records[1].at("record"), "frame");
+  EXPECT_EQ(records[1].at("source_index"), 0u);
+  EXPECT_EQ(records[1].at("frame_id"), "0000000001");
+  EXPECT_EQ(records[1].at("pts_ticks"), 100);
+  EXPECT_EQ(records[1].at("duration_ticks"), 40);
+  EXPECT_EQ(records[2].at("pts_ticks"), 140);
+  EXPECT_EQ(records[2].at("duration_ticks"), 55);
+  EXPECT_EQ(records[3].at("pts_ticks"), 195);
+  EXPECT_EQ(records[3].at("duration_ticks"), 45);
+  EXPECT_GE(
+    offline_sbs::
+      scene_controller_source_time_max_artifact_bytes_for_test(),
+    (12ull * 60ull * 60ull * 90ull + 1ull) * 256ull
+  );
+  EXPECT_LT(
+    offline_sbs::
+      scene_controller_source_time_max_artifact_bytes_for_test(),
+    2ull * 1024ull * 1024ull * 1024ull
+  );
+  std::error_code ec;
+  fs::remove_all(root, ec);
+  EXPECT_FALSE(ec);
+}
+
+TEST(OfflineSbsWorker, RequiresExactDisabledSourceTimeOnReplay) {
+  const nlohmann::json disabled {
+    {"enabled", false},
+    {"schema", nullptr},
+    {"clock", nullptr},
+    {"file_sha256", nullptr},
+    {"frame_count", 0u},
+    {"total_elapsed_seconds", 0.0},
+  };
+  EXPECT_TRUE(
+    offline_sbs::scene_controller_source_time_attestation_valid_for_test(
+      disabled,
+      disabled
+    )
+  );
+  for (const auto &[key, replacement] : std::vector<
+         std::pair<std::string, nlohmann::json>
+       > {
+         {"enabled", 0},
+         {"schema", 2u},
+         {"clock", "source-presentation-timeline-v2"},
+         {"file_sha256", std::string(64u, '0')},
+         {"frame_count", 1u},
+         {"total_elapsed_seconds", 0},
+       }) {
+    auto changed = disabled;
+    changed[key] = replacement;
+    EXPECT_FALSE(
+      offline_sbs::scene_controller_source_time_attestation_valid_for_test(
+        changed,
+        disabled
+      )
+    ) << key;
+  }
+  auto added = disabled;
+  added["timeline_sha256"] = nullptr;
+  EXPECT_FALSE(
+    offline_sbs::scene_controller_source_time_attestation_valid_for_test(
+      added,
+      disabled
+    )
+  );
 }
 
 TEST(OfflineSbsWorker, ParsesNativeSpecAndNeverBuildsPythonCommands) {

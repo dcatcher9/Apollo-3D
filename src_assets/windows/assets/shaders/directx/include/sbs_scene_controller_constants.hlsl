@@ -132,6 +132,16 @@ float SceneLogit(float probability) {
     return clamp(log(p / (1.0f - p)), -12.0f, 12.0f);
 }
 
+// One authority for deciding whether two ROI envelopes describe the same
+// geometry. Acquisition, challenger retention, and static/temporal
+// arbitration must not drift onto different overlap bands.
+static const float SBS_SCENE_ROI_GEOMETRY_IDENTITY_MIN_IOU = 0.86f;
+// One temporal cadence bridge serves acquisition and replacement when visual content updates
+// more slowly than the stream. The controller measures accepted stream time only; it neither
+// knows nor guesses an embedded video's FPS. This is not a general liveness timeout: only
+// recurring VIDEO evidence may use it, and dwell advances only when fresh proof returns.
+static const float SBS_SCENE_TEMPORAL_CADENCE_GAP_SECONDS = 0.20f;
+
 float SceneIou(float4 a, float4 b) {
     float2 lo = max(a.xy, b.xy);
     float2 hi = min(a.zw, b.zw);
@@ -142,6 +152,35 @@ float SceneIou(float4 a, float4 b) {
     float union_area =
         a_extent.x * a_extent.y + b_extent.x * b_extent.y - intersection;
     return union_area > 1e-6f ? intersection / union_area : 0.0f;
+}
+
+float SceneIntersectionOverMinArea(float4 a, float4 b) {
+    const float2 lo = max(a.xy, b.xy);
+    const float2 hi = min(a.zw, b.zw);
+    const float2 intersection_extent = max(hi - lo, 0.0f.xx);
+    const float intersection =
+        intersection_extent.x * intersection_extent.y;
+    const float2 a_extent = max(a.zw - a.xy, 0.0f.xx);
+    const float2 b_extent = max(b.zw - b.xy, 0.0f.xx);
+    const float min_area = min(
+        a_extent.x * a_extent.y,
+        b_extent.x * b_extent.y);
+    return min_area > 1e-6f ? intersection / min_area : 0.0f;
+}
+
+float SceneIntersectionFractionOfFirst(float4 subject, float4 other) {
+    const float2 lo = max(subject.xy, other.xy);
+    const float2 hi = min(subject.zw, other.zw);
+    const float2 intersection_extent = max(hi - lo, 0.0f.xx);
+    const float intersection =
+        intersection_extent.x * intersection_extent.y;
+    const float2 subject_extent =
+        max(subject.zw - subject.xy, 0.0f.xx);
+    const float subject_area =
+        subject_extent.x * subject_extent.y;
+    return subject_area > 1e-6f ?
+        intersection / subject_area :
+        0.0f;
 }
 
 #endif

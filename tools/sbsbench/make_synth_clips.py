@@ -46,6 +46,7 @@ EXPOSURE_STABLE_FROM_FRAME = 10
 SHOT_CUT_FRAME = N // 2 + 1
 SUSTAINED_SETUP_CUT_FRAME = 11
 SUSTAINED_TRUE_CUT_FRAME = 27
+SUSTAINED_ESCAPE_PULSE_FRAME = SUSTAINED_TRUE_CUT_FRAME + 1
 SUSTAINED_FRAME_COUNT = 36
 SUSTAINED_ROLL_PX = 96
 BRIDGE_FLASH_FRAME = 11
@@ -81,7 +82,8 @@ DESC = {
     ),
     "sustained_motion_scene_cut": (
         "A setup cut latches shot state; broad persistent horizontal motion prevents either "
-        "proposal arm from rearming, then a real scene cut must use the relative-depth escape."
+        "proposal arm from rearming, then a real scene cut must survive one held-endpoint update "
+        "before the relative-depth escape pulses."
     ),
     "structureless_history_bridge": (
         "A one-frame black flash returns to structured scene A without a cut; a later black "
@@ -321,11 +323,12 @@ def clip_metadata(clip):
                 "kind": "latched-motion-hard-cut",
                 "monitor_from_frame": SHOT_STATE_MONITOR_FROM_FRAME,
                 "expected_pulse_frames": [
-                    SUSTAINED_SETUP_CUT_FRAME, SUSTAINED_TRUE_CUT_FRAME],
+                    SUSTAINED_SETUP_CUT_FRAME, SUSTAINED_ESCAPE_PULSE_FRAME],
                 "setup_pulse_frame": SUSTAINED_SETUP_CUT_FRAME,
                 "persistent_motion_frames": [
-                    SUSTAINED_SETUP_CUT_FRAME, SUSTAINED_TRUE_CUT_FRAME - 1],
-                "escape_pulse_frame": SUSTAINED_TRUE_CUT_FRAME,
+                    SUSTAINED_SETUP_CUT_FRAME, SUSTAINED_TRUE_CUT_FRAME],
+                "escape_candidate_frame": SUSTAINED_TRUE_CUT_FRAME,
+                "escape_pulse_frame": SUSTAINED_ESCAPE_PULSE_FRAME,
                 "source_base_frame_by_frame": (
                     [1] * (SUSTAINED_SETUP_CUT_FRAME - 1) +
                     [SUSTAINED_SETUP_CUT_FRAME] * (

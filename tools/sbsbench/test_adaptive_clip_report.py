@@ -107,6 +107,7 @@ def frame_record(
         "appearance_quiet_once": bool(flags & 8),
         "cut_latched": bool(flags & 16),
         "appearance_recovery": bool(flags & 32),
+        "geometry_confirmation_pending": bool(flags & 64),
         "hard_cut_pulse": pulse,
         "hard_cut_count": hard_cuts,
         "external_cut_count": external_cuts,
@@ -167,9 +168,18 @@ class AdaptiveTraceContractTests(unittest.TestCase):
             [frame["frame_id"] for frame in decoded],
             ["0000000001", "0000000002"],
         )
+        self.assertIs(decoded[0]["hard_cut_pulse"], False)
         with self.assertRaisesRegex(
                 report.TraceContractError, "after finalization"):
             decoder.feed_line(json.dumps(frame_record(2)) + "\n")
+
+    def test_decoded_hard_cut_pulse_remains_boolean_after_positional_expansion(self):
+        decoder = report.IncrementalTraceDecoder()
+        decoder.feed_line(json.dumps(trace_header()) + "\n")
+        quiet = decoder.feed_line(json.dumps(frame_record(0, pulse=False)) + "\n")
+        pulse = decoder.feed_line(json.dumps(frame_record(1, pulse=True)) + "\n")
+        self.assertIs(quiet["hard_cut_pulse"], False)
+        self.assertIs(pulse["hard_cut_pulse"], True)
 
     def test_rejects_duplicate_counter_disagreement(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -207,17 +217,32 @@ class AdaptiveTraceContractTests(unittest.TestCase):
                     "appearance_recovery duplicate disagrees"):
                 report.load_trace(path)
 
+    def test_accepts_geometry_confirmation_pending_and_rejects_a_wrong_duplicate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "adaptive_state.jsonl"
+            pending = frame_record(0, flags=64)
+            write_trace(path, [pending])
+            _header, frames = report.load_trace(path)
+            self.assertTrue(frames[0]["geometry_confirmation_pending"])
+
+            pending["geometry_confirmation_pending"] = False
+            write_trace(path, [pending])
+            with self.assertRaisesRegex(
+                    report.TraceContractError,
+                    "geometry_confirmation_pending duplicate disagrees"):
+                report.load_trace(path)
+
     def test_rejects_unknown_cut_and_analysis_flag_bits(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "adaptive_state.jsonl"
-            unknown_cut = frame_record(0, flags=64)
+            unknown_cut = frame_record(0, flags=128)
             write_trace(path, [unknown_cut])
             with self.assertRaisesRegex(
                     report.TraceContractError, "cut_flags.*unknown schema bits"):
                 report.load_trace(path)
 
             unknown_analysis = frame_record(0)
-            unknown_analysis["values"][31] = 64
+            unknown_analysis["values"][31] = 256
             write_trace(path, [unknown_analysis])
             with self.assertRaisesRegex(
                     report.TraceContractError,
@@ -258,6 +283,29 @@ class AdaptiveTraceContractTests(unittest.TestCase):
             write_trace(path, [first, second])
             with self.assertRaisesRegex(report.TraceContractError, "duplicate trace frame_id"):
                 report.load_trace(path)
+
+            first = frame_record(0)
+            first["frame_id"] = "1"
+            second = frame_record(1)
+            second["frame_id"] = "00001"
+            write_trace(path, [first, second])
+            with self.assertRaisesRegex(report.TraceContractError, "duplicate trace frame_id"):
+                report.load_trace(path)
+
+    def test_trace_frame_id_rejects_non_ascii_decimal_and_uint64_overflow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "adaptive_state.jsonl"
+            for invalid_id, message in (
+                ("1x", "ASCII decimal string"),
+                ("\uff11", "ASCII decimal string"),
+                (str(report.UINT64_MAX + 1), "uint64 range"),
+            ):
+                with self.subTest(frame_id=invalid_id):
+                    frame = frame_record(0)
+                    frame["frame_id"] = invalid_id
+                    write_trace(path, [frame])
+                    with self.assertRaisesRegex(report.TraceContractError, message):
+                        report.load_trace(path)
 
     def test_rejects_depth_update_outside_declared_reuse_cadence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -496,6 +544,51 @@ class AdaptiveReportTests(unittest.TestCase):
         self.assertAlmostEqual(joined[2]["timestamp_seconds"], 0.08)
         self.assertEqual(timing["first_pts_seconds"], 11.25)
         self.assertEqual(timing["source"], "source-video-presentation")
+
+    def test_timeline_frame_ids_match_by_numeric_value_across_zero_padding(self):
+        frames = [frame_record(index) for index in range(2)]
+        parsed = [
+            report._validate_frame(frame, index + 2, trace_header()["config"])
+            for index, frame in enumerate(frames)
+        ]
+        timeline = wrapper_timeline(frames)
+        timeline["frames"][0]["frame_id"] = "00001"
+        timeline["frames"][1]["frame_id"] = "2"
+
+        joined, _timing = report.join_timeline(parsed, timeline)
+
+        self.assertEqual(
+            [frame["frame_id"] for frame in joined],
+            ["0000000001", "0000000002"],
+        )
+
+    def test_timeline_frame_ids_reject_malformed_overflow_and_numeric_duplicates(self):
+        frame = frame_record(0)
+        parsed = [
+            report._validate_frame(frame, 2, trace_header()["config"])
+        ]
+        for invalid_id, message in (
+            ("1x", "ASCII decimal string"),
+            ("\uff11", "ASCII decimal string"),
+            (str(report.UINT64_MAX + 1), "uint64 range"),
+        ):
+            with self.subTest(frame_id=invalid_id):
+                timeline = wrapper_timeline([frame])
+                timeline["frames"][0]["frame_id"] = invalid_id
+                with self.assertRaisesRegex(report.TraceContractError, message):
+                    report.join_timeline(parsed, timeline)
+
+        frames = [frame_record(index) for index in range(2)]
+        parsed = [
+            report._validate_frame(item, index + 2, trace_header()["config"])
+            for index, item in enumerate(frames)
+        ]
+        timeline = wrapper_timeline(frames)
+        timeline["frames"][0]["frame_id"] = "1"
+        timeline["frames"][1]["frame_id"] = "00001"
+        with self.assertRaisesRegex(
+                report.TraceContractError, "invalid/duplicate frame_id"):
+            report.join_timeline(parsed, timeline)
 
     def test_timeline_rejects_mismatched_frame_id_even_when_index_matches(self):
         frames = [frame_record(index) for index in range(2)]

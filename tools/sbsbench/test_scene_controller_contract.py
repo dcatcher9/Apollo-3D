@@ -17,7 +17,7 @@ import scene_controller_contract as contract  # noqa: E402
 class SceneControllerContractTests(unittest.TestCase):
     def test_schema_version_pins_the_complete_contract(self):
         expected_digest_by_schema = {
-            1: "e5d10b79eb1748fff9b1f4b8da7f83af068aca7da2fe2e4652235ac83780bf7c",
+            1: "01b6548acc5e31fa4cf74a0811ac8556d3d521f4e4afe2d69678523445bd16a4",
         }
         canonical = json.dumps(
             contract.CONTRACT,
@@ -57,6 +57,23 @@ class SceneControllerContractTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "ordered ABI hash mismatch"):
             contract.validate_contract(changed_meaning)
+
+    def test_scroll_hold_is_an_overlay_not_a_geometry_state(self):
+        self.assertEqual(
+            contract.CONTRACT["enums"]["state_kind"],
+            {
+                "full_frame": 0,
+                "video": 1,
+                "content": 2,
+            },
+        )
+        self.assertEqual(contract.CONTRACT["meta"][9]["name"], "reserved_9")
+        self.assertTrue(contract.CONTRACT["meta"][9]["required_zero"])
+        self.assertEqual(
+            contract.CONTRACT["flag_bits"]["state_flags"]["scroll_hold_active"],
+            2,
+        )
+        self.assertIn("scroll_hold_s", contract.RULE_STATE_NAMES)
 
     def test_generated_native_and_shader_contracts_are_current(self):
         result = subprocess.run(
@@ -99,7 +116,7 @@ class SceneControllerContractTests(unittest.TestCase):
 
     def test_rule_state_is_a_complete_typed_layout(self):
         self.assertEqual(contract.RULE_REVISION, "rules_v1")
-        self.assertEqual(len(contract.RULE_STATE_NAMES), 64)
+        self.assertEqual(len(contract.RULE_STATE_NAMES), 68)
         self.assertEqual(contract.RULE_STATE_NAMES[:8], (
             "schema_version",
             "state_kind",
@@ -110,19 +127,26 @@ class SceneControllerContractTests(unittest.TestCase):
             "state_flags",
             "reset_flags",
         ))
-        self.assertEqual(contract.RULE_STATE_NAMES[-4:], (
+        self.assertEqual(contract.RULE_STATE_NAMES[60:65], (
             "last_external_cut_count",
-            "reserved_1",
-            "reserved_2",
-            "reserved_3",
+            "roi_structural_cut_support",
+            "roi_exposure_only_support",
+            "roi_event_depth_coverage",
+            "last_detector_cut_count",
         ))
         self.assertEqual(contract.CONTRACT["rule_state"][-4]["type"], "uint32")
         self.assertEqual(
             contract.CONTRACT["rule_state"][-4]["gpu_encoding"],
             "uint_bits",
         )
+        self.assertEqual(
+            contract.RULE_STATE_NAMES[-3:],
+            ("reserved_65", "reserved_66", "reserved_67"),
+        )
         for field in contract.CONTRACT["rule_state"][-3:]:
             self.assertTrue(field["required_zero"])
+            self.assertEqual(field["type"], "float32")
+            self.assertEqual(field["gpu_encoding"], "float")
             self.assertEqual(field["initial"], 0.0)
 
     def test_reserved_tensor_outputs_are_explicitly_required_zero(self):

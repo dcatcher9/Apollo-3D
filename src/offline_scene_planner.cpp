@@ -22,9 +22,6 @@ namespace offline_sbs {
 
     constexpr float depth_cut_high = 0.60f;
     constexpr float depth_cut_corroborate = 0.25f;
-    constexpr float raw_rgb_cut_high = 0.70f;
-    constexpr float structural_color_cut_high = 0.03f;
-    constexpr float structural_color_min_support = 0.01f;
     constexpr float zero_anchor_min_px = -1.39635933f;
     constexpr float zero_anchor_max_px = 8.58230571f;
 
@@ -52,46 +49,88 @@ namespace offline_sbs {
       if (has_flag(frame, analysis_appearance_veto)) {
         return false;
       }
-      const std::optional<float> supports[] {
-        frame.current_structural_support_fraction,
-        frame.previous_structural_support_fraction,
-        frame.common_structural_support_fraction,
-      };
-      for (const auto &support : supports) {
-        if (support && (!finite(*support) || *support < structural_color_min_support)) {
-          return false;
-        }
-      }
       return usable_metric(frame.depth_change_fraction) &&
              *frame.depth_change_fraction >= depth_cut_corroborate &&
-             usable_metric(frame.raw_rgb_change_fraction) &&
-             *frame.raw_rgb_change_fraction >= raw_rgb_cut_high &&
-             usable_metric(frame.structural_change_fraction) &&
-             *frame.structural_change_fraction >= structural_color_cut_high;
+             has_flag(frame, analysis_appearance_proposal);
+    }
+
+    bool structureless_geometry_exception(const scene_frame_t &frame) {
+      if (!has_flag(frame, analysis_structureless_transition)) {
+        return false;
+      }
+      // Schema v4 exports the resolver's post-floor candidate bit. Older
+      // complete traces can still prove that the second, persistent
+      // structureless endpoint was accepted through the causal pulse itself.
+      // The bare structureless bit is insufficient: it is also set on the
+      // first update whose depth/appearance histories are intentionally held.
+      return
+        has_flag(frame, analysis_geometry_confirmation_candidate) ||
+        frame.hard_cut_pulse;
+    }
+
+    bool geometry_structure_corroborated(const scene_frame_t &frame) {
+      return
+        structureless_geometry_exception(frame) ||
+        (
+          usable_metric(frame.structural_change_fraction) &&
+          *frame.structural_change_fraction >=
+            structural_geometry_cut_floor
+        );
     }
 
     bool geometry_qualified(const scene_frame_t &frame) {
       return !has_flag(frame, analysis_appearance_veto) &&
+             geometry_structure_corroborated(frame) &&
              usable_metric(frame.depth_change_fraction) &&
              *frame.depth_change_fraction >= depth_cut_high;
     }
 
-    bool complete_evidence(const scene_frame_t &frame) {
+    bool relative_geometry_qualified(const scene_frame_t &frame) {
+      return !has_flag(frame, analysis_appearance_veto) &&
+             geometry_structure_corroborated(frame) &&
+             has_flag(frame, analysis_relative_geometry_spike);
+    }
+
+    bool complete_causal_evidence(const scene_frame_t &frame) {
+      // Raw-RGB magnitude is not part of the offline qualification contract. Appearance is
+      // represented by the producer-qualified analysis bit, while ordinary geometry requires
+      // the exposure-invariant structural metric. Missing unrelated RGB telemetry must therefore
+      // neither rescue nor downgrade an otherwise complete boundary decision.
       return usable_metric(frame.depth_change_fraction) &&
-             usable_metric(frame.raw_rgb_change_fraction) &&
-             usable_metric(frame.structural_change_fraction);
+             (
+               usable_metric(frame.structural_change_fraction) ||
+               structureless_geometry_exception(frame)
+             );
+    }
+
+    bool causal_qualification_unavailable(const scene_frame_t &frame) {
+      if (has_flag(frame, analysis_appearance_veto)) {
+        return false;
+      }
+      if (!usable_metric(frame.depth_change_fraction)) {
+        return true;
+      }
+      if (usable_metric(frame.structural_change_fraction) ||
+          structureless_geometry_exception(frame)) {
+        return false;
+      }
+      // Missing structure can hide an ordinary absolute or relative geometry
+      // decision. Missing raw RGB alone cannot: schema v4 already exports the
+      // producer-qualified appearance bit, and a measured sub-floor
+      // structural value is authoritative.
+      return
+        *frame.depth_change_fraction >= depth_cut_high ||
+        has_flag(frame, analysis_relative_geometry_spike);
     }
 
     float evidence_score(const scene_frame_t &frame) {
       const auto depth = metric_or_zero(frame.depth_change_fraction);
-      const auto raw = metric_or_zero(frame.raw_rgb_change_fraction);
-      const auto structural = metric_or_zero(frame.structural_change_fraction);
       const auto geometry = depth / depth_cut_high;
-      const auto appearance = std::min({
-        depth / depth_cut_corroborate,
-        raw / raw_rgb_cut_high,
-        structural / structural_color_cut_high,
-      });
+      const auto producer_appearance =
+        has_flag(frame, analysis_appearance_proposal);
+      const auto appearance = producer_appearance ?
+        depth / depth_cut_corroborate :
+        0.0f;
       return std::max(geometry, appearance);
     }
 
@@ -572,9 +611,9 @@ namespace offline_sbs {
       const auto proposal = is_proposal(frame.sequence);
       const auto appearance = appearance_qualified(frame);
       const auto geometry = geometry_qualified(frame);
-      const auto relative = has_flag(frame, analysis_relative_geometry_spike);
+      const auto relative = relative_geometry_qualified(frame);
       if (!(appearance || geometry || relative) &&
-          !(proposal && !complete_evidence(frame))) {
+          !(proposal && causal_qualification_unavailable(frame))) {
         continue;
       }
       if (!proposal && !(appearance || geometry)) {
@@ -601,7 +640,7 @@ namespace offline_sbs {
         .ordinal = tracked.depth_update_ordinal,
         .score = evidence_score(frame),
         .nearest_distance = nearest,
-        .evidence_complete = complete_evidence(frame),
+        .evidence_complete = complete_causal_evidence(frame),
         .appearance = appearance,
         .geometry = geometry,
         .relative = relative,
@@ -699,8 +738,9 @@ namespace offline_sbs {
         boundary_decision_e::rejected_unsupported_proposal :
         boundary_decision_e::rejected_minimum_scene_length;
       boundary.reason = legal_length_proposal ?
-        "every legal proposal was vetoed or its complete exported evidence "
-        "supported neither geometry, appearance, nor the relative-geometry escape" :
+        "every legal proposal was vetoed or its available exported evidence "
+        "supported neither appearance nor structurally corroborated geometry, "
+        "including the relative-geometry escape" :
         "the proposed boundary could not leave legal scene prefixes on both sides";
       boundary.truncated = truncated;
       boundary.budget_forced = budget_forced;
@@ -733,11 +773,13 @@ namespace offline_sbs {
     if (!best->evidence_complete) {
       decision = boundary_decision_e::confirmed_causal_fallback;
       reason =
-        "the specific non-vetoed production proposal lacked optional diagnostics "
-        "and was retained conservatively";
+        "the specific non-vetoed production proposal lacked optional trace "
+        "diagnostics needed for complete live-detector parity and was retained "
+        "conservatively without relocating its held endpoint";
     } else if (!is_proposal(boundary_sequence)) {
       decision = boundary_decision_e::moved_to_correlated_evidence;
-      reason = "lookahead found a stronger depth-corroborated transition";
+      reason =
+        "lookahead found a stronger structurally corroborated depth transition";
     } else if (cluster.proposal_sequences.size() > 1) {
       decision = boundary_decision_e::merged_duplicate_proposals;
       reason = "nearby production pulses resolved to one deterministic boundary";

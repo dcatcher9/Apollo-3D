@@ -112,15 +112,19 @@ The deterministic `sustained_motion_scene_cut` probe starts monitoring at frame 
 replacement pulses at frame 11, then an exact alternating 0/96-pixel horizontal-roll schedule
 holds the production flag word at `16` (latched, neither proposal arm ready) through frame 26.
 That frame has scene age 15 and depth-motion EMA `0.3443`. The real replacement at frame 27 changes
-`0.6864` of depth texels, clears the relative `baseline + 0.20` test, and produces one accepted
-`16 -> 16` latched escape with scene age reset to zero. The evaluator authenticates the source
-roll/replacement construction and hard-gates both the exact pulse schedule and those route
-preconditions. The default baseline-gated command evaluates this probe without a numeric baseline;
+`0.6864` of depth texels and clears the relative `baseline + 0.20` test, but it does not pulse:
+it holds the pre-cut endpoint for one update and changes the flag word `16 -> 80`
+(`LATCHED | GEOMETRY_CONFIRMATION_PENDING`). Frame 28 is compared against that held endpoint;
+the same new scene independently clears the geometry test and produces the single accepted
+`80 -> 16` escape with scene age reset to zero. The evaluator authenticates the source
+roll/replacement construction and hard-gates the exact frames 11/28 pulse schedule, frame 27
+pending state, and route preconditions. The default baseline-gated command evaluates this probe
+without a numeric baseline;
 `conformance-only` authority comes from the authenticated invariant itself.
 
 Final production-harness validation covered both conformance probes with the documented default
 runner: zero hard/evidence failures, zero exposure pulses or settled anchor/pop drift, and exactly
-the authenticated sustained-motion pulses at frames 11 and 27. A separate FP16 scRGB run at
+the authenticated sustained-motion pulses at frames 11 and 28. A separate FP16 scRGB run at
 `--simulate-hdr --hdr-scale 4` also produced zero exposure pulses and zero anchor/pop drift. The
 complete schema-34 comparison-only suites passed 13 core and 12 extended clips with zero
 hard/evidence failures or issues and no GPU-contention flag.

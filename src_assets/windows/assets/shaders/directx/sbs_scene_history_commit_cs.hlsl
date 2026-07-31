@@ -6,6 +6,7 @@ RWStructuredBuffer<float> NextLayoutHistory : register(u0);
 RWStructuredBuffer<float> NextDepthHistory : register(u1);
 
 #include "include/sbs_scene_controller_constants.hlsl"
+#include "include/sbs_scene_rules_summary_layout.shared.h"
 
 float RuleStateWord(uint word) {
     uint4 value = ResolvedRuleState[word / 4u];
@@ -17,7 +18,10 @@ uint RuleStateUint(uint word) {
     return value[word & 3u];
 }
 
-[numthreads(16, 16, 1)]
+[numthreads(
+    SBS_RULE_EVIDENCE_GROUP_SIZE,
+    SBS_RULE_EVIDENCE_GROUP_SIZE,
+    1)]
 void main(uint3 dispatch_id : SV_DispatchThreadID) {
     const uint canvas = SBS_SCENE_ANALYSIS_CANVAS_SIZE;
     if (dispatch_id.x >= canvas || dispatch_id.y >= canvas) {
@@ -31,11 +35,13 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         RuleStateUint(SBS_SCENE_RULE_STATE_WORD_PROMOTION_FLAGS);
     uint reset_flags =
         RuleStateUint(SBS_SCENE_RULE_STATE_WORD_RESET_FLAGS);
-    bool scroll_hold =
+    uint state_flags =
+        RuleStateUint(SBS_SCENE_RULE_STATE_WORD_STATE_FLAGS);
+    bool scroll_freeze =
         output_valid &&
-        abs(
-            RuleStateWord(SBS_SCENE_RULE_STATE_WORD_STATE_KIND) -
-            (float)SBS_SCENE_STATE_KIND_SCROLL_HOLD) < 0.5f;
+        ((state_flags & SBS_SCENE_STATE_FLAGS_SCROLL_HOLD_ACTIVE) != 0u ||
+         RuleStateWord(
+             SBS_SCENE_RULE_STATE_WORD_SCROLL_CONFIDENCE) > 0.0f);
     bool layout_promote =
         output_valid &&
         (promotion_flags & SBS_SCENE_PROMOTION_FLAGS_LAYOUT_HISTORY) != 0u;
@@ -48,6 +54,16 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
     bool roi_reset =
         (promotion_flags & SBS_SCENE_PROMOTION_FLAGS_ROI) != 0u ||
         (reset_flags & SBS_SCENE_RESET_FLAGS_GEOMETRY) != 0u;
+
+    // Evidence already wrote both candidate history banks. In the normal promote path there
+    // is nothing for this pass to preserve or reinitialize.
+    if (layout_promote &&
+        depth_promote &&
+        !scroll_freeze &&
+        !shot_reset &&
+        !roi_reset) {
+        return;
+    }
 
     // A hard content cut does not invalidate stable page/video layout. Display/backend layout
     // resets are different: their freshly prepared candidate is the new canonical reference.
@@ -64,7 +80,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID) {
         float next_value = NextLayoutHistory[index];
         if (!layout_promote) {
             next_value = PreviousLayoutHistory[index];
-        } else if (scroll_hold) {
+        } else if (scroll_freeze) {
             bool advance_for_scroll =
                 channel ==
                     SBS_SCENE_LAYOUT_HISTORY_PREVIOUS_LUMINANCE_ORDINAL ||

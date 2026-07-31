@@ -3,6 +3,7 @@
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -203,6 +204,258 @@ class WholeClipTimelineTests(unittest.TestCase):
                         output, root / "probe.log")
 
 
+class WholeClipProgressTests(unittest.TestCase):
+    def test_live_progress_retries_transient_windows_sharing_violation(self):
+        child = mock.Mock()
+        child.poll.return_value = None
+        child.log_path = Path("native.log")
+        progress = {
+            "schema": 1,
+            "processed_count": 1,
+            "status": "running",
+        }
+        with mock.patch.object(
+                whole,
+                "read_json_object",
+                side_effect=[PermissionError("sharing violation"), progress]
+        ) as read, mock.patch.object(whole.time, "sleep"):
+            result = whole.wait_for_progress(
+                Path("follow_progress.json"),
+                "processed_count",
+                1,
+                child,
+                timeout_seconds=1.0,
+                expected={"schema": 1},
+            )
+
+        self.assertEqual(result, progress)
+        self.assertEqual(read.call_count, 2)
+        self.assertTrue(
+            read.call_args.kwargs["allow_transient_permission_error"])
+
+    def test_pipeline_prefers_the_matching_build_local_ffmpeg(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary)
+            tools = build_dir / "tools"
+            tools.mkdir()
+            ffmpeg = tools / "ffmpeg.exe"
+            ffmpeg.write_bytes(b"test")
+            with mock.patch.object(whole, "resolve_ffmpeg") as fallback:
+                resolved = whole.resolve_pipeline_ffmpeg(build_dir)
+
+        self.assertEqual(resolved, os.fspath(ffmpeg.resolve()))
+        fallback.assert_not_called()
+
+    def test_pipeline_ffmpeg_falls_back_when_build_has_no_tool(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+                whole,
+                "resolve_ffmpeg",
+                return_value="system-ffmpeg",
+        ) as fallback:
+            resolved = whole.resolve_pipeline_ffmpeg(Path(temporary))
+
+        self.assertEqual(resolved, "system-ffmpeg")
+        fallback.assert_called_once_with()
+
+
+class SceneControllerSourceTimeTests(unittest.TestCase):
+    @staticmethod
+    def _video_timeline(pts):
+        rows = [
+            {
+                "n": index,
+                "pts": value,
+                "pts_time_text": str(value / 1000),
+                "duration": None,
+                "duration_time_text": None,
+            }
+            for index, value in enumerate(pts)
+        ]
+        return whole.build_video_timeline(
+            Fraction(1, 1000),
+            rows,
+            {"fps": 30.0},
+        )
+
+    def test_vfr_source_time_preserves_exact_presentation_deltas(self):
+        timeline = self._video_timeline([100, 140, 240, 280])
+        records = list(whole.build_scene_controller_source_time(timeline))
+        header = records[0]
+        self.assertEqual(header["schema"], 2)
+        self.assertEqual(
+            header["clock"],
+            whole.SCENE_CONTROLLER_SOURCE_TIME_CLOCK,
+        )
+        self.assertEqual(header["time_base"], {"num": 1, "den": 1000})
+        self.assertEqual(
+            [frame["pts_ticks"] for frame in records[1:]],
+            [100, 140, 240, 280],
+        )
+        self.assertEqual(
+            [frame["duration_ticks"] for frame in records[1:]],
+            [40, 100, 40, 40],
+        )
+
+    def test_cfr_source_time_is_deterministic_and_hashes_exact_jsonl_bytes(self):
+        timeline = whole.build_frame_directory_timeline(
+            [
+                Path("frame_00001.png"),
+                Path("frame_00002.png"),
+                Path("frame_00003.png"),
+            ],
+            30.0,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            timeline_path = root / whole.TIMELINE_NAME
+            sidecar_path = (
+                root / whole.SCENE_CONTROLLER_SOURCE_TIME_NAME
+            )
+            whole.write_json_atomic(timeline_path, timeline)
+            first = whole.write_scene_controller_source_time(
+                sidecar_path, timeline)
+            first_bytes = sidecar_path.read_bytes()
+            second = whole.write_scene_controller_source_time(
+                sidecar_path, timeline)
+            second_bytes = sidecar_path.read_bytes()
+            records = [
+                json.loads(line)
+                for line in sidecar_path.read_text(
+                    encoding="utf-8").splitlines()
+            ]
+        self.assertEqual(first_bytes, second_bytes)
+        self.assertEqual(first, second)
+        self.assertEqual(first["sha256"], hashlib.sha256(first_bytes).hexdigest())
+        self.assertEqual(first["frame_count"], 3)
+        self.assertEqual(first["file_bytes"], len(first_bytes))
+        self.assertEqual(first["disk_reservation_bytes"], len(first_bytes))
+        self.assertAlmostEqual(first["total_elapsed_seconds"], 2 / 30)
+        self.assertEqual(
+            [frame["pts_ticks"] for frame in records[1:]],
+            [0, 1, 2],
+        )
+
+    def test_elapsed_attestation_mirrors_native_sequential_double_sum(self):
+        timeline = whole.build_frame_directory_timeline(
+            [
+                Path(f"frame_{index:05d}.png")
+                for index in range(1, 1002)
+            ],
+            30.0,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            timeline_path = root / whole.TIMELINE_NAME
+            sidecar_path = (
+                root / whole.SCENE_CONTROLLER_SOURCE_TIME_NAME
+            )
+            whole.write_json_atomic(timeline_path, timeline)
+            provenance = whole.write_scene_controller_source_time(
+                sidecar_path,
+                timeline,
+            )
+            records = [
+                json.loads(line)
+                for line in sidecar_path.read_text(
+                    encoding="utf-8").splitlines()
+            ]
+
+        native_style_total = 0.0
+        previous_pts = None
+        for frame in records[1:]:
+            delta = (
+                0 if previous_pts is None
+                else frame["pts_ticks"] - previous_pts
+            )
+            native_style_total += float(delta) / 30.0
+            previous_pts = frame["pts_ticks"]
+        self.assertEqual(
+            provenance["total_elapsed_seconds"],
+            native_style_total,
+        )
+        self.assertNotEqual(
+            provenance["total_elapsed_seconds"],
+            float(Fraction(1000, 30)),
+        )
+
+    def test_source_time_rejects_timeline_identity_and_clock_corruption(self):
+        valid = self._video_timeline([0, 40])
+        mutations = []
+        wrong_count = copy.deepcopy(valid)
+        wrong_count["frame_count"] = True
+        mutations.append(("exact timeline", wrong_count))
+        wrong_index = copy.deepcopy(valid)
+        wrong_index["frames"][0]["index"] = False
+        mutations.append(("indices", wrong_index))
+        duplicate_pts = copy.deepcopy(valid)
+        duplicate_pts["frames"][1]["pts"] = 0
+        mutations.append(("increase strictly", duplicate_pts))
+        wrong_time_base = copy.deepcopy(valid)
+        wrong_time_base["time_base"]["num"] = True
+        mutations.append(("exact JSON integers", wrong_time_base))
+        bad_identity = copy.deepcopy(valid)
+        bad_identity["frames"][0]["frame_id"] = "frame-one"
+        mutations.append(("frame identity", bad_identity))
+        bad_duration = copy.deepcopy(valid)
+        bad_duration["frames"][0]["duration"] = 0
+        mutations.append(("positive signed 64-bit", bad_duration))
+        oversized_delta = copy.deepcopy(valid)
+        oversized_delta["frames"][1]["pts"] = whole.INT64_MAX + 1
+        mutations.append(("signed 64-bit", oversized_delta))
+        oversized_clock = copy.deepcopy(valid)
+        oversized_clock["time_base"] = {
+            "num": whole.INT64_MAX + 1,
+            "den": 1,
+        }
+        mutations.append(("signed 64-bit clock", oversized_clock))
+        for message, timeline in mutations:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(
+                        whole.WholeClipError, message):
+                    list(whole.build_scene_controller_source_time(timeline))
+
+    def test_follow_source_time_uses_native_global_sequence_identities(self):
+        timeline = self._video_timeline([0, 40])
+        timeline["frames"][0]["frame_id"] = "00001"
+        timeline["frames"][1]["frame_id"] = "00002"
+
+        legacy_records = list(
+            whole.build_scene_controller_source_time(timeline))
+        records = list(whole.build_scene_controller_source_time(
+            timeline,
+            follow_frame_ids=True,
+        ))
+        self.assertEqual(
+            [record["frame_id"] for record in legacy_records[1:]],
+            ["00001", "00002"],
+        )
+        self.assertEqual(
+            [record["frame_id"] for record in records[1:]],
+            ["0000000001", "0000000002"],
+        )
+        self.assertEqual(
+            [frame["frame_id"] for frame in timeline["frames"]],
+            ["00001", "00002"],
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / whole.SCENE_CONTROLLER_SOURCE_TIME_NAME
+            provenance = whole.write_scene_controller_source_time(
+                path,
+                timeline,
+                follow_frame_ids=True,
+            )
+            written = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+        self.assertEqual(
+            [record["frame_id"] for record in written[1:]],
+            ["0000000001", "0000000002"],
+        )
+        self.assertEqual(provenance["frame_count"], 2)
+
+
 class WholeClipNativeContractTests(unittest.TestCase):
     @staticmethod
     def _capabilities(*, state_schema=whole.SCENE_CACHE_STATE_SCHEMA,
@@ -215,6 +468,33 @@ class WholeClipNativeContractTests(unittest.TestCase):
                 "follow_protocol_schema": 1,
                 "follow_global_first_sequence": True,
                 "adaptive_state_schema": whole.ADAPTIVE_TRACE_SCHEMA,
+                "scene_controller_trace": {
+                    "trace_schema":
+                        whole.scene_controller_trace.TRACE_SCHEMA,
+                    "controller_schema":
+                        whole.scene_controller_trace.controller_contract.SCHEMA_VERSION,
+                    "rule_revision":
+                        whole.scene_controller_trace.controller_contract.RULE_REVISION,
+                    "ordered_abi_hash":
+                        whole.scene_controller_trace.controller_contract.ORDERED_ABI_HASH,
+                    "backends": ["off", "shadow_rules"],
+                    "active_roi_authority": False,
+                    "file": whole.scene_controller_trace.TRACE_NAME,
+                    "transports": [
+                        whole.scene_controller_trace.TRACE_TRANSPORT,
+                        whole.scene_controller_trace.ATOMIC_TRACE_TRANSPORT,
+                    ],
+                    "atomic_header_file":
+                        whole.scene_controller_trace.ATOMIC_HEADER_NAME,
+                    "atomic_frame_file":
+                        whole.scene_controller_trace.ATOMIC_FRAME_NAME,
+                    "global_out_word_count":
+                        len(whole.scene_controller_trace.GLOBAL_OUT_CONTRACT),
+                    "rule_state_word_count":
+                        len(whole.scene_controller_trace.RULE_STATE_CONTRACT),
+                    "source_time_override":
+                        whole.SCENE_CONTROLLER_SOURCE_TIME_CLOCK,
+                },
                 "scene_cache_contract_schema":
                     whole.SCENE_CACHE_CONTRACT_SCHEMA,
                 "scene_cache_packed_sbs_contract": True,
@@ -260,10 +540,129 @@ class WholeClipNativeContractTests(unittest.TestCase):
             },
         }
 
-    def _write_contract(self, root, mode="conversion", count=2):
+    def _write_contract(
+        self,
+        root,
+        mode="conversion",
+        count=2,
+        *,
+        frame_ids=None,
+        scene_controller_backend="shadow_rules",
+        follow_mode=None,
+    ):
+        source_time = {
+            "file": whole.SCENE_CONTROLLER_SOURCE_TIME_NAME,
+            "sha256": "1" * 64,
+            "schema": whole.SCENE_CONTROLLER_SOURCE_TIME_SCHEMA,
+            "clock": whole.SCENE_CONTROLLER_SOURCE_TIME_CLOCK,
+            "frame_count": count,
+            "total_elapsed_seconds": float(max(0, count - 1)),
+        }
         (root / whole.TRACE_NAME).write_text(
             '{"schema":2,"frame_id":"00001"}\n', encoding="utf-8")
-        (root / whole.NATIVE_CONTRACT_NAME).write_text(json.dumps({
+        if frame_ids is None:
+            frame_ids = [
+                f"{index + 1:05d}" for index in range(count)
+            ]
+        self.assertEqual(len(frame_ids), count)
+        if scene_controller_backend == "shadow_rules":
+            controller = whole.scene_controller_trace
+            rule_state = []
+            for field in controller.RULE_STATE_CONTRACT:
+                value = 0
+                if field["name"] == "schema_version":
+                    value = controller.controller_contract.SCHEMA_VERSION
+                elif field["name"] == "backend_generation":
+                    value = 1
+                rule_state.append(
+                    value if field["type"] == "uint32" else float(value)
+                )
+            header = {
+                "record": "header",
+                "trace_schema": controller.TRACE_SCHEMA,
+                "source": controller.TRACE_SOURCE,
+                "capture": controller.TRACE_CAPTURE,
+                "backend": "shadow_rules",
+                "controller_schema":
+                    controller.controller_contract.SCHEMA_VERSION,
+                "rule_revision":
+                    controller.controller_contract.RULE_REVISION,
+                "ordered_abi_hash":
+                    controller.controller_contract.ORDERED_ABI_HASH,
+                "global_out_fields": list(controller.GLOBAL_OUT_FIELDS),
+                "rule_state_fields": list(controller.RULE_STATE_FIELDS),
+                "config": {
+                    "model": "test-model",
+                    "depth_reuse_interval": 1,
+                    "active_roi_authority": False,
+                },
+            }
+            frames = [
+                {
+                    "record": "frame",
+                    "frame_id": frame_id,
+                    "source_index": index,
+                    "depth_updated": True,
+                    "snapshot_available": True,
+                    "controller_frame_id": index,
+                    "backend_generation": 1,
+                    "shadow": True,
+                    "global_out": [
+                        0.0 for _field in controller.GLOBAL_OUT_CONTRACT
+                    ],
+                    "rule_state": rule_state,
+                }
+                for index, frame_id in enumerate(frame_ids)
+            ]
+            (root / controller.TRACE_NAME).write_text(
+                "".join(
+                    json.dumps(record) + "\n"
+                    for record in [header, *frames]
+                ),
+                encoding="utf-8",
+            )
+            scene_controller_descriptor = {
+                "enabled": True,
+                "backend": "shadow_rules",
+                "active_roi_authority": False,
+                "transport": controller.TRACE_TRANSPORT,
+                "file": controller.TRACE_NAME,
+                "header_file": None,
+                "frame_file": None,
+                "retained_history": True,
+                "trace_schema": controller.TRACE_SCHEMA,
+                "controller_schema":
+                    controller.controller_contract.SCHEMA_VERSION,
+                "rule_revision":
+                    controller.controller_contract.RULE_REVISION,
+                "ordered_abi_hash":
+                    controller.controller_contract.ORDERED_ABI_HASH,
+                "frame_count": count,
+            }
+        else:
+            self.assertEqual(scene_controller_backend, "off")
+            scene_controller_descriptor = {
+                "enabled": False,
+                "backend": "off",
+                "active_roi_authority": False,
+                "transport": None,
+                "file": None,
+                "header_file": None,
+                "frame_file": None,
+                "retained_history": False,
+                "trace_schema": None,
+                "controller_schema": (
+                    whole.scene_controller_trace.controller_contract.SCHEMA_VERSION
+                ),
+                "rule_revision": (
+                    whole.scene_controller_trace.controller_contract.RULE_REVISION
+                ),
+                "ordered_abi_hash": (
+                    whole.scene_controller_trace.controller_contract.ORDERED_ABI_HASH
+                ),
+                "frame_count": 0,
+            }
+        contract = {
             "schema": 1,
             "artifact_mode": mode,
             "source_frame_count": count,
@@ -272,10 +671,21 @@ class WholeClipNativeContractTests(unittest.TestCase):
             "scheduled_depth_update_count": count,
             "tensorrt_enqueue_count": count,
             "depth_reuse_interval": 1,
+            "model": "test-model",
             "adaptive_state": {
                 "file": whole.TRACE_NAME,
                 "schema": whole.ADAPTIVE_TRACE_SCHEMA,
                 "frame_count": count,
+            },
+            "scene_controller": scene_controller_descriptor,
+            "scene_controller_source_time": {
+                "enabled": True,
+                "schema": whole.SCENE_CONTROLLER_SOURCE_TIME_SCHEMA,
+                "clock": whole.SCENE_CONTROLLER_SOURCE_TIME_CLOCK,
+                "file_sha256": source_time["sha256"],
+                "frame_count": count,
+                "total_elapsed_seconds":
+                    source_time["total_elapsed_seconds"],
             },
             "sbs": {
                 "enabled": mode == "conversion",
@@ -283,7 +693,12 @@ class WholeClipNativeContractTests(unittest.TestCase):
                     "sbs_<frame-id>.png" if mode == "conversion" else None),
                 "frame_count": count if mode == "conversion" else 0,
             },
-        }), encoding="utf-8")
+        }
+        if follow_mode is not None:
+            contract["resolved_runtime"] = {"follow_mode": follow_mode}
+        (root / whole.NATIVE_CONTRACT_NAME).write_text(
+            json.dumps(contract), encoding="utf-8")
+        return source_time
 
     def test_conversion_requires_exact_sbs_identity_set(self):
         timeline = {
@@ -292,14 +707,16 @@ class WholeClipNativeContractTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            self._write_contract(root)
+            source_time = self._write_contract(root)
             (root / "sbs_00001.png").write_bytes(b"x")
             (root / "sbs_00002.png").write_bytes(b"x")
-            contract = whole.validate_native_outputs(root, timeline, "conversion")
+            contract = whole.validate_native_outputs(
+                root, timeline, "conversion", source_time)
             self.assertEqual(contract["source_frame_count"], 2)
             (root / "sbs_00002.png").unlink()
             with self.assertRaisesRegex(whole.WholeClipError, "identities"):
-                whole.validate_native_outputs(root, timeline, "conversion")
+                whole.validate_native_outputs(
+                    root, timeline, "conversion", source_time)
 
     def test_conversion_accepts_mixed_numeric_and_fallback_identity_order(self):
         timeline = {
@@ -312,10 +729,57 @@ class WholeClipNativeContractTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            self._write_contract(root, count=3)
+            source_time = self._write_contract(
+                root,
+                count=3,
+                frame_ids=["00010", "00020", "00002"],
+            )
             for frame_id in ("00010", "00020", "00002"):
                 (root / f"sbs_{frame_id}.png").write_bytes(b"x")
-            whole.validate_native_outputs(root, timeline, "conversion")
+            whole.validate_native_outputs(
+                root, timeline, "conversion", source_time)
+
+    def test_followed_analysis_uses_native_sequence_ids_for_controller_trace(self):
+        timeline = {
+            "frame_count": 3,
+            "frames": [
+                {"frame_id": "00010"},
+                {"frame_id": "00020"},
+                {"frame_id": "00002"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_time = self._write_contract(
+                root,
+                mode="adaptive",
+                count=3,
+                frame_ids=[
+                    "0000000001", "0000000002", "0000000003",
+                ],
+                follow_mode=True,
+            )
+            whole.validate_native_outputs(
+                root, timeline, "adaptive", source_time)
+
+    def test_analysis_rejects_disabled_scene_controller_descriptor(self):
+        timeline = {
+            "frame_count": 2,
+            "frames": [{"frame_id": "00001"}, {"frame_id": "00002"}],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_time = self._write_contract(
+                root,
+                scene_controller_backend="off",
+            )
+            (root / "sbs_00001.png").write_bytes(b"x")
+            (root / "sbs_00002.png").write_bytes(b"x")
+            with self.assertRaisesRegex(
+                    whole.WholeClipError,
+                    "scene-controller backend mismatch"):
+                whole.validate_native_outputs(
+                    root, timeline, "conversion", source_time)
 
     def test_native_inference_attestation_rejects_analysis_and_replay_drift(self):
         timeline = {
@@ -324,7 +788,7 @@ class WholeClipNativeContractTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            self._write_contract(root)
+            source_time = self._write_contract(root)
             (root / "sbs_00001.png").write_bytes(b"x")
             (root / "sbs_00002.png").write_bytes(b"x")
             contract_path = root / whole.NATIVE_CONTRACT_NAME
@@ -336,7 +800,33 @@ class WholeClipNativeContractTests(unittest.TestCase):
                     whole.WholeClipError,
                     "analysis inference attestation"):
                 whole.validate_native_outputs(
-                    root, timeline, "conversion")
+                    root, timeline, "conversion", source_time)
+
+        one_frame_analysis = {
+            "inference_mode": "single-pass-tensorrt",
+            "depth_inference_enabled": True,
+            "scheduled_depth_update_count": 1,
+            "tensorrt_enqueue_count": 1,
+            "depth_reuse_interval": 1,
+        }
+        whole._validate_native_inference_attestation(
+            one_frame_analysis,
+            replay=False,
+            source_frame_count=1,
+        )
+        for key in (
+                "scheduled_depth_update_count",
+                "tensorrt_enqueue_count"):
+            wrong_type = dict(one_frame_analysis)
+            wrong_type[key] = True
+            with self.assertRaisesRegex(
+                    whole.WholeClipError,
+                    "analysis inference attestation"):
+                whole._validate_native_inference_attestation(
+                    wrong_type,
+                    replay=False,
+                    source_frame_count=1,
+                )
 
         replay_contract = {
             "inference_mode": "scene-cache-replay",
@@ -349,17 +839,188 @@ class WholeClipNativeContractTests(unittest.TestCase):
             replay=True,
             source_frame_count=2,
         )
-        replay_contract["depth_inference_enabled"] = True
-        with self.assertRaisesRegex(
-                whole.WholeClipError,
-                "scene replay inference attestation"):
-            whole._validate_native_inference_attestation(
-                replay_contract,
-                replay=True,
-                source_frame_count=2,
-            )
+        for key, wrong_value in (
+                ("depth_inference_enabled", 0),
+                ("scheduled_depth_update_count", False),
+                ("tensorrt_enqueue_count", False)):
+            wrong_type = dict(replay_contract)
+            wrong_type[key] = wrong_value
+            with self.assertRaisesRegex(
+                    whole.WholeClipError,
+                    "scene replay inference attestation"):
+                whole._validate_native_inference_attestation(
+                    wrong_type,
+                    replay=True,
+                    source_frame_count=2,
+                )
 
-    def test_capability_gate_requires_schema_2_sixteen_word_cache_state(self):
+    def test_source_time_attestation_is_exact_and_replay_is_disabled(self):
+        source_time = {
+            "file": whole.SCENE_CONTROLLER_SOURCE_TIME_NAME,
+            "sha256": "1" * 64,
+            "schema": whole.SCENE_CONTROLLER_SOURCE_TIME_SCHEMA,
+            "clock": whole.SCENE_CONTROLLER_SOURCE_TIME_CLOCK,
+            "frame_count": 2,
+            "total_elapsed_seconds": 0.04,
+        }
+        enabled = {
+            "scene_controller_source_time": {
+                "enabled": True,
+                "schema": whole.SCENE_CONTROLLER_SOURCE_TIME_SCHEMA,
+                "clock": whole.SCENE_CONTROLLER_SOURCE_TIME_CLOCK,
+                "file_sha256": source_time["sha256"],
+                "frame_count": 2,
+                "total_elapsed_seconds": 0.04,
+            },
+        }
+        whole._validate_scene_controller_source_time_attestation(
+            enabled, source_time, enabled=True)
+        for key, value in (
+                ("enabled", 1),
+                ("schema", 1.0),
+                ("file_sha256", "3" * 64),
+                ("clock", "forged-presentation-clock"),
+                ("frame_count", 2.0),
+                ("total_elapsed_seconds", 0)):
+            with self.subTest(enabled_field=key):
+                mutated = copy.deepcopy(enabled)
+                mutated["scene_controller_source_time"][key] = value
+                with self.assertRaisesRegex(
+                        whole.WholeClipError,
+                        "source-time attestation"):
+                    whole._validate_scene_controller_source_time_attestation(
+                        mutated, source_time, enabled=True)
+
+        disabled = {
+            "scene_controller_source_time": {
+                "enabled": False,
+                "schema": None,
+                "clock": None,
+                "file_sha256": None,
+                "frame_count": 0,
+                "total_elapsed_seconds": 0.0,
+            },
+        }
+        whole._validate_scene_controller_source_time_attestation(
+            disabled, None, enabled=False)
+        disabled["scene_controller_source_time"][
+            "total_elapsed_seconds"] = 0
+        with self.assertRaisesRegex(
+                whole.WholeClipError, "source-time attestation"):
+            whole._validate_scene_controller_source_time_attestation(
+                disabled, None, enabled=False)
+
+    def test_scene_replay_command_disables_controller_without_sidecar(self):
+        import scene_plan
+
+        class ReplayCommandCaptured(RuntimeError):
+            pass
+
+        captured = []
+
+        def capture_command(command, _cwd, _log_path):
+            captured.append(command)
+            raise ReplayCommandCaptured
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            producer = mock.Mock()
+            producer.extension = "png"
+            with mock.patch.object(
+                        scene_plan,
+                        "native_scene_plan_document",
+                        return_value={"schema": 1}), \
+                    mock.patch.object(
+                        whole,
+                        "LoggedSubprocess",
+                        side_effect=capture_command):
+                with self.assertRaises(ReplayCommandCaptured):
+                    whole.render_cached_scene(
+                        sunshine=root / "sunshine.exe",
+                        conf=root / "bench.conf",
+                        build_dir=root,
+                        cache_dir=root / "cache",
+                        scene={
+                            "scene_id": 1,
+                            "start_sequence": 1,
+                            "end_sequence_exclusive": 2,
+                        },
+                        render_producer=producer,
+                        bridge=mock.Mock(),
+                        encoder=mock.Mock(),
+                        work_dir=root / "work",
+                        plans_dir=root / "plans",
+                        timeout_seconds=1.0,
+                        expected_sbs_dimensions=(32, 8),
+                    )
+
+        self.assertEqual(len(captured), 1)
+        command = captured[0]
+        controller_index = command.index("--scene-controller")
+        self.assertEqual(command[controller_index + 1], "off")
+        self.assertNotIn("--scene-controller-source-time", command)
+
+    def test_browser_qualification_requires_the_analysis_source_time_attestation(self):
+        source_time = {
+            "file": whole.SCENE_CONTROLLER_SOURCE_TIME_NAME,
+            "sha256": "1" * 64,
+            "schema": whole.SCENE_CONTROLLER_SOURCE_TIME_SCHEMA,
+            "clock": whole.SCENE_CONTROLLER_SOURCE_TIME_CLOCK,
+            "frame_count": 2,
+            "total_elapsed_seconds": 0.04,
+        }
+        native_contract = {
+            "scene_controller_source_time": {
+                "enabled": True,
+                "schema": whole.SCENE_CONTROLLER_SOURCE_TIME_SCHEMA,
+                "clock": whole.SCENE_CONTROLLER_SOURCE_TIME_CLOCK,
+                "file_sha256": source_time["sha256"],
+                "frame_count": source_time["frame_count"],
+                "total_elapsed_seconds":
+                    source_time["total_elapsed_seconds"],
+            },
+        }
+        timeline = {"frame_count": 2}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.object(
+                        whole.scene_controller_eval,
+                        "evaluate_generated_clip_trace",
+                        return_value={"schema": 1, "pass": True}) as evaluate:
+                result = whole.browser_scene_qualification(
+                    root / "frames",
+                    root / "artifacts",
+                    native_contract,
+                    timeline,
+                    source_time,
+                    root,
+                )
+                self.assertTrue(result["pass"])
+                evaluate.assert_called_once_with(
+                    root / "frames",
+                    root / "artifacts",
+                    native_contract,
+                    timeline,
+                    root / "browser_scene_controller_report.json",
+                )
+
+                mismatched = copy.deepcopy(native_contract)
+                mismatched["scene_controller_source_time"][
+                    "file_sha256"] = "3" * 64
+                with self.assertRaisesRegex(
+                        whole.WholeClipError,
+                        "source-time attestation"):
+                    whole.browser_scene_qualification(
+                        root / "frames",
+                        root / "artifacts",
+                        mismatched,
+                        timeline,
+                        source_time,
+                        root,
+                    )
+                self.assertEqual(evaluate.call_count, 1)
+
+    def test_capability_gate_requires_schema_3_sixteen_word_cache_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             output = root / "capabilities.json"
@@ -378,7 +1039,7 @@ class WholeClipNativeContractTests(unittest.TestCase):
                     root / "capabilities.log",
                 )
             state = result["value"]["native_whole_clip"]["scene_cache_state"]
-            self.assertEqual(state["schema"], 2)
+            self.assertEqual(state["schema"], 3)
             self.assertEqual(state["word_count"], 16)
             self.assertEqual(state["dtype"], "uint32-le")
 
@@ -418,6 +1079,61 @@ class WholeClipNativeContractTests(unittest.TestCase):
                         output,
                         root / "capabilities.log",
                     )
+
+    def test_capability_gate_rejects_json_scalar_type_coercions(self):
+        mutations = [
+            (("schema",), True),
+            (("native_whole_clip", "scene_controller_trace",
+              "controller_schema"), float(
+                  whole.scene_controller_trace.controller_contract.SCHEMA_VERSION)),
+            (("native_whole_clip", "scene_controller_trace",
+              "active_roi_authority"), 0),
+            (("native_whole_clip", "scene_controller_trace",
+              "source_time_override"), "wall-clock-delta-v1"),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "capabilities.json"
+            for path, replacement in mutations:
+                with self.subTest(path=path):
+                    value = self._capabilities()
+                    target = value
+                    for key in path[:-1]:
+                        target = target[key]
+                    target[path[-1]] = replacement
+
+                    def publish_capabilities(
+                            command, _cwd, _log_path, document=value):
+                        Path(command[-1]).write_text(
+                            json.dumps(document), encoding="utf-8")
+
+                    with mock.patch.object(
+                            whole, "run_logged_command",
+                            side_effect=publish_capabilities):
+                        with self.assertRaisesRegex(
+                                whole.WholeClipError,
+                                "required bounded scene replay"):
+                            whole.query_native_capabilities(
+                                root / "sunshine.exe",
+                                root,
+                                output,
+                                root / "capabilities.log",
+                            )
+
+    def test_bounded_adaptive_transport_cannot_be_overridden(self):
+        with self.assertRaisesRegex(
+                whole.WholeClipError, "owned by the whole-clip wrapper"):
+            whole.validate_native_extra(["--bounded-adaptive-state"])
+        with self.assertRaisesRegex(
+                whole.WholeClipError, "owned by the whole-clip wrapper"):
+            whole.validate_native_extra([
+                "--scene-controller-source-time", "forged.json",
+            ])
+
+    def test_capability_gate_rejects_roi_and_inference_contract_drift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "capabilities.json"
 
             def publish_wrong_roi_schema(command, _cwd, _log_path):
                 value = self._capabilities()
@@ -833,6 +1549,52 @@ class WholeClipSceneCacheTests(unittest.TestCase):
                     whole.WholeClipError, "retained source identity"):
                 ledger.acknowledge_pair(5, contract)
 
+    def test_ledger_allows_only_explicit_terminal_forced_current_depth(self):
+        def contract_for_sequence() -> dict:
+            contract = self._contract(processed_count=6)
+            contract["render_config"]["depth_reuse_interval"] = 4
+            return contract
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_triplet(root, sequence=6)
+            ledger = whole.SceneCacheLedger(root, 10_000)
+            with self.assertRaisesRegex(
+                    whole.WholeClipError, "retained source identity"):
+                ledger.acknowledge_pair(6, contract_for_sequence())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_triplet(root, sequence=6)
+            ledger = whole.SceneCacheLedger(root, 10_000)
+            self.assertEqual(
+                ledger.acknowledge_pair(
+                    6,
+                    contract_for_sequence(),
+                    allow_forced_current=True,
+                ),
+                14 * 14 * 4 + 64 + 192,
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_triplet(
+                root,
+                sequence=6,
+                state_mutator=lambda state: state.__setitem__(
+                    whole.SCENE_CACHE_SUBJECT_WORDS + 3,
+                    self._float_word(0.0),
+                ),
+            )
+            ledger = whole.SceneCacheLedger(root, 10_000)
+            with self.assertRaisesRegex(
+                    whole.WholeClipError, "retained source identity"):
+                ledger.acknowledge_pair(
+                    6,
+                    contract_for_sequence(),
+                    allow_forced_current=True,
+                )
+
     def test_ledger_accepts_first_valid_and_reports_preserve_previous_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -896,7 +1658,7 @@ class WholeClipSceneCacheTests(unittest.TestCase):
             (
                 "history state",
                 whole.ADAPTIVE_MODEL_INPUT_HISTORY_STATE_WORD,
-                4.0,
+                5.0,
             ),
         )
         for name, index, value in invalid_fields:
@@ -1069,6 +1831,8 @@ class WholeClipOrchestrationTests(unittest.TestCase):
         self.assertEqual(args.extra, ["--zero-plane", "subject"])
         with self.assertRaisesRegex(whole.WholeClipError, "owned"):
             whole.validate_native_extra(["--limit=5"])
+        with self.assertRaisesRegex(whole.WholeClipError, "owned"):
+            whole.validate_native_extra(["--scene-controller", "off"])
 
     def test_run_uses_bounded_scene_pipeline_and_cleans_success_work(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1087,9 +1851,12 @@ class WholeClipOrchestrationTests(unittest.TestCase):
 
             def fake_pipeline(**kwargs):
                 calls.append(kwargs)
+                source_time = kwargs["scene_controller_source_time"]
                 artifacts = output / "artifacts"
                 (artifacts / whole.TRACE_NAME).write_text(
                     '{"schema":3}\n', encoding="utf-8")
+                (artifacts / whole.SCENE_CONTROLLER_TRACE_NAME).write_text(
+                    '{"record":"header"}\n', encoding="utf-8")
                 native_contract = {
                     "schema": 1,
                     "artifact_mode": "adaptive",
@@ -1105,6 +1872,40 @@ class WholeClipOrchestrationTests(unittest.TestCase):
                         "enabled": False,
                         "file_pattern": None,
                         "frame_count": 0,
+                    },
+                    "scene_controller": {
+                        "enabled": True,
+                        "backend": "shadow_rules",
+                        "active_roi_authority": False,
+                        "transport":
+                            whole.scene_controller_trace.TRACE_TRANSPORT,
+                        "file": whole.SCENE_CONTROLLER_TRACE_NAME,
+                        "header_file": None,
+                        "frame_file": None,
+                        "retained_history": True,
+                        "trace_schema":
+                            whole.scene_controller_trace.TRACE_SCHEMA,
+                        "controller_schema": (
+                            whole.scene_controller_trace.controller_contract.SCHEMA_VERSION
+                        ),
+                        "rule_revision": (
+                            whole.scene_controller_trace.controller_contract.RULE_REVISION
+                        ),
+                        "ordered_abi_hash": (
+                            whole.scene_controller_trace.controller_contract.ORDERED_ABI_HASH
+                        ),
+                        "frame_count": 2,
+                    },
+                    "scene_controller_source_time": {
+                        "enabled": True,
+                        "schema":
+                            whole.SCENE_CONTROLLER_SOURCE_TIME_SCHEMA,
+                        "clock":
+                            whole.SCENE_CONTROLLER_SOURCE_TIME_CLOCK,
+                        "file_sha256": source_time["sha256"],
+                        "frame_count": source_time["frame_count"],
+                        "total_elapsed_seconds":
+                            source_time["total_elapsed_seconds"],
                     },
                 }
                 (artifacts / whole.NATIVE_CONTRACT_NAME).write_text(json.dumps({
@@ -1125,6 +1926,10 @@ class WholeClipOrchestrationTests(unittest.TestCase):
                     },
                     "cache": {"enabled": False},
                     "render_scenes": [],
+                    "scene_controller_qualification": {
+                        "schema": 1,
+                        "pass": True,
+                    },
                     "encoder": None,
                 }
 
@@ -1157,11 +1962,86 @@ class WholeClipOrchestrationTests(unittest.TestCase):
             )
             self.assertEqual(
                 calls[0]["native_extra"], ["--zero-plane", "subject"])
+            source_time_path = calls[0][
+                "scene_controller_source_time_path"]
+            self.assertEqual(
+                source_time_path,
+                output / whole.SCENE_CONTROLLER_SOURCE_TIME_NAME,
+            )
+            self.assertTrue(source_time_path.is_file())
+            self.assertEqual(
+                calls[0]["scene_controller_source_time"]["sha256"],
+                whole.sha256_file(source_time_path),
+            )
+            self.assertEqual(
+                calls[0]["qualification_frames_dir"],
+                source,
+            )
             self.assertFalse((output / "work").exists())
             manifest = json.loads(
                 (output / whole.MANIFEST_NAME).read_text(encoding="utf-8"))
             self.assertEqual(manifest["status"], "complete")
             self.assertEqual(manifest["timeline"]["frame_count"], 2)
+            self.assertEqual(
+                manifest["scene_controller_source_time"]["sha256"],
+                whole.sha256_file(source_time_path),
+            )
+            self.assertTrue(
+                manifest["scene_controller_qualification"]["pass"])
+
+    def test_streaming_pipeline_authenticates_fixture_before_native_launch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "generated"
+            source.mkdir()
+            producer = mock.Mock()
+            producer.extension = "png"
+            with mock.patch.object(
+                    whole.scene_controller_eval,
+                    "load_generated_clip_contract",
+                    side_effect=whole.scene_controller_eval.SceneControllerEvalError(
+                        "forged generated fixture"
+                    )), mock.patch.object(
+                        whole, "LoggedSubprocess"
+                    ) as launch:
+                with self.assertRaisesRegex(
+                        whole.WholeClipError,
+                        "source authentication failed"):
+                    whole.run_streaming_scene_pipeline(
+                        sunshine=root / "sunshine.exe",
+                        conf=root / "bench.conf",
+                        build_dir=root,
+                        timeline={
+                            "frame_count": 1,
+                            "frames": [{
+                                "frame_id": "0000000001",
+                                "pts_time": 0.0,
+                                "duration_time": 1.0 / 30.0,
+                            }],
+                        },
+                        source_width=320,
+                        source_height=180,
+                        analysis_producer=producer,
+                        render_producer=None,
+                        output_dir=root / "out",
+                        work_dir=root / "work",
+                        artifacts_dir=root / "artifacts",
+                        scene_controller_source_time_path=(
+                            root / whole.SCENE_CONTROLLER_SOURCE_TIME_NAME
+                        ),
+                        scene_controller_source_time={},
+                        native_extra=[],
+                        cache_max_bytes=whole.DEFAULT_SCENE_CACHE_MAX_BYTES,
+                        cache_budget_policy="segment",
+                        ffmpeg=None,
+                        ffprobe=None,
+                        source_video=None,
+                        output_video=None,
+                        codec="hevc_nvenc",
+                        color={"mode": "sdr"},
+                        qualification_frames_dir=source,
+                    )
+            launch.assert_not_called()
 
     def test_failed_native_process_retains_work_and_failure_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:

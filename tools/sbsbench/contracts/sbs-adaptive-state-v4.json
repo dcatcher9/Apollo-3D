@@ -1,5 +1,5 @@
 {
-  "schema": 3,
+  "schema": 4,
   "source": "depth_subject_resolve_cs.SubjectState",
   "capture": "every-source-frame-after-estimator-update",
   "render_prefix_words": 12,
@@ -35,6 +35,7 @@
     "appearance_quiet_once",
     "cut_latched",
     "appearance_recovery",
+    "geometry_confirmation_pending",
     "hard_cut_pulse",
     "hard_cut_count",
     "external_cut_count",
@@ -48,7 +49,8 @@
     "geometry_low_once": 2,
     "appearance_quiet_once": 3,
     "latched": 4,
-    "appearance_recovery": 5
+    "appearance_recovery": 5,
+    "geometry_confirmation_pending": 6
   },
   "analysis_flag_bits": {
     "appearance_proposal": 0,
@@ -56,7 +58,9 @@
     "structureless": 2,
     "same_return": 3,
     "veto": 4,
-    "relative_spike": 5
+    "relative_spike": 5,
+    "localized_appearance_proposal": 6,
+    "geometry_confirmation_candidate": 7
   },
   "fields": [
     {"index": 0, "name": "subject_recenter_delta", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
@@ -82,7 +86,7 @@
     {"index": 20, "name": "range_collapsed", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
     {"index": 21, "name": "depth_ready", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
     {"index": 22, "name": "hard_cut_pulse", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
-    {"index": 23, "name": "reserved", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 23, "name": "appearance_change_baseline_ema", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
     {"index": 24, "name": "current_edge_fraction", "type": "float32", "gpu_encoding": "float", "initial": -1.0},
     {"index": 25, "name": "current_zero_anchor_candidate_shift_px", "type": "float32", "gpu_encoding": "float", "initial": -1.0},
     {"index": 26, "name": "structural_change_fraction", "type": "float32", "gpu_encoding": "float", "initial": -1.0},

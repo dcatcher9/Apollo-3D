@@ -272,6 +272,7 @@ def validate_latched_motion_hard_cut_source(src_by_id, contract):
     shifts = contract.get("horizontal_roll_px_by_frame")
     setup = contract.get("setup_pulse_frame")
     persistent = contract.get("persistent_motion_frames")
+    candidate = contract.get("escape_candidate_frame")
     escape = contract.get("escape_pulse_frame")
     if frame_ids != list(range(1, len(frame_ids) + 1)):
         raise ValueError(
@@ -280,8 +281,9 @@ def validate_latched_motion_hard_cut_source(src_by_id, contract):
             not isinstance(shifts, list) or len(shifts) != len(frame_ids)):
         raise ValueError(
             "latched-motion source construction does not match the source frame set")
-    if persistent != [setup, escape - 1]:
-        raise ValueError("latched-motion persistent range does not end immediately before escape")
+    if persistent != [setup, candidate] or escape != candidate + 1:
+        raise ValueError(
+            "latched-motion persistent range must end at the one-update escape candidate")
 
     arrays = {}
     for frame_id in frame_ids:
@@ -299,17 +301,17 @@ def validate_latched_motion_hard_cut_source(src_by_id, contract):
                 f"frame {frame_id} violates the declared horizontal-roll source contract")
 
     prelude_base = base_frames[0]
-    final_base = base_frames[escape - 1]
+    final_base = base_frames[candidate - 1]
     if (any(base != prelude_base for base in base_frames[:setup - 1]) or
             any(shift != 0 for shift in shifts[:setup - 1]) or
-            any(base != setup for base in base_frames[setup - 1:escape - 1]) or
+            any(base != setup for base in base_frames[setup - 1:candidate - 1]) or
             base_frames[setup - 1] != setup or shifts[setup - 1] != 0 or
-            any(base != final_base for base in base_frames[escape - 1:]) or
-            any(shift != 0 for shift in shifts[escape - 1:]) or
+            any(base != final_base for base in base_frames[candidate - 1:]) or
+            any(shift != 0 for shift in shifts[candidate - 1:]) or
             final_base != prelude_base):
         raise ValueError(
             "latched-motion source phases do not match prelude/motion/return construction")
-    motion_shifts = shifts[setup - 1:escape - 1]
+    motion_shifts = shifts[setup - 1:candidate - 1]
     if (len(set(motion_shifts)) < 2 or
             any(left == right for left, right in zip(
                 motion_shifts, motion_shifts[1:]))):
@@ -358,6 +360,7 @@ def apply_shot_state_contract(rows, frame_ids, trace, contract):
     relative_escape_ok = None
     if kind == "latched-motion-hard-cut":
         setup = contract["setup_pulse_frame"]
+        candidate = contract["escape_candidate_frame"]
         escape = contract["escape_pulse_frame"]
 
         def age_reset_at(frame_id):
@@ -368,14 +371,15 @@ def apply_shot_state_contract(rows, frame_ids, trace, contract):
             return (before["initialized"] > 0.5 and before["scene_age"] > 0.5 and
                     after["initialized"] > 0.5 and after["scene_age"] < 0.5)
 
-        persistent_ids = list(range(setup, escape))
+        persistent_ids = list(range(setup, candidate))
         escape_previous = trace.get(predecessor_frame_id(trace, escape))
         relative_escape_ok = bool(
-            setup in trace and escape in trace and
+            setup in trace and candidate in trace and escape in trace and
             age_reset_at(setup) and age_reset_at(escape) and
             int(round(trace[setup]["cut_flags"])) == 16 and
             all(frame_id in trace and int(round(trace[frame_id]["cut_flags"])) == 16
                 for frame_id in persistent_ids) and
+            int(round(trace[candidate]["cut_flags"])) == 80 and
             all(not age_reset_at(frame_id) for frame_id in range(setup + 1, escape)) and
             escape_previous is not None and escape_previous["scene_age"] >= 8.0)
 

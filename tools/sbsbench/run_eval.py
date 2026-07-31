@@ -536,7 +536,8 @@ def load_clip_metadata(path, suite=None, required=True):
             },
             "latched-motion-hard-cut": {
                 "setup_pulse_frame", "persistent_motion_frames",
-                "escape_pulse_frame", "source_base_frame_by_frame",
+                "escape_candidate_frame", "escape_pulse_frame",
+                "source_base_frame_by_frame",
                 "horizontal_roll_px_by_frame", "rgb_transform",
             },
             "structureless-history-bridge": {
@@ -596,20 +597,23 @@ def load_clip_metadata(path, suite=None, required=True):
         if kind == "latched-motion-hard-cut":
             setup = shot_contract.get("setup_pulse_frame")
             persistent = shot_contract.get("persistent_motion_frames")
+            candidate = shot_contract.get("escape_candidate_frame")
             escape = shot_contract.get("escape_pulse_frame")
             base_frames = shot_contract.get("source_base_frame_by_frame")
             shifts = shot_contract.get("horizontal_roll_px_by_frame")
             if (not isinstance(setup, int) or isinstance(setup, bool) or
+                    not isinstance(candidate, int) or isinstance(candidate, bool) or
                     not isinstance(escape, int) or isinstance(escape, bool) or
-                    not monitor_from <= setup < escape <= frame_count or
+                    not monitor_from <= setup < candidate < escape <= frame_count or
+                    escape != candidate + 1 or
                     pulses != [setup, escape]):
                 raise ValueError(
                     f"invalid clip metadata {meta_path}: latched-motion pulse schedule must "
-                    "contain exactly the setup cut and later escape cut")
-            if (not isinstance(persistent, list) or persistent != [setup, escape - 1]):
+                    "contain the setup cut and the one-update-confirmed escape cut")
+            if (not isinstance(persistent, list) or persistent != [setup, candidate]):
                 raise ValueError(
                     f"invalid clip metadata {meta_path}: persistent_motion_frames must span "
-                    "from the setup cut through the frame before the escape cut")
+                    "from the setup cut through the held escape candidate")
             if (not isinstance(base_frames, list) or len(base_frames) != frame_count or
                     any(not isinstance(frame, int) or isinstance(frame, bool) or
                         not 1 <= frame <= frame_count for frame in base_frames)):

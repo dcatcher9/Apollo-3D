@@ -8,12 +8,14 @@
 //                       cut-state flags (stored exactly as a uint-valued float),
 //                       model-input history state:
 //                         0 empty, 1 normal advance, 2 one-update hold,
-//                         3 persistent-low endpoint (advance + return authority) }
+//                         3 persistent-low endpoint (advance + return authority),
+//                         4 geometry-confirmation hold }
 // Append-only telemetry; the production warp never reads these elements:
 //   SubjectState[3] = { settle-latched edge fraction, current depth-change fraction,
 //                       valid-depth fraction, effective raw-range width }
 //   SubjectState[4] = uint-bit counters { hard cuts, external cuts, empty raw, collapsed raw }
-//   SubjectState[5] = { current range-collapsed flag, depth-ready flag, hard-cut pulse, reserved }
+//   SubjectState[5] = { current range-collapsed flag, depth-ready flag, hard-cut pulse,
+//                       ordinary appearance-change baseline EMA }
 //   SubjectState[6] = { current edge fraction, current zero-anchor candidate shift in source px,
 //                       structural-change fraction, raw-RGB-change fraction }
 //   SubjectState[7] = { current/previous/common structural support fractions,
@@ -23,7 +25,7 @@
 
 RWStructuredBuffer<uint>   SubjectHist  : register(u0);  // 256 weighted bins (subject estimate)
 RWStructuredBuffer<float4> SubjectState : register(u1);  // [0..7], see header above
-RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 bins + seven evidence counters
+RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 bins + nine evidence counters
 StructuredBuffer<uint4>    FrameRoiTransform : register(t0);
 StructuredBuffer<uint4>    PreviousFrameRoiTransform : register(t1);
 
@@ -44,12 +46,16 @@ StructuredBuffer<uint4>    PreviousFrameRoiTransform : register(t1);
 // Geometry rearms after two low-depth updates; appearance rearms after two updates without the
 // qualified broad-RGB + ordinal proposal. CUT_FLAG_LATCHED is a permanent "has accepted a cut"
 // phase marker for this estimator lifetime: independent branch rearm deliberately never clears
-// it. CUT_FLAG_APPEARANCE_RECOVERY marks the first update after a photometric veto. Geometry is
-// blocked only if that update is a quiet, well-supported repeat of the same endpoint: neural-depth
-// normalization can remain unsettled one update after a flash has returned even though RGB and
-// ordinal evidence are already quiet. A disjoint or correlated new endpoint remains authoritative
-// during that guard. This asymmetry distinguishes post-cut recovery from startup, where no weak
-// or relative cut path is allowed.
+// it. CUT_FLAG_APPEARANCE_RECOVERY marks the first update after a photometric veto.
+// CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING means the last reliable appearance/depth endpoint is
+// held for exactly one subsequent valid update: appearance-correlated cuts remain immediate,
+// while a depth-only candidate must remain different from that held endpoint before it pulses.
+// Geometry is
+// blocked for exactly one following valid update unless that update is itself a new qualified
+// appearance proposal: neural-depth normalization can remain unsettled after a flash even while
+// normal playback motion resumes. A new broad semantic endpoint remains authoritative immediately.
+// This asymmetry distinguishes post-cut recovery from startup, where no weak or relative cut path
+// is allowed.
 // Scene-risk endpoints, calibrated against the MEASURED weighted edge fraction of the committed
 // suites. The three stable-shot synthetic probes used for calibration (fast_motion 0.0001,
 // flat_transition 0.0048, flat_page 0.0087) sit far below the remaining non-probe measurements,
@@ -111,7 +117,7 @@ void main() {
     bool histogram_resources_safe =
         subject_hist_count >= NUM_BINS &&
         subject_hist_stride == 4u &&
-        plain_hist_count >= NUM_BINS + 7u &&
+        plain_hist_count >= NUM_BINS + 9u &&
         plain_hist_stride == 4u;
     bool subject_state_safe =
         subject_state_count >= SBS_ADAPTIVE_STATE_VECTOR_COUNT &&
@@ -234,14 +240,17 @@ void main() {
         float change_fraction = ptotal > 0.5f ? (float)PlainHist[NUM_BINS + 1] / ptotal : 0.0f;
         float structural_change_fraction = ptotal > 0.5f ?
                                            (float)PlainHist[NUM_BINS + 2] / ptotal : 0.0f;
+        uint raw_rgb_change_count = PlainHist[NUM_BINS + 3];
         float raw_rgb_change_fraction = ptotal > 0.5f ?
-                                        (float)PlainHist[NUM_BINS + 3] / ptotal : 0.0f;
+                                        (float)raw_rgb_change_count / ptotal : 0.0f;
         float current_structural_support_fraction = ptotal > 0.5f ?
                                                     (float)PlainHist[NUM_BINS + 4] / ptotal : 0.0f;
         float previous_structural_support_fraction = ptotal > 0.5f ?
                                                      (float)PlainHist[NUM_BINS + 5] / ptotal : 0.0f;
         float common_structural_support_fraction = ptotal > 0.5f ?
                                                    (float)PlainHist[NUM_BINS + 6] / ptotal : 0.0f;
+        uint brightness_rise_count = PlainHist[NUM_BINS + 7];
+        uint brightness_fall_count = PlainHist[NUM_BINS + 8];
         // Normalization settling can change 50-60% of depth texels on the first few frames.
         // The measured committed cuts reach 62.5% and 63.1%, while ordinary core motion stays
         // below 19.7%; 60% is therefore the armed geometry authority. The weaker 25% path requires
@@ -274,11 +283,8 @@ void main() {
             SBS_STATE_MODEL_INPUT_HISTORY_STATE(s2) < 2.5f;
         bool low_structure_scene =
             !geometry_reseed &&
-            SBS_STATE_MODEL_INPUT_HISTORY_STATE(s2) > 2.5f;
-        bool appearance_proposal =
-            model_input_history_valid &&
-            raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH &&
-            structural_change_fraction >= STRUCTURAL_COLOR_CUT_HIGH;
+            SBS_STATE_MODEL_INPUT_HISTORY_STATE(s2) > 2.5f &&
+            SBS_STATE_MODEL_INPUT_HISTORY_STATE(s2) < 3.5f;
         bool current_structure_reliable =
             current_structural_support_fraction >= STRUCTURAL_COLOR_MIN_SUPPORT;
         bool previous_structure_reliable =
@@ -291,18 +297,61 @@ void main() {
                 STRUCTURAL_COLOR_EXPOSURE_MIN_COMMON_RATIO *
                 min(current_structural_support_fraction,
                     previous_structural_support_fraction);
+        float appearance_change_baseline = initialized ?
+            saturate(
+                SBS_STATE_APPEARANCE_CHANGE_BASELINE_EMA(
+                    telemetry_flags)) :
+            0.0f;
+        bool broad_appearance_proposal =
+            model_input_history_valid &&
+            raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH &&
+            structural_change_fraction >= STRUCTURAL_COLOR_CUT_HIGH;
+        // A stable embedded player can replace only ~20% of the model grid. Treat that as a
+        // localized cut only when it is a sharp increase above this estimator's persistent
+        // ordinary-motion baseline and both endpoints have usable ordinal structure. The broad
+        // 70% path above remains unchanged and exposure classification remains frame-wide.
+        bool localized_appearance_proposal =
+            model_input_history_valid &&
+            current_structure_reliable &&
+            previous_structure_reliable &&
+            raw_rgb_change_fraction >= LOCALIZED_RGB_CUT_FLOOR &&
+            structural_change_fraction >= STRUCTURAL_COLOR_CUT_HIGH &&
+            raw_rgb_change_fraction >=
+                appearance_change_baseline +
+                LOCALIZED_RGB_CUT_BASELINE_MARGIN &&
+            raw_rgb_change_fraction >=
+                max(
+                    LOCALIZED_RGB_CUT_FLOOR,
+                    appearance_change_baseline *
+                    LOCALIZED_RGB_CUT_BASELINE_MULTIPLIER);
+        bool appearance_proposal =
+            broad_appearance_proposal ||
+            localized_appearance_proposal;
         bool broad_rgb_transition =
             model_input_history_valid &&
             raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH;
-        // Quiet ordinal change is evidence of exposure only when both frames and their common
-        // comparison sites carry enough usable structure. Without these support checks, a black
-        // or fully clipped frame vacuously looks exposure-like because every ordinal pair abstains.
+        // Quiet ordinal evidence remains the conservative exposure path. The motion-bearing ratio
+        // path additionally requires most broadly changed texels to move capture-domain maxRGB in
+        // one direction. This admits a gain over playing video while rejecting mixed-sign semantic
+        // cuts in the ratio overlap. The structural support checks below keep clipped/empty
+        // endpoints from passing through abstention.
+        bool brightness_direction_consistent =
+            raw_rgb_change_count > 0u &&
+            (float)max(brightness_rise_count, brightness_fall_count) >=
+                STRUCTURAL_COLOR_EXPOSURE_MIN_DIRECTIONAL_SHARE *
+                (float)raw_rgb_change_count;
+        bool exposure_structure_preserved =
+            structural_change_fraction < STRUCTURAL_COLOR_EXPOSURE_QUIET ||
+            (structural_change_fraction <=
+                 STRUCTURAL_COLOR_EXPOSURE_MAX_FLIP_TO_RGB_RATIO *
+                 raw_rgb_change_fraction &&
+             brightness_direction_consistent);
         bool exposure_like_transition =
             broad_rgb_transition &&
             current_structure_reliable &&
             previous_structure_reliable &&
             common_structure_representative &&
-            structural_change_fraction < STRUCTURAL_COLOR_EXPOSURE_QUIET;
+            exposure_structure_preserved;
         // A transition from reliable structure into a structureless frame is intentionally
         // deferred and the last reliable appearance/depth history is retained below. Raw RGB
         // cannot qualify the flat frame itself: a uniform value can match the previous scene's
@@ -338,21 +387,16 @@ void main() {
             same_scene_gap_return;
         bool photometric_recovery_veto =
             exposure_like_transition || same_scene_gap_return;
-        bool quiet_supported_repeat =
-            model_input_history_valid &&
-            current_structure_reliable &&
-            previous_structure_reliable &&
-            common_structure_representative &&
-            raw_rgb_change_fraction < STRUCTURELESS_RETURN_RGB_SAME_MAX &&
-            structural_change_fraction < STRUCTURAL_COLOR_EXPOSURE_QUIET;
         uint cut_flags = (uint)max(SBS_STATE_CUT_FLAGS(s2), 0.0f);
         bool geometry_armed = (cut_flags & CUT_FLAG_GEOMETRY_ARMED) != 0u;
         bool appearance_armed = (cut_flags & CUT_FLAG_APPEARANCE_ARMED) != 0u;
         bool cut_latched = (cut_flags & CUT_FLAG_LATCHED) != 0u;
         bool appearance_recovery =
             (cut_flags & CUT_FLAG_APPEARANCE_RECOVERY) != 0u;
+        bool geometry_confirmation_pending =
+            (cut_flags & CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING) != 0u;
         bool appearance_recovery_tail =
-            appearance_recovery && quiet_supported_repeat;
+            appearance_recovery && !appearance_proposal;
         bool appearance_veto =
             base_appearance_veto || appearance_recovery_tail;
         float depth_change_baseline = initialized ?
@@ -373,6 +417,53 @@ void main() {
             (change_fraction >= depth_change_baseline + DEPTH_CUT_RELATIVE_MARGIN ||
              change_fraction >=
                  depth_change_baseline * DEPTH_CUT_RELATIVE_MULTIPLIER);
+        bool immediate_appearance_cut =
+            appearance_armed &&
+            appearance_proposal &&
+            !appearance_veto &&
+            change_fraction >= DEPTH_CUT_CORROBORATE;
+        // Depth normalization and ordinary motion can move most depth texels without replacing
+        // visible structure. Require a small exposure-invariant ordinal change on every ordinary
+        // geometry-confirmation update. Persistent structureless content is the deliberate
+        // exception: it has no current ordinal evidence, and its one-update hold already provides
+        // the independent confirmation described below.
+        bool geometry_structure_corroborated =
+            persistent_structureless_transition ||
+            structural_change_fraction >= STRUCTURAL_GEOMETRY_CUT_FLOOR;
+        bool geometry_confirmation_candidate =
+            !appearance_veto &&
+            geometry_structure_corroborated &&
+            ((geometry_armed &&
+              change_fraction >= DEPTH_CUT_HIGH) ||
+             (low_structure_scene &&
+              current_structure_reliable &&
+              change_fraction >= DEPTH_CUT_HIGH) ||
+             (geometry_confirmation_pending &&
+              current_structure_reliable &&
+              change_fraction >= DEPTH_CUT_HIGH) ||
+             relative_geometry_spike);
+        // Persistent structureless content already spent one valid update holding the last
+        // reliable endpoint (history state 2), so its second low-structure update is itself the
+        // confirmation. Every other geometry-only candidate starts a one-update hold. The next
+        // valid update is still compared against the pre-candidate endpoint and must independently
+        // qualify before the cut is accepted.
+        bool structureless_candidate_already_confirmed =
+            persistent_structureless_transition &&
+            geometry_confirmation_candidate;
+        bool confirmed_geometry_cut =
+            geometry_confirmation_pending &&
+            geometry_confirmation_candidate;
+        bool shot_cut =
+            initialized &&
+            (immediate_appearance_cut ||
+             structureless_candidate_already_confirmed ||
+             confirmed_geometry_cut);
+        bool start_geometry_confirmation =
+            initialized &&
+            !shot_cut &&
+            !geometry_confirmation_pending &&
+            geometry_confirmation_candidate &&
+            !persistent_structureless_transition;
         uint analysis_flags =
             (appearance_proposal ? ANALYSIS_FLAG_APPEARANCE_PROPOSAL : 0u) |
             (exposure_like_transition ? ANALYSIS_FLAG_EXPOSURE_LIKE : 0u) |
@@ -380,35 +471,42 @@ void main() {
                 ANALYSIS_FLAG_STRUCTURELESS : 0u) |
             (same_scene_gap_return ? ANALYSIS_FLAG_SAME_RETURN : 0u) |
             (appearance_veto ? ANALYSIS_FLAG_VETO : 0u) |
-            (relative_geometry_spike ? ANALYSIS_FLAG_RELATIVE_SPIKE : 0u);
+            (relative_geometry_spike ? ANALYSIS_FLAG_RELATIVE_SPIKE : 0u) |
+            (localized_appearance_proposal ?
+                ANALYSIS_FLAG_LOCALIZED_APPEARANCE_PROPOSAL : 0u) |
+            (geometry_confirmation_candidate ?
+                ANALYSIS_FLAG_GEOMETRY_CONFIRMATION_CANDIDATE : 0u);
         // Do not bit-cast small uint masks into IEEE subnormals. GPU FTZ mode
         // legally collapses those bit patterns to zero before readback.
         SBS_STATE_ANALYSIS_FLAGS(analysis_diagnostics) = (float)analysis_flags;
-        bool shot_cut =
-            initialized &&
-            ((geometry_armed && !appearance_veto &&
-              change_fraction >= DEPTH_CUT_HIGH) ||
-             (appearance_armed && appearance_proposal &&
-              change_fraction >= DEPTH_CUT_CORROBORATE) ||
-             (low_structure_scene && current_structure_reliable &&
-              change_fraction >= DEPTH_CUT_HIGH) ||
-             relative_geometry_spike);
 
         if (!initialized) {
             scene_age = 0.0f;
             cut_flags = 0u;
             depth_change_baseline = change_fraction;
+            appearance_change_baseline = 0.0f;
         } else if (shot_cut) {
             scene_age = 0.0f;
             cut_flags = CUT_FLAG_LATCHED;
             depth_change_baseline = change_fraction;
+            appearance_change_baseline = 0.0f;
         } else {
             // The structureless frame has no trustworthy geometry. Its comparison to the
             // preserved endpoint must not pull the relative-cut baseline upward and hide the
             // supported A-vs-B return that resolves the deferred transition.
-            if (!structureless_transition && !appearance_recovery_tail) {
+            if (!structureless_transition &&
+                !appearance_recovery_tail &&
+                !start_geometry_confirmation) {
                 depth_change_baseline =
                     lerp(depth_change_baseline, change_fraction, DEPTH_CUT_BASELINE_ALPHA);
+            }
+            if (model_input_history_valid &&
+                !start_geometry_confirmation) {
+                appearance_change_baseline =
+                    lerp(
+                        appearance_change_baseline,
+                        raw_rgb_change_fraction,
+                        APPEARANCE_CUT_BASELINE_ALPHA);
             }
             if (!cut_latched) {
                 if (scene_age >= POP_CLASSIFY_SETTLE_FRAMES) {
@@ -446,16 +544,22 @@ void main() {
                 cut_flags |= CUT_FLAG_APPEARANCE_RECOVERY;
             } else {
                 // `appearance_recovery` above was read from the previous update, so the first
-                // quiet update remains guarded and only arms geometry again for the next frame.
+                // valid non-proposal update remains guarded and only exposes geometry again on
+                // the next update.
                 cut_flags &= ~CUT_FLAG_APPEARANCE_RECOVERY;
+            }
+            cut_flags &= ~CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING;
+            if (start_geometry_confirmation) {
+                cut_flags |= CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING;
             }
         }
         float next_model_input_history_state =
             geometry_reseed ? 1.0f :
-            (structureless_transition ? 2.0f :
-             ((persistent_structureless_transition ||
-               (low_structure_scene && !current_structure_reliable)) ? 3.0f :
-              1.0f));
+            (start_geometry_confirmation ? 4.0f :
+             (structureless_transition ? 2.0f :
+              ((persistent_structureless_transition ||
+                (low_structure_scene && !current_structure_reliable)) ? 3.0f :
+               1.0f)));
 
         // Damp the stretch band, the last per-frame adaptive gain in the depth domain that had no
         // smoothing at all (subject depth and the normalization min/max are both EMA'd).
@@ -601,6 +705,8 @@ void main() {
             next_model_input_history_state;
         SBS_STATE_LATCHED_EDGE_FRACTION(telemetry) = latched_edge_fraction;
         SBS_STATE_CURRENT_DEPTH_CHANGE_FRACTION(telemetry) = change_fraction;
+        SBS_STATE_APPEARANCE_CHANGE_BASELINE_EMA(telemetry_flags) =
+            appearance_change_baseline;
         if (shot_cut) {
             SBS_STATE_HARD_CUT_COUNT(health_counters) =
                 min(SBS_STATE_HARD_CUT_COUNT(health_counters) + 1u, 0xfffffffeu);
@@ -632,4 +738,6 @@ void main() {
     PlainHist[NUM_BINS + 4] = 0u;
     PlainHist[NUM_BINS + 5] = 0u;
     PlainHist[NUM_BINS + 6] = 0u;
+    PlainHist[NUM_BINS + 7] = 0u;
+    PlainHist[NUM_BINS + 8] = 0u;
 }

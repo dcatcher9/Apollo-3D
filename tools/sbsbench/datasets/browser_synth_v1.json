@@ -1,0 +1,986 @@
+{
+  "schema": 1,
+  "generator": "browser-scene-compositor-v1",
+  "description": "Locked procedural browser layouts for Host SBS ROI and event-scope safety.",
+  "scenarios": [
+    {
+      "name": "video_sidebar_ad",
+      "description": "One clear playing video beside an independently animated and cutting ad/sidebar.",
+      "seed": 1103,
+      "width": 320,
+      "height": 180,
+      "frames": 64,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "primary_video",
+      "selected_instance_id": 101,
+      "layers": [
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 320, 180],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "browser_chrome",
+          "role": "chrome",
+          "instance_id": 0,
+          "rect": [0, 0, 320, 22],
+          "pattern": "chrome",
+          "z": 1
+        },
+        {
+          "name": "primary_video",
+          "role": "primary_video",
+          "instance_id": 101,
+          "rect": [16, 31, 220, 158],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["subject"],
+          "cut_scope": "content",
+          "animation": "frame"
+        },
+        {
+          "name": "stable_gutter",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [223, 31, 230, 158],
+          "pattern": "solid",
+          "z": 3,
+          "tags": ["stable_gutter"]
+        },
+        {
+          "name": "sidebar",
+          "role": "ad_unsafe",
+          "instance_id": 201,
+          "rect": [233, 31, 312, 169],
+          "pattern": "cards",
+          "z": 2,
+          "tags": ["unrelated"],
+          "cut_scope": "exterior",
+          "animation": "frame"
+        },
+        {
+          "name": "sidebar_ad",
+          "role": "ad_unsafe",
+          "instance_id": 202,
+          "rect": [238, 105, 307, 151],
+          "pattern": "ad",
+          "z": 4,
+          "tags": ["unrelated"],
+          "cut_scope": "exterior",
+          "animation": "frame"
+        }
+      ],
+      "events": {
+        "content_cut_frames": [19],
+        "exterior_cut_frames": [9, 19, 27],
+        "exposure_gain_percent_by_frame": {
+          "14": 145
+        },
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": []
+      }
+    },
+    {
+      "name": "paused_video_animated_sidebar",
+      "description": "A playing video is acquired, pauses while the sidebar keeps animating, then resumes in the same rectangle.",
+      "seed": 1709,
+      "width": 360,
+      "height": 240,
+      "frames": 64,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "primary_video",
+      "selected_instance_id": 151,
+      "layers": [
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 360, 240],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "browser_chrome",
+          "role": "chrome",
+          "instance_id": 0,
+          "rect": [0, 0, 360, 29],
+          "pattern": "chrome",
+          "z": 1
+        },
+        {
+          "name": "playing_then_paused_video",
+          "role": "primary_video",
+          "instance_id": 151,
+          "rect": [18, 41, 248, 211],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["subject"],
+          "cut_scope": "content",
+          "animation": "frame",
+          "animation_pause_frames": [25, 44]
+        },
+        {
+          "name": "stable_gutter",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [251, 41, 259, 211],
+          "pattern": "solid",
+          "z": 3,
+          "tags": ["stable_gutter"]
+        },
+        {
+          "name": "animated_sidebar",
+          "role": "ad_unsafe",
+          "instance_id": 251,
+          "rect": [262, 41, 351, 225],
+          "pattern": "ad",
+          "z": 2,
+          "tags": ["unrelated"],
+          "cut_scope": "exterior",
+          "animation": "frame"
+        }
+      ],
+      "events": {
+        "content_cut_frames": [],
+        "exterior_cut_frames": [8, 16, 24, 40, 48, 56],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": []
+      }
+    },
+    {
+      "name": "cold_start_static_media",
+      "description": "A cold static player-shaped region beside a comparable animated sidebar has no playback authority and must abstain.",
+      "seed": 1913,
+      "width": 352,
+      "height": 220,
+      "frames": 32,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "ambiguous",
+      "selected_instance_id": 0,
+      "layers": [
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 352, 220],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "browser_chrome",
+          "role": "chrome",
+          "instance_id": 0,
+          "rect": [0, 0, 352, 28],
+          "pattern": "chrome",
+          "z": 1
+        },
+        {
+          "name": "static_media",
+          "role": "accepted_content",
+          "instance_id": 171,
+          "rect": [18, 38, 245, 202],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["subject"]
+        },
+        {
+          "name": "stable_gutter",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [248, 38, 257, 202],
+          "pattern": "solid",
+          "z": 3,
+          "tags": ["stable_gutter"]
+        },
+        {
+          "name": "animated_sidebar",
+          "role": "ad_unsafe",
+          "instance_id": 271,
+          "rect": [261, 38, 343, 211],
+          "pattern": "ad",
+          "z": 2,
+          "tags": ["unrelated"],
+          "cut_scope": "exterior",
+          "animation": "frame"
+        }
+      ],
+      "events": {
+        "content_cut_frames": [],
+        "exterior_cut_frames": [8, 16, 24],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": []
+      }
+    },
+    {
+      "name": "collage_scroll",
+      "description": "A non-rectangular thumbnail collage scrolls inside a stable browser envelope.",
+      "seed": 2211,
+      "width": 300,
+      "height": 200,
+      "frames": 28,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "content_collage",
+      "selected_instance_id": 301,
+      "layers": [
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 300, 200],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "chrome",
+          "role": "chrome",
+          "instance_id": 0,
+          "rect": [0, 0, 300, 24],
+          "pattern": "chrome",
+          "z": 1
+        },
+        {
+          "name": "collage",
+          "role": "accepted_content",
+          "instance_id": 301,
+          "rect": [17, 32, 283, 188],
+          "pattern": "cards",
+          "z": 2,
+          "animation": "scroll"
+        },
+        {
+          "name": "left_gutter",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [17, 32, 22, 188],
+          "pattern": "solid",
+          "z": 3,
+          "tags": ["stable_gutter"]
+        },
+        {
+          "name": "right_gutter",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [278, 32, 283, 188],
+          "pattern": "solid",
+          "z": 3,
+          "tags": ["stable_gutter"]
+        }
+      ],
+      "events": {
+        "content_cut_frames": [],
+        "exterior_cut_frames": [],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [8, 17],
+        "scroll_step_px": [0, 5],
+        "geometry_reset_frames": []
+      }
+    },
+    {
+      "name": "ambiguous_dual_video",
+      "description": "Two equally strong playing videos require full-frame abstention.",
+      "seed": 3301,
+      "width": 360,
+      "height": 180,
+      "frames": 48,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "ambiguous",
+      "selected_instance_id": 0,
+      "layers": [
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 360, 180],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "chrome",
+          "role": "chrome",
+          "instance_id": 0,
+          "rect": [0, 0, 360, 22],
+          "pattern": "chrome",
+          "z": 1
+        },
+        {
+          "name": "left_video",
+          "role": "primary_video",
+          "instance_id": 401,
+          "rect": [14, 39, 173, 145],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["ambiguous_candidate"],
+          "cut_scope": "content",
+          "animation": "frame"
+        },
+        {
+          "name": "right_video",
+          "role": "primary_video",
+          "instance_id": 402,
+          "rect": [187, 39, 346, 145],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["ambiguous_candidate"],
+          "cut_scope": "content",
+          "animation": "frame"
+        }
+      ],
+      "events": {
+        "content_cut_frames": [13],
+        "exterior_cut_frames": [],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": []
+      }
+    },
+    {
+      "name": "partial_player",
+      "description": "A moving region clipped by the browser edge has no closed rectangular boundary and must abstain.",
+      "seed": 4409,
+      "width": 240,
+      "height": 320,
+      "frames": 48,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "ambiguous",
+      "selected_instance_id": 0,
+      "layers": [
+        {
+          "name": "unrelated_window",
+          "role": "ad_unsafe",
+          "instance_id": 0,
+          "rect": [0, 0, 69, 320],
+          "pattern": "noise",
+          "z": 0,
+          "tags": ["unrelated"]
+        },
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [69, 0, 240, 320],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "chrome",
+          "role": "chrome",
+          "instance_id": 0,
+          "rect": [69, 0, 240, 39],
+          "pattern": "chrome",
+          "z": 1
+        },
+        {
+          "name": "partial_video",
+          "role": "primary_video",
+          "instance_id": 501,
+          "rect": [116, 66, 240, 299],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["subject"],
+          "cut_scope": "content",
+          "animation": "frame"
+        }
+      ],
+      "events": {
+        "content_cut_frames": [],
+        "exterior_cut_frames": [],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": []
+      }
+    },
+    {
+      "name": "embedded_to_fullscreen",
+      "description": "One video changes from embedded playback to identity fullscreen without a content cut.",
+      "seed": 5519,
+      "width": 384,
+      "height": 216,
+      "frames": 64,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "primary_video",
+      "expected_layout_after_geometry_reset": "identity_fullscreen",
+      "selected_instance_id": 601,
+      "layers": [
+        {
+          "name": "page_before",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 384, 216],
+          "pattern": "page",
+          "z": 0,
+          "visible_phase": "before_geometry_reset"
+        },
+        {
+          "name": "chrome_before",
+          "role": "chrome",
+          "instance_id": 0,
+          "rect": [0, 0, 384, 26],
+          "pattern": "chrome",
+          "z": 1,
+          "visible_phase": "before_geometry_reset"
+        },
+        {
+          "name": "video",
+          "role": "primary_video",
+          "instance_id": 601,
+          "rect": [47, 41, 337, 204],
+          "rect_after_geometry_reset": [0, 0, 384, 216],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["subject"],
+          "cut_scope": "content",
+          "animation": "frame"
+        }
+      ],
+      "events": {
+        "content_cut_frames": [],
+        "exterior_cut_frames": [],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": [45]
+      }
+    },
+    {
+      "name": "video_sidebar_style_swap",
+      "description": "A palette and texture counterexample: the selected player uses card texture while unrelated sidebar motion uses video texture.",
+      "seed": 7907,
+      "width": 288,
+      "height": 192,
+      "frames": 48,
+      "fps_num": 24,
+      "fps_den": 1,
+      "expected_layout": "primary_video",
+      "selected_instance_id": 701,
+      "layers": [
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 288, 192],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "chrome",
+          "role": "chrome",
+          "instance_id": 0,
+          "rect": [0, 0, 288, 24],
+          "pattern": "chrome",
+          "z": 1
+        },
+        {
+          "name": "selected_player_counterstyle",
+          "role": "primary_video",
+          "instance_id": 701,
+          "rect": [14, 34, 197, 168],
+          "pattern": "cards",
+          "z": 2,
+          "tags": ["subject"],
+          "cut_scope": "content",
+          "animation": "frame"
+        },
+        {
+          "name": "stable_gutter",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [200, 34, 207, 168],
+          "pattern": "solid",
+          "z": 3,
+          "tags": ["stable_gutter"]
+        },
+        {
+          "name": "video_textured_sidebar",
+          "role": "ad_unsafe",
+          "instance_id": 702,
+          "rect": [211, 34, 280, 180],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["unrelated"],
+          "cut_scope": "exterior",
+          "animation": "frame"
+        }
+      ],
+      "events": {
+        "content_cut_frames": [33],
+        "exterior_cut_frames": [8, 40],
+        "exposure_gain_percent_by_frame": {
+          "12": 135
+        },
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": []
+      }
+    },
+    {
+      "name": "static_dense_collage",
+      "description": "One dense, gutter-bounded static image grid has a simple enclosing rectangle and remains required CONTENT.",
+      "seed": 8209,
+      "width": 320,
+      "height": 200,
+      "frames": 32,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "content_collage",
+      "selected_instance_id": 801,
+      "layers": [
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 320, 200],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "chrome",
+          "role": "chrome",
+          "instance_id": 0,
+          "rect": [0, 0, 320, 24],
+          "pattern": "chrome",
+          "z": 1
+        },
+        {
+          "name": "dense_collage",
+          "role": "accepted_content",
+          "instance_id": 801,
+          "rect": [20, 36, 300, 186],
+          "pattern": "cards",
+          "z": 2,
+          "tags": ["subject"]
+        },
+        {
+          "name": "left_gutter",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [14, 36, 19, 186],
+          "pattern": "solid",
+          "z": 3,
+          "tags": ["stable_gutter"]
+        },
+        {
+          "name": "right_gutter",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [301, 36, 306, 186],
+          "pattern": "solid",
+          "z": 3,
+          "tags": ["stable_gutter"]
+        }
+      ],
+      "events": {
+        "content_cut_frames": [],
+        "exterior_cut_frames": [],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": []
+      }
+    },
+    {
+      "name": "stable_relocated_player",
+      "description": "A proven player moves once, retains its incumbent ROI during a 0.75-second challenger dwell, then accepts the stable destination in the explicit frame 59-61 window.",
+      "seed": 8311,
+      "width": 360,
+      "height": 220,
+      "frames": 72,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "primary_video",
+      "selected_instance_id": 811,
+      "layers": [
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 360, 220],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "chrome",
+          "role": "chrome",
+          "instance_id": 0,
+          "rect": [0, 0, 360, 27],
+          "pattern": "chrome",
+          "z": 1
+        },
+        {
+          "name": "relocated_player",
+          "role": "primary_video",
+          "instance_id": 811,
+          "rect": [18, 42, 170, 180],
+          "rect_after_relocation": [190, 42, 342, 180],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["subject"],
+          "animation": "frame"
+        }
+      ],
+      "events": {
+        "content_cut_frames": [],
+        "exterior_cut_frames": [],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": [],
+        "relocation_frames": [37],
+        "relocation_acceptance_windows": [[59, 61]]
+      }
+    },
+    {
+      "name": "cross_axis_disjoint_motion",
+      "description": "Comparable moving regions occupy disjoint corners and axes, so no unique rectangular focus is inferable.",
+      "seed": 8423,
+      "width": 360,
+      "height": 220,
+      "frames": 48,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "ambiguous",
+      "selected_instance_id": 0,
+      "layers": [
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 360, 220],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "top_left_motion",
+          "role": "primary_video",
+          "instance_id": 821,
+          "rect": [14, 34, 164, 112],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["ambiguous_candidate"],
+          "animation": "frame"
+        },
+        {
+          "name": "bottom_right_motion",
+          "role": "primary_video",
+          "instance_id": 822,
+          "rect": [196, 122, 346, 206],
+          "pattern": "cards",
+          "z": 2,
+          "tags": ["ambiguous_candidate"],
+          "animation": "frame"
+        }
+      ],
+      "events": {
+        "content_cut_frames": [],
+        "exterior_cut_frames": [],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": []
+      }
+    },
+    {
+      "name": "sparse_three_side_candidate",
+      "description": "Sparse activity with only three supported sides cannot establish a safe closed rectangle.",
+      "seed": 8537,
+      "width": 300,
+      "height": 220,
+      "frames": 48,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "ambiguous",
+      "selected_instance_id": 0,
+      "layers": [
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 300, 220],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "open_edge_motion",
+          "role": "primary_video",
+          "instance_id": 831,
+          "rect": [138, 55, 300, 196],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["ambiguous_candidate"],
+          "animation": "frame"
+        },
+        {
+          "name": "top_gutter",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [138, 49, 300, 54],
+          "pattern": "solid",
+          "z": 3,
+          "tags": ["stable_gutter"]
+        },
+        {
+          "name": "bottom_gutter",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [138, 197, 300, 202],
+          "pattern": "solid",
+          "z": 3,
+          "tags": ["stable_gutter"]
+        },
+        {
+          "name": "left_gutter",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [132, 55, 137, 196],
+          "pattern": "solid",
+          "z": 3,
+          "tags": ["stable_gutter"]
+        }
+      ],
+      "events": {
+        "content_cut_frames": [],
+        "exterior_cut_frames": [],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": []
+      }
+    },
+    {
+      "name": "cold_paused_video",
+      "description": "A single clear dense static envelope without playback history is required CONTENT, never VIDEO.",
+      "seed": 8641,
+      "width": 320,
+      "height": 200,
+      "frames": 32,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "content_collage",
+      "selected_instance_id": 841,
+      "layers": [
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 320, 200],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "static_player_shape",
+          "role": "accepted_content",
+          "instance_id": 841,
+          "rect": [34, 42, 286, 184],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["subject"]
+        }
+      ],
+      "events": {
+        "content_cut_frames": [],
+        "exterior_cut_frames": [],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": []
+      }
+    },
+    {
+      "name": "ambiguous_candidate_during_scroll",
+      "description": "A candidate first appears during page translation, but the clip never proves one uniquely attributable post-scroll video rectangle. FULL_FRAME scroll hold covers the scroll and 0.12-second tail, histories rebase on release, and ambiguity remains FULL_FRAME.",
+      "seed": 8747,
+      "width": 320,
+      "height": 200,
+      "frames": 55,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "ambiguous",
+      "selected_instance_id": 0,
+      "layers": [
+        {
+          "name": "scrolling_page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 320, 200],
+          "pattern": "cards",
+          "z": 0,
+          "animation": "scroll"
+        },
+        {
+          "name": "moving_candidate",
+          "role": "primary_video",
+          "instance_id": 851,
+          "rect": [38, 42, 282, 182],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["subject"],
+          "animation": "frame"
+        }
+      ],
+      "events": {
+        "content_cut_frames": [],
+        "exterior_cut_frames": [],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [2, 24],
+        "scroll_step_px": [0, 4],
+        "geometry_reset_frames": []
+      }
+    },
+    {
+      "name": "animated_sidebar_no_dominant_player",
+      "description": "A player-like region and animated sidebar have comparable support, so neither is allowed to win.",
+      "seed": 8861,
+      "width": 360,
+      "height": 220,
+      "frames": 48,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "ambiguous",
+      "selected_instance_id": 0,
+      "layers": [
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 360, 220],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "player_like",
+          "role": "primary_video",
+          "instance_id": 861,
+          "rect": [14, 38, 174, 190],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["ambiguous_candidate"],
+          "animation": "frame"
+        },
+        {
+          "name": "sidebar_like",
+          "role": "ad_unsafe",
+          "instance_id": 862,
+          "rect": [186, 38, 346, 190],
+          "pattern": "cards",
+          "z": 2,
+          "tags": ["ambiguous_candidate", "unrelated"],
+          "animation": "frame"
+        }
+      ],
+      "events": {
+        "content_cut_frames": [],
+        "exterior_cut_frames": [],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": []
+      }
+    },
+    {
+      "name": "interrupted_relocation",
+      "description": "A proven incumbent keeps its ROI while a separated challenger appears too briefly to satisfy the 0.75-second replacement dwell, then continues normally.",
+      "seed": 8971,
+      "width": 360,
+      "height": 220,
+      "frames": 64,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "primary_video",
+      "selected_instance_id": 871,
+      "layers": [
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 360, 220],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "incumbent_like",
+          "role": "primary_video",
+          "instance_id": 871,
+          "rect": [16, 40, 170, 184],
+          "pattern": "video",
+          "z": 2,
+          "tags": ["subject"],
+          "animation": "frame"
+        },
+        {
+          "name": "interrupted_destination",
+          "role": "primary_video",
+          "instance_id": 872,
+          "rect": [190, 40, 344, 184],
+          "pattern": "cards",
+          "z": 2,
+          "tags": ["ambiguous_candidate"],
+          "animation": "frame",
+          "visible_frames": [18, 30]
+        }
+      ],
+      "events": {
+        "content_cut_frames": [],
+        "exterior_cut_frames": [],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": []
+      }
+    },
+    {
+      "name": "grayscale_static_media",
+      "description": "A grayscale static texture cannot be separated reliably from dense text or chrome, so it must abstain.",
+      "seed": 9091,
+      "width": 320,
+      "height": 200,
+      "frames": 32,
+      "fps_num": 30,
+      "fps_den": 1,
+      "expected_layout": "ambiguous",
+      "selected_instance_id": 0,
+      "layers": [
+        {
+          "name": "page",
+          "role": "background",
+          "instance_id": 0,
+          "rect": [0, 0, 320, 200],
+          "pattern": "page",
+          "z": 0
+        },
+        {
+          "name": "grayscale_region",
+          "role": "accepted_content",
+          "instance_id": 881,
+          "rect": [30, 38, 290, 184],
+          "pattern": "grayscale",
+          "z": 2,
+          "tags": ["ambiguous_candidate"]
+        }
+      ],
+      "events": {
+        "content_cut_frames": [],
+        "exterior_cut_frames": [],
+        "exposure_gain_percent_by_frame": {},
+        "scroll_frames": [],
+        "scroll_step_px": [0, 0],
+        "geometry_reset_frames": []
+      }
+    }
+  ]
+}

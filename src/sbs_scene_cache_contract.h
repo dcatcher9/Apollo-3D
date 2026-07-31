@@ -24,7 +24,7 @@
 
 namespace sbs_scene_cache {
   inline constexpr std::uint32_t contract_schema = 2u;
-  inline constexpr std::uint32_t cached_state_schema = 2u;
+  inline constexpr std::uint32_t cached_state_schema = 3u;
   inline constexpr std::uint32_t frame_metadata_magic = 0x32434253u;  // "SBC2"
   inline constexpr std::uint32_t frame_metadata_schema = 1u;
   inline constexpr std::uint32_t frame_metadata_vector_count = 12u;
@@ -348,7 +348,8 @@ namespace sbs_scene_cache {
     const std::uint64_t expected_sequence,
     const std::uint32_t expected_source_width,
     const std::uint32_t expected_source_height,
-    const std::uint32_t depth_reuse_interval
+    const std::uint32_t depth_reuse_interval,
+    const bool allow_forced_current = false
   ) {
     const auto width = value.depth[0u];
     const auto height = value.depth[1u];
@@ -399,8 +400,17 @@ namespace sbs_scene_cache {
     const auto expected_retained =
       ((expected_sequence - 1u) / depth_reuse_interval) *
       depth_reuse_interval;
-    return retained <= expected_retained &&
-           retained % depth_reuse_interval == 0u &&
+    const auto current_source_frame = expected_sequence - 1u;
+    const bool forced_current =
+      allow_forced_current && retained == current_source_frame;
+    return
+           (
+             forced_current ||
+             (
+               retained <= expected_retained &&
+               retained % depth_reuse_interval == 0u
+             )
+           ) &&
            valid_roi_transform(
              value.roi_transform,
              retained,
@@ -458,7 +468,7 @@ namespace sbs_scene_cache {
       cut_flags <=
         static_cast<float>(sbs_adaptive_state::known_cut_flag_mask) &&
       std::trunc(cut_flags) == cut_flags &&
-      history_state >= 0.0f && history_state <= 3.0f &&
+      history_state >= 0.0f && history_state <= 4.0f &&
       std::trunc(history_state) == history_state &&
       (initialized == 0.0f || initialized == 1.0f) &&
       frame_state_valid;
@@ -490,7 +500,8 @@ namespace sbs_scene_cache {
     const std::uint64_t expected_sequence,
     const std::uint32_t expected_source_width,
     const std::uint32_t expected_source_height,
-    const std::uint32_t depth_reuse_interval
+    const std::uint32_t depth_reuse_interval,
+    const bool allow_forced_current = false
   ) {
     if (
       !valid_frame_metadata(
@@ -498,7 +509,8 @@ namespace sbs_scene_cache {
         expected_sequence,
         expected_source_width,
         expected_source_height,
-        depth_reuse_interval
+        depth_reuse_interval,
+        allow_forced_current
       ) ||
       !valid_cached_state(state)
     ) {
@@ -507,10 +519,17 @@ namespace sbs_scene_cache {
     if (transform_is_unbound_zero(metadata.roi_transform)) {
       return true;
     }
-    const auto expected_retained =
+    const auto cadence_retained =
       ((expected_sequence - 1u) / depth_reuse_interval) *
       depth_reuse_interval;
     const auto retained = retained_source_frame_id(metadata);
+    const auto current_source_frame = expected_sequence - 1u;
+    const bool forced_current =
+      allow_forced_current && retained == current_source_frame;
+    const auto expected_retained =
+      forced_current ?
+        current_source_frame :
+        cadence_retained;
     const bool requires_previous =
       cached_state_requires_previous(state);
     return requires_previous ?
@@ -530,7 +549,8 @@ namespace sbs_scene_cache {
     const std::uint64_t scene_start_sequence,
     const std::uint32_t expected_source_width,
     const std::uint32_t expected_source_height,
-    const std::uint32_t depth_reuse_interval
+    const std::uint32_t depth_reuse_interval,
+    const bool allow_forced_current = false
   ) {
     return
       scene_start_sequence != 0u &&
@@ -541,7 +561,8 @@ namespace sbs_scene_cache {
         expected_sequence,
         expected_source_width,
         expected_source_height,
-        depth_reuse_interval
+        depth_reuse_interval,
+        allow_forced_current
       ) &&
       (
         expected_sequence != scene_start_sequence ||

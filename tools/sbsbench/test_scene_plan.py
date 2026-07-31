@@ -92,7 +92,12 @@ class StreamingScenePlannerTests(unittest.TestCase):
         for index in range(8):
             if index == 2:
                 frame = sample(
-                    index, depth=0.40, raw=0.95, structural=0.06)
+                    index,
+                    depth=0.40,
+                    raw=0.95,
+                    structural=0.06,
+                    flags=planning.ANALYSIS_APPEARANCE_PROPOSAL,
+                )
             elif index == 3:
                 frame = sample(index, pulse=True, depth=0.60)
             else:
@@ -105,6 +110,51 @@ class StreamingScenePlannerTests(unittest.TestCase):
             "moved_to_correlated_evidence",
         )
         self.assertEqual(finalized[0]["boundary"]["revision_updates"], -1)
+
+    def test_producer_localized_appearance_can_move_boundary(self):
+        def run(producer_qualified: bool):
+            planner = planning.StreamingScenePlanner(config())
+            finalized = []
+            for index in range(8):
+                if index == 2:
+                    frame = sample(
+                        index,
+                        depth=0.3864,
+                        raw=0.2019,
+                        structural=0.0396,
+                        flags=(
+                            planning.ANALYSIS_APPEARANCE_PROPOSAL
+                            if producer_qualified else 0
+                        ),
+                    )
+                elif index == 3:
+                    frame = sample(index, pulse=True, depth=0.61)
+                else:
+                    frame = sample(index)
+                finalized.extend(planner.feed(frame))
+            return finalized
+
+        qualified = run(True)
+        self.assertEqual(len(qualified), 1)
+        self.assertEqual(qualified[0]["end_sequence_exclusive"], 3)
+        self.assertTrue(
+            qualified[0]["boundary"]["evidence_window"]["selected"][
+                "appearance_qualified"
+            ]
+        )
+        self.assertEqual(
+            qualified[0]["boundary"]["decision"],
+            "moved_to_correlated_evidence",
+        )
+
+        unqualified = run(False)
+        self.assertEqual(len(unqualified), 1)
+        self.assertEqual(unqualified[0]["end_sequence_exclusive"], 4)
+        self.assertFalse(
+            unqualified[0]["boundary"]["evidence_window"]["selected"][
+                "appearance_qualified"
+            ]
+        )
 
     def test_duplicate_pulses_merge_but_distinct_close_cuts_survive(self):
         planner = planning.StreamingScenePlanner(config(
@@ -133,6 +183,7 @@ class StreamingScenePlannerTests(unittest.TestCase):
     def test_supported_flash_return_rejects_provisional_cut(self):
         planner = planning.StreamingScenePlanner(config())
         veto = (
+            planning.ANALYSIS_APPEARANCE_PROPOSAL |
             planning.ANALYSIS_EXPOSURE_LIKE |
             planning.ANALYSIS_APPEARANCE_VETO
         )
@@ -455,7 +506,8 @@ class StreamingScenePlannerTests(unittest.TestCase):
         for index in range(8):
             flags = (
                 planning.ANALYSIS_SAME_SCENE_RETURN if index == 1 else
-                (planning.ANALYSIS_EXPOSURE_LIKE |
+                (planning.ANALYSIS_APPEARANCE_PROPOSAL |
+                 planning.ANALYSIS_EXPOSURE_LIKE |
                  planning.ANALYSIS_APPEARANCE_VETO) if index == 3 else 0
             )
             planner.feed(sample(

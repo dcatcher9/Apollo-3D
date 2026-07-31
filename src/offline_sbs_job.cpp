@@ -33,6 +33,7 @@
 #include "config.h"
 #include "crypto.h"
 #include "entry_handler.h"
+#include "generated/sbs_scene_controller_contract.h"
 #include "gpu_workload_arbiter.h"
 #include "offline_sbs_contract.h"
 #include "offline_sbs_filesystem.h"
@@ -43,6 +44,7 @@
 #include <boost/process/v1/child.hpp>
 #include <boost/process/v1/environment.hpp>
 #include <boost/process/v1/group.hpp>
+#include <zlib.h>
 
 #include "logging.h"
 
@@ -76,6 +78,10 @@ namespace offline_sbs {
       1ull * 1024ull * 1024ull;
     constexpr std::uintmax_t max_contract_bytes = 16ull * 1024ull * 1024ull;
     constexpr std::uintmax_t max_scene_audit_bytes = 32ull * 1024ull * 1024ull;
+    constexpr std::uintmax_t max_scene_controller_summary_bytes =
+      64ull * 1024ull;
+    constexpr std::uint64_t max_scene_controller_record_bytes =
+      1ull * 1024ull * 1024ull;
     constexpr std::uintmax_t max_progress_contract_bytes = 256ull * 1024ull;
     constexpr std::size_t max_current_scene_bytes = 16ull * 1024ull;
     constexpr std::size_t max_scene_count = max_serialized_scene_count;
@@ -2762,6 +2768,609 @@ namespace offline_sbs {
       return value;
     }
 
+    std::optional<std::uint64_t> exact_json_unsigned(
+      const nlohmann::json &value
+    ) {
+      try {
+        if (!value.is_number_integer()) {
+          return std::nullopt;
+        }
+        if (value.is_number_unsigned()) {
+          return value.get<std::uint64_t>();
+        }
+        const auto signed_value = value.get<std::int64_t>();
+        if (signed_value < 0) {
+          return std::nullopt;
+        }
+        return static_cast<std::uint64_t>(signed_value);
+      } catch (...) {
+        return std::nullopt;
+      }
+    }
+
+    bool exact_json_string(
+      const nlohmann::json &value,
+      const std::string_view expected
+    ) {
+      return
+        value.is_string() &&
+        value.get_ref<const std::string &>() == expected;
+    }
+
+    bool lowercase_sha256(const std::string_view value) {
+      return
+        value.size() == 64 &&
+        std::ranges::all_of(value, [](const unsigned char character) {
+          return
+            (character >= '0' && character <= '9') ||
+            (character >= 'a' && character <= 'f');
+        });
+    }
+
+    std::string digest_hex(
+      const unsigned char *bytes,
+      const std::size_t size
+    ) {
+      static constexpr char digits[] = "0123456789abcdef";
+      std::string result(size * 2u, '\0');
+      for (std::size_t index = 0; index < size; ++index) {
+        result[index * 2u] = digits[bytes[index] >> 4u];
+        result[index * 2u + 1u] = digits[bytes[index] & 0x0fu];
+      }
+      return result;
+    }
+
+    struct scene_controller_gzip_resources_t {
+      gzFile gzip = nullptr;
+#ifdef _WIN32
+      HANDLE pinned = INVALID_HANDLE_VALUE;
+#else
+      int pinned = -1;
+#endif
+
+      ~scene_controller_gzip_resources_t() {
+        (void) close();
+      }
+
+      int close() noexcept {
+        int gzip_status = Z_OK;
+        if (gzip != nullptr) {
+          gzip_status = gzclose(std::exchange(gzip, nullptr));
+        }
+#ifdef _WIN32
+        if (pinned != INVALID_HANDLE_VALUE) {
+          CloseHandle(std::exchange(pinned, INVALID_HANDLE_VALUE));
+        }
+#else
+        if (pinned >= 0) {
+          ::close(std::exchange(pinned, -1));
+        }
+#endif
+        return gzip_status;
+      }
+    };
+
+    bool validate_scene_controller_gzip(
+      const fs::path &path,
+      const std::uint64_t expected_compressed_bytes,
+      const std::uint64_t expected_uncompressed_bytes,
+      const std::uint64_t expected_frame_count,
+      const std::string_view expected_sha256,
+      std::string &error
+    ) {
+      gzFile gzip = nullptr;
+#ifdef _WIN32
+      HANDLE pinned = CreateFileW(
+        path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
+        nullptr
+      );
+      if (pinned == INVALID_HANDLE_VALUE) {
+        error =
+          "cannot open scene-controller gzip without following links "
+          "(Windows error " + std::to_string(GetLastError()) + ")";
+        return false;
+      }
+      BY_HANDLE_FILE_INFORMATION initial {};
+      if (!GetFileInformationByHandle(pinned, &initial)) {
+        const auto inspect_error = GetLastError();
+        CloseHandle(pinned);
+        error =
+          "cannot inspect scene-controller gzip (Windows error " +
+          std::to_string(inspect_error) + ")";
+        return false;
+      }
+      const auto initial_size =
+        (static_cast<std::uint64_t>(initial.nFileSizeHigh) << 32u) |
+        initial.nFileSizeLow;
+      if (
+        (initial.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+        (initial.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+        initial_size != expected_compressed_bytes
+      ) {
+        CloseHandle(pinned);
+        error =
+          "scene-controller gzip is not the exact no-follow compressed artifact";
+        return false;
+      }
+      HANDLE duplicate = INVALID_HANDLE_VALUE;
+      if (!DuplicateHandle(
+            GetCurrentProcess(),
+            pinned,
+            GetCurrentProcess(),
+            &duplicate,
+            0,
+            FALSE,
+            DUPLICATE_SAME_ACCESS
+          )) {
+        const auto duplicate_error = GetLastError();
+        CloseHandle(pinned);
+        error =
+          "cannot duplicate scene-controller gzip handle (Windows error " +
+          std::to_string(duplicate_error) + ")";
+        return false;
+      }
+      const int descriptor = _open_osfhandle(
+        reinterpret_cast<std::intptr_t>(duplicate),
+        _O_RDONLY | _O_BINARY
+      );
+      if (descriptor < 0) {
+        CloseHandle(duplicate);
+        CloseHandle(pinned);
+        error = "cannot adapt the pinned scene-controller gzip handle";
+        return false;
+      }
+      gzip = gzdopen(descriptor, "rb");
+      if (gzip == nullptr) {
+        _close(descriptor);
+        CloseHandle(pinned);
+        error = "cannot initialize the pinned scene-controller gzip reader";
+        return false;
+      }
+#else
+      const int pinned = ::open(
+        path.c_str(),
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+      );
+      if (pinned < 0) {
+        error =
+          "cannot open scene-controller gzip without following links: " +
+          std::string {std::strerror(errno)};
+        return false;
+      }
+      struct stat initial {};
+      if (
+        ::fstat(pinned, &initial) != 0 ||
+        !S_ISREG(initial.st_mode) ||
+        initial.st_size <= 0 ||
+        static_cast<std::uint64_t>(initial.st_size) !=
+          expected_compressed_bytes
+      ) {
+        const auto inspect_error = errno;
+        ::close(pinned);
+        error =
+          "scene-controller gzip is not the exact no-follow compressed "
+          "artifact: " + std::string {std::strerror(inspect_error)};
+        return false;
+      }
+      const int descriptor = ::dup(pinned);
+      if (descriptor < 0) {
+        const auto duplicate_error = errno;
+        ::close(pinned);
+        error =
+          "cannot duplicate scene-controller gzip descriptor: " +
+          std::string {std::strerror(duplicate_error)};
+        return false;
+      }
+      gzip = gzdopen(descriptor, "rb");
+      if (gzip == nullptr) {
+        ::close(descriptor);
+        ::close(pinned);
+        error = "cannot initialize the pinned scene-controller gzip reader";
+        return false;
+      }
+#endif
+      scene_controller_gzip_resources_t resources {
+        .gzip = gzip,
+        .pinned = pinned,
+      };
+      const auto fail = [&](std::string message) {
+        (void) resources.close();
+        error = std::move(message);
+        return false;
+      };
+
+      std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> digest {
+        EVP_MD_CTX_new(),
+        &EVP_MD_CTX_free,
+      };
+      if (
+        !digest ||
+        EVP_DigestInit_ex(digest.get(), EVP_sha256(), nullptr) != 1
+      ) {
+        return fail("cannot initialize scene-controller trace SHA-256");
+      }
+
+      std::array<char, 64u * 1024u> chunk {};
+      std::string pending_line;
+      std::uint64_t uncompressed_bytes = 0;
+      std::uint64_t frame_records = 0;
+      bool header_seen = false;
+      for (;;) {
+        const int read = gzread(
+          gzip,
+          chunk.data(),
+          static_cast<unsigned>(chunk.size())
+        );
+        if (read < 0) {
+          int gzip_error = Z_OK;
+          const char *message = gzerror(gzip, &gzip_error);
+          return fail(
+            "cannot decompress scene-controller trace: " +
+            std::string {message ? message : "unknown gzip error"}
+          );
+        }
+        if (read == 0) {
+          break;
+        }
+        const auto bytes = static_cast<std::uint64_t>(read);
+        if (
+          bytes > expected_uncompressed_bytes ||
+          uncompressed_bytes > expected_uncompressed_bytes - bytes
+        ) {
+          return fail(
+            "scene-controller gzip expands past its attested byte count"
+          );
+        }
+        if (
+          EVP_DigestUpdate(
+            digest.get(),
+            chunk.data(),
+            static_cast<std::size_t>(read)
+          ) != 1
+        ) {
+          return fail("cannot hash decompressed scene-controller trace");
+        }
+        uncompressed_bytes += bytes;
+        pending_line.append(chunk.data(), static_cast<std::size_t>(read));
+
+        std::size_t newline = 0;
+        while ((newline = pending_line.find('\n')) != std::string::npos) {
+          if (
+            newline == 0 ||
+            newline >= max_scene_controller_record_bytes
+          ) {
+            return fail(
+              "scene-controller trace contains an invalid record length"
+            );
+          }
+          nlohmann::json record;
+          try {
+            record = nlohmann::json::parse(
+              std::string_view {pending_line.data(), newline}
+            );
+          } catch (const std::exception &exception) {
+            return fail(
+              "scene-controller trace contains invalid JSON: " +
+              std::string {exception.what()}
+            );
+          }
+          if (!record.is_object() || !record.contains("record")) {
+            return fail(
+              "scene-controller trace record lacks exact attribution"
+            );
+          }
+          if (!header_seen) {
+            if (!exact_json_string(record.at("record"), "header")) {
+              return fail(
+                "scene-controller trace does not begin with its header"
+              );
+            }
+            header_seen = true;
+          } else {
+            if (
+              !exact_json_string(record.at("record"), "frame") ||
+              !record.contains("source_index")
+            ) {
+              return fail(
+                "scene-controller trace contains a non-frame history record"
+              );
+            }
+            const auto source_index =
+              exact_json_unsigned(record.at("source_index"));
+            if (!source_index || *source_index != frame_records) {
+              return fail(
+                "scene-controller trace frame history is not contiguous"
+              );
+            }
+            ++frame_records;
+          }
+          pending_line.erase(0, newline + 1u);
+        }
+        if (pending_line.size() > max_scene_controller_record_bytes) {
+          return fail(
+            "scene-controller trace contains an oversized unterminated record"
+          );
+        }
+      }
+      if (!pending_line.empty()) {
+        return fail(
+          "scene-controller trace does not end at a JSONL record boundary"
+        );
+      }
+
+      std::array<unsigned char, EVP_MAX_MD_SIZE> digest_bytes {};
+      unsigned int digest_size = 0;
+      if (
+        EVP_DigestFinal_ex(
+          digest.get(),
+          digest_bytes.data(),
+          &digest_size
+        ) != 1 ||
+        digest_size != 32u
+      ) {
+        return fail("cannot finalize scene-controller trace SHA-256");
+      }
+
+#ifdef _WIN32
+      BY_HANDLE_FILE_INFORMATION final {};
+      if (
+        !GetFileInformationByHandle(pinned, &final) ||
+        final.dwVolumeSerialNumber != initial.dwVolumeSerialNumber ||
+        final.nFileIndexHigh != initial.nFileIndexHigh ||
+        final.nFileIndexLow != initial.nFileIndexLow ||
+        final.nFileSizeHigh != initial.nFileSizeHigh ||
+        final.nFileSizeLow != initial.nFileSizeLow ||
+        (final.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+      ) {
+        return fail(
+          "scene-controller gzip identity changed during validation"
+        );
+      }
+#else
+      struct stat final {};
+      if (
+        ::fstat(pinned, &final) != 0 ||
+        final.st_dev != initial.st_dev ||
+        final.st_ino != initial.st_ino ||
+        final.st_size != initial.st_size
+      ) {
+        return fail(
+          "scene-controller gzip identity changed during validation"
+        );
+      }
+#endif
+      const auto close_status = resources.close();
+      if (close_status != Z_OK) {
+        error = "cannot finalize scene-controller gzip validation";
+        return false;
+      }
+      if (
+        !header_seen ||
+        frame_records != expected_frame_count ||
+        uncompressed_bytes != expected_uncompressed_bytes ||
+        digest_hex(digest_bytes.data(), digest_size) != expected_sha256
+      ) {
+        error =
+          "scene-controller gzip content does not match its trace summary";
+        return false;
+      }
+      return true;
+    }
+
+    bool validate_scene_controller_trace_contract(
+      const nlohmann::json &trace,
+      const worker_context_t &context,
+      const std::uint64_t source_frame_count,
+      std::string &error,
+      const bool validate_artifacts = true
+    ) {
+      static constexpr std::array keys {
+        "schema"sv,
+        "version"sv,
+        "file"sv,
+        "encoding"sv,
+        "compression"sv,
+        "uncompressed_sha256"sv,
+        "uncompressed_bytes"sv,
+        "compressed_bytes"sv,
+        "frame_count"sv,
+        "unavailable_frame_count"sv,
+        "first_sequence"sv,
+        "last_sequence"sv,
+        "controller_schema"sv,
+        "rule_revision"sv,
+        "ordered_abi_hash"sv,
+        "model"sv,
+        "depth_reuse_interval"sv,
+        "active_roi_authority"sv,
+      };
+      if (!trace.is_object() || trace.size() != keys.size()) {
+        error = "scene-controller trace summary shape is invalid";
+        return false;
+      }
+      for (const auto key : keys) {
+        if (!trace.contains(key)) {
+          error =
+            "scene-controller trace summary is missing " +
+            std::string {key};
+          return false;
+        }
+      }
+
+      const auto schema = exact_json_unsigned(trace.at("schema"));
+      const auto uncompressed_bytes =
+        exact_json_unsigned(trace.at("uncompressed_bytes"));
+      const auto compressed_bytes =
+        exact_json_unsigned(trace.at("compressed_bytes"));
+      const auto frame_count =
+        exact_json_unsigned(trace.at("frame_count"));
+      const auto unavailable =
+        exact_json_unsigned(trace.at("unavailable_frame_count"));
+      const auto first_sequence =
+        exact_json_unsigned(trace.at("first_sequence"));
+      const auto last_sequence =
+        exact_json_unsigned(trace.at("last_sequence"));
+      const auto controller_schema =
+        exact_json_unsigned(trace.at("controller_schema"));
+      const auto depth_reuse_interval =
+        exact_json_unsigned(trace.at("depth_reuse_interval"));
+      if (
+        !schema || *schema != 1u ||
+        !exact_json_string(
+          trace.at("version"),
+          "scene-controller-jsonl-gzip-v1"
+        ) ||
+        !exact_json_string(trace.at("encoding"), "utf-8-jsonl") ||
+        !exact_json_string(trace.at("compression"), "gzip") ||
+        !uncompressed_bytes || *uncompressed_bytes == 0u ||
+        !compressed_bytes || *compressed_bytes == 0u ||
+        !frame_count || *frame_count != source_frame_count ||
+        !unavailable || *unavailable != 0u ||
+        !first_sequence || *first_sequence != 1u ||
+        !last_sequence || *last_sequence != source_frame_count ||
+        !controller_schema ||
+          *controller_schema != sbs_scene_controller::schema_version ||
+        !exact_json_string(
+          trace.at("rule_revision"),
+          sbs_scene_controller::rule_revision
+        ) ||
+        !exact_json_string(
+          trace.at("ordered_abi_hash"),
+          sbs_scene_controller::ordered_abi_hash
+        ) ||
+        !trace.at("model").is_string() ||
+        trace.at("model").get_ref<const std::string &>().empty() ||
+        trace.at("model").get_ref<const std::string &>().size() > 4096u ||
+        !depth_reuse_interval ||
+        *depth_reuse_interval == 0u ||
+        *depth_reuse_interval > 8u ||
+        !trace.at("active_roi_authority").is_boolean() ||
+        trace.at("active_roi_authority").get<bool>()
+      ) {
+        error = "scene-controller trace summary contract is invalid";
+        return false;
+      }
+      if (
+        !trace.at("uncompressed_sha256").is_string() ||
+        !lowercase_sha256(
+          trace.at("uncompressed_sha256").get_ref<const std::string &>()
+        )
+      ) {
+        error = "scene-controller trace SHA-256 is invalid";
+        return false;
+      }
+      if (
+        source_frame_count >
+          std::numeric_limits<std::uint64_t>::max() /
+            max_scene_controller_record_bytes - 1u ||
+        *uncompressed_bytes >
+          (source_frame_count + 1u) * max_scene_controller_record_bytes
+      ) {
+        error = "scene-controller trace byte count exceeds its record bound";
+        return false;
+      }
+
+      const auto expected_gzip =
+        (context.result_directory / "scene-controller.jsonl.gz")
+          .lexically_normal();
+      try {
+        if (
+          !trace.at("file").is_string() ||
+          path_from_utf8(trace.at("file").get<std::string>())
+              .lexically_normal() != expected_gzip
+        ) {
+          error = "scene-controller trace path is not manager-owned";
+          return false;
+        }
+      } catch (const std::exception &exception) {
+        error =
+          "scene-controller trace path is invalid: " +
+          std::string {exception.what()};
+        return false;
+      }
+      if (!validate_artifacts) {
+        return true;
+      }
+
+      const auto summary_path =
+        context.result_directory / "scene-controller-trace.json";
+      std::string summary_error;
+      const auto summary = read_json_contract(
+        summary_path,
+        summary_error,
+        max_scene_controller_summary_bytes
+      );
+      if (!summary) {
+        error =
+          "scene-controller trace summary is unavailable: " + summary_error;
+        return false;
+      }
+      std::string nested_error;
+      if (
+        !validate_scene_controller_trace_contract(
+          *summary,
+          context,
+          source_frame_count,
+          nested_error,
+          false
+        )
+      ) {
+        error =
+          "published scene-controller trace summary is invalid: " +
+          nested_error;
+        return false;
+      }
+      if (summary->dump() != trace.dump()) {
+        error =
+          "published scene-controller trace summary differs from worker result";
+        return false;
+      }
+
+      return validate_scene_controller_gzip(
+        expected_gzip,
+        *compressed_bytes,
+        *uncompressed_bytes,
+        *frame_count,
+        trace.at("uncompressed_sha256").get_ref<const std::string &>(),
+        error
+      );
+    }
+
+    bool remove_scene_controller_trace_artifacts_no_follow(
+      const fs::path &result_directory,
+      std::string &error
+    ) {
+      static constexpr std::array names {
+        "scene-controller-trace.json"sv,
+        "scene-controller.jsonl.gz"sv,
+        "scene-controller.jsonl.gz.part"sv,
+      };
+      std::string combined_error;
+      bool removed = true;
+      for (const auto name : names) {
+        std::string remove_error;
+        if (
+          !safe_filesystem::remove_tree_no_follow(
+            result_directory / std::string {name},
+            remove_error
+          )
+        ) {
+          removed = false;
+          if (!combined_error.empty()) {
+            combined_error += "; ";
+          }
+          combined_error += std::string {name} + ": " + remove_error;
+        }
+      }
+      error = std::move(combined_error);
+      return removed;
+    }
+
     bool validate_worker_result_contract(
       const nlohmann::json &result,
       const worker_context_t &context,
@@ -2788,6 +3397,8 @@ namespace offline_sbs {
           !result.contains("scenes") || !result["scenes"].is_array() ||
           !result.contains("analysis_contract") ||
           !result["analysis_contract"].is_object() ||
+          !result.contains("scene_controller_trace") ||
+          !result["scene_controller_trace"].is_object() ||
           !result.contains("replay_contracts") ||
           !result["replay_contracts"].is_array() ||
           !result.contains("cache") || !result["cache"].is_object()
@@ -2805,10 +3416,15 @@ namespace offline_sbs {
           return false;
         }
         const auto &source = result["source"];
+        const auto source_frame_count =
+          source.contains("frame_count") ?
+            exact_json_unsigned(source.at("frame_count")) :
+            std::nullopt;
         if (
           source.value("width", 0u) == 0 ||
           source.value("height", 0u) == 0 ||
-          source.value("frame_count", 0ull) == 0 ||
+          !source_frame_count ||
+          *source_frame_count == 0 ||
           !std::isfinite(source.value("duration_seconds", 0.0)) ||
           source.value("duration_seconds", 0.0) <= 0
         ) {
@@ -2828,6 +3444,16 @@ namespace offline_sbs {
           !regular_nonempty_file(expected_scene_audit)
         ) {
           error = "worker result artifact paths are invalid";
+          return false;
+        }
+        if (
+          !validate_scene_controller_trace_contract(
+            result.at("scene_controller_trace"),
+            context,
+            *source_frame_count,
+            error
+          )
+        ) {
           return false;
         }
         const auto &cache = result["cache"];
@@ -2959,6 +3585,32 @@ namespace offline_sbs {
           "remaining_bytes"sv,
         }
       );
+      copy_summary_object(
+        "scene_controller_trace",
+        std::array {
+          "schema"sv,
+          "version"sv,
+          "file"sv,
+          "uncompressed_sha256"sv,
+          "uncompressed_bytes"sv,
+          "compressed_bytes"sv,
+          "frame_count"sv,
+          "controller_schema"sv,
+          "rule_revision"sv,
+          "ordered_abi_hash"sv,
+          "model"sv,
+          "depth_reuse_interval"sv,
+          "active_roi_authority"sv,
+        }
+      );
+      if (
+        compact.contains("scene_controller_trace") &&
+        compact["scene_controller_trace"].is_object()
+      ) {
+        compact["scene_controller_trace"]["summary_file"] = path_to_utf8(
+          context.result_directory / "scene-controller-trace.json"
+        );
+      }
       compact["full_result_contract"] = path_to_utf8(context.worker_result);
       compact["scene_decisions_contract"] =
         path_to_utf8(context.result_directory / "scene-audit.json");
@@ -2966,6 +3618,34 @@ namespace offline_sbs {
       return compact;
     }
   }  // namespace
+
+#ifdef SUNSHINE_TESTS
+  bool validate_scene_controller_trace_for_test(
+    const nlohmann::json &trace,
+    const fs::path &result_directory,
+    const std::uint64_t source_frame_count,
+    std::string &error
+  ) {
+    worker_context_t context;
+    context.result_directory = result_directory;
+    return validate_scene_controller_trace_contract(
+      trace,
+      context,
+      source_frame_count,
+      error
+    );
+  }
+
+  bool remove_scene_controller_trace_artifacts_for_test(
+    const fs::path &result_directory,
+    std::string &error
+  ) {
+    return remove_scene_controller_trace_artifacts_no_follow(
+      result_directory,
+      error
+    );
+  }
+#endif
 
   nlohmann::json job_snapshot_t::json() const {
     nlohmann::json value {
@@ -4000,6 +4680,53 @@ namespace offline_sbs {
           }
         }
         if (
+          is_terminal(record->snapshot.state) &&
+          record->snapshot.state != job_state_e::complete &&
+          worker_paths_trusted &&
+          !record->worker_artifacts_pruned
+        ) {
+          std::string trace_cleanup_error;
+          const bool trace_cleanup_accessed =
+            run_user_filesystem_action([&]() {
+              if (!record->worker_tree) {
+                throw std::runtime_error(
+                  "retained offline worker tree identity pin is missing"
+                );
+              }
+#ifdef _WIN32
+              if (
+                !revalidate_pins(
+                  managed_root_pins,
+                  "offline managed roots",
+                  trace_cleanup_error
+                ) ||
+                record->worker_path_pins.empty() ||
+                !revalidate_pins(
+                  record->worker_path_pins,
+                  "offline worker job paths",
+                  trace_cleanup_error
+                )
+              ) {
+                throw std::runtime_error(trace_cleanup_error);
+              }
+#endif
+              if (
+                !remove_scene_controller_trace_artifacts_no_follow(
+                  record->worker.result_directory,
+                  trace_cleanup_error
+                )
+              ) {
+                throw std::runtime_error(trace_cleanup_error);
+              }
+            }, trace_cleanup_error);
+          if (!trace_cleanup_accessed) {
+            BOOST_LOG(warning)
+              << "Could not remove recovered non-complete offline SBS "
+                 "scene-controller evidence ["sv
+              << id << "]: "sv << trace_cleanup_error;
+          }
+        }
+        if (
           !persisted_terminal_state &&
           is_terminal(record->snapshot.state) &&
           worker_paths_trusted &&
@@ -4650,6 +5377,49 @@ namespace offline_sbs {
             }
             record->snapshot.worker_result["scene_audit_sha256"] =
               std::move(audit_hash);
+          }
+          if (record->snapshot.state != job_state_e::complete) {
+            std::string trace_cleanup_error;
+            const bool trace_cleanup_accessed =
+              run_user_filesystem_action([&]() {
+                if (!record->worker_tree) {
+                  throw std::runtime_error(
+                    "offline worker tree identity pin is missing"
+                  );
+                }
+#ifdef _WIN32
+                if (
+                  !revalidate_pins(
+                    managed_root_pins,
+                    "offline managed roots",
+                    trace_cleanup_error
+                  ) ||
+                  record->worker_path_pins.empty() ||
+                  !revalidate_pins(
+                    record->worker_path_pins,
+                    "offline worker job paths",
+                    trace_cleanup_error
+                  )
+                ) {
+                  throw std::runtime_error(trace_cleanup_error);
+                }
+#endif
+                if (
+                  !remove_scene_controller_trace_artifacts_no_follow(
+                    record->worker.result_directory,
+                    trace_cleanup_error
+                  )
+                ) {
+                  throw std::runtime_error(trace_cleanup_error);
+                }
+              }, trace_cleanup_error);
+            if (!trace_cleanup_accessed) {
+              BOOST_LOG(warning)
+                << "Could not remove non-complete offline SBS "
+                   "scene-controller evidence ["sv
+                << record->snapshot.id << "]: "sv
+                << trace_cleanup_error;
+            }
           }
           // Never remove a failed/canceled staging pathname from the manager. The
           // native worker reserves its file identity and performs handle-based cleanup;

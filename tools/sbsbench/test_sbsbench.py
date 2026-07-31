@@ -229,7 +229,9 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(committed_meta["evaluation_role"], "conformance-only")
         self.assertEqual(contract["kind"], "latched-motion-hard-cut")
         self.assertEqual(contract["monitor_from_frame"], 2)
-        self.assertEqual(contract["expected_pulse_frames"], [11, 27])
+        self.assertEqual(contract["expected_pulse_frames"], [11, 28])
+        self.assertEqual(contract["escape_candidate_frame"], 27)
+        self.assertEqual(contract["escape_pulse_frame"], 28)
         committed_frames = sbsbench.indexed_files(
             os.path.join(committed, "frame_*.*"), "frame_")
         sbsbench.validate_latched_motion_hard_cut_source(
@@ -484,13 +486,17 @@ class EvalContractTests(unittest.TestCase):
             2: self.subject_state(1, 3),
             3: self.subject_state(0, 16),
         }
-        for frame_id in range(4, 12):
+        for frame_id in range(4, 11):
             trace[frame_id] = self.subject_state(frame_id - 3, 16)
+        trace[11] = self.subject_state(8, 80, history=4.0)
         trace[12] = self.subject_state(0, 16)
         contract = {
             "kind": "latched-motion-hard-cut", "monitor_from_frame": 2,
             "expected_pulse_frames": [3, 12],
-            "setup_pulse_frame": 3, "escape_pulse_frame": 12,
+            "setup_pulse_frame": 3,
+            "persistent_motion_frames": [3, 11],
+            "escape_candidate_frame": 11,
+            "escape_pulse_frame": 12,
         }
         summary = sbsbench.apply_shot_state_contract(
             rows, list(range(1, 13)), trace, contract)
@@ -499,7 +505,7 @@ class EvalContractTests(unittest.TestCase):
             row.get("shot_state_relative_escape_ok", 100.0)
             for row in rows if row["_frame_id"] >= 2), 100.0)
 
-        trace[11] = self.subject_state(8, 17)
+        trace[11] = self.subject_state(8, 16)
         failed_rows = [{"_frame_id": frame_id} for frame_id in range(1, 13)]
         failed = sbsbench.apply_shot_state_contract(
             failed_rows, list(range(1, 13)), trace, contract)
@@ -1267,6 +1273,9 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("next_model_input_history_state", adaptive)
         self.assertIn("model_input_history_gap", adaptive)
         self.assertIn("low_structure_scene", adaptive)
+        self.assertIn(
+            "appearance_recovery && !appearance_proposal", adaptive)
+        self.assertIn("brightness_direction_consistent", adaptive)
         self.assertIn("raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH", adaptive)
         self.assertIn(
             "structural_change_fraction >= STRUCTURAL_COLOR_CUT_HIGH", adaptive)
@@ -1288,6 +1297,10 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("PlainHist[NUM_BINS + 4]", cut_evidence)
         self.assertIn("PlainHist[NUM_BINS + 5]", cut_evidence)
         self.assertIn("PlainHist[NUM_BINS + 6]", cut_evidence)
+        self.assertIn("PlainHist[NUM_BINS + 7]", cut_evidence)
+        self.assertIn("PlainHist[NUM_BINS + 8]", cut_evidence)
+        self.assertIn("g_brightness_rise_count", cut_evidence)
+        self.assertIn("g_brightness_fall_count", cut_evidence)
         self.assertNotIn("max(color.r, max(color.g, color.b))", cut_evidence)
         self.assertIn("for (int first = 0; first < 4; ++first)", cut_evidence)
         self.assertIn("for (int second = first + 1; second < 5; ++second)",
@@ -1297,6 +1310,9 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("ordering_flips * 2u >= common_comparisons", cut_evidence)
         self.assertIn("#define RAW_RGB_CUT_HIGH 0.70f", depth_constants)
         self.assertIn("#define STRUCTURAL_COLOR_MIN_SUPPORT 0.01f", depth_constants)
+        self.assertIn(
+            "#define STRUCTURAL_COLOR_EXPOSURE_MIN_DIRECTIONAL_SHARE 0.80f",
+            depth_constants)
         self.assertIn("#define STRUCTURAL_COLOR_CUT_HIGH 0.03f", depth_constants)
         self.assertIn("#define DEPTH_CUT_HIGH 0.60f", depth_constants)
         self.assertIn("#define DEPTH_CUT_CORROBORATE 0.25f", depth_constants)
