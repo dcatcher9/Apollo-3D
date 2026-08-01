@@ -132,6 +132,12 @@ namespace platf::dxgi {
   blob_t depth_warp_prefilter_cs_hlsl;
   blob_t sbs_reprojection_ps_hlsl;
   blob_t sbs_reprojection_vs_hlsl;
+  // Optional Dump 3D entry points are compiled with the rest of the process-wide shader blobs.
+  // Per-device resource creation may then occur during a stream without invoking the HLSL
+  // compiler on the capture/encode path.
+  blob_t sbs_reprojection_mapping_ps_hlsl;
+  blob_t sbs_reprojection_mask_ps_hlsl;
+  blob_t sbs_forward_coverage_cs_hlsl;
 
   struct img_d3d_t: public platf::img_t {
     // These objects are owned by the display_t's ID3D11Device
@@ -657,32 +663,6 @@ namespace platf::dxgi {
                 frame_id,
                 snapshot_debug_inputs
               );
-              if (est.completion_dropped) {
-                // The estimator consumed this accepted inference without allowing its raw output
-                // to touch normalization/history because exact ROI-transform ownership could not
-                // be proven. TensorRT no longer owns the matched color texture, so retire only
-                // that frame's slot while repeating the last complete SBS pair.
-                if (auto *dropped_slot =
-                      find_pending_matched_slot(est.dropped_frame_id)) {
-                  dropped_slot->pending = false;
-                } else {
-                  const auto error_now = std::chrono::steady_clock::now();
-                  if (
-                    matched_unknown_frame_error_last.time_since_epoch().count() == 0 ||
-                    error_now - matched_unknown_frame_error_last >=
-                      std::chrono::seconds(30)
-                  ) {
-                    BOOST_LOG(error)
-                      << "Matched depth dropped unknown frame "sv
-                      << est.dropped_frame_id
-                      << "; the last complete SBS output remains authoritative."sv;
-                    matched_unknown_frame_error_last = error_now;
-                    matched_unknown_frame_errors_suppressed = 0;
-                  } else {
-                    ++matched_unknown_frame_errors_suppressed;
-                  }
-                }
-              }
               if (est.completed_frame_valid) {
                 matched_render_slot = find_pending_matched_slot(est.completed_frame_id);
                 if (matched_render_slot) {
@@ -780,7 +760,6 @@ namespace platf::dxgi {
               est.subject.Get(),
               nullptr,
               est.depth_frame_state.Get(),
-              est.depth_roi_transform.Get(),
             };
             device_ctx->PSSetShaderResources(0, (UINT) std::size(srvs), srvs);
             ID3D11Buffer *sbs_cb[] = {
@@ -797,7 +776,6 @@ namespace platf::dxgi {
 
             // Clear shader resources
             ID3D11ShaderResourceView *null_srvs[] = {
-              nullptr,
               nullptr,
               nullptr,
               nullptr,
@@ -851,7 +829,6 @@ namespace platf::dxgi {
           if (!repeat_matched_output) {
             const bool complete_dump_snapshot =
               matched_render_slot && est.depth && dump_warp_depth && est.subject &&
-              est.depth_roi_transform &&
               est.depth_frame_state && est.model_input_snapshot &&
               est.raw_model_depth_snapshot;
             const bool dump_frame_valid =
@@ -871,7 +848,6 @@ namespace platf::dxgi {
                   render_input_srv,
                   dump_warp_depth,
                   est.subject.Get(),
-                  est.depth_roi_transform.Get(),
                   completed_constants
                 );
               } catch (const std::exception &error) {
@@ -897,38 +873,6 @@ namespace platf::dxgi {
               dump_frame.warp_depth = dump_warp_depth;
               dump_frame.adaptive_state = est.subject.Get();
               dump_frame.depth_frame_state = est.depth_frame_state.Get();
-              dump_frame.depth_roi_transform =
-                est.depth_roi_transform.Get();
-              const bool matched_scene_controller =
-                est.scene_controller_snapshot_available &&
-                est.scene_controller_frame_id == est.completed_frame_id;
-              if (matched_scene_controller) {
-                dump_frame.scene_controller_scene_rgb =
-                  est.scene_controller_scene_rgb.Get();
-                dump_frame.scene_controller_analysis_grid =
-                  est.scene_controller_analysis_grid.Get();
-                dump_frame.scene_controller_dense_output =
-                  est.scene_controller_dense_output.Get();
-                dump_frame.scene_controller_global_output =
-                  est.scene_controller_global_output.Get();
-                dump_frame.scene_controller_layout_history =
-                  est.scene_controller_layout_history.Get();
-                dump_frame.scene_controller_depth_history =
-                  est.scene_controller_depth_history.Get();
-                dump_frame.scene_controller_hidden_output =
-                  est.scene_controller_hidden_output.Get();
-                dump_frame.scene_controller_meta =
-                  est.scene_controller_meta.Get();
-                dump_frame.scene_controller_rule_state =
-                  est.scene_controller_rule_state.Get();
-                dump_frame.scene_controller_frame_id =
-                  est.scene_controller_frame_id;
-                dump_frame.scene_controller_backend_generation =
-                  est.scene_controller_backend_generation;
-                dump_frame.scene_controller_snapshot_available = true;
-                dump_frame.scene_controller_shadow =
-                  est.scene_controller_shadow;
-              }
               dump_frame.warp_map =
                 geometry_available ? sbs_debug_mapping_srv.Get() : nullptr;
               dump_frame.warp_mask =
@@ -1057,23 +1001,7 @@ namespace platf::dxgi {
     // that warm context and creates only device/session resources on a background thread.
     bool ensure_depth_estimator() {
       if (depth_estimator) {
-        if (depth_estimator->is_valid()) {
-          return true;
-        }
-
-        // A terminal interop/ownership failure must not freeze the last matched SBS texture.
-        // Retire the estimator and its private color ownership atomically, then the ordinary
-        // no-depth branch below renders the current source as flat SBS for every later frame.
-        BOOST_LOG(error)
-          << "Host SBS depth pipeline became invalid; retiring it and continuing with "
-             "current-frame flat SBS."sv;
-        depth_estimator.reset();
-        depth_estimator_failed = true;
-        matched_frame_slots = {};
-        matched_output_valid = false;
-        sbs_dumper.cancel_pending_request();
-        publish_depth_status(0);
-        return false;
+        return true;
       }
 
       // A failed build streams flat SBS for the rest of this encode device's life instead of
@@ -1670,22 +1598,27 @@ namespace platf::dxgi {
       }
       sbs_debug_geometry_init_attempted = true;
 
-      auto mapping_blob = compile_shader(
-        SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl",
-        "mapping_ps",
-        "ps_5_0"
-      );
-      auto mask_blob = compile_shader(
-        SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl",
-        "mask_ps",
-        "ps_5_0"
-      );
-      auto coverage_blob = compile_shader(
-        SUNSHINE_SHADERS_DIR "/sbs_forward_coverage_cs.hlsl",
-        "main",
-        "cs_5_0"
-      );
-      if (!mapping_blob || !mask_blob || !coverage_blob || FAILED(device->CreatePixelShader(mapping_blob->GetBufferPointer(), mapping_blob->GetBufferSize(), nullptr, &sbs_debug_mapping_ps)) || FAILED(device->CreatePixelShader(mask_blob->GetBufferPointer(), mask_blob->GetBufferSize(), nullptr, &sbs_debug_mask_ps)) || FAILED(device->CreateComputeShader(coverage_blob->GetBufferPointer(), coverage_blob->GetBufferSize(), nullptr, &sbs_debug_coverage_cs))) {
+      if (!sbs_reprojection_mapping_ps_hlsl ||
+          !sbs_reprojection_mask_ps_hlsl ||
+          !sbs_forward_coverage_cs_hlsl ||
+          FAILED(device->CreatePixelShader(
+            sbs_reprojection_mapping_ps_hlsl->GetBufferPointer(),
+            sbs_reprojection_mapping_ps_hlsl->GetBufferSize(),
+            nullptr,
+            &sbs_debug_mapping_ps
+          )) ||
+          FAILED(device->CreatePixelShader(
+            sbs_reprojection_mask_ps_hlsl->GetBufferPointer(),
+            sbs_reprojection_mask_ps_hlsl->GetBufferSize(),
+            nullptr,
+            &sbs_debug_mask_ps
+          )) ||
+          FAILED(device->CreateComputeShader(
+            sbs_forward_coverage_cs_hlsl->GetBufferPointer(),
+            sbs_forward_coverage_cs_hlsl->GetBufferSize(),
+            nullptr,
+            &sbs_debug_coverage_cs
+          ))) {
         BOOST_LOG(warning) << "Dump 3D geometry shaders are unavailable; the core dump will "
                               "record warp mapping/coverage as unavailable."sv;
         return false;
@@ -1724,17 +1657,9 @@ namespace platf::dxgi {
       ID3D11ShaderResourceView *source,
       ID3D11ShaderResourceView *warp_depth,
       ID3D11ShaderResourceView *subject,
-      ID3D11ShaderResourceView *depth_roi_transform,
       ID3D11Buffer *constants
     ) {
-      if (
-        !source ||
-        !warp_depth ||
-        !subject ||
-        !depth_roi_transform ||
-        !constants ||
-        !ensure_sbs_debug_geometry_resources()
-      ) {
+      if (!source || !warp_depth || !subject || !constants || !ensure_sbs_debug_geometry_resources()) {
         return false;
       }
 
@@ -1750,9 +1675,6 @@ namespace platf::dxgi {
         source,
         warp_depth,
         subject,
-        nullptr,
-        nullptr,
-        depth_roi_transform,
       };
       device_ctx->CSSetShaderResources(
         0,
@@ -1774,14 +1696,7 @@ namespace platf::dxgi {
         1u
       );
       ID3D11UnorderedAccessView *null_uav = nullptr;
-      ID3D11ShaderResourceView *null_cs_srvs[] = {
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr
-      };
+      ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr};
       device_ctx->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
       device_ctx->CSSetShaderResources(
         0,
@@ -1806,9 +1721,6 @@ namespace platf::dxgi {
         source,
         warp_depth,
         subject,
-        nullptr,
-        nullptr,
-        depth_roi_transform,
       };
       device_ctx->PSSetShaderResources(
         0,
@@ -1828,8 +1740,6 @@ namespace platf::dxgi {
         warp_depth,
         subject,
         sbs_debug_coverage_srv.Get(),
-        nullptr,
-        depth_roi_transform,
       };
       device_ctx->PSSetShaderResources(
         0,
@@ -1840,8 +1750,6 @@ namespace platf::dxgi {
 
       ID3D11RenderTargetView *null_rtv = nullptr;
       ID3D11ShaderResourceView *null_ps_srvs[] = {
-        nullptr,
-        nullptr,
         nullptr,
         nullptr,
         nullptr,
@@ -4648,6 +4556,30 @@ namespace platf::dxgi {
     compile_pixel_shader_helper(sbs_reprojection_ps);
     compile_vertex_shader_helper(sbs_reprojection_vs);
     compile_vertex_shader_helper(cursor_vs);
+
+    sbs_reprojection_mapping_ps_hlsl = compile_shader(
+      SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl",
+      "mapping_ps",
+      "ps_5_0"
+    );
+    sbs_reprojection_mask_ps_hlsl = compile_shader(
+      SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl",
+      "mask_ps",
+      "ps_5_0"
+    );
+    sbs_forward_coverage_cs_hlsl = compile_shader(
+      SUNSHINE_SHADERS_DIR "/sbs_forward_coverage_cs.hlsl",
+      "main",
+      "cs_5_0"
+    );
+    if (!sbs_reprojection_mapping_ps_hlsl ||
+        !sbs_reprojection_mask_ps_hlsl ||
+        !sbs_forward_coverage_cs_hlsl) {
+      // Dump 3D is optional. Preserve normal capture and Host SBS if only a diagnostic entry
+      // point is unavailable; the dump records mapping/coverage as unavailable later.
+      BOOST_LOG(warning)
+        << "One or more optional Dump 3D geometry shaders could not be precompiled."sv;
+    }
 
     BOOST_LOG(info) << "Compiled shaders"sv;
 

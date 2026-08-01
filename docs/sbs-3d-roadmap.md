@@ -6,9 +6,6 @@ forward/backward hybrid and its selectable profile were removed after headset te
 rim/halo behavior and a serious thin-structure artifact for only about 0.12 ms of warp-time saving.
 Historical experiment evidence remains in Git history and `sbs-feature-decision-revisit.md`.
 
-The scoped design for automatically focusing Host SBS inference on one embedded video or one main
-content envelope is documented in [host-sbs-single-roi-plan.md](host-sbs-single-roi-plan.md).
-
 Approved AR glasses connected as a Windows monitor also use an automatic local presenter; see
 `docs/sbs-local-ar-glasses.md`. That path reuses the production depth and warp without NVENC.
 

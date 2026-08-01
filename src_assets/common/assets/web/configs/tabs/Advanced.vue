@@ -24,18 +24,6 @@ const config = ref(props.config)
       <div class="form-text">{{ $t('config.sbs_3d_profile_desc') }}</div>
     </div>
 
-    <!-- Host SBS GPU scene controller -->
-    <div class="mb-3">
-      <label for="sbs_scene_controller" class="form-label">
-        {{ $t('config.sbs_scene_controller') }}
-      </label>
-      <select id="sbs_scene_controller" class="form-select" v-model="config.sbs_scene_controller">
-        <option value="off">{{ $t('config.sbs_scene_controller_off') }}</option>
-        <option value="shadow_rules">{{ $t('config.sbs_scene_controller_shadow_rules') }}</option>
-      </select>
-      <div class="form-text">{{ $t('config.sbs_scene_controller_desc') }}</div>
-    </div>
-
   </div>
 </template>
 

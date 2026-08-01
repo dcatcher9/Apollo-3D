@@ -32,13 +32,6 @@ images shown on the headset. This is the visual half of the host benchmark; see
    The mapping/coverage files are explicitly marked unavailable in the manifest only if their
    dump-only shaders or diagnostic resources could not be created. No partial directory is
    published as a completed dump.
-
-   Adaptive-state schema 4 adds the ordinary appearance-change baseline at word 23, history state
-   4 for a held geometry-confirmation endpoint, and explicit localized-appearance and
-   geometry-candidate analysis flags. Geometry-only candidates therefore pulse one valid update
-   later only if they still differ from the held endpoint; producer-qualified appearance cuts can
-   still pulse immediately. Offline planners consume the producer's `appearance_proposal` bit
-   instead of independently reclassifying raw RGB/ordinal metrics.
 2. Score a set and save a baseline **before** your change:
    ```
    python tools/sbsbench/sbsbench.py --glob "E:/ApolloDev/sbs_dump/dump_2026*" --json base.json
@@ -77,63 +70,6 @@ The wrapper's `libx265`, executable overrides, and retention switches are experi
 developers. They do not imply a production CPU fallback or allow the Web UI to run arbitrary
 executables. Production accepts only trusted installation-local FFmpeg/FFprobe (or a trusted
 host-side absolute override) and NVIDIA `hevc_nvenc` or `av1_nvenc`.
-
-### Locked browser-layout shadow gate
-
-The Scene Controller cannot gain crop authority merely because its shaders run. The committed
-[browser recipe manifest](datasets/browser_synth_v1.json) procedurally generates exact RGB,
-semantic/instance masks, selected-target and unsafe-region masks, plus cut, exposure, scroll, and
-geometry-reset timelines. Generated pixels are authenticated against the recipe before scoring;
-the materialized PNGs are disposable harness input and are not committed.
-
-```powershell
-python tools/sbsbench/browser_scene_compositor.py `
-  --scenario video_sidebar_ad `
-  --output E:\ApolloDev\sbs_bench\browser\video_sidebar_ad `
-  --emit-frames
-
-python tools/sbsbench/run_whole_clip.py `
-  E:\ApolloDev\sbs_bench\browser\video_sidebar_ad `
-  --out E:\ApolloDev\sbs_bench\runs\video_sidebar_ad
-```
-
-When the input carries the exact `scene_controller_contract`, `run_whole_clip.py` automatically
-loads the complete `shadow_rules` JSONL trace and applies the fail-closed
-[threshold policy](datasets/browser_scene_thresholds_v1.json). It writes
-`browser_scene_controller_report.json` and exits nonzero for sidebar/ad overlap, ambiguity that
-selects an ROI, missed/false events, acquisition, release, jitter, layout, ROI-generation, IoU, or
-coverage failures. Ordinary user clips have no implicit gate. Qualification requires
-`depth_reuse_interval=1`; it never weakens an exact event label to fit held-depth sampling.
-
-The locked recipe set covers 17 scenarios:
-
-| scenario | safety contract |
-|---|---|
-| `video_sidebar_ad` | clear video; independent sidebar/ad cuts and a global exposure flash |
-| `paused_video_animated_sidebar` | acquire while playing, then retain the paused target while the exterior keeps animating |
-| `cold_start_static_media` | a cold static region beside comparable animated activity must abstain |
-| `collage_scroll` | non-rectangular thumbnail content inside a stable envelope and scroll |
-| `ambiguous_dual_video` | equal candidates must abstain to full frame |
-| `partial_player` | clipped player plus unrelated neighboring window |
-| `embedded_to_fullscreen` | geometry reset and ROI-generation change without a content cut |
-| `video_sidebar_style_swap` | appearance-swapped video/ad patterns must not become semantic shortcuts |
-| `static_dense_collage` | one clear dense cold-static envelope is required `CONTENT` |
-| `stable_relocated_player` | retain the incumbent for 0.75-second challenger dwell, then accept only in the explicit relocation window |
-| `cross_axis_disjoint_motion` | disconnected motion without one unique rectangle must abstain |
-| `sparse_three_side_candidate` | no special three-side boundary rescue |
-| `cold_paused_video` | one clear cold-static player shape is `CONTENT`, never `VIDEO` |
-| `ambiguous_candidate_during_scroll` | a candidate that first appears during page motion remains `FULL_FRAME`; scroll hold covers motion plus its 0.12-second tail, then releases only after histories rebase |
-| `animated_sidebar_no_dominant_player` | comparable player/sidebar support must abstain |
-| `interrupted_relocation` | a brief challenger cannot replace the proven incumbent or change ROI generation |
-| `grayscale_static_media` | static grayscale that cannot be separated safely from text/chrome must abstain |
-
-List or materialize all recipes with:
-
-```powershell
-python tools/sbsbench/browser_scene_compositor.py --list
-python tools/sbsbench/browser_scene_compositor.py --all `
-  --output E:\ApolloDev\sbs_bench\browser\locked-v1 --emit-frames
-```
 
 ### Comparing two eval runs — use `compare_runs.py`, not an ad-hoc mean
 

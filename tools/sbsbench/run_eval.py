@@ -853,10 +853,39 @@ def baseline_required_context(candidate_meta):
         "eval_schema": candidate_meta.get("eval_schema"),
         "depth_step": candidate_meta.get("depth_step"),
         "depth_compensation": candidate_meta.get("depth_compensation"),
+        # CUDA graphs and ordinary enqueueV3 are different execution modes. Their timing
+        # baselines are not interchangeable, even when every quality lever is identical.
+        "cuda_graph": candidate_meta.get("cuda_graph"),
         "conf_sha256": candidate_meta.get("conf_sha256"),
         "metric_sha256": candidate_meta.get("metric_sha256"),
         "metric_runtime": candidate_meta.get("metric_runtime"),
     }
+
+
+_NO_CUDA_GRAPH_BASELINE = object()
+
+
+def validate_cuda_graph_execution_mode(
+        requested, captured, baseline_captured=_NO_CUDA_GRAPH_BASELINE):
+    """Fail closed when requested, observed, or baseline TensorRT launch modes differ."""
+    if not isinstance(requested, bool):
+        raise ValueError("cuda_graph request must be boolean")
+    if not isinstance(captured, bool):
+        raise ValueError("cuda_graph_captured must be a boolean harness result")
+    if captured != requested:
+        raise ValueError(
+            "CUDA graph execution did not match the requested mode "
+            f"(requested={requested}, captured={captured}); refusing to mix "
+            "CUDA-graph and enqueueV3-fallback timing")
+    if baseline_captured is not _NO_CUDA_GRAPH_BASELINE:
+        if not isinstance(baseline_captured, bool):
+            raise ValueError(
+                "committed baseline cuda_graph_captured must be boolean")
+        if baseline_captured != captured:
+            raise ValueError(
+                "committed baseline CUDA graph execution mode differs from the "
+                f"candidate (baseline={baseline_captured}, candidate={captured})")
+    return captured
 
 
 def extra_value(args, name, default=None):
@@ -1542,9 +1571,11 @@ def authoritative_remeasurement_clip_meta(
         raise ValueError(
             f"clips.{clip}: harness contract schema must be 17, got "
             f"{contract.get('schema') if isinstance(contract, dict) else None!r}")
+    validate_cuda_graph_execution_mode(
+        contract.get("cuda_graph"), contract.get("cuda_graph_captured"))
     contract_keys = (
         "model", "profile", "depth_compensation", "literal_bestv2", "cuda_graph",
-        "adaptive_pop", "adaptive_pop_max", "zero_plane",
+        "cuda_graph_captured", "adaptive_pop", "adaptive_pop_max", "zero_plane",
     )
     authoritative = {key: contract[key] for key in contract_keys if key in contract}
     for key in contract_keys:
@@ -1572,8 +1603,6 @@ def authoritative_remeasurement_clip_meta(
                 raise ValueError(f"clips.{clip}: harness contract is missing {key}")
             _require_matching_result(
                 run_meta[key], contract[key], f"meta.{key} vs clips.{clip}.contract")
-    if "cuda_graph_captured" in contract:
-        authoritative["cuda_graph_captured"] = contract["cuda_graph_captured"]
     authoritative["source_frame_count"] = len(source_files)
     authoritative.update(published_clip_metadata(source_meta))
 
@@ -1703,6 +1732,13 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
             results, clip, clips_root, run_dir,
             source_sha1=actual_clip_hash, artifact_sha256=actual_artifact_hash,
             validate_images=False)
+        if clip in baseline_manifests:
+            baseline_meta = baseline_manifests[clip].get("meta", {})
+            validate_cuda_graph_execution_mode(
+                entry_meta.get("cuda_graph"),
+                entry_meta.get("cuda_graph_captured"),
+                baseline_meta.get("cuda_graph_captured"),
+            )
         _require_matching_result(
             recorded_artifacts.get(clip), actual_artifact_hash,
             f"meta.scored_artifact_sha256.{clip}")
@@ -2295,6 +2331,7 @@ def main():
             "eval_schema": EVAL_SCHEMA,
             "depth_step": depth_step,
             "depth_compensation": depth_compensation,
+            "cuda_graph": expected_cuda_graph,
             "conf_sha256": conf_sha,
             "metric_sha256": metric_sha,
             "label_contract_sha256": label_sha,
@@ -2357,6 +2394,7 @@ def main():
         "adaptive_pop_max": expected_adaptive_max,
         "zero_plane": expected_zero_plane,
         "literal_bestv2": literal_bestv2,
+        "cuda_graph": expected_cuda_graph,
         "depth_compensation": depth_compensation,
         "eval_schema": EVAL_SCHEMA, "depth_step": depth_step,
         "depth_reuse_interval": depth_reuse_interval,
@@ -2424,6 +2462,7 @@ def main():
             "zero_plane": expected_zero_plane,
             "literal_bestv2": literal_bestv2,
             "cuda_graph": expected_cuda_graph,
+            "cuda_graph_captured": expected_cuda_graph,
             "subject_state": {
                 "file": "subject_state.json",
                 "schema": 1,
@@ -2435,6 +2474,18 @@ def main():
                       if contract.get(key) != expected}
         if mismatched:
             fail(f"{clip}: harness contract mismatch: {mismatched}")
+        baseline_graph_mode = _NO_CUDA_GRAPH_BASELINE
+        if clip in baseline_manifests:
+            baseline_meta = baseline_manifests[clip].get("meta", {})
+            baseline_graph_mode = baseline_meta.get("cuda_graph_captured")
+        try:
+            validate_cuda_graph_execution_mode(
+                expected_cuda_graph,
+                contract.get("cuda_graph_captured"),
+                baseline_graph_mode,
+            )
+        except ValueError as exc:
+            fail(f"{clip}: {exc}")
         clip_meta = {"model": contract["model"], "profile": contract["profile"],
                      "depth_compensation": contract["depth_compensation"],
                      "literal_bestv2": contract["literal_bestv2"],
@@ -2442,7 +2493,7 @@ def main():
                      "adaptive_pop": contract["adaptive_pop"],
                      "adaptive_pop_max": contract["adaptive_pop_max"],
                      "zero_plane": contract["zero_plane"],
-                     "cuda_graph_captured": contract.get("cuda_graph_captured", False)}
+                     "cuda_graph_captured": contract["cuda_graph_captured"]}
 
         # A valid harness result has one source, raw-model, warp-input depth, and SBS artifact for
         # every numeric frame identity. This catches dropped/renumbered outputs before metrics run.

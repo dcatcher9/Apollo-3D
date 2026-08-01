@@ -7,10 +7,8 @@
 
 #include "crypto.h"
 #include "generated/sbs_adaptive_state_contract.h"
-#include "generated/sbs_scene_controller_contract.h"
 #include "offline_sbs_contract.h"
 #include "offline_scene_planner.h"
-#include "sbs_scene_cache_contract.h"
 
 #include <algorithm>
 #include <array>
@@ -41,7 +39,6 @@
 #include <string_view>
 #include <thread>
 #include <utility>
-#include <zlib.h>
 
 #ifdef _WIN32
 // clang-format off
@@ -78,24 +75,9 @@ namespace offline_sbs {
       128ull * 1024ull * 1024ull;
     constexpr std::uint64_t max_retained_timing_frames =
       max_retained_timing_bytes / sizeof(frame_timing_t);
-    constexpr std::uint32_t scene_controller_source_time_schema = 2u;
-    constexpr std::string_view scene_controller_source_time_clock =
-      "source-presentation-timeline-v2";
-    constexpr std::string_view scene_controller_source_time_name =
-      "scene-controller-timeline.jsonl";
-    constexpr std::uint64_t scene_controller_source_time_max_line_bytes =
-      256u;
-    constexpr std::uint64_t scene_controller_source_time_max_artifact_bytes =
-      (max_retained_timing_frames + 1u) *
-      scene_controller_source_time_max_line_bytes;
     static_assert(
       max_retained_timing_frames > 12ull * 60ull * 60ull * 90ull,
       "the timing contract must cover the child timeout at 90 FPS"
-    );
-    static_assert(
-      scene_controller_source_time_max_artifact_bytes <
-        2ull * 1024ull * 1024ull * 1024ull,
-      "the bounded 12-hour source-time artifact must remain below 2 GiB"
     );
     constexpr auto child_poll = 20ms;
     constexpr auto child_timeout = std::chrono::hours(12);
@@ -105,368 +87,6 @@ namespace offline_sbs {
     public:
       using std::runtime_error::runtime_error;
     };
-
-    bool json_exact_unsigned(
-      const nlohmann::json &value,
-      const std::uint64_t expected
-    ) noexcept {
-      try {
-        if (!value.is_number_integer()) {
-          return false;
-        }
-        if (value.is_number_unsigned()) {
-          return value.get<std::uint64_t>() == expected;
-        }
-        const auto signed_value = value.get<std::int64_t>();
-        return
-          signed_value >= 0 &&
-          static_cast<std::uint64_t>(signed_value) == expected;
-      } catch (...) {
-        return false;
-      }
-    }
-
-    bool json_exact_boolean(
-      const nlohmann::json &value,
-      const bool expected
-    ) noexcept {
-      return
-        value.is_boolean() &&
-        value.get<bool>() == expected;
-    }
-
-    bool json_exact_string(
-      const nlohmann::json &value,
-      const std::string_view expected
-    ) noexcept {
-      return
-        value.is_string() &&
-        value.get_ref<const std::string &>() == expected;
-    }
-
-    bool json_exact_contract(
-      const nlohmann::json &value,
-      const nlohmann::json &expected
-    ) noexcept {
-      try {
-        if (expected.is_null()) {
-          return value.is_null();
-        }
-        if (expected.is_boolean()) {
-          return json_exact_boolean(value, expected.get<bool>());
-        }
-        if (expected.is_number_integer()) {
-          if (expected.is_number_unsigned()) {
-            return json_exact_unsigned(
-              value,
-              expected.get<std::uint64_t>()
-            );
-          }
-          const auto expected_signed = expected.get<std::int64_t>();
-          if (expected_signed >= 0) {
-            return json_exact_unsigned(
-              value,
-              static_cast<std::uint64_t>(expected_signed)
-            );
-          }
-          return
-            value.is_number_integer() &&
-            !value.is_number_unsigned() &&
-            value.get<std::int64_t>() == expected_signed;
-        }
-        if (expected.is_number_float()) {
-          return
-            value.is_number_float() &&
-            value.get<double>() == expected.get<double>();
-        }
-        if (expected.is_string()) {
-          return
-            value.is_string() &&
-            value.get_ref<const std::string &>() ==
-              expected.get_ref<const std::string &>();
-        }
-        if (expected.is_array()) {
-          if (!value.is_array() || value.size() != expected.size()) {
-            return false;
-          }
-          for (std::size_t index = 0; index < expected.size(); ++index) {
-            if (!json_exact_contract(value[index], expected[index])) {
-              return false;
-            }
-          }
-          return true;
-        }
-        if (expected.is_object()) {
-          if (!value.is_object() || value.size() != expected.size()) {
-            return false;
-          }
-          for (const auto &[key, expected_member] : expected.items()) {
-            const auto found = value.find(key);
-            if (
-              found == value.end() ||
-              !json_exact_contract(*found, expected_member)
-            ) {
-              return false;
-            }
-          }
-          return true;
-        }
-      } catch (...) {
-      }
-      return false;
-    }
-
-    nlohmann::json parse_json_strict(
-      std::istream &input,
-      const std::string_view description
-    ) {
-      std::map<int, std::set<std::string>> object_keys;
-      bool invalid_callback_depth = false;
-      std::optional<std::string> duplicate_key;
-      const auto callback =
-        [&](const int depth,
-            const nlohmann::json::parse_event_t event,
-            nlohmann::json &parsed) {
-          switch (event) {
-            case nlohmann::json::parse_event_t::object_start:
-              object_keys[depth].clear();
-              break;
-            case nlohmann::json::parse_event_t::key: {
-              if (
-                depth <= 0 ||
-                !parsed.is_string() ||
-                !object_keys.contains(depth - 1)
-              ) {
-                invalid_callback_depth = true;
-                break;
-              }
-              const auto &key = parsed.get_ref<const std::string &>();
-              if (
-                !object_keys[depth - 1].insert(key).second &&
-                !duplicate_key
-              ) {
-                duplicate_key = key;
-              }
-              break;
-            }
-            case nlohmann::json::parse_event_t::object_end:
-              object_keys.erase(depth);
-              break;
-            default:
-              break;
-          }
-          return true;
-        };
-      try {
-        auto value = nlohmann::json::parse(input, callback);
-        if (invalid_callback_depth) {
-          throw worker_error(
-            std::string {description} +
-            " has an invalid JSON object structure"
-          );
-        }
-        if (duplicate_key) {
-          throw worker_error(
-            std::string {description} +
-            " contains duplicate key '" + *duplicate_key + "'"
-          );
-        }
-        return value;
-      } catch (const worker_error &) {
-        throw;
-      } catch (const std::exception &exception) {
-        throw worker_error(
-          "cannot parse " + std::string {description} + ": " +
-          exception.what()
-        );
-      }
-    }
-
-    nlohmann::json parse_json_strict(
-      const std::string_view bytes,
-      const std::string_view description
-    ) {
-      std::istringstream input(std::string {bytes});
-      return parse_json_strict(input, description);
-    }
-
-    bool native_replay_capabilities_valid(
-      const nlohmann::json &capabilities
-    ) noexcept {
-      try {
-        const auto &native = capabilities.at("native_whole_clip");
-        const auto &depth = native.at("scene_cache_depth");
-        const auto &metadata = native.at("scene_cache_frame_metadata");
-        const auto &state = native.at("scene_cache_state");
-        const auto &scene_plan = native.at("scene_plan");
-        const auto &scene_controller =
-          native.at("scene_controller_trace");
-        const auto &inference =
-          native.at("whole_clip_inference_attestation");
-        nlohmann::json expected_analysis_flag_bits =
-          nlohmann::json::object();
-        for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
-          expected_analysis_flag_bits[std::string {flag.name}] = flag.bit;
-        }
-        return
-          json_exact_unsigned(capabilities.at("schema"), 1u) &&
-          json_exact_unsigned(native.at("follow_protocol_schema"), 1u) &&
-          json_exact_boolean(
-            native.at("follow_global_first_sequence"),
-            true
-          ) &&
-          json_exact_unsigned(
-            native.at("adaptive_state_schema"),
-            sbs_adaptive_state::schema_version
-          ) &&
-          json_exact_contract(
-            native.at("adaptive_analysis_flag_bits"),
-            expected_analysis_flag_bits
-          ) &&
-          json_exact_unsigned(
-            scene_controller.at("trace_schema"),
-            1u
-          ) &&
-          json_exact_unsigned(
-            scene_controller.at("controller_schema"),
-            sbs_scene_controller::schema_version
-          ) &&
-          json_exact_string(
-            scene_controller.at("rule_revision"),
-            sbs_scene_controller::rule_revision
-          ) &&
-          json_exact_string(
-            scene_controller.at("ordered_abi_hash"),
-            sbs_scene_controller::ordered_abi_hash
-          ) &&
-          json_exact_contract(
-            scene_controller.at("backends"),
-            nlohmann::json::array({"off", "shadow_rules"})
-          ) &&
-          json_exact_boolean(
-            scene_controller.at("active_roi_authority"),
-            false
-          ) &&
-          json_exact_string(
-            scene_controller.at("source_time_override"),
-            scene_controller_source_time_clock
-          ) &&
-          json_exact_string(
-            scene_controller.at("file"),
-            "scene_controller.jsonl"
-          ) &&
-          json_exact_contract(
-            scene_controller.at("transports"),
-            nlohmann::json::array({
-              "jsonl-v1",
-              "atomic-latest-v1",
-            })
-          ) &&
-          json_exact_string(
-            scene_controller.at("atomic_header_file"),
-            "scene_controller_header.json"
-          ) &&
-          json_exact_string(
-            scene_controller.at("atomic_frame_file"),
-            "scene_controller_frame.json"
-          ) &&
-          json_exact_unsigned(
-            scene_controller.at("global_out_word_count"),
-            sbs_scene_controller::global_out_word_count
-          ) &&
-          json_exact_unsigned(
-            scene_controller.at("rule_state_word_count"),
-            sbs_scene_controller::rule_state_word_count
-          ) &&
-          json_exact_unsigned(
-            native.at("scene_cache_contract_schema"),
-            sbs_scene_cache::contract_schema
-          ) &&
-          json_exact_boolean(
-            native.at("scene_cache_packed_sbs_contract"),
-            true
-          ) &&
-          json_exact_string(depth.at("dtype"), "float32-le") &&
-          json_exact_string(depth.at("layout"), "row-major") &&
-          json_exact_string(depth.at("dxgi_format"), "R32_FLOAT") &&
-          json_exact_string(
-            depth.at("dimensions"),
-            "per-frame-metadata"
-          ) &&
-          depth.at("bytes_per_frame").is_null() &&
-          json_exact_unsigned(
-            metadata.at("schema"),
-            sbs_scene_cache::frame_metadata_schema
-          ) &&
-          json_exact_unsigned(
-            metadata.at("word_count"),
-            sbs_scene_cache::frame_metadata_word_count
-          ) &&
-          json_exact_unsigned(
-            metadata.at("roi_transform_word_offset"),
-            sbs_scene_cache::roi_transform_word_offset
-          ) &&
-          json_exact_unsigned(
-            metadata.at("roi_transform_word_count"),
-            sbs_scene_cache::roi_transform_word_count
-          ) &&
-          json_exact_unsigned(
-            metadata.at("roi_transform_contract_schema"),
-            models::frame_roi_transform_contract_version
-          ) &&
-          json_exact_unsigned(
-            state.at("schema"),
-            sbs_scene_cache::cached_state_schema
-          ) &&
-          json_exact_unsigned(
-            state.at("subject_word_count"),
-            sbs_adaptive_state::render_prefix_word_count
-          ) &&
-          json_exact_unsigned(
-            state.at("depth_frame_state_word_count"),
-            sbs_scene_cache::depth_frame_state_word_count
-          ) &&
-          json_exact_unsigned(
-            state.at("word_count"),
-            sbs_scene_cache::cached_state_word_count
-          ) &&
-          json_exact_string(state.at("dtype"), "uint32-le") &&
-          json_exact_unsigned(scene_plan.at("schema"), 1u) &&
-          json_exact_string(
-            scene_plan.at("version"),
-            "scene-plan-v1"
-          ) &&
-          json_exact_boolean(
-            scene_plan.at("one_scene_per_replay"),
-            true
-          ) &&
-          json_exact_boolean(
-            scene_plan.at("absolute_pop_strength"),
-            true
-          ) &&
-          json_exact_boolean(
-            scene_plan.at("source_pixel_zero_anchor"),
-            true
-          ) &&
-          json_exact_boolean(native.at("render_cache_follow"), true) &&
-          json_exact_boolean(native.at("render_skips_tensorrt"), true) &&
-          json_exact_boolean(
-            inference.at("depth_inference_enabled"),
-            true
-          ) &&
-          json_exact_boolean(
-            inference.at("scheduled_depth_update_count"),
-            true
-          ) &&
-          json_exact_boolean(
-            inference.at("tensorrt_enqueue_count"),
-            true
-          ) &&
-          json_exact_boolean(native.at("atomic_sbs_publication"), true);
-      } catch (...) {
-        return false;
-      }
-    }
 
     constexpr bool can_retain_another_timing_frame(
       const std::uint64_t retained_frames
@@ -704,12 +324,7 @@ namespace offline_sbs {
         throw worker_error("cannot open JSON contract: " + path_utf8(path));
       }
       try {
-        return parse_json_strict(
-          stream,
-          "JSON contract " + path_utf8(path)
-        );
-      } catch (const worker_error &) {
-        throw;
+        return nlohmann::json::parse(stream);
       } catch (const std::exception &exception) {
         throw worker_error(
           "cannot parse JSON contract " + path_utf8(path) + ": " +
@@ -1114,416 +729,6 @@ namespace offline_sbs {
       char buffer[16] {};
       std::snprintf(buffer, sizeof(buffer), "%010llu", static_cast<unsigned long long>(sequence));
       return buffer;
-    }
-
-    std::string_view scene_controller_encoding_name(
-      const sbs_scene_controller::gpu_encoding_e encoding
-    ) {
-      switch (encoding) {
-        case sbs_scene_controller::gpu_encoding_e::float_value:
-          return "float";
-        case sbs_scene_controller::gpu_encoding_e::uint_bits:
-          return "uint_bits";
-        case sbs_scene_controller::gpu_encoding_e::uint_valued_float:
-          return "uint_valued_float";
-      }
-      throw worker_error("unknown scene-controller GPU encoding");
-    }
-
-    std::uint64_t scene_controller_uint(
-      const nlohmann::json &value,
-      const std::uint64_t maximum,
-      const std::string_view description
-    ) {
-      if (value.is_number_unsigned()) {
-        const auto result = value.get<std::uint64_t>();
-        if (result <= maximum) {
-          return result;
-        }
-      } else if (value.is_number_integer()) {
-        const auto result = value.get<std::int64_t>();
-        if (result >= 0 && static_cast<std::uint64_t>(result) <= maximum) {
-          return static_cast<std::uint64_t>(result);
-        }
-      }
-      throw worker_error(
-        "scene-controller " + std::string(description) +
-        " is not an exact bounded unsigned integer"
-      );
-    }
-
-    double scene_controller_float(
-      const nlohmann::json &value,
-      const std::string_view description
-    ) {
-      if (!value.is_number()) {
-        throw worker_error(
-          "scene-controller " + std::string(description) +
-          " is not numeric"
-        );
-      }
-      const auto result = value.get<double>();
-      if (
-        !std::isfinite(result) ||
-        std::abs(result) > std::numeric_limits<float>::max()
-      ) {
-        throw worker_error(
-          "scene-controller " + std::string(description) +
-          " is not a finite float32 value"
-        );
-      }
-      return result;
-    }
-
-    bool scene_controller_artifact_exists(const fs::path &path) {
-      std::error_code ec;
-      const auto exists = fs::exists(path, ec);
-      if (ec) {
-        throw worker_error(
-          "cannot inspect scene-controller artifact: " + path_utf8(path)
-        );
-      }
-      return exists;
-    }
-
-    struct scene_controller_frame_identity_t {
-      std::uint64_t controller_frame_id = 0;
-      std::uint32_t backend_generation = 0;
-    };
-
-    nlohmann::json expected_scene_controller_header(
-      const std::string_view model,
-      const std::uint64_t depth_reuse_interval
-    ) {
-      nlohmann::json global_out_fields = nlohmann::json::array();
-      for (const auto name : sbs_scene_controller::global_out_names) {
-        global_out_fields.push_back({
-          {"name", name},
-          {"type", "float32"},
-        });
-      }
-      nlohmann::json rule_state_fields = nlohmann::json::array();
-      for (const auto &field : sbs_scene_controller::rule_state_fields) {
-        rule_state_fields.push_back({
-          {"name", field.name},
-          {"type", field.json_type},
-          {"gpu_encoding",
-           scene_controller_encoding_name(field.gpu_encoding)},
-        });
-      }
-      return {
-        {"record", "header"},
-        {"trace_schema", 1u},
-        {"source", "video_depth_estimator.scene_controller_snapshot"},
-        {"capture", "every-source-frame-after-estimator-update"},
-        {"backend", "shadow_rules"},
-        {"controller_schema", sbs_scene_controller::schema_version},
-        {"rule_revision", sbs_scene_controller::rule_revision},
-        {"ordered_abi_hash", sbs_scene_controller::ordered_abi_hash},
-        {"global_out_fields", std::move(global_out_fields)},
-        {"rule_state_fields", std::move(rule_state_fields)},
-        {"config", {
-          {"model", model},
-          {"depth_reuse_interval", depth_reuse_interval},
-          {"active_roi_authority", false},
-        }},
-      };
-    }
-
-    scene_controller_frame_identity_t validate_scene_controller_frame(
-      const nlohmann::json &frame,
-      const std::uint64_t source_index,
-      const std::uint64_t expected_sequence,
-      const std::uint64_t expected_frame_count,
-      const std::uint64_t depth_reuse_interval,
-      const std::optional<scene_controller_frame_identity_t> previous =
-        std::nullopt
-    ) {
-      static constexpr std::array frame_keys {
-        "record",
-        "frame_id",
-        "source_index",
-        "depth_updated",
-        "snapshot_available",
-        "controller_frame_id",
-        "backend_generation",
-        "shadow",
-        "global_out",
-        "rule_state",
-      };
-      if (!frame.is_object() || frame.size() != frame_keys.size()) {
-        throw worker_error(
-          "bounded scene-controller frame shape mismatch"
-        );
-      }
-      for (const auto key : frame_keys) {
-        if (!frame.contains(key)) {
-          throw worker_error(
-            "bounded scene-controller frame lacks an exact key"
-          );
-        }
-      }
-      if (
-        expected_frame_count == 0u ||
-        source_index >= expected_frame_count
-      ) {
-        throw worker_error(
-          "bounded scene-controller source count is invalid"
-        );
-      }
-      const bool terminal_source_update =
-        source_index + 1u == expected_frame_count;
-      const bool expected_depth_updated =
-        source_index % depth_reuse_interval == 0u ||
-        terminal_source_update;
-      const auto expected_controller_frame =
-        expected_depth_updated ?
-          source_index :
-          source_index - source_index % depth_reuse_interval;
-      const auto backend_generation = scene_controller_uint(
-        frame.at("backend_generation"),
-        std::numeric_limits<std::uint32_t>::max(),
-        "backend generation"
-      );
-      if (
-        !frame.at("record").is_string() ||
-        frame.at("record").get<std::string>() != "frame" ||
-        !frame.at("frame_id").is_string() ||
-        frame.at("frame_id").get<std::string>() !=
-          frame_id(expected_sequence) ||
-        scene_controller_uint(
-          frame.at("source_index"),
-          max_sequence,
-          "source index"
-        ) != source_index ||
-        !frame.at("depth_updated").is_boolean() ||
-        frame.at("depth_updated").get<bool>() !=
-          expected_depth_updated ||
-        !frame.at("snapshot_available").is_boolean() ||
-        !frame.at("snapshot_available").get<bool>() ||
-        scene_controller_uint(
-          frame.at("controller_frame_id"),
-          max_sequence,
-          "controller frame identity"
-        ) != expected_controller_frame ||
-        backend_generation == 0u ||
-        !frame.at("shadow").is_boolean() ||
-        !frame.at("shadow").get<bool>()
-      ) {
-        throw worker_error(
-          "bounded scene-controller frame identity mismatch"
-        );
-      }
-
-      const auto &global_out = frame.at("global_out");
-      if (
-        !global_out.is_array() ||
-        global_out.size() != sbs_scene_controller::global_out_word_count
-      ) {
-        throw worker_error(
-          "bounded scene-controller global output shape mismatch"
-        );
-      }
-      const auto first_reserved_global = static_cast<std::size_t>(
-        sbs_scene_controller::global_out_word_e::reserved_35
-      );
-      for (std::size_t index = 0; index < global_out.size(); ++index) {
-        const auto value = scene_controller_float(
-          global_out[index],
-          "global output"
-        );
-        if (index >= first_reserved_global && value != 0.0) {
-          throw worker_error(
-            "bounded scene-controller reserved global output is nonzero"
-          );
-        }
-      }
-
-      const auto &rule_state = frame.at("rule_state");
-      if (
-        !rule_state.is_array() ||
-        rule_state.size() != sbs_scene_controller::rule_state_word_count
-      ) {
-        throw worker_error(
-          "bounded scene-controller rule state shape mismatch"
-        );
-      }
-      for (const auto &field : sbs_scene_controller::rule_state_fields) {
-        const auto index = sbs_scene_controller::index(field.word);
-        double value = 0.0;
-        if (
-          field.gpu_encoding ==
-          sbs_scene_controller::gpu_encoding_e::uint_bits
-        ) {
-          value = static_cast<double>(scene_controller_uint(
-            rule_state[index],
-            std::numeric_limits<std::uint32_t>::max(),
-            field.name
-          ));
-        } else {
-          value = scene_controller_float(rule_state[index], field.name);
-          if (
-            field.gpu_encoding ==
-              sbs_scene_controller::gpu_encoding_e::uint_valued_float &&
-            (
-              value < 0.0 ||
-              value > std::numeric_limits<std::uint32_t>::max() ||
-              value != std::trunc(value)
-            )
-          ) {
-            throw worker_error(
-              "bounded scene-controller uint-valued float is invalid"
-            );
-          }
-        }
-        if (field.required_zero && value != 0.0) {
-          throw worker_error(
-            "bounded scene-controller reserved rule state is nonzero"
-          );
-        }
-      }
-      if (
-        scene_controller_float(
-          rule_state[sbs_scene_controller::index(
-            sbs_scene_controller::rule_state_word_e::schema_version
-          )],
-          "rule-state schema"
-        ) != sbs_scene_controller::schema_version ||
-        scene_controller_uint(
-          rule_state[sbs_scene_controller::index(
-            sbs_scene_controller::rule_state_word_e::backend_generation
-          )],
-          std::numeric_limits<std::uint32_t>::max(),
-          "rule-state backend generation"
-        ) != backend_generation
-      ) {
-        throw worker_error(
-          "bounded scene-controller rule-state identity mismatch"
-        );
-      }
-      const scene_controller_frame_identity_t identity {
-        expected_controller_frame,
-        static_cast<std::uint32_t>(backend_generation),
-      };
-      if (
-        previous &&
-        (
-          identity.backend_generation < previous->backend_generation ||
-          (
-            identity.controller_frame_id ==
-              previous->controller_frame_id &&
-            identity.backend_generation != previous->backend_generation
-          )
-        )
-      ) {
-        throw worker_error(
-          "bounded scene-controller generation history is inconsistent"
-        );
-      }
-      return identity;
-    }
-
-    void validate_scene_controller_transport(
-      const nlohmann::json &contract,
-      const fs::path &output,
-      const std::string_view expected_backend,
-      const std::uint64_t expected_frame_count,
-      const std::uint64_t expected_first_sequence
-    ) {
-      if (
-        expected_backend != "off" &&
-        expected_backend != "shadow_rules"
-      ) {
-        throw worker_error("invalid expected scene-controller backend");
-      }
-      const auto &descriptor = contract.at("scene_controller");
-      const bool enabled = expected_backend == "shadow_rules";
-      const nlohmann::json expected_descriptor {
-        {"enabled", enabled},
-        {"backend", expected_backend},
-        {"active_roi_authority", false},
-        {"transport", enabled ?
-          nlohmann::json("atomic-latest-v1") :
-          nlohmann::json(nullptr)},
-        {"file", nullptr},
-        {"header_file", enabled ?
-          nlohmann::json("scene_controller_header.json") :
-          nlohmann::json(nullptr)},
-        {"frame_file", enabled ?
-          nlohmann::json("scene_controller_frame.json") :
-          nlohmann::json(nullptr)},
-        {"retained_history", false},
-        {"trace_schema", enabled ?
-          nlohmann::json(1u) :
-          nlohmann::json(nullptr)},
-        {"controller_schema", sbs_scene_controller::schema_version},
-        {"rule_revision", sbs_scene_controller::rule_revision},
-        {"ordered_abi_hash", sbs_scene_controller::ordered_abi_hash},
-        {"frame_count", enabled ? expected_frame_count : 0u},
-      };
-      if (!json_exact_contract(descriptor, expected_descriptor)) {
-        throw worker_error(
-          "scene-controller descriptor does not match the selected backend"
-        );
-      }
-
-      const auto jsonl_path = output / "scene_controller.jsonl";
-      const auto header_path = output / "scene_controller_header.json";
-      const auto frame_path = output / "scene_controller_frame.json";
-      if (!enabled) {
-        if (
-          scene_controller_artifact_exists(jsonl_path) ||
-          scene_controller_artifact_exists(header_path) ||
-          scene_controller_artifact_exists(frame_path)
-        ) {
-          throw worker_error(
-            "disabled scene-controller emitted an artifact"
-          );
-        }
-        return;
-      }
-      if (expected_frame_count == 0u) {
-        throw worker_error(
-          "enabled scene-controller requires at least one source frame"
-        );
-      }
-      if (scene_controller_artifact_exists(jsonl_path)) {
-        throw worker_error(
-          "bounded scene-controller unexpectedly retained JSONL history"
-        );
-      }
-
-      const auto model = contract.at("model").get<std::string>();
-      const auto depth_reuse_interval = scene_controller_uint(
-        contract.at("depth_reuse_interval"),
-        8u,
-        "depth reuse interval"
-      );
-      if (model.empty() || depth_reuse_interval == 0u) {
-        throw worker_error(
-          "scene-controller trace has invalid model/depth configuration"
-        );
-      }
-      if (
-        !json_exact_contract(
-          read_json(header_path),
-          expected_scene_controller_header(model, depth_reuse_interval)
-        )
-      ) {
-        throw worker_error(
-          "bounded scene-controller header contract mismatch"
-        );
-      }
-
-      const auto frame = read_json(frame_path);
-      const auto source_index = expected_frame_count - 1u;
-      (void) validate_scene_controller_frame(
-        frame,
-        source_index,
-        expected_first_sequence + source_index,
-        expected_frame_count,
-        depth_reuse_interval
-      );
     }
 
     std::int64_t parse_integer_json(
@@ -3577,328 +2782,6 @@ namespace offline_sbs {
       return result;
     }
 
-    struct scene_controller_source_time_artifact_t {
-      fs::path path;
-      std::string file_sha256;
-      double total_elapsed_seconds = 0.0;
-      std::size_t frame_count = 0;
-      std::uint64_t file_bytes = 0;
-      std::uint64_t disk_reservation_bytes = 0;
-    };
-
-    template<class Visitor>
-    double visit_scene_controller_source_time_lines(
-      const media_contract_t &media,
-      Visitor &&visitor
-    ) {
-      if (
-        media.frames.empty() ||
-        media.time_base.numerator <= 0 ||
-        media.time_base.denominator <= 0
-      ) {
-        throw worker_error(
-          "cannot build scene-controller source time from invalid media"
-        );
-      }
-      const auto emit = [&](const nlohmann::json &record) {
-        const std::string line = record.dump() + "\n";
-        if (
-          line.size() >
-          scene_controller_source_time_max_line_bytes
-        ) {
-          throw worker_error(
-            "scene-controller source-time JSONL record exceeds its " +
-            std::to_string(
-              scene_controller_source_time_max_line_bytes
-            ) + "-byte bound"
-          );
-        }
-        visitor(line);
-      };
-      emit({
-        {"record", "header"},
-        {"schema", scene_controller_source_time_schema},
-        {"clock", scene_controller_source_time_clock},
-        {"frame_count", media.frames.size()},
-        {"time_base", {
-          {"num", media.time_base.numerator},
-          {"den", media.time_base.denominator},
-        }},
-      });
-
-      double total_elapsed_seconds = 0.0;
-      for (std::size_t index = 0; index < media.frames.size(); ++index) {
-        const auto &frame = media.frames[index];
-        if (frame.sequence != index + 1u) {
-          throw worker_error(
-            "scene-controller source time requires contiguous media sequence"
-          );
-        }
-        if (frame.duration <= 0) {
-          throw worker_error(
-            "scene-controller source time requires positive frame duration"
-          );
-        }
-        const std::int64_t delta_ticks = index == 0u ? 0 :
-          positive_tick_difference(
-            frame.pts,
-            media.frames[index - 1u].pts,
-            "scene-controller presentation delta"
-          );
-        const double delta_seconds =
-          media.time_base.seconds(delta_ticks);
-        if (!std::isfinite(delta_seconds) || delta_seconds < 0.0) {
-          throw worker_error(
-            "scene-controller presentation delta is not finite"
-          );
-        }
-        total_elapsed_seconds += delta_seconds;
-        if (!std::isfinite(total_elapsed_seconds)) {
-          throw worker_error(
-            "scene-controller presentation duration overflowed"
-          );
-        }
-        emit({
-          {"record", "frame"},
-          {"source_index", index},
-          {"frame_id", frame_id(frame.sequence)},
-          {"pts_ticks", frame.pts},
-          {"duration_ticks", frame.duration},
-        });
-      }
-      return total_elapsed_seconds;
-    }
-
-    scene_controller_source_time_artifact_t
-    write_scene_controller_source_time_contract(
-      const fs::path &result_directory,
-      const media_contract_t &media
-    ) {
-      const fs::path path =
-        result_directory / scene_controller_source_time_name;
-      std::uint64_t projected_bytes = 0;
-      const double total_elapsed_seconds =
-        visit_scene_controller_source_time_lines(
-          media,
-          [&](const std::string &line) {
-            if (
-              line.size() >
-                scene_controller_source_time_max_artifact_bytes -
-                  projected_bytes
-            ) {
-              throw worker_error(
-                "scene-controller source-time artifact exceeds its " +
-                std::to_string(
-                  scene_controller_source_time_max_artifact_bytes
-                ) + "-byte bound"
-              );
-            }
-            projected_bytes += line.size();
-          }
-        );
-      std::error_code ec;
-      const auto space = fs::space(result_directory, ec);
-      if (ec) {
-        throw worker_error(
-          "cannot inspect disk space for scene-controller source time: " +
-          ec.message()
-        );
-      }
-      if (space.available < projected_bytes) {
-        throw worker_error(
-          "scene-controller source-time artifact requires " +
-          std::to_string(projected_bytes) +
-          " bytes but only " + std::to_string(space.available) +
-          " bytes are available"
-        );
-      }
-
-      auto temporary = path;
-      temporary += L".tmp";
-      const auto digest =
-        std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> {
-          EVP_MD_CTX_new(),
-          &EVP_MD_CTX_free,
-        };
-      if (
-        !digest ||
-        EVP_DigestInit_ex(digest.get(), EVP_sha256(), nullptr) != 1
-      ) {
-        throw worker_error(
-          "cannot initialize scene-controller source-time SHA-256"
-        );
-      }
-#ifdef _WIN32
-      HANDLE handle = CreateFileW(
-        temporary.c_str(),
-        GENERIC_WRITE,
-        0,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
-        nullptr
-      );
-      if (handle == INVALID_HANDLE_VALUE) {
-        throw worker_error(
-          "cannot create source-time temporary file: " +
-          path_utf8(temporary)
-        );
-      }
-#else
-      std::ofstream output(
-        temporary,
-        std::ios::binary | std::ios::trunc
-      );
-      if (!output) {
-        throw worker_error(
-          "cannot create source-time temporary file: " +
-          path_utf8(temporary)
-        );
-      }
-#endif
-      bool closed = false;
-      try {
-        std::uint64_t written_bytes = 0;
-        (void) visit_scene_controller_source_time_lines(
-          media,
-          [&](const std::string &line) {
-#ifdef _WIN32
-            if (!write_all(handle, line.data(), line.size())) {
-              throw worker_error(
-                "cannot durably write scene-controller source time"
-              );
-            }
-#else
-            output.write(
-              line.data(),
-              static_cast<std::streamsize>(line.size())
-            );
-            if (!output) {
-              throw worker_error(
-                "cannot write scene-controller source time"
-              );
-            }
-#endif
-            if (
-              EVP_DigestUpdate(
-                digest.get(),
-                line.data(),
-                line.size()
-              ) != 1
-            ) {
-              throw worker_error(
-                "cannot hash scene-controller source time"
-              );
-            }
-            written_bytes += line.size();
-          }
-        );
-        if (written_bytes != projected_bytes) {
-          throw worker_error(
-            "scene-controller source-time size changed while writing"
-          );
-        }
-#ifdef _WIN32
-        const bool flushed = FlushFileBuffers(handle);
-        const bool handle_closed = CloseHandle(handle);
-        handle = INVALID_HANDLE_VALUE;
-        if (!flushed || !handle_closed) {
-          throw worker_error(
-            "cannot flush scene-controller source time"
-          );
-        }
-#else
-        output.flush();
-        output.close();
-        if (!output) {
-          throw worker_error(
-            "cannot flush scene-controller source time"
-          );
-        }
-#endif
-        closed = true;
-      } catch (...) {
-#ifdef _WIN32
-        if (handle != INVALID_HANDLE_VALUE) {
-          CloseHandle(handle);
-        }
-#else
-        if (output.is_open()) {
-          output.close();
-        }
-#endif
-        fs::remove(temporary, ec);
-        throw;
-      }
-      if (!closed) {
-        fs::remove(temporary, ec);
-        throw worker_error(
-          "scene-controller source-time writer did not close"
-        );
-      }
-
-      std::array<unsigned char, EVP_MAX_MD_SIZE> digest_bytes {};
-      unsigned int digest_size = 0;
-      if (
-        EVP_DigestFinal_ex(
-          digest.get(),
-          digest_bytes.data(),
-          &digest_size
-        ) != 1 ||
-        digest_size != 32u
-      ) {
-        fs::remove(temporary, ec);
-        throw worker_error(
-          "cannot finalize scene-controller source-time SHA-256"
-        );
-      }
-      static constexpr char digits[] = "0123456789abcdef";
-      std::string file_sha256(digest_size * 2u, '\0');
-      for (std::size_t index = 0; index < digest_size; ++index) {
-        file_sha256[index * 2u] =
-          digits[digest_bytes[index] >> 4u];
-        file_sha256[index * 2u + 1u] =
-          digits[digest_bytes[index] & 0x0fu];
-      }
-#ifdef _WIN32
-      if (!MoveFileExW(
-            temporary.c_str(),
-            path.c_str(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
-          )) {
-        fs::remove(temporary, ec);
-        throw worker_error(
-          "cannot atomically publish scene-controller source time"
-        );
-      }
-#else
-      fs::rename(temporary, path, ec);
-      if (ec) {
-        fs::remove(temporary, ec);
-        throw worker_error(
-          "cannot atomically publish scene-controller source time: " +
-          ec.message()
-        );
-      }
-#endif
-      const auto actual_bytes = fs::file_size(path, ec);
-      if (ec || actual_bytes != projected_bytes) {
-        std::error_code cleanup_error;
-        fs::remove(path, cleanup_error);
-        throw worker_error(
-          "published scene-controller source-time size mismatch"
-        );
-      }
-      return {
-        .path = path,
-        .file_sha256 = std::move(file_sha256),
-        .total_elapsed_seconds = total_elapsed_seconds,
-        .frame_count = media.frames.size(),
-        .file_bytes = projected_bytes,
-        .disk_reservation_bytes = projected_bytes,
-      };
-    }
-
     nlohmann::json media_contract_json(const media_contract_t &media) {
       if (media.frames.empty()) {
         throw worker_error("cannot serialize an empty media contract");
@@ -4271,8 +3154,7 @@ namespace offline_sbs {
       const nlohmann::json &value,
       const frame_timing_t &timing,
       const rational_t time_base,
-      const std::uint64_t cache_bytes,
-      const bool requires_previous_packed_frame
+      const std::uint64_t cache_bytes
     ) {
       using sbs_adaptive_state::word_e;
       if (!value.is_object() || value.value("record", "") != "frame" || value.value("frame_id", "") != frame_id(timing.sequence) || value.value("source_index", max_sequence) != timing.sequence - 1 || !value.contains("values") || !value["values"].is_array() || value["values"].size() != sbs_adaptive_state::word_count) {
@@ -4332,8 +3214,6 @@ namespace offline_sbs {
         words[sbs_adaptive_state::index(word_e::valid_depth_fraction)].get<float>();
       frame.scene_age =
         words[sbs_adaptive_state::index(word_e::scene_age)].get<float>();
-      frame.requires_previous_packed_frame =
-        requires_previous_packed_frame;
       const auto cut_flags_value =
         words[sbs_adaptive_state::index(word_e::cut_flags)].get<float>();
       const auto analysis_flags =
@@ -4531,470 +3411,10 @@ namespace offline_sbs {
       std::uint64_t frame_count_ = 0;
     };
 
-    class scene_controller_trace_capture_t {
-    public:
-      scene_controller_trace_capture_t(
-        fs::path snapshot_directory,
-        fs::path result_directory,
-        const std::uint64_t expected_frame_count
-      ):
-          snapshot_directory_(std::move(snapshot_directory)),
-          expected_frame_count_(expected_frame_count),
-          final_path_(std::move(result_directory) /
-                      "scene-controller.jsonl.gz"),
-          summary_path_(final_path_.parent_path() /
-                        "scene-controller-trace.json"),
-          partial_path_(final_path_.wstring() + L".part"),
-          digest_(
-            EVP_MD_CTX_new(),
-            &EVP_MD_CTX_free
-          ) {
-        if (
-          expected_frame_count_ == 0u ||
-          expected_frame_count_ > max_sequence
-        ) {
-          throw worker_error(
-            "scene-controller evidence source count is invalid"
-          );
-        }
-        std::error_code ec;
-        if (
-          fs::exists(final_path_, ec) ||
-          ec ||
-          fs::exists(summary_path_, ec) ||
-          ec ||
-          fs::exists(partial_path_, ec) ||
-          ec
-        ) {
-          throw worker_error(
-            "scene-controller evidence output already exists"
-          );
-        }
-#ifdef _WIN32
-        gzip_ = gzopen_w(partial_path_.c_str(), "wb6");
-#else
-        gzip_ = gzopen(partial_path_.c_str(), "wb6");
-#endif
-        if (
-          gzip_ == nullptr ||
-          gzbuffer(gzip_, 256u * 1024u) != 0 ||
-          !digest_ ||
-          EVP_DigestInit_ex(digest_.get(), EVP_sha256(), nullptr) != 1
-        ) {
-          abort();
-          throw worker_error(
-            "cannot initialize compressed scene-controller evidence"
-          );
-        }
-      }
-
-      ~scene_controller_trace_capture_t() {
-        abort();
-      }
-
-      scene_controller_trace_capture_t(
-        const scene_controller_trace_capture_t &
-      ) = delete;
-      scene_controller_trace_capture_t &operator=(
-        const scene_controller_trace_capture_t &
-      ) = delete;
-
-      void read_header(const child_process_t &child) {
-        if (header_read_) {
-          throw worker_error(
-            "scene-controller evidence header was read twice"
-          );
-        }
-        const auto header = read_snapshot(
-          child,
-          "scene_controller_header.json"
-        );
-        if (!header.is_object() || !header.contains("config")) {
-          throw worker_error(
-            "bounded scene-controller header is not an exact object"
-          );
-        }
-        const auto &config = header.at("config");
-        static constexpr std::array config_keys {
-          "model",
-          "depth_reuse_interval",
-          "active_roi_authority",
-        };
-        if (!config.is_object() || config.size() != config_keys.size()) {
-          throw worker_error(
-            "bounded scene-controller header config shape mismatch"
-          );
-        }
-        for (const auto key : config_keys) {
-          if (!config.contains(key)) {
-            throw worker_error(
-              "bounded scene-controller header config lacks an exact key"
-            );
-          }
-        }
-        if (
-          !config.at("model").is_string() ||
-          config.at("model").get<std::string>().empty() ||
-          !config.at("active_roi_authority").is_boolean() ||
-          config.at("active_roi_authority").get<bool>()
-        ) {
-          throw worker_error(
-            "bounded scene-controller header config is invalid"
-          );
-        }
-        model_ = config.at("model").get<std::string>();
-        depth_reuse_interval_ = scene_controller_uint(
-          config.at("depth_reuse_interval"),
-          8u,
-          "depth reuse interval"
-        );
-        if (
-          depth_reuse_interval_ == 0u ||
-          !json_exact_contract(
-            header,
-            expected_scene_controller_header(
-              model_,
-              depth_reuse_interval_
-            )
-          )
-        ) {
-          throw worker_error(
-            "bounded scene-controller header contract mismatch"
-          );
-        }
-        write_record(header);
-        header_read_ = true;
-      }
-
-      void read_frame(
-        const child_process_t &child,
-        const std::uint64_t sequence
-      ) {
-        if (
-          !header_read_ ||
-          sequence == 0u ||
-          sequence != frame_count_ + 1u
-        ) {
-          throw worker_error(
-            "scene-controller evidence read is not contiguous"
-          );
-        }
-        const auto frame = read_frame_snapshot(child, sequence - 1u);
-        previous_identity_ = validate_scene_controller_frame(
-          frame,
-          sequence - 1u,
-          sequence,
-          expected_frame_count_,
-          depth_reuse_interval_,
-          previous_identity_
-        );
-        write_record(frame);
-        ++frame_count_;
-      }
-
-      nlohmann::json finish(const std::uint64_t expected_frame_count) {
-        if (
-          prepared_ ||
-          committed_ ||
-          !header_read_ ||
-          expected_frame_count != expected_frame_count_ ||
-          frame_count_ != expected_frame_count ||
-          gzip_ == nullptr
-        ) {
-          throw worker_error(
-            "scene-controller evidence frame count mismatch"
-          );
-        }
-        const auto close_result = gzclose(std::exchange(gzip_, nullptr));
-        if (close_result != Z_OK) {
-          throw worker_error(
-            "cannot finalize compressed scene-controller evidence"
-          );
-        }
-
-        std::array<unsigned char, EVP_MAX_MD_SIZE> digest {};
-        unsigned int digest_size = 0;
-        if (
-          !digest_ ||
-          EVP_DigestFinal_ex(
-            digest_.get(),
-            digest.data(),
-            &digest_size
-          ) != 1 ||
-          digest_size != 32u
-        ) {
-          throw worker_error(
-            "cannot finalize scene-controller evidence SHA-256"
-          );
-        }
-        const auto digest_hex = hex_digest(digest.data(), digest_size);
-        std::error_code ec;
-        const auto compressed_bytes = fs::file_size(partial_path_, ec);
-        if (ec || compressed_bytes == 0u) {
-          throw worker_error(
-            "compressed scene-controller evidence is empty"
-          );
-        }
-        prepared_result_ = {
-          {"schema", 1u},
-          {"version", "scene-controller-jsonl-gzip-v1"},
-          {"file", path_utf8(final_path_)},
-          {"encoding", "utf-8-jsonl"},
-          {"compression", "gzip"},
-          {"uncompressed_sha256", digest_hex},
-          {"uncompressed_bytes", uncompressed_bytes_},
-          {"compressed_bytes", compressed_bytes},
-          {"frame_count", frame_count_},
-          {"unavailable_frame_count", 0u},
-          {"first_sequence", 1u},
-          {"last_sequence", frame_count_},
-          {"controller_schema", sbs_scene_controller::schema_version},
-          {"rule_revision", sbs_scene_controller::rule_revision},
-          {"ordered_abi_hash", sbs_scene_controller::ordered_abi_hash},
-          {"model", model_},
-          {"depth_reuse_interval", depth_reuse_interval_},
-          {"active_roi_authority", false},
-        };
-        prepared_ = true;
-        return prepared_result_;
-      }
-
-      [[nodiscard]] bool ready_to_commit() const noexcept {
-        return
-          prepared_ &&
-          !published_ &&
-          !committed_ &&
-          gzip_ == nullptr &&
-          prepared_result_.is_object();
-      }
-
-      void publish() {
-        if (!ready_to_commit()) {
-          throw worker_error(
-            "scene-controller evidence is not prepared for publication"
-          );
-        }
-        std::error_code ec;
-        fs::rename(partial_path_, final_path_, ec);
-        if (ec) {
-          throw worker_error(
-            "cannot atomically publish scene-controller evidence: " +
-            ec.message()
-          );
-        }
-        final_renamed_ = true;
-        try {
-          // The summary is the pair-level commit marker. It is deliberately
-          // withheld until every encoder/cache/timeline check has passed and the
-          // worker result is ready for its adjacent atomic publication.
-          write_json_atomic(summary_path_, prepared_result_);
-        } catch (...) {
-          abort();
-          throw;
-        }
-        published_ = true;
-      }
-
-      void commit() noexcept {
-        if (published_) {
-          committed_ = true;
-        }
-      }
-
-    private:
-      static std::string hex_digest(
-        const unsigned char *bytes,
-        const std::size_t size
-      ) {
-        static constexpr char digits[] = "0123456789abcdef";
-        std::string result(size * 2u, '\0');
-        for (std::size_t index = 0; index < size; ++index) {
-          result[index * 2u] = digits[bytes[index] >> 4u];
-          result[index * 2u + 1u] = digits[bytes[index] & 0x0fu];
-        }
-        return result;
-      }
-
-      nlohmann::json read_snapshot(
-        const child_process_t &child,
-        const std::string_view filename
-      ) const {
-        constexpr std::uintmax_t max_snapshot_bytes =
-          1ull * 1024ull * 1024ull;
-        const auto snapshot = snapshot_directory_ / filename;
-        const auto deadline =
-          std::chrono::steady_clock::now() + frame_io_timeout;
-        while (std::chrono::steady_clock::now() < deadline) {
-          std::error_code ec;
-          if (fs::is_regular_file(snapshot, ec) && !ec) {
-            const auto size = fs::file_size(snapshot, ec);
-            if (
-              ec ||
-              size == 0u ||
-              size > max_snapshot_bytes ||
-              size > static_cast<std::uintmax_t>(
-                std::numeric_limits<std::streamsize>::max()
-              )
-            ) {
-              throw worker_error(
-                "bounded scene-controller snapshot has an invalid size"
-              );
-            }
-            std::string bytes(static_cast<std::size_t>(size), '\0');
-            std::ifstream input(snapshot, std::ios::binary);
-            if (
-              !input ||
-              !input.read(
-                bytes.data(),
-                static_cast<std::streamsize>(bytes.size())
-              ) ||
-              input.peek() != std::char_traits<char>::eof()
-            ) {
-              throw worker_error(
-                "cannot read bounded scene-controller snapshot"
-              );
-            }
-            try {
-              return parse_json_strict(
-                bytes,
-                "bounded scene-controller snapshot"
-              );
-            } catch (const worker_error &) {
-              throw;
-            } catch (const std::exception &exception) {
-              throw worker_error(
-                "invalid bounded scene-controller JSON: " +
-                std::string(exception.what())
-              );
-            }
-          }
-          if (ec) {
-            throw worker_error(
-              "cannot inspect bounded scene-controller snapshot"
-            );
-          }
-          if (!child.running()) {
-            throw worker_error(
-              "analysis exited before publishing scene-controller evidence"
-            );
-          }
-          std::this_thread::sleep_for(child_poll);
-        }
-        throw worker_error(
-          "timed out reading bounded scene-controller evidence"
-        );
-      }
-
-      nlohmann::json read_frame_snapshot(
-        const child_process_t &child,
-        const std::uint64_t expected_source_index
-      ) const {
-        const auto deadline =
-          std::chrono::steady_clock::now() + frame_io_timeout;
-        while (std::chrono::steady_clock::now() < deadline) {
-          const auto frame = read_snapshot(
-            child,
-            "scene_controller_frame.json"
-          );
-          if (!frame.is_object() || !frame.contains("source_index")) {
-            throw worker_error(
-              "bounded scene-controller frame lacks source identity"
-            );
-          }
-          const auto source_index = scene_controller_uint(
-            frame.at("source_index"),
-            max_sequence,
-            "source index"
-          );
-          if (source_index == expected_source_index) {
-            return frame;
-          }
-          if (source_index > expected_source_index || !child.running()) {
-            throw worker_error(
-              "bounded scene-controller frame skipped a source identity"
-            );
-          }
-          std::this_thread::sleep_for(child_poll);
-        }
-        throw worker_error(
-          "timed out waiting for the next scene-controller frame"
-        );
-      }
-
-      void write_record(const nlohmann::json &value) {
-        const auto line = value.dump() + '\n';
-        if (
-          line.empty() ||
-          line.size() > 1024u * 1024u ||
-          line.size() > std::numeric_limits<unsigned>::max() ||
-          gzip_ == nullptr ||
-          gzwrite(
-            gzip_,
-            line.data(),
-            static_cast<unsigned>(line.size())
-          ) != static_cast<int>(line.size()) ||
-          !digest_ ||
-          EVP_DigestUpdate(
-            digest_.get(),
-            line.data(),
-            line.size()
-          ) != 1
-        ) {
-          throw worker_error(
-            "cannot stream compressed scene-controller evidence"
-          );
-        }
-        if (
-          uncompressed_bytes_ >
-          std::numeric_limits<std::uint64_t>::max() - line.size()
-        ) {
-          throw worker_error(
-            "scene-controller evidence byte count overflows"
-          );
-        }
-        uncompressed_bytes_ += line.size();
-      }
-
-      void abort() noexcept {
-        if (gzip_ != nullptr) {
-          (void) gzclose(std::exchange(gzip_, nullptr));
-        }
-        if (!committed_ && !partial_path_.empty()) {
-          std::error_code ignored;
-          fs::remove(partial_path_, ignored);
-          fs::remove(summary_path_, ignored);
-          if (final_renamed_) {
-            fs::remove(final_path_, ignored);
-          }
-        }
-      }
-
-      fs::path snapshot_directory_;
-      std::uint64_t expected_frame_count_ = 0;
-      fs::path final_path_;
-      fs::path summary_path_;
-      fs::path partial_path_;
-      gzFile gzip_ = nullptr;
-      std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> digest_;
-      std::optional<scene_controller_frame_identity_t> previous_identity_;
-      std::string model_;
-      std::uint64_t depth_reuse_interval_ = 0;
-      std::uint64_t frame_count_ = 0;
-      std::uint64_t uncompressed_bytes_ = 0;
-      nlohmann::json prepared_result_;
-      bool header_read_ = false;
-      bool final_renamed_ = false;
-      bool prepared_ = false;
-      bool published_ = false;
-      bool committed_ = false;
-    };
-
     struct cache_contract_t {
       std::uint64_t processed_count = 0;
       std::uint64_t depth_bytes = 0;
       std::uint64_t state_bytes = 0;
-      std::uint64_t metadata_bytes = 0;
-      bool requires_previous_packed_frame = false;
       std::uint32_t source_width = 0;
       std::uint32_t source_height = 0;
       std::uint32_t sbs_width = 0;
@@ -5002,12 +3422,6 @@ namespace offline_sbs {
       std::string extension;
       nlohmann::json value;
     };
-
-    bool depth_frame_requires_previous(
-      const sbs_scene_cache::cached_state_words_t &state
-    ) {
-      return sbs_scene_cache::cached_state_requires_previous(state);
-    }
 
     cache_contract_t parse_cache_contract(
       const fs::path &cache_directory,
@@ -5017,20 +3431,17 @@ namespace offline_sbs {
       const auto value = read_json(
         cache_directory / "scene_cache_contract.json"
       );
-      if (value.value("schema", 0u) != sbs_scene_cache::contract_schema || value.value("status", "") != "running" || value.value("first_sequence", 0) != 1 || value.value("processed_count", 0ull) != sequence || !value.value("atomic_frame_publication", false)) {
+      if (value.value("schema", 0) != 1 || value.value("status", "") != "running" || value.value("first_sequence", 0) != 1 || value.value("processed_count", 0ull) != sequence || !value.value("atomic_frame_publication", false)) {
         throw worker_error("running scene-cache sequence contract mismatch");
       }
       const auto &source = value.at("source");
       const auto &depth = value.at("depth");
-      const auto &frame_metadata = value.at("frame_metadata");
       const auto &state = value.at("state");
       const auto &packed = value.at("packed_sbs");
-      const auto &render_config = value.at("render_config");
       cache_contract_t result;
       result.processed_count = sequence;
+      result.depth_bytes = depth.at("bytes_per_frame").get<std::uint64_t>();
       result.state_bytes = state.at("bytes_per_frame").get<std::uint64_t>();
-      result.metadata_bytes =
-        frame_metadata.at("bytes_per_frame").get<std::uint64_t>();
       result.source_width = source.at("width").get<std::uint32_t>();
       result.source_height = source.at("height").get<std::uint32_t>();
       result.sbs_width = packed.at("width").get<std::uint32_t>();
@@ -5041,51 +3452,15 @@ namespace offline_sbs {
         media.color == media_color_e::sdr ?
           "sRGB-BMP-WIC" :
           "linear-scRGB-f32-pfm";
-      const auto depth_reuse_interval =
-        render_config.at("depth_reuse_interval").get<std::uint32_t>();
-      if (result.source_width != media.width || result.source_height != media.height || source.at("frame_format").get<std::string>() != expected_frame_format || result.sbs_width == 0 || result.sbs_height == 0 || result.sbs_width % 2 != 0 || packed.at("eye_width").get<std::uint32_t>() * 2 != result.sbs_width || packed.at("eye_height").get<std::uint32_t>() != result.sbs_height || result.extension != (media.color == media_color_e::sdr ? "png" : "pfm") || depth.at("dtype").get<std::string>() != "float32-le" || depth.at("dxgi_format").get<std::string>() != "R32_FLOAT" || depth.at("dimensions").get<std::string>() != "per-frame-metadata" || !depth.at("bytes_per_frame").is_null() || depth.at("bytes_per_sample").get<std::uint32_t>() != sizeof(float) || frame_metadata.at("schema").get<std::uint32_t>() != sbs_scene_cache::frame_metadata_schema || frame_metadata.at("magic").get<std::uint32_t>() != sbs_scene_cache::frame_metadata_magic || frame_metadata.at("word_count").get<std::uint32_t>() != sbs_scene_cache::frame_metadata_word_count || result.metadata_bytes != sizeof(sbs_scene_cache::frame_metadata_t) || state.at("schema").get<std::uint32_t>() != sbs_scene_cache::cached_state_schema || state.at("subject_word_count").get<std::size_t>() != sbs_adaptive_state::render_prefix_word_count || state.at("depth_frame_state_word_count").get<std::size_t>() != sbs_scene_cache::depth_frame_state_word_count || state.at("word_count").get<std::size_t>() != sbs_scene_cache::cached_state_word_count || result.state_bytes != sizeof(sbs_scene_cache::cached_state_words_t) || depth_reuse_interval < 1u || depth_reuse_interval > 8u) {
+      if (result.source_width != media.width || result.source_height != media.height || source.at("frame_format").get<std::string>() != expected_frame_format || result.sbs_width == 0 || result.sbs_height == 0 || result.sbs_width % 2 != 0 || packed.at("eye_width").get<std::uint32_t>() * 2 != result.sbs_width || packed.at("eye_height").get<std::uint32_t>() != result.sbs_height || result.extension != (media.color == media_color_e::sdr ? "png" : "pfm") || depth.at("dtype").get<std::string>() != "float32-le" || depth.at("dxgi_format").get<std::string>() != "R32_FLOAT" || state.at("schema").get<int>() != 1 || state.at("word_count").get<int>() != 12 || result.state_bytes != 48) {
         throw worker_error("scene-cache media/layout contract mismatch");
       }
       const auto stem = "frame_" + frame_id(sequence);
       const auto depth_path = cache_directory / (stem + ".depth.r32f");
       const auto state_path = cache_directory / (stem + ".state.u32");
-      const auto metadata_path = cache_directory / (stem + ".meta.u32");
-      sbs_scene_cache::cached_state_words_t cached_state {};
-      sbs_scene_cache::frame_metadata_t metadata {};
       std::error_code ec;
-      std::ifstream state_stream(state_path, std::ios::binary);
-      std::ifstream metadata_stream(metadata_path, std::ios::binary);
-      if (!state_stream ||
-          !state_stream.read(
-            reinterpret_cast<char *>(cached_state.data()),
-            sizeof(cached_state)
-          ) ||
-          state_stream.peek() != std::char_traits<char>::eof() ||
-          !metadata_stream ||
-          !metadata_stream.read(
-            reinterpret_cast<char *>(&metadata),
-            sizeof(metadata)
-          ) ||
-          metadata_stream.peek() != std::char_traits<char>::eof() ||
-          !sbs_scene_cache::valid_frame_metadata_for_state(
-            metadata,
-            cached_state,
-            sequence,
-            result.source_width,
-            result.source_height,
-            depth_reuse_interval,
-            sequence == media.frames.size()
-          )) {
-        throw worker_error(
-          "scene-cache ACK has invalid cached state or frame metadata"
-        );
-      }
-      result.depth_bytes =
-        sbs_scene_cache::depth_payload_bytes(metadata);
-      result.requires_previous_packed_frame =
-        depth_frame_requires_previous(cached_state);
-      if (!fs::is_regular_file(depth_path, ec) || ec || fs::file_size(depth_path, ec) != result.depth_bytes || ec || !fs::is_regular_file(state_path, ec) || ec || fs::file_size(state_path, ec) != result.state_bytes || ec || !fs::is_regular_file(metadata_path, ec) || ec || fs::file_size(metadata_path, ec) != result.metadata_bytes || ec) {
-        throw worker_error("scene-cache ACK lacks its exact depth/state/metadata triplet");
+      if (!fs::is_regular_file(depth_path, ec) || ec || fs::file_size(depth_path, ec) != result.depth_bytes || ec || !fs::is_regular_file(state_path, ec) || ec || fs::file_size(state_path, ec) != result.state_bytes || ec) {
+        throw worker_error("scene-cache ACK lacks its exact depth/state pair");
       }
       return result;
     }
@@ -5094,7 +3469,7 @@ namespace offline_sbs {
       return {
         {"schema", 1},
         {"version", "scene-plan-v1"},
-        {"cache_contract_schema", sbs_scene_cache::contract_schema},
+        {"cache_contract_schema", 1},
         {"scenes", nlohmann::json::array({
                      {
                        {"start_sequence", scene.start_sequence},
@@ -5230,7 +3605,6 @@ namespace offline_sbs {
         const auto stem = "frame_" + frame_id(sequence);
         remove_file_checked(cache / (stem + ".depth.r32f"));
         remove_file_checked(cache / (stem + ".state.u32"));
-        remove_file_checked(cache / (stem + ".meta.u32"));
       }
     }
 
@@ -6780,9 +5154,7 @@ namespace offline_sbs {
       const fs::path &cache,
       const std::uint32_t expected_sbs_width,
       const std::uint32_t expected_sbs_height,
-      const std::uint64_t live_cache_bytes,
-      const std::uint64_t source_raster_reservation_bytes,
-      const std::uint64_t sbs_raster_reservation_bytes
+      const std::uint64_t live_cache_bytes
     ) {
       const std::string output_extension =
         media.color == media_color_e::sdr ? "png" : "pfm";
@@ -6791,22 +5163,6 @@ namespace offline_sbs {
       const auto input = work / "render-input" / scene_name;
       const auto output = work / "render-output" / scene_name;
       const auto plan = work / "scene-plans" / (scene_name + ".json");
-      const auto live_raster_reservation = checked_byte_sum(
-        source_raster_reservation_bytes,
-        sbs_raster_reservation_bytes,
-        "replay live-raster reservation"
-      );
-      if (
-        source_raster_reservation_bytes == 0u ||
-        sbs_raster_reservation_bytes == 0u ||
-        live_raster_reservation > spec.scene_cache_hard_cap_bytes ||
-        live_cache_bytes >
-          spec.scene_cache_hard_cap_bytes - live_raster_reservation
-      ) {
-        throw worker_error(
-          "scene cache plus reserved replay rasters exceeds the hard cap"
-        );
-      }
       std::error_code ec;
       fs::create_directories(input, ec);
       fs::create_directories(output, ec);
@@ -6831,8 +5187,6 @@ namespace offline_sbs {
         "--artifacts",
         "conversion",
         "--bounded-adaptive-state",
-        "--scene-controller",
-        "off",
         "--render-cache",
         path_utf8(cache),
         "--scene-plan",
@@ -6878,16 +5232,9 @@ namespace offline_sbs {
             static_cast<std::uint64_t>(source_bytes);
           const auto sbs_size =
             static_cast<std::uint64_t>(sbs_bytes);
-          if (
-            source_size != source_raster_reservation_bytes ||
-            sbs_size > sbs_raster_reservation_bytes ||
-            source_size > spec.scene_cache_hard_cap_bytes ||
-            sbs_size > spec.scene_cache_hard_cap_bytes - source_size ||
-            live_cache_bytes >
-              spec.scene_cache_hard_cap_bytes - source_size - sbs_size
-          ) {
+          if (source_size > spec.scene_cache_hard_cap_bytes || sbs_size > spec.scene_cache_hard_cap_bytes - source_size || live_cache_bytes > spec.scene_cache_hard_cap_bytes - source_size - sbs_size) {
             throw worker_error(
-              "live replay raster violated its preflight storage reservation"
+              "scene cache plus live replay rasters exceeded the hard cap"
             );
           }
           peak_live_raster_bytes = std::max(
@@ -6927,32 +5274,6 @@ namespace offline_sbs {
           "scene replay did not attest a zero-inference exact cache replay"
         );
       }
-      const nlohmann::json disabled_source_time {
-        {"enabled", false},
-        {"schema", nullptr},
-        {"clock", nullptr},
-        {"file_sha256", nullptr},
-        {"frame_count", 0u},
-        {"total_elapsed_seconds", 0.0},
-      };
-      if (
-        !contract.contains("scene_controller_source_time") ||
-        !json_exact_contract(
-          contract.at("scene_controller_source_time"),
-          disabled_source_time
-        )
-      ) {
-        throw worker_error(
-          "scene replay did not attest an exact disabled source-time contract"
-        );
-      }
-      validate_scene_controller_transport(
-        contract,
-        output,
-        "off",
-        scene.frame_count,
-        scene.start_sequence
-      );
       const auto &adaptive_state = contract.at("adaptive_state");
       if (
         !adaptive_state.is_object() ||
@@ -7017,121 +5338,6 @@ namespace offline_sbs {
   }
 
 #ifdef SUNSHINE_TESTS
-  bool native_replay_capabilities_valid_for_test(
-    const nlohmann::json &capabilities
-  ) {
-    return native_replay_capabilities_valid(capabilities);
-  }
-
-  bool native_replay_capabilities_json_valid_for_test(
-    const std::string_view capabilities_json
-  ) {
-    try {
-      const auto parsed = parse_json_strict(
-        capabilities_json,
-        "test native capabilities"
-      );
-      return native_replay_capabilities_valid(parsed);
-    } catch (...) {
-      return false;
-    }
-  }
-
-  nlohmann::json write_scene_controller_source_time_contract_for_test(
-    const fs::path &result_directory,
-    const media_contract_t &media
-  ) {
-    const auto artifact =
-      write_scene_controller_source_time_contract(
-        result_directory,
-        media
-      );
-    return {
-      {"path", path_utf8(artifact.path)},
-      {"schema", scene_controller_source_time_schema},
-      {"clock", scene_controller_source_time_clock},
-      {"file_sha256", artifact.file_sha256},
-      {"frame_count", artifact.frame_count},
-      {"total_elapsed_seconds", artifact.total_elapsed_seconds},
-      {"file_bytes", artifact.file_bytes},
-      {"disk_reservation_bytes", artifact.disk_reservation_bytes},
-    };
-  }
-
-  bool scene_controller_source_time_attestation_valid_for_test(
-    const nlohmann::json &actual,
-    const nlohmann::json &expected
-  ) {
-    return json_exact_contract(actual, expected);
-  }
-
-  std::uint64_t
-  scene_controller_source_time_max_artifact_bytes_for_test() {
-    return scene_controller_source_time_max_artifact_bytes;
-  }
-
-  void validate_scene_controller_transport_for_test(
-    const nlohmann::json &contract,
-    const fs::path &output,
-    const std::string_view expected_backend,
-    const std::uint64_t expected_frame_count,
-    const std::uint64_t expected_first_sequence
-  ) {
-    validate_scene_controller_transport(
-      contract,
-      output,
-      expected_backend,
-      expected_frame_count,
-      expected_first_sequence
-    );
-  }
-
-  void validate_scene_controller_frame_for_test(
-    const nlohmann::json &frame,
-    const std::uint64_t source_index,
-    const std::uint64_t expected_sequence,
-    const std::uint64_t expected_frame_count,
-    const std::uint64_t depth_reuse_interval,
-    const std::optional<std::uint64_t> previous_controller_frame_id,
-    const std::optional<std::uint32_t> previous_backend_generation
-  ) {
-    if (
-      previous_controller_frame_id.has_value() !=
-      previous_backend_generation.has_value()
-    ) {
-      throw worker_error(
-        "test scene-controller previous identity is incomplete"
-      );
-    }
-    const auto previous = previous_controller_frame_id ?
-      std::optional<scene_controller_frame_identity_t> {
-        scene_controller_frame_identity_t {
-          *previous_controller_frame_id,
-          *previous_backend_generation,
-        }
-      } :
-      std::nullopt;
-    (void) validate_scene_controller_frame(
-      frame,
-      source_index,
-      expected_sequence,
-      expected_frame_count,
-      depth_reuse_interval,
-      previous
-    );
-  }
-
-  bool depth_frame_requires_previous_for_test(
-    const float initialized,
-    const float frame_state
-  ) {
-    sbs_scene_cache::cached_state_words_t state {};
-    const auto offset = sbs_adaptive_state::render_prefix_word_count;
-    state[offset + 2u] = std::bit_cast<std::uint32_t>(initialized);
-    state[offset + 3u] = std::bit_cast<std::uint32_t>(frame_state);
-    return depth_frame_requires_previous(state);
-  }
-
   bool adaptive_trace_flags_valid_for_test(
     const float cut_flags,
     const std::uint32_t analysis_flags
@@ -8576,129 +6782,25 @@ namespace offline_sbs {
 
   std::uint64_t analysis_open_cache_limit(
     const std::uint64_t hard_cap_bytes,
-    const std::uint64_t live_raster_reservation_bytes,
-    const std::uint64_t reserved_cache_triplet_bytes
+    const std::uint64_t source_raster_bytes,
+    const std::uint64_t depth_state_pair_bytes
   ) {
-    if (hard_cap_bytes == 0 || live_raster_reservation_bytes == 0 || reserved_cache_triplet_bytes == 0 || live_raster_reservation_bytes >= hard_cap_bytes) {
+    if (hard_cap_bytes == 0 || source_raster_bytes == 0 || depth_state_pair_bytes == 0 || source_raster_bytes >= hard_cap_bytes) {
       throw worker_error("analysis storage budget has an invalid byte contract");
     }
-    const auto after_rasters =
-      hard_cap_bytes - live_raster_reservation_bytes;
-    if (reserved_cache_triplet_bytes > after_rasters) {
+    const auto after_source = hard_cap_bytes - source_raster_bytes;
+    if (depth_state_pair_bytes > after_source) {
       throw worker_error(
-        "analysis hard cap cannot hold the reserved replay rasters and cache triplet"
+        "analysis hard cap cannot hold the live source raster and depth/state pair"
       );
     }
-    const auto open_cache_limit =
-      after_rasters - reserved_cache_triplet_bytes;
-    if (open_cache_limit < reserved_cache_triplet_bytes) {
+    const auto open_cache_limit = after_source - depth_state_pair_bytes;
+    if (open_cache_limit < depth_state_pair_bytes) {
       throw worker_error(
-        "analysis hard cap cannot reserve the next maximum cache triplet"
+        "analysis hard cap cannot reserve the next exact depth/state pair"
       );
     }
     return open_cache_limit;
-  }
-
-  std::uint64_t analysis_source_raster_reservation_bytes(
-    const media_color_e color,
-    const std::uint32_t width,
-    const std::uint32_t height
-  ) {
-    if (width == 0u || height == 0u) {
-      throw worker_error("analysis source raster has invalid dimensions");
-    }
-    const auto pixels =
-      static_cast<std::uint64_t>(width) * height;
-    if (color == media_color_e::sdr) {
-      if (
-        pixels >
-          (std::numeric_limits<std::uint32_t>::max() - 54ull) / 4ull
-      ) {
-        throw worker_error(
-          "analysis source is too large for the BMP follow contract"
-        );
-      }
-      return pixels * 4ull + 54ull;
-    }
-    constexpr std::uint64_t max_pfm_header_bytes = 16ull + 128ull + 64ull;
-    if (
-      pixels >
-        (std::numeric_limits<std::uint64_t>::max() -
-         max_pfm_header_bytes) /
-          12ull
-    ) {
-      throw worker_error("HDR analysis source raster byte count overflows");
-    }
-    return pixels * 12ull + max_pfm_header_bytes;
-  }
-
-  std::uint64_t replay_sbs_raster_reservation_bytes(
-    const media_color_e color,
-    const std::uint32_t width,
-    const std::uint32_t height
-  ) {
-    if (width == 0u || height == 0u) {
-      throw worker_error("replay SBS raster has invalid dimensions");
-    }
-    const auto pixels =
-      static_cast<std::uint64_t>(width) * height;
-    if (color == media_color_e::sdr) {
-      if (pixels > std::numeric_limits<std::uint64_t>::max() / 4u) {
-        throw worker_error("SDR replay SBS raster byte count overflows");
-      }
-      const auto raw_bgra_bytes = pixels * 4u;
-      // A deflate stream is bounded just above its uncompressed scanlines. Keep an
-      // additional 12.5% plus 1 MiB for PNG filters/chunks and WIC container overhead.
-      return checked_byte_sum(
-        checked_byte_sum(
-          raw_bgra_bytes,
-          raw_bgra_bytes / 8u,
-          "SDR replay SBS reservation"
-        ),
-        1ull * 1024ull * 1024ull,
-        "SDR replay SBS reservation"
-      );
-    }
-    if (pixels > (std::numeric_limits<std::uint64_t>::max() - 64u) / 12u) {
-      throw worker_error("HDR replay SBS raster byte count overflows");
-    }
-    // save_pfm() writes exactly three little-endian float32 channels plus a
-    // short dimensions/scale header. Sixty-four bytes bounds every uint32 dimension.
-    return pixels * 12u + 64u;
-  }
-
-  std::uint64_t analysis_max_cache_triplet_bytes(
-    const std::uint32_t source_width,
-    const std::uint32_t source_height
-  ) {
-    const auto aligned_extent = [](const std::uint32_t source_extent) {
-      constexpr auto patch = models::frame_roi_model_patch_size;
-      const auto bounded = std::min(
-        source_extent,
-        sbs_scene_cache::max_depth_dimension
-      );
-      return bounded - bounded % patch;
-    };
-    const auto max_width = aligned_extent(source_width);
-    const auto max_height = aligned_extent(source_height);
-    if (max_width == 0u || max_height == 0u) {
-      throw worker_error(
-        "source raster cannot hold a valid scene-cache depth shape"
-      );
-    }
-    const auto max_depth_bytes =
-      static_cast<std::uint64_t>(max_width) *
-      static_cast<std::uint64_t>(max_height) *
-      sizeof(float);
-    return checked_byte_sum(
-      checked_byte_sum(
-        max_depth_bytes,
-        sizeof(sbs_scene_cache::cached_state_words_t),
-        "maximum scene-cache depth/state pair"
-      ),
-      sizeof(sbs_scene_cache::frame_metadata_t),
-      "maximum scene-cache triplet"
-    );
   }
 
   void validate_avexpr_timeline_exactness(const media_contract_t &media) {
@@ -8990,11 +7092,6 @@ namespace offline_sbs {
         spec.result_directory / "source-contract.json",
         media_contract_json(media)
       );
-      const auto scene_controller_source_time =
-        write_scene_controller_source_time_contract(
-          spec.result_directory,
-          media
-        );
 
       // Refuse to start TensorRT unless the exact cache/replay harness is present.
       const auto capabilities_path = spec.result_directory / "native-capabilities.json";
@@ -9010,8 +7107,19 @@ namespace offline_sbs {
         work / "logs" / "native-capabilities.log"
       );
       const auto capabilities = read_json(capabilities_path);
-      if (!native_replay_capabilities_valid(capabilities)) {
+      const auto &native = capabilities.at("native_whole_clip");
+      if (capabilities.value("schema", 0) != 1 || native.value("follow_protocol_schema", 0) != 1 || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("scene_cache_contract_schema", 0) != 1 || !native.value("render_cache_follow", false) || !native.value("render_skips_tensorrt", false) || !native.value("atomic_sbs_publication", false)) {
         throw worker_error("native SBS harness lacks the required replay contract");
+      }
+      nlohmann::json expected_analysis_flag_bits = nlohmann::json::object();
+      for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
+        expected_analysis_flag_bits[std::string {flag.name}] = flag.bit;
+      }
+      if (
+        !native.contains("adaptive_analysis_flag_bits") ||
+        native["adaptive_analysis_flag_bits"] != expected_analysis_flag_bits
+      ) {
+        throw worker_error("native SBS harness adaptive flag meanings differ");
       }
 
       const auto analysis_input = work / "analysis-input";
@@ -9028,34 +7136,6 @@ namespace offline_sbs {
       }
       if (ec) {
         throw worker_error("cannot create analysis directories");
-      }
-      const auto analysis_source_raster_reservation =
-        analysis_source_raster_reservation_bytes(
-          media.color,
-          media.width,
-          media.height
-        );
-      if (
-        analysis_source_raster_reservation >
-        spec.scene_cache_hard_cap_bytes
-      ) {
-        throw worker_error(
-          "analysis source raster reservation exceeds the hard cap"
-        );
-      }
-      std::optional<std::uint64_t> reserved_triplet_bytes;
-      if (spec.operation == "convert") {
-        reserved_triplet_bytes =
-          analysis_max_cache_triplet_bytes(media.width, media.height);
-        if (
-          *reserved_triplet_bytes >
-            spec.scene_cache_hard_cap_bytes -
-              analysis_source_raster_reservation
-        ) {
-          throw worker_error(
-            "analysis source and first cache triplet reservations exceed the hard cap"
-          );
-        }
       }
       streaming_decoder_t analysis_decoder {
         spec,
@@ -9086,10 +7166,6 @@ namespace offline_sbs {
         "--artifacts",
         "adaptive",
         "--bounded-adaptive-state",
-        "--scene-controller",
-        "shadow_rules",
-        "--scene-controller-source-time",
-        path_utf8(scene_controller_source_time.path),
       };
       if (spec.operation == "convert") {
         analysis_command.insert(
@@ -9103,18 +7179,13 @@ namespace offline_sbs {
         work / "logs" / "analysis-harness.log"
       );
       trace_tail_t trace(analysis_output, true);
-      scene_controller_trace_capture_t scene_controller_trace(
-        analysis_output,
-        spec.result_directory,
-        media.frames.size()
-      );
       bool analysis_done = false;
       std::uint64_t live_cache_bytes = 0;
       std::uint64_t peak_cache_bytes = 0;
       std::uint64_t peak_live_raster_bytes = 0;
       std::uint64_t peak_cache_plus_raster_bytes = 0;
       std::optional<std::uint64_t> analysis_source_raster_bytes;
-      std::optional<std::uint64_t> replay_sbs_raster_reservation;
+      std::optional<std::uint64_t> pair_bytes;
       std::uint32_t sbs_width = 0;
       std::uint32_t sbs_height = 0;
       std::vector<scene_plan_t> scenes;
@@ -9122,7 +7193,6 @@ namespace offline_sbs {
       std::unique_ptr<whole_clip_encoder_t> conversion_encoder;
       std::unique_ptr<scene_planner_t> planner;
       nlohmann::json trace_header;
-      nlohmann::json scene_controller_evidence;
       std::uint64_t covered_until = 1;
       std::size_t accounted_scene_count = 0;
       std::size_t accounted_boundary_count = 0;
@@ -9242,11 +7312,7 @@ namespace offline_sbs {
           scenes.push_back(scene);
           account_contract_records();
           if (spec.operation == "convert") {
-            if (
-              !render_decoder || !sbs_width || !sbs_height ||
-              !analysis_source_raster_bytes ||
-              !replay_sbs_raster_reservation
-            ) {
+            if (!render_decoder || !sbs_width || !sbs_height) {
               throw worker_error("scene replay began before cache geometry");
             }
             publish_progress(
@@ -9277,9 +7343,7 @@ namespace offline_sbs {
               cache,
               sbs_width,
               sbs_height,
-              live_cache_bytes,
-              *analysis_source_raster_bytes,
-              *replay_sbs_raster_reservation
+              live_cache_bytes
             );
             peak_live_raster_bytes = std::max(
               peak_live_raster_bytes,
@@ -9364,13 +7428,9 @@ namespace offline_sbs {
               "fixed-resolution analysis source raster size changed mid-clip"
             );
           }
-          if (
-            current_source_raster_bytes >
-              analysis_source_raster_reservation ||
-            current_source_raster_bytes > spec.scene_cache_hard_cap_bytes
-          ) {
+          if (current_source_raster_bytes > spec.scene_cache_hard_cap_bytes) {
             throw worker_error(
-              "live analysis source raster exceeds its preflight reservation"
+              "live analysis source raster exceeds the hard cap"
             );
           }
           peak_live_raster_bytes = std::max(
@@ -9388,13 +7448,11 @@ namespace offline_sbs {
           }
           if (timing.sequence == 1) {
             trace_header = trace.read_header(analysis);
-            scene_controller_trace.read_header(analysis);
             if (spec.operation != "convert") {
               initialize_planner(std::numeric_limits<std::uint64_t>::max());
             }
           }
           std::uint64_t current_pair_bytes = 0;
-          bool current_requires_previous_packed_frame = false;
           if (spec.operation == "convert") {
             const auto contract = parse_cache_contract(
               cache,
@@ -9406,50 +7464,18 @@ namespace offline_sbs {
               contract.state_bytes,
               "depth/state pair"
             );
-            current_pair_bytes = checked_byte_sum(
-              current_pair_bytes,
-              contract.metadata_bytes,
-              "depth/state/metadata triplet"
-            );
-            current_requires_previous_packed_frame =
-              contract.requires_previous_packed_frame;
-            if (!reserved_triplet_bytes) {
-              throw worker_error(
-                "scene-cache triplet reservation was not preflighted"
-              );
-            }
-            if (!replay_sbs_raster_reservation) {
-              if (current_pair_bytes > *reserved_triplet_bytes) {
-                throw worker_error(
-                  "scene-cache triplet exceeds its source-shape upper bound"
-                );
-              }
+            if (!pair_bytes) {
+              pair_bytes = current_pair_bytes;
               sbs_width = contract.sbs_width;
               sbs_height = contract.sbs_height;
-              replay_sbs_raster_reservation =
-                replay_sbs_raster_reservation_bytes(
-                  media.color,
-                  sbs_width,
-                  sbs_height
-              );
-              const auto replay_live_raster_reservation = checked_byte_sum(
-                analysis_source_raster_reservation,
-                *replay_sbs_raster_reservation,
-                "replay source/SBS reservation"
-              );
               initialize_planner(analysis_open_cache_limit(
                 spec.scene_cache_hard_cap_bytes,
-                replay_live_raster_reservation,
-                *reserved_triplet_bytes
+                current_source_raster_bytes,
+                current_pair_bytes
               ));
-            } else if (sbs_width != contract.sbs_width || sbs_height != contract.sbs_height) {
+            } else if (*pair_bytes != current_pair_bytes || sbs_width != contract.sbs_width || sbs_height != contract.sbs_height) {
               throw worker_error(
-                "fixed-output scene-cache geometry changed mid-clip"
-              );
-            }
-            if (current_pair_bytes > *reserved_triplet_bytes) {
-              throw worker_error(
-                "scene-cache triplet exceeds its source-shape upper bound"
+                "fixed-resolution scene-cache pair/geometry changed mid-clip"
               );
             }
             const auto after_source =
@@ -9477,7 +7503,6 @@ namespace offline_sbs {
             cache_plus_analysis_raster
           );
           const auto trace_value = trace.read_frame(analysis, timing.sequence);
-          scene_controller_trace.read_frame(analysis, timing.sequence);
           remove_file_checked(source);
           if (!planner) {
             throw worker_error("scene planner was not initialized");
@@ -9486,8 +7511,7 @@ namespace offline_sbs {
             trace_value,
             timing,
             media.time_base,
-            current_pair_bytes,
-            current_requires_previous_packed_frame
+            current_pair_bytes
           ));
           account_contract_records();
           render_scenes(finalized);
@@ -9545,36 +7569,6 @@ namespace offline_sbs {
           "analysis did not attest exactly one TensorRT enqueue per source frame"
         );
       }
-      const nlohmann::json expected_source_time {
-        {"enabled", true},
-        {"schema", scene_controller_source_time_schema},
-        {"clock", scene_controller_source_time_clock},
-        {"file_sha256", scene_controller_source_time.file_sha256},
-        {"frame_count", scene_controller_source_time.frame_count},
-        {"total_elapsed_seconds",
-         scene_controller_source_time.total_elapsed_seconds},
-      };
-      if (
-        !analysis_contract.contains("scene_controller_source_time") ||
-        !json_exact_contract(
-          analysis_contract.at("scene_controller_source_time"),
-          expected_source_time
-        )
-      ) {
-        throw worker_error(
-          "analysis source-time attestation does not match the authenticated "
-          "media timeline"
-        );
-      }
-      validate_scene_controller_transport(
-        analysis_contract,
-        analysis_output,
-        "shadow_rules",
-        media.frames.size(),
-        1u
-      );
-      scene_controller_evidence =
-        scene_controller_trace.finish(media.frames.size());
       const auto &analysis_state = analysis_contract.at("adaptive_state");
       if (
         !analysis_state.is_object() ||
@@ -9761,19 +7755,6 @@ namespace offline_sbs {
          }()},
         {"scene_audit", path_utf8(spec.result_directory / "scene-audit.json")},
         {"analysis_contract", analysis_contract},
-        {"scene_controller_trace", scene_controller_evidence},
-        {"scene_controller_source_time", {
-          {"path", path_utf8(scene_controller_source_time.path)},
-          {"schema", scene_controller_source_time_schema},
-          {"clock", scene_controller_source_time_clock},
-          {"file_sha256", scene_controller_source_time.file_sha256},
-          {"frame_count", scene_controller_source_time.frame_count},
-          {"total_elapsed_seconds",
-           scene_controller_source_time.total_elapsed_seconds},
-          {"file_bytes", scene_controller_source_time.file_bytes},
-          {"disk_reservation_bytes",
-           scene_controller_source_time.disk_reservation_bytes},
-        }},
         {"replay_contracts", replay_contracts},
         {"cache", {
                     {"hard_cap_bytes", spec.scene_cache_hard_cap_bytes},
@@ -9787,28 +7768,19 @@ namespace offline_sbs {
         {"staging_identity", std::move(staging_identity)},
         {"output", spec.staging_output ? nlohmann::json(path_utf8(*spec.staging_output)) : nlohmann::json(nullptr)},
       };
-      if (!scene_controller_trace.ready_to_commit()) {
-        throw worker_error(
-          "scene-controller evidence is not ready for the job commit"
-        );
-      }
-      // Release the verified staging identity before either durable completion
-      // marker. A later result-write failure remains a failed job and the trace
-      // capture destructor removes its prepared evidence pair.
-      if (staging_claim) {
-        staging_claim->release_for_publish();
-      }
-      scene_controller_trace.publish();
       write_json_atomic_bounded(
         spec.result_path,
         result,
         worker_result_max_bytes,
         "worker result"
       );
-      // result.json is the job-level commit marker. Keep the adjacent published
-      // trace pair only after that atomic publication succeeds; every later path
-      // is non-throwing.
-      scene_controller_trace.commit();
+      // The manager retains the job-root identity handle and removes native-work
+      // only after this process (and its process group) has been reaped. A child
+      // cannot safely re-resolve or delete that user-writable pathname, and on
+      // Windows such an attempt also conflicts with the manager's delete pin.
+      if (staging_claim) {
+        staging_claim->release_for_publish();
+      }
       return 0;
     } catch (const std::exception &exception) {
       if (parsed_spec) {

@@ -9,9 +9,8 @@
 // hides background instead of ghosting, and disoccluded gaps fall back to the
 // nearest edge instead of smearing a duplicate.
 //
-// Inputs:
+// Inputs (unchanged contract with display_vram.cpp):
 //   t0 = mono color, t1 = robust P2/P98-normalized and temporally filtered depth (high = near),
-//   t2 = subject state, t3/t4 = diagnostics/frame validity, t5 = transform retained with depth,
 //   s0 = linear clamp sampler, b2 = tuning constants below.
 
 Texture2D<float4> LeftColorTexture : register(t0);
@@ -26,9 +25,6 @@ Texture2D<uint> ForwardCoverageTexture : register(t3);
 // {min, max, initialized, frame_state}; frame_state == 0 means this TensorRT completion was
 // entirely invalid and every depth/subject output deliberately held its preceding value.
 StructuredBuffer<float4> DepthFrameState : register(t4);
-// Exact transform retained with DepthTexture. t5 is shared with the forward-coverage shader so
-// production and diagnostic mappings cannot accidentally bind different ownership records.
-StructuredBuffer<uint4> FrameRoiTransform : register(t5);
 SamplerState      LinearSampler     : register(s0);
 
 struct PS_INPUT {
@@ -44,205 +40,10 @@ float SampleDepth(float sx, float sy) {
     return DepthTexture.SampleLevel(LinearSampler, float2(sx, sy), 0);
 }
 
-bool SampleActiveRoiDepthParallax(
-    SbsFrameRoiTransformData transform,
-    float2 source_uv,
-    uint2 depth_dimensions,
-    float4 s0,
-    float4 s1,
-    Bestv2Params params,
-    bool use_subject_stretch,
-    out float depth,
-    out float parallax)
-{
-    float2 depth_uv;
-    float feather_weight;
-    if (!SbsWarpActiveSourceToDepthUv(
-            transform,
-            source_uv,
-            depth_dimensions,
-            depth_uv,
-            feather_weight)) {
-        depth = 0.0f;
-        parallax = 0.0f;
-        return false;
-    }
-    depth = DepthTexture.SampleLevel(LinearSampler, depth_uv, 0);
-    parallax = SbsWarpActiveParallax(
-        depth,
-        feather_weight,
-        s0,
-        s1,
-        params,
-        use_subject_stretch);
-    return true;
-}
-
-float2 ReprojectActiveRoi(
-    float2 uv,
-    float eyeSign,
-    bool use_subject_stretch,
-    SbsFrameRoiTransformData transform)
-{
-    float4 s0 = SubjectState[SBS_STATE_VECTOR_SUBJECT_RECENTER_DELTA];
-    float4 s1 = SubjectState[SBS_STATE_VECTOR_STRETCH_LO];
-    float4 s2 = SubjectState[SBS_STATE_VECTOR_ZERO_ANCHOR_SHIFT_PX];
-    bool shaped = SBS_STATE_INITIALIZED(s0) > 0.5f;
-    uint sourceWidth, sourceHeight;
-    LeftColorTexture.GetDimensions(sourceWidth, sourceHeight);
-    uint depthWidth, depthHeight;
-    DepthTexture.GetDimensions(depthWidth, depthHeight);
-
-    // Outside the accepted source focus, both eyes use the untouched mono coordinate. Testing the
-    // shared mapping helper here also keeps the half-open focus boundary identical to coverage.
-    float2 center_depth_uv;
-    float center_feather;
-    if (!shaped ||
-        !SbsWarpActiveSourceToDepthUv(
-            transform,
-            uv,
-            uint2(depthWidth, depthHeight),
-            center_depth_uv,
-            center_feather)) {
-        return uv;
-    }
-
-    Bestv2Params params = MakeBestv2Params(
-        s0,
-        s1,
-        s2,
-        (float)sourceWidth,
-        (float)sourceHeight,
-        use_subject_stretch);
-    float searchRadius = Bestv2SearchRadius(params);
-    if (searchRadius <= 1e-6f) {
-        return uv;
-    }
-
-    float spacing =
-        Bestv2ProbeSpacing((float)sourceWidth, (float)depthWidth);
-    int intervals = Bestv2ProbeIntervals(
-        searchRadius,
-        Bestv2MaxProbes((float)sourceWidth, (float)sourceHeight),
-        spacing);
-    int probeStart = Bestv2ProbeStart(uv.x, searchRadius, spacing);
-    uint2 depth_dimensions = uint2(depthWidth, depthHeight);
-
-    float bestX = uv.x;
-    float bestDepth = -1.0f;
-    float bgX = uv.x;
-    float bgDepth = 2.0f;
-    bool background_found = false;
-
-    float prevX = (float)probeStart * spacing;
-    float prevD;
-    float prevParallax;
-    bool prevDepthValid = SampleActiveRoiDepthParallax(
-        transform,
-        float2(prevX, uv.y),
-        depth_dimensions,
-        s0,
-        s1,
-        params,
-        use_subject_stretch,
-        prevD,
-        prevParallax);
-    float prevG = (prevX - uv.x) - eyeSign * prevParallax;
-    if (prevDepthValid && prevD < bgDepth) {
-        bgDepth = prevD;
-        bgX = prevX;
-        background_found = true;
-    }
-
-    [loop]
-    for (int i = 1; i <= intervals; i++) {
-        float x = (float)(probeStart + i) * spacing;
-        float d;
-        float parallax;
-        bool depthValid = SampleActiveRoiDepthParallax(
-            transform,
-            float2(x, uv.y),
-            depth_dimensions,
-            s0,
-            s1,
-            params,
-            use_subject_stretch,
-            d,
-            parallax);
-        float g = (x - uv.x) - eyeSign * parallax;
-
-        if ((prevG <= 0.0f && g >= 0.0f) ||
-            (prevG >= 0.0f && g <= 0.0f)) {
-            float denom = g - prevG;
-            float t =
-                (abs(denom) > 1e-6f) ?
-                    saturate(-prevG / denom) :
-                    0.0f;
-            float crossX = lerp(prevX, x, t);
-
-            // Re-sample the crossing itself. This admits a boundary interval only when its root
-            // really lies inside the exact focus and supplies a real model depth for ordering;
-            // no fabricated neutral depth can win as foreground or background.
-            float crossDepth;
-            float crossParallax;
-            bool crossDepthValid = SampleActiveRoiDepthParallax(
-                transform,
-                float2(crossX, uv.y),
-                depth_dimensions,
-                s0,
-                s1,
-                params,
-                use_subject_stretch,
-                crossDepth,
-                crossParallax);
-            if (crossDepthValid && crossDepth > bestDepth) {
-                bestDepth = crossDepth;
-                bestX = crossX;
-            }
-        }
-
-        if (depthValid && d < bgDepth) {
-            bgDepth = d;
-            bgX = x;
-            background_found = true;
-        }
-        prevX = x;
-        prevG = g;
-    }
-
-    float outX =
-        bestDepth >= 0.0f ?
-            bestX :
-        background_found ?
-            bgX :
-            uv.x;
-    return float2(outX, uv.y);
-}
-
 // Find the source U coordinate that reprojects onto `uv` for one eye, choosing the
 // nearest (frontmost) surface so foreground occludes rather than duplicates.
 // eyeSign = +1 right eye, -1 left eye.
 float2 Reproject(float2 uv, float eyeSign, bool use_subject_stretch) {
-    uint roiSourceWidth, roiSourceHeight;
-    uint roiDepthWidth, roiDepthHeight;
-    LeftColorTexture.GetDimensions(roiSourceWidth, roiSourceHeight);
-    DepthTexture.GetDimensions(roiDepthWidth, roiDepthHeight);
-    SbsFrameRoiTransformData transform = FrameRoiTransformLoad();
-    uint roi_mode = SbsWarpRoiMode(
-        transform,
-        uint2(roiSourceWidth, roiSourceHeight),
-        uint2(roiDepthWidth, roiDepthHeight));
-    if (roi_mode == SBS_WARP_ROI_MODE_INERT) {
-        return uv;
-    }
-    if (roi_mode == SBS_WARP_ROI_MODE_ACTIVE) {
-        return ReprojectActiveRoi(
-            uv,
-            eyeSign,
-            use_subject_stretch,
-            transform);
-    }
-
     // Subject anchoring is live this frame only if configured AND the resolve pass has
     // produced state (init != 0 -- it is 0 for the first frames). Mandatory shader/resource
     // initialization is validated before the estimator is published. Decide it ONCE here

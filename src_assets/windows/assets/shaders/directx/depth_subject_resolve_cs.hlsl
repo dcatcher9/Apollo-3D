@@ -26,13 +26,10 @@
 RWStructuredBuffer<uint>   SubjectHist  : register(u0);  // 256 weighted bins (subject estimate)
 RWStructuredBuffer<float4> SubjectState : register(u1);  // [0..7], see header above
 RWStructuredBuffer<uint>   PlainHist    : register(u2);  // 256 bins + nine evidence counters
-StructuredBuffer<uint4>    FrameRoiTransform : register(t0);
-StructuredBuffer<uint4>    PreviousFrameRoiTransform : register(t1);
 
 #include "include/depth_constants.hlsl"
 #include "include/bestv2_curve.hlsl"
 #include "include/sbs_adaptive_state_contract.generated.hlsl"
-#include "include/sbs_frame_roi_transform.hlsl"
 
 #define NUM_BINS 256
 
@@ -50,12 +47,11 @@ StructuredBuffer<uint4>    PreviousFrameRoiTransform : register(t1);
 // CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING means the last reliable appearance/depth endpoint is
 // held for exactly one subsequent valid update: appearance-correlated cuts remain immediate,
 // while a depth-only candidate must remain different from that held endpoint before it pulses.
-// Geometry is
-// blocked for exactly one following valid update unless that update is itself a new qualified
-// appearance proposal: neural-depth normalization can remain unsettled after a flash even while
-// normal playback motion resumes. A new broad semantic endpoint remains authoritative immediately.
-// This asymmetry distinguishes post-cut recovery from startup, where no weak or relative cut path
-// is allowed.
+// Geometry is blocked for exactly one following valid update unless that update is itself a new
+// qualified appearance proposal: neural-depth normalization can remain unsettled after a flash
+// even while normal playback motion resumes. A new broad semantic endpoint remains authoritative
+// immediately. This asymmetry distinguishes post-cut recovery from startup, where no weak or
+// relative cut path is allowed.
 // Scene-risk endpoints, calibrated against the MEASURED weighted edge fraction of the committed
 // suites. The three stable-shot synthetic probes used for calibration (fast_motion 0.0001,
 // flat_transition 0.0048, flat_page 0.0087) sit far below the remaining non-probe measurements,
@@ -76,57 +72,8 @@ StructuredBuffer<uint4>    PreviousFrameRoiTransform : register(t1);
 #define POP_RISK_LOW 0.04f
 #define POP_RISK_HIGH 0.20f
 
-SbsFrameRoiTransformData LoadPreviousFrameRoiTransform() {
-    return SBS_FRAME_ROI_DECODE_RESOURCE(
-        PreviousFrameRoiTransform);
-}
-
-bool TargetDimensionsSafe() {
-    return target_w > 0u &&
-           target_h > 0u &&
-           target_w <= 0xffffffffu / target_h;
-}
-
 [numthreads(1, 1, 1)]
 void main() {
-    uint subject_hist_count;
-    uint subject_hist_stride;
-    SubjectHist.GetDimensions(
-        subject_hist_count,
-        subject_hist_stride);
-    uint subject_state_count;
-    uint subject_state_stride;
-    SubjectState.GetDimensions(
-        subject_state_count,
-        subject_state_stride);
-    uint plain_hist_count;
-    uint plain_hist_stride;
-    PlainHist.GetDimensions(
-        plain_hist_count,
-        plain_hist_stride);
-    uint current_transform_vectors;
-    uint current_transform_stride;
-    FrameRoiTransform.GetDimensions(
-        current_transform_vectors,
-        current_transform_stride);
-    uint previous_transform_vectors;
-    uint previous_transform_stride;
-    PreviousFrameRoiTransform.GetDimensions(
-        previous_transform_vectors,
-        previous_transform_stride);
-    bool histogram_resources_safe =
-        subject_hist_count >= NUM_BINS &&
-        subject_hist_stride == 4u &&
-        plain_hist_count >= NUM_BINS + 9u &&
-        plain_hist_stride == 4u;
-    bool subject_state_safe =
-        subject_state_count >= SBS_ADAPTIVE_STATE_VECTOR_COUNT &&
-        subject_state_stride == 16u;
-    if (!histogram_resources_safe ||
-        !subject_state_safe) {
-        return;
-    }
-
     // Total weighted votes.
     float total = 0.0f;
     for (uint b = 0; b < NUM_BINS; b++) {
@@ -152,38 +99,7 @@ void main() {
     // One-update values must never look live merely because an invalid frame preserved state.
     SBS_STATE_CURRENT_DEPTH_CHANGE_FRACTION(telemetry) = 0.0f;
     SBS_STATE_HARD_CUT_PULSE(telemetry_flags) = 0.0f;
-    SbsFrameRoiTransformData current_transform =
-        FrameRoiTransformLoad();
-    SbsFrameRoiTransformData previous_transform =
-        LoadPreviousFrameRoiTransform();
-    bool current_transform_valid =
-        current_transform_vectors >= SBS_FRAME_ROI_VECTOR_COUNT &&
-        current_transform_stride == 16u &&
-        FrameRoiDataValid(current_transform);
-    bool current_transform_dimensions_match =
-        current_transform_valid &&
-        TargetDimensionsSafe() &&
-        all(FrameRoiDataModelDimensions(current_transform) ==
-            uint2(target_w, target_h));
-    bool previous_transform_valid =
-        previous_transform_vectors >= SBS_FRAME_ROI_VECTOR_COUNT &&
-        previous_transform_stride == 16u &&
-        FrameRoiDataValid(previous_transform);
-    bool legacy_unbound_pair =
-        FrameRoiDataUnboundZero(current_transform) &&
-        FrameRoiDataUnboundZero(previous_transform);
-    bool current_transform_usable =
-        legacy_unbound_pair ||
-        current_transform_dimensions_match;
-    bool geometry_reseed =
-        current_transform_dimensions_match &&
-        !legacy_unbound_pair &&
-        (!previous_transform_valid ||
-         FrameRoiDataGeometryReseedRequired(
-             current_transform,
-             previous_transform));
-    if (total > 0.5f &&
-        current_transform_usable) {
+    if (total > 0.5f) {
         float previous_scene_age = SBS_STATE_SCENE_AGE(s);
         // Weighted 35th percentile from the NEAR side (bin 255 = nearest): the subject is
         // usually among the nearer smooth regions but not the extreme foreground.
@@ -198,12 +114,7 @@ void main() {
             }
         }
 
-        // A transform/generation change is a geometry reseed, not a content cut. Treat the first
-        // valid completion as a fresh adaptive field so normalization, subject EMA, stretch, pop,
-        // and zero plane snap without emitting or incrementing the hard-cut signal.
-        bool initialized =
-            SBS_STATE_INITIALIZED(s) > 0.5f &&
-            !geometry_reseed;
+        bool initialized = SBS_STATE_INITIALIZED(s) > 0.5f;
 
         // Disparity stretch (Bestv2 shape_depth_for_pop): rescale the [lo,hi] percentile band of
         // the (unweighted) depth distribution to full [0,1] so the mid-range uses the whole
@@ -257,7 +168,6 @@ void main() {
         // BOTH broad RGB replacement and ordinal structural change. A flash passes broad RGB but
         // fails ordinal structure; detailed motion can pass ordinal but stays far below broad RGB.
         bool model_input_history_valid =
-            !geometry_reseed &&
             SBS_STATE_MODEL_INPUT_HISTORY_STATE(s2) > 0.5f;
         SBS_STATE_CURRENT_STRUCTURAL_SUPPORT_FRACTION(analysis_diagnostics) =
             current_structural_support_fraction;
@@ -278,11 +188,9 @@ void main() {
                 raw_rgb_change_fraction :
                 -1.0f;
         bool model_input_history_gap =
-            !geometry_reseed &&
             SBS_STATE_MODEL_INPUT_HISTORY_STATE(s2) > 1.5f &&
             SBS_STATE_MODEL_INPUT_HISTORY_STATE(s2) < 2.5f;
         bool low_structure_scene =
-            !geometry_reseed &&
             SBS_STATE_MODEL_INPUT_HISTORY_STATE(s2) > 2.5f &&
             SBS_STATE_MODEL_INPUT_HISTORY_STATE(s2) < 3.5f;
         bool current_structure_reliable =
@@ -554,12 +462,11 @@ void main() {
             }
         }
         float next_model_input_history_state =
-            geometry_reseed ? 1.0f :
-            (start_geometry_confirmation ? 4.0f :
-             (structureless_transition ? 2.0f :
-              ((persistent_structureless_transition ||
-                (low_structure_scene && !current_structure_reliable)) ? 3.0f :
-               1.0f)));
+            start_geometry_confirmation ? 4.0f :
+            (structureless_transition ? 2.0f :
+             ((persistent_structureless_transition ||
+               (low_structure_scene && !current_structure_reliable)) ? 3.0f :
+              1.0f));
 
         // Damp the stretch band, the last per-frame adaptive gain in the depth domain that had no
         // smoothing at all (subject depth and the normalization min/max are both EMA'd).

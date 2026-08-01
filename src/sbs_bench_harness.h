@@ -10,30 +10,8 @@
  */
 #pragma once
 
-#ifdef SUNSHINE_TESTS
-  #include <cstddef>
-  #include <filesystem>
-  #include <string>
-  #include <vector>
-#endif
-
 namespace sbs_bench {
   /// Entry point for the `--sbs-bench` subcommand. argc/argv are the post-flag args
   /// (see config::sunshine.cmd). Returns a process exit code.
   int run(int argc, char **argv);
-
-#ifdef SUNSHINE_TESTS
-  struct source_time_validation_result {
-    std::size_t frame_count = 0;
-    double total_elapsed_seconds = 0.0;
-    std::string file_sha256;
-  };
-
-  bool validate_scene_controller_source_time_for_test(
-    const std::filesystem::path &path,
-    const std::vector<std::string> &expected_frame_ids,
-    source_time_validation_result &result,
-    std::string &error
-  );
-#endif
 }

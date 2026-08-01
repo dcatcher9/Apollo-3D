@@ -115,7 +115,7 @@ def _uint32(value: Any, description: str) -> int:
 
 
 def _frame_id_value(value: Any, description: str) -> int:
-    """Parse the unsigned 64-bit identity while ignoring decimal zero-padding."""
+    """Parse an unsigned 64-bit identity while ignoring decimal zero-padding."""
     if (
         not isinstance(value, str) or
         not value or
@@ -131,8 +131,7 @@ def _frame_id_value(value: Any, description: str) -> int:
             significant > _UINT64_MAX_DECIMAL
         )
     ):
-        raise TraceContractError(
-            f"{description} exceeds the uint64 range")
+        raise TraceContractError(f"{description} exceeds the uint64 range")
     return int(significant)
 
 
@@ -406,7 +405,7 @@ class IncrementalTraceDecoder:
 
 
 def load_trace(path: str | os.PathLike[str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Load and validate an exact schema-3 adaptive JSONL trace."""
+    """Load and validate an exact schema-4 adaptive JSONL trace."""
     trace_path = Path(path)
     decoder = IncrementalTraceDecoder()
     frames: list[dict[str, Any]] = []
@@ -456,9 +455,7 @@ def join_timeline(
 
     The wrapper supplies source-video PTS records.  Direct callers may pass a list containing
     ``frame_id`` or zero-based ``index`` plus ``pts_seconds``/``pts_time`` and an optional
-    ``duration_seconds``/``duration_time``. Decimal frame IDs are uint64 identities; transport-
-    specific leading-zero widths do not affect a match. With no timeline, frame index is the
-    explicit clock.
+    ``duration_seconds``/``duration_time``.  With no timeline, frame index is the explicit clock.
     """
     if timeline is None:
         rows = [

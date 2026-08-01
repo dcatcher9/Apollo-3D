@@ -1250,32 +1250,6 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr><td>Default</td><td><code>apollo</code></td></tr>
 </table>
 
-### sbs_scene_controller
-
-<table>
-    <tr>
-        <td>Description</td>
-        <td>
-            Select the GPU-only scene and content-region controller used by Host SBS.
-            <code>off</code> disables the controller.
-            <code>shadow_rules</code> runs the rule backend and records diagnostics, but cannot
-            change the rendered SBS output.
-            Unknown values are rejected with a warning and fall back to <code>off</code>.
-        </td>
-    </tr>
-    <tr><td>Default</td><td><code>off</code></td></tr>
-    <tr>
-        <td>Options</td>
-        <td><code>off</code>, <code>shadow_rules</code></td>
-    </tr>
-    <tr>
-        <td>Example</td>
-        <td>@code{}
-            sbs_scene_controller = shadow_rules
-            @endcode</td>
-    </tr>
-</table>
-
 ## NVIDIA NVENC Encoder
 
 ### nvenc_preset

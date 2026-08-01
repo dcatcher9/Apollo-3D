@@ -164,28 +164,6 @@ namespace config {
     return registry;
   }
 
-  std::optional<sbs_scene_controller_e> parse_sbs_scene_controller(
-    const std::string_view value
-  ) {
-    if (value == "off") {
-      return sbs_scene_controller_e::off;
-    }
-    if (value == "shadow_rules") {
-      return sbs_scene_controller_e::shadow_rules;
-    }
-    return std::nullopt;
-  }
-
-  std::string_view to_string(const sbs_scene_controller_e value) {
-    switch (value) {
-      case sbs_scene_controller_e::off:
-        return "off";
-      case sbs_scene_controller_e::shadow_rules:
-        return "shadow_rules";
-    }
-    return "off";
-  }
-
   bool endline(char ch) {
     return ch == '\r' || ch == '\n';
   }
@@ -708,20 +686,6 @@ namespace config {
     video.sbs.profile = sbs_profile;
     apply_sbs_values(video.sbs, "sbs_3d_profile_" + sbs_profile + "_");
     apply_sbs_values(video.sbs, "sbs_3d_");
-
-    std::string sbs_scene_controller {
-      to_string(video.sbs.scene_controller)
-    };
-    string_f(vars, "sbs_scene_controller", sbs_scene_controller);
-    if (const auto parsed = parse_sbs_scene_controller(sbs_scene_controller)) {
-      video.sbs.scene_controller = *parsed;
-    } else {
-      BOOST_LOG(warning) << "Invalid sbs_scene_controller value '"
-                         << sbs_scene_controller
-                         << "'; use off or shadow_rules. Using off.";
-      video.sbs.scene_controller = sbs_scene_controller_e::off;
-    }
-
     if (video.sbs.zero_plane != "subject" && video.sbs.zero_plane != "median" && video.sbs.zero_plane != "background") {
       // Fall back to the shipped default rather than a hard-coded mode, so a typo cannot silently
       // opt a user out of the validated default.

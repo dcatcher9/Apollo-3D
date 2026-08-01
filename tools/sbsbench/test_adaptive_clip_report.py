@@ -297,7 +297,7 @@ class AdaptiveTraceContractTests(unittest.TestCase):
             path = Path(directory) / "adaptive_state.jsonl"
             for invalid_id, message in (
                 ("1x", "ASCII decimal string"),
-                ("\uff11", "ASCII decimal string"),
+                ("１", "ASCII decimal string"),
                 (str(report.UINT64_MAX + 1), "uint64 range"),
             ):
                 with self.subTest(frame_id=invalid_id):
@@ -569,7 +569,7 @@ class AdaptiveReportTests(unittest.TestCase):
         ]
         for invalid_id, message in (
             ("1x", "ASCII decimal string"),
-            ("\uff11", "ASCII decimal string"),
+            ("１", "ASCII decimal string"),
             (str(report.UINT64_MAX + 1), "uint64 range"),
         ):
             with self.subTest(frame_id=invalid_id):

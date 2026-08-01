@@ -273,17 +273,6 @@ namespace offline_sbs {
   );
   std::size_t native_worker_log_max_bytes_for_test();
 
-  bool validate_scene_controller_trace_for_test(
-    const nlohmann::json &trace,
-    const std::filesystem::path &result_directory,
-    std::uint64_t source_frame_count,
-    std::string &error
-  );
-  bool remove_scene_controller_trace_artifacts_for_test(
-    const std::filesystem::path &result_directory,
-    std::string &error
-  );
-
   std::string build_worker_command_for_test(
     const std::filesystem::path &sunshine_executable,
     const std::filesystem::path &sunshine_config,

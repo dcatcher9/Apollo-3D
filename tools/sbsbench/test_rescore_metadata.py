@@ -53,6 +53,7 @@ class RescoreMetadataTests(unittest.TestCase):
             "depth_compensation": "none",
             "literal_bestv2": False,
             "cuda_graph": True,
+            "cuda_graph_captured": True,
             "adaptive_pop": True,
             "adaptive_pop_max": 1.3,
             "zero_plane": "median",

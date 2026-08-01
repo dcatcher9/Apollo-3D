@@ -30,10 +30,8 @@ import os
 import re
 import secrets
 import shutil
-import struct
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from fractions import Fraction
@@ -44,19 +42,9 @@ from typing import Any, Iterable
 from urllib.parse import urlsplit
 
 if __package__:
-    from .adaptive_state_contract import (
-        KNOWN_CUT_FLAG_MASK as ADAPTIVE_KNOWN_CUT_FLAG_MASK,
-        TRACE_SCHEMA as ADAPTIVE_TRACE_SCHEMA,
-    )
-    from . import scene_controller_eval
-    from . import scene_controller_trace
+    from .adaptive_state_contract import TRACE_SCHEMA as ADAPTIVE_TRACE_SCHEMA
 else:
-    from adaptive_state_contract import (
-        KNOWN_CUT_FLAG_MASK as ADAPTIVE_KNOWN_CUT_FLAG_MASK,
-        TRACE_SCHEMA as ADAPTIVE_TRACE_SCHEMA,
-    )
-    import scene_controller_eval
-    import scene_controller_trace
+    from adaptive_state_contract import TRACE_SCHEMA as ADAPTIVE_TRACE_SCHEMA
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -66,42 +54,14 @@ DEFAULT_CONF = SCRIPT_DIR / "bench.conf"
 MANIFEST_NAME = "conversion_manifest.json"
 TIMELINE_NAME = "timeline.json"
 TRACE_NAME = "adaptive_state.jsonl"
-SCENE_CONTROLLER_TRACE_NAME = scene_controller_trace.TRACE_NAME
-SCENE_CONTROLLER_SOURCE_TIME_NAME = "scene-controller-timeline.jsonl"
-SCENE_CONTROLLER_SOURCE_TIME_SCHEMA = 2
-SCENE_CONTROLLER_SOURCE_TIME_CLOCK = "source-presentation-timeline-v2"
-SCENE_CONTROLLER_SOURCE_TIME_MAX_LINE_BYTES = 256
 NATIVE_CONTRACT_NAME = "whole_clip_contract.json"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 CODECS = ("hevc_nvenc", "av1_nvenc", "libx265")
 SPOOL_SAFETY_FACTOR = Fraction(5, 4)
 SPOOL_FIXED_RESERVE_BYTES = 256 * 1024 * 1024
 DEFAULT_SCENE_CACHE_MAX_BYTES = 4 * 1024 * 1024 * 1024
-SCENE_CACHE_CONTRACT_SCHEMA = 2
-SCENE_CACHE_METADATA_MAGIC = 0x32434253
-SCENE_CACHE_METADATA_SCHEMA = 1
-SCENE_CACHE_METADATA_WORDS = 48
-SCENE_CACHE_METADATA_BYTES = SCENE_CACHE_METADATA_WORDS * 4
-SCENE_CACHE_METADATA_ROI_OFFSET = 16
-SCENE_CACHE_ROI_WORDS = 32
-SCENE_CACHE_STATE_SCHEMA = 3
-SCENE_CACHE_SUBJECT_WORDS = 12
-SCENE_CACHE_DEPTH_FRAME_STATE_WORDS = 4
-SCENE_CACHE_STATE_WORDS = 16
-SCENE_CACHE_MAX_DEPTH_DIMENSION = 1036
-FRAME_ROI_TRANSFORM_SCHEMA = 1
-FRAME_ROI_TRANSFORM_PATCH_SIZE = 14
-FRAME_ROI_TRANSFORM_BANK_COUNT = 2
-ADAPTIVE_INITIALIZED_WORD = 3
-ADAPTIVE_ZERO_ANCHOR_VALID_WORD = 9
-ADAPTIVE_CUT_FLAGS_WORD = 10
-ADAPTIVE_MODEL_INPUT_HISTORY_STATE_WORD = 11
-UINT32_MAX = (1 << 32) - 1
-UINT64_MAX = (1 << 64) - 1
-INT64_MAX = (1 << 63) - 1
 RESERVED_NATIVE_OPTIONS = {
     "--artifacts",
-    "--bounded-adaptive-state",
     "--frames",
     "--follow",
     "--follow-count",
@@ -110,8 +70,6 @@ RESERVED_NATIVE_OPTIONS = {
     "--out",
     "--output-every",
     "--render-cache",
-    "--scene-controller",
-    "--scene-controller-source-time",
     "--scene-cache",
     "--scene-plan",
 }
@@ -935,361 +893,6 @@ def wait_for_progress(
         time.sleep(min(0.02, remaining))
 
 
-def _float_from_word(word: int) -> float:
-    return struct.unpack("<f", struct.pack("<I", word))[0]
-
-
-def _join_u64_words(low: int, high: int) -> int:
-    return low | (high << 32)
-
-
-def _finite_roi_rect(
-    words: tuple[int, ...],
-    offset: int,
-) -> tuple[float, float, float, float] | None:
-    rect = tuple(_float_from_word(words[offset + index]) for index in range(4))
-    x0, y0, x1, y1 = rect
-    if (
-        not all(math.isfinite(value) for value in rect) or
-        x0 < 0.0 or y0 < 0.0 or
-        x1 > 1.0 or y1 > 1.0 or
-        x1 <= x0 or y1 <= y0
-    ):
-        return None
-    return rect
-
-
-def _accepted_roi_axis(value: float, extent: int) -> int:
-    return min(max(math.ceil(value * extent - 0.5), 0), extent)
-
-
-def _roi_physical_aspect_matches(
-    crop: tuple[float, float, float, float],
-    source_width: int,
-    source_height: int,
-    model_width: int,
-    model_height: int,
-    tolerance: float,
-) -> bool:
-    crop_width = (crop[2] - crop[0]) * source_width
-    crop_height = (crop[3] - crop[1]) * source_height
-    left = crop_width * model_height
-    right = crop_height * model_width
-    scale = max(abs(left), abs(right), 1.0)
-    return (
-        math.isfinite(left) and math.isfinite(right) and
-        abs(left - right) <= scale * tolerance
-    )
-
-
-def _validate_roi_transform(
-    words: tuple[int, ...],
-    *,
-    expected_source_frame_id: int,
-    source_width: int,
-    source_height: int,
-    model_width: int,
-    model_height: int,
-    sequence: int,
-) -> None:
-    valid_flag = 1 << 0
-    full_frame_flag = 1 << 1
-    active_roi_flag = 1 << 2
-    reset_debt_flag = 1 << 3
-    known_flags = (
-        valid_flag | full_frame_flag | active_roi_flag | reset_debt_flag)
-    flags = words[1]
-    full_frame = bool(flags & full_frame_flag)
-    active_roi = bool(flags & active_roi_flag)
-    transform_version = _join_u64_words(words[28], words[29])
-    source_frame_id = _join_u64_words(words[2], words[3])
-    focus = _finite_roi_rect(words, 12)
-    crop = _finite_roi_rect(words, 16)
-    if (
-        words[0] != FRAME_ROI_TRANSFORM_SCHEMA or
-        not flags & valid_flag or
-        flags & ~known_flags or
-        full_frame == active_roi or
-        source_frame_id != expected_source_frame_id or
-        words[6] != source_width or words[7] != source_height or
-        words[8] != model_width or words[9] != model_height or
-        model_width <= 0 or model_height <= 0 or
-        model_width > SCENE_CACHE_MAX_DEPTH_DIMENSION or
-        model_height > SCENE_CACHE_MAX_DEPTH_DIMENSION or
-        model_width > source_width or model_height > source_height or
-        model_width % FRAME_ROI_TRANSFORM_PATCH_SIZE != 0 or
-        model_height % FRAME_ROI_TRANSFORM_PATCH_SIZE != 0 or
-        transform_version == 0 or
-        words[30] >= FRAME_ROI_TRANSFORM_BANK_COUNT or
-        focus is None or crop is None
-    ):
-        raise WholeClipError(
-            f"scene cache metadata {sequence} ROI transform mismatch")
-    assert focus is not None and crop is not None
-    if not (
-        focus[0] >= crop[0] and focus[1] >= crop[1] and
-        focus[2] <= crop[2] and focus[3] <= crop[3]
-    ):
-        raise WholeClipError(
-            f"scene cache metadata {sequence} ROI transform mismatch")
-
-    feathers = tuple(_float_from_word(words[index]) for index in range(24, 28))
-    if any(not math.isfinite(value) or value < 0.0 for value in feathers):
-        raise WholeClipError(
-            f"scene cache metadata {sequence} ROI transform mismatch")
-
-    crop_width = crop[2] - crop[0]
-    crop_height = crop[3] - crop[1]
-    accepted = (
-        _accepted_roi_axis((focus[0] - crop[0]) / crop_width, model_width),
-        _accepted_roi_axis((focus[1] - crop[1]) / crop_height, model_height),
-        _accepted_roi_axis((focus[2] - crop[0]) / crop_width, model_width),
-        _accepted_roi_axis((focus[3] - crop[1]) / crop_height, model_height),
-    )
-    x0, y0, x1, y1 = accepted
-    accepted_count = (x1 - x0) * (y1 - y0)
-    if (
-        x1 <= x0 or y1 <= y0 or
-        tuple(words[20:24]) != accepted or
-        words[10] != accepted_count
-    ):
-        raise WholeClipError(
-            f"scene cache metadata {sequence} ROI transform mismatch")
-
-    if full_frame:
-        full_rect_words = (0, 0, 0x3F800000, 0x3F800000)
-        if (
-            tuple(words[12:16]) != full_rect_words or
-            tuple(words[16:20]) != full_rect_words or
-            accepted != (0, 0, model_width, model_height) or
-            words[10] != model_width * model_height or
-            any(value != 0.0 for value in feathers) or
-            not _roi_physical_aspect_matches(
-                crop,
-                source_width,
-                source_height,
-                model_width,
-                model_height,
-                0.02,
-            )
-        ):
-            raise WholeClipError(
-                f"scene cache metadata {sequence} ROI transform mismatch")
-        return
-
-    focus_width = focus[2] - focus[0]
-    focus_height = focus[3] - focus[1]
-    if (
-        words[4] == 0 or words[5] == 0 or words[11] == 0 or
-        feathers[0] > 0.25 * focus_width or
-        feathers[2] > 0.25 * focus_width or
-        feathers[1] > 0.25 * focus_height or
-        feathers[3] > 0.25 * focus_height or
-        not _roi_physical_aspect_matches(
-            crop,
-            source_width,
-            source_height,
-            model_width,
-            model_height,
-            0.0001,
-        )
-    ):
-        raise WholeClipError(
-            f"scene cache metadata {sequence} ROI transform mismatch")
-
-
-def _validate_frame_metadata(
-    words: tuple[int, ...],
-    *,
-    sequence: int,
-    source_width: int,
-    source_height: int,
-    depth_reuse_interval: int,
-    requires_previous: bool,
-    allow_forced_current: bool = False,
-) -> int:
-    expected_header = (
-        SCENE_CACHE_METADATA_MAGIC,
-        SCENE_CACHE_METADATA_SCHEMA,
-        SCENE_CACHE_METADATA_WORDS,
-        SCENE_CACHE_METADATA_ROI_OFFSET,
-    )
-    if tuple(words[0:4]) != expected_header:
-        raise WholeClipError(
-            f"scene cache metadata {sequence} header mismatch")
-    depth_width, depth_height, depth_pixels, bytes_per_sample = words[4:8]
-    pixels = depth_width * depth_height
-    if (
-        depth_width <= 0 or depth_height <= 0 or
-        depth_width > SCENE_CACHE_MAX_DEPTH_DIMENSION or
-        depth_height > SCENE_CACHE_MAX_DEPTH_DIMENSION or
-        depth_width > source_width or depth_height > source_height or
-        depth_width % FRAME_ROI_TRANSFORM_PATCH_SIZE != 0 or
-        depth_height % FRAME_ROI_TRANSFORM_PATCH_SIZE != 0 or
-        pixels > UINT32_MAX or depth_pixels != pixels or
-        bytes_per_sample != 4 or
-        _join_u64_words(words[8], words[9]) != sequence
-    ):
-        raise WholeClipError(
-            f"scene cache metadata {sequence} depth identity mismatch")
-    if tuple(words[12:16]) != (
-        source_width,
-        source_height,
-        depth_width,
-        depth_height,
-    ):
-        raise WholeClipError(
-            f"scene cache metadata {sequence} source identity mismatch")
-
-    if (
-        not isinstance(depth_reuse_interval, int) or
-        isinstance(depth_reuse_interval, bool) or
-        not 1 <= depth_reuse_interval <= 8
-    ):
-        raise WholeClipError(
-            "scene cache depth reuse interval is invalid")
-    retained_source_frame_id = _join_u64_words(words[10], words[11])
-    transform = tuple(words[SCENE_CACHE_METADATA_ROI_OFFSET:])
-    if all(word == 0 for word in transform):
-        left = source_width * depth_height
-        right = source_height * depth_width
-        scale = max(abs(left), abs(right), 1.0)
-        if (
-            retained_source_frame_id != UINT64_MAX or
-            abs(left - right) > scale * 0.02
-        ):
-            raise WholeClipError(
-                f"scene cache metadata {sequence} retained source identity mismatch")
-    else:
-        expected_retained_source_frame_id = (
-            ((sequence - 1) // depth_reuse_interval) *
-            depth_reuse_interval
-        )
-        forced_current_source_frame_id = sequence - 1
-        forced_current = (
-            allow_forced_current and
-            retained_source_frame_id == forced_current_source_frame_id
-        )
-        cadence_aligned = (
-            forced_current or
-            (
-                retained_source_frame_id <= expected_retained_source_frame_id and
-                retained_source_frame_id % depth_reuse_interval == 0
-            )
-        )
-        expected_for_state = (
-            forced_current_source_frame_id
-            if forced_current else
-            expected_retained_source_frame_id
-        )
-        state_matches_retained_identity = (
-            retained_source_frame_id < expected_for_state
-            if requires_previous else
-            retained_source_frame_id == expected_for_state
-        )
-        if not cadence_aligned or not state_matches_retained_identity:
-            raise WholeClipError(
-                f"scene cache metadata {sequence} retained source identity mismatch")
-        _validate_roi_transform(
-            transform,
-            expected_source_frame_id=retained_source_frame_id,
-            source_width=source_width,
-            source_height=source_height,
-            model_width=depth_width,
-            model_height=depth_height,
-            sequence=sequence,
-        )
-    return depth_pixels * bytes_per_sample
-
-
-def _validate_cached_state(payload: bytes, sequence: int) -> bool:
-    words = struct.unpack(f"<{SCENE_CACHE_STATE_WORDS}I", payload)
-    values = tuple(_float_from_word(word) for word in words)
-    if not all(math.isfinite(value) for value in values):
-        raise WholeClipError(
-            f"scene cache state {sequence} contains a non-finite value")
-    subject_initialized = values[ADAPTIVE_INITIALIZED_WORD]
-    zero_anchor_valid = values[ADAPTIVE_ZERO_ANCHOR_VALID_WORD]
-    cut_flags = values[ADAPTIVE_CUT_FLAGS_WORD]
-    history_state = values[ADAPTIVE_MODEL_INPUT_HISTORY_STATE_WORD]
-    initialized = values[SCENE_CACHE_SUBJECT_WORDS + 2]
-    frame_state = values[SCENE_CACHE_SUBJECT_WORDS + 3]
-    frame_state_valid = (
-        frame_state == 0.0 or
-        (
-            initialized == 1.0 and
-            frame_state in (1.0, 2.0)
-        )
-    )
-    if (
-        subject_initialized not in (0.0, 1.0) or
-        zero_anchor_valid not in (0.0, 1.0) or
-        not 0.0 <= cut_flags <= ADAPTIVE_KNOWN_CUT_FLAG_MASK or
-        math.trunc(cut_flags) != cut_flags or
-        not 0.0 <= history_state <= 4.0 or
-        math.trunc(history_state) != history_state or
-        initialized not in (0.0, 1.0) or
-        not frame_state_valid
-    ):
-        raise WholeClipError(
-            f"scene cache state {sequence} has invalid validity flags")
-    return initialized == 1.0 and frame_state == 0.0
-
-
-def scene_cache_max_triplet_bytes(
-    source_width: int,
-    source_height: int,
-) -> int:
-    """Bound every dynamic schema-2 depth/state/metadata publication."""
-    for name, value in (
-        ("width", source_width),
-        ("height", source_height),
-    ):
-        if (
-            not isinstance(value, int) or isinstance(value, bool) or
-            not 1 <= value <= UINT32_MAX
-        ):
-            raise WholeClipError(
-                f"scene-cache source {name} is invalid")
-    max_width = min(
-        source_width, SCENE_CACHE_MAX_DEPTH_DIMENSION)
-    max_height = min(
-        source_height, SCENE_CACHE_MAX_DEPTH_DIMENSION)
-    max_width -= max_width % FRAME_ROI_TRANSFORM_PATCH_SIZE
-    max_height -= max_height % FRAME_ROI_TRANSFORM_PATCH_SIZE
-    if max_width <= 0 or max_height <= 0:
-        raise WholeClipError(
-            "source raster cannot hold a valid scene-cache depth shape")
-    return (
-        max_width * max_height * 4 +
-        SCENE_CACHE_STATE_WORDS * 4 +
-        SCENE_CACHE_METADATA_BYTES
-    )
-
-
-def preflight_scene_cache_hard_cap(
-    source_width: int,
-    source_height: int,
-    hard_cap_bytes: int,
-) -> int:
-    """Reject a cap before the native producer can publish its first triplet."""
-    if (
-        not isinstance(hard_cap_bytes, int) or
-        isinstance(hard_cap_bytes, bool) or
-        hard_cap_bytes <= 0
-    ):
-        raise WholeClipError(
-            "scene-cache max bytes must be a positive integer")
-    maximum_triplet = scene_cache_max_triplet_bytes(
-        source_width, source_height)
-    if maximum_triplet > hard_cap_bytes // 10:
-        raise WholeClipError(
-            "scene-cache budget must hold at least ten maximum-sized "
-            "depth/state/metadata triplets before native publication: "
-            f"maximum_pair={maximum_triplet}, cap={hard_cap_bytes}")
-    return maximum_triplet
-
-
 class SceneCacheLedger:
     """Track only native-attested depth/state pairs and enforce a hard byte budget."""
 
@@ -1306,150 +909,60 @@ class SceneCacheLedger:
         self.max_bytes = max_bytes
         self.current_bytes = 0
         self.high_water_bytes = 0
-        self._pairs: dict[int, tuple[Path, Path, Path, int, bool]] = {}
+        self._pairs: dict[int, tuple[Path, Path, int]] = {}
         self.forced_segments: list[dict[str, Any]] = []
 
     def acknowledge_pair(
         self,
         sequence: int,
         contract: dict[str, Any],
-        *,
-        allow_forced_current: bool = False,
     ) -> int:
         if sequence in self._pairs:
             raise WholeClipError(f"scene cache pair {sequence} was already acknowledged")
         if sequence <= 0:
             raise WholeClipError("scene cache sequence must be positive")
-        if (
-            contract.get("schema") != SCENE_CACHE_CONTRACT_SCHEMA or
-            contract.get("status") != "running" or
-            contract.get("first_sequence") != 1 or
-            contract.get("atomic_frame_publication") is not True
-        ):
-            raise WholeClipError(
-                "scene cache running publication contract is invalid")
+        if contract.get("schema") != 1:
+            raise WholeClipError("scene cache contract schema is not 1")
         processed_count = contract.get("processed_count")
         if (
             not isinstance(processed_count, int) or
             isinstance(processed_count, bool) or
-            processed_count != sequence
+            processed_count < sequence
         ):
             raise WholeClipError(
-                "scene cache contract does not exactly acknowledge the requested sequence")
+                "scene cache contract does not acknowledge the requested sequence")
         try:
-            source_width = contract["source"]["width"]
-            source_height = contract["source"]["height"]
-            depth_reuse_interval = contract[
-                "render_config"]["depth_reuse_interval"]
+            depth_bytes = int(contract["depth"]["bytes_per_frame"])
             state_bytes = int(contract["state"]["bytes_per_frame"])
-            metadata_bytes = int(
-                contract["frame_metadata"]["bytes_per_frame"])
         except (KeyError, TypeError, ValueError) as exc:
             raise WholeClipError(
-                "scene cache contract lacks exact source/state/metadata layout") from exc
-        if (
-            not isinstance(source_width, int) or isinstance(source_width, bool) or
-            not isinstance(source_height, int) or isinstance(source_height, bool) or
-            not 1 <= source_width <= UINT32_MAX or
-            not 1 <= source_height <= UINT32_MAX
-        ):
-            raise WholeClipError("scene cache contract source dimensions are invalid")
-        state_contract = contract.get("state", {})
-        metadata_contract = contract.get("frame_metadata", {})
-        if (
-            contract.get("depth", {}).get("dimensions") != "per-frame-metadata" or
-            contract.get("depth", {}).get("dtype") != "float32-le" or
-            contract.get("depth", {}).get("dxgi_format") != "R32_FLOAT" or
-            contract.get("depth", {}).get("bytes_per_frame") is not None or
-            contract.get("depth", {}).get("bytes_per_sample") != 4 or
-            metadata_contract.get("schema") != SCENE_CACHE_METADATA_SCHEMA or
-            metadata_contract.get("magic") != SCENE_CACHE_METADATA_MAGIC or
-            metadata_contract.get("word_count") != SCENE_CACHE_METADATA_WORDS or
-            metadata_contract.get("roi_transform_word_offset") !=
-                SCENE_CACHE_METADATA_ROI_OFFSET or
-            metadata_contract.get("roi_transform_word_count") !=
-                SCENE_CACHE_ROI_WORDS or
-            metadata_contract.get("roi_transform_contract_schema") !=
-                FRAME_ROI_TRANSFORM_SCHEMA or
-            state_contract.get("schema") != SCENE_CACHE_STATE_SCHEMA or
-            state_contract.get("subject_word_count") !=
-                SCENE_CACHE_SUBJECT_WORDS or
-            state_contract.get("depth_frame_state_word_count") !=
-                SCENE_CACHE_DEPTH_FRAME_STATE_WORDS or
-            state_contract.get("word_count") != SCENE_CACHE_STATE_WORDS or
-            state_bytes != SCENE_CACHE_STATE_WORDS * 4 or
-            metadata_bytes != SCENE_CACHE_METADATA_BYTES
-        ):
-            raise WholeClipError("scene cache schema-2 layout is invalid")
+                "scene cache contract lacks exact per-frame byte sizes") from exc
+        if depth_bytes <= 0 or state_bytes <= 0:
+            raise WholeClipError("scene cache per-frame byte sizes must be positive")
         stem = f"frame_{sequence:010d}"
         depth = self.directory / f"{stem}.depth.r32f"
         state = self.directory / f"{stem}.state.u32"
-        metadata = self.directory / f"{stem}.meta.u32"
         try:
             actual_depth = depth.stat().st_size
             actual_state = state.stat().st_size
-            actual_metadata = metadata.stat().st_size
-            metadata_payload = metadata.read_bytes()
-            state_payload = state.read_bytes()
         except OSError as exc:
             raise WholeClipError(
-                f"scene cache ACK {sequence} is missing its frame triplet") from exc
-        if (
-            actual_metadata != metadata_bytes or
-            len(metadata_payload) != metadata_bytes
-        ):
+                f"scene cache ACK {sequence} is missing its depth/state pair") from exc
+        if actual_depth != depth_bytes or actual_state != state_bytes:
             raise WholeClipError(
-                f"scene cache metadata {sequence} size mismatch")
-        metadata_words = struct.unpack(
-            f"<{SCENE_CACHE_METADATA_WORDS}I", metadata_payload)
-        if (
-            actual_state != state_bytes or
-            len(state_payload) != state_bytes
-        ):
-            raise WholeClipError(
-                f"scene cache triplet {sequence} size mismatch: "
+                f"scene cache pair {sequence} size mismatch: "
+                f"depth={actual_depth}/{depth_bytes}, "
                 f"state={actual_state}/{state_bytes}")
-        requires_previous = _validate_cached_state(state_payload, sequence)
-        expected_depth = _validate_frame_metadata(
-            metadata_words,
-            sequence=sequence,
-            source_width=source_width,
-            source_height=source_height,
-            depth_reuse_interval=depth_reuse_interval,
-            requires_previous=requires_previous,
-            allow_forced_current=allow_forced_current,
-        )
-        if (
-            actual_depth != expected_depth or
-            actual_state != state_bytes
-        ):
-            raise WholeClipError(
-                f"scene cache triplet {sequence} size mismatch: "
-                f"depth={actual_depth}/{expected_depth}, "
-                f"state={actual_state}/{state_bytes}")
-        pair_bytes = actual_depth + actual_state + actual_metadata
+        pair_bytes = actual_depth + actual_state
         projected = self.current_bytes + pair_bytes
         if projected > self.max_bytes:
             raise WholeClipError(
                 "scene cache exceeded its hard byte budget before replay release: "
                 f"{projected} > {self.max_bytes}")
-        self._pairs[sequence] = (
-            depth,
-            state,
-            metadata,
-            pair_bytes,
-            requires_previous,
-        )
+        self._pairs[sequence] = (depth, state, pair_bytes)
         self.current_bytes = projected
         self.high_water_bytes = max(self.high_water_bytes, projected)
         return pair_bytes
-
-    def requires_previous_packed_frame(self, sequence: int) -> bool:
-        pair = self._pairs.get(sequence)
-        if pair is None:
-            raise WholeClipError(
-                f"scene cache pair {sequence} was not acknowledged")
-        return pair[4]
 
     def pressure_state(self, next_pair_bytes: int = 0) -> str:
         if next_pair_bytes < 0:
@@ -1494,12 +1007,10 @@ class SceneCacheLedger:
         )
         removed_bytes = 0
         for sequence in sequences:
-            depth, state, metadata, pair_bytes, _requires_previous = (
-                self._pairs[sequence])
+            depth, state, pair_bytes = self._pairs[sequence]
             try:
                 depth.unlink()
                 state.unlink()
-                metadata.unlink()
             except OSError as exc:
                 raise WholeClipError(
                     f"cannot release rendered scene-cache pair {sequence}: {exc}") from exc
@@ -1913,13 +1424,13 @@ def resolve_ffprobe(
     environment_probe = os.environ.get("FFPROBE_EXE")
     if environment_probe:
         candidates.append(environment_probe)
-    discovered = shutil.which("ffprobe")
-    if discovered:
-        candidates.append(discovered)
     if ffmpeg:
         ffmpeg_path = Path(ffmpeg).expanduser().resolve()
         for name in ("ffprobe.exe", "ffprobe"):
             candidates.append(os.fspath(ffmpeg_path.with_name(name)))
+    discovered = shutil.which("ffprobe")
+    if discovered:
+        candidates.append(discovered)
     for candidate in candidates:
         expanded = os.path.expandvars(os.path.expanduser(candidate))
         path = Path(expanded)
@@ -2304,76 +1815,9 @@ def query_native_capabilities(
         ("native_whole_clip", "follow_protocol_schema"): 1,
         ("native_whole_clip", "follow_global_first_sequence"): True,
         ("native_whole_clip", "adaptive_state_schema"): ADAPTIVE_TRACE_SCHEMA,
-        ("native_whole_clip", "scene_controller_trace", "trace_schema"):
-            scene_controller_trace.TRACE_SCHEMA,
-        ("native_whole_clip", "scene_controller_trace", "controller_schema"):
-            scene_controller_trace.controller_contract.SCHEMA_VERSION,
-        ("native_whole_clip", "scene_controller_trace", "rule_revision"):
-            scene_controller_trace.controller_contract.RULE_REVISION,
-        ("native_whole_clip", "scene_controller_trace", "ordered_abi_hash"):
-            scene_controller_trace.controller_contract.ORDERED_ABI_HASH,
-        ("native_whole_clip", "scene_controller_trace", "backends"):
-            ["off", "shadow_rules"],
-        ("native_whole_clip", "scene_controller_trace", "active_roi_authority"):
-            False,
-        ("native_whole_clip", "scene_controller_trace", "file"):
-            scene_controller_trace.TRACE_NAME,
-        ("native_whole_clip", "scene_controller_trace", "transports"):
-            [
-                scene_controller_trace.TRACE_TRANSPORT,
-                scene_controller_trace.ATOMIC_TRACE_TRANSPORT,
-            ],
-        ("native_whole_clip", "scene_controller_trace", "atomic_header_file"):
-            scene_controller_trace.ATOMIC_HEADER_NAME,
-        ("native_whole_clip", "scene_controller_trace", "atomic_frame_file"):
-            scene_controller_trace.ATOMIC_FRAME_NAME,
-        ("native_whole_clip", "scene_controller_trace", "global_out_word_count"):
-            len(scene_controller_trace.GLOBAL_OUT_CONTRACT),
-        ("native_whole_clip", "scene_controller_trace", "rule_state_word_count"):
-            len(scene_controller_trace.RULE_STATE_CONTRACT),
-        ("native_whole_clip", "scene_controller_trace", "source_time_override"):
-            SCENE_CONTROLLER_SOURCE_TIME_CLOCK,
-        ("native_whole_clip", "scene_cache_contract_schema"):
-            SCENE_CACHE_CONTRACT_SCHEMA,
-        ("native_whole_clip", "scene_cache_packed_sbs_contract"): True,
-        ("native_whole_clip", "scene_cache_depth", "dtype"): "float32-le",
-        ("native_whole_clip", "scene_cache_depth", "layout"): "row-major",
-        ("native_whole_clip", "scene_cache_depth", "dxgi_format"):
-            "R32_FLOAT",
-        ("native_whole_clip", "scene_cache_depth", "dimensions"):
-            "per-frame-metadata",
-        ("native_whole_clip", "scene_cache_depth", "bytes_per_frame"): None,
-        ("native_whole_clip", "scene_cache_frame_metadata", "schema"):
-            SCENE_CACHE_METADATA_SCHEMA,
-        ("native_whole_clip", "scene_cache_frame_metadata", "word_count"):
-            SCENE_CACHE_METADATA_WORDS,
-        (
-            "native_whole_clip",
-            "scene_cache_frame_metadata",
-            "roi_transform_word_offset",
-        ): SCENE_CACHE_METADATA_ROI_OFFSET,
-        (
-            "native_whole_clip",
-            "scene_cache_frame_metadata",
-            "roi_transform_word_count",
-        ): SCENE_CACHE_ROI_WORDS,
-        (
-            "native_whole_clip",
-            "scene_cache_frame_metadata",
-            "roi_transform_contract_schema",
-        ): FRAME_ROI_TRANSFORM_SCHEMA,
-        ("native_whole_clip", "scene_cache_state", "schema"):
-            SCENE_CACHE_STATE_SCHEMA,
-        ("native_whole_clip", "scene_cache_state", "subject_word_count"):
-            SCENE_CACHE_SUBJECT_WORDS,
-        (
-            "native_whole_clip",
-            "scene_cache_state",
-            "depth_frame_state_word_count",
-        ): SCENE_CACHE_DEPTH_FRAME_STATE_WORDS,
-        ("native_whole_clip", "scene_cache_state", "word_count"):
-            SCENE_CACHE_STATE_WORDS,
-        ("native_whole_clip", "scene_cache_state", "dtype"): "uint32-le",
+        ("native_whole_clip", "scene_cache_contract_schema"): 1,
+        ("native_whole_clip", "scene_cache_state", "schema"): 1,
+        ("native_whole_clip", "scene_cache_state", "word_count"): 12,
         ("native_whole_clip", "scene_plan", "schema"): 1,
         ("native_whole_clip", "scene_plan", "version"): "scene-plan-v1",
         ("native_whole_clip", "scene_plan", "one_scene_per_replay"): True,
@@ -2381,21 +1825,6 @@ def query_native_capabilities(
         ("native_whole_clip", "scene_plan", "source_pixel_zero_anchor"): True,
         ("native_whole_clip", "render_cache_follow"): True,
         ("native_whole_clip", "render_skips_tensorrt"): True,
-        (
-            "native_whole_clip",
-            "whole_clip_inference_attestation",
-            "depth_inference_enabled",
-        ): True,
-        (
-            "native_whole_clip",
-            "whole_clip_inference_attestation",
-            "scheduled_depth_update_count",
-        ): True,
-        (
-            "native_whole_clip",
-            "whole_clip_inference_attestation",
-            "tensorrt_enqueue_count",
-        ): True,
         ("native_whole_clip", "atomic_sbs_publication"): True,
     }
     mismatches = {}
@@ -2970,53 +2399,10 @@ def decode_video(
     return timeline, command
 
 
-def _validate_scene_controller_source_time_attestation(
-    contract: dict[str, Any],
-    source_time: dict[str, Any] | None,
-    *,
-    enabled: bool,
-) -> None:
-    if enabled:
-        if not isinstance(source_time, dict):
-            raise WholeClipError(
-                "enabled scene-controller source time lacks wrapper provenance")
-        expected = {
-            "enabled": True,
-            "schema": SCENE_CONTROLLER_SOURCE_TIME_SCHEMA,
-            "clock": SCENE_CONTROLLER_SOURCE_TIME_CLOCK,
-            "file_sha256": source_time.get("sha256"),
-            "frame_count": source_time.get("frame_count"),
-            "total_elapsed_seconds": source_time.get(
-                "total_elapsed_seconds"),
-        }
-    else:
-        if source_time is not None:
-            raise WholeClipError(
-                "disabled scene-controller source time received wrapper provenance")
-        expected = {
-            "enabled": False,
-            "schema": None,
-            "clock": None,
-            "file_sha256": None,
-            "frame_count": 0,
-            "total_elapsed_seconds": 0.0,
-        }
-    actual = contract.get("scene_controller_source_time")
-    if not _same_json_contract_type(actual, expected):
-        raise WholeClipError(
-            "whole-clip scene-controller source-time attestation mismatch: " +
-            json.dumps(
-                {"expected": expected, "actual": actual},
-                sort_keys=True,
-            )
-        )
-
-
 def validate_native_outputs(
     artifacts_dir: Path,
     timeline: dict[str, Any],
     artifact_mode: str,
-    source_time: dict[str, Any],
 ) -> dict[str, Any]:
     trace_path = artifacts_dir / TRACE_NAME
     contract_path = artifacts_dir / NATIVE_CONTRACT_NAME
@@ -3039,16 +2425,6 @@ def validate_native_outputs(
         raise WholeClipError(
             "whole-clip contract source count mismatch: "
             f"{contract.get('source_frame_count')!r} != {expected_count}")
-    _validate_native_inference_attestation(
-        contract,
-        replay=False,
-        source_frame_count=expected_count,
-    )
-    _validate_scene_controller_source_time_attestation(
-        contract,
-        source_time,
-        enabled=True,
-    )
     adaptive_contract = contract.get("adaptive_state")
     if not isinstance(adaptive_contract, dict):
         raise WholeClipError("whole-clip contract lacks the adaptive-state descriptor")
@@ -3058,30 +2434,6 @@ def validate_native_outputs(
         adaptive_contract.get("frame_count") != expected_count
     ):
         raise WholeClipError("whole-clip adaptive-state contract mismatch")
-    resolved_runtime = contract.get("resolved_runtime")
-    followed_native_ids = (
-        isinstance(resolved_runtime, dict) and
-        resolved_runtime.get("follow_mode") is True
-    )
-    controller_frame_ids = (
-        [f"{index + 1:010d}" for index in range(expected_count)]
-        if followed_native_ids else
-        [row["frame_id"] for row in timeline["frames"]]
-    )
-    try:
-        scene_controller_trace.validate_descriptor(
-            contract.get("scene_controller"),
-            artifacts_dir,
-            expected_frame_ids=controller_frame_ids,
-            expected_model=contract.get("model"),
-            expected_depth_reuse_interval=contract.get(
-                "depth_reuse_interval"),
-            expected_backend="shadow_rules",
-            replay=False,
-        )
-    except scene_controller_trace.SceneControllerTraceError as exc:
-        raise WholeClipError(
-            f"whole-clip scene-controller contract mismatch: {exc}") from exc
     sbs_contract = contract.get("sbs")
     if not isinstance(sbs_contract, dict):
         raise WholeClipError("whole-clip contract lacks the SBS descriptor")
@@ -3106,124 +2458,6 @@ def validate_native_outputs(
     elif sbs_contract.get("enabled") or sbs_contract.get("frame_count") != 0:
         raise WholeClipError("adaptive-only contract unexpectedly attests SBS frames")
     return contract
-
-
-def scene_controller_artifact_manifest(
-    artifacts_dir: Path,
-    native_contract: dict[str, Any],
-) -> dict[str, Any]:
-    descriptor = native_contract.get("scene_controller")
-    if not isinstance(descriptor, dict):
-        raise WholeClipError(
-            "native contract lacks a scene-controller descriptor")
-    result = {
-        "enabled": descriptor.get("enabled"),
-        "backend": descriptor.get("backend"),
-        "transport": descriptor.get("transport"),
-        "ordered_abi_hash": descriptor.get("ordered_abi_hash"),
-    }
-    if descriptor.get("enabled") is not True:
-        return result
-    names = (
-        [descriptor.get("file")]
-        if descriptor.get("transport") == scene_controller_trace.TRACE_TRANSPORT
-        else [descriptor.get("header_file"), descriptor.get("frame_file")]
-    )
-    artifacts = []
-    for name in names:
-        if not isinstance(name, str) or not name:
-            raise WholeClipError(
-                "scene-controller descriptor has an invalid artifact path")
-        path = artifacts_dir / name
-        artifacts.append({
-            "file": f"artifacts/{name}",
-            "sha256": sha256_file(path),
-        })
-    result["artifacts"] = artifacts
-    return result
-
-
-def browser_scene_qualification(
-    frames_dir: Path,
-    artifacts_dir: Path,
-    native_contract: dict[str, Any],
-    timeline: dict[str, Any],
-    source_time: dict[str, Any],
-    output_dir: Path,
-) -> dict[str, Any] | None:
-    """Evaluate a locked generated-browser contract, or ignore ordinary user media."""
-    _validate_scene_controller_source_time_attestation(
-        native_contract,
-        source_time,
-        enabled=True,
-    )
-    try:
-        return scene_controller_eval.evaluate_generated_clip_trace(
-            frames_dir,
-            artifacts_dir,
-            native_contract,
-            timeline,
-            output_dir / "browser_scene_controller_report.json",
-        )
-    except (
-        scene_controller_eval.SceneControllerEvalError,
-        scene_controller_trace.SceneControllerTraceError,
-    ) as exc:
-        raise WholeClipError(
-            f"browser scene-controller qualification failed: {exc}"
-        ) from exc
-
-
-def _validate_native_inference_attestation(
-    contract: dict[str, Any],
-    *,
-    replay: bool,
-    source_frame_count: int,
-) -> None:
-    if (
-        not isinstance(source_frame_count, int) or
-        isinstance(source_frame_count, bool) or
-        source_frame_count <= 0
-    ):
-        raise WholeClipError(
-            "native inference attestation requires a positive source count")
-    if replay:
-        expected = {
-            "inference_mode": "scene-cache-replay",
-            "depth_inference_enabled": False,
-            "scheduled_depth_update_count": 0,
-            "tensorrt_enqueue_count": 0,
-        }
-    else:
-        depth_reuse_interval = contract.get("depth_reuse_interval")
-        if (
-            not isinstance(depth_reuse_interval, int) or
-            isinstance(depth_reuse_interval, bool) or
-            not 1 <= depth_reuse_interval <= 8
-        ):
-            raise WholeClipError(
-                "native analysis inference attestation has an invalid depth reuse interval")
-        # Shadow whole-clip analysis always schedules the final source frame so
-        # a depth-reuse tail cannot leave presentation-time dwell unconsumed.
-        scheduled_count = 1 + (
-            source_frame_count - 1 + depth_reuse_interval - 1
-        ) // depth_reuse_interval
-        expected = {
-            "inference_mode": "single-pass-tensorrt",
-            "depth_inference_enabled": True,
-            "scheduled_depth_update_count": scheduled_count,
-            "tensorrt_enqueue_count": scheduled_count,
-        }
-    mismatches = {
-        key: {"expected": wanted, "actual": contract.get(key)}
-        for key, wanted in expected.items()
-        if not _same_json_contract_type(contract.get(key), wanted)
-    }
-    if mismatches:
-        mode = "scene replay" if replay else "analysis"
-        raise WholeClipError(
-            f"native {mode} inference attestation mismatch: " +
-            json.dumps(mismatches, sort_keys=True))
 
 
 def _concat_quote(path: Path) -> str:
@@ -3320,212 +2554,13 @@ def timeline_time_base(timeline: dict[str, Any]) -> Fraction:
     value = timeline.get("time_base")
     if not isinstance(value, dict):
         raise WholeClipError("timeline lacks an exact time base")
-    if set(value) != {"num", "den"}:
-        raise WholeClipError("timeline time base must have exact num/den fields")
-    if (
-        not isinstance(value["num"], int) or
-        isinstance(value["num"], bool) or
-        not isinstance(value["den"], int) or
-        isinstance(value["den"], bool)
-    ):
-        raise WholeClipError("timeline time base must use exact JSON integers")
     try:
-        time_base = Fraction(value["num"], value["den"])
+        time_base = Fraction(int(value["num"]), int(value["den"]))
     except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
         raise WholeClipError("timeline has an invalid exact time base") from exc
     if time_base <= 0:
         raise WholeClipError("timeline time base must be positive")
     return time_base
-
-
-def build_scene_controller_source_time(
-    timeline: dict[str, Any],
-    *,
-    follow_frame_ids: bool = False,
-) -> Iterable[dict[str, Any]]:
-    """Yield the exact source presentation timeline without an O(frame-count) copy."""
-
-    if (
-        not isinstance(timeline, dict) or
-        not _same_json_contract_type(timeline.get("schema"), 1)
-    ):
-        raise WholeClipError(
-            "scene-controller source time requires timeline schema 1")
-    frame_count = timeline.get("frame_count")
-    frames = timeline.get("frames")
-    if (
-        not isinstance(frame_count, int) or
-        isinstance(frame_count, bool) or
-        frame_count <= 0 or
-        not isinstance(frames, list) or
-        len(frames) != frame_count
-    ):
-        raise WholeClipError(
-            "scene-controller source time requires a non-empty exact timeline")
-    time_base = timeline_time_base(timeline)
-    if (
-        time_base.numerator > INT64_MAX or
-        time_base.denominator > INT64_MAX
-    ):
-        raise WholeClipError(
-            "scene-controller source time must fit the native signed 64-bit clock")
-
-    yield {
-        "record": "header",
-        "schema": SCENE_CONTROLLER_SOURCE_TIME_SCHEMA,
-        "clock": SCENE_CONTROLLER_SOURCE_TIME_CLOCK,
-        "frame_count": frame_count,
-        "time_base": {
-            "num": time_base.numerator,
-            "den": time_base.denominator,
-        },
-    }
-    previous_pts: int | None = None
-    for source_index, frame in enumerate(frames):
-        if not isinstance(frame, dict):
-            raise WholeClipError(
-                "scene-controller source time frame must be an object")
-        if not _same_json_contract_type(frame.get("index"), source_index):
-            raise WholeClipError(
-                "scene-controller source time timeline indices are not contiguous")
-        frame_id = frame.get("frame_id")
-        pts = frame.get("pts")
-        duration = frame.get("duration")
-        if (
-            not isinstance(frame_id, str) or
-            not frame_id or
-            not frame_id.isdigit()
-        ):
-            raise WholeClipError(
-                "scene-controller source time frame identity is invalid")
-        if (
-            not isinstance(pts, int) or
-            isinstance(pts, bool) or
-            not -INT64_MAX - 1 <= pts <= INT64_MAX
-        ):
-            raise WholeClipError(
-                "scene-controller source PTS must fit a signed 64-bit integer")
-        if (
-            not isinstance(duration, int) or
-            isinstance(duration, bool) or
-            not 0 < duration <= INT64_MAX
-        ):
-            raise WholeClipError(
-                "scene-controller source duration must be a positive "
-                "signed 64-bit integer")
-        if previous_pts is not None:
-            delta_ticks = pts - previous_pts
-            if delta_ticks <= 0:
-                raise WholeClipError(
-                    "scene-controller source PTS must increase strictly")
-            if delta_ticks > INT64_MAX:
-                raise WholeClipError(
-                    "scene-controller source delta must fit a signed 64-bit integer")
-        yield {
-            "record": "frame",
-            "source_index": source_index,
-            "frame_id": (
-                f"{source_index + 1:010d}"
-                if follow_frame_ids else
-                frame_id
-            ),
-            "pts_ticks": pts,
-            "duration_ticks": duration,
-        }
-        previous_pts = pts
-
-
-def _scene_controller_source_time_line(
-    record: dict[str, Any],
-) -> bytes:
-    line = (
-        json.dumps(record, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        ) +
-        b"\n"
-    )
-    if len(line) > SCENE_CONTROLLER_SOURCE_TIME_MAX_LINE_BYTES:
-        raise WholeClipError(
-            "scene-controller source-time JSONL record exceeds its "
-            f"{SCENE_CONTROLLER_SOURCE_TIME_MAX_LINE_BYTES}-byte bound")
-    return line
-
-
-def write_scene_controller_source_time(
-    path: Path,
-    timeline: dict[str, Any],
-    *,
-    follow_frame_ids: bool = False,
-) -> dict[str, Any]:
-    """Atomically stream the durable timeline and return exact native provenance."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=path.parent,
-    )
-    digest = hashlib.sha256()
-    file_bytes = 0
-    frame_count = 0
-    total_elapsed_seconds = 0.0
-    previous_pts: int | None = None
-    time_base = timeline_time_base(timeline)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            for record in build_scene_controller_source_time(
-                timeline,
-                follow_frame_ids=follow_frame_ids,
-            ):
-                line = _scene_controller_source_time_line(record)
-                stream.write(line)
-                digest.update(line)
-                file_bytes += len(line)
-                if record["record"] != "frame":
-                    continue
-                pts = record["pts_ticks"]
-                delta_ticks = (
-                    0 if previous_pts is None else pts - previous_pts
-                )
-                delta_seconds = (
-                    float(delta_ticks) *
-                    float(time_base.numerator) /
-                    float(time_base.denominator)
-                )
-                if (
-                    not math.isfinite(delta_seconds) or
-                    delta_seconds < 0.0
-                ):
-                    raise WholeClipError(
-                        "scene-controller source presentation delta is invalid")
-                total_elapsed_seconds += delta_seconds
-                if not math.isfinite(total_elapsed_seconds):
-                    raise WholeClipError(
-                        "scene-controller source presentation duration overflowed")
-                previous_pts = pts
-                frame_count += 1
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary_name, path)
-    except Exception:
-        try:
-            os.unlink(temporary_name)
-        except OSError:
-            pass
-        raise
-    if frame_count != timeline["frame_count"] or file_bytes <= 0:
-        raise WholeClipError(
-            "scene-controller source-time writer did not consume the timeline")
-    return {
-        "file": path.name,
-        "sha256": digest.hexdigest(),
-        "schema": SCENE_CONTROLLER_SOURCE_TIME_SCHEMA,
-        "clock": SCENE_CONTROLLER_SOURCE_TIME_CLOCK,
-        "frame_count": frame_count,
-        "total_elapsed_seconds": total_elapsed_seconds,
-        "file_bytes": file_bytes,
-        "disk_reservation_bytes": file_bytes,
-    }
 
 
 def validate_output_target(
@@ -3756,7 +2791,6 @@ def render_cached_scene(
         "--artifacts", "conversion",
         "--render-cache", os.fspath(cache_dir),
         "--scene-plan", os.fspath(plan_path),
-        "--scene-controller", "off",
     ]
     child = LoggedSubprocess(
         command, build_dir, work_dir / "logs" / f"render-{scene_id:08d}.log")
@@ -3839,46 +2873,6 @@ def render_cached_scene(
             for key, wanted in contract_expected.items()
             if native_contract.get(key) != wanted
         }
-        try:
-            scene_controller_trace.validate_descriptor(
-                native_contract.get("scene_controller"),
-                native_out,
-                expected_frame_ids=(
-                    f"{sequence:010d}" for sequence in range(start, end)
-                ),
-                expected_model=native_contract.get("model"),
-                expected_depth_reuse_interval=native_contract.get(
-                    "depth_reuse_interval"),
-                expected_backend="off",
-                replay=True,
-            )
-        except scene_controller_trace.SceneControllerTraceError as exc:
-            contract_mismatches["scene_controller"] = {
-                "expected": "disabled/no-trace scene-cache replay",
-                "actual": str(exc),
-            }
-        try:
-            _validate_scene_controller_source_time_attestation(
-                native_contract,
-                None,
-                enabled=False,
-            )
-        except WholeClipError as exc:
-            contract_mismatches["scene_controller_source_time"] = {
-                "expected": "disabled/no-sidecar scene-cache replay",
-                "actual": str(exc),
-            }
-        try:
-            _validate_native_inference_attestation(
-                native_contract,
-                replay=True,
-                source_frame_count=count,
-            )
-        except WholeClipError as exc:
-            contract_mismatches["inference_attestation"] = {
-                "expected": "zero-inference exact scene-cache replay",
-                "actual": str(exc),
-            }
         resolved_runtime = native_contract.get("resolved_runtime")
         expected_runtime = {
             "scene_cache_replay": True,
@@ -3996,15 +2990,11 @@ def run_streaming_scene_pipeline(
     conf: Path,
     build_dir: Path,
     timeline: dict[str, Any],
-    source_width: int,
-    source_height: int,
     analysis_producer: Any,
     render_producer: Any | None,
     output_dir: Path,
     work_dir: Path,
     artifacts_dir: Path,
-    scene_controller_source_time_path: Path,
-    scene_controller_source_time: dict[str, Any],
     native_extra: list[str],
     cache_max_bytes: int,
     cache_budget_policy: str,
@@ -4014,7 +3004,6 @@ def run_streaming_scene_pipeline(
     output_video: Path | None,
     codec: str,
     color: dict[str, Any],
-    qualification_frames_dir: Path | None = None,
     timeout_seconds: float = 900.0,
 ) -> dict[str, Any]:
     """Run one inference pass and optionally replay finalized scenes into one encoder."""
@@ -4040,32 +3029,6 @@ def run_streaming_scene_pipeline(
         render_producer.extension != analysis_producer.extension
     ):
         raise WholeClipError("analysis/render producer color formats differ")
-    if conversion:
-        preflight_scene_cache_hard_cap(
-            source_width,
-            source_height,
-            cache_max_bytes,
-        )
-
-    qualification_required = False
-    if qualification_frames_dir is not None:
-        try:
-            qualification_required = (
-                scene_controller_eval.load_generated_clip_contract(
-                    qualification_frames_dir
-                ) is not None
-            )
-        except scene_controller_eval.SceneControllerEvalError as exc:
-            raise WholeClipError(
-                f"browser scene-controller source authentication failed: {exc}"
-            ) from exc
-    # Qualification fixtures are deliberately small, locked regression inputs.
-    # Retain their scene-cache entries until the complete native trace passes so
-    # a failing controller never starts replay or creates an encoded deliverable.
-    # Ordinary user media still replays finalized scenes incrementally.
-    defer_conversion_until_qualification = (
-        conversion and qualification_required
-    )
 
     analysis_input = work_dir / "analysis-input"
     analysis_input.mkdir()
@@ -4082,9 +3045,6 @@ def run_streaming_scene_pipeline(
         "--follow-count", str(frame_count),
         "--out", os.fspath(artifacts_dir),
         "--artifacts", "adaptive",
-        "--scene-controller", "shadow_rules",
-        "--scene-controller-source-time",
-        os.fspath(scene_controller_source_time_path),
     ]
     if conversion:
         analysis_command += ["--scene-cache", os.fspath(cache_dir)]
@@ -4105,9 +3065,8 @@ def run_streaming_scene_pipeline(
     encoder_filter = None
     concat_path = work_dir / "sbs-http.ffconcat"
     analysis_terminal = False
-    planned_until = 1
     rendered_until = 1
-    rendered_scene_count = 0
+    single_pair_bytes: int | None = None
     sbs_dimensions: tuple[int, int] | None = None
 
     def ensure_encoder() -> tuple[SbsFrameHttpBridge, LoggedSubprocess]:
@@ -4136,54 +3095,13 @@ def run_streaming_scene_pipeline(
             encoder_command, None, work_dir / "encode.log")
         return bridge, encoder
 
-    def render_pending_scenes() -> None:
-        nonlocal rendered_until, rendered_scene_count
-        if not conversion:
-            return
-        assert ledger is not None and render_producer is not None
-        for scene in scenes[rendered_scene_count:]:
+    def render_scenes(finalized: list[dict[str, Any]]) -> None:
+        nonlocal rendered_until
+        for scene in finalized:
             if scene["start_sequence"] != rendered_until:
                 raise WholeClipError(
-                    "scene replay produced a gap/overlap: "
-                    f"{scene['start_sequence']} != {rendered_until}")
-            if sbs_dimensions is None:
-                raise WholeClipError(
-                    "scene replay started before native SBS geometry was attested")
-            current_bridge, current_encoder = ensure_encoder()
-            result = render_cached_scene(
-                sunshine=sunshine,
-                conf=conf,
-                build_dir=build_dir,
-                cache_dir=cache_dir,
-                scene=scene,
-                render_producer=render_producer,
-                bridge=current_bridge,
-                encoder=current_encoder,
-                work_dir=work_dir,
-                plans_dir=plans_dir,
-                timeout_seconds=timeout_seconds,
-                expected_sbs_dimensions=sbs_dimensions,
-            )
-            render_results.append({
-                key: value for key, value in result.items()
-                if key != "sbs_paths"
-            })
-            released = ledger.release_through(
-                scene["end_sequence_exclusive"])
-            if released["pairs"] != scene["frame_count"]:
-                raise WholeClipError(
-                    "scene cache release count differs from rendered scene: "
-                    f"{released['pairs']} != {scene['frame_count']}")
-            rendered_until = scene["end_sequence_exclusive"]
-            rendered_scene_count += 1
-
-    def accept_scenes(finalized: list[dict[str, Any]]) -> None:
-        nonlocal planned_until
-        for scene in finalized:
-            if scene["start_sequence"] != planned_until:
-                raise WholeClipError(
                     "scene planner produced a gap/overlap: "
-                    f"{scene['start_sequence']} != {planned_until}")
+                    f"{scene['start_sequence']} != {rendered_until}")
             scenes.append(scene)
             if scene["boundary"].get("budget_forced"):
                 if ledger is None:
@@ -4201,9 +3119,37 @@ def run_streaming_scene_pipeline(
                 boundary_revisions=planner.boundary_revisions,
                 cache=ledger,
             )
-            planned_until = scene["end_sequence_exclusive"]
-        if not defer_conversion_until_qualification:
-            render_pending_scenes()
+            if conversion:
+                assert ledger is not None and render_producer is not None
+                if sbs_dimensions is None:
+                    raise WholeClipError(
+                        "scene replay started before native SBS geometry was attested")
+                current_bridge, current_encoder = ensure_encoder()
+                result = render_cached_scene(
+                    sunshine=sunshine,
+                    conf=conf,
+                    build_dir=build_dir,
+                    cache_dir=cache_dir,
+                    scene=scene,
+                    render_producer=render_producer,
+                    bridge=current_bridge,
+                    encoder=current_encoder,
+                    work_dir=work_dir,
+                    plans_dir=plans_dir,
+                    timeout_seconds=timeout_seconds,
+                    expected_sbs_dimensions=sbs_dimensions,
+                )
+                render_results.append({
+                    key: value for key, value in result.items()
+                    if key != "sbs_paths"
+                })
+                released = ledger.release_through(
+                    scene["end_sequence_exclusive"])
+                if released["pairs"] != scene["frame_count"]:
+                    raise WholeClipError(
+                        "scene cache release count differs from rendered scene: "
+                        f"{released['pairs']} != {scene['frame_count']}")
+            rendered_until = scene["end_sequence_exclusive"]
 
     try:
         for sequence in range(1, frame_count + 1):
@@ -4240,13 +3186,7 @@ def run_streaming_scene_pipeline(
                     "running scene cache contract",
                 )
                 pair_bytes = ledger.acknowledge_pair(
-                    sequence,
-                    cache_contract,
-                    allow_forced_current=(sequence == frame_count),
-                )
-                trace_frame["requires_previous_packed_frame"] = (
-                    ledger.requires_previous_packed_frame(sequence)
-                )
+                    sequence, cache_contract)
                 current_sbs_dimensions = validate_packed_sbs_contract(
                     cache_contract, analysis_producer.extension)
                 if sbs_dimensions is None:
@@ -4254,24 +3194,16 @@ def run_streaming_scene_pipeline(
                 elif current_sbs_dimensions != sbs_dimensions:
                     raise WholeClipError(
                         "scene-cache SBS geometry changed during the clip")
-                if pair_bytes * 10 > cache_max_bytes:
-                    raise WholeClipError(
-                        "scene-cache budget must hold at least ten maximum-sized "
-                        "depth/state/metadata triplets so the 90% semantic limit "
-                        "cannot cross the 100% hard cap: "
-                        f"pair={pair_bytes}, cap={cache_max_bytes}")
-                if defer_conversion_until_qualification:
-                    remaining = frame_count - sequence
-                    remaining_capacity = (
-                        cache_max_bytes - ledger.current_bytes
-                    )
-                    if (
-                        remaining > 0 and
-                        pair_bytes > remaining_capacity // remaining
-                    ):
+                if single_pair_bytes is None:
+                    single_pair_bytes = pair_bytes
+                    if single_pair_bytes * 10 > cache_max_bytes:
                         raise WholeClipError(
-                            "generated browser qualification fixture cannot "
-                            "retain its complete scene cache below the hard cap")
+                            "scene-cache budget must hold at least ten depth/state pairs "
+                            "so the 90% semantic limit cannot cross the 100% hard cap: "
+                            f"pair={single_pair_bytes}, cap={cache_max_bytes}")
+                elif pair_bytes != single_pair_bytes:
+                    raise WholeClipError(
+                        "scene-cache pair size changed during a fixed-resolution clip")
             analysis_path.unlink()
 
             if planner is None:
@@ -4280,10 +3212,7 @@ def run_streaming_scene_pipeline(
                     raise WholeClipError("adaptive trace header was not decoded")
                 config = header["config"]
                 semantic_limit = (
-                    cache_max_bytes * 9 // 10
-                    if conversion and
-                       not defer_conversion_until_qualification
-                    else 0
+                    cache_max_bytes * 9 // 10 if conversion else 0
                 )
                 planner = scene_policy.StreamingScenePlanner(
                     scene_policy.ScenePlannerConfig(
@@ -4297,7 +3226,7 @@ def run_streaming_scene_pipeline(
                 )
             finalized = planner.feed(
                 trace_frame, frame_cache_bytes=pair_bytes)
-            accept_scenes(finalized)
+            render_scenes(finalized)
 
         analysis_producer.finish(frame_count)
         publish_producer_terminal(analysis_input, frame_count=frame_count)
@@ -4330,46 +3259,26 @@ def run_streaming_scene_pipeline(
                 json.dumps(analysis_mismatches, sort_keys=True))
         trace_header = trace_tail.finish(frame_count)
         assert planner is not None
-        accept_scenes(planner.finish())
-        if planned_until != frame_count + 1:
+        render_scenes(planner.finish())
+        if rendered_until != frame_count + 1:
             raise WholeClipError(
                 "final scene plan does not cover the complete source sequence")
+        write_scene_audit(
+            audit_path,
+            status="complete",
+            planner_config=planner.config,
+            scenes=scenes,
+            boundary_revisions=planner.boundary_revisions,
+            cache=ledger,
+        )
 
         native_contract = validate_native_outputs(
-            artifacts_dir,
-            timeline,
-            "adaptive",
-            scene_controller_source_time,
-        )
-        qualification = None
-        if qualification_required:
-            assert qualification_frames_dir is not None
-            qualification = browser_scene_qualification(
-                qualification_frames_dir,
-                artifacts_dir,
-                native_contract,
-                timeline,
-                scene_controller_source_time,
-                output_dir,
-            )
-            if qualification is None:
-                raise WholeClipError(
-                    "authenticated browser qualification source lost its contract")
-            if qualification["pass"] is not True:
-                raise WholeClipError(
-                    "browser scene-controller shadow gate failed; see "
-                    "browser_scene_controller_report.json"
-                )
-        if defer_conversion_until_qualification:
-            render_pending_scenes()
+            artifacts_dir, timeline, "adaptive")
         if conversion:
             assert (
                 render_producer is not None and bridge is not None and
                 encoder is not None and output_video is not None and ffmpeg is not None
             )
-            if rendered_until != frame_count + 1:
-                raise WholeClipError(
-                    "scene replay does not cover the complete source sequence")
             render_producer.finish(frame_count)
             encoder.wait(
                 timeout=timeout_seconds, description="persistent SBS encoder")
@@ -4400,14 +3309,6 @@ def run_streaming_scene_pipeline(
             video_validation = None
             hdr_validation = None
 
-        write_scene_audit(
-            audit_path,
-            status="complete",
-            planner_config=planner.config,
-            scenes=scenes,
-            boundary_revisions=planner.boundary_revisions,
-            cache=ledger,
-        )
         return {
             "analysis": {
                 "command": analysis_command,
@@ -4423,7 +3324,6 @@ def run_streaming_scene_pipeline(
             },
             "cache": ledger.snapshot() if ledger else {"enabled": False},
             "render_scenes": render_results,
-            "scene_controller_qualification": qualification,
             "encoder": (
                 {
                     "command": encoder_command,
@@ -4960,13 +3860,6 @@ def _run_spooled_legacy(args: argparse.Namespace) -> dict[str, Any]:
 
         timeline_path = output_dir / TIMELINE_NAME
         write_json_atomic(timeline_path, timeline)
-        source_time_path = (
-            output_dir / SCENE_CONTROLLER_SOURCE_TIME_NAME
-        )
-        source_time = write_scene_controller_source_time(
-            source_time_path,
-            timeline,
-        )
         manifest["timeline"] = {
             "file": TIMELINE_NAME,
             "sha256": sha256_file(timeline_path),
@@ -4974,7 +3867,6 @@ def _run_spooled_legacy(args: argparse.Namespace) -> dict[str, Any]:
             "variable_frame_rate": timeline["variable_frame_rate"],
             "first_pts_time": timeline["first_pts_time"],
         }
-        manifest["scene_controller_source_time"] = source_time
         manifest["status"] = "decoded"
         write_json_atomic(manifest_path, manifest)
 
@@ -4985,19 +3877,13 @@ def _run_spooled_legacy(args: argparse.Namespace) -> dict[str, Any]:
             "--frames", os.fspath(frames_dir),
             "--out", os.fspath(artifacts_dir),
             "--artifacts", artifact_mode,
-            "--scene-controller", "shadow_rules",
-            "--scene-controller-source-time", os.fspath(source_time_path),
             *args.extra,
         ]
         manifest["commands"]["harness"] = harness_command
         write_json_atomic(manifest_path, manifest)
         run_logged_command(harness_command, build_dir, output_dir / "harness.log")
         native_contract = validate_native_outputs(
-            artifacts_dir,
-            timeline,
-            artifact_mode,
-            source_time,
-        )
+            artifacts_dir, timeline, artifact_mode)
         contract_path = artifacts_dir / NATIVE_CONTRACT_NAME
         trace_path = artifacts_dir / TRACE_NAME
         manifest["native_contract"] = {
@@ -5011,26 +3897,6 @@ def _run_spooled_legacy(args: argparse.Namespace) -> dict[str, Any]:
             "file": f"artifacts/{TRACE_NAME}",
             "sha256": sha256_file(trace_path),
         }
-        manifest["scene_controller_trace"] = (
-            scene_controller_artifact_manifest(
-                artifacts_dir, native_contract)
-        )
-        qualification = browser_scene_qualification(
-            frames_dir,
-            artifacts_dir,
-            native_contract,
-            timeline,
-            source_time,
-            output_dir,
-        )
-        if qualification is not None:
-            manifest["scene_controller_qualification"] = qualification
-            write_json_atomic(manifest_path, manifest)
-            if qualification["pass"] is not True:
-                raise WholeClipError(
-                    "browser scene-controller shadow gate failed; see "
-                    "browser_scene_controller_report.json"
-                )
         manifest["status"] = "harness_complete"
         write_json_atomic(manifest_path, manifest)
 
@@ -5297,14 +4163,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             conversion=output_video is not None,
             source_size_bytes=source_size,
         )
-        if output_video:
-            manifest["scene_cache"]["maximum_triplet_bytes"] = (
-                preflight_scene_cache_hard_cap(
-                    width,
-                    height,
-                    cache_max_bytes,
-                )
-            )
         if source_video is not None:
             assert ffmpeg is not None
             analysis_producer = VideoFollowFrameDecoder(
@@ -5331,14 +4189,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 render_producer = FrameDirectoryFollowProducer(frames)
         timeline_path = output_dir / TIMELINE_NAME
         write_json_atomic(timeline_path, timeline)
-        source_time_path = (
-            output_dir / SCENE_CONTROLLER_SOURCE_TIME_NAME
-        )
-        source_time = write_scene_controller_source_time(
-            source_time_path,
-            timeline,
-            follow_frame_ids=True,
-        )
         manifest["timeline"] = {
             "file": TIMELINE_NAME,
             "sha256": sha256_file(timeline_path),
@@ -5346,7 +4196,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "variable_frame_rate": timeline["variable_frame_rate"],
             "first_pts_time": timeline["first_pts_time"],
         }
-        manifest["scene_controller_source_time"] = source_time
         manifest["status"] = "source-validated"
         write_json_atomic(manifest_path, manifest)
 
@@ -5356,15 +4205,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             conf=conf,
             build_dir=build_dir,
             timeline=timeline,
-            source_width=width,
-            source_height=height,
             analysis_producer=analysis_producer,
             render_producer=render_producer,
             output_dir=output_dir,
             work_dir=work_dir,
             artifacts_dir=artifacts_dir,
-            scene_controller_source_time_path=source_time_path,
-            scene_controller_source_time=source_time,
             native_extra=list(args.extra),
             cache_max_bytes=cache_max_bytes,
             cache_budget_policy=cache_budget_policy,
@@ -5374,7 +4219,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             output_video=output_video,
             codec=args.codec,
             color=color,
-            qualification_frames_dir=source if source.is_dir() else None,
         )
         manifest["commands"]["analysis"] = pipeline["analysis"]["command"]
         if pipeline["encoder"]:
@@ -5392,13 +4236,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "sha256": sha256_file(trace_path),
             "schema": ADAPTIVE_TRACE_SCHEMA,
         }
-        manifest["scene_controller_trace"] = (
-            scene_controller_artifact_manifest(
-                artifacts_dir, pipeline["analysis"]["native_contract"])
-        )
-        qualification = pipeline["scene_controller_qualification"]
-        if qualification is not None:
-            manifest["scene_controller_qualification"] = qualification
         manifest["scene_audit"] = pipeline["scene_audit"]
         manifest["scene_cache"]["result"] = pipeline["cache"]
         manifest["render_scenes"] = pipeline["render_scenes"]

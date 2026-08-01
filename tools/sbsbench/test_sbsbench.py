@@ -465,8 +465,9 @@ class EvalContractTests(unittest.TestCase):
             2: self.subject_state(1, 3),
             3: self.subject_state(0, 16),
         }
-        for frame_id in range(4, 12):
+        for frame_id in range(4, 11):
             trace[frame_id] = self.subject_state(frame_id - 3, 16)
+        trace[11] = self.subject_state(8, 80, history=4.0)
         trace[12] = self.subject_state(0, 16)
         summary = sbsbench.apply_shot_state_contract(
             rows, list(range(1, 13)), trace, {
@@ -955,6 +956,7 @@ class EvalContractTests(unittest.TestCase):
             "eval_schema": run_eval.EVAL_SCHEMA,
             "depth_step": "current-once",
             "depth_compensation": "none",
+            "cuda_graph": True,
             "conf_sha256": "config",
             "metric_sha256": "numeric-metrics",
             "label_contract_sha256": "labels-only",
@@ -962,7 +964,67 @@ class EvalContractTests(unittest.TestCase):
         }
         context = run_eval.baseline_required_context(candidate)
         self.assertEqual(context["metric_sha256"], "numeric-metrics")
+        self.assertTrue(context["cuda_graph"])
         self.assertNotIn("label_contract_sha256", context)
+
+    def test_cuda_graph_mode_is_part_of_fail_closed_baseline_context(self):
+        with tempfile.TemporaryDirectory() as baseline_dir:
+            context = {
+                "eval_schema": run_eval.EVAL_SCHEMA,
+                "metric_sha256": "metric",
+                "run_kind": "baseline-update",
+                "cuda_graph": False,
+            }
+            payload = {
+                "meta": {
+                    **context,
+                    "cuda_graph": True,
+                    "clip_sha1": "cliphash",
+                    "extra_args": [],
+                },
+                "aggregate": {"quality": 1.0},
+                "perf_ms": {"warp": 1.0},
+            }
+            path = os.path.join(baseline_dir, "clip.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+
+            with self.assertRaisesRegex(ValueError, "stale/incompatible"):
+                run_eval.preflight_baselines(
+                    baseline_dir, ["clip"], context, {"clip": "cliphash"})
+
+            payload["meta"]["cuda_graph"] = False
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            loaded = run_eval.preflight_baselines(
+                baseline_dir, ["clip"], context, {"clip": "cliphash"})
+            self.assertFalse(loaded["clip"]["meta"]["cuda_graph"])
+
+    def test_cuda_graph_actual_execution_mode_fails_closed(self):
+        self.assertTrue(run_eval.validate_cuda_graph_execution_mode(
+            True, True, True))
+        self.assertFalse(run_eval.validate_cuda_graph_execution_mode(
+            False, False, False))
+
+        for requested, captured in ((True, False), (False, True)):
+            with self.subTest(requested=requested, captured=captured):
+                with self.assertRaisesRegex(ValueError, "refusing to mix"):
+                    run_eval.validate_cuda_graph_execution_mode(
+                        requested, captured)
+
+        for captured in (None, 1, "true"):
+            with self.subTest(invalid_candidate=captured):
+                with self.assertRaisesRegex(ValueError, "must be a boolean"):
+                    run_eval.validate_cuda_graph_execution_mode(True, captured)
+
+        for baseline in (None, 1, "true"):
+            with self.subTest(invalid_baseline=baseline):
+                with self.assertRaisesRegex(ValueError, "baseline.*must be boolean"):
+                    run_eval.validate_cuda_graph_execution_mode(
+                        True, True, baseline)
+
+        with self.assertRaisesRegex(ValueError, "baseline CUDA graph.*differs"):
+            run_eval.validate_cuda_graph_execution_mode(True, True, False)
 
     def test_only_conformance_only_clips_are_exempt_from_committed_baselines(self):
         clips = ["decisive", "reference", "probe"]
@@ -1083,9 +1145,7 @@ class EvalContractTests(unittest.TestCase):
             estimator = fh.read()
         self.assertIn("cuda_device_for_configured_adapter", estimator)
         self.assertIn("if (!warmup_execution_context", estimator)
-        self.assertIn("const bool synchronized =", estimator)
-        self.assertIn("sbs_cuda_resource_cleanup_policy(", estimator)
-        self.assertIn("enqueued && synchronized && cleanup_succeeded", estimator)
+        self.assertIn("const bool synchronized = enqueued", estimator)
 
     def test_relative_cli_paths_are_resolved_before_subprocess_cwd(self):
         args = argparse.Namespace(build_dir="cmake-build-relwithdebinfo", conf="bench.conf",
@@ -1175,8 +1235,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("LeftColorTexture.GetDimensions(sourceWidth, sourceHeight)", text)
         self.assertIn("Bestv2ProbeSpacing((float)sourceWidth, (float)depthWidth)", text)
         self.assertIn("s0, s1, s2, (float)sourceWidth, (float)sourceHeight", text)
-        self.assertEqual(text.count("eyeSign * DepthParallax("), 2)
-        self.assertIn("SampleActiveRoiDepthParallax(", text)
+        self.assertEqual(text.count("DepthParallax("), 2)
         self.assertNotIn("Bestv2SearchRadius((float)dw)", text)
         # The window is sized from the frame's own resolved parallax, not from source geometry
         # and a global worst case.
@@ -1273,9 +1332,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("next_model_input_history_state", adaptive)
         self.assertIn("model_input_history_gap", adaptive)
         self.assertIn("low_structure_scene", adaptive)
-        self.assertIn(
-            "appearance_recovery && !appearance_proposal", adaptive)
-        self.assertIn("brightness_direction_consistent", adaptive)
         self.assertIn("raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH", adaptive)
         self.assertIn(
             "structural_change_fraction >= STRUCTURAL_COLOR_CUT_HIGH", adaptive)
@@ -1287,7 +1343,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn("cut_state = -2.0f", adaptive)
         self.assertNotIn("scene_age >= 2.0f", adaptive)
         self.assertIn("float subj = (!initialized || shot_cut) ?", adaptive)
-        self.assertIn("subj_raw :", adaptive)
+        self.assertIn("lerp(SBS_STATE_SUBJECT_DEPTH_EMA(s), subj_raw", adaptive)
         self.assertIn("CurrentModelColor", cut_evidence)
         self.assertIn("PreviousModelColor", cut_evidence)
         self.assertIn("CurrentAppearanceOrdinal", cut_evidence)
@@ -1297,10 +1353,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("PlainHist[NUM_BINS + 4]", cut_evidence)
         self.assertIn("PlainHist[NUM_BINS + 5]", cut_evidence)
         self.assertIn("PlainHist[NUM_BINS + 6]", cut_evidence)
-        self.assertIn("PlainHist[NUM_BINS + 7]", cut_evidence)
-        self.assertIn("PlainHist[NUM_BINS + 8]", cut_evidence)
-        self.assertIn("g_brightness_rise_count", cut_evidence)
-        self.assertIn("g_brightness_fall_count", cut_evidence)
         self.assertNotIn("max(color.r, max(color.g, color.b))", cut_evidence)
         self.assertIn("for (int first = 0; first < 4; ++first)", cut_evidence)
         self.assertIn("for (int second = first + 1; second < 5; ++second)",
@@ -1310,9 +1362,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("ordering_flips * 2u >= common_comparisons", cut_evidence)
         self.assertIn("#define RAW_RGB_CUT_HIGH 0.70f", depth_constants)
         self.assertIn("#define STRUCTURAL_COLOR_MIN_SUPPORT 0.01f", depth_constants)
-        self.assertIn(
-            "#define STRUCTURAL_COLOR_EXPOSURE_MIN_DIRECTIONAL_SHARE 0.80f",
-            depth_constants)
         self.assertIn("#define STRUCTURAL_COLOR_CUT_HIGH 0.03f", depth_constants)
         self.assertIn("#define DEPTH_CUT_HIGH 0.60f", depth_constants)
         self.assertIn("#define DEPTH_CUT_CORROBORATE 0.25f", depth_constants)
@@ -1357,13 +1406,9 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(shader_dir, "buffer_to_tex_cs.hlsl"),
                   encoding="utf-8") as fh:
             mapper = fh.read()
-        self.assertIn("legacy_scale.w < 0.5f", mapper)
-        self.assertIn("legacy_scale.w > 1.5f ?", mapper)
-        self.assertIn("PreviousDepth[DTid.xy]", mapper)
-        self.assertIn("if (!promote_current)", mapper)
-        self.assertIn("CopyPreviousTransformToNext()", mapper)
-        self.assertIn("scale.w > 1.5f ||", mapper)
-        self.assertIn("!same_surface_geometry", mapper)
+        self.assertIn("OutputTexture[DTid.xy] = PreviousDepth[DTid.xy]", mapper)
+        self.assertIn("scale.w < 0.5f", mapper)
+        self.assertIn("scale.w > 1.5f ? 1.0f : ema_alpha", mapper)
         with open(os.path.join(shader_dir, "depth_ema_motion_cs.hlsl"),
                   encoding="utf-8") as fh:
             motion = fh.read()
@@ -1371,8 +1416,7 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(shader_dir, "depth_valid_history_cs.hlsl"),
                   encoding="utf-8") as fh:
             history = fh.read()
-        self.assertIn("MinMaxEma[0].w >= 0.5f", history)
-        self.assertIn("!hold_history", history)
+        self.assertIn("MinMaxEma[0].w < 0.5f", history)
         self.assertIn("PreviousModelInput[idx + 2u * plane]", history)
 
     def test_failed_tensorrt_warmups_are_quarantined_and_not_advertised(self):
@@ -1383,9 +1427,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("quarantine_execution_context_locked(engine_key, exec_context)", estimator)
         self.assertIn("quarantined_context_count", estimator)
         self.assertIn("warmed_context_count", estimator)
-        self.assertIn("context_warmed,", estimator)
-        self.assertIn("sbs_trt_context_pool_disposition(", estimator)
-        self.assertIn("context_reusable", estimator)
+        self.assertIn("if (context_warmed)", estimator)
         self.assertIn('model.name + ".active-engine.json"', estimator)
         self.assertIn('{"onnx_sha256", artifact.source_sha256}', estimator)
 
@@ -1610,17 +1652,7 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             common = fh.read()
         self.assertIn(
-            "p.anchor_shift_px = SBS_STATE_ZERO_ANCHOR_SHIFT_PX(s2);",
-            common)
-        with open(os.path.join(
-                repo, "src_assets", "windows", "assets", "shaders",
-                "directx", "include",
-                "sbs_adaptive_state_contract.generated.hlsl"),
-                encoding="utf-8") as fh:
-            generated_contract = fh.read()
-        self.assertIn(
-            "#define SBS_STATE_ZERO_ANCHOR_SHIFT_PX(value) ((value).x)",
-            generated_contract)
+            "p.anchor_shift_px = SBS_STATE_ZERO_ANCHOR_SHIFT_PX(s2);", common)
         # `legacy` is removed, so there is no non-explicit plane left to bias for.
         self.assertNotIn("convergence_bias", common)
         self.assertNotIn("explicit_zero_plane", common)
@@ -1665,8 +1697,7 @@ class EvalContractTests(unittest.TestCase):
             estimator.index("estimate_result estimate("):
             estimator.index("video_depth_estimator::video_depth_estimator")
         ]
-        normalized = live_estimate.index(
-            "normalize_depth_output(*completed_roi_identity, d3d_timer);")
+        normalized = live_estimate.index("normalize_depth_output();")
         production_post_timing_ended = live_estimate.index(
             "mark_d3d_post_end(d3d_timer);", normalized)
         raw_snapshotted = live_estimate.index(
@@ -1796,9 +1827,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("PreviousDepth", mask_shader)
         self.assertIn("ema_edge_change", mask_shader)
         self.assertNotIn("ema_edge_dilation", mask_shader)
-        assignment = mask_shader.index("MotionMask[DTid.xy] =")
-        moving_edge = mask_shader.index("IsMovingEdge(", assignment)
-        self.assertLess(assignment, moving_edge)
+        self.assertIn("MotionMask[DTid.xy] = IsMovingEdge", mask_shader)
         with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
                   encoding="utf-8") as fh:
             estimator = fh.read()
@@ -1933,13 +1962,10 @@ class EvalContractTests(unittest.TestCase):
                 text = fh.read()
                 self.assertIn('include/depth_color.hlsl', text)
                 self.assertIn("DepthColorToSrgb", text)
-                full_footprint = text.find("pixel = SampleModelFootprint")
-                roi_footprint = text.find("pixel = SampleRoiModelFootprint")
+                footprint = text.find("float4 pixel = SampleModelFootprint")
                 transform = text.find("DepthColorToSrgb(pixel.rgb, color_mode)")
-                self.assertGreaterEqual(full_footprint, 0)
-                self.assertGreaterEqual(roi_footprint, 0)
-                self.assertGreater(transform, full_footprint)
-                self.assertGreater(transform, roi_footprint)
+                self.assertGreaterEqual(footprint, 0)
+                self.assertGreater(transform, footprint)
 
     def test_hdr_warp_stays_linear_fp16_until_pq_conversion(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

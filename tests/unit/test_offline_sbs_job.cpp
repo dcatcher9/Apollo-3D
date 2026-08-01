@@ -5,10 +5,8 @@
 #include <thread>
 
 #include <gtest/gtest.h>
-#include <zlib.h>
 
 #include "src/crypto.h"
-#include "src/generated/sbs_scene_controller_contract.h"
 #include "src/gpu_workload_arbiter.h"
 #include "src/offline_sbs_contract.h"
 #include "src/offline_sbs_job.h"
@@ -57,79 +55,6 @@ namespace {
       result[index * 2 + 1] = digits[digest[index] & 0x0fu];
     }
     return result;
-  }
-
-  nlohmann::json write_scene_controller_trace(
-    const fs::path &result_directory,
-    const std::uint64_t frame_count,
-    const bool noncontiguous = false
-  ) {
-    fs::create_directories(result_directory);
-    const auto gzip_path =
-      result_directory / "scene-controller.jsonl.gz";
-    std::string payload =
-      nlohmann::json({{"record", "header"}}).dump() + "\n";
-    for (std::uint64_t index = 0; index < frame_count; ++index) {
-      payload += nlohmann::json({
-        {"record", "frame"},
-        {
-          "source_index",
-          noncontiguous && index + 1u == frame_count ?
-            index + 1u :
-            index
-        },
-      }).dump() + "\n";
-    }
-#ifdef _WIN32
-    gzFile gzip = gzopen_w(gzip_path.c_str(), "wb6");
-#else
-    gzFile gzip = gzopen(gzip_path.c_str(), "wb6");
-#endif
-    if (gzip == nullptr) {
-      throw std::runtime_error(
-        "cannot create scene-controller trace test fixture"
-      );
-    }
-    const auto written = gzwrite(
-      gzip,
-      payload.data(),
-      static_cast<unsigned>(payload.size())
-    );
-    const auto closed = gzclose(gzip);
-    if (
-      written != static_cast<int>(payload.size()) ||
-      closed != Z_OK
-    ) {
-      throw std::runtime_error(
-        "cannot create scene-controller trace test fixture"
-      );
-    }
-    const auto compressed_bytes = fs::file_size(gzip_path);
-    nlohmann::json summary {
-      {"schema", 1u},
-      {"version", "scene-controller-jsonl-gzip-v1"},
-      {"file", gzip_path.string()},
-      {"encoding", "utf-8-jsonl"},
-      {"compression", "gzip"},
-      {"uncompressed_sha256", sha256_hex(payload)},
-      {"uncompressed_bytes", payload.size()},
-      {"compressed_bytes", compressed_bytes},
-      {"frame_count", frame_count},
-      {"unavailable_frame_count", 0u},
-      {"first_sequence", 1u},
-      {"last_sequence", frame_count},
-      {"controller_schema", sbs_scene_controller::schema_version},
-      {"rule_revision", sbs_scene_controller::rule_revision},
-      {"ordered_abi_hash", sbs_scene_controller::ordered_abi_hash},
-      {"model", "dav2"},
-      {"depth_reuse_interval", 1u},
-      {"active_roi_authority", false},
-    };
-    write_nonempty(
-      result_directory / "scene-controller-trace.json",
-      summary.dump(2) + "\n"
-    );
-    return summary;
   }
 
 #ifdef _WIN32
@@ -214,104 +139,6 @@ namespace {
     throw std::runtime_error("timed out waiting for offline job");
   }
 }  // namespace
-
-TEST(OfflineSbsJob, ValidatesExactCompressedSceneControllerTraceEvidence) {
-  temporary_tree_t tree;
-  const auto result_directory = tree.path / "result";
-  const auto summary = write_scene_controller_trace(result_directory, 2u);
-
-  std::string error;
-  EXPECT_TRUE(offline_sbs::validate_scene_controller_trace_for_test(
-    summary,
-    result_directory,
-    2u,
-    error
-  )) << error;
-
-  auto wrong_count = summary;
-  wrong_count["frame_count"] = 1u;
-  error.clear();
-  EXPECT_FALSE(offline_sbs::validate_scene_controller_trace_for_test(
-    wrong_count,
-    result_directory,
-    2u,
-    error
-  ));
-  EXPECT_FALSE(error.empty());
-
-  auto mismatched_summary = summary;
-  mismatched_summary["model"] = "midas";
-  write_nonempty(
-    result_directory / "scene-controller-trace.json",
-    mismatched_summary.dump(2) + "\n"
-  );
-  error.clear();
-  EXPECT_FALSE(offline_sbs::validate_scene_controller_trace_for_test(
-    summary,
-    result_directory,
-    2u,
-    error
-  ));
-  EXPECT_FALSE(error.empty());
-  write_nonempty(
-    result_directory / "scene-controller-trace.json",
-    summary.dump(2) + "\n"
-  );
-
-  std::ofstream append(
-    result_directory / "scene-controller.jsonl.gz",
-    std::ios::binary | std::ios::app
-  );
-  append.put('\0');
-  append.close();
-  error.clear();
-  EXPECT_FALSE(offline_sbs::validate_scene_controller_trace_for_test(
-    summary,
-    result_directory,
-    2u,
-    error
-  ));
-  EXPECT_FALSE(error.empty());
-
-  const auto noncontiguous_directory = tree.path / "noncontiguous";
-  const auto noncontiguous =
-    write_scene_controller_trace(noncontiguous_directory, 2u, true);
-  error.clear();
-  EXPECT_FALSE(offline_sbs::validate_scene_controller_trace_for_test(
-    noncontiguous,
-    noncontiguous_directory,
-    2u,
-    error
-  ));
-  EXPECT_FALSE(error.empty());
-}
-
-TEST(OfflineSbsJob, RemovesEverySceneControllerTracePublicationNoFollow) {
-  temporary_tree_t tree;
-  const auto result_directory = tree.path / "result";
-  (void) write_scene_controller_trace(result_directory, 1u);
-  write_nonempty(
-    result_directory / "scene-controller.jsonl.gz.part",
-    "partial"
-  );
-
-  std::string error;
-  EXPECT_TRUE(
-    offline_sbs::remove_scene_controller_trace_artifacts_for_test(
-      result_directory,
-      error
-    )
-  ) << error;
-  EXPECT_FALSE(
-    fs::exists(result_directory / "scene-controller-trace.json")
-  );
-  EXPECT_FALSE(
-    fs::exists(result_directory / "scene-controller.jsonl.gz")
-  );
-  EXPECT_FALSE(
-    fs::exists(result_directory / "scene-controller.jsonl.gz.part")
-  );
-}
 
 TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
   temporary_tree_t tree;
@@ -1372,21 +1199,9 @@ TEST(OfflineSbsJob, EnforcesOneActiveJobAndCancelsTheWholeWorkerContract) {
 
   offline_sbs::job_service_t service {
     service_config(tree.path),
-    [&entered](const offline_sbs::worker_context_t &context,
+    [&entered](const offline_sbs::worker_context_t &,
                const std::stop_token stop,
                const offline_sbs::progress_callback_t &) {
-      write_nonempty(
-        context.result_directory / "scene-controller-trace.json",
-        "published-summary"
-      );
-      write_nonempty(
-        context.result_directory / "scene-controller.jsonl.gz",
-        "published-gzip"
-      );
-      write_nonempty(
-        context.result_directory / "scene-controller.jsonl.gz.part",
-        "prepared-gzip"
-      );
       entered = true;
       while (!stop.stop_requested()) {
         std::this_thread::sleep_for(2ms);
@@ -1420,17 +1235,6 @@ TEST(OfflineSbsJob, EnforcesOneActiveJobAndCancelsTheWholeWorkerContract) {
   EXPECT_EQ(cancel.job->state, offline_sbs::job_state_e::canceling);
   const auto terminal = wait_for_terminal(service, first.job->id);
   EXPECT_EQ(terminal.state, offline_sbs::job_state_e::canceled);
-  const auto result_directory =
-    tree.path / "worker" / "jobs" / first.job->id / "result";
-  EXPECT_FALSE(fs::exists(
-    result_directory / "scene-controller-trace.json"
-  ));
-  EXPECT_FALSE(fs::exists(
-    result_directory / "scene-controller.jsonl.gz"
-  ));
-  EXPECT_FALSE(fs::exists(
-    result_directory / "scene-controller.jsonl.gz.part"
-  ));
   EXPECT_FALSE(service.has_active_job());
   service.shutdown();
 }
@@ -1468,23 +1272,6 @@ TEST(OfflineSbsJob, RestartRecoveryNeverResumesAnUnfinishedGpuJob) {
     {"worker_result", nullptr},
   };
   write_nonempty(job_directory / "job.json", running.dump(2));
-  const auto worker_result_directory =
-    config.worker_root / "jobs" / id / "result";
-  write_nonempty(
-    worker_result_directory / "scene-controller-trace.json",
-    "published-summary"
-  );
-  write_nonempty(
-    worker_result_directory / "scene-controller.jsonl.gz",
-    "published-gzip"
-  );
-  write_nonempty(
-    worker_result_directory / "scene-controller.jsonl.gz.part",
-    "prepared-gzip"
-  );
-  write_nonempty(
-    config.worker_root / "jobs" / id / "native-work" / "transient.bin"
-  );
 
   std::atomic_bool runner_called {false};
   offline_sbs::job_service_t service {
@@ -1505,15 +1292,6 @@ TEST(OfflineSbsJob, RestartRecoveryNeverResumesAnUnfinishedGpuJob) {
   EXPECT_NE(recovered.job->error.find("not resumed"), std::string::npos);
   EXPECT_FALSE(runner_called);
   EXPECT_FALSE(service.has_active_job());
-  EXPECT_FALSE(fs::exists(
-    worker_result_directory / "scene-controller-trace.json"
-  ));
-  EXPECT_FALSE(fs::exists(
-    worker_result_directory / "scene-controller.jsonl.gz"
-  ));
-  EXPECT_FALSE(fs::exists(
-    worker_result_directory / "scene-controller.jsonl.gz.part"
-  ));
   service.shutdown();
 }
 

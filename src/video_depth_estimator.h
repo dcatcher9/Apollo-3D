@@ -1,7 +1,6 @@
 #pragma once
 
 #include "config.h"
-#include "sbs_frame_roi_transform.h"
 
 #include <cstdint>
 #include <d3d11.h>
@@ -26,7 +25,7 @@ namespace models {
     scrgb_hdr = 2,  ///< linear scRGB FP16 HDR capture; tone-map for the SDR-trained model
   };
 
-  /** Build, deserialize, create, and warm one reusable execution context for the active model. */
+  /** Build and warm the active model and prewarm fixed-shape Host SBS shader bytecode. */
   bool prepare_tensorrt_model(
     const std::filesystem::path &assets_dir,
     const config::depth_model_info &model,
@@ -40,25 +39,12 @@ namespace models {
    */
   struct estimate_result {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_roi_transform;  ///< Exact GPU transform retained with `depth`; all-zero is the legacy full-frame ABI.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject;  ///< permanent Bestv2 subject state (t2 of the reprojection)
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_frame_state;  ///< {min,max,initialized,frame_state}; frame_state 0 means an all-invalid completion held the prior depth.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask;  ///< Edge-selective EMA snap mask.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Raw model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth_snapshot;  ///< Optional stable copy of the completed frame's raw output for a live Dump 3D request.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> model_input_snapshot;  ///< Optional stable NCHW/ImageNet-normalized input for the same live Dump 3D frame.
-    // GPU-only Scene Controller ABI v1 views. In shadow_rules these are diagnostics and cannot
-    // influence the rendered SBS output. They remain frame-owned by scene_controller_frame_id.
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_scene_rgb;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_analysis_grid;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_dense_output;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_global_output;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_layout_history;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_depth_history;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_hidden_output;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_meta;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_rule_state;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_controller_rule_summary;
     int raw_width = 0;
     int raw_height = 0;
     // A TensorRT result completed and its GPU normalization passes were submitted. The associated
@@ -68,21 +54,6 @@ namespace models {
     std::uint64_t completed_frame_id = 0;  ///< Caller-provided identity of that completed result.
     bool inference_enqueued = false;  ///< This call submitted inference for the supplied input frame.
     bool cuda_graph_active = false;  ///< TensorRT enqueue is currently replaying a captured graph.
-    // Exact inference-transform ownership. ROI geometry/generation remains in the paired GPU
-    // bank; these identities only bind that bank to a frame, model shape, backend, and accepted
-    // enqueue version. An identity is present only when its source_frame_id matches the
-    // corresponding completed/enqueued frame.
-    std::optional<frame_roi_transform_identity> completed_roi_transform_identity;
-    std::optional<frame_roi_transform_identity> enqueued_roi_transform_identity;
-    // An accepted inference was consumed without normalization because exact ROI-transform
-    // ownership could not be proven. Callers use this identity to retire its matched color slot
-    // while repeating the last valid SBS output.
-    bool completion_dropped = false;
-    std::uint64_t dropped_frame_id = 0;
-    std::uint64_t scene_controller_frame_id = 0;
-    std::uint32_t scene_controller_backend_generation = 0;
-    bool scene_controller_snapshot_available = false;
-    bool scene_controller_shadow = false;
   };
 
   /**
@@ -186,15 +157,6 @@ namespace models {
      * exact current-frame quality path; production remains bounded matched-frame async.
      */
     estimate_result finish_pending_depth_for_evaluation(input_color_space color_space = input_color_space::srgb);
-
-    /**
-     * Supply the exact source-presentation delta for the next offline
-     * scene-controller update. Returns false when the controller is unavailable
-     * or the value is invalid. Live capture does not call this method.
-     */
-    bool set_next_scene_controller_elapsed_seconds_for_evaluation(
-      float elapsed_seconds
-    );
 
     /**
      * Poll completed telemetry copies and optionally enqueue one new copy after the caller has

@@ -596,7 +596,6 @@ namespace offline_sbs {
       const auto &tracked = frames_[position];
       const auto &frame = tracked.sample;
       if (!frame.depth_updated ||
-          frame.requires_previous_packed_frame ||
           tracked.depth_update_ordinal < left_ordinal ||
           tracked.depth_update_ordinal > right_ordinal ||
           frame.sequence < minimum_boundary) {
@@ -717,16 +716,7 @@ namespace offline_sbs {
           }
           const auto prefix =
             static_cast<std::size_t>(sequence - open_start);
-          const auto found = std::find_if(
-            frames_.begin(),
-            frames_.end(),
-            [&](const tracked_frame_t &frame) {
-              return frame.sample.sequence == sequence;
-            }
-          );
-          return found != frames_.end() &&
-                 !found->sample.requires_previous_packed_frame &&
-                 prefix >= config_.minimum_scene_frames &&
+          return prefix >= config_.minimum_scene_frames &&
                  frames_.size() - prefix >= config_.minimum_scene_frames;
         }
       );
@@ -901,34 +891,9 @@ namespace offline_sbs {
       );
     }
 
-    // A replay process starts with an empty packed target. Keep invalid
-    // preserve-previous completions behind a self-contained frame so every
-    // emitted segment can reproduce the continuous draw without carrying an
-    // SBS predecessor raster across processes.
-    std::optional<std::size_t> prefix_count;
-    std::uint64_t retained_bytes = 0;
-    for (std::size_t index = frames_.size(); index-- > 1;) {
-      if (add_overflows(retained_bytes, frames_[index].sample.cache_bytes)) {
-        throw scene_plan_error("scene cache suffix byte counter overflow");
-      }
-      retained_bytes += frames_[index].sample.cache_bytes;
-      if (index >= config_.minimum_scene_frames &&
-          !frames_[index].sample.requires_previous_packed_frame &&
-          retained_bytes <= limit) {
-        prefix_count = index;
-        break;
-      }
-    }
-    if (!prefix_count) {
-      throw scene_cache_budget_error(
-        limit,
-        open_cache_bytes_,
-        open_start_sequence(),
-        next_sequence_ - 1
-      );
-    }
+    const auto prefix_count = frames_.size() - 1;
     boundary_audit_t boundary;
-    boundary.final_sequence = frames_[*prefix_count].sample.sequence;
+    boundary.final_sequence = frames_[prefix_count].sample.sequence;
     boundary.accepted = false;
     boundary.semantic_cut = false;
     boundary.truncated = true;
@@ -938,7 +903,7 @@ namespace offline_sbs {
       "the opt-in split policy inserted an explicit camera boundary before a "
       "semantic cut; the next segment receives a new scene-wide camera plan";
     boundary_audit_.push_back(boundary);
-    result.push_back(finalize_prefix(*prefix_count, std::move(boundary)));
+    result.push_back(finalize_prefix(prefix_count, std::move(boundary)));
     if (open_cache_bytes_ > limit) {
       throw scene_cache_budget_error(
         limit,
@@ -957,11 +922,6 @@ namespace offline_sbs {
   ) {
     if (prefix_count == 0 || prefix_count > frames_.size()) {
       throw scene_plan_error("finalized scene prefix is empty or out of range");
-    }
-    if (frames_.front().sample.requires_previous_packed_frame) {
-      throw scene_plan_error(
-        "a separately replayed scene cannot begin with preserve-previous state"
-      );
     }
 
     std::vector<tracked_frame_t> scene_frames;

@@ -41,21 +41,6 @@ namespace platf::sbs_debug {
     ID3D11ShaderResourceView *warp_depth = nullptr;
     ID3D11ShaderResourceView *adaptive_state = nullptr;
     ID3D11ShaderResourceView *depth_frame_state = nullptr;
-    // Exact eight-uint4 transform sampled by preprocessing, normalization, scene evidence, and
-    // reprojection for matched_frame_id. The dump serializes both raw words and decoded geometry.
-    ID3D11ShaderResourceView *depth_roi_transform = nullptr;
-    // Optional, exact-frame GPU Scene Controller ABI v1 tensors. These are populated only when
-    // the controller reports a completed output for matched_frame_id. They must never become a
-    // prerequisite for the core Host-SBS dump because the controller defaults to off.
-    ID3D11ShaderResourceView *scene_controller_scene_rgb = nullptr;
-    ID3D11ShaderResourceView *scene_controller_analysis_grid = nullptr;
-    ID3D11ShaderResourceView *scene_controller_dense_output = nullptr;
-    ID3D11ShaderResourceView *scene_controller_global_output = nullptr;
-    ID3D11ShaderResourceView *scene_controller_layout_history = nullptr;
-    ID3D11ShaderResourceView *scene_controller_depth_history = nullptr;
-    ID3D11ShaderResourceView *scene_controller_hidden_output = nullptr;
-    ID3D11ShaderResourceView *scene_controller_meta = nullptr;
-    ID3D11ShaderResourceView *scene_controller_rule_state = nullptr;
     ID3D11ShaderResourceView *warp_map = nullptr;
     ID3D11ShaderResourceView *warp_mask = nullptr;
     ID3D11ShaderResourceView *sbs = nullptr;
@@ -64,10 +49,6 @@ namespace platf::sbs_debug {
     int raw_width = 0;
     int raw_height = 0;
     std::uint64_t matched_frame_id = 0;
-    std::uint64_t scene_controller_frame_id = 0;
-    std::uint32_t scene_controller_backend_generation = 0;
-    bool scene_controller_snapshot_available = false;
-    bool scene_controller_shadow = false;
     bool warp_depth_prefilter_applied = false;
     bool cuda_graph_active = false;
     models::input_color_space color_space {};

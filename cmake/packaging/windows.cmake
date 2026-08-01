@@ -66,23 +66,10 @@ install(DIRECTORY "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/misc/gamepad/"
         DESTINATION "scripts"
         COMPONENT gamepad)
 
-# Sunshine assets. The serial scene-rule reducer is an internal test oracle: keep it reachable
-# through the build-tree shader junction below so unit tests can compile it, but never ship it
-# with the runtime.
+# Sunshine assets
 install(DIRECTORY "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/assets/"
         DESTINATION "${SUNSHINE_ASSETS_DIR}"
-        COMPONENT assets
-        PATTERN "sbs_scene_rules_reduce_serial_reference_cs.hlsl" EXCLUDE)
-string(CONCAT SBS_SERIAL_ORACLE_INSTALL_CHECK
-        "set(_sbs_serial_oracle "
-        "\"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${SUNSHINE_ASSETS_DIR}/"
-        "shaders/directx/sbs_scene_rules_reduce_serial_reference_cs.hlsl\")\n"
-        "if(EXISTS \"\${_sbs_serial_oracle}\")\n"
-        "  message(FATAL_ERROR \"Internal SBS serial reducer was included in "
-        "the installed asset tree: \${_sbs_serial_oracle}\")\n"
-        "endif()")
-install(CODE "${SBS_SERIAL_ORACLE_INSTALL_CHECK}" COMPONENT assets)
-unset(SBS_SERIAL_ORACLE_INSTALL_CHECK)
+        COMPONENT assets)
 
 # copy assets (excluding shaders) to build directory, for running without install
 file(COPY "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/assets/"
