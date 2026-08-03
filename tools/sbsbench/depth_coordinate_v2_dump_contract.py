@@ -20,9 +20,15 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 7
-SHADOW_STATE_DUMP_SCHEMA = 7
+DUMP_MANIFEST_SCHEMA = 8
+SHADOW_STATE_DUMP_SCHEMA = 8
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
+LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
+    "758dad091b2f142ac5a2a2bf95eff3b5ca280843b970d2aba4211397adc3966d"
+)
+DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
+    "79841ce4c1f906093e75160940e48aca300e818a2aab4532b69676a68deb2e3a"
+)
 
 _CONTRACT = coordinate_contract.load_contract()
 _CONTRACT_TAG = generator.contract_tag(_CONTRACT)
@@ -48,6 +54,7 @@ _STATE_CONSTANT_KEYS = {
     "reference_pop_strength", "reference_gain_at_pop_2", "requested_gain",
     "requested_pop_strength", "direct_container_limit", "max_horizontal_slope",
     "max_vertical_shear", "convergence_curve_default",
+    "vertical_majorant_share",
 }
 _DECODED_KEYS = {
     "frame_valid", "camera_valid", "calibration_revision", "confirmed_cut_count", "contract_tag",
@@ -170,7 +177,9 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
             "container_scale":
                 "frame-local-hard-direct-parallax-attenuation-recoverable-next-frame",
             "near_shoulder":
-                "shot-latched-near-tail-coverage-and-effective-tau-reset-on-confirmed-cut"}:
+                "shot-latched-near-tail-coverage-and-effective-tau-reset-on-confirmed-cut",
+            "spatial_conditioner":
+                "fixed-75pct-vertical-majorant-share-then-horizontal-majorant"}:
         raise ValueError("shadow_state.json has unknown adaptation semantics")
 
     constants = document.get("constants")
@@ -193,6 +202,7 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
         "direct_container_limit": _DEFAULTS.direct_container_limit,
         "max_horizontal_slope": _DEFAULTS.max_horizontal_slope,
         "max_vertical_shear": _DEFAULTS.max_vertical_shear,
+        "vertical_majorant_share": _DEFAULTS.vertical_majorant_share,
         "convergence_curve_default": _DEFAULTS.convergence_curve_default,
     }
     if any(not _same_number(constants.get(key), value)
@@ -364,11 +374,11 @@ def validate_shadow_frame_stats_document(document: Any) -> Dict[str, float]:
 
 
 def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
-    """Validate the schema-7 V2 geometry fragment of ``dump_manifest.json``.
+    """Validate the schema-8 V2 geometry fragment of ``dump_manifest.json``.
 
     The full package contains legacy/color/model metadata owned by other contracts. This reader
-    deliberately validates only the fields that attribute the V2 candidate -> vertical majorant
-    -> final 2D majorant chain, including the presence semantics of the new intermediate artifact.
+    deliberately validates only the candidate -> vertical envelopes/share -> row-majorant chain,
+    including the presence semantics of both authenticated intermediates.
     """
 
     if not isinstance(document, dict) or document.get("schema") != DUMP_MANIFEST_SCHEMA:
@@ -390,47 +400,119 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         raise ValueError("dump_manifest.json V2 selection flags disagree")
     if selected and not active:
         raise ValueError("dump_manifest.json selects V2 without an active producer")
+    requested = renderer.get("parallax_v2_render_requested")
+    mapping_matches = renderer.get("mapping_artifacts_match_selected_renderer")
+    if (not isinstance(requested, bool) or
+            not isinstance(mapping_matches, bool) or
+            (selected and not requested)):
+        raise ValueError("dump_manifest.json has invalid V2 renderer request attribution")
 
     expected_position = "shadow_final_parallax" if selected else None
+    expected_authority = (
+        "authenticated-parallax-v2-orientation-selective-conditioned-field"
+        if selected else None
+    )
+    expected_inverse = (
+        "12-step contractive fixed point; no owner pass or synthetic fill"
+        if selected else None
+    )
+    expected_coordinate_role = (
+        "shadow_coordinate is diagnostic only; it has no renderer authority"
+        if selected else None
+    )
+    expected_live_shader_source = ({
+        "source_closure_schema": generator.SOURCE_CLOSURE_SCHEMA,
+        "source_compile_flags": generator.SHADER_COMPILE_FLAGS,
+        "source_macro_count": 0,
+        "source_closure_sha256": LIVE_RENDERER_SOURCE_CLOSURE_SHA256,
+        "source_file": "sbs_reprojection_v2_live_ps.hlsl",
+        "entrypoint": "main_ps",
+        "target": "ps_5_0",
+        "diagnostic_source_closure_sha256": DIAGNOSTIC_SOURCE_CLOSURE_SHA256,
+        "mapping_source_file": "sbs_reprojection_v2_diagnostics_ps.hlsl",
+        "mapping_entrypoint": "mapping_ps",
+        "mask_source_file": "sbs_reprojection_v2_diagnostics_ps.hlsl",
+        "mask_entrypoint": "mask_ps",
+    } if selected else None)
     expected_vertical_role = (
-        "least column-wise v >= candidate with adjacent-row source-U change <= "
-        "max_vertical_shear/target_width; diagnostic intermediate consumed by the row limiter"
+        "least column-wise upper envelope v+ >= candidate with adjacent-row source-U change <= "
+        "max_vertical_shear/target_width; diagnostic evidence only"
+        if selected else None
+    )
+    expected_conditioned_role = (
+        "fixed 75/25 share of column upper/lower envelopes; may raise or lower candidate and "
+        "feeds the row majorant"
         if selected else None
     )
     expected_final_role = (
-        "least row-wise q >= shadow_vertical_majorant; final q >= vertical >= candidate "
-        "with horizontal slope <= max_horizontal_slope and vertical shear <= "
-        "max_vertical_shear; live position authority"
+        "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
+        "max_horizontal_slope and vertical shear <= max_vertical_shear; q may raise or lower "
+        "candidate and is the live position authority"
         if selected else None
     )
-    if (renderer.get("parallax_v2_position_field") != expected_position or
+    expected_collar_defocus = ({
+        "enabled": True,
+        "role": ("positive conditioner-deviation color-only background defocus; geometry "
+                 "is unchanged"),
+        "deviation": ("max(shadow_final_parallax - shadow_candidate_parallax, 0) in "
+                      "source-color pixels at the inverse-warped source coordinate"),
+        "onset_source_px": 4.0,
+        "full_response_source_px": 20.0,
+        "gaussian_sigma_source_px": 6.0,
+        "kernel": ("one-pass 3x3 binomial approximation with sqrt(2)-sigma-spaced taps "
+                   "and smoothstep opacity"),
+        "resolution_basis": ("current-source-color-pixels; depth-grid-independent, not "
+                             "stream-resolution-invariant"),
+        "hdr": ("weighted native source values; no clamp, tone map, or gamma conversion"),
+    } if selected else None)
+    if (renderer.get("authority") != expected_authority or
+            renderer.get("parallax_v2_inverse") != expected_inverse or
+            renderer.get("live_shader_source") != expected_live_shader_source or
+            renderer.get("parallax_v2_coordinate_role") != expected_coordinate_role or
+            renderer.get("parallax_v2_position_field") != expected_position or
             renderer.get("parallax_v2_vertical_majorant_role") != expected_vertical_role or
-            renderer.get("parallax_v2_majorant_role") != expected_final_role):
-        raise ValueError("dump_manifest.json has unknown V2 majorant attribution")
+            renderer.get("parallax_v2_vertical_conditioned_role") !=
+                expected_conditioned_role or
+            renderer.get("parallax_v2_conditioner_role") != expected_final_role or
+            renderer.get("collar_defocus") != expected_collar_defocus):
+        raise ValueError("dump_manifest.json has unknown V2 conditioner attribution")
 
     expected_artifacts = {
-        "shadow_vertical_majorant.f32":
-            "parallax-v2 vertical shear-limiter intermediate",
+        "shadow_candidate_parallax.f32": (
+            "parallax-v2 pre-limiter candidate displacement", True),
+        "shadow_vertical_majorant.f32": (
+            "parallax-v2 vertical shear-limiter intermediate", False),
         "shadow_vertical_majorant_shape.json":
-            "parallax-v2 vertical shear-limiter intermediate contract",
+            ("parallax-v2 vertical shear-limiter intermediate contract", False),
         "shadow_vertical_majorant.png":
-            "parallax-v2 vertical shear-limiter intermediate preview",
+            ("parallax-v2 vertical shear-limiter intermediate preview", False),
         "shadow_vertical_majorant_heat.png":
-            "parallax-v2 vertical shear-limiter intermediate preview",
+            ("parallax-v2 vertical shear-limiter intermediate preview", False),
+        "shadow_vertical_conditioned.f32":
+            ("parallax-v2 orientation-selective vertical conditioner", False),
+        "shadow_vertical_conditioned_shape.json":
+            ("parallax-v2 orientation-selective vertical conditioner contract", False),
+        "shadow_vertical_conditioned.png":
+            ("parallax-v2 orientation-selective vertical conditioner preview", False),
+        "shadow_vertical_conditioned_heat.png":
+            ("parallax-v2 orientation-selective vertical conditioner preview", False),
+        "shadow_final_parallax.f32": (
+            "parallax-v2 final conditioned displacement field", True),
     }
-    for name, stage in expected_artifacts.items():
+    for name, (stage, required) in expected_artifacts.items():
         descriptor = artifacts.get(name)
         if (not isinstance(descriptor, dict) or
                 set(descriptor) != {"available", "required", "stage", "description"} or
                 descriptor.get("available") is not active or
-                descriptor.get("required") is not False or
+                descriptor.get("required") is not required or
                 descriptor.get("stage") != stage or
                 not isinstance(descriptor.get("description"), str) or
                 not descriptor["description"]):
             raise ValueError(
-                "dump_manifest.json has an invalid shadow_vertical_majorant artifact contract")
+                "dump_manifest.json has an invalid vertical conditioner artifact contract")
     dimension_names = (
-        "shadow_candidate_parallax", "shadow_vertical_majorant", "shadow_final_parallax")
+        "shadow_candidate_parallax", "shadow_vertical_majorant",
+        "shadow_vertical_conditioned", "shadow_final_parallax")
     geometry_dimensions = [dimensions.get(name) for name in dimension_names]
     if active:
         if any(not isinstance(value, dict) for value in geometry_dimensions):
@@ -449,13 +531,17 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     return {
         "active": active,
         "rendered_output_selected": selected,
+        "mapping_artifacts_match_selected_renderer": mapping_matches,
         "position_field": expected_position,
         "vertical_majorant_available": active,
+        "vertical_conditioned_available": active,
     }
 
 
 __all__ = [
+    "DIAGNOSTIC_SOURCE_CLOSURE_SHA256",
     "DUMP_MANIFEST_SCHEMA",
+    "LIVE_RENDERER_SOURCE_CLOSURE_SHA256",
     "SHADOW_FRAME_STATS_DUMP_SCHEMA",
     "SHADOW_STATE_DUMP_SCHEMA",
     "camera_center_integrity_bits",

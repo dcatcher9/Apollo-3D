@@ -4,9 +4,8 @@
 Unlike the single-dump witness, this tool uploads every authenticated raw DAV2 field and cut signal
 to one persistent native GPU state. Seven experimental shadow compute shaders resolve the fixed
 raw coordinate, scene camera, and latched near-tail occupancy, apply one exact frame-local
-container, then apply the least
-near-preserving vertical and horizontal majorants before handing the final-parallax field directly
-to the D3D renderer.
+container, then compute the vertical upper/lower envelopes, their authenticated 75/25 share, and
+one row majorant before handing the final-parallax field directly to the D3D renderer.
 NumPy runs afterward as a comparison-only oracle. The native trace authenticates current-color flat
 fallback, retained-camera semantics, cut attribution, calibration revisions, and the effective gain
 used by each rendered output.
@@ -74,6 +73,7 @@ FRAME_PATTERN = re.compile(r"frame_(\d+)\.(png|jpg|jpeg)$", re.IGNORECASE)
 SEQUENCE_CONTRACT_SCHEMA = 13
 GPU_INPUT_MANIFEST_SCHEMA = 4
 GPU_INPUT_MANIFEST_MODE = "depth-coordinate-v2-experimental-shadow-gpu-sequence-v5"
+SEQUENCE_MAPPING_CONFIG_KEYS = frozenset(asdict(MappingV2Config()).keys())
 NUMPY_COMPARISON_SCHEMA = 2
 PRODUCER_EVIDENCE_SCHEMA = 1
 PRODUCER_EVIDENCE_BINDING = "self-contained-schema36-schema18-raw-producer-v1"
@@ -195,10 +195,14 @@ def _diagnostic_summary(rows: Sequence[Dict[str, object]]) -> Dict[str, object]:
         "minimum_active_effective_gain": min(
             (float(row["effective_gain"]) for row in rows if row["frame_valid"]),
             default=0.0),
-        "maximum_limiter_raised_fraction": max(
-            float(row["limiter_raised_fraction"]) for row in rows),
-        "maximum_limiter_raise_source_u": max(
-            float(row["limiter_max_raise_source_u"]) for row in rows),
+        "maximum_conditioner_raised_fraction": max(
+            float(row["conditioner_raised_fraction"]) for row in rows),
+        "maximum_conditioner_raise_source_u": max(
+            float(row["conditioner_max_raise_source_u"]) for row in rows),
+        "maximum_conditioner_lowered_fraction": max(
+            float(row["conditioner_lowered_fraction"]) for row in rows),
+        "maximum_conditioner_lower_source_u": max(
+            float(row["conditioner_max_lower_source_u"]) for row in rows),
         "maximum_final_horizontal_slope": max(
             float(row["final_horizontal_slope_max"]) for row in rows),
         "maximum_final_vertical_shear": max(
@@ -1025,16 +1029,11 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
     if declared_input_digest != measured_input_digest:
         raise ValueError("sequence input evidence digest mismatch")
     mapping = document.get("mapping_config")
-    expected_mapping_keys = {
-        "raw_coordinate_scale", "collapse_abs_epsilon", "far_tau", "near_log_tau",
-        "near_tail_probe_u", "near_tail_coverage_low", "near_tail_coverage_high",
-        "near_log_tau_dense",
-        "pop_strength", "gain_per_pop", "max_horizontal_slope", "max_vertical_shear",
-        "direct_container_limit",
-    }
-    if (not isinstance(mapping, dict) or set(mapping) != expected_mapping_keys or
+    if (not isinstance(mapping, dict) or set(mapping) != SEQUENCE_MAPPING_CONFIG_KEYS or
             mapping.get("raw_coordinate_scale") !=
-            input_contract.get("raw_coordinate_scale")):
+            input_contract.get("raw_coordinate_scale") or
+            mapping.get("vertical_majorant_share") !=
+            MappingV2Config().vertical_majorant_share):
         raise ValueError("sequence mapping does not use the authenticated model calibration")
     pop_authority = document.get("pop_strength_authority")
     if (not isinstance(pop_authority, dict) or

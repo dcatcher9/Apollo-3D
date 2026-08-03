@@ -35,6 +35,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             12: "75486b54117c99baefa38ee6ff821941739da2abecd6fe4335cd571ed3d651da",
             13: "0bcb9598d3e1795d789ae807cddfcd85fa0c42a51f071874b28a48cd6ceb9161",
             14: "fdfda53e49ede50fc3408c7ecdafe7076a37b8468f5d828dc4a0d47e0656f458",
+            15: "09f4eae02ddfd437dbf29116c6f7f4f5c754af40a7a9124edee3c071adfc8ed6",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -42,10 +43,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x1AD89481)
+        self.assertEqual(generator.contract_tag(contract), 0x7ADF0988)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "1ad894818b5e3a42ae5619e9d55a757cc10d1356098fc832de512be59d8c6907",
+            "7adf09889f87bc391afe42a4f56f4d38a534573c6e751ced03c01c029adecf53",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -119,6 +120,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(mapping.near_log_tau_dense, defaults.near_log_tau_dense)
         self.assertEqual(mapping.pop_strength, defaults.reference_pop_strength)
         self.assertEqual(mapping.gain_per_pop, defaults.gain_per_pop)
+        self.assertEqual(
+            mapping.vertical_majorant_share, defaults.vertical_majorant_share)
         self.assertEqual(mapping.max_horizontal_slope, defaults.max_horizontal_slope)
         self.assertEqual(mapping.max_vertical_shear, defaults.max_vertical_shear)
         self.assertEqual(mapping.direct_container_limit, defaults.direct_container_limit)
@@ -217,6 +220,15 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 changed = copy.deepcopy(original)
                 changed["calibrated_defaults"][field] = value
                 with self.assertRaisesRegex(ValueError, message):
+                    generator.validate_contract(changed)
+
+    def test_vertical_share_rejects_values_that_round_to_float32_endpoints(self):
+        original = generator.load_contract()
+        for value in (1.0e-50, 1.0 - 1.0e-12):
+            with self.subTest(value=value):
+                changed = copy.deepcopy(original)
+                changed["calibrated_defaults"]["vertical_majorant_share"] = value
+                with self.assertRaisesRegex(ValueError, "positive in float32"):
                     generator.validate_contract(changed)
 
     def test_shader_digest_is_independent_and_generation_converges(self):

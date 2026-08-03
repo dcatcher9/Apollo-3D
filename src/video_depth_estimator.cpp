@@ -525,7 +525,7 @@ namespace models {
   bool parallax_v2_result_is_authenticated(const estimate_result &result) {
     if (!result.completed_frame_valid || result.completed_frame_id == 0u ||
         !result.parallax_v2_producer_active || !result.shadow_candidate_parallax ||
-        !result.shadow_vertical_majorant ||
+        !result.shadow_vertical_majorant || !result.shadow_vertical_conditioned ||
         !result.shadow_final_parallax ||
         !result.shadow_state || !result.shadow_frame_stats ||
         !result.raw_model_provenance || !result.parallax_v2_shader_provenance ||
@@ -1702,6 +1702,11 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_vertical_majorant_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_vertical_majorant_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_vertical_majorant_srv;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_vertical_conditioned_tex;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>
+      depth_coordinate_v2_vertical_conditioned_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>
+      depth_coordinate_v2_vertical_conditioned_srv;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_final_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_final_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_final_srv;
@@ -2475,6 +2480,9 @@ namespace models {
       depth_coordinate_v2_vertical_majorant_tex.Reset();
       depth_coordinate_v2_vertical_majorant_uav.Reset();
       depth_coordinate_v2_vertical_majorant_srv.Reset();
+      depth_coordinate_v2_vertical_conditioned_tex.Reset();
+      depth_coordinate_v2_vertical_conditioned_uav.Reset();
+      depth_coordinate_v2_vertical_conditioned_srv.Reset();
       depth_coordinate_v2_final_tex.Reset();
       depth_coordinate_v2_final_uav.Reset();
       depth_coordinate_v2_final_srv.Reset();
@@ -2615,6 +2623,11 @@ namespace models {
                        depth_coordinate_v2_vertical_majorant_uav
                      ) &&
                      create_float_texture(
+                       depth_coordinate_v2_vertical_conditioned_tex,
+                       &depth_coordinate_v2_vertical_conditioned_srv,
+                       depth_coordinate_v2_vertical_conditioned_uav
+                     ) &&
+                     create_float_texture(
                        depth_coordinate_v2_final_tex,
                        &depth_coordinate_v2_final_srv,
                        depth_coordinate_v2_final_uav
@@ -2656,11 +2669,17 @@ namespace models {
         depth_coordinate_v2_vertical_majorant_uav.Get(),
         clear
       );
+      context->ClearUnorderedAccessViewFloat(
+        depth_coordinate_v2_vertical_conditioned_uav.Get(),
+        clear
+      );
       context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_final_uav.Get(), clear);
       parallax_v2_producer_active = true;
       BOOST_LOG(info)
         << "Host SBS V2 GPU producer active at " << target_w << 'x' << target_h
-        << "; the renderer will authenticate its first completed field before the one-time "
+        << "; crown conditioner uses 75% vertical upper and 25% vertical lower envelope "
+           "followed by one horizontal majorant; "
+           "the renderer will authenticate its first completed field before the one-time "
            "V2-or-flat latch.";
       return true;
     }
@@ -2760,26 +2779,26 @@ namespace models {
       context->CSSetShaderResources(0, 2, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
 
-      // Exact near-preserving column majorant bounds vertical disparity shear without mutating the
-      // candidate evidence. The row pass then enforces the horizontal invertibility contract.
+      // Produce the exact column upper envelope plus the fixed 75/25 vertical share. The upper
+      // remains diagnostic evidence; only the neutral conditioned field feeds live geometry.
       context->CSSetShader(depth_coordinate_v2_vertical_limit_cs.Get(), nullptr, 0);
       context->CSSetShaderResources(0, 1, depth_coordinate_v2_candidate_srv.GetAddressOf());
-      context->CSSetUnorderedAccessViews(
-        0,
-        1,
-        depth_coordinate_v2_vertical_majorant_uav.GetAddressOf(),
-        nullptr
-      );
+      ID3D11UnorderedAccessView *vertical_envelope_uavs[2] = {
+        depth_coordinate_v2_vertical_majorant_uav.Get(),
+        depth_coordinate_v2_vertical_conditioned_uav.Get(),
+      };
+      context->CSSetUnorderedAccessViews(0, 2, vertical_envelope_uavs, nullptr);
       context->Dispatch((target_w + 63) / 64, 1, 1);
       context->CSSetShaderResources(0, 1, null_srvs3);
-      context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
+      context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
 
-      // Exact near-preserving row-wise Lipschitz majorant of the vertical-shear-conditioned field.
+      // Apply one pure horizontal majorant to the vertically conditioned field. There is no
+      // horizontal minorant or completed-2D-envelope blend, so lateral lowering is not added.
       context->CSSetShader(depth_coordinate_v2_limit_cs.Get(), nullptr, 0);
       context->CSSetShaderResources(
         0,
         1,
-        depth_coordinate_v2_vertical_majorant_srv.GetAddressOf()
+        depth_coordinate_v2_vertical_conditioned_srv.GetAddressOf()
       );
       context->CSSetUnorderedAccessViews(
         0,
@@ -2913,6 +2932,7 @@ namespace models {
         }
         r.shadow_candidate_parallax = depth_coordinate_v2_candidate_srv;
         r.shadow_vertical_majorant = depth_coordinate_v2_vertical_majorant_srv;
+        r.shadow_vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv;
         r.shadow_final_parallax = depth_coordinate_v2_final_srv;
         r.shadow_state = depth_coordinate_v2_state_srv;
         r.shadow_frame_stats = depth_coordinate_v2_frame_stats_srv;

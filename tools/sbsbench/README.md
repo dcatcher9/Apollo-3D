@@ -22,16 +22,19 @@ images shown on the headset. This is the visual half of the host benchmark; see
      offline/evaluator artifact, not an alternate live renderer input.
    - `warp_depth.f32` / `warp_depth.png` / `warp_depth_heat.png` /
      `warp_depth_shape.json`: the actual scalar field sampled by the SBS reprojection shader. For
-     production V2 this is the final near-preserving anisotropic 2D majorant; legacy/offline
+     production V2 this is the final row-majorant of the orientation-selective vertical share;
+     legacy/offline
      packages use the effective depth and record whether the 3x3 prefilter was applied.
    - `adaptive_state.json`: compatibility evidence from the legacy analysis stack, including the
      cut pulse/generation still bridged into V2. Legacy adaptive-pop, zero-plane, subject, range,
      and depth-health values have no live V2 geometry authority.
    - `shadow_candidate_parallax.f32`, `shadow_vertical_majorant.f32`,
-     `shadow_coordinate.f32`, `shadow_final_parallax.f32`, and previews: V2's immutable pre-limiter
-     candidate, exact column-wise shear-2 intermediate, canonical coordinate diagnostic, and final
-     live position field respectively. Dump manifest schema 7 distinguishes the intermediate from
-     renderer authority.
+     `shadow_vertical_conditioned.f32`, `shadow_coordinate.f32`,
+     `shadow_final_parallax.f32`, and previews: V2's immutable pre-conditioner candidate, exact
+     column-wise upper envelope, fixed 75/25 upper/lower vertical share, canonical coordinate
+     diagnostic, and final live position field respectively. Dump manifest schema 8 distinguishes
+     the intermediates from renderer authority and records the experimental color-only 4/20/6
+     collar-defocus policy.
    - `warp_map.f32`, `warp_map_shape.json`, `warp_displacement_heat.png`, `warp_mask.png`: exact
      inverse-warp source coordinates, derived eye-pixel displacement, and renderer-specific mask.
      A V2 map is the 12-step contractive inverse. Its mask marks only inverse samples beyond the
@@ -63,7 +66,8 @@ Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 
 - **Exact dump geometry** means the replay hashes and consumes the captured `raw_depth.f32` bytes,
   publishes canonical-coordinate and immutable-candidate diagnostics separately from the final
-  vertical shear-2 and final anisotropic 2D majorants, and authenticates the rendered final field
+  vertical upper-envelope and orientation-selective conditioned intermediates plus the final
+  row-majorant field, and authenticates the rendered final field
   through the direct-geometry harness contract.
 - **Authoritative raw-model provenance** additionally requires capture-time
   `dump_manifest.json.raw_model_provenance` to bind the effective model name and URL, the ONNX
@@ -83,7 +87,7 @@ python tools/sbsbench/replay_depth_mapping_v2.py `
   --experimental-raw-coordinate-scale 0.5
 ```
 
-The schema-6 report records `raw_model_provenance.status = "unverified"`, the reason, and the exact
+The schema-8 report records `raw_model_provenance.status = "unverified"`, the reason, and the exact
 raw artifact hash. Legacy captures do **not** silently inherit the DAV2 Small `0.5` fixed
 raw-coordinate scale. They require both the unverified-provenance opt-in and the explicitly
 non-authoritative `--experimental-raw-coordinate-scale VALUE`; the resulting
@@ -95,7 +99,7 @@ are intentionally rejected.
 
 The two 2026-08-02 hair dumps use depth-coordinate contract schema 7. They remain historical input
 witnesses for explicitly unverified replay; their manifests and SBS output are not evidence of the
-schema-14 producer or final live renderer.
+schema-15 producer or final live renderer.
 
 A capture is considered authoritative only with this exact additional manifest record
 (digest values abbreviated here):
@@ -122,7 +126,7 @@ not bypass corrupt provenance. “Authoritative” here authenticates the dump's
 not HDR preview fidelity, perceptual quality, or metric ground truth.
 
 The production calibration identity and its `0.5` fixed coordinate scale live in the generated
-schema-14 depth-coordinate-v2 contract, not in the replay script. It covers the exact calibrated
+schema-15 depth-coordinate-v2 contract, not in the replay script. It covers the exact calibrated
 Small ONNX at six standard tensor shapes: `770x434`, `1022x434`, `1036x434`, `434x770`,
 `434x1022`, and `434x1036`. A different but syntactically valid SHA-256, URL, profile, tensor
 shape, layout, normalization, or bound artifact hash always aborts; the legacy override does not
@@ -133,9 +137,9 @@ Host SBS.
 
 `replay_depth_mapping_v2_sequence.py` uploads each authenticated raw field and cut generation to
 one persistent GPU state, dispatches the same seven production compute shaders used by live Host
-SBS V2, and renders the GPU-produced final anisotropic 2D majorant through Apollo's exact
-D3D SBS harness. Canonical coordinate, pre-limiter candidate, and vertical shear-2 intermediate
-remain separately attributable comparison fields:
+SBS V2, and renders the GPU-produced final orientation-selective conditioned field through
+Apollo's exact D3D SBS harness. Canonical coordinate, pre-limiter candidate, vertical upper
+envelope, and fixed vertical upper/lower share remain separately attributable comparison fields:
 
 ```powershell
 python tools/sbsbench/replay_depth_mapping_v2_sequence.py `
@@ -158,9 +162,11 @@ retains only the scene camera so the next usable field resumes the same coordina
 confirmed-cut frame clears that camera, and the next usable field reacquires it. No old per-pixel
 depth is paired with current color, and there is no timed/frame-counted atomic hold.
 `depth_coordinate_v2_sequence_contract.json` hashes those outputs and the harness direct-geometry
-manifest, then independently remeasures the 4% source-U container, the
-`q >= vertical >= candidate` no-lowering chain, the `2.0/depth_width` adjacent-row bound, and the
-`0.5/depth_width` adjacent-column bound before scoring. Final-field replay uses the same 12-step
+manifest, then independently remeasures the 4% source-U container, the authenticated 75/25
+vertical upper/lower share, the `2.0/depth_width` adjacent-row bound, and the
+`0.5/depth_width` adjacent-column bound. The final row majorant is required to be above the
+vertical-conditioned field but may be above or below the original candidate. Final-field replay
+uses the same 12-step
 contractive inverse as live
 V2. It has one root, no canonical visibility decision, no forward-owner pass, and no synthetic
 internal fill; its mask reports only finite-source boundary extrapolation.
@@ -512,14 +518,14 @@ Schema 35 additionally records the exact runtime RGB-to-model-input shader closu
 binds each clip's exact schema-18 producer identity, raw tensor shape, and ordered raw-file hashes;
 unsupported model contracts or shapes abstain per clip. A calibrated
 profile and V2 calibration ID are admitted only when model name/URL/ONNX, source closure, and input
-shape all match the generated schema-14 contract; otherwise the run records an explicit null
+shape all match the generated schema-15 contract; otherwise the run records an explicit null
 calibration instead of silently inheriting the DAV2 scale.
-Schema 14 also binds the ordered seven-shader V2 implementation by its immutable
+Schema 15 also binds the ordered seven-shader V2 implementation by its immutable
 source/spec/include closure. The GPU tag hashes the semantic manifest with only that
 self-referential closure digest
 replaced by a fixed sentinel; generated C++ and evidence retain the full canonical-manifest and
-independent shader-closure digests. Live state/frame-stat dumps use serialization schemas 7/2 and
-reject a missing or mismatched shader identity. State schema 7 also authenticates the full
+independent shader-closure digests. Live state/frame-stat dumps use serialization schemas 8/2 and
+reject a missing or mismatched shader identity. State schema 8 also authenticates the full
 12-word scene state: shot-latched near-tail coverage/count, its effective near-log tau, the
 camera-center integrity checksum, and the probe/coverage/dense-tau constants used to derive it.
 The acquisition field selects `tau_near = lerp(2, 1, smoothstep(0.15, 0.22,

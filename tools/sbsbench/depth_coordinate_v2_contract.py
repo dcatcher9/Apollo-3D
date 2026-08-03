@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import struct
 from typing import Any, Optional
 
 
@@ -27,8 +28,13 @@ CALIBRATED_DEFAULT_NAMES = (
     "direct_container_limit",
     "max_horizontal_slope",
     "max_vertical_shear",
+    "vertical_majorant_share",
     "convergence_curve_default",
 )
+
+
+def _float32(value: float) -> float:
+    return struct.unpack("<f", struct.pack("<f", float(value)))[0]
 MODEL_CALIBRATION_KEYS = {
     "calibration_id", "depth_model", "depth_model_url", "onnx_sha256",
     "raw_coordinate_scale", "calibrated_input_shapes", "preprocess",
@@ -68,6 +74,7 @@ class CalibratedDefaults:
     direct_container_limit: float
     max_horizontal_slope: float
     max_vertical_shear: float
+    vertical_majorant_share: float
     convergence_curve_default: float
 
 
@@ -296,6 +303,11 @@ def load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
             raise ValueError(f"depth-coordinate-v2 default {name} must be positive")
     if defaults["max_horizontal_slope"] >= 1.0:
         raise ValueError("max_horizontal_slope must be below one")
+    majorant_share = _float32(defaults["vertical_majorant_share"])
+    minorant_share = _float32(_float32(1.0) - majorant_share)
+    if majorant_share <= 0.0 or minorant_share <= 0.0:
+        raise ValueError(
+            "vertical_majorant_share and its complement must remain positive in float32")
     if defaults["near_tail_probe_u"] < 1.0:
         raise ValueError("near_tail_probe_u must be at least the near-curve knee")
     if not (0.0 <= defaults["near_tail_coverage_low"] <

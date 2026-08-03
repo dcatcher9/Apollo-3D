@@ -1,5 +1,5 @@
 {
-  "schema": 14,
+  "schema": 15,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -47,7 +47,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "2e2d9425588a2af2bad380988b9a2186ed81e9d33801fc784f9b9777cd3f87d2"
+    "source_closure_sha256": "b2cd29990fbbda1117ea2ead9a01bca7d43543c5d8d2dce917cab75287d28351"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
@@ -62,6 +62,7 @@
     "direct_container_limit": 0.04,
     "max_horizontal_slope": 0.5,
     "max_vertical_shear": 2.0,
+    "vertical_majorant_share": 0.75,
     "convergence_curve_default": 0.0
   },
   "model_calibrations": [

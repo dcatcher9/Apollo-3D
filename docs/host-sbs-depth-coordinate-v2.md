@@ -1,10 +1,12 @@
 # Host SBS Depth Coordinate V2
 
-Status: shipped as the sole live Host SBS renderer. There is no V1 renderer selection or fallback;
-an unauthenticated model, tensor shape, shader closure, state, or current frame renders flat SBS.
-Client SBS and offline conversion are unchanged.
+Status: the V2 cutover is shipped as the sole live Host SBS renderer, with no V1 selection or
+fallback. This working tree adds the unqualified schema-15 C75/collar trial described below; that
+overlay still requires headset and 4K90 qualification. An unauthenticated model, tensor shape,
+shader closure, state, or current frame renders flat SBS. Client SBS and offline conversion are
+unchanged.
 
-## Production behavior
+## Live working-tree behavior
 
 ```ini
 sbs_3d_pop_strength = 2.0
@@ -13,7 +15,7 @@ sbs_3d_pop_strength = 2.0
 Host SBS always starts the V2 producer and renderer. The producer, model identity, preprocess
 identity, tensor shape, shader closure, resources, state, and renderer closure must all authenticate
 before stereo geometry becomes live. Failure stays flat for that encode-device lifetime; it never
-falls back to V1. The live production shaders are compiled and cached at process start. Dump 3D's
+falls back to V1. The live shaders are compiled and cached at process start. Dump 3D's
 full-frame diagnostic resources and mapping/mask shaders are created lazily; its optional canonical-
 coordinate shader has no live authority, and no diagnostic failure can prevent a stream starting.
 
@@ -39,14 +41,16 @@ authenticated raw model field
   -> requested pop gain
   -> exact frame-local 4% source-U container
   -> immutable pre-limiter candidate p
-  -> least column-wise near-preserving vertical majorant v (shear 2)
-  -> least row-wise near-preserving majorant q of v
+  -> exact column upper/lower envelopes V+ and V- (shear 2)
+  -> orientation-selective vertical share c = 0.75 V+ + 0.25 V-
+  -> least row-wise majorant q of c
   -> 12-step contractive inverse using q
+  -> positive (q - p) collar mask and color-only defocus
 ```
 
 ## Authenticated contract
 
-Algorithm contract schema 14 admits one production calibration:
+Algorithm contract schema 15 admits one authenticated working-tree calibration:
 
 | Property | Required value |
 |---|---|
@@ -58,6 +62,7 @@ Algorithm contract schema 14 admits one production calibration:
 | Direct source-U container | 0.04 |
 | Maximum horizontal slope | 0.5 |
 | Maximum vertical shear | 2.0 |
+| Vertical upper-envelope share | 0.75 |
 | Near-tail probe | `u > 1.0` |
 | Dense-occupancy transition | 15% to 22% |
 | Sparse / dense near-tail tau | 2.0 / 1.0 |
@@ -122,7 +127,7 @@ The contract-pinned thresholds separate the paired 2026-08-02 hair inputs: the l
 has 57.6% `u > 1` coverage while fullscreen has 12.3%. Across the current 360-frame core raw set,
 coverage spans about 8% to 50% with a 24% median. This exercises both endpoints; extended
 whole-clip evidence remains useful for future recalibration, but cannot silently change the
-schema-14 constants.
+schema-15 constants.
 
 ## Pop, convergence, and the hard container
 
@@ -143,42 +148,73 @@ The 4% container is frame-local representation safety. Its envelope always uses 
 compression cannot relax the container and amplify middle or far geometry. It attacks and
 recovers on the same frame, so one transient cannot weaken the rest of a shot.
 
-## Near-preserving anisotropic cliff projection
+## Orientation-selective cliff conditioning
 
 The immutable candidate `p` records the requested signed one-eye source-U field. It is useful for
-measuring how much intervention the renderer needed, but it is never sampled by live V2.
+measuring how much intervention the renderer needed. It is also sampled by the live renderer only
+to derive the color-only collar-defocus mask; it never replaces final geometry.
 
-The first spatial pass computes the least column-wise majorant `v` satisfying:
+The first spatial pass computes both exact column-wise Lipschitz envelopes:
 
 ```text
-v(x, y) >= p(x, y)
-abs(v(x, y + 1) - v(x, y)) <= 2.0 / depth_width
+V+(x, y) = max_s p(x,s) - step * abs(y-s)
+V-(x, y) = min_s p(x,s) + step * abs(y-s)
+c(x, y)  = 0.75 * V+(x,y) + 0.25 * V-(x,y)
+step      = 2.0 / depth_width
 ```
 
-A top-to-bottom scan followed by a bottom-to-top scan computes `v` exactly. The selected shear-2
+A top-to-bottom scan followed by a bottom-to-top scan computes both envelopes and their fixed
+share exactly. The selected shear-2
 bound is expressed in source-width-normalized disparity: on an aspect-matched model/source grid it
 is approximately two source-horizontal disparity pixels of change per source-image vertical pixel.
-It spreads a one-row crown onset vertically without lowering requested near disparity.
+The 75/25 share reduces top-edge background shear while retaining substantially more foreground
+volume than the rejected vertical-minorant endpoint. It may raise or lower the candidate locally.
 
-The second pass computes the least row-wise majorant `q` of `v`:
+The second pass computes the least row-wise majorant `q` of `c`:
 
 ```text
-q(x, y) >= v(x, y) >= p(x, y)
+q(x, y) >= c(x, y)
 abs(q(x + 1, y) - q(x, y)) <= 0.5 / depth_width
 abs(q(x, y + 1) - q(x, y)) <= 2.0 / depth_width
 ```
 
-The row scan preserves the vertical bound, so the final is the exact least anisotropic 2D
-majorant under these separable constraints. Neither pass weakens requested near disparity. The
-horizontal bound keeps both eye maps one-to-one, so every output pixel pulls a real source sample
-and no hidden-background fill can copy the foreground. This deliberately trades an unavoidable
-disocclusion for bounded deformation of visible background; a hard cliff cannot retain rigid
-geometry without one of those two costs.
+The pure horizontal majorant preserves the vertical bound without introducing horizontal
+foreground lowering, which avoids the measured hair/shoulder notch of a global two-dimensional
+upper/lower blend. The final may still be below `p` where the vertical share compressed the first
+foreground rows, so diagnostics report raising and lowering separately. The horizontal bound keeps
+both eye maps one-to-one: every output pixel pulls a real source sample and no hidden-background
+fill can copy the foreground.
 
 `shadow_final_parallax` is the live position authority. `shadow_candidate_parallax` is immutable
-pre-limiter evidence. `shadow_vertical_majorant` is the exact vertical-pass intermediate and
-diagnostic evidence. `shadow_coordinate` is coordinate evidence only: its full-size texture and
-alternate map entrypoint are allocated/dispatched solely for an explicit Dump 3D snapshot.
+pre-conditioner evidence. `shadow_vertical_majorant` is the exact `V+` diagnostic;
+`shadow_vertical_conditioned` is the fixed 75/25 vertical share consumed by the row pass.
+`shadow_coordinate` is coordinate evidence only: its full-size texture and alternate map
+entrypoint are allocated/dispatched solely for an explicit Dump 3D snapshot.
+
+## Collar defocus trial
+
+After the inverse converges, the renderer evaluates the positive geometry correction at that same
+source coordinate:
+
+```text
+raised_px = max(q - p, 0) * source_color_width
+amount    = smoothstep(4, 20, raised_px)
+color     = lerp(one_tap_color, fixed_sigma6_blur, amount)
+```
+
+The fixed blur is a one-pass 3x3 binomial approximation. A `[1,2,1]/4` axis kernel has variance
+`radius^2/2`, so taps are placed at `sqrt(2) * 6` source pixels to preserve the configured
+sigma-6 second moment. A 5x5 trial increased active color sampling from 9 to 25 reads; the user
+reported little visible difference in that one crown A/B, so the denser kernel was removed. This
+subjective observation is not a general equivalence claim.
+The exact one-tap path is retained for `raised_px <= 4`; negative correction belongs to compressed
+foreground rows and is never blurred. Both eyes use the same source-space rule. This is a
+color-sampling experiment only: it does not change candidate, final parallax, the inverse, comfort
+bounds, or scene state. Native color values are averaged without clamping, tone mapping, or gamma
+conversion, preserving linear scRGB HDR values outside `[0,1]`. The live renderer closure and Dump
+3D manifest pin these choices; the ordinary geometry evaluator does not qualify their appearance
+or worst-case pixel cost. The 4/20/6 calibration is in pixels of the current source-color raster:
+it is depth-grid independent, but it is not claimed to be stream-resolution invariant.
 
 ## Unique inverse
 
@@ -208,11 +244,12 @@ An authenticated completion runs seven GPU passes:
 3. acquisition/cut-gated canonical `u > 1` near-tail count with one atomic add per reduction group;
 4. scene-camera/current-frame/near-shoulder resolve;
 5. immutable candidate map;
-6. least column-wise near-preserving shear-2 majorant;
-7. least row-wise near-preserving majorant of that vertical intermediate.
+6. exact column upper/lower shear-2 envelopes and their fixed 75/25 share;
+7. least row-wise majorant of that vertically conditioned field.
 
-All per-pixel data stays on the GPU. Live Host SBS binds the final anisotropic 2D majorant directly;
-the removed V1 selector and legacy warp prefilter have no live rendering role.
+All per-pixel data stays on the GPU. Live Host SBS binds the final conditioned field for geometry
+and the matched immutable candidate for the collar-defocus mask; the removed V1 selector and
+legacy warp prefilter have no live rendering role.
 
 Dump 3D adds one diagnostic dispatch after production timing has ended to materialize the
 canonical coordinate for that exact completed frame. Ordinary live frames neither allocate nor
@@ -241,8 +278,8 @@ pop or zero-plane authority, and leaves legacy subject/anchor/range readiness fi
 
 ## Dump 3D semantics
 
-New live dump manifest schema 7 describes the selected renderer without the rejected owner path.
-Its `shadow_state.json` schema 7 records both generated spatial bounds and the complete 12-word
+New live dump manifest schema 8 describes the selected renderer without the rejected owner path.
+Its `shadow_state.json` schema 8 records both generated spatial bounds and the complete 12-word
 scene state. The added shoulder words expose the shot-latched near-tail coverage, the effective
 near logarithmic tau, the exact tail count, and the camera-center integrity checksum. The same document
 binds `near_tail_probe_u = 1`, coverage thresholds `0.15/0.22`, and dense-tail tau `1`, so a dump
@@ -252,20 +289,21 @@ mistaken for the older coverage-based record:
 
 | Artifact | V2 meaning |
 |---|---|
-| `warp_depth.f32` | exact final anisotropic 2D majorant sampled by live V2 |
-| `shadow_final_parallax.f32` | same final anisotropic 2D majorant; live position authority |
-| `shadow_vertical_majorant.f32` | exact column-wise shear-2 majorant; intermediate diagnostic |
-| `shadow_candidate_parallax.f32` | immutable requested field before the limiter; diagnostic |
+| `warp_depth.f32` | exact final conditioned field sampled by live V2 geometry |
+| `shadow_final_parallax.f32` | same final row-majorant of the vertical share; live position authority |
+| `shadow_vertical_conditioned.f32` | exact 75/25 column-envelope share consumed by the row pass |
+| `shadow_vertical_majorant.f32` | exact column-wise upper envelope `V+`; diagnostic |
+| `shadow_candidate_parallax.f32` | immutable requested field before conditioning; diagnostic and color-mask input |
 | `shadow_coordinate.f32` | dump-only canonical raw coordinate; diagnostic |
 | `warp_map.f32` | exact 12-step fixed-point inverse source-U map |
 | `warp_mask.png` | red = finite-source boundary extrapolation; no internal owner/fill path |
 
 The manifest records the algorithm schema/tag, all seven producer shaders including the coverage
-pass, and the independent live renderer closure.
+pass, the independent live renderer closure, and the fixed 4/20/6 collar-defocus policy.
 
 The two 2026-08-02 hair captures were produced under depth-coordinate contract schema 7. They are
 valuable historical input witnesses for replay, but their manifests and rendered artifacts do not
-describe the schema-14 producer or the final live renderer. Fresh dumps are required for current
+describe the schema-15 producer or the final live renderer. Fresh dumps are required for current
 evidence.
 
 ## Hair-cliff evidence
@@ -284,7 +322,7 @@ horizontal-only result motivated the selected vertical shear-2 pass; it is histo
 evidence, not proof of the new seven-pass output.
 
 This is targeted historical evidence, not a current release baseline. Ongoing qualification should
-use fresh schema-14/manifest-schema-7 dumps, whole-clip quality evaluation, isolated GPU timing,
+use fresh schema-15/manifest-schema-8 dumps, whole-clip quality evaluation, isolated GPU timing,
 hard-container telemetry, cut coverage, invalid-depth behavior, HDR, and long browser/video
 sessions.
 
@@ -306,5 +344,5 @@ model identity, tensor shapes, or private cut calibration.
 
 This production cutover changes neither Client SBS nor offline conversion. Any future client backend must
 authenticate and calibrate its own model bytes, preprocessing, tensor shape, direction, raw scale,
-curve, gain, container, and slope. Offline conversion may reuse the coordinate and final-majorant
+curve, gain, container, and slope. Offline conversion may reuse the coordinate and conditioned-field
 semantics, but scene lookahead and encoder policy remain separate owners.

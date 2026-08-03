@@ -6,8 +6,10 @@
 
 #ifdef _WIN32
 
+#include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -190,15 +192,23 @@ namespace {
       const UINT source_width,
       const UINT source_height,
       const void *source_pixels,
-      const std::vector<float> &parallax,
+      const std::vector<float> &final_parallax,
+      const std::vector<float> &candidate_parallax,
       const models::depth_coordinate_v2::state_words_t &state,
       const std::array<float, 4> &clear_color,
       std::vector<std::byte> &packed_output,
-      std::string &error
+      std::string &error,
+      const UINT depth_width = 0u,
+      const UINT depth_height = 0u
     ) {
+      const UINT resolved_depth_width = depth_width == 0u ? source_width : depth_width;
+      const UINT resolved_depth_height = depth_height == 0u ? source_height : depth_height;
       if (!source_pixels || source_width == 0u || source_height == 0u ||
-          parallax.size() !=
-            static_cast<std::size_t>(source_width) * source_height) {
+          (depth_width == 0u) != (depth_height == 0u) ||
+          final_parallax.size() !=
+            static_cast<std::size_t>(resolved_depth_width) * resolved_depth_height ||
+          candidate_parallax.size() !=
+            static_cast<std::size_t>(resolved_depth_width) * resolved_depth_height) {
         error = "invalid live V2 render input";
         return false;
       }
@@ -222,14 +232,29 @@ namespace {
       ComPtr<ID3D11ShaderResourceView> parallax_srv;
       if (!create_immutable_texture_srv(
             DXGI_FORMAT_R32_FLOAT,
-            source_width,
-            source_height,
+            resolved_depth_width,
+            resolved_depth_height,
             sizeof(float),
-            parallax.data(),
+            final_parallax.data(),
             parallax_texture,
             parallax_srv
           )) {
         error = "could not create the signed parallax texture";
+        return false;
+      }
+
+      ComPtr<ID3D11Texture2D> candidate_texture;
+      ComPtr<ID3D11ShaderResourceView> candidate_srv;
+      if (!create_immutable_texture_srv(
+            DXGI_FORMAT_R32_FLOAT,
+            resolved_depth_width,
+            resolved_depth_height,
+            sizeof(float),
+            candidate_parallax.data(),
+            candidate_texture,
+            candidate_srv
+          )) {
+        error = "could not create the candidate parallax texture";
         return false;
       }
 
@@ -299,7 +324,7 @@ namespace {
         color_srv.Get(),
         parallax_srv.Get(),
         state_srv.Get(),
-        nullptr,
+        candidate_srv.Get(),
         nullptr,
         nullptr,
       };
@@ -461,6 +486,115 @@ namespace {
       }
     }
   }
+
+  rgba32f_t lerp_rgba(const rgba32f_t &a, const rgba32f_t &b, const float t) {
+    return {
+      a.r + t * (b.r - a.r),
+      a.g + t * (b.g - a.g),
+      a.b + t * (b.b - a.b),
+      a.a + t * (b.a - a.a),
+    };
+  }
+
+  rgba32f_t sample_linear_clamp(
+    const std::vector<rgba32f_t> &source,
+    const UINT width,
+    const UINT height,
+    const float u,
+    const float v
+  ) {
+    const float x = std::clamp(u, 0.0f, 1.0f) * static_cast<float>(width) - 0.5f;
+    const float y = std::clamp(v, 0.0f, 1.0f) * static_cast<float>(height) - 0.5f;
+    const int x0_unclamped = static_cast<int>(std::floor(x));
+    const int y0_unclamped = static_cast<int>(std::floor(y));
+    const UINT x0 = static_cast<UINT>(std::clamp(x0_unclamped, 0, static_cast<int>(width) - 1));
+    const UINT x1 = static_cast<UINT>(std::clamp(x0_unclamped + 1, 0, static_cast<int>(width) - 1));
+    const UINT y0 = static_cast<UINT>(std::clamp(y0_unclamped, 0, static_cast<int>(height) - 1));
+    const UINT y1 = static_cast<UINT>(std::clamp(y0_unclamped + 1, 0, static_cast<int>(height) - 1));
+    const float tx = x - std::floor(x);
+    const float ty = y - std::floor(y);
+    const auto at = [&](const UINT sx, const UINT sy) -> const rgba32f_t & {
+      return source[static_cast<std::size_t>(sy) * width + sx];
+    };
+    return lerp_rgba(
+      lerp_rgba(at(x0, y0), at(x1, y0), tx),
+      lerp_rgba(at(x0, y1), at(x1, y1), tx),
+      ty
+    );
+  }
+
+  float sample_linear_clamp(
+    const std::vector<float> &source,
+    const UINT width,
+    const UINT height,
+    const float u,
+    const float v
+  ) {
+    const float x = std::clamp(u, 0.0f, 1.0f) * static_cast<float>(width) - 0.5f;
+    const float y = std::clamp(v, 0.0f, 1.0f) * static_cast<float>(height) - 0.5f;
+    const int x0_unclamped = static_cast<int>(std::floor(x));
+    const int y0_unclamped = static_cast<int>(std::floor(y));
+    const UINT x0 = static_cast<UINT>(std::clamp(x0_unclamped, 0, static_cast<int>(width) - 1));
+    const UINT x1 = static_cast<UINT>(std::clamp(x0_unclamped + 1, 0, static_cast<int>(width) - 1));
+    const UINT y0 = static_cast<UINT>(std::clamp(y0_unclamped, 0, static_cast<int>(height) - 1));
+    const UINT y1 = static_cast<UINT>(std::clamp(y0_unclamped + 1, 0, static_cast<int>(height) - 1));
+    const float tx = x - std::floor(x);
+    const float ty = y - std::floor(y);
+    const auto at = [&](const UINT sx, const UINT sy) {
+      return source[static_cast<std::size_t>(sy) * width + sx];
+    };
+    const float top = at(x0, y0) + tx * (at(x1, y0) - at(x0, y0));
+    const float bottom = at(x0, y1) + tx * (at(x1, y1) - at(x0, y1));
+    return top + ty * (bottom - top);
+  }
+
+  rgba32f_t collar_defocus_3x3_reference(
+    const std::vector<rgba32f_t> &source,
+    const UINT width,
+    const UINT height,
+    const float u,
+    const float v
+  ) {
+    constexpr float sqrt_two = 1.4142135623730951f;
+    constexpr float sigma_source_px = 6.0f;
+    constexpr std::array<float, 3> weights {1.0f, 2.0f, 1.0f};
+    const float offset_x = sqrt_two * sigma_source_px / static_cast<float>(width);
+    const float offset_y = sqrt_two * sigma_source_px / static_cast<float>(height);
+    rgba32f_t result {};
+    for (int tap_y = -1; tap_y <= 1; ++tap_y) {
+      for (int tap_x = -1; tap_x <= 1; ++tap_x) {
+        const float weight = weights[tap_x + 1] * weights[tap_y + 1];
+        const auto sample = sample_linear_clamp(
+          source,
+          width,
+          height,
+          u + static_cast<float>(tap_x) * offset_x,
+          v + static_cast<float>(tap_y) * offset_y
+        );
+        result.r += weight * sample.r;
+        result.g += weight * sample.g;
+        result.b += weight * sample.b;
+        result.a += weight * sample.a;
+      }
+    }
+    result.r *= 1.0f / 16.0f;
+    result.g *= 1.0f / 16.0f;
+    result.b *= 1.0f / 16.0f;
+    result.a *= 1.0f / 16.0f;
+    return result;
+  }
+
+  void expect_rgba_near(
+    const rgba32f_t &actual,
+    const rgba32f_t &expected,
+    const float tolerance,
+    const std::string &where
+  ) {
+    EXPECT_NEAR(actual.r, expected.r, tolerance) << where << " r";
+    EXPECT_NEAR(actual.g, expected.g, tolerance) << where << " g";
+    EXPECT_NEAR(actual.b, expected.b, tolerance) << where << " b";
+    EXPECT_NEAR(actual.a, expected.a, tolerance) << where << " a";
+  }
 }  // namespace
 
 TEST(HostSbsV2LiveWarpGpuTest, ExecutesAuthenticatedPixelContract) {
@@ -490,6 +624,7 @@ TEST(HostSbsV2LiveWarpGpuTest, ExecutesAuthenticatedPixelContract) {
     height,
     source.data(),
     std::vector<float>(width, 0.0f),
+    std::vector<float>(width, 0.0f),
     make_live_state(true, true),
     sentinel_clear,
     packed_bytes,
@@ -506,6 +641,7 @@ TEST(HostSbsV2LiveWarpGpuTest, ExecutesAuthenticatedPixelContract) {
     width,
     height,
     source.data(),
+    std::vector<float>(width, 0.10f),
     std::vector<float>(width, 0.10f),
     make_live_state(true, true),
     sentinel_clear,
@@ -530,6 +666,7 @@ TEST(HostSbsV2LiveWarpGpuTest, ExecutesAuthenticatedPixelContract) {
     height,
     source.data(),
     std::vector<float>(width, 0.10f),
+    std::vector<float>(width, -3.0f),
     make_live_state(false, true),
     sentinel_clear,
     packed_bytes,
@@ -546,6 +683,7 @@ TEST(HostSbsV2LiveWarpGpuTest, ExecutesAuthenticatedPixelContract) {
     height,
     source.data(),
     std::vector<float>(width, 0.10f),
+    std::vector<float>(width, -3.0f),
     make_live_state(true, false),
     sentinel_clear,
     packed_bytes,
@@ -564,6 +702,7 @@ TEST(HostSbsV2LiveWarpGpuTest, ExecutesAuthenticatedPixelContract) {
     height,
     source.data(),
     std::vector<float>(width, 0.10f),
+    std::vector<float>(width, -3.0f),
     corrupt_center_state,
     sentinel_clear,
     packed_bytes,
@@ -587,6 +726,7 @@ TEST(HostSbsV2LiveWarpGpuTest, ExecutesAuthenticatedPixelContract) {
     height,
     scrgb_source.data(),
     std::vector<float>(width, 0.0f),
+    std::vector<float>(width, -3.0f),
     make_live_state(true, true),
     sentinel_clear,
     packed_bytes,
@@ -597,6 +737,259 @@ TEST(HostSbsV2LiveWarpGpuTest, ExecutesAuthenticatedPixelContract) {
   for (std::size_t index = 0; index < scrgb_output.size(); ++index) {
     EXPECT_EQ(scrgb_output[index], scrgb_pixel) << "packed pixel " << index;
   }
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, CollarDefocusMatchesExactPositiveSourcePixelPolicy) {
+  constexpr UINT width = 67u;
+  constexpr UINT height = 53u;
+  const std::array<float, 4> sentinel_clear {0.91f, 0.13f, 0.77f, 0.42f};
+  std::string error;
+  live_v2_warp_fixture_t warp;
+  ASSERT_TRUE(warp.initialize(error)) << error;
+
+  // Prime-sized, non-periodic, spatially varying values prevent the source from aliasing with
+  // either kernel spacing. Negative and >1 values also exercise the active linear-scRGB policy.
+  std::vector<rgba32f_t> source(static_cast<std::size_t>(width) * height);
+  for (UINT y = 0; y < height; ++y) {
+    for (UINT x = 0; x < width; ++x) {
+      source[static_cast<std::size_t>(y) * width + x] = {
+        static_cast<float>((17u * x + 29u * y + 3u) % 113u) / 37.0f - 0.8f,
+        static_cast<float>((31u * x + 11u * y + 7u) % 127u) / 41.0f - 0.6f,
+        static_cast<float>((13u * x + 43u * y + 5u) % 109u) / 35.0f - 0.7f,
+        1.0f,
+      };
+    }
+  }
+
+  const std::vector<float> zero_final(source.size(), 0.0f);
+  auto render_candidate = [&](const float deviation_source_px) {
+    std::vector<std::byte> bytes;
+    const std::vector<float> candidate(
+      source.size(),
+      -deviation_source_px / static_cast<float>(width)
+    );
+    EXPECT_TRUE(warp.render(
+      DXGI_FORMAT_R32G32B32A32_FLOAT,
+      sizeof(rgba32f_t),
+      width,
+      height,
+      source.data(),
+      zero_final,
+      candidate,
+      make_live_state(true, true),
+      sentinel_clear,
+      bytes,
+      error
+    )) << error;
+    return unpack_rgba32f(bytes);
+  };
+
+  const auto inactive = render_candidate(0.0f);
+  const auto onset = render_candidate(4.0f);
+  const auto quarter_response = render_candidate(8.0f);
+  const auto active = render_candidate(20.0f);
+  const auto saturated = render_candidate(40.0f);
+  ASSERT_EQ(inactive.size(), source.size() * 2u);
+  ASSERT_EQ(inactive.size(), active.size());
+  ASSERT_EQ(inactive.size(), onset.size());
+  ASSERT_EQ(inactive.size(), quarter_response.size());
+  ASSERT_EQ(active.size(), saturated.size());
+
+  float active_max_difference = 0.0f;
+  // smoothstep(4, 20, 8) = smoothstep(0, 1, 0.25) = 0.15625.
+  constexpr float expected_quarter_response = 0.15625f;
+  for (UINT eye = 0; eye < 2u; ++eye) {
+    for (UINT y = 0; y < height; ++y) {
+      for (UINT x = 0; x < width; ++x) {
+        const std::size_t packed_index =
+          static_cast<std::size_t>(y) * width * 2u + eye * width + x;
+        const std::size_t source_index = static_cast<std::size_t>(y) * width + x;
+        const std::string where =
+          "eye=" + std::to_string(eye) + ", x=" + std::to_string(x) +
+          ", y=" + std::to_string(y);
+        const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
+        const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
+        const auto exact_blur = collar_defocus_3x3_reference(
+          source, width, height, u, v);
+        expect_rgba_near(inactive[packed_index], source[source_index], 3.0e-6f, where);
+        expect_rgba_near(onset[packed_index], inactive[packed_index], 3.0e-6f, where);
+        // D3D11 WARP quantizes linear-filter coordinates more coarsely than the scalar CPU
+        // reference. The observed error on this deliberately high-frequency fixture stays below
+        // 6e-4; 1e-3 validates the intended kernel while still detecting material policy changes.
+        expect_rgba_near(active[packed_index], exact_blur, 1.0e-3f, where);
+        expect_rgba_near(saturated[packed_index], exact_blur, 1.0e-3f, where);
+        expect_rgba_near(
+          quarter_response[packed_index],
+          lerp_rgba(inactive[packed_index], exact_blur, expected_quarter_response),
+          1.0e-3f,
+          where
+        );
+        active_max_difference = std::max(
+          active_max_difference,
+          std::abs(active[packed_index].r - inactive[packed_index].r)
+        );
+      }
+    }
+  }
+  EXPECT_GT(active_max_difference, 0.05f);
+
+  // A negative final-minus-candidate deviation is foreground compression and remains on the
+  // exact one-tap path even when its magnitude is above the positive collar threshold.
+  std::vector<std::byte> negative_bytes;
+  ASSERT_TRUE(warp.render(
+    DXGI_FORMAT_R32G32B32A32_FLOAT,
+    sizeof(rgba32f_t),
+    width,
+    height,
+    source.data(),
+    zero_final,
+    std::vector<float>(source.size(), 20.0f / static_cast<float>(width)),
+    make_live_state(true, true),
+    sentinel_clear,
+    negative_bytes,
+    error
+  )) << error;
+  const auto negative = unpack_rgba32f(negative_bytes);
+  ASSERT_EQ(negative.size(), inactive.size());
+  for (std::size_t index = 0; index < inactive.size(); ++index) {
+    expect_rgba_near(negative[index], inactive[index], 3.0e-6f, "negative mask");
+  }
+
+  // Validate mask/filter sampling after a real, nonzero inverse warp. A constant one-pixel
+  // parallax has an exact inverse: left samples x-1 and right samples x+1.
+  const float one_pixel_parallax = 1.0f / static_cast<float>(width);
+  std::vector<std::byte> shifted_bytes;
+  ASSERT_TRUE(warp.render(
+    DXGI_FORMAT_R32G32B32A32_FLOAT,
+    sizeof(rgba32f_t),
+    width,
+    height,
+    source.data(),
+    std::vector<float>(source.size(), one_pixel_parallax),
+    std::vector<float>(
+      source.size(), one_pixel_parallax - 20.0f / static_cast<float>(width)),
+    make_live_state(true, true),
+    sentinel_clear,
+    shifted_bytes,
+    error
+  )) << error;
+  const auto shifted = unpack_rgba32f(shifted_bytes);
+  ASSERT_EQ(shifted.size(), inactive.size());
+  for (UINT eye = 0; eye < 2u; ++eye) {
+    const float eye_sign = eye == 0u ? -1.0f : 1.0f;
+    for (UINT y = 0; y < height; ++y) {
+      for (UINT x = 0; x < width; ++x) {
+        const std::size_t packed_index =
+          static_cast<std::size_t>(y) * width * 2u + eye * width + x;
+        const float u = std::clamp(
+          (static_cast<float>(x) + 0.5f) / static_cast<float>(width) +
+            eye_sign * one_pixel_parallax,
+          0.0f,
+          1.0f
+        );
+        const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
+        expect_rgba_near(
+          shifted[packed_index],
+          collar_defocus_3x3_reference(source, width, height, u, v),
+          1.5e-3f,
+          "nonzero inverse warp"
+        );
+      }
+    }
+  }
+
+  // Production binds the depth fields at the smaller DAV2 resolution. Exercise nonconstant
+  // geometry and a spatially varying candidate delta so coordinate normalization, bilinear depth
+  // sampling, the 12-step inverse, and source-pixel mask scaling are all independently checked.
+  constexpr UINT depth_width = 19u;
+  constexpr UINT depth_height = 13u;
+  std::vector<rgba32f_t> smooth_source(source.size());
+  for (UINT y = 0; y < height; ++y) {
+    for (UINT x = 0; x < width; ++x) {
+      const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
+      const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
+      smooth_source[static_cast<std::size_t>(y) * width + x] = {
+        0.15f + 0.55f * u + 0.12f * std::sin(12.5663706f * u),
+        0.20f + 0.45f * v + 0.10f * std::cos(9.4247780f * v),
+        0.10f + 0.30f * u + 0.25f * v +
+          0.08f * std::sin(6.2831853f * (u + v)),
+        1.0f,
+      };
+    }
+  }
+  std::vector<float> final_depth(static_cast<std::size_t>(depth_width) * depth_height);
+  std::vector<float> candidate_depth(final_depth.size());
+  for (UINT y = 0; y < depth_height; ++y) {
+    for (UINT x = 0; x < depth_width; ++x) {
+      const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(depth_width);
+      const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(depth_height);
+      const std::size_t index = static_cast<std::size_t>(y) * depth_width + x;
+      final_depth[index] = 0.008f * (u - 0.5f) + 0.003f * (v - 0.5f);
+      const float deviation_source_px = 2.0f + 24.0f * u * (1.0f - 0.35f * v);
+      candidate_depth[index] =
+        final_depth[index] - deviation_source_px / static_cast<float>(width);
+    }
+  }
+  std::vector<std::byte> production_ratio_bytes;
+  ASSERT_TRUE(warp.render(
+    DXGI_FORMAT_R32G32B32A32_FLOAT,
+    sizeof(rgba32f_t),
+    width,
+    height,
+    smooth_source.data(),
+    final_depth,
+    candidate_depth,
+    make_live_state(true, true),
+    sentinel_clear,
+    production_ratio_bytes,
+    error,
+    depth_width,
+    depth_height
+  )) << error;
+  const auto production_ratio = unpack_rgba32f(production_ratio_bytes);
+  ASSERT_EQ(production_ratio.size(), inactive.size());
+  float production_max_defocus = 0.0f;
+  for (UINT eye = 0; eye < 2u; ++eye) {
+    const float eye_sign = eye == 0u ? -1.0f : 1.0f;
+    for (UINT y = 0; y < height; ++y) {
+      for (UINT x = 0; x < width; ++x) {
+        const std::size_t packed_index =
+          static_cast<std::size_t>(y) * width * 2u + eye * width + x;
+        const float destination_u =
+          (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
+        const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
+        float source_u = destination_u;
+        for (int iteration = 0; iteration < 12; ++iteration) {
+          source_u = destination_u + eye_sign * sample_linear_clamp(
+            final_depth, depth_width, depth_height, source_u, v);
+        }
+        source_u = std::clamp(source_u, 0.0f, 1.0f);
+        const float final_sample = sample_linear_clamp(
+          final_depth, depth_width, depth_height, source_u, v);
+        const float candidate_sample = sample_linear_clamp(
+          candidate_depth, depth_width, depth_height, source_u, v);
+        const float deviation_source_px =
+          std::max(final_sample - candidate_sample, 0.0f) * static_cast<float>(width);
+        const float response_t = std::clamp((deviation_source_px - 4.0f) / 16.0f, 0.0f, 1.0f);
+        const float response = response_t * response_t * (3.0f - 2.0f * response_t);
+        const auto center = sample_linear_clamp(
+          smooth_source, width, height, source_u, v);
+        const auto blur = collar_defocus_3x3_reference(
+          smooth_source, width, height, source_u, v);
+        production_max_defocus = std::max(
+          production_max_defocus,
+          std::abs(blur.r - center.r)
+        );
+        expect_rgba_near(
+          production_ratio[packed_index],
+          lerp_rgba(center, blur, response),
+          8.0e-4f,
+          "production depth/color ratio"
+        );
+      }
+    }
+  }
+  EXPECT_GT(production_max_defocus, 0.02f);
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, IndependentFlatShaderIgnoresV2Geometry) {
@@ -624,6 +1017,7 @@ TEST(HostSbsV2LiveWarpGpuTest, IndependentFlatShaderIgnoresV2Geometry) {
     height,
     source.data(),
     std::vector<float>(width, 0.4f),
+    std::vector<float>(width, -3.0f),
     make_live_state(true, true),
     sentinel_clear,
     packed_bytes,

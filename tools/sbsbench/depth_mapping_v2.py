@@ -30,6 +30,14 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
 DIRECT_PARALLAX_SOURCE_U_LIMIT = V2_DEFAULTS.direct_container_limit
 
 
+def vertical_share_coefficients(majorant_share: float) -> Tuple[float, float]:
+    """Return the exact float32 coefficients consumed by the HLSL vertical blend."""
+
+    majorant_f32 = np.float32(majorant_share)
+    minorant_f32 = np.float32(np.float32(1.0) - majorant_f32)
+    return float(majorant_f32), float(minorant_f32)
+
+
 @dataclass(frozen=True)
 class MappingV2Config:
     raw_coordinate_scale: float = V2_MODEL_CALIBRATIONS[0].raw_coordinate_scale
@@ -44,6 +52,7 @@ class MappingV2Config:
     gain_per_pop: float = V2_DEFAULTS.gain_per_pop
     max_horizontal_slope: float = V2_DEFAULTS.max_horizontal_slope
     max_vertical_shear: float = V2_DEFAULTS.max_vertical_shear
+    vertical_majorant_share: float = V2_DEFAULTS.vertical_majorant_share
     direct_container_limit: float = V2_DEFAULTS.direct_container_limit
 
     @property
@@ -101,15 +110,17 @@ class MappingV2Diagnostics:
     requested_max: float
     output_min: float
     output_max: float
-    vertical_limiter_raised_fraction: float
-    vertical_limiter_max_raise: float
-    vertical_limiter_illegal_lower_count: int
+    vertical_conditioned_raised_fraction: float
+    vertical_conditioned_max_raise: float
+    vertical_conditioned_lowered_fraction: float
+    vertical_conditioned_max_lower: float
     horizontal_limiter_raised_fraction: float
     horizontal_limiter_max_raise: float
     horizontal_limiter_illegal_lower_count: int
-    limiter_raised_fraction: float
-    limiter_max_raise: float
-    limiter_illegal_lower_count: int
+    conditioner_raised_fraction: float
+    conditioner_max_raise: float
+    conditioner_lowered_fraction: float
+    conditioner_max_lower: float
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -161,6 +172,13 @@ def _validate_config(config: MappingV2Config) -> None:
     if config.max_horizontal_slope >= 1.0:
         raise ValueError("max_horizontal_slope must be below 1 for a no-fold forward map")
     _finite_positive("max_vertical_shear", config.max_vertical_shear)
+    if not math.isfinite(config.vertical_majorant_share):
+        raise ValueError("vertical_majorant_share must lie strictly between zero and one")
+    majorant_share, minorant_share = vertical_share_coefficients(
+        config.vertical_majorant_share)
+    if majorant_share <= 0.0 or minorant_share <= 0.0:
+        raise ValueError(
+            "vertical_majorant_share and its complement must remain positive in float32")
     _finite_positive("direct_container_limit", config.direct_container_limit)
 
 
@@ -341,6 +359,21 @@ def vertical_lipschitz_majorant(field: np.ndarray, max_step: float) -> np.ndarra
     return limited
 
 
+def vertical_lipschitz_minorant(field: np.ndarray, max_step: float) -> np.ndarray:
+    """Greatest column-wise lower envelope under the authenticated vertical-shear bound."""
+
+    values = _require_raw_depth(field)
+    step = _finite_positive("max_step", max_step)
+    limited = values.copy()
+    for y in range(1, limited.shape[0]):
+        limited[y, :] = np.minimum(limited[y, :], limited[y - 1, :] + step)
+    for y in range(limited.shape[0] - 2, -1, -1):
+        limited[y, :] = np.minimum(limited[y, :], limited[y + 1, :] + step)
+    if not np.isfinite(limited).all():
+        raise ValueError("vertical lower envelope produced a non-finite value")
+    return limited
+
+
 def _max_adjacent_step(field: np.ndarray) -> float:
     return 0.0 if field.shape[1] < 2 else float(np.max(np.abs(np.diff(field, axis=1))))
 
@@ -434,12 +467,14 @@ def generate_depth_mapping_v2(
             estimated_collar_texels_before_container=0,
             estimated_collar_texels_after_container=0,
             requested_min=0.0, requested_max=0.0, output_min=0.0, output_max=0.0,
-            vertical_limiter_raised_fraction=0.0, vertical_limiter_max_raise=0.0,
-            vertical_limiter_illegal_lower_count=0,
+            vertical_conditioned_raised_fraction=0.0,
+            vertical_conditioned_max_raise=0.0,
+            vertical_conditioned_lowered_fraction=0.0,
+            vertical_conditioned_max_lower=0.0,
             horizontal_limiter_raised_fraction=0.0, horizontal_limiter_max_raise=0.0,
             horizontal_limiter_illegal_lower_count=0,
-            limiter_raised_fraction=0.0, limiter_max_raise=0.0,
-            limiter_illegal_lower_count=0,
+            conditioner_raised_fraction=0.0, conditioner_max_raise=0.0,
+            conditioner_lowered_fraction=0.0, conditioner_max_lower=0.0,
         )
         return MappingV2Result(
             zero.copy(), zero.copy(), zero.copy(), zero.copy(), zero, diagnostics)
@@ -458,7 +493,17 @@ def generate_depth_mapping_v2(
     container_scale, _ = container_scale_for_curve_range(
         float(np.min(base_curve_relative)), float(np.max(base_curve_relative)), config)
     conditioned = requested * container_scale
-    vertical_limited = vertical_lipschitz_majorant(conditioned, max_vertical_step)
+    vertical_majorant = vertical_lipschitz_majorant(conditioned, max_vertical_step)
+    vertical_minorant = vertical_lipschitz_minorant(conditioned, max_vertical_step)
+    # The contract is consumed by a float32 HLSL shader. Canonicalize both coefficients to the
+    # exact values used there rather than rejecting ordinary decimal policy values such as 0.7.
+    # The surrounding NumPy path remains a float64 semantic oracle; the executable GPU test owns
+    # bit-exact per-operation parity.
+    majorant_share, minorant_share = vertical_share_coefficients(
+        config.vertical_majorant_share)
+    vertical_limited = (
+        majorant_share * vertical_majorant +
+        minorant_share * vertical_minorant)
     limited = horizontal_lipschitz_majorant(vertical_limited, max_step)
     tolerance = max(1.0e-12, max(max_step, max_vertical_step) * 1.0e-9)
     if _max_adjacent_vertical_step(vertical_limited) > max_vertical_step + tolerance:
@@ -470,11 +515,11 @@ def generate_depth_mapping_v2(
     vertical_lowered = vertical_limited < conditioned - tolerance
     horizontal_lowered = limited < vertical_limited - tolerance
     lowered = limited < conditioned - tolerance
-    if np.any(vertical_lowered) or np.any(horizontal_lowered) or np.any(lowered):
-        raise RuntimeError("near-preserving two-axis limiter lowered input parallax")
-    vertical_raise = vertical_limited - conditioned
+    if np.any(horizontal_lowered):
+        raise RuntimeError("row majorant lowered the vertically conditioned field")
+    vertical_correction = vertical_limited - conditioned
     horizontal_raise = limited - vertical_limited
-    raised = limited - conditioned
+    correction = limited - conditioned
     p01, p50, p99 = _canonical_quantiles(canonical)
     diagnostics = MappingV2Diagnostics(
         shape=raw.shape,
@@ -512,15 +557,18 @@ def generate_depth_mapping_v2(
             _max_adjacent_step(conditioned), max_step),
         requested_min=float(np.min(requested)), requested_max=float(np.max(requested)),
         output_min=float(np.min(limited)), output_max=float(np.max(limited)),
-        vertical_limiter_raised_fraction=float(np.mean(vertical_raise > tolerance)),
-        vertical_limiter_max_raise=float(np.max(vertical_raise)),
-        vertical_limiter_illegal_lower_count=int(np.count_nonzero(vertical_lowered)),
+        vertical_conditioned_raised_fraction=float(
+            np.mean(vertical_correction > tolerance)),
+        vertical_conditioned_max_raise=max(0.0, float(np.max(vertical_correction))),
+        vertical_conditioned_lowered_fraction=float(np.mean(vertical_lowered)),
+        vertical_conditioned_max_lower=max(0.0, float(np.max(-vertical_correction))),
         horizontal_limiter_raised_fraction=float(np.mean(horizontal_raise > tolerance)),
         horizontal_limiter_max_raise=float(np.max(horizontal_raise)),
         horizontal_limiter_illegal_lower_count=int(np.count_nonzero(horizontal_lowered)),
-        limiter_raised_fraction=float(np.mean(raised > tolerance)),
-        limiter_max_raise=float(np.max(raised)),
-        limiter_illegal_lower_count=int(np.count_nonzero(lowered)),
+        conditioner_raised_fraction=float(np.mean(correction > tolerance)),
+        conditioner_max_raise=max(0.0, float(np.max(correction))),
+        conditioner_lowered_fraction=float(np.mean(lowered)),
+        conditioner_max_lower=max(0.0, float(np.max(-correction))),
     )
     outputs = tuple(field.astype(np.float32) for field in (
         canonical, requested, conditioned, vertical_limited, limited))
@@ -547,4 +595,5 @@ __all__ = [
     "horizontal_lipschitz_majorant",
     "near_tail_count_and_coverage",
     "vertical_lipschitz_majorant",
+    "vertical_lipschitz_minorant",
 ]

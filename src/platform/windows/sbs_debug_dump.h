@@ -37,8 +37,9 @@ namespace platf::sbs_debug {
    * anisotropically slope-limited final source-U parallax consumed by production V2. The
    * adaptive_state/depth_frame_state pair is optional comparison-only evidence from the retained
    * scene-cut bridge; it never authorizes a dump or controls live geometry. The immutable V2
-   * candidate first produces shadow_vertical_majorant (the exact shear-2 column majorant), then
-   * the row majorant produces shadow_final_parallax. shadow_coordinate is allocated and written
+   * candidate first produces shadow_vertical_majorant (the exact upper-envelope diagnostic) and
+   * shadow_vertical_conditioned (the fixed 75/25 vertical share), then the row majorant produces
+   * shadow_final_parallax. shadow_coordinate is allocated and written
    * only for this explicit dump; it is never a live resource. V2 supplies an exact fixed-point
    * inverse warp_map when its matching dump-only
    * shader is available. V2 has no internal owner/fill mask; warp_mask attributes only inverse
@@ -58,6 +59,7 @@ namespace platf::sbs_debug {
     ID3D11ShaderResourceView *shadow_coordinate = nullptr;
     ID3D11ShaderResourceView *shadow_candidate_parallax = nullptr;
     ID3D11ShaderResourceView *shadow_vertical_majorant = nullptr;
+    ID3D11ShaderResourceView *shadow_vertical_conditioned = nullptr;
     ID3D11ShaderResourceView *shadow_final_parallax = nullptr;
     ID3D11ShaderResourceView *shadow_state = nullptr;
     ID3D11ShaderResourceView *shadow_frame_stats = nullptr;

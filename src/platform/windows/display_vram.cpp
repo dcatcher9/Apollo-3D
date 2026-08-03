@@ -857,8 +857,11 @@ namespace platf::dxgi {
             host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2;
           const bool v2_renderer_failed_flat =
             host_sbs_renderer == models::host_sbs_renderer_e::failed_flat;
+          const bool v2_live_resources_complete =
+            est.shadow_final_parallax && est.shadow_candidate_parallax && est.shadow_state;
           const bool v2_live_warp_selected =
-            v2_renderer_selected && sbs_reprojection_v2_live_ps;
+            v2_renderer_selected && sbs_reprojection_v2_live_ps &&
+            v2_live_resources_complete;
           ID3D11ShaderResourceView *selected_parallax_field =
             v2_live_warp_selected ? est.shadow_final_parallax.Get() : nullptr;
           const bool timing_has_depth_warp =
@@ -915,7 +918,7 @@ namespace platf::dxgi {
               render_input_srv,
               warp_depth,
               v2_live_warp_selected ? est.shadow_state.Get() : nullptr,
-              nullptr,
+              v2_live_warp_selected ? est.shadow_candidate_parallax.Get() : nullptr,
               nullptr,
               nullptr,
             };
@@ -1044,6 +1047,8 @@ namespace platf::dxgi {
                 est.shadow_candidate_parallax.Get();
               dump_frame.shadow_vertical_majorant =
                 est.shadow_vertical_majorant.Get();
+              dump_frame.shadow_vertical_conditioned =
+                est.shadow_vertical_conditioned.Get();
               dump_frame.shadow_final_parallax = est.shadow_final_parallax.Get();
               dump_frame.shadow_state = est.shadow_state.Get();
               dump_frame.shadow_frame_stats = est.shadow_frame_stats.Get();

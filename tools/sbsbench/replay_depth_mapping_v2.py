@@ -12,10 +12,10 @@ the live frame. For an exact captured-state check, use the dump's authenticated
 ``shadow_final_parallax`` field as direct-final input; candidate and canonical fields are
 diagnostic evidence only. HDR color fidelity is not claimed.
 
-The calibrated spatial projection is composed in a fixed order: first the column-wise vertical
-near-preserving majorant, then the row-wise horizontal near-preserving majorant. Vertical shear
-is expressed as horizontal disparity pixels per source-image vertical pixel and assumes the
-calibrated DAV2 grid preserves the source aspect ratio.
+The calibrated spatial projection is composed in a fixed order: compute the column-wise upper and
+lower envelopes, form their authenticated 75/25 orientation-selective share, then apply one
+row-wise horizontal majorant. Vertical shear is expressed as horizontal disparity pixels per
+source-image vertical pixel and assumes the calibrated DAV2 grid preserves the source aspect ratio.
 """
 
 from __future__ import annotations
@@ -248,9 +248,16 @@ def _mapping_metrics(result) -> Dict[str, Any]:
         }
 
     near = result.canonical.astype(np.float64) >= 0.5
-    changed = np.abs(post - pre) > 1.0e-8
+    delta = post - pre
+    changed = np.abs(delta) > 1.0e-8
+    raised = delta > 1.0e-8
+    lowered = delta < -1.0e-8
     metrics: Dict[str, Any] = {
-        "schema": 2,
+        "schema": 3,
+        "post_vertical_stage": (
+            "fixed vertical upper/lower envelope share; may raise or lower candidate"),
+        "post_limiter_stage": (
+            "row majorant of post_vertical_stage; may raise or lower original candidate"),
         "slope_units": "one-eye parallax derivative per source-U",
         "vertical_shear_units": (
             "horizontal source-image disparity pixels per vertical source-image pixel; "
@@ -267,6 +274,10 @@ def _mapping_metrics(result) -> Dict[str, Any]:
             np.mean(post_vertical_shear > result.diagnostics.max_vertical_shear + 1.0e-6)
         ) if post_vertical_shear.size else 0.0,
         "changed_fraction": float(np.mean(changed)),
+        "raised_fraction": float(np.mean(raised)),
+        "lowered_fraction": float(np.mean(lowered)),
+        "maximum_raise_source_u": float(np.max(np.maximum(delta, 0.0))),
+        "maximum_lower_source_u": float(np.max(np.maximum(-delta, 0.0))),
         "near_changed_fraction": float(np.mean(changed[near])) if np.any(near) else 0.0,
     }
     if np.count_nonzero(near) >= 2:
@@ -421,7 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         result.parallax.astype("<f4").tofile(output / "conditioned_parallax.f32")
 
         report = {
-            "schema": 7,
+            "schema": 8,
             "experiment": "depth-mapping-v2-raw-recomputed-direct-parallax-experiment",
             "captured_state_replay": False,
             "captured_state_limitation": (
@@ -454,6 +465,15 @@ def main(argv: list[str] | None = None) -> int:
                 "real D3D warp, but not captured-state or HDR color-fidelity replay"
             ),
             "config": vars(config),
+            "geometry_stages": {
+                "pre_limiter_parallax.f32": (
+                    "immutable signed candidate before spatial conditioning"),
+                "post_vertical_parallax.f32": (
+                    "fixed vertical upper/lower envelope share; may raise or lower candidate"),
+                "conditioned_parallax.f32": (
+                    "row majorant of the vertical share; live-equivalent position field and may "
+                    "raise or lower the original candidate"),
+            },
             "diagnostics": result.diagnostics.to_dict(),
             "mapping_metrics": _mapping_metrics(result),
         }

@@ -1,7 +1,8 @@
 # Host SBS Depth-System Rethink
 
-Status: design record for the shipped Host SBS V2 cutover. V2 is the sole live Host SBS renderer;
-Client SBS and offline conversion remain unchanged.
+Status: design record for the shipped Host SBS V2 cutover plus the unqualified schema-15 C75/collar
+working-tree trial. V2 is the sole live Host SBS renderer; the schema-15 overlay still requires
+headset and 4K90 qualification. Client SBS and offline conversion remain unchanged.
 
 The implementation details and exact equations are in
 [host-sbs-depth-coordinate-v2.md](host-sbs-depth-coordinate-v2.md).
@@ -22,8 +23,9 @@ fixed authenticated raw scale
   + one scene-latched convergence value
   + one requested pop
   + one frame-local hard container
-  + one near-preserving anisotropic 2D slope constraint
+  + one orientation-selective anisotropic slope conditioner
   + one unique contractive inverse
+  + one geometry-derived color-only collar defocus
 ```
 
 Every adaptation must name the constraint it owns. Ambiguous content is allowed to remain
@@ -47,9 +49,10 @@ unadapted rather than introducing another classifier or feedback loop.
 | Temporal depth EMA | Do not port initially | Add temporal filtering only after raw-coordinate flicker is measured. |
 | Cut pulse/generation | Keep behind a cut-only path | V2 consumes only one scene-reset input. Dedicated evidence/resolve shaders publish it without compiling or dispatching legacy subject, adaptive-pop, zero-plane, or warp analysis. |
 | Old depth with current color | Remove | It breaks frame attribution. |
-| Immutable candidate field | Keep as diagnostic | It records requested geometry before local safety intervention. |
+| Immutable candidate field | Keep as evidence and live color-mask input | It records requested geometry before local safety intervention and drives only the experimental positive-correction collar color filter; it never selects geometry. |
 | Canonical coordinate | Keep as diagnostic | It helps explain model output but does not select visibility. |
-| Least near-preserving anisotropic 2D majorant | Keep as live position authority | A vertical shear-2 majorant conditions one-row silhouette onsets, then a slope-0.5 row majorant retains requested near disparity, keeps both eye maps invertible, and assigns the unavoidable collar to less-important background. |
+| Orientation-selective conditioned field | Keep as live position authority | A fixed 75/25 share of vertical upper/lower shear-2 envelopes reduces top-edge collar while preserving foreground; a pure slope-0.5 row majorant avoids lateral silhouette notches and keeps both eye maps invertible. |
+| Positive-correction collar defocus | Experimental live trial | The positive final-minus-candidate field identifies raised geometry without another detector. A bounded 4/20/6 source-pixel color filter softens rivalrous lines while leaving geometry and negative foreground correction unchanged. Controlled A/B requires separately authenticated builds; there is no runtime toggle. |
 | Forward owner, multi-root visibility, synthetic fill | Remove | The slope-limited final field has a unique inverse; these mechanisms caused the measured bands. |
 | Adaptive ROI | Keep removed | It adds inference, tracking, shape churn, and boundary policy. |
 | Area/HDR-aware model preprocessing | Keep | It preserves input signal and belongs to authenticated model provenance. |
@@ -69,7 +72,7 @@ candidate p = requested_gain * container * (curve - convergence_curve)
 currently zero. This separation is structural: a future zero-plane allocator may translate the
 curve once per scene, but it may not rescale or reshape depth.
 
-Schema 14 authenticates the standard tensor family: `770x434`, `1022x434`, `1036x434`,
+Schema 15 authenticates the standard tensor family: `770x434`, `1022x434`, `1036x434`,
 `434x770`, `434x1022`, and `434x1036`. DAV2 Base, custom models, and custom tensor shapes have no
 live calibration and fail flat rather than borrowing the Small-model scale.
 
@@ -80,23 +83,24 @@ source-time semantics before it could own screen-plane motion.
 ## Local cliff policy
 
 After the exact source-U container, the candidate can still contain a steep silhouette cliff. The
-live field is a vertical-first separable majorant:
+live field uses an orientation-selective vertical share followed by a pure row majorant:
 
 ```text
-v >= p
-|v(x,y+1) - v(x,y)| <= 2.0 / depth_width
-q >= v
+V+ = vertical_majorant(p)
+V- = vertical_minorant(p)
+c  = 0.75 V+ + 0.25 V-
+q  = horizontal_majorant(c)
 |q(x+1,y) - q(x,y)| <= 0.5 / depth_width
+|q(x,y+1) - q(x,y)| <= 2.0 / depth_width
 ```
 
-Top/bottom scans compute the exact shear-2 column majorant `v`; left/right scans then compute the
-exact row majorant `q`. Both are one-sided, so `q >= v >= p` and requested near disparity is never
-lowered. The row scan preserves the vertical bound, making `q` the least anisotropic 2D majorant
-under the selected separable metric. The passes raise only the minimum low/background collar
-needed to bound crown shear and keep both eye maps one-to-one. That visible-background strain is
-the deliberate no-hallucination trade: a rigid foreground shift exposes source pixels that do not
-exist in a monocular frame. The rejected forward-owner experiments kept that rigid cliff and then
-copied hair into their synthetic fill, producing the duplicated silhouette.
+Top/bottom scans compute exact shear-2 upper and lower envelopes; their constant convex share keeps
+the vertical bound and may raise background or lower only the top foreground rows. Left/right
+scans then compute the exact row majorant `q` of that share. Keeping the horizontal pass one-sided
+avoids the lateral hair/shoulder notch measured with a global 2D envelope blend. The passes keep
+both eye maps one-to-one while accepting a bounded background/foreground compromise at top edges.
+The rejected forward-owner experiments instead copied hair into synthetic fill, producing the
+duplicated silhouette.
 
 The final slope is below one, so each eye has a unique inverse. Live and exact dump mapping use 12
 fixed-point iterations. Canonical coordinate, multiple-root selection, forward coverage, owner
@@ -109,7 +113,7 @@ samples beyond the finite source boundary that live rendering clamps to the near
 
 - Input: one user-requested `cfg.pop_strength`.
 - Global reduction: only the exact current-frame 4% source-U container.
-- Local response: the near-preserving majorant enforces the slope contract.
+- Local response: the orientation-selective conditioner enforces the slope contract.
 - Forbidden: content boost, edge-density feedback, permanent shot minimum, or stacked scale
   normalizers.
 
@@ -172,7 +176,7 @@ container scale are current-dispatch values, not controller history.
 
 | Runtime | Shared concept | Runtime-specific owner |
 |---|---|---|
-| Host live V2 | sign, curve, separate convergence, container, final majorant | first usable acquisition, cut reset, no lookahead |
+| Host live V2 | sign, curve, separate convergence, container, final conditioned row-majorant | first usable acquisition, cut reset, no lookahead |
 | Host offline | potential future coordinate semantics | finalized scene boundary, lookahead, encoder and HDR policy |
 | Client DAV2 | semantic interface only | Android model bytes, preprocessing, tensor shape, renderer and display calibration |
 | Client MiDaS | semantic interface only | independent sign, scale, curve, validity, slope, and performance calibration |
@@ -183,17 +187,21 @@ remain unchanged by the Host live cutover.
 ## Performance shape
 
 The producer uses moments reduction, frame resolve, an acquisition/cut-gated group-reduced
-near-tail count, state resolve, coordinate/candidate mapping, one column-wise vertical-majorant
+near-tail count, state resolve, coordinate/candidate mapping, one column-wise upper/lower/share
 dispatch, and one row-wise majorant dispatch. On ordinary frames the count shader exits from a
 GPU-uniform state/cut gate before tensor reads or barriers. When needed, the counter adds once per
 threadgroup and is consumed/cleared by the same-frame state resolve. Columns and rows
 are serial only inside their owning GPU threads; independent columns/rows execute in parallel and
 no CPU readback or GPU/CPU synchronization is introduced.
 
-The renderer samples the final field through a 12-step fixed-point inverse. It does not allocate,
-clear, dispatch, or bind a full-resolution owner texture, and it performs
-no bounded hole search. Exact dump mapping compiles from the same renderer closure; the mask
-entrypoint writes zero.
+The renderer samples the final field through a 12-step fixed-point inverse. It then derives a
+positive correction mask from the matched candidate at the converged source coordinate. Below four
+source pixels it keeps the exact one-tap color path; by 20 pixels it blends fully to a fixed sigma-6
+3x3 binomial approximation with taps at `sqrt(2) * sigma`. This adds no dispatch, owner texture,
+readback, or geometry change. Every warped pixel pays two mask-depth samples; active pixels add
+eight color samples over the ordinary one-tap path, so masked cost and sharp-background appearance
+require separate qualification. Exact dump
+mapping remains geometry-only; the ordinary evaluator does not exercise this color filter.
 
 The production parallax interval measures exactly the seven V2 compute passes. The dedicated
 cut-only analysis runs before that interval and must be reported separately when measuring live
@@ -201,17 +209,18 @@ detector overhead. Historical shadow-mode or legacy-analysis totals are not prod
 
 ## Provenance and evidence
 
-Depth-coordinate contract schema 14 binds algorithm constants, model identity, preprocessing
+Depth-coordinate contract schema 15 binds algorithm constants, model identity, preprocessing
 closure, the six standard tensor shapes, and the ordered seven-shader producer closure. The live renderer has its own
-authenticated main/mapping/mask closure. New Dump 3D manifest schema 7 records final parallax as
-position authority and candidate/canonical/vertical-majorant fields as diagnostics.
+authenticated main/mapping/mask closure. New Dump 3D manifest schema 8 records final parallax as
+position authority, the vertical upper/share fields, candidate/canonical diagnostics, and the
+collar-defocus policy.
 
 The original fullscreen and windowed hair dumps use depth-coordinate schema 7. They remain useful
-historical input witnesses for exact replay but cannot authenticate schema-14 output. The prior
+historical input witnesses for exact replay but cannot authenticate schema-15 output. The prior
 slope-0.5 row-majorant replay removes the duplicated hair and hair/body step while never lowering
 the candidate. It raises 3.837% of fullscreen texels and 2.152% of windowed texels; its residual
-fullscreen crown bending motivated the selected vertical shear-2 pass. Fresh schema-14,
-manifest-schema-7 live dumps remain required.
+fullscreen crown bending motivated the selected orientation-selective pass. Fresh schema-15,
+manifest-schema-8 live dumps remain required.
 
 ## Production cutover and continuing gates
 
@@ -221,12 +230,12 @@ tensor shapes and it does not migrate Client SBS or offline conversion.
 
 Continuing release evidence should:
 
-1. Generate fresh schema-14 native and manifest-schema-7 live evidence with exact producer and renderer closures.
+1. Generate fresh schema-15 native and manifest-schema-8 live evidence with exact producer and renderer closures.
 2. Replay core and extended clips at the chosen fixed scale and pop values.
 3. Inspect near-hair cliffs, thin structures, flat pages, HDR, cuts, flashes, fast motion, invalid
    inference, and long browser/video sessions.
-4. Report container attenuation, candidate-to-final raising, near-core retention, final slope,
-   fixed-point residual, disparity bounds, and timing independently.
+4. Report container attenuation, candidate-to-final raising and lowering, near-core retention,
+   final slope, fixed-point residual, disparity bounds, collar-filter support, and timing independently.
 5. Prove V2 takes `pop_strength` literally, ignores legacy adaptive geometry controls, and changes
    its near shoulder only on acquisition or a confirmed cut.
 6. Keep the extracted cut-only epoch contract and its persistent-motion tests authenticated as the detector evolves.

@@ -46,7 +46,7 @@ namespace sbs_bench {
       "depth-coordinate-v2-experimental-shadow-gpu-sequence-v5";
     constexpr float direct_container_limit = v2::direct_container_limit;
 
-    const std::array<const char *, 38> trace_field_names {{
+    const std::array<const char *, 41> trace_field_names {{
       "frame_id",
       "input_source_frame_id",
       "rendered_source_frame_id",
@@ -78,12 +78,15 @@ namespace sbs_bench {
       "vertical_majorant_raised_fraction",
       "vertical_majorant_max_raise_source_u",
       "final_max_abs_source_u",
-      "limiter_raised_fraction",
-      "limiter_max_raise_source_u",
+      "conditioner_raised_fraction",
+      "conditioner_max_raise_source_u",
+      "conditioner_lowered_fraction",
+      "conditioner_max_lower_source_u",
       "final_horizontal_slope_max",
       "final_vertical_shear_max",
       "order_sha256",
       "vertical_majorant_sha256",
+      "vertical_conditioned_sha256",
       "parallax_sha256",
     }};
 
@@ -429,6 +432,9 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11Texture2D> vertical_majorant_texture;
     ComPtr<ID3D11ShaderResourceView> vertical_majorant_srv;
     ComPtr<ID3D11UnorderedAccessView> vertical_majorant_uav;
+    ComPtr<ID3D11Texture2D> vertical_conditioned_texture;
+    ComPtr<ID3D11ShaderResourceView> vertical_conditioned_srv;
+    ComPtr<ID3D11UnorderedAccessView> vertical_conditioned_uav;
     ComPtr<ID3D11Texture2D> final_texture;
     ComPtr<ID3D11ShaderResourceView> final_srv;
     ComPtr<ID3D11UnorderedAccessView> final_uav;
@@ -574,12 +580,12 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
 
       mapping_config = root["mapping_config"];
-      const std::array<const char *, 13> mapping_keys {{
+      const std::array<const char *, 14> mapping_keys {{
         "raw_coordinate_scale", "collapse_abs_epsilon", "far_tau", "near_log_tau",
         "near_tail_probe_u", "near_tail_coverage_low", "near_tail_coverage_high",
         "near_log_tau_dense",
         "pop_strength", "gain_per_pop", "max_horizontal_slope",
-        "max_vertical_shear", "direct_container_limit",
+        "max_vertical_shear", "vertical_majorant_share", "direct_container_limit",
       }};
       if (!mapping_config.is_object() || mapping_config.size() != mapping_keys.size() ||
           std::any_of(mapping_keys.begin(), mapping_keys.end(), [&](const char *key) {
@@ -591,6 +597,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       float pop_strength = 0.0f;
       float gain_per_pop = 0.0f;
       float max_vertical_shear = 0.0f;
+      float vertical_majorant_share = 0.0f;
       if (!finite_number(mapping_config["raw_coordinate_scale"],
                          constants.raw_coordinate_scale) ||
           !finite_number(mapping_config["collapse_abs_epsilon"],
@@ -610,6 +617,10 @@ void main(uint3 id : SV_DispatchThreadID) {
           !finite_number(mapping_config["max_horizontal_slope"],
                          constants.max_horizontal_slope) ||
           !finite_number(mapping_config["max_vertical_shear"], max_vertical_shear) ||
+          !finite_number(
+            mapping_config["vertical_majorant_share"],
+            vertical_majorant_share
+          ) ||
           !finite_number(mapping_config["direct_container_limit"],
                          constants.direct_container_limit)) {
         error = "v2 GPU replay mapping values must be finite float32-compatible numbers";
@@ -631,6 +642,7 @@ void main(uint3 id : SV_DispatchThreadID) {
           gain_per_pop != v2::gain_per_pop ||
           constants.max_horizontal_slope != v2::max_horizontal_slope ||
           max_vertical_shear != v2::max_vertical_shear ||
+          vertical_majorant_share != v2::vertical_majorant_share ||
           constants.direct_container_limit != v2::direct_container_limit ||
           constants.convergence_curve_default != v2::convergence_curve_default ||
           pop_strength < 0.25f || pop_strength > 2.0f ||
@@ -854,6 +866,12 @@ void main(uint3 id : SV_DispatchThreadID) {
           ) ||
           !create_float_texture(
             device.Get(), width, height,
+            vertical_conditioned_texture,
+            vertical_conditioned_srv,
+            vertical_conditioned_uav
+          ) ||
+          !create_float_texture(
+            device.Get(), width, height,
             final_texture, final_srv, final_uav
           ) ||
           !create_float_texture(
@@ -983,14 +1001,16 @@ void main(uint3 id : SV_DispatchThreadID) {
 
       context->CSSetShader(vertical_limit_shader.Get(), nullptr, 0);
       ID3D11ShaderResourceView *vertical_limit_srvs[] = {candidate_srv.Get()};
-      ID3D11UnorderedAccessView *vertical_limit_uavs[] = {vertical_majorant_uav.Get()};
+      ID3D11UnorderedAccessView *vertical_limit_uavs[] = {
+        vertical_majorant_uav.Get(), vertical_conditioned_uav.Get(),
+      };
       context->CSSetShaderResources(0, 1, vertical_limit_srvs);
-      context->CSSetUnorderedAccessViews(0, 1, vertical_limit_uavs, nullptr);
+      context->CSSetUnorderedAccessViews(0, 2, vertical_limit_uavs, nullptr);
       context->Dispatch((width + 63u) / 64u, 1u, 1u);
-      unbind(1u, 1u);
+      unbind(1u, 2u);
 
       context->CSSetShader(limit_shader.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *limit_srvs[] = {vertical_majorant_srv.Get()};
+      ID3D11ShaderResourceView *limit_srvs[] = {vertical_conditioned_srv.Get()};
       ID3D11UnorderedAccessView *limit_uavs[] = {final_uav.Get()};
       context->CSSetShaderResources(0, 1, limit_srvs);
       context->CSSetUnorderedAccessViews(0, 1, limit_uavs, nullptr);
@@ -1021,6 +1041,8 @@ void main(uint3 id : SV_DispatchThreadID) {
         device.Get(), context.Get(), candidate_texture.Get(), width, height);
       const auto vertical_majorant = read_float_texture(
         device.Get(), context.Get(), vertical_majorant_texture.Get(), width, height);
+      const auto vertical_conditioned = read_float_texture(
+        device.Get(), context.Get(), vertical_conditioned_texture.Get(), width, height);
       const auto final_values = read_float_texture(
         device.Get(), context.Get(), final_texture.Get(), width, height);
       const auto encoded = read_float_texture(
@@ -1031,6 +1053,7 @@ void main(uint3 id : SV_DispatchThreadID) {
           near_tail_counter_words.size() != 1u || near_tail_counter_words[0] != 0u ||
           canonical.size() != element_count || candidate.size() != element_count ||
           vertical_majorant.size() != element_count ||
+          vertical_conditioned.size() != element_count ||
           final_values.size() != element_count || encoded.size() != element_count ||
           state_words[v2::contract_tag_bits] != v2::contract_tag) {
         error = "v2 GPU replay readback or contract tag is incomplete";
@@ -1046,6 +1069,11 @@ void main(uint3 id : SV_DispatchThreadID) {
         std::all_of(vertical_majorant.begin(), vertical_majorant.end(), [](const float value) {
           return std::isfinite(value);
         }) &&
+        std::all_of(
+          vertical_conditioned.begin(),
+          vertical_conditioned.end(),
+          [](const float value) { return std::isfinite(value); }
+        ) &&
         std::all_of(final_values.begin(), final_values.end(), [](const float value) {
           return std::isfinite(value);
         }) &&
@@ -1229,10 +1257,13 @@ void main(uint3 id : SV_DispatchThreadID) {
       float vertical_majorant_max_raise = 0.0f;
       std::size_t vertical_majorant_raised = 0u;
       bool vertical_majorant_illegally_lowered = false;
-      float vertical_stage_shear_max = 0.0f;
-      float limiter_max_raise = 0.0f;
-      std::size_t limiter_raised = 0u;
-      bool limiter_illegally_lowered = false;
+      float vertical_majorant_shear_max = 0.0f;
+      float vertical_conditioned_shear_max = 0.0f;
+      bool vertical_conditioned_above_majorant = false;
+      float conditioner_max_raise = 0.0f;
+      float conditioner_max_lower = 0.0f;
+      std::size_t conditioner_raised = 0u;
+      std::size_t conditioner_lowered = 0u;
       bool row_majorant_illegally_lowered = false;
       float horizontal_slope_max = 0.0f;
       float final_vertical_shear_max = 0.0f;
@@ -1254,12 +1285,15 @@ void main(uint3 id : SV_DispatchThreadID) {
         );
         vertical_majorant_raised += vertical_raise > vertical_tolerance ? 1u : 0u;
         vertical_majorant_illegally_lowered |= vertical_raise < -vertical_tolerance;
-        const float raise = final_values[index] - candidate[index];
-        limiter_max_raise = std::max(limiter_max_raise, raise);
-        limiter_raised += raise > limiter_tolerance ? 1u : 0u;
-        limiter_illegally_lowered |= raise < -limiter_tolerance;
+        const float correction = final_values[index] - candidate[index];
+        conditioner_max_raise = std::max(conditioner_max_raise, correction);
+        conditioner_max_lower = std::max(conditioner_max_lower, -correction);
+        conditioner_raised += correction > limiter_tolerance ? 1u : 0u;
+        conditioner_lowered += correction < -limiter_tolerance ? 1u : 0u;
+        vertical_conditioned_above_majorant |=
+          vertical_conditioned[index] - vertical_majorant[index] > vertical_tolerance;
         row_majorant_illegally_lowered |=
-          final_values[index] - vertical_majorant[index] < -limiter_tolerance;
+          final_values[index] - vertical_conditioned[index] < -limiter_tolerance;
         if (index % width != 0u) {
           horizontal_slope_max = std::max(
             horizontal_slope_max,
@@ -1267,9 +1301,15 @@ void main(uint3 id : SV_DispatchThreadID) {
           );
         }
         if (index >= width) {
-          vertical_stage_shear_max = std::max(
-            vertical_stage_shear_max,
+          vertical_majorant_shear_max = std::max(
+            vertical_majorant_shear_max,
             std::abs(vertical_majorant[index] - vertical_majorant[index - width]) * width
+          );
+          vertical_conditioned_shear_max = std::max(
+            vertical_conditioned_shear_max,
+            std::abs(
+              vertical_conditioned[index] - vertical_conditioned[index - width]
+            ) * width
           );
           final_vertical_shear_max = std::max(
             final_vertical_shear_max,
@@ -1284,11 +1324,12 @@ void main(uint3 id : SV_DispatchThreadID) {
           return false;
         }
       }
-      if (vertical_majorant_illegally_lowered || limiter_illegally_lowered ||
+      if (vertical_majorant_illegally_lowered || vertical_conditioned_above_majorant ||
           row_majorant_illegally_lowered ||
           final_max > direct_container_limit + 2.0e-7f ||
           horizontal_slope_max > constants.max_horizontal_slope + 2.0e-5f ||
-          vertical_stage_shear_max > v2::max_vertical_shear + 2.0e-5f ||
+          vertical_majorant_shear_max > v2::max_vertical_shear + 2.0e-5f ||
+          vertical_conditioned_shear_max > v2::max_vertical_shear + 2.0e-5f ||
           final_vertical_shear_max > v2::max_vertical_shear + 2.0e-5f ||
           (!frame_valid && (pre_limiter_max > 2.0e-7f || final_max > 2.0e-7f ||
                        std::any_of(
@@ -1296,11 +1337,16 @@ void main(uint3 id : SV_DispatchThreadID) {
                          vertical_majorant.end(),
                          [](const float value) { return value != 0.0f; }
                        ) ||
+                       std::any_of(
+                         vertical_conditioned.begin(),
+                         vertical_conditioned.end(),
+                         [](const float value) { return value != 0.0f; }
+                       ) ||
                        std::any_of(canonical.begin(), canonical.end(), [](const float value) {
                          return value != 0.0f;
                        })))) {
-        error =
-          "v2 GPU replay violated anisotropic majorant, flat, hard-container, or slope contract";
+        error = "v2 GPU replay violated vertical-share, row-majorant, flat, container, or "
+                "spatial-bound contract";
         return false;
       }
 
@@ -1315,6 +1361,10 @@ void main(uint3 id : SV_DispatchThreadID) {
       const std::string vertical_majorant_hash = sha256_hex(std::string_view {
         reinterpret_cast<const char *>(vertical_majorant.data()),
         vertical_majorant.size() * sizeof(float)
+      });
+      const std::string vertical_conditioned_hash = sha256_hex(std::string_view {
+        reinterpret_cast<const char *>(vertical_conditioned.data()),
+        vertical_conditioned.size() * sizeof(float)
       });
       const std::string parallax_hash = sha256_hex(std::string_view {
         reinterpret_cast<const char *>(encoded.data()),
@@ -1360,13 +1410,17 @@ void main(uint3 id : SV_DispatchThreadID) {
             static_cast<double>(element_count)},
         {"vertical_majorant_max_raise_source_u", vertical_majorant_max_raise},
         {"final_max_abs_source_u", final_max},
-        {"limiter_raised_fraction",
-          static_cast<double>(limiter_raised) / static_cast<double>(element_count)},
-        {"limiter_max_raise_source_u", limiter_max_raise},
+        {"conditioner_raised_fraction",
+          static_cast<double>(conditioner_raised) / static_cast<double>(element_count)},
+        {"conditioner_max_raise_source_u", conditioner_max_raise},
+        {"conditioner_lowered_fraction",
+          static_cast<double>(conditioner_lowered) / static_cast<double>(element_count)},
+        {"conditioner_max_lower_source_u", conditioner_max_lower},
         {"final_horizontal_slope_max", horizontal_slope_max},
         {"final_vertical_shear_max", final_vertical_shear_max},
         {"order_sha256", order_hash},
         {"vertical_majorant_sha256", vertical_majorant_hash},
+        {"vertical_conditioned_sha256", vertical_conditioned_hash},
         {"parallax_sha256", parallax_hash},
       };
       trace_rows.push_back(std::move(row));
@@ -1377,12 +1431,14 @@ void main(uint3 id : SV_DispatchThreadID) {
       result.canonical_order = coordinate_srv;
       result.candidate_parallax = candidate_srv;
       result.vertical_majorant = vertical_majorant_srv;
+      result.vertical_conditioned = vertical_conditioned_srv;
       result.encoded_final_parallax = encoded_srv;
       result.legacy_subject_state = legacy_srv;
       result.raw_values = std::move(raw_values);
       result.canonical_values = canonical;
       result.candidate_parallax_values = candidate;
       result.vertical_majorant_values = vertical_majorant;
+      result.vertical_conditioned_values = vertical_conditioned;
       result.encoded_parallax_values = encoded;
       result.encoded_minimum = *encoded_min;
       result.encoded_maximum = *encoded_max;
@@ -1393,6 +1449,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       result.order_sha256 = order_hash;
       result.candidate_sha256 = candidate_hash;
       result.vertical_majorant_sha256 = vertical_majorant_hash;
+      result.vertical_conditioned_sha256 = vertical_conditioned_hash;
       result.parallax_sha256 = parallax_hash;
       return true;
     }

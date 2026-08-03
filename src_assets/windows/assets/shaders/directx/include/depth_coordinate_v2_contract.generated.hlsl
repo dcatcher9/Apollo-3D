@@ -3,13 +3,15 @@
 #ifndef DEPTH_COORDINATE_V2_CONTRACT_GENERATED_HLSL
 #define DEPTH_COORDINATE_V2_CONTRACT_GENERATED_HLSL
 
-#define V2_CONTRACT_SCHEMA 14u
-#define V2_CONTRACT_TAG 0x1AD89481u
+#define V2_CONTRACT_SCHEMA 15u
+#define V2_CONTRACT_TAG 0x7ADF0988u
 #define V2_SHADOW_STATE_WORD_COUNT 12u
 #define V2_SHADOW_STATE_VECTOR_COUNT 3u
 #define V2_DIRECT_CONTAINER_LIMIT 0.04f
 #define V2_MAX_VERTICAL_SHEAR 2.0f
+#define V2_VERTICAL_MAJORANT_SHARE 0.75f
 static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;
+static const float v2_vertical_majorant_share = V2_VERTICAL_MAJORANT_SHARE;
 
 cbuffer DepthCoordinateV2Constants : register(b1) {
     float v2_raw_coordinate_scale;

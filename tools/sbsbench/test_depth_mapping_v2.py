@@ -26,6 +26,7 @@ from depth_mapping_v2 import (  # noqa: E402
     horizontal_lipschitz_majorant,
     near_tail_count_and_coverage,
     vertical_lipschitz_majorant,
+    vertical_lipschitz_minorant,
 )
 
 
@@ -70,7 +71,8 @@ class DepthMappingV2Test(unittest.TestCase):
              "near_tail_probe_u", "near_tail_coverage_low", "near_tail_coverage_high",
              "near_log_tau_dense",
              "pop_strength", "gain_per_pop", "max_horizontal_slope",
-             "max_vertical_shear", "direct_container_limit"))
+             "max_vertical_shear", "vertical_majorant_share",
+             "direct_container_limit"))
         result = generate_depth_mapping_v2(np.asarray([[-1.0, 0.0, 1.0]]))
         names = set(result.diagnostics.to_dict())
         for removed in (
@@ -191,19 +193,41 @@ class DepthMappingV2Test(unittest.TestCase):
         self.assertEqual(float(limited[1, 1]), 0.8)
         self.assertGreater(float(limited[0, 1]), -0.2)
 
-    def test_mapping_composes_vertical_then_horizontal_majorants(self):
+    def test_vertical_minorant_never_raises_and_honors_aspect_matched_step(self):
+        field = np.asarray([
+            [-1.0, -0.2, -1.0],
+            [-1.0, 0.8, -1.0],
+            [-1.0, -0.4, -1.0],
+        ])
+        limited = vertical_lipschitz_minorant(field, 0.1)
+        self.assertTrue(np.all(limited <= field))
+        self.assertLessEqual(
+            float(np.max(np.abs(np.diff(limited, axis=0)))), 0.10000001)
+        self.assertAlmostEqual(float(limited[0, 1]), -0.2)
+        self.assertLess(float(limited[1, 1]), 0.8)
+
+    def test_mapping_composes_vertical_share_then_horizontal_majorant(self):
         raw = np.zeros((7, 9), dtype=np.float64)
         raw[3, 4] = 8.0
         config = MappingV2Config(
             raw_coordinate_scale=0.5,
             max_horizontal_slope=0.5,
-            max_vertical_shear=2.0,
+            max_vertical_shear=0.01,
         )
         result = generate_depth_mapping_v2(raw, config)
         candidate = result.pre_limiter_parallax.astype(np.float64)
         vertical = result.post_vertical_parallax.astype(np.float64)
         final = result.parallax.astype(np.float64)
-        self.assertTrue(np.all(vertical >= candidate - 1.0e-8))
+        vertical_step = config.max_vertical_shear / raw.shape[1]
+        upper = vertical_lipschitz_majorant(candidate, vertical_step)
+        lower = vertical_lipschitz_minorant(candidate, vertical_step)
+        expected_vertical = (
+            config.vertical_majorant_share * upper +
+            (1.0 - config.vertical_majorant_share) * lower)
+        np.testing.assert_allclose(vertical, expected_vertical, atol=1.0e-8)
+        self.assertTrue(np.all(vertical <= upper + 1.0e-8))
+        self.assertTrue(np.all(vertical >= lower - 1.0e-8))
+        self.assertTrue(np.any(vertical < candidate - 1.0e-8))
         self.assertTrue(np.all(final >= vertical - 1.0e-8))
         self.assertLessEqual(
             float(np.max(np.abs(np.diff(vertical, axis=0)))) * raw.shape[1],
@@ -214,8 +238,8 @@ class DepthMappingV2Test(unittest.TestCase):
         self.assertLessEqual(
             float(np.max(np.abs(np.diff(final, axis=1)))) * raw.shape[1],
             config.max_horizontal_slope + 1.0e-6)
-        self.assertEqual(result.diagnostics.vertical_limiter_illegal_lower_count, 0)
         self.assertEqual(result.diagnostics.horizontal_limiter_illegal_lower_count, 0)
+        self.assertGreater(result.diagnostics.conditioner_lowered_fraction, 0.0)
 
     def test_direct_parallax_interchange_round_trips_without_clipping(self):
         field = np.asarray([[-0.04, -0.01, 0.0, 0.02, 0.04]], dtype=np.float32)
@@ -245,12 +269,35 @@ class DepthMappingV2Test(unittest.TestCase):
             MappingV2Config(max_horizontal_slope=1.0),
             MappingV2Config(max_vertical_shear=0.0),
             MappingV2Config(max_vertical_shear=float("inf")),
+            MappingV2Config(vertical_majorant_share=0.0),
+            MappingV2Config(vertical_majorant_share=1.0),
+            MappingV2Config(vertical_majorant_share=1.0e-50),
+            MappingV2Config(vertical_majorant_share=1.0 - 1.0e-12),
+            MappingV2Config(vertical_majorant_share=float("nan")),
             MappingV2Config(direct_container_limit=0.0),
         )
         for config in invalid:
             with self.subTest(config=config):
                 with self.assertRaises(ValueError):
                     generate_depth_mapping_v2(np.asarray([[0.0, 1.0]]), config)
+
+    def test_decimal_share_uses_shader_float32_coefficients(self):
+        config = MappingV2Config(vertical_majorant_share=0.7)
+        raw = np.asarray([
+            [-1.0, 0.2, 0.9],
+            [0.8, -0.4, 0.1],
+            [-0.2, 1.0, -0.7],
+        ])
+        result = generate_depth_mapping_v2(raw, config)
+        candidate = result.pre_limiter_parallax.astype(np.float64)
+        step = config.max_vertical_shear / raw.shape[1]
+        upper = vertical_lipschitz_majorant(candidate, step)
+        lower = vertical_lipschitz_minorant(candidate, step)
+        majorant_share = np.float32(0.7)
+        minorant_share = np.float32(np.float32(1.0) - majorant_share)
+        expected = float(majorant_share) * upper + float(minorant_share) * lower
+        np.testing.assert_allclose(
+            result.post_vertical_parallax.astype(np.float64), expected, atol=1.0e-8)
 
     def test_zero_raw_coordinate_scale_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "raw_coordinate_scale"):

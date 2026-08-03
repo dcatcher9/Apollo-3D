@@ -104,14 +104,15 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth_snapshot;  ///< Optional stable copy of the completed frame's raw output for a live Dump 3D request.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> model_input_snapshot;  ///< Optional stable NCHW/ImageNet-normalized input for the same live Dump 3D frame.
     std::shared_ptr<const raw_model_provenance_t> raw_model_provenance;  ///< Capture-time model-byte identity; copied by pointer on ordinary frames.
-    // Production V2 outputs. final_parallax is the least row-wise near-preserving Lipschitz
-    // majorant of the vertical-shear-conditioned field and the live position authority.
-    // candidate_parallax is immutable pre-limiter evidence; vertical_majorant is the explicit
-    // shear2 intermediate. coordinate is an optional Dump-3D-only snapshot, never a live resource
-    // or authentication prerequisite. The legacy `shadow_*` names remain for dump compatibility.
+    // Production V2 outputs. candidate_parallax is immutable pre-conditioner evidence;
+    // vertical_majorant is the upper-envelope diagnostic, vertical_conditioned is the fixed
+    // upper/lower vertical share consumed by the pure row majorant, and final_parallax is the live
+    // position authority. coordinate is an optional Dump-3D-only snapshot, never a live resource
+    // or authentication prerequisite. The legacy `shadow_*` prefix remains for dump compatibility.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_coordinate;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_candidate_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_majorant;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_conditioned;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_final_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_state;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_frame_stats;

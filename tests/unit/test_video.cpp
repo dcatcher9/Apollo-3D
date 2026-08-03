@@ -622,18 +622,19 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   );
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
-  EXPECT_EQ(v2::contract_schema, 14u);
-  EXPECT_EQ(v2::contract_tag, 0x1AD89481u);
+  EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
+  EXPECT_EQ(v2::contract_schema, 15u);
+  EXPECT_EQ(v2::contract_tag, 0x7ADF0988u);
   EXPECT_EQ(
     v2::contract_canonical_sha256,
-    "fdfda53e49ede50fc3408c7ecdafe7076a37b8468f5d828dc4a0d47e0656f458"
+    "09f4eae02ddfd437dbf29116c6f7f4f5c754af40a7a9124edee3c071adfc8ed6"
   );
   EXPECT_EQ(
     v2::contract_tag_semantic_sha256,
-    "1ad894818b5e3a42ae5619e9d55a757cc10d1356098fc832de512be59d8c6907"
+    "7adf09889f87bc391afe42a4f56f4d38a534573c6e751ced03c01c029adecf53"
   );
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
-  EXPECT_EQ(v2::shadow_state_dump_schema, 7u);
+  EXPECT_EQ(v2::shadow_state_dump_schema, 8u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
   EXPECT_EQ(v2::capture_provenance_manifest_key, "raw_model_provenance");
   EXPECT_EQ(
@@ -680,6 +681,16 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
     models::host_sbs_shader_cache::source_closure_sha256(live_renderer_sources),
     models::host_sbs_shader_cache::
       parallax_v2_live_renderer_source_closure_sha256
+  );
+  const auto live_diagnostic_sources =
+    models::host_sbs_shader_cache::snapshot_sources(
+      SUNSHINE_SHADERS_DIR,
+      models::host_sbs_shader_cache::parallax_v2_live_diagnostic_specs
+    );
+  ASSERT_TRUE(live_diagnostic_sources);
+  EXPECT_EQ(
+    models::host_sbs_shader_cache::source_closure_sha256(live_diagnostic_sources),
+    models::host_sbs_shader_cache::parallax_v2_diagnostic_source_closure_sha256
   );
   ASSERT_EQ(
     v2::shader_source_specs.size(),
@@ -1047,6 +1058,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   models::estimate_result result;
   result.shadow_candidate_parallax = view;
   result.shadow_vertical_majorant = view;
+  result.shadow_vertical_conditioned = view;
   result.shadow_final_parallax = view;
   result.shadow_state = view;
   result.shadow_frame_stats = view;
@@ -1092,6 +1104,10 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   auto missing_vertical_majorant = result;
   missing_vertical_majorant.shadow_vertical_majorant.Reset();
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_vertical_majorant));
+
+  auto missing_vertical_conditioned = result;
+  missing_vertical_conditioned.shadow_vertical_conditioned.Reset();
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_vertical_conditioned));
 
   const std::array supported_shapes {
     std::pair {770, 434},
@@ -1155,7 +1171,7 @@ TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
   EXPECT_NE(source.find("parallax_v2_coordinate_binding("), std::string::npos);
   EXPECT_NE(source.find("source_closure_sha256"), std::string::npos);
   EXPECT_NE(
-    source.find("nlohmann::json manifest {\n          {\"schema\", 7}"),
+    source.find("nlohmann::json manifest {\n          {\"schema\", 8}"),
     std::string::npos
   );
   EXPECT_NE(source.find("completed.parallax_v2_render_selected"), std::string::npos);
@@ -2064,7 +2080,12 @@ TEST(DirectxShaderSourceTest, ConvertsEveryChromaTapBeforeAveraging) {
 TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {
   const auto display =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  const auto live_shader = read_source_file(
+    SUNSHINE_SOURCE_DIR
+    "/src_assets/windows/assets/shaders/directx/sbs_reprojection_v2_live_ps.hlsl"
+  );
   ASSERT_FALSE(display.empty());
+  ASSERT_FALSE(live_shader.empty());
   EXPECT_NE(
     display.find("display->display_rotation != DXGI_MODE_ROTATION_IDENTITY"),
     std::string::npos
@@ -2075,6 +2096,50 @@ TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {
   );
   EXPECT_NE(display.find("find_pending_matched_slot(est.completed_frame_id)"), std::string::npos);
   EXPECT_NE(display.find("parallax_v2_result_is_authenticated(est)"), std::string::npos);
+  EXPECT_NE(display.find("v2_live_resources_complete"), std::string::npos);
+  EXPECT_NE(display.find("est.shadow_candidate_parallax.Get()"), std::string::npos);
+  EXPECT_NE(
+    live_shader.find("Texture2D<float> CandidateParallax : register(t3)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    live_shader.find("max(final_parallax - candidate_parallax, 0.0f)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    live_shader.find("COLLAR_DEFOCUS_ONSET_SOURCE_PX = 4.0f"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    live_shader.find("COLLAR_DEFOCUS_FULL_SOURCE_PX = 20.0f"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    live_shader.find("COLLAR_DEFOCUS_MAX_SIGMA_SOURCE_PX = 6.0f"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    live_shader.find("binomial_weights[3] = {1.0f, 2.0f, 1.0f}"),
+    std::string::npos
+  );
+  EXPECT_NE(live_shader.find("blurred *= (1.0f / 16.0f)"), std::string::npos);
+  EXPECT_NE(live_shader.find("smoothstep("), std::string::npos);
+  EXPECT_NE(live_shader.find("return lerp(center, blurred, response)"), std::string::npos);
+
+  const auto dump = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
+  );
+  EXPECT_NE(dump.find("{\"onset_source_px\", 4.0}"), std::string::npos);
+  EXPECT_NE(dump.find("{\"full_response_source_px\", 20.0}"), std::string::npos);
+  EXPECT_NE(dump.find("{\"gaussian_sigma_source_px\", 6.0}"), std::string::npos);
+  EXPECT_NE(
+    dump.find("one-pass 3x3 binomial approximation with sqrt(2)-sigma-spaced taps"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dump.find("depth-grid-independent, not stream-resolution-invariant"),
+    std::string::npos
+  );
 }
 
 TEST(DirectxShaderSourceTest, LocalRgbPresentationPreservesTheTransferContract) {

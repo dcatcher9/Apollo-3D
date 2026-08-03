@@ -110,6 +110,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "direct_container_limit": defaults.direct_container_limit,
             "max_horizontal_slope": defaults.max_horizontal_slope,
             "max_vertical_shear": defaults.max_vertical_shear,
+            "vertical_majorant_share": defaults.vertical_majorant_share,
             "convergence_curve_default": defaults.convergence_curve_default,
         }
         self.state = {
@@ -159,6 +160,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "frame-local-hard-direct-parallax-attenuation-recoverable-next-frame",
                 "near_shoulder":
                     "shot-latched-near-tail-coverage-and-effective-tau-reset-on-confirmed-cut",
+                "spatial_conditioner":
+                    "fixed-75pct-vertical-majorant-share-then-horizontal-majorant",
             },
         }
         stats = {
@@ -181,28 +184,85 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "named_values": stats,
         }
         vertical_descriptions = {
+            "shadow_candidate_parallax.f32":
+                ("parallax-v2 pre-limiter candidate displacement", True),
             "shadow_vertical_majorant.f32":
-                "parallax-v2 vertical shear-limiter intermediate",
+                ("parallax-v2 vertical shear-limiter intermediate", False),
             "shadow_vertical_majorant_shape.json":
-                "parallax-v2 vertical shear-limiter intermediate contract",
+                ("parallax-v2 vertical shear-limiter intermediate contract", False),
             "shadow_vertical_majorant.png":
-                "parallax-v2 vertical shear-limiter intermediate preview",
+                ("parallax-v2 vertical shear-limiter intermediate preview", False),
             "shadow_vertical_majorant_heat.png":
-                "parallax-v2 vertical shear-limiter intermediate preview",
+                ("parallax-v2 vertical shear-limiter intermediate preview", False),
+            "shadow_vertical_conditioned.f32":
+                ("parallax-v2 orientation-selective vertical conditioner", False),
+            "shadow_vertical_conditioned_shape.json":
+                ("parallax-v2 orientation-selective vertical conditioner contract", False),
+            "shadow_vertical_conditioned.png":
+                ("parallax-v2 orientation-selective vertical conditioner preview", False),
+            "shadow_vertical_conditioned_heat.png":
+                ("parallax-v2 orientation-selective vertical conditioner preview", False),
+            "shadow_final_parallax.f32":
+                ("parallax-v2 final conditioned displacement field", True),
         }
         self.manifest = {
             "schema": dump_contract.DUMP_MANIFEST_SCHEMA,
             "renderer": {
+                "authority":
+                    "authenticated-parallax-v2-orientation-selective-conditioned-field",
+                "parallax_v2_render_requested": True,
                 "parallax_v2_render_selected": True,
+                "mapping_artifacts_match_selected_renderer": False,
                 "parallax_v2_position_field": "shadow_final_parallax",
+                "parallax_v2_coordinate_role":
+                    "shadow_coordinate is diagnostic only; it has no renderer authority",
                 "parallax_v2_vertical_majorant_role":
-                    "least column-wise v >= candidate with adjacent-row source-U change <= "
-                    "max_vertical_shear/target_width; diagnostic intermediate consumed by the "
-                    "row limiter",
-                "parallax_v2_majorant_role":
-                    "least row-wise q >= shadow_vertical_majorant; final q >= vertical >= "
-                    "candidate with horizontal slope <= max_horizontal_slope and vertical "
-                    "shear <= max_vertical_shear; live position authority",
+                    "least column-wise upper envelope v+ >= candidate with adjacent-row "
+                    "source-U change <= max_vertical_shear/target_width; diagnostic evidence "
+                    "only",
+                "parallax_v2_vertical_conditioned_role":
+                    "fixed 75/25 share of column upper/lower envelopes; may raise or lower "
+                    "candidate and feeds the row majorant",
+                "parallax_v2_conditioner_role":
+                    "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
+                    "max_horizontal_slope and vertical shear <= max_vertical_shear; q may "
+                    "raise or lower candidate and is the live position authority",
+                "parallax_v2_inverse":
+                    "12-step contractive fixed point; no owner pass or synthetic fill",
+                "collar_defocus": {
+                    "enabled": True,
+                    "role": ("positive conditioner-deviation color-only background defocus; "
+                             "geometry is unchanged"),
+                    "deviation": ("max(shadow_final_parallax - "
+                                  "shadow_candidate_parallax, 0) in source-color pixels at "
+                                  "the inverse-warped source coordinate"),
+                    "onset_source_px": 4.0,
+                    "full_response_source_px": 20.0,
+                    "gaussian_sigma_source_px": 6.0,
+                    "kernel": ("one-pass 3x3 binomial approximation with "
+                               "sqrt(2)-sigma-spaced taps and smoothstep opacity"),
+                    "resolution_basis": ("current-source-color-pixels; "
+                                         "depth-grid-independent, not "
+                                         "stream-resolution-invariant"),
+                    "hdr": ("weighted native source values; no clamp, tone map, or gamma "
+                            "conversion"),
+                },
+                "live_shader_source": {
+                    "source_closure_schema": generator.SOURCE_CLOSURE_SCHEMA,
+                    "source_compile_flags": generator.SHADER_COMPILE_FLAGS,
+                    "source_macro_count": 0,
+                    "source_closure_sha256":
+                        dump_contract.LIVE_RENDERER_SOURCE_CLOSURE_SHA256,
+                    "source_file": "sbs_reprojection_v2_live_ps.hlsl",
+                    "entrypoint": "main_ps",
+                    "target": "ps_5_0",
+                    "diagnostic_source_closure_sha256":
+                        dump_contract.DIAGNOSTIC_SOURCE_CLOSURE_SHA256,
+                    "mapping_source_file": "sbs_reprojection_v2_diagnostics_ps.hlsl",
+                    "mapping_entrypoint": "mapping_ps",
+                    "mask_source_file": "sbs_reprojection_v2_diagnostics_ps.hlsl",
+                    "mask_entrypoint": "mask_ps",
+                },
             },
             "parallax_v2_shadow": {
                 "active": True,
@@ -217,6 +277,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "width": 770, "height": 434,
                     "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41,
                 },
+                "shadow_vertical_conditioned": {
+                    "width": 770, "height": 434,
+                    "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41,
+                },
                 "shadow_final_parallax": {
                     "width": 770, "height": 434,
                     "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41,
@@ -225,11 +289,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "artifacts": {
                 name: {
                     "available": True,
-                    "required": False,
+                    "required": required,
                     "stage": stage,
                     "description": "authenticated test artifact",
                 }
-                for name, stage in vertical_descriptions.items()
+                for name, (stage, required) in vertical_descriptions.items()
             },
         }
 
@@ -249,12 +313,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         stats = dump_contract.validate_shadow_frame_stats_document(self.frame_stats)
         self.assertEqual(stats["valid"], 1.0)
 
-    def test_schema_7_manifest_attributes_vertical_then_horizontal_majorants(self):
+    def test_schema_8_manifest_attributes_vertical_share_then_row_majorant(self):
         decoded = dump_contract.validate_v2_dump_manifest_document(self.manifest)
         self.assertTrue(decoded["active"])
         self.assertTrue(decoded["rendered_output_selected"])
         self.assertTrue(decoded["vertical_majorant_available"])
+        self.assertTrue(decoded["vertical_conditioned_available"])
         self.assertEqual(decoded["position_field"], "shadow_final_parallax")
+        self.assertFalse(decoded["mapping_artifacts_match_selected_renderer"])
 
         native = (REPO / "src" / "platform" / "windows" /
                   "sbs_debug_dump.cpp").read_text(encoding="utf-8")
@@ -262,17 +328,52 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             f'{{"schema", {dump_contract.DUMP_MANIFEST_SCHEMA}}}', native)
         self.assertIn('"shadow_vertical_majorant"', native)
         self.assertIn("completed.shadow_vertical_majorant", native)
+        self.assertIn('"shadow_vertical_conditioned"', native)
+        self.assertIn("completed.shadow_vertical_conditioned", native)
 
     def test_manifest_rejects_missing_or_misattributed_vertical_intermediate(self):
         changed = copy.deepcopy(self.manifest)
         changed["artifacts"].pop("shadow_vertical_majorant.f32")
-        with self.assertRaisesRegex(ValueError, "vertical_majorant artifact"):
+        with self.assertRaisesRegex(ValueError, "conditioner artifact"):
             dump_contract.validate_v2_dump_manifest_document(changed)
+
+    def test_manifest_authenticates_live_and_diagnostic_renderer_sources(self):
+        for key, replacement in (
+                ("source_closure_sha256", "0" * 64),
+                ("diagnostic_source_closure_sha256", "0" * 64),
+                ("source_compile_flags", 0),
+                ("entrypoint", "wrong")):
+            with self.subTest(key=key):
+                changed = copy.deepcopy(self.manifest)
+                changed["renderer"]["live_shader_source"][key] = replacement
+                with self.assertRaisesRegex(ValueError, "conditioner attribution"):
+                    dump_contract.validate_v2_dump_manifest_document(changed)
+
+        changed = copy.deepcopy(self.manifest)
+        changed["renderer"].pop("live_shader_source")
+        with self.assertRaisesRegex(ValueError, "conditioner attribution"):
+            dump_contract.validate_v2_dump_manifest_document(changed)
+
+        native_cache = (REPO / "src" / "host_sbs_shader_cache.h").read_text(
+            encoding="utf-8")
+        self.assertIn(dump_contract.LIVE_RENDERER_SOURCE_CLOSURE_SHA256, native_cache)
+        self.assertIn(dump_contract.DIAGNOSTIC_SOURCE_CLOSURE_SHA256, native_cache)
+
+    def test_manifest_requires_complete_renderer_attribution(self):
+        for key in (
+                "parallax_v2_render_requested",
+                "mapping_artifacts_match_selected_renderer",
+                "parallax_v2_coordinate_role"):
+            with self.subTest(key=key):
+                changed = copy.deepcopy(self.manifest)
+                changed["renderer"].pop(key)
+                with self.assertRaises(ValueError):
+                    dump_contract.validate_v2_dump_manifest_document(changed)
 
         changed = copy.deepcopy(self.manifest)
         changed["renderer"]["parallax_v2_position_field"] = (
             "shadow_vertical_majorant")
-        with self.assertRaisesRegex(ValueError, "majorant attribution"):
+        with self.assertRaisesRegex(ValueError, "conditioner attribution"):
             dump_contract.validate_v2_dump_manifest_document(changed)
 
         changed = copy.deepcopy(self.manifest)
@@ -283,15 +384,24 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
     def test_inactive_manifest_requires_unavailable_vertical_artifacts(self):
         inactive = copy.deepcopy(self.manifest)
         inactive["renderer"].update({
+            "authority": None,
+            "parallax_v2_render_requested": False,
             "parallax_v2_render_selected": False,
+            "mapping_artifacts_match_selected_renderer": False,
             "parallax_v2_position_field": None,
+            "parallax_v2_coordinate_role": None,
             "parallax_v2_vertical_majorant_role": None,
-            "parallax_v2_majorant_role": None,
+            "parallax_v2_vertical_conditioned_role": None,
+            "parallax_v2_conditioner_role": None,
+            "parallax_v2_inverse": None,
+            "collar_defocus": None,
+            "live_shader_source": None,
         })
         inactive["parallax_v2_shadow"]["active"] = False
         inactive["parallax_v2_shadow"]["rendered_output_selected"] = False
         for name in (
                 "shadow_candidate_parallax", "shadow_vertical_majorant",
+                "shadow_vertical_conditioned",
                 "shadow_final_parallax"):
             inactive["dimensions"][name] = None
         for descriptor in inactive["artifacts"].values():
@@ -333,7 +443,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertTrue(summary["camera_valid"])
             self.assertEqual(summary["calibration_revision"], 4)
 
-    def test_single_dump_replay_validates_the_schema_7_manifest(self):
+    def test_single_dump_replay_validates_the_schema_8_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "dump_manifest.json").write_text(
@@ -342,7 +452,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             summary = _inspect_optional_v2_dump_manifest(root)
 
             self.assertEqual(summary["status"], "validated")
-            self.assertEqual(summary["manifest_schema"], 7)
+            self.assertEqual(summary["manifest_schema"], 8)
             self.assertTrue(summary["active"])
 
     def test_paired_state_rejects_both_directions_of_frame_validity_mismatch(self):

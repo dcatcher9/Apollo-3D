@@ -18,7 +18,10 @@ import depth_mapping_v2_temporal as temporal  # noqa: E402
 from depth_coordinate_v2_contract import (  # noqa: E402
     CALIBRATED_DEFAULTS, CONTRACT_CANONICAL_SHA256, MODEL_CALIBRATIONS)
 from depth_mapping_v2 import (  # noqa: E402
-    MappingV2Config, asymmetric_curve, container_scale_for_curve_range)
+    MappingV2Config, asymmetric_curve, container_scale_for_curve_range,
+    curve_relative_coordinate, horizontal_lipschitz_majorant,
+    vertical_lipschitz_majorant,
+    vertical_lipschitz_minorant)
 from depth_mapping_v2_temporal import (  # noqa: E402
     CoordinateState,
     TemporalConfig,
@@ -200,6 +203,55 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
             for row in rows))
         validate_v2_state_trace(result.state_trace, result.frame_ids)
 
+    def test_exact_sequence_decimal_share_matches_shader_float32_coefficients(self):
+        # This deterministic witness crosses a float32 rounding boundary while remaining small.
+        # Recreate both the HLSL coefficients and the old float64 mistake independently,
+        # including the production row majorant.
+        row_values = np.asarray([
+            0.6106296235510911,
+            -2.507666082986585,
+            -2.094924163273948,
+            -2.008051750593882,
+            7.799119842983465,
+        ])
+        raw = np.repeat(row_values[:, None], 67, axis=1)
+        config = MappingV2Config(
+            raw_coordinate_scale=0.5,
+            vertical_majorant_share=0.7,
+            direct_container_limit=10.0,
+        )
+        result = generate_first_latch_exact_sequence(
+            [raw], [0], [False], "unit-decimal-share", config)
+        row = result.state_trace["frames"][0]
+        _, curved = curve_relative_coordinate(
+            raw,
+            row["center"],
+            row["latched_scale"],
+            config,
+            convergence_curve=row["convergence_curve"],
+            near_log_tau=row["effective_near_log_tau"],
+        )
+        candidate = curved * row["effective_gain"]
+        max_vertical_step = config.max_vertical_shear / raw.shape[1]
+        upper = vertical_lipschitz_majorant(candidate, max_vertical_step)
+        lower = vertical_lipschitz_minorant(candidate, max_vertical_step)
+        majorant_f32 = np.float32(config.vertical_majorant_share)
+        minorant_f32 = np.float32(np.float32(1.0) - majorant_f32)
+        expected = (
+            horizontal_lipschitz_majorant(
+                float(majorant_f32) * upper + float(minorant_f32) * lower,
+                config.max_horizontal_slope / raw.shape[1],
+            )
+        ).astype("<f4")
+        float64_coefficients = horizontal_lipschitz_majorant(
+            config.vertical_majorant_share * upper +
+            (1.0 - config.vertical_majorant_share) * lower,
+            config.max_horizontal_slope / raw.shape[1],
+        ).astype("<f4")
+
+        np.testing.assert_array_equal(result.parallax_fields[0], expected)
+        self.assertTrue(np.any(expected != float64_coefficients))
+
     def test_invalid_trace_row_keeps_requested_gain_but_has_zero_effective_gain(self):
         base = np.asarray([[-1.0, 0.0, 1.0]])
         invalid = np.full(base.shape, np.nan)
@@ -291,13 +343,16 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "input/collapse/frame validity"):
             validate_v2_state_trace(changed, result.frame_ids)
 
-    def test_trace_layout_adds_only_latched_near_tail_state(self):
-        self.assertEqual(len(V2_STATE_TRACE_FIELDS), 38)
+    def test_trace_layout_records_vertical_conditioner_attribution(self):
+        self.assertEqual(len(V2_STATE_TRACE_FIELDS), 41)
         self.assertIn("latched_near_tail_coverage", V2_STATE_TRACE_FIELDS)
         self.assertIn("effective_near_log_tau", V2_STATE_TRACE_FIELDS)
         self.assertIn("latched_near_tail_count", V2_STATE_TRACE_FIELDS)
         self.assertIn("vertical_majorant_raised_fraction", V2_STATE_TRACE_FIELDS)
         self.assertIn("vertical_majorant_sha256", V2_STATE_TRACE_FIELDS)
+        self.assertIn("vertical_conditioned_sha256", V2_STATE_TRACE_FIELDS)
+        self.assertIn("conditioner_raised_fraction", V2_STATE_TRACE_FIELDS)
+        self.assertIn("conditioner_lowered_fraction", V2_STATE_TRACE_FIELDS)
         self.assertIn("final_vertical_shear_max", V2_STATE_TRACE_FIELDS)
         for removed in (
                 "upper_l4", "source_u_budget", "source_u_safety_scale",

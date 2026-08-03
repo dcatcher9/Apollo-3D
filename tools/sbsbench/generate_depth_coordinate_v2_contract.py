@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import re
+import struct
 import sys
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,10 @@ EXPECTED_TOP_LEVEL_KEYS = {
     "schema", "vector_width", "calibrated_defaults", "constant_buffer", "frame_stats",
     "shadow_state", "model_calibrations", "capture_provenance", "shader_implementation",
 }
+
+
+def _float32(value: float) -> float:
+    return struct.unpack("<f", struct.pack("<f", float(value)))[0]
 EXPECTED_FIELD_KEYS = {"index", "name", "type", "gpu_encoding", "initial"}
 EXPECTED_LAYOUT_FIELD_KEYS = {"index", "name", "type"}
 EXPECTED_DEFAULT_NAMES = (
@@ -43,6 +48,7 @@ EXPECTED_DEFAULT_NAMES = (
     "direct_container_limit",
     "max_horizontal_slope",
     "max_vertical_shear",
+    "vertical_majorant_share",
     "convergence_curve_default",
 )
 EXPECTED_DEFAULT_KEYS = set(EXPECTED_DEFAULT_NAMES)
@@ -339,6 +345,11 @@ def validate_contract(
             raise ValueError(f"calibrated default {name} must be positive")
     if calibrated_defaults["max_horizontal_slope"] >= 1.0:
         raise ValueError("max_horizontal_slope must be below one")
+    majorant_share = _float32(calibrated_defaults["vertical_majorant_share"])
+    minorant_share = _float32(_float32(1.0) - majorant_share)
+    if majorant_share <= 0.0 or minorant_share <= 0.0:
+        raise ValueError(
+            "vertical_majorant_share and its complement must remain positive in float32")
     if calibrated_defaults["near_tail_probe_u"] < 1.0:
         raise ValueError("near_tail_probe_u must be at least the near-curve knee")
     coverage_low = calibrated_defaults["near_tail_coverage_low"]
@@ -662,6 +673,7 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "  static_assert(convergence_curve_default == 0.0f);",
         "  static_assert(max_horizontal_slope > 0.0f && max_horizontal_slope < 1.0f);",
         "  static_assert(max_vertical_shear > 0.0f);",
+        "  static_assert(vertical_majorant_share > 0.0f && vertical_majorant_share < 1.0f);",
         "",
         "  struct model_preprocess_contract_t {",
         "    std::string_view profile;",
@@ -961,7 +973,10 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"{_float_literal(defaults['direct_container_limit'])}",
         f"#define V2_MAX_VERTICAL_SHEAR "
         f"{_float_literal(defaults['max_vertical_shear'])}",
+        f"#define V2_VERTICAL_MAJORANT_SHARE "
+        f"{_float_literal(defaults['vertical_majorant_share'])}",
         "static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;",
+        "static const float v2_vertical_majorant_share = V2_VERTICAL_MAJORANT_SHARE;",
         "",
         f"cbuffer {constant_buffer['name']} : register({constant_buffer['register']}) {{",
     ]

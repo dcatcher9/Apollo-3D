@@ -146,6 +146,7 @@ namespace platf::sbs_debug {
       texture_snapshot shadow_coordinate;
       texture_snapshot shadow_candidate;
       texture_snapshot shadow_vertical;
+      texture_snapshot shadow_vertical_conditioned;
       texture_snapshot shadow_final;
       std::vector<float> shadow_state;
       std::vector<float> shadow_frame_stats;
@@ -1220,6 +1221,7 @@ namespace platf::sbs_debug {
                         {"direct_container_limit", direct_container_limit},
                         {"max_horizontal_slope", max_horizontal_slope},
                         {"max_vertical_shear", max_vertical_shear},
+                        {"vertical_majorant_share", vertical_majorant_share},
                         {"convergence_curve_default", convergence_curve_default},
                       }},
         {"fields", std::move(fields)},
@@ -1231,6 +1233,7 @@ namespace platf::sbs_debug {
                                     {"requested_gain", "immutable-cfg-pop-strength"},
                                     {"container_scale", "frame-local-hard-direct-parallax-attenuation-recoverable-next-frame"},
                                     {"near_shoulder", "shot-latched-near-tail-coverage-and-effective-tau-reset-on-confirmed-cut"},
+                                    {"spatial_conditioner", "fixed-75pct-vertical-majorant-share-then-horizontal-majorant"},
                                   }},
       };
 
@@ -1946,7 +1949,7 @@ namespace platf::sbs_debug {
             paths.temporary / "warp_depth.f32",
             paths.temporary / "warp_depth_shape.json",
             warp_depth,
-            "exact one-eye source-U from the least near-preserving anisotropic 2D Lipschitz majorant sampled by live Host-SBS V2 reprojection"
+            "exact one-eye source-U from the orientation-selective vertical conditioner followed by the row majorant sampled by live Host-SBS V2 reprojection"
           ) ||
           !write_scalar_previews(
             paths.temporary / "warp_depth.png",
@@ -2000,6 +2003,7 @@ namespace platf::sbs_debug {
         const auto &shadow_coordinate = job.shadow_coordinate;
         const auto &shadow_candidate = job.shadow_candidate;
         const auto &shadow_vertical = job.shadow_vertical;
+        const auto &shadow_vertical_conditioned = job.shadow_vertical_conditioned;
         const auto &shadow_final = job.shadow_final;
         nlohmann::json shadow_summary = nullptr;
         if (
@@ -2013,19 +2017,25 @@ namespace platf::sbs_debug {
              shadow_candidate,
              paths.temporary,
              "shadow_candidate_parallax",
-             "parallax-v2 immutable signed pre-limiter candidate one-eye source-U; diagnostic only"
+             "parallax-v2 immutable signed pre-conditioner geometry evidence and live collar color-mask input; never geometry authority"
            ) ||
            !dump_shadow_float_texture(
              shadow_vertical,
              paths.temporary,
              "shadow_vertical_majorant",
-             "parallax-v2 least column-wise near-preserving shear-2 majorant; explicit intermediate consumed by the row limiter"
+              "parallax-v2 least column-wise upper envelope; diagnostic evidence only and not consumed directly by the row limiter"
+           ) ||
+           !dump_shadow_float_texture(
+             shadow_vertical_conditioned,
+             paths.temporary,
+             "shadow_vertical_conditioned",
+             "parallax-v2 fixed 75/25 share of the column upper/lower envelopes; neutral intermediate consumed by the row majorant"
            ) ||
            !dump_shadow_float_texture(
              shadow_final,
              paths.temporary,
              "shadow_final_parallax",
-             "parallax-v2 least anisotropic 2D near-preserving Lipschitz majorant; live render position authority"
+             "parallax-v2 vertically conditioned field after one horizontal Lipschitz majorant; live render position authority"
            ) ||
            !dump_parallax_v2_state(
              completed,
@@ -2086,9 +2096,9 @@ namespace platf::sbs_debug {
           eye_aspect < source_aspect ? eye_aspect / source_aspect : 1.0f;
 
         const std::string warp_scalar_stage =
-          "actual near-preserving anisotropic 2D Lipschitz majorant sampled by live V2 reprojection";
+          "actual orientation-selective conditioned field sampled by live V2 reprojection";
         const std::string warp_scalar_description =
-          "Exact signed one-eye source-U after the vertical shear-2 majorant and row majorant, sampled by the live V2 12-step contractive inverse.";
+          "Exact signed one-eye source-U after the fixed vertical upper/lower share and row majorant, sampled by the live V2 12-step contractive inverse.";
         nlohmann::json artifacts = nlohmann::json::object();
         artifacts["source.png"] = artifact_description(
           true,
@@ -2166,7 +2176,7 @@ namespace platf::sbs_debug {
           true,
           true,
           warp_scalar_stage,
-          "Grayscale preview of the exact near-preserving anisotropic 2D majorant sampled by the warp."
+          "Grayscale preview of the exact orientation-selective conditioned field sampled by the warp."
         );
         artifacts["warp_depth.f32"] = artifact_description(
           true,
@@ -2177,14 +2187,14 @@ namespace platf::sbs_debug {
         artifacts["warp_depth_shape.json"] = artifact_description(
           true,
           true,
-          "actual near-preserving anisotropic 2D majorant contract",
+          "actual orientation-selective conditioned-field contract",
           "Dimensions, layout, units, and scalar range for warp_depth.f32."
         );
         artifacts["warp_depth_heat.png"] = artifact_description(
           true,
           true,
           warp_scalar_stage,
-          "Jet preview of the exact near-preserving anisotropic 2D majorant sampled by the warp."
+          "Jet preview of the exact orientation-selective conditioned field sampled by the warp."
         );
         artifacts["adaptive_state.json"] = artifact_description(
           adaptive_available,
@@ -2220,9 +2230,9 @@ namespace platf::sbs_debug {
         );
         artifacts["shadow_candidate_parallax.f32"] = artifact_description(
           true,
-          false,
+          true,
           "parallax-v2 pre-limiter candidate displacement",
-          "Exact immutable signed one-eye source-U before the spatial limiter; diagnostic only."
+          "Exact immutable signed one-eye source-U before the spatial limiter; geometry evidence and live collar color-mask input, never geometry authority."
         );
         artifacts["shadow_candidate_parallax_shape.json"] = artifact_description(
           true,
@@ -2246,7 +2256,7 @@ namespace platf::sbs_debug {
           true,
           false,
           "parallax-v2 vertical shear-limiter intermediate",
-          "Exact signed one-eye source-U after the least column-wise majorant v >= candidate with |dv/dy| <= max_vertical_shear/target_width; diagnostic intermediate consumed by the row limiter."
+          "Exact signed one-eye source-U for the least column-wise upper envelope v+ >= candidate with |dv+/dy| <= max_vertical_shear/target_width; diagnostic evidence only."
         );
         artifacts["shadow_vertical_majorant_shape.json"] = artifact_description(
           true,
@@ -2266,28 +2276,52 @@ namespace platf::sbs_debug {
           "parallax-v2 vertical shear-limiter intermediate preview",
           "Finite p2-p98 jet preview of the exact column-wise majorant."
         );
+        artifacts["shadow_vertical_conditioned.f32"] = artifact_description(
+          true,
+          false,
+          "parallax-v2 orientation-selective vertical conditioner",
+          "Exact signed one-eye source-U after the fixed 75/25 share of the column upper/lower envelopes; may raise or lower candidate while preserving the vertical shear bound."
+        );
+        artifacts["shadow_vertical_conditioned_shape.json"] = artifact_description(
+          true,
+          false,
+          "parallax-v2 orientation-selective vertical conditioner contract",
+          "Dimensions, units, finite scalar range, authenticated envelope share, and vertical shear bound; intermediate consumed by the row majorant."
+        );
+        artifacts["shadow_vertical_conditioned.png"] = artifact_description(
+          true,
+          false,
+          "parallax-v2 orientation-selective vertical conditioner preview",
+          "Finite p2-p98 grayscale preview of the exact vertical share."
+        );
+        artifacts["shadow_vertical_conditioned_heat.png"] = artifact_description(
+          true,
+          false,
+          "parallax-v2 orientation-selective vertical conditioner preview",
+          "Finite p2-p98 jet preview of the exact vertical share."
+        );
         artifacts["shadow_final_parallax.f32"] = artifact_description(
           true,
           true,
-          "parallax-v2 final near-preserving anisotropic 2D majorant",
-          "Exact signed one-eye source-U after the row majorant of shadow_vertical_majorant; q >= vertical >= candidate, |dq/dx| <= max_horizontal_slope/target_width, and |dq/dy| <= max_vertical_shear/target_width. Live V2 render position authority."
+          "parallax-v2 final conditioned displacement field",
+          "Exact signed one-eye source-U after the row majorant of shadow_vertical_conditioned; q >= conditioned, |dq/dx| <= max_horizontal_slope/target_width, and |dq/dy| <= max_vertical_shear/target_width. q may raise or lower candidate. Live V2 render position authority."
         );
         artifacts["shadow_final_parallax_shape.json"] = artifact_description(
           true,
           false,
-          "parallax-v2 final near-preserving anisotropic 2D majorant contract",
-          "Dimensions, units, finite scalar range, no-lowering chain, horizontal slope bound, and vertical shear bound; live renderer authority."
+          "parallax-v2 final conditioned displacement contract",
+          "Dimensions, units, finite scalar range, authenticated vertical share, horizontal slope bound, and vertical shear bound; live renderer authority."
         );
         artifacts["shadow_final_parallax.png"] = artifact_description(
           true,
           false,
-          "parallax-v2 final near-preserving anisotropic 2D majorant preview",
+          "parallax-v2 final conditioned displacement preview",
           "Finite p2-p98 grayscale preview of the live V2 position field."
         );
         artifacts["shadow_final_parallax_heat.png"] = artifact_description(
           true,
           false,
-          "parallax-v2 final near-preserving anisotropic 2D majorant preview",
+          "parallax-v2 final conditioned displacement preview",
           "Finite p2-p98 jet preview of the live V2 position field."
         );
         artifacts["shadow_state.json"] = artifact_description(
@@ -2394,6 +2428,8 @@ namespace platf::sbs_debug {
           texture_description(shadow_candidate);
         dimensions["shadow_vertical_majorant"] =
           texture_description(shadow_vertical);
+        dimensions["shadow_vertical_conditioned"] =
+          texture_description(shadow_vertical_conditioned);
         dimensions["shadow_final_parallax"] = texture_description(shadow_final);
 
         const std::string color_mode =
@@ -2414,7 +2450,7 @@ namespace platf::sbs_debug {
             *completed.parallax_v2_shader_provenance
           );
         nlohmann::json manifest {
-          {"schema", 7},
+          {"schema", 8},
           {"capture", "one matched, completed Host-SBS frame"},
           {"published_atomically", true},
           {"host_sbs_mode", "ai"},
@@ -2427,15 +2463,27 @@ namespace platf::sbs_debug {
           {"cuda_graph_active", completed.cuda_graph_active},
           {"warp_depth_prefilter_applied", false},
           {"renderer", {
-                         {"authority", "authenticated-parallax-v2-final-near-preserving-anisotropic-2d-majorant"},
+                         {"authority", "authenticated-parallax-v2-orientation-selective-conditioned-field"},
                          {"parallax_v2_render_requested", true},
                          {"parallax_v2_render_selected", true},
                          {"mapping_artifacts_match_selected_renderer", warp_map_available && warp_mask_available},
                          {"parallax_v2_position_field", "shadow_final_parallax"},
                          {"parallax_v2_coordinate_role", "shadow_coordinate is diagnostic only; it has no renderer authority"},
-                         {"parallax_v2_vertical_majorant_role", "least column-wise v >= candidate with adjacent-row source-U change <= max_vertical_shear/target_width; diagnostic intermediate consumed by the row limiter"},
-                         {"parallax_v2_majorant_role", "least row-wise q >= shadow_vertical_majorant; final q >= vertical >= candidate with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear; live position authority"},
+                         {"parallax_v2_vertical_majorant_role", "least column-wise upper envelope v+ >= candidate with adjacent-row source-U change <= max_vertical_shear/target_width; diagnostic evidence only"},
+                         {"parallax_v2_vertical_conditioned_role", "fixed 75/25 share of column upper/lower envelopes; may raise or lower candidate and feeds the row majorant"},
+                         {"parallax_v2_conditioner_role", "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear; q may raise or lower candidate and is the live position authority"},
                          {"parallax_v2_inverse", "12-step contractive fixed point; no owner pass or synthetic fill"},
+                         {"collar_defocus", nlohmann::json {
+                              {"enabled", true},
+                              {"role", "positive conditioner-deviation color-only background defocus; geometry is unchanged"},
+                              {"deviation", "max(shadow_final_parallax - shadow_candidate_parallax, 0) in source-color pixels at the inverse-warped source coordinate"},
+                              {"onset_source_px", 4.0},
+                              {"full_response_source_px", 20.0},
+                              {"gaussian_sigma_source_px", 6.0},
+                              {"kernel", "one-pass 3x3 binomial approximation with sqrt(2)-sigma-spaced taps and smoothstep opacity"},
+                              {"resolution_basis", "current-source-color-pixels; depth-grid-independent, not stream-resolution-invariant"},
+                              {"hdr", "weighted native source values; no clamp, tone map, or gamma conversion"},
+                            }},
                          {"live_shader_source", nlohmann::json {
                               {"source_closure_schema", models::host_sbs_shader_cache::source_closure_schema},
                               {"source_compile_flags", models::host_sbs_shader_cache::shader_compile_flags},
@@ -2549,7 +2597,13 @@ namespace platf::sbs_debug {
              << "parallax_v2_shadow_active=true\n"
              << "parallax_v2_render_requested=true\n"
              << "parallax_v2_render_selected=true\n"
-             << "renderer_authority=authenticated-parallax-v2-final-near-preserving-anisotropic-2d-majorant\n"
+             << "renderer_authority=authenticated-parallax-v2-orientation-selective-conditioned-field\n"
+             << "collar_defocus_enabled=true\n"
+             << "collar_defocus_deviation=positive-final-minus-candidate-source-color-pixels\n"
+             << "collar_defocus_onset_source_px=4\n"
+             << "collar_defocus_full_response_source_px=20\n"
+             << "collar_defocus_gaussian_sigma_source_px=6\n"
+             << "collar_defocus_kernel=3x3-binomial-fixed-sigma-smoothstep-opacity\n"
              << "parallax_v2_live_renderer_source_closure_sha256="
              << completed.parallax_v2_live_renderer_source_closure_sha256 << '\n'
              << "raw_model_provenance=authoritative\n"
@@ -2693,7 +2747,7 @@ namespace platf::sbs_debug {
       if (!completed.parallax_v2_render_selected ||
           !completed.parallax_v2_producer_active ||
           !completed.shadow_candidate_parallax ||
-          !completed.shadow_vertical_majorant ||
+          !completed.shadow_vertical_majorant || !completed.shadow_vertical_conditioned ||
           !completed.shadow_final_parallax || !completed.shadow_state ||
           !completed.shadow_frame_stats) {
         BOOST_LOG(warning)
@@ -2802,6 +2856,12 @@ namespace platf::sbs_debug {
         read_texture(
           device,
           ctx,
+          completed.shadow_vertical_conditioned,
+          job.shadow_vertical_conditioned
+        ) &&
+        read_texture(
+          device,
+          ctx,
           completed.shadow_final_parallax,
           job.shadow_final
         ) &&
@@ -2871,6 +2931,7 @@ namespace platf::sbs_debug {
       job.completed.shadow_coordinate = nullptr;
       job.completed.shadow_candidate_parallax = nullptr;
       job.completed.shadow_vertical_majorant = nullptr;
+      job.completed.shadow_vertical_conditioned = nullptr;
       job.completed.shadow_final_parallax = nullptr;
       job.completed.shadow_state = nullptr;
       job.completed.shadow_frame_stats = nullptr;

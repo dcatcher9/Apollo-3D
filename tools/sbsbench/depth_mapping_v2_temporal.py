@@ -57,7 +57,9 @@ try:
         effective_near_log_tau,
         horizontal_lipschitz_majorant,
         near_tail_count_and_coverage,
+        vertical_share_coefficients,
         vertical_lipschitz_majorant,
+        vertical_lipschitz_minorant,
     )
     from .depth_coordinate_v2_contract import (
         CALIBRATED_DEFAULTS as V2_DEFAULTS, CONTRACT_CANONICAL_SHA256,
@@ -76,7 +78,9 @@ except ImportError:  # Direct execution from tools/sbsbench.
         effective_near_log_tau,
         horizontal_lipschitz_majorant,
         near_tail_count_and_coverage,
+        vertical_share_coefficients,
         vertical_lipschitz_majorant,
+        vertical_lipschitz_minorant,
     )
     from depth_coordinate_v2_contract import (  # type: ignore
         CALIBRATED_DEFAULTS as V2_DEFAULTS, CONTRACT_CANONICAL_SHA256,
@@ -89,9 +93,9 @@ RAW_PATTERN = re.compile(r"raw_(\d+)\.f32$")
 SELECTED_POLICY = "first"
 RESEARCH_POLICIES = ("aggregate", "slow")
 POLICY_STUDY_POLICIES = (SELECTED_POLICY, *RESEARCH_POLICIES)
-V2_STATE_TRACE_SCHEMA = 10
+V2_STATE_TRACE_SCHEMA = 11
 V2_STATE_TRACE_POLICY = (
-    "latched-center-scale-near-tail-retained-camera-base-container-vertical-shear2-near-majorant-v8"
+    "latched-center-scale-near-tail-retained-camera-base-container-vertical-share75-row-majorant-v9"
 )
 V2_GPU_SHADER_SEQUENCE = (
     "depth_coordinate_v2_moments_cs.hlsl",
@@ -134,12 +138,15 @@ V2_STATE_TRACE_FIELDS = (
     "vertical_majorant_raised_fraction",
     "vertical_majorant_max_raise_source_u",
     "final_max_abs_source_u",
-    "limiter_raised_fraction",
-    "limiter_max_raise_source_u",
+    "conditioner_raised_fraction",
+    "conditioner_max_raise_source_u",
+    "conditioner_lowered_fraction",
+    "conditioner_max_lower_source_u",
     "final_horizontal_slope_max",
     "final_vertical_shear_max",
     "order_sha256",
     "vertical_majorant_sha256",
+    "vertical_conditioned_sha256",
     "parallax_sha256",
 )
 
@@ -201,9 +208,9 @@ class ExactSequenceResult:
     """Fields and state attestation for an exact whole-clip direct replay.
 
     ``canonical_fields`` preserve DAV2 ordering before the spatial projection. ``parallax_fields``
-    are final one-eye source-U displacement after frame-local hard safety, the least column-wise
-    vertical near-preserving majorant, and then the least row-wise horizontal near-preserving
-    majorant. An unusable field publishes flat geometry for the current color while retaining the
+    are final one-eye source-U displacement after frame-local hard safety, the fixed 75/25 share
+    of the column upper/lower envelopes, and then the least row-wise horizontal majorant. An
+    unusable field publishes flat geometry for the current color while retaining the
     scene camera unless an authenticated cut also arrives. Near-tail occupancy, its smoothstep
     weight, and its effective logarithmic tau are acquired with the camera and held for the shot.
     There is deliberately no timed or frame-counted hold policy.
@@ -573,7 +580,8 @@ def validate_v2_state_trace(
                 "pre_limiter_max_abs_source_u",
                 "vertical_majorant_raised_fraction",
                 "vertical_majorant_max_raise_source_u", "final_max_abs_source_u",
-                "limiter_raised_fraction", "limiter_max_raise_source_u",
+                "conditioner_raised_fraction", "conditioner_max_raise_source_u",
+                "conditioner_lowered_fraction", "conditioner_max_lower_source_u",
                 "final_horizontal_slope_max", "final_vertical_shear_max"):
             value = row[key]
             if (isinstance(value, bool) or not isinstance(value, (int, float)) or
@@ -587,7 +595,9 @@ def validate_v2_state_trace(
                 row["frame_valid"] != expected_frame_valid):
             raise ValueError(
                 f"v2 state trace {frame_id} has inconsistent input/collapse/frame validity")
-        for key in ("order_sha256", "vertical_majorant_sha256", "parallax_sha256"):
+        for key in (
+                "order_sha256", "vertical_majorant_sha256",
+                "vertical_conditioned_sha256", "parallax_sha256"):
             if (not isinstance(row[key], str) or digest_pattern.fullmatch(row[key]) is None):
                 raise ValueError(f"v2 state trace {frame_id} has invalid {key}")
 
@@ -650,11 +660,14 @@ def validate_v2_state_trace(
         for key in ("pre_limiter_max_abs_source_u",
                     "vertical_majorant_raised_fraction",
                     "vertical_majorant_max_raise_source_u", "final_max_abs_source_u",
-                    "limiter_raised_fraction", "limiter_max_raise_source_u",
+                    "conditioner_raised_fraction", "conditioner_max_raise_source_u",
+                    "conditioner_lowered_fraction", "conditioner_max_lower_source_u",
                     "final_horizontal_slope_max", "final_vertical_shear_max"):
             if row[key] < 0.0:
                 raise ValueError(f"v2 state trace {frame_id} has negative {key}")
-        for key in ("vertical_majorant_raised_fraction", "limiter_raised_fraction"):
+        for key in (
+                "vertical_majorant_raised_fraction", "conditioner_raised_fraction",
+                "conditioner_lowered_fraction"):
             if row[key] > 1.0:
                 raise ValueError(f"v2 state trace {frame_id} {key} exceeds one")
         if row["frame_valid"]:
@@ -843,8 +856,10 @@ def generate_first_latch_exact_sequence(
         vertical_majorant_raised_fraction = 0.0
         vertical_majorant_max_raise = 0.0
         final_max_abs = 0.0
-        limiter_raised_fraction = 0.0
-        limiter_max_raise = 0.0
+        conditioner_raised_fraction = 0.0
+        conditioner_max_raise = 0.0
+        conditioner_lowered_fraction = 0.0
+        conditioner_max_lower = 0.0
         final_horizontal_slope_max = 0.0
         final_vertical_shear_max = 0.0
         if not frame_valid:
@@ -862,7 +877,8 @@ def generate_first_latch_exact_sequence(
                 latched_effective_near_log_tau = config.near_log_tau
             container_scale = 1.0
             canonical = np.zeros(shape, dtype="<f4")
-            vertical = np.zeros(shape, dtype="<f4")
+            vertical_majorant = np.zeros(shape, dtype="<f4")
+            vertical_conditioned = np.zeros(shape, dtype="<f4")
             parallax = np.zeros(shape, dtype="<f4")
         else:
             assert candidate is not None
@@ -888,11 +904,18 @@ def generate_first_latch_exact_sequence(
                 near_log_tau=latched_effective_near_log_tau)
             effective_gain = config.parallax_gain * container_scale
             candidate_parallax = curved * effective_gain
-            vertical = vertical_lipschitz_majorant(
+            vertical_majorant = vertical_lipschitz_majorant(
                 candidate_parallax, config.max_vertical_shear / shape[1])
+            vertical_minorant = vertical_lipschitz_minorant(
+                candidate_parallax, config.max_vertical_shear / shape[1])
+            majorant_share, minorant_share = vertical_share_coefficients(
+                config.vertical_majorant_share)
+            vertical_conditioned = (
+                majorant_share * vertical_majorant +
+                minorant_share * vertical_minorant)
             final = horizontal_lipschitz_majorant(
-                vertical, config.max_horizontal_slope / shape[1])
-            vertical_correction = vertical - candidate_parallax
+                vertical_conditioned, config.max_horizontal_slope / shape[1])
+            vertical_correction = vertical_majorant - candidate_parallax
             correction = final - candidate_parallax
             vertical_tolerance = max(
                 1.0e-12, config.max_vertical_shear / shape[1] * 1.0e-9)
@@ -903,8 +926,10 @@ def generate_first_latch_exact_sequence(
                 np.mean(vertical_correction > vertical_tolerance))
             vertical_majorant_max_raise = float(np.max(vertical_correction))
             final_max_abs = float(np.max(np.abs(final)))
-            limiter_raised_fraction = float(np.mean(correction > tolerance))
-            limiter_max_raise = float(np.max(correction))
+            conditioner_raised_fraction = float(np.mean(correction > tolerance))
+            conditioner_max_raise = max(0.0, float(np.max(correction)))
+            conditioner_lowered_fraction = float(np.mean(correction < -tolerance))
+            conditioner_max_lower = max(0.0, float(np.max(-correction)))
             final_horizontal_slope_max = (
                 float(np.max(np.abs(np.diff(final, axis=1)))) * shape[1]
                 if shape[1] > 1 else 0.0
@@ -914,12 +939,14 @@ def generate_first_latch_exact_sequence(
                 if shape[0] > 1 else 0.0
             )
             canonical = canonical64.astype("<f4")
-            vertical = vertical.astype("<f4")
+            vertical_majorant = vertical_majorant.astype("<f4")
+            vertical_conditioned = vertical_conditioned.astype("<f4")
             parallax = final.astype("<f4")
 
         encoded = encode_direct_parallax(parallax)
         order_sha = _field_sha256(canonical)
-        vertical_majorant_sha = _field_sha256(vertical)
+        vertical_majorant_sha = _field_sha256(vertical_majorant)
+        vertical_conditioned_sha = _field_sha256(vertical_conditioned)
         parallax_sha = _field_sha256(encoded)
         effective_gain = (config.parallax_gain * container_scale
                           if frame_valid else 0.0)
@@ -970,12 +997,15 @@ def generate_first_latch_exact_sequence(
             "vertical_majorant_raised_fraction": vertical_majorant_raised_fraction,
             "vertical_majorant_max_raise_source_u": vertical_majorant_max_raise,
             "final_max_abs_source_u": final_max_abs,
-            "limiter_raised_fraction": limiter_raised_fraction,
-            "limiter_max_raise_source_u": limiter_max_raise,
+            "conditioner_raised_fraction": conditioner_raised_fraction,
+            "conditioner_max_raise_source_u": conditioner_max_raise,
+            "conditioner_lowered_fraction": conditioner_lowered_fraction,
+            "conditioner_max_lower_source_u": conditioner_max_lower,
             "final_horizontal_slope_max": final_horizontal_slope_max,
             "final_vertical_shear_max": final_vertical_shear_max,
             "order_sha256": order_sha,
             "vertical_majorant_sha256": vertical_majorant_sha,
+            "vertical_conditioned_sha256": vertical_conditioned_sha,
             "parallax_sha256": parallax_sha,
         }
         canonical_fields.append(canonical)
@@ -1060,11 +1090,18 @@ def _limiter_burden(
         near_log_tau=state.effective_near_log_tau)
     desired = unit * gain
     max_step = config.max_horizontal_slope / raw.shape[1]
+    max_vertical_step = config.max_vertical_shear / raw.shape[1]
     adjacent = (float(np.max(np.abs(np.diff(desired, axis=1))))
                 if raw.shape[1] > 1 else 0.0)
     collar = int(math.ceil(adjacent / max_step - 1.0e-12)) if adjacent > 0.0 else 0
-    vertical = vertical_lipschitz_majorant(desired, max_vertical_step)
-    limited = horizontal_lipschitz_majorant(vertical, max_step)
+    vertical_majorant = vertical_lipschitz_majorant(desired, max_vertical_step)
+    vertical_minorant = vertical_lipschitz_minorant(desired, max_vertical_step)
+    majorant_share, minorant_share = vertical_share_coefficients(
+        config.vertical_majorant_share)
+    vertical_conditioned = (
+        majorant_share * vertical_majorant +
+        minorant_share * vertical_minorant)
+    limited = horizontal_lipschitz_majorant(vertical_conditioned, max_step)
     correction = limited - desired
     tolerance = max(1.0e-12, max_step * 1.0e-9)
     limited_min = min(
@@ -1080,9 +1117,11 @@ def _limiter_burden(
         "source_u_envelope_feasible": float(
             absolute_max <= config.direct_container_limit + 1.0e-12),
         "estimated_collar_texels": collar,
-        "limiter_raised_fraction": float(np.mean(correction > tolerance)),
-        "limiter_correction_source_u_p95": float(np.percentile(correction, 95.0)),
-        "limiter_correction_source_u_max": float(np.max(correction)),
+        "conditioner_raised_fraction": float(np.mean(correction > tolerance)),
+        "conditioner_lowered_fraction": float(np.mean(correction < -tolerance)),
+        "conditioner_correction_source_u_p95": float(np.percentile(correction, 95.0)),
+        "conditioner_correction_source_u_max": float(np.max(correction)),
+        "conditioner_correction_source_u_min": float(np.min(correction)),
     }
 
 
@@ -1132,12 +1171,16 @@ def evaluate_gain_ownership(
                 value["source_u_envelope_feasible"] < 0.5 for value in values),
             "estimated_collar_texels_max": max(
                 value["estimated_collar_texels"] for value in values),
-            "limiter_raised_fraction_p95": _percentile(
-                (value["limiter_raised_fraction"] for value in values), 95.0),
-            "limiter_correction_source_u_p95": _percentile(
-                (value["limiter_correction_source_u_p95"] for value in values), 95.0),
-            "limiter_correction_source_u_max": max(
-                value["limiter_correction_source_u_max"] for value in values),
+            "conditioner_raised_fraction_p95": _percentile(
+                (value["conditioner_raised_fraction"] for value in values), 95.0),
+            "conditioner_lowered_fraction_p95": _percentile(
+                (value["conditioner_lowered_fraction"] for value in values), 95.0),
+            "conditioner_correction_source_u_p95": _percentile(
+                (value["conditioner_correction_source_u_p95"] for value in values), 95.0),
+            "conditioner_correction_source_u_max": max(
+                value["conditioner_correction_source_u_max"] for value in values),
+            "conditioner_correction_source_u_min": min(
+                value["conditioner_correction_source_u_min"] for value in values),
         }
 
     finite_absolute = [value for value in absolute_limits if math.isfinite(value)]
@@ -1866,12 +1909,12 @@ def summarize(clips: Sequence[Dict[str, object]]) -> Dict[str, object]:
                 float(entry["requested_capped_by_shot_safety"]
                       ["estimated_collar_texels_max"])
                 for entry in gain_entries),
-            "fixed_requested_limiter_correction_source_u_max": max(
-                float(entry["fixed_requested"]["limiter_correction_source_u_max"])
+            "fixed_requested_conditioner_correction_source_u_max": max(
+                float(entry["fixed_requested"]["conditioner_correction_source_u_max"])
                 for entry in gain_entries),
-            "safe_capped_limiter_correction_source_u_max": max(
+            "safe_capped_conditioner_correction_source_u_max": max(
                 float(entry["requested_capped_by_shot_safety"]
-                      ["limiter_correction_source_u_max"])
+                      ["conditioner_correction_source_u_max"])
                 for entry in gain_entries),
             "fixed_absolute_parallax_source_u_max": max(
                 float(entry["fixed_requested"]["absolute_parallax_source_u_max"])

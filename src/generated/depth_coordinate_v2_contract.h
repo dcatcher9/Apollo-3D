@@ -10,10 +10,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 14u;
-  inline constexpr std::uint32_t contract_tag = 0x1AD89481u;
-  inline constexpr std::string_view contract_canonical_sha256 = "fdfda53e49ede50fc3408c7ecdafe7076a37b8468f5d828dc4a0d47e0656f458";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "1ad894818b5e3a42ae5619e9d55a757cc10d1356098fc832de512be59d8c6907";
+  inline constexpr std::uint32_t contract_schema = 15u;
+  inline constexpr std::uint32_t contract_tag = 0x7ADF0988u;
+  inline constexpr std::string_view contract_canonical_sha256 = "09f4eae02ddfd437dbf29116c6f7f4f5c754af40a7a9124edee3c071adfc8ed6";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "7adf09889f87bc391afe42a4f56f4d38a534573c6e751ced03c01c029adecf53";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -25,7 +25,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "2e2d9425588a2af2bad380988b9a2186ed81e9d33801fc784f9b9777cd3f87d2";
+  inline constexpr std::string_view shader_source_closure_sha256 = "b2cd29990fbbda1117ea2ead9a01bca7d43543c5d8d2dce917cab75287d28351";
 
   struct shader_source_spec_t {
     std::string_view source_file;
@@ -55,11 +55,13 @@ namespace models::depth_coordinate_v2 {
   inline constexpr float direct_container_limit = 0.04f;
   inline constexpr float max_horizontal_slope = 0.5f;
   inline constexpr float max_vertical_shear = 2.0f;
+  inline constexpr float vertical_majorant_share = 0.75f;
   inline constexpr float convergence_curve_default = 0.0f;
   inline constexpr std::string_view direct_parallax_decode_expression = "(encoded * 2 - 1) * 0.04";
   static_assert(convergence_curve_default == 0.0f);
   static_assert(max_horizontal_slope > 0.0f && max_horizontal_slope < 1.0f);
   static_assert(max_vertical_shear > 0.0f);
+  static_assert(vertical_majorant_share > 0.0f && vertical_majorant_share < 1.0f);
 
   struct model_preprocess_contract_t {
     std::string_view profile;

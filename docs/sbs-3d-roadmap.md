@@ -2,14 +2,14 @@
 
 Apollo converts captured mono frames into host-rendered SBS with TensorRT depth estimation and one
 production live geometry implementation: Host SBS Depth Coordinate V2. The V1 occlusion-aware
-backward-probe renderer and its live selector have been removed. V2 consumes the least anisotropic
-2D near-preserving majorant of the signed candidate field: a vertical shear-2 column majorant
-followed by the slope-0.5 row majorant. Neither pass lowers requested disparity; the final field
-bounds crown shear and horizontal slope and is inverted with a unique 12-step contractive fixed
-point. Candidate, vertical intermediate, and canonical coordinate remain diagnostics only; V2 has
-no forward-owner, visibility-selection, or synthetic-fill path.
+backward-probe renderer and its live selector have been removed. V2 computes exact vertical
+shear-2 upper/lower envelopes, takes a fixed 75/25 orientation-selective share, then applies a pure
+slope-0.5 row majorant. The final field bounds crown shear and horizontal slope and is inverted with
+a unique 12-step contractive fixed point. Candidate, vertical upper/share, and canonical coordinate
+remain attributable evidence; candidate additionally drives a positive-correction color-only
+collar-defocus trial. V2 has no forward-owner, visibility-selection, or synthetic-fill path.
 
-Production contract schema 14 authenticates DAV2 Small, its HDR/SDR preprocessing closure, the
+Production contract schema 15 authenticates DAV2 Small, its HDR/SDR preprocessing closure, the
 seven-pass producer, the standalone live renderer, and six standard tensor shapes (`770x434`,
 `1022x434`, `1036x434`, `434x770`, `434x1022`, and `434x1036`). DAV2 Base, custom models, and custom
 tensor shapes fail flat. There is no V1 fallback. See
@@ -31,7 +31,8 @@ Approved AR glasses connected as a Windows monitor also use an automatic local p
 3. Infer raw depth and obtain only the confirmed cut epoch from the dedicated cut-only analysis.
 4. Acquire or retain the scene center and near-tail shoulder, then apply the fixed raw scale,
    monotone asymmetric curve, requested pop, and exact frame-local 4% source-U container.
-5. Produce the vertical shear-2 majorant and then the slope-0.5 row majorant entirely on the GPU.
+5. Produce the vertical upper/lower envelopes, combine their authenticated 75/25 share, and then
+   apply the slope-0.5 row majorant entirely on the GPU.
 6. Render each eye with the unique 12-step contractive inverse. Invalid or unauthenticated current
    geometry renders flat rather than reusing stale depth or falling back to V1.
 7. Convert the packed SBS raster directly to the encoder format. If doubled width exceeds
@@ -212,10 +213,12 @@ selection until a hard cut.
   `|dq/dx| <= 0.5`, then used the same 12-step contractive inverse. Exact pop-1.5 replay removes the
   duplicate and hair/body step without lowering any candidate value; 3.837% of fullscreen texels
   and 2.152% of windowed texels are raised. Its residual background bending around the fullscreen
-  crown selected a pure vertical shear-2 majorant before the row pass. The final is the least
-  anisotropic 2D majorant and preserves `q >= vertical >= candidate`. The source captures are
-  historical schema-7 input witnesses and cannot authenticate the shipped schema-14 path. Current
-  qualification therefore uses fresh schema-14/manifest-schema-7 live dumps and timing. Evidence:
+  crown first selected a pure vertical shear-2 majorant before the row pass. The later crown trial
+  superseded that endpoint with a 75/25 vertical upper/lower share while keeping the row pass pure;
+  this allows bounded top-row foreground compression without the global blend's lateral notch.
+  The source captures are historical schema-7 input witnesses and cannot authenticate the live
+  schema-15 trial path. Qualification still requires fresh schema-15/manifest-schema-8 live dumps
+  and isolated timing; those results have not yet been recorded. Historical evidence:
   `E:\ApolloDev\majorant-row-both-confirm-20260802`.
 - Symmetric horizontal edge-band supersampling was rejected after the full core screen. It nudged
   mean halo from 4.57 to 4.52 and the rim proxy from 4.41 to 4.31, but produced no validated

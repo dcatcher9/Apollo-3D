@@ -13,7 +13,7 @@ namespace models::depth_coordinate_v2 {
   // layout change must bump the relevant value without pretending the coordinate math changed.
   // Dump 3D retains the historical `shadow_*` filenames as a compatibility schema; these values
   // now describe production V2 evidence, not an alternate renderer.
-  inline constexpr std::uint32_t shadow_state_dump_schema = 7u;
+  inline constexpr std::uint32_t shadow_state_dump_schema = 8u;
   inline constexpr std::uint32_t shadow_frame_stats_dump_schema = 2u;
   inline constexpr std::uint32_t reserved_calibration_revision = 0xffffffffu;
 

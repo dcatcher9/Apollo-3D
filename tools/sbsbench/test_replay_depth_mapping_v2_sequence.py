@@ -71,8 +71,10 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             "candidate_center_drift_u": 0.01,
             "predicted_zero_translation_source_u": 0.002,
             "effective_gain": 0.005,
-            "limiter_raised_fraction": 0.1,
-            "limiter_max_raise_source_u": 0.003,
+            "conditioner_raised_fraction": 0.1,
+            "conditioner_max_raise_source_u": 0.003,
+            "conditioner_lowered_fraction": 0.02,
+            "conditioner_max_lower_source_u": 0.001,
             "final_horizontal_slope_max": 0.2,
             "final_vertical_shear_max": 0.3,
             "collapsed": False,
@@ -634,12 +636,15 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             self.assertEqual(
                 {key: manifest["mapping_config"][key] for key in (
                     "near_tail_probe_u", "near_tail_coverage_low",
-                    "near_tail_coverage_high", "near_log_tau_dense")},
+                    "near_tail_coverage_high", "near_log_tau_dense",
+                    "vertical_majorant_share")},
                 {
                     "near_tail_probe_u": CALIBRATED_DEFAULTS.near_tail_probe_u,
                     "near_tail_coverage_low": CALIBRATED_DEFAULTS.near_tail_coverage_low,
                     "near_tail_coverage_high": CALIBRATED_DEFAULTS.near_tail_coverage_high,
                     "near_log_tau_dense": CALIBRATED_DEFAULTS.near_log_tau_dense,
+                    "vertical_majorant_share":
+                        CALIBRATED_DEFAULTS.vertical_majorant_share,
                 })
             self.assertEqual(
                 manifest["model_identity"]["preprocess_source_closure_sha256"],

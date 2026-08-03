@@ -5,9 +5,10 @@
  * This is deliberately not a second mapping implementation. The helper loads authenticated raw
  * DAV2 fields and hard-cut generations, keeps one GPU state buffer alive for the sequence, and
  * dispatches the same seven production V2 shader entrypoints used by video_depth_estimator. Its
- * candidate texture is retained as immutable pre-limiter evidence, and its explicit vertical
- * majorant is the shear2 intermediate consumed by the row majorant. The encoded final texture is
- * the authenticated live render input for the twelve-step contractive inverse. A separate
+ * candidate texture is retained as immutable pre-conditioner evidence. The column pass publishes
+ * both an upper-envelope diagnostic and the authenticated 75/25 vertical share consumed by the
+ * pure row majorant. The encoded final texture is the live render input for the twelve-step
+ * contractive inverse. A separate
  * diagnostic-only map entrypoint materializes canonical_values for the replay report; it is not
  * part of the seven-entry production sequence or live authentication.
  */
@@ -28,9 +29,9 @@
 
 namespace sbs_bench {
 
-  inline constexpr unsigned depth_coordinate_v2_state_trace_schema = 10;
+  inline constexpr unsigned depth_coordinate_v2_state_trace_schema = 11;
   inline constexpr std::string_view depth_coordinate_v2_state_trace_policy =
-    "latched-center-scale-near-tail-retained-camera-base-container-vertical-shear2-near-majorant-v8";
+    "latched-center-scale-near-tail-retained-camera-base-container-vertical-share75-row-majorant-v9";
   inline constexpr std::string_view depth_coordinate_v2_diagnostic_role =
     "non-controlling-fixed-scale-camera-audit-v4";
   inline constexpr std::string_view depth_coordinate_v2_gpu_authority =
@@ -44,12 +45,14 @@ namespace sbs_bench {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> canonical_order;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> candidate_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> vertical_majorant;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> vertical_conditioned;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> encoded_final_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> legacy_subject_state;
     std::vector<float> raw_values;
     std::vector<float> canonical_values;
     std::vector<float> candidate_parallax_values;
     std::vector<float> vertical_majorant_values;
+    std::vector<float> vertical_conditioned_values;
     std::vector<float> encoded_parallax_values;
     float encoded_minimum = 0.5f;
     float encoded_maximum = 0.5f;
@@ -60,6 +63,7 @@ namespace sbs_bench {
     std::string order_sha256;
     std::string candidate_sha256;
     std::string vertical_majorant_sha256;
+    std::string vertical_conditioned_sha256;
     std::string parallax_sha256;
   };
 

@@ -157,6 +157,7 @@ namespace {
         {"gain_per_pop", v2::gain_per_pop},
         {"max_horizontal_slope", v2::max_horizontal_slope},
         {"max_vertical_shear", v2::max_vertical_shear},
+        {"vertical_majorant_share", v2::vertical_majorant_share},
         {"direct_container_limit", v2::direct_container_limit},
       }},
       {"cut_source", "unit-authenticated-hard-cut-generation"},
@@ -220,6 +221,61 @@ namespace {
     return result;
   }
 
+  std::vector<float> greatest_columnwise_lipschitz_minorant(
+    const std::vector<float> &candidate,
+    const std::uint32_t width,
+    const std::uint32_t height
+  ) {
+    std::vector<float> result = candidate;
+    if (width == 0u || height == 0u ||
+        result.size() != static_cast<std::size_t>(width) * height) {
+      return {};
+    }
+    const float max_step = models::depth_coordinate_v2::max_vertical_shear /
+                           static_cast<float>(width);
+    for (std::uint32_t x = 0; x < width; ++x) {
+      for (std::uint32_t y = 1u; y < height; ++y) {
+        const auto index = static_cast<std::size_t>(y) * width + x;
+        result[index] = std::min(
+          candidate[index],
+          result[index - width] + max_step
+        );
+      }
+      for (std::uint32_t y = height - 1u; y > 0u; --y) {
+        const auto index = static_cast<std::size_t>(y - 1u) * width + x;
+        result[index] = std::min(
+          result[index],
+          result[index + width] + max_step
+        );
+      }
+    }
+    return result;
+  }
+
+  float vertical_envelope_share(const float majorant, const float minorant) {
+    const float majorant_share = models::depth_coordinate_v2::vertical_majorant_share;
+    volatile float majorant_term = majorant_share * majorant;
+    volatile float minorant_term = (1.0f - majorant_share) * minorant;
+    return majorant_term + minorant_term;
+  }
+
+  std::vector<float> orientation_selective_vertical_conditioner(
+    const std::vector<float> &candidate,
+    const std::uint32_t width,
+    const std::uint32_t height
+  ) {
+    const auto majorant = least_columnwise_lipschitz_majorant(candidate, width, height);
+    const auto minorant = greatest_columnwise_lipschitz_minorant(candidate, width, height);
+    if (majorant.size() != candidate.size() || minorant.size() != candidate.size()) {
+      return {};
+    }
+    std::vector<float> result(candidate.size());
+    for (std::size_t index = 0; index < result.size(); ++index) {
+      result[index] = vertical_envelope_share(majorant[index], minorant[index]);
+    }
+    return result;
+  }
+
   bool dispatch_depth_coordinate_v2_limit(
     warp_device_t &warp,
     ID3D11ComputeShader *shader,
@@ -227,7 +283,8 @@ namespace {
     const std::uint32_t height,
     const std::uint32_t dispatch_groups,
     const std::vector<float> &candidate,
-    std::vector<float> &result
+    std::vector<float> &result,
+    std::vector<float> *secondary_result = nullptr
   ) {
     if (!shader || width == 0u || height == 0u ||
         candidate.size() != static_cast<std::size_t>(width) * height) {
@@ -277,6 +334,21 @@ namespace {
           nullptr,
           &final_uav
         ))) {
+      return false;
+    }
+    ComPtr<ID3D11Texture2D> secondary_texture;
+    ComPtr<ID3D11UnorderedAccessView> secondary_uav;
+    if (secondary_result &&
+        (FAILED(warp.device->CreateTexture2D(
+           &final_desc,
+           nullptr,
+           &secondary_texture
+         )) ||
+         FAILED(warp.device->CreateUnorderedAccessView(
+           secondary_texture.Get(),
+           nullptr,
+           &secondary_uav
+         )))) {
       return false;
     }
 
@@ -329,21 +401,22 @@ namespace {
     }
 
     ID3D11ShaderResourceView *srvs[] = {candidate_srv.Get()};
-    ID3D11UnorderedAccessView *uavs[] = {final_uav.Get()};
+    ID3D11UnorderedAccessView *uavs[] = {final_uav.Get(), secondary_uav.Get()};
+    const UINT uav_count = secondary_result ? 2u : 1u;
     ID3D11Buffer *constant_buffers[] = {
       constant_buffer.Get(),
       v2_constant_buffer.Get()
     };
     warp.context->CSSetShader(shader, nullptr, 0u);
     warp.context->CSSetShaderResources(0u, 1u, srvs);
-    warp.context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+    warp.context->CSSetUnorderedAccessViews(0u, uav_count, uavs, nullptr);
     warp.context->CSSetConstantBuffers(0u, 2u, constant_buffers);
     warp.context->Dispatch(dispatch_groups, 1u, 1u);
 
     ID3D11ShaderResourceView *null_srvs[] = {nullptr};
-    ID3D11UnorderedAccessView *null_uavs[] = {nullptr};
+    ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr};
     warp.context->CSSetShaderResources(0u, 1u, null_srvs);
-    warp.context->CSSetUnorderedAccessViews(0u, 1u, null_uavs, nullptr);
+    warp.context->CSSetUnorderedAccessViews(0u, uav_count, null_uavs, nullptr);
     warp.context->CSSetShader(nullptr, nullptr, 0u);
 
     D3D11_TEXTURE2D_DESC staging_desc = final_desc;
@@ -372,6 +445,40 @@ namespace {
       );
     }
     warp.context->Unmap(staging.Get(), 0u);
+    if (secondary_result) {
+      ComPtr<ID3D11Texture2D> secondary_staging;
+      if (FAILED(warp.device->CreateTexture2D(
+            &staging_desc,
+            nullptr,
+            &secondary_staging
+          ))) {
+        return false;
+      }
+      warp.context->CopyResource(secondary_staging.Get(), secondary_texture.Get());
+      D3D11_MAPPED_SUBRESOURCE secondary_mapped {};
+      if (FAILED(warp.context->Map(
+            secondary_staging.Get(),
+            0u,
+            D3D11_MAP_READ,
+            0u,
+            &secondary_mapped
+          ))) {
+        return false;
+      }
+      secondary_result->resize(candidate.size());
+      for (std::uint32_t y = 0; y < height; ++y) {
+        const auto *source = reinterpret_cast<const float *>(
+          static_cast<const std::byte *>(secondary_mapped.pData) +
+          static_cast<std::size_t>(y) * secondary_mapped.RowPitch
+        );
+        std::copy_n(
+          source,
+          width,
+          secondary_result->begin() + static_cast<std::size_t>(y) * width
+        );
+      }
+      warp.context->Unmap(secondary_staging.Get(), 0u);
+    }
     return true;
   }
 }  // namespace
@@ -484,7 +591,7 @@ TEST(DepthCoordinateV2GpuTest, LimiterIsExactLeastRowwiseLipschitzMajorant) {
   verify_case(1u, 3u, {-0.031f, 0.0f, 0.039f});
 }
 
-TEST(DepthCoordinateV2GpuTest, VerticalLimiterIsExactLeastColumnwiseLipschitzMajorant) {
+TEST(DepthCoordinateV2GpuTest, VerticalPassPublishesExactMajorantAndConditionedShare) {
   namespace v2 = models::depth_coordinate_v2;
 
   warp_device_t warp;
@@ -527,9 +634,22 @@ TEST(DepthCoordinateV2GpuTest, VerticalLimiterIsExactLeastColumnwiseLipschitzMaj
       width,
       height
     );
+    const auto minorant_oracle = greatest_columnwise_lipschitz_minorant(
+      candidate,
+      width,
+      height
+    );
+    const auto conditioned_oracle = orientation_selective_vertical_conditioner(
+      candidate,
+      width,
+      height
+    );
     ASSERT_EQ(oracle.size(), candidate.size());
+    ASSERT_EQ(minorant_oracle.size(), candidate.size());
+    ASSERT_EQ(conditioned_oracle.size(), candidate.size());
 
     std::vector<float> gpu;
+    std::vector<float> conditioned_gpu;
     ASSERT_TRUE(dispatch_depth_coordinate_v2_limit(
       warp,
       shader.Get(),
@@ -537,9 +657,11 @@ TEST(DepthCoordinateV2GpuTest, VerticalLimiterIsExactLeastColumnwiseLipschitzMaj
       height,
       (width + 63u) / 64u,
       candidate,
-      gpu
+      gpu,
+      &conditioned_gpu
     ));
     ASSERT_EQ(gpu.size(), oracle.size());
+    ASSERT_EQ(conditioned_gpu.size(), conditioned_oracle.size());
 
     const float max_step = v2::max_vertical_shear /
                            static_cast<float>(width);
@@ -550,6 +672,10 @@ TEST(DepthCoordinateV2GpuTest, VerticalLimiterIsExactLeastColumnwiseLipschitzMaj
           << "x=" << x << ", y=" << y << ", height=" << height;
         EXPECT_GE(gpu[index], candidate[index])
           << "x=" << x << ", y=" << y << ", height=" << height;
+        EXPECT_FLOAT_EQ(conditioned_gpu[index], conditioned_oracle[index])
+          << "conditioned x=" << x << ", y=" << y << ", height=" << height;
+        EXPECT_GE(conditioned_gpu[index], minorant_oracle[index]);
+        EXPECT_LE(conditioned_gpu[index], oracle[index]);
 
         // Check the defining pointwise supremum independently of the two directional scans.
         float least = -std::numeric_limits<float>::infinity();
@@ -589,7 +715,7 @@ TEST(DepthCoordinateV2GpuTest, VerticalLimiterIsExactLeastColumnwiseLipschitzMaj
   verify_case(3u, 1u, {-0.031f, 0.0f, 0.039f});
 }
 
-TEST(DepthCoordinateV2GpuTest, VerticalThenHorizontalMajorantsEnforceFinal2DBounds) {
+TEST(DepthCoordinateV2GpuTest, VerticalShareThenHorizontalMajorantMatchesC75AndBounds) {
   namespace v2 = models::depth_coordinate_v2;
 
   warp_device_t warp;
@@ -646,6 +772,7 @@ TEST(DepthCoordinateV2GpuTest, VerticalThenHorizontalMajorantsEnforceFinal2DBoun
   }
 
   std::vector<float> vertical_gpu;
+  std::vector<float> vertical_conditioned_gpu;
   ASSERT_TRUE(dispatch_depth_coordinate_v2_limit(
     warp,
     vertical_shader.Get(),
@@ -653,7 +780,8 @@ TEST(DepthCoordinateV2GpuTest, VerticalThenHorizontalMajorantsEnforceFinal2DBoun
     height,
     (width + 63u) / 64u,
     candidate,
-    vertical_gpu
+    vertical_gpu,
+    &vertical_conditioned_gpu
   ));
   std::vector<float> final_gpu;
   ASSERT_TRUE(dispatch_depth_coordinate_v2_limit(
@@ -662,17 +790,24 @@ TEST(DepthCoordinateV2GpuTest, VerticalThenHorizontalMajorantsEnforceFinal2DBoun
     width,
     height,
     (height + 63u) / 64u,
-    vertical_gpu,
+    vertical_conditioned_gpu,
     final_gpu
   ));
 
-  const auto vertical_oracle = least_columnwise_lipschitz_majorant(
+  const auto vertical_majorant_oracle = least_columnwise_lipschitz_majorant(
+    candidate, width, height
+  );
+  const auto vertical_conditioned_oracle = orientation_selective_vertical_conditioner(
     candidate, width, height
   );
   const auto final_oracle = least_rowwise_lipschitz_majorant(
-    vertical_oracle, width, height
+    vertical_conditioned_oracle, width, height
+  );
+  const auto shipped_upper_oracle = least_rowwise_lipschitz_majorant(
+    vertical_majorant_oracle, width, height
   );
   ASSERT_EQ(vertical_gpu.size(), candidate.size());
+  ASSERT_EQ(vertical_conditioned_gpu.size(), candidate.size());
   ASSERT_EQ(final_gpu.size(), candidate.size());
   ASSERT_EQ(final_oracle.size(), candidate.size());
 
@@ -683,32 +818,15 @@ TEST(DepthCoordinateV2GpuTest, VerticalThenHorizontalMajorantsEnforceFinal2DBoun
   for (std::uint32_t y = 0; y < height; ++y) {
     for (std::uint32_t x = 0; x < width; ++x) {
       const auto index = static_cast<std::size_t>(y) * width + x;
-      EXPECT_FLOAT_EQ(vertical_gpu[index], vertical_oracle[index]);
+      EXPECT_FLOAT_EQ(vertical_gpu[index], vertical_majorant_oracle[index]);
+      EXPECT_FLOAT_EQ(
+        vertical_conditioned_gpu[index],
+        vertical_conditioned_oracle[index]
+      );
       EXPECT_FLOAT_EQ(final_gpu[index], final_oracle[index]);
       EXPECT_GE(vertical_gpu[index], candidate[index]);
-      EXPECT_GE(final_gpu[index], vertical_gpu[index]);
-      EXPECT_GE(final_gpu[index], candidate[index]);
-
-      // The staged separable projection is the least 2D majorant under the selected anisotropic
-      // metric. This independent O(W*H) oracle also catches accidentally reversed pass order or
-      // a final pass that reads Candidate instead of the vertical intermediate.
-      float least_2d = -std::numeric_limits<float>::infinity();
-      for (std::uint32_t source_y = 0; source_y < height; ++source_y) {
-        for (std::uint32_t source_x = 0; source_x < width; ++source_x) {
-          least_2d = std::max(
-            least_2d,
-            candidate[static_cast<std::size_t>(source_y) * width + source_x] -
-              horizontal_step * static_cast<float>(
-                x > source_x ? x - source_x : source_x - x
-              ) -
-              vertical_step * static_cast<float>(
-                y > source_y ? y - source_y : source_y - y
-              )
-          );
-        }
-      }
-      EXPECT_NEAR(final_gpu[index], least_2d, 4.0e-7f)
-        << "x=" << x << ", y=" << y;
+      EXPECT_GE(final_gpu[index], vertical_conditioned_gpu[index]);
+      EXPECT_LE(final_gpu[index], shipped_upper_oracle[index] + 2.0e-7f);
 
       if (x > 0u) {
         EXPECT_LE(
@@ -852,6 +970,7 @@ TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionPr
     EXPECT_EQ(output.canonical_values.size(), element_count);
     EXPECT_EQ(output.candidate_parallax_values.size(), element_count);
     EXPECT_EQ(output.vertical_majorant_values.size(), element_count);
+    EXPECT_EQ(output.vertical_conditioned_values.size(), element_count);
     EXPECT_EQ(output.encoded_parallax_values.size(), element_count);
     EXPECT_LT(output.order_minimum, output.order_maximum);
     EXPECT_LE(
@@ -1005,8 +1124,10 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
     ASSERT_EQ(outputs[index].canonical_values.size(), element_count);
     ASSERT_EQ(outputs[index].candidate_parallax_values.size(), element_count);
     ASSERT_EQ(outputs[index].vertical_majorant_values.size(), element_count);
+    ASSERT_EQ(outputs[index].vertical_conditioned_values.size(), element_count);
     ASSERT_EQ(outputs[index].encoded_parallax_values.size(), element_count);
     EXPECT_FALSE(outputs[index].vertical_majorant_sha256.empty());
+    EXPECT_FALSE(outputs[index].vertical_conditioned_sha256.empty());
     EXPECT_GE(outputs[index].encoded_minimum, 0.0f);
     EXPECT_LE(outputs[index].encoded_maximum, 1.0f);
     EXPECT_LE(outputs[index].maximum_absolute_source_u,
@@ -1023,7 +1144,7 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
   const auto trace = nlohmann::ordered_json::parse(read_bytes(trace_path));
   ASSERT_EQ(trace.at("schema"), sbs_bench::depth_coordinate_v2_state_trace_schema);
   ASSERT_EQ(trace.at("frames").size(), raw_fields.size());
-  ASSERT_EQ(trace.at("frame_fields").size(), 38u);
+  ASSERT_EQ(trace.at("frame_fields").size(), 41u);
   EXPECT_EQ(trace["producer"]["authority"],
             "seven-experimental-shadow-compute-shaders-persistent-gpu-state-v3");
   EXPECT_EQ(trace["producer"]["tensor_shape"]["width"], replay->width());
