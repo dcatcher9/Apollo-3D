@@ -78,7 +78,11 @@ namespace stream {
     constexpr std::uint16_t hdr_mode = 0x010e;
     constexpr std::uint16_t rumble_triggers = 0x5500;
     constexpr std::uint16_t set_motion_event = 0x5501;
-    constexpr std::uint16_t set_rgb_led = 0x5502;
+    // Direction-specific reuse: Moonlight sends frame FEC status on this ID, while Sunshine sends
+    // controller RGB feedback on it. Name both directions so an inbound FEC report is never
+    // mistaken for an echoed LED command.
+    constexpr std::uint16_t frame_fec_status = 0x5502;
+    constexpr std::uint16_t set_rgb_led_feedback = 0x5502;
     constexpr std::uint16_t set_adaptive_triggers = 0x5503;
     constexpr std::uint16_t set_sbs_mode = 0x3003;
     constexpr std::uint16_t sbs_debug_dump = 0x3004;
@@ -198,6 +202,11 @@ namespace stream {
     std::uint8_t g;
     std::uint8_t b;
   };
+
+  static_assert(
+    sizeof(SS_FRAME_FEC_STATUS) == FRAME_FEC_STATUS_PAYLOAD_SIZE,
+    "Moonlight frame-FEC status wire size changed"
+  );
 
   struct control_adaptive_triggers_t {
     control_header_v2 header;
@@ -1513,7 +1522,7 @@ namespace stream {
       payload = encode_control(session, util::view(plaintext), encrypted_payload);
     } else if (msg.type == platf::gamepad_feedback_e::set_rgb_led) {
       control_set_rgb_led_t plaintext;
-      plaintext.header.type = control_packet::set_rgb_led;
+      plaintext.header.type = control_packet::set_rgb_led_feedback;
       plaintext.header.payloadLength = sizeof(plaintext) - sizeof(control_header_v2);
 
       auto &data = msg.data.rgb_led;
@@ -1767,6 +1776,17 @@ namespace stream {
     server->map(control_packet::periodic_ping, [](session_t *, const std::string_view &) {
     });
 
+    // Moonlight sends these per-frame/per-FEC-block reception reports. Apollo does not currently
+    // feed them into adaptive FEC, but they are known protocol messages rather than errors.
+    // Validate and consume it without a per-frame log burst; malformed reports remain visible.
+    server->map(control_packet::frame_fec_status, [](session_t *, const std::string_view &payload) {
+      if (!is_valid_frame_fec_status_payload_size(payload.size())) {
+        BOOST_LOG(warning) << "Dropping malformed frame FEC status: expected "sv
+                           << FRAME_FEC_STATUS_PAYLOAD_SIZE << " payload bytes, got "sv
+                           << payload.size();
+      }
+    });
+
     server->map(control_packet::start, [](session_t *, const std::string_view &) {
       BOOST_LOG(debug) << "Received control-stream start"sv;
     });
@@ -1811,7 +1831,7 @@ namespace stream {
 
       // Hand the requested mode to this session's video pipeline. capture_async consumes it and
       // rebuilds the encode device at the new resolution (W x H for OFF, 2W x H for AI). The
-      // single configured depth model is prepared once during host startup.
+      // pinned authenticated live depth model is prepared once during host startup.
       // Log the recalculated pacing plan after the output dimensions change.
       session->video->pacing_plan_logged.store(false, std::memory_order_release);
       session->video->idr_pacing_plan_logged.store(false, std::memory_order_release);

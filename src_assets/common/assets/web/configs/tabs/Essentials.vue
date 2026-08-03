@@ -123,6 +123,20 @@ function setOnOff(key, event) {
         </select>
         <small>Keeps the single active session ready while a headset reconnects.</small>
       </label>
+
+      <label class="simple-field" for="host-3d-strength">
+        <span>Host 3D strength</span>
+        <input
+          id="host-3d-strength"
+          v-model.number="config.sbs_3d_pop_strength"
+          class="form-control"
+          type="number"
+          min="0.25"
+          max="2"
+          step="0.05"
+        />
+        <small>Controls 3D separation in Host 3D. Higher values look deeper but may be harder to focus. Also sets the base strength for new offline conversions.</small>
+      </label>
     </section>
 
     <section class="settings-card">

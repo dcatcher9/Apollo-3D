@@ -2542,9 +2542,10 @@ namespace sbs_bench {
             return m;
           }
         }
-        BOOST_LOG(warning) << "sbs-bench: model '" << want << "' not in registry; using active model";
+        BOOST_LOG(warning) << "sbs-bench: model '" << want
+                           << "' not in registry; using configured evaluator model";
       }
-      return video::active_depth_model();
+      return video::depth_model_for_profile(config::video.sbs);
     }
 
   }  // namespace

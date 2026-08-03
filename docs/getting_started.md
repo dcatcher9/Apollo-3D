@@ -20,8 +20,10 @@ and initial SBS mode for each launch. Sunshine 3D accepts one active remote sess
 the launched app and virtual display warm for the configured reconnect grace period.
 
 Sunshine 3D supports H.264, HEVC, and AV1 in 4:2:0, including 10-bit HDR where the selected codec,
-NVIDIA GPU, Windows display path, and Moonlight 3D decoder all support it. Host SBS AI uses the configured
-Depth Anything V2/TensorRT profile before native NVENC encoding.
+NVIDIA GPU, Windows display path, and Moonlight 3D decoder all support it. Live Host 3D uses the
+authenticated Depth Anything V2 Small TensorRT model and takes the configured Host 3D strength
+literally before native NVENC encoding. Model, adaptive-pop, subject-shaping, and zero-plane
+overrides remain available only to offline conversion and evaluation.
 
 For the developer build and Galaxy XR test loop, see [CLAUDE.md](../CLAUDE.md). For local DisplayPort
 AR glasses, see [Local AR glasses](sbs-local-ar-glasses.md).

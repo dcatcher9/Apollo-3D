@@ -182,13 +182,16 @@ Run each sequence for at least 20 seconds, followed by five seconds of a static 
     anti-double-pulse refractory: record both missed second cuts and false relatches from the first
     cut before changing the relative-geometry settle boundary.
 
-Repeat the pan, corridor, flash, and true-cut cases with SDR/HDR, 16:9/21:9/32:9, each supported
-depth model, fixed/adaptive pop, and every zero-plane mode.
+Repeat the live pan, corridor, flash, and true-cut cases with SDR/HDR and the authenticated
+landscape, ultrawide, and portrait tensor shapes. Live Host SBS always uses authenticated DAV2
+Small and literal configured pop. Exercise additional depth models, adaptive pop, and zero-plane
+modes only in the offline/evaluator compatibility matrix.
 
 Record one row per depth update with the three evidence fractions, accepted-shot pulse/reason,
-scene age, arm/latch flags, depth-motion baseline, subject-depth raw/EMA, stretch-band bounds,
-adaptive-pop ratio, zero-plane source-pixel shift, and rendered disparity percentiles. Diagnostics
-may use the exact blocking offline readback. Production telemetry may use only its existing
+scene age, arm/latch flags, depth-motion baseline, V2 camera generation, near-tail shoulder, and
+rendered disparity percentiles. Offline legacy traces may additionally record subject depth,
+stretch-band bounds, adaptive-pop ratio, and zero-plane shift. Diagnostics may use exact blocking
+offline readback. Production telemetry may use only its existing
 nonblocking query/staging ring: a `DONOTFLUSH`/`DO_NOT_WAIT` miss must drop that sample rather than
 introduce a CPU/GPU synchronization point in the capture loop. Missing live samples under load
 are expected and must not be compared one-for-one with the complete offline trace.
@@ -198,16 +201,16 @@ are expected and must not be compared one-for-one with the complete offline trac
 Build and launch the RelWithDebInfo dev build, connect Artemis, and capture synchronized host
 telemetry and headset video. The contract passes when:
 
-- exposure-only changes do not move the zero plane or restart adaptive-pop classification;
-- sustained motion produces no repeated shot pulses, rhythmic depth pumping, or convergence jumps;
-- subject and stretch tracking continue between accepted cuts;
-- each different-depth hard cut produces exactly one shot pulse; the zero plane resolves
-  immediately and performs its existing settled-age correction without another cut pulse;
+- exposure-only changes do not produce a cut pulse or reacquire the V2 scene camera;
+- sustained motion produces no repeated shot pulses, rhythmic depth pumping, or camera resets;
+- the V2 scene center and near-tail shoulder remain stable between accepted cuts;
+- each different-depth hard cut produces exactly one shot pulse and one V2 camera/shoulder
+  acquisition, without another pulse during normalization settling;
 - a true cut during persistent motion remains observable through an independently ready
   appearance arm or a relative geometry edge;
 - the rapid-cut sweep identifies the shortest spacing that accepts the second cut without ever
   turning one cut's normalization settling into a second pulse; keep the current refractory until
   that false-positive/false-negative boundary has headset evidence;
-- fixed HUD elements remain stable relative to the zero plane;
+- fixed HUD elements remain stable relative to the shot-held V2 scene center;
 - diagnostics introduce no GPU queue stall; production readback remains nonblocking and any
   skipped live samples are attributed separately from controller behavior.

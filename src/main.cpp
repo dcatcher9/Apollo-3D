@@ -196,6 +196,14 @@ int main(int argc, char *argv[]) {
   // Log modified_config_settings
   for (auto &[name, val] : config::modified_config_settings) {
     BOOST_LOG(info) << "config: '"sv << name << "' = "sv << val;
+    const bool is_offline_zero_plane_setting =
+      name == "sbs_3d_zero_plane"sv ||
+      (name.starts_with("sbs_3d_profile_") && name.ends_with("_zero_plane"));
+    if (is_offline_zero_plane_setting) {
+      BOOST_LOG(info)
+        << name << " is an offline/evaluator-only setting; live Host SBS V2 uses its "
+                   "fixed scene-latched coordinate policy and ignores this value."sv;
+    }
   }
   config::modified_config_settings.clear();
 
@@ -215,12 +223,12 @@ int main(int argc, char *argv[]) {
     return fn->second(argv[0], config::sunshine.cmd.argc, config::sunshine.cmd.argv);
   }
 
-  // Prepare the single configured TensorRT model in the background only for the long-lived host.
+  // Prepare the pinned authenticated live TensorRT model in the background for the long-lived host.
   // Command modes such as --sbs-bench own their TensorRT lifecycle and must not race this work.
   // jthread joins before logging and process globals are torn down, preventing exit-time races.
-  std::jthread model_prepare_thread([model = video::host_sbs_v2_depth_model_for_profile(config::video.sbs),
+  std::jthread model_prepare_thread([model = video::host_sbs_v2_depth_model(),
                                      adapter_name = config::video.adapter_name]() {
-    BOOST_LOG(info) << "Preparing startup depth model '"sv << model.name << "'..."sv;
+    BOOST_LOG(info) << "Preparing authenticated live depth model '"sv << model.name << "'..."sv;
     if (!models::prepare_tensorrt_model(
           SUNSHINE_ASSETS_DIR,
           model,

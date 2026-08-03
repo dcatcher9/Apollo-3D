@@ -38,8 +38,9 @@ images shown on the headset. This is the visual half of the host benchmark; see
      finite source boundary that live rendering clamps to the nearest edge column; V2 does not
      select internal visibility owners or synthesize internal fill. `warp_map_shape.json` schema 2
      records this renderer-specific validity contract.
-   - `sbs.png`, `dump_manifest.json`, `meta.txt`: the packed result, effective profile/config,
-     texture geometry/formats, artifact contracts, and backwards-compatible summary.
+   - `sbs.png`, `dump_manifest.json`, `meta.txt`: the packed result, effective live authority,
+     separately labeled shared/offline configuration, texture geometry/formats, artifact
+     contracts, and backwards-compatible summary.
 
    The mapping/mask files are explicitly marked unavailable in the manifest only if their
    dump-only shaders or diagnostic resources could not be created. No partial directory is
@@ -244,28 +245,31 @@ error. The controlled values are `real-capture`, `animation`, `simulation`, `ai-
 
 ## One-command eval loop (start here)
 
-Production configuration resolves one profile at host startup:
+Production configuration resolves one legacy analysis profile at host startup:
 
 ```
 sbs_3d_profile = apollo   # default
 ```
 
-The profile supplies the complete stack. A configuration-only preset can use
-`sbs_3d_profile_<name>_<parameter>` keys; selecting another preset requires restarting Apollo.
+The profile supplies offline/evaluator model, tensor-shape, normalization, subject, adaptive-pop,
+and zero-plane settings. A configuration-only preset can use
+`sbs_3d_profile_<name>_<parameter>` keys for those analysis fields; selecting another preset
+requires restarting Apollo.
 For example, an **offline/evaluator-only** Base-model experiment can use:
 
 ```
 sbs_3d_profile = cinema
 sbs_3d_profile_cinema_depth_model = depth_anything_v2_base_fp16
-sbs_3d_profile_cinema_pop_strength = 1.20
+sbs_3d_pop_strength = 1.20
 ```
 
 Live Host SBS V2 is pinned to the authenticated DAV2-Small model; Base and custom model choices
 are intentionally honored only by this offline/evaluator workflow. Unspecified values inherit
-Apollo defaults. Ordinary
-`sbs_3d_*` keys are applied last and explicitly override the corresponding selected-profile
-parameter. Artemis selects only Normal or Host SBS AI; it does not select a host profile, model,
-or individual parameter. Each encode device receives an immutable startup configuration snapshot.
+Apollo defaults. `sbs_3d_pop_strength`, `sbs_3d_max_encode_width`, and `sbs_3d_cuda_graph` are
+top-level-only shared controls: profile-prefixed aliases are intentionally ignored. Other ordinary
+`sbs_3d_*` keys are applied last and override the corresponding selected analysis-profile value.
+Artemis selects only Normal or Host SBS AI; it does not select a host profile, model, or individual
+parameter. Each encode device receives an immutable startup configuration snapshot.
 
 Production always keeps a bounded two-frame color buffer and presents only exact color/depth pairs,
 repeating the last completed SBS frame while inference is busy. The former wrong-frame async path,
@@ -419,7 +423,8 @@ the literal `sbs_3d_pop_strength` consumed by the authenticated V2 contract.
 
 Live Host SBS uses `sbs_3d_pop_strength = F` literally. The retained adaptive-pop and zero-plane
 switches above are evaluator/offline controls only; they do not modify production V2 geometry.
-CUDA Graph replay is enabled by default for every profile. Use `sbs_3d_cuda_graph = false` only
+CUDA Graph replay is enabled by default through the top-level shared control. Use
+`sbs_3d_cuda_graph = false` only
 for driver diagnosis or a controlled performance A/B; unsupported/capture-failed systems already
 fall back to ordinary TensorRT enqueue automatically.
 

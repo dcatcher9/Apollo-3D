@@ -651,9 +651,9 @@ namespace config {
     int_f(vars, "max_bitrate", video.max_bitrate);
     double_between_f(vars, "minimum_fps_target", video.minimum_fps_target, {0.0, 1000.0});
 
-    // Apply one complete startup profile first. Individual sbs_3d_* keys are parsed afterwards,
-    // so an explicitly configured parameter always overrides its profile value. Reinitializing
-    // the struct also clears stale values when a config reload removes an override.
+    // Apply the selected offline/evaluator analysis profile first, then explicit sbs_3d_* keys.
+    // The three controls shared with live V2 (pop, packed width, and CUDA Graph) deliberately
+    // have no profile-prefixed aliases. Reinitializing also clears stale values on reload.
     std::string sbs_profile = "apollo";
     string_f(vars, "sbs_3d_profile", sbs_profile);
     if (sbs_profile.empty() || sbs_profile.size() > 64 || sbs_profile.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos) {
@@ -665,8 +665,27 @@ namespace config {
       BOOST_LOG(warning) << "SBS profile 'vd3d' was retired; using 'apollo'.";
       sbs_profile = "apollo";
     }
-    auto apply_sbs_values = [&](video_t::sbs_t &target, const std::string &prefix) {
-      double_between_f(vars, prefix + "pop_strength", target.pop_strength, {0.25, 2.0});
+    for (const auto *shared_key : {"pop_strength", "max_encode_width", "cuda_graph"}) {
+      const std::string deprecated_key =
+        "sbs_3d_profile_" + sbs_profile + "_" + shared_key;
+      if (vars.erase(deprecated_key) != 0u) {
+        BOOST_LOG(warning) << "Ignoring deprecated SBS profile key '" << deprecated_key
+                           << "'; use top-level 'sbs_3d_" << shared_key << "' instead.";
+      }
+    }
+    auto apply_sbs_values = [&](
+                              video_t::sbs_t &target,
+                              const std::string &prefix,
+                              const bool include_shared_controls
+                            ) {
+      // Pop, the packed-output cap, and CUDA Graph are one set of explicit top-level controls
+      // shared by live V2 and offline work. A legacy analysis profile must not silently override
+      // live behavior through profile-prefixed duplicates.
+      if (include_shared_controls) {
+        double_between_f(vars, prefix + "pop_strength", target.pop_strength, {0.25, 2.0});
+        int_between_f(vars, prefix + "max_encode_width", target.max_encode_width, {256, 16384});
+        bool_f(vars, prefix + "cuda_graph", target.cuda_graph);
+      }
       bool_f(vars, prefix + "adaptive_pop", target.adaptive_pop);
       double_between_f(vars, prefix + "adaptive_pop_max", target.adaptive_pop_max, {0.25, 2.0});
       double_between_f(vars, prefix + "ema", target.ema, {0.01, 1.0});
@@ -681,14 +700,12 @@ namespace config {
       string_f(vars, prefix + "zero_plane", target.zero_plane);
       string_f(vars, prefix + "depth_model", target.depth_model);
       string_f(vars, prefix + "depth_model_url", target.depth_model_url);
-      int_between_f(vars, prefix + "max_encode_width", target.max_encode_width, {256, 16384});
-      bool_f(vars, prefix + "cuda_graph", target.cuda_graph);
     };
 
     video.sbs = {};
     video.sbs.profile = sbs_profile;
-    apply_sbs_values(video.sbs, "sbs_3d_profile_" + sbs_profile + "_");
-    apply_sbs_values(video.sbs, "sbs_3d_");
+    apply_sbs_values(video.sbs, "sbs_3d_profile_" + sbs_profile + "_", false);
+    apply_sbs_values(video.sbs, "sbs_3d_", true);
     if (video.sbs.zero_plane != "subject" && video.sbs.zero_plane != "median" && video.sbs.zero_plane != "background") {
       // Fall back to the shipped default rather than a hard-coded mode, so a typo cannot silently
       // opt a user out of the validated default.

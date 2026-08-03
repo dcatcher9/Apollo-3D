@@ -16,7 +16,6 @@ const config = ref(props.config)
       <div class="form-text">{{ $t('config.fec_percentage_desc') }}</div>
     </div>
 
-    <!-- Host SBS profile -->
     <div class="mb-3">
       <label for="sbs_3d_profile" class="form-label">{{ $t('config.sbs_3d_profile') }}</label>
       <input id="sbs_3d_profile" class="form-control" type="text" placeholder="apollo"

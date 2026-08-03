@@ -22,6 +22,40 @@
   #include <sddl.h>
 
 namespace {
+  struct fake_token_job_launch_operations_t {
+    bool assignment_succeeds = true;
+    bool resume_succeeds = true;
+    DWORD failure = ERROR_ACCESS_DENIED;
+    std::vector<std::string> calls;
+
+    bool assign_to_job() {
+      calls.emplace_back("assign");
+      return assignment_succeeds;
+    }
+
+    bool resume_initial_thread() {
+      calls.emplace_back("resume");
+      return resume_succeeds;
+    }
+
+    DWORD last_error() {
+      calls.emplace_back("last-error");
+      return failure;
+    }
+
+    void terminate_process(const DWORD exit_code) {
+      calls.emplace_back("terminate:" + std::to_string(exit_code));
+    }
+
+    void close_initial_thread() {
+      calls.emplace_back("close-thread");
+    }
+
+    void close_process() {
+      calls.emplace_back("close-process");
+    }
+  };
+
   struct fake_explorer_restart_operations_t {
     std::optional<platf::explorer_restart_result_e> preflight_failure;
     bool terminate_succeeds = true;
@@ -719,5 +753,84 @@ TEST(RunCommandUnelevatedTest, ElevatedTrayLaunchesProductionShapeStandardUserCh
   const auto output_size = _ftelli64(child_output);
   ASSERT_GE(output_size, 0);
   EXPECT_GT(output_size, 0) << "The child did not inherit the redirected output handle";
+}
+
+TEST(RunCommandUnelevatedTest, TokenLaunchAssignsJobBeforeResumingChild) {
+  constexpr DWORD requested_flags =
+    EXTENDED_STARTUPINFO_PRESENT |
+    CREATE_UNICODE_ENVIRONMENT |
+    CREATE_NO_WINDOW;
+
+  constexpr auto isolated =
+    platf::detail::create_process_with_token_plan(requested_flags, true);
+  EXPECT_EQ(isolated.creation_flags & EXTENDED_STARTUPINFO_PRESENT, 0u);
+  EXPECT_NE(isolated.creation_flags & CREATE_SUSPENDED, 0u);
+  EXPECT_NE(isolated.creation_flags & CREATE_UNICODE_ENVIRONMENT, 0u);
+  EXPECT_NE(isolated.creation_flags & CREATE_NO_WINDOW, 0u);
+  EXPECT_EQ(isolated.startup_info_size, sizeof(STARTUPINFOW));
+  EXPECT_TRUE(isolated.assign_job_after_create);
+
+  constexpr auto ungrouped =
+    platf::detail::create_process_with_token_plan(requested_flags, false);
+  EXPECT_EQ(ungrouped.creation_flags & EXTENDED_STARTUPINFO_PRESENT, 0u);
+  EXPECT_EQ(ungrouped.creation_flags & CREATE_SUSPENDED, 0u);
+  EXPECT_EQ(ungrouped.startup_info_size, sizeof(STARTUPINFOW));
+  EXPECT_FALSE(ungrouped.assign_job_after_create);
+}
+
+TEST(RunCommandUnelevatedTest, SuspendedJobLaunchAssignsBeforeResume) {
+  fake_token_job_launch_operations_t operations;
+
+  EXPECT_EQ(
+    platf::detail::finish_suspended_job_launch(operations),
+    ERROR_SUCCESS
+  );
+  EXPECT_EQ(
+    operations.calls,
+    (std::vector<std::string> {"assign", "resume"})
+  );
+}
+
+TEST(RunCommandUnelevatedTest, SuspendedJobLaunchCleansUpAssignmentFailure) {
+  fake_token_job_launch_operations_t operations;
+  operations.assignment_succeeds = false;
+  operations.failure = ERROR_SUCCESS;
+
+  EXPECT_EQ(
+    platf::detail::finish_suspended_job_launch(operations),
+    ERROR_PROCESS_ABORTED
+  );
+  EXPECT_EQ(
+    operations.calls,
+    (std::vector<std::string> {
+      "assign",
+      "last-error",
+      "terminate:" + std::to_string(ERROR_PROCESS_ABORTED),
+      "close-thread",
+      "close-process",
+    })
+  );
+}
+
+TEST(RunCommandUnelevatedTest, SuspendedJobLaunchCleansUpResumeFailure) {
+  fake_token_job_launch_operations_t operations;
+  operations.resume_succeeds = false;
+  operations.failure = ERROR_ACCESS_DENIED;
+
+  EXPECT_EQ(
+    platf::detail::finish_suspended_job_launch(operations),
+    ERROR_ACCESS_DENIED
+  );
+  EXPECT_EQ(
+    operations.calls,
+    (std::vector<std::string> {
+      "assign",
+      "resume",
+      "last-error",
+      "terminate:" + std::to_string(ERROR_ACCESS_DENIED),
+      "close-thread",
+      "close-process",
+    })
+  );
 }
 #endif

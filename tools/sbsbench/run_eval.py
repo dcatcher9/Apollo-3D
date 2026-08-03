@@ -2146,7 +2146,7 @@ def require_current_build(build_dir):
 
 
 def expected_profile(conf, extra):
-    """Resolve the startup production profile; every profile uses Apollo geometry."""
+    """Resolve the startup offline/evaluator analysis profile."""
     profile = conf_value(conf, "sbs_3d_profile", "apollo")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", profile):
         fail(f"invalid sbs_3d_profile {profile!r}")
@@ -2166,6 +2166,28 @@ def expected_profile_number(conf, profile, key, default, extra, cli_key, cast=fl
 def expected_profile_bool(conf, profile, key, default, extra, cli_key):
     value = conf_value(conf, f"sbs_3d_profile_{profile}_{key}", default)
     value = conf_value(conf, f"sbs_3d_{key}", value)
+    value = extra_value(extra, cli_key, value)
+    normalized = str(value).strip().lower()
+    if normalized in ("true", "yes", "on", "1"):
+        return True
+    if normalized in ("false", "no", "off", "0"):
+        return False
+    fail(f"invalid boolean value for {key}: {value!r}")
+
+
+def expected_shared_number(conf, key, default, extra, cli_key, cast=float):
+    """Resolve a shared live/offline control with no profile-prefixed alias."""
+    value = conf_value(conf, f"sbs_3d_{key}", default)
+    value = extra_value(extra, cli_key, value)
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        fail(f"invalid numeric value for {key}: {value!r}")
+
+
+def expected_shared_bool(conf, key, default, extra, cli_key):
+    """Resolve a shared live/offline boolean with no profile-prefixed alias."""
+    value = conf_value(conf, f"sbs_3d_{key}", default)
     value = extra_value(extra, cli_key, value)
     normalized = str(value).strip().lower()
     if normalized in ("true", "yes", "on", "1"):
@@ -2556,9 +2578,8 @@ def main():
     expected_ema_edge_strength = expected_profile_number(
         args.conf, expected_config_profile, "ema_edge_strength", 0.25, args.extra,
         "--ema-edge-strength")
-    expected_cuda_graph = expected_profile_bool(
-        args.conf, expected_config_profile, "cuda_graph", True, args.extra,
-        "--cuda-graph")
+    expected_cuda_graph = expected_shared_bool(
+        args.conf, "cuda_graph", True, args.extra, "--cuda-graph")
     # These persisted fields describe this evaluator invocation, not live Host SBS configuration.
     # The default clip gate intentionally remains the legacy comparison pipeline; authenticated
     # V2 sequence replay records render=true in its own manifest-driven path.
@@ -2568,9 +2589,8 @@ def main():
     expected_adaptive_max = expected_profile_number(
         args.conf, expected_config_profile, "adaptive_pop_max", 2.00, args.extra,
         "--adaptive-pop-max")
-    expected_pop = expected_profile_number(
-        args.conf, expected_config_profile, "pop_strength", 1.20, args.extra,
-        "--pop-strength")
+    expected_pop = expected_shared_number(
+        args.conf, "pop_strength", 1.20, args.extra, "--pop-strength")
     expected_adaptive_max = max(expected_adaptive_max, expected_pop)
     # These fallbacks mirror the C++ defaults in src/config.h and must move with them, or the
     # harness contract check rejects every clip before any measurement runs.

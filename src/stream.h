@@ -257,6 +257,18 @@ namespace stream {
            declared_payload_size == plaintext_size - CONTROL_HEADER_V2_SIZE;
   }
 
+  // Sunshine's encrypted Gen-7 protocol uses 0x5502 in both directions for unrelated messages:
+  // controller RGB feedback is host->client, while this fixed-size per-frame FEC report is
+  // client->host. Keeping the inbound body's size explicit prevents it from falling through as an
+  // "unknown control message" and prevents a malformed RGB-sized body from being accepted as FEC.
+  constexpr std::size_t FRAME_FEC_STATUS_PAYLOAD_SIZE = 21;
+
+  [[nodiscard]] constexpr bool is_valid_frame_fec_status_payload_size(
+    std::size_t payload_size
+  ) {
+    return payload_size == FRAME_FEC_STATUS_PAYLOAD_SIZE;
+  }
+
   // Bounds for a live 0x3007 stream geometry/rate change. Dimensions must be even because the
   // whole encode path is 4:2:0 subsampled, and the frame rate travels in hundredths of a hertz so
   // fractional rates (23.976, 29.97) survive the wire.

@@ -64,10 +64,10 @@ Algorithm contract schema 14 admits one production calibration:
 
 The exact model URL and bytes, preprocessing shader closure, ordered seven-shader producer closure,
 and tensor shape are also authenticated. The six allowlisted shapes cover the standard landscape,
-ultrawide, and portrait UI resolutions. Live Host SBS resolves every unqualified Base/custom model
-selection to the authenticated DAV2 Small production identity; those model choices remain available
-to offline evaluation only. An unauthenticated identity or tensor shape reaching the producer still
-fails flat. Client SBS and MiDaS must not borrow this Host calibration.
+ultrawide, and portrait UI resolutions. Live Host SBS always selects the authenticated DAV2 Small
+production identity; configured Base/custom model choices are read only by offline conversion and
+the evaluator. An unauthenticated identity or tensor shape reaching the producer still fails flat.
+Client SBS and MiDaS must not borrow this Host calibration.
 
 The persistent GPU state also carries a deterministic checksum of the latched center, fixed
 inverse scale, and calibration revision. A same-tag state with a corrupted center fails closed and
@@ -291,13 +291,16 @@ sessions.
 ## Legacy boundary
 
 V2 is the only live position authority and its standalone pixel shader does not include the V1
-reprojection shader. The existing normalization/subject analysis is retained in the live estimator
-only as a scene-cut bridge: V2 consumes its confirmed `{generation, pulse}` and no legacy depth,
-anchor, adaptive-pop, or warp field. Extracting that narrow cut detector is separate cleanup work.
+reprojection shader. Live Host SBS now runs a cut-only evidence and resolve path that publishes the
+confirmed `{generation, pulse}` consumed by V2. It does not compile or dispatch the legacy subject,
+stretch, adaptive-pop, or zero-plane analysis shaders. The cut detector's normalized depth is
+private evidence and never becomes live geometry.
 
 Legacy reprojection and normalization shader sources remain in the repository because the offline
 converter and evaluation harness still compile their established pipelines. Their presence on disk
-does not make V1 selectable in a live Host SBS stream.
+does not make V1 selectable in a live Host SBS stream. The corresponding `sbs_3d_*` configuration
+keys remain accepted for offline/evaluator compatibility but cannot override live V2 geometry,
+model identity, tensor shapes, or private cut calibration.
 
 ## Boundaries
 

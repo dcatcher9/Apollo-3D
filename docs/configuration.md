@@ -30,6 +30,16 @@ location by modifying the configuration file.
 Although the configuration UI is recommended, Apollo can also be configured manually by
 editing the `conf` file in a text editor. Use the examples as reference.
 
+## Essentials
+
+### sbs_3d_pop_strength
+
+<table>
+    <tr><td>Description</td><td>Set the literal 3D separation strength used by new live Host 3D V2 streams. Higher values create more depth but may be harder to focus. This shared value is also the base strength for new offline conversions.</td></tr>
+    <tr><td>Default</td><td><code>1.20</code></td></tr>
+    <tr><td>Range</td><td><code>0.25</code>-<code>2.00</code></td></tr>
+</table>
+
 ## General
 
 ### locale
@@ -1243,11 +1253,26 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### sbs_3d_max_encode_width
+
+<table>
+    <tr><td>Description</td><td>Cap the packed Host 3D output width. The effective limit is the lower of this value and the selected codec's runtime NVENC capability; Sunshine 3D preserves each eye's aspect when it must scale down.</td></tr>
+    <tr><td>Default</td><td><code>8192</code></td></tr>
+    <tr><td>Range</td><td><code>256</code>-<code>16384</code> (rounded down to an even value)</td></tr>
+</table>
+
+### sbs_3d_cuda_graph
+
+<table>
+    <tr><td>Description</td><td>Enable TensorRT CUDA Graph replay for Host 3D and evaluator inference. Leave enabled for normal use; disable only for driver diagnosis or a controlled performance comparison. Unsupported systems fall back automatically.</td></tr>
+    <tr><td>Default</td><td><code>true</code></td></tr>
+</table>
+
 ### sbs_3d_profile
 
 <table>
-    <tr><td>Description</td><td>Select the startup Host SBS parameter profile. Explicit top-level <code>sbs_3d_*</code> settings override the selected profile.</td></tr>
-    <tr><td>Default</td><td><code>apollo</code></td></tr>
+    <tr><td>Description</td><td><code>sbs_3d_profile</code> selects profile-prefixed model, tensor-shape, adaptive-pop, subject, normalization, and zero-plane settings for offline conversion and evaluator compatibility. Pop strength, maximum packed width, and CUDA Graph are deliberately not profile fields; their explicit top-level settings are shared by live V2 and offline work. Live Host 3D V2 always uses authenticated DAV2 Small, authenticated tensor shapes, fixed private cut calibration, and the literal pop strength above; legacy analysis keys do not change its geometry.</td></tr>
+    <tr><td>Profile default</td><td><code>apollo</code></td></tr>
 </table>
 
 ## NVIDIA NVENC Encoder

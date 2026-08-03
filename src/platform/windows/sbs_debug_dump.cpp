@@ -40,6 +40,7 @@
 #include "src/logging.h"
 #include "src/model_manager.h"
 #include "src/video_depth_estimator.h"
+#include "sbs_debug_dump_async.h"
 
 namespace platf::sbs_debug {
 
@@ -117,6 +118,51 @@ namespace platf::sbs_debug {
       std::vector<std::uint8_t> bytes;
       std::size_t row_bytes = 0;
     };
+
+    /**
+     * CPU-owned copy of one authenticated render pair. D3D11 resources are read while the
+     * immediate context is still owned by the render thread; the background publisher never
+     * touches the device or context and therefore cannot race the live pipeline.
+     */
+    struct captured_dump_job {
+      std::filesystem::path root;
+      std::filesystem::path trigger;
+      std::shared_ptr<std::atomic<bool>> button_request;
+      bool by_button = false;
+      bool by_file = false;
+      frame completed;
+      config::video_t::sbs_t cfg;
+      const models::depth_coordinate_v2::model_preprocess_contract_t *preprocess = nullptr;
+
+      normalization_state normalization {};
+      bool scene_cut_bridge_state_available = false;
+      std::vector<std::uint8_t> adaptive_state;
+
+      texture_snapshot source;
+      std::vector<float> model_input;
+      std::vector<float> raw_depth;
+      texture_snapshot warp_depth;
+      texture_snapshot sbs;
+      texture_snapshot shadow_coordinate;
+      texture_snapshot shadow_candidate;
+      texture_snapshot shadow_vertical;
+      texture_snapshot shadow_final;
+      std::vector<float> shadow_state;
+      std::vector<float> shadow_frame_stats;
+      bool warp_map_available = false;
+      texture_snapshot warp_map;
+      bool warp_mask_available = false;
+      texture_snapshot warp_mask;
+    };
+
+    struct dump_publish_result {
+      bool success = false;
+      bool trigger_remove_failed = false;
+      std::filesystem::path published_path;
+      std::string error;
+    };
+
+    dump_publish_result publish_captured_dump(const captured_dump_job &job);
 
     struct scalar_stats {
       std::size_t finite_count = 0;
@@ -804,9 +850,7 @@ namespace platf::sbs_debug {
     }
 
     bool dump_model_input(
-      ID3D11Device *device,
-      ID3D11DeviceContext *ctx,
-      ID3D11ShaderResourceView *srv,
+      const std::vector<float> &values,
       const int width,
       const int height,
       const std::filesystem::path &dir,
@@ -820,15 +864,8 @@ namespace platf::sbs_debug {
       if (pixel_count > SIZE_MAX / (3u * sizeof(float))) {
         return false;
       }
-      std::vector<float> values;
       if (
-        !read_float_buffer(
-          device,
-          ctx,
-          srv,
-          static_cast<std::size_t>(pixel_count) * 3u,
-          values
-        ) ||
+        values.size() != static_cast<std::size_t>(pixel_count) * 3u ||
         !write_bytes(
           dir / "model_input.f32",
           values.data(),
@@ -889,9 +926,7 @@ namespace platf::sbs_debug {
     }
 
     bool dump_raw_depth(
-      ID3D11Device *device,
-      ID3D11DeviceContext *ctx,
-      ID3D11ShaderResourceView *srv,
+      const std::vector<float> &values,
       const int width,
       const int height,
       const std::filesystem::path &dir,
@@ -905,16 +940,7 @@ namespace platf::sbs_debug {
       if (value_count > SIZE_MAX / sizeof(float)) {
         return false;
       }
-      std::vector<float> values;
-      if (
-        !read_float_buffer(
-          device,
-          ctx,
-          srv,
-          static_cast<std::size_t>(value_count),
-          values
-        )
-      ) {
+      if (values.size() != static_cast<std::size_t>(value_count)) {
         return false;
       }
       const scalar_stats scalar = calculate_scalar_stats(values);
@@ -959,17 +985,13 @@ namespace platf::sbs_debug {
     }
 
     bool dump_shadow_float_texture(
-      ID3D11Device *device,
-      ID3D11DeviceContext *ctx,
-      ID3D11ShaderResourceView *srv,
+      const texture_snapshot &snapshot,
       const std::filesystem::path &dir,
       const std::string_view stem,
-      const std::string_view stage,
-      texture_snapshot &snapshot
+      const std::string_view stage
     ) {
       std::vector<float> values;
-      if (!read_texture(device, ctx, srv, snapshot) ||
-          !texture_float_values(snapshot, values)) {
+      if (!texture_float_values(snapshot, values)) {
         return false;
       }
       const scalar_stats stats = calculate_scalar_stats(values);
@@ -994,9 +1016,9 @@ namespace platf::sbs_debug {
     }
 
     bool dump_parallax_v2_state(
-      ID3D11Device *device,
-      ID3D11DeviceContext *ctx,
       const frame &completed,
+      const std::vector<float> &state,
+      const std::vector<float> &frame_stats,
       const std::filesystem::path &dir,
       nlohmann::json &summary
     ) {
@@ -1007,22 +1029,8 @@ namespace platf::sbs_debug {
         return false;
       }
       const auto &shader_identity = *completed.parallax_v2_shader_provenance;
-      std::vector<float> state;
-      std::vector<float> frame_stats;
-      if (!read_float_buffer(
-            device,
-            ctx,
-            completed.shadow_state,
-            state_float_count,
-            state
-          ) ||
-          !read_float_buffer(
-            device,
-            ctx,
-            completed.shadow_frame_stats,
-            frame_stats_float_count,
-            frame_stats
-          )) {
+      if (state.size() != state_float_count ||
+          frame_stats.size() != frame_stats_float_count) {
         return false;
       }
       bool state_finite = true;
@@ -1281,24 +1289,14 @@ namespace platf::sbs_debug {
     }
 
     bool dump_adaptive_state(
-      ID3D11Device *device,
-      ID3D11DeviceContext *ctx,
-      ID3D11ShaderResourceView *srv,
+      const std::vector<std::uint8_t> &bytes,
       const normalization_state &normalization,
       const frame &completed,
       const std::filesystem::path &dir,
       nlohmann::json &adaptive_summary
     ) {
-      std::vector<std::uint8_t> bytes;
-      if (
-        !read_buffer(
-          device,
-          ctx,
-          srv,
-          sbs_adaptive_state::word_count * sizeof(std::uint32_t),
-          bytes
-        )
-      ) {
+      if (bytes.size() !=
+          sbs_adaptive_state::word_count * sizeof(std::uint32_t)) {
         return false;
       }
       sbs_adaptive_state::words_t words {};
@@ -1586,32 +1584,53 @@ namespace platf::sbs_debug {
 
     nlohmann::json config_json(
       const config::video_t::sbs_t &cfg,
+      const frame &completed,
       const std::string &model_name,
       const std::string &effective_model_url
     ) {
       return {
-        {"profile", cfg.profile},
-        {"pop_strength", cfg.pop_strength},
-        {"adaptive_pop", cfg.adaptive_pop},
-        {"adaptive_pop_max", cfg.adaptive_pop_max},
-        {"ema", cfg.ema},
-        {"ema_edge_change", cfg.ema_edge_change},
-        {"ema_edge_gradient", cfg.ema_edge_gradient},
-        {"ema_edge_strength", cfg.ema_edge_strength},
-        {"depth_short_side", cfg.depth_short_side},
-        {"depth_max_aspect", cfg.depth_max_aspect},
-        {"minmax_ema", cfg.minmax_ema},
-        {"subject_recenter", cfg.subject_recenter},
-        {"subject_stretch", cfg.subject_stretch},
-        {"zero_plane", cfg.zero_plane},
-        {"depth_model", model_name},
-        {"configured_depth_model", cfg.depth_model},
-        {"depth_model_url", effective_model_url},
-        {"configured_depth_model_url", cfg.depth_model_url},
-        {"max_encode_width", cfg.max_encode_width},
-        {"cuda_graph", cfg.cuda_graph},
-        {"parallax_v2_shadow", false},
-        {"parallax_v2_render", true},
+        {"schema", 2},
+        {"shared_configured", {
+          {"pop_strength", cfg.pop_strength},
+          {"max_packed_encode_width", cfg.max_encode_width},
+          {"cuda_graph", cfg.cuda_graph},
+        }},
+        {"live_effective", {
+          {"renderer", "depth-coordinate-v2"},
+          {"pop_strength", completed.parallax_v2_requested_pop_strength},
+          {"adaptive_pop", false},
+          {"zero_plane_authority", "scene-latched raw center and near-tail shoulder"},
+          {"depth_model", model_name},
+          {"depth_model_url", effective_model_url},
+          {"model_input_width", completed.model_width},
+          {"model_input_height", completed.model_height},
+          {"cuda_graph_active", completed.cuda_graph_active},
+          {"cut_analysis", {
+            {"mode", "cut-only"},
+            {"depth_ema", config::host_sbs_v2_live_calibration::depth_ema},
+            {"ema_edge_change", config::host_sbs_v2_live_calibration::edge_change},
+            {"ema_edge_gradient", config::host_sbs_v2_live_calibration::edge_gradient},
+            {"ema_edge_strength", config::host_sbs_v2_live_calibration::edge_strength},
+            {"minmax_ema", config::host_sbs_v2_live_calibration::minmax_ema},
+          }},
+        }},
+        {"offline_analysis_configured", {
+          {"profile", cfg.profile},
+          {"adaptive_pop", cfg.adaptive_pop},
+          {"adaptive_pop_max", cfg.adaptive_pop_max},
+          {"ema", cfg.ema},
+          {"ema_edge_change", cfg.ema_edge_change},
+          {"ema_edge_gradient", cfg.ema_edge_gradient},
+          {"ema_edge_strength", cfg.ema_edge_strength},
+          {"depth_short_side", cfg.depth_short_side},
+          {"depth_max_aspect", cfg.depth_max_aspect},
+          {"minmax_ema", cfg.minmax_ema},
+          {"subject_recenter", cfg.subject_recenter},
+          {"subject_stretch", cfg.subject_stretch},
+          {"zero_plane", cfg.zero_plane},
+          {"depth_model", cfg.depth_model},
+          {"depth_model_url", cfg.depth_model_url},
+        }},
       };
     }
 
@@ -1677,7 +1696,8 @@ namespace platf::sbs_debug {
 
   }  // namespace
 
-  dumper::dumper() {
+  dumper::dumper():
+      async_(detail::publication_state::create()) {
     if (const char *override_dir = std::getenv("APOLLO_SBS_DUMP"); override_dir && *override_dir) {
       dir_ = override_dir;
       file_trigger_enabled_ = config::sunshine.diagnostics_enabled;
@@ -1690,11 +1710,24 @@ namespace platf::sbs_debug {
     }
   }
 
+  dumper::~dumper() {
+    // Invalidate retry callbacks first, then release the session handle. Accepted publication
+    // owns only CPU snapshots plus shared state and finishes on the process-lifetime queue.
+    cancel_pending_request();
+    async_.reset();
+  }
+
   void dumper::set_button_request(std::shared_ptr<std::atomic<bool>> request) {
     button_request_ = std::move(request);
+    if (async_) {
+      async_->allow_retries_and_token();
+    }
   }
 
   void dumper::cancel_pending_request() noexcept {
+    if (async_) {
+      async_->cancel_retries(button_request_);
+    }
     const bool remove_file_trigger =
       file_trigger_enabled_ || file_trigger_pending_;
     snapshot_armed_for_dump_ = false;
@@ -1737,12 +1770,29 @@ namespace platf::sbs_debug {
   bool dumper::snapshot_requested() {
     snapshot_armed_for_dump_ = false;
     prepared_frame_id_ = 0;
+    if (async_ && async_->take_file_retry_pending()) {
+      file_trigger_pending_ = true;
+    }
+    if (async_ && async_->take_trigger_remove_failed()) {
+      file_trigger_enabled_ = false;
+    }
+    if (async_ && async_->take_publication_failed()) {
+      retry_backoff_frames_ = retry_backoff_frames;
+    }
+    // The button latch remains armed while publication is active, so a later click is retained
+    // for the next frame instead of replacing or aliasing the in-flight package.
+    if (async_ && async_->busy()) {
+      return false;
+    }
     if (retry_backoff_frames_ != 0u) {
       --retry_backoff_frames_;
       return false;
     }
     const auto *button = button_request_.get();
     if (button && button->load(std::memory_order_relaxed)) {
+      if (async_) {
+        async_->allow_retries_and_token();
+      }
       snapshot_armed_for_dump_ = true;
       return true;
     }
@@ -1750,6 +1800,9 @@ namespace platf::sbs_debug {
       return false;
     }
     if (file_trigger_pending_) {
+      if (async_) {
+        async_->allow_retries_and_token();
+      }
       snapshot_armed_for_dump_ = true;
       return true;
     }
@@ -1760,6 +1813,9 @@ namespace platf::sbs_debug {
     file_trigger_pending_ =
       std::filesystem::exists(dir_ / "dump.trigger", error) && !error;
     snapshot_armed_for_dump_ = file_trigger_pending_;
+    if (file_trigger_pending_ && async_) {
+      async_->allow_retries_and_token();
+    }
     return file_trigger_pending_;
   }
 
@@ -1818,145 +1874,56 @@ namespace platf::sbs_debug {
     return false;
   }
 
-  bool dumper::maybe_dump(
-    ID3D11Device *device,
-    ID3D11DeviceContext *ctx,
-    const frame &completed,
-    const config::video_t::sbs_t &cfg
-  ) {
+  namespace {
+
+  dump_publish_result publish_captured_dump(const captured_dump_job &job) {
+    dump_publish_result result;
+    const auto &completed = job.completed;
+    const auto &cfg = job.cfg;
+    const auto &capture_preprocess = *job.preprocess;
     const bool hdr =
       completed.color_space == models::input_color_space::scrgb_hdr;
-    auto *button = button_request_.get();
-    const bool by_button =
-      button && button->load(std::memory_order_relaxed);
-    const bool by_file = file_trigger_pending_;
-    if ((!by_button && !by_file) || !snapshot_armed_for_dump_) {
-      return false;
-    }
-    snapshot_armed_for_dump_ = false;
-    if (
-      !device || !ctx || !completed.source || !completed.model_input ||
-      !completed.raw_depth || !completed.warp_depth || !completed.sbs ||
-      completed.model_width <= 0 ||
-      completed.model_height <= 0 || completed.raw_width <= 0 ||
-      completed.raw_height <= 0 || !completed.raw_model_provenance ||
-      completed.raw_model_provenance->depth_model.empty() ||
-      completed.raw_model_provenance->depth_model != completed.depth_model ||
-      completed.raw_model_provenance->onnx_sha256.empty() ||
-      completed.raw_model_provenance->preprocess_source_closure_sha256.empty() ||
-      completed.raw_width != completed.model_width ||
-      completed.raw_height != completed.model_height ||
-      prepared_frame_id_ != completed.matched_frame_id
-    ) {
-      return false;
-    }
-    if (!completed.parallax_v2_render_selected ||
-        !completed.parallax_v2_producer_active ||
-        !completed.shadow_candidate_parallax ||
-        !completed.shadow_vertical_majorant ||
-        !completed.shadow_final_parallax || !completed.shadow_state ||
-        !completed.shadow_frame_stats) {
-      BOOST_LOG(warning)
-        << "SBS debug dump: production V2 renderer is not selected or has an incomplete "sv
-           "authenticated resource set; dump rejected (legacy live rendering is unsupported)."sv;
-      return false;
-    }
-    if (!completed.shadow_coordinate) {
-      BOOST_LOG(warning)
-        << "SBS debug dump: the explicit Dump 3D canonical-coordinate snapshot is "sv
-           "unavailable; live V2 rendering remains authenticated and unaffected."sv;
-      return false;
-    }
-    if (completed.parallax_v2_live_renderer_source_closure_sha256 !=
-          models::host_sbs_shader_cache::
-            parallax_v2_live_renderer_source_closure_sha256) {
-      BOOST_LOG(warning)
-        << "SBS debug dump: production V2 renderer source closure is missing or "sv
-           "mismatched; dump rejected."sv;
-      return false;
-    }
+    const bool by_button = job.by_button;
+    const bool by_file = job.by_file;
     const auto &model_identity = *completed.raw_model_provenance;
-    const auto *capture_calibration =
-      models::depth_coordinate_v2::find_capture_calibration(
-        model_identity.depth_model,
-        model_identity.depth_model_url,
-        model_identity.onnx_sha256,
-        model_identity.preprocess_profile,
-        model_identity.preprocess_source_closure_sha256,
-        static_cast<std::uint32_t>(completed.model_width),
-        static_cast<std::uint32_t>(completed.model_height)
-      );
-    if (!capture_calibration) {
-      BOOST_LOG(warning)
-        << "SBS debug dump: production V2 resources do not resolve to exactly one "sv
-           "authenticated model/preprocess/shape calibration; dump rejected."sv;
-      return false;
-    }
-    if (!parallax_v2_shader_identity_matches_contract(
-          completed.parallax_v2_shader_provenance
-        )) {
-      BOOST_LOG(warning)
-        << "SBS debug dump: production V2 resources have missing or mismatched "sv
-           "shader-source provenance; dump rejected."sv;
-      return false;
-    }
-    const auto &capture_preprocess = capture_calibration->preprocess;
 
-    std::filesystem::path trigger;
+    const std::filesystem::path &trigger = job.trigger;
     std::error_code error;
     output_paths paths;
     bool success = false;
     try {
-      trigger = dir_ / "dump.trigger";
-      normalization_state normalization {};
-      bool scene_cut_bridge_state_available = false;
-      if (completed.adaptive_state && completed.depth_frame_state) {
-        try {
-          scene_cut_bridge_state_available =
-            read_normalization_state(
-              device,
-              ctx,
-              completed.depth_frame_state,
-              normalization
-            ) == depth_dumpability::valid;
-        } catch (...) {
-          // This comparison-only bridge must never gate an authenticated production-V2 dump.
-        }
-      }
+      const auto &normalization = job.normalization;
+      const bool scene_cut_bridge_state_available =
+        job.scene_cut_bridge_state_available;
 
       if (
-        !std::filesystem::create_directories(dir_, error) && error
+        !std::filesystem::create_directories(job.root, error) && error
       ) {
-        retry_backoff_frames_ = retry_backoff_frames;
         BOOST_LOG(warning) << "SBS debug dump: cannot create root "sv
-                           << dir_.string() << ": " << error.message();
-        return false;
+                           << job.root.string() << ": " << error.message();
+        result.error = error.message();
+        return result;
       }
-      if (!make_output_paths(dir_, paths, error)) {
-        retry_backoff_frames_ = retry_backoff_frames;
+      if (!make_output_paths(job.root, paths, error)) {
         BOOST_LOG(warning) << "SBS debug dump: cannot reserve a unique output folder in "sv
-                           << dir_.string()
+                           << job.root.string()
                            << (error ? ": " + error.message() : "."s);
-        return false;
+        result.error = error ? error.message() : "cannot reserve output folder";
+        return result;
       }
 
       do {
-        texture_snapshot source;
-        texture_snapshot warp_depth;
-        texture_snapshot sbs;
+        const auto &source = job.source;
+        const auto &warp_depth = job.warp_depth;
+        const auto &sbs = job.sbs;
         if (
-          !read_texture(device, ctx, completed.source, source) ||
-          !read_texture(device, ctx, completed.warp_depth, warp_depth) ||
-          !read_texture(device, ctx, completed.sbs, sbs) ||
           !write_color_preview(
             paths.temporary / "source.png",
             source,
             completed.color_space
           ) ||
           !dump_model_input(
-            device,
-            ctx,
-            completed.model_input,
+            job.model_input,
             completed.model_width,
             completed.model_height,
             paths.temporary,
@@ -1969,9 +1936,7 @@ namespace platf::sbs_debug {
         raw_depth_dump_stats raw_stats;
         if (
           !dump_raw_depth(
-            device,
-            ctx,
-            completed.raw_depth,
+            job.raw_depth,
             completed.raw_width,
             completed.raw_height,
             paths.temporary,
@@ -2002,9 +1967,7 @@ namespace platf::sbs_debug {
         if (scene_cut_bridge_state_available) {
           try {
             adaptive_available = dump_adaptive_state(
-              device,
-              ctx,
-              completed.adaptive_state,
+              job.adaptive_state,
               normalization,
               completed,
               paths.temporary,
@@ -2034,52 +1997,40 @@ namespace platf::sbs_debug {
           break;
         }
 
-        texture_snapshot shadow_coordinate;
-        texture_snapshot shadow_candidate;
-        texture_snapshot shadow_vertical;
-        texture_snapshot shadow_final;
+        const auto &shadow_coordinate = job.shadow_coordinate;
+        const auto &shadow_candidate = job.shadow_candidate;
+        const auto &shadow_vertical = job.shadow_vertical;
+        const auto &shadow_final = job.shadow_final;
         nlohmann::json shadow_summary = nullptr;
         if (
           !dump_shadow_float_texture(
-             device,
-             ctx,
-             completed.shadow_coordinate,
+             shadow_coordinate,
              paths.temporary,
              "shadow_coordinate",
-             "parallax-v2 canonical unbounded coordinate u; diagnostic only",
-             shadow_coordinate
+             "parallax-v2 canonical unbounded coordinate u; diagnostic only"
            ) ||
            !dump_shadow_float_texture(
-             device,
-             ctx,
-             completed.shadow_candidate_parallax,
+             shadow_candidate,
              paths.temporary,
              "shadow_candidate_parallax",
-             "parallax-v2 immutable signed pre-limiter candidate one-eye source-U; diagnostic only",
-             shadow_candidate
+             "parallax-v2 immutable signed pre-limiter candidate one-eye source-U; diagnostic only"
            ) ||
            !dump_shadow_float_texture(
-             device,
-             ctx,
-             completed.shadow_vertical_majorant,
+             shadow_vertical,
              paths.temporary,
              "shadow_vertical_majorant",
-             "parallax-v2 least column-wise near-preserving shear-2 majorant; explicit intermediate consumed by the row limiter",
-             shadow_vertical
+             "parallax-v2 least column-wise near-preserving shear-2 majorant; explicit intermediate consumed by the row limiter"
            ) ||
            !dump_shadow_float_texture(
-             device,
-             ctx,
-             completed.shadow_final_parallax,
+             shadow_final,
              paths.temporary,
              "shadow_final_parallax",
-             "parallax-v2 least anisotropic 2D near-preserving Lipschitz majorant; live render position authority",
-             shadow_final
+             "parallax-v2 least anisotropic 2D near-preserving Lipschitz majorant; live render position authority"
            ) ||
            !dump_parallax_v2_state(
-             device,
-             ctx,
              completed,
+             job.shadow_state,
+             job.shadow_frame_stats,
              paths.temporary,
              shadow_summary
            )
@@ -2087,14 +2038,13 @@ namespace platf::sbs_debug {
           break;
         }
 
-        const bool warp_map_available = completed.warp_map != nullptr;
-        const bool warp_mask_available = completed.warp_mask != nullptr;
+        const bool warp_map_available = job.warp_map_available;
+        const bool warp_mask_available = job.warp_mask_available;
         warp_map_dump_stats warp_map_stats;
-        texture_snapshot warp_map;
+        const auto &warp_map = job.warp_map;
         if (
           warp_map_available &&
-          (!read_texture(device, ctx, completed.warp_map, warp_map) ||
-           !dump_warp_map(
+          (!dump_warp_map(
              warp_map,
              source.desc.Width,
              source.desc.Height,
@@ -2104,11 +2054,10 @@ namespace platf::sbs_debug {
         ) {
           break;
         }
-        texture_snapshot warp_mask;
+        const auto &warp_mask = job.warp_mask;
         if (
           warp_mask_available &&
-          (!read_texture(device, ctx, completed.warp_mask, warp_mask) ||
-           !write_color_preview(
+          (!write_color_preview(
              paths.temporary / "warp_mask.png",
              warp_mask,
              models::input_color_space::srgb
@@ -2533,6 +2482,7 @@ namespace platf::sbs_debug {
                                   }},
           {"config", config_json(
                        cfg,
+                       completed,
                        completed.depth_model,
                        completed.raw_model_provenance->depth_model_url
                      )},
@@ -2638,10 +2588,10 @@ namespace platf::sbs_debug {
       if (!success) {
         error.clear();
         std::filesystem::remove_all(paths.temporary, error);
-        retry_backoff_frames_ = retry_backoff_frames;
         BOOST_LOG(warning)
           << "SBS debug dump failed; request retained for a rate-limited retry."sv;
-        return false;
+        result.error = "artifact publication failed";
+        return result;
       }
     } catch (const std::exception &exception) {
       try {
@@ -2651,14 +2601,14 @@ namespace platf::sbs_debug {
         }
       } catch (...) {
       }
-      retry_backoff_frames_ = retry_backoff_frames;
       try {
         BOOST_LOG(warning)
           << "SBS debug dump transaction threw; partial output removed and request retained: "
           << exception.what();
       } catch (...) {
       }
-      return false;
+      result.error = exception.what();
+      return result;
     } catch (...) {
       try {
         if (!paths.temporary.empty()) {
@@ -2667,18 +2617,15 @@ namespace platf::sbs_debug {
         }
       } catch (...) {
       }
-      retry_backoff_frames_ = retry_backoff_frames;
       try {
         BOOST_LOG(warning)
           << "SBS debug dump transaction threw an unknown exception; partial output removed and request retained."sv;
       } catch (...) {
       }
-      return false;
+      result.error = "unknown publication exception";
+      return result;
     }
 
-    if (by_button && button) {
-      button->store(false, std::memory_order_relaxed);
-    }
     if (by_file) {
       try {
         error.clear();
@@ -2686,9 +2633,8 @@ namespace platf::sbs_debug {
       } catch (...) {
         error = std::make_error_code(std::errc::not_enough_memory);
       }
-      file_trigger_pending_ = false;
       if (error) {
-        file_trigger_enabled_ = false;
+        result.trigger_remove_failed = true;
         try {
           BOOST_LOG(warning)
             << "SBS debug dump: could not remove dump.trigger; file polling disabled for this session: "
@@ -2703,7 +2649,302 @@ namespace platf::sbs_debug {
                       << completed.matched_frame_id << ')';
     } catch (...) {
     }
-    return true;
+    result.success = true;
+    result.published_path = paths.final;
+    return result;
+  }
+
+  }  // namespace
+
+  bool dumper::maybe_dump(
+    ID3D11Device *device,
+    ID3D11DeviceContext *ctx,
+    const frame &completed,
+    const config::video_t::sbs_t &cfg
+  ) {
+    const bool by_file = file_trigger_pending_;
+    if (!snapshot_armed_for_dump_ || !async_ || async_->busy()) {
+      return false;
+    }
+    snapshot_armed_for_dump_ = false;
+    detail::button_request_guard button_request(button_request_);
+    if (!button_request.consumed() && !by_file) {
+      return false;
+    }
+
+    try {
+      const std::uint64_t retry_token = async_->allow_retries_and_token();
+      if (
+        !device || !ctx || !completed.source || !completed.model_input ||
+        !completed.raw_depth || !completed.warp_depth || !completed.sbs ||
+        completed.model_width <= 0 || completed.model_height <= 0 ||
+        completed.raw_width <= 0 || completed.raw_height <= 0 ||
+        !completed.raw_model_provenance ||
+        completed.raw_model_provenance->depth_model.empty() ||
+        completed.raw_model_provenance->depth_model != completed.depth_model ||
+        completed.raw_model_provenance->onnx_sha256.empty() ||
+        completed.raw_model_provenance->preprocess_source_closure_sha256.empty() ||
+        completed.raw_width != completed.model_width ||
+        completed.raw_height != completed.model_height ||
+        prepared_frame_id_ != completed.matched_frame_id
+      ) {
+        return false;
+      }
+      if (!completed.parallax_v2_render_selected ||
+          !completed.parallax_v2_producer_active ||
+          !completed.shadow_candidate_parallax ||
+          !completed.shadow_vertical_majorant ||
+          !completed.shadow_final_parallax || !completed.shadow_state ||
+          !completed.shadow_frame_stats) {
+        BOOST_LOG(warning)
+          << "SBS debug dump: production V2 renderer is not selected or has an incomplete "sv
+             "authenticated resource set; dump rejected (legacy live rendering is unsupported)."sv;
+        return false;
+      }
+      if (!completed.shadow_coordinate) {
+        BOOST_LOG(warning)
+          << "SBS debug dump: the explicit Dump 3D canonical-coordinate snapshot is "sv
+             "unavailable; live V2 rendering remains authenticated and unaffected."sv;
+        return false;
+      }
+      if (completed.parallax_v2_live_renderer_source_closure_sha256 !=
+            models::host_sbs_shader_cache::
+              parallax_v2_live_renderer_source_closure_sha256) {
+        BOOST_LOG(warning)
+          << "SBS debug dump: production V2 renderer source closure is missing or "sv
+             "mismatched; dump rejected."sv;
+        return false;
+      }
+
+      const auto &model_identity = *completed.raw_model_provenance;
+      const auto *capture_calibration =
+        models::depth_coordinate_v2::find_capture_calibration(
+          model_identity.depth_model,
+          model_identity.depth_model_url,
+          model_identity.onnx_sha256,
+          model_identity.preprocess_profile,
+          model_identity.preprocess_source_closure_sha256,
+          static_cast<std::uint32_t>(completed.model_width),
+          static_cast<std::uint32_t>(completed.model_height)
+        );
+      if (!capture_calibration) {
+        BOOST_LOG(warning)
+          << "SBS debug dump: production V2 resources do not resolve to exactly one "sv
+             "authenticated model/preprocess/shape calibration; dump rejected."sv;
+        return false;
+      }
+      if (!parallax_v2_shader_identity_matches_contract(
+            completed.parallax_v2_shader_provenance
+          )) {
+        BOOST_LOG(warning)
+          << "SBS debug dump: production V2 resources have missing or mismatched "sv
+             "shader-source provenance; dump rejected."sv;
+        return false;
+      }
+
+      const std::uint64_t model_pixels =
+        static_cast<std::uint64_t>(completed.model_width) *
+        static_cast<std::uint64_t>(completed.model_height);
+      const std::uint64_t raw_values =
+        static_cast<std::uint64_t>(completed.raw_width) *
+        static_cast<std::uint64_t>(completed.raw_height);
+      if (model_pixels > SIZE_MAX / (3u * sizeof(float)) ||
+          raw_values > SIZE_MAX / sizeof(float)) {
+        retry_backoff_frames_ = retry_backoff_frames;
+        return false;
+      }
+
+      captured_dump_job job;
+      job.root = dir_;
+      job.trigger = dir_ / "dump.trigger";
+      job.button_request = button_request_;
+      job.by_button = button_request.consumed();
+      job.by_file = by_file;
+      job.completed = completed;
+      job.cfg = cfg;
+      job.preprocess = &capture_calibration->preprocess;
+      job.warp_map_available = completed.warp_map != nullptr;
+      job.warp_mask_available = completed.warp_mask != nullptr;
+
+      // Snapshot every GPU-owned byte before returning to the render loop. All expensive CPU
+      // transformation and publication happens later from these immutable vectors.
+      bool captured =
+        read_texture(device, ctx, completed.source, job.source) &&
+        read_float_buffer(
+          device,
+          ctx,
+          completed.model_input,
+          static_cast<std::size_t>(model_pixels) * 3u,
+          job.model_input
+        ) &&
+        read_float_buffer(
+          device,
+          ctx,
+          completed.raw_depth,
+          static_cast<std::size_t>(raw_values),
+          job.raw_depth
+        ) &&
+        read_texture(device, ctx, completed.warp_depth, job.warp_depth) &&
+        read_texture(device, ctx, completed.sbs, job.sbs) &&
+        read_texture(device, ctx, completed.shadow_coordinate, job.shadow_coordinate) &&
+        read_texture(
+          device,
+          ctx,
+          completed.shadow_candidate_parallax,
+          job.shadow_candidate
+        ) &&
+        read_texture(
+          device,
+          ctx,
+          completed.shadow_vertical_majorant,
+          job.shadow_vertical
+        ) &&
+        read_texture(
+          device,
+          ctx,
+          completed.shadow_final_parallax,
+          job.shadow_final
+        ) &&
+        read_float_buffer(
+          device,
+          ctx,
+          completed.shadow_state,
+          models::depth_coordinate_v2::state_float_count,
+          job.shadow_state
+        ) &&
+        read_float_buffer(
+          device,
+          ctx,
+          completed.shadow_frame_stats,
+          models::depth_coordinate_v2::frame_stats_float_count,
+          job.shadow_frame_stats
+        );
+      if (captured && job.warp_map_available) {
+        captured = read_texture(device, ctx, completed.warp_map, job.warp_map);
+      }
+      if (captured && job.warp_mask_available) {
+        captured = read_texture(device, ctx, completed.warp_mask, job.warp_mask);
+      }
+
+      // The retained scene-cut bridge is comparison-only. An unavailable optional readback must
+      // not reject an otherwise authenticated V2 package.
+      if (captured && completed.adaptive_state && completed.depth_frame_state) {
+        try {
+          job.scene_cut_bridge_state_available =
+            read_normalization_state(
+              device,
+              ctx,
+              completed.depth_frame_state,
+              job.normalization
+            ) == depth_dumpability::valid &&
+            read_buffer(
+              device,
+              ctx,
+              completed.adaptive_state,
+              sbs_adaptive_state::word_count * sizeof(std::uint32_t),
+              job.adaptive_state
+            );
+        } catch (...) {
+          job.scene_cut_bridge_state_available = false;
+          job.adaptive_state.clear();
+        }
+      }
+
+      if (!captured) {
+        retry_backoff_frames_ = retry_backoff_frames;
+        BOOST_LOG(warning)
+          << "SBS debug dump: stable GPU snapshot readback failed; request retained for retry."sv;
+        return false;
+      }
+
+      // No background code may observe a live COM pointer. The worker receives only CPU-owned
+      // snapshots plus copied scalar/provenance metadata.
+      job.completed.source = nullptr;
+      job.completed.model_input = nullptr;
+      job.completed.raw_depth = nullptr;
+      job.completed.warp_depth = nullptr;
+      job.completed.adaptive_state = nullptr;
+      job.completed.depth_frame_state = nullptr;
+      job.completed.warp_map = nullptr;
+      job.completed.warp_mask = nullptr;
+      job.completed.sbs = nullptr;
+      job.completed.shadow_coordinate = nullptr;
+      job.completed.shadow_candidate_parallax = nullptr;
+      job.completed.shadow_vertical_majorant = nullptr;
+      job.completed.shadow_final_parallax = nullptr;
+      job.completed.shadow_state = nullptr;
+      job.completed.shadow_frame_stats = nullptr;
+
+      const auto queued_frame_id = job.completed.matched_frame_id;
+      const auto worker_state = async_;
+      const bool queued = worker_state->enqueue(
+        [job = std::move(job), worker_state, retry_token]() mutable {
+          dump_publish_result result;
+          try {
+            result = publish_captured_dump(job);
+          } catch (const std::exception &exception) {
+            result.error = exception.what();
+          } catch (...) {
+            result.error = "unknown background publication exception";
+          }
+          if (!result.success) {
+            const bool rearmed = worker_state->record_publication_failure(
+              retry_token,
+              job.by_button,
+              job.by_file,
+              job.button_request
+            );
+            try {
+              BOOST_LOG(warning)
+                << "SBS debug dump background publication failed; request "
+                << (rearmed ? "re-armed" : "discarded after cancellation")
+                << (result.error.empty() ? "." : ": " + result.error);
+            } catch (...) {
+            }
+          }
+          if (result.trigger_remove_failed) {
+            worker_state->record_trigger_remove_failure();
+          }
+        }
+      );
+      if (!queued) {
+        retry_backoff_frames_ = retry_backoff_frames;
+        return false;
+      }
+
+      // Publication now owns this request. Do not write the button latch again: a click that
+      // arrived after the initial exchange belongs to the next package.
+      button_request.commit();
+      if (by_file) {
+        file_trigger_pending_ = false;
+      }
+      prepared_frame_id_ = 0;
+      try {
+        BOOST_LOG(info)
+          << "SBS debug dump stable GPU snapshot queued for background publication (frame "sv
+          << queued_frame_id << ")."sv;
+      } catch (...) {
+      }
+      return true;
+    } catch (const std::exception &exception) {
+      retry_backoff_frames_ = retry_backoff_frames;
+      try {
+        BOOST_LOG(warning)
+          << "SBS debug dump render-thread snapshot failed; request retained: "
+          << exception.what();
+      } catch (...) {
+      }
+      return false;
+    } catch (...) {
+      retry_backoff_frames_ = retry_backoff_frames;
+      try {
+        BOOST_LOG(warning)
+          << "SBS debug dump render-thread snapshot failed with an unknown exception; "sv
+             "request retained."sv;
+      } catch (...) {
+      }
+      return false;
+    }
   }
 
 }  // namespace platf::sbs_debug

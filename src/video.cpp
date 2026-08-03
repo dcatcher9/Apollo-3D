@@ -51,12 +51,12 @@ namespace video {
   ) noexcept {
     snapshot.valid_fields |= sbs_telemetry_valid_field::config;
     snapshot.runtime_flags &= ~sbs_telemetry_runtime_flag::adaptive_enabled;
-    // Telemetry v1 requires a nonzero configured mode whenever VALID_CONFIG is set. Preserve the
-    // configured value as wire/UI compatibility metadata even though V2 does not consume the
-    // legacy zero-plane controller as geometry authority.
-    snapshot.zero_plane_mode = profile.zero_plane == "subject" ? 1 :
-                               profile.zero_plane == "background" ? 3 :
-                                                                       2;
+    // Telemetry v1 requires one of its three legacy plane values whenever VALID_CONFIG is set,
+    // but it cannot represent V2's scene-latched raw center/near-tail policy. Keep the neutral
+    // compatibility value stable instead of reflecting profile.zero_plane: that setting belongs
+    // to offline/evaluation and changing it must never make live telemetry claim a geometry
+    // change that did not occur.
+    snapshot.zero_plane_mode = 2;
     snapshot.pop_floor = static_cast<float>(profile.pop_strength);
     snapshot.pop_ceiling = snapshot.pop_floor;
     snapshot.effective_pop = snapshot.pop_floor;
@@ -188,31 +188,13 @@ namespace video {
     return custom;
   }
 
-  config::depth_model_info host_sbs_v2_depth_model_for_profile(
-    const config::video_t::sbs_t &profile
-  ) {
-    const auto requested = depth_model_for_profile(profile);
-    for (const auto &calibration : models::depth_coordinate_v2::model_calibrations) {
-      if (requested.name == calibration.depth_model &&
-          requested.url == calibration.depth_model_url) {
-        return requested;
-      }
-    }
-
+  config::depth_model_info host_sbs_v2_depth_model() {
     static_assert(!models::depth_coordinate_v2::model_calibrations.empty());
     const auto &production = models::depth_coordinate_v2::model_calibrations.front();
-    BOOST_LOG(warning)
-      << "Live Host SBS V2 does not have an authenticated calibration for depth model '"sv
-      << requested.name << "'; using production model '"sv << production.depth_model
-      << "'. Base/custom model selection remains available to offline evaluation only."sv;
     return {
       std::string {production.depth_model},
       std::string {production.depth_model_url},
     };
-  }
-
-  config::depth_model_info active_depth_model() {
-    return depth_model_for_profile(config::video.sbs);
   }
 
   /**
@@ -1289,10 +1271,11 @@ namespace video {
                           << session_config.width << 'x' << session_config.height;
         }
       }
-      BOOST_LOG(info) << "Encode session: host SBS mode "sv
-                      << current_sbs_mode << ", profile '"sv
-                      << session_config.sbs_config.profile << "'"sv
-                      << ", output "sv << session_config.width << 'x' << session_config.height;
+      BOOST_LOG(info) << "Encode session: Host SBS V2 mode "sv
+                      << current_sbs_mode << ", strength "sv
+                      << session_config.sbs_config.pop_strength
+                      << ", model '"sv << host_sbs_v2_depth_model().name << "', output "sv
+                      << session_config.width << 'x' << session_config.height;
 
       auto recover_failed_sbs_session = [&]() {
         if (session_config.sbs_mode == SBS_OFF) {

@@ -32,6 +32,8 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec depth_subject_hist {"depth_subject_hist_cs.hlsl"};
   inline constexpr shader_spec depth_subject_resolve {"depth_subject_resolve_cs.hlsl"};
   inline constexpr shader_spec depth_valid_history {"depth_valid_history_cs.hlsl"};
+  inline constexpr shader_spec depth_scene_cut_evidence {"depth_scene_cut_evidence_cs.hlsl"};
+  inline constexpr shader_spec depth_scene_cut_resolve {"depth_scene_cut_resolve_cs.hlsl"};
   inline constexpr shader_spec depth_coordinate_v2_moments {"depth_coordinate_v2_moments_cs.hlsl"};
   inline constexpr shader_spec depth_coordinate_v2_frame_resolve {"depth_coordinate_v2_frame_resolve_cs.hlsl"};
   inline constexpr shader_spec depth_coordinate_v2_near_coverage {"depth_coordinate_v2_near_coverage_cs.hlsl"};
@@ -60,7 +62,23 @@ namespace models::host_sbs_shader_cache {
     rgb_to_nchw,
   };
 
+  // Production live V2 set. The normalized depth is private scene-cut evidence; subject shaping,
+  // adaptive pop, and legacy zero-plane shaders are intentionally absent.
   inline constexpr std::array core_specs {
+    rgb_to_nchw,
+    buffer_to_tex,
+    depth_ema_motion,
+    depth_minmax,
+    depth_minmax_ema,
+    depth_hist,
+    depth_scene_cut_evidence,
+    depth_scene_cut_resolve,
+    depth_valid_history,
+  };
+
+  // Offline conversion/evaluation keeps the established legacy state contract and rendering
+  // controls. It is compiled lazily by those callers and is not part of Host SBS prewarm.
+  inline constexpr std::array legacy_evaluation_specs {
     rgb_to_nchw,
     buffer_to_tex,
     depth_ema_motion,

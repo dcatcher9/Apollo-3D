@@ -1912,11 +1912,13 @@ namespace offline_sbs {
     /**
      * Pipe-backed capture for the native worker's merged stdout/stderr.
      *
-     * The child receives only the pipe writer through the existing restricted
-     * handle-list/user-token launch path. A manager-owned reader drains it into the
-     * strictly bounded file above. The reader uses non-blocking availability checks,
-     * so abort() always joins promptly even if a failed process-tree cleanup leaves a
-     * writer handle alive; this keeps cancellation and Sunshine shutdown deadlock-free.
+     * The child receives the duplicated pipe writer as its STARTF_USESTDHANDLES
+     * standard output/error. The elevated-tray token path uses plain STARTUPINFO;
+     * no other handle is named by that launch contract. A manager-owned reader drains
+     * it into the strictly bounded file above. The reader uses non-blocking availability
+     * checks, so abort() always joins promptly even if a failed process-tree cleanup
+     * leaves a writer handle alive; this keeps cancellation and Sunshine shutdown
+     * deadlock-free.
      */
     class bounded_native_worker_log_pipe_t {
     public:
@@ -4131,9 +4133,10 @@ namespace offline_sbs {
         &group,
         config.expected_user_id
       );
-      // run_command_unelevated() duplicates only this handle into its explicit
-      // inheritance list. Closing the manager's writer immediately guarantees EOF
-      // once the isolated process group is gone.
+      // run_command_unelevated() duplicates this stream into inheritable standard-output/error
+      // handles. Its elevated-tray token path supplies them through STARTF_USESTDHANDLES with
+      // plain STARTUPINFO. Closing the manager's writer immediately guarantees EOF once the
+      // isolated process group and its duplicated writer are gone.
       log.close_parent_writer();
       if (process_error || !child.valid()) {
         log.finish();

@@ -2554,20 +2554,69 @@ namespace platf {
               wcmd = resolve_command_string(cmd, start_dir, user_token, creation_flags);
             });
             if (!ec) {
+              // CreateProcessWithTokenW exposes no bInheritHandles parameter, so the extended
+              // HANDLE_LIST contract cannot be satisfied; its documented STARTF_USESTDHANDLES
+              // path copies the duplicated inheritable standard handles directly. Use plain
+              // STARTUPINFO, create the process suspended, and assign it to the hardened job
+              // before allowing its first instruction to run.
+              const auto token_launch = detail::create_process_with_token_plan(
+                creation_flags,
+                job != nullptr
+              );
+              auto token_startup_info = startup_info.StartupInfo;
+              token_startup_info.cb = token_launch.startup_info_size;
               ret = CreateProcessWithTokenW(
                 user_token,
                 0,
                 nullptr,
                 wcmd.data(),
-                creation_flags,
+                token_launch.creation_flags,
                 env_block.data(),
                 start_dir.empty() ? nullptr : start_dir.c_str(),
-                reinterpret_cast<LPSTARTUPINFOW>(&startup_info),
+                &token_startup_info,
                 &process_info
               );
               if (!ret) {
                 // Capture before privilege restoration or logging can overwrite it.
                 process_launch_error = GetLastError();
+              } else if (token_launch.assign_job_after_create) {
+                struct token_job_launch_operations_t {
+                  HANDLE job;
+                  PROCESS_INFORMATION &process;
+
+                  bool assign_to_job() {
+                    return AssignProcessToJobObject(job, process.hProcess) != FALSE;
+                  }
+
+                  bool resume_initial_thread() {
+                    return ResumeThread(process.hThread) != static_cast<DWORD>(-1);
+                  }
+
+                  DWORD last_error() const {
+                    return GetLastError();
+                  }
+
+                  void terminate_process(const DWORD exit_code) {
+                    TerminateProcess(process.hProcess, exit_code);
+                  }
+
+                  void close_initial_thread() {
+                    CloseHandle(process.hThread);
+                    process.hThread = nullptr;
+                  }
+
+                  void close_process() {
+                    CloseHandle(process.hProcess);
+                    process.hProcess = nullptr;
+                  }
+                } operations {job, process_info};
+                const DWORD post_create_error =
+                  detail::finish_suspended_job_launch(operations);
+                if (post_create_error != ERROR_SUCCESS) {
+                  process_info = {};
+                  process_launch_error = post_create_error;
+                  ret = FALSE;
+                }
               }
             }
           }

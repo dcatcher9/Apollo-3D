@@ -434,7 +434,9 @@
           {
             id: "essential",
             name: "Essentials",
-            options: {},
+            options: {
+              "sbs_3d_pop_strength": 1.20,
+            },
           },
           {
             id: "general",
@@ -633,6 +635,13 @@
         if (!Number.isInteger(packetSize) || (packetSize !== 0 && (packetSize < 200 || packetSize > 65459))) {
           this.config.packetsize = 0;
         }
+        const host3dStrengthText = this.config.sbs_3d_pop_strength == null
+          ? ""
+          : String(this.config.sbs_3d_pop_strength).trim();
+        const host3dStrength = host3dStrengthText === "" ? NaN : Number(host3dStrengthText);
+        this.config.sbs_3d_pop_strength = Number.isFinite(host3dStrength)
+          ? Math.min(2, Math.max(0.25, host3dStrength))
+          : 1.2;
         let config = JSON.parse(JSON.stringify(this.config));
         config.global_prep_cmd = this.global_prep_cmd.filter(cmd => (cmd.do && cmd.do.trim()) || (cmd.undo && cmd.undo.trim()));
         return config;

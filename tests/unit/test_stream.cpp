@@ -288,6 +288,15 @@ TEST(ControlPayloadValidationTests, EnforcesDecryptedInnerLength) {
   EXPECT_FALSE(stream::is_valid_decrypted_control_payload(stream::CONTROL_HEADER_V2_SIZE + 17, 18));
 }
 
+TEST(ControlPayloadValidationTests, RecognizesOnlyTheFixedFrameFecStatusBody) {
+  EXPECT_EQ(stream::FRAME_FEC_STATUS_PAYLOAD_SIZE, 21U);
+  EXPECT_TRUE(stream::is_valid_frame_fec_status_payload_size(21));
+  // Five bytes is the opposite-direction RGB LED body that shares packet type 0x5502.
+  EXPECT_FALSE(stream::is_valid_frame_fec_status_payload_size(5));
+  EXPECT_FALSE(stream::is_valid_frame_fec_status_payload_size(20));
+  EXPECT_FALSE(stream::is_valid_frame_fec_status_payload_size(22));
+}
+
 TEST(ControlPayloadValidationTests, EnforcesLiveVideoModeGeometryBounds) {
   EXPECT_TRUE(stream::is_valid_live_video_mode_dimension(1920));
   EXPECT_TRUE(stream::is_valid_live_video_mode_dimension(stream::LIVE_VIDEO_MODE_DIMENSION_MIN));

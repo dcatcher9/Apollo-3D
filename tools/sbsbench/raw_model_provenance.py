@@ -170,18 +170,46 @@ def inspect_dump(dump: Path) -> RawModelProvenance:
     if not isinstance(config, dict):
         raise ValueError("dump_manifest.json lacks its authoritative config object")
 
+    live_config = config.get("live_effective")
+    offline_config = config.get("offline_analysis_configured")
+    shared_config = config.get("shared_configured")
+    config_schema = config.get("schema")
+    if config_schema is None:
+        if live_config is not None or offline_config is not None or shared_config is not None:
+            raise ValueError("structured dump config is missing its schema")
+    elif config_schema == 2:
+        if not isinstance(live_config, dict):
+            raise ValueError("config.live_effective must be an object")
+        if not isinstance(offline_config, dict):
+            raise ValueError("config.offline_analysis_configured must be an object")
+        if not isinstance(shared_config, dict):
+            raise ValueError("config.shared_configured must be an object")
+    else:
+        raise ValueError("structured dump config has unknown semantics")
+    # Schema-2 dumps separate effective live authority from configured offline analysis. Keep the
+    # flat-key fallback so historical captures remain auditable.
+    effective_config = live_config if isinstance(live_config, dict) else config
+    configured_analysis = offline_config if isinstance(offline_config, dict) else config
+    effective_prefix = "config.live_effective" if live_config is not None else "config"
+    configured_prefix = (
+        "config.offline_analysis_configured" if offline_config is not None else "config")
+
     manifest_model = _optional_string(manifest.get("depth_model"), "depth_model")
-    config_model = _optional_string(config.get("depth_model"), "config.depth_model")
+    config_model = _optional_string(
+        effective_config.get("depth_model"), f"{effective_prefix}.depth_model")
     if manifest_model and config_model and manifest_model != config_model:
         raise ValueError("dump manifest disagrees about the effective depth model")
     declared_model = manifest_model or config_model
     if declared_model is None:
         raise ValueError("dump manifest lacks an effective depth model name")
     configured_model = _optional_string(
-        config.get("configured_depth_model"), "config.configured_depth_model",
+        configured_analysis.get("depth_model") if offline_config is not None else
+        config.get("configured_depth_model"),
+        f"{configured_prefix}.depth_model",
         empty_is_none=True)
     declared_url = _optional_string(
-        config.get("depth_model_url"), "config.depth_model_url", empty_is_none=True)
+        effective_config.get("depth_model_url"),
+        f"{effective_prefix}.depth_model_url", empty_is_none=True)
     raw_digest = file_sha256(raw_path)
 
     proof = manifest.get(PROVENANCE_KEY)

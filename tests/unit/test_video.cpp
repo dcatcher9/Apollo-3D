@@ -453,6 +453,44 @@ TEST(DirectxShaderTest, CompilesAllColorShaderVariants) {
   EXPECT_EQ(platf::dxgi::init(), 0);
 }
 
+TEST(DirectxShaderTest, BgraYuvConvertersCompileWithoutDiagnostics) {
+  using Microsoft::WRL::ComPtr;
+
+  // These are the three entry points that include convert_base.hlsl. FXC previously emitted an
+  // X4000 "potentially uninitialized CONVERT_FUNCTION" warning for each one at host startup.
+  constexpr std::array filenames {
+    "convert_yuv420_packed_uv_type0_ps.hlsl",
+    "convert_yuv420_packed_uv_type0s_ps.hlsl",
+    "convert_yuv420_planar_y_ps.hlsl",
+  };
+  for (const auto *filename : filenames) {
+    const auto path = std::filesystem::path(SUNSHINE_SHADERS_DIR) / filename;
+    ComPtr<ID3DBlob> shader;
+    ComPtr<ID3DBlob> diagnostics;
+    const auto status = D3DCompileFromFile(
+      path.c_str(),
+      nullptr,
+      D3D_COMPILE_STANDARD_FILE_INCLUDE,
+      "main_ps",
+      "ps_5_0",
+      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+      0,
+      &shader,
+      &diagnostics
+    );
+    const std::string_view diagnostic_text = diagnostics ?
+                                               std::string_view {
+                                                 static_cast<const char *>(
+                                                   diagnostics->GetBufferPointer()
+                                                 ),
+                                                 diagnostics->GetBufferSize()
+                                               } :
+                                               std::string_view {};
+    ASSERT_TRUE(SUCCEEDED(status)) << filename << ": " << diagnostic_text;
+    EXPECT_TRUE(diagnostic_text.empty()) << filename << ": " << diagnostic_text;
+  }
+}
+
 TEST(DirectxShaderTest, FixedShapeHostSbsCachePrewarmsAndReusesBytecode) {
   namespace cache = models::host_sbs_shader_cache;
   const std::filesystem::path shader_root = SUNSHINE_SHADERS_DIR;
@@ -477,10 +515,19 @@ TEST(DirectxShaderTest, FixedShapeHostSbsCachePrewarmsAndReusesBytecode) {
     ASSERT_TRUE(second) << spec.filename;
     EXPECT_EQ(first.get(), second.get()) << spec.filename;
 
-    // This cache is deliberately limited to the fixed-shape production shader set.
+    // This cache is deliberately limited to the fixed-shape production shader set. Scene-cut
+    // analysis is production work; the retired arbitrary-ROI/controller shaders remain excluded.
     EXPECT_EQ(spec.filename.find("roi"), std::string_view::npos);
-    EXPECT_EQ(spec.filename.find("scene"), std::string_view::npos);
   }
+  const auto has_core_shader = [](const cache::shader_spec &wanted) {
+    return std::ranges::any_of(cache::core_specs, [&](const cache::shader_spec &candidate) {
+      return candidate.filename == wanted.filename;
+    });
+  };
+  EXPECT_TRUE(has_core_shader(cache::depth_scene_cut_evidence));
+  EXPECT_TRUE(has_core_shader(cache::depth_scene_cut_resolve));
+  EXPECT_FALSE(has_core_shader(cache::depth_subject_hist));
+  EXPECT_FALSE(has_core_shader(cache::depth_subject_resolve));
 }
 
 TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
@@ -876,21 +923,15 @@ TEST(ParallaxV2ContractTest, LiveModelResolverPinsAuthenticatedProductionIdentit
   ASSERT_EQ(v2::model_calibrations.size(), 1u);
   const auto &production = v2::model_calibrations.front();
 
-  config::video_t::sbs_t small_profile {};
-  small_profile.depth_model = std::string {production.depth_model};
-  small_profile.depth_model_url = std::string {production.depth_model_url};
-  const auto small = video::host_sbs_v2_depth_model_for_profile(small_profile);
-  EXPECT_EQ(small.name, production.depth_model);
-  EXPECT_EQ(small.url, production.depth_model_url);
+  const auto live = video::host_sbs_v2_depth_model();
+  EXPECT_EQ(live.name, production.depth_model);
+  EXPECT_EQ(live.url, production.depth_model_url);
 
   config::video_t::sbs_t base_profile {};
   base_profile.depth_model = "depth_anything_v2_base_fp16";
   const auto base_for_evaluation = video::depth_model_for_profile(base_profile);
   EXPECT_EQ(base_for_evaluation.name, base_profile.depth_model);
   EXPECT_NE(base_for_evaluation.url, production.depth_model_url);
-  const auto base_for_live = video::host_sbs_v2_depth_model_for_profile(base_profile);
-  EXPECT_EQ(base_for_live.name, production.depth_model);
-  EXPECT_EQ(base_for_live.url, production.depth_model_url);
 
   config::video_t::sbs_t custom_profile {};
   custom_profile.depth_model = "custom-unqualified-model";
@@ -898,9 +939,6 @@ TEST(ParallaxV2ContractTest, LiveModelResolverPinsAuthenticatedProductionIdentit
   const auto custom_for_evaluation = video::depth_model_for_profile(custom_profile);
   EXPECT_EQ(custom_for_evaluation.name, custom_profile.depth_model);
   EXPECT_EQ(custom_for_evaluation.url, custom_profile.depth_model_url);
-  const auto custom_for_live = video::host_sbs_v2_depth_model_for_profile(custom_profile);
-  EXPECT_EQ(custom_for_live.name, production.depth_model);
-  EXPECT_EQ(custom_for_live.url, production.depth_model_url);
 }
 
 TEST(ParallaxV2RendererTest, AuthenticationLatchesV2OrLiveFlat) {
@@ -1136,6 +1174,74 @@ TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
     std::string::npos
   );
   EXPECT_NE(source.find("state_semantics_valid"), std::string::npos);
+  EXPECT_NE(source.find("{\"shared_configured\", {"), std::string::npos);
+  EXPECT_NE(source.find("{\"live_effective\", {"), std::string::npos);
+  EXPECT_NE(source.find("{\"offline_analysis_configured\", {"), std::string::npos);
+}
+
+TEST(ParallaxV2ContractTest, DebugDumpPublishesCpuSnapshotOffTheRenderThread) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
+  );
+  const auto async_source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump_async.h"
+  );
+  ASSERT_FALSE(source.empty());
+  ASSERT_FALSE(async_source.empty());
+
+  const auto publisher = source.rfind(
+    "dump_publish_result publish_captured_dump(const captured_dump_job &job)"
+  );
+  const auto capture = source.find("bool dumper::maybe_dump(");
+  ASSERT_NE(publisher, std::string::npos);
+  ASSERT_NE(capture, std::string::npos);
+  ASSERT_LT(publisher, capture);
+
+  const auto publisher_body = source.substr(publisher, capture - publisher);
+  const auto capture_body = source.substr(capture);
+  EXPECT_NE(publisher_body.find("write_color_preview("), std::string::npos);
+  EXPECT_NE(publisher_body.find("models::file_sha256_hex("), std::string::npos);
+  EXPECT_NE(
+    publisher_body.find("std::filesystem::create_directories("),
+    std::string::npos
+  );
+  EXPECT_EQ(publisher_body.find("read_texture(device"), std::string::npos);
+  EXPECT_EQ(publisher_body.find("ID3D11DeviceContext"), std::string::npos);
+
+  const auto enqueue = capture_body.find("worker_state->enqueue(");
+  ASSERT_NE(enqueue, std::string::npos);
+  const auto render_thread_prefix = capture_body.substr(0, enqueue);
+  EXPECT_NE(render_thread_prefix.find("read_texture(device"), std::string::npos);
+  EXPECT_EQ(render_thread_prefix.find("write_png("), std::string::npos);
+  EXPECT_EQ(
+    render_thread_prefix.find("models::file_sha256_hex("),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    render_thread_prefix.find("std::filesystem::create_directories("),
+    std::string::npos
+  );
+
+  EXPECT_NE(async_source.find("std::jthread worker_;"), std::string::npos);
+  EXPECT_NE(
+    async_source.find("process_publication_queue()"),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("dumper::~dumper()"), std::string::npos);
+  EXPECT_NE(source.find("async_.reset();"), std::string::npos);
+  EXPECT_NE(
+    capture_body.find("job.completed.source = nullptr;"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    capture_body.find("detail::button_request_guard button_request"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    capture_body.find("worker_state->record_publication_failure("),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("async_->cancel_retries(button_request_);"), std::string::npos);
 }
 
 TEST(ParallaxV2ContractTest, CalibrationRevisionRejectsReservedSentinel) {
@@ -1453,6 +1559,8 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
 
   constexpr std::array shaders {
     std::tuple {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"depth_scene_cut_resolve_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_subject_resolve_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_valid_history_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_forward_coverage_cs.hlsl", "main", "cs_5_0"},
@@ -2980,8 +3088,8 @@ TEST(HostSbsSceneCutTest, GeometryLowRearmIsStrictAndConsecutive) {
 TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryArms) {
   const std::string shader_dir =
     SUNSHINE_SOURCE_DIR "/src_assets/windows/assets/shaders/directx/";
-  const auto histogram = read_source_file(shader_dir + "depth_subject_hist_cs.hlsl");
-  const auto resolve = read_source_file(shader_dir + "depth_subject_resolve_cs.hlsl");
+  const auto histogram = read_source_file(shader_dir + "depth_scene_cut_evidence_cs.hlsl");
+  const auto resolve = read_source_file(shader_dir + "depth_scene_cut_resolve_cs.hlsl");
   const auto constants = read_source_file(shader_dir + "include/depth_constants.hlsl");
   const auto preprocess = read_source_file(shader_dir + "rgb_to_nchw_cs.hlsl");
   const auto history = read_source_file(shader_dir + "depth_valid_history_cs.hlsl");
@@ -3041,10 +3149,10 @@ TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryAr
   EXPECT_NE(estimator.find("ID3D11ShaderResourceView *history_srvs[5]"), std::string::npos);
   EXPECT_NE(estimator.find("ID3D11UnorderedAccessView *history_uavs[3]"), std::string::npos);
   EXPECT_NE(histogram.find("RAW_RGB_PIXEL_DELTA"), std::string::npos);
-  EXPECT_NE(histogram.find("PlainHist[NUM_BINS + 3]"), std::string::npos);
-  EXPECT_NE(histogram.find("PlainHist[NUM_BINS + 4]"), std::string::npos);
-  EXPECT_NE(histogram.find("PlainHist[NUM_BINS + 5]"), std::string::npos);
-  EXPECT_NE(histogram.find("PlainHist[NUM_BINS + 6]"), std::string::npos);
+  EXPECT_NE(histogram.find("CUT_EVIDENCE_RAW_RGB_CHANGE"), std::string::npos);
+  EXPECT_NE(histogram.find("CUT_EVIDENCE_CURRENT_STRUCTURAL_SUPPORT"), std::string::npos);
+  EXPECT_NE(histogram.find("CUT_EVIDENCE_PREVIOUS_STRUCTURAL_SUPPORT"), std::string::npos);
+  EXPECT_NE(histogram.find("CUT_EVIDENCE_COMMON_STRUCTURAL_SUPPORT"), std::string::npos);
   EXPECT_NE(histogram.find("current_comparisons"), std::string::npos);
   EXPECT_NE(histogram.find("previous_comparisons"), std::string::npos);
   EXPECT_NE(histogram.find("tile_idx += 256u"), std::string::npos);
@@ -3101,19 +3209,14 @@ TEST(DirectxShaderSourceTest, HostSceneCutUsesIndependentAppearanceAndGeometryAr
   EXPECT_NE(resolve.find("change_fraction >= DEPTH_CUT_CORROBORATE"), std::string::npos);
   EXPECT_NE(resolve.find("relative_geometry_spike"), std::string::npos);
   EXPECT_NE(
-    resolve.find("scene_age >= POP_CLASSIFY_SETTLE_FRAMES"),
+    resolve.find("scene_age >= CUT_ARM_SETTLE_UPDATES"),
     std::string::npos
   );
   EXPECT_NE(resolve.find("CUT_FLAG_GEOMETRY_ARMED"), std::string::npos);
   EXPECT_NE(resolve.find("CUT_FLAG_APPEARANCE_ARMED"), std::string::npos);
   EXPECT_NE(resolve.find("low_structure_scene &&"), std::string::npos);
   EXPECT_NE(resolve.find("change_fraction < DEPTH_CUT_LOW"), std::string::npos);
-  EXPECT_NE(
-    resolve.find(
-      "lerp(depth_change_baseline, change_fraction, DEPTH_CUT_BASELINE_ALPHA)"
-    ),
-    std::string::npos
-  );
+  EXPECT_NE(resolve.find("DEPTH_CUT_BASELINE_ALPHA"), std::string::npos);
   EXPECT_EQ(resolve.find("cut_state = -2.0f"), std::string::npos);
   EXPECT_EQ(resolve.find("scene_age >= 2.0f"), std::string::npos);
   EXPECT_EQ(resolve.find("color_change_fraction"), std::string::npos);
@@ -3839,7 +3942,7 @@ TEST(HostSbsTelemetryTest, WireVisibleBitAssignmentsAreFrozen) {
   EXPECT_EQ(video::sbs_telemetry_runtime_flag::hard_cut_pulse, 1u << 8);
 }
 
-TEST(HostSbsTelemetryTest, RendererProfileKeepsWirePlaneButNoAdaptiveAuthority) {
+TEST(HostSbsTelemetryTest, RendererProfileDoesNotExposeOfflinePlaneAsLiveAuthority) {
   config::video_t::sbs_t profile;
   profile.pop_strength = 1.5;
   profile.adaptive_pop = true;
@@ -3849,7 +3952,9 @@ TEST(HostSbsTelemetryTest, RendererProfileKeepsWirePlaneButNoAdaptiveAuthority) 
   video::sbs_telemetry_snapshot_t v2;
   v2.runtime_flags = video::sbs_telemetry_runtime_flag::adaptive_enabled;
   video::apply_sbs_telemetry_profile(v2, profile);
-  EXPECT_EQ(v2.zero_plane_mode, 3);
+  // Telemetry v1 cannot encode V2's scene-latched coordinate policy. Its neutral compatibility
+  // value must not follow the offline-only profile setting.
+  EXPECT_EQ(v2.zero_plane_mode, 2);
   EXPECT_FLOAT_EQ(v2.pop_floor, 1.5f);
   EXPECT_FLOAT_EQ(v2.pop_ceiling, 1.5f);
   EXPECT_FLOAT_EQ(v2.effective_pop, 1.5f);

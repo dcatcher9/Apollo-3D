@@ -15,11 +15,11 @@ seven-pass producer, the standalone live renderer, and six standard tensor shape
 tensor shapes fail flat. There is no V1 fallback. See
 `docs/host-sbs-depth-coordinate-v2.md` for the complete fail-closed contract.
 
-The legacy analysis stack remains live only as the temporary producer of the confirmed scene-cut
-`{generation, pulse}` bridge consumed by V2. Its normalized depth, subject, adaptive-pop,
-zero-plane, and warp outputs have no live geometry authority. Legacy renderer/shader sources remain
-in the tree for offline conversion and evaluation harnesses; their presence does not make V1
-selectable in Host SBS.
+Live V2 uses a dedicated cut-only evidence and resolve path to produce the confirmed scene-cut
+`{generation, pulse}` it consumes. The private normalized cut field has no live geometry authority,
+and live streams do not compile or dispatch legacy subject, adaptive-pop, zero-plane, or warp
+analysis. Legacy renderer/shader sources remain in the tree for offline conversion and evaluation
+harnesses; their presence does not make V1 selectable in Host SBS.
 
 Approved AR glasses connected as a Windows monitor also use an automatic local presenter; see
 `docs/sbs-local-ar-glasses.md`. That path reuses the production depth and warp without NVENC.
@@ -28,8 +28,7 @@ Approved AR glasses connected as a Windows monitor also use an automatic local p
 
 1. Preserve source aspect while selecting one of the six authenticated patch-aligned tensor grids.
 2. Convert SDR or HDR capture into the authenticated DAV2 Small input domain.
-3. Infer raw depth and obtain only the confirmed cut epoch from the temporary legacy-analysis
-   bridge.
+3. Infer raw depth and obtain only the confirmed cut epoch from the dedicated cut-only analysis.
 4. Acquire or retain the scene center and near-tail shoulder, then apply the fixed raw scale,
    monotone asymmetric curve, requested pop, and exact frame-local 4% source-U container.
 5. Produce the vertical shear-2 majorant and then the slope-0.5 row majorant entirely on the GPU.
@@ -65,7 +64,8 @@ selection until a hard cut.
 - Bestv2-derived subject estimation and P2/P98 normalization are mandatory.
 - Range-to-pixel temporal ordering and the Apollo probe are permanent.
 - Edge/change-aware EMA is accepted for the Apollo profile at the headset-validated settings.
-- TensorRT CUDA Graph replay is accepted and inherited by every profile. It validates the mapped
+- TensorRT CUDA Graph replay is accepted. It is now one top-level shared control rather than a
+  profile-prefixed duplicate. It validates the mapped
   D3D tensor addresses and model shape before every replay, warms and recaptures a changed
   signature, and falls back to ordinary enqueue when graph APIs/capture/launch are unavailable.
   It kept all 456 raw tensors, processed depth maps, and SBS frames byte-identical while reducing
@@ -411,7 +411,9 @@ selection until a hard cut.
   histograms alone are not a safe selector: scenes with similar percentiles and edge density chose
   different winners. Evidence:
   `zero-plane-{legacy,subject,median,background}-{core-screen,spring}`.
-- **SUPERSEDED 2026-07-24: `sbs_3d_zero_plane` now defaults to `median`.** The headset preference
+- **Historical/offline only since Host SBS V2 shipped:** `sbs_3d_zero_plane` defaults to `median`
+  for the retained evaluator and offline pipeline. Live Host SBS V2 ignores this setting and uses
+  its authenticated scene-latched coordinate policy. The headset preference
   label this decision was waiting on was collected and is decisively positive. Re-measured on the
   current metric schema (`pop-A-control` vs `zp-subject` vs `zp-median`, core suite), the earlier
   costs do not reproduce and the earlier framing understated the win:
@@ -752,6 +754,6 @@ comfort and integrity remain hard gates.
 - `tools/sbsbench/README.md` — build, evaluation, report, and dataset commands.
 - `docs/sbs-feature-decision-revisit.md` — historical accepted/rejected evidence.
 - `docs/sbs-resolution-robustness.md` — coordinate-space and encoder-resolution audit.
-- `src/video_depth_estimator.cpp` — V2 producer plus the temporary legacy scene-cut bridge.
+- `src/video_depth_estimator.cpp` — V2 producer plus the dedicated cut-only analysis path.
 - `src_assets/windows/assets/shaders/directx/sbs_reprojection_v2_live_ps.hlsl` — production live geometry.
 - `src_assets/windows/assets/shaders/directx/sbs_reprojection_ps.hlsl` — legacy offline/evaluator geometry only.

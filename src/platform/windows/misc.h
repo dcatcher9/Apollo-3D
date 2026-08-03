@@ -29,6 +29,62 @@ namespace platf {
   };
 
   namespace detail {
+    struct create_process_with_token_plan_t {
+      DWORD creation_flags;
+      DWORD startup_info_size;
+      bool assign_job_after_create;
+    };
+
+    /**
+     * CreateProcessWithTokenW does not reliably accept the process-thread job-list
+     * attribute used by CreateProcessW/CreateProcessAsUserW, and it has no
+     * bInheritHandles parameter required by PROC_THREAD_ATTRIBUTE_HANDLE_LIST. Launch with
+     * plain STARTUPINFO instead, then assign a suspended process to the requested job before
+     * any child code runs.
+     */
+    constexpr create_process_with_token_plan_t create_process_with_token_plan(
+      const DWORD requested_flags,
+      const bool has_job
+    ) {
+      return {
+        .creation_flags =
+          (requested_flags & ~EXTENDED_STARTUPINFO_PRESENT) |
+          (has_job ? CREATE_SUSPENDED : 0),
+        .startup_info_size = sizeof(STARTUPINFOW),
+        .assign_job_after_create = has_job,
+      };
+    }
+
+    /**
+     * Finish a CreateProcessWithTokenW launch that was suspended for safe job assignment.
+     * Operations is a small Win32 adapter in production and a deterministic fake in tests.
+     */
+    template<class Operations>
+    DWORD finish_suspended_job_launch(Operations &operations) {
+      DWORD failure = ERROR_SUCCESS;
+      if (!operations.assign_to_job()) {
+        failure = operations.last_error();
+        if (failure == ERROR_SUCCESS) {
+          failure = ERROR_PROCESS_ABORTED;
+        }
+      } else if (!operations.resume_initial_thread()) {
+        failure = operations.last_error();
+        if (failure == ERROR_SUCCESS) {
+          failure = ERROR_PROCESS_ABORTED;
+        }
+      }
+      if (failure == ERROR_SUCCESS) {
+        return ERROR_SUCCESS;
+      }
+
+      // Assignment failure leaves the child suspended and uncontained. Resume failure leaves it
+      // suspended inside the kill-on-close job. Terminate and release both handles in either case.
+      operations.terminate_process(failure);
+      operations.close_initial_thread();
+      operations.close_process();
+      return failure;
+    }
+
     /**
      * Coordinate one bounded Explorer restart without embedding Win32 side effects in the policy.
      *

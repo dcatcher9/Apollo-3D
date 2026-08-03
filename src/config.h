@@ -16,6 +16,32 @@
 #include "nvenc/nvenc_config.h"
 
 namespace config {
+  // Common initial values for the retained offline/evaluator analysis and the private live cut
+  // detector. They share today's calibration deliberately, but each consumer names its authority
+  // below so a future live-only change cannot accidentally masquerade as an offline default.
+  namespace sbs_analysis_defaults {
+    inline constexpr double depth_ema = 0.5;
+    inline constexpr double edge_change = 0.05;
+    inline constexpr double edge_gradient = 0.02;
+    inline constexpr double edge_strength = 0.25;
+    inline constexpr double minmax_ema = 0.18;
+    inline constexpr int depth_short_side = 432;
+    inline constexpr double depth_max_aspect = 4.0;
+  }
+
+  // Authenticated live Host SBS V2 policy. It owns both the inference-shape budget and the private
+  // normalized-depth analysis used by scene cuts. Similar sbs_3d_* configuration keys remain
+  // available to offline conversion/evaluation, but they cannot override this live policy.
+  namespace host_sbs_v2_live_calibration {
+    inline constexpr double depth_ema = sbs_analysis_defaults::depth_ema;
+    inline constexpr double edge_change = sbs_analysis_defaults::edge_change;
+    inline constexpr double edge_gradient = sbs_analysis_defaults::edge_gradient;
+    inline constexpr double edge_strength = sbs_analysis_defaults::edge_strength;
+    inline constexpr double minmax_ema = sbs_analysis_defaults::minmax_ema;
+    inline constexpr int depth_short_side = sbs_analysis_defaults::depth_short_side;
+    inline constexpr double depth_max_aspect = sbs_analysis_defaults::depth_max_aspect;
+  }
+
   // track modified config options
   inline std::unordered_map<std::string, std::string> modified_config_settings;
 
@@ -41,27 +67,27 @@ namespace config {
     int max_bitrate;  // Maximum bitrate, sets ceiling in kbps for bitrate requested from client
     double minimum_fps_target;  ///< Lowest framerate that will be used when streaming. Range 0-1000, 0 = half of client's requested framerate.
 
-    // Real-time 2D->3D side-by-side (SBS) depth reprojection tuning.
-    // The selected host profile is resolved once at startup, then explicit sbs_3d_* overrides
-    // are applied on top. Profiles are configuration presets only; they are not switched live.
+    // Host/offline 2D->3D side-by-side (SBS) settings. The selected legacy analysis profile is
+    // resolved once at startup, then explicit sbs_3d_* values override it. Shared live controls
+    // are top-level-only and profiles are never switched while streaming.
     struct sbs_t {
-      std::string profile = "apollo";  ///< Startup quality preset. Custom names use sbs_3d_profile_<name>_<parameter> keys.
-      double pop_strength = 1.20;  ///< Production stereo-parallax multiplier (0.25-2). Literal reference runs bypass production scaling in the offline harness.
-      // The following legacy-analysis controls remain serialized for offline conversion/evaluation
-      // and for the retained live scene-cut bridge. They do not alter V2 live geometry or pop.
+      std::string profile = "apollo";  ///< Offline/evaluator preset. Custom names use sbs_3d_profile_<name>_<parameter> keys; live V2 ignores this selector.
+      double pop_strength = 1.20;  ///< Literal live V2 stereo strength (0.25-2) and offline conversion base strength.
+      // Legacy/offline analysis controls. Live Host SBS V2 neither reads these as geometry nor
+      // accepts their overrides for its private cut detector; it uses the calibration above.
       bool adaptive_pop = true;
       double adaptive_pop_max = 2.00;
-      double ema = 0.5;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
-      double ema_edge_change = 0.05;  ///< Edge-selective EMA: minimum current-vs-history depth change. 0 disables it.
+      double ema = sbs_analysis_defaults::depth_ema;  ///< Offline/evaluator depth temporal blend.
+      double ema_edge_change = sbs_analysis_defaults::edge_change;  ///< Offline/evaluator moving-edge threshold.
       /// Edge-selective EMA: minimum current depth gradient in 434-short-side reference-texel units.
-      double ema_edge_gradient = 0.02;
-      double ema_edge_strength = 0.25;  ///< Edge-selective EMA blend toward current depth inside the mask.
-      int depth_short_side = 432;  ///< Depth map short-side resolution, clamped to the frame's native short side. At 16:9 this maps to about 768x432, matching the VisionDepth3D reference input.
-      double depth_max_aspect = 4.0;  ///< Aspect-ratio cap (long side <= short * this). Bounds worst-case inference cost on ultrawide.
-      double minmax_ema = 0.18;  ///< Temporal EMA blend for the normalized disparity min/max (0-1). Lower = steadier depth scale, higher = adapts faster.
+      double ema_edge_gradient = sbs_analysis_defaults::edge_gradient;
+      double ema_edge_strength = sbs_analysis_defaults::edge_strength;  ///< Offline/evaluator moving-edge blend.
+      int depth_short_side = sbs_analysis_defaults::depth_short_side;  ///< Offline/evaluator tensor short side; live V2 uses authenticated fixed shapes.
+      double depth_max_aspect = sbs_analysis_defaults::depth_max_aspect;  ///< Offline/evaluator aspect cap; live V2 uses authenticated fixed shapes.
+      double minmax_ema = sbs_analysis_defaults::minmax_ema;  ///< Offline/evaluator normalized-range EMA.
       double subject_recenter = 0.35;
       bool subject_stretch = true;
-      std::string zero_plane = "median";
+      std::string zero_plane = "median";  ///< Offline/evaluator anchor only; live V2 uses its fixed scene-latched coordinate policy.
       std::string depth_model = "depth_anything_v2_fp16";  ///< Offline/evaluator selection. Live Host SBS V2 is pinned to the authenticated DAV2-Small identity.
       std::string depth_model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< Offline/evaluator download source; live Host SBS uses the authenticated production URL.
       int max_encode_width = 8192;  ///< Configured maximum packed Host SBS width. The effective cap is the lower of this value and the selected codec's NVENC capability (RTX 5080: H.264 4096, HEVC/AV1 8192); wider requests are aspect-preservingly scaled.

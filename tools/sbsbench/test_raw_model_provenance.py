@@ -115,6 +115,51 @@ class RawModelProvenanceTests(unittest.TestCase):
             self.assertIsNone(observed.reason)
             provenance.require_authoritative(observed, False)
 
+    def test_structured_dump_separates_live_model_from_offline_configuration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            dump, manifest = self._dump(Path(temporary))
+            manifest["config"] = {
+                "schema": 2,
+                "shared_configured": {"pop_strength": 1.2},
+                "live_effective": {
+                    "depth_model": self.CALIBRATION.depth_model,
+                    "depth_model_url": self.CALIBRATION.depth_model_url,
+                },
+                "offline_analysis_configured": {
+                    "depth_model": "depth_anything_v2_base_fp16",
+                    "depth_model_url": "https://example.invalid/base.onnx",
+                },
+            }
+            manifest[provenance.PROVENANCE_KEY] = self._proof(dump)
+            (dump / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+
+            observed = provenance.inspect_dump(dump)
+            self.assertTrue(observed.authoritative)
+            self.assertEqual(observed.declared_model, self.CALIBRATION.depth_model)
+            self.assertEqual(observed.configured_model, "depth_anything_v2_base_fp16")
+            self.assertEqual(observed.declared_url, self.CALIBRATION.depth_model_url)
+
+            manifest["config"]["schema"] = 3
+            (dump / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown semantics"):
+                provenance.inspect_dump(dump)
+
+            manifest["config"] = {"schema": 2}
+            (dump / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "live_effective"):
+                provenance.inspect_dump(dump)
+
+            manifest["config"] = {
+                "live_effective": {"depth_model": self.CALIBRATION.depth_model},
+            }
+            (dump / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "missing its schema"):
+                provenance.inspect_dump(dump)
+
     def test_corrupt_or_mismatched_proof_never_downgrades_to_unverified(self):
         for mutation, message in (("unknown", "missing or unknown"),
                                   ("model", "disagrees"),

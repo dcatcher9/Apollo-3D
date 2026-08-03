@@ -128,8 +128,8 @@ namespace video {
   };
 
   /** Apply the profile fields shared by unavailable, ready, and failed telemetry snapshots. V2
-   * has fixed pop and no legacy zero-plane/adaptive-pop authority; the configured plane remains
-   * present solely because telemetry v1 requires it when the configuration field is valid.
+   * has fixed pop and no legacy zero-plane/adaptive-pop authority; telemetry v1 receives a stable
+   * neutral plane placeholder because its VALID_CONFIG contract requires a nonzero legacy mode.
    */
   void apply_sbs_telemetry_profile(
     sbs_telemetry_snapshot_t &snapshot,
@@ -407,18 +407,14 @@ namespace video {
     int runtime_max_width = 0
   );
 
-  /* Startup-profile-selected depth model for the host SBS pipeline. The configured name is matched
-     against config::depth_model_registry(), else synthesized from the model/url escape hatch. */
-  config::depth_model_info active_depth_model();
+  /* Resolve an offline/evaluator profile model against config::depth_model_registry(), else
+     synthesize it from the model/url escape hatch. This function has no live-model authority. */
   config::depth_model_info depth_model_for_profile(const config::video_t::sbs_t &profile);
 
-  /** Resolve the only model family authenticated for live Host SBS V2. Offline/evaluator callers
-   * continue to use depth_model_for_profile() so their explicit Base/custom model experiments are
-   * not silently changed by the production-live restriction.
+  /** Return the authenticated production model for live Host SBS V2. Model/profile overrides are
+   * explicitly offline/evaluator-only and therefore cannot masquerade as live controls.
    */
-  config::depth_model_info host_sbs_v2_depth_model_for_profile(
-    const config::video_t::sbs_t &profile
-  );
+  config::depth_model_info host_sbs_v2_depth_model();
   using img_event_t = std::shared_ptr<safe::event_t<std::shared_ptr<platf::img_t>>>;
 
   struct encode_session_t {

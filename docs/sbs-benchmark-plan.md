@@ -40,7 +40,9 @@ Design for two reproducible, host-side benchmarks so every SBS change ships with
 > Historical result: the first adaptive-pop calibration (`spring-adaptive-vs-fixed130`) was
 > neutral. Fixed 1.30 changed pop spread by no more than 0.045 percentage points and produced mixed
 > artistic-reference deltas. Its recommendation to retain the 1.25-1.30 band is superseded:
-> production now uses a scene-latched 1.20-2.00 band with a shot-latched median zero plane.
+> the later V1/offline path used a scene-latched 1.20-2.00 band with a shot-latched median zero
+> plane. Live Host SBS V2 supersedes that geometry with literal configured pop and its
+> authenticated shot-held scene center; the adaptive band remains offline/evaluator evidence.
 
 ## Why the offline warpsim was removed
 

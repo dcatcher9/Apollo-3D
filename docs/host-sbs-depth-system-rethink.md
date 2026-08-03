@@ -45,7 +45,7 @@ unadapted rather than introducing another classifier or feedback loop.
 | Permanent within-shot safety minimum | Remove | A transient prediction must not weaken a long scene indefinitely. |
 | Frame-local 4% container | Keep | This owns a precise representation bound and recovers immediately. |
 | Temporal depth EMA | Do not port initially | Add temporal filtering only after raw-coordinate flicker is measured. |
-| Existing cut pulse/generation | Keep temporarily behind a narrow bridge | V2 consumes only one scene-reset input. The legacy analysis stack currently produces it, but none of its geometry state reaches V2. |
+| Cut pulse/generation | Keep behind a cut-only path | V2 consumes only one scene-reset input. Dedicated evidence/resolve shaders publish it without compiling or dispatching legacy subject, adaptive-pop, zero-plane, or warp analysis. |
 | Old depth with current color | Remove | It breaks frame attribution. |
 | Immutable candidate field | Keep as diagnostic | It records requested geometry before local safety intervention. |
 | Canonical coordinate | Keep as diagnostic | It helps explain model output but does not select visibility. |
@@ -140,9 +140,9 @@ The current convergence value is zero. Intelligent zero-plane allocation is not 
 - V2 consumes only `{generation, pulse}`.
 - Pulse handles the exact update; generation recovers a pulse missed while inference was skipped.
 - Persistent-motion behavior belongs to the detector; V2 adds no second cooldown or timeout.
-- The live estimator currently obtains this pair from a narrow bridge over the legacy analysis
-  stack. That bridge is the only legacy live dependency; its depth, anchor, pop, and warp outputs
-  have no V2 authority.
+- The live estimator obtains this pair from dedicated cut-only evidence and resolve shaders. Their
+  normalized depth is private detector evidence; no subject, anchor, adaptive-pop, or legacy warp
+  output is produced for live V2.
 
 ### Invalid depth
 
@@ -195,9 +195,9 @@ clear, dispatch, or bind a full-resolution owner texture, and it performs
 no bounded hole search. Exact dump mapping compiles from the same renderer closure; the mask
 entrypoint writes zero.
 
-The production parallax interval measures exactly the seven V2 compute passes. The retained
-scene-cut bridge runs before that interval and must be reported separately when measuring the
-remaining legacy-analysis overhead. Historical shadow-mode totals are not production V2 cost.
+The production parallax interval measures exactly the seven V2 compute passes. The dedicated
+cut-only analysis runs before that interval and must be reported separately when measuring live
+detector overhead. Historical shadow-mode or legacy-analysis totals are not production V2 cost.
 
 ## Provenance and evidence
 
@@ -229,5 +229,5 @@ Continuing release evidence should:
    fixed-point residual, disparity bounds, and timing independently.
 5. Prove V2 takes `pop_strength` literally, ignores legacy adaptive geometry controls, and changes
    its near shoulder only on acquisition or a confirmed cut.
-6. Extract and authenticate the narrow cut epoch before retiring the remaining legacy scene-cut bridge.
+6. Keep the extracted cut-only epoch contract and its persistent-motion tests authenticated as the detector evolves.
 7. Calibrate every additional model, tensor shape, client backend, and offline path independently.

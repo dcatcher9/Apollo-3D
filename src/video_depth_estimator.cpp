@@ -1605,6 +1605,8 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_hist_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_subject_hist_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_subject_resolve_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_scene_cut_evidence_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_scene_cut_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_valid_history_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_moments_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_frame_resolve_cs;
@@ -1654,7 +1656,11 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_hist_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subject_plain_buf;  // 256 bins + nine evidence counters
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_plain_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;  // seven float4 elements; first three are the warp contract
+    Microsoft::WRL::ComPtr<ID3D11Buffer> scene_cut_evidence_buf;  // nine cut-only counters (live V2)
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> scene_cut_evidence_uav;
+    // Established 32-word analysis ABI. Live V2 writes only cut/health fields; offline evaluation
+    // additionally owns subject, adaptive-pop, stretch, and zero-plane fields.
+    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject_srv;
 
@@ -1754,26 +1760,45 @@ namespace models {
         device(d),
         context(c),
         usage(estimator_usage),
-        ema_alpha((float) cfg.ema),
-        ema_edge_change((float) cfg.ema_edge_change),
-        ema_edge_gradient((float) cfg.ema_edge_gradient),
-        ema_edge_strength((float) cfg.ema_edge_strength),
-        depth_short_side(std::max(196, cfg.depth_short_side)),
-        max_aspect(std::max(1.0f, (float) cfg.depth_max_aspect)),
-        minmax_alpha((float) cfg.minmax_ema),
+        ema_alpha((float) (estimator_usage == depth_estimator_usage_e::host_sbs_v2 ?
+                             config::host_sbs_v2_live_calibration::depth_ema : cfg.ema)),
+        ema_edge_change((float) (estimator_usage == depth_estimator_usage_e::host_sbs_v2 ?
+                                   config::host_sbs_v2_live_calibration::edge_change :
+                                   cfg.ema_edge_change)),
+        ema_edge_gradient((float) (estimator_usage == depth_estimator_usage_e::host_sbs_v2 ?
+                                     config::host_sbs_v2_live_calibration::edge_gradient :
+                                     cfg.ema_edge_gradient)),
+        ema_edge_strength((float) (estimator_usage == depth_estimator_usage_e::host_sbs_v2 ?
+                                     config::host_sbs_v2_live_calibration::edge_strength :
+                                     cfg.ema_edge_strength)),
+        depth_short_side(estimator_usage == depth_estimator_usage_e::host_sbs_v2 ?
+                           config::host_sbs_v2_live_calibration::depth_short_side :
+                           std::max(196, cfg.depth_short_side)),
+        max_aspect((float) (estimator_usage == depth_estimator_usage_e::host_sbs_v2 ?
+                              config::host_sbs_v2_live_calibration::depth_max_aspect :
+                              std::max(1.0, cfg.depth_max_aspect))),
+        minmax_alpha((float) (estimator_usage == depth_estimator_usage_e::host_sbs_v2 ?
+                                config::host_sbs_v2_live_calibration::minmax_ema :
+                                cfg.minmax_ema)),
         cuda_graph_enabled(cfg.cuda_graph),
         diagnostics_enabled(config::sunshine.diagnostics_enabled),
-        subject_recenter((float) cfg.subject_recenter),
-        subject_stretch(cfg.subject_stretch),
-        adaptive_pop(cfg.adaptive_pop),
-        adaptive_pop_max_ratio((float) (std::max(cfg.adaptive_pop_max, cfg.pop_strength) /
-                                        std::max(cfg.pop_strength, 0.25))),
-        // Unrecognised falls back to `median`, the default and validated plane. It must NOT fall
-        // back to 0: that was `legacy`, which no longer exists, and the shader would read it as
-        // `subject` (its selector is `< 1.5f`). config.cpp resets bad strings, but the offline
-        // harness assigns sbs_cfg directly and bypasses that.
-        zero_plane_mode(cfg.zero_plane == "subject" ? 1.0f : cfg.zero_plane == "background" ? 3.0f :
-                                                                                              2.0f),
+        subject_recenter(estimator_usage == depth_estimator_usage_e::legacy_evaluation ?
+                           (float) cfg.subject_recenter : 0.0f),
+        subject_stretch(estimator_usage == depth_estimator_usage_e::legacy_evaluation &&
+                        cfg.subject_stretch),
+        adaptive_pop(estimator_usage == depth_estimator_usage_e::legacy_evaluation &&
+                     cfg.adaptive_pop),
+        adaptive_pop_max_ratio(estimator_usage == depth_estimator_usage_e::legacy_evaluation ?
+                                 (float) (std::max(cfg.adaptive_pop_max, cfg.pop_strength) /
+                                          std::max(cfg.pop_strength, 0.25)) :
+                                 1.0f),
+        // The legacy evaluator maps an unrecognized value to median because its harness can
+        // assign sbs_cfg directly and bypass config validation. Live V2 has no legacy zero-plane
+        // parameter, so its shared cbuffer slot is explicitly inert.
+        zero_plane_mode(estimator_usage == depth_estimator_usage_e::legacy_evaluation ?
+                          (cfg.zero_plane == "subject" ? 1.0f :
+                           cfg.zero_plane == "background" ? 3.0f : 2.0f) :
+                          0.0f),
         parallax_v2_requested_pop_strength(
           depth_coordinate_v2::requested_pop_strength(
             static_cast<float>(cfg.pop_strength)
@@ -1942,9 +1967,9 @@ namespace models {
         }
       }
 
-      // The legacy evaluator and the temporary live scene-cut bridge share these analysis
-      // shaders. Their normalized depth, subject, adaptive-pop, and zero-plane outputs never feed
-      // Host SBS V2 geometry; live V2 consumes only the confirmed cut generation/pulse.
+      // Live Host SBS and the legacy evaluator share preprocessing and the private normalized
+      // depth used by cut evidence. Their analysis roots diverge below: live V2 compiles only the
+      // cut detector, while offline/evaluation retains subject, adaptive-pop, and zero-plane work.
       const auto preprocess_sources = host_sbs_shader_cache::snapshot_sources(
         assets_dir / "shaders" / "directx",
         host_sbs_shader_cache::preprocess_specs
@@ -1984,11 +2009,14 @@ namespace models {
         }
       );
 
+      const auto &analysis_specs = host_v2_required() ?
+                                     host_sbs_shader_cache::core_specs :
+                                     host_sbs_shader_cache::legacy_evaluation_specs;
       const auto shader_sources = host_sbs_shader_cache::snapshot_sources(
         assets_dir / "shaders" / "directx",
-        host_sbs_shader_cache::core_specs
+        analysis_specs
       );
-      const bool core_shaders_ok =
+      const bool common_shaders_ok =
         preprocess_sources &&
         shader_sources &&
         create_shader(preprocess_sources, host_sbs_shader_cache::rgb_to_nchw, rgb_to_nchw_cs) &&
@@ -1997,9 +2025,29 @@ namespace models {
         create_shader(shader_sources, host_sbs_shader_cache::depth_minmax, depth_minmax_cs) &&
         create_shader(shader_sources, host_sbs_shader_cache::depth_minmax_ema, depth_minmax_ema_cs) &&
         create_shader(shader_sources, host_sbs_shader_cache::depth_hist, depth_hist_cs) &&
-        create_shader(shader_sources, host_sbs_shader_cache::depth_subject_hist, depth_subject_hist_cs) &&
-        create_shader(shader_sources, host_sbs_shader_cache::depth_subject_resolve, depth_subject_resolve_cs) &&
         create_shader(shader_sources, host_sbs_shader_cache::depth_valid_history, depth_valid_history_cs);
+      const bool analysis_shaders_ok = host_v2_required() ?
+        create_shader(
+          shader_sources,
+          host_sbs_shader_cache::depth_scene_cut_evidence,
+          depth_scene_cut_evidence_cs
+        ) &&
+          create_shader(
+            shader_sources,
+            host_sbs_shader_cache::depth_scene_cut_resolve,
+            depth_scene_cut_resolve_cs
+          ) :
+        create_shader(
+          shader_sources,
+          host_sbs_shader_cache::depth_subject_hist,
+          depth_subject_hist_cs
+        ) &&
+          create_shader(
+            shader_sources,
+            host_sbs_shader_cache::depth_subject_resolve,
+            depth_subject_resolve_cs
+          );
+      const bool core_shaders_ok = common_shaders_ok && analysis_shaders_ok;
       if (!core_shaders_ok) {
         BOOST_LOG(error) << "Depth estimator failed: required Bestv2 shader initialization failed.";
         return;
@@ -2131,8 +2179,8 @@ namespace models {
       }
       if (host_v2_required()) {
         BOOST_LOG(info)
-          << "Host SBS V2 scene-cut bridge enabled; legacy normalized depth, subject, "
-             "adaptive-pop, and zero-plane outputs have no live geometry authority.";
+          << "Host SBS V2 cut-only GPU analysis enabled; subject, adaptive-pop, stretch, and "
+             "legacy zero-plane work is not compiled or dispatched for live streams.";
       } else {
         BOOST_LOG(info)
           << "Legacy evaluator subject shaping enabled (recenter " << subject_recenter << ").";
@@ -2195,34 +2243,44 @@ namespace models {
         }
       }
 
-      // Subject tracking: weighted histogram (256 uint bins), plain histogram plus depth-edge,
-      // depth-change, ordinal-structure, broad-RGB-change, three structure-support counters, and
-      // capture-domain brightness rise/fall counters (265 uints), and
-      // three-float4 state.
+      // The state buffer keeps the established 32-word ABI for offline traces, Dump 3D, and live
+      // telemetry. Live V2 allocates only nine cut counters; legacy evaluation additionally owns
+      // the two 256-bin subject/stretch histograms.
       {
-        uint32_t init_hist[256] = {};
         D3D11_BUFFER_DESC bd = {};
         bd.Usage = D3D11_USAGE_DEFAULT;
-        bd.ByteWidth = sizeof(init_hist);
         bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
         bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
         bd.StructureByteStride = sizeof(uint32_t);
-        D3D11_SUBRESOURCE_DATA sd = {init_hist, 0, 0};
-        device->CreateBuffer(&bd, &sd, &subject_hist_buf);
-        if (subject_hist_buf) {
-          device->CreateUnorderedAccessView(subject_hist_buf.Get(), nullptr, &subject_hist_uav);
-        }
-        uint32_t init_plain[265] = {};
-        bd.ByteWidth = sizeof(init_plain);
-        D3D11_SUBRESOURCE_DATA plain_sd = {init_plain, 0, 0};
-        device->CreateBuffer(&bd, &plain_sd, &subject_plain_buf);
-        if (subject_plain_buf) {
-          device->CreateUnorderedAccessView(subject_plain_buf.Get(), nullptr, &subject_plain_uav);
+        if (host_v2_required()) {
+          uint32_t initial_cut_evidence[9] = {};
+          bd.ByteWidth = sizeof(initial_cut_evidence);
+          D3D11_SUBRESOURCE_DATA cut_sd = {initial_cut_evidence, 0, 0};
+          device->CreateBuffer(&bd, &cut_sd, &scene_cut_evidence_buf);
+          if (scene_cut_evidence_buf) {
+            device->CreateUnorderedAccessView(
+              scene_cut_evidence_buf.Get(),
+              nullptr,
+              &scene_cut_evidence_uav
+            );
+          }
+        } else {
+          uint32_t init_hist[256] = {};
+          bd.ByteWidth = sizeof(init_hist);
+          D3D11_SUBRESOURCE_DATA sd = {init_hist, 0, 0};
+          device->CreateBuffer(&bd, &sd, &subject_hist_buf);
+          if (subject_hist_buf) {
+            device->CreateUnorderedAccessView(subject_hist_buf.Get(), nullptr, &subject_hist_uav);
+          }
+          uint32_t init_plain[265] = {};
+          bd.ByteWidth = sizeof(init_plain);
+          D3D11_SUBRESOURCE_DATA plain_sd = {init_plain, 0, 0};
+          device->CreateBuffer(&bd, &plain_sd, &subject_plain_buf);
+          if (subject_plain_buf) {
+            device->CreateUnorderedAccessView(subject_plain_buf.Get(), nullptr, &subject_plain_uav);
+          }
         }
 
-        // [0] subject/recenter, [1] stretch/depth-cut baseline/pop,
-        // [2] explicit zero-plane anchor/cut flags. [3..7] are append-only diagnostics and are
-        // never consumed by the production warp. Keep [3].x at the unclassified sentinel.
         const auto &init_state = sbs_adaptive_state::initial_values;
         bd.ByteWidth = sizeof(init_state);
         bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
@@ -2242,12 +2300,14 @@ namespace models {
       samp_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
       device->CreateSamplerState(&samp_desc, &linear_sampler);
 
+      const bool analysis_ready = host_v2_required() ?
+        depth_scene_cut_evidence_cs && depth_scene_cut_resolve_cs && scene_cut_evidence_uav :
+        depth_subject_hist_cs && depth_subject_resolve_cs &&
+          subject_hist_uav && subject_plain_uav;
       valid = engine && exec_context && cu_stream && rgb_to_nchw_cs && buffer_to_tex_cs &&
-              depth_minmax_cs && depth_minmax_ema_cs && depth_hist_cs &&
-              depth_subject_hist_cs && depth_subject_resolve_cs && depth_valid_history_cs &&
+              depth_minmax_cs && depth_minmax_ema_cs && depth_hist_cs && depth_valid_history_cs &&
               minmax_raw_uav && minmax_ema_uav && minmax_ema_srv && hist_uav &&
-              subject_hist_uav && subject_plain_uav && subject_uav && subject_srv &&
-              linear_sampler;
+              analysis_ready && subject_uav && subject_srv && linear_sampler;
       if (!valid) {
         BOOST_LOG(error) << "Depth estimator failed: required engine or Bestv2 GPU resource initialization failed.";
         return;
@@ -3088,12 +3148,11 @@ namespace models {
       context->CSSetUnorderedAccessViews(0, 1, null_uav2, nullptr);
       context->CSSetShaderResources(0, 4, null_srvs);
 
-      // 3s. Subject tracking: weighted depth histogram over the freshly-normalized
-      // depth, then a 1-thread resolve into the subject state the reprojection reads.
+      // 3s. Analyze the freshly normalized private cut field. Live V2 dispatches only compact
+      // evidence + cut resolve; the evaluator retains its established subject/geometry analysis.
       {
-        context->CSSetShader(depth_subject_hist_cs.Get(), nullptr, 0);
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        ID3D11ShaderResourceView *subject_srvs[7] = {
+        ID3D11ShaderResourceView *analysis_srvs[7] = {
           depth_srv.Get(),
           depth_cut_history_srv.Get(),
           tensor_in_srv.Get(),
@@ -3102,14 +3161,28 @@ namespace models {
           appearance_ordinal_srv.Get(),
           previous_appearance_ordinal_srv.Get()
         };
-        context->CSSetShaderResources(0, 7, subject_srvs);
-        ID3D11UnorderedAccessView *hist_uavs[2] = {subject_hist_uav.Get(), subject_plain_uav.Get()};
-        context->CSSetUnorderedAccessViews(0, 2, hist_uavs, nullptr);
+        context->CSSetShaderResources(0, 7, analysis_srvs);
+        if (host_v2_required()) {
+          context->CSSetShader(depth_scene_cut_evidence_cs.Get(), nullptr, 0);
+          context->CSSetUnorderedAccessViews(
+            0,
+            1,
+            scene_cut_evidence_uav.GetAddressOf(),
+            nullptr
+          );
+        } else {
+          context->CSSetShader(depth_subject_hist_cs.Get(), nullptr, 0);
+          ID3D11UnorderedAccessView *hist_uavs[2] = {
+            subject_hist_uav.Get(),
+            subject_plain_uav.Get()
+          };
+          context->CSSetUnorderedAccessViews(0, 2, hist_uavs, nullptr);
+        }
         context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
         ID3D11UnorderedAccessView *null_uavs_h2[2] = {nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 2, null_uavs_h2, nullptr);
-        ID3D11ShaderResourceView *null_subject_srvs[7] = {
+        ID3D11ShaderResourceView *null_analysis_srvs[7] = {
           nullptr,
           nullptr,
           nullptr,
@@ -3118,15 +3191,29 @@ namespace models {
           nullptr,
           nullptr
         };
-        context->CSSetShaderResources(0, 7, null_subject_srvs);
+        context->CSSetShaderResources(0, 7, null_analysis_srvs);
 
-        context->CSSetShader(depth_subject_resolve_cs.Get(), nullptr, 0);
-        ID3D11UnorderedAccessView *subj_uavs[3] = {subject_hist_uav.Get(), subject_uav.Get(), subject_plain_uav.Get()};
-        context->CSSetUnorderedAccessViews(0, 3, subj_uavs, nullptr);
-        context->Dispatch(1, 1, 1);
-
-        ID3D11UnorderedAccessView *null_uavs2[3] = {nullptr, nullptr, nullptr};
-        context->CSSetUnorderedAccessViews(0, 3, null_uavs2, nullptr);
+        if (host_v2_required()) {
+          context->CSSetShader(depth_scene_cut_resolve_cs.Get(), nullptr, 0);
+          ID3D11UnorderedAccessView *cut_uavs[2] = {
+            subject_uav.Get(),
+            scene_cut_evidence_uav.Get()
+          };
+          context->CSSetUnorderedAccessViews(0, 2, cut_uavs, nullptr);
+          context->Dispatch(1, 1, 1);
+          context->CSSetUnorderedAccessViews(0, 2, null_uavs_h2, nullptr);
+        } else {
+          context->CSSetShader(depth_subject_resolve_cs.Get(), nullptr, 0);
+          ID3D11UnorderedAccessView *subj_uavs[3] = {
+            subject_hist_uav.Get(),
+            subject_uav.Get(),
+            subject_plain_uav.Get()
+          };
+          context->CSSetUnorderedAccessViews(0, 3, subj_uavs, nullptr);
+          context->Dispatch(1, 1, 1);
+          ID3D11UnorderedAccessView *null_uavs2[3] = {nullptr, nullptr, nullptr};
+          context->CSSetUnorderedAccessViews(0, 3, null_uavs2, nullptr);
+        }
 
         // tensor_in_buf, appearance_ordinal_buf and depth_tex still own the matched inputs/result
         // for this completed inference. Advance the complete appearance/depth tuple only when the

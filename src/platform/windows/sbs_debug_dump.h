@@ -25,6 +25,10 @@ namespace models {
 
 namespace platf::sbs_debug {
 
+  namespace detail {
+    class publication_state;
+  }
+
   /**
    * @brief One exact, completed Host-SBS frame and all optional diagnostic render passes that
    *        belong to it.
@@ -86,6 +90,10 @@ namespace platf::sbs_debug {
   class dumper {
   public:
     dumper();  ///< Resolves the output directory (APOLLO_SBS_DUMP, else <log dir>/sbs_dump).
+    ~dumper();
+
+    dumper(const dumper &) = delete;
+    dumper &operator=(const dumper &) = delete;
 
     /**
      * @brief Attach the request latch owned by this encoder/session.
@@ -121,11 +129,13 @@ namespace platf::sbs_debug {
     void reject_pending_request() noexcept;
 
     /**
-     * @brief Atomically publish a fresh timestamped package for the supplied completed frame.
+     * @brief Snapshot a completed frame and queue its package for background publication.
      *
      * An incomplete matched set or invalid completion defers the trigger. Writer failures retain
-     * it with bounded retry cadence; no partial folder is exposed as a completed dump. Cheap no-op
-     * otherwise. Call once per Host-SBS convert().
+     * it with bounded retry cadence; no partial folder is exposed as a completed dump. GPU
+     * readback remains on the owning render thread so the resources form one stable frame, while
+     * PNG generation, hashing, JSON serialization, and filesystem I/O run on the process-lifetime
+     * publication worker. Cheap no-op otherwise. Call once per Host-SBS convert().
      */
     bool maybe_dump(
       ID3D11Device *device,
@@ -136,6 +146,7 @@ namespace platf::sbs_debug {
 
   private:
     std::filesystem::path dir_;
+    std::shared_ptr<detail::publication_state> async_;
     std::shared_ptr<std::atomic<bool>> button_request_;
     bool file_trigger_enabled_ = false;
     bool file_trigger_pending_ = false;

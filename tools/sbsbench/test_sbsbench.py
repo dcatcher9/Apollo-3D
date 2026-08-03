@@ -1416,7 +1416,10 @@ class EvalContractTests(unittest.TestCase):
 
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
             config = fh.read()
-        self.assertIn('apply_sbs_values(video.sbs, "sbs_3d_profile_" + sbs_profile + "_")', config)
+        self.assertIn(
+            'apply_sbs_values(video.sbs, "sbs_3d_profile_" + sbs_profile + "_", false)',
+            config)
+        self.assertIn('apply_sbs_values(video.sbs, "sbs_3d_", true)', config)
         self.assertNotIn("video.sbs_profiles", config)
         self.assertIn('if (sbs_profile == "vd3d")', config)
 
@@ -2159,17 +2162,36 @@ class EvalContractTests(unittest.TestCase):
                        "cuGraphExecDestroy"):
             self.assertIn(symbol, driver)
 
-    def test_cuda_graph_eval_override_matches_profile_precedence(self):
+    def test_shared_eval_controls_ignore_profile_prefixed_aliases(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
             fh.write("sbs_3d_profile = cinema\n"
-                     "sbs_3d_profile_cinema_cuda_graph = false\n")
+                     "sbs_3d_profile_cinema_cuda_graph = false\n"
+                     "sbs_3d_profile_cinema_pop_strength = 1.8\n")
             path = fh.name
         try:
-            self.assertFalse(run_eval.expected_profile_bool(
-                path, "cinema", "cuda_graph", True, [], "--cuda-graph"))
-            self.assertTrue(run_eval.expected_profile_bool(
-                path, "cinema", "cuda_graph", True,
-                ["--cuda-graph", "on"], "--cuda-graph"))
+            self.assertTrue(run_eval.expected_shared_bool(
+                path, "cuda_graph", True, [], "--cuda-graph"))
+            self.assertEqual(run_eval.expected_shared_number(
+                path, "pop_strength", 1.2, [], "--pop-strength"), 1.2)
+            self.assertFalse(run_eval.expected_shared_bool(
+                path, "cuda_graph", True,
+                ["--cuda-graph", "off"], "--cuda-graph"))
+            self.assertEqual(run_eval.expected_shared_number(
+                path, "pop_strength", 1.2,
+                ["--pop-strength", "1.6"], "--pop-strength"), 1.6)
+        finally:
+            os.unlink(path)
+
+    def test_shared_eval_controls_read_explicit_top_level_values(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
+            fh.write("sbs_3d_cuda_graph = false\n"
+                     "sbs_3d_pop_strength = 1.45\n")
+            path = fh.name
+        try:
+            self.assertFalse(run_eval.expected_shared_bool(
+                path, "cuda_graph", True, [], "--cuda-graph"))
+            self.assertEqual(run_eval.expected_shared_number(
+                path, "pop_strength", 1.2, [], "--pop-strength"), 1.45)
         finally:
             os.unlink(path)
 
