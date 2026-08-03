@@ -2017,7 +2017,7 @@ namespace platf::sbs_debug {
              shadow_candidate,
              paths.temporary,
              "shadow_candidate_parallax",
-             "parallax-v2 immutable signed pre-conditioner geometry evidence and live collar color-mask input; never geometry authority"
+             "parallax-v2 immutable signed pre-conditioner geometry evidence; never geometry authority"
            ) ||
            !dump_shadow_float_texture(
              shadow_vertical,
@@ -2232,7 +2232,7 @@ namespace platf::sbs_debug {
           true,
           true,
           "parallax-v2 pre-limiter candidate displacement",
-          "Exact immutable signed one-eye source-U before the spatial limiter; geometry evidence and live collar color-mask input, never geometry authority."
+          "Exact immutable signed one-eye source-U before the spatial limiter; geometry evidence only, never live render authority."
         );
         artifacts["shadow_candidate_parallax_shape.json"] = artifact_description(
           true,
@@ -2450,7 +2450,7 @@ namespace platf::sbs_debug {
             *completed.parallax_v2_shader_provenance
           );
         nlohmann::json manifest {
-          {"schema", 8},
+          {"schema", 9},
           {"capture", "one matched, completed Host-SBS frame"},
           {"published_atomically", true},
           {"host_sbs_mode", "ai"},
@@ -2474,15 +2474,10 @@ namespace platf::sbs_debug {
                          {"parallax_v2_conditioner_role", "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear; q may raise or lower candidate and is the live position authority"},
                          {"parallax_v2_inverse", "12-step contractive fixed point; no owner pass or synthetic fill"},
                          {"collar_defocus", nlohmann::json {
-                              {"enabled", true},
-                              {"role", "positive conditioner-deviation color-only background defocus; geometry is unchanged"},
-                              {"deviation", "max(shadow_final_parallax - shadow_candidate_parallax, 0) in source-color pixels at the inverse-warped source coordinate"},
-                              {"onset_source_px", 4.0},
-                              {"full_response_source_px", 20.0},
-                              {"gaussian_sigma_source_px", 6.0},
-                              {"kernel", "one-pass 3x3 binomial approximation with sqrt(2)-sigma-spaced taps and smoothstep opacity"},
-                              {"resolution_basis", "current-source-color-pixels; depth-grid-independent, not stream-resolution-invariant"},
-                              {"hdr", "weighted native source values; no clamp, tone map, or gamma conversion"},
+                              {"enabled", false},
+                              {"role", "disabled after live hand-boundary halo regression; live color uses one linear sample at the inverse-warped coordinate"},
+                              {"kernel", "none"},
+                              {"hdr", "native source sample; no clamp, tone map, or gamma conversion"},
                             }},
                          {"live_shader_source", nlohmann::json {
                               {"source_closure_schema", models::host_sbs_shader_cache::source_closure_schema},
@@ -2598,12 +2593,8 @@ namespace platf::sbs_debug {
              << "parallax_v2_render_requested=true\n"
              << "parallax_v2_render_selected=true\n"
              << "renderer_authority=authenticated-parallax-v2-orientation-selective-conditioned-field\n"
-             << "collar_defocus_enabled=true\n"
-             << "collar_defocus_deviation=positive-final-minus-candidate-source-color-pixels\n"
-             << "collar_defocus_onset_source_px=4\n"
-             << "collar_defocus_full_response_source_px=20\n"
-             << "collar_defocus_gaussian_sigma_source_px=6\n"
-             << "collar_defocus_kernel=3x3-binomial-fixed-sigma-smoothstep-opacity\n"
+             << "collar_defocus_enabled=false\n"
+             << "collar_defocus_kernel=none\n"
              << "parallax_v2_live_renderer_source_closure_sha256="
              << completed.parallax_v2_live_renderer_source_closure_sha256 << '\n'
              << "raw_model_provenance=authoritative\n"

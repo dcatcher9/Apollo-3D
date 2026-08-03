@@ -1,9 +1,9 @@
 # Host SBS V2 Crown Artifact: Bounded-Compromise Trial Results
 
-Status: investigation record plus a live headset A/B implementation. The original trial was
-offline-only; the follow-up at the end of this document records the subsequent schema-15 C75
-geometry migration, live collar filter, and regression tests. The result is still awaiting visual
-and worst-case 4K90 qualification before it becomes a locked production decision.
+Status: historical investigation record. Schema-15 C75 geometry remains selected, but its live
+collar-filter companion was rejected on 2026-08-03 after matched old/new hand-scene dumps exposed
+a new translucent/soft hand-boundary halo. Manifest schema 9 records the filter as disabled and
+the live renderer again takes one native-color sample. Later sections preserve the trial history.
 
 Date: 2026-08-03. Continues [host-sbs-v2-crown-artifact-handoff.md](host-sbs-v2-crown-artifact-handoff.md).
 

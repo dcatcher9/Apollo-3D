@@ -514,7 +514,7 @@ Keep the next pass small and falsifiable.
    exact depth. This distinguishes projection policy, low-resolution interpolation, and upstream
    DAV2 segmentation.
 5. **Expand the witness set before live integration.** Capture a fresh committed-baseline
-   schema-15 / manifest-schema-8 dump. Then include top, bottom, vertical, diagonal, thin, and
+   schema-15 / manifest-schema-9 dump. Then include top, bottom, vertical, diagonal, thin, and
    multiple-object silhouettes; fullscreen and windowed video; HDR and SDR; and pop
    0.5/1.0/1.5/2.0. Do not make production conclusions from only the older 8-word-state witness.
 6. **Then test temporal behavior.** A spatial result that looks good on one frame can crawl,

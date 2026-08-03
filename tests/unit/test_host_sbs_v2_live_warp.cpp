@@ -548,40 +548,14 @@ namespace {
     return top + ty * (bottom - top);
   }
 
-  rgba32f_t collar_defocus_3x3_reference(
+  rgba32f_t one_tap_reference(
     const std::vector<rgba32f_t> &source,
     const UINT width,
     const UINT height,
     const float u,
     const float v
   ) {
-    constexpr float sqrt_two = 1.4142135623730951f;
-    constexpr float sigma_source_px = 6.0f;
-    constexpr std::array<float, 3> weights {1.0f, 2.0f, 1.0f};
-    const float offset_x = sqrt_two * sigma_source_px / static_cast<float>(width);
-    const float offset_y = sqrt_two * sigma_source_px / static_cast<float>(height);
-    rgba32f_t result {};
-    for (int tap_y = -1; tap_y <= 1; ++tap_y) {
-      for (int tap_x = -1; tap_x <= 1; ++tap_x) {
-        const float weight = weights[tap_x + 1] * weights[tap_y + 1];
-        const auto sample = sample_linear_clamp(
-          source,
-          width,
-          height,
-          u + static_cast<float>(tap_x) * offset_x,
-          v + static_cast<float>(tap_y) * offset_y
-        );
-        result.r += weight * sample.r;
-        result.g += weight * sample.g;
-        result.b += weight * sample.b;
-        result.a += weight * sample.a;
-      }
-    }
-    result.r *= 1.0f / 16.0f;
-    result.g *= 1.0f / 16.0f;
-    result.b *= 1.0f / 16.0f;
-    result.a *= 1.0f / 16.0f;
-    return result;
+    return sample_linear_clamp(source, width, height, u, v);
   }
 
   void expect_rgba_near(
@@ -739,7 +713,7 @@ TEST(HostSbsV2LiveWarpGpuTest, ExecutesAuthenticatedPixelContract) {
   }
 }
 
-TEST(HostSbsV2LiveWarpGpuTest, CollarDefocusMatchesExactPositiveSourcePixelPolicy) {
+TEST(HostSbsV2LiveWarpGpuTest, CandidateFieldCannotBlurOrAlterLiveColor) {
   constexpr UINT width = 67u;
   constexpr UINT height = 53u;
   const std::array<float, 4> sentinel_clear {0.91f, 0.13f, 0.77f, 0.42f};
@@ -747,8 +721,8 @@ TEST(HostSbsV2LiveWarpGpuTest, CollarDefocusMatchesExactPositiveSourcePixelPolic
   live_v2_warp_fixture_t warp;
   ASSERT_TRUE(warp.initialize(error)) << error;
 
-  // Prime-sized, non-periodic, spatially varying values prevent the source from aliasing with
-  // either kernel spacing. Negative and >1 values also exercise the active linear-scRGB policy.
+  // Prime-sized, non-periodic, spatially varying values expose any accidental extra color tap.
+  // Negative and >1 values also exercise the active linear-scRGB policy.
   std::vector<rgba32f_t> source(static_cast<std::size_t>(width) * height);
   for (UINT y = 0; y < height; ++y) {
     for (UINT x = 0; x < width; ++x) {
@@ -809,13 +783,12 @@ TEST(HostSbsV2LiveWarpGpuTest, CollarDefocusMatchesExactPositiveSourcePixelPolic
           ", y=" + std::to_string(y);
         const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
         const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
-        const auto exact_blur = collar_defocus_3x3_reference(
+        const auto exact_blur = one_tap_reference(
           source, width, height, u, v);
         expect_rgba_near(inactive[packed_index], source[source_index], 3.0e-6f, where);
         expect_rgba_near(onset[packed_index], inactive[packed_index], 3.0e-6f, where);
-        // D3D11 WARP quantizes linear-filter coordinates more coarsely than the scalar CPU
-        // reference. The observed error on this deliberately high-frequency fixture stays below
-        // 6e-4; 1e-3 validates the intended kernel while still detecting material policy changes.
+        // Candidate displacement is diagnostic geometry evidence only. It must not soften or
+        // otherwise alter the one-tap live color sample at any deviation magnitude.
         expect_rgba_near(active[packed_index], exact_blur, 1.0e-3f, where);
         expect_rgba_near(saturated[packed_index], exact_blur, 1.0e-3f, where);
         expect_rgba_near(
@@ -831,7 +804,7 @@ TEST(HostSbsV2LiveWarpGpuTest, CollarDefocusMatchesExactPositiveSourcePixelPolic
       }
     }
   }
-  EXPECT_GT(active_max_difference, 0.05f);
+  EXPECT_LT(active_max_difference, 3.0e-6f);
 
   // A negative final-minus-candidate deviation is foreground compression and remains on the
   // exact one-tap path even when its magnitude is above the positive collar threshold.
@@ -890,7 +863,7 @@ TEST(HostSbsV2LiveWarpGpuTest, CollarDefocusMatchesExactPositiveSourcePixelPolic
         const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
         expect_rgba_near(
           shifted[packed_index],
-          collar_defocus_3x3_reference(source, width, height, u, v),
+          one_tap_reference(source, width, height, u, v),
           1.5e-3f,
           "nonzero inverse warp"
         );
@@ -974,7 +947,7 @@ TEST(HostSbsV2LiveWarpGpuTest, CollarDefocusMatchesExactPositiveSourcePixelPolic
         const float response = response_t * response_t * (3.0f - 2.0f * response_t);
         const auto center = sample_linear_clamp(
           smooth_source, width, height, source_u, v);
-        const auto blur = collar_defocus_3x3_reference(
+        const auto blur = one_tap_reference(
           smooth_source, width, height, source_u, v);
         production_max_defocus = std::max(
           production_max_defocus,
@@ -989,7 +962,7 @@ TEST(HostSbsV2LiveWarpGpuTest, CollarDefocusMatchesExactPositiveSourcePixelPolic
       }
     }
   }
-  EXPECT_GT(production_max_defocus, 0.02f);
+  EXPECT_LT(production_max_defocus, 3.0e-6f);
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, IndependentFlatShaderIgnoresV2Geometry) {

@@ -20,14 +20,14 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 8
+DUMP_MANIFEST_SCHEMA = 9
 SHADOW_STATE_DUMP_SCHEMA = 8
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "758dad091b2f142ac5a2a2bf95eff3b5ca280843b970d2aba4211397adc3966d"
+    "bf9c97f2df69269e335e50be22f448591c4ae713b87a4997bab769f3c1d4be2b"
 )
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "79841ce4c1f906093e75160940e48aca300e818a2aab4532b69676a68deb2e3a"
+    "79a715711e1d4e21b3d4d9977e2a1c9a172fc37aaa4ca786b37c62b0bc997a2d"
 )
 
 _CONTRACT = coordinate_contract.load_contract()
@@ -374,7 +374,7 @@ def validate_shadow_frame_stats_document(document: Any) -> Dict[str, float]:
 
 
 def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
-    """Validate the schema-8 V2 geometry fragment of ``dump_manifest.json``.
+    """Validate the schema-9 V2 geometry fragment of ``dump_manifest.json``.
 
     The full package contains legacy/color/model metadata owned by other contracts. This reader
     deliberately validates only the candidate -> vertical envelopes/share -> row-majorant chain,
@@ -451,19 +451,11 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         if selected else None
     )
     expected_collar_defocus = ({
-        "enabled": True,
-        "role": ("positive conditioner-deviation color-only background defocus; geometry "
-                 "is unchanged"),
-        "deviation": ("max(shadow_final_parallax - shadow_candidate_parallax, 0) in "
-                      "source-color pixels at the inverse-warped source coordinate"),
-        "onset_source_px": 4.0,
-        "full_response_source_px": 20.0,
-        "gaussian_sigma_source_px": 6.0,
-        "kernel": ("one-pass 3x3 binomial approximation with sqrt(2)-sigma-spaced taps "
-                   "and smoothstep opacity"),
-        "resolution_basis": ("current-source-color-pixels; depth-grid-independent, not "
-                             "stream-resolution-invariant"),
-        "hdr": ("weighted native source values; no clamp, tone map, or gamma conversion"),
+        "enabled": False,
+        "role": ("disabled after live hand-boundary halo regression; live color uses one "
+                 "linear sample at the inverse-warped coordinate"),
+        "kernel": "none",
+        "hdr": "native source sample; no clamp, tone map, or gamma conversion",
     } if selected else None)
     if (renderer.get("authority") != expected_authority or
             renderer.get("parallax_v2_inverse") != expected_inverse or

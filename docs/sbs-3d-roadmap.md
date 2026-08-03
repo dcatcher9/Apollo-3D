@@ -6,8 +6,8 @@ backward-probe renderer and its live selector have been removed. V2 computes exa
 shear-2 upper/lower envelopes, takes a fixed 75/25 orientation-selective share, then applies a pure
 slope-0.5 row majorant. The final field bounds crown shear and horizontal slope and is inverted with
 a unique 12-step contractive fixed point. Candidate, vertical upper/share, and canonical coordinate
-remain attributable evidence; candidate additionally drives a positive-correction color-only
-collar-defocus trial. V2 has no forward-owner, visibility-selection, or synthetic-fill path.
+remain attributable evidence only. The rejected collar color filter is absent; V2 has no
+forward-owner, visibility-selection, or synthetic-fill path.
 
 Production contract schema 15 authenticates DAV2 Small, its HDR/SDR preprocessing closure, the
 seven-pass producer, the standalone live renderer, and six standard tensor shapes (`770x434`,
@@ -217,7 +217,7 @@ selection until a hard cut.
   superseded that endpoint with a 75/25 vertical upper/lower share while keeping the row pass pure;
   this allows bounded top-row foreground compression without the global blend's lateral notch.
   The source captures are historical schema-7 input witnesses and cannot authenticate the live
-  schema-15 trial path. Qualification still requires fresh schema-15/manifest-schema-8 live dumps
+  schema-15 trial path. Qualification still requires fresh schema-15/manifest-schema-9 live dumps
   and isolated timing; those results have not yet been recorded. Historical evidence:
   `E:\ApolloDev\majorant-row-both-confirm-20260802`.
 - Symmetric horizontal edge-band supersampling was rejected after the full core screen. It nudged

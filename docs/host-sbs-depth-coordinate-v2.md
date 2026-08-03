@@ -1,8 +1,9 @@
 # Host SBS Depth Coordinate V2
 
 Status: the V2 cutover is shipped as the sole live Host SBS renderer, with no V1 selection or
-fallback. This working tree adds the unqualified schema-15 C75/collar trial described below; that
-overlay still requires headset and 4K90 qualification. An unauthenticated model, tensor shape,
+fallback. Schema 15 keeps the C75 orientation-selective geometry, but the experimental collar
+color filter was removed after it produced a visible hand-boundary halo in live fullscreen video.
+An unauthenticated model, tensor shape,
 shader closure, state, or current frame renders flat SBS. Client SBS and offline conversion are
 unchanged.
 
@@ -45,7 +46,7 @@ authenticated raw model field
   -> orientation-selective vertical share c = 0.75 V+ + 0.25 V-
   -> least row-wise majorant q of c
   -> 12-step contractive inverse using q
-  -> positive (q - p) collar mask and color-only defocus
+  -> one linear source-color sample at the inverse-warped coordinate
 ```
 
 ## Authenticated contract
@@ -151,8 +152,8 @@ recovers on the same frame, so one transient cannot weaken the rest of a shot.
 ## Orientation-selective cliff conditioning
 
 The immutable candidate `p` records the requested signed one-eye source-U field. It is useful for
-measuring how much intervention the renderer needed. It is also sampled by the live renderer only
-to derive the color-only collar-defocus mask; it never replaces final geometry.
+measuring how much intervention the renderer needed, but it is not sampled by the live renderer
+and never replaces final geometry.
 
 The first spatial pass computes both exact column-wise Lipschitz envelopes:
 
@@ -191,30 +192,14 @@ pre-conditioner evidence. `shadow_vertical_majorant` is the exact `V+` diagnosti
 `shadow_coordinate` is coordinate evidence only: its full-size texture and alternate map
 entrypoint are allocated/dispatched solely for an explicit Dump 3D snapshot.
 
-## Collar defocus trial
+## Rejected collar-defocus trial
 
-After the inverse converges, the renderer evaluates the positive geometry correction at that same
-source coordinate:
-
-```text
-raised_px = max(q - p, 0) * source_color_width
-amount    = smoothstep(4, 20, raised_px)
-color     = lerp(one_tap_color, fixed_sigma6_blur, amount)
-```
-
-The fixed blur is a one-pass 3x3 binomial approximation. A `[1,2,1]/4` axis kernel has variance
-`radius^2/2`, so taps are placed at `sqrt(2) * 6` source pixels to preserve the configured
-sigma-6 second moment. A 5x5 trial increased active color sampling from 9 to 25 reads; the user
-reported little visible difference in that one crown A/B, so the denser kernel was removed. This
-subjective observation is not a general equivalence claim.
-The exact one-tap path is retained for `raised_px <= 4`; negative correction belongs to compressed
-foreground rows and is never blurred. Both eyes use the same source-space rule. This is a
-color-sampling experiment only: it does not change candidate, final parallax, the inverse, comfort
-bounds, or scene state. Native color values are averaged without clamping, tone mapping, or gamma
-conversion, preserving linear scRGB HDR values outside `[0,1]`. The live renderer closure and Dump
-3D manifest pin these choices; the ordinary geometry evaluator does not qualify their appearance
-or worst-case pixel cost. The 4/20/6 calibration is in pixels of the current source-color raster:
-it is depth-grid independent, but it is not claimed to be stream-resolution invariant.
+Schema 15 briefly used positive `q - p` as a mask for a 3x3 color blur after inverse reprojection.
+Matched earlier/current hand-scene dumps showed that the filter introduced a new translucent/soft
+halo at fingertips and the hand silhouette, especially fullscreen. The older no-filter renderer
+had comparable positive geometry corrections without that halo. The trial was therefore removed:
+candidate is no longer bound to the live pixel shader, every output uses one native linear color
+sample, and C75 geometry is unchanged. Manifest schema 9 records this disabled policy explicitly.
 
 ## Unique inverse
 
@@ -247,8 +232,8 @@ An authenticated completion runs seven GPU passes:
 6. exact column upper/lower shear-2 envelopes and their fixed 75/25 share;
 7. least row-wise majorant of that vertically conditioned field.
 
-All per-pixel data stays on the GPU. Live Host SBS binds the final conditioned field for geometry
-and the matched immutable candidate for the collar-defocus mask; the removed V1 selector and
+All per-pixel data stays on the GPU. Live Host SBS binds only the final conditioned field and its
+authenticated state for geometry; the removed V1 selector and
 legacy warp prefilter have no live rendering role.
 
 Dump 3D adds one diagnostic dispatch after production timing has ended to materialize the
@@ -278,7 +263,7 @@ pop or zero-plane authority, and leaves legacy subject/anchor/range readiness fi
 
 ## Dump 3D semantics
 
-New live dump manifest schema 8 describes the selected renderer without the rejected owner path.
+New live dump manifest schema 9 describes the selected renderer without the rejected owner path.
 Its `shadow_state.json` schema 8 records both generated spatial bounds and the complete 12-word
 scene state. The added shoulder words expose the shot-latched near-tail coverage, the effective
 near logarithmic tau, the exact tail count, and the camera-center integrity checksum. The same document
@@ -299,7 +284,8 @@ mistaken for the older coverage-based record:
 | `warp_mask.png` | red = finite-source boundary extrapolation; no internal owner/fill path |
 
 The manifest records the algorithm schema/tag, all seven producer shaders including the coverage
-pass, the independent live renderer closure, and the fixed 4/20/6 collar-defocus policy.
+pass, the independent live renderer closure, and that collar defocus is disabled in favor of a
+single native-color sample.
 
 The two 2026-08-02 hair captures were produced under depth-coordinate contract schema 7. They are
 valuable historical input witnesses for replay, but their manifests and rendered artifacts do not
@@ -322,7 +308,7 @@ horizontal-only result motivated the selected vertical shear-2 pass; it is histo
 evidence, not proof of the new seven-pass output.
 
 This is targeted historical evidence, not a current release baseline. Ongoing qualification should
-use fresh schema-15/manifest-schema-8 dumps, whole-clip quality evaluation, isolated GPU timing,
+use fresh schema-15/manifest-schema-9 dumps, whole-clip quality evaluation, isolated GPU timing,
 hard-container telemetry, cut coverage, invalid-depth behavior, HDR, and long browser/video
 sessions.
 

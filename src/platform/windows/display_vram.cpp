@@ -858,7 +858,7 @@ namespace platf::dxgi {
           const bool v2_renderer_failed_flat =
             host_sbs_renderer == models::host_sbs_renderer_e::failed_flat;
           const bool v2_live_resources_complete =
-            est.shadow_final_parallax && est.shadow_candidate_parallax && est.shadow_state;
+            est.shadow_final_parallax && est.shadow_state;
           const bool v2_live_warp_selected =
             v2_renderer_selected && sbs_reprojection_v2_live_ps &&
             v2_live_resources_complete;
@@ -918,7 +918,7 @@ namespace platf::dxgi {
               render_input_srv,
               warp_depth,
               v2_live_warp_selected ? est.shadow_state.Get() : nullptr,
-              v2_live_warp_selected ? est.shadow_candidate_parallax.Get() : nullptr,
+              nullptr,
               nullptr,
               nullptr,
             };
@@ -1013,6 +1013,7 @@ namespace platf::dxgi {
                 geometry_available = render_sbs_debug_geometry(
                   render_input_srv,
                   dump_warp_depth,
+                  est.shadow_state.Get(),
                   completed_constants
                 );
               } catch (const std::exception &error) {
@@ -1867,9 +1868,11 @@ namespace platf::dxgi {
     bool render_sbs_debug_geometry(
       ID3D11ShaderResourceView *source,
       ID3D11ShaderResourceView *warp_depth,
+      ID3D11ShaderResourceView *parallax_state,
       ID3D11Buffer *constants
     ) {
-      if (!source || !warp_depth || !constants || !ensure_sbs_debug_geometry_resources()) {
+      if (!source || !warp_depth || !parallax_state || !constants ||
+          !ensure_sbs_debug_geometry_resources()) {
         return false;
       }
 
@@ -1890,7 +1893,7 @@ namespace platf::dxgi {
       ID3D11ShaderResourceView *mapping_inputs[] = {
         source,
         warp_depth,
-        nullptr,
+        parallax_state,
         nullptr,
         nullptr,
         nullptr,
@@ -1911,7 +1914,7 @@ namespace platf::dxgi {
       ID3D11ShaderResourceView *mask_inputs[] = {
         source,
         warp_depth,
-        nullptr,
+        parallax_state,
         nullptr,
         nullptr,
         nullptr,

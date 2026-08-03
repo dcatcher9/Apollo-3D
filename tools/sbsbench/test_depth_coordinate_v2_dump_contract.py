@@ -230,21 +230,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "parallax_v2_inverse":
                     "12-step contractive fixed point; no owner pass or synthetic fill",
                 "collar_defocus": {
-                    "enabled": True,
-                    "role": ("positive conditioner-deviation color-only background defocus; "
-                             "geometry is unchanged"),
-                    "deviation": ("max(shadow_final_parallax - "
-                                  "shadow_candidate_parallax, 0) in source-color pixels at "
-                                  "the inverse-warped source coordinate"),
-                    "onset_source_px": 4.0,
-                    "full_response_source_px": 20.0,
-                    "gaussian_sigma_source_px": 6.0,
-                    "kernel": ("one-pass 3x3 binomial approximation with "
-                               "sqrt(2)-sigma-spaced taps and smoothstep opacity"),
-                    "resolution_basis": ("current-source-color-pixels; "
-                                         "depth-grid-independent, not "
-                                         "stream-resolution-invariant"),
-                    "hdr": ("weighted native source values; no clamp, tone map, or gamma "
+                    "enabled": False,
+                    "role": ("disabled after live hand-boundary halo regression; live color "
+                             "uses one linear sample at the inverse-warped coordinate"),
+                    "kernel": "none",
+                    "hdr": ("native source sample; no clamp, tone map, or gamma "
                             "conversion"),
                 },
                 "live_shader_source": {
@@ -313,7 +303,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         stats = dump_contract.validate_shadow_frame_stats_document(self.frame_stats)
         self.assertEqual(stats["valid"], 1.0)
 
-    def test_schema_8_manifest_attributes_vertical_share_then_row_majorant(self):
+    def test_schema_9_manifest_attributes_vertical_share_then_row_majorant(self):
         decoded = dump_contract.validate_v2_dump_manifest_document(self.manifest)
         self.assertTrue(decoded["active"])
         self.assertTrue(decoded["rendered_output_selected"])
@@ -443,7 +433,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertTrue(summary["camera_valid"])
             self.assertEqual(summary["calibration_revision"], 4)
 
-    def test_single_dump_replay_validates_the_schema_8_manifest(self):
+    def test_single_dump_replay_validates_the_schema_9_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "dump_manifest.json").write_text(
@@ -452,7 +442,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             summary = _inspect_optional_v2_dump_manifest(root)
 
             self.assertEqual(summary["status"], "validated")
-            self.assertEqual(summary["manifest_schema"], 8)
+            self.assertEqual(summary["manifest_schema"], 9)
             self.assertTrue(summary["active"])
 
     def test_paired_state_rejects_both_directions_of_frame_validity_mismatch(self):

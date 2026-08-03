@@ -8,7 +8,6 @@
 Texture2D<float4> SourceColor : register(t0);
 Texture2D<float> FinalParallax : register(t1);
 StructuredBuffer<float4> ParallaxState : register(t2);
-Texture2D<float> CandidateParallax : register(t3);
 SamplerState LinearSampler : register(s0);
 
 cbuffer HostSbsV2Geometry : register(b2) {
@@ -67,74 +66,6 @@ float SampleParallax(float source_x, float source_y) {
     return FinalParallax.SampleLevel(LinearSampler, float2(source_x, source_y), 0);
 }
 
-// Experimental collar defocus selected for the C75 headset trial. Values are measured in current
-// source-color pixels: this is independent of the smaller depth-grid resolution, but deliberately
-// is not claimed to preserve the same angular footprint when the stream resolution changes. Only
-// positive conditioner deviation is eligible; negative deviation belongs to compressed foreground
-// rows and must keep the original sharp color sample.
-static const float COLLAR_DEFOCUS_ONSET_SOURCE_PX = 4.0f;
-static const float COLLAR_DEFOCUS_FULL_SOURCE_PX = 20.0f;
-static const float COLLAR_DEFOCUS_MAX_SIGMA_SOURCE_PX = 6.0f;
-
-float4 SampleSourceColor(float2 source_uv) {
-    return SourceColor.SampleLevel(LinearSampler, saturate(source_uv), 0);
-}
-
-float4 SampleWithCollarDefocus(float2 source_uv) {
-    uint source_width;
-    uint source_height;
-    SourceColor.GetDimensions(source_width, source_height);
-    if (source_width == 0u || source_height == 0u) {
-        return float4(0.0f, 0.0f, 0.0f, 0.0f);
-    }
-
-    float final_parallax = FinalParallax.SampleLevel(LinearSampler, source_uv, 0);
-    float candidate_parallax = CandidateParallax.SampleLevel(LinearSampler, source_uv, 0);
-    float positive_deviation_source_px =
-        max(final_parallax - candidate_parallax, 0.0f) * (float)source_width;
-
-    // Preserve the previous one-tap renderer bit-for-bit outside the measured collar support.
-    [branch]
-    if (positive_deviation_source_px <= COLLAR_DEFOCUS_ONSET_SOURCE_PX) {
-        return SourceColor.SampleLevel(LinearSampler, source_uv, 0);
-    }
-
-    float response = smoothstep(
-        COLLAR_DEFOCUS_ONSET_SOURCE_PX,
-        COLLAR_DEFOCUS_FULL_SOURCE_PX,
-        positive_deviation_source_px
-    );
-
-    // Use the smallest separable binomial kernel that preserves the trial's sigma-6 second
-    // moment. A [1,2,1]/4 kernel has variance radius^2/2, so its tap radius is sqrt(2)*sigma.
-    // The denser 5x5 trial was visually indistinguishable on the crown witness while requiring
-    // 25 rather than 9 color reads; retain the cheaper policy until headset evidence justifies a
-    // larger footprint. The same source-space taps and weights are used for both eyes. Samples
-    // remain in the existing render color space (including linear scRGB HDR); do not clamp,
-    // tone-map, or gamma-convert here.
-    static const float SQRT_TWO = 1.4142135623730951f;
-    float2 offset = (SQRT_TWO * COLLAR_DEFOCUS_MAX_SIGMA_SOURCE_PX) /
-        float2(source_width, source_height);
-    const float binomial_weights[3] = {1.0f, 2.0f, 1.0f};
-    float4 center = SampleSourceColor(source_uv);
-    float4 blurred = (binomial_weights[1] * binomial_weights[1]) * center;
-    [unroll]
-    for (int tap_y = -1; tap_y <= 1; ++tap_y) {
-        [unroll]
-        for (int tap_x = -1; tap_x <= 1; ++tap_x) {
-            if (tap_x == 0 && tap_y == 0) {
-                continue;
-            }
-            float weight = binomial_weights[tap_x + 1] * binomial_weights[tap_y + 1];
-            blurred += weight * SampleSourceColor(
-                source_uv + float2((float)tap_x, (float)tap_y) * offset
-            );
-        }
-    }
-    blurred *= (1.0f / 16.0f);
-    return lerp(center, blurred, response);
-}
-
 float2 Reproject(float2 destination_uv, float eye_sign) {
     // out(x) = x - eye_sign * parallax(x). The authenticated field is contractive, so this
     // iteration converges to its unique inverse without ownership search or hole filling.
@@ -164,10 +95,7 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
 
     // Null/uninitialized buffers read as an invalid contract. Keep the exact current color frame
     // live while the producer starts or after it fails terminally.
-    bool warp_available = WarpAvailable();
-    float2 sample_uv = warp_available ? Reproject(source_uv, eye_sign) : source_uv;
+    float2 sample_uv = WarpAvailable() ? Reproject(source_uv, eye_sign) : source_uv;
     sample_uv.x = saturate(sample_uv.x);
-    return warp_available ?
-        SampleWithCollarDefocus(sample_uv) :
-        SourceColor.Sample(LinearSampler, sample_uv);
+    return SourceColor.Sample(LinearSampler, sample_uv);
 }

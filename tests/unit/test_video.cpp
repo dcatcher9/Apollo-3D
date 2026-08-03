@@ -1171,7 +1171,7 @@ TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
   EXPECT_NE(source.find("parallax_v2_coordinate_binding("), std::string::npos);
   EXPECT_NE(source.find("source_closure_sha256"), std::string::npos);
   EXPECT_NE(
-    source.find("nlohmann::json manifest {\n          {\"schema\", 8}"),
+    source.find("nlohmann::json manifest {\n          {\"schema\", 9}"),
     std::string::npos
   );
   EXPECT_NE(source.find("completed.parallax_v2_render_selected"), std::string::npos);
@@ -1568,6 +1568,57 @@ TEST(DirectxShaderSourceTest, DumpGeometryCompilationStaysOffTheLivePath) {
   );
   EXPECT_EQ(dump_initializer.find("sbs_forward_coverage"), std::string::npos);
   EXPECT_EQ(dump_initializer.find("sbs_reprojection_mapping_ps_hlsl"), std::string::npos);
+}
+
+TEST(DirectxShaderSourceTest, DumpGeometryBindsMatchedAuthenticatedState) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+  const auto render_begin = source.find(
+    "bool render_sbs_debug_geometry("
+  );
+  const auto render_end = source.find(
+    "void reset_matched_stats(",
+    render_begin
+  );
+  ASSERT_NE(render_begin, std::string::npos);
+  ASSERT_NE(render_end, std::string::npos);
+  const auto render = source.substr(render_begin, render_end - render_begin);
+
+  // The diagnostic shaders include the production WarpAvailable() authentication check. Both
+  // mapping and mask draws must therefore bind the matched completion's state at t2; a null t2
+  // silently turns both artifacts into identity geometry.
+  EXPECT_NE(render.find("!parallax_state"), std::string::npos);
+  for (const auto declaration : {
+         "ID3D11ShaderResourceView *mapping_inputs[]",
+         "ID3D11ShaderResourceView *mask_inputs[]",
+       }) {
+    const auto inputs_begin = render.find(declaration);
+    ASSERT_NE(inputs_begin, std::string::npos);
+    const auto inputs_end = render.find("};", inputs_begin);
+    ASSERT_NE(inputs_end, std::string::npos);
+    const auto inputs = render.substr(inputs_begin, inputs_end - inputs_begin);
+    std::string compact_inputs;
+    for (const char value : inputs) {
+      if (value != ' ' && value != '\t' && value != '\r' && value != '\n') {
+        compact_inputs.push_back(value);
+      }
+    }
+    EXPECT_NE(
+      compact_inputs.find("[]={source,warp_depth,parallax_state,"),
+      std::string::npos
+    );
+  }
+
+  const auto call = source.find("geometry_available = render_sbs_debug_geometry(");
+  ASSERT_NE(call, std::string::npos);
+  const auto call_end = source.find(");", call);
+  ASSERT_NE(call_end, std::string::npos);
+  EXPECT_NE(
+    source.substr(call, call_end - call).find("est.shadow_state.Get(),"),
+    std::string::npos
+  );
 }
 
 TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
@@ -2097,49 +2148,27 @@ TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {
   EXPECT_NE(display.find("find_pending_matched_slot(est.completed_frame_id)"), std::string::npos);
   EXPECT_NE(display.find("parallax_v2_result_is_authenticated(est)"), std::string::npos);
   EXPECT_NE(display.find("v2_live_resources_complete"), std::string::npos);
-  EXPECT_NE(display.find("est.shadow_candidate_parallax.Get()"), std::string::npos);
-  EXPECT_NE(
-    live_shader.find("Texture2D<float> CandidateParallax : register(t3)"),
+  EXPECT_EQ(
+    live_shader.find("Texture2D<float> CandidateParallax"),
     std::string::npos
   );
+  EXPECT_EQ(live_shader.find("COLLAR_DEFOCUS"), std::string::npos);
+  EXPECT_EQ(live_shader.find("blurred"), std::string::npos);
   EXPECT_NE(
-    live_shader.find("max(final_parallax - candidate_parallax, 0.0f)"),
+    live_shader.find("return SourceColor.Sample(LinearSampler, sample_uv);"),
     std::string::npos
   );
-  EXPECT_NE(
-    live_shader.find("COLLAR_DEFOCUS_ONSET_SOURCE_PX = 4.0f"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    live_shader.find("COLLAR_DEFOCUS_FULL_SOURCE_PX = 20.0f"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    live_shader.find("COLLAR_DEFOCUS_MAX_SIGMA_SOURCE_PX = 6.0f"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    live_shader.find("binomial_weights[3] = {1.0f, 2.0f, 1.0f}"),
-    std::string::npos
-  );
-  EXPECT_NE(live_shader.find("blurred *= (1.0f / 16.0f)"), std::string::npos);
-  EXPECT_NE(live_shader.find("smoothstep("), std::string::npos);
-  EXPECT_NE(live_shader.find("return lerp(center, blurred, response)"), std::string::npos);
 
   const auto dump = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
   );
-  EXPECT_NE(dump.find("{\"onset_source_px\", 4.0}"), std::string::npos);
-  EXPECT_NE(dump.find("{\"full_response_source_px\", 20.0}"), std::string::npos);
-  EXPECT_NE(dump.find("{\"gaussian_sigma_source_px\", 6.0}"), std::string::npos);
+  EXPECT_NE(dump.find("{\"collar_defocus\", nlohmann::json"), std::string::npos);
+  EXPECT_NE(dump.find("{\"enabled\", false}"), std::string::npos);
   EXPECT_NE(
-    dump.find("one-pass 3x3 binomial approximation with sqrt(2)-sigma-spaced taps"),
+    dump.find("live color uses one linear sample at the inverse-warped coordinate"),
     std::string::npos
   );
-  EXPECT_NE(
-    dump.find("depth-grid-independent, not stream-resolution-invariant"),
-    std::string::npos
-  );
+  EXPECT_NE(dump.find("{\"kernel\", \"none\"}"), std::string::npos);
 }
 
 TEST(DirectxShaderSourceTest, LocalRgbPresentationPreservesTheTransferContract) {

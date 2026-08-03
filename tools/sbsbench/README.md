@@ -32,9 +32,9 @@ images shown on the headset. This is the visual half of the host benchmark; see
      `shadow_vertical_conditioned.f32`, `shadow_coordinate.f32`,
      `shadow_final_parallax.f32`, and previews: V2's immutable pre-conditioner candidate, exact
      column-wise upper envelope, fixed 75/25 upper/lower vertical share, canonical coordinate
-     diagnostic, and final live position field respectively. Dump manifest schema 8 distinguishes
-     the intermediates from renderer authority and records the experimental color-only 4/20/6
-     collar-defocus policy.
+     diagnostic, and final live position field respectively. Dump manifest schema 9 distinguishes
+     the intermediates from renderer authority and records that collar defocus is disabled after
+     the live hand-boundary regression.
    - `warp_map.f32`, `warp_map_shape.json`, `warp_displacement_heat.png`, `warp_mask.png`: exact
      inverse-warp source coordinates, derived eye-pixel displacement, and renderer-specific mask.
      A V2 map is the 12-step contractive inverse. Its mask marks only inverse samples beyond the
@@ -87,7 +87,7 @@ python tools/sbsbench/replay_depth_mapping_v2.py `
   --experimental-raw-coordinate-scale 0.5
 ```
 
-The schema-8 report records `raw_model_provenance.status = "unverified"`, the reason, and the exact
+The schema-9 report records `raw_model_provenance.status = "unverified"`, the reason, and the exact
 raw artifact hash. Legacy captures do **not** silently inherit the DAV2 Small `0.5` fixed
 raw-coordinate scale. They require both the unverified-provenance opt-in and the explicitly
 non-authoritative `--experimental-raw-coordinate-scale VALUE`; the resulting
