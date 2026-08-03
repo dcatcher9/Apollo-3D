@@ -10,10 +10,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 12u;
-  inline constexpr std::uint32_t contract_tag = 0x8FAA6FA5u;
-  inline constexpr std::string_view contract_canonical_sha256 = "75486b54117c99baefa38ee6ff821941739da2abecd6fe4335cd571ed3d651da";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "8faa6fa5a71b69b478d419c5df756e8f76450e553e9a7ceee13848c1a197c1bc";
+  inline constexpr std::uint32_t contract_schema = 14u;
+  inline constexpr std::uint32_t contract_tag = 0x1AD89481u;
+  inline constexpr std::string_view contract_canonical_sha256 = "fdfda53e49ede50fc3408c7ecdafe7076a37b8468f5d828dc4a0d47e0656f458";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "1ad894818b5e3a42ae5619e9d55a757cc10d1356098fc832de512be59d8c6907";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -25,7 +25,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "125eb39e2e524532327c05f291a8e03b90c619be49e46ba7e53938f90615bb40";
+  inline constexpr std::string_view shader_source_closure_sha256 = "2e2d9425588a2af2bad380988b9a2186ed81e9d33801fc784f9b9777cd3f87d2";
 
   struct shader_source_spec_t {
     std::string_view source_file;
@@ -98,7 +98,7 @@ namespace models::depth_coordinate_v2 {
 
   inline constexpr std::array<model_calibration_t, 1> model_calibrations {{
     {
-      "dav2-small-fp16-raw-coordinate-v1",
+      "dav2-small-fp16-standardized-ui-shapes-v2",
       "depth_anything_v2_fp16",
       "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",
       "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
@@ -125,8 +125,13 @@ namespace models::depth_coordinate_v2 {
     },
   }};
 
-  inline constexpr std::array<model_calibrated_shape_t, 1> model_calibrated_shapes {{
-    {"dav2-small-fp16-raw-coordinate-v1", 770u, 434u},
+  inline constexpr std::array<model_calibrated_shape_t, 6> model_calibrated_shapes {{
+    {"dav2-small-fp16-standardized-ui-shapes-v2", 770u, 434u},
+    {"dav2-small-fp16-standardized-ui-shapes-v2", 1022u, 434u},
+    {"dav2-small-fp16-standardized-ui-shapes-v2", 1036u, 434u},
+    {"dav2-small-fp16-standardized-ui-shapes-v2", 434u, 770u},
+    {"dav2-small-fp16-standardized-ui-shapes-v2", 434u, 1022u},
+    {"dav2-small-fp16-standardized-ui-shapes-v2", 434u, 1036u},
   }};
 
   constexpr bool model_calibration_supports_shape(
@@ -271,7 +276,7 @@ namespace models::depth_coordinate_v2 {
     latched_near_tail_coverage = 8u,
     effective_near_log_tau = 9u,
     latched_near_tail_count = 10u,
-    near_shoulder_reserved = 11u,
+    camera_center_integrity_bits = 11u,
     count = 12u,
   };
 
@@ -290,7 +295,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::size_t latched_near_tail_coverage = state_index(state_word_e::latched_near_tail_coverage);
   inline constexpr std::size_t effective_near_log_tau = state_index(state_word_e::effective_near_log_tau);
   inline constexpr std::size_t latched_near_tail_count = state_index(state_word_e::latched_near_tail_count);
-  inline constexpr std::size_t near_shoulder_reserved = state_index(state_word_e::near_shoulder_reserved);
+  inline constexpr std::size_t camera_center_integrity_bits = state_index(state_word_e::camera_center_integrity_bits);
 
   inline constexpr std::size_t state_float_count =
     state_index(state_word_e::count);
@@ -319,7 +324,7 @@ namespace models::depth_coordinate_v2 {
     {state_word_e::latched_near_tail_coverage, "latched_near_tail_coverage", "float32", state_gpu_encoding_e::float_value, std::bit_cast<std::uint32_t>(0.0f)},
     {state_word_e::effective_near_log_tau, "effective_near_log_tau", "float32", state_gpu_encoding_e::float_value, std::bit_cast<std::uint32_t>(2.0f)},
     {state_word_e::latched_near_tail_count, "latched_near_tail_count", "uint32", state_gpu_encoding_e::uint_bits, 0u},
-    {state_word_e::near_shoulder_reserved, "near_shoulder_reserved", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::camera_center_integrity_bits, "camera_center_integrity_bits", "uint32", state_gpu_encoding_e::uint_bits, 0u},
   }};
 
   inline constexpr std::array<const char *, state_float_count> state_field_names {{
@@ -334,7 +339,7 @@ namespace models::depth_coordinate_v2 {
     "latched_near_tail_coverage",
     "effective_near_log_tau",
     "latched_near_tail_count",
-    "near_shoulder_reserved",
+    "camera_center_integrity_bits",
   }};
 
   inline constexpr state_words_t state_initial_words {{

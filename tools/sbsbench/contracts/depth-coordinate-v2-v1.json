@@ -1,5 +1,5 @@
 {
-  "schema": 12,
+  "schema": 14,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -47,7 +47,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "125eb39e2e524532327c05f291a8e03b90c619be49e46ba7e53938f90615bb40"
+    "source_closure_sha256": "2e2d9425588a2af2bad380988b9a2186ed81e9d33801fc784f9b9777cd3f87d2"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
@@ -66,7 +66,7 @@
   },
   "model_calibrations": [
     {
-      "calibration_id": "dav2-small-fp16-raw-coordinate-v1",
+      "calibration_id": "dav2-small-fp16-standardized-ui-shapes-v2",
       "depth_model": "depth_anything_v2_fp16",
       "depth_model_url": "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",
       "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
@@ -75,6 +75,26 @@
         {
           "width": 770,
           "height": 434
+        },
+        {
+          "width": 1022,
+          "height": 434
+        },
+        {
+          "width": 1036,
+          "height": 434
+        },
+        {
+          "width": 434,
+          "height": 770
+        },
+        {
+          "width": 434,
+          "height": 1022
+        },
+        {
+          "width": 434,
+          "height": 1036
         }
       ],
       "preprocess": {
@@ -304,7 +324,7 @@
       },
       {
         "index": 11,
-        "name": "near_shoulder_reserved",
+        "name": "camera_center_integrity_bits",
         "type": "uint32",
         "gpu_encoding": "uint_bits",
         "initial": 0

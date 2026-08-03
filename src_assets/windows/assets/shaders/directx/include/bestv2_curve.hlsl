@@ -31,9 +31,8 @@ float Bestv2WarpDepth(float d, float4 s0, float4 s1, bool shaped, bool stretch_e
 // the maximum supported aspect scaling). The live full-resolution probe loop uses this form
 // to replace three transcendental operations per probe.
 // No input clamp: every call site already delivers [0,1]. Bestv2WarpDepth returns saturate(...)
-// on its shaped path, depth_subject_resolve_cs saturates before calling, and the one unshaped
-// passthrough (sbs_forward_coverage_cs) never reaches here -- DepthParallax is inside `if (shaped)`
-// and the raw value it produces feeds saturate(shaped_depth) instead.
+// on its shaped path, and depth_subject_resolve_cs saturates before calling. The offline evaluator's
+// unshaped coverage pass never reaches this approximation; it uses the raw-depth path instead.
 float Bestv2RawShiftPxFast(float d) {
     return -1.39635933f + d * (2.776208766f + d * (21.04503417f + d *
            (-94.6673759f + d * (376.6610774f + d * (-645.141824f + d *

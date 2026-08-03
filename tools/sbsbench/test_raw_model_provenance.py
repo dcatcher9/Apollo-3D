@@ -156,7 +156,7 @@ class RawModelProvenanceTests(unittest.TestCase):
             "layout": ("layout", "NHWC", "preprocess contract"),
             "mean": ("imagenet_mean", [0.0, 0.0, 0.0], "preprocess contract"),
             "patch": ("width", 13, "spatial contract"),
-            "uncalibrated_shape": ("width", 1036, "not an exact shape"),
+            "uncalibrated_shape": ("width", 1008, "not an exact shape"),
         }
         for name, (field, value, message) in mutations.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:

@@ -33,6 +33,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             10: "61d305a57c5b3a08e0b8550a9f2573339017c018c5d4b889fce978aae03a1699",
             11: "349774fcff9be7d1959bd95388c469451c17dbaa835df1b863061e39546e2117",
             12: "75486b54117c99baefa38ee6ff821941739da2abecd6fe4335cd571ed3d651da",
+            13: "0bcb9598d3e1795d789ae807cddfcd85fa0c42a51f071874b28a48cd6ceb9161",
+            14: "fdfda53e49ede50fc3408c7ecdafe7076a37b8468f5d828dc4a0d47e0656f458",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -40,10 +42,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x8FAA6FA5)
+        self.assertEqual(generator.contract_tag(contract), 0x1AD89481)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "8faa6fa5a71b69b478d419c5df756e8f76450e553e9a7ceee13848c1a197c1bc",
+            "1ad894818b5e3a42ae5619e9d55a757cc10d1356098fc832de512be59d8c6907",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -82,7 +84,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 "center", "inverse_scale", "convergence_curve", "container_scale",
                 "calibration_revision", "frame_valid", "confirmed_cut_count", "contract_tag_bits",
                 "latched_near_tail_coverage", "effective_near_log_tau",
-                "latched_near_tail_count", "near_shoulder_reserved",
+                "latched_near_tail_count", "camera_center_integrity_bits",
             ],
         )
         uint_fields = [field for field in fields if field["gpu_encoding"] == "uint_bits"]
@@ -93,7 +95,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 ("confirmed_cut_count", 0),
                 ("contract_tag_bits", generator.CONTRACT_TAG_SENTINEL),
                 ("latched_near_tail_count", 0),
-                ("near_shoulder_reserved", 0),
+                ("camera_center_integrity_bits", 0),
             ],
         )
         self.assertEqual(fields[2]["initial"], 0.0)
@@ -141,7 +143,21 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
             generator.shader_source_closure_sha256())
-        self.assertEqual(calibration.calibrated_input_shapes, ((770, 434),))
+        self.assertEqual(
+            calibration.calibration_id,
+            "dav2-small-fp16-standardized-ui-shapes-v2",
+        )
+        self.assertEqual(
+            calibration.calibrated_input_shapes,
+            (
+                (770, 434),
+                (1022, 434),
+                (1036, 434),
+                (434, 770),
+                (434, 1022),
+                (434, 1036),
+            ),
+        )
         self.assertIs(
             python_contract.find_model_calibration(
                 calibration.depth_model, calibration.depth_model_url,
@@ -297,7 +313,12 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertIn("shader_source_closure_sha256", cpp)
         self.assertIn("source_closure_sha256", cpp)
         self.assertIn("model_calibration_supports_shape", cpp)
-        self.assertIn('{"dav2-small-fp16-raw-coordinate-v1", 770u, 434u}', cpp)
+        for width, height in python_contract.MODEL_CALIBRATIONS[0].calibrated_input_shapes:
+            self.assertIn(
+                '{"dav2-small-fp16-standardized-ui-shapes-v2", '
+                f'{width}u, {height}u}}',
+                cpp,
+            )
 
     def test_gpu_counter_updates_preserve_the_reserved_sentinel(self):
         source = (REPO / "src_assets" / "windows" / "assets" / "shaders" / "directx" /

@@ -29,6 +29,16 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         field = next(item for item in document["fields"] if item["name"] == name)
         field["value"] = value
 
+    @classmethod
+    def _seal_camera_center(cls, document):
+        checksum = dump_contract.camera_center_integrity_bits(
+            document["named_values"]["center"],
+            document["named_values"]["inverse_scale"],
+            document["named_values"]["calibration_revision"],
+        )
+        cls._set_state_word(document, "camera_center_integrity_bits", checksum)
+        document["decoded"]["camera_center_integrity_bits"] = checksum
+
     def setUp(self):
         manifest = coordinate.load_contract()
         tag = generator.contract_tag(manifest)
@@ -55,8 +65,12 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "latched_near_tail_coverage": near_tail_coverage,
             "effective_near_log_tau": effective_near_log_tau,
             "latched_near_tail_count": near_tail_count,
-            "near_shoulder_reserved": 0,
+            "camera_center_integrity_bits": 0,
         }
+        values["camera_center_integrity_bits"] = (
+            dump_contract.camera_center_integrity_bits(
+                values["center"], values["inverse_scale"],
+                values["calibration_revision"]))
         fields = []
         for descriptor in manifest["shadow_state"]["fields"]:
             name = descriptor["name"]
@@ -132,7 +146,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "latched_near_tail_coverage": values["latched_near_tail_coverage"],
                 "effective_near_log_tau": values["effective_near_log_tau"],
                 "latched_near_tail_count": values["latched_near_tail_count"],
-                "near_shoulder_reserved": values["near_shoulder_reserved"],
+                "camera_center_integrity_bits":
+                    values["camera_center_integrity_bits"],
             },
             "adaptation_semantics": {
                 "coordinate":
@@ -229,7 +244,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "center", "inverse_scale", "convergence_curve", "container_scale",
             "calibration_revision", "frame_valid", "confirmed_cut_count", "contract_tag_bits",
             "latched_near_tail_coverage", "effective_near_log_tau",
-            "latched_near_tail_count", "near_shoulder_reserved",
+            "latched_near_tail_count", "camera_center_integrity_bits",
         })
         stats = dump_contract.validate_shadow_frame_stats_document(self.frame_stats)
         self.assertEqual(stats["valid"], 1.0)
@@ -448,11 +463,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "out of range"):
             dump_contract.validate_shadow_state_document(changed)
 
-    def test_near_shoulder_is_exact_scene_latched_state(self):
+    def test_near_shoulder_and_center_integrity_are_exact_scene_latched_state(self):
         changed = copy.deepcopy(self.state)
-        self._set_state_word(changed, "near_shoulder_reserved", 1)
-        changed["decoded"]["near_shoulder_reserved"] = 1
-        with self.assertRaisesRegex(ValueError, "reserved word"):
+        self._set_state_word(changed, "center", 2.25)
+        with self.assertRaisesRegex(ValueError, "center integrity checksum"):
             dump_contract.validate_shadow_state_document(changed)
 
         changed = copy.deepcopy(self.state)
@@ -493,12 +507,13 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "container_scale": 1.0,
             "effective_gain": 0.0,
         })
+        self._seal_camera_center(changed)
         with self.assertRaisesRegex(ValueError, "out of range"):
             dump_contract.validate_shadow_state_document(changed)
 
         native = (REPO / "src" / "platform" / "windows" /
                   "sbs_debug_dump.cpp").read_text(encoding="utf-8")
-        self.assertIn("near_shoulder_reserved_value == 0u", native)
+        self.assertIn("camera_center_integrity_is_valid", native)
         self.assertIn("near_tail_effective_tau_for_coverage", native)
         self.assertIn('{"near_tail_probe_u", near_tail_probe_u}', native)
 
@@ -510,7 +525,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "latched_near_tail_coverage": 0.0,
             "effective_near_log_tau": coordinate.CALIBRATED_DEFAULTS.near_log_tau,
             "latched_near_tail_count": 0,
-            "near_shoulder_reserved": 0,
+            "camera_center_integrity_bits": dump_contract.camera_center_integrity_bits(
+                0.0, 0.0, changed["named_values"]["calibration_revision"]),
         }
         for name, value in replacements.items():
             changed["named_values"][name] = value
@@ -525,7 +541,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         changed["decoded"]["effective_near_log_tau"] = (
             coordinate.CALIBRATED_DEFAULTS.near_log_tau)
         changed["decoded"]["latched_near_tail_count"] = 0
-        changed["decoded"]["near_shoulder_reserved"] = 0
+        changed["decoded"]["camera_center_integrity_bits"] = (
+            replacements["camera_center_integrity_bits"])
         dump_contract.validate_shadow_state_document(changed)
         self.assertEqual(
             changed["decoded"]["requested_gain"], changed["constants"]["requested_gain"])
@@ -547,6 +564,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         changed["fields"][1]["value"] = 0.0
         changed["decoded"]["camera_valid"] = False
         changed["decoded"]["latched_scale"] = 0.0
+        self._seal_camera_center(changed)
         with self.assertRaisesRegex(ValueError, "out of range"):
             dump_contract.validate_shadow_state_document(changed)
         changed = copy.deepcopy(self.state)

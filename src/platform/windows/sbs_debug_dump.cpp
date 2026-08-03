@@ -54,31 +54,6 @@ namespace platf::sbs_debug {
 
     constexpr unsigned retry_backoff_frames = 60;
 
-    // Dump 3D is a legacy diagnostic too. Its model-input bytes remain useful when a model/shape
-    // has no V2 coordinate calibration, so keep the actual runtime tensor contract available
-    // without pretending that it authenticates any V2 scale. The authenticated V2 path replaces
-    // this semantic-only fallback with its generated model/preprocess calibration.
-    constexpr models::depth_coordinate_v2::model_preprocess_contract_t
-      uncalibrated_runtime_preprocess {
-        "",
-        0u,
-        "",
-        "",
-        "",
-        0u,
-        0u,
-        "",
-        1u,
-        "float32-le",
-        "NCHW",
-        {{"R", "G", "B"}},
-        14u,
-        1036u,
-        {{0.485f, 0.456f, 0.406f}},
-        {{0.229f, 0.224f, 0.225f}},
-        "exact model input after area resize, HDR tone mapping, sRGB conversion, and ImageNet normalization",
-      };
-
     bool parallax_v2_shader_identity_matches_contract(
       const std::shared_ptr<const models::parallax_v2_shader_provenance_t> &identity
     ) {
@@ -1082,8 +1057,14 @@ namespace platf::sbs_debug {
       const float effective_near_log_tau_value = state[effective_near_log_tau];
       const auto latched_near_tail_count_value =
         std::bit_cast<std::uint32_t>(state[latched_near_tail_count]);
-      const auto near_shoulder_reserved_value =
-        std::bit_cast<std::uint32_t>(state[near_shoulder_reserved]);
+      const auto camera_center_integrity_value =
+        std::bit_cast<std::uint32_t>(state[camera_center_integrity_bits]);
+      const bool camera_center_integrity_valid = camera_center_integrity_is_valid(
+        std::bit_cast<std::uint32_t>(state[center]),
+        std::bit_cast<std::uint32_t>(state[inverse_scale]),
+        calibration_revision_value,
+        camera_center_integrity_value
+      );
       const float expected_near_log_tau =
         near_tail_effective_tau_for_coverage(latched_near_tail_coverage_value);
       const bool near_shoulder_semantics_valid =
@@ -1093,10 +1074,10 @@ namespace platf::sbs_debug {
         std::isfinite(effective_near_log_tau_value) &&
         effective_near_log_tau_value >= near_log_tau_dense &&
         effective_near_log_tau_value <= near_log_tau &&
-        std::abs(effective_near_log_tau_value - expected_near_log_tau) <= 1.0e-6f &&
-        near_shoulder_reserved_value == 0u;
+        std::abs(effective_near_log_tau_value - expected_near_log_tau) <= 1.0e-6f;
       const bool camera_initialized =
-        near_shoulder_semantics_valid && state[inverse_scale] > 0.0f &&
+        camera_center_integrity_valid && near_shoulder_semantics_valid &&
+        state[inverse_scale] > 0.0f &&
         calibration_revision_value > 0u &&
         calibration_revision_is_valid(calibration_revision_value);
       const bool camera_empty =
@@ -1104,9 +1085,9 @@ namespace platf::sbs_debug {
       const bool near_shoulder_empty =
         latched_near_tail_coverage_value == 0.0f &&
         effective_near_log_tau_value == near_log_tau &&
-        latched_near_tail_count_value == 0u &&
-        near_shoulder_reserved_value == 0u;
+        latched_near_tail_count_value == 0u;
       const bool state_semantics_valid =
+        camera_center_integrity_valid &&
         calibration_revision_is_valid(calibration_revision_value) &&
         (state[frame_valid] == 0.0f || state[frame_valid] == 1.0f) &&
         state[container_scale] >= 0.0f && state[container_scale] <= 1.0f &&
@@ -1196,7 +1177,7 @@ namespace platf::sbs_debug {
         {"latched_near_tail_coverage", latched_near_tail_coverage_value},
         {"effective_near_log_tau", effective_near_log_tau_value},
         {"latched_near_tail_count", latched_near_tail_count_value},
-        {"near_shoulder_reserved", near_shoulder_reserved_value},
+        {"camera_center_integrity_bits", camera_center_integrity_value},
       };
       const nlohmann::json state_json {
         {"schema", shadow_state_dump_schema},
@@ -1207,10 +1188,8 @@ namespace platf::sbs_debug {
                                 )},
         {"source", std::string {shadow_state_source}},
         {"capture", std::string {shadow_state_capture}},
-        {"rendered_output_selected", completed.parallax_v2_render_selected},
-        {"wire_contract", completed.parallax_v2_render_selected ?
-                            "authenticated live Host-SBS renderer input; not a client wire contract" :
-                            "experimental diagnostic shadow; not selected by the renderer or client"},
+        {"rendered_output_selected", true},
+        {"wire_contract", "authenticated live Host-SBS renderer input; not a client wire contract"},
         {"units", {
                     {"coordinate", "dimensionless canonical coordinate derived from raw depth"},
                     {"gain", "one-eye source-U per curve unit"},
@@ -1263,7 +1242,7 @@ namespace platf::sbs_debug {
       };
       summary = decoded;
       summary["raw_coordinate_scale"] = completed.parallax_v2_raw_coordinate_scale;
-      summary["rendered_output_selected"] = completed.parallax_v2_render_selected;
+      summary["rendered_output_selected"] = true;
       return write_json(dir / "shadow_state.json", state_json) &&
              write_json(dir / "shadow_frame_stats.json", frame_json);
     }
@@ -1307,7 +1286,6 @@ namespace platf::sbs_debug {
       ID3D11ShaderResourceView *srv,
       const normalization_state &normalization,
       const frame &completed,
-      const config::video_t::sbs_t &cfg,
       const std::filesystem::path &dir,
       nlohmann::json &adaptive_summary
     ) {
@@ -1402,21 +1380,11 @@ namespace platf::sbs_debug {
         decoded_analysis_flags[std::string(bit.name)] =
           (analysis_flags & bit.mask) != 0u;
       }
-      const float effective_ratio = cfg.adaptive_pop ?
-                                      std::max(
-                                        scalar(word_e::adaptive_pop_ratio),
-                                        1.0f
-                                      ) :
-                                      1.0f;
-      const double absolute_effective_pop = cfg.pop_strength * effective_ratio;
-      if (!std::isfinite(absolute_effective_pop)) {
-        return false;
-      }
-
       adaptive_summary = {
         {"schema", sbs_adaptive_state::schema_version},
         {"source", std::string(sbs_adaptive_state::source)},
         {"capture", std::string(sbs_adaptive_state::capture)},
+        {"role", "comparison-only scene-cut bridge evidence; no live V2 geometry authority"},
         {"matched_frame_id", completed.matched_frame_id},
         {"depth_model", completed.depth_model},
         {"fields", std::move(fields)},
@@ -1438,10 +1406,10 @@ namespace platf::sbs_debug {
                       {"external_cut_count", words[sbs_adaptive_state::index(word_e::external_cut_count)]},
                       {"empty_raw_count", words[sbs_adaptive_state::index(word_e::empty_raw_count)]},
                       {"collapsed_raw_count", words[sbs_adaptive_state::index(word_e::collapsed_raw_count)]},
-                      {"absolute_effective_pop", absolute_effective_pop},
-                      {"resolved_zero_anchor_shift_px", scalar(word_e::zero_anchor_shift_px)},
+                      {"geometry_authority", false},
                     }},
         {"normalization", {
+                            {"role", "comparison-only scene-cut bridge evidence"},
                             {"effective_lower", normalization.lower},
                             {"effective_upper", normalization.upper},
                             {"initialized", normalization.initialized > 0.5f},
@@ -1457,7 +1425,6 @@ namespace platf::sbs_debug {
       const texture_snapshot &mapping,
       const std::uint32_t source_width,
       const std::uint32_t source_height,
-      const bool parallax_v2_rendered,
       const std::filesystem::path &dir,
       warp_map_dump_stats &stats
     ) {
@@ -1581,16 +1548,11 @@ namespace platf::sbs_debug {
         {"dtype", "float32-le"},
         {"layout", "row-major"},
         {"channels", {"raw_reproject_source_u_normalized"}},
-        {"validity", parallax_v2_rendered ?
-          nlohmann::json {
-            {"content", "derive from content_scale_x/content_scale_y and packed output coordinate"},
-            {"inverse", "12-step contractive fixed-point solution of the signed final-parallax field"},
-            {"mask", "warp_mask.png red marks finite-source boundary extrapolation; V2 has no internal owner or synthetic-fill path"},
-          } :
-          nlohmann::json {
-            {"content", "derive from content_scale_x/content_scale_y and packed output coordinate"},
-            {"forward_coverage", "warp_mask.png red == 0 inside content"},
-          }},
+        {"validity", {
+          {"content", "derive from content_scale_x/content_scale_y and packed output coordinate"},
+          {"inverse", "12-step contractive fixed-point solution of the signed final-parallax field"},
+          {"mask", "warp_mask.png red marks finite-source boundary extrapolation; V2 has no internal owner or synthetic-fill path"},
+        }},
         {"live_sample_source_u_normalized", "clamp(raw_reproject_source_u_normalized, 0, 1)"},
         {"derived_inverse_displacement_output_eye_px", "(raw_reproject_source_u_normalized - aspect_fitted_unwarped_source_u) * content_scale_x * eye_width"},
         {"derived_signed_binocular_disparity_px", "invert both eye maps at common source-U samples; x_right - x_left"},
@@ -1648,8 +1610,8 @@ namespace platf::sbs_debug {
         {"configured_depth_model_url", cfg.depth_model_url},
         {"max_encode_width", cfg.max_encode_width},
         {"cuda_graph", cfg.cuda_graph},
-        {"parallax_v2_shadow", cfg.parallax_v2_shadow},
-        {"parallax_v2_render", cfg.parallax_v2_render},
+        {"parallax_v2_shadow", false},
+        {"parallax_v2_render", true},
       };
     }
 
@@ -1736,7 +1698,7 @@ namespace platf::sbs_debug {
     const bool remove_file_trigger =
       file_trigger_enabled_ || file_trigger_pending_;
     snapshot_armed_for_dump_ = false;
-    prepared_normalization_valid_ = false;
+    prepared_frame_id_ = 0;
     retry_backoff_frames_ = 0;
     if (auto *button = button_request_.get()) {
       button->store(false, std::memory_order_relaxed);
@@ -1757,7 +1719,7 @@ namespace platf::sbs_debug {
 
   void dumper::reject_pending_request() noexcept {
     snapshot_armed_for_dump_ = false;
-    prepared_normalization_valid_ = false;
+    prepared_frame_id_ = 0;
     retry_backoff_frames_ = 0;
     if (auto *button = button_request_.get()) {
       button->store(false, std::memory_order_relaxed);
@@ -1774,7 +1736,7 @@ namespace platf::sbs_debug {
 
   bool dumper::snapshot_requested() {
     snapshot_armed_for_dump_ = false;
-    prepared_normalization_valid_ = false;
+    prepared_frame_id_ = 0;
     if (retry_backoff_frames_ != 0u) {
       --retry_backoff_frames_;
       return false;
@@ -1799,67 +1761,6 @@ namespace platf::sbs_debug {
       std::filesystem::exists(dir_ / "dump.trigger", error) && !error;
     snapshot_armed_for_dump_ = file_trigger_pending_;
     return file_trigger_pending_;
-  }
-
-  bool dumper::preflight_requested_frame(
-    ID3D11Device *device,
-    ID3D11DeviceContext *ctx,
-    ID3D11ShaderResourceView *depth_frame_state,
-    const std::uint64_t matched_frame_id
-  ) noexcept {
-    auto *button = button_request_.get();
-    const bool requested =
-      (button && button->load(std::memory_order_relaxed)) ||
-      file_trigger_pending_;
-    if (!requested || !snapshot_armed_for_dump_) {
-      return false;
-    }
-
-    normalization_state normalization;
-    depth_dumpability dumpability = depth_dumpability::unreadable;
-    try {
-      dumpability =
-        read_normalization_state(device, ctx, depth_frame_state, normalization);
-    } catch (const std::exception &error) {
-      try {
-        BOOST_LOG(warning)
-          << "SBS debug dump normalization preflight failed transiently: "
-          << error.what();
-      } catch (...) {
-      }
-    } catch (...) {
-      try {
-        BOOST_LOG(warning)
-          << "SBS debug dump normalization preflight failed transiently."sv;
-      } catch (...) {
-      }
-    }
-
-    if (dumpability == depth_dumpability::valid) {
-      prepared_frame_id_ = matched_frame_id;
-      prepared_normalization_ = {
-        normalization.lower,
-        normalization.upper,
-        normalization.initialized,
-        normalization.frame_state,
-      };
-      prepared_normalization_valid_ = true;
-      return true;
-    }
-
-    // Do not run diagnostic mapping for an invalid or temporarily unreadable depth
-    // completion. Retain the request, but avoid retrying diagnostic allocations every render frame.
-    snapshot_armed_for_dump_ = false;
-    prepared_normalization_valid_ = false;
-    retry_backoff_frames_ = retry_backoff_frames;
-    if (dumpability == depth_dumpability::unreadable) {
-      try {
-        BOOST_LOG(warning)
-          << "SBS debug dump normalization state is temporarily unreadable; request retained for a rate-limited retry."sv;
-      } catch (...) {
-      }
-    }
-    return false;
   }
 
   bool dumper::preflight_requested_v2_frame(
@@ -1933,8 +1834,6 @@ namespace platf::sbs_debug {
       return false;
     }
     snapshot_armed_for_dump_ = false;
-    const bool v2_rendered = completed.parallax_v2_render_selected;
-
     if (
       !device || !ctx || !completed.source || !completed.model_input ||
       !completed.raw_depth || !completed.warp_depth || !completed.sbs ||
@@ -1946,37 +1845,36 @@ namespace platf::sbs_debug {
       completed.raw_model_provenance->onnx_sha256.empty() ||
       completed.raw_model_provenance->preprocess_source_closure_sha256.empty() ||
       completed.raw_width != completed.model_width ||
-      completed.raw_height != completed.model_height
+      completed.raw_height != completed.model_height ||
+      prepared_frame_id_ != completed.matched_frame_id
     ) {
       return false;
     }
-    if (!v2_rendered &&
-        (!completed.depth || !completed.adaptive_state ||
-         !completed.depth_frame_state)) {
-      return false;
-    }
-    if (completed.parallax_v2_render_selected &&
-        (!completed.parallax_v2_render_requested ||
-         !completed.parallax_v2_shadow_active ||
-         !completed.shadow_coordinate || !completed.shadow_candidate_parallax ||
-         !completed.shadow_vertical_majorant ||
-         !completed.shadow_final_parallax || !completed.shadow_state ||
-         !completed.shadow_frame_stats)) {
+    if (!completed.parallax_v2_render_selected ||
+        !completed.parallax_v2_producer_active ||
+        !completed.shadow_candidate_parallax ||
+        !completed.shadow_vertical_majorant ||
+        !completed.shadow_final_parallax || !completed.shadow_state ||
+        !completed.shadow_frame_stats) {
       BOOST_LOG(warning)
-        << "SBS debug dump: selected parallax-v2 renderer has an incomplete authenticated "sv
-           "resource set; dump rejected."sv;
+        << "SBS debug dump: production V2 renderer is not selected or has an incomplete "sv
+           "authenticated resource set; dump rejected (legacy live rendering is unsupported)."sv;
       return false;
     }
-    if (completed.parallax_v2_render_selected &&
-        completed.parallax_v2_live_renderer_source_closure_sha256 !=
+    if (!completed.shadow_coordinate) {
+      BOOST_LOG(warning)
+        << "SBS debug dump: the explicit Dump 3D canonical-coordinate snapshot is "sv
+           "unavailable; live V2 rendering remains authenticated and unaffected."sv;
+      return false;
+    }
+    if (completed.parallax_v2_live_renderer_source_closure_sha256 !=
           models::host_sbs_shader_cache::
             parallax_v2_live_renderer_source_closure_sha256) {
       BOOST_LOG(warning)
-        << "SBS debug dump: selected parallax-v2 renderer source closure is missing or "sv
+        << "SBS debug dump: production V2 renderer source closure is missing or "sv
            "mismatched; dump rejected."sv;
       return false;
     }
-    const bool shadow_available = completed.parallax_v2_shadow_active;
     const auto &model_identity = *completed.raw_model_provenance;
     const auto *capture_calibration =
       models::depth_coordinate_v2::find_capture_calibration(
@@ -1988,33 +1886,21 @@ namespace platf::sbs_debug {
         static_cast<std::uint32_t>(completed.model_width),
         static_cast<std::uint32_t>(completed.model_height)
       );
-    if (shadow_available && !capture_calibration) {
+    if (!capture_calibration) {
       BOOST_LOG(warning)
-        << "SBS debug dump: active parallax-v2 resources do not resolve to exactly one "sv
+        << "SBS debug dump: production V2 resources do not resolve to exactly one "sv
            "authenticated model/preprocess/shape calibration; dump rejected."sv;
       return false;
     }
-    if (shadow_available &&
-        !parallax_v2_shader_identity_matches_contract(
+    if (!parallax_v2_shader_identity_matches_contract(
           completed.parallax_v2_shader_provenance
         )) {
       BOOST_LOG(warning)
-        << "SBS debug dump: active parallax-v2 resources have missing or mismatched "sv
+        << "SBS debug dump: production V2 resources have missing or mismatched "sv
            "shader-source provenance; dump rejected."sv;
       return false;
     }
-    const auto &capture_preprocess = capture_calibration ?
-                                       capture_calibration->preprocess :
-                                       uncalibrated_runtime_preprocess;
-    if (shadow_available &&
-        (!completed.shadow_coordinate || !completed.shadow_candidate_parallax ||
-         !completed.shadow_vertical_majorant ||
-         !completed.shadow_final_parallax || !completed.shadow_state ||
-         !completed.shadow_frame_stats)) {
-      BOOST_LOG(warning)
-        << "SBS debug dump: parallax-v2 shadow reported active with an incomplete resource set; dump deferred."sv;
-      return false;
-    }
+    const auto &capture_preprocess = capture_calibration->preprocess;
 
     std::filesystem::path trigger;
     std::error_code error;
@@ -2023,39 +1909,18 @@ namespace platf::sbs_debug {
     try {
       trigger = dir_ / "dump.trigger";
       normalization_state normalization {};
-      depth_dumpability dumpability = depth_dumpability::unreadable;
-      if (v2_rendered) {
-        // V2 publication is gated by its own authenticated state below. Do not map or interpret
-        // the legacy normalization buffer merely to authorize the selected renderer's dump.
-        dumpability = depth_dumpability::invalid;
-      } else if (
-        prepared_normalization_valid_ &&
-        prepared_frame_id_ == completed.matched_frame_id
-      ) {
-        normalization = {
-          prepared_normalization_[0],
-          prepared_normalization_[1],
-          prepared_normalization_[2],
-          prepared_normalization_[3],
-        };
-        prepared_normalization_valid_ = false;
-        dumpability = depth_dumpability::valid;
-      } else {
-        dumpability = read_normalization_state(
-          device,
-          ctx,
-          completed.depth_frame_state,
-          normalization
-        );
-      }
-      if (dumpability != depth_dumpability::valid) {
-        if (!v2_rendered) {
-          retry_backoff_frames_ = retry_backoff_frames;
-          if (dumpability == depth_dumpability::unreadable) {
-            BOOST_LOG(warning)
-              << "SBS debug dump validity state is temporarily unreadable; request retained for a rate-limited retry."sv;
-          }
-          return false;
+      bool scene_cut_bridge_state_available = false;
+      if (completed.adaptive_state && completed.depth_frame_state) {
+        try {
+          scene_cut_bridge_state_available =
+            read_normalization_state(
+              device,
+              ctx,
+              completed.depth_frame_state,
+              normalization
+            ) == depth_dumpability::valid;
+        } catch (...) {
+          // This comparison-only bridge must never gate an authenticated production-V2 dump.
         }
       }
 
@@ -2077,12 +1942,10 @@ namespace platf::sbs_debug {
 
       do {
         texture_snapshot source;
-        texture_snapshot depth;
         texture_snapshot warp_depth;
         texture_snapshot sbs;
         if (
           !read_texture(device, ctx, completed.source, source) ||
-          (!v2_rendered && !read_texture(device, ctx, completed.depth, depth)) ||
           !read_texture(device, ctx, completed.warp_depth, warp_depth) ||
           !read_texture(device, ctx, completed.sbs, sbs) ||
           !write_color_preview(
@@ -2118,9 +1981,7 @@ namespace platf::sbs_debug {
             paths.temporary / "warp_depth.f32",
             paths.temporary / "warp_depth_shape.json",
             warp_depth,
-            completed.parallax_v2_render_selected ?
-              "exact one-eye source-U from the least near-preserving anisotropic 2D Lipschitz majorant sampled by live Host-SBS V2 reprojection" :
-              "exact normalized depth texture sampled by legacy Host-SBS reprojection"
+            "exact one-eye source-U from the least near-preserving anisotropic 2D Lipschitz majorant sampled by live Host-SBS V2 reprojection"
           ) ||
           !write_scalar_previews(
             paths.temporary / "warp_depth.png",
@@ -2136,35 +1997,22 @@ namespace platf::sbs_debug {
           break;
         }
 
-        if (!v2_rendered &&
-            (!write_float_texture_artifacts(
-               paths.temporary / "depth.f32",
-               paths.temporary / "depth_shape.json",
-               depth,
-               "normalized and temporally filtered estimator depth before warp prefilter"
-             ) ||
-             !write_scalar_previews(
-               paths.temporary / "depth.png",
-               paths.temporary / "depth_heat.png",
-               depth
-             ))) {
-          break;
-        }
-
         nlohmann::json adaptive = nullptr;
-        const bool adaptive_available =
-          !v2_rendered && dump_adaptive_state(
-            device,
-            ctx,
-            completed.adaptive_state,
-            normalization,
-            completed,
-            cfg,
-            paths.temporary,
-            adaptive
-          );
-        if (!adaptive_available && !v2_rendered) {
-          break;
+        bool adaptive_available = false;
+        if (scene_cut_bridge_state_available) {
+          try {
+            adaptive_available = dump_adaptive_state(
+              device,
+              ctx,
+              completed.adaptive_state,
+              normalization,
+              completed,
+              paths.temporary,
+              adaptive
+            );
+          } catch (...) {
+            // Scene-cut bridge evidence is optional and has no live V2 geometry authority.
+          }
         }
 
         // Bind provenance to the exact bytes that were successfully written into this
@@ -2192,8 +2040,7 @@ namespace platf::sbs_debug {
         texture_snapshot shadow_final;
         nlohmann::json shadow_summary = nullptr;
         if (
-          shadow_available &&
-          (!dump_shadow_float_texture(
+          !dump_shadow_float_texture(
              device,
              ctx,
              completed.shadow_coordinate,
@@ -2235,7 +2082,7 @@ namespace platf::sbs_debug {
              completed,
              paths.temporary,
              shadow_summary
-           ))
+           )
         ) {
           break;
         }
@@ -2251,7 +2098,6 @@ namespace platf::sbs_debug {
              warp_map,
              source.desc.Width,
              source.desc.Height,
-             v2_rendered,
              paths.temporary,
              warp_map_stats
            ))
@@ -2290,12 +2136,10 @@ namespace platf::sbs_debug {
         const float content_scale_y =
           eye_aspect < source_aspect ? eye_aspect / source_aspect : 1.0f;
 
-        const std::string warp_scalar_stage = v2_rendered ?
-          "actual near-preserving anisotropic 2D Lipschitz majorant sampled by live V2 reprojection" :
-          "actual reprojection depth";
-        const std::string warp_scalar_description = v2_rendered ?
-          "Exact signed one-eye source-U after the vertical shear-2 majorant and row majorant, sampled by the live V2 12-step contractive inverse." :
-          "Exact normalized depth texture sampled by the legacy inverse warp.";
+        const std::string warp_scalar_stage =
+          "actual near-preserving anisotropic 2D Lipschitz majorant sampled by live V2 reprojection";
+        const std::string warp_scalar_description =
+          "Exact signed one-eye source-U after the vertical shear-2 majorant and row majorant, sampled by the live V2 12-step contractive inverse.";
         nlohmann::json artifacts = nlohmann::json::object();
         artifacts["source.png"] = artifact_description(
           true,
@@ -2346,44 +2190,34 @@ namespace platf::sbs_debug {
           "Dimensions, scalar statistics, and preview bounds."
         );
         artifacts["depth.png"] = artifact_description(
-          !v2_rendered,
-          !v2_rendered,
-          "legacy normalized temporal depth",
-          v2_rendered ?
-            "Not captured: legacy depth has no authority in selected live V2 rendering." :
-            "Grayscale preview of the estimator output before warp prefiltering."
+          false,
+          false,
+          "removed V1 normalized-depth renderer artifact",
+          "Not captured: production Host SBS consumes the authenticated V2 parallax field directly."
         );
         artifacts["depth.f32"] = artifact_description(
-          !v2_rendered,
-          !v2_rendered,
-          "legacy normalized temporal depth",
-          v2_rendered ?
-            "Not captured: legacy depth has no authority in selected live V2 rendering." :
-            "Exact float32-le estimator output before warp prefiltering."
+          false,
+          false,
+          "removed V1 normalized-depth renderer artifact",
+          "Not captured: production Host SBS consumes the authenticated V2 parallax field directly."
         );
         artifacts["depth_shape.json"] = artifact_description(
-          !v2_rendered,
-          !v2_rendered,
-          "legacy normalized temporal depth contract",
-          v2_rendered ?
-            "Not captured: legacy depth has no authority in selected live V2 rendering." :
-            "Dimensions, layout, and scalar range for depth.f32."
+          false,
+          false,
+          "removed V1 normalized-depth renderer artifact",
+          "Not captured: the V1 normalized-depth live renderer has been removed."
         );
         artifacts["depth_heat.png"] = artifact_description(
-          !v2_rendered,
-          !v2_rendered,
-          "legacy normalized temporal depth",
-          v2_rendered ?
-            "Not captured: legacy depth has no authority in selected live V2 rendering." :
-            "Jet preview of the estimator output before warp prefiltering."
+          false,
+          false,
+          "removed V1 normalized-depth renderer artifact",
+          "Not captured: the V1 normalized-depth live renderer has been removed."
         );
         artifacts["warp_depth.png"] = artifact_description(
           true,
           true,
           warp_scalar_stage,
-          v2_rendered ?
-            "Grayscale preview of the exact near-preserving anisotropic 2D majorant sampled by the warp." :
-            "Grayscale preview of the exact depth texture sampled by the warp."
+          "Grayscale preview of the exact near-preserving anisotropic 2D majorant sampled by the warp."
         );
         artifacts["warp_depth.f32"] = artifact_description(
           true,
@@ -2394,140 +2228,130 @@ namespace platf::sbs_debug {
         artifacts["warp_depth_shape.json"] = artifact_description(
           true,
           true,
-          v2_rendered ? "actual near-preserving anisotropic 2D majorant contract" :
-                        "actual reprojection depth contract",
+          "actual near-preserving anisotropic 2D majorant contract",
           "Dimensions, layout, units, and scalar range for warp_depth.f32."
         );
         artifacts["warp_depth_heat.png"] = artifact_description(
           true,
           true,
           warp_scalar_stage,
-          v2_rendered ?
-            "Jet preview of the exact near-preserving anisotropic 2D majorant sampled by the warp." :
-            "Jet preview of the exact depth texture sampled by the warp."
+          "Jet preview of the exact near-preserving anisotropic 2D majorant sampled by the warp."
         );
         artifacts["adaptive_state.json"] = artifact_description(
           adaptive_available,
-          !v2_rendered,
-          v2_rendered ? "legacy adaptive controller comparison state" :
-                        "adaptive controller state",
+          false,
+          "scene-cut bridge comparison state",
           adaptive_available ?
-            (v2_rendered ?
-               "Comparison-only legacy adaptive state; it has no V2 geometry authority." :
-               "Generated typed state, decoded flags, counters, and normalization float4.") :
-            "Unavailable; this does not gate an authenticated live V2 dump."
+            "Comparison-only cut flags, counters, and normalization state; no live V2 geometry authority." :
+            "Unavailable; scene-cut bridge evidence never gates an authenticated live V2 dump."
         );
-        const std::string shadow_unavailable =
-          (cfg.parallax_v2_shadow || cfg.parallax_v2_render) ?
-            "Unavailable because the optional V2 producer failed calibration, shader compilation, or GPU resource creation." :
-            "Unavailable because both sbs_3d_parallax_v2_shadow and sbs_3d_parallax_v2_render are disabled (the default).";
         artifacts["shadow_coordinate.f32"] = artifact_description(
-          shadow_available,
-          v2_rendered,
+          true,
+          true,
           "parallax-v2 canonical coordinate diagnostic",
-          shadow_available ? "Exact float32-le unbounded canonical coordinate u; diagnostic only and never used by the live renderer." : shadow_unavailable
+          "Exact float32-le unbounded canonical coordinate u; diagnostic only and never used by the live renderer."
         );
         artifacts["shadow_coordinate_shape.json"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 canonical coordinate contract",
-          shadow_available ? "Dimensions, units, and finite scalar range." : shadow_unavailable
+          "Dimensions, units, and finite scalar range."
         );
         artifacts["shadow_coordinate.png"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 canonical coordinate preview",
-          shadow_available ? "Finite p2-p98 grayscale preview; not the numeric contract." : shadow_unavailable
+          "Finite p2-p98 grayscale preview; not the numeric contract."
         );
         artifacts["shadow_coordinate_heat.png"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 canonical coordinate preview",
-          shadow_available ? "Finite p2-p98 jet preview." : shadow_unavailable
+          "Finite p2-p98 jet preview."
         );
         artifacts["shadow_candidate_parallax.f32"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 pre-limiter candidate displacement",
-          shadow_available ? "Exact immutable signed one-eye source-U before the spatial limiter; diagnostic only." : shadow_unavailable
+          "Exact immutable signed one-eye source-U before the spatial limiter; diagnostic only."
         );
         artifacts["shadow_candidate_parallax_shape.json"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 pre-limiter candidate displacement contract",
-          shadow_available ? "Dimensions, units, and finite scalar range." : shadow_unavailable
+          "Dimensions, units, and finite scalar range."
         );
         artifacts["shadow_candidate_parallax.png"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 pre-limiter candidate displacement preview",
-          shadow_available ? "Finite p2-p98 grayscale preview." : shadow_unavailable
+          "Finite p2-p98 grayscale preview."
         );
         artifacts["shadow_candidate_parallax_heat.png"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 pre-limiter candidate displacement preview",
-          shadow_available ? "Finite p2-p98 jet preview." : shadow_unavailable
+          "Finite p2-p98 jet preview."
         );
         artifacts["shadow_vertical_majorant.f32"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 vertical shear-limiter intermediate",
-          shadow_available ? "Exact signed one-eye source-U after the least column-wise majorant v >= candidate with |dv/dy| <= max_vertical_shear/target_width; diagnostic intermediate consumed by the row limiter." : shadow_unavailable
+          "Exact signed one-eye source-U after the least column-wise majorant v >= candidate with |dv/dy| <= max_vertical_shear/target_width; diagnostic intermediate consumed by the row limiter."
         );
         artifacts["shadow_vertical_majorant_shape.json"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 vertical shear-limiter intermediate contract",
-          shadow_available ? "Dimensions, units, finite scalar range, v >= candidate, and the generated max_vertical_shear bound; not the live renderer position authority." : shadow_unavailable
+          "Dimensions, units, finite scalar range, v >= candidate, and the generated max_vertical_shear bound; not the live renderer position authority."
         );
         artifacts["shadow_vertical_majorant.png"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 vertical shear-limiter intermediate preview",
-          shadow_available ? "Finite p2-p98 grayscale preview of the exact column-wise majorant." : shadow_unavailable
+          "Finite p2-p98 grayscale preview of the exact column-wise majorant."
         );
         artifacts["shadow_vertical_majorant_heat.png"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 vertical shear-limiter intermediate preview",
-          shadow_available ? "Finite p2-p98 jet preview of the exact column-wise majorant." : shadow_unavailable
+          "Finite p2-p98 jet preview of the exact column-wise majorant."
         );
         artifacts["shadow_final_parallax.f32"] = artifact_description(
-          shadow_available,
-          v2_rendered,
+          true,
+          true,
           "parallax-v2 final near-preserving anisotropic 2D majorant",
-          shadow_available ? "Exact signed one-eye source-U after the row majorant of shadow_vertical_majorant; q >= vertical >= candidate, |dq/dx| <= max_horizontal_slope/target_width, and |dq/dy| <= max_vertical_shear/target_width. Live V2 render position authority." : shadow_unavailable
+          "Exact signed one-eye source-U after the row majorant of shadow_vertical_majorant; q >= vertical >= candidate, |dq/dx| <= max_horizontal_slope/target_width, and |dq/dy| <= max_vertical_shear/target_width. Live V2 render position authority."
         );
         artifacts["shadow_final_parallax_shape.json"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 final near-preserving anisotropic 2D majorant contract",
-          shadow_available ? "Dimensions, units, finite scalar range, no-lowering chain, horizontal slope bound, and vertical shear bound; live renderer authority when V2 is selected." : shadow_unavailable
+          "Dimensions, units, finite scalar range, no-lowering chain, horizontal slope bound, and vertical shear bound; live renderer authority."
         );
         artifacts["shadow_final_parallax.png"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 final near-preserving anisotropic 2D majorant preview",
-          shadow_available ? "Finite p2-p98 grayscale preview of the live V2 position field." : shadow_unavailable
+          "Finite p2-p98 grayscale preview of the live V2 position field."
         );
         artifacts["shadow_final_parallax_heat.png"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 final near-preserving anisotropic 2D majorant preview",
-          shadow_available ? "Finite p2-p98 jet preview of the live V2 position field." : shadow_unavailable
+          "Finite p2-p98 jet preview of the live V2 position field."
         );
         artifacts["shadow_state.json"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 shot calibration and attenuation state",
-          shadow_available ? "Independent typed state bound to the exact coordinate contract tag." : shadow_unavailable
+          "Independent typed state bound to the exact coordinate contract tag."
         );
         artifacts["shadow_frame_stats.json"] = artifact_description(
-          shadow_available,
+          true,
           false,
           "parallax-v2 current-frame moments",
-          shadow_available ? "Independent mean/std/min/max state bound to the exact coordinate contract tag." : shadow_unavailable
+          "Independent mean/std/min/max state bound to the exact coordinate contract tag."
         );
         artifacts["warp_map.f32"] = artifact_description(
           warp_map_available,
@@ -2556,11 +2380,9 @@ namespace platf::sbs_debug {
         artifacts["warp_mask.png"] = artifact_description(
           warp_mask_available,
           false,
-          v2_rendered ? "V2 boundary-extrapolation mask" : "legacy forward-coverage mask",
+          "V2 boundary-extrapolation mask",
           warp_mask_available ?
-            (v2_rendered ?
-               "Red marks inverse samples outside the finite source interval that the live renderer clamps to the nearest boundary column; V2 has no internal owner selection or synthetic fill." :
-               "Red records the legacy diagnostic coverage result; aspect bars remain unmarked.") :
+            "Red marks inverse samples outside the finite source interval that the live renderer clamps to the nearest boundary column; V2 has no internal owner selection or synthetic fill." :
             "Unavailable because the matching dump-only mask pass could not be created."
         );
       artifacts["sbs.png"] = artifact_description(
@@ -2596,8 +2418,7 @@ namespace platf::sbs_debug {
                           {"height", completed.raw_height},
                           {"format", "float32-le structured buffer"},
                         }},
-          {"normalized_depth", v2_rendered ? nlohmann::json {nullptr} :
-                                             texture_description(depth)},
+          {"normalized_depth", nullptr},
           {"warp_depth", texture_description(warp_depth)},
           {"packed_sbs", texture_description(sbs)},
           {"eye", {
@@ -2619,19 +2440,12 @@ namespace platf::sbs_debug {
         } else {
           dimensions["warp_mask"] = nullptr;
         }
-        if (shadow_available) {
-          dimensions["shadow_coordinate"] = texture_description(shadow_coordinate);
-          dimensions["shadow_candidate_parallax"] =
-            texture_description(shadow_candidate);
-          dimensions["shadow_vertical_majorant"] =
-            texture_description(shadow_vertical);
-          dimensions["shadow_final_parallax"] = texture_description(shadow_final);
-        } else {
-          dimensions["shadow_coordinate"] = nullptr;
-          dimensions["shadow_candidate_parallax"] = nullptr;
-          dimensions["shadow_vertical_majorant"] = nullptr;
-          dimensions["shadow_final_parallax"] = nullptr;
-        }
+        dimensions["shadow_coordinate"] = texture_description(shadow_coordinate);
+        dimensions["shadow_candidate_parallax"] =
+          texture_description(shadow_candidate);
+        dimensions["shadow_vertical_majorant"] =
+          texture_description(shadow_vertical);
+        dimensions["shadow_final_parallax"] = texture_description(shadow_final);
 
         const std::string color_mode =
           completed.color_space == models::input_color_space::scrgb_hdr  ? "scrgb_hdr" :
@@ -2646,11 +2460,10 @@ namespace platf::sbs_debug {
         const std::string trigger_source =
           by_button && by_file ? "button+file" : by_button ? "button" :
                                                              "file";
-        const nlohmann::json shadow_shader_source = shadow_available ?
+        const nlohmann::json shadow_shader_source =
           parallax_v2_shader_identity_json(
             *completed.parallax_v2_shader_provenance
-          ) :
-          nlohmann::json {nullptr};
+          );
         nlohmann::json manifest {
           {"schema", 7},
           {"capture", "one matched, completed Host-SBS frame"},
@@ -2663,30 +2476,18 @@ namespace platf::sbs_debug {
           {"color_preview_transform", color_preview_transform},
           {"hdr_preview", hdr ? color_preview_transform : "not applied"},
           {"cuda_graph_active", completed.cuda_graph_active},
-          {"warp_depth_prefilter_applied", completed.warp_depth_prefilter_applied},
+          {"warp_depth_prefilter_applied", false},
           {"renderer", {
-                         {"authority", completed.parallax_v2_render_selected ?
-                                           "authenticated-parallax-v2-final-near-preserving-anisotropic-2d-majorant" :
-                                           "legacy-bestv2-depth-and-subject-state"},
-                         {"parallax_v2_render_requested", completed.parallax_v2_render_requested},
-                         {"parallax_v2_render_selected", completed.parallax_v2_render_selected},
+                         {"authority", "authenticated-parallax-v2-final-near-preserving-anisotropic-2d-majorant"},
+                         {"parallax_v2_render_requested", true},
+                         {"parallax_v2_render_selected", true},
                          {"mapping_artifacts_match_selected_renderer", warp_map_available && warp_mask_available},
-                         {"parallax_v2_position_field", completed.parallax_v2_render_selected ?
-                            "shadow_final_parallax" : nlohmann::json {nullptr}},
-                         {"parallax_v2_coordinate_role", completed.parallax_v2_render_selected ?
-                            "shadow_coordinate is diagnostic only; it has no renderer authority" :
-                            nlohmann::json {nullptr}},
-                         {"parallax_v2_vertical_majorant_role", completed.parallax_v2_render_selected ?
-                            "least column-wise v >= candidate with adjacent-row source-U change <= max_vertical_shear/target_width; diagnostic intermediate consumed by the row limiter" :
-                            nlohmann::json {nullptr}},
-                         {"parallax_v2_majorant_role", completed.parallax_v2_render_selected ?
-                            "least row-wise q >= shadow_vertical_majorant; final q >= vertical >= candidate with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear; live position authority" :
-                            nlohmann::json {nullptr}},
-                         {"parallax_v2_inverse", completed.parallax_v2_render_selected ?
-                            "12-step contractive fixed point; no owner pass or synthetic fill" :
-                            nlohmann::json {nullptr}},
-                         {"live_shader_source", completed.parallax_v2_render_selected ?
-                            nlohmann::json {
+                         {"parallax_v2_position_field", "shadow_final_parallax"},
+                         {"parallax_v2_coordinate_role", "shadow_coordinate is diagnostic only; it has no renderer authority"},
+                         {"parallax_v2_vertical_majorant_role", "least column-wise v >= candidate with adjacent-row source-U change <= max_vertical_shear/target_width; diagnostic intermediate consumed by the row limiter"},
+                         {"parallax_v2_majorant_role", "least row-wise q >= shadow_vertical_majorant; final q >= vertical >= candidate with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear; live position authority"},
+                         {"parallax_v2_inverse", "12-step contractive fixed point; no owner pass or synthetic fill"},
+                         {"live_shader_source", nlohmann::json {
                               {"source_closure_schema", models::host_sbs_shader_cache::source_closure_schema},
                               {"source_compile_flags", models::host_sbs_shader_cache::shader_compile_flags},
                               {"source_macro_count", 0u},
@@ -2694,20 +2495,24 @@ namespace platf::sbs_debug {
                               {"source_file", std::string {models::host_sbs_shader_cache::parallax_v2_live_renderer.filename}},
                               {"entrypoint", std::string {models::host_sbs_shader_cache::parallax_v2_live_renderer.entrypoint}},
                               {"target", std::string {models::host_sbs_shader_cache::parallax_v2_live_renderer.target}},
-                               {"mapping_entrypoint", std::string {models::host_sbs_shader_cache::parallax_v2_live_mapping.entrypoint}},
-                               {"mask_entrypoint", std::string {models::host_sbs_shader_cache::parallax_v2_live_mask.entrypoint}},
-                            } : nlohmann::json {nullptr}},
+                              {"diagnostic_source_closure_sha256", std::string {models::host_sbs_shader_cache::parallax_v2_diagnostic_source_closure_sha256}},
+                              {"mapping_source_file", std::string {models::host_sbs_shader_cache::parallax_v2_live_mapping.filename}},
+                              {"mapping_entrypoint", std::string {models::host_sbs_shader_cache::parallax_v2_live_mapping.entrypoint}},
+                              {"mask_source_file", std::string {models::host_sbs_shader_cache::parallax_v2_live_mask.filename}},
+                              {"mask_entrypoint", std::string {models::host_sbs_shader_cache::parallax_v2_live_mask.entrypoint}},
+                            }},
                        }},
           {"dimensions", std::move(dimensions)},
-          {"normalization", v2_rendered ? nlohmann::json {nullptr} :
+          {"normalization", adaptive_available ?
              nlohmann::json {
+               {"role", "comparison-only scene-cut bridge evidence; no live V2 geometry authority"},
                {"effective_lower", normalization.lower},
                {"effective_upper", normalization.upper},
                {"initialized", normalization.initialized > 0.5f},
                {"initialized_value", normalization.initialized},
                {"frame_state", normalization_frame_state_name(normalization.frame_state)},
                {"frame_state_value", normalization.frame_state},
-             }},
+             } : nlohmann::json {nullptr}},
           {"raw_depth_statistics", {
                                      {"finite_count", raw_stats.finite_count},
                                      {"sample_count", static_cast<std::uint64_t>(raw_stats.width) * raw_stats.height},
@@ -2720,9 +2525,9 @@ namespace platf::sbs_debug {
           {"adaptive_summary", adaptive_available ? adaptive["decoded"] :
                                                      nlohmann::json {nullptr}},
           {"parallax_v2_shadow", {
-                                    {"requested", cfg.parallax_v2_shadow},
-                                    {"active", shadow_available},
-                                    {"rendered_output_selected", completed.parallax_v2_render_selected},
+                                    {"requested", false},
+                                    {"active", true},
+                                    {"rendered_output_selected", true},
                                     {"shader_source", shadow_shader_source},
                                     {"state", std::move(shadow_summary)},
                                   }},
@@ -2733,8 +2538,7 @@ namespace platf::sbs_debug {
                      )},
           {"artifacts", std::move(artifacts)},
         };
-        if (capture_calibration) {
-          manifest[std::string {
+        manifest[std::string {
             models::depth_coordinate_v2::capture_provenance_manifest_key
           }] = {
             {"schema", models::depth_coordinate_v2::capture_provenance_schema},
@@ -2751,7 +2555,6 @@ namespace platf::sbs_debug {
             {"model_input_sha256", model_input_sha256},
             {"model_input_shape_sha256", model_input_shape_sha256},
           };
-        }
 
         std::ostringstream meta;
         meta.imbue(std::locale::classic());
@@ -2779,53 +2582,42 @@ namespace platf::sbs_debug {
              << "raw_depth_preview_low_p02=" << raw_stats.preview_low << '\n'
              << "raw_depth_preview_high_p98=" << raw_stats.preview_high << '\n'
              << "legacy_normalization_available="
-             << (v2_rendered ? "false" : "true") << '\n'
+             << (adaptive_available ? "true" : "false") << '\n'
              << "normalization_effective_lower=" << normalization.lower << '\n'
              << "normalization_effective_upper=" << normalization.upper << '\n'
              << "normalization_initialized=" << normalization.initialized << '\n'
              << "normalization_frame_state=" << normalization.frame_state << '\n'
              << "cuda_graph_active="
              << (completed.cuda_graph_active ? "true" : "false") << '\n'
-             << "warp_depth_prefilter_applied="
-             << (completed.warp_depth_prefilter_applied ? "true" : "false") << '\n'
+             << "warp_depth_prefilter_applied=false\n"
              << "warp_map_available=" << (warp_map_available ? "true" : "false")
              << '\n'
              << "warp_mask_available=" << (warp_mask_available ? "true" : "false")
              << '\n'
              << "parallax_v2_shadow_requested="
-             << (cfg.parallax_v2_shadow ? "true" : "false") << '\n'
-             << "parallax_v2_shadow_active="
-             << (shadow_available ? "true" : "false") << '\n'
-             << "parallax_v2_render_requested="
-             << (completed.parallax_v2_render_requested ? "true" : "false") << '\n'
-             << "parallax_v2_render_selected="
-             << (completed.parallax_v2_render_selected ? "true" : "false") << '\n'
-             << "renderer_authority="
-             << (completed.parallax_v2_render_selected ?
-                   "authenticated-parallax-v2-final-near-preserving-anisotropic-2d-majorant" :
-                   "legacy-bestv2-depth-and-subject-state")
-             << '\n'
+             << "false\n"
+             << "parallax_v2_shadow_active=true\n"
+             << "parallax_v2_render_requested=true\n"
+             << "parallax_v2_render_selected=true\n"
+             << "renderer_authority=authenticated-parallax-v2-final-near-preserving-anisotropic-2d-majorant\n"
              << "parallax_v2_live_renderer_source_closure_sha256="
              << completed.parallax_v2_live_renderer_source_closure_sha256 << '\n'
-             << "raw_model_provenance="
-             << (capture_calibration ? "authoritative" : "unverified") << '\n'
+             << "raw_model_provenance=authoritative\n"
              << "raw_model_preprocess_profile="
              << model_identity.preprocess_profile
              << '\n'
              << "raw_model_preprocess_source_closure_sha256="
              << model_identity.preprocess_source_closure_sha256
              << '\n';
-        if (shadow_available) {
-          const auto &shader_identity = *completed.parallax_v2_shader_provenance;
-          meta << "parallax_v2_shader_source_closure_schema="
-               << shader_identity.source_closure_schema << '\n'
-               << "parallax_v2_shader_source_compile_flags="
-               << shader_identity.source_compile_flags << '\n'
-               << "parallax_v2_shader_source_macro_count="
-               << shader_identity.source_macro_count << '\n'
-               << "parallax_v2_shader_source_closure_sha256="
-               << shader_identity.source_closure_sha256 << '\n';
-        }
+        const auto &shader_identity = *completed.parallax_v2_shader_provenance;
+        meta << "parallax_v2_shader_source_closure_schema="
+             << shader_identity.source_closure_schema << '\n'
+             << "parallax_v2_shader_source_compile_flags="
+             << shader_identity.source_compile_flags << '\n'
+             << "parallax_v2_shader_source_macro_count="
+             << shader_identity.source_macro_count << '\n'
+             << "parallax_v2_shader_source_closure_sha256="
+             << shader_identity.source_closure_sha256 << '\n';
         if (
           !write_text(paths.temporary / "meta.txt", meta.str()) ||
           !write_json(paths.temporary / "dump_manifest.json", manifest)

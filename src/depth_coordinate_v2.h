@@ -1,6 +1,6 @@
 /**
  * @file src/depth_coordinate_v2.h
- * @brief CPU-side contract for the default-off Host SBS raw-coordinate v2 GPU shadow.
+ * @brief CPU-side contract for the production Host SBS raw-coordinate V2 GPU pipeline.
  */
 #pragma once
 
@@ -11,7 +11,9 @@
 namespace models::depth_coordinate_v2 {
   // File schemas are intentionally independent of the GPU/algorithm contract schema. A JSON
   // layout change must bump the relevant value without pretending the coordinate math changed.
-  inline constexpr std::uint32_t shadow_state_dump_schema = 6u;
+  // Dump 3D retains the historical `shadow_*` filenames as a compatibility schema; these values
+  // now describe production V2 evidence, not an alternate renderer.
+  inline constexpr std::uint32_t shadow_state_dump_schema = 7u;
   inline constexpr std::uint32_t shadow_frame_stats_dump_schema = 2u;
   inline constexpr std::uint32_t reserved_calibration_revision = 0xffffffffu;
 
@@ -22,6 +24,33 @@ namespace models::depth_coordinate_v2 {
   static_assert(calibration_revision_is_valid(0u));
   static_assert(calibration_revision_is_valid(1u));
   static_assert(!calibration_revision_is_valid(reserved_calibration_revision));
+
+  constexpr std::uint32_t camera_center_integrity_for_words(
+    const std::uint32_t center_bits,
+    const std::uint32_t inverse_scale_bits,
+    const std::uint32_t calibration_revision_bits
+  ) {
+    std::uint32_t checksum = 0u;
+    checksum = (checksum ^ center_bits) * 16777619u;
+    checksum = (checksum ^ inverse_scale_bits) * 16777619u;
+    checksum = (checksum ^ calibration_revision_bits) * 16777619u;
+    return checksum;
+  }
+
+  constexpr bool camera_center_integrity_is_valid(
+    const std::uint32_t center_bits,
+    const std::uint32_t inverse_scale_bits,
+    const std::uint32_t calibration_revision_bits,
+    const std::uint32_t integrity_bits
+  ) {
+    return integrity_bits == camera_center_integrity_for_words(
+      center_bits,
+      inverse_scale_bits,
+      calibration_revision_bits
+    );
+  }
+
+  static_assert(camera_center_integrity_for_words(0u, 0u, 0u) == 0u);
 
   inline constexpr float parallax_gain = gain_per_pop * reference_pop_strength;
 

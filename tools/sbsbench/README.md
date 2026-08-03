@@ -18,13 +18,15 @@ images shown on the headset. This is the visual half of the host benchmark; see
    - `raw_depth.f32`, `raw_depth.png`, `raw_depth_heat.png`, `raw_shape.json`: exact model
      output plus finite-P2/P98 previews.
    - `depth.f32` / `depth.png` / `depth_heat.png` / `depth_shape.json`: legacy normalized and
-     temporally filtered depth; intentionally absent from a selected V2 package.
+     temporally filtered depth; intentionally absent from a production V2 package. It remains an
+     offline/evaluator artifact, not an alternate live renderer input.
    - `warp_depth.f32` / `warp_depth.png` / `warp_depth_heat.png` /
      `warp_depth_shape.json`: the actual scalar field sampled by the SBS reprojection shader. For
-     selected V2 this is the final near-preserving anisotropic 2D majorant; for legacy it is the
-     effective depth and the manifest says whether the 3x3 prefilter was applied.
-   - `adaptive_state.json`: the complete legacy adaptive-pop, zero-plane, cut, and depth-health
-     state, including effective normalization bounds. It has no authority in selected V2.
+     production V2 this is the final near-preserving anisotropic 2D majorant; legacy/offline
+     packages use the effective depth and record whether the 3x3 prefilter was applied.
+   - `adaptive_state.json`: compatibility evidence from the legacy analysis stack, including the
+     cut pulse/generation still bridged into V2. Legacy adaptive-pop, zero-plane, subject, range,
+     and depth-health values have no live V2 geometry authority.
    - `shadow_candidate_parallax.f32`, `shadow_vertical_majorant.f32`,
      `shadow_coordinate.f32`, `shadow_final_parallax.f32`, and previews: V2's immutable pre-limiter
      candidate, exact column-wise shear-2 intermediate, canonical coordinate diagnostic, and final
@@ -92,7 +94,7 @@ are intentionally rejected.
 
 The two 2026-08-02 hair dumps use depth-coordinate contract schema 7. They remain historical input
 witnesses for explicitly unverified replay; their manifests and SBS output are not evidence of the
-schema-12 producer or final live renderer.
+schema-14 producer or final live renderer.
 
 A capture is considered authoritative only with this exact additional manifest record
 (digest values abbreviated here):
@@ -118,18 +120,19 @@ Malformed, contradictory, or raw-hash-mismatched proof always aborts; the unveri
 not bypass corrupt provenance. “Authoritative” here authenticates the dump's model-to-raw binding,
 not HDR preview fidelity, perceptual quality, or metric ground truth.
 
-The experimental calibration identity and its `0.5` fixed coordinate scale live in the generated
-depth-coordinate-v2 contract, not in the replay script. Initially it covers only the exact
-calibrated Small ONNX and 770x434 input shape. A different but syntactically valid SHA-256, URL,
-profile, tensor shape, layout, normalization, or bound artifact hash always aborts; the legacy
-override does not downgrade a bad proof to unverified. This default-off calibration does not own
-or modify the production model registry.
+The production calibration identity and its `0.5` fixed coordinate scale live in the generated
+schema-14 depth-coordinate-v2 contract, not in the replay script. It covers the exact calibrated
+Small ONNX at six standard tensor shapes: `770x434`, `1022x434`, `1036x434`, `434x770`,
+`434x1022`, and `434x1036`. A different but syntactically valid SHA-256, URL, profile, tensor
+shape, layout, normalization, or bound artifact hash always aborts; the legacy override does not
+downgrade a bad proof to unverified. DAV2 Base, custom models, and custom shapes fail flat in live
+Host SBS.
 
 ## Mapping-v2 exact whole-clip replay
 
 `replay_depth_mapping_v2_sequence.py` uploads each authenticated raw field and cut generation to
-one persistent GPU state, dispatches the same seven experimental compute shaders used by default-off
-live Host SBS V2, and renders the GPU-produced final anisotropic 2D majorant through Apollo's exact
+one persistent GPU state, dispatches the same seven production compute shaders used by live Host
+SBS V2, and renders the GPU-produced final anisotropic 2D majorant through Apollo's exact
 D3D SBS harness. Canonical coordinate, pre-limiter candidate, and vertical shear-2 intermediate
 remain separately attributable comparison fields:
 
@@ -144,7 +147,7 @@ The wrapper requires consecutive frame IDs and complete, identical raw/SBS/depth
 subject-state identity sets. It binds the evaluator run's model URL, ONNX hash, preprocessing
 profile, engine hash, per-clip contract, exact raw shape, ordered raw-field hashes, and separate
 cut-pulse/generation evidence. The native harness rejects every mapping constant that differs from
-the generated experimental contract; only the explicit user pop value may vary. The emitted state
+the generated production contract; only the explicit user pop value may vary. The emitted state
 trace records frame validity, retained scene-camera validity, calibration revision,
 confirmed-cut attribution, the exact frame-local container,
 effective gain, and input/rendered source identity. Every original color is preserved under
@@ -249,7 +252,7 @@ sbs_3d_profile = apollo   # default
 
 The profile supplies the complete stack. A configuration-only preset can use
 `sbs_3d_profile_<name>_<parameter>` keys; selecting another preset requires restarting Apollo.
-For example:
+For example, an **offline/evaluator-only** Base-model experiment can use:
 
 ```
 sbs_3d_profile = cinema
@@ -257,8 +260,9 @@ sbs_3d_profile_cinema_depth_model = depth_anything_v2_base_fp16
 sbs_3d_profile_cinema_pop_strength = 1.20
 ```
 
-Every profile uses Apollo's occlusion-aware warp; profiles select depth-processing, model, pop,
-and performance parameters only. Unspecified values inherit Apollo defaults. Ordinary
+Live Host SBS V2 is pinned to the authenticated DAV2-Small model; Base and custom model choices
+are intentionally honored only by this offline/evaluator workflow. Unspecified values inherit
+Apollo defaults. Ordinary
 `sbs_3d_*` keys are applied last and explicitly override the corresponding selected-profile
 parameter. Artemis selects only Normal or Host SBS AI; it does not select a host profile, model,
 or individual parameter. Each encode device receives an immutable startup configuration snapshot.
@@ -350,7 +354,12 @@ and then the explicit `sbs_3d_depth_model` override, exactly like production. Th
 `--mode` model selector. Never compare reports using different model/config hashes as if they were
 a controlled feature A/B.
 
-Harness A/B levers (after `--extra`):
+Legacy/offline harness A/B levers (after `--extra`):
+
+These switches exercise the retained evaluator pipeline unless a Mapping-V2 replay command is
+used explicitly. They do not re-enable V1 or change live Host SBS, whose only geometry control is
+the literal `sbs_3d_pop_strength` consumed by the authenticated V2 contract.
+
 - `--pop-strength F` — multiply the final shared stereo-parallax field (`0.25`-`2`; default
   `1.20`, the adaptive floor). This is the user-facing pop control. It is separate from the internal
   854-pixel Bestv2 calibration that keeps apparent depth stable across source resolutions. Below
@@ -365,7 +374,7 @@ Harness A/B levers (after `--extra`):
   subject-recenter and stretch changes: they are computed on the pre-warp depth map, which
   none of those levers touch. Their neutrality on such a run is a tautology, not evidence of
   safety. They do respond to `--depth-short-side`, `--ema*`, `--minmax-ema` and model changes.
-- `--literal-bestv2` — comparison-only reference mode. It bypasses production resolution,
+- `--literal-bestv2` — comparison-only reference mode. It bypasses the retained evaluator's resolution,
   aspect, and pop scaling and writes the fact to `contract.json`; never use it for quality gates or
   committed baselines.
 - `--depth-override-root DIR` — comparison-only offline reference that replaces explicitly
@@ -378,7 +387,7 @@ Harness A/B levers (after `--extra`):
   inferred depth frame for a spatial/temporal processor oracle. `prepare_flow_ema_reference.py`
   builds the exact-flow EMA oracle used to reject recursive and one-frame flow history. It requires
   exact `gt_flow` sidecars and a source run made with `--ema 1 --ema-edge-change 0`.
-- Bestv2 is the only disparity field. It uses the preset's source-pixel FG/MG/BG shifts
+- Within the legacy/offline harness, Bestv2 is the only disparity field. It uses the preset's source-pixel FG/MG/BG shifts
   (`-9/-3/+2.4`), `.35` parallax
   balance, `1.11/1.05` multipliers, `.008` zero-parallax trim, dynamic convergence `.006`,
   `.071` safety cap. Rejected subject-plane lock and per-eye sharpen paths have been removed.
@@ -402,21 +411,14 @@ Harness A/B levers (after `--extra`):
 - `--no-subject-stretch` — disable that stretch for an accepted-feature ablation.
 - `--zero-plane subject|median|background` — choose a shot-latched screen-plane anchor.
   All three preserve symmetric eye geometry and the disparity scale, and update only at startup or
-  a hard scene cut. `median` is the headset-validated production default; `subject` and
+  a hard scene cut. `median` is the legacy evaluator's headset-validated default; `subject` and
   `background` are experimental camera-offset treatments. The historical per-frame `legacy` mode
   was removed because its moving anchor caused visible convergence wobble.
 - `--cuda-graph on|off` — capture and replay the TensorRT enqueue when the mapped D3D tensor
   addresses remain stable. The first enqueue for a new address/shape is an uncaptured warmup.
 
-Production uses the equivalent `sbs_3d_pop_strength = F` key. Like every individual SBS key it
-overrides every profile; omit it to retain each profile's configured/default value (`1.20`).
-Scene-adaptive pop is enabled by default. It selects once per scene between the `1.20` floor and
-the validated `sbs_3d_adaptive_pop_max = 2.00` ceiling using a gradient-magnitude-weighted edge
-statistic, then
-holds the result bit-stable until a hard cut. Set `sbs_3d_adaptive_pop = false` for the fixed floor.
-The equivalent production key is `sbs_3d_zero_plane`. Its default is `median`; `subject` and
-`background` remain controlled headset/evaluator A/B treatments that change convergence placement
-without changing the configured pop multiplier.
+Live Host SBS uses `sbs_3d_pop_strength = F` literally. The retained adaptive-pop and zero-plane
+switches above are evaluator/offline controls only; they do not modify production V2 geometry.
 CUDA Graph replay is enabled by default for every profile. Use `sbs_3d_cuda_graph = false` only
 for driver diagnosis or a controlled performance A/B; unsupported/capture-failed systems already
 fall back to ordinary TensorRT enqueue automatically.
@@ -505,16 +507,16 @@ Schema 35 additionally records the exact runtime RGB-to-model-input shader closu
 binds each clip's exact schema-18 producer identity, raw tensor shape, and ordered raw-file hashes;
 unsupported model contracts or shapes abstain per clip. A calibrated
 profile and V2 calibration ID are admitted only when model name/URL/ONNX, source closure, and input
-shape all match the generated schema-12 contract; otherwise the run records an explicit null
+shape all match the generated schema-14 contract; otherwise the run records an explicit null
 calibration instead of silently inheriting the DAV2 scale.
-Schema 12 also binds the ordered seven-shader V2 implementation by its immutable
+Schema 14 also binds the ordered seven-shader V2 implementation by its immutable
 source/spec/include closure. The GPU tag hashes the semantic manifest with only that
 self-referential closure digest
 replaced by a fixed sentinel; generated C++ and evidence retain the full canonical-manifest and
-independent shader-closure digests. Live state/frame-stat dumps use serialization schemas 6/2 and
-reject a missing or mismatched shader identity. State schema 6 also authenticates the full
+independent shader-closure digests. Live state/frame-stat dumps use serialization schemas 7/2 and
+reject a missing or mismatched shader identity. State schema 7 also authenticates the full
 12-word scene state: shot-latched near-tail coverage/count, its effective near-log tau, the
-required-zero reserved word, and the probe/coverage/dense-tau constants used to derive it.
+camera-center integrity checksum, and the probe/coverage/dense-tau constants used to derive it.
 The acquisition field selects `tau_near = lerp(2, 1, smoothstep(0.15, 0.22,
 fraction(u > 1)))`; ordinary and unusable no-cut frames retain it, while a confirmed cut replaces
 it with the new camera or clears it when depth is unusable. Rendering uses that latched tau, but

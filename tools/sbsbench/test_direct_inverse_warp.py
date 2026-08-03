@@ -157,7 +157,7 @@ class DirectInverseWarpMathTest(unittest.TestCase):
         self.assertLessEqual(theoretical_bound * 5120.0, 0.05)
 
 class DirectInverseWarpSourceTest(unittest.TestCase):
-    def test_live_and_external_final_paths_use_only_the_contractive_inverse(self) -> None:
+    def test_external_final_path_uses_only_the_contractive_inverse(self) -> None:
         reprojection = (SHADER_ROOT / "sbs_reprojection_ps.hlsl").read_text(
             encoding="utf-8"
         )
@@ -201,17 +201,6 @@ class DirectInverseWarpSourceTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("DirectOrderTexture", coverage)
-
-        display = (REPO_ROOT / "src" / "platform" / "windows" /
-                   "display_vram.cpp").read_text(encoding="utf-8")
-        self.assertIn(
-            "v2_renderer_selected ? est.shadow_final_parallax.Get()",
-            display,
-        )
-        self.assertNotIn(
-            "v2_renderer_selected ? est.shadow_candidate_parallax.Get()",
-            display,
-        )
 
     def test_direct_constant_buffer_has_no_search_radius_authority(self) -> None:
         common = (SHADER_ROOT / "include" / "sbs_warp_common.hlsl").read_text(

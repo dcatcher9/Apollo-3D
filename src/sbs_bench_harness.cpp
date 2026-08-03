@@ -3058,7 +3058,7 @@ namespace sbs_bench {
     // ---- estimator ----
     // Cache and raw-v2 replay are deliberately pure D3D render passes: do not construct the
     // TensorRT estimator. The v2 path uploads authenticated model output directly into the same
-    // seven experimental shadow compute shaders, and no legacy estimator may silently run beside
+    // seven authenticated production V2 compute shaders, and no legacy estimator may silently run beside
     // it.
     std::unique_ptr<models::video_depth_estimator> estimator;
     if (!replay_mode && !depth_coordinate_v2_gpu_mode) {
@@ -3067,7 +3067,8 @@ namespace sbs_bench {
         ctx,
         fs::path(SUNSHINE_ASSETS_DIR),
         sbs_cfg,
-        model
+        model,
+        models::depth_estimator_usage_e::legacy_evaluation
       );
     }
 
@@ -4514,10 +4515,9 @@ namespace sbs_bench {
                 "\"pop_strength_authority\": \"contract.pop_strength-only\", "
                 "\"adaptive_pop_applied\": false},\n";
         }
-        contract << "  \"parallax_v2_shadow\": "
-                 << (sbs_cfg.parallax_v2_shadow ? "true" : "false") << ",\n"
+        contract << "  \"parallax_v2_shadow\": false,\n"
                  << "  \"parallax_v2_render\": "
-                 << (sbs_cfg.parallax_v2_render ? "true" : "false") << ",\n"
+                 << (depth_coordinate_v2_gpu_mode ? "true" : "false") << ",\n"
                  << "  \"cuda_graph\": " << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
                  << "  \"cuda_graph_captured\": " << (cuda_graph_captured ? "true" : "false") << ",\n"
                  << "  \"subject_state\": {\"file\": \"subject_state.json\", "
@@ -4703,10 +4703,9 @@ namespace sbs_bench {
         << "    \"ema_edge_strength\": " << sbs_cfg.ema_edge_strength << ",\n"
         << "    \"cuda_graph\": "
         << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
-        << "    \"parallax_v2_shadow\": "
-        << (sbs_cfg.parallax_v2_shadow ? "true" : "false") << ",\n"
+        << "    \"parallax_v2_shadow\": false,\n"
         << "    \"parallax_v2_render\": "
-        << (sbs_cfg.parallax_v2_render ? "true" : "false") << ",\n"
+        << (depth_coordinate_v2_gpu_mode ? "true" : "false") << ",\n"
         << "    \"cuda_graph_captured\": "
         << (cuda_graph_captured ? "true" : "false") << ",\n"
         << "    \"literal_bestv2\": "

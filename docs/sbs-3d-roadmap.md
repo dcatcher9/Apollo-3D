@@ -1,33 +1,40 @@
 # SBS 3D — current status and roadmap
 
 Apollo converts captured mono frames into host-rendered SBS with TensorRT depth estimation and one
-production geometry implementation: Apollo's occlusion-aware backward probe. The retired VD3D
-forward/backward hybrid and its selectable profile were removed after headset testing found worse
-rim/halo behavior and a serious thin-structure artifact for only about 0.12 ms of warp-time saving.
-Historical experiment evidence remains in Git history and `sbs-feature-decision-revisit.md`.
+production live geometry implementation: Host SBS Depth Coordinate V2. The V1 occlusion-aware
+backward-probe renderer and its live selector have been removed. V2 consumes the least anisotropic
+2D near-preserving majorant of the signed candidate field: a vertical shear-2 column majorant
+followed by the slope-0.5 row majorant. Neither pass lowers requested disparity; the final field
+bounds crown shear and horizontal slope and is inverted with a unique 12-step contractive fixed
+point. Candidate, vertical intermediate, and canonical coordinate remain diagnostics only; V2 has
+no forward-owner, visibility-selection, or synthetic-fill path.
 
-The default-off Host SBS Depth Coordinate V2 experiment is intentionally separate from that
-shipping path. Its live renderer consumes the least anisotropic 2D near-preserving majorant of the
-signed candidate field: a vertical shear-2 column majorant followed by the slope-0.5 row majorant.
-Neither pass lowers requested disparity; the final bounds both crown shear and horizontal slope and
-is inverted with a unique 12-step contractive fixed point. Candidate, vertical intermediate, and
-canonical coordinate remain diagnostics only; V2 has no forward-owner, visibility-selection, or
-synthetic-fill path. See
-`docs/host-sbs-depth-coordinate-v2.md` for the fail-closed test contract.
+Production contract schema 14 authenticates DAV2 Small, its HDR/SDR preprocessing closure, the
+seven-pass producer, the standalone live renderer, and six standard tensor shapes (`770x434`,
+`1022x434`, `1036x434`, `434x770`, `434x1022`, and `434x1036`). DAV2 Base, custom models, and custom
+tensor shapes fail flat. There is no V1 fallback. See
+`docs/host-sbs-depth-coordinate-v2.md` for the complete fail-closed contract.
+
+The legacy analysis stack remains live only as the temporary producer of the confirmed scene-cut
+`{generation, pulse}` bridge consumed by V2. Its normalized depth, subject, adaptive-pop,
+zero-plane, and warp outputs have no live geometry authority. Legacy renderer/shader sources remain
+in the tree for offline conversion and evaluation harnesses; their presence does not make V1
+selectable in Host SBS.
 
 Approved AR glasses connected as a Windows monitor also use an automatic local presenter; see
 `docs/sbs-local-ar-glasses.md`. That path reuses the production depth and warp without NVENC.
 
 ## Shipping pipeline
 
-1. Preserve source aspect while selecting a patch-aligned TensorRT input grid.
-2. Convert SDR or HDR capture into the color domain expected by the depth model.
-3. Transform model output into Apollo's high-is-near convention.
-4. Normalize with permanent P2/P98 bounds and temporal range EMA.
-5. Apply per-pixel EMA, accepted edge/change-aware EMA, Bestv2-derived subject estimation,
-   and P2/P98 stretch/recenter (both the normalization range and the stretch band are
-   attack-fast/release-slow envelopes, never narrower than the live percentiles).
-6. Render Apollo's occlusion-aware backward probe.
+1. Preserve source aspect while selecting one of the six authenticated patch-aligned tensor grids.
+2. Convert SDR or HDR capture into the authenticated DAV2 Small input domain.
+3. Infer raw depth and obtain only the confirmed cut epoch from the temporary legacy-analysis
+   bridge.
+4. Acquire or retain the scene center and near-tail shoulder, then apply the fixed raw scale,
+   monotone asymmetric curve, requested pop, and exact frame-local 4% source-U container.
+5. Produce the vertical shear-2 majorant and then the slope-0.5 row majorant entirely on the GPU.
+6. Render each eye with the unique 12-step contractive inverse. Invalid or unauthenticated current
+   geometry renders flat rather than reusing stale depth or falling back to V1.
 7. Convert the packed SBS raster directly to the encoder format. If doubled width exceeds
    `sbs_3d_max_encode_width` or the selected codec's runtime `NV_ENC_CAPS_WIDTH_MAX`, preserve each
    eye's aspect while scaling to the lower cap. The configured production ceiling is 8192 packed
@@ -35,10 +42,17 @@ Approved AR glasses connected as a Windows monitor also use an automatic local p
    source becomes 4096x1152 in H.264 but remains 7680x2160 in HEVC/AV1. Apollo records the
    authoritative per-codec capability during NVENC probing and refreshes it at encoder creation.
 
-Profiles remain configuration-only parameter sets over this single geometry. Define fields with
-`sbs_3d_profile_<name>_<parameter>`; `sbs_3d_profile` selects the startup preset. Explicit top-level
-`sbs_3d_*` keys override the corresponding selected-profile value. Artemis switches only between
-Normal and Host SBS AI; changing the host profile requires restarting Apollo.
+`sbs_3d_pop_strength` is the live user geometry control and V2 takes it literally. Legacy adaptive
+pop, subject stretch/recenter, min/max normalization, and zero-plane controls do not modify live
+V2 geometry. Standard stream resolutions choose among the authenticated landscape, ultrawide, and
+portrait tensor shapes automatically; a configuration override cannot authorize an unlisted shape
+or different model calibration.
+
+## Archived V1 processor decisions
+
+The entries below record the pre-cutover V1 evaluation history. They remain useful evidence for
+offline/evaluator compatibility and for avoiding repeated experiments, but they do not describe
+the shipped live renderer or live configuration authority.
 
 Bestv2 disparity is calibrated at the evaluator's 854-pixel source width and normalized to the
 5120x2160 Artemis reference aspect. `sbs_3d_pop_strength` scales the final parallax (`0.25`–`2`,
@@ -46,7 +60,7 @@ default floor `1.20`) without changing that resolution correction. The accepted 
 select up to `sbs_3d_adaptive_pop_max` (default `2.00`) from depth-edge risk and holds the
 selection until a hard cut.
 
-## Frozen processor decisions
+### Frozen processor decisions
 
 - Bestv2-derived subject estimation and P2/P98 normalization are mandatory.
 - Range-to-pixel temporal ordering and the Apollo probe are permanent.
@@ -200,8 +214,8 @@ selection until a hard cut.
   and 2.152% of windowed texels are raised. Its residual background bending around the fullscreen
   crown selected a pure vertical shear-2 majorant before the row pass. The final is the least
   anisotropic 2D majorant and preserves `q >= vertical >= candidate`. The source captures are
-  historical schema-7 input witnesses, so fresh schema-12/manifest-schema-7 live dumps and timing
-  are still required before cutover. Evidence:
+  historical schema-7 input witnesses and cannot authenticate the shipped schema-14 path. Current
+  qualification therefore uses fresh schema-14/manifest-schema-7 live dumps and timing. Evidence:
   `E:\ApolloDev\majorant-row-both-confirm-20260802`.
 - Symmetric horizontal edge-band supersampling was rejected after the full core screen. It nudged
   mean halo from 4.57 to 4.52 and the rim proxy from 4.41 to 4.31, but produced no validated
@@ -647,7 +661,7 @@ non-wrapping photometric alignment before they may contribute to signed-disparit
 Style summaries require complete evidence on every frame so failed fits cannot improve an average;
 comfort and integrity remain hard gates.
 
-## Current priorities
+## Archived V1 priorities and completed investigations
 
 1. Correlate the new previous-only GT ghost-edge diagnostic with additional known-motion scenes
    and headset evidence before allowing it to become a primary gate.
@@ -738,5 +752,6 @@ comfort and integrity remain hard gates.
 - `tools/sbsbench/README.md` — build, evaluation, report, and dataset commands.
 - `docs/sbs-feature-decision-revisit.md` — historical accepted/rejected evidence.
 - `docs/sbs-resolution-robustness.md` — coordinate-space and encoder-resolution audit.
-- `src/video_depth_estimator.cpp` — depth normalization and subject state.
-- `src_assets/windows/assets/shaders/directx/sbs_reprojection_ps.hlsl` — production geometry.
+- `src/video_depth_estimator.cpp` — V2 producer plus the temporary legacy scene-cut bridge.
+- `src_assets/windows/assets/shaders/directx/sbs_reprojection_v2_live_ps.hlsl` — production live geometry.
+- `src_assets/windows/assets/shaders/directx/sbs_reprojection_ps.hlsl` — legacy offline/evaluator geometry only.

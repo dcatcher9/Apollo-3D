@@ -37,17 +37,6 @@ namespace video {
     bool input_is_linear
   ) noexcept;
 
-  /**
-   * Whether an SBS intermediate must retain FP16 precision while capture format discovery
-   * is still pending. Transfer state is tracked separately from the actual frame format.
-   */
-  bool sbs_intermediate_requires_fp16(
-    bool capture_is_fp16,
-    bool capture_format_is_unknown,
-    bool source_display_is_hdr,
-    bool output_is_10bit
-  ) noexcept;
-
   // Declared in video.h
   struct config_t;
 

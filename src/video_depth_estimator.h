@@ -2,6 +2,7 @@
 
 #include "config.h"
 
+#include <chrono>
 #include <cstdint>
 #include <d3d11.h>
 #include <filesystem>
@@ -48,6 +49,40 @@ namespace models {
     scrgb_hdr = 2,  ///< linear scRGB FP16 HDR capture; tone-map for the SDR-trained model
   };
 
+  constexpr bool input_color_space_is_linear(const input_color_space color_space) {
+    return color_space != input_color_space::srgb;
+  }
+
+  struct depth_tensor_shape_t {
+    int width = 0;
+    int height = 0;
+
+    constexpr bool valid() const noexcept {
+      return width > 0 && height > 0;
+    }
+
+    constexpr bool operator==(const depth_tensor_shape_t &) const = default;
+  };
+
+  /** Fit one patch-aligned depth tensor to the source aspect using the same native-size and
+   * TensorRT-profile bounds as the production estimator. Invalid source dimensions return 0x0.
+   */
+  depth_tensor_shape_t fit_depth_tensor_shape(
+    std::uint32_t source_width,
+    std::uint32_t source_height,
+    int short_side,
+    float max_aspect
+  );
+
+  /** Selects the additional GPU products required by a caller. The live Host SBS path requires
+   * the authenticated V2 coordinate field; the evaluator/offline converter retains its legacy
+   * normalization outputs and must not be constrained by the live model/shape allowlist.
+   */
+  enum class depth_estimator_usage_e {
+    host_sbs_v2,
+    legacy_evaluation,
+  };
+
   /** Build and warm the active model and prewarm fixed-shape Host SBS shader bytecode. */
   bool prepare_tensorrt_model(
     const std::filesystem::path &assets_dir,
@@ -69,11 +104,11 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth_snapshot;  ///< Optional stable copy of the completed frame's raw output for a live Dump 3D request.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> model_input_snapshot;  ///< Optional stable NCHW/ImageNet-normalized input for the same live Dump 3D frame.
     std::shared_ptr<const raw_model_provenance_t> raw_model_provenance;  ///< Capture-time model-byte identity; copied by pointer on ordinary frames.
-    // Default-off V2 outputs. Shadow-only runs leave production on `depth`/`subject`. In the
-    // config-only render experiment, shadow_final_parallax is the least row-wise near-preserving
-    // Lipschitz majorant of the vertical-shear-conditioned field and the live position authority.
-    // shadow_candidate_parallax is immutable pre-limiter evidence; shadow_vertical_majorant is
-    // the explicit shear2 intermediate; shadow_coordinate is a coordinate diagnostic only.
+    // Production V2 outputs. final_parallax is the least row-wise near-preserving Lipschitz
+    // majorant of the vertical-shear-conditioned field and the live position authority.
+    // candidate_parallax is immutable pre-limiter evidence; vertical_majorant is the explicit
+    // shear2 intermediate. coordinate is an optional Dump-3D-only snapshot, never a live resource
+    // or authentication prerequisite. The legacy `shadow_*` names remain for dump compatibility.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_coordinate;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_candidate_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_majorant;
@@ -81,7 +116,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_state;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_frame_stats;
     std::shared_ptr<const parallax_v2_shader_provenance_t>
-      parallax_v2_shader_provenance;  ///< Exact shader closure; present iff shadow is active.
+      parallax_v2_shader_provenance;  ///< Exact producer shader closure when V2 is active.
     int raw_width = 0;
     int raw_height = 0;
     // A TensorRT result completed and its GPU normalization passes were submitted. The associated
@@ -91,7 +126,7 @@ namespace models {
     std::uint64_t completed_frame_id = 0;  ///< Caller-provided identity of that completed result.
     bool inference_enqueued = false;  ///< This call submitted inference for the supplied input frame.
     bool cuda_graph_active = false;  ///< TensorRT enqueue is currently replaying a captured graph.
-    bool parallax_v2_shadow_active = false;  ///< All optional V2 producer shaders/resources are active. Renderer selection is reported separately by the caller.
+    bool parallax_v2_producer_active = false;  ///< All production V2 producer shaders/resources are active.
     float parallax_v2_raw_coordinate_scale = 0.0f;  ///< Fixed authenticated model/shape coordinate scale.
     float parallax_v2_requested_pop_strength = 0.0f;  ///< Fixed V2 request from cfg.pop_strength only; no legacy adaptive ratio or ceiling is consumed.
     float parallax_v2_requested_gain = 0.0f;  ///< One-eye source-U gain before safety attenuation.
@@ -100,36 +135,63 @@ namespace models {
   /** Fail-closed CPU authentication for a completed live V2 result.
    *
    * This verifies the complete model/preprocess/shape and seven-dispatch source identities, the
-   * presence of every V2 resource, and the fixed-pop gain relation. It deliberately does not map
-   * GPU state; the live shader authenticates the per-frame contract tag before sampling geometry.
+   * presence of every production V2 resource, and the fixed-pop gain relation. Dump-only canonical
+   * coordinate evidence is deliberately excluded. It does not map GPU state; the live shader
+   * authenticates the per-frame contract tag before sampling geometry.
    */
   bool parallax_v2_result_is_authenticated(const estimate_result &result);
 
   enum class host_sbs_renderer_e {
-    undecided,
-    legacy,
+    awaiting_v2,
     parallax_v2,
-    parallax_v2_failed_flat,
+    failed_flat,
   };
 
-  /** One-way renderer latch used by a Host-SBS stream. Once decided, later frames cannot switch
-   * geometry backends even if a result becomes invalid or a transient resource is unavailable.
+  /** One-way production latch. Host SBS authenticates the first completed V2 field before it may
+   * render geometry; rejection is terminal for this stream and can only render live identity.
    */
   constexpr host_sbs_renderer_e latch_host_sbs_renderer(
     const host_sbs_renderer_e current,
-    const bool v2_requested,
-    const bool live_shader_ready,
     const bool result_authenticated
   ) {
-    if (current != host_sbs_renderer_e::undecided) {
+    if (current != host_sbs_renderer_e::awaiting_v2) {
       return current;
     }
-    if (!v2_requested) {
-      return host_sbs_renderer_e::legacy;
-    }
-    return live_shader_ready && result_authenticated ?
+    return result_authenticated ?
              host_sbs_renderer_e::parallax_v2 :
-             host_sbs_renderer_e::parallax_v2_failed_flat;
+             host_sbs_renderer_e::failed_flat;
+  }
+
+  /** A failed V2 producer is terminal for geometry, but not for the video stream. The host
+   * stops producing unused depth and draws each current color frame through flat identity.
+   */
+  constexpr bool host_sbs_renderer_uses_depth_pipeline(
+    const host_sbs_renderer_e renderer
+  ) {
+    return renderer != host_sbs_renderer_e::failed_flat;
+  }
+
+  inline constexpr auto host_sbs_v2_max_matched_repeat_age =
+    std::chrono::milliseconds {250};
+
+  constexpr bool host_sbs_should_repeat_matched_output(
+    const host_sbs_renderer_e renderer,
+    const bool has_matched_frame,
+    const bool matched_output_valid,
+    const std::chrono::steady_clock::duration repeat_source_age =
+      std::chrono::steady_clock::duration::zero()
+  ) {
+    return renderer == host_sbs_renderer_e::parallax_v2 &&
+           !has_matched_frame && matched_output_valid &&
+           repeat_source_age <= host_sbs_v2_max_matched_repeat_age;
+  }
+
+  /** A terminal producer failure moves every nonfailed Host SBS stream to live flat identity. */
+  constexpr host_sbs_renderer_e fail_host_sbs_renderer_flat(
+    const host_sbs_renderer_e current
+  ) {
+    return current == host_sbs_renderer_e::failed_flat ? current :
+                                                        host_sbs_renderer_e::failed_flat;
   }
 
   /**
@@ -187,7 +249,14 @@ namespace models {
      * @param model The selected depth model: name/url (which engine to load/build) plus the
      *            DA-V2-compatible model contract (pixel_values -> predicted_depth).
      */
-    video_depth_estimator(Microsoft::WRL::ComPtr<ID3D11Device> device, Microsoft::WRL::ComPtr<ID3D11DeviceContext> context, const std::filesystem::path &assets_dir, const config::video_t::sbs_t &cfg, const config::depth_model_info &model);
+    video_depth_estimator(
+      Microsoft::WRL::ComPtr<ID3D11Device> device,
+      Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
+      const std::filesystem::path &assets_dir,
+      const config::video_t::sbs_t &cfg,
+      const config::depth_model_info &model,
+      depth_estimator_usage_e usage
+    );
 
     ~video_depth_estimator();
 
@@ -204,6 +273,9 @@ namespace models {
      * color frame into its private matched slot.
      */
     bool can_accept_frame();
+
+    /** True after CUDA/TensorRT reports a non-recoverable execution/interoperability error. */
+    bool has_terminal_failure() const;
 
     // Non-copyable
     video_depth_estimator(const video_depth_estimator &) = delete;

@@ -56,16 +56,6 @@ namespace video {
     return !target_is_hdr && source_display_is_hdr && input_is_linear;
   }
 
-  bool sbs_intermediate_requires_fp16(
-    bool capture_is_fp16,
-    bool capture_format_is_unknown,
-    bool source_display_is_hdr,
-    bool output_is_10bit
-  ) noexcept {
-    return capture_is_fp16 ||
-           (capture_format_is_unknown && (source_display_is_hdr || output_is_10bit));
-  }
-
   sunshine_colorspace_t colorspace_from_client_config(const config_t &config, bool hdr_display) {
     sunshine_colorspace_t colorspace;
 

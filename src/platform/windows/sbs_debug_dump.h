@@ -1,7 +1,6 @@
 /**
  * @file src/platform/windows/sbs_debug_dump.h
- * @brief Debug-only: atomically publish a matched Host-SBS package spanning model input, raw and
- *        processed depth, adaptive state, exact warp mapping, and packed output.
+ * @brief Debug-only: atomically publish one authenticated production-V2 Host-SBS frame.
  */
 #pragma once
 
@@ -9,7 +8,6 @@
 #include <d3d11.h>
 
 // standard includes
-#include <array>
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
@@ -31,22 +29,22 @@ namespace platf::sbs_debug {
    * @brief One exact, completed Host-SBS frame and all optional diagnostic render passes that
    *        belong to it.
    *
-   * model_input and raw_depth are immutable snapshots of the estimator buffers. Legacy rendering
-   * supplies normalized depth/adaptive state and the actual possibly-prefiltered depth as
-   * warp_depth. Selected V2 rendering may omit every legacy field and supplies the exact signed
-   * anisotropically slope-limited final source-U parallax as warp_depth. The immutable candidate
-   * first produces shadow_vertical_majorant (the exact shear-2 column majorant), then the row
-   * majorant produces shadow_final_parallax. shadow_coordinate remains a coordinate diagnostic
-   * only. V2 supplies an exact fixed-point inverse warp_map when its matching dump-only shader is
-   * available. V2 has no internal owner/fill mask; warp_mask attributes only inverse samples
-   * outside the finite source interval that the live renderer clamps to the nearest boundary
-   * column.
+   * model_input and raw_depth are immutable estimator snapshots. warp_depth is the exact signed,
+   * anisotropically slope-limited final source-U parallax consumed by production V2. The
+   * adaptive_state/depth_frame_state pair is optional comparison-only evidence from the retained
+   * scene-cut bridge; it never authorizes a dump or controls live geometry. The immutable V2
+   * candidate first produces shadow_vertical_majorant (the exact shear-2 column majorant), then
+   * the row majorant produces shadow_final_parallax. shadow_coordinate is allocated and written
+   * only for this explicit dump; it is never a live resource. V2 supplies an exact fixed-point
+   * inverse warp_map when its matching dump-only
+   * shader is available. V2 has no internal owner/fill mask; warp_mask attributes only inverse
+   * samples outside the finite source interval that the live renderer clamps to the nearest
+   * boundary column.
    */
   struct frame {
     ID3D11ShaderResourceView *source = nullptr;
     ID3D11ShaderResourceView *model_input = nullptr;
     ID3D11ShaderResourceView *raw_depth = nullptr;
-    ID3D11ShaderResourceView *depth = nullptr;
     ID3D11ShaderResourceView *warp_depth = nullptr;
     ID3D11ShaderResourceView *adaptive_state = nullptr;
     ID3D11ShaderResourceView *depth_frame_state = nullptr;
@@ -67,10 +65,8 @@ namespace platf::sbs_debug {
     int raw_width = 0;
     int raw_height = 0;
     std::uint64_t matched_frame_id = 0;
-    bool warp_depth_prefilter_applied = false;
     bool cuda_graph_active = false;
-    bool parallax_v2_shadow_active = false;
-    bool parallax_v2_render_requested = false;
+    bool parallax_v2_producer_active = false;
     bool parallax_v2_render_selected = false;
     std::string parallax_v2_live_renderer_source_closure_sha256;
     float parallax_v2_raw_coordinate_scale = 0.0f;
@@ -106,20 +102,6 @@ namespace platf::sbs_debug {
      * raw tensor before immediately reusing its CUDA/D3D buffer for the next frame.
      */
     bool snapshot_requested();
-
-    /**
-     * @brief Validate and cache the requested frame's 16-byte normalization state.
-     *
-     * Call this only after the estimator has produced the complete stable snapshot set and before
-     * launching the dump-only mapping pass. Invalid or temporarily unreadable state retains the
-     * request with a bounded retry delay.
-     */
-    bool preflight_requested_frame(
-      ID3D11Device *device,
-      ID3D11DeviceContext *ctx,
-      ID3D11ShaderResourceView *depth_frame_state,
-      std::uint64_t matched_frame_id
-    ) noexcept;
 
     /** Require a current valid authenticated V2 camera before publishing a live-render dump.
      * Invalid V2 completions hold the prior packed SBS via pixel-shader discard, so pairing their
@@ -160,9 +142,7 @@ namespace platf::sbs_debug {
     unsigned poll_counter_ = 0;  ///< Rate-limits the dump.trigger file stat to ~1/s.
     unsigned retry_backoff_frames_ = 0;
     bool snapshot_armed_for_dump_ = false;
-    bool prepared_normalization_valid_ = false;
     std::uint64_t prepared_frame_id_ = 0;
-    std::array<float, 4> prepared_normalization_ {};
   };
 
 }  // namespace platf::sbs_debug

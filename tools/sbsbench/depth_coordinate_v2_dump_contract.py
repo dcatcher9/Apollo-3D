@@ -9,6 +9,7 @@ field layout, so a consumer cannot silently reinterpret a same-sized state buffe
 from __future__ import annotations
 
 import math
+import struct
 from typing import Any, Dict
 
 try:
@@ -20,7 +21,7 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
 
 
 DUMP_MANIFEST_SCHEMA = 7
-SHADOW_STATE_DUMP_SCHEMA = 6
+SHADOW_STATE_DUMP_SCHEMA = 7
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 
 _CONTRACT = coordinate_contract.load_contract()
@@ -53,7 +54,7 @@ _DECODED_KEYS = {
     "requested_gain", "requested_pop_strength", "latched_scale",
     "convergence_curve", "container_scale", "effective_gain",
     "latched_near_tail_coverage", "effective_near_log_tau",
-    "latched_near_tail_count", "near_shoulder_reserved",
+    "latched_near_tail_count", "camera_center_integrity_bits",
 }
 
 
@@ -70,6 +71,20 @@ def _uint32(value: Any, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 0xFFFFFFFF:
         raise ValueError(f"{label} must be a uint32")
     return value
+
+
+def camera_center_integrity_bits(center: float, inverse_scale: float, revision: int) -> int:
+    """Mirror the authenticated SM5 uint32 checksum over the latched camera center."""
+
+    words = (
+        struct.unpack("<I", struct.pack("<f", center))[0],
+        struct.unpack("<I", struct.pack("<f", inverse_scale))[0],
+        revision,
+    )
+    checksum = 0
+    for word in words:
+        checksum = ((checksum ^ word) * 16777619) & 0xFFFFFFFF
+    return checksum
 
 
 def _calibration_revision(value: Any, label: str) -> int:
@@ -233,8 +248,13 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
     coverage = float(typed["latched_near_tail_coverage"])
     effective_tau = float(typed["effective_near_log_tau"])
     near_tail_count = int(typed["latched_near_tail_count"])
-    if typed["near_shoulder_reserved"] != 0:
-        raise ValueError("shadow_state.json near shoulder reserved word must be zero")
+    expected_camera_integrity = camera_center_integrity_bits(
+        float(typed["center"]),
+        float(typed["inverse_scale"]),
+        int(typed["calibration_revision"]),
+    )
+    if typed["camera_center_integrity_bits"] != expected_camera_integrity:
+        raise ValueError("shadow_state.json camera center integrity checksum disagrees")
     if (not 0.0 <= coverage <= 1.0 or
             not _DEFAULTS.near_log_tau_dense <= effective_tau <= _DEFAULTS.near_log_tau or
             not _same_number(effective_tau, _expected_near_log_tau(coverage)) or
@@ -255,7 +275,7 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
         "shadow_state.json decoded.calibration_revision",
     )
     for key in ("confirmed_cut_count", "contract_tag", "latched_near_tail_count",
-                "near_shoulder_reserved"):
+                "camera_center_integrity_bits"):
         _uint32(decoded.get(key), f"shadow_state.json decoded.{key}")
     for key in ("requested_gain", "requested_pop_strength", "latched_scale",
                 "convergence_curve", "container_scale", "effective_gain",
@@ -278,12 +298,12 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
         "latched_near_tail_coverage": coverage,
         "effective_near_log_tau": effective_tau,
         "latched_near_tail_count": near_tail_count,
-        "near_shoulder_reserved": 0,
+        "camera_center_integrity_bits": expected_camera_integrity,
     }
     if any(
             (decoded.get(key) != value if key in {
                 "camera_valid", "calibration_revision", "confirmed_cut_count", "contract_tag",
-                "latched_near_tail_count", "near_shoulder_reserved",
+                "latched_near_tail_count", "camera_center_integrity_bits",
             } else not _same_number(decoded.get(key), value))
             for key, value in expected_decoded.items()):
         raise ValueError("shadow_state.json decoded values disagree with the state words")
@@ -438,6 +458,7 @@ __all__ = [
     "DUMP_MANIFEST_SCHEMA",
     "SHADOW_FRAME_STATS_DUMP_SCHEMA",
     "SHADOW_STATE_DUMP_SCHEMA",
+    "camera_center_integrity_bits",
     "validate_v2_dump_manifest_document",
     "validate_shadow_frame_stats_document",
     "validate_shadow_state_document",

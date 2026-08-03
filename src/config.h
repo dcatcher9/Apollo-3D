@@ -47,8 +47,10 @@ namespace config {
     struct sbs_t {
       std::string profile = "apollo";  ///< Startup quality preset. Custom names use sbs_3d_profile_<name>_<parameter> keys.
       double pop_strength = 1.20;  ///< Production stereo-parallax multiplier (0.25-2). Literal reference runs bypass production scaling in the offline harness.
-      bool adaptive_pop = true;  ///< Select pop once per scene from depth-edge risk, then hold it constant until a hard cut.
-      double adaptive_pop_max = 2.00;  ///< Validated absolute ceiling for adaptive pop (pop_strength-2). Values below pop_strength clamp to the floor. The 1.20-2.00 band gives the controller a 1.67 ratio, so the scene classifier dominates quality; its risk statistic is gradient-magnitude weighted and its endpoints are calibrated to measured content (see depth_subject_resolve_cs). The former 1.25-1.30 band was a 1.04 ratio, below the noise floor of every metric that could judge it.
+      // The following legacy-analysis controls remain serialized for offline conversion/evaluation
+      // and for the retained live scene-cut bridge. They do not alter V2 live geometry or pop.
+      bool adaptive_pop = true;
+      double adaptive_pop_max = 2.00;
       double ema = 0.5;  ///< Temporal smoothing blend for the depth map (0-1). Higher = snappier, lower = more stable.
       double ema_edge_change = 0.05;  ///< Edge-selective EMA: minimum current-vs-history depth change. 0 disables it.
       /// Edge-selective EMA: minimum current depth gradient in 434-short-side reference-texel units.
@@ -57,15 +59,13 @@ namespace config {
       int depth_short_side = 432;  ///< Depth map short-side resolution, clamped to the frame's native short side. At 16:9 this maps to about 768x432, matching the VisionDepth3D reference input.
       double depth_max_aspect = 4.0;  ///< Aspect-ratio cap (long side <= short * this). Bounds worst-case inference cost on ultrawide.
       double minmax_ema = 0.18;  ///< Temporal EMA blend for the normalized disparity min/max (0-1). Lower = steadier depth scale, higher = adapts faster.
-      double subject_recenter = 0.35;  ///< How strongly the depth field is shifted to put the tracked subject at mid-depth before the band mapping (0-1).
-      bool subject_stretch = true;  ///< Bestv2 shape_depth_for_pop stretch: rescale the permanent P5/P95 band to [0,1].
-      std::string zero_plane = "median";  ///< Shot-latched screen-plane anchor: subject, median, or background. Experimental modes preserve disparity range and eye symmetry. `median` is the validated default. The former `legacy` mode tracked the anchor per frame and its wobble fed both stretch and jitter; it was removed along with the convergence bias and subject-lock scaling that only it used.
-      std::string depth_model = "depth_anything_v2_fp16";  ///< Local ONNX stem/logical model name. Identifies models so each gets its own recipe-specific engine cache.
-      std::string depth_model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< URL to download the depth model ONNX from if <depth_model>.onnx is absent. Point this (and depth_model) elsewhere to use a different model.
+      double subject_recenter = 0.35;
+      bool subject_stretch = true;
+      std::string zero_plane = "median";
+      std::string depth_model = "depth_anything_v2_fp16";  ///< Offline/evaluator selection. Live Host SBS V2 is pinned to the authenticated DAV2-Small identity.
+      std::string depth_model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< Offline/evaluator download source; live Host SBS uses the authenticated production URL.
       int max_encode_width = 8192;  ///< Configured maximum packed Host SBS width. The effective cap is the lower of this value and the selected codec's NVENC capability (RTX 5080: H.264 4096, HEVC/AV1 8192); wider requests are aspect-preservingly scaled.
       bool cuda_graph = true;  ///< Capture/replay the TensorRT enqueue when mapped D3D buffer addresses remain stable. Falls back to ordinary enqueue when unsupported.
-      bool parallax_v2_shadow = false;  ///< Config-file-only, default-off GPU shadow of the unclipped raw-coordinate/parallax-v2 mapping. It never selects rendered output.
-      bool parallax_v2_render = false;  ///< Config-file-only, default-off live Host-SBS renderer cutover. Enabling it also activates the authenticated V2 producer; failures latch the stream to flat identity, never legacy geometry.
     };
 
     sbs_t sbs;

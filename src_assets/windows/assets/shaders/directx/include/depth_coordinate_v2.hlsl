@@ -16,6 +16,29 @@ bool V2CalibrationRevisionValid(uint revision) {
     return revision > 0u && revision != 0xffffffffu;
 }
 
+// Authenticate the only otherwise-unbounded camera coordinate. The fixed inverse scale and
+// revision are included so a same-tag state assembled from different camera generations cannot
+// accidentally validate. Starting from zero deliberately keeps the generated empty-state word
+// zero while still making every acquired camera carry a deterministic non-zero checksum in the
+// ordinary case. Integer overflow is the specified modulo-2^32 checksum behavior.
+uint V2CameraCenterIntegrityBits(float4 active, float4 control) {
+    uint checksum = 0u;
+    checksum = (checksum ^ asuint(V2_STATE_CENTER(active))) * 16777619u;
+    checksum = (checksum ^ asuint(V2_STATE_INVERSE_SCALE(active))) * 16777619u;
+    checksum = (checksum ^ asuint(V2_STATE_CALIBRATION_REVISION(control))) * 16777619u;
+    return checksum;
+}
+
+bool V2CameraCenterIntegrityValid(float4 active, float4 control, float4 shoulder) {
+    return asuint(V2_STATE_CAMERA_CENTER_INTEGRITY_BITS(shoulder)) ==
+        V2CameraCenterIntegrityBits(active, control);
+}
+
+void V2SealCameraCenter(float4 active, float4 control, inout float4 shoulder) {
+    V2_STATE_CAMERA_CENTER_INTEGRITY_BITS(shoulder) = asfloat(
+        V2CameraCenterIntegrityBits(active, control));
+}
+
 float V2NearDenseWeight(float coverage) {
     return smoothstep(
         v2_near_tail_coverage_low,
@@ -42,8 +65,7 @@ bool V2NearShoulderValid(float4 shoulder, uint texel_count) {
         V2Finite(effective_tau) &&
         effective_tau >= v2_near_log_tau_dense &&
         effective_tau <= v2_near_log_tau &&
-        V2ApproximatelyEqual(effective_tau, V2ExpectedNearTau(coverage)) &&
-        asuint(V2_STATE_NEAR_SHOULDER_RESERVED(shoulder)) == 0u;
+        V2ApproximatelyEqual(effective_tau, V2ExpectedNearTau(coverage));
 }
 
 bool V2CameraStateValid(
@@ -67,6 +89,7 @@ bool V2CameraStateValid(
         (frame_valid == 0.0f || frame_valid == 1.0f) &&
         (frame_valid > 0.5f || container_scale == 1.0f) &&
         V2CalibrationRevisionValid(revision) &&
+        V2CameraCenterIntegrityValid(active, control, shoulder) &&
         V2NearShoulderValid(shoulder, texel_count);
 }
 
@@ -86,7 +109,7 @@ bool V2EmptyCameraStateValid(
         V2_STATE_LATCHED_NEAR_TAIL_COVERAGE(shoulder) == 0.0f &&
         V2_STATE_EFFECTIVE_NEAR_LOG_TAU(shoulder) == v2_near_log_tau &&
         asuint(V2_STATE_LATCHED_NEAR_TAIL_COUNT(shoulder)) == 0u &&
-        asuint(V2_STATE_NEAR_SHOULDER_RESERVED(shoulder)) == 0u;
+        V2CameraCenterIntegrityValid(active, control, shoulder);
 }
 
 // D3D shader model 5 has exp/log but not expm1/log1p. Preserve precision at both C1 joins with

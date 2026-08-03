@@ -252,6 +252,7 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
             "authority": "seven-experimental-shadow-compute-shaders-persistent-gpu-state-v3",
             "manifest_sha256": "0" * 64,
             "contract_canonical_sha256": CONTRACT_CANONICAL_SHA256,
+            "tensor_shape": {"width": width, "height": height},
             "shader_sequence": list(V2_GPU_SHADER_SEQUENCE),
             "state_persistence": "single-buffer-whole-sequence",
             "numpy_role": "comparison-only-not-render-authority",
@@ -263,6 +264,11 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
         # count-to-coverage relationship is corrupted.
         changed["frames"][0]["latched_near_tail_coverage"] += 0.01
         with self.assertRaisesRegex(ValueError, "count/coverage disagree"):
+            validate_v2_state_trace(changed, result.frame_ids)
+
+        changed = copy.deepcopy(native)
+        changed["producer"]["tensor_shape"]["width"] += 16
+        with self.assertRaisesRegex(ValueError, "unauthenticated replay tensor shape"):
             validate_v2_state_trace(changed, result.frame_ids)
 
     def test_trace_rejects_impossible_collapse_and_frame_validity_combinations(self):

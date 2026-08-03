@@ -2559,10 +2559,11 @@ def main():
     expected_cuda_graph = expected_profile_bool(
         args.conf, expected_config_profile, "cuda_graph", True, args.extra,
         "--cuda-graph")
-    expected_v2_shadow = expected_profile_bool(
-        args.conf, expected_config_profile, "parallax_v2_shadow", False, [], "")
-    expected_v2_render = expected_profile_bool(
-        args.conf, expected_config_profile, "parallax_v2_render", False, [], "")
+    # These persisted fields describe this evaluator invocation, not live Host SBS configuration.
+    # The default clip gate intentionally remains the legacy comparison pipeline; authenticated
+    # V2 sequence replay records render=true in its own manifest-driven path.
+    expected_v2_shadow = False
+    expected_v2_render = False
     expected_adaptive = expected_adaptive_pop(args.conf, expected_config_profile, args.extra)
     expected_adaptive_max = expected_profile_number(
         args.conf, expected_config_profile, "adaptive_pop_max", 2.00, args.extra,

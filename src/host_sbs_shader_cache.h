@@ -37,19 +37,24 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec depth_coordinate_v2_near_coverage {"depth_coordinate_v2_near_coverage_cs.hlsl"};
   inline constexpr shader_spec depth_coordinate_v2_state_resolve {"depth_coordinate_v2_state_resolve_cs.hlsl"};
   inline constexpr shader_spec depth_coordinate_v2_map {"depth_coordinate_v2_map_cs.hlsl"};
+  inline constexpr shader_spec depth_coordinate_v2_coordinate_diagnostic {
+    "depth_coordinate_v2_map_cs.hlsl", "coordinate_main", "cs_5_0"
+  };
   inline constexpr shader_spec depth_coordinate_v2_vertical_limit {"depth_coordinate_v2_vertical_limit_cs.hlsl"};
   inline constexpr shader_spec depth_coordinate_v2_limit {"depth_coordinate_v2_limit_cs.hlsl"};
   inline constexpr shader_spec parallax_v2_live_renderer {
     "sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"
   };
   inline constexpr shader_spec parallax_v2_live_mapping {
-    "sbs_reprojection_v2_live_ps.hlsl", "mapping_ps", "ps_5_0"
+    "sbs_reprojection_v2_diagnostics_ps.hlsl", "mapping_ps", "ps_5_0"
   };
   inline constexpr shader_spec parallax_v2_live_mask {
-    "sbs_reprojection_v2_live_ps.hlsl", "mask_ps", "ps_5_0"
+    "sbs_reprojection_v2_diagnostics_ps.hlsl", "mask_ps", "ps_5_0"
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "25061ab84be309d97910deffa8dc41ec31cbf95af8c9e5ef844ee0113a7b2b83";
+    "f0f5d1da39786574e6eeb7eca9a8e944e2b3955f8a204c7b7945b13a92f0559e";
+  inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
+    "ccfaac7b76e0fc5d91889d4d537a5d8b74338b6058762fa3e60e15d39ed71c15";
 
   inline constexpr std::array preprocess_specs {
     rgb_to_nchw,
@@ -67,9 +72,7 @@ namespace models::host_sbs_shader_cache {
     depth_valid_history,
   };
 
-  // Kept out of core_specs on purpose: the v2 path is config-file-only and default-off. A normal
-  // Host SBS startup must neither compile these experimental shaders nor inherit their failures.
-  inline constexpr std::array parallax_v2_shadow_specs {
+  inline constexpr std::array parallax_v2_producer_specs {
     depth_coordinate_v2_moments,
     depth_coordinate_v2_frame_resolve,
     depth_coordinate_v2_near_coverage,
@@ -79,8 +82,20 @@ namespace models::host_sbs_shader_cache {
     depth_coordinate_v2_limit,
   };
 
+  // The canonical-coordinate field is not a production input or output. Keep its alternate
+  // entrypoint outside the authenticated live producer set so a normal frame never depends on
+  // diagnostic shader availability.
+  inline constexpr std::array parallax_v2_diagnostic_specs {
+    depth_coordinate_v2_coordinate_diagnostic,
+  };
+
   inline constexpr std::array parallax_v2_live_renderer_specs {
     parallax_v2_live_renderer,
+  };
+
+  // Dump-only shader roots. These are intentionally absent from prewarm() and from the pinned
+  // production renderer closure; a diagnostics failure must not affect live Host SBS.
+  inline constexpr std::array parallax_v2_live_diagnostic_specs {
     parallax_v2_live_mapping,
     parallax_v2_live_mask,
   };
@@ -112,6 +127,6 @@ namespace models::host_sbs_shader_cache {
     const shader_spec &spec
   );
 
-  /** Precompile every shader consumed by the ordinary fixed-shape depth-estimator constructor. */
+  /** Precompile the production Host SBS V2 shader set (never dump-only diagnostics). */
   bool prewarm(const std::filesystem::path &assets_dir);
 }  // namespace models::host_sbs_shader_cache

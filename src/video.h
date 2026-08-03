@@ -127,6 +127,15 @@ namespace video {
     std::uint32_t sampled_frame_id = 0;
   };
 
+  /** Apply the profile fields shared by unavailable, ready, and failed telemetry snapshots. V2
+   * has fixed pop and no legacy zero-plane/adaptive-pop authority; the configured plane remains
+   * present solely because telemetry v1 requires it when the configuration field is valid.
+   */
+  void apply_sbs_telemetry_profile(
+    sbs_telemetry_snapshot_t &snapshot,
+    const config::video_t::sbs_t &profile
+  ) noexcept;
+
   /** Allocate a nonzero renderer generation. Called for every encode-device rebuild/reset. */
   std::uint32_t next_sbs_telemetry_generation() noexcept;
 
@@ -402,6 +411,14 @@ namespace video {
      against config::depth_model_registry(), else synthesized from the model/url escape hatch. */
   config::depth_model_info active_depth_model();
   config::depth_model_info depth_model_for_profile(const config::video_t::sbs_t &profile);
+
+  /** Resolve the only model family authenticated for live Host SBS V2. Offline/evaluator callers
+   * continue to use depth_model_for_profile() so their explicit Base/custom model experiments are
+   * not silently changed by the production-live restriction.
+   */
+  config::depth_model_info host_sbs_v2_depth_model_for_profile(
+    const config::video_t::sbs_t &profile
+  );
   using img_event_t = std::shared_ptr<safe::event_t<std::shared_ptr<platf::img_t>>>;
 
   struct encode_session_t {

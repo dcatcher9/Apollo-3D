@@ -99,7 +99,7 @@ EXPECTED_SHADOW_STATE_FIELD_NAMES = (
     "latched_near_tail_coverage",
     "effective_near_log_tau",
     "latched_near_tail_count",
-    "near_shoulder_reserved",
+    "camera_center_integrity_bits",
 )
 CONTRACT_TAG_SENTINEL = "contract_tag"
 PREPROCESS_SHADER_ROOT = (

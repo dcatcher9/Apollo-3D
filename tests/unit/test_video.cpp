@@ -483,35 +483,67 @@ TEST(DirectxShaderTest, FixedShapeHostSbsCachePrewarmsAndReusesBytecode) {
   }
 }
 
-TEST(DirectxShaderTest, ParallaxV2ShadowShadersCompileOutsideCorePrewarm) {
+TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   namespace cache = models::host_sbs_shader_cache;
   const std::filesystem::path shader_root = SUNSHINE_SHADERS_DIR;
-  const auto shadow_sources = cache::snapshot_sources(
+  const auto assets_dir = shader_root.parent_path().parent_path();
+  ASSERT_TRUE(cache::prewarm(assets_dir));
+  const auto producer_sources = cache::snapshot_sources(
     shader_root,
-    cache::parallax_v2_shadow_specs
+    cache::parallax_v2_producer_specs
   );
-  ASSERT_TRUE(shadow_sources);
+  ASSERT_TRUE(producer_sources);
 
-  for (const auto &shadow : cache::parallax_v2_shadow_specs) {
-    ASSERT_TRUE(cache::get(shadow_sources, shadow)) << shadow.filename;
+  for (const auto &producer : cache::parallax_v2_producer_specs) {
+    const auto first = cache::get(producer_sources, producer);
+    const auto second = cache::get(producer_sources, producer);
+    ASSERT_TRUE(first) << producer.filename;
+    ASSERT_TRUE(second) << producer.filename;
+    EXPECT_EQ(first.get(), second.get()) << producer.filename;
     EXPECT_EQ(
       std::count_if(
         cache::core_specs.begin(),
         cache::core_specs.end(),
-        [&shadow](const cache::shader_spec &core) {
-          return core.filename == shadow.filename;
+        [&producer](const cache::shader_spec &core) {
+          return core.filename == producer.filename;
         }
       ),
       0
-    ) << shadow.filename;
+    ) << producer.filename;
   }
+
+  const auto diagnostic_sources = cache::snapshot_sources(
+    shader_root,
+    cache::parallax_v2_diagnostic_specs
+  );
+  ASSERT_TRUE(diagnostic_sources);
+  const auto coordinate_diagnostic = cache::get(
+    diagnostic_sources,
+    cache::depth_coordinate_v2_coordinate_diagnostic
+  );
+  ASSERT_TRUE(coordinate_diagnostic);
+
+  const auto live_sources = cache::snapshot_sources(
+    shader_root,
+    cache::parallax_v2_live_renderer_specs
+  );
+  ASSERT_TRUE(live_sources);
+  for (const auto &live : cache::parallax_v2_live_renderer_specs) {
+    const auto first = cache::get(live_sources, live);
+    const auto second = cache::get(live_sources, live);
+    ASSERT_TRUE(first) << live.filename << ':' << live.entrypoint;
+    ASSERT_TRUE(second) << live.filename << ':' << live.entrypoint;
+    EXPECT_EQ(first.get(), second.get()) << live.filename << ':' << live.entrypoint;
+  }
+  EXPECT_EQ(cache::parallax_v2_live_renderer_specs.size(), 1u);
+  EXPECT_EQ(cache::parallax_v2_live_diagnostic_specs.size(), 2u);
 }
 
-TEST(ParallaxV2ShadowContractTest, DefaultsOffAndCarriesAttributableState) {
+TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   namespace v2 = models::depth_coordinate_v2;
-  const config::video_t::sbs_t defaults;
-  EXPECT_FALSE(defaults.parallax_v2_shadow);
-  EXPECT_FALSE(defaults.parallax_v2_render);
+  EXPECT_FALSE(models::input_color_space_is_linear(models::input_color_space::srgb));
+  EXPECT_TRUE(models::input_color_space_is_linear(models::input_color_space::linear_sdr));
+  EXPECT_TRUE(models::input_color_space_is_linear(models::input_color_space::scrgb_hdr));
   EXPECT_FLOAT_EQ(v2::gain_per_pop, 0.00375f);
   EXPECT_FLOAT_EQ(v2::parallax_gain, 0.0075f);
   EXPECT_FLOAT_EQ(v2::requested_pop_strength(1.2f), 1.2f);
@@ -543,18 +575,18 @@ TEST(ParallaxV2ShadowContractTest, DefaultsOffAndCarriesAttributableState) {
   );
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
-  EXPECT_EQ(v2::contract_schema, 12u);
-  EXPECT_EQ(v2::contract_tag, 0x8FAA6FA5u);
+  EXPECT_EQ(v2::contract_schema, 14u);
+  EXPECT_EQ(v2::contract_tag, 0x1AD89481u);
   EXPECT_EQ(
     v2::contract_canonical_sha256,
-    "75486b54117c99baefa38ee6ff821941739da2abecd6fe4335cd571ed3d651da"
+    "fdfda53e49ede50fc3408c7ecdafe7076a37b8468f5d828dc4a0d47e0656f458"
   );
   EXPECT_EQ(
     v2::contract_tag_semantic_sha256,
-    "8faa6fa5a71b69b478d419c5df756e8f76450e553e9a7ceee13848c1a197c1bc"
+    "1ad894818b5e3a42ae5619e9d55a757cc10d1356098fc832de512be59d8c6907"
   );
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
-  EXPECT_EQ(v2::shadow_state_dump_schema, 6u);
+  EXPECT_EQ(v2::shadow_state_dump_schema, 7u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
   EXPECT_EQ(v2::capture_provenance_manifest_key, "raw_model_provenance");
   EXPECT_EQ(
@@ -573,13 +605,13 @@ TEST(ParallaxV2ShadowContractTest, DefaultsOffAndCarriesAttributableState) {
     small_calibration.preprocess.source_closure_sha256
   );
   EXPECT_EQ(models::host_sbs_shader_cache::shader_compile_flags, 0x00008800u);
-  const auto shadow_sources = models::host_sbs_shader_cache::snapshot_sources(
+  const auto producer_sources = models::host_sbs_shader_cache::snapshot_sources(
     SUNSHINE_SHADERS_DIR,
-    models::host_sbs_shader_cache::parallax_v2_shadow_specs
+    models::host_sbs_shader_cache::parallax_v2_producer_specs
   );
-  ASSERT_TRUE(shadow_sources);
+  ASSERT_TRUE(producer_sources);
   EXPECT_EQ(
-    models::host_sbs_shader_cache::source_closure_sha256(shadow_sources),
+    models::host_sbs_shader_cache::source_closure_sha256(producer_sources),
     v2::shader_source_closure_sha256
   );
   EXPECT_EQ(
@@ -604,12 +636,12 @@ TEST(ParallaxV2ShadowContractTest, DefaultsOffAndCarriesAttributableState) {
   );
   ASSERT_EQ(
     v2::shader_source_specs.size(),
-    models::host_sbs_shader_cache::parallax_v2_shadow_specs.size()
+    models::host_sbs_shader_cache::parallax_v2_producer_specs.size()
   );
   for (std::size_t index = 0; index < v2::shader_source_specs.size(); ++index) {
     const auto &contract_spec = v2::shader_source_specs[index];
     const auto &runtime_spec =
-      models::host_sbs_shader_cache::parallax_v2_shadow_specs[index];
+      models::host_sbs_shader_cache::parallax_v2_producer_specs[index];
     EXPECT_EQ(contract_spec.source_file, runtime_spec.filename);
     EXPECT_EQ(contract_spec.source_entrypoint, runtime_spec.entrypoint);
     EXPECT_EQ(contract_spec.source_target, runtime_spec.target);
@@ -694,8 +726,28 @@ TEST(ParallaxV2ShadowContractTest, DefaultsOffAndCarriesAttributableState) {
     models::host_sbs_shader_cache::shader_compile_flags
   );
   EXPECT_EQ(small_calibration.preprocess.source_macro_count, 0u);
-  EXPECT_TRUE(v2::model_calibration_supports_shape(small_calibration, 770u, 434u));
-  EXPECT_FALSE(v2::model_calibration_supports_shape(small_calibration, 434u, 770u));
+  const std::array supported_shapes {
+    std::pair {770u, 434u},
+    std::pair {1022u, 434u},
+    std::pair {1036u, 434u},
+    std::pair {434u, 770u},
+    std::pair {434u, 1022u},
+    std::pair {434u, 1036u},
+  };
+  for (const auto &[width, height] : supported_shapes) {
+    EXPECT_TRUE(v2::model_calibration_supports_shape(
+      small_calibration, width, height
+    )) << width << 'x' << height;
+    EXPECT_TRUE(v2::capture_identity_is_calibrated(
+      small_calibration.depth_model,
+      small_calibration.depth_model_url,
+      small_calibration.onnx_sha256,
+      small_calibration.preprocess.profile,
+      small_calibration.preprocess.source_closure_sha256,
+      width,
+      height
+    )) << width << 'x' << height;
+  }
   EXPECT_EQ(v2::constant_float_count, 12u);
   EXPECT_EQ(v2::constant_vector_count, 3u);
   EXPECT_EQ(sizeof(v2::constants_t), 48u);
@@ -729,7 +781,8 @@ TEST(ParallaxV2ShadowContractTest, DefaultsOffAndCarriesAttributableState) {
   EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::confirmed_cut_count));
   EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::contract_tag_bits));
   EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::latched_near_tail_count));
-  EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::near_shoulder_reserved));
+  EXPECT_TRUE(v2::state_word_is_uint_bits(
+    v2::state_word_e::camera_center_integrity_bits));
   EXPECT_FALSE(v2::state_word_is_uint_bits(v2::state_word_e::center));
   EXPECT_EQ(v2::state_initial_words[v2::calibration_revision], 0u);
   EXPECT_EQ(v2::state_initial_words[v2::confirmed_cut_count], 0u);
@@ -745,7 +798,10 @@ TEST(ParallaxV2ShadowContractTest, DefaultsOffAndCarriesAttributableState) {
     std::bit_cast<std::uint32_t>(v2::near_log_tau)
   );
   EXPECT_EQ(v2::state_initial_words[v2::latched_near_tail_count], 0u);
-  EXPECT_EQ(v2::state_initial_words[v2::near_shoulder_reserved], 0u);
+  EXPECT_EQ(v2::state_initial_words[v2::camera_center_integrity_bits], 0u);
+  EXPECT_TRUE(v2::camera_center_integrity_is_valid(0u, 0u, 0u, 0u));
+  EXPECT_FALSE(v2::camera_center_integrity_is_valid(
+    std::bit_cast<std::uint32_t>(1.0f), 0u, 0u, 0u));
   EXPECT_FALSE(v2::cut_generation_changed(7u, 7u, false));
   EXPECT_TRUE(v2::cut_generation_changed(7u, 8u, false));
   EXPECT_TRUE(v2::cut_generation_changed(7u, 7u, true));
@@ -763,7 +819,7 @@ TEST(ParallaxV2ShadowContractTest, DefaultsOffAndCarriesAttributableState) {
   EXPECT_EQ(base->url,
             "https://huggingface.co/onnx-community/depth-anything-v2-base/resolve/main/onnx/model_fp16.onnx");
 
-  EXPECT_FALSE(v2::model_calibration_supports_shape(
+  EXPECT_TRUE(v2::model_calibration_supports_shape(
     small_calibration,
     1036u,
     434u
@@ -777,7 +833,7 @@ TEST(ParallaxV2ShadowContractTest, DefaultsOffAndCarriesAttributableState) {
     770u,
     434u
   ));
-  EXPECT_FALSE(v2::capture_identity_is_calibrated(
+  EXPECT_TRUE(v2::capture_identity_is_calibrated(
     small_calibration.depth_model,
     small_calibration.depth_model_url,
     small_calibration.onnx_sha256,
@@ -815,46 +871,101 @@ TEST(ParallaxV2ShadowContractTest, DefaultsOffAndCarriesAttributableState) {
   ));
 }
 
-TEST(ParallaxV2RendererTest, SelectionLatchesV2OrFlatAndNeverFallsBackToLegacy) {
+TEST(ParallaxV2ContractTest, LiveModelResolverPinsAuthenticatedProductionIdentity) {
+  namespace v2 = models::depth_coordinate_v2;
+  ASSERT_EQ(v2::model_calibrations.size(), 1u);
+  const auto &production = v2::model_calibrations.front();
+
+  config::video_t::sbs_t small_profile {};
+  small_profile.depth_model = std::string {production.depth_model};
+  small_profile.depth_model_url = std::string {production.depth_model_url};
+  const auto small = video::host_sbs_v2_depth_model_for_profile(small_profile);
+  EXPECT_EQ(small.name, production.depth_model);
+  EXPECT_EQ(small.url, production.depth_model_url);
+
+  config::video_t::sbs_t base_profile {};
+  base_profile.depth_model = "depth_anything_v2_base_fp16";
+  const auto base_for_evaluation = video::depth_model_for_profile(base_profile);
+  EXPECT_EQ(base_for_evaluation.name, base_profile.depth_model);
+  EXPECT_NE(base_for_evaluation.url, production.depth_model_url);
+  const auto base_for_live = video::host_sbs_v2_depth_model_for_profile(base_profile);
+  EXPECT_EQ(base_for_live.name, production.depth_model);
+  EXPECT_EQ(base_for_live.url, production.depth_model_url);
+
+  config::video_t::sbs_t custom_profile {};
+  custom_profile.depth_model = "custom-unqualified-model";
+  custom_profile.depth_model_url = "file:///custom-unqualified-model.onnx";
+  const auto custom_for_evaluation = video::depth_model_for_profile(custom_profile);
+  EXPECT_EQ(custom_for_evaluation.name, custom_profile.depth_model);
+  EXPECT_EQ(custom_for_evaluation.url, custom_profile.depth_model_url);
+  const auto custom_for_live = video::host_sbs_v2_depth_model_for_profile(custom_profile);
+  EXPECT_EQ(custom_for_live.name, production.depth_model);
+  EXPECT_EQ(custom_for_live.url, production.depth_model_url);
+}
+
+TEST(ParallaxV2RendererTest, AuthenticationLatchesV2OrLiveFlat) {
   using models::host_sbs_renderer_e;
   using models::latch_host_sbs_renderer;
 
   EXPECT_EQ(
-    latch_host_sbs_renderer(
-      host_sbs_renderer_e::undecided, false, false, false
-    ),
-    host_sbs_renderer_e::legacy
-  );
-  EXPECT_EQ(
-    latch_host_sbs_renderer(
-      host_sbs_renderer_e::undecided, true, true, true
-    ),
+    latch_host_sbs_renderer(host_sbs_renderer_e::awaiting_v2, true),
     host_sbs_renderer_e::parallax_v2
   );
   EXPECT_EQ(
-    latch_host_sbs_renderer(
-      host_sbs_renderer_e::undecided, true, false, true
-    ),
-    host_sbs_renderer_e::parallax_v2_failed_flat
+    latch_host_sbs_renderer(host_sbs_renderer_e::awaiting_v2, false),
+    host_sbs_renderer_e::failed_flat
   );
+  // Once chosen, no later frame can change geometry authority.
   EXPECT_EQ(
-    latch_host_sbs_renderer(
-      host_sbs_renderer_e::undecided, true, true, false
-    ),
-    host_sbs_renderer_e::parallax_v2_failed_flat
-  );
-  // Once chosen, no later frame can alternate the stream's backend.
-  EXPECT_EQ(
-    latch_host_sbs_renderer(
-      host_sbs_renderer_e::parallax_v2, true, false, false
-    ),
+    latch_host_sbs_renderer(host_sbs_renderer_e::parallax_v2, false),
     host_sbs_renderer_e::parallax_v2
   );
   EXPECT_EQ(
-    latch_host_sbs_renderer(
-      host_sbs_renderer_e::parallax_v2_failed_flat, true, true, true
-    ),
-    host_sbs_renderer_e::parallax_v2_failed_flat
+    latch_host_sbs_renderer(host_sbs_renderer_e::failed_flat, true),
+    host_sbs_renderer_e::failed_flat
+  );
+
+  EXPECT_TRUE(models::host_sbs_renderer_uses_depth_pipeline(
+    host_sbs_renderer_e::awaiting_v2
+  ));
+  EXPECT_TRUE(models::host_sbs_renderer_uses_depth_pipeline(
+    host_sbs_renderer_e::parallax_v2
+  ));
+  EXPECT_FALSE(models::host_sbs_renderer_uses_depth_pipeline(
+    host_sbs_renderer_e::failed_flat
+  ));
+  EXPECT_TRUE(models::host_sbs_should_repeat_matched_output(
+    host_sbs_renderer_e::parallax_v2, false, true
+  ));
+  EXPECT_FALSE(models::host_sbs_should_repeat_matched_output(
+    host_sbs_renderer_e::failed_flat, false, true
+  ));
+  EXPECT_FALSE(models::host_sbs_should_repeat_matched_output(
+    host_sbs_renderer_e::parallax_v2, true, true
+  ));
+  EXPECT_TRUE(models::host_sbs_should_repeat_matched_output(
+    host_sbs_renderer_e::parallax_v2,
+    false,
+    true,
+    models::host_sbs_v2_max_matched_repeat_age
+  ));
+  EXPECT_FALSE(models::host_sbs_should_repeat_matched_output(
+    host_sbs_renderer_e::parallax_v2,
+    false,
+    true,
+    models::host_sbs_v2_max_matched_repeat_age + std::chrono::milliseconds(1)
+  ));
+  EXPECT_EQ(
+    models::fail_host_sbs_renderer_flat(host_sbs_renderer_e::parallax_v2),
+    host_sbs_renderer_e::failed_flat
+  );
+  EXPECT_EQ(
+    models::fail_host_sbs_renderer_flat(host_sbs_renderer_e::awaiting_v2),
+    host_sbs_renderer_e::failed_flat
+  );
+  EXPECT_EQ(
+    models::fail_host_sbs_renderer_flat(host_sbs_renderer_e::failed_flat),
+    host_sbs_renderer_e::failed_flat
   );
 }
 
@@ -896,7 +1007,6 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
 
   const auto &calibration = v2::model_calibrations.front();
   models::estimate_result result;
-  result.shadow_coordinate = view;
   result.shadow_candidate_parallax = view;
   result.shadow_vertical_majorant = view;
   result.shadow_final_parallax = view;
@@ -926,11 +1036,16 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   result.raw_height = 434;
   result.completed_frame_valid = true;
   result.completed_frame_id = 1;
-  result.parallax_v2_shadow_active = true;
+  result.parallax_v2_producer_active = true;
   result.parallax_v2_raw_coordinate_scale = calibration.raw_coordinate_scale;
   result.parallax_v2_requested_pop_strength = 2.0f;
   result.parallax_v2_requested_gain = v2::requested_gain_for_config(2.0f);
+  EXPECT_FALSE(result.shadow_coordinate);
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(result));
+
+  auto dump_augmented = result;
+  dump_augmented.shadow_coordinate = view;
+  EXPECT_TRUE(models::parallax_v2_result_is_authenticated(dump_augmented));
 
   auto missing_resource = result;
   missing_resource.shadow_state.Reset();
@@ -940,8 +1055,24 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   missing_vertical_majorant.shadow_vertical_majorant.Reset();
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_vertical_majorant));
 
+  const std::array supported_shapes {
+    std::pair {770, 434},
+    std::pair {1022, 434},
+    std::pair {1036, 434},
+    std::pair {434, 770},
+    std::pair {434, 1022},
+    std::pair {434, 1036},
+  };
+  for (const auto &[width, height] : supported_shapes) {
+    auto supported_shape = result;
+    supported_shape.raw_width = width;
+    supported_shape.raw_height = height;
+    EXPECT_TRUE(models::parallax_v2_result_is_authenticated(supported_shape))
+      << width << 'x' << height;
+  }
+
   auto wrong_shape = result;
-  wrong_shape.raw_width = 1036;
+  wrong_shape.raw_width = 1008;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_shape));
 
   auto wrong_shader = result;
@@ -957,262 +1088,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
 }
 #endif
 
-TEST(ParallaxV2RendererTest, LiveSelectionUsesMatchedFramesAndFailedModeBindsFlat) {
-  const auto display = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
-  );
-  const auto config = read_source_file(SUNSHINE_SOURCE_DIR "/src/config.cpp");
-  ASSERT_FALSE(display.empty());
-  ASSERT_FALSE(config.empty());
-  EXPECT_NE(
-    config.find("prefix + \"parallax_v2_render\""),
-    std::string::npos
-  );
-
-  const auto matched = display.find(
-    "if (matched_render_slot &&\n              host_sbs_renderer =="
-  );
-  const auto latch = display.find("latch_host_sbs_renderer(", matched);
-  const auto selected = display.find(
-    "const bool v2_renderer_selected", latch
-  );
-  const auto draw = display.find("mark_sbs_warp_end(gpu_timer);", selected);
-  ASSERT_NE(matched, std::string::npos);
-  ASSERT_NE(latch, std::string::npos);
-  ASSERT_NE(selected, std::string::npos);
-  ASSERT_NE(draw, std::string::npos);
-  EXPECT_LT(matched, latch);
-  EXPECT_LT(latch, selected);
-  EXPECT_LT(selected, draw);
-
-  const auto render_region = display.substr(selected, draw - selected);
-  EXPECT_NE(render_region.find("parallax_v2_failed_flat"), std::string::npos);
-  EXPECT_NE(
-    render_region.find("legacy_renderer_selected ? est.depth.Get() : nullptr"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    render_region.find("v2_renderer_selected ? est.shadow_final_parallax.Get()"),
-    std::string::npos
-  );
-  EXPECT_EQ(
-    render_region.find("v2_renderer_selected ? est.shadow_candidate_parallax.Get()"),
-    std::string::npos
-  );
-  EXPECT_EQ(
-    render_region.find("v2_renderer_selected ? est.shadow_vertical_majorant.Get()"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    render_region.find("legacy_renderer_selected ? est.subject.Get() : nullptr"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    render_region.find("legacy_renderer_selected ? est.depth_frame_state.Get() : nullptr"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    render_region.find("selected_parallax_field || v2_renderer_failed_flat"),
-    std::string::npos
-  );
-
-  const auto dump_gate = display.find("const bool complete_dump_snapshot", draw);
-  const auto dump_geometry = display.find(
-    "geometry_available = render_sbs_debug_geometry(", dump_gate
-  );
-  ASSERT_NE(dump_gate, std::string::npos);
-  ASSERT_NE(dump_geometry, std::string::npos);
-  EXPECT_NE(
-    display.substr(dump_gate, dump_geometry - dump_gate).find(
-      "parallax_v2_result_is_authenticated(est)"
-    ),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display.find("sbs_dumper.preflight_requested_v2_frame(", dump_gate),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display.find("sbs_dumper.reject_pending_request();", draw),
-    std::string::npos
-  );
-  const auto dump_geometry_call = display.substr(
-    dump_geometry,
-    display.find(");", dump_geometry) - dump_geometry
-  );
-  EXPECT_EQ(dump_geometry_call.find("shadow_coordinate"), std::string::npos);
-  EXPECT_NE(
-    dump_geometry_call.find("v2_renderer_selected"),
-    std::string::npos
-  );
-
-  const auto dump_source = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
-  );
-  const auto v2_preflight = dump_source.find(
-    "bool dumper::preflight_requested_v2_frame("
-  );
-  ASSERT_NE(v2_preflight, std::string::npos);
-  const auto preflight_end = dump_source.find(
-    "bool dumper::maybe_dump(", v2_preflight
-  );
-  ASSERT_NE(preflight_end, std::string::npos);
-  const auto preflight_body = dump_source.substr(
-    v2_preflight,
-    preflight_end - v2_preflight
-  );
-  EXPECT_NE(preflight_body.find("std::isfinite"), std::string::npos);
-  EXPECT_NE(preflight_body.find("frame_valid"), std::string::npos);
-  EXPECT_NE(preflight_body.find("contract_tag"), std::string::npos);
-}
-
-TEST(ParallaxV2ShadowContractTest, TimingIsNestedNonblockingAndDoesNotRedefinePostprocess) {
-  const auto estimator =
-    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
-  ASSERT_FALSE(estimator.empty());
-  const auto normalize = estimator.find("void normalize_depth_output(d3d_perf_slot *perf_slot)");
-  const auto parallax_start = estimator.find("mark_d3d_parallax_start(perf_slot);", normalize);
-  const auto dispatch = estimator.find("dispatch_parallax_v2_shadow();", parallax_start);
-  const auto parallax_end = estimator.find("mark_d3d_parallax_end(perf_slot);", dispatch);
-  const auto post_end = estimator.find("mark_d3d_post_end(d3d_timer);", parallax_end);
-  ASSERT_NE(normalize, std::string::npos);
-  ASSERT_NE(parallax_start, std::string::npos);
-  ASSERT_NE(dispatch, std::string::npos);
-  ASSERT_NE(parallax_end, std::string::npos);
-  ASSERT_NE(post_end, std::string::npos);
-  EXPECT_LT(normalize, parallax_start);
-  EXPECT_LT(parallax_start, dispatch);
-  EXPECT_LT(dispatch, parallax_end);
-  EXPECT_LT(parallax_end, post_end);
-  EXPECT_NE(estimator.find("\"depth_parallax_gpu\""), std::string::npos);
-  EXPECT_NE(estimator.find("D3D11_ASYNC_GETDATA_DONOTFLUSH"), std::string::npos);
-  const auto query_gate = estimator.find("parallax_v2_shadow_requested &&");
-  const auto query_allocation = estimator.find(
-    "CreateQuery(&desc, &slot.parallax_start)", query_gate);
-  ASSERT_NE(query_gate, std::string::npos);
-  ASSERT_NE(query_allocation, std::string::npos);
-  EXPECT_LT(query_allocation - query_gate, 160u);
-
-  const auto gain_begin = estimator.find("parallax_v2_shadow_requested(");
-  const auto gain_end = estimator.find(")) {", gain_begin);
-  ASSERT_NE(gain_begin, std::string::npos);
-  ASSERT_NE(gain_end, std::string::npos);
-  const auto gain_authority = estimator.substr(gain_begin, gain_end - gain_begin);
-  EXPECT_NE(gain_authority.find("cfg.parallax_v2_shadow"), std::string::npos);
-  EXPECT_NE(gain_authority.find("cfg.parallax_v2_render"), std::string::npos);
-  EXPECT_NE(gain_authority.find("cfg.pop_strength"), std::string::npos);
-  EXPECT_EQ(gain_authority.find("cfg.adaptive_pop"), std::string::npos);
-  EXPECT_EQ(gain_authority.find("cfg.adaptive_pop_max"), std::string::npos);
-  EXPECT_EQ(gain_authority.find("adaptive_pop_max_ratio"), std::string::npos);
-  EXPECT_EQ(gain_authority.find("SubjectState"), std::string::npos);
-}
-
-TEST(ParallaxV2ShadowContractTest, DirectRendererHasNoLegacyAdaptiveGeometryAuthority) {
-  const std::string shader_dir =
-    SUNSHINE_SOURCE_DIR "/src_assets/windows/assets/shaders/directx/";
-  const auto common = read_source_file(shader_dir + "include/sbs_warp_common.hlsl");
-  const auto reprojection = read_source_file(shader_dir + "sbs_reprojection_ps.hlsl");
-  const auto live_wrapper = read_source_file(
-    shader_dir + "sbs_reprojection_v2_live_ps.hlsl"
-  );
-  const auto coverage = read_source_file(shader_dir + "sbs_forward_coverage_cs.hlsl");
-  const auto harness = read_source_file(SUNSHINE_SOURCE_DIR "/src/sbs_bench_harness.cpp");
-  ASSERT_FALSE(common.empty());
-  ASSERT_FALSE(reprojection.empty());
-  ASSERT_FALSE(live_wrapper.empty());
-  ASSERT_FALSE(coverage.empty());
-  ASSERT_FALSE(harness.empty());
-  EXPECT_NE(common.find("float DepthParallax(float d)"), std::string::npos);
-  EXPECT_EQ(common.find("direct_parallax_search_radius"), std::string::npos);
-  EXPECT_NE(common.find("float3 direct_parallax_reserved;"), std::string::npos);
-  const auto direct_begin = reprojection.find("#ifdef SBS_CONTRACTIVE_PARALLAX");
-  const auto direct_end = reprojection.find("#else", direct_begin);
-  ASSERT_NE(direct_begin, std::string::npos);
-  ASSERT_NE(direct_end, std::string::npos);
-  const auto direct_inverse = reprojection.substr(
-    direct_begin,
-    direct_end - direct_begin
-  );
-  EXPECT_NE(
-    direct_inverse.find("for (int iteration = 0; iteration < 12; ++iteration)"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    direct_inverse.find(
-      "sourceX = uv.x + eyeSign * DepthParallax(SampleDepth(sourceX, uv.y));"
-    ),
-    std::string::npos
-  );
-  EXPECT_EQ(direct_inverse.find("DirectOrderTexture"), std::string::npos);
-  EXPECT_EQ(direct_inverse.find("Bestv2SearchRadius"), std::string::npos);
-  EXPECT_EQ(direct_inverse.find("Bestv2Probe"), std::string::npos);
-  EXPECT_EQ(direct_inverse.find("ForwardCoverageTexture"), std::string::npos);
-  EXPECT_EQ(reprojection.find("CanonicalOrderTexture"), std::string::npos);
-  EXPECT_EQ(reprojection.find("SBS_DIRECT_CANDIDATE_PARALLAX"), std::string::npos);
-  EXPECT_EQ(reprojection.find("SBS_CANDIDATE_GAP_FILL"), std::string::npos);
-  EXPECT_EQ(reprojection.find("backgroundOwner"), std::string::npos);
-  EXPECT_NE(coverage.find("DirectOrderTexture"), std::string::npos);
-  const auto reprojection_guard = reprojection.find(
-    "#elif !defined(SBS_DIRECT_PARALLAX)"
-  );
-  const auto reprojection_state = reprojection.find(
-    "StructuredBuffer<float4> SubjectState", reprojection_guard);
-  ASSERT_NE(reprojection_guard, std::string::npos);
-  ASSERT_NE(reprojection_state, std::string::npos);
-  EXPECT_LT(reprojection_state - reprojection_guard, 400u);
-  EXPECT_NE(
-    reprojection.find("StructuredBuffer<float4> ParallaxV2State : register(t2)"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    live_wrapper.find("#define SBS_LIVE_V2_SIGNED_PARALLAX 1"),
-    std::string::npos
-  );
-  EXPECT_EQ(live_wrapper.find("SBS_CANDIDATE_GAP_FILL"), std::string::npos);
-  const auto encoded_parallax = common.find("#ifdef SBS_DIRECT_PARALLAX");
-  const auto live_parallax = common.find(
-    "#elif defined(SBS_LIVE_V2_SIGNED_PARALLAX)",
-    encoded_parallax
-  );
-  const auto legacy_parallax = common.find("#else", live_parallax);
-  ASSERT_NE(encoded_parallax, std::string::npos);
-  ASSERT_NE(live_parallax, std::string::npos);
-  ASSERT_NE(legacy_parallax, std::string::npos);
-  const auto encoded_body = common.substr(
-    encoded_parallax,
-    live_parallax - encoded_parallax
-  );
-  const auto live_body = common.substr(
-    live_parallax,
-    legacy_parallax - live_parallax
-  );
-  EXPECT_NE(encoded_body.find("direct_parallax_source_u_limit"), std::string::npos);
-  EXPECT_NE(live_body.find("return d;"), std::string::npos);
-  EXPECT_EQ(live_body.find("adaptive_pop"), std::string::npos);
-  EXPECT_EQ(live_body.find("SubjectState"), std::string::npos);
-  const auto coverage_guard = coverage.find(
-    "#if !defined(SBS_DIRECT_PARALLAX)"
-  );
-  const auto coverage_state = coverage.find(
-    "StructuredBuffer<float4> SubjectState", coverage_guard);
-  ASSERT_NE(coverage_guard, std::string::npos);
-  ASSERT_NE(coverage_state, std::string::npos);
-  EXPECT_LT(coverage_state - coverage_guard, 160u);
-  EXPECT_EQ(reprojection.find("float4 unused_state"), std::string::npos);
-  EXPECT_EQ(coverage.find("float4 unused_state"), std::string::npos);
-  EXPECT_EQ(harness.find("SBS_DIRECT_CANDIDATE_PARALLAX"), std::string::npos);
-  EXPECT_EQ(harness.find("SBS_CANDIDATE_GAP_FILL"), std::string::npos);
-  EXPECT_NE(
-    harness.find("\\\"pop_strength_authority\\\": \\\"contract.pop_strength-only\\\""),
-    std::string::npos
-  );
-  EXPECT_NE(
-    harness.find("\\\"adaptive_pop_applied\\\": false"),
-    std::string::npos
-  );
-}
-
-TEST(ParallaxV2ShadowContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
+TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
   );
@@ -1262,14 +1138,14 @@ TEST(ParallaxV2ShadowContractTest, DumpDecodesExactCountersInsteadOfSubnormalFlo
   EXPECT_NE(source.find("state_semantics_valid"), std::string::npos);
 }
 
-TEST(ParallaxV2ShadowContractTest, CalibrationRevisionRejectsReservedSentinel) {
+TEST(ParallaxV2ContractTest, CalibrationRevisionRejectsReservedSentinel) {
   namespace v2 = models::depth_coordinate_v2;
   EXPECT_TRUE(v2::calibration_revision_is_valid(0u));
   EXPECT_TRUE(v2::calibration_revision_is_valid(1u));
   EXPECT_FALSE(v2::calibration_revision_is_valid(v2::reserved_calibration_revision));
 }
 
-TEST(ParallaxV2ShadowContractTest, NativeReplayUsesTheAuthenticatedShaderCache) {
+TEST(ParallaxV2ContractTest, NativeReplayUsesTheAuthenticatedShaderCache) {
   const auto replay = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/sbs_bench_depth_coordinate_v2.cpp"
   );
@@ -1280,40 +1156,7 @@ TEST(ParallaxV2ShadowContractTest, NativeReplayUsesTheAuthenticatedShaderCache) 
   EXPECT_EQ(replay.find("D3DCompileFromFile("), std::string::npos);
 }
 
-TEST(ParallaxV2ShadowContractTest, DumpBindsExactOnDiskModelArtifacts) {
-  const auto source = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
-  );
-  ASSERT_FALSE(source.empty());
-  EXPECT_NE(
-    source.find("paths.temporary / \"raw_depth.f32\""),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("paths.temporary / \"model_input.f32\""),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("paths.temporary / \"model_input_shape.json\""),
-    std::string::npos
-  );
-  EXPECT_NE(source.find("models::file_sha256_hex("), std::string::npos);
-  EXPECT_NE(
-    source.find("capture_provenance_manifest_key"),
-    std::string::npos
-  );
-  EXPECT_NE(source.find("configured_depth_model_url"), std::string::npos);
-  EXPECT_EQ(source.find("model_calibrations.front()"), std::string::npos);
-  EXPECT_NE(source.find("find_capture_calibration("), std::string::npos);
-  EXPECT_NE(source.find("capture_calibration->preprocess"), std::string::npos);
-  EXPECT_NE(source.find("if (shadow_available && !capture_calibration)"), std::string::npos);
-  EXPECT_NE(source.find("uncalibrated_runtime_preprocess"), std::string::npos);
-  EXPECT_NE(source.find("if (capture_calibration)"), std::string::npos);
-  EXPECT_NE(source.find("preprocess.imagenet_mean"), std::string::npos);
-  EXPECT_NE(source.find("preprocess.imagenet_std"), std::string::npos);
-}
-
-TEST(ParallaxV2ShadowContractTest, RawProvenanceResolvesTheExactModelIdentity) {
+TEST(ParallaxV2ContractTest, RawProvenanceResolvesTheExactModelIdentity) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp"
   );
@@ -1345,7 +1188,7 @@ TEST(ParallaxV2ShadowContractTest, RawProvenanceResolvesTheExactModelIdentity) {
   );
 }
 
-TEST(ParallaxV2ShadowContractTest, EvaluationRawArtifactsCarryProducerAttestation) {
+TEST(ParallaxV2ContractTest, EvaluationRawArtifactsCarryProducerAttestation) {
   const auto harness = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/sbs_bench_harness.cpp"
   );
@@ -1587,28 +1430,22 @@ TEST(DirectxShaderSourceTest, DumpGeometryCompilationStaysOffTheLivePath) {
   );
   ASSERT_NE(ensure_begin, std::string::npos);
   ASSERT_NE(ensure_end, std::string::npos);
-  const auto live_initializer = source.substr(
+  const auto dump_initializer = source.substr(
     ensure_begin,
     ensure_end - ensure_begin
   );
-  EXPECT_EQ(live_initializer.find("compile_shader("), std::string::npos);
+  EXPECT_EQ(dump_initializer.find("compile_shader("), std::string::npos);
   EXPECT_NE(
-    live_initializer.find("sbs_reprojection_mapping_ps_hlsl"),
+    dump_initializer.find("parallax_v2_live_diagnostic_specs"),
     std::string::npos
   );
+  EXPECT_NE(dump_initializer.find("cache::get("), std::string::npos);
   EXPECT_NE(
-    live_initializer.find("sbs_reprojection_mask_ps_hlsl"),
+    dump_initializer.find("parallax_v2_diagnostic_source_closure_sha256"),
     std::string::npos
   );
-  EXPECT_NE(
-    live_initializer.find("sbs_forward_coverage_cs_hlsl"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    live_initializer.find("sbs_reprojection_v2_mapping_ps_hlsl"),
-    std::string::npos
-  );
-  EXPECT_EQ(live_initializer.find("sbs_forward_coverage_v2"), std::string::npos);
+  EXPECT_EQ(dump_initializer.find("sbs_forward_coverage"), std::string::npos);
+  EXPECT_EQ(dump_initializer.find("sbs_reprojection_mapping_ps_hlsl"), std::string::npos);
 }
 
 TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
@@ -1620,9 +1457,10 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"depth_valid_history_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_forward_coverage_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0"},
+    std::tuple {"sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"},
-    std::tuple {"sbs_reprojection_v2_live_ps.hlsl", "mapping_ps", "ps_5_0"},
-    std::tuple {"sbs_reprojection_v2_live_ps.hlsl", "mask_ps", "ps_5_0"},
+    std::tuple {"sbs_reprojection_v2_diagnostics_ps.hlsl", "mapping_ps", "ps_5_0"},
+    std::tuple {"sbs_reprojection_v2_diagnostics_ps.hlsl", "mask_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_ps.hlsl", "mapping_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_ps.hlsl", "mask_ps", "ps_5_0"},
   };
@@ -1716,11 +1554,12 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
                           UINT source_width,
                           UINT source_height,
                           UINT target_width,
-                          UINT target_height,
-                          const std::vector<rgba_pixel_t> &source_pixels,
-                          std::vector<float> &model_output,
-                          std::vector<float> &appearance_ordinal
-                        ) {
+                           UINT target_height,
+                           const std::vector<rgba_pixel_t> &source_pixels,
+                           std::vector<float> &model_output,
+                           std::vector<float> &appearance_ordinal,
+                           std::uint32_t color_mode = 0u
+                         ) {
     if (source_pixels.size() !=
         static_cast<std::size_t>(source_width) * source_height) {
       return false;
@@ -1786,7 +1625,7 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     std::array<std::uint32_t, 16> constants {};
     constants[0] = target_width;
     constants[1] = target_height;
-    constants[2] = 0u;  // display-referred sRGB input
+    constants[2] = color_mode;
     D3D11_BUFFER_DESC constant_desc {};
     constant_desc.ByteWidth = sizeof(constants);
     constant_desc.Usage = D3D11_USAGE_IMMUTABLE;
@@ -1883,6 +1722,41 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
              imagenet_stddev[channel] +
            imagenet_mean[channel];
   };
+  const auto linear_to_srgb = [](float value) {
+    value = std::clamp(value, 0.0f, 1.0f);
+    return value <= 0.0031308f ?
+             value * 12.92f :
+             1.055f * std::pow(value, 1.0f / 2.4f) - 0.055f;
+  };
+  const auto depth_color_reference = [&](rgba_pixel_t pixel, std::uint32_t color_mode) {
+    std::array<float, 3> rgb {pixel[0], pixel[1], pixel[2]};
+    if (color_mode == 2u) {
+      for (auto &channel : rgb) {
+        channel = std::max(channel, 0.0f);
+      }
+      const float luminance = std::max(
+        0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2],
+        0.0f
+      );
+      for (auto &channel : rgb) {
+        channel /= 1.0f + luminance;
+      }
+      const float peak = std::max({rgb[0], rgb[1], rgb[2], 1.0f});
+      for (auto &channel : rgb) {
+        channel /= peak;
+      }
+    }
+    if (color_mode != 0u) {
+      for (auto &channel : rgb) {
+        channel = linear_to_srgb(channel);
+      }
+    } else {
+      for (auto &channel : rgb) {
+        channel = std::clamp(channel, 0.0f, 1.0f);
+      }
+    }
+    return rgb;
+  };
 
   {
     std::vector<rgba_pixel_t> source_pixels(
@@ -1944,6 +1818,65 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     }
     EXPECT_FLOAT_EQ(appearance_ordinal[0], 0.0f);
     EXPECT_FLOAT_EQ(appearance_ordinal[1], 0.6f);
+  }
+
+  // FP16 Advanced-Color SDR is linear, not already encoded sRGB. Execute the real shader path
+  // and verify the sRGB OETF happens once after spatial sampling.
+  {
+    const rgba_pixel_t source {0.18f, 0.0031308f, 2.0f, 1.0f};
+    std::vector<float> model_output;
+    std::vector<float> appearance_ordinal;
+    ASSERT_TRUE(run_case(
+      1,
+      1,
+      1,
+      1,
+      {source},
+      model_output,
+      appearance_ordinal,
+      static_cast<std::uint32_t>(models::input_color_space::linear_sdr)
+    ));
+    const auto expected = depth_color_reference(source, 1u);
+    for (UINT channel = 0; channel < 3u; ++channel) {
+      const float actual = reconstructed_channel(model_output, 1u, 0u, channel);
+      EXPECT_TRUE(std::isfinite(actual));
+      EXPECT_NEAR(actual, expected[channel], 3e-6f);
+    }
+    ASSERT_EQ(appearance_ordinal.size(), 1u);
+    EXPECT_FLOAT_EQ(appearance_ordinal[0], 2.0f);
+  }
+
+  // HDR capture is linear scRGB. The model input must use luminance-preserving Reinhard,
+  // optional uniform peak normalization, and then the same sRGB OETF. Appearance evidence stays
+  // in the original capture domain and therefore deliberately retains values above one.
+  {
+    const std::vector<rgba_pixel_t> source_pixels {
+      rgba_pixel_t {0.6f, 0.3f, 0.15f, 1.0f},
+      rgba_pixel_t {-0.5f, 4.0f, 1.0f, 1.0f},
+    };
+    std::vector<float> model_output;
+    std::vector<float> appearance_ordinal;
+    ASSERT_TRUE(run_case(
+      2,
+      1,
+      2,
+      1,
+      source_pixels,
+      model_output,
+      appearance_ordinal,
+      static_cast<std::uint32_t>(models::input_color_space::scrgb_hdr)
+    ));
+    for (UINT pixel = 0; pixel < 2u; ++pixel) {
+      const auto expected = depth_color_reference(source_pixels[pixel], 2u);
+      for (UINT channel = 0; channel < 3u; ++channel) {
+        const float actual = reconstructed_channel(model_output, 2u, pixel, channel);
+        EXPECT_TRUE(std::isfinite(actual));
+        EXPECT_NEAR(actual, expected[channel], 4e-6f);
+      }
+    }
+    ASSERT_EQ(appearance_ordinal.size(), 2u);
+    EXPECT_FLOAT_EQ(appearance_ordinal[0], 0.6f);
+    EXPECT_FLOAT_EQ(appearance_ordinal[1], 4.0f);
   }
 }
 #endif
@@ -2020,24 +1953,10 @@ TEST(DirectxShaderSourceTest, ConvertsEveryChromaTapBeforeAveraging) {
   EXPECT_EQ(shader.find("CONVERT_CHROMA_PER_TAP"), std::string::npos);
 }
 
-TEST(DirectxShaderSourceTest, HostSbsKeepsFramePairingAndProbeCapsAndRejectsRotation) {
-  const std::string shader_dir =
-    SUNSHINE_SOURCE_DIR "/src_assets/windows/assets/shaders/directx/";
-  const auto reprojection = read_source_file(shader_dir + "sbs_reprojection_ps.hlsl");
-  const auto common = read_source_file(shader_dir + "include/sbs_warp_common.hlsl");
+TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {
   const auto display =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
-
-  ASSERT_FALSE(reprojection.empty());
-  ASSERT_FALSE(common.empty());
   ASSERT_FALSE(display.empty());
-
-  EXPECT_NE(reprojection.find("depth_change_baseline, adaptive_pop_ratio"), std::string::npos);
-  EXPECT_EQ(reprojection.find("convergence_ema"), std::string::npos);
-
-  // Portrait is an explicit W < H mode. Host SBS rejects non-identity DXGI rotation instead of
-  // adding a dynamic transform to every depth probe or rotating the packed frame into top/bottom.
-  EXPECT_EQ(reprojection.find("SourceTextureUV"), std::string::npos);
   EXPECT_NE(
     display.find("display->display_rotation != DXGI_MODE_ROTATION_IDENTITY"),
     std::string::npos
@@ -2046,38 +1965,52 @@ TEST(DirectxShaderSourceTest, HostSbsKeepsFramePairingAndProbeCapsAndRejectsRota
     display.find("Use an explicit portrait resolution instead of Windows display"),
     std::string::npos
   );
+  EXPECT_NE(display.find("find_pending_matched_slot(est.completed_frame_id)"), std::string::npos);
+  EXPECT_NE(display.find("parallax_v2_result_is_authenticated(est)"), std::string::npos);
+}
 
-  // An all-invalid completion preserves the old packed target only after real depth exists,
-  // instead of pairing its new color slot with deliberately held older depth. With no history,
-  // repeated invalid completions keep drawing their matched colors through the flat identity path.
-  EXPECT_NE(reprojection.find("DepthFrameState[0].w < 0.5f"), std::string::npos);
-  EXPECT_NE(reprojection.find("DepthFrameState[0].z >= 0.5f"), std::string::npos);
-  EXPECT_NE(reprojection.find("discard;"), std::string::npos);
-  const auto preserves_previous = [](float initialized, float frame_state) {
-    return frame_state < 0.5f && initialized >= 0.5f;
-  };
-  EXPECT_FALSE(preserves_previous(0.0f, 0.0f));  // first/repeated invalid: live flat color
-  EXPECT_FALSE(preserves_previous(1.0f, 1.0f));  // first valid: matched color + depth
-  EXPECT_TRUE(preserves_previous(1.0f, 0.0f));  // later invalid: hold matched pair
-  // The unmatched path clears the whole estimate before the SRV array is built, so the direct
-  // binding is null without duplicating the matched-slot condition at every estimate field.
-  const auto unmatched_guard = display.find("if (!matched_render_slot)");
-  const auto reset_estimate = display.find("est = {};", unmatched_guard);
-  const auto frame_state_binding =
-    display.find("est.depth_frame_state.Get()", reset_estimate);
-  ASSERT_NE(unmatched_guard, std::string::npos);
-  ASSERT_NE(reset_estimate, std::string::npos);
-  ASSERT_NE(frame_state_binding, std::string::npos);
-  EXPECT_LT(unmatched_guard, reset_estimate);
-  EXPECT_LT(reset_estimate, frame_state_binding);
+TEST(DirectxShaderSourceTest, LocalRgbPresentationPreservesTheTransferContract) {
+  const std::string shader_dir =
+    SUNSHINE_SOURCE_DIR "/src_assets/windows/assets/shaders/directx/";
+  const auto display =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  const auto srgb_to_linear =
+    read_source_file(shader_dir + "rgb_present_srgb_to_linear_ps.hlsl");
 
-  // The cap is in total samples: one initial lookup plus at most max_probes - 1 loop samples.
-  EXPECT_NE(common.find("int max_intervals = max(max_probes - 1, 1);"), std::string::npos);
-  // Meeting that cap must coarsen the lattice rather than truncate its right-edge bracket.
-  EXPECT_NE(common.find("while (intervals > max_intervals)"), std::string::npos);
-  EXPECT_NE(common.find("return intervals;"), std::string::npos);
-  EXPECT_EQ(common.find("return min(intervals, max_intervals);"), std::string::npos);
+  ASSERT_FALSE(display.empty());
+  ASSERT_FALSE(srgb_to_linear.empty());
 
+  // CopyResource is valid only when both the storage layout and the transfer contract match.
+  // A BGRA/sRGB source can otherwise look layout-compatible with an FP16 intermediate while the
+  // local HDR swapchain interprets its code values as linear light.
+  EXPECT_NE(
+    display.find("input_is_linear == rgb_present_target_is_linear"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find("rgb_present_srgb_to_linear_ps.get()"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    srgb_to_linear.find("RemoveSRGBCurve(source.rgb) * source_sdr_white_scrgb"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find("sdr_white_nits / 80.0f"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find("PSSetConstantBuffers(1, 1, &sdr_white)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find("copy_rgb(final_sbs_texture, final_sbs_is_linear)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find("copy_rgb(img_ctx.encoder_texture.get(), input_is_linear)"),
+    std::string::npos
+  );
 }
 
 TEST(HostSbsSceneCutTest, OrdinalEvidenceRejectsMonotoneExposureButDetectsContent) {
@@ -3398,7 +3331,7 @@ TEST(DirectxShaderSourceTest, HostTelemetryReadbackIsNonblockingAndPreservesTheB
   const auto enabled_gate = display.find("enabled &&", due_declaration);
   const auto poll_call =
     display.find("depth_estimator->poll_depth_telemetry(", enabled_gate);
-  const auto due_argument = display.find("due,", poll_call);
+  const auto due_argument = display.find("due && producer_active", poll_call);
   ASSERT_NE(due_declaration, std::string::npos);
   ASSERT_NE(enabled_gate, std::string::npos);
   ASSERT_NE(poll_call, std::string::npos);
@@ -3406,37 +3339,48 @@ TEST(DirectxShaderSourceTest, HostTelemetryReadbackIsNonblockingAndPreservesTheB
   EXPECT_LT(due_declaration, enabled_gate);
   EXPECT_LT(enabled_gate, poll_call);
   EXPECT_LT(poll_call, due_argument);
+  const auto producer_failure_gate = display.find(
+    "if (!producer_active)",
+    poll_call
+  );
+  const auto producer_failure_publish = display.find(
+    "publish_sbs_telemetry_failure();",
+    producer_failure_gate
+  );
+  const auto producer_failure_return = display.find("return;", producer_failure_publish);
+  ASSERT_NE(producer_failure_gate, std::string::npos);
+  ASSERT_NE(producer_failure_publish, std::string::npos);
+  ASSERT_NE(producer_failure_return, std::string::npos);
+  EXPECT_LT(producer_failure_gate, producer_failure_publish);
+  EXPECT_LT(producer_failure_publish, producer_failure_return);
   const auto output_end = display.find("end_sbs_gpu_timer(gpu_timer);");
   const auto telemetry_poll = display.find("poll_sbs_telemetry_after_output();", output_end);
   ASSERT_NE(output_end, std::string::npos);
   ASSERT_NE(telemetry_poll, std::string::npos);
   EXPECT_LT(output_end, telemetry_poll);
 
-  // Readiness bits must agree with the runtime flags. Otherwise the shared client history records
-  // sentinel/uninitialized values as real chart samples (notably anchor=0 and subject=0).
-  const auto profile_ready = display.find("if (sample.profile_initialized)");
-  const auto edge_ready = display.find("if (sample.edge_fraction >= 0.0f)", profile_ready);
-  const auto anchor_ready = display.find("if (sample.anchor_valid)", edge_ready);
+  // The shipped V2 renderer has no legacy subject, edge-risk, range, or anchor authority. Keep
+  // those payload slots invalid instead of publishing stale bridge diagnostics as rendered state.
+  EXPECT_EQ(
+    display.find("sbs_telemetry_valid_field::subject"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    display.find("sbs_telemetry_valid_field::edge"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    display.find("sbs_telemetry_valid_field::anchor"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    display.find("sbs_telemetry_valid_field::range"),
+    std::string::npos
+  );
   const auto cut_flags = display.find(
-    "sbs_adaptive_state::cut_flag_geometry_armed",
-    anchor_ready
+    "sbs_adaptive_state::cut_flag_geometry_armed"
   );
-  ASSERT_NE(profile_ready, std::string::npos);
-  ASSERT_NE(edge_ready, std::string::npos);
-  ASSERT_NE(anchor_ready, std::string::npos);
   ASSERT_NE(cut_flags, std::string::npos);
-  EXPECT_LT(
-    display.find("sbs_telemetry_valid_field::subject", profile_ready),
-    edge_ready
-  );
-  EXPECT_LT(
-    display.find("sbs_telemetry_valid_field::edge", edge_ready),
-    anchor_ready
-  );
-  EXPECT_LT(
-    display.find("sbs_telemetry_valid_field::anchor", anchor_ready),
-    cut_flags
-  );
   EXPECT_NE(
     display.find("sbs_adaptive_state::cut_flag_appearance_armed", cut_flags),
     std::string::npos
@@ -3638,14 +3582,6 @@ TEST(ColorTransferTest, HdrToSdrToneMapRequiresLinearHdrInputAndSdrTarget) {
   EXPECT_FALSE(video::hdr_to_sdr_tonemap_required(false, true, false));
   EXPECT_FALSE(video::hdr_to_sdr_tonemap_required(false, false, true));
   EXPECT_FALSE(video::hdr_to_sdr_tonemap_required(true, true, true));
-}
-
-TEST(ColorTransferTest, SbsIntermediatePreservesPrecisionDuringDdupFormatDiscovery) {
-  EXPECT_TRUE(video::sbs_intermediate_requires_fp16(true, false, false, false));
-  EXPECT_TRUE(video::sbs_intermediate_requires_fp16(false, true, true, false));
-  EXPECT_TRUE(video::sbs_intermediate_requires_fp16(false, true, false, true));
-  EXPECT_FALSE(video::sbs_intermediate_requires_fp16(false, true, false, false));
-  EXPECT_FALSE(video::sbs_intermediate_requires_fp16(false, false, true, true));
 }
 
 TEST(HdrNegotiationTest, RequiresHttpAndRtspToSelectTheSameDynamicRange) {
@@ -3901,6 +3837,27 @@ TEST(HostSbsTelemetryTest, WireVisibleBitAssignmentsAreFrozen) {
   EXPECT_EQ(video::sbs_telemetry_runtime_flag::range_collapsed, 1u << 6);
   EXPECT_EQ(video::sbs_telemetry_runtime_flag::depth_ready, 1u << 7);
   EXPECT_EQ(video::sbs_telemetry_runtime_flag::hard_cut_pulse, 1u << 8);
+}
+
+TEST(HostSbsTelemetryTest, RendererProfileKeepsWirePlaneButNoAdaptiveAuthority) {
+  config::video_t::sbs_t profile;
+  profile.pop_strength = 1.5;
+  profile.adaptive_pop = true;
+  profile.adaptive_pop_max = 2.0;
+  profile.zero_plane = "background";
+
+  video::sbs_telemetry_snapshot_t v2;
+  v2.runtime_flags = video::sbs_telemetry_runtime_flag::adaptive_enabled;
+  video::apply_sbs_telemetry_profile(v2, profile);
+  EXPECT_EQ(v2.zero_plane_mode, 3);
+  EXPECT_FLOAT_EQ(v2.pop_floor, 1.5f);
+  EXPECT_FLOAT_EQ(v2.pop_ceiling, 1.5f);
+  EXPECT_FLOAT_EQ(v2.effective_pop, 1.5f);
+  EXPECT_EQ(
+    v2.runtime_flags & video::sbs_telemetry_runtime_flag::adaptive_enabled,
+    0u
+  );
+  EXPECT_NE(v2.valid_fields & video::sbs_telemetry_valid_field::config, 0u);
 }
 
 TEST(HostSbsTelemetryTest, SubscriptionLatchIsDisabledUntilExplicitlyEnabled) {

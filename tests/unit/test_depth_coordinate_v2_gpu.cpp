@@ -3,7 +3,7 @@
  * @brief Executable D3D11-WARP replay checks for depth-coordinate V2.
  *
  * The replay is intentionally the test surface here: it authenticates the generated contract,
- * compiles and dispatches the experimental shadow shaders, keeps the real GPU state buffer alive
+ * compiles and dispatches the production V2 shaders, keeps the real GPU state buffer alive
  * across frames, and emits the same trace consumed by the NumPy comparison gate.
  */
 #include "../tests_common.h"
@@ -32,6 +32,7 @@
 #include <src/crypto.h>
 #include <src/depth_coordinate_v2.h>
 #include <src/sbs_bench_depth_coordinate_v2.h>
+#include <src/video_depth_estimator.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -108,6 +109,58 @@ namespace {
     return {
       reinterpret_cast<const char *>(values.data()),
       values.size() * sizeof(values.front()),
+    };
+  }
+
+  nlohmann::ordered_json make_replay_manifest(
+    const models::depth_coordinate_v2::model_calibration_t &calibration,
+    const std::string_view contract_sha256,
+    const std::uint32_t width,
+    const std::uint32_t height,
+    const nlohmann::ordered_json &frames,
+    const float pop_strength = 2.0f
+  ) {
+    namespace v2 = models::depth_coordinate_v2;
+    return {
+      {"schema", 4u},
+      {"mode", "depth-coordinate-v2-experimental-shadow-gpu-sequence-v5"},
+      {"calibration_contract", {
+        {"file", "contracts/depth-coordinate-v2-v1.json"},
+        {"schema", v2::contract_schema},
+        {"sha256", contract_sha256},
+      }},
+      {"model_identity", {
+        {"calibration_id", calibration.calibration_id},
+        {"model", calibration.depth_model},
+        {"depth_model_url", calibration.depth_model_url},
+        {"onnx_sha256", calibration.onnx_sha256},
+        {"preprocess_profile", calibration.preprocess.profile},
+        {"preprocess_source_closure_sha256",
+         calibration.preprocess.source_closure_sha256},
+      }},
+      {"raw_shape", {
+        {"width", width},
+        {"height", height},
+        {"dtype", "float32-le"},
+        {"layout", "row-major"},
+      }},
+      {"mapping_config", {
+        {"raw_coordinate_scale", calibration.raw_coordinate_scale},
+        {"collapse_abs_epsilon", v2::collapse_abs_epsilon},
+        {"far_tau", v2::far_tau},
+        {"near_log_tau", v2::near_log_tau},
+        {"near_tail_probe_u", v2::near_tail_probe_u},
+        {"near_tail_coverage_low", v2::near_tail_coverage_low},
+        {"near_tail_coverage_high", v2::near_tail_coverage_high},
+        {"near_log_tau_dense", v2::near_log_tau_dense},
+        {"pop_strength", pop_strength},
+        {"gain_per_pop", v2::gain_per_pop},
+        {"max_horizontal_slope", v2::max_horizontal_slope},
+        {"max_vertical_shear", v2::max_vertical_shear},
+        {"direct_container_limit", v2::direct_container_limit},
+      }},
+      {"cut_source", "unit-authenticated-hard-cut-generation"},
+      {"frames", frames},
     };
   }
 
@@ -673,6 +726,153 @@ TEST(DepthCoordinateV2GpuTest, VerticalThenHorizontalMajorantsEnforceFinal2DBoun
   }
 }
 
+TEST(DepthCoordinateV2ShapeTest, StandardSourceAspectsFitEveryAuthenticatedTensorShape) {
+  namespace v2 = models::depth_coordinate_v2;
+  const auto &calibration = v2::model_calibrations.front();
+  struct shape_case_t {
+    std::uint32_t source_width;
+    std::uint32_t source_height;
+    int tensor_width;
+    int tensor_height;
+  };
+  constexpr std::array cases {
+    shape_case_t {3840u, 2160u, 770, 434},
+    shape_case_t {5120u, 2160u, 1022, 434},
+    shape_case_t {3840u, 1600u, 1036, 434},
+    shape_case_t {2160u, 3840u, 434, 770},
+    shape_case_t {2160u, 5120u, 434, 1022},
+    shape_case_t {1600u, 3840u, 434, 1036},
+  };
+
+  for (const auto &test_case : cases) {
+    SCOPED_TRACE(
+      std::to_string(test_case.source_width) + "x" +
+      std::to_string(test_case.source_height)
+    );
+    const auto fitted = models::fit_depth_tensor_shape(
+      test_case.source_width,
+      test_case.source_height,
+      432,
+      4.0f
+    );
+    EXPECT_EQ(fitted.width, test_case.tensor_width);
+    EXPECT_EQ(fitted.height, test_case.tensor_height);
+    EXPECT_TRUE(v2::model_calibration_supports_shape(
+      calibration,
+      static_cast<std::uint32_t>(fitted.width),
+      static_cast<std::uint32_t>(fitted.height)
+    ));
+  }
+
+  EXPECT_EQ(
+    models::fit_depth_tensor_shape(0u, 2160u, 432, 4.0f),
+    models::depth_tensor_shape_t {}
+  );
+  EXPECT_EQ(
+    models::fit_depth_tensor_shape(3840u, 0u, 432, 4.0f),
+    models::depth_tensor_shape_t {}
+  );
+}
+
+TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionProducer) {
+  namespace fs = std::filesystem;
+  namespace v2 = models::depth_coordinate_v2;
+
+  warp_device_t warp;
+  ASSERT_TRUE(warp.initialize());
+  temporary_tree_t tree;
+
+  const fs::path contract_source = fs::path(SUNSHINE_SOURCE_DIR) /
+    "tools/sbsbench/contracts/depth-coordinate-v2-v1.json";
+  const std::string contract_bytes = read_bytes(contract_source);
+  ASSERT_FALSE(contract_bytes.empty());
+  const std::string contract_sha256 = sha256_hex(contract_bytes);
+  const auto &calibration = v2::model_calibrations.front();
+
+  std::size_t tested_shapes = 0u;
+  for (const auto &shape : v2::model_calibrated_shapes) {
+    if (shape.calibration_id != calibration.calibration_id) {
+      continue;
+    }
+    ++tested_shapes;
+    const std::uint32_t width = shape.width;
+    const std::uint32_t height = shape.height;
+    SCOPED_TRACE(std::to_string(width) + "x" + std::to_string(height));
+
+    const fs::path shape_root = tree.path /
+      (std::to_string(width) + "x" + std::to_string(height));
+    ASSERT_TRUE(write_bytes(
+      shape_root / "contracts/depth-coordinate-v2-v1.json",
+      contract_bytes
+    ));
+
+    const std::size_t element_count = static_cast<std::size_t>(width) * height;
+    std::vector<float> raw(element_count);
+    for (std::uint32_t y = 0; y < height; ++y) {
+      for (std::uint32_t x = 0; x < width; ++x) {
+        raw[static_cast<std::size_t>(y) * width + x] =
+          -0.45f + 0.8f * static_cast<float>(x) /
+                     static_cast<float>(std::max(width - 1u, 1u)) +
+          0.1f * static_cast<float>(y) /
+                   static_cast<float>(std::max(height - 1u, 1u));
+      }
+    }
+    const std::string raw_bytes = float_bytes(raw);
+    ASSERT_TRUE(write_bytes(shape_root / "raw_0001.f32", raw_bytes));
+    const nlohmann::ordered_json frames = nlohmann::ordered_json::array({{
+      {"frame_id", "0001"},
+      {"raw_file", "raw_0001.f32"},
+      {"raw_sha256", sha256_hex(raw_bytes)},
+      {"hard_cut_count", 0u},
+      {"hard_cut_pulse", false},
+    }});
+    const auto manifest = make_replay_manifest(
+      calibration,
+      contract_sha256,
+      width,
+      height,
+      frames
+    );
+    const fs::path manifest_path = shape_root / "manifest.json";
+    ASSERT_TRUE(write_bytes(manifest_path, manifest.dump(2) + "\n"));
+
+    std::string error;
+    auto replay = sbs_bench::depth_coordinate_v2_gpu_replay::create(
+      warp.device.Get(),
+      warp.context.Get(),
+      manifest_path,
+      error
+    );
+    ASSERT_NE(replay, nullptr) << error;
+    EXPECT_EQ(replay->width(), width);
+    EXPECT_EQ(replay->height(), height);
+
+    sbs_bench::depth_coordinate_v2_gpu_frame output;
+    ASSERT_TRUE(replay->dispatch(0u, "0001", output, error)) << error;
+    EXPECT_EQ(output.canonical_values.size(), element_count);
+    EXPECT_EQ(output.candidate_parallax_values.size(), element_count);
+    EXPECT_EQ(output.vertical_majorant_values.size(), element_count);
+    EXPECT_EQ(output.encoded_parallax_values.size(), element_count);
+    EXPECT_LT(output.order_minimum, output.order_maximum);
+    EXPECT_LE(
+      output.maximum_absolute_source_u,
+      v2::direct_container_limit + 2.0e-7f
+    );
+
+    const fs::path trace_path = shape_root / "trace.json";
+    ASSERT_TRUE(replay->write_state_trace(trace_path, error)) << error;
+    const auto trace = nlohmann::ordered_json::parse(read_bytes(trace_path));
+    ASSERT_EQ(trace.at("frames").size(), 1u);
+    EXPECT_EQ(trace["producer"]["contract_canonical_sha256"],
+              v2::contract_canonical_sha256);
+    EXPECT_EQ(trace["frames"][0]["input_valid"], true);
+    EXPECT_EQ(trace["frames"][0]["frame_valid"], true);
+    EXPECT_EQ(trace["frames"][0]["camera_valid"], true);
+    EXPECT_EQ(trace["frames"][0]["calibration_revision"], 1u);
+  }
+  EXPECT_EQ(tested_shapes, 6u);
+}
+
 TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly) {
   namespace fs = std::filesystem;
   namespace v2 = models::depth_coordinate_v2;
@@ -749,47 +949,14 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
 
   constexpr float pop_strength = 2.0f;
   const float requested_gain = pop_strength * v2::gain_per_pop;
-  nlohmann::ordered_json manifest = {
-    {"schema", 4u},
-    {"mode", "depth-coordinate-v2-experimental-shadow-gpu-sequence-v5"},
-    {"calibration_contract", {
-      {"file", "contracts/depth-coordinate-v2-v1.json"},
-      {"schema", v2::contract_schema},
-      {"sha256", sha256_hex(contract_bytes)},
-    }},
-    {"model_identity", {
-      {"calibration_id", calibration.calibration_id},
-      {"model", calibration.depth_model},
-      {"depth_model_url", calibration.depth_model_url},
-      {"onnx_sha256", calibration.onnx_sha256},
-      {"preprocess_profile", calibration.preprocess.profile},
-      {"preprocess_source_closure_sha256",
-       calibration.preprocess.source_closure_sha256},
-    }},
-    {"raw_shape", {
-      {"width", width},
-      {"height", height},
-      {"dtype", "float32-le"},
-      {"layout", "row-major"},
-    }},
-    {"mapping_config", {
-      {"raw_coordinate_scale", calibration.raw_coordinate_scale},
-      {"collapse_abs_epsilon", v2::collapse_abs_epsilon},
-      {"far_tau", v2::far_tau},
-      {"near_log_tau", v2::near_log_tau},
-      {"near_tail_probe_u", v2::near_tail_probe_u},
-      {"near_tail_coverage_low", v2::near_tail_coverage_low},
-      {"near_tail_coverage_high", v2::near_tail_coverage_high},
-      {"near_log_tau_dense", v2::near_log_tau_dense},
-      {"pop_strength", pop_strength},
-      {"gain_per_pop", v2::gain_per_pop},
-      {"max_horizontal_slope", v2::max_horizontal_slope},
-      {"max_vertical_shear", v2::max_vertical_shear},
-      {"direct_container_limit", v2::direct_container_limit},
-    }},
-    {"cut_source", "unit-authenticated-hard-cut-generation"},
-    {"frames", frames},
-  };
+  auto manifest = make_replay_manifest(
+    calibration,
+    sha256_hex(contract_bytes),
+    width,
+    height,
+    frames,
+    pop_strength
+  );
   const fs::path manifest_path = tree.path / "manifest.json";
   const std::string manifest_bytes = manifest.dump(2) + "\n";
   ASSERT_TRUE(write_bytes(manifest_path, manifest_bytes));
@@ -803,15 +970,25 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
   EXPECT_EQ(replay->height(), height);
   EXPECT_EQ(replay->manifest_sha256(), sha256_hex(manifest_bytes));
 
-  // Same contract tag, plausible ranges, but a wrong fixed inverse scale. Both the coverage gate
-  // and state resolver must classify this as corrupt, collect acquisition evidence, and replace
-  // it rather than retaining a pseudo-camera indefinitely.
+  // Same contract tag and otherwise-valid fixed calibration, but the center was changed without
+  // resealing its integrity word. Both the coverage gate and state resolver must classify this
+  // center-only corruption as invalid, collect acquisition evidence, and replace it rather than
+  // retaining a plausible same-tag pseudo-camera indefinitely.
   std::vector<std::uint32_t> corrupt_same_tag(
     v2::state_initial_words.begin(), v2::state_initial_words.end());
   corrupt_same_tag[v2::center] = std::bit_cast<std::uint32_t>(123.0f);
-  corrupt_same_tag[v2::inverse_scale] = std::bit_cast<std::uint32_t>(1.0f);
+  corrupt_same_tag[v2::inverse_scale] = std::bit_cast<std::uint32_t>(
+    1.0f / calibration.raw_coordinate_scale);
   corrupt_same_tag[v2::calibration_revision] = 7u;
   corrupt_same_tag[v2::frame_valid] = std::bit_cast<std::uint32_t>(1.0f);
+  ASSERT_NE(
+    corrupt_same_tag[v2::camera_center_integrity_bits],
+    v2::camera_center_integrity_for_words(
+      corrupt_same_tag[v2::center],
+      corrupt_same_tag[v2::inverse_scale],
+      corrupt_same_tag[v2::calibration_revision]
+    )
+  );
   ASSERT_TRUE(replay->overwrite_state_for_testing(corrupt_same_tag, error)) << error;
 
   std::vector<sbs_bench::depth_coordinate_v2_gpu_frame> outputs(raw_fields.size());
@@ -849,6 +1026,8 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
   ASSERT_EQ(trace.at("frame_fields").size(), 38u);
   EXPECT_EQ(trace["producer"]["authority"],
             "seven-experimental-shadow-compute-shaders-persistent-gpu-state-v3");
+  EXPECT_EQ(trace["producer"]["tensor_shape"]["width"], replay->width());
+  EXPECT_EQ(trace["producer"]["tensor_shape"]["height"], replay->height());
   ASSERT_EQ(trace["producer"]["shader_sequence"].size(), 7u);
   EXPECT_EQ(trace["producer"]["shader_sequence"][2],
             "depth_coordinate_v2_near_coverage_cs.hlsl");

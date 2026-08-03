@@ -325,6 +325,44 @@ static std::pair<int, int> aspect_aligned_dims(float aspect, int short_side, int
   return {patch, patch};
 }
 
+models::depth_tensor_shape_t models::fit_depth_tensor_shape(
+  const std::uint32_t source_width,
+  const std::uint32_t source_height,
+  const int short_side,
+  const float max_aspect
+) {
+  if (source_width == 0u || source_height == 0u) {
+    return {};
+  }
+
+  const float aspect = static_cast<float>(source_width) /
+                       static_cast<float>(source_height);
+  const float bounded_max_aspect = std::max(1.0f, max_aspect);
+  const float fitted_aspect = aspect >= 1.0f ?
+                                std::min(aspect, bounded_max_aspect) :
+                                1.0f / std::min(1.0f / aspect, bounded_max_aspect);
+  const int bounded_short_side = std::clamp(
+    short_side,
+    14,
+    depth_engine_max_dim
+  );
+  const int max_width = static_cast<int>(std::min<std::uint32_t>(
+    source_width,
+    depth_engine_max_dim
+  ));
+  const int max_height = static_cast<int>(std::min<std::uint32_t>(
+    source_height,
+    depth_engine_max_dim
+  ));
+  const auto [width, height] = aspect_aligned_dims(
+    fitted_aspect,
+    bounded_short_side,
+    max_width,
+    max_height
+  );
+  return {width, height};
+}
+
 // Ensure the shared runtime exists, deserialize the compatible engine into its global slot if not
 // already resident, and hand back a spare pooled execution context if one is available. The CALLER
 // must hold g_trt_mutex. Context CREATION is deliberately left to the caller OUTSIDE the lock:
@@ -486,8 +524,8 @@ namespace models {
 
   bool parallax_v2_result_is_authenticated(const estimate_result &result) {
     if (!result.completed_frame_valid || result.completed_frame_id == 0u ||
-        !result.parallax_v2_shadow_active || !result.shadow_coordinate ||
-        !result.shadow_candidate_parallax || !result.shadow_vertical_majorant ||
+        !result.parallax_v2_producer_active || !result.shadow_candidate_parallax ||
+        !result.shadow_vertical_majorant ||
         !result.shadow_final_parallax ||
         !result.shadow_state || !result.shadow_frame_stats ||
         !result.raw_model_provenance || !result.parallax_v2_shader_provenance ||
@@ -907,6 +945,7 @@ namespace models {
   struct video_depth_estimator::impl {
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+    const depth_estimator_usage_e usage;
 
     nvinfer1::ICudaEngine *engine = nullptr;
     nvinfer1::IExecutionContext *exec_context = nullptr;
@@ -939,17 +978,15 @@ namespace models {
     bool adaptive_pop;
     float adaptive_pop_max_ratio;
     float zero_plane_mode;  // 1 subject, 2 median depth, 3 far/mid-background
-    const bool parallax_v2_render_requested;
-    const bool parallax_v2_shadow_requested;
     float parallax_v2_raw_coordinate_scale = 0.0f;
     const float parallax_v2_requested_pop_strength;
     const float parallax_v2_requested_gain;
     std::shared_ptr<const raw_model_provenance_t> raw_model_provenance;
     std::shared_ptr<const parallax_v2_shader_provenance_t>
       parallax_v2_shader_provenance;
-    bool parallax_v2_shadow_shaders_ready = false;
-    bool parallax_v2_shadow_active = false;
-    bool parallax_v2_shadow_failed = false;
+    bool parallax_v2_producer_shaders_ready = false;
+    bool parallax_v2_producer_active = false;
+    bool parallax_v2_producer_failed = false;
 
     // Subscription-gated, nonblocking telemetry readback. Resources are created lazily only after
     // a client enables the protocol, then a three-slot staging/query ring absorbs GPU latency
@@ -1031,9 +1068,8 @@ namespace models {
         desc.Query = D3D11_QUERY_TIMESTAMP;
         if (FAILED(device->CreateQuery(&desc, &slot.post_start)) ||
             FAILED(device->CreateQuery(&desc, &slot.post_end)) ||
-            (parallax_v2_shadow_requested &&
-             (FAILED(device->CreateQuery(&desc, &slot.parallax_start)) ||
-              FAILED(device->CreateQuery(&desc, &slot.parallax_end)))) ||
+            FAILED(device->CreateQuery(&desc, &slot.parallax_start)) ||
+            FAILED(device->CreateQuery(&desc, &slot.parallax_end)) ||
             FAILED(device->CreateQuery(&desc, &slot.pre_start)) ||
             FAILED(device->CreateQuery(&desc, &slot.pre_end))) {
           BOOST_LOG(warning) << "Depth D3D11 timing unavailable: could not create timestamp queries.";
@@ -1553,6 +1589,13 @@ namespace models {
     int target_h = 0;
     UINT reduce_groups = 0;  // threadgroups for the min/max reduction (groups * 256 = total threads)
     int cb_color_mode = -1;  // input_color_space baked into constant buffers
+    // TensorRT retains dynamic shape and tensor-address bindings on an execution context. The
+    // interop pointer is allowed to change after any map, so cache each piece independently and
+    // rebind only the values that actually changed.
+    int trt_bound_width = 0;
+    int trt_bound_height = 0;
+    CUdeviceptr trt_bound_input = 0;
+    CUdeviceptr trt_bound_output = 0;
 
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> rgb_to_nchw_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_cs;
@@ -1568,6 +1611,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_near_coverage_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_state_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_map_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_coordinate_diagnostic_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_vertical_limit_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_limit_cs;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> linear_sampler;
@@ -1628,8 +1672,10 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ema_motion_mask_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask_srv;
 
-    // Optional GPU-only raw-coordinate V2 producer. Shadow-only mode exposes these resources only
-    // to diagnostics; an explicitly selected V2 renderer consumes the authenticated final field.
+    // GPU-only raw-coordinate V2 producer. Live Host SBS requires these resources; the legacy
+    // evaluation mode leaves them unallocated. The canonical-coordinate texture is exceptional:
+    // it is allocated and written only for an explicit Dump 3D snapshot. The authenticated final
+    // field is the sole live position authority.
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_partials_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_partials_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_partials_srv;
@@ -1653,15 +1699,37 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_final_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_final_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_final_srv;
+    bool depth_coordinate_v2_coordinate_diagnostic_error_logged = false;
 
     CUgraphicsResource cuda_in_res = nullptr;
     CUgraphicsResource cuda_out_res = nullptr;
     bool has_previous_frame = false;
     std::uint64_t pending_frame_id = 0;
     bool stream_error_logged = false;
+    bool terminal_failure = false;
+    bool execution_context_poisoned = false;
     bool readiness_preflighted = false;  // can_accept_frame() already counted/queried this source opportunity
     bool depth_context_pooled = false;  // context reused from the pool (modules already loaded -> skip warmup)
     bool context_warmed = false;  // only warmed contexts may return to context_pool
+
+    bool host_v2_required() const {
+      return usage == depth_estimator_usage_e::host_sbs_v2;
+    }
+
+    bool live_v2_producer_unavailable() const {
+      return host_v2_required() && parallax_v2_producer_failed;
+    }
+
+    // Host V2 fails flat on any producer error. Only async execution/query failures quarantine the
+    // TRT context; a rejected shape or interop mapping may still be safely reused by a later stream.
+    void mark_terminal_failure(const bool poison_execution_context = false) {
+      execution_context_poisoned =
+        execution_context_poisoned || poison_execution_context;
+      // Live V2 cannot safely resume after any producer-contract failure. The legacy evaluator
+      // keeps its historical retry behavior for recoverable D3D/interop setup failures, but an
+      // asynchronous CUDA/TensorRT fault poisons the execution context in either mode.
+      terminal_failure = terminal_failure || host_v2_required() || poison_execution_context;
+    }
 
     bool create_shader(
       const host_sbs_shader_cache::source_snapshot_t &sources,
@@ -1675,9 +1743,17 @@ namespace models {
       return SUCCEEDED(device->CreateComputeShader(bytecode->data(), bytecode->size(), nullptr, &out_cs));
     }
 
-    impl(Microsoft::WRL::ComPtr<ID3D11Device> d, Microsoft::WRL::ComPtr<ID3D11DeviceContext> c, const std::filesystem::path &assets_dir, const config::video_t::sbs_t &cfg, const config::depth_model_info &model):
+    impl(
+      Microsoft::WRL::ComPtr<ID3D11Device> d,
+      Microsoft::WRL::ComPtr<ID3D11DeviceContext> c,
+      const std::filesystem::path &assets_dir,
+      const config::video_t::sbs_t &cfg,
+      const config::depth_model_info &model,
+      const depth_estimator_usage_e estimator_usage
+    ):
         device(d),
         context(c),
+        usage(estimator_usage),
         ema_alpha((float) cfg.ema),
         ema_edge_change((float) cfg.ema_edge_change),
         ema_edge_gradient((float) cfg.ema_edge_gradient),
@@ -1698,10 +1774,6 @@ namespace models {
         // harness assigns sbs_cfg directly and bypasses that.
         zero_plane_mode(cfg.zero_plane == "subject" ? 1.0f : cfg.zero_plane == "background" ? 3.0f :
                                                                                               2.0f),
-        parallax_v2_render_requested(cfg.parallax_v2_render),
-        parallax_v2_shadow_requested(
-          cfg.parallax_v2_shadow || cfg.parallax_v2_render
-        ),
         parallax_v2_requested_pop_strength(
           depth_coordinate_v2::requested_pop_strength(
             static_cast<float>(cfg.pop_strength)
@@ -1870,9 +1942,9 @@ namespace models {
         }
       }
 
-      // Bestv2 normalization and subject shaping are one permanent pipeline. Never create a
-      // partially usable estimator: without any one of these shaders the warp would either
-      // consume invalid bounds or silently collapse to flat 2D.
+      // The legacy evaluator and the temporary live scene-cut bridge share these analysis
+      // shaders. Their normalized depth, subject, adaptive-pop, and zero-plane outputs never feed
+      // Host SBS V2 geometry; live V2 consumes only the confirmed cut generation/pulse.
       const auto preprocess_sources = host_sbs_shader_cache::snapshot_sources(
         assets_dir / "shaders" / "directx",
         host_sbs_shader_cache::preprocess_specs
@@ -1932,20 +2004,17 @@ namespace models {
         BOOST_LOG(error) << "Depth estimator failed: required Bestv2 shader initialization failed.";
         return;
       }
-      if (parallax_v2_shadow_requested) {
-        if (!coordinate_calibration) {
-          parallax_v2_shadow_failed = true;
-          BOOST_LOG(warning)
-            << "Host SBS parallax-v2 shadow requested for uncalibrated depth model '"
-            << model.name << "' (ONNX SHA-256 " << artifact.source_sha256
-            << ", preprocess source SHA-256 " << preprocess_source_closure_sha256
-            << (parallax_v2_render_requested ?
-                  "); explicit render-on stream will fail flat with no legacy geometry." :
-                  "); shadow-only stream retains the complete legacy path.");
-        } else {
+      if (host_v2_required() && !coordinate_calibration) {
+        parallax_v2_producer_failed = true;
+        BOOST_LOG(error)
+          << "Host SBS V2 cannot authenticate uncalibrated depth model '"
+          << model.name << "' (ONNX SHA-256 " << artifact.source_sha256
+          << ", preprocess source SHA-256 " << preprocess_source_closure_sha256
+          << "); Host SBS will fail flat.";
+      } else if (host_v2_required()) {
           const auto shadow_sources = host_sbs_shader_cache::snapshot_sources(
             assets_dir / "shaders" / "directx",
-            host_sbs_shader_cache::parallax_v2_shadow_specs
+            host_sbs_shader_cache::parallax_v2_producer_specs
           );
           static_assert(
             depth_coordinate_v2::shader_source_closure_schema ==
@@ -1958,7 +2027,7 @@ namespace models {
           static_assert(depth_coordinate_v2::shader_source_macro_count == 0u);
           static_assert(
             depth_coordinate_v2::shader_source_specs.size() ==
-            host_sbs_shader_cache::parallax_v2_shadow_specs.size()
+            host_sbs_shader_cache::parallax_v2_producer_specs.size()
           );
           bool shader_specs_match = true;
           for (std::size_t index = 0;
@@ -1966,7 +2035,7 @@ namespace models {
                ++index) {
             const auto &contract_spec = depth_coordinate_v2::shader_source_specs[index];
             const auto &runtime_spec =
-              host_sbs_shader_cache::parallax_v2_shadow_specs[index];
+              host_sbs_shader_cache::parallax_v2_producer_specs[index];
             shader_specs_match =
               shader_specs_match &&
               contract_spec.source_file == runtime_spec.filename &&
@@ -1981,7 +2050,7 @@ namespace models {
             shader_specs_match &&
             shader_source_closure_sha256 ==
               depth_coordinate_v2::shader_source_closure_sha256;
-          parallax_v2_shadow_shaders_ready =
+          parallax_v2_producer_shaders_ready =
             shadow_sources && shader_identity_matches &&
             create_shader(
               shadow_sources,
@@ -2018,7 +2087,7 @@ namespace models {
               host_sbs_shader_cache::depth_coordinate_v2_limit,
               depth_coordinate_v2_limit_cs
             );
-          if (parallax_v2_shadow_shaders_ready) {
+          if (parallax_v2_producer_shaders_ready) {
             parallax_v2_shader_provenance =
               std::make_shared<const parallax_v2_shader_provenance_t>(
                 parallax_v2_shader_provenance_t {
@@ -2036,20 +2105,41 @@ namespace models {
               << "' (fixed raw coordinate scale " << parallax_v2_raw_coordinate_scale
               << ", requested pop " << parallax_v2_requested_pop_strength
               << ", requested gain " << parallax_v2_requested_gain
-              << "); any live render cutover remains separately authenticated and stream-latched.";
+              << "); completed fields remain separately authenticated before rendering.";
+            const auto diagnostic_sources = host_sbs_shader_cache::snapshot_sources(
+              assets_dir / "shaders" / "directx",
+              host_sbs_shader_cache::parallax_v2_diagnostic_specs
+            );
+            if (!diagnostic_sources ||
+                !create_shader(
+                  diagnostic_sources,
+                  host_sbs_shader_cache::depth_coordinate_v2_coordinate_diagnostic,
+                  depth_coordinate_v2_coordinate_diagnostic_cs
+                )) {
+              // Dump diagnostics must never become a live-render dependency. A later Dump 3D
+              // request will be rejected explicitly, while authenticated V2 rendering continues.
+              BOOST_LOG(warning)
+                << "Host SBS V2 canonical-coordinate Dump 3D shader is unavailable; "
+                   "live rendering remains active.";
+            }
           } else {
-            parallax_v2_shadow_failed = true;
-            BOOST_LOG(warning)
-              << "Host SBS parallax-v2 shadow shader initialization or source-identity "
-              << (parallax_v2_render_requested ?
-                    "verification failed; explicit render-on stream will fail flat with no legacy geometry." :
-                    "verification failed; shadow-only stream retains the complete legacy path.");
+            parallax_v2_producer_failed = true;
+            BOOST_LOG(error)
+              << "Host SBS V2 shader initialization or source-identity verification failed; "
+                 "Host SBS will fail flat.";
           }
-        }
       }
-      BOOST_LOG(info) << "Permanent Bestv2 subject shaping enabled (recenter " << subject_recenter << ").";
-      BOOST_LOG(info) << "SBS zero-plane mode: " << cfg.zero_plane
-                      << (zero_plane_mode > 0.5f ? " (shot-latched experimental anchor)." : ".");
+      if (host_v2_required()) {
+        BOOST_LOG(info)
+          << "Host SBS V2 scene-cut bridge enabled; legacy normalized depth, subject, "
+             "adaptive-pop, and zero-plane outputs have no live geometry authority.";
+      } else {
+        BOOST_LOG(info)
+          << "Legacy evaluator subject shaping enabled (recenter " << subject_recenter << ").";
+        BOOST_LOG(info) << "Legacy evaluator zero-plane mode: " << cfg.zero_plane
+                        << (zero_plane_mode > 0.5f ?
+                              " (shot-latched experimental anchor)." : ".");
+      }
       // Min/max reduction accumulator, pre-seeded to the reduction identity
       // {min = 0xFFFFFFFF, max = 0, valid = 0}. depth_minmax_ema_cs resets it after each frame.
       {
@@ -2220,22 +2310,51 @@ namespace models {
 
     ~impl() {
       auto &cuda = cuda_driver_api::get();
+      bool cleanup_execution_ok = cuda.is_valid() && cuda_ctx;
       if (cuda.is_valid() && cuda_ctx) {
-        cuda.cuCtxSetCurrent(cuda_ctx);
+        const auto set_current = cuda.cuCtxSetCurrent(cuda_ctx);
+        if (set_current != CUDA_SUCCESS) {
+          cleanup_execution_ok = false;
+          BOOST_LOG(warning)
+            << "cuCtxSetCurrent failed during depth-estimator teardown: " << set_current;
+        }
         if (cu_stream) {
           if (cuda.cuStreamSynchronize) {
-            cuda.cuStreamSynchronize(cu_stream);
+            const auto synchronized = cuda.cuStreamSynchronize(cu_stream);
+            if (synchronized != CUDA_SUCCESS) {
+              cleanup_execution_ok = false;
+              BOOST_LOG(warning)
+                << "Depth-estimator teardown observed a failed asynchronous inference: "
+                << synchronized;
+            }
+          } else {
+            cleanup_execution_ok = false;
           }
           destroy_inference_graph(cuda);
-          cuda.cuStreamDestroy(cu_stream);
+          if (!cuda.cuStreamDestroy ||
+              cuda.cuStreamDestroy(cu_stream) != CUDA_SUCCESS) {
+            cleanup_execution_ok = false;
+          }
         }
         if (cuda_in_res) {
-          cuda.cuGraphicsUnregisterResource(cuda_in_res);
+          if (!cuda.cuGraphicsUnregisterResource ||
+              cuda.cuGraphicsUnregisterResource(cuda_in_res) != CUDA_SUCCESS) {
+            cleanup_execution_ok = false;
+          }
         }
         if (cuda_out_res) {
-          cuda.cuGraphicsUnregisterResource(cuda_out_res);
+          if (!cuda.cuGraphicsUnregisterResource ||
+              cuda.cuGraphicsUnregisterResource(cuda_out_res) != CUDA_SUCCESS) {
+            cleanup_execution_ok = false;
+          }
         }
         perf_destroy_events();  // free the timing events while cuda_ctx is still current
+      }
+      if (!cleanup_execution_ok) {
+        // Teardown synchronization can be the first API call to surface a deferred launch fault.
+        // Never give that execution context to a later stream, even if the live polling path did
+        // not have another opportunity to mark it before this instance was destroyed.
+        execution_context_poisoned = true;
       }
 
       // Return only a successfully warmed context to the reusable pool. Construction can fail
@@ -2244,11 +2363,16 @@ namespace models {
       // Contexts cannot be destroyed safely across the DLL boundary, so quarantine them instead.
       std::lock_guard<std::mutex> lock(g_trt_mutex);
       if (exec_context) {
-        if (context_warmed) {
+        if (context_warmed && !execution_context_poisoned) {
           g_engines[engine_key].context_pool.push_back(exec_context);
           exec_context = nullptr;
           g_trt_context_available.notify_all();
         } else {
+          if (execution_context_poisoned) {
+            BOOST_LOG(warning)
+              << "Quarantining a TensorRT execution context after CUDA/TensorRT execution or "
+                 "teardown failure.";
+          }
           quarantine_execution_context_locked(engine_key, exec_context);
         }
       }
@@ -2269,7 +2393,7 @@ namespace models {
     }
 
     void release_parallax_v2_resources() {
-      parallax_v2_shadow_active = false;
+      parallax_v2_producer_active = false;
       depth_coordinate_v2_cbuffer.Reset();
       depth_coordinate_v2_partials_buf.Reset();
       depth_coordinate_v2_partials_uav.Reset();
@@ -2296,23 +2420,21 @@ namespace models {
       depth_coordinate_v2_final_srv.Reset();
     }
 
-    void disable_parallax_v2_shadow(std::string_view reason) {
-      if (!parallax_v2_shadow_failed) {
-        BOOST_LOG(warning) << "Host SBS parallax-v2 shadow disabled: " << reason
-                           << (parallax_v2_render_requested ?
-                                 "; explicit render-on stream will remain flat with no legacy geometry." :
-                                 "; shadow-only stream retains the complete legacy path.");
+    void fail_parallax_v2_producer(std::string_view reason) {
+      if (!parallax_v2_producer_failed) {
+        BOOST_LOG(error) << "Host SBS V2 producer failed: " << reason
+                         << "; this stream will remain live flat identity.";
       }
-      parallax_v2_shadow_failed = true;
+      parallax_v2_producer_failed = true;
       release_parallax_v2_resources();
     }
 
     bool ensure_parallax_v2_resources() {
       using namespace depth_coordinate_v2;
-      if (parallax_v2_shadow_active) {
+      if (parallax_v2_producer_active) {
         return true;
       }
-      if (!parallax_v2_shadow_shaders_ready || parallax_v2_shadow_failed ||
+      if (!parallax_v2_producer_shaders_ready || parallax_v2_producer_failed ||
           target_w <= 0 || target_h <= 0 || reduce_groups == 0) {
         return false;
       }
@@ -2330,7 +2452,7 @@ namespace models {
         reason << "model identity, preprocess profile/source closure, or input shape "
                << target_w << 'x' << target_h
                << " is outside the calibrated allowlist";
-        disable_parallax_v2_shadow(reason.str());
+        fail_parallax_v2_producer(reason.str());
         return false;
       }
 
@@ -2423,11 +2545,6 @@ namespace models {
       };
       resources_ok = resources_ok &&
                      create_float_texture(
-                       depth_coordinate_v2_coordinate_tex,
-                       &depth_coordinate_v2_coordinate_srv,
-                       depth_coordinate_v2_coordinate_uav
-                     ) &&
-                     create_float_texture(
                        depth_coordinate_v2_candidate_tex,
                        &depth_coordinate_v2_candidate_srv,
                        depth_coordinate_v2_candidate_uav
@@ -2469,28 +2586,27 @@ namespace models {
       ));
 
       if (!resources_ok) {
-        disable_parallax_v2_shadow("GPU resource allocation failed"sv);
+        fail_parallax_v2_producer("GPU resource allocation failed"sv);
         return false;
       }
 
       const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-      context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_coordinate_uav.Get(), clear);
       context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_candidate_uav.Get(), clear);
       context->ClearUnorderedAccessViewFloat(
         depth_coordinate_v2_vertical_majorant_uav.Get(),
         clear
       );
       context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_final_uav.Get(), clear);
-      parallax_v2_shadow_active = true;
+      parallax_v2_producer_active = true;
       BOOST_LOG(info)
-        << "Host SBS parallax-v2 GPU producer active at " << target_w << 'x' << target_h
-        << "; a render-on stream will authenticate this candidate before its one-time "
-           "V2-or-flat latch, while shadow-only streams remain legacy.";
+        << "Host SBS V2 GPU producer active at " << target_w << 'x' << target_h
+        << "; the renderer will authenticate its first completed field before the one-time "
+           "V2-or-flat latch.";
       return true;
     }
 
-    void dispatch_parallax_v2_shadow() {
-      if (!parallax_v2_shadow_active) {
+    void dispatch_parallax_v2_producer() {
+      if (!parallax_v2_producer_active) {
         return;
       }
 
@@ -2566,21 +2682,23 @@ namespace models {
       context->CSSetShaderResources(0, 2, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
 
-      // Raw depth -> diagnostic canonical coordinate and immutable pre-limiter candidate.
+      // Raw depth -> immutable pre-limiter candidate. The full-size canonical-coordinate field
+      // is deliberately absent from production; an explicit Dump 3D dispatches it separately.
       context->CSSetShader(depth_coordinate_v2_map_cs.Get(), nullptr, 0);
       ID3D11ShaderResourceView *map_srvs[2] = {
         tensor_out_srv.Get(),
         depth_coordinate_v2_state_srv.Get(),
       };
-      ID3D11UnorderedAccessView *map_uavs[2] = {
-        depth_coordinate_v2_coordinate_uav.Get(),
-        depth_coordinate_v2_candidate_uav.Get(),
-      };
       context->CSSetShaderResources(0, 2, map_srvs);
-      context->CSSetUnorderedAccessViews(0, 2, map_uavs, nullptr);
+      context->CSSetUnorderedAccessViews(
+        0,
+        1,
+        depth_coordinate_v2_candidate_uav.GetAddressOf(),
+        nullptr
+      );
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
       context->CSSetShaderResources(0, 2, null_srvs3);
-      context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
+      context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
 
       // Exact near-preserving column majorant bounds vertical disparity shear without mutating the
       // candidate evidence. The row pass then enforces the horizontal invertibility contract.
@@ -2617,6 +2735,93 @@ namespace models {
       context->CSSetConstantBuffers(1, 1, &null_constant);
     }
 
+    bool ensure_parallax_v2_coordinate_diagnostic_resource() {
+      if (depth_coordinate_v2_coordinate_tex && depth_coordinate_v2_coordinate_uav &&
+          depth_coordinate_v2_coordinate_srv) {
+        return true;
+      }
+      if (!parallax_v2_producer_active ||
+          !depth_coordinate_v2_coordinate_diagnostic_cs ||
+          target_w <= 0 || target_h <= 0) {
+        return false;
+      }
+
+      D3D11_TEXTURE2D_DESC desc {};
+      desc.Width = static_cast<UINT>(target_w);
+      desc.Height = static_cast<UINT>(target_h);
+      desc.MipLevels = 1;
+      desc.ArraySize = 1;
+      desc.Format = DXGI_FORMAT_R32_FLOAT;
+      desc.SampleDesc.Count = 1;
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+      const bool created =
+        SUCCEEDED(device->CreateTexture2D(
+          &desc,
+          nullptr,
+          depth_coordinate_v2_coordinate_tex.ReleaseAndGetAddressOf()
+        )) &&
+        SUCCEEDED(device->CreateShaderResourceView(
+          depth_coordinate_v2_coordinate_tex.Get(),
+          nullptr,
+          depth_coordinate_v2_coordinate_srv.ReleaseAndGetAddressOf()
+        )) &&
+        SUCCEEDED(device->CreateUnorderedAccessView(
+          depth_coordinate_v2_coordinate_tex.Get(),
+          nullptr,
+          depth_coordinate_v2_coordinate_uav.ReleaseAndGetAddressOf()
+        ));
+      if (!created) {
+        depth_coordinate_v2_coordinate_tex.Reset();
+        depth_coordinate_v2_coordinate_uav.Reset();
+        depth_coordinate_v2_coordinate_srv.Reset();
+        if (!depth_coordinate_v2_coordinate_diagnostic_error_logged) {
+          BOOST_LOG(warning)
+            << "Host SBS V2 could not allocate the Dump 3D canonical-coordinate texture; "
+               "live rendering is unaffected.";
+          depth_coordinate_v2_coordinate_diagnostic_error_logged = true;
+        }
+      }
+      return created;
+    }
+
+    bool dispatch_parallax_v2_coordinate_diagnostic() {
+      if (!ensure_parallax_v2_coordinate_diagnostic_resource()) {
+        return false;
+      }
+
+      ID3D11Buffer *constant_buffers[2] = {
+        cbuffer.Get(),
+        depth_coordinate_v2_cbuffer.Get(),
+      };
+      ID3D11ShaderResourceView *inputs[2] = {
+        tensor_out_srv.Get(),
+        depth_coordinate_v2_state_srv.Get(),
+      };
+      context->CSSetShader(
+        depth_coordinate_v2_coordinate_diagnostic_cs.Get(),
+        nullptr,
+        0
+      );
+      context->CSSetConstantBuffers(0, 2, constant_buffers);
+      context->CSSetShaderResources(0, 2, inputs);
+      context->CSSetUnorderedAccessViews(
+        0,
+        1,
+        depth_coordinate_v2_coordinate_uav.GetAddressOf(),
+        nullptr
+      );
+      context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+
+      ID3D11ShaderResourceView *null_srvs[2] = {nullptr, nullptr};
+      ID3D11UnorderedAccessView *null_uav = nullptr;
+      ID3D11Buffer *null_constant = nullptr;
+      context->CSSetShaderResources(0, 2, null_srvs);
+      context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+      context->CSSetConstantBuffers(1, 1, &null_constant);
+      return true;
+    }
+
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> output_srv() {
       return depth_srv;
     }
@@ -2626,7 +2831,8 @@ namespace models {
       std::uint64_t completed_frame_id = 0,
       bool inference_enqueued = false,
       bool raw_snapshot_valid = false,
-      bool model_input_snapshot_valid = false
+      bool model_input_snapshot_valid = false,
+      bool coordinate_snapshot_valid = false
     ) {
       estimate_result r;
       r.depth = output_srv();
@@ -2641,15 +2847,17 @@ namespace models {
         r.model_input_snapshot = model_input_snapshot_srv;
       }
       r.raw_model_provenance = raw_model_provenance;
-      if (parallax_v2_shadow_active) {
-        r.shadow_coordinate = depth_coordinate_v2_coordinate_srv;
+      if (parallax_v2_producer_active) {
+        if (coordinate_snapshot_valid) {
+          r.shadow_coordinate = depth_coordinate_v2_coordinate_srv;
+        }
         r.shadow_candidate_parallax = depth_coordinate_v2_candidate_srv;
         r.shadow_vertical_majorant = depth_coordinate_v2_vertical_majorant_srv;
         r.shadow_final_parallax = depth_coordinate_v2_final_srv;
         r.shadow_state = depth_coordinate_v2_state_srv;
         r.shadow_frame_stats = depth_coordinate_v2_frame_stats_srv;
         r.parallax_v2_shader_provenance = parallax_v2_shader_provenance;
-        r.parallax_v2_shadow_active = true;
+        r.parallax_v2_producer_active = true;
         r.parallax_v2_raw_coordinate_scale = parallax_v2_raw_coordinate_scale;
         r.parallax_v2_requested_pop_strength = parallax_v2_requested_pop_strength;
         r.parallax_v2_requested_gain = parallax_v2_requested_gain;
@@ -2718,12 +2926,15 @@ namespace models {
       if (!has_previous_frame || !cu_stream || !cuda.cuStreamSynchronize) {
         return make_result();
       }
-      if (cuda_ctx) {
-        cuda.cuCtxSetCurrent(cuda_ctx);
+      if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
+        BOOST_LOG(error) << "cuCtxSetCurrent failed while finishing pending depth.";
+        mark_terminal_failure(true);
+        return make_result();
       }
       CUresult sync = cuda.cuStreamSynchronize(cu_stream);
       if (sync != CUDA_SUCCESS) {
         BOOST_LOG(error) << "Depth synchronization failed: " << sync;
+        mark_terminal_failure(true);
         return make_result();
       }
       if (diagnostics_enabled) {
@@ -2951,17 +3162,15 @@ namespace models {
         context->CSSetUnorderedAccessViews(0, 3, null_history_uavs, nullptr);
       }
 
-      // V2 producer path: output remains diagnostic in shadow-only mode; an explicit render-on
-      // stream may consume it only after the caller authenticates and latches the V2 renderer.
-      // It deliberately runs after the legacy resolve so the only shared semantic input is that
-      // detector's confirmed-cut generation (with its same-frame pulse retained for attribution).
-      if (parallax_v2_shadow_active) {
+      // Production V2 runs after the shared scene-cut bridge so the only legacy-analysis input is
+      // its confirmed-cut generation (with the same-frame pulse retained for attribution).
+      if (parallax_v2_producer_active) {
         // This nested interval covers exactly the seven v2 compute passes. It remains inside the
         // inclusive depth_postprocess_gpu interval so existing benchmark semantics do not move.
         mark_d3d_parallax_start(perf_slot);
       }
-      dispatch_parallax_v2_shadow();
-      if (parallax_v2_shadow_active) {
+      dispatch_parallax_v2_producer();
+      if (parallax_v2_producer_active) {
         mark_d3d_parallax_end(perf_slot);
       }
     }
@@ -3005,11 +3214,12 @@ namespace models {
     // output buffer untouched; estimate() consumes that result after the caller has copied the
     // exact color frame that will own the next inference.
     bool can_accept() {
-      if (!valid) {
+      if (!valid || terminal_failure || live_v2_producer_unavailable()) {
         return false;
       }
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid() || !cu_stream || !cuda.cuStreamQuery) {
+        mark_terminal_failure(true);
         return false;
       }
       if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
@@ -3017,6 +3227,7 @@ namespace models {
           BOOST_LOG(error) << "cuCtxSetCurrent failed during depth readiness preflight.";
           stream_error_logged = true;
         }
+        mark_terminal_failure(true);
         return false;
       }
 
@@ -3036,6 +3247,7 @@ namespace models {
           BOOST_LOG(error) << "cuStreamQuery failed during depth readiness preflight: " << query;
           stream_error_logged = true;
         }
+        mark_terminal_failure(true);
         readiness_preflighted = false;
         return false;
       }
@@ -3049,22 +3261,29 @@ namespace models {
       std::uint64_t frame_id,
       bool snapshot_raw_model_depth
     ) {
-      if (!valid || !input_srv) {
+      if (!valid || terminal_failure || live_v2_producer_unavailable() || !input_srv) {
         return {};
       }
       bool completed_frame_valid = false;
       std::uint64_t completed_frame_id = 0;
       bool raw_snapshot_valid = false;
       bool model_input_snapshot_valid = false;
+      bool coordinate_snapshot_valid = false;
 
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid()) {
         BOOST_LOG(error) << "CUDA Driver API is not available.";
+        mark_terminal_failure(true);
         return {};
       }
 
-      if (cuda_ctx) {
-        cuda.cuCtxSetCurrent(cuda_ctx);
+      if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
+        if (!stream_error_logged) {
+          BOOST_LOG(error) << "cuCtxSetCurrent failed during depth estimation.";
+          stream_error_logged = true;
+        }
+        mark_terminal_failure(true);
+        return {};
       }
 
       // Production preflights before its expensive full-resolution color copy. The evaluator and
@@ -3095,19 +3314,21 @@ namespace models {
           stream_error_logged = true;
         }
         if (q != CUDA_SUCCESS) {
+          mark_terminal_failure(true);
           return make_result();
         }
       }
 
-      D3D11_TEXTURE2D_DESC input_desc = {0};
-      Microsoft::WRL::ComPtr<ID3D11Resource> input_res;
-      input_srv->GetResource(&input_res);
-      Microsoft::WRL::ComPtr<ID3D11Texture2D> input_tex;
-      if (SUCCEEDED(input_res.As(&input_tex))) {
-        input_tex->GetDesc(&input_desc);
-      }
-
       if (target_w == 0 || target_h == 0) {
+        // Shape is session-constant after the first valid frame. Avoid three COM calls on every
+        // accepted frame merely to rediscover a descriptor consumed only by this initialization.
+        D3D11_TEXTURE2D_DESC input_desc = {0};
+        Microsoft::WRL::ComPtr<ID3D11Resource> input_res;
+        input_srv->GetResource(&input_res);
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> input_tex;
+        if (SUCCEEDED(input_res.As(&input_tex))) {
+          input_tex->GetDesc(&input_desc);
+        }
         // The capture surface can report a 0x0 descriptor mid HDR/mode transition or
         // before the first real frame. Deriving the model resolution from that yields a
         // garbage size (NaN aspect -> integer-overflow -> clamps to the profile max) that would
@@ -3115,20 +3336,16 @@ namespace models {
         if (input_desc.Width == 0 || input_desc.Height == 0) {
           return {};
         }
-        float aspect_ratio = (float) input_desc.Width / (float) input_desc.Height;
         // Keep the patch-aligned tensor as close as possible to source aspect while respecting
         // the TensorRT profile, configured aspect cap, and native size.
-        int max_w = std::min(models::depth_engine_max_dim, (int) input_desc.Width);
-        int max_h = std::min(models::depth_engine_max_dim, (int) input_desc.Height);
-        const float fitted_aspect = aspect_ratio >= 1.0f ? std::min(aspect_ratio, max_aspect) : 1.0f / std::min(1.0f / aspect_ratio, max_aspect);
-        const auto fitted_dims = aspect_aligned_dims(
-          fitted_aspect,
+        const auto fitted_shape = models::fit_depth_tensor_shape(
+          input_desc.Width,
+          input_desc.Height,
           depth_short_side,
-          max_w,
-          max_h
+          max_aspect
         );
-        target_w = fitted_dims.first;
-        target_h = fitted_dims.second;
+        target_w = fitted_shape.width;
+        target_h = fitted_shape.height;
 
         // Threads for the min/max reduction; grid-stride handles any element count.
         int elems = target_w * target_h;
@@ -3279,15 +3496,18 @@ namespace models {
                        SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_srv));
 
         if (!resources_ok) {
-          BOOST_LOG(error) << "Depth estimator D3D11 resource creation failed; retrying on a later frame.";
+          BOOST_LOG(error) << "Depth estimator D3D11 resource creation failed"
+                           << (host_v2_required() ?
+                                 "; Host SBS V2 will fail flat." :
+                                 "; evaluation may retry on a later frame.");
           target_w = target_h = 0;
+          mark_terminal_failure();
           return {};
         }
 
-        if (parallax_v2_shadow_shaders_ready && !parallax_v2_shadow_failed) {
-          // Optional failure is fail-contained: production remains valid and renders its complete
-          // legacy geometry rather than mixing resources from the two coordinate systems.
-          ensure_parallax_v2_resources();
+        if (host_v2_required() && !ensure_parallax_v2_resources()) {
+          mark_terminal_failure();
+          return {};
         }
 
         // Clear depth so the range->pixel EMA initializes from a known value.
@@ -3310,6 +3530,7 @@ namespace models {
           cuda_in_res = nullptr;
           cuda_out_res = nullptr;
           target_w = target_h = 0;
+          mark_terminal_failure();
           return {};
         }
       }
@@ -3318,6 +3539,7 @@ namespace models {
       // Session-constant, so the buffer is built once (immutable), not mapped per frame.
       ensure_cbuffers(color_space);
       if (!cbuffer) {
+        mark_terminal_failure();
         return {};
       }
 
@@ -3331,10 +3553,13 @@ namespace models {
       if (has_previous_frame) {
         normalize_depth_output(d3d_timer);
         // Production post-process timing ends at the normalized depth result. The two stable
-        // Dump 3D copies below are explicit diagnostic work and must not contaminate live
+        // Dump 3D copies and canonical-coordinate pass below are explicit diagnostic work and
+        // must not contaminate live
         // depth_postprocess_gpu samples.
         mark_d3d_post_end(d3d_timer);
         if (snapshot_raw_model_depth) {
+          coordinate_snapshot_valid =
+            dispatch_parallax_v2_coordinate_diagnostic();
           // tensor_in_buf and tensor_out_buf still own the exact completed frame here. Preserve
           // both before the current frame's preprocess and CUDA mapping reuse those allocations.
           raw_snapshot_valid = snapshot_buffer(
@@ -3393,24 +3618,26 @@ namespace models {
       auto map_res = cuda.cuGraphicsMapResources(2, resources, cu_stream);
       if (map_res != 0) {
         BOOST_LOG(error) << "cuGraphicsMapResources failed: " << map_res;
+        mark_terminal_failure();
         return make_result(
           completed_frame_valid,
           completed_frame_id,
           false,
           raw_snapshot_valid,
-          model_input_snapshot_valid
+          model_input_snapshot_valid,
+          coordinate_snapshot_valid
         );
       }
 
-      void *d_in = nullptr;
-      void *d_out = nullptr;
+      CUdeviceptr d_in = 0;
+      CUdeviceptr d_out = 0;
       auto in_ptr_res = cuda.cuGraphicsResourceGetMappedPointer(
-        (CUdeviceptr *) &d_in,
+        &d_in,
         nullptr,
         cuda_in_res
       );
       auto out_ptr_res = cuda.cuGraphicsResourceGetMappedPointer(
-        (CUdeviceptr *) &d_out,
+        &d_out,
         nullptr,
         cuda_out_res
       );
@@ -3419,28 +3646,62 @@ namespace models {
       if (in_ptr_res != CUDA_SUCCESS || out_ptr_res != CUDA_SUCCESS || !d_in || !d_out) {
         BOOST_LOG(error) << "Failed to get mapped pointer for TensorRT: "
                          << in_ptr_res << ", " << out_ptr_res;
+        mark_terminal_failure();
       } else {
-        nvinfer1::Dims in_dims = make_input_dims(target_h, target_w);
-        bool bindings_ok = exec_context->setInputShape("pixel_values", in_dims);
-        if (!bindings_ok) {
-          BOOST_LOG(error) << "TensorRT setInputShape failed for " << target_w << "x" << target_h
-                           << " (outside the engine's optimization profile?)";
+        bool bindings_ok = true;
+        if (trt_bound_width != target_w || trt_bound_height != target_h) {
+          nvinfer1::Dims in_dims = make_input_dims(target_h, target_w);
+          bindings_ok = exec_context->setInputShape("pixel_values", in_dims);
+          if (bindings_ok) {
+            trt_bound_width = target_w;
+            trt_bound_height = target_h;
+          } else {
+            BOOST_LOG(error) << "TensorRT setInputShape failed for " << target_w << "x" << target_h
+                             << " (outside the engine's optimization profile?)";
+          }
         }
-        bindings_ok = bindings_ok &&
-                      exec_context->setTensorAddress("pixel_values", (void *) d_in) &&
-                      exec_context->setTensorAddress("predicted_depth", (void *) d_out);
+        if (bindings_ok && trt_bound_input != d_in) {
+          bindings_ok = exec_context->setTensorAddress(
+            "pixel_values",
+            reinterpret_cast<void *>(d_in)
+          );
+          if (bindings_ok) {
+            trt_bound_input = d_in;
+          }
+        }
+        if (bindings_ok && trt_bound_output != d_out) {
+          bindings_ok = exec_context->setTensorAddress(
+            "predicted_depth",
+            reinterpret_cast<void *>(d_out)
+          );
+          if (bindings_ok) {
+            trt_bound_output = d_out;
+          }
+        }
+        if (!bindings_ok) {
+          mark_terminal_failure();
+          if (!stream_error_logged) {
+            BOOST_LOG(error) << "TensorRT shape/tensor binding failed"
+                             << (host_v2_required() ?
+                                   "; Host SBS V2 will fail flat." :
+                                   "; evaluation may retry on a later frame.");
+            stream_error_logged = true;
+          }
+        }
         if (bindings_ok) {
           // Serialize TensorRT async enqueue to avoid driver-level concurrent execution faults
           std::lock_guard<std::mutex> lock(*trt_mutex);
           int perf_slot = perf_begin(perf_depth, cu_stream);
           enqueued = enqueue_inference(
-            (CUdeviceptr) d_in,
-            (CUdeviceptr) d_out,
+            d_in,
+            d_out,
             cuda
           );
           if (!enqueued) {
+            mark_terminal_failure(true);
             if (!stream_error_logged) {
-              BOOST_LOG(error) << "TensorRT enqueueV3 failed; retaining the last valid depth.";
+              BOOST_LOG(error) << "TensorRT enqueueV3 failed; the execution context is "
+                                   "quarantined and this estimator cannot continue.";
               stream_error_logged = true;
             }
           }
@@ -3451,6 +3712,7 @@ namespace models {
       auto unmap_res = cuda.cuGraphicsUnmapResources(2, resources, cu_stream);
       if (unmap_res != CUDA_SUCCESS) {
         BOOST_LOG(error) << "cuGraphicsUnmapResources failed: " << unmap_res;
+        mark_terminal_failure(true);
         enqueued = false;
       }
 
@@ -3467,13 +3729,21 @@ namespace models {
         completed_frame_id,
         enqueued,
         raw_snapshot_valid,
-        model_input_snapshot_valid
+        model_input_snapshot_valid,
+        coordinate_snapshot_valid
       );
     }
   };
 
-  video_depth_estimator::video_depth_estimator(Microsoft::WRL::ComPtr<ID3D11Device> device, Microsoft::WRL::ComPtr<ID3D11DeviceContext> context, const std::filesystem::path &assets_dir, const config::video_t::sbs_t &cfg, const config::depth_model_info &model):
-      pimpl(std::make_unique<impl>(device, context, assets_dir, cfg, model)) {}
+  video_depth_estimator::video_depth_estimator(
+    Microsoft::WRL::ComPtr<ID3D11Device> device,
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
+    const std::filesystem::path &assets_dir,
+    const config::video_t::sbs_t &cfg,
+    const config::depth_model_info &model,
+    const depth_estimator_usage_e usage
+  ):
+      pimpl(std::make_unique<impl>(device, context, assets_dir, cfg, model, usage)) {}
 
   video_depth_estimator::~video_depth_estimator() = default;
 
@@ -3483,6 +3753,11 @@ namespace models {
 
   bool video_depth_estimator::can_accept_frame() {
     return pimpl && pimpl->can_accept();
+  }
+
+  bool video_depth_estimator::has_terminal_failure() const {
+    return !pimpl || !pimpl->valid || pimpl->terminal_failure ||
+           pimpl->live_v2_producer_unavailable();
   }
 
   estimate_result video_depth_estimator::estimate_depth(

@@ -89,7 +89,7 @@ RAW_PATTERN = re.compile(r"raw_(\d+)\.f32$")
 SELECTED_POLICY = "first"
 RESEARCH_POLICIES = ("aggregate", "slow")
 POLICY_STUDY_POLICIES = (SELECTED_POLICY, *RESEARCH_POLICIES)
-V2_STATE_TRACE_SCHEMA = 9
+V2_STATE_TRACE_SCHEMA = 10
 V2_STATE_TRACE_POLICY = (
     "latched-center-scale-near-tail-retained-camera-base-container-vertical-shear2-near-majorant-v8"
 )
@@ -492,7 +492,7 @@ def validate_v2_state_trace(
         digest_pattern = re.compile(r"[0-9a-f]{64}")
         if (set(producer) != {
                 "authority", "manifest_sha256", "contract_canonical_sha256",
-                "shader_sequence", "state_persistence", "numpy_role"} or
+                "tensor_shape", "shader_sequence", "state_persistence", "numpy_role"} or
                 not isinstance(producer.get("manifest_sha256"), str) or
                 digest_pattern.fullmatch(producer["manifest_sha256"]) is None or
                 producer.get("contract_canonical_sha256") != CONTRACT_CANONICAL_SHA256 or
@@ -509,10 +509,20 @@ def validate_v2_state_trace(
                 rel_tol=0.0, abs_tol=1.0e-12)
             for shape in calibration.calibrated_input_shapes
         }
-        if len(calibrated_shapes) != 1:
+        tensor_shape = producer.get("tensor_shape")
+        if (not isinstance(tensor_shape, dict) or
+                set(tensor_shape) != {"width", "height"} or
+                isinstance(tensor_shape.get("width"), bool) or
+                isinstance(tensor_shape.get("height"), bool) or
+                not isinstance(tensor_shape.get("width"), int) or
+                not isinstance(tensor_shape.get("height"), int)):
             raise ValueError(
-                "v2 native trace does not identify one calibrated replay tensor shape")
-        calibrated_width, calibrated_height = next(iter(calibrated_shapes))
+                "v2 native trace has an invalid replay tensor shape")
+        calibrated_width = tensor_shape["width"]
+        calibrated_height = tensor_shape["height"]
+        if (calibrated_width, calibrated_height) not in calibrated_shapes:
+            raise ValueError(
+                "v2 native trace identifies an unauthenticated replay tensor shape")
         native_texel_count = calibrated_width * calibrated_height
     else:
         raise ValueError("v2 state trace has an invalid producer authority")

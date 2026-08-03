@@ -168,7 +168,7 @@ namespace sbs_bench {
 
     ComPtr<ID3DBlob> compile_encode_shader(std::string &error) {
       // Interchange only. The controller and conditioning remain exclusively in the seven
-      // experimental shadow shaders; this pass changes signed [-.04,+.04] storage into the existing
+      // production V2 shaders; this pass changes signed [-.04,+.04] storage into the existing
       // direct-renderer's [0,1] storage without a GPU->CPU->GPU round trip.
       static constexpr char source[] = R"(
 Texture2D<float> SignedParallax : register(t0);
@@ -398,6 +398,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11ComputeShader> near_coverage_shader;
     ComPtr<ID3D11ComputeShader> state_shader;
     ComPtr<ID3D11ComputeShader> map_shader;
+    ComPtr<ID3D11ComputeShader> coordinate_diagnostic_shader;
     ComPtr<ID3D11ComputeShader> vertical_limit_shader;
     ComPtr<ID3D11ComputeShader> limit_shader;
     ComPtr<ID3D11ComputeShader> encode_shader;
@@ -724,7 +725,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       static_assert(v2::shader_source_macro_count == 0u);
       const auto shader_sources = shader_cache::snapshot_sources(
         shader_root,
-        shader_cache::parallax_v2_shadow_specs
+        shader_cache::parallax_v2_producer_specs
       );
       if (!shader_sources ||
           shader_cache::source_closure_sha256(shader_sources) !=
@@ -755,6 +756,25 @@ void main(uint3 id : SV_DispatchThreadID) {
             std::string(target.spec->filename);
           return false;
         }
+      }
+      const auto diagnostic_sources = shader_cache::snapshot_sources(
+        shader_root,
+        shader_cache::parallax_v2_diagnostic_specs
+      );
+      const auto diagnostic_bytecode = diagnostic_sources ?
+        shader_cache::get(
+          diagnostic_sources,
+          shader_cache::depth_coordinate_v2_coordinate_diagnostic
+        ) : nullptr;
+      if (!diagnostic_bytecode || diagnostic_bytecode->empty() ||
+          FAILED(device->CreateComputeShader(
+            diagnostic_bytecode->data(),
+            diagnostic_bytecode->size(),
+            nullptr,
+            coordinate_diagnostic_shader.ReleaseAndGetAddressOf()
+          )) || !coordinate_diagnostic_shader) {
+        error = "cannot create V2 canonical-coordinate diagnostic compute shader";
+        return false;
       }
       auto encode_blob = compile_encode_shader(error);
       if (!encode_blob || FAILED(device->CreateComputeShader(
@@ -946,15 +966,20 @@ void main(uint3 id : SV_DispatchThreadID) {
       context->Dispatch(1u, 1u, 1u);
       unbind(2u, 2u);
 
-      context->CSSetShader(map_shader.Get(), nullptr, 0);
       ID3D11ShaderResourceView *map_srvs[] = {raw_srv.Get(), state_srv.Get()};
-      ID3D11UnorderedAccessView *map_uavs[] = {
-        coordinate_uav.Get(), candidate_uav.Get(),
-      };
+
+      // The canonical coordinate is a replay diagnostic, matching the live Dump-3D-only pass.
+      context->CSSetShader(coordinate_diagnostic_shader.Get(), nullptr, 0);
       context->CSSetShaderResources(0, 2, map_srvs);
-      context->CSSetUnorderedAccessViews(0, 2, map_uavs, nullptr);
+      context->CSSetUnorderedAccessViews(0, 1, coordinate_uav.GetAddressOf(), nullptr);
       context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
-      unbind(2u, 2u);
+      unbind(2u, 1u);
+
+      context->CSSetShader(map_shader.Get(), nullptr, 0);
+      context->CSSetShaderResources(0, 2, map_srvs);
+      context->CSSetUnorderedAccessViews(0, 1, candidate_uav.GetAddressOf(), nullptr);
+      context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
+      unbind(2u, 1u);
 
       context->CSSetShader(vertical_limit_shader.Get(), nullptr, 0);
       ID3D11ShaderResourceView *vertical_limit_srvs[] = {candidate_srv.Get()};
@@ -1051,8 +1076,8 @@ void main(uint3 id : SV_DispatchThreadID) {
       const float effective_near_log_tau = float_state(v2::effective_near_log_tau);
       const std::uint32_t latched_near_tail_count =
         state_words[v2::latched_near_tail_count];
-      const std::uint32_t near_shoulder_reserved =
-        state_words[v2::near_shoulder_reserved];
+      const std::uint32_t camera_center_integrity =
+        state_words[v2::camera_center_integrity_bits];
       const float container_scale = float_state(v2::container_scale);
       const bool shoulder_valid =
         std::isfinite(latched_near_tail_coverage) &&
@@ -1060,10 +1085,17 @@ void main(uint3 id : SV_DispatchThreadID) {
         std::isfinite(effective_near_log_tau) &&
         effective_near_log_tau >= constants.near_log_tau_dense &&
         effective_near_log_tau <= constants.near_log_tau &&
-        latched_near_tail_count <= element_count && near_shoulder_reserved == 0u;
+        latched_near_tail_count <= element_count;
       const std::uint32_t calibration_revision =
         state_words[v2::calibration_revision];
-      const bool camera_valid = shoulder_valid && inverse_scale > 0.0f &&
+      const bool camera_integrity_valid = v2::camera_center_integrity_is_valid(
+        state_words[v2::center],
+        state_words[v2::inverse_scale],
+        calibration_revision,
+        camera_center_integrity
+      );
+      const bool camera_valid = camera_integrity_valid && shoulder_valid &&
+        inverse_scale > 0.0f &&
         calibration_revision > 0u &&
         v2::calibration_revision_is_valid(calibration_revision);
       const float effective_gain = frame_valid ?
@@ -1449,6 +1481,13 @@ void main(uint3 id : SV_DispatchThreadID) {
         {"authority", std::string(depth_coordinate_v2_gpu_authority)},
         {"manifest_sha256", impl_->manifest_sha256},
         {"contract_canonical_sha256", v2::contract_canonical_sha256},
+        {"tensor_shape", {
+          {"width", impl_->width},
+          {"height", impl_->height},
+        }},
+        // Production state/geometry passes only. The replay's coordinate_main dispatch is
+        // diagnostic report materialization, exactly like live Dump 3D, and is intentionally
+        // excluded from this authenticated seven-entry sequence.
         {"shader_sequence", {
           "depth_coordinate_v2_moments_cs.hlsl",
           "depth_coordinate_v2_frame_resolve_cs.hlsl",

@@ -130,23 +130,14 @@ namespace platf::dxgi {
   blob_t cursor_ps_hlsl;
   blob_t cursor_ps_normalize_white_hlsl;
   blob_t rgb_present_linear_to_srgb_ps_hlsl;
+  blob_t rgb_present_srgb_to_linear_ps_hlsl;
+  blob_t sbs_flat_identity_ps_hlsl;
   blob_t cursor_vs_hlsl;
-  blob_t depth_warp_prefilter_cs_hlsl;
-  blob_t sbs_reprojection_ps_hlsl;
-  // Optional, config-only live V2 cutover shader. It is never compiled when the experiment is
-  // disabled. Failure leaves legacy available to render-off streams; an explicit render-on
-  // stream fails flat and never falls back to legacy geometry.
+  // Authenticated production Host SBS V2 shader. Dump-only entry points are snapshotted and
+  // compiled lazily by the per-device dumper, outside startup and production frame timing.
   models::host_sbs_shader_cache::bytecode_t sbs_reprojection_v2_live_ps_hlsl;
-  models::host_sbs_shader_cache::bytecode_t sbs_reprojection_v2_mapping_ps_hlsl;
-  models::host_sbs_shader_cache::bytecode_t sbs_reprojection_v2_mask_ps_hlsl;
   std::string sbs_reprojection_v2_live_source_closure_sha256;
   blob_t sbs_reprojection_vs_hlsl;
-  // Optional Dump 3D entry points are compiled with the rest of the process-wide shader blobs.
-  // Per-device resource creation may then occur during a stream without invoking the HLSL
-  // compiler on the capture/encode path.
-  blob_t sbs_reprojection_mapping_ps_hlsl;
-  blob_t sbs_reprojection_mask_ps_hlsl;
-  blob_t sbs_forward_coverage_cs_hlsl;
 
   struct img_d3d_t: public platf::img_t {
     // These objects are owned by the display_t's ID3D11Device
@@ -452,6 +443,21 @@ namespace platf::dxgi {
       workers_.push_back({std::move(thread), std::move(completed)});
     }
 
+    // CUDA/TensorRT teardown can synchronize and return a large execution context to the pool.
+    // Never perform that work on the encode thread after a terminal fail-flat transition.
+    void retire(std::unique_ptr<models::video_depth_estimator> estimator) {
+      if (!estimator) {
+        return;
+      }
+      depth_estimator_build_task_t task(
+        [estimator = std::move(estimator)]() mutable {
+          estimator.reset();
+          return std::unique_ptr<models::video_depth_estimator> {};
+        }
+      );
+      launch(std::move(task));
+    }
+
   private:
     struct worker_t {
       std::thread thread;
@@ -559,12 +565,17 @@ namespace platf::dxgi {
         auto draw_rgb = [&](ID3D11ShaderResourceView *input, bool input_is_linear) {
           device_ctx->OMSetRenderTargets(1, &rgb_present_target, nullptr);
           device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
-          device_ctx->PSSetShader(
-            input_is_linear && !rgb_present_target_is_linear ? rgb_present_linear_to_srgb_ps.get() :
-                                                               rgb_present_ps.get(),
-            nullptr,
-            0
-          );
+          ID3D11PixelShader *presentation_shader = rgb_present_ps.get();
+          if (input_is_linear != rgb_present_target_is_linear) {
+            presentation_shader = input_is_linear ?
+                                    rgb_present_linear_to_srgb_ps.get() :
+                                    rgb_present_srgb_to_linear_ps.get();
+          }
+          device_ctx->PSSetShader(presentation_shader, nullptr, 0);
+          if (!input_is_linear && rgb_present_target_is_linear) {
+            ID3D11Buffer *sdr_white = rgb_present_sdr_white.get();
+            device_ctx->PSSetConstantBuffers(1, 1, &sdr_white);
+          }
           device_ctx->RSSetViewports(1, &rgb_present_viewport);
           device_ctx->PSSetSamplers(0, 1, &sampler_linear);
           device_ctx->PSSetShaderResources(0, 1, &input);
@@ -576,7 +587,7 @@ namespace platf::dxgi {
           device_ctx->PSSetShaderResources(0, 1, &null_srv);
         };
 
-        auto copy_rgb = [&](ID3D11Texture2D *input) {
+        auto copy_rgb = [&](ID3D11Texture2D *input, bool input_is_linear) {
           if (!input || !rgb_present_texture) {
             return false;
           }
@@ -591,14 +602,18 @@ namespace platf::dxgi {
                                   input_desc.ArraySize == output_desc.ArraySize &&
                                   input_desc.Format == output_desc.Format &&
                                   input_desc.SampleDesc.Count == output_desc.SampleDesc.Count &&
-                                  input_desc.SampleDesc.Quality == output_desc.SampleDesc.Quality;
+                                  input_desc.SampleDesc.Quality == output_desc.SampleDesc.Quality &&
+                                  input_is_linear == rgb_present_target_is_linear;
           if (!compatible) {
             if (!rgb_copy_fallback_logged) {
               BOOST_LOG(info) << "Local AR exact-copy path unavailable (source "sv
                               << input_desc.Width << 'x' << input_desc.Height << ' '
                               << (int) input_desc.Format << ", target "sv
                               << output_desc.Width << 'x' << output_desc.Height << ' '
-                              << (int) output_desc.Format << "); using the RGB presentation shader."sv;
+                              << (int) output_desc.Format << ", transfer "sv
+                              << (input_is_linear ? "linear" : "sRGB") << " -> "sv
+                              << (rgb_present_target_is_linear ? "linear" : "sRGB")
+                              << "); using the RGB presentation shader."sv;
               rgb_copy_fallback_logged = true;
             }
             return false;
@@ -620,6 +635,15 @@ namespace platf::dxgi {
         };
 
         if (sbs_mode != ::video::SBS_OFF) {
+          const bool input_is_linear =
+            img.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+          // DDup does not reveal its capture format until the first real frame. Allocate (or
+          // correct) the packed target from that observed format so ordinary BGRA SDR does not
+          // remain in the conservative FP16 storage selected during device setup.
+          if (!ensure_sbs_intermediate_storage(input_is_linear)) {
+            return -1;
+          }
+
           // Perf benchmark: CPU wall time of the whole SBS block (estimator dispatch + composite
           // draw submission). GPU-side inference times are measured separately via CUDA events in
           // the estimator. No-op unless runtime diagnostics are on.
@@ -628,7 +652,11 @@ namespace platf::dxgi {
           const bool snapshot_debug_inputs = sbs_dumper.snapshot_requested();
 
           // Lazy-create the depth estimator on the first SBS frame.
-          ensure_depth_estimator();
+          if (models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
+            ensure_depth_estimator();
+          } else {
+            sbs_dumper.cancel_pending_request();
+          }
           // Stable tensor copies are inserted into the same D3D command stream before the current
           // preprocess. Skip whole-frame performance publication for an explicit dump frame so
           // diagnostic work cannot appear as a production regression.
@@ -637,8 +665,6 @@ namespace platf::dxgi {
 
           // Production always uses bounded matched pairing: infer asynchronously from a private
           // color slot, then warp only the slot whose frame identity completed.
-          const bool input_is_linear =
-            img.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
           const auto input_color_space = input_is_linear ?
                                            (display->is_hdr() ? models::input_color_space::scrgb_hdr :
                                                                 models::input_color_space::linear_sdr) :
@@ -649,7 +675,8 @@ namespace platf::dxgi {
           matched_frame_slot_t *matched_candidate_slot = nullptr;
           models::estimate_result est;
 
-          if (depth_estimator) {
+          if (depth_estimator &&
+              models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
             matched_candidate_slot = available_matched_slot();
             // Readiness is checked before the full-resolution private-slot copy. When TensorRT is
             // still using the previous matched frame, the output is repeated without spending a
@@ -725,19 +752,32 @@ namespace platf::dxgi {
             mark_sbs_matched_copy_end(gpu_timer, false);
           }
 
-          // The experiment chooses its geometry backend once, on the first depth completion for
-          // which the exact buffered color is still present. A later invalid V2 frame is handled
-          // inside the V2 shader; it must never make this stream alternate back to legacy.
+          // A poisoned CUDA/TensorRT producer cannot recover by repeating its last stereo pair:
+          // that turns a fail-closed renderer into a frozen stream. V2 has an explicit terminal
+          // transition to current-frame flat identity (never V1), and releases the now-unused
+          // matched-slot bookkeeping without destroying the estimator on the encode thread.
+          if (depth_estimator && depth_estimator->has_terminal_failure()) {
+            const auto failed_renderer =
+              models::fail_host_sbs_renderer_flat(host_sbs_renderer);
+            if (failed_renderer != host_sbs_renderer) {
+              fail_depth_pipeline_flat();
+              matched_render_slot = nullptr;
+              est = {};
+              render_input_srv = img_ctx.encoder_input_res.get();
+              BOOST_LOG(error)
+                << "Host SBS parallax-v2 producer reported a terminal CUDA/TensorRT failure; "sv
+                   "this stream is now live flat identity with depth submissions disabled."sv;
+            }
+          }
+
+          // Authenticate the first completed V2 field for which the exact buffered color remains.
+          // A later invalid frame is handled inside the V2 shader and never changes geometry mode.
           if (matched_render_slot &&
-              host_sbs_renderer == models::host_sbs_renderer_e::undecided) {
-            const bool live_shader_ready =
-              sbs_reprojection_v2_live_ps.get() != nullptr;
+              host_sbs_renderer == models::host_sbs_renderer_e::awaiting_v2) {
             const bool result_authenticated =
               models::parallax_v2_result_is_authenticated(est);
             host_sbs_renderer = models::latch_host_sbs_renderer(
               host_sbs_renderer,
-              sbs_config.parallax_v2_render,
-              live_shader_ready,
               result_authenticated
             );
             if (host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2) {
@@ -754,39 +794,80 @@ namespace platf::dxgi {
                 << est.parallax_v2_requested_pop_strength << ")."sv;
             } else {
               BOOST_LOG(warning)
-                << "Host SBS parallax-v2 render request failed closed; this stream is "sv
-                   "permanently latched to flat identity with no legacy geometry "sv
-                   "(live_shader_ready="sv
-                << (live_shader_ready ? "true" : "false")
-                << ", authenticated_result="sv
+                << "Host SBS V2 authentication failed closed; this stream is permanently "sv
+                   "latched to live flat identity (authenticated_result="sv
                 << (result_authenticated ? "true" : "false")
                 << ", producer_active="sv
-                << (est.parallax_v2_shadow_active ? "true" : "false")
+                << (est.parallax_v2_producer_active ? "true" : "false")
                 << ", model_shape="sv << est.raw_width << 'x' << est.raw_height
                 << ")."sv;
+              // Authentication failure is a terminal live-identity state. Do not retain the
+              // delayed completion as a repeat source, and do not keep slot ownership for the
+              // inference that estimate_depth may have opportunistically enqueued this frame.
+              fail_depth_pipeline_flat();
+              matched_render_slot = nullptr;
+              est = {};
+              render_input_srv = img_ctx.encoder_input_res.get();
             }
           }
 
-          const bool repeat_matched_output = !matched_render_slot && matched_output_valid;
+          // A busy CUDA stream may legitimately repeat one matched pair for a few source frames,
+          // but NOT_READY is not proof of eventual progress. Bound live V2 by the source frame's
+          // age; once stale, render current color through the V2 shader's flat-identity path while
+          // continuing nonblocking queries so a later fresh completion can recover automatically.
+          const auto repeat_now = std::chrono::steady_clock::now();
+          bool stale_v2_completion = false;
+          if (matched_render_slot &&
+              host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
+              repeat_now - matched_render_slot->captured_at >
+                models::host_sbs_v2_max_matched_repeat_age) {
+            stale_v2_completion = true;
+            matched_render_slot = nullptr;
+            est = {};
+            render_input_srv = img_ctx.encoder_input_res.get();
+          }
+          const auto repeat_source_age =
+            matched_output_source_at.time_since_epoch().count() != 0 ?
+              repeat_now - matched_output_source_at :
+              std::chrono::steady_clock::duration::max();
+          const bool repeat_matched_output =
+            models::host_sbs_should_repeat_matched_output(
+              host_sbs_renderer,
+              matched_render_slot != nullptr,
+              matched_output_valid,
+              repeat_source_age
+            );
+          const bool v2_repeat_timed_out =
+            stale_v2_completion ||
+            (host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
+             !matched_render_slot && matched_output_valid &&
+             repeat_source_age > models::host_sbs_v2_max_matched_repeat_age);
+          if (v2_repeat_timed_out && !matched_output_timeout_active) {
+            matched_output_timeout_active = true;
+            BOOST_LOG(warning)
+              << "Host SBS V2 depth completion exceeded "sv
+              << models::host_sbs_v2_max_matched_repeat_age.count()
+              << " ms; rendering live current-frame flat identity until depth recovers."sv;
+          } else if (!v2_repeat_timed_out && matched_output_timeout_active &&
+                     matched_render_slot) {
+            matched_output_timeout_active = false;
+            BOOST_LOG(info) << "Host SBS V2 depth completion recovered; stereo warp resumed."sv;
+          }
           const bool v2_renderer_selected =
             host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2;
-          const bool legacy_renderer_selected =
-            host_sbs_renderer == models::host_sbs_renderer_e::legacy;
           const bool v2_renderer_failed_flat =
-            host_sbs_renderer ==
-            models::host_sbs_renderer_e::parallax_v2_failed_flat;
+            host_sbs_renderer == models::host_sbs_renderer_e::failed_flat;
+          const bool v2_live_warp_selected =
+            v2_renderer_selected && sbs_reprojection_v2_live_ps;
           ID3D11ShaderResourceView *selected_parallax_field =
-            // V2 samples the one-sided, sub-unit-slope final field. Its monotone eye maps have a
-            // unique inverse, so neither canonical visibility nor a forward-owner pass is live.
-            v2_renderer_selected ? est.shadow_final_parallax.Get() :
-            legacy_renderer_selected ? est.depth.Get() : nullptr;
+            v2_live_warp_selected ? est.shadow_final_parallax.Get() : nullptr;
           const bool timing_has_depth_warp =
             !repeat_matched_output && selected_parallax_field;
           mark_sbs_warp_start(gpu_timer, timing_has_depth_warp);
           ID3D11ShaderResourceView *final_sbs_srv = nullptr;
           ID3D11Texture2D *final_sbs_texture = nullptr;
+          bool final_sbs_is_linear = sbs_intermediate_is_linear;
           ID3D11ShaderResourceView *dump_warp_depth = nullptr;
-          bool dump_warp_depth_prefiltered = false;
           if (repeat_matched_output) {
             final_sbs_srv = sbs_intermediate_srv.get();
             final_sbs_texture = sbs_intermediate_texture.get();
@@ -801,24 +882,28 @@ namespace platf::dxgi {
               render_input_srv = img_ctx.encoder_input_res.get();
             }
 
-            ID3D11ShaderResourceView *warp_depth = selected_parallax_field;
-            if (legacy_renderer_selected && est.depth) {
-              if (auto *filtered_depth = prefilter_warp_depth(est.depth.Get())) {
-                warp_depth = filtered_depth;
-                dump_warp_depth_prefiltered = true;
-              }
-            }
-            dump_warp_depth = warp_depth;
-            ID3D11Buffer *sbs_constants = matched_render_slot ?
-              sbs_reprojection_completed_cbuffer.get() :
-              sbs_reprojection_cbuffer.get();
+            // Output transfer follows the color frame actually rendered. Matched inference may
+            // complete later than the current capture; repeated output retains the transfer of
+            // the packed texture already stored in the intermediate.
+            const bool render_input_is_linear = matched_render_slot ?
+                                                    models::input_color_space_is_linear(
+                                                      matched_render_slot->color_space
+                                                    ) :
+                                                    input_is_linear;
 
-            // Draw Apollo's occlusion-aware geometry into the shared SBS intermediate.
+            ID3D11ShaderResourceView *warp_depth = selected_parallax_field;
+            dump_warp_depth = warp_depth;
+            ID3D11Buffer *sbs_constants = sbs_reprojection_cbuffer.get();
+
+            // Only an authenticated V2 stream selects the production warp. Awaiting, stale, and
+            // terminal failure states use the independent current-frame identity shader, so V2
+            // shader authentication/device-creation failures cannot freeze or end the stream.
             device_ctx->OMSetRenderTargets(1, &sbs_intermediate_rtv, nullptr);
             device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
             device_ctx->PSSetShader(
-              v2_renderer_selected ? sbs_reprojection_v2_live_ps.get() :
-                                     sbs_reprojection_ps.get(),
+              v2_live_warp_selected ?
+                sbs_reprojection_v2_live_ps.get() :
+                sbs_flat_identity_ps.get(),
               nullptr,
               0
             );
@@ -829,10 +914,9 @@ namespace platf::dxgi {
             ID3D11ShaderResourceView *srvs[] = {
               render_input_srv,
               warp_depth,
-              v2_renderer_selected ? est.shadow_state.Get() :
-              legacy_renderer_selected ? est.subject.Get() : nullptr,
+              v2_live_warp_selected ? est.shadow_state.Get() : nullptr,
               nullptr,
-              legacy_renderer_selected ? est.depth_frame_state.Get() : nullptr,
+              nullptr,
               nullptr,
             };
             device_ctx->PSSetShaderResources(0, (UINT) std::size(srvs), srvs);
@@ -856,9 +940,11 @@ namespace platf::dxgi {
 
             final_sbs_srv = sbs_intermediate_srv.get();
             final_sbs_texture = sbs_intermediate_texture.get();
-            if (matched_render_slot &&
-                (selected_parallax_field || v2_renderer_failed_flat)) {
+            sbs_intermediate_is_linear = render_input_is_linear;
+            final_sbs_is_linear = render_input_is_linear;
+            if (matched_render_slot && selected_parallax_field) {
               matched_output_valid = true;
+              matched_output_source_at = matched_render_slot->captured_at;
             }
           }
 
@@ -868,13 +954,13 @@ namespace platf::dxgi {
             // The local AR presenter consumes the production RGB warp directly, avoiding an
             // encode/decode round trip. Exact layouts take the copy fast path; retain the shader
             // for any future mode whose source and physical target require scaling or conversion.
-            if (!copy_rgb(final_sbs_texture)) {
-              draw_rgb(final_sbs_srv, input_is_linear);
+            if (!copy_rgb(final_sbs_texture, final_sbs_is_linear)) {
+              draw_rgb(final_sbs_srv, final_sbs_is_linear);
             }
           } else {
             // Host SBS accepts identity-oriented sources only. Portrait is represented by actual
             // W < H display dimensions, so this final conversion never rotates a packed 2W frame.
-            draw(final_sbs_srv, out_Y_or_YUV_viewport, out_UV_viewport, input_is_linear);
+            draw(final_sbs_srv, out_Y_or_YUV_viewport, out_UV_viewport, final_sbs_is_linear);
           }
           end_sbs_gpu_timer(gpu_timer);
           // Telemetry is deliberately submitted after the production warp/output work. The
@@ -908,36 +994,23 @@ namespace platf::dxgi {
             const bool complete_dump_snapshot =
               matched_render_slot && dump_warp_depth && est.model_input_snapshot &&
               est.raw_model_depth_snapshot && est.raw_model_provenance &&
-              (v2_renderer_selected ?
-                 models::parallax_v2_result_is_authenticated(est) :
-                 (legacy_renderer_selected && est.depth && est.subject &&
-                  est.depth_frame_state));
+              v2_renderer_selected && models::parallax_v2_result_is_authenticated(est);
             const bool dump_frame_valid =
               complete_dump_snapshot &&
-              (v2_renderer_selected ?
-                 sbs_dumper.preflight_requested_v2_frame(
-                   device.get(),
-                   device_ctx.get(),
-                   est.shadow_state.Get(),
-                   est.completed_frame_id
-                 ) :
-                 sbs_dumper.preflight_requested_frame(
-                 device.get(),
-                 device_ctx.get(),
-                 est.depth_frame_state.Get(),
-                 est.completed_frame_id
-               ));
+              sbs_dumper.preflight_requested_v2_frame(
+                device.get(),
+                device_ctx.get(),
+                est.shadow_state.Get(),
+                est.completed_frame_id
+              );
             if (dump_frame_valid) {
-              ID3D11Buffer *completed_constants =
-                sbs_reprojection_completed_cbuffer.get();
+              ID3D11Buffer *completed_constants = sbs_reprojection_cbuffer.get();
               bool geometry_available = false;
               try {
                 geometry_available = render_sbs_debug_geometry(
                   render_input_srv,
                   dump_warp_depth,
-                  legacy_renderer_selected ? est.subject.Get() : nullptr,
-                  completed_constants,
-                  v2_renderer_selected
+                  completed_constants
                 );
               } catch (const std::exception &error) {
                 try {
@@ -958,7 +1031,6 @@ namespace platf::dxgi {
               dump_frame.source = render_input_srv;
               dump_frame.model_input = est.model_input_snapshot.Get();
               dump_frame.raw_depth = est.raw_model_depth_snapshot.Get();
-              dump_frame.depth = est.depth.Get();
               dump_frame.warp_depth = dump_warp_depth;
               dump_frame.adaptive_state = est.subject.Get();
               dump_frame.depth_frame_state = est.depth_frame_state.Get();
@@ -983,13 +1055,9 @@ namespace platf::dxgi {
               dump_frame.raw_width = est.raw_width;
               dump_frame.raw_height = est.raw_height;
               dump_frame.matched_frame_id = est.completed_frame_id;
-              dump_frame.warp_depth_prefilter_applied =
-                dump_warp_depth_prefiltered;
               dump_frame.cuda_graph_active = est.cuda_graph_active;
-              dump_frame.parallax_v2_shadow_active =
-                est.parallax_v2_shadow_active;
-              dump_frame.parallax_v2_render_requested =
-                sbs_config.parallax_v2_render;
+              dump_frame.parallax_v2_producer_active =
+                est.parallax_v2_producer_active;
               dump_frame.parallax_v2_render_selected =
                 v2_renderer_selected;
               dump_frame.parallax_v2_live_renderer_source_closure_sha256 =
@@ -1036,10 +1104,12 @@ namespace platf::dxgi {
 
         } else {
           if (rgb_present_target) {
-            if (!copy_rgb(img_ctx.encoder_texture.get())) {
+            const bool input_is_linear =
+              img.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+            if (!copy_rgb(img_ctx.encoder_texture.get(), input_is_linear)) {
               draw_rgb(
                 img_ctx.encoder_input_res.get(),
-                img.format == DXGI_FORMAT_R16G16B16A16_FLOAT
+                input_is_linear
               );
             }
           } else {
@@ -1114,10 +1184,28 @@ namespace platf::dxgi {
       return true;
     }
 
+    void fail_depth_pipeline_flat() {
+      depth_estimator_failed = true;
+      host_sbs_renderer = models::fail_host_sbs_renderer_flat(host_sbs_renderer);
+      depth_estimator_build_manager().retire(std::move(depth_estimator));
+      for (auto &slot : matched_frame_slots) {
+        slot.pending = false;
+      }
+      matched_output_valid = false;
+      matched_output_source_at = {};
+      matched_output_timeout_active = false;
+      sbs_dumper.cancel_pending_request();
+      publish_depth_status(0);
+    }
+
     // Create the D3D depth pipeline on demand (first SBS frame). The heavy TensorRT engine,
     // execution context, and CUDA modules were prepared at host startup; construction now borrows
     // that warm context and creates only device/session resources on a background thread.
     bool ensure_depth_estimator() {
+      if (!models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
+        sbs_dumper.cancel_pending_request();
+        return false;
+      }
       if (depth_estimator) {
         return true;
       }
@@ -1139,20 +1227,19 @@ namespace platf::dxgi {
             // Don't let a background-build exception propagate on the encode thread (it would end
             // the stream); log it, clear the client's "loading" indicator, and stream flat.
             BOOST_LOG(error) << "Host SBS per-stream GPU pipeline initialization failed: "sv << e.what();
-            depth_estimator_failed = true;
-            sbs_dumper.cancel_pending_request();
-            publish_depth_status(0);
+            fail_depth_pipeline_flat();
             return false;
           }
-          if (depth_estimator && depth_estimator->is_valid()) {
+          if (depth_estimator && depth_estimator->is_valid() &&
+              !depth_estimator->has_terminal_failure()) {
             BOOST_LOG(info) << "Host SBS per-stream GPU pipeline ready; depth is now live."sv;
             publish_depth_status(2);  // ready -> client hides indicator
           } else {
-            BOOST_LOG(error) << "Host SBS per-stream GPU pipeline initialization returned an invalid result; streaming flat SBS."sv;
-            depth_estimator.reset();
-            depth_estimator_failed = true;
-            sbs_dumper.cancel_pending_request();
-            publish_depth_status(0);
+            BOOST_LOG(error)
+              << (depth_estimator && depth_estimator->has_terminal_failure() ?
+                    "Host SBS V2 producer is unavailable for this stream; streaming flat SBS."sv :
+                    "Host SBS per-stream GPU pipeline initialization returned an invalid result; streaming flat SBS."sv);
+            fail_depth_pipeline_flat();
           }
           return (bool) depth_estimator;
         }
@@ -1162,15 +1249,13 @@ namespace platf::dxgi {
       // Startup model preparation is process-global and may take minutes on first use. It includes
       // engine compilation, deserialization, execution-context creation, and CUDA warmup. Report
       // that complete wait as loading, but don't duplicate it on this encode device.
-      auto active = ::video::depth_model_for_profile(sbs_config);
+      auto active = ::video::host_sbs_v2_depth_model_for_profile(sbs_config);
       auto build_status = models::tensorrt_model_prepare_status(active);
       if (build_status != models::engine_build_status::ready) {
         if (build_status == models::engine_build_status::failed) {
           BOOST_LOG(error) << "Startup TensorRT model preparation failed for '"sv << active.name
                            << "'; streaming flat SBS."sv;
-          depth_estimator_failed = true;
-          sbs_dumper.cancel_pending_request();
-          publish_depth_status(0);
+          fail_depth_pipeline_flat();
         } else {
           if (engine_poll_counter++ % 1800 == 0) {  // ~every 20 s at 90 fps
             BOOST_LOG(warning) << "Waiting for startup TensorRT model preparation for '"sv << active.name
@@ -1185,6 +1270,11 @@ namespace platf::dxgi {
       // resource creation the constructor does (it makes no immediate-context calls). Capture
       // owning ComPtrs so a presentation-session teardown never has to wait for construction.
       auto sbs_cfg = sbs_config;
+      // Production V2 authenticates the six patch-aligned grids generated by the advertised XR
+      // landscape/ultrawide/portrait modes. Legacy tuning overrides remain available to the
+      // offline evaluator, but may not silently select an unauthenticated live tensor shape.
+      sbs_cfg.depth_short_side = 432;
+      sbs_cfg.depth_max_aspect = 4.0;
       BOOST_LOG(info) << "Host SBS enabled; initializing the per-stream GPU pipeline for resident model \""sv
                       << active.name
                       << "\" in the background (streaming flat until ready)..."sv;
@@ -1196,7 +1286,8 @@ namespace platf::dxgi {
           std::move(ctx),
           std::filesystem::path(SUNSHINE_ASSETS_DIR),
           sbs_cfg,
-          active
+          active,
+          models::depth_estimator_usage_e::host_sbs_v2
         );
       });
       depth_estimator_build = build_task.get_future();
@@ -1221,23 +1312,14 @@ namespace platf::dxgi {
     }
 
     void update_sbs_constant_buffer(float content_scale_x, float content_scale_y) {
-      // Slot-for-slot mirror of the `Constants` cbuffer in
-      // shaders/directx/include/sbs_warp_common.hlsl, which sbs_reprojection_ps and
-      // sbs_forward_coverage_cs both bind at b2. Every entry must stay in declaration
-      // order; to add a field, append it here AND to the include.
-      float sbs_params[8] {
-        sbs_config.subject_stretch ? 1.0f : 0.0f,
+      // Slot-for-slot mirror of HostSbsV2Geometry in sbs_reprojection_v2_live_ps.hlsl.
+      float sbs_params[4] {
         content_scale_x,
         content_scale_y,
-        (float) sbs_config.pop_strength,
         0.0f,
-        sbs_config.adaptive_pop ? 1.0f : 0.0f,
-        (float) std::max(sbs_config.adaptive_pop_max, sbs_config.pop_strength),
-        0.0f  // ordinary/flat draw: overwrite the packed target
+        0.0f,
       };
       sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);
-      sbs_params[7] = 1.0f;
-      sbs_reprojection_completed_cbuffer = make_buffer(device.get(), sbs_params);
     }
 
     std::uint32_t next_sbs_telemetry_sequence() {
@@ -1254,18 +1336,7 @@ namespace platf::dxgi {
       snapshot.status = status;
       snapshot.generation = sbs_telemetry_generation;
       snapshot.sequence = next_sbs_telemetry_sequence();
-      snapshot.valid_fields = ::video::sbs_telemetry_valid_field::config;
-      snapshot.zero_plane_mode = sbs_config.zero_plane == "subject"    ? 1 :
-                                 sbs_config.zero_plane == "background" ? 3 :
-                                                                         2;
-      snapshot.pop_floor = static_cast<float>(sbs_config.pop_strength);
-      snapshot.pop_ceiling = static_cast<float>(
-        std::max(sbs_config.adaptive_pop_max, sbs_config.pop_strength)
-      );
-      snapshot.effective_pop = snapshot.pop_floor;
-      if (sbs_config.adaptive_pop) {
-        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::adaptive_enabled;
-      }
+      ::video::apply_sbs_telemetry_profile(snapshot, sbs_config);
       return snapshot;
     }
 
@@ -1290,7 +1361,6 @@ namespace platf::dxgi {
         ::video::sbs_telemetry_valid_field::effective_pop |
         ::video::sbs_telemetry_valid_field::change |
         ::video::sbs_telemetry_valid_field::valid_fraction |
-        ::video::sbs_telemetry_valid_field::range |
         ::video::sbs_telemetry_valid_field::cuts |
         ::video::sbs_telemetry_valid_field::faults;
       snapshot.depth_width = static_cast<std::uint16_t>(std::clamp(
@@ -1303,13 +1373,7 @@ namespace platf::dxgi {
         0,
         static_cast<int>(std::numeric_limits<std::uint16_t>::max())
       ));
-      const float max_ratio = snapshot.pop_floor > 0.0f ?
-                                snapshot.pop_ceiling / snapshot.pop_floor :
-                                1.0f;
-      const float effective_ratio = sbs_config.adaptive_pop ?
-                                      std::clamp(sample.adaptive_pop_ratio, 1.0f, max_ratio) :
-                                      1.0f;
-      snapshot.effective_pop = snapshot.pop_floor * effective_ratio;
+      snapshot.effective_pop = snapshot.pop_floor;
       snapshot.edge_fraction = sample.edge_fraction;
       snapshot.change_fraction = sample.change_fraction;
       snapshot.zero_anchor_shift_px = sample.zero_anchor_shift_px;
@@ -1325,17 +1389,7 @@ namespace platf::dxgi {
 
       if (sample.profile_initialized) {
         snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::profile_initialized;
-        snapshot.valid_fields |=
-          ::video::sbs_telemetry_valid_field::subject |
-          ::video::sbs_telemetry_valid_field::scene;
-      }
-      if (sample.edge_fraction >= 0.0f) {
-        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::pop_classified;
-        snapshot.valid_fields |= ::video::sbs_telemetry_valid_field::edge;
-      }
-      if (sample.anchor_valid) {
-        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::anchor_valid;
-        snapshot.valid_fields |= ::video::sbs_telemetry_valid_field::anchor;
+        snapshot.valid_fields |= ::video::sbs_telemetry_valid_field::scene;
       }
       if (
         (sample.cut_flags & sbs_adaptive_state::cut_flag_geometry_armed) != 0
@@ -1346,12 +1400,6 @@ namespace platf::dxgi {
         (sample.cut_flags & sbs_adaptive_state::cut_flag_appearance_armed) != 0
       ) {
         snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::appearance_armed;
-      }
-      if (sample.range_collapsed) {
-        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::range_collapsed;
-      }
-      if (sample.depth_ready) {
-        snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::depth_ready;
       }
       const bool unseen_cut =
         sbs_telemetry_has_sample &&
@@ -1365,11 +1413,21 @@ namespace platf::dxgi {
     }
 
     void poll_sbs_telemetry_after_output() {
-      if (!depth_estimator || !sbs_telemetry_subscription || !sbs_telemetry_event) {
+      if (!sbs_telemetry_subscription || !sbs_telemetry_event) {
         return;
       }
 
       const bool enabled = sbs_telemetry_subscription->enabled();
+      const bool producer_active =
+        models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer);
+      if (!depth_estimator) {
+        if (enabled && (!producer_active || depth_estimator_failed) &&
+            !sbs_telemetry_producer_failure_published) {
+          publish_sbs_telemetry_failure();
+          sbs_telemetry_producer_failure_published = true;
+        }
+        return;
+      }
       const auto now = std::chrono::steady_clock::now();
       const auto interval = std::chrono::milliseconds(
         std::max<std::uint16_t>(sbs_telemetry_subscription->interval_ms(), 1)
@@ -1379,9 +1437,22 @@ namespace platf::dxgi {
         (sbs_telemetry_last_copy.time_since_epoch().count() == 0 ||
          now - sbs_telemetry_last_copy >= interval);
       auto result = depth_estimator->poll_depth_telemetry(
-        due,
+        due && producer_active,
         sbs_telemetry_last_sampled_frame_id
       );
+      // A terminal fail-flat renderer still retires an already-submitted readback, but its last
+      // ready depth sample is no longer live data. Publish one explicit failure and suppress that
+      // retired sample so subscribers cannot mistake a frozen chart for an active producer.
+      if (!producer_active) {
+        if (due) {
+          sbs_telemetry_last_copy = now;
+        }
+        if (enabled && !sbs_telemetry_producer_failure_published) {
+          publish_sbs_telemetry_failure();
+          sbs_telemetry_producer_failure_published = true;
+        }
+        return;
+      }
       // A failed lazy allocation/query creation is also an attempt. Advancing the cadence here
       // prevents a permanent device error from publishing a fresh failed sequence every render
       // frame, while still retrying (and therefore recovering) at the requested interval.
@@ -1566,6 +1637,72 @@ namespace platf::dxgi {
       bool pending = false;
     };
 
+    bool ensure_sbs_intermediate_storage(const bool input_is_linear) {
+      const DXGI_FORMAT required_format = input_is_linear ?
+                                              DXGI_FORMAT_R16G16B16A16_FLOAT :
+                                              DXGI_FORMAT_B8G8R8A8_UNORM;
+      D3D11_TEXTURE2D_DESC current_desc {};
+      if (sbs_intermediate_texture) {
+        sbs_intermediate_texture->GetDesc(&current_desc);
+        if (current_desc.Format == required_format) {
+          return true;
+        }
+      }
+
+      D3D11_TEXTURE2D_DESC desc {};
+      desc.Width = static_cast<UINT>(std::lround(sbs_viewport.Width));
+      desc.Height = static_cast<UINT>(std::lround(sbs_viewport.Height));
+      desc.MipLevels = 1;
+      desc.ArraySize = 1;
+      desc.Format = required_format;
+      desc.SampleDesc.Count = 1;
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+      if (desc.Width == 0 || desc.Height == 0) {
+        BOOST_LOG(error) << "Host SBS intermediate has invalid dimensions."sv;
+        return false;
+      }
+
+      texture2d_t texture;
+      render_target_t rtv;
+      shader_res_t srv;
+      HRESULT status = device->CreateTexture2D(&desc, nullptr, &texture);
+      if (SUCCEEDED(status)) {
+        status = device->CreateRenderTargetView(texture.get(), nullptr, &rtv);
+      }
+      if (SUCCEEDED(status)) {
+        status = device->CreateShaderResourceView(texture.get(), nullptr, &srv);
+      }
+      if (FAILED(status)) {
+        // FP16 can safely store either linear values or SDR code values because transfer state is
+        // tracked separately. Retain an existing FP16 target if only the optional SDR downsizing
+        // failed; never retain BGRA8 for genuine linear input.
+        if (!input_is_linear &&
+            sbs_intermediate_texture &&
+            current_desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+          BOOST_LOG(warning)
+            << "Could not resize the Host SBS intermediate to BGRA8 [0x"sv
+            << util::hex(status).to_string_view()
+            << "]; retaining transfer-safe FP16 storage."sv;
+          return true;
+        }
+        BOOST_LOG(error) << "Failed to create the Host SBS intermediate [0x"sv
+                         << util::hex(status).to_string_view() << ']';
+        return false;
+      }
+
+      sbs_intermediate_texture = std::move(texture);
+      sbs_intermediate_rtv = std::move(rtv);
+      sbs_intermediate_srv = std::move(srv);
+      sbs_intermediate_is_linear = false;
+      matched_output_valid = false;
+      matched_output_source_at = {};
+      matched_output_timeout_active = false;
+      BOOST_LOG(info) << "Host SBS intermediate storage finalized as "sv
+                      << (input_is_linear ? "FP16 linear-capable."sv : "BGRA8 SDR."sv);
+      return true;
+    }
+
     matched_frame_slot_t *available_matched_slot() {
       for (auto &slot : matched_frame_slots) {
         if (!slot.pending) {
@@ -1638,9 +1775,9 @@ namespace platf::dxgi {
       device_ctx->CopyResource(slot.texture.get(), source);
       slot.frame_id = frame_id;
       slot.color_space = color_space;
-      if (diagnostics_enabled) {
-        slot.captured_at = std::chrono::steady_clock::now();
-      }
+      // Production uses source age to bound V2 output repetition; this is no longer diagnostics-
+      // only metadata. The aggregate age counters below remain gated by diagnostics_enabled.
+      slot.captured_at = std::chrono::steady_clock::now();
       slot.pending = false;
       return true;
     }
@@ -1659,54 +1796,6 @@ namespace platf::dxgi {
       }
     }
 
-    ID3D11ShaderResourceView *prefilter_warp_depth(ID3D11ShaderResourceView *source_srv) {
-      if (!source_srv || !sbs_depth_prefilter_cs) {
-        return nullptr;
-      }
-
-      Microsoft::WRL::ComPtr<ID3D11Resource> source_resource;
-      source_srv->GetResource(&source_resource);
-      Microsoft::WRL::ComPtr<ID3D11Texture2D> source_texture;
-      if (FAILED(source_resource.As(&source_texture))) {
-        return nullptr;
-      }
-
-      D3D11_TEXTURE2D_DESC source_desc {};
-      source_texture->GetDesc(&source_desc);
-      bool recreate = !sbs_warp_depth_texture || !sbs_warp_depth_uav || !sbs_warp_depth_srv;
-      if (!recreate) {
-        D3D11_TEXTURE2D_DESC current_desc {};
-        sbs_warp_depth_texture->GetDesc(&current_desc);
-        recreate = current_desc.Width != source_desc.Width ||
-                   current_desc.Height != source_desc.Height ||
-                   current_desc.Format != source_desc.Format;
-      }
-      if (recreate) {
-        auto filtered_desc = source_desc;
-        filtered_desc.Usage = D3D11_USAGE_DEFAULT;
-        filtered_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
-        filtered_desc.CPUAccessFlags = 0;
-        filtered_desc.MiscFlags = 0;
-        sbs_warp_depth_texture.reset();
-        sbs_warp_depth_uav.reset();
-        sbs_warp_depth_srv.reset();
-        if (FAILED(device->CreateTexture2D(&filtered_desc, nullptr, &sbs_warp_depth_texture)) || FAILED(device->CreateUnorderedAccessView(sbs_warp_depth_texture.get(), nullptr, &sbs_warp_depth_uav)) || FAILED(device->CreateShaderResourceView(sbs_warp_depth_texture.get(), nullptr, &sbs_warp_depth_srv))) {
-          BOOST_LOG(error) << "Failed to create the SBS warp-depth prefilter resources."sv;
-          return nullptr;
-        }
-      }
-
-      device_ctx->CSSetShader(sbs_depth_prefilter_cs.get(), nullptr, 0);
-      device_ctx->CSSetShaderResources(0, 1, &source_srv);
-      device_ctx->CSSetUnorderedAccessViews(0, 1, &sbs_warp_depth_uav, nullptr);
-      device_ctx->Dispatch((source_desc.Width + 15u) / 16u, (source_desc.Height + 15u) / 16u, 1u);
-      ID3D11UnorderedAccessView *null_uav = nullptr;
-      ID3D11ShaderResourceView *null_srv = nullptr;
-      device_ctx->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
-      device_ctx->CSSetShaderResources(0, 1, &null_srv);
-      return sbs_warp_depth_srv.get();
-    }
-
     bool ensure_sbs_debug_geometry_resources() {
       if (sbs_debug_geometry_ready) {
         return true;
@@ -1716,43 +1805,35 @@ namespace platf::dxgi {
       }
       sbs_debug_geometry_init_attempted = true;
 
-      const bool v2_geometry_required = sbs_config.parallax_v2_render;
-      if (!sbs_reprojection_mapping_ps_hlsl ||
-          !sbs_reprojection_mask_ps_hlsl ||
-          !sbs_forward_coverage_cs_hlsl ||
-          FAILED(device->CreatePixelShader(
-            sbs_reprojection_mapping_ps_hlsl->GetBufferPointer(),
-            sbs_reprojection_mapping_ps_hlsl->GetBufferSize(),
-            nullptr,
-            &sbs_debug_mapping_ps
-          )) ||
-          FAILED(device->CreatePixelShader(
-            sbs_reprojection_mask_ps_hlsl->GetBufferPointer(),
-            sbs_reprojection_mask_ps_hlsl->GetBufferSize(),
-            nullptr,
-            &sbs_debug_mask_ps
-          )) ||
-          FAILED(device->CreateComputeShader(
-            sbs_forward_coverage_cs_hlsl->GetBufferPointer(),
-            sbs_forward_coverage_cs_hlsl->GetBufferSize(),
-            nullptr,
-            &sbs_debug_coverage_cs
-          )) ||
-          (v2_geometry_required &&
-           (!sbs_reprojection_v2_mapping_ps_hlsl ||
-            !sbs_reprojection_v2_mask_ps_hlsl ||
-            FAILED(device->CreatePixelShader(
-              sbs_reprojection_v2_mapping_ps_hlsl->data(),
-              sbs_reprojection_v2_mapping_ps_hlsl->size(),
-              nullptr,
-              &sbs_debug_v2_mapping_ps
-            )) ||
-            FAILED(device->CreatePixelShader(
-              sbs_reprojection_v2_mask_ps_hlsl->data(),
-              sbs_reprojection_v2_mask_ps_hlsl->size(),
-              nullptr,
-              &sbs_debug_v2_mask_ps
-            ))))) {
+      namespace cache = models::host_sbs_shader_cache;
+      const auto diagnostic_sources = cache::snapshot_sources(
+        SUNSHINE_SHADERS_DIR,
+        cache::parallax_v2_live_diagnostic_specs
+      );
+      const bool diagnostic_sources_authenticated =
+        cache::source_closure_sha256(diagnostic_sources) ==
+          cache::parallax_v2_diagnostic_source_closure_sha256;
+      const auto mapping_bytecode = diagnostic_sources_authenticated ?
+        cache::get(diagnostic_sources, cache::parallax_v2_live_mapping) :
+        cache::bytecode_t {};
+      const auto mask_bytecode = diagnostic_sources_authenticated ?
+        cache::get(diagnostic_sources, cache::parallax_v2_live_mask) :
+        cache::bytecode_t {};
+      const bool geometry_shaders_ready =
+        mapping_bytecode && mask_bytecode &&
+        SUCCEEDED(device->CreatePixelShader(
+          mapping_bytecode->data(),
+          mapping_bytecode->size(),
+          nullptr,
+          &sbs_debug_v2_mapping_ps
+        )) &&
+        SUCCEEDED(device->CreatePixelShader(
+          mask_bytecode->data(),
+          mask_bytecode->size(),
+          nullptr,
+          &sbs_debug_v2_mask_ps
+        ));
+      if (!geometry_shaders_ready) {
         BOOST_LOG(warning) << "Dump 3D geometry shaders are unavailable; the core dump will "
                               "record warp mapping/coverage as unavailable."sv;
         return false;
@@ -1776,13 +1857,6 @@ namespace platf::dxgi {
         return false;
       }
 
-      desc.Format = DXGI_FORMAT_R32_UINT;
-      desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
-      if (FAILED(device->CreateTexture2D(&desc, nullptr, &sbs_debug_coverage_texture)) || FAILED(device->CreateUnorderedAccessView(sbs_debug_coverage_texture.Get(), nullptr, &sbs_debug_coverage_uav)) || FAILED(device->CreateShaderResourceView(sbs_debug_coverage_texture.Get(), nullptr, &sbs_debug_coverage_srv))) {
-        BOOST_LOG(warning) << "Dump 3D forward-coverage resources are unavailable."sv;
-        return false;
-      }
-
       sbs_debug_geometry_ready = true;
       return true;
     }
@@ -1790,59 +1864,13 @@ namespace platf::dxgi {
     bool render_sbs_debug_geometry(
       ID3D11ShaderResourceView *source,
       ID3D11ShaderResourceView *warp_depth,
-      ID3D11ShaderResourceView *subject,
-      ID3D11Buffer *constants,
-      const bool v2_final
+      ID3D11Buffer *constants
     ) {
-      if (!source || !warp_depth || !constants ||
-          (!v2_final && !subject) ||
-          !ensure_sbs_debug_geometry_resources()) {
+      if (!source || !warp_depth || !constants || !ensure_sbs_debug_geometry_resources()) {
         return false;
       }
 
       ID3D11SamplerState *sampler = sampler_linear.get();
-      if (!v2_final) {
-        const UINT clear_coverage[4] = {0, 0, 0, 0};
-        device_ctx->ClearUnorderedAccessViewUint(
-          sbs_debug_coverage_uav.Get(),
-          clear_coverage
-        );
-        device_ctx->CSSetShader(sbs_debug_coverage_cs.Get(), nullptr, 0);
-        device_ctx->CSSetSamplers(0, 1, &sampler);
-        ID3D11ShaderResourceView *coverage_inputs[] = {
-          source,
-          warp_depth,
-          subject,
-        };
-        device_ctx->CSSetShaderResources(
-          0,
-          (UINT) std::size(coverage_inputs),
-          coverage_inputs
-        );
-        device_ctx->CSSetUnorderedAccessViews(
-          0,
-          1,
-          sbs_debug_coverage_uav.GetAddressOf(),
-          nullptr
-        );
-        device_ctx->CSSetConstantBuffers(2, 1, &constants);
-        const UINT packed_width = (UINT) sbs_viewport.Width;
-        const UINT packed_height = (UINT) sbs_viewport.Height;
-        device_ctx->Dispatch(
-          ((packed_width / 2u) + 15u) / 16u,
-          (packed_height + 15u) / 16u,
-          1u
-        );
-        ID3D11UnorderedAccessView *null_uav = nullptr;
-        ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr};
-        device_ctx->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
-        device_ctx->CSSetShaderResources(
-          0,
-          (UINT) std::size(null_cs_srvs),
-          null_cs_srvs
-        );
-      }
-
       device_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
       device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
       device_ctx->RSSetViewports(1, &sbs_viewport);
@@ -1855,16 +1883,11 @@ namespace platf::dxgi {
         sbs_debug_mapping_rtv.GetAddressOf(),
         nullptr
       );
-      device_ctx->PSSetShader(
-        v2_final ? sbs_debug_v2_mapping_ps.Get() :
-                   sbs_debug_mapping_ps.Get(),
-        nullptr,
-        0
-      );
+      device_ctx->PSSetShader(sbs_debug_v2_mapping_ps.Get(), nullptr, 0);
       ID3D11ShaderResourceView *mapping_inputs[] = {
         source,
         warp_depth,
-        subject,
+        nullptr,
         nullptr,
         nullptr,
         nullptr,
@@ -1881,17 +1904,12 @@ namespace platf::dxgi {
         sbs_debug_mask_rtv.GetAddressOf(),
         nullptr
       );
-      device_ctx->PSSetShader(
-        v2_final ? sbs_debug_v2_mask_ps.Get() :
-                   sbs_debug_mask_ps.Get(),
-        nullptr,
-        0
-      );
+      device_ctx->PSSetShader(sbs_debug_v2_mask_ps.Get(), nullptr, 0);
       ID3D11ShaderResourceView *mask_inputs[] = {
         source,
         warp_depth,
-        subject,
-        v2_final ? nullptr : sbs_debug_coverage_srv.Get(),
+        nullptr,
+        nullptr,
         nullptr,
         nullptr,
       };
@@ -1953,30 +1971,23 @@ namespace platf::dxgi {
       }
       sbs_mode = sbs_mode_param;
       sbs_config = profile;
-      host_sbs_renderer = sbs_config.parallax_v2_render ?
-                            models::host_sbs_renderer_e::undecided :
-                            models::host_sbs_renderer_e::legacy;
+      host_sbs_renderer = models::host_sbs_renderer_e::awaiting_v2;
       diagnostics_enabled = config::sunshine.diagnostics_enabled;
       sbs_depth_status_event = std::move(depth_status_event);
       sbs_depth_pipeline_ready_event = std::move(depth_pipeline_ready_event);
       sbs_telemetry_event = std::move(telemetry_event);
       sbs_telemetry_subscription = std::move(telemetry_subscription);
       sbs_dumper.set_button_request(std::move(sbs_debug_dump_request));
+      sbs_flat_identity_ps.reset();
       sbs_reprojection_v2_live_ps.reset();
       sbs_debug_v2_mapping_ps.Reset();
       sbs_debug_v2_mask_ps.Reset();
-      sbs_debug_mapping_ps.Reset();
-      sbs_debug_mask_ps.Reset();
-      sbs_debug_coverage_cs.Reset();
       sbs_debug_mapping_texture.Reset();
       sbs_debug_mapping_rtv.Reset();
       sbs_debug_mapping_srv.Reset();
       sbs_debug_mask_texture.Reset();
       sbs_debug_mask_rtv.Reset();
       sbs_debug_mask_srv.Reset();
-      sbs_debug_coverage_texture.Reset();
-      sbs_debug_coverage_uav.Reset();
-      sbs_debug_coverage_srv.Reset();
       sbs_debug_geometry_init_attempted = false;
       sbs_debug_geometry_ready = false;
       sbs_telemetry_generation = telemetry_generation;
@@ -1984,10 +1995,14 @@ namespace platf::dxgi {
       sbs_telemetry_last_sampled_frame_id = 0;
       sbs_telemetry_last_hard_cut_count = 0;
       sbs_telemetry_has_sample = false;
+      sbs_telemetry_producer_failure_published = false;
       sbs_telemetry_last_copy = {};
       matched_frame_slots = {};
       sbs_frame_sequence = 0;
       matched_output_valid = false;
+      matched_output_source_at = {};
+      matched_output_timeout_active = false;
+      sbs_intermediate_is_linear = false;
       matched_unknown_frame_error_last = {};
       matched_unknown_frame_errors_suppressed = 0;
       if (diagnostics_enabled) {
@@ -1997,13 +2012,6 @@ namespace platf::dxgi {
       // Preserve FP16 storage while HDR/10-bit discovery is pending; WGC's already-known BGRA
       // format remains BGRA even on a physical HDR display. The transfer state is deliberately
       // separate and follows each actual img.format in convert().
-      sbs_intermediate_fp16 = ::video::sbs_intermediate_requires_fp16(
-        display->capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT,
-        display->capture_format == DXGI_FORMAT_UNKNOWN,
-        display->is_hdr(),
-        format == DXGI_FORMAT_P010
-      );
-
       HRESULT status = S_OK;
 
 #define create_vertex_shader_helper(x, y) \
@@ -2033,33 +2041,90 @@ namespace platf::dxgi {
       // FP16 capture is linear for both HDR and Advanced Color SDR. Runtime shader selection uses
       // the actual input transfer plus the negotiated display mode; resource format alone is not
       // an HDR-mode signal.
-      create_pixel_shader_helper(cursor_ps_hlsl, rgb_present_ps);
-      create_pixel_shader_helper(rgb_present_linear_to_srgb_ps_hlsl, rgb_present_linear_to_srgb_ps);
+      if (rgb_only) {
+        create_pixel_shader_helper(cursor_ps_hlsl, rgb_present_ps);
+        create_pixel_shader_helper(
+          rgb_present_linear_to_srgb_ps_hlsl,
+          rgb_present_linear_to_srgb_ps
+        );
+        create_pixel_shader_helper(
+          rgb_present_srgb_to_linear_ps_hlsl,
+          rgb_present_srgb_to_linear_ps
+        );
+        // Local HDR presentation can receive BGRA/sRGB frames from WGC even though its swapchain
+        // is linear scRGB. Match the existing HDR cursor convention: scRGB 1.0 is 80 nits, while
+        // captured SDR white follows the user's display setting (203 nits is Windows' fallback).
+        constexpr float fallback_sdr_white_nits = 203.0f;
+        float sdr_white_nits = fallback_sdr_white_nits;
+        if (display->is_hdr()) {
+          const auto queried_sdr_white_nits = display->get_sdr_white_nits();
+          if (queried_sdr_white_nits && *queried_sdr_white_nits > 0.0f) {
+            sdr_white_nits = *queried_sdr_white_nits;
+          } else {
+            BOOST_LOG(warning)
+              << "Failed to query the display's SDR reference white; using "sv
+              << fallback_sdr_white_nits
+              << " nits for local HDR RGB presentation."sv;
+          }
+        }
+        const std::array<float, 4> white_multiplier {
+          sdr_white_nits / 80.0f,
+          0.0f,
+          0.0f,
+          0.0f,
+        };
+        rgb_present_sdr_white = make_buffer(device.get(), white_multiplier);
+        if (!rgb_present_sdr_white) {
+          BOOST_LOG(error)
+            << "Failed to create local RGB presentation white-level constants."sv;
+          return -1;
+        }
+      }
       create_vertex_shader_helper(sbs_reprojection_vs_hlsl, sbs_reprojection_vs);
       if (sbs_on) {
-        create_compute_shader_helper(depth_warp_prefilter_cs_hlsl, sbs_depth_prefilter_cs);
-        create_pixel_shader_helper(sbs_reprojection_ps_hlsl, sbs_reprojection_ps);
-        if (sbs_config.parallax_v2_render) {
-          if (!sbs_reprojection_v2_live_ps_hlsl) {
+        if (sbs_flat_identity_ps_hlsl) {
+          const auto flat_pixel_status = device->CreatePixelShader(
+            sbs_flat_identity_ps_hlsl->GetBufferPointer(),
+            sbs_flat_identity_ps_hlsl->GetBufferSize(),
+            nullptr,
+            &sbs_flat_identity_ps
+          );
+          if (FAILED(flat_pixel_status)) {
             BOOST_LOG(warning)
-              << "Host SBS parallax-v2 live shader is unavailable; this render-on stream will "sv
-                 "latch to flat identity after its first matched depth completion."sv;
-          } else {
-            const auto v2_pixel_status = device->CreatePixelShader(
-              sbs_reprojection_v2_live_ps_hlsl->data(),
-              sbs_reprojection_v2_live_ps_hlsl->size(),
-              nullptr,
-              &sbs_reprojection_v2_live_ps
-            );
-            if (FAILED(v2_pixel_status)) {
-              sbs_reprojection_v2_live_ps.reset();
-              BOOST_LOG(warning)
-                << "Host SBS could not create the optional parallax-v2 live shader "sv
-                   "[0x"sv
-                << util::hex(v2_pixel_status).to_string_view()
-                << "]; this render-on stream will latch to flat identity."sv;
-            }
+              << "Failed to create the Host SBS flat-identity renderer [0x"sv
+              << util::hex(flat_pixel_status).to_string_view() << "]"sv;
+            sbs_flat_identity_ps.reset();
           }
+        }
+
+        HRESULT v2_pixel_status = E_FAIL;
+        if (sbs_reprojection_v2_live_ps_hlsl) {
+          v2_pixel_status = device->CreatePixelShader(
+            sbs_reprojection_v2_live_ps_hlsl->data(),
+            sbs_reprojection_v2_live_ps_hlsl->size(),
+            nullptr,
+            &sbs_reprojection_v2_live_ps
+          );
+        }
+        if (!sbs_reprojection_v2_live_ps) {
+          if (!sbs_flat_identity_ps) {
+            BOOST_LOG(error)
+              << "Host SBS cannot create either the authenticated V2 renderer or its "sv
+                 "independent flat-identity safety renderer."sv;
+            return -1;
+          }
+          BOOST_LOG(error)
+            << "Host SBS V2 renderer is unavailable [0x"sv
+            << util::hex(v2_pixel_status).to_string_view()
+            << "]; continuing this stream with current-frame flat identity."sv;
+          fail_depth_pipeline_flat();
+        } else if (!sbs_flat_identity_ps) {
+          // V2 can render identity while it awaits valid state, but a later V2 device-creation
+          // failure cannot be recovered without the independent safety shader. Reject this Host
+          // SBS device rather than pretending its fail-flat guarantee exists.
+          BOOST_LOG(error)
+            << "Host SBS flat-identity safety renderer is unavailable."sv;
+          return -1;
         }
       }
 
@@ -2148,8 +2213,8 @@ namespace platf::dxgi {
         }
       }
       update_sbs_constant_buffer(content_scale_x, content_scale_y);
-      if (!sbs_reprojection_cbuffer || !sbs_reprojection_completed_cbuffer) {
-        BOOST_LOG(error) << "Failed to create SBS reprojection constant buffers";
+      if (!sbs_reprojection_cbuffer) {
+        BOOST_LOG(error) << "Failed to create the Host SBS V2 geometry constants";
         return -1;
       }
 
@@ -2167,38 +2232,18 @@ namespace platf::dxgi {
       // (possibly capped) encode resolution and applies identical aspect-fit bars inside each eye.
       if (sbs_on) {
         initialize_sbs_gpu_timers();
-
-        D3D11_TEXTURE2D_DESC tex_desc = {};
-        tex_desc.Width = (UINT) std::lround(out_width_f);
-        tex_desc.Height = (UINT) std::lround(out_height_f);
-        tex_desc.MipLevels = 1;
-        tex_desc.ArraySize = 1;
-        tex_desc.Format = sbs_intermediate_fp16 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
-                                                  DXGI_FORMAT_B8G8R8A8_UNORM;
-        tex_desc.SampleDesc.Count = 1;
-        tex_desc.Usage = D3D11_USAGE_DEFAULT;
-        tex_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-
-        status = device->CreateTexture2D(&tex_desc, nullptr, &sbs_intermediate_texture);
-        if (FAILED(status)) {
-          BOOST_LOG(error) << "Failed to create SBS texture";
+        BOOST_LOG(info)
+          << "Host SBS warp: authenticated Depth Coordinate V2 contractive renderer, fixed pop "
+          << sbs_config.pop_strength << ".";
+        sbs_viewport = {0.0f, 0.0f, out_width_f, out_height_f, 0.0f, 1.0f};
+        // DDup starts with UNKNOWN and exposes the actual format on its first real frame. Defer
+        // allocation in that case; known WGC/DDup formats can be finalized now.
+        if (display->capture_format != DXGI_FORMAT_UNKNOWN &&
+            !ensure_sbs_intermediate_storage(
+              display->capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT
+            )) {
           return -1;
         }
-        if (FAILED(device->CreateRenderTargetView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_rtv)) || FAILED(device->CreateShaderResourceView(sbs_intermediate_texture.get(), nullptr, &sbs_intermediate_srv))) {
-          BOOST_LOG(error) << "Failed to create SBS texture views";
-          return -1;
-        }
-
-        if (sbs_config.adaptive_pop) {
-          BOOST_LOG(info) << "Host SBS warp: Sunshine 3D occlusion-aware probe, scene-latched pop "
-                          << sbs_config.pop_strength << "-"
-                          << std::max(sbs_config.adaptive_pop_max, sbs_config.pop_strength) << ".";
-        } else {
-          BOOST_LOG(info) << "Host SBS warp: Sunshine 3D occlusion-aware probe, fixed pop "
-                          << sbs_config.pop_strength << ".";
-        }
-
-        sbs_viewport = {0.0f, 0.0f, (float) tex_desc.Width, (float) tex_desc.Height, 0.0f, 1.0f};
       }
 
       if (rgb_only) {
@@ -2538,6 +2583,8 @@ namespace platf::dxgi {
     bool rgb_copy_fallback_logged = false;
     ps_t rgb_present_ps;
     ps_t rgb_present_linear_to_srgb_ps;
+    ps_t rgb_present_srgb_to_linear_ps;
+    buf_t rgb_present_sdr_white;
     D3D11_VIEWPORT rgb_present_viewport {};
 
     std::unique_ptr<models::video_depth_estimator> depth_estimator;
@@ -2560,44 +2607,36 @@ namespace platf::dxgi {
     std::uint64_t sbs_telemetry_last_sampled_frame_id = 0;
     std::uint32_t sbs_telemetry_last_hard_cut_count = 0;
     bool sbs_telemetry_has_sample = false;
+    bool sbs_telemetry_producer_failure_published = false;
     std::chrono::steady_clock::time_point sbs_telemetry_last_copy {};
     vs_t sbs_reprojection_vs;
-    ps_t sbs_reprojection_ps;
+    ps_t sbs_flat_identity_ps;
     ps_t sbs_reprojection_v2_live_ps;
     models::host_sbs_renderer_e host_sbs_renderer =
-      models::host_sbs_renderer_e::legacy;
-    cs_t sbs_depth_prefilter_cs;
+      models::host_sbs_renderer_e::awaiting_v2;
     buf_t sbs_reprojection_cbuffer;
-    buf_t sbs_reprojection_completed_cbuffer;
     texture2d_t sbs_intermediate_texture;
     render_target_t sbs_intermediate_rtv;
     shader_res_t sbs_intermediate_srv;
-    texture2d_t sbs_warp_depth_texture;
-    unordered_access_t sbs_warp_depth_uav;
-    shader_res_t sbs_warp_depth_srv;
-    // Lazily created only for an explicit Dump 3D. These repeat the exact production warp after
-    // its timing window to export inverse mapping and pre-fill forward-coverage evidence.
-    Microsoft::WRL::ComPtr<ID3D11PixelShader> sbs_debug_mapping_ps;
+    bool sbs_intermediate_is_linear = false;
+    // Lazily created only for an explicit Dump 3D. These repeat the exact production inverse map
+    // after its timing window without allocating the removed V1 forward-coverage resources.
     Microsoft::WRL::ComPtr<ID3D11PixelShader> sbs_debug_v2_mapping_ps;
-    Microsoft::WRL::ComPtr<ID3D11PixelShader> sbs_debug_mask_ps;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> sbs_debug_v2_mask_ps;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> sbs_debug_coverage_cs;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> sbs_debug_mapping_texture;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> sbs_debug_mapping_rtv;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sbs_debug_mapping_srv;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> sbs_debug_mask_texture;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> sbs_debug_mask_rtv;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sbs_debug_mask_srv;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> sbs_debug_coverage_texture;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> sbs_debug_coverage_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sbs_debug_coverage_srv;
     bool sbs_debug_geometry_init_attempted = false;
     bool sbs_debug_geometry_ready = false;
-    bool sbs_intermediate_fp16 = false;
     D3D11_VIEWPORT sbs_viewport;
     std::array<matched_frame_slot_t, 2> matched_frame_slots;
     std::uint64_t sbs_frame_sequence = 0;
     bool matched_output_valid = false;
+    std::chrono::steady_clock::time_point matched_output_source_at {};
+    bool matched_output_timeout_active = false;
     std::chrono::steady_clock::time_point matched_stats_started {};
     unsigned matched_stats_calls = 0;
     unsigned matched_stats_completions = 0;
@@ -4741,74 +4780,43 @@ namespace platf::dxgi {
     compile_pixel_shader_helper(cursor_ps);
     compile_pixel_shader_helper(cursor_ps_normalize_white);
     compile_pixel_shader_helper(rgb_present_linear_to_srgb_ps);
-    compile_compute_shader_helper(depth_warp_prefilter_cs);
-    compile_pixel_shader_helper(sbs_reprojection_ps);
+    compile_pixel_shader_helper(rgb_present_srgb_to_linear_ps);
+    // This independent current-frame identity renderer is the safety net for Host SBS. Its
+    // failure must not disable ordinary non-SBS video; a Host SBS device will reject creation
+    // only if neither this shader nor the authenticated V2 renderer can be created.
+    sbs_flat_identity_ps_hlsl = compile_pixel_shader(
+      SUNSHINE_SHADERS_DIR "/sbs_flat_identity_ps.hlsl"
+    );
+    if (!sbs_flat_identity_ps_hlsl) {
+      BOOST_LOG(warning)
+        << "Host SBS flat-identity shader is unavailable; ordinary video remains enabled."sv;
+    }
     sbs_reprojection_v2_live_ps_hlsl.reset();
-    sbs_reprojection_v2_mapping_ps_hlsl.reset();
-    sbs_reprojection_v2_mask_ps_hlsl.reset();
     sbs_reprojection_v2_live_source_closure_sha256.clear();
-    if (config::video.sbs.parallax_v2_render) {
-      namespace cache = models::host_sbs_shader_cache;
-      const auto renderer_sources = cache::snapshot_sources(
-        SUNSHINE_SHADERS_DIR,
-        cache::parallax_v2_live_renderer_specs
+    namespace cache = models::host_sbs_shader_cache;
+    const auto renderer_sources = cache::snapshot_sources(
+      SUNSHINE_SHADERS_DIR,
+      cache::parallax_v2_live_renderer_specs
+    );
+    sbs_reprojection_v2_live_source_closure_sha256 =
+      cache::source_closure_sha256(renderer_sources);
+    if (renderer_sources &&
+        sbs_reprojection_v2_live_source_closure_sha256 ==
+          cache::parallax_v2_live_renderer_source_closure_sha256) {
+      sbs_reprojection_v2_live_ps_hlsl = cache::get(
+        renderer_sources,
+        cache::parallax_v2_live_renderer
       );
-      sbs_reprojection_v2_live_source_closure_sha256 =
-        cache::source_closure_sha256(renderer_sources);
-      if (renderer_sources &&
-          sbs_reprojection_v2_live_source_closure_sha256 ==
-            cache::parallax_v2_live_renderer_source_closure_sha256) {
-        sbs_reprojection_v2_live_ps_hlsl = cache::get(
-          renderer_sources,
-          cache::parallax_v2_live_renderer
-        );
-        sbs_reprojection_v2_mapping_ps_hlsl = cache::get(
-          renderer_sources,
-          cache::parallax_v2_live_mapping
-        );
-        sbs_reprojection_v2_mask_ps_hlsl = cache::get(
-          renderer_sources,
-          cache::parallax_v2_live_mask
-        );
-      }
-      if (!sbs_reprojection_v2_live_ps_hlsl) {
-        // The renderer cutover is an experiment, not a process-start dependency. Each render-on
-        // stream sees the missing blob and permanently latches to flat identity.
-        BOOST_LOG(warning)
-          << "Optional Host SBS parallax-v2 live shader source authentication or compilation "sv
-             "failed (observed closure "sv
-          << sbs_reprojection_v2_live_source_closure_sha256
-          << ", expected "sv
-          << cache::parallax_v2_live_renderer_source_closure_sha256
-          << "); parallax-v2 render requests will fail closed to flat identity."sv;
-      }
+    }
+    if (!sbs_reprojection_v2_live_ps_hlsl) {
+      BOOST_LOG(warning)
+        << "Host SBS V2 renderer authentication or compilation failed; Host SBS will stream "sv
+           "current-frame flat identity (observed closure "sv
+        << sbs_reprojection_v2_live_source_closure_sha256 << ", expected "sv
+        << cache::parallax_v2_live_renderer_source_closure_sha256 << ")."sv;
     }
     compile_vertex_shader_helper(sbs_reprojection_vs);
     compile_vertex_shader_helper(cursor_vs);
-
-    sbs_reprojection_mapping_ps_hlsl = compile_shader(
-      SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl",
-      "mapping_ps",
-      "ps_5_0"
-    );
-    sbs_reprojection_mask_ps_hlsl = compile_shader(
-      SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl",
-      "mask_ps",
-      "ps_5_0"
-    );
-    sbs_forward_coverage_cs_hlsl = compile_shader(
-      SUNSHINE_SHADERS_DIR "/sbs_forward_coverage_cs.hlsl",
-      "main",
-      "cs_5_0"
-    );
-    if (!sbs_reprojection_mapping_ps_hlsl ||
-        !sbs_reprojection_mask_ps_hlsl ||
-        !sbs_forward_coverage_cs_hlsl) {
-      // Dump 3D is optional. Preserve normal capture and Host SBS if only a diagnostic entry
-      // point is unavailable; the dump records mapping/coverage as unavailable later.
-      BOOST_LOG(warning)
-        << "One or more optional Dump 3D geometry shaders could not be precompiled."sv;
-    }
 
     BOOST_LOG(info) << "Compiled shaders"sv;
 

@@ -448,12 +448,13 @@ namespace models::host_sbs_shader_cache {
   }
 
   bool prewarm(const std::filesystem::path &assets_dir) {
+    const auto shader_root = assets_dir / "shaders" / "directx";
     const auto preprocess_sources = snapshot_sources(
-      assets_dir / "shaders" / "directx",
+      shader_root,
       preprocess_specs
     );
     const auto sources = snapshot_sources(
-      assets_dir / "shaders" / "directx",
+      shader_root,
       core_specs
     );
     if (!preprocess_sources || !sources || !get(preprocess_sources, rgb_to_nchw)) {
@@ -467,9 +468,36 @@ namespace models::host_sbs_shader_cache {
         return false;
       }
     }
+
+    const auto parallax_v2_sources = snapshot_sources(
+      shader_root,
+      parallax_v2_producer_specs
+    );
+    if (!parallax_v2_sources) {
+      return false;
+    }
+    for (const auto &spec : parallax_v2_producer_specs) {
+      if (!get(parallax_v2_sources, spec)) {
+        return false;
+      }
+    }
+    const auto parallax_v2_live_sources = snapshot_sources(
+      shader_root,
+      parallax_v2_live_renderer_specs
+    );
+    if (!parallax_v2_live_sources) {
+      return false;
+    }
+    for (const auto &spec : parallax_v2_live_renderer_specs) {
+      if (!get(parallax_v2_live_sources, spec)) {
+        return false;
+      }
+    }
     BOOST_LOG(info)
-      << "Prewarmed " << core_specs.size()
-      << " fixed-shape Host SBS depth shaders.";
+      << "Prewarmed the complete Host SBS V2 shader set ("
+      << core_specs.size() + parallax_v2_producer_specs.size() +
+           parallax_v2_live_renderer_specs.size()
+      << " production shaders; dump-only shaders remain lazy).";
     return true;
   }
 }  // namespace models::host_sbs_shader_cache

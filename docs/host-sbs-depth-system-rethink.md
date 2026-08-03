@@ -1,7 +1,7 @@
 # Host SBS Depth-System Rethink
 
-Status: design record for the default-off Host SBS V2 experiment. It does not change Client SBS or
-offline conversion, and it is not a production cutover.
+Status: design record for the shipped Host SBS V2 cutover. V2 is the sole live Host SBS renderer;
+Client SBS and offline conversion remain unchanged.
 
 The implementation details and exact equations are in
 [host-sbs-depth-coordinate-v2.md](host-sbs-depth-coordinate-v2.md).
@@ -45,7 +45,7 @@ unadapted rather than introducing another classifier or feedback loop.
 | Permanent within-shot safety minimum | Remove | A transient prediction must not weaken a long scene indefinitely. |
 | Frame-local 4% container | Keep | This owns a precise representation bound and recovers immediately. |
 | Temporal depth EMA | Do not port initially | Add temporal filtering only after raw-coordinate flicker is measured. |
-| Existing cut pulse/generation | Keep behind a narrow interface | V2 needs one scene reset input, not the legacy subject stack. |
+| Existing cut pulse/generation | Keep temporarily behind a narrow bridge | V2 consumes only one scene-reset input. The legacy analysis stack currently produces it, but none of its geometry state reaches V2. |
 | Old depth with current color | Remove | It breaks frame attribution. |
 | Immutable candidate field | Keep as diagnostic | It records requested geometry before local safety intervention. |
 | Canonical coordinate | Keep as diagnostic | It helps explain model output but does not select visibility. |
@@ -68,6 +68,10 @@ candidate p = requested_gain * container * (curve - convergence_curve)
 `coordinate_scale` is fixed by the authenticated calibration. `convergence_curve` is separate and
 currently zero. This separation is structural: a future zero-plane allocator may translate the
 curve once per scene, but it may not rescale or reshape depth.
+
+Schema 14 authenticates the standard tensor family: `770x434`, `1022x434`, `1036x434`,
+`434x770`, `434x1022`, and `434x1036`. DAV2 Base, custom models, and custom tensor shapes have no
+live calibration and fail flat rather than borrowing the Small-model scale.
 
 There is no live gauge tracker yet. Per-frame mean changes cannot distinguish model gauge drift
 from camera motion or changed occupancy. Any tracker would need controlled registered evidence and
@@ -136,7 +140,9 @@ The current convergence value is zero. Intelligent zero-plane allocation is not 
 - V2 consumes only `{generation, pulse}`.
 - Pulse handles the exact update; generation recovers a pulse missed while inference was skipped.
 - Persistent-motion behavior belongs to the detector; V2 adds no second cooldown or timeout.
-- Before cutover, this reset signal should be extracted from the legacy subject stack.
+- The live estimator currently obtains this pair from a narrow bridge over the legacy analysis
+  stack. That bridge is the only legacy live dependency; its depth, anchor, pop, and warp outputs
+  have no V2 authority.
 
 ### Invalid depth
 
@@ -172,7 +178,7 @@ container scale are current-dispatch values, not controller history.
 | Client MiDaS | semantic interface only | independent sign, scale, curve, validity, slope, and performance calibration |
 
 Similar labels do not make legacy Client SBS values wire-compatible with V2. Client and offline
-remain unchanged during Host live evaluation.
+remain unchanged by the Host live cutover.
 
 ## Performance shape
 
@@ -189,26 +195,33 @@ clear, dispatch, or bind a full-resolution owner texture, and it performs
 no bounded hole search. Exact dump mapping compiles from the same renderer closure; the mask
 entrypoint writes zero.
 
-Shadow timing is intentionally pessimistic because it runs after the legacy stack. A production
-cost claim must measure the replacement path, not add shadow overhead to the legacy cost.
+The production parallax interval measures exactly the seven V2 compute passes. The retained
+scene-cut bridge runs before that interval and must be reported separately when measuring the
+remaining legacy-analysis overhead. Historical shadow-mode totals are not production V2 cost.
 
 ## Provenance and evidence
 
-Depth-coordinate contract schema 12 binds algorithm constants, model identity, preprocessing
-closure, tensor shape, and the ordered seven-shader producer closure. The live renderer has its own
+Depth-coordinate contract schema 14 binds algorithm constants, model identity, preprocessing
+closure, the six standard tensor shapes, and the ordered seven-shader producer closure. The live renderer has its own
 authenticated main/mapping/mask closure. New Dump 3D manifest schema 7 records final parallax as
 position authority and candidate/canonical/vertical-majorant fields as diagnostics.
 
 The original fullscreen and windowed hair dumps use depth-coordinate schema 7. They remain useful
-historical input witnesses for exact replay but cannot authenticate schema-12 output. The prior
+historical input witnesses for exact replay but cannot authenticate schema-14 output. The prior
 slope-0.5 row-majorant replay removes the duplicated hair and hair/body step while never lowering
 the candidate. It raises 3.837% of fullscreen texels and 2.152% of windowed texels; its residual
-fullscreen crown bending motivated the selected vertical shear-2 pass. Fresh schema-12,
+fullscreen crown bending motivated the selected vertical shear-2 pass. Fresh schema-14,
 manifest-schema-7 live dumps remain required.
 
-## Gates before cutover
+## Production cutover and continuing gates
 
-1. Generate fresh schema-12 native and manifest-schema-7 live evidence with exact producer and renderer closures.
+The live cutover removes V1 renderer selection, prewarms the production V2 shaders, and fails flat
+when production authentication or execution fails. It does not authorize unsupported models or
+tensor shapes and it does not migrate Client SBS or offline conversion.
+
+Continuing release evidence should:
+
+1. Generate fresh schema-14 native and manifest-schema-7 live evidence with exact producer and renderer closures.
 2. Replay core and extended clips at the chosen fixed scale and pop values.
 3. Inspect near-hair cliffs, thin structures, flat pages, HDR, cuts, flashes, fast motion, invalid
    inference, and long browser/video sessions.
@@ -216,7 +229,5 @@ manifest-schema-7 live dumps remain required.
    fixed-point residual, disparity bounds, and timing independently.
 5. Prove V2 takes `pop_strength` literally, ignores legacy adaptive geometry controls, and changes
    its near shoulder only on acquisition or a confirmed cut.
-6. Extract and authenticate the narrow cut epoch before retiring the legacy producer.
+6. Extract and authenticate the narrow cut epoch before retiring the remaining legacy scene-cut bridge.
 7. Calibrate every additional model, tensor shape, client backend, and offline path independently.
-
-Until these gates pass, V2 remains default-off, Host-only, and V2-or-flat.

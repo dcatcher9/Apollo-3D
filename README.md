@@ -111,36 +111,32 @@ The Web UI also shows QR pairing as a secondary option for compatible clients. M
 normal setup flow uses the PIN. For the direct local path, configure
 [Local AR glasses](./docs/sbs-local-ar-glasses.md) instead; Moonlight 3D is not involved.
 
-## Scene-aware adaptive pop and zero plane
+## Stable depth from scene to scene
 
-Host 3D and Client 3D use the same scene-level strategy, with implementation details calibrated
-for their respective GPU pipelines:
+Host 3D and Client 3D both avoid per-frame depth pumping, but they use different calibrated
+controllers:
 
-- **Scene-aware adaptive pop** waits for a new scene’s depth to settle, measures
-  gradient-magnitude-weighted depth-edge risk, then—using the shipping defaults—chooses a parallax
-  multiplier between `1.20×` and `2.00×`. Lower-risk depth fields can use more relief; edge-dense
-  fields move toward the gentler end. The choice stays fixed for the shot instead of pumping every
-  frame.
-- With the shipping defaults, **shot-stable zero plane** places the display surface—the depth
-  rendered at zero disparity—at the scene’s median inferred depth. It is resolved immediately on
-  an accepted scene cut, corrected once after depth settles, and then latched. Between accepted
-  cuts it does not continuously follow per-frame motion or depth noise; the committed synthetic
-  exposure-flash tests also verify that supported brightness flashes do not relatch it.
+- **Host 3D V2** applies the configured pop strength literally. On the first usable depth field and
+  after an accepted scene cut, it latches the model's scene center as the zero-disparity plane and
+  holds it for the shot. It also selects one near-foreground shoulder from the scene's foreground
+  occupancy. That shoulder preserves sparse “wow” objects without boosting a large near layer; it
+  does not change pop strength or continuously move the screen plane. Legacy adaptive-pop and
+  configurable zero-plane controls do not alter live Host 3D V2 geometry.
+- **Client 3D** retains scene-aware adaptive pop and its shot-stable median zero plane. With the
+  shipping defaults it chooses a shot-level multiplier between `1.20×` and `2.00×`, using less
+  relief for edge-dense depth and more for lower-risk scenes.
 
 ```mermaid
 flowchart TD
-    CUT["Accepted scene cut<br/>set the median zero plane immediately"]
-    CUT --> SETTLE["After depth settles<br/>correct the plane once · measure depth-edge risk"]
-    SETTLE -->|"Lower risk"| MORE["Stronger relief<br/>pop multiplier toward 2.00×"]
-    SETTLE -->|"Higher risk"| LESS["Gentler relief<br/>pop multiplier toward 1.20×"]
-    MORE --> HOLD["Hold pop and zero plane<br/>until the next accepted cut"]
-    LESS --> HOLD
+    CUT["Accepted scene cut"]
+    CUT --> HOST["Host 3D V2<br/>latch scene center and near shoulder"]
+    CUT --> CLIENT["Client 3D<br/>resolve median plane and edge risk"]
+    HOST --> HOSTHOLD["Hold configured pop and geometry<br/>until the next cut"]
+    CLIENT --> CLIENTHOLD["Choose and hold adaptive pop<br/>until the next cut"]
 ```
 
-The controller favors stronger stereo relief in lower-risk depth fields and backs off in edge-dense
-fields. The shot-latched screen plane reduces convergence breathing from per-frame tracking. These
-controls reduce pumping and warp risk; they do not guarantee perfect depth, artifact-free
-reprojection, or flawless cut detection.
+These shot-stable decisions reduce convergence breathing and pumping. They do not guarantee perfect
+depth, artifact-free reprojection, or flawless cut detection.
 
 ## Why this pair stands out
 

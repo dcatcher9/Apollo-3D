@@ -21,6 +21,13 @@ void ResetNearShoulder(inout float4 shoulder) {
     shoulder = float4(0.0f, v2_near_log_tau, asfloat(0u), asfloat(0u));
 }
 
+void StoreCameraState(float4 active, float4 control, inout float4 shoulder) {
+    V2SealCameraCenter(active, control, shoulder);
+    ShadowState[0] = active;
+    ShadowState[1] = control;
+    ShadowState[2] = shoulder;
+}
+
 void PublishUnavailable(
     inout float4 active,
     inout float4 control,
@@ -86,9 +93,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     if (!frame_valid) {
         PublishUnavailable(
             active, control, shoulder, confirmed_cut || !camera_initialized);
-        ShadowState[0] = active;
-        ShadowState[1] = control;
-        ShadowState[2] = shoulder;
+        StoreCameraState(active, control, shoulder);
         return;
     }
 
@@ -105,9 +110,7 @@ void main(uint3 id : SV_DispatchThreadID) {
             !coverage_count_valid || !V2Finite(coverage) ||
             !V2Finite(effective_near_tau) || effective_near_tau <= 0.0f) {
             PublishUnavailable(active, control, shoulder, true);
-            ShadowState[0] = active;
-            ShadowState[1] = control;
-            ShadowState[2] = shoulder;
+            StoreCameraState(active, control, shoulder);
             return;
         }
         active = float4(
@@ -145,7 +148,5 @@ void main(uint3 id : SV_DispatchThreadID) {
         V2_STATE_FRAME_VALID(control) = 1.0f;
     }
 
-    ShadowState[0] = active;
-    ShadowState[1] = control;
-    ShadowState[2] = shoulder;
+    StoreCameraState(active, control, shoulder);
 }

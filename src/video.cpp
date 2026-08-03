@@ -20,6 +20,7 @@
 #include "process.h"
 #include "sync.h"
 #include "video.h"
+#include "depth_coordinate_v2.h"
 
 #ifdef _WIN32
   #include "platform/windows/virtual_display.h"
@@ -39,20 +40,27 @@ namespace video {
       sbs_telemetry_snapshot_t snapshot;
       snapshot.status = sbs_telemetry_sample_status_e::unavailable;
       snapshot.generation = generation;
-      snapshot.valid_fields = sbs_telemetry_valid_field::config;
-      snapshot.runtime_flags = profile.adaptive_pop ?
-                                 sbs_telemetry_runtime_flag::adaptive_enabled :
-                                 0u;
-      snapshot.zero_plane_mode = profile.zero_plane == "subject" ? 1 :
-                                 profile.zero_plane == "background" ? 3 :
-                                                                       2;
-      snapshot.pop_floor = static_cast<float>(profile.pop_strength);
-      snapshot.pop_ceiling =
-        static_cast<float>(std::max(profile.adaptive_pop_max, profile.pop_strength));
-      snapshot.effective_pop = snapshot.pop_floor;
+      apply_sbs_telemetry_profile(snapshot, profile);
       return snapshot;
     }
   }  // namespace
+
+  void apply_sbs_telemetry_profile(
+    sbs_telemetry_snapshot_t &snapshot,
+    const config::video_t::sbs_t &profile
+  ) noexcept {
+    snapshot.valid_fields |= sbs_telemetry_valid_field::config;
+    snapshot.runtime_flags &= ~sbs_telemetry_runtime_flag::adaptive_enabled;
+    // Telemetry v1 requires a nonzero configured mode whenever VALID_CONFIG is set. Preserve the
+    // configured value as wire/UI compatibility metadata even though V2 does not consume the
+    // legacy zero-plane controller as geometry authority.
+    snapshot.zero_plane_mode = profile.zero_plane == "subject" ? 1 :
+                               profile.zero_plane == "background" ? 3 :
+                                                                       2;
+    snapshot.pop_floor = static_cast<float>(profile.pop_strength);
+    snapshot.pop_ceiling = snapshot.pop_floor;
+    snapshot.effective_pop = snapshot.pop_floor;
+  }
 
   std::uint32_t next_sbs_telemetry_generation() noexcept {
     // Zero is reserved for "no renderer has existed yet". Skip it on the theoretical wrap.
@@ -178,6 +186,29 @@ namespace video {
     custom.name = profile.depth_model;
     custom.url = profile.depth_model_url;
     return custom;
+  }
+
+  config::depth_model_info host_sbs_v2_depth_model_for_profile(
+    const config::video_t::sbs_t &profile
+  ) {
+    const auto requested = depth_model_for_profile(profile);
+    for (const auto &calibration : models::depth_coordinate_v2::model_calibrations) {
+      if (requested.name == calibration.depth_model &&
+          requested.url == calibration.depth_model_url) {
+        return requested;
+      }
+    }
+
+    static_assert(!models::depth_coordinate_v2::model_calibrations.empty());
+    const auto &production = models::depth_coordinate_v2::model_calibrations.front();
+    BOOST_LOG(warning)
+      << "Live Host SBS V2 does not have an authenticated calibration for depth model '"sv
+      << requested.name << "'; using production model '"sv << production.depth_model
+      << "'. Base/custom model selection remains available to offline evaluation only."sv;
+    return {
+      std::string {production.depth_model},
+      std::string {production.depth_model_url},
+    };
   }
 
   config::depth_model_info active_depth_model() {

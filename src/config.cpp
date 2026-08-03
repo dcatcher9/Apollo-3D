@@ -155,7 +155,7 @@ namespace config {
 
   const std::vector<depth_model_info> &depth_model_registry() {
     // Built-in DA-V2 model definitions referenced by profile depth_model names.
-    // Keep this production roster independent of the default-off raw-coordinate experiment.
+    // Keep the general depth-model roster independent of Host SBS V2's authenticated live subset.
     // V2 joins its calibration after the exact selected name/URL/model bytes are known; changing
     // an experimental manifest must never add, remove, or redirect a production model.
     static const std::vector<depth_model_info> registry = {
@@ -683,8 +683,6 @@ namespace config {
       string_f(vars, prefix + "depth_model_url", target.depth_model_url);
       int_between_f(vars, prefix + "max_encode_width", target.max_encode_width, {256, 16384});
       bool_f(vars, prefix + "cuda_graph", target.cuda_graph);
-      bool_f(vars, prefix + "parallax_v2_shadow", target.parallax_v2_shadow);
-      bool_f(vars, prefix + "parallax_v2_render", target.parallax_v2_render);
     };
 
     video.sbs = {};

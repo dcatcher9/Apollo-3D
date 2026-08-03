@@ -1589,103 +1589,43 @@ class EvalContractTests(unittest.TestCase):
         self.assertAlmostEqual(reference_aspect / (3840.0 / 2160.0), 4.0 / 3.0)
         self.assertAlmostEqual(reference_aspect / (3552.0 / 3840.0), 2.562562563, places=6)
 
-    def test_pop_strength_scales_shared_parallax_and_apollo_probe_radius(self):
+    def test_production_v2_pop_strength_has_one_configured_authority(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
-                              "include", "sbs_warp_common.hlsl")
-        with open(common, encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn("float pop_strength;", text)
-        self.assertIn("pop_strength * adaptive_ratio", text)
-        self.assertIn("return parallax * p.output_scale;", text)
-
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
             config = fh.read()
         self.assertIn('prefix + "pop_strength", target.pop_strength, {0.25, 2.0}', config)
         with open(os.path.join(repo, "src", "config.h"), encoding="utf-8") as fh:
             config_header = fh.read()
         self.assertIn("double pop_strength = 1.20;", config_header)
-        self.assertIn("bool adaptive_pop = true;", config_header)
-        self.assertIn("double adaptive_pop_max = 2.00;", config_header)
-        self.assertIn('std::string zero_plane = "median";', config_header)
 
-        with open(os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
+        with open(os.path.join(repo, "src", "depth_coordinate_v2.h"),
                   encoding="utf-8") as fh:
-            production = fh.read()
-        self.assertIn("(float) sbs_config.pop_strength", production)
-        self.assertIn("sbs_config.adaptive_pop ? 1.0f : 0.0f", production)
+            coordinate = fh.read()
+        self.assertIn("requested_pop_strength(const float configured_pop)", coordinate)
+        self.assertIn(
+            "return gain_per_pop * requested_pop_strength(configured_pop);", coordinate)
+        self.assertNotIn("adaptive_pop_max", coordinate)
+        self.assertNotIn("zero_plane", coordinate)
 
-        with open(os.path.join(repo, "src_assets", "windows", "assets", "shaders",
-                               "directx", "depth_subject_resolve_cs.hlsl"),
+        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
                   encoding="utf-8") as fh:
-            adaptive = fh.read()
-        with open(os.path.join(repo, "src_assets", "windows", "assets", "shaders",
-                               "directx", "depth_subject_hist_cs.hlsl"),
-                  encoding="utf-8") as fh:
-            cut_evidence = fh.read()
-        with open(os.path.join(repo, "src_assets", "windows", "assets", "shaders",
-                               "directx", "include", "depth_constants.hlsl"),
-                  encoding="utf-8") as fh:
-            depth_constants = fh.read()
-        self.assertIn("change_fraction >= DEPTH_CUT_HIGH", adaptive)
-        self.assertIn("scene_age >= POP_CLASSIFY_SETTLE_FRAMES", adaptive)
+            estimator = fh.read()
+        self.assertIn("static_cast<float>(cfg.pop_strength)", estimator)
+        self.assertIn(".requested_gain = parallax_v2_requested_gain", estimator)
         self.assertIn(
-            "POP_RISK_LOW, POP_RISK_HIGH, current_edge_fraction", adaptive)
-        self.assertIn("#define POP_RISK_LOW 0.04f", adaptive)
-        self.assertIn("#define POP_RISK_HIGH 0.20f", adaptive)
-        self.assertNotIn("lerp(pop_ratio, target_ratio", adaptive)
-        self.assertIn("Bestv2RawShiftPxFast(zero_anchor_shaped)", adaptive)
-        self.assertIn("model_input_history_valid", adaptive)
-        self.assertIn("appearance_proposal", adaptive)
-        self.assertIn("current_structural_support_fraction", adaptive)
-        self.assertIn("previous_structural_support_fraction", adaptive)
-        self.assertIn("common_structural_support_fraction", adaptive)
-        self.assertIn("structureless_transition", adaptive)
-        self.assertIn("same_scene_gap_return", adaptive)
-        self.assertIn("next_model_input_history_state", adaptive)
-        self.assertIn("model_input_history_gap", adaptive)
-        self.assertIn("low_structure_scene", adaptive)
-        self.assertIn("raw_rgb_change_fraction >= RAW_RGB_CUT_HIGH", adaptive)
-        self.assertIn(
-            "structural_change_fraction >= STRUCTURAL_COLOR_CUT_HIGH", adaptive)
-        self.assertIn("change_fraction >= DEPTH_CUT_CORROBORATE", adaptive)
-        self.assertIn("change_fraction < DEPTH_CUT_LOW", adaptive)
-        self.assertIn("relative_geometry_spike", adaptive)
-        self.assertIn("CUT_FLAG_GEOMETRY_ARMED", adaptive)
-        self.assertIn("CUT_FLAG_APPEARANCE_ARMED", adaptive)
-        self.assertNotIn("cut_state = -2.0f", adaptive)
-        self.assertNotIn("scene_age >= 2.0f", adaptive)
-        self.assertIn("float subj = (!initialized || shot_cut) ?", adaptive)
-        self.assertIn("lerp(SBS_STATE_SUBJECT_DEPTH_EMA(s), subj_raw", adaptive)
-        self.assertIn("CurrentModelColor", cut_evidence)
-        self.assertIn("PreviousModelColor", cut_evidence)
-        self.assertIn("CurrentAppearanceOrdinal", cut_evidence)
-        self.assertIn("PreviousAppearanceOrdinal", cut_evidence)
-        self.assertIn("RAW_RGB_PIXEL_DELTA", cut_evidence)
-        self.assertIn("PlainHist[NUM_BINS + 3]", cut_evidence)
-        self.assertIn("PlainHist[NUM_BINS + 4]", cut_evidence)
-        self.assertIn("PlainHist[NUM_BINS + 5]", cut_evidence)
-        self.assertIn("PlainHist[NUM_BINS + 6]", cut_evidence)
-        self.assertNotIn("max(color.r, max(color.g, color.b))", cut_evidence)
-        self.assertIn("for (int first = 0; first < 4; ++first)", cut_evidence)
-        self.assertIn("for (int second = first + 1; second < 5; ++second)",
-                      cut_evidence)
-        self.assertIn("abs(current_delta) >= STRUCTURAL_ORDINAL_CONTRAST_FLOOR",
-                      cut_evidence)
-        self.assertIn("ordering_flips * 2u >= common_comparisons", cut_evidence)
-        self.assertIn("#define RAW_RGB_CUT_HIGH 0.70f", depth_constants)
-        self.assertIn("#define STRUCTURAL_COLOR_MIN_SUPPORT 0.01f", depth_constants)
-        self.assertIn("#define STRUCTURAL_COLOR_CUT_HIGH 0.03f", depth_constants)
-        self.assertIn("#define DEPTH_CUT_HIGH 0.60f", depth_constants)
-        self.assertIn("#define DEPTH_CUT_CORROBORATE 0.25f", depth_constants)
-        self.assertIn("#define DEPTH_CUT_RELATIVE_FLOOR 0.30f", depth_constants)
-        self.assertIn("#define DEPTH_CUT_RELATIVE_MARGIN 0.20f", depth_constants)
-        self.assertIn("#define DEPTH_CUT_RELATIVE_MULTIPLIER 2.0f", depth_constants)
-        self.assertNotIn("conv_target", adaptive)
-        self.assertIn("bool shot_cut =", adaptive)
-        self.assertIn("initialized &&", adaptive)
-        self.assertNotIn("scene_control && initialized", adaptive)
-        self.assertIn("SBS_STATE_SCENE_AGE(s) = scene_age;", adaptive)
+            "r.parallax_v2_requested_pop_strength = parallax_v2_requested_pop_strength;",
+            estimator,
+        )
+        self.assertIn("r.parallax_v2_requested_gain = parallax_v2_requested_gain;", estimator)
+
+        live_shader_path = os.path.join(
+            repo, "src_assets", "windows", "assets", "shaders", "directx",
+            "sbs_reprojection_v2_live_ps.hlsl")
+        with open(live_shader_path, encoding="utf-8") as fh:
+            live_shader = fh.read()
+        self.assertIn("Texture2D<float> FinalParallax : register(t1);", live_shader)
+        self.assertNotIn("pop_strength", live_shader)
+        self.assertNotIn("adaptive_ratio", live_shader)
 
     def test_depth_runtime_seeds_history_and_sanitizes_nonfinite_model_output(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1740,7 +1680,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("quarantine_execution_context_locked(engine_key, exec_context)", estimator)
         self.assertIn("quarantined_context_count", estimator)
         self.assertIn("warmed_context_count", estimator)
-        self.assertIn("if (context_warmed)", estimator)
+        self.assertIn("if (context_warmed && !execution_context_poisoned)", estimator)
         self.assertIn('model.name + ".active-engine.json"', estimator)
         self.assertIn('{"onnx_sha256", artifact.source_sha256}', estimator)
 
@@ -2145,9 +2085,9 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("if (perf && !snapshot_debug_inputs)", production)
         self.assertIn("est.raw_model_depth_snapshot.Get()", production[estimate_call:])
         self.assertIn("est.model_input_snapshot.Get()", production[estimate_call:])
-        # The real filtered warp is retained for both reprojection and its diagnostic replay.
+        # The authenticated final-parallax field is retained for live rendering and dump replay.
         self.assertIn("dump_warp_depth = warp_depth;", production)
-        preflight = production.index("sbs_dumper.preflight_requested_frame(")
+        preflight = production.index("sbs_dumper.preflight_requested_v2_frame(")
         self.assertIn("render_sbs_debug_geometry(", production)
         self.assertLess(
             preflight,
@@ -2386,15 +2326,16 @@ class EvalContractTests(unittest.TestCase):
                 self.assertGreaterEqual(footprint, 0)
                 self.assertGreater(transform, footprint)
 
-    def test_hdr_warp_stays_linear_fp16_until_pq_conversion(self):
+    def test_host_sbs_intermediate_follows_observed_capture_transfer(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         display = os.path.join(repo, "src", "platform", "windows", "display_vram.cpp")
         with open(display, encoding="utf-8") as fh:
             pipeline = fh.read()
-        self.assertIn(
-            "tex_desc.Format = sbs_intermediate_fp16 ? DXGI_FORMAT_R16G16B16A16_FLOAT",
-            pipeline,
-        )
+        self.assertIn("const DXGI_FORMAT required_format = input_is_linear ?", pipeline)
+        self.assertIn("DXGI_FORMAT_R16G16B16A16_FLOAT", pipeline)
+        self.assertIn("DXGI_FORMAT_B8G8R8A8_UNORM", pipeline)
+        self.assertIn("display->capture_format != DXGI_FORMAT_UNKNOWN", pipeline)
+        self.assertIn("if (!input_is_linear &&", pipeline)
         self.assertNotIn("sbs_sharpen", pipeline)
         self.assertIn("input_is_linear ? convert_Y_or_YUV_fp16_ps.get()", pipeline)
         self.assertIn("models::input_color_space::linear_sdr", pipeline)
@@ -2417,7 +2358,8 @@ class EvalContractTests(unittest.TestCase):
         with open(shader_path, encoding="utf-8") as fh:
             shader = fh.read()
         self.assertIn("bool rgb_present_target_is_linear = false;", display)
-        self.assertIn("input_is_linear && !rgb_present_target_is_linear", display)
+        self.assertIn("if (input_is_linear != rgb_present_target_is_linear)", display)
+        self.assertIn("rgb_present_srgb_to_linear_ps.get()", display)
         self.assertIn("rgb_present_linear_to_srgb_ps.get()", display)
         self.assertNotIn("frame_is_hdr = d3d_image.format", display)
         self.assertIn("ApplySRGBCurve(saturate(source.rgb))", shader)
@@ -2700,22 +2642,28 @@ class EvalContractTests(unittest.TestCase):
                     "sbs_3d_subject_track"):
             self.assertNotIn(key, config)
 
-    def test_bestv2_subject_pipeline_is_mandatory_and_validated(self):
+    def test_production_v2_pipeline_is_mandatory_and_fails_flat(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         paths = {
             "estimator": os.path.join(repo, "src", "video_depth_estimator.cpp"),
             "display": os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
-            "harness": os.path.join(repo, "src", "sbs_bench_harness.cpp"),
         }
         text = {}
         for key, path in paths.items():
             with open(path, encoding="utf-8") as fh:
                 text[key] = fh.read()
         self.assertIn("const bool core_shaders_ok", text["estimator"])
-        self.assertIn("if (!valid || !input_srv)", text["estimator"])
+        self.assertIn("if (!core_shaders_ok)", text["estimator"])
+        self.assertIn(
+            "if (!valid || terminal_failure || live_v2_producer_unavailable() || !input_srv)",
+            text["estimator"],
+        )
         self.assertIn("depth_estimator->is_valid()", text["display"])
-        self.assertNotIn("--no-subject-track", text["harness"])
-        self.assertNotIn("sbs_cfg.subject_track", text["harness"])
+        self.assertIn("models::parallax_v2_result_is_authenticated(est)", text["display"])
+        self.assertIn(
+            "host_sbs_renderer = models::fail_host_sbs_renderer_flat(host_sbs_renderer);",
+            text["display"],
+        )
 
     def test_bestv2_fast_curve_is_subpixel_and_live_only(self):
         depth = np.linspace(0.0, 1.0, 100001, dtype=np.float64)

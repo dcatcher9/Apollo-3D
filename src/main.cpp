@@ -218,10 +218,14 @@ int main(int argc, char *argv[]) {
   // Prepare the single configured TensorRT model in the background only for the long-lived host.
   // Command modes such as --sbs-bench own their TensorRT lifecycle and must not race this work.
   // jthread joins before logging and process globals are torn down, preventing exit-time races.
-  std::jthread model_prepare_thread([model = video::depth_model_for_profile(config::video.sbs),
+  std::jthread model_prepare_thread([model = video::host_sbs_v2_depth_model_for_profile(config::video.sbs),
                                      adapter_name = config::video.adapter_name]() {
     BOOST_LOG(info) << "Preparing startup depth model '"sv << model.name << "'..."sv;
-    if (!models::prepare_tensorrt_model(SUNSHINE_ASSETS_DIR, model, adapter_name)) {
+    if (!models::prepare_tensorrt_model(
+          SUNSHINE_ASSETS_DIR,
+          model,
+          adapter_name
+        )) {
       BOOST_LOG(error) << "Startup depth-model preparation failed for '"sv << model.name << "'."sv;
     }
   });
