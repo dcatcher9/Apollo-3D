@@ -3,6 +3,13 @@
 
 #include "include/bestv2_curve.hlsl"
 
+// External final-parallax replay and live V2 both consume a field whose authenticated horizontal
+// source-U slope is strictly below one. Each eye map is therefore monotone with one inverse, and
+// twelve fixed-point samples are both cheaper and more accurate than a visibility search.
+#if defined(SBS_DIRECT_PARALLAX) || defined(SBS_LIVE_V2_SIGNED_PARALLAX)
+#define SBS_CONTRACTIVE_PARALLAX 1
+#endif
+
 // The validated core clips and Bestv2-derived profile were calibrated at 854 source pixels wide.
 // The reference preset expresses disparity as literal render pixels, which becomes imperceptible on a 5120px
 // desktop. Preserve exact behavior at and below the calibration raster, but scale wider sources
@@ -16,6 +23,15 @@ static const float BESTV2_CALIBRATION_WIDTH = 854.0f;
 // strength when the client requests a different image shape. This is image geometry; it does not
 // depend on the client's physical panel size or placement.
 static const float BESTV2_REFERENCE_ASPECT = 5120.0f / 2160.0f;
+
+// Harness-only direct-parallax contract. The immutable R32 artifact uses the historical finite
+// [0,1] interchange encoding; live V2 instead binds its signed final field directly.
+#if defined(SBS_DIRECT_PARALLAX)
+cbuffer DirectParallaxConstants : register(b4) {
+    float direct_parallax_source_u_limit;
+    float3 direct_parallax_reserved;
+};
+#endif
 
 float Bestv2AspectScale(float source_width, float source_height, float literal_mode) {
     if (literal_mode > 0.5f) {
@@ -75,9 +91,24 @@ bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {
     return true;
 }
 
-// Loop-invariant values for the production warp. Keeping the original
-// operation groups here avoids recomputing source geometry and the resolved anchor for
-// every search probe while retaining the same Bestv2 field.
+// Direct replay consumes a complete, conditioned source-U field. Its immutable R32 texture uses
+// the historical finite [0,1] encoding and b4 container value. Keep this branch byte-for-byte
+// semantically distinct from the live signed field.
+#ifdef SBS_DIRECT_PARALLAX
+float DepthParallax(float d) {
+    return (d * 2.0f - 1.0f) * direct_parallax_source_u_limit;
+}
+#elif defined(SBS_LIVE_V2_SIGNED_PARALLAX)
+// FinalOut is already the complete signed one-eye displacement in source-U units. Pop, zero plane,
+// the hard source-U container, and the one-sided slope contract belong to its authenticated
+// producer. Applying legacy or encoded-replay normalization here would create a second authority.
+float DepthParallax(float d) {
+    return d;
+}
+#else
+// Loop-invariant values for the production warp. Keeping the original operation groups here
+// avoids recomputing source geometry and the resolved anchor for every search probe while
+// retaining the same Bestv2 field.
 struct Bestv2Params {
     float anchor_shift_px;
     float parallax_scale;
@@ -118,6 +149,9 @@ float DepthParallax(float d, float4 s0, float4 s1, Bestv2Params p,
     // [0.25, 2.0]. 8.7x margin, enforced rather than incidental.
     return parallax * p.output_scale;
 }
+#endif
+
+#if !defined(SBS_DIRECT_PARALLAX) && !defined(SBS_LIVE_V2_SIGNED_PARALLAX)
 
 // Probe SPACING is what the historical calibration actually pinned; the step count was only ever
 // the number of probes needed to achieve that spacing across an oversized radius. The former
@@ -301,5 +335,7 @@ int Bestv2ProbeIntervals(float radius, int max_probes, inout float spacing) {
 int Bestv2ProbeStart(float uv_x, float radius, float spacing) {
     return (int)floor((uv_x - radius) / spacing);
 }
+
+#endif  // legacy Bestv2 search helpers
 
 #endif

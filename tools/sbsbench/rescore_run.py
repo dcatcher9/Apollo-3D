@@ -47,6 +47,10 @@ def validate_rescore_provenance(data):
         raise SystemExit(
             f"refusing evaluator schema {meta.get('eval_schema')!r}; rerun with current schema "
             f"{run_eval.EVAL_SCHEMA}")
+    try:
+        run_eval.validate_preprocess_identity_meta(meta)
+    except ValueError as exc:
+        raise SystemExit(f"refusing unauthenticated preprocessing identity: {exc}") from exc
 
 
 def authoritative_clip_meta(

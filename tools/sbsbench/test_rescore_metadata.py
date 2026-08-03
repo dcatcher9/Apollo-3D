@@ -45,7 +45,7 @@ class RescoreMetadataTests(unittest.TestCase):
         np.zeros((8, 24), np.float32).tofile(
             os.path.join(artifact_dir, "warp_map_00000.f32"))
         contract = {
-            "schema": 17,
+            "schema": run_eval.whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA,
             "model": "depth_anything_v2_fp16",
             "profile": "apollo",
             "depth_step": "current-once",
@@ -54,11 +54,13 @@ class RescoreMetadataTests(unittest.TestCase):
             "literal_bestv2": False,
             "cuda_graph": True,
             "cuda_graph_captured": True,
+            "parallax_v2_shadow": False,
+            "parallax_v2_render": False,
             "adaptive_pop": True,
             "adaptive_pop_max": 1.3,
             "zero_plane": "median",
             "subject_state": {
-                "file": "subject_state.json", "schema": 1,
+                "file": "subject_state.json", "schema": sbsbench.SUBJECT_STATE_SCHEMA,
                 "capture": "every-source-frame-after-estimator-update",
             },
         }
@@ -68,13 +70,13 @@ class RescoreMetadataTests(unittest.TestCase):
         with open(os.path.join(artifact_dir, "subject_state.json"), "w",
                   encoding="utf-8") as stream:
             json.dump({
-                "schema": 1,
+                "schema": sbsbench.SUBJECT_STATE_SCHEMA,
                 "source": "depth_subject_resolve_cs.SubjectState",
                 "capture": "every-source-frame-after-estimator-update",
                 "fields": list(sbsbench.SUBJECT_STATE_FIELDS),
                 "frames": [{"frame_id": "00000", "values": [
                     0.0, 0.0, 0.5, 1.0, 0.0, 1.0,
-                    0.0, 1.0, 0.0, 1.0, 3.0, 1.0,
+                    0.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 0.0,
                 ]}],
             }, stream)
         artifact_hash = run_eval.scored_artifact_sha256(artifact_dir)
@@ -86,6 +88,7 @@ class RescoreMetadataTests(unittest.TestCase):
                 **{key: contract[key] for key in (
                     "model", "profile", "depth_step", "depth_reuse_interval",
                     "depth_compensation", "literal_bestv2", "cuda_graph",
+                    "parallax_v2_shadow", "parallax_v2_render",
                     "adaptive_pop", "adaptive_pop_max", "zero_plane")},
             },
             "clips": {"demo": {"meta": {
@@ -132,6 +135,9 @@ class RescoreMetadataTests(unittest.TestCase):
             "meta": {
                 "run_kind": "comparison-only",
                 "eval_schema": run_eval.EVAL_SCHEMA,
+                "preprocess_profile": None,
+                "preprocess_source_closure_sha256": "0" * 64,
+                "depth_coordinate_v2_calibration_id": None,
                 "clips_root": clips_root,
                 "clip_set_sha1": {
                     clip: f"source-sha1-{clip}" for clip in clip_names},

@@ -1,6 +1,7 @@
 import io
 import ast
 import glob
+import hashlib
 import json
 import math
 import os
@@ -115,6 +116,183 @@ class EvalContractTests(unittest.TestCase):
             with open(os.path.join(run, "sbs_00001.png"), "wb") as stream:
                 stream.write(b"changed-sbs")
             self.assertNotEqual(numeric_original, run_eval.scored_artifact_digests(run)[1])
+
+    def test_direct_parallax_manifest_is_authenticated_and_geometry_bound(self):
+        with tempfile.TemporaryDirectory() as artifact_dir:
+            depth_files = {}
+            fields = []
+            for frame_id, encoded, maximum, order in (
+                    (1, 0.5, 0.0, -0.75), (2, 0.75, 0.02, 1.25)):
+                field_bytes = np.full((8, 12), encoded, dtype="<f4").tobytes()
+                field_sha = hashlib.sha256(field_bytes).hexdigest()
+                order_bytes = np.full((8, 12), order, dtype="<f4").tobytes()
+                order_sha = hashlib.sha256(order_bytes).hexdigest()
+                depth_path = os.path.join(artifact_dir, f"depth_{frame_id:05d}.f32")
+                parallax_path = os.path.join(
+                    artifact_dir, f"parallax_{frame_id:05d}.f32")
+                with open(depth_path, "wb") as stream:
+                    stream.write(order_bytes)
+                with open(parallax_path, "wb") as stream:
+                    stream.write(field_bytes)
+                depth_files[frame_id] = depth_path
+                fields.append({
+                    "frame_id": f"{frame_id:05d}",
+                    "width": 12,
+                    "height": 8,
+                    "parallax_sha256": field_sha,
+                    "maximum_absolute_source_u": maximum,
+                    "order_sha256": order_sha,
+                    "order_minimum": order,
+                    "order_maximum": order,
+                })
+            manifest = {
+                **run_eval._DIRECT_GEOMETRY_MANIFEST_V4,
+                "fields": fields,
+            }
+            manifest_path = os.path.join(
+                artifact_dir, "direct_parallax_manifest.json")
+            with open(manifest_path, "w", encoding="utf-8", newline="\n") as stream:
+                json.dump(manifest, stream, indent=2)
+                stream.write("\n")
+            contract = {
+                "schema": run_eval.direct_geometry.CONTRACT_SCHEMA,
+                "warp_input": run_eval.direct_geometry.WARP_INPUT,
+                "direct_parallax_frames": 2,
+                "direct_parallax": run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4,
+                "direct_parallax_manifest": {
+                    "file": "direct_parallax_manifest.json",
+                    "schema": run_eval.direct_geometry.MANIFEST_SCHEMA,
+                    "sha256": run_eval.file_sha256(manifest_path),
+                },
+            }
+
+            loaded = run_eval.validate_direct_parallax_manifest(
+                artifact_dir, contract, {1, 2}, depth_files)
+            self.assertEqual(loaded["fields"][0]["maximum_absolute_source_u"], 0.0)
+            self.assertEqual(loaded["fields"][1]["maximum_absolute_source_u"], 0.02)
+
+            old_contract = json.loads(json.dumps(contract))
+            old_contract["schema"] = 20
+            with self.assertRaisesRegex(ValueError, "requires harness contract schema 21"):
+                run_eval.validate_direct_parallax_manifest(
+                    artifact_dir, old_contract, {1, 2}, depth_files)
+            old_contract = json.loads(json.dumps(contract))
+            old_contract["warp_input"] = "external-final-parallax-and-order-v3"
+            with self.assertRaisesRegex(ValueError, "unknown warp_input"):
+                run_eval.validate_direct_parallax_manifest(
+                    artifact_dir, old_contract, {1, 2}, depth_files)
+            old_contract = json.loads(json.dumps(contract))
+            old_contract["direct_parallax_manifest"]["schema"] = 3
+            with self.assertRaisesRegex(ValueError, "invalid manifest reference"):
+                run_eval.validate_direct_parallax_manifest(
+                    artifact_dir, old_contract, {1, 2}, depth_files)
+
+            # The manifest is provenance rather than a numeric metric input: changing it must
+            # invalidate the full artifact digest without pretending the scored pixels changed.
+            with open(os.path.join(artifact_dir, "sbs_00001.png"), "wb") as stream:
+                stream.write(b"numeric")
+            before = run_eval.scored_artifact_digests(artifact_dir)
+            contract["direct_parallax_manifest"]["sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                run_eval.validate_direct_parallax_manifest(
+                    artifact_dir, contract, {1, 2}, depth_files)
+            with open(manifest_path, "ab") as stream:
+                stream.write(b" ")
+            after = run_eval.scored_artifact_digests(artifact_dir)
+            self.assertNotEqual(before[0], after[0])
+            self.assertEqual(before[1], after[1])
+
+    def test_direct_parallax_manifest_rejects_invalid_bound_and_dimensions(self):
+        with tempfile.TemporaryDirectory() as artifact_dir:
+            depth_path = os.path.join(artifact_dir, "depth_00001.f32")
+            parallax_path = os.path.join(artifact_dir, "parallax_00001.f32")
+            order_values = np.ones((8, 12), dtype="<f4")
+            parallax_values = np.zeros((8, 12), dtype="<f4")
+            order_values.tofile(depth_path)
+            parallax_values.tofile(parallax_path)
+            manifest = {
+                **run_eval._DIRECT_GEOMETRY_MANIFEST_V4,
+                "fields": [{
+                    "frame_id": "00001",
+                    "width": 12,
+                    "height": 8,
+                    "parallax_sha256": hashlib.sha256(parallax_values.tobytes()).hexdigest(),
+                    "maximum_absolute_source_u": 0.0401,
+                    "order_sha256": hashlib.sha256(order_values.tobytes()).hexdigest(),
+                    "order_minimum": -1.0,
+                    "order_maximum": 1.0,
+                }],
+            }
+            manifest_path = os.path.join(
+                artifact_dir, "direct_parallax_manifest.json")
+
+            def write_contract():
+                with open(manifest_path, "w", encoding="utf-8", newline="\n") as stream:
+                    json.dump(manifest, stream, indent=2)
+                    stream.write("\n")
+                return {
+                    "schema": run_eval.direct_geometry.CONTRACT_SCHEMA,
+                    "warp_input": run_eval.direct_geometry.WARP_INPUT,
+                    "direct_parallax_frames": 1,
+                    "direct_parallax": run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4,
+                    "direct_parallax_manifest": {
+                        "file": "direct_parallax_manifest.json",
+                        "schema": run_eval.direct_geometry.MANIFEST_SCHEMA,
+                        "sha256": run_eval.file_sha256(manifest_path),
+                    },
+                }
+
+            with self.assertRaisesRegex(ValueError, "invalid displacement bound"):
+                run_eval.validate_direct_parallax_manifest(
+                    artifact_dir, write_contract(), {1}, {1: depth_path})
+            manifest["fields"][0]["maximum_absolute_source_u"] = 0.02
+            manifest["fields"][0]["order_minimum"] = 2.0
+            with self.assertRaisesRegex(ValueError, "invalid order range"):
+                run_eval.validate_direct_parallax_manifest(
+                    artifact_dir, write_contract(), {1}, {1: depth_path})
+            manifest["fields"][0]["order_minimum"] = 1.0
+            parallax_values.fill(0.0)
+            parallax_values[:, 1::2] = 1.0
+            parallax_values.tofile(parallax_path)
+            manifest["fields"][0]["parallax_sha256"] = hashlib.sha256(
+                parallax_values.tobytes()).hexdigest()
+            manifest["fields"][0]["maximum_absolute_source_u"] = \
+                run_eval.direct_geometry.SOURCE_U_LIMIT
+            with self.assertRaisesRegex(ValueError, "horizontal slope bound"):
+                run_eval.validate_direct_parallax_manifest(
+                    artifact_dir, write_contract(), {1}, {1: depth_path})
+            manifest["fields"][0]["width"] = 11
+            with self.assertRaisesRegex(ValueError, "artifact size mismatch"):
+                run_eval.validate_direct_parallax_manifest(
+                    artifact_dir, write_contract(), {1}, {1: depth_path})
+
+    def test_conditioned_parallax_cannot_replace_canonical_depth_order(self):
+        # The near-preserving Lipschitz majorant raises background samples around a nearby
+        # foreground cliff. That conditioned displacement is safe warp geometry, but its
+        # numeric ordering can therefore disagree with the semantic order that produced it.
+        canonical_order = np.array([[2.0, 0.5, 1.0]], dtype=np.float32)
+        pre_limiter = np.array([[0.020, 0.010, 0.015]], dtype=np.float32)
+        texel_slope = 0.001
+        conditioned = np.max(np.stack([
+            pre_limiter[:, source:source + 1] - texel_slope * np.abs(
+                np.arange(pre_limiter.shape[1]) - source)
+            for source in range(pre_limiter.shape[1])
+        ], axis=0), axis=0)
+
+        self.assertGreater(canonical_order[0, 2], canonical_order[0, 1])
+        self.assertLess(conditioned[0, 2], conditioned[0, 1])
+        self.assertEqual(
+            run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4["depth_artifact_semantics"],
+            "canonical-pre-limiter-order-float32-v1")
+        self.assertFalse(
+            run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4["renderer_uses_order"])
+        self.assertEqual(
+            run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4["order_role"],
+            "diagnostic-semantic-depth-and-forward-coverage-only-v1")
+        self.assertNotIn(
+            "occlusion_order", run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4)
+        self.assertNotIn(
+            "displacement_high_is_near", run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4)
 
     def test_clip_hash_covers_stereo_reference_and_contract(self):
         with tempfile.TemporaryDirectory() as clip:
@@ -554,7 +732,8 @@ class EvalContractTests(unittest.TestCase):
             "sbsbench.py", "sbs_interocular_metrics.py",
             "sbs_interocular_phase_chroma.py",
             "sbs_interocular_photometric_rivalry.py", "sbs_stereo_window_metrics.py",
-            "sbs_warp_shear_metrics.py", "thresholds.json",
+            "sbs_warp_shear_metrics.py", "direct_geometry_contract.py",
+            "subject_state_contract.py", "thresholds.json",
         })
 
     def test_label_contract_covers_parallel_result_association(self):
@@ -601,6 +780,104 @@ class EvalContractTests(unittest.TestCase):
                       evaluator)
         self.assertIn("--update-baselines requires the canonical profile/config", evaluator)
         self.assertIn('meta.get("extra_args") != []', evaluator)
+
+    def test_baseline_update_requires_clean_stable_head(self):
+        dirty = subprocess.CompletedProcess([], 0, stdout=" M src/video.cpp\n", stderr="")
+        with mock.patch.object(run_eval.subprocess, "run", return_value=dirty):
+            with self.assertRaises(SystemExit):
+                run_eval.require_clean_baseline_update(True)
+
+        clean = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        head_a = subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n", stderr="")
+        with mock.patch.object(run_eval.subprocess, "run", side_effect=[clean, head_a]):
+            self.assertEqual(run_eval.require_clean_baseline_update(True), "a" * 40)
+        head_b = subprocess.CompletedProcess([], 0, stdout="b" * 40 + "\n", stderr="")
+        with mock.patch.object(run_eval.subprocess, "run", side_effect=[clean, head_b]):
+            with self.assertRaises(SystemExit):
+                run_eval.require_clean_baseline_update(True, expected_head="a" * 40)
+
+    def test_runtime_identity_stability_guard_names_changed_component(self):
+        engine = {
+            "engine_name": "unit.engine", "engine_sha256": "d" * 64,
+            "onnx_sha256": "e" * 64,
+        }
+        with (mock.patch.object(run_eval, "file_sha256", return_value="a" * 64),
+              mock.patch.object(run_eval, "runtime_shader_sha256", return_value="b" * 64),
+              mock.patch.object(
+                  run_eval, "shader_source_closure_sha256", return_value="c" * 64),
+              mock.patch.object(run_eval, "engine_provenance", return_value=engine)):
+            expected = run_eval.runtime_identity_snapshot("sunshine.exe", "build", "model")
+            run_eval.require_runtime_identity_unchanged(
+                expected, "sunshine.exe", "build", "model")
+            changed = dict(engine, engine_sha256="f" * 64)
+            with mock.patch.object(run_eval, "engine_provenance", return_value=changed):
+                with self.assertRaisesRegex(ValueError, "engine_sha256"):
+                    run_eval.require_runtime_identity_unchanged(
+                        expected, "sunshine.exe", "build", "model")
+
+        runtime = {
+            "executable_sha256": "a" * 64,
+            "runtime_shader_sha256": "b" * 64,
+            "preprocess_source_closure_sha256": "c" * 64,
+            **engine,
+        }
+        with (mock.patch.object(run_eval, "runtime_identity_snapshot", return_value=runtime),
+              mock.patch.object(run_eval, "sha256_files", return_value="conf-a"),
+              mock.patch.object(run_eval, "metric_contract_sha", return_value="metric-a"),
+              mock.patch.object(run_eval, "label_contract_sha", return_value="label-a")):
+            expected = run_eval.evaluation_identity_snapshot(
+                "sunshine.exe", "build", "model", "bench.conf")
+            run_eval.require_evaluation_identity_unchanged(
+                expected, "sunshine.exe", "build", "model", "bench.conf")
+            with mock.patch.object(run_eval, "sha256_files", return_value="conf-b"):
+                with self.assertRaisesRegex(ValueError, "conf_sha256"):
+                    run_eval.require_evaluation_identity_unchanged(
+                        expected, "sunshine.exe", "build", "model", "bench.conf")
+
+    def test_uncalibrated_builtin_or_local_url_comes_from_harness_identity(self):
+        for model, url in (
+                ("depth_anything_v2_base_fp16",
+                 "https://huggingface.co/onnx-community/depth-anything-v2-base/resolve/"
+                 "main/onnx/model_fp16.onnx"),
+                ("custom-midas", "")):
+            with self.subTest(model=model):
+                identity = {
+                    "schema": 1, "model": model, "depth_model_url": url,
+                    "onnx_sha256": "a" * 64, "preprocess_profile": "",
+                    "preprocess_source_closure_sha256": "b" * 64,
+                    "raw_width": 256, "raw_height": 256,
+                }
+                manifest = {
+                    "schema": run_eval.whole_clip_raw_contract.MANIFEST_SCHEMA,
+                    "binding": run_eval.whole_clip_raw_contract.BINDING,
+                    "evaluator_schema": run_eval.EVAL_SCHEMA,
+                    "harness_contract_schema":
+                        run_eval.whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA,
+                    "contract_json_sha256": "c" * 64,
+                    "raw_shape": {"height": 256, "width": 256},
+                    "raw_shape_json_sha256": "d" * 64,
+                    "producer_model_identity": identity,
+                    "calibration_status": "abstain-unsupported-model-contract",
+                    "calibration_id": None,
+                    "abstention_reason": "no exact calibration",
+                    "frames": [{
+                        "frame_id": "00001", "file": "raw_00001.f32",
+                        "sha256": "e" * 64,
+                    }],
+                }
+                meta = {
+                    "model": model, "depth_model_url": "",
+                    "onnx_sha256": "a" * 64,
+                    "preprocess_source_closure_sha256": "b" * 64,
+                }
+                summaries = run_eval.finalize_whole_clip_raw_identity(
+                    meta, {"clip": manifest})
+                self.assertEqual(meta["depth_model_url"], url)
+                self.assertIsNone(meta["preprocess_profile"])
+                self.assertIsNone(meta["depth_coordinate_v2_calibration_id"])
+                self.assertEqual(
+                    summaries["clip"]["calibration_status"],
+                    "abstain-unsupported-model-contract")
 
     def test_missing_metric_and_perf_evidence_fail_closed(self):
         thresholds = {
@@ -931,7 +1208,8 @@ class EvalContractTests(unittest.TestCase):
             context = {"eval_schema": run_eval.EVAL_SCHEMA, "metric_sha256": "metric",
                        "run_kind": "baseline-update"}
             payload = {
-                "meta": {**context, "clip_sha1": "cliphash", "extra_args": []},
+                "meta": {**context, "clip_sha1": "cliphash", "extra_args": [],
+                         "git_dirty": False},
                 "aggregate": {"quality": 1.0},
                 "perf_ms": {"warp": 1.0},
             }
@@ -941,6 +1219,13 @@ class EvalContractTests(unittest.TestCase):
             loaded = run_eval.preflight_baselines(
                 baseline_dir, ["clip"], context, {"clip": "cliphash"})
             self.assertEqual(loaded["clip"]["aggregate"]["quality"], 1.0)
+            payload["meta"]["git_dirty"] = True
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            with self.assertRaisesRegex(ValueError, "dirty or unauthenticated"):
+                run_eval.preflight_baselines(
+                    baseline_dir, ["clip"], context, {"clip": "cliphash"})
+            payload["meta"]["git_dirty"] = False
             payload["meta"]["eval_schema"] -= 1
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh)
@@ -957,6 +1242,8 @@ class EvalContractTests(unittest.TestCase):
             "depth_step": "current-once",
             "depth_compensation": "none",
             "cuda_graph": True,
+            "parallax_v2_shadow": False,
+            "parallax_v2_render": True,
             "conf_sha256": "config",
             "metric_sha256": "numeric-metrics",
             "label_contract_sha256": "labels-only",
@@ -965,6 +1252,8 @@ class EvalContractTests(unittest.TestCase):
         context = run_eval.baseline_required_context(candidate)
         self.assertEqual(context["metric_sha256"], "numeric-metrics")
         self.assertTrue(context["cuda_graph"])
+        self.assertFalse(context["parallax_v2_shadow"])
+        self.assertTrue(context["parallax_v2_render"])
         self.assertNotIn("label_contract_sha256", context)
 
     def test_cuda_graph_mode_is_part_of_fail_closed_baseline_context(self):
@@ -981,6 +1270,7 @@ class EvalContractTests(unittest.TestCase):
                     "cuda_graph": True,
                     "clip_sha1": "cliphash",
                     "extra_args": [],
+                    "git_dirty": False,
                 },
                 "aggregate": {"quality": 1.0},
                 "perf_ms": {"warp": 1.0},
@@ -1059,7 +1349,12 @@ class EvalContractTests(unittest.TestCase):
     def test_baseline_snapshot_exactly_covers_only_required_clips(self):
         context = {"eval_schema": run_eval.EVAL_SCHEMA, "run_kind": "baseline-update"}
         manifest = {
-            "meta": {**context, "clip_sha1": "decisive-hash", "extra_args": []},
+            "meta": {
+                **context,
+                "clip_sha1": "decisive-hash",
+                "extra_args": [],
+                "git_dirty": False,
+            },
             "aggregate": {"quality": 1.0},
             "perf_ms": {"warp": 1.0},
         }
@@ -1235,7 +1530,25 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("LeftColorTexture.GetDimensions(sourceWidth, sourceHeight)", text)
         self.assertIn("Bestv2ProbeSpacing((float)sourceWidth, (float)depthWidth)", text)
         self.assertIn("s0, s1, s2, (float)sourceWidth, (float)sourceHeight", text)
-        self.assertEqual(text.count("DepthParallax("), 2)
+        reproject = text[text.index("float2 Reproject"):text.index("float4 main_ps")]
+        direct_begin = reproject.index("#ifdef SBS_CONTRACTIVE_PARALLAX")
+        legacy_begin = reproject.index("#else", direct_begin)
+        direct_inverse = reproject[direct_begin:legacy_begin]
+        legacy_search = reproject[legacy_begin:]
+        self.assertIn(
+            "DepthParallax(SampleDepth(sourceX, uv.y))",
+            direct_inverse,
+        )
+        self.assertNotIn("s0, s1, params", direct_inverse)
+        # The non-direct compile retains both original Bestv2 calls and their subject parameters.
+        self.assertIn(
+            "DepthParallax(\n        prevD, s0, s1, params, use_subject_stretch)",
+            legacy_search,
+        )
+        self.assertIn(
+            "DepthParallax(\n            d, s0, s1, params, use_subject_stretch)",
+            legacy_search,
+        )
         self.assertNotIn("Bestv2SearchRadius((float)dw)", text)
         # The window is sized from the frame's own resolved parallax, not from source geometry
         # and a global worst case.
@@ -1575,8 +1888,16 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
-        self.assertIn('"  \\"schema\\": 17,\\n"', harness)
+        self.assertIn(
+            '(direct_parallax_mode ? direct_geometry_contract_schema : 18u)',
+            harness)
+        self.assertIn('direct_geometry_contract_schema = 21u', harness)
+        self.assertIn('direct_geometry_manifest_schema = 4u', harness)
+        self.assertIn(
+            '"external-final-parallax-with-diagnostic-order-v4"',
+            harness)
         self.assertIn('\\"depth_override_frames\\"', harness)
+        self.assertIn('\\"pop_strength\\"', harness)
         self.assertIn('\\"zero_plane\\"', harness)
         self.assertIn('"mapping_ps"', harness)
         self.assertIn('"warp_map_%s.f32"', harness)
@@ -1639,11 +1960,106 @@ class EvalContractTests(unittest.TestCase):
             evaluator = fh.read()
         self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
         self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
-        self.assertIn('"schema": 17', evaluator)
+        self.assertGreaterEqual(
+            evaluator.count("whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA"), 2)
         self.assertIn('"subject_state.json"', evaluator)
         self.assertIn('"warp_map_*.f32"', evaluator)
         self.assertIn('expected_mapping_bytes = width * height * 4', evaluator)
         self.assertIn('depth_override_root and not args.comparison_only', evaluator)
+
+    def test_direct_parallax_is_harness_only_and_machine_verified(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
+                  encoding="utf-8") as fh:
+            harness = fh.read()
+        self.assertIn('a == "--direct-parallax-root"', harness)
+        self.assertNotIn('a == "--direct-candidate-root"', harness)
+        self.assertNotIn('a == "--direct-candidate-fill"', harness)
+        self.assertIn('o.output_every != 1 || o.depth_every != 1', harness)
+        self.assertIn('o.literal_bestv2', harness)
+        self.assertIn('!o.depth_override_root.empty() || o.depth_override_all', harness)
+        self.assertNotIn('direct_parallax_max_abs * 1.10f', harness)
+        self.assertIn('words remain reserved to preserve the 16-byte constant-buffer ABI', harness)
+        self.assertIn('direct_parallax_source_u_limit =\n      models::depth_coordinate_v2::direct_container_limit', harness)
+        self.assertIn('direct_parallax_max_horizontal_slope =\n      models::depth_coordinate_v2::max_horizontal_slope', harness)
+        self.assertIn('violates the generated horizontal slope contract', harness)
+        self.assertIn('"order_" + output_id + ".f32"', harness)
+        self.assertIn('direct_order_srv.GetAddressOf()', harness)
+        self.assertIn('"direct_parallax_manifest.json"', harness)
+        self.assertNotIn('"direct_candidate_manifest.json"', harness)
+        self.assertNotIn('SBS_DIRECT_CANDIDATE_PARALLAX', harness)
+        self.assertNotIn('SBS_CANDIDATE_GAP_FILL', harness)
+        self.assertIn(
+            '(direct_parallax_mode ? direct_geometry_contract_schema : 18u)',
+            harness)
+        self.assertIn('{"renderer_uses_order", false}', harness)
+        self.assertIn(
+            '{"order_role", "diagnostic-semantic-depth-and-forward-coverage-only-v1"}',
+            harness)
+        self.assertIn('("depth_" + output_id + ".f32")', harness)
+        self.assertNotIn('"displacement_high_is_near"', harness)
+
+        shader_root = os.path.join(
+            repo, "src_assets", "windows", "assets", "shaders", "directx")
+        with open(os.path.join(shader_root, "include", "sbs_warp_common.hlsl"),
+                  encoding="utf-8") as fh:
+            common = fh.read()
+        self.assertIn("#ifdef SBS_DIRECT_PARALLAX", common)
+        self.assertNotIn("SBS_DIRECT_PARALLAX_SOURCE_U_LIMIT", common)
+        self.assertNotIn("direct_parallax_search_radius", common)
+        self.assertIn("float3 direct_parallax_reserved;", common)
+        self.assertIn(
+            "return (d * 2.0f - 1.0f) * direct_parallax_source_u_limit;", common)
+        with open(os.path.join(shader_root, "sbs_reprojection_ps.hlsl"),
+                  encoding="utf-8") as fh:
+            reprojection = fh.read()
+        self.assertNotIn("CanonicalOrderTexture", reprojection)
+        self.assertNotIn("SBS_DIRECT_CANDIDATE_PARALLAX", reprojection)
+        self.assertNotIn("SBS_CANDIDATE_GAP_FILL", reprojection)
+        direct_begin = reprojection.index("#ifdef SBS_CONTRACTIVE_PARALLAX",
+                                           reprojection.index("float2 Reproject"))
+        direct_end = reprojection.index("#else", direct_begin)
+        direct_inverse = reprojection[direct_begin:direct_end]
+        self.assertIn("for (int iteration = 0; iteration < 12; ++iteration)",
+                      direct_inverse)
+        self.assertIn(
+            "sourceX = uv.x + eyeSign * DepthParallax(SampleDepth(sourceX, uv.y));",
+            direct_inverse)
+        self.assertNotIn("Bestv2SearchRadius", direct_inverse)
+        self.assertNotIn("Bestv2Probe", direct_inverse)
+        self.assertNotIn("ForwardCoverageTexture", direct_inverse)
+        self.assertNotIn("bgOrder", direct_inverse)
+        with open(os.path.join(shader_root, "sbs_forward_coverage_cs.hlsl"),
+                  encoding="utf-8") as fh:
+            coverage = fh.read()
+        self.assertIn("Texture2D<float> DirectOrderTexture : register(t5);", coverage)
+        self.assertIn("uint ordered =", coverage)
+        self.assertIn("CSSetShaderResources(5", harness)
+        production_mentions = set()
+        for path in glob.glob(os.path.join(repo, "src", "**", "*"), recursive=True):
+            if not os.path.isfile(path):
+                continue
+            with open(path, encoding="utf-8", errors="ignore") as source_file:
+                if "SBS_DIRECT_PARALLAX" in source_file.read():
+                    production_mentions.add(path)
+        self.assertEqual(
+            production_mentions, {
+                os.path.join(repo, "src", "sbs_bench_harness.cpp"),
+            })
+
+        evaluator_path = os.path.join(repo, "tools", "sbsbench", "run_eval.py")
+        with open(evaluator_path, encoding="utf-8") as fh:
+            evaluator = fh.read()
+        self.assertIn(
+            'direct_parallax_root and not args.comparison_only', evaluator)
+        self.assertIn(
+            'direct_parallax_root and depth_override_root', evaluator)
+        self.assertIn(
+            'direct_parallax_root and literal_bestv2', evaluator)
+        self.assertIn(
+            'direct_parallax_root and depth_reuse_interval != 1', evaluator)
+        self.assertIn(
+            'validate_direct_parallax_manifest(', evaluator)
 
     def test_zero_plane_modes_are_shot_latched_and_machine_verified(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1697,7 +2113,7 @@ class EvalContractTests(unittest.TestCase):
             estimator.index("estimate_result estimate("):
             estimator.index("video_depth_estimator::video_depth_estimator")
         ]
-        normalized = live_estimate.index("normalize_depth_output();")
+        normalized = live_estimate.index("normalize_depth_output(d3d_timer);")
         production_post_timing_ended = live_estimate.index(
             "mark_d3d_post_end(d3d_timer);", normalized)
         raw_snapshotted = live_estimate.index(
@@ -1931,7 +2347,10 @@ class EvalContractTests(unittest.TestCase):
 
     def test_rescore_requires_current_comparison_only_provenance(self):
         valid = {"meta": {"run_kind": "comparison-only",
-                          "eval_schema": run_eval.EVAL_SCHEMA}}
+                          "eval_schema": run_eval.EVAL_SCHEMA,
+                          "preprocess_profile": None,
+                          "preprocess_source_closure_sha256": "0" * 64,
+                          "depth_coordinate_v2_calibration_id": None}}
         rescore_run.validate_rescore_provenance(valid)
         with self.assertRaisesRegex(SystemExit, "comparison-only provenance"):
             rescore_run.validate_rescore_provenance(
@@ -2026,7 +2445,11 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('"decision_clips": DECISION_CLIPS', text)
         self.assertIn('"decision_scope": DECISION_SCOPE', text)
         self.assertIn('"source_artifact_clips": SOURCE_ARTIFACT_CLIPS', text)
-        self.assertIn('"schema": 3', text)
+        self.assertIn('"schema": 4', text)
+        self.assertIn('"control_depth_model_url"', text)
+        self.assertIn('"treatment_preprocess_profile"', text)
+        self.assertIn('"control_preprocess_source_closure_sha256"', text)
+        self.assertIn('"treatment_depth_coordinate_v2_calibration_id"', text)
         self.assertIn('"report_sha256": REPORT_SHA', text)
         self.assertIn('AB_DECISION["verdict"]', text)
         self.assertIn('"canonical_gate"', text)
@@ -2509,6 +2932,72 @@ class EvalContractTests(unittest.TestCase):
                 json.dump({}, fh)
             rows, agg = sbsbench.measure_sequence(seq, frames)
             self.assertEqual(rows[0]["_frame_id"], 7)
+            self.assertEqual(agg["_n"], 1)
+
+    def test_direct_sequence_scores_canonical_order_not_conditioned_parallax(self):
+        with tempfile.TemporaryDirectory() as root:
+            seq = os.path.join(root, "seq")
+            frames = os.path.join(root, "frames")
+            os.makedirs(seq)
+            os.makedirs(frames)
+            Image.fromarray(np.zeros((4, 8, 3), dtype=np.uint8)).save(
+                os.path.join(seq, "sbs_00001.png"))
+            Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(
+                os.path.join(frames, "frame_00001.png"))
+            with open(os.path.join(frames, "meta.json"), "w", encoding="utf-8") as stream:
+                json.dump({}, stream)
+
+            # Canonical order says sample 2 is nearer than sample 1, while the cliff limiter has
+            # raised sample 1's final displacement above sample 2. The scorer must receive the
+            # former; parallax remains authenticated but is never substituted as semantic depth.
+            order = np.array([[1.0, -1.0, 0.9], [1.0, -1.0, 0.9]], dtype="<f4")
+            encoded = np.array([[0.75, 0.7375, 0.725],
+                                [0.75, 0.7375, 0.725]], dtype="<f4")
+            depth_path = os.path.join(seq, "depth_00001.f32")
+            parallax_path = os.path.join(seq, "parallax_00001.f32")
+            order.tofile(depth_path)
+            encoded.tofile(parallax_path)
+            field = {
+                "frame_id": "00001", "width": 3, "height": 2,
+                "parallax_sha256": run_eval.file_sha256(parallax_path),
+                "maximum_absolute_source_u": float(np.max(np.abs(
+                    (encoded.astype(np.float64) * 2.0 - 1.0) *
+                    run_eval.direct_geometry.SOURCE_U_LIMIT))),
+                "order_sha256": run_eval.file_sha256(depth_path),
+                "order_minimum": float(np.min(order)),
+                "order_maximum": float(np.max(order)),
+            }
+            manifest = {**run_eval._DIRECT_GEOMETRY_MANIFEST_V4, "fields": [field]}
+            manifest_path = os.path.join(seq, "direct_parallax_manifest.json")
+            with open(manifest_path, "w", encoding="utf-8", newline="\n") as stream:
+                json.dump(manifest, stream, indent=2)
+                stream.write("\n")
+            contract = {
+                "schema": run_eval.direct_geometry.CONTRACT_SCHEMA,
+                "warp_input": run_eval.direct_geometry.WARP_INPUT,
+                "direct_parallax_frames": 1,
+                "direct_parallax": run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4,
+                "direct_parallax_manifest": {
+                    "file": "direct_parallax_manifest.json",
+                    "schema": run_eval.direct_geometry.MANIFEST_SCHEMA,
+                    "sha256": run_eval.file_sha256(manifest_path),
+                },
+            }
+            with open(os.path.join(seq, "contract.json"), "w", encoding="utf-8") as stream:
+                json.dump(contract, stream)
+
+            def inspect_job(jobs):
+                self.assertEqual(len(jobs), 1)
+                self.assertEqual(jobs[0]["depth_shape"], (2, 3))
+                np.testing.assert_array_equal(
+                    sbsbench.load_depth(jobs[0]["depth_path"], jobs[0]["depth_shape"]), order)
+                self.assertNotEqual(jobs[0]["depth_path"], parallax_path)
+                return [{"_frame_id": 1}]
+
+            with mock.patch.object(
+                    sbsbench, "_measure_sequence_spatial_rows", side_effect=inspect_job):
+                rows, agg = sbsbench.measure_sequence(seq, frames)
+            self.assertEqual(rows, [{"_frame_id": 1}])
             self.assertEqual(agg["_n"], 1)
 
     def _write_parallel_sequence_fixture(self, root, frame_count=8):

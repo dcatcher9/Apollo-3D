@@ -1,7 +1,7 @@
 /**
  * @file src/platform/windows/sbs_debug_dump.h
  * @brief Debug-only: atomically publish a matched Host-SBS package spanning model input, raw and
- *        processed depth, adaptive state, exact warp mapping/coverage, and packed output.
+ *        processed depth, adaptive state, exact warp mapping, and packed output.
  */
 #pragma once
 
@@ -21,6 +21,8 @@
 
 namespace models {
   enum class input_color_space : std::uint32_t;
+  struct parallax_v2_shader_provenance_t;
+  struct raw_model_provenance_t;
 }
 
 namespace platf::sbs_debug {
@@ -29,9 +31,16 @@ namespace platf::sbs_debug {
    * @brief One exact, completed Host-SBS frame and all optional diagnostic render passes that
    *        belong to it.
    *
-   * model_input and raw_depth are immutable snapshots of the estimator buffers. The caller must
-   * pass the normalized depth and the actual (possibly prefiltered) depth used by reprojection.
-   * warp_map/warp_mask may be null only when the dump-only diagnostic shaders could not be made.
+   * model_input and raw_depth are immutable snapshots of the estimator buffers. Legacy rendering
+   * supplies normalized depth/adaptive state and the actual possibly-prefiltered depth as
+   * warp_depth. Selected V2 rendering may omit every legacy field and supplies the exact signed
+   * anisotropically slope-limited final source-U parallax as warp_depth. The immutable candidate
+   * first produces shadow_vertical_majorant (the exact shear-2 column majorant), then the row
+   * majorant produces shadow_final_parallax. shadow_coordinate remains a coordinate diagnostic
+   * only. V2 supplies an exact fixed-point inverse warp_map when its matching dump-only shader is
+   * available. V2 has no internal owner/fill mask; warp_mask attributes only inverse samples
+   * outside the finite source interval that the live renderer clamps to the nearest boundary
+   * column.
    */
   struct frame {
     ID3D11ShaderResourceView *source = nullptr;
@@ -44,6 +53,15 @@ namespace platf::sbs_debug {
     ID3D11ShaderResourceView *warp_map = nullptr;
     ID3D11ShaderResourceView *warp_mask = nullptr;
     ID3D11ShaderResourceView *sbs = nullptr;
+    ID3D11ShaderResourceView *shadow_coordinate = nullptr;
+    ID3D11ShaderResourceView *shadow_candidate_parallax = nullptr;
+    ID3D11ShaderResourceView *shadow_vertical_majorant = nullptr;
+    ID3D11ShaderResourceView *shadow_final_parallax = nullptr;
+    ID3D11ShaderResourceView *shadow_state = nullptr;
+    ID3D11ShaderResourceView *shadow_frame_stats = nullptr;
+    std::shared_ptr<const models::raw_model_provenance_t> raw_model_provenance;
+    std::shared_ptr<const models::parallax_v2_shader_provenance_t>
+      parallax_v2_shader_provenance;
     int model_width = 0;
     int model_height = 0;
     int raw_width = 0;
@@ -51,6 +69,13 @@ namespace platf::sbs_debug {
     std::uint64_t matched_frame_id = 0;
     bool warp_depth_prefilter_applied = false;
     bool cuda_graph_active = false;
+    bool parallax_v2_shadow_active = false;
+    bool parallax_v2_render_requested = false;
+    bool parallax_v2_render_selected = false;
+    std::string parallax_v2_live_renderer_source_closure_sha256;
+    float parallax_v2_raw_coordinate_scale = 0.0f;
+    float parallax_v2_requested_pop_strength = 0.0f;
+    float parallax_v2_requested_gain = 0.0f;
     models::input_color_space color_space {};
     std::string depth_model;
   };
@@ -86,8 +111,8 @@ namespace platf::sbs_debug {
      * @brief Validate and cache the requested frame's 16-byte normalization state.
      *
      * Call this only after the estimator has produced the complete stable snapshot set and before
-     * launching the full-resolution dump-only mapping/coverage passes. Invalid or temporarily
-     * unreadable state retains the request with a bounded retry delay.
+     * launching the dump-only mapping pass. Invalid or temporarily unreadable state retains the
+     * request with a bounded retry delay.
      */
     bool preflight_requested_frame(
       ID3D11Device *device,
@@ -96,8 +121,22 @@ namespace platf::sbs_debug {
       std::uint64_t matched_frame_id
     ) noexcept;
 
+    /** Require a current valid authenticated V2 camera before publishing a live-render dump.
+     * Invalid V2 completions hold the prior packed SBS via pixel-shader discard, so pairing their
+     * current source/raw field with that prior output would create a false package.
+     */
+    bool preflight_requested_v2_frame(
+      ID3D11Device *device,
+      ID3D11DeviceContext *ctx,
+      ID3D11ShaderResourceView *shadow_state,
+      std::uint64_t matched_frame_id
+    ) noexcept;
+
     /** Cancel a request that can never complete, such as after permanent estimator failure. */
     void cancel_pending_request() noexcept;
+
+    /** Consume one impossible request without disabling future file-trigger polling. */
+    void reject_pending_request() noexcept;
 
     /**
      * @brief Atomically publish a fresh timestamped package for the supplied completed frame.

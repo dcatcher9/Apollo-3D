@@ -128,11 +128,12 @@ def shift_y(image, pixels):
     return result
 
 
-def exact_metrics(mapping, shape, depth=None):
+def exact_metrics(mapping, shape, depth=None, depth_semantics=None):
     """Evaluate with a fully covered companion warp mask."""
     warp_mask = np.zeros(mapping.shape, dtype=np.float32)
     return sbsbench.exact_warp_mapping_metrics(
-        mapping, shape, depth=depth, warp_mask=warp_mask)
+        mapping, shape, depth=depth, warp_mask=warp_mask,
+        depth_semantics=depth_semantics)
 
 
 class ExactWarpMapLoaderTests(unittest.TestCase):
@@ -179,6 +180,57 @@ class ExactWarpMapLoaderTests(unittest.TestCase):
 
 
 class ExactGeometryMetricTests(unittest.TestCase):
+    def test_direct_canonical_structure_metrics_are_positive_affine_invariant(self):
+        shape = mapping_shape(160, 80)
+        mapping = identity_mapping(shape)
+        canonical = np.broadcast_to(
+            np.linspace(-1.5, 2.5, shape["eye_width"], dtype=np.float32),
+            (shape["height"], shape["eye_width"])).copy()
+        set_signed_disparity(mapping, 8.0 * (canonical - np.median(canonical)))
+
+        baseline = exact_metrics(
+            mapping, shape, canonical,
+            depth_semantics=sbsbench.DIRECT_CANONICAL_DEPTH_SEMANTICS)
+        transformed = exact_metrics(
+            mapping, shape, canonical * 37.0 + 900.0,
+            depth_semantics=sbsbench.DIRECT_CANONICAL_DEPTH_SEMANTICS)
+
+        for key in (
+                "exact_polarity_ok", "exact_polarity_support_pct",
+                "exact_local_polarity_support_count",
+                "exact_local_polarity_support_pct",
+                "exact_local_polarity_component_pct"):
+            self.assertAlmostEqual(baseline[key], transformed[key], places=9)
+        self.assertEqual(
+            baseline["_depth_structure_metric_semantics"],
+            sbsbench.DIRECT_STRUCTURE_METRIC_SEMANTICS)
+
+    def test_direct_structure_metric_transform_is_shared_and_explicit(self):
+        canonical = np.asarray([
+            [-2.0, -0.2, 0.0, 0.4, 3.0],
+            [-1.5, -0.1, 0.1, 0.8, 4.0],
+        ], dtype=np.float32)
+        normalized, semantics = sbsbench._structure_metric_depth(
+            canonical, sbsbench.DIRECT_CANONICAL_DEPTH_SEMANTICS)
+        transformed, transformed_semantics = sbsbench._structure_metric_depth(
+            canonical * 11.0 - 27.0, sbsbench.DIRECT_CANONICAL_DEPTH_SEMANTICS)
+
+        np.testing.assert_allclose(normalized, transformed, rtol=0.0, atol=2.0e-7)
+        self.assertEqual(semantics, sbsbench.DIRECT_STRUCTURE_METRIC_SEMANTICS)
+        self.assertEqual(transformed_semantics, semantics)
+        legacy, legacy_semantics = sbsbench._structure_metric_depth(canonical, None)
+        np.testing.assert_array_equal(legacy, canonical)
+        self.assertEqual(legacy_semantics, sbsbench.LEGACY_STRUCTURE_METRIC_SEMANTICS)
+
+    def test_direct_structure_metric_abstains_before_normalizing_numerical_dust(self):
+        canonical = np.broadcast_to(
+            np.linspace(-2.0e-5, 2.0e-5, 32, dtype=np.float32), (8, 32)).copy()
+        normalized, semantics = sbsbench._structure_metric_depth(
+            canonical, sbsbench.DIRECT_CANONICAL_DEPTH_SEMANTICS)
+
+        self.assertIsNone(normalized)
+        self.assertEqual(semantics, sbsbench.DIRECT_STRUCTURE_INSUFFICIENT_SEMANTICS)
+
     def test_raw_offscreen_demand_is_excluded_from_actual_binocular_disparity(self):
         shape = mapping_shape(100, 24)
         clean = identity_mapping(shape)
@@ -965,6 +1017,8 @@ class LabelProvenanceTests(unittest.TestCase):
                 "sbs_interocular_photometric_rivalry.py": "photometric-v1\n",
                 "sbs_stereo_window_metrics.py": "window-v1\n",
                 "sbs_warp_shear_metrics.py": "shear-v1\n",
+                "direct_geometry_contract.py": "direct-geometry-v1\n",
+                "subject_state_contract.py": "subject-state-v1\n",
                 "thresholds.json": "{}\n",
                 "run_eval.py": "runner-v1\n",
                 "rescore_run.py": "rescorer-v1\n",
@@ -993,6 +1047,7 @@ class LabelProvenanceTests(unittest.TestCase):
             "engine_name": "engine",
             "engine_sha256": "engine-sha",
             "onnx_sha256": "onnx-sha",
+            "preprocess_source_closure_sha256": "preprocess-sha",
             "profile": "apollo",
             "extra_args": ["--pop-strength", "1.25"],
             "depth_step": 1,
@@ -1015,6 +1070,7 @@ class LabelProvenanceTests(unittest.TestCase):
                 ("scored_artifact_sha256", {"clip": "changed-artifacts"}),
                 ("training_label_gate", {"passed": False}),
                 ("model", "different-model"),
+                ("preprocess_source_closure_sha256", "different-preprocess-sha"),
                 ("extra_args", ["--pop-strength", "1.3"])):
             with self.subTest(key=key):
                 candidate = dict(base)
@@ -1023,6 +1079,37 @@ class LabelProvenanceTests(unittest.TestCase):
         irrelevant = dict(base)
         irrelevant["report_sha256"] = "presentation-only"
         self.assertEqual(original, run_eval.label_context_sha(irrelevant))
+
+    def test_schema35_preprocess_identity_is_exact_or_explicitly_unclaimed(self):
+        calibration = run_eval.MODEL_CALIBRATIONS[0]
+        authenticated = {
+            "model": calibration.depth_model,
+            "depth_model_url": calibration.depth_model_url,
+            "onnx_sha256": calibration.onnx_sha256,
+            "preprocess_profile": calibration.preprocess.profile,
+            "preprocess_source_closure_sha256":
+                calibration.preprocess.source_closure_sha256,
+            "depth_coordinate_v2_calibration_id": calibration.calibration_id,
+        }
+        run_eval.validate_preprocess_identity_meta(authenticated)
+        run_eval.validate_preprocess_identity_meta({
+            "preprocess_profile": None,
+            "preprocess_source_closure_sha256": "0" * 64,
+            "depth_coordinate_v2_calibration_id": None,
+        })
+        for key, value in (
+                ("preprocess_source_closure_sha256", "1" * 64),
+                ("preprocess_profile", None),
+                ("depth_coordinate_v2_calibration_id", None),
+                ("onnx_sha256", "2" * 64)):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                candidate = dict(authenticated)
+                candidate[key] = value
+                run_eval.validate_preprocess_identity_meta(candidate)
+        missing = dict(authenticated)
+        missing.pop("preprocess_source_closure_sha256")
+        with self.assertRaises(ValueError):
+            run_eval.validate_preprocess_identity_meta(missing)
 
 
 class ReportEvidenceContractTests(unittest.TestCase):
@@ -1123,7 +1210,7 @@ class ReportEvidenceContractTests(unittest.TestCase):
                 with open(os.path.join(artifact_dir, "contract.json"), "w",
                           encoding="utf-8") as stream:
                     json.dump({
-                        "schema": 17,
+                        "schema": run_eval.whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA,
                         "model": "depth_anything_v2_fp16",
                         "profile": "apollo",
                         "depth_step": "current-once",
@@ -1132,24 +1219,27 @@ class ReportEvidenceContractTests(unittest.TestCase):
                         "literal_bestv2": False,
                         "cuda_graph": True,
                         "cuda_graph_captured": True,
+                        "parallax_v2_shadow": False,
+                        "parallax_v2_render": False,
                         "adaptive_pop": True,
                         "adaptive_pop_max": 1.3,
                         "zero_plane": "median",
                         "subject_state": {
-                            "file": "subject_state.json", "schema": 1,
+                            "file": "subject_state.json",
+                            "schema": sbsbench.SUBJECT_STATE_SCHEMA,
                             "capture": "every-source-frame-after-estimator-update",
                         },
                     }, stream)
                 with open(os.path.join(artifact_dir, "subject_state.json"), "w",
                           encoding="utf-8") as stream:
                     json.dump({
-                        "schema": 1,
+                        "schema": sbsbench.SUBJECT_STATE_SCHEMA,
                         "source": "depth_subject_resolve_cs.SubjectState",
                         "capture": "every-source-frame-after-estimator-update",
                         "fields": list(sbsbench.SUBJECT_STATE_FIELDS),
                         "frames": [{"frame_id": "00000", "values": [
                             0.0, 0.0, 0.5, 1.0, 0.0, 1.0,
-                            0.0, 1.0, 0.0, 1.0, 3.0, 1.0,
+                            0.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 0.0,
                         ]}],
                     }, stream)
                 with open(os.path.join(artifact_dir, "sbs_perf.json"), "w",
@@ -1182,11 +1272,16 @@ class ReportEvidenceContractTests(unittest.TestCase):
                 "model": "depth_anything_v2_fp16",
                 "profile": "apollo",
                 "eval_schema": run_eval.EVAL_SCHEMA,
+                "preprocess_profile": None,
+                "preprocess_source_closure_sha256": "0" * 64,
+                "depth_coordinate_v2_calibration_id": None,
                 "depth_step": "current-once",
                 "depth_reuse_interval": 1,
                 "depth_compensation": "none",
                 "literal_bestv2": False,
                 "cuda_graph": True,
+                "parallax_v2_shadow": False,
+                "parallax_v2_render": False,
                 "adaptive_pop": True,
                 "adaptive_pop_max": 1.3,
                 "zero_plane": "median",
@@ -1208,6 +1303,8 @@ class ReportEvidenceContractTests(unittest.TestCase):
                     "literal_bestv2": False,
                     "cuda_graph": True,
                     "cuda_graph_captured": True,
+                    "parallax_v2_shadow": False,
+                    "parallax_v2_render": False,
                     "adaptive_pop": True,
                     "adaptive_pop_max": 1.3,
                     "zero_plane": "median",

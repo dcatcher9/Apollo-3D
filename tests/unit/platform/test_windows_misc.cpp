@@ -6,12 +6,20 @@
 
 #ifdef _WIN32
   #include <algorithm>
+  #include <cstdio>
+  #include <filesystem>
   #include <optional>
   #include <string>
   #include <vector>
 
+  #include <boost/filesystem/path.hpp>
+  #include <boost/process/v1/child.hpp>
+  #include <boost/process/v1/environment.hpp>
+  #include <boost/process/v1/group.hpp>
+
   #include <src/platform/windows/misc.h>
   #include <ShlObj.h>
+  #include <sddl.h>
 
 namespace {
   struct fake_explorer_restart_operations_t {
@@ -73,6 +81,33 @@ namespace {
     EXPECT_EQ(actual.iCtrlSpeed, expected.iCtrlSpeed);
     EXPECT_EQ(actual.dwReserved1, expected.dwReserved1);
     EXPECT_EQ(actual.dwReserved2, expected.dwReserved2);
+  }
+
+  std::optional<std::string> token_sid(HANDLE token) {
+    DWORD bytes = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &bytes);
+    if (bytes == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+      return std::nullopt;
+    }
+    std::vector<std::byte> buffer(bytes);
+    if (!GetTokenInformation(
+          token,
+          TokenUser,
+          buffer.data(),
+          static_cast<DWORD>(buffer.size()),
+          &bytes
+        )) {
+      return std::nullopt;
+    }
+    const auto token_user = reinterpret_cast<const TOKEN_USER *>(buffer.data());
+    LPWSTR sid_text = nullptr;
+    if (!ConvertSidToStringSidW(token_user->User.Sid, &sid_text) || !sid_text) {
+      return std::nullopt;
+    }
+    auto sid_text_guard = util::fail_guard([&]() {
+      LocalFree(sid_text);
+    });
+    return platf::to_utf8(sid_text);
   }
 }  // namespace
 
@@ -482,6 +517,45 @@ TEST(RunAsActiveUserTest, CanInspectTheUserProfileWithUsableImpersonation) {
       ));
       EXPECT_EQ(elevation.TokenIsElevated, 0u);
 
+      TOKEN_STATISTICS outer_statistics {};
+      ASSERT_TRUE(GetTokenInformation(
+        thread_token,
+        TokenStatistics,
+        &outer_statistics,
+        sizeof(outer_statistics),
+        &returned
+      ));
+      bool nested_callback_called = false;
+      const auto nested_result = platf::run_as_active_user(
+        [&]() {
+          nested_callback_called = true;
+        },
+        expected_user
+      );
+      EXPECT_FALSE(nested_result);
+      EXPECT_TRUE(nested_callback_called);
+
+      HANDLE restored_thread_token = nullptr;
+      ASSERT_TRUE(OpenThreadToken(
+        GetCurrentThread(),
+        TOKEN_QUERY,
+        TRUE,
+        &restored_thread_token
+      ));
+      auto restored_thread_token_guard = util::fail_guard([&]() {
+        CloseHandle(restored_thread_token);
+      });
+      TOKEN_STATISTICS restored_statistics {};
+      ASSERT_TRUE(GetTokenInformation(
+        restored_thread_token,
+        TokenStatistics,
+        &restored_statistics,
+        sizeof(restored_statistics),
+        &returned
+      ));
+      EXPECT_EQ(restored_statistics.TokenId.HighPart, outer_statistics.TokenId.HighPart);
+      EXPECT_EQ(restored_statistics.TokenId.LowPart, outer_statistics.TokenId.LowPart);
+
       HANDLE profile_handle = CreateFileW(
         profile.c_str(),
         FILE_READ_ATTRIBUTES,
@@ -500,5 +574,150 @@ TEST(RunAsActiveUserTest, CanInspectTheUserProfileWithUsableImpersonation) {
 
   EXPECT_FALSE(result);
   EXPECT_TRUE(callback_called);
+}
+
+TEST(RunCommandUnelevatedTest, ElevatedTrayLaunchesProductionShapeStandardUserChild) {
+  DWORD process_session = 0;
+  ASSERT_TRUE(ProcessIdToSessionId(GetCurrentProcessId(), &process_session));
+  if (process_session != WTSGetActiveConsoleSessionId()) {
+    GTEST_SKIP() << "This contract requires an interactive test process";
+  }
+
+  HANDLE process_token = nullptr;
+  ASSERT_TRUE(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &process_token));
+  auto process_token_guard = util::fail_guard([&]() {
+    CloseHandle(process_token);
+  });
+  TOKEN_ELEVATION process_elevation {};
+  DWORD returned = 0;
+  ASSERT_TRUE(GetTokenInformation(
+    process_token,
+    TokenElevation,
+    &process_elevation,
+    sizeof(process_elevation),
+    &returned
+  ));
+  if (process_elevation.TokenIsElevated == 0) {
+    GTEST_SKIP() << "The de-elevated launch regression requires an elevated tray process";
+  }
+
+  const auto expected_user = platf::active_user_id();
+  if (!expected_user) {
+    GTEST_SKIP() << "Windows did not expose a validated active desktop user";
+  }
+
+  std::vector<wchar_t> system_directory(MAX_PATH + 1, L'\0');
+  const auto system_directory_size = GetSystemDirectoryW(
+    system_directory.data(),
+    static_cast<UINT>(system_directory.size())
+  );
+  ASSERT_GT(system_directory_size, 0u);
+  ASSERT_LT(system_directory_size, system_directory.size());
+  const std::filesystem::path ping =
+    std::filesystem::path {system_directory.data()} / L"ping.exe";
+  ASSERT_TRUE(std::filesystem::is_regular_file(ping));
+
+  const auto command =
+    std::string {"\""} + platf::to_utf8(ping.wstring()) +
+    "\" 127.0.0.1 -n 6";
+  boost::filesystem::path working_directory {
+    platf::to_utf8(std::filesystem::path {system_directory.data()}.wstring())
+  };
+  auto environment = boost::this_process::environment();
+  FILE *child_output = std::tmpfile();
+  ASSERT_NE(child_output, nullptr);
+  auto child_output_guard = util::fail_guard([&]() {
+    std::fclose(child_output);
+  });
+  boost::process::v1::group child_group;
+  std::error_code launch_error;
+  auto child = platf::run_command_unelevated(
+    false,
+    command,
+    working_directory,
+    environment,
+    child_output,
+    launch_error,
+    &child_group,
+    expected_user
+  );
+  ASSERT_FALSE(launch_error) << launch_error.message();
+  ASSERT_TRUE(child.valid());
+  auto child_cleanup = util::fail_guard([&]() {
+    if (child.valid() && child.running()) {
+      std::error_code ignored;
+      child.terminate(ignored);
+    }
+    if (child.valid()) {
+      std::error_code ignored;
+      child.wait(ignored);
+    }
+  });
+
+  HANDLE child_process = OpenProcess(
+    PROCESS_QUERY_LIMITED_INFORMATION,
+    FALSE,
+    static_cast<DWORD>(child.id())
+  );
+  ASSERT_NE(child_process, nullptr) << "Win32 error " << GetLastError();
+  auto child_process_guard = util::fail_guard([&]() {
+    CloseHandle(child_process);
+  });
+  HANDLE child_token = nullptr;
+  ASSERT_TRUE(OpenProcessToken(child_process, TOKEN_QUERY, &child_token))
+    << "Win32 error " << GetLastError();
+  auto child_token_guard = util::fail_guard([&]() {
+    CloseHandle(child_token);
+  });
+  TOKEN_ELEVATION child_elevation {};
+  ASSERT_TRUE(GetTokenInformation(
+    child_token,
+    TokenElevation,
+    &child_elevation,
+    sizeof(child_elevation),
+    &returned
+  ));
+  EXPECT_EQ(child_elevation.TokenIsElevated, 0u);
+
+  TOKEN_ELEVATION_TYPE child_elevation_type = TokenElevationTypeFull;
+  ASSERT_TRUE(GetTokenInformation(
+    child_token,
+    TokenElevationType,
+    &child_elevation_type,
+    sizeof(child_elevation_type),
+    &returned
+  ));
+  EXPECT_NE(child_elevation_type, TokenElevationTypeFull);
+
+  const auto child_user = token_sid(child_token);
+  ASSERT_TRUE(child_user);
+  EXPECT_EQ(*child_user, *expected_user);
+
+  DWORD child_session = 0xFFFFFFFF;
+  ASSERT_TRUE(GetTokenInformation(
+    child_token,
+    TokenSessionId,
+    &child_session,
+    sizeof(child_session),
+    &returned
+  ));
+  EXPECT_EQ(child_session, process_session);
+  EXPECT_EQ(child_session, WTSGetActiveConsoleSessionId());
+
+  BOOL child_is_in_job = FALSE;
+  ASSERT_TRUE(IsProcessInJob(
+    child_process,
+    child_group.native_handle(),
+    &child_is_in_job
+  )) << "Win32 error " << GetLastError();
+  EXPECT_TRUE(child_is_in_job);
+
+  std::error_code wait_error;
+  child.wait(wait_error);
+  ASSERT_FALSE(wait_error) << wait_error.message();
+  ASSERT_EQ(_fseeki64(child_output, 0, SEEK_END), 0);
+  const auto output_size = _ftelli64(child_output);
+  ASSERT_GE(output_size, 0);
+  EXPECT_GT(output_size, 0) << "The child did not inherit the redirected output handle";
 }
 #endif

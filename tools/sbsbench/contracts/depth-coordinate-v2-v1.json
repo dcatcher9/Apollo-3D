@@ -1,0 +1,314 @@
+{
+  "schema": 12,
+  "vector_width": 4,
+  "capture_provenance": {
+    "schema": 3,
+    "manifest_key": "raw_model_provenance",
+    "binding": "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3"
+  },
+  "shader_implementation": {
+    "source_closure_schema": 2,
+    "source_compile_flags": 34816,
+    "source_macro_count": 0,
+    "source_specs": [
+      {
+        "source_file": "depth_coordinate_v2_moments_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_coordinate_v2_frame_resolve_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_coordinate_v2_near_coverage_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_coordinate_v2_state_resolve_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_coordinate_v2_map_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_coordinate_v2_vertical_limit_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_coordinate_v2_limit_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      }
+    ],
+    "source_closure_sha256": "125eb39e2e524532327c05f291a8e03b90c619be49e46ba7e53938f90615bb40"
+  },
+  "calibrated_defaults": {
+    "collapse_abs_epsilon": 1e-06,
+    "far_tau": 0.15,
+    "near_log_tau": 2.0,
+    "near_tail_probe_u": 1.0,
+    "near_tail_coverage_low": 0.15,
+    "near_tail_coverage_high": 0.22,
+    "near_log_tau_dense": 1.0,
+    "gain_per_pop": 0.00375,
+    "reference_pop_strength": 2.0,
+    "direct_container_limit": 0.04,
+    "max_horizontal_slope": 0.5,
+    "max_vertical_shear": 2.0,
+    "convergence_curve_default": 0.0
+  },
+  "model_calibrations": [
+    {
+      "calibration_id": "dav2-small-fp16-raw-coordinate-v1",
+      "depth_model": "depth_anything_v2_fp16",
+      "depth_model_url": "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",
+      "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
+      "raw_coordinate_scale": 0.5,
+      "calibrated_input_shapes": [
+        {
+          "width": 770,
+          "height": 434
+        }
+      ],
+      "preprocess": {
+        "profile": "apollo-dav2-area-hdr-srgb-imagenet-v1",
+        "source_closure_schema": 2,
+        "source_file": "rgb_to_nchw_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0",
+        "source_compile_flags": 34816,
+        "source_macro_count": 0,
+        "source_closure_sha256": "5e7c210aaf090645cb12d703e2484c201db840ad541f59095a2eabbfcea2eb4a",
+        "model_input_schema": 1,
+        "dtype": "float32-le",
+        "layout": "NCHW",
+        "channels": [
+          "R",
+          "G",
+          "B"
+        ],
+        "patch_multiple": 14,
+        "maximum_dimension": 1036,
+        "imagenet_mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "imagenet_std": [
+          0.229,
+          0.224,
+          0.225
+        ],
+        "stage": "exact model input after area resize, HDR tone mapping, sRGB conversion, and ImageNet normalization"
+      }
+    }
+  ],
+  "constant_buffer": {
+    "name": "DepthCoordinateV2Constants",
+    "register": "b1",
+    "fields": [
+      {
+        "index": 0,
+        "name": "raw_coordinate_scale",
+        "type": "float32"
+      },
+      {
+        "index": 1,
+        "name": "collapse_abs_epsilon",
+        "type": "float32"
+      },
+      {
+        "index": 2,
+        "name": "far_tau",
+        "type": "float32"
+      },
+      {
+        "index": 3,
+        "name": "near_log_tau",
+        "type": "float32"
+      },
+      {
+        "index": 4,
+        "name": "requested_gain",
+        "type": "float32"
+      },
+      {
+        "index": 5,
+        "name": "max_horizontal_slope",
+        "type": "float32"
+      },
+      {
+        "index": 6,
+        "name": "direct_container_limit",
+        "type": "float32"
+      },
+      {
+        "index": 7,
+        "name": "convergence_curve_default",
+        "type": "float32"
+      },
+      {
+        "index": 8,
+        "name": "near_tail_probe_u",
+        "type": "float32"
+      },
+      {
+        "index": 9,
+        "name": "near_tail_coverage_low",
+        "type": "float32"
+      },
+      {
+        "index": 10,
+        "name": "near_tail_coverage_high",
+        "type": "float32"
+      },
+      {
+        "index": 11,
+        "name": "near_log_tau_dense",
+        "type": "float32"
+      }
+    ]
+  },
+  "frame_stats": {
+    "source": "depth_coordinate_v2_frame_resolve_cs.FrameStats",
+    "fields": [
+      {
+        "index": 0,
+        "name": "mean",
+        "type": "float32"
+      },
+      {
+        "index": 1,
+        "name": "population_std",
+        "type": "float32"
+      },
+      {
+        "index": 2,
+        "name": "minimum",
+        "type": "float32"
+      },
+      {
+        "index": 3,
+        "name": "maximum",
+        "type": "float32"
+      },
+      {
+        "index": 4,
+        "name": "valid_count",
+        "type": "float32"
+      },
+      {
+        "index": 5,
+        "name": "texel_count",
+        "type": "float32"
+      },
+      {
+        "index": 6,
+        "name": "valid",
+        "type": "float32"
+      },
+      {
+        "index": 7,
+        "name": "reserved",
+        "type": "float32"
+      }
+    ]
+  },
+  "shadow_state": {
+    "source": "depth_coordinate_v2_state_resolve_cs.ShadowState",
+    "capture": "after-every-complete-depth-coordinate-v2-state-update",
+    "fields": [
+      {
+        "index": 0,
+        "name": "center",
+        "type": "float32",
+        "gpu_encoding": "float",
+        "initial": 0.0
+      },
+      {
+        "index": 1,
+        "name": "inverse_scale",
+        "type": "float32",
+        "gpu_encoding": "float",
+        "initial": 0.0
+      },
+      {
+        "index": 2,
+        "name": "convergence_curve",
+        "type": "float32",
+        "gpu_encoding": "float",
+        "initial": 0.0
+      },
+      {
+        "index": 3,
+        "name": "container_scale",
+        "type": "float32",
+        "gpu_encoding": "float",
+        "initial": 1.0
+      },
+      {
+        "index": 4,
+        "name": "calibration_revision",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
+      },
+      {
+        "index": 5,
+        "name": "frame_valid",
+        "type": "float32",
+        "gpu_encoding": "float",
+        "initial": 0.0
+      },
+      {
+        "index": 6,
+        "name": "confirmed_cut_count",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
+      },
+      {
+        "index": 7,
+        "name": "contract_tag_bits",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": "contract_tag"
+      },
+      {
+        "index": 8,
+        "name": "latched_near_tail_coverage",
+        "type": "float32",
+        "gpu_encoding": "float",
+        "initial": 0.0
+      },
+      {
+        "index": 9,
+        "name": "effective_near_log_tau",
+        "type": "float32",
+        "gpu_encoding": "float",
+        "initial": 2.0
+      },
+      {
+        "index": 10,
+        "name": "latched_near_tail_count",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
+      },
+      {
+        "index": 11,
+        "name": "near_shoulder_reserved",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
+      }
+    ]
+  }
+}

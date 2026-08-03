@@ -12,6 +12,29 @@
 
 namespace models {
 
+  /** Immutable identity of the exact model bytes behind raw depth.
+   *
+   * preprocess_profile is populated only when the complete model name/URL/SHA identity resolves
+   * to a calibrated coordinate-v2 entry and the runtime RGB-to-NCHW source closure has the exact
+   * calibrated digest. An empty profile is explicitly uncalibrated rather than an inferred match
+   * by registry position.
+   */
+  struct raw_model_provenance_t {
+    std::string depth_model;
+    std::string depth_model_url;
+    std::string onnx_sha256;
+    std::string preprocess_profile;
+    std::string preprocess_source_closure_sha256;
+  };
+
+  /** Immutable identity of the exact seven-dispatch source closure behind a live parallax-v2 result. */
+  struct parallax_v2_shader_provenance_t {
+    std::uint32_t source_closure_schema = 0;
+    std::uint32_t source_compile_flags = 0;
+    std::uint32_t source_macro_count = 0;
+    std::string source_closure_sha256;
+  };
+
   enum class engine_build_status {
     unknown,
     building,
@@ -45,6 +68,20 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Raw model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth_snapshot;  ///< Optional stable copy of the completed frame's raw output for a live Dump 3D request.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> model_input_snapshot;  ///< Optional stable NCHW/ImageNet-normalized input for the same live Dump 3D frame.
+    std::shared_ptr<const raw_model_provenance_t> raw_model_provenance;  ///< Capture-time model-byte identity; copied by pointer on ordinary frames.
+    // Default-off V2 outputs. Shadow-only runs leave production on `depth`/`subject`. In the
+    // config-only render experiment, shadow_final_parallax is the least row-wise near-preserving
+    // Lipschitz majorant of the vertical-shear-conditioned field and the live position authority.
+    // shadow_candidate_parallax is immutable pre-limiter evidence; shadow_vertical_majorant is
+    // the explicit shear2 intermediate; shadow_coordinate is a coordinate diagnostic only.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_coordinate;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_candidate_parallax;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_majorant;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_final_parallax;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_state;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_frame_stats;
+    std::shared_ptr<const parallax_v2_shader_provenance_t>
+      parallax_v2_shader_provenance;  ///< Exact shader closure; present iff shadow is active.
     int raw_width = 0;
     int raw_height = 0;
     // A TensorRT result completed and its GPU normalization passes were submitted. The associated
@@ -54,7 +91,46 @@ namespace models {
     std::uint64_t completed_frame_id = 0;  ///< Caller-provided identity of that completed result.
     bool inference_enqueued = false;  ///< This call submitted inference for the supplied input frame.
     bool cuda_graph_active = false;  ///< TensorRT enqueue is currently replaying a captured graph.
+    bool parallax_v2_shadow_active = false;  ///< All optional V2 producer shaders/resources are active. Renderer selection is reported separately by the caller.
+    float parallax_v2_raw_coordinate_scale = 0.0f;  ///< Fixed authenticated model/shape coordinate scale.
+    float parallax_v2_requested_pop_strength = 0.0f;  ///< Fixed V2 request from cfg.pop_strength only; no legacy adaptive ratio or ceiling is consumed.
+    float parallax_v2_requested_gain = 0.0f;  ///< One-eye source-U gain before safety attenuation.
   };
+
+  /** Fail-closed CPU authentication for a completed live V2 result.
+   *
+   * This verifies the complete model/preprocess/shape and seven-dispatch source identities, the
+   * presence of every V2 resource, and the fixed-pop gain relation. It deliberately does not map
+   * GPU state; the live shader authenticates the per-frame contract tag before sampling geometry.
+   */
+  bool parallax_v2_result_is_authenticated(const estimate_result &result);
+
+  enum class host_sbs_renderer_e {
+    undecided,
+    legacy,
+    parallax_v2,
+    parallax_v2_failed_flat,
+  };
+
+  /** One-way renderer latch used by a Host-SBS stream. Once decided, later frames cannot switch
+   * geometry backends even if a result becomes invalid or a transient resource is unavailable.
+   */
+  constexpr host_sbs_renderer_e latch_host_sbs_renderer(
+    const host_sbs_renderer_e current,
+    const bool v2_requested,
+    const bool live_shader_ready,
+    const bool result_authenticated
+  ) {
+    if (current != host_sbs_renderer_e::undecided) {
+      return current;
+    }
+    if (!v2_requested) {
+      return host_sbs_renderer_e::legacy;
+    }
+    return live_shader_ready && result_authenticated ?
+             host_sbs_renderer_e::parallax_v2 :
+             host_sbs_renderer_e::parallax_v2_failed_flat;
+  }
 
   /**
    * One opportunistic, nonblocking readback of the append-only diagnostic portion of

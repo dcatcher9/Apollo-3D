@@ -6,6 +6,15 @@ forward/backward hybrid and its selectable profile were removed after headset te
 rim/halo behavior and a serious thin-structure artifact for only about 0.12 ms of warp-time saving.
 Historical experiment evidence remains in Git history and `sbs-feature-decision-revisit.md`.
 
+The default-off Host SBS Depth Coordinate V2 experiment is intentionally separate from that
+shipping path. Its live renderer consumes the least anisotropic 2D near-preserving majorant of the
+signed candidate field: a vertical shear-2 column majorant followed by the slope-0.5 row majorant.
+Neither pass lowers requested disparity; the final bounds both crown shear and horizontal slope and
+is inverted with a unique 12-step contractive fixed point. Candidate, vertical intermediate, and
+canonical coordinate remain diagnostics only; V2 has no forward-owner, visibility-selection, or
+synthetic-fill path. See
+`docs/host-sbs-depth-coordinate-v2.md` for the fail-closed test contract.
+
 Approved AR glasses connected as a Windows monitor also use an automatic local presenter; see
 `docs/sbs-local-ar-glasses.md`. That path reuses the production depth and warp without NVENC.
 
@@ -178,6 +187,22 @@ selection until a hard cut.
   the measured slivers. Exact coverage remains diagnostic only; a future learned refiner would
   need color- and time-coherent synthesis rather than forced far-background substitution. Evidence:
   `coverage-hole-fill-control` and `coverage-hole-fill-target`.
+- The later default-off Depth Coordinate V2 experiment exposed a different failure in the
+  fullscreen hair dumps. An unbounded candidate cliff produced a broad translucent ramp; rejecting
+  interpolation and filling uncovered pixels produced obvious horizontal comb/teeth. Full-
+  resolution forward ownership did not solve it: exact attribution put every visible difference
+  inside synthetic-fill pixels. Those owner/fill variants are rejected and removed from live V2.
+  The first targeted treatment used a greatest row-wise minorant and removed the bands by lowering
+  foreground disparity, but the fullscreen hair/body contour visibly separated. It is superseded.
+  The first no-fill treatment computed the least row-wise majorant `q >= p` with
+  `|dq/dx| <= 0.5`, then used the same 12-step contractive inverse. Exact pop-1.5 replay removes the
+  duplicate and hair/body step without lowering any candidate value; 3.837% of fullscreen texels
+  and 2.152% of windowed texels are raised. Its residual background bending around the fullscreen
+  crown selected a pure vertical shear-2 majorant before the row pass. The final is the least
+  anisotropic 2D majorant and preserves `q >= vertical >= candidate`. The source captures are
+  historical schema-7 input witnesses, so fresh schema-12/manifest-schema-7 live dumps and timing
+  are still required before cutover. Evidence:
+  `E:\ApolloDev\majorant-row-both-confirm-20260802`.
 - Symmetric horizontal edge-band supersampling was rejected after the full core screen. It nudged
   mean halo from 4.57 to 4.52 and the rim proxy from 4.41 to 4.31, but produced no validated
   primary-axis win, was visually imperceptible at the strongest frame, and increased mean warp
@@ -611,7 +636,7 @@ and profile provenance; cover the 11-clip core and public extended suites; gener
 and `decision.json`; inspect primary-axis examples; and treat comfort/image-integrity limits as hard
 constraints. Headset evidence resolves coequal-axis tradeoffs.
 
-The harness uses contract 17 and eval schema 34. It exports raw depth, pre-warp depth, exact forward
+The harness uses contract 18 and eval schema 36. It exports raw depth, pre-warp depth, exact forward
 coverage diagnostics, and final SBS artifacts by numeric frame identity. Ground-truth depth scoring
 is scale/shift invariant but polarity preserving. MPI Sintel true-right references additionally
 score global-horizontal-registered PSNR/SSIM, local epipolar residual/coverage, and Art3D-inspired

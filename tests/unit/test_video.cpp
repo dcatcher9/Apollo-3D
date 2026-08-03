@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -15,9 +16,11 @@
 #include <src/nvenc/nvenc_base.h>
 #include <src/nvenc/nvenc_config.h>
 #include <src/generated/sbs_adaptive_state_contract.h>
+#include <src/depth_coordinate_v2.h>
 #include <src/host_sbs_shader_cache.h>
 #include <src/video.h>
 #include <src/video_colorspace.h>
+#include <src/video_depth_estimator.h>
 #include <tuple>
 #include <vector>
 
@@ -480,7 +483,900 @@ TEST(DirectxShaderTest, FixedShapeHostSbsCachePrewarmsAndReusesBytecode) {
   }
 }
 
-TEST(DirectxShaderTest, FixedShapeHostSbsCacheRejectsChangedSourceSnapshots) {
+TEST(DirectxShaderTest, ParallaxV2ShadowShadersCompileOutsideCorePrewarm) {
+  namespace cache = models::host_sbs_shader_cache;
+  const std::filesystem::path shader_root = SUNSHINE_SHADERS_DIR;
+  const auto shadow_sources = cache::snapshot_sources(
+    shader_root,
+    cache::parallax_v2_shadow_specs
+  );
+  ASSERT_TRUE(shadow_sources);
+
+  for (const auto &shadow : cache::parallax_v2_shadow_specs) {
+    ASSERT_TRUE(cache::get(shadow_sources, shadow)) << shadow.filename;
+    EXPECT_EQ(
+      std::count_if(
+        cache::core_specs.begin(),
+        cache::core_specs.end(),
+        [&shadow](const cache::shader_spec &core) {
+          return core.filename == shadow.filename;
+        }
+      ),
+      0
+    ) << shadow.filename;
+  }
+}
+
+TEST(ParallaxV2ShadowContractTest, DefaultsOffAndCarriesAttributableState) {
+  namespace v2 = models::depth_coordinate_v2;
+  const config::video_t::sbs_t defaults;
+  EXPECT_FALSE(defaults.parallax_v2_shadow);
+  EXPECT_FALSE(defaults.parallax_v2_render);
+  EXPECT_FLOAT_EQ(v2::gain_per_pop, 0.00375f);
+  EXPECT_FLOAT_EQ(v2::parallax_gain, 0.0075f);
+  EXPECT_FLOAT_EQ(v2::requested_pop_strength(1.2f), 1.2f);
+  EXPECT_FLOAT_EQ(v2::requested_gain_for_config(1.2f), 0.0045f);
+  EXPECT_FLOAT_EQ(v2::requested_pop_strength(-1.0f), 0.0f);
+  EXPECT_FLOAT_EQ(v2::requested_gain_for_config(-1.0f), 0.0f);
+  EXPECT_FLOAT_EQ(v2::direct_container_limit, 0.04f);
+  EXPECT_FLOAT_EQ(v2::max_horizontal_slope, 0.5f);
+  EXPECT_FLOAT_EQ(v2::convergence_curve_default, 0.0f);
+  EXPECT_FLOAT_EQ(v2::near_tail_probe_u, 1.0f);
+  EXPECT_FLOAT_EQ(v2::near_tail_coverage_low, 0.15f);
+  EXPECT_FLOAT_EQ(v2::near_tail_coverage_high, 0.22f);
+  EXPECT_FLOAT_EQ(v2::near_log_tau_dense, 1.0f);
+  EXPECT_FLOAT_EQ(
+    v2::near_tail_dense_weight_for_coverage(v2::near_tail_coverage_low),
+    0.0f
+  );
+  EXPECT_FLOAT_EQ(
+    v2::near_tail_dense_weight_for_coverage(v2::near_tail_coverage_high),
+    1.0f
+  );
+  EXPECT_FLOAT_EQ(
+    v2::near_tail_effective_tau_for_coverage(v2::near_tail_coverage_low),
+    v2::near_log_tau
+  );
+  EXPECT_FLOAT_EQ(
+    v2::near_tail_effective_tau_for_coverage(v2::near_tail_coverage_high),
+    v2::near_log_tau_dense
+  );
+  EXPECT_GT(v2::max_horizontal_slope, 0.0f);
+  EXPECT_LT(v2::max_horizontal_slope, 1.0f);
+  EXPECT_EQ(v2::contract_schema, 12u);
+  EXPECT_EQ(v2::contract_tag, 0x8FAA6FA5u);
+  EXPECT_EQ(
+    v2::contract_canonical_sha256,
+    "75486b54117c99baefa38ee6ff821941739da2abecd6fe4335cd571ed3d651da"
+  );
+  EXPECT_EQ(
+    v2::contract_tag_semantic_sha256,
+    "8faa6fa5a71b69b478d419c5df756e8f76450e553e9a7ceee13848c1a197c1bc"
+  );
+  EXPECT_EQ(v2::capture_provenance_schema, 3u);
+  EXPECT_EQ(v2::shadow_state_dump_schema, 6u);
+  EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
+  EXPECT_EQ(v2::capture_provenance_manifest_key, "raw_model_provenance");
+  EXPECT_EQ(
+    v2::capture_provenance_binding,
+    "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3"
+  );
+  ASSERT_EQ(v2::model_calibrations.size(), 1u);
+  const auto &small_calibration = v2::model_calibrations.front();
+  const auto preprocess_sources = models::host_sbs_shader_cache::snapshot_sources(
+    SUNSHINE_SHADERS_DIR,
+    models::host_sbs_shader_cache::preprocess_specs
+  );
+  ASSERT_TRUE(preprocess_sources);
+  EXPECT_EQ(
+    models::host_sbs_shader_cache::source_closure_sha256(preprocess_sources),
+    small_calibration.preprocess.source_closure_sha256
+  );
+  EXPECT_EQ(models::host_sbs_shader_cache::shader_compile_flags, 0x00008800u);
+  const auto shadow_sources = models::host_sbs_shader_cache::snapshot_sources(
+    SUNSHINE_SHADERS_DIR,
+    models::host_sbs_shader_cache::parallax_v2_shadow_specs
+  );
+  ASSERT_TRUE(shadow_sources);
+  EXPECT_EQ(
+    models::host_sbs_shader_cache::source_closure_sha256(shadow_sources),
+    v2::shader_source_closure_sha256
+  );
+  EXPECT_EQ(
+    v2::shader_source_closure_schema,
+    models::host_sbs_shader_cache::source_closure_schema
+  );
+  EXPECT_EQ(
+    v2::shader_source_compile_flags,
+    models::host_sbs_shader_cache::shader_compile_flags
+  );
+  EXPECT_EQ(v2::shader_source_macro_count, 0u);
+  const auto live_renderer_sources =
+    models::host_sbs_shader_cache::snapshot_sources(
+      SUNSHINE_SHADERS_DIR,
+      models::host_sbs_shader_cache::parallax_v2_live_renderer_specs
+    );
+  ASSERT_TRUE(live_renderer_sources);
+  EXPECT_EQ(
+    models::host_sbs_shader_cache::source_closure_sha256(live_renderer_sources),
+    models::host_sbs_shader_cache::
+      parallax_v2_live_renderer_source_closure_sha256
+  );
+  ASSERT_EQ(
+    v2::shader_source_specs.size(),
+    models::host_sbs_shader_cache::parallax_v2_shadow_specs.size()
+  );
+  for (std::size_t index = 0; index < v2::shader_source_specs.size(); ++index) {
+    const auto &contract_spec = v2::shader_source_specs[index];
+    const auto &runtime_spec =
+      models::host_sbs_shader_cache::parallax_v2_shadow_specs[index];
+    EXPECT_EQ(contract_spec.source_file, runtime_spec.filename);
+    EXPECT_EQ(contract_spec.source_entrypoint, runtime_spec.entrypoint);
+    EXPECT_EQ(contract_spec.source_target, runtime_spec.target);
+  }
+  EXPECT_EQ(
+    v2::find_model_calibration(
+      small_calibration.depth_model,
+      small_calibration.depth_model_url,
+      small_calibration.onnx_sha256
+    ),
+    &small_calibration
+  );
+  EXPECT_EQ(
+    v2::find_model_calibration(
+      small_calibration.depth_model,
+      small_calibration.depth_model_url,
+      std::string(64u, '0')
+    ),
+    nullptr
+  );
+  EXPECT_EQ(
+    v2::find_capture_calibration(
+      small_calibration.depth_model,
+      small_calibration.depth_model_url,
+      small_calibration.onnx_sha256,
+      small_calibration.preprocess.profile,
+      small_calibration.preprocess.source_closure_sha256,
+      770u,
+      434u
+    ),
+    &small_calibration
+  );
+  EXPECT_EQ(
+    v2::find_capture_calibration(
+      small_calibration.depth_model,
+      small_calibration.depth_model_url,
+      small_calibration.onnx_sha256,
+      "different-preprocess",
+      small_calibration.preprocess.source_closure_sha256,
+      770u,
+      434u
+    ),
+    nullptr
+  );
+  const std::array duplicate_calibrations {
+    small_calibration,
+    small_calibration,
+  };
+  EXPECT_EQ(
+    v2::find_model_calibration_in(
+      duplicate_calibrations,
+      small_calibration.depth_model,
+      small_calibration.depth_model_url,
+      small_calibration.onnx_sha256
+    ),
+    nullptr
+  );
+  EXPECT_EQ(small_calibration.depth_model, "depth_anything_v2_fp16");
+  EXPECT_EQ(small_calibration.preprocess.profile, "apollo-dav2-area-hdr-srgb-imagenet-v1");
+  EXPECT_EQ(
+    small_calibration.preprocess.source_closure_sha256,
+    "5e7c210aaf090645cb12d703e2484c201db840ad541f59095a2eabbfcea2eb4a"
+  );
+  EXPECT_EQ(
+    small_calibration.preprocess.source_closure_schema,
+    models::host_sbs_shader_cache::source_closure_schema
+  );
+  EXPECT_EQ(
+    small_calibration.preprocess.source_file,
+    models::host_sbs_shader_cache::rgb_to_nchw.filename
+  );
+  EXPECT_EQ(
+    small_calibration.preprocess.source_entrypoint,
+    models::host_sbs_shader_cache::rgb_to_nchw.entrypoint
+  );
+  EXPECT_EQ(
+    small_calibration.preprocess.source_target,
+    models::host_sbs_shader_cache::rgb_to_nchw.target
+  );
+  EXPECT_EQ(
+    small_calibration.preprocess.source_compile_flags,
+    models::host_sbs_shader_cache::shader_compile_flags
+  );
+  EXPECT_EQ(small_calibration.preprocess.source_macro_count, 0u);
+  EXPECT_TRUE(v2::model_calibration_supports_shape(small_calibration, 770u, 434u));
+  EXPECT_FALSE(v2::model_calibration_supports_shape(small_calibration, 434u, 770u));
+  EXPECT_EQ(v2::constant_float_count, 12u);
+  EXPECT_EQ(v2::constant_vector_count, 3u);
+  EXPECT_EQ(sizeof(v2::constants_t), 48u);
+  EXPECT_EQ(alignof(v2::constants_t), 16u);
+  EXPECT_EQ(v2::frame_stats_float_count, 8u);
+  EXPECT_EQ(v2::frame_stats_vector_count, 2u);
+  EXPECT_EQ(v2::state_float_count, 12u);
+  EXPECT_EQ(v2::state_vector_count, 3u);
+  EXPECT_EQ(v2::state_float_count, v2::state_field_names.size());
+  EXPECT_EQ(v2::constant_float_count, v2::constant_field_names.size());
+  EXPECT_EQ(v2::frame_stats_float_count, v2::frame_stat_names.size());
+  EXPECT_STREQ(v2::constant_field_names[0], "raw_coordinate_scale");
+  EXPECT_STREQ(v2::constant_field_names[4], "requested_gain");
+  EXPECT_STREQ(v2::constant_field_names[7], "convergence_curve_default");
+  EXPECT_STREQ(v2::constant_field_names[8], "near_tail_probe_u");
+  EXPECT_STREQ(v2::constant_field_names[11], "near_log_tau_dense");
+  EXPECT_STREQ(v2::frame_stat_names[v2::frame_stat_mean], "mean");
+  EXPECT_STREQ(v2::frame_stat_names[v2::frame_stat_valid], "valid");
+  EXPECT_STREQ(v2::state_field_names[v2::calibration_revision], "calibration_revision");
+  EXPECT_STREQ(v2::state_field_names[v2::convergence_curve], "convergence_curve");
+  EXPECT_STREQ(v2::state_field_names[v2::container_scale], "container_scale");
+  EXPECT_STREQ(
+    v2::state_field_names[v2::latched_near_tail_coverage],
+    "latched_near_tail_coverage"
+  );
+  EXPECT_STREQ(
+    v2::state_field_names[v2::effective_near_log_tau],
+    "effective_near_log_tau"
+  );
+  EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::calibration_revision));
+  EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::confirmed_cut_count));
+  EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::contract_tag_bits));
+  EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::latched_near_tail_count));
+  EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::near_shoulder_reserved));
+  EXPECT_FALSE(v2::state_word_is_uint_bits(v2::state_word_e::center));
+  EXPECT_EQ(v2::state_initial_words[v2::calibration_revision], 0u);
+  EXPECT_EQ(v2::state_initial_words[v2::confirmed_cut_count], 0u);
+  EXPECT_EQ(v2::state_initial_words[v2::frame_valid],
+            std::bit_cast<std::uint32_t>(0.0f));
+  EXPECT_EQ(v2::state_initial_words[v2::convergence_curve],
+            std::bit_cast<std::uint32_t>(0.0f));
+  EXPECT_EQ(v2::state_initial_words[v2::container_scale],
+            std::bit_cast<std::uint32_t>(1.0f));
+  EXPECT_EQ(v2::state_initial_words[v2::contract_tag_bits], v2::contract_tag);
+  EXPECT_EQ(
+    v2::state_initial_words[v2::effective_near_log_tau],
+    std::bit_cast<std::uint32_t>(v2::near_log_tau)
+  );
+  EXPECT_EQ(v2::state_initial_words[v2::latched_near_tail_count], 0u);
+  EXPECT_EQ(v2::state_initial_words[v2::near_shoulder_reserved], 0u);
+  EXPECT_FALSE(v2::cut_generation_changed(7u, 7u, false));
+  EXPECT_TRUE(v2::cut_generation_changed(7u, 8u, false));
+  EXPECT_TRUE(v2::cut_generation_changed(7u, 7u, true));
+
+  const auto &models = config::depth_model_registry();
+  const auto small = std::find_if(models.begin(), models.end(), [](const auto &model) {
+    return model.name == "depth_anything_v2_fp16";
+  });
+  const auto base = std::find_if(models.begin(), models.end(), [](const auto &model) {
+    return model.name == "depth_anything_v2_base_fp16";
+  });
+  ASSERT_NE(small, models.end());
+  ASSERT_NE(base, models.end());
+  EXPECT_EQ(small->url, small_calibration.depth_model_url);
+  EXPECT_EQ(base->url,
+            "https://huggingface.co/onnx-community/depth-anything-v2-base/resolve/main/onnx/model_fp16.onnx");
+
+  EXPECT_FALSE(v2::model_calibration_supports_shape(
+    small_calibration,
+    1036u,
+    434u
+  ));
+  EXPECT_TRUE(v2::capture_identity_is_calibrated(
+    small_calibration.depth_model,
+    small_calibration.depth_model_url,
+    small_calibration.onnx_sha256,
+    small_calibration.preprocess.profile,
+    small_calibration.preprocess.source_closure_sha256,
+    770u,
+    434u
+  ));
+  EXPECT_FALSE(v2::capture_identity_is_calibrated(
+    small_calibration.depth_model,
+    small_calibration.depth_model_url,
+    small_calibration.onnx_sha256,
+    small_calibration.preprocess.profile,
+    small_calibration.preprocess.source_closure_sha256,
+    1036u,
+    434u
+  ));
+  EXPECT_FALSE(v2::capture_identity_is_calibrated(
+    small_calibration.depth_model,
+    small_calibration.depth_model_url,
+    small_calibration.onnx_sha256,
+    "different-preprocess",
+    small_calibration.preprocess.source_closure_sha256,
+    770u,
+    434u
+  ));
+  EXPECT_FALSE(v2::capture_identity_is_calibrated(
+    small_calibration.depth_model,
+    small_calibration.depth_model_url,
+    std::string(64u, '0'),
+    small_calibration.preprocess.profile,
+    small_calibration.preprocess.source_closure_sha256,
+    770u,
+    434u
+  ));
+  EXPECT_FALSE(v2::capture_identity_is_calibrated(
+    small_calibration.depth_model,
+    small_calibration.depth_model_url,
+    small_calibration.onnx_sha256,
+    small_calibration.preprocess.profile,
+    std::string(64u, '0'),
+    770u,
+    434u
+  ));
+}
+
+TEST(ParallaxV2RendererTest, SelectionLatchesV2OrFlatAndNeverFallsBackToLegacy) {
+  using models::host_sbs_renderer_e;
+  using models::latch_host_sbs_renderer;
+
+  EXPECT_EQ(
+    latch_host_sbs_renderer(
+      host_sbs_renderer_e::undecided, false, false, false
+    ),
+    host_sbs_renderer_e::legacy
+  );
+  EXPECT_EQ(
+    latch_host_sbs_renderer(
+      host_sbs_renderer_e::undecided, true, true, true
+    ),
+    host_sbs_renderer_e::parallax_v2
+  );
+  EXPECT_EQ(
+    latch_host_sbs_renderer(
+      host_sbs_renderer_e::undecided, true, false, true
+    ),
+    host_sbs_renderer_e::parallax_v2_failed_flat
+  );
+  EXPECT_EQ(
+    latch_host_sbs_renderer(
+      host_sbs_renderer_e::undecided, true, true, false
+    ),
+    host_sbs_renderer_e::parallax_v2_failed_flat
+  );
+  // Once chosen, no later frame can alternate the stream's backend.
+  EXPECT_EQ(
+    latch_host_sbs_renderer(
+      host_sbs_renderer_e::parallax_v2, true, false, false
+    ),
+    host_sbs_renderer_e::parallax_v2
+  );
+  EXPECT_EQ(
+    latch_host_sbs_renderer(
+      host_sbs_renderer_e::parallax_v2_failed_flat, true, true, true
+    ),
+    host_sbs_renderer_e::parallax_v2_failed_flat
+  );
+}
+
+#ifdef _WIN32
+TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
+  using Microsoft::WRL::ComPtr;
+  namespace v2 = models::depth_coordinate_v2;
+
+  ComPtr<ID3D11Device> device;
+  ComPtr<ID3D11DeviceContext> context;
+  D3D_FEATURE_LEVEL feature_level {};
+  constexpr D3D_FEATURE_LEVEL requested_levels[] {D3D_FEATURE_LEVEL_11_0};
+  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(
+    nullptr,
+    D3D_DRIVER_TYPE_WARP,
+    nullptr,
+    0,
+    requested_levels,
+    static_cast<UINT>(std::size(requested_levels)),
+    D3D11_SDK_VERSION,
+    &device,
+    &feature_level,
+    &context
+  )));
+
+  D3D11_TEXTURE2D_DESC desc {};
+  desc.Width = 1;
+  desc.Height = 1;
+  desc.MipLevels = 1;
+  desc.ArraySize = 1;
+  desc.Format = DXGI_FORMAT_R32_FLOAT;
+  desc.SampleDesc.Count = 1;
+  desc.Usage = D3D11_USAGE_DEFAULT;
+  desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  ComPtr<ID3D11Texture2D> texture;
+  ComPtr<ID3D11ShaderResourceView> view;
+  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &texture)));
+  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &view)));
+
+  const auto &calibration = v2::model_calibrations.front();
+  models::estimate_result result;
+  result.shadow_coordinate = view;
+  result.shadow_candidate_parallax = view;
+  result.shadow_vertical_majorant = view;
+  result.shadow_final_parallax = view;
+  result.shadow_state = view;
+  result.shadow_frame_stats = view;
+  result.raw_model_provenance =
+    std::make_shared<const models::raw_model_provenance_t>(
+      models::raw_model_provenance_t {
+        .depth_model = std::string {calibration.depth_model},
+        .depth_model_url = std::string {calibration.depth_model_url},
+        .onnx_sha256 = std::string {calibration.onnx_sha256},
+        .preprocess_profile = std::string {calibration.preprocess.profile},
+        .preprocess_source_closure_sha256 =
+          std::string {calibration.preprocess.source_closure_sha256},
+      }
+    );
+  result.parallax_v2_shader_provenance =
+    std::make_shared<const models::parallax_v2_shader_provenance_t>(
+      models::parallax_v2_shader_provenance_t {
+        .source_closure_schema = v2::shader_source_closure_schema,
+        .source_compile_flags = v2::shader_source_compile_flags,
+        .source_macro_count = v2::shader_source_macro_count,
+        .source_closure_sha256 = std::string {v2::shader_source_closure_sha256},
+      }
+    );
+  result.raw_width = 770;
+  result.raw_height = 434;
+  result.completed_frame_valid = true;
+  result.completed_frame_id = 1;
+  result.parallax_v2_shadow_active = true;
+  result.parallax_v2_raw_coordinate_scale = calibration.raw_coordinate_scale;
+  result.parallax_v2_requested_pop_strength = 2.0f;
+  result.parallax_v2_requested_gain = v2::requested_gain_for_config(2.0f);
+  EXPECT_TRUE(models::parallax_v2_result_is_authenticated(result));
+
+  auto missing_resource = result;
+  missing_resource.shadow_state.Reset();
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_resource));
+
+  auto missing_vertical_majorant = result;
+  missing_vertical_majorant.shadow_vertical_majorant.Reset();
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_vertical_majorant));
+
+  auto wrong_shape = result;
+  wrong_shape.raw_width = 1036;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_shape));
+
+  auto wrong_shader = result;
+  auto shader = *result.parallax_v2_shader_provenance;
+  shader.source_closure_sha256 = std::string(64u, '0');
+  wrong_shader.parallax_v2_shader_provenance =
+    std::make_shared<const models::parallax_v2_shader_provenance_t>(shader);
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_shader));
+
+  auto wrong_gain = result;
+  wrong_gain.parallax_v2_requested_gain *= 2.0f;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_gain));
+}
+#endif
+
+TEST(ParallaxV2RendererTest, LiveSelectionUsesMatchedFramesAndFailedModeBindsFlat) {
+  const auto display = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
+  );
+  const auto config = read_source_file(SUNSHINE_SOURCE_DIR "/src/config.cpp");
+  ASSERT_FALSE(display.empty());
+  ASSERT_FALSE(config.empty());
+  EXPECT_NE(
+    config.find("prefix + \"parallax_v2_render\""),
+    std::string::npos
+  );
+
+  const auto matched = display.find(
+    "if (matched_render_slot &&\n              host_sbs_renderer =="
+  );
+  const auto latch = display.find("latch_host_sbs_renderer(", matched);
+  const auto selected = display.find(
+    "const bool v2_renderer_selected", latch
+  );
+  const auto draw = display.find("mark_sbs_warp_end(gpu_timer);", selected);
+  ASSERT_NE(matched, std::string::npos);
+  ASSERT_NE(latch, std::string::npos);
+  ASSERT_NE(selected, std::string::npos);
+  ASSERT_NE(draw, std::string::npos);
+  EXPECT_LT(matched, latch);
+  EXPECT_LT(latch, selected);
+  EXPECT_LT(selected, draw);
+
+  const auto render_region = display.substr(selected, draw - selected);
+  EXPECT_NE(render_region.find("parallax_v2_failed_flat"), std::string::npos);
+  EXPECT_NE(
+    render_region.find("legacy_renderer_selected ? est.depth.Get() : nullptr"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    render_region.find("v2_renderer_selected ? est.shadow_final_parallax.Get()"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    render_region.find("v2_renderer_selected ? est.shadow_candidate_parallax.Get()"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    render_region.find("v2_renderer_selected ? est.shadow_vertical_majorant.Get()"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    render_region.find("legacy_renderer_selected ? est.subject.Get() : nullptr"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    render_region.find("legacy_renderer_selected ? est.depth_frame_state.Get() : nullptr"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    render_region.find("selected_parallax_field || v2_renderer_failed_flat"),
+    std::string::npos
+  );
+
+  const auto dump_gate = display.find("const bool complete_dump_snapshot", draw);
+  const auto dump_geometry = display.find(
+    "geometry_available = render_sbs_debug_geometry(", dump_gate
+  );
+  ASSERT_NE(dump_gate, std::string::npos);
+  ASSERT_NE(dump_geometry, std::string::npos);
+  EXPECT_NE(
+    display.substr(dump_gate, dump_geometry - dump_gate).find(
+      "parallax_v2_result_is_authenticated(est)"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find("sbs_dumper.preflight_requested_v2_frame(", dump_gate),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find("sbs_dumper.reject_pending_request();", draw),
+    std::string::npos
+  );
+  const auto dump_geometry_call = display.substr(
+    dump_geometry,
+    display.find(");", dump_geometry) - dump_geometry
+  );
+  EXPECT_EQ(dump_geometry_call.find("shadow_coordinate"), std::string::npos);
+  EXPECT_NE(
+    dump_geometry_call.find("v2_renderer_selected"),
+    std::string::npos
+  );
+
+  const auto dump_source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
+  );
+  const auto v2_preflight = dump_source.find(
+    "bool dumper::preflight_requested_v2_frame("
+  );
+  ASSERT_NE(v2_preflight, std::string::npos);
+  const auto preflight_end = dump_source.find(
+    "bool dumper::maybe_dump(", v2_preflight
+  );
+  ASSERT_NE(preflight_end, std::string::npos);
+  const auto preflight_body = dump_source.substr(
+    v2_preflight,
+    preflight_end - v2_preflight
+  );
+  EXPECT_NE(preflight_body.find("std::isfinite"), std::string::npos);
+  EXPECT_NE(preflight_body.find("frame_valid"), std::string::npos);
+  EXPECT_NE(preflight_body.find("contract_tag"), std::string::npos);
+}
+
+TEST(ParallaxV2ShadowContractTest, TimingIsNestedNonblockingAndDoesNotRedefinePostprocess) {
+  const auto estimator =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
+  ASSERT_FALSE(estimator.empty());
+  const auto normalize = estimator.find("void normalize_depth_output(d3d_perf_slot *perf_slot)");
+  const auto parallax_start = estimator.find("mark_d3d_parallax_start(perf_slot);", normalize);
+  const auto dispatch = estimator.find("dispatch_parallax_v2_shadow();", parallax_start);
+  const auto parallax_end = estimator.find("mark_d3d_parallax_end(perf_slot);", dispatch);
+  const auto post_end = estimator.find("mark_d3d_post_end(d3d_timer);", parallax_end);
+  ASSERT_NE(normalize, std::string::npos);
+  ASSERT_NE(parallax_start, std::string::npos);
+  ASSERT_NE(dispatch, std::string::npos);
+  ASSERT_NE(parallax_end, std::string::npos);
+  ASSERT_NE(post_end, std::string::npos);
+  EXPECT_LT(normalize, parallax_start);
+  EXPECT_LT(parallax_start, dispatch);
+  EXPECT_LT(dispatch, parallax_end);
+  EXPECT_LT(parallax_end, post_end);
+  EXPECT_NE(estimator.find("\"depth_parallax_gpu\""), std::string::npos);
+  EXPECT_NE(estimator.find("D3D11_ASYNC_GETDATA_DONOTFLUSH"), std::string::npos);
+  const auto query_gate = estimator.find("parallax_v2_shadow_requested &&");
+  const auto query_allocation = estimator.find(
+    "CreateQuery(&desc, &slot.parallax_start)", query_gate);
+  ASSERT_NE(query_gate, std::string::npos);
+  ASSERT_NE(query_allocation, std::string::npos);
+  EXPECT_LT(query_allocation - query_gate, 160u);
+
+  const auto gain_begin = estimator.find("parallax_v2_shadow_requested(");
+  const auto gain_end = estimator.find(")) {", gain_begin);
+  ASSERT_NE(gain_begin, std::string::npos);
+  ASSERT_NE(gain_end, std::string::npos);
+  const auto gain_authority = estimator.substr(gain_begin, gain_end - gain_begin);
+  EXPECT_NE(gain_authority.find("cfg.parallax_v2_shadow"), std::string::npos);
+  EXPECT_NE(gain_authority.find("cfg.parallax_v2_render"), std::string::npos);
+  EXPECT_NE(gain_authority.find("cfg.pop_strength"), std::string::npos);
+  EXPECT_EQ(gain_authority.find("cfg.adaptive_pop"), std::string::npos);
+  EXPECT_EQ(gain_authority.find("cfg.adaptive_pop_max"), std::string::npos);
+  EXPECT_EQ(gain_authority.find("adaptive_pop_max_ratio"), std::string::npos);
+  EXPECT_EQ(gain_authority.find("SubjectState"), std::string::npos);
+}
+
+TEST(ParallaxV2ShadowContractTest, DirectRendererHasNoLegacyAdaptiveGeometryAuthority) {
+  const std::string shader_dir =
+    SUNSHINE_SOURCE_DIR "/src_assets/windows/assets/shaders/directx/";
+  const auto common = read_source_file(shader_dir + "include/sbs_warp_common.hlsl");
+  const auto reprojection = read_source_file(shader_dir + "sbs_reprojection_ps.hlsl");
+  const auto live_wrapper = read_source_file(
+    shader_dir + "sbs_reprojection_v2_live_ps.hlsl"
+  );
+  const auto coverage = read_source_file(shader_dir + "sbs_forward_coverage_cs.hlsl");
+  const auto harness = read_source_file(SUNSHINE_SOURCE_DIR "/src/sbs_bench_harness.cpp");
+  ASSERT_FALSE(common.empty());
+  ASSERT_FALSE(reprojection.empty());
+  ASSERT_FALSE(live_wrapper.empty());
+  ASSERT_FALSE(coverage.empty());
+  ASSERT_FALSE(harness.empty());
+  EXPECT_NE(common.find("float DepthParallax(float d)"), std::string::npos);
+  EXPECT_EQ(common.find("direct_parallax_search_radius"), std::string::npos);
+  EXPECT_NE(common.find("float3 direct_parallax_reserved;"), std::string::npos);
+  const auto direct_begin = reprojection.find("#ifdef SBS_CONTRACTIVE_PARALLAX");
+  const auto direct_end = reprojection.find("#else", direct_begin);
+  ASSERT_NE(direct_begin, std::string::npos);
+  ASSERT_NE(direct_end, std::string::npos);
+  const auto direct_inverse = reprojection.substr(
+    direct_begin,
+    direct_end - direct_begin
+  );
+  EXPECT_NE(
+    direct_inverse.find("for (int iteration = 0; iteration < 12; ++iteration)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    direct_inverse.find(
+      "sourceX = uv.x + eyeSign * DepthParallax(SampleDepth(sourceX, uv.y));"
+    ),
+    std::string::npos
+  );
+  EXPECT_EQ(direct_inverse.find("DirectOrderTexture"), std::string::npos);
+  EXPECT_EQ(direct_inverse.find("Bestv2SearchRadius"), std::string::npos);
+  EXPECT_EQ(direct_inverse.find("Bestv2Probe"), std::string::npos);
+  EXPECT_EQ(direct_inverse.find("ForwardCoverageTexture"), std::string::npos);
+  EXPECT_EQ(reprojection.find("CanonicalOrderTexture"), std::string::npos);
+  EXPECT_EQ(reprojection.find("SBS_DIRECT_CANDIDATE_PARALLAX"), std::string::npos);
+  EXPECT_EQ(reprojection.find("SBS_CANDIDATE_GAP_FILL"), std::string::npos);
+  EXPECT_EQ(reprojection.find("backgroundOwner"), std::string::npos);
+  EXPECT_NE(coverage.find("DirectOrderTexture"), std::string::npos);
+  const auto reprojection_guard = reprojection.find(
+    "#elif !defined(SBS_DIRECT_PARALLAX)"
+  );
+  const auto reprojection_state = reprojection.find(
+    "StructuredBuffer<float4> SubjectState", reprojection_guard);
+  ASSERT_NE(reprojection_guard, std::string::npos);
+  ASSERT_NE(reprojection_state, std::string::npos);
+  EXPECT_LT(reprojection_state - reprojection_guard, 400u);
+  EXPECT_NE(
+    reprojection.find("StructuredBuffer<float4> ParallaxV2State : register(t2)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    live_wrapper.find("#define SBS_LIVE_V2_SIGNED_PARALLAX 1"),
+    std::string::npos
+  );
+  EXPECT_EQ(live_wrapper.find("SBS_CANDIDATE_GAP_FILL"), std::string::npos);
+  const auto encoded_parallax = common.find("#ifdef SBS_DIRECT_PARALLAX");
+  const auto live_parallax = common.find(
+    "#elif defined(SBS_LIVE_V2_SIGNED_PARALLAX)",
+    encoded_parallax
+  );
+  const auto legacy_parallax = common.find("#else", live_parallax);
+  ASSERT_NE(encoded_parallax, std::string::npos);
+  ASSERT_NE(live_parallax, std::string::npos);
+  ASSERT_NE(legacy_parallax, std::string::npos);
+  const auto encoded_body = common.substr(
+    encoded_parallax,
+    live_parallax - encoded_parallax
+  );
+  const auto live_body = common.substr(
+    live_parallax,
+    legacy_parallax - live_parallax
+  );
+  EXPECT_NE(encoded_body.find("direct_parallax_source_u_limit"), std::string::npos);
+  EXPECT_NE(live_body.find("return d;"), std::string::npos);
+  EXPECT_EQ(live_body.find("adaptive_pop"), std::string::npos);
+  EXPECT_EQ(live_body.find("SubjectState"), std::string::npos);
+  const auto coverage_guard = coverage.find(
+    "#if !defined(SBS_DIRECT_PARALLAX)"
+  );
+  const auto coverage_state = coverage.find(
+    "StructuredBuffer<float4> SubjectState", coverage_guard);
+  ASSERT_NE(coverage_guard, std::string::npos);
+  ASSERT_NE(coverage_state, std::string::npos);
+  EXPECT_LT(coverage_state - coverage_guard, 160u);
+  EXPECT_EQ(reprojection.find("float4 unused_state"), std::string::npos);
+  EXPECT_EQ(coverage.find("float4 unused_state"), std::string::npos);
+  EXPECT_EQ(harness.find("SBS_DIRECT_CANDIDATE_PARALLAX"), std::string::npos);
+  EXPECT_EQ(harness.find("SBS_CANDIDATE_GAP_FILL"), std::string::npos);
+  EXPECT_NE(
+    harness.find("\\\"pop_strength_authority\\\": \\\"contract.pop_strength-only\\\""),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("\\\"adaptive_pop_applied\\\": false"),
+    std::string::npos
+  );
+}
+
+TEST(ParallaxV2ShadowContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+  EXPECT_NE(
+    source.find("std::bit_cast<std::uint32_t>(state[calibration_revision])"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("std::bit_cast<std::uint32_t>(state[confirmed_cut_count])"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("calibration_revision_is_valid(calibration_revision_value)"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    source.find("{\"calibration_revision\", state[calibration_revision]}"),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("{\"schema\", shadow_state_dump_schema}"), std::string::npos);
+  EXPECT_NE(
+    source.find("{\"schema\", shadow_frame_stats_dump_schema}"),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("parallax_v2_coordinate_binding("), std::string::npos);
+  EXPECT_NE(source.find("source_closure_sha256"), std::string::npos);
+  EXPECT_NE(
+    source.find("nlohmann::json manifest {\n          {\"schema\", 7}"),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("completed.parallax_v2_render_selected"), std::string::npos);
+  EXPECT_NE(
+    source.find("mapping_artifacts_match_selected_renderer"),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("live_shader_source"), std::string::npos);
+  EXPECT_NE(
+    source.find("parallax_v2_live_renderer_source_closure_sha256"),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("{\"shader_source\", shadow_shader_source}"), std::string::npos);
+  EXPECT_NE(
+    source.find("!parallax_v2_shader_identity_matches_contract("),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("state_semantics_valid"), std::string::npos);
+}
+
+TEST(ParallaxV2ShadowContractTest, CalibrationRevisionRejectsReservedSentinel) {
+  namespace v2 = models::depth_coordinate_v2;
+  EXPECT_TRUE(v2::calibration_revision_is_valid(0u));
+  EXPECT_TRUE(v2::calibration_revision_is_valid(1u));
+  EXPECT_FALSE(v2::calibration_revision_is_valid(v2::reserved_calibration_revision));
+}
+
+TEST(ParallaxV2ShadowContractTest, NativeReplayUsesTheAuthenticatedShaderCache) {
+  const auto replay = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/sbs_bench_depth_coordinate_v2.cpp"
+  );
+  ASSERT_FALSE(replay.empty());
+  EXPECT_NE(replay.find("shader_cache::snapshot_sources("), std::string::npos);
+  EXPECT_NE(replay.find("shader_cache::source_closure_sha256("), std::string::npos);
+  EXPECT_NE(replay.find("shader_cache::get("), std::string::npos);
+  EXPECT_EQ(replay.find("D3DCompileFromFile("), std::string::npos);
+}
+
+TEST(ParallaxV2ShadowContractTest, DumpBindsExactOnDiskModelArtifacts) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+  EXPECT_NE(
+    source.find("paths.temporary / \"raw_depth.f32\""),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("paths.temporary / \"model_input.f32\""),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("paths.temporary / \"model_input_shape.json\""),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("models::file_sha256_hex("), std::string::npos);
+  EXPECT_NE(
+    source.find("capture_provenance_manifest_key"),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("configured_depth_model_url"), std::string::npos);
+  EXPECT_EQ(source.find("model_calibrations.front()"), std::string::npos);
+  EXPECT_NE(source.find("find_capture_calibration("), std::string::npos);
+  EXPECT_NE(source.find("capture_calibration->preprocess"), std::string::npos);
+  EXPECT_NE(source.find("if (shadow_available && !capture_calibration)"), std::string::npos);
+  EXPECT_NE(source.find("uncalibrated_runtime_preprocess"), std::string::npos);
+  EXPECT_NE(source.find("if (capture_calibration)"), std::string::npos);
+  EXPECT_NE(source.find("preprocess.imagenet_mean"), std::string::npos);
+  EXPECT_NE(source.find("preprocess.imagenet_std"), std::string::npos);
+}
+
+TEST(ParallaxV2ShadowContractTest, RawProvenanceResolvesTheExactModelIdentity) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+  const auto lookup = source.find("depth_coordinate_v2::find_model_calibration(");
+  ASSERT_NE(lookup, std::string::npos);
+  const auto preprocess_snapshot = source.find(
+    "host_sbs_shader_cache::snapshot_sources(",
+    lookup
+  );
+  ASSERT_NE(preprocess_snapshot, std::string::npos);
+  const auto exact_calibration = source.find(
+    "const auto *coordinate_calibration =",
+    preprocess_snapshot
+  );
+  ASSERT_NE(exact_calibration, std::string::npos);
+  const auto provenance = source.find("raw_model_provenance =", exact_calibration);
+  ASSERT_NE(provenance, std::string::npos);
+  EXPECT_LT(lookup, preprocess_snapshot);
+  EXPECT_LT(preprocess_snapshot, exact_calibration);
+  EXPECT_LT(exact_calibration, provenance);
+  EXPECT_NE(
+    source.find(".preprocess_source_closure_sha256 =", provenance),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    source.rfind("model_calibrations.front()", provenance),
+    std::string::npos
+  );
+}
+
+TEST(ParallaxV2ShadowContractTest, EvaluationRawArtifactsCarryProducerAttestation) {
+  const auto harness = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/sbs_bench_harness.cpp"
+  );
+  ASSERT_FALSE(harness.empty());
+
+  const auto provenance_gate = harness.find(
+    "ordinary evaluation completed without exact raw-model provenance"
+  );
+  const auto provenance_contract = harness.find("\\\"raw_model_provenance\\\"");
+  ASSERT_NE(provenance_gate, std::string::npos);
+  ASSERT_NE(provenance_contract, std::string::npos);
+  EXPECT_LT(provenance_gate, provenance_contract);
+  EXPECT_NE(harness.find("direct_geometry_contract_schema = 21u"), std::string::npos);
+  for (const auto *field : {
+         "\\\"depth_model_url\\\"",
+         "\\\"onnx_sha256\\\"",
+         "\\\"preprocess_profile\\\"",
+         "\\\"preprocess_source_closure_sha256\\\"",
+         "\\\"raw_width\\\"",
+         "\\\"raw_height\\\"",
+       }) {
+    EXPECT_NE(harness.find(field, provenance_contract), std::string::npos);
+  }
+
+  const auto raw_shape = harness.find("fs::path(o.out) / \"raw_shape.json\"");
+  ASSERT_NE(raw_shape, std::string::npos);
+  EXPECT_NE(harness.find("\\\"schema\\\": 1", raw_shape), std::string::npos);
+  EXPECT_NE(harness.find("\\\"layout\\\": \\\"row-major\\\"", raw_shape), std::string::npos);
+}
+
+TEST(DirectxShaderTest, FixedShapeHostSbsCacheOwnsAuthenticatedSourceSnapshots) {
   namespace cache = models::host_sbs_shader_cache;
   const auto unique = std::to_string(
     std::chrono::steady_clock::now().time_since_epoch().count()
@@ -515,25 +1411,166 @@ TEST(DirectxShaderTest, FixedShapeHostSbsCacheRejectsChangedSourceSnapshots) {
   constexpr std::array specs {cache::shader_spec {"root.hlsl"}};
   const auto initial = cache::snapshot_sources(shader_root, specs);
   ASSERT_TRUE(initial);
+  const auto initial_digest = cache::source_closure_sha256(initial);
+  ASSERT_EQ(initial_digest.size(), 64u);
 
-  // A changed transitive include invalidates the old aggregate snapshot. The failed entry must
-  // also be erased so restoring that exact source generation can compile successfully.
+  // The snapshot owns A's bytes. A disk mutation before compilation cannot create bytecode B
+  // carrying identity A; a new snapshot receives a new transitive-closure identity.
   ASSERT_TRUE(write_source(include_path, "#define SHARED_VALUE 2.0f\n"));
-  EXPECT_FALSE(cache::get(initial, specs.front()));
+  const auto initial_bytecode = cache::get(initial, specs.front());
+  ASSERT_TRUE(initial_bytecode);
+  const auto changed = cache::snapshot_sources(shader_root, specs);
+  ASSERT_TRUE(changed);
+  EXPECT_NE(cache::source_closure_sha256(changed), initial_digest);
+  const auto changed_bytecode = cache::get(changed, specs.front());
+  ASSERT_TRUE(changed_bytecode);
+  EXPECT_NE(*initial_bytecode, *changed_bytecode);
+
   ASSERT_TRUE(write_source(include_path, "#define SHARED_VALUE 1.0f\n"));
   const auto restored = cache::snapshot_sources(shader_root, specs);
   ASSERT_TRUE(restored);
-  EXPECT_TRUE(cache::get(restored, specs.front()));
+  EXPECT_EQ(cache::source_closure_sha256(restored), initial_digest);
+  EXPECT_EQ(cache::get(restored, specs.front()), initial_bytecode);
 
-  // Root-source mutation is guarded by the same full-snapshot revalidation.
-  ASSERT_TRUE(write_source(include_path, "#define SHARED_VALUE 2.0f\n"));
-  const auto before_root_change = cache::snapshot_sources(shader_root, specs);
-  ASSERT_TRUE(before_root_change);
+  // Root/spec changes are bound; an unrelated file is not. Line-ending conversion is normalized
+  // so a Git CRLF checkout does not invalidate the reviewed source contract.
+  ASSERT_TRUE(write_source(shader_root / "unrelated.hlsl", "// unrelated\n"));
+  EXPECT_EQ(
+    cache::source_closure_sha256(cache::snapshot_sources(shader_root, specs)),
+    initial_digest
+  );
   ASSERT_TRUE(write_source(root_path, root_source + "// changed generation\n"));
-  EXPECT_FALSE(cache::get(before_root_change, specs.front()));
   const auto current = cache::snapshot_sources(shader_root, specs);
   ASSERT_TRUE(current);
-  EXPECT_TRUE(cache::get(current, specs.front()));
+  EXPECT_NE(cache::source_closure_sha256(current), initial_digest);
+  constexpr std::array different_entry {
+    cache::shader_spec {"root.hlsl", "different", "cs_5_0"}
+  };
+  EXPECT_NE(
+    cache::source_closure_sha256(cache::snapshot_sources(shader_root, different_entry)),
+    cache::source_closure_sha256(current)
+  );
+  constexpr std::array different_target {
+    cache::shader_spec {"root.hlsl", "main", "cs_4_0"}
+  };
+  EXPECT_NE(
+    cache::source_closure_sha256(cache::snapshot_sources(shader_root, different_target)),
+    cache::source_closure_sha256(current)
+  );
+  ASSERT_TRUE(write_source(root_path,
+    "#include \"shared.hlsl\"\r\n"
+    "RWStructuredBuffer<float> Out : register(u0);\r\n"
+    "[numthreads(1, 1, 1)]\r\n"
+    "void main(uint3 id : SV_DispatchThreadID) { Out[0] = SHARED_VALUE; }\r\n"));
+  ASSERT_TRUE(write_source(include_path, "#define SHARED_VALUE 1.0f\r\n"));
+  EXPECT_EQ(
+    cache::source_closure_sha256(cache::snapshot_sources(shader_root, specs)),
+    initial_digest
+  );
+  ASSERT_TRUE(write_source(root_path,
+    "#include \"shared.hlsl\"\r"
+    "RWStructuredBuffer<float> Out : register(u0);\r"
+    "[numthreads(1, 1, 1)]\r"
+    "void main(uint3 id : SV_DispatchThreadID) { Out[0] = SHARED_VALUE; }\r"));
+  ASSERT_TRUE(write_source(include_path, "#define SHARED_VALUE 1.0f\r"));
+  EXPECT_EQ(
+    cache::source_closure_sha256(cache::snapshot_sources(shader_root, specs)),
+    initial_digest
+  );
+}
+
+TEST(DirectxShaderTest, FixedShapeHostSbsCacheCompilesAuthenticatedNestedIncludeEdges) {
+  namespace cache = models::host_sbs_shader_cache;
+  const auto unique = std::to_string(
+    std::chrono::steady_clock::now().time_since_epoch().count()
+  );
+  const auto root = std::filesystem::temp_directory_path() /
+    ("apollo-sbs-shader-nested-" + unique);
+  ASSERT_TRUE(std::filesystem::create_directories(root / "nested"));
+  struct cleanup_t {
+    std::filesystem::path path;
+    ~cleanup_t() {
+      std::error_code error;
+      std::filesystem::remove_all(path, error);
+    }
+  } cleanup {root};
+  const auto write_source = [](const std::filesystem::path &path,
+                               const std::string_view source) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(source.data(), static_cast<std::streamsize>(source.size()));
+    return output.good();
+  };
+  ASSERT_TRUE(write_source(root / "root.hlsl",
+    "#include \"nested/parent.hlsl\"\n"
+    "RWStructuredBuffer<float> Out : register(u0);\n"
+    "[numthreads(1, 1, 1)]\n"
+    "void main(uint3 id : SV_DispatchThreadID) { Out[0] = NESTED_VALUE; }\n"));
+  ASSERT_TRUE(write_source(root / "nested" / "parent.hlsl",
+                           "#include \"shared.hlsl\"\n"));
+  ASSERT_TRUE(write_source(root / "nested" / "shared.hlsl",
+                           "#define NESTED_VALUE 2.0f\n"));
+  ASSERT_TRUE(write_source(root / "shared.hlsl", "#define NESTED_VALUE 1.0f\n"));
+  constexpr std::array specs {cache::shader_spec {"root.hlsl"}};
+  const auto initial = cache::snapshot_sources(root, specs);
+  ASSERT_TRUE(initial);
+  const auto initial_digest = cache::source_closure_sha256(initial);
+  ASSERT_TRUE(cache::get(initial, specs.front()));
+
+  // The same token names a different root file, but that unreachable file is neither hashed nor
+  // compiled. The authenticated parent/token edge selects nested/shared.hlsl exactly.
+  ASSERT_TRUE(write_source(root / "shared.hlsl", "#define NESTED_VALUE 9.0f\n"));
+  const auto unrelated = cache::snapshot_sources(root, specs);
+  ASSERT_TRUE(unrelated);
+  EXPECT_EQ(cache::source_closure_sha256(unrelated), initial_digest);
+  ASSERT_TRUE(write_source(root / "nested" / "shared.hlsl",
+                           "#define NESTED_VALUE 3.0f\n"));
+  const auto changed = cache::snapshot_sources(root, specs);
+  ASSERT_TRUE(changed);
+  EXPECT_NE(cache::source_closure_sha256(changed), initial_digest);
+  ASSERT_TRUE(cache::get(changed, specs.front()));
+}
+
+TEST(DirectxShaderTest, FixedShapeHostSbsCacheRejectsUnauthenticatedIncludes) {
+  namespace cache = models::host_sbs_shader_cache;
+  const auto unique = std::to_string(
+    std::chrono::steady_clock::now().time_since_epoch().count()
+  );
+  const auto parent = std::filesystem::temp_directory_path() /
+    ("apollo-sbs-shader-include-" + unique);
+  const auto root = parent / "root";
+  ASSERT_TRUE(std::filesystem::create_directories(root));
+  struct cleanup_t {
+    std::filesystem::path path;
+    ~cleanup_t() {
+      std::error_code error;
+      std::filesystem::remove_all(path, error);
+    }
+  } cleanup {parent};
+  const auto write_source = [](const std::filesystem::path &path,
+                               const std::string_view source) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(source.data(), static_cast<std::streamsize>(source.size()));
+    return output.good();
+  };
+  constexpr std::array specs {cache::shader_spec {"root.hlsl"}};
+
+  ASSERT_TRUE(write_source(root / "root.hlsl", "#include \"missing.hlsl\"\n"));
+  EXPECT_FALSE(cache::snapshot_sources(root, specs));
+  ASSERT_TRUE(write_source(parent / "outside.hlsl", "#define VALUE 1\n"));
+  ASSERT_TRUE(write_source(root / "root.hlsl", "#include \"../outside.hlsl\"\n"));
+  EXPECT_FALSE(cache::snapshot_sources(root, specs));
+  ASSERT_TRUE(write_source(root / "root.hlsl", "#include <outside.hlsl>\n"));
+  EXPECT_FALSE(cache::snapshot_sources(root, specs));
+  ASSERT_TRUE(write_source(root / "root.hlsl",
+    "#define WHICH \"outside.hlsl\"\n#include WHICH\n"));
+  EXPECT_FALSE(cache::snapshot_sources(root, specs));
+
+  std::error_code symlink_error;
+  std::filesystem::create_symlink(parent / "outside.hlsl", root / "linked.hlsl", symlink_error);
+  if (!symlink_error) {
+    ASSERT_TRUE(write_source(root / "root.hlsl", "#include \"linked.hlsl\"\n"));
+    EXPECT_FALSE(cache::snapshot_sources(root, specs));
+  }
 }
 
 TEST(DirectxShaderSourceTest, DumpGeometryCompilationStaysOffTheLivePath) {
@@ -567,6 +1604,11 @@ TEST(DirectxShaderSourceTest, DumpGeometryCompilationStaysOffTheLivePath) {
     live_initializer.find("sbs_forward_coverage_cs_hlsl"),
     std::string::npos
   );
+  EXPECT_NE(
+    live_initializer.find("sbs_reprojection_v2_mapping_ps_hlsl"),
+    std::string::npos
+  );
+  EXPECT_EQ(live_initializer.find("sbs_forward_coverage_v2"), std::string::npos);
 }
 
 TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
@@ -578,6 +1620,9 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"depth_valid_history_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_forward_coverage_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0"},
+    std::tuple {"sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"},
+    std::tuple {"sbs_reprojection_v2_live_ps.hlsl", "mapping_ps", "ps_5_0"},
+    std::tuple {"sbs_reprojection_v2_live_ps.hlsl", "mask_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_ps.hlsl", "mapping_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_ps.hlsl", "mask_ps", "ps_5_0"},
   };
@@ -1142,6 +2187,43 @@ TEST(HostSbsSceneCutTest, OrdinalEvidenceRejectsMonotoneExposureButDetectsConten
   EXPECT_FLOAT_EQ(black_evidence.current_support_fraction, 0.0f);
   EXPECT_GT(black_evidence.previous_support_fraction, 0.01f);
   EXPECT_FLOAT_EQ(black_evidence.common_support_fraction, 0.0f);
+}
+
+TEST(DirectxShaderTest, CompilesContractiveDirectParallaxRendererAndDiagnostics) {
+  using Microsoft::WRL::ComPtr;
+
+  constexpr D3D_SHADER_MACRO direct_parallax_macros[] = {
+    {"SBS_DIRECT_PARALLAX", "1"},
+    {nullptr, nullptr},
+  };
+  constexpr std::array shaders {
+    std::tuple {"sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0"},
+    std::tuple {"sbs_reprojection_ps.hlsl", "mapping_ps", "ps_5_0"},
+    std::tuple {"sbs_reprojection_ps.hlsl", "mask_ps", "ps_5_0"},
+    std::tuple {"sbs_forward_coverage_cs.hlsl", "main", "cs_5_0"},
+  };
+  for (const auto &[filename, entrypoint, target] : shaders) {
+    const std::filesystem::path shader_path =
+      std::filesystem::path(SUNSHINE_SHADERS_DIR) / filename;
+    ComPtr<ID3DBlob> shader_blob;
+    ComPtr<ID3DBlob> shader_errors;
+    const auto status = D3DCompileFromFile(
+      shader_path.c_str(),
+      direct_parallax_macros,
+      D3D_COMPILE_STANDARD_FILE_INCLUDE,
+      entrypoint,
+      target,
+      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+      0,
+      &shader_blob,
+      &shader_errors
+    );
+    EXPECT_TRUE(SUCCEEDED(status))
+      << filename << " (direct): "
+      << (shader_errors ?
+            static_cast<const char *>(shader_errors->GetBufferPointer()) :
+            "no compiler diagnostics");
+  }
 }
 
 TEST(EffectiveVideoModePublisherTests, PublishesOnlyCoherentProvenPacingPairs) {
@@ -2251,7 +3333,7 @@ TEST(DirectxShaderSourceTest, HostTelemetryReadbackIsNonblockingAndPreservesTheB
   EXPECT_NE(harness.find("std::array<float, 12> values"), std::string::npos);
   EXPECT_NE(
     harness.find(
-      "std::memcpy(values.data(), mapped.pData, values.size() * sizeof(float))"
+      "std::memcpy(values.data(), words, values.size() * sizeof(float))"
     ),
     std::string::npos
   );
@@ -2429,7 +3511,9 @@ TEST(DirectxShaderSourceTest, WholeClipReplayKeepsCanonicalStateAndUsesAnOffline
        }) {
     EXPECT_NE(harness.find(packed_field), std::string::npos);
   }
-  const auto live_estimator_guard = harness.find("if (!replay_mode) {");
+  const auto live_estimator_guard = harness.find(
+    "if (!replay_mode && !depth_coordinate_v2_gpu_mode) {"
+  );
   const auto live_estimator_construction =
     harness.find("estimator = std::make_unique", live_estimator_guard);
   ASSERT_NE(live_estimator_guard, std::string::npos);
@@ -2437,8 +3521,12 @@ TEST(DirectxShaderSourceTest, WholeClipReplayKeepsCanonicalStateAndUsesAnOffline
   EXPECT_LT(live_estimator_guard, live_estimator_construction);
   EXPECT_NE(
     harness.find(
-      "const auto *warp_macros = replay_mode ? scene_camera_macros : nullptr"
+      "const auto *warp_macros = direct_parallax_mode ? direct_parallax_macros"
     ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("(replay_mode ? scene_camera_macros : nullptr)"),
     std::string::npos
   );
   EXPECT_NE(

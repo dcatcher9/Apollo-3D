@@ -153,6 +153,8 @@ TEST(ProcessTest, PlatformLaunchDoesNotReuseStaleErrorCode) {
   EXPECT_FALSE(child.valid());
   EXPECT_TRUE(ec);
   EXPECT_NE(ec, stale_error);
+  EXPECT_EQ(ec.category(), std::system_category());
+  EXPECT_EQ(ec.value(), ERROR_FILE_NOT_FOUND);
 }
 
 TEST(ProcessTest, AddsCanonicalVirtualDisplayTileWhenDriverIsReady) {

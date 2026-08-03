@@ -103,6 +103,28 @@ add_custom_target(verify_sbs_adaptive_state_contract ALL
         VERBATIM)
 list(APPEND SUNSHINE_TARGET_DEPENDENCIES verify_sbs_adaptive_state_contract)
 
+# The complete depth-coordinate-v2 experimental ABI is generated from one manifest. Its semantic
+# tag catches same-sized reorders and meaning/default changes in native, GPU, and diagnostic code.
+set(DEPTH_COORDINATE_V2_GENERATOR
+        "${CMAKE_SOURCE_DIR}/tools/sbsbench/generate_depth_coordinate_v2_contract.py")
+set(DEPTH_COORDINATE_V2_MANIFEST
+        "${CMAKE_SOURCE_DIR}/tools/sbsbench/contracts/depth-coordinate-v2-v1.json")
+set(DEPTH_COORDINATE_V2_CPP
+        "${CMAKE_SOURCE_DIR}/src/generated/depth_coordinate_v2_contract.h")
+set(DEPTH_COORDINATE_V2_HLSL
+        "${CMAKE_SOURCE_DIR}/src_assets/windows/assets/shaders/directx/include/depth_coordinate_v2_contract.generated.hlsl")
+add_custom_target(verify_depth_coordinate_v2_contract ALL
+        COMMAND "${Python3_EXECUTABLE}" "${DEPTH_COORDINATE_V2_GENERATOR}" --check
+        DEPENDS
+            "${DEPTH_COORDINATE_V2_GENERATOR}"
+            "${DEPTH_COORDINATE_V2_MANIFEST}"
+            "${DEPTH_COORDINATE_V2_CPP}"
+            "${DEPTH_COORDINATE_V2_HLSL}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Verifying generated Host SBS depth-coordinate-v2 contract"
+        VERBATIM)
+list(APPEND SUNSHINE_TARGET_DEPENDENCIES verify_depth_coordinate_v2_contract)
+
 # setup compile definitions
 include(${CMAKE_MODULE_PATH}/compile_definitions/common.cmake)
 

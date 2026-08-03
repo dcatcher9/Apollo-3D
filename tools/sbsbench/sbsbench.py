@@ -2,10 +2,12 @@
 """
 sbsbench - validated visual metrics for Apollo's host SBS 3D output.
 
-Runs on real "Dump 3D" output (the actual sbs.png the client receives + the depth.png
-that produced it), so the numbers reflect the LIVE pipeline, not a CPU replica -- this is
-the whole point vs. warpsim (see docs/sbs-benchmark-plan.md). Each metric is a number that
-should move with a real quality change, so improvements can be A/B'd against a baseline.
+Runs on real "Dump 3D" output (the actual sbs.png the client receives plus its authenticated
+semantic-depth artifact), so the numbers reflect the LIVE pipeline, not a CPU replica -- this is
+the whole point vs. warpsim (see docs/sbs-benchmark-plan.md). Direct-geometry experiments retain
+unbounded canonical order as float32 instead of substituting their conditioned displacement.
+Each metric is a number that should move with a real quality change, so improvements can be A/B'd
+against a baseline.
 
 Metric families:
   exact visible stereo Production inverse-map disparity, weighted by independent horizontal
@@ -52,6 +54,8 @@ import sbs_interocular_phase_chroma  # noqa: E402
 import sbs_interocular_photometric_rivalry  # noqa: E402
 import sbs_stereo_window_metrics  # noqa: E402
 import sbs_warp_shear_metrics  # noqa: E402
+import direct_geometry_contract as direct_geometry  # noqa: E402
+import subject_state_contract  # noqa: E402
 
 TEMPORAL_MIN_SUPPORT = 0.1
 # Minimum GT boundary support (percent of valid pixels) for depth_gt_edge_f1 to gate.
@@ -80,12 +84,8 @@ EVIDENCE_SUPPORT_REQUIREMENTS = {
     "exposure_shot_state_contract_support": 1.0,
     "latched_motion_contract_support": 1.0,
 }
-SUBJECT_STATE_FIELDS = (
-    "subject_recenter_delta", "scene_age", "subject_depth_ema", "initialized",
-    "stretch_lo", "stretch_inv_range", "depth_change_baseline_ema", "adaptive_pop_ratio",
-    "zero_anchor_shift_px", "zero_anchor_valid", "cut_flags",
-    "model_input_history_valid",
-)
+SUBJECT_STATE_SCHEMA = subject_state_contract.SCHEMA
+SUBJECT_STATE_FIELDS = subject_state_contract.FIELDS
 
 
 # ---------------------------------------------------------------------------- io
@@ -104,9 +104,21 @@ def load_gray(path):
     return rgb_luma(load_rgb(path))
 
 
-def load_depth(path):
+def load_depth(path, shape=None):
     """Depth map -> float array. NPY preserves public-dataset metric depth; image sidecars and
     harness depth retain their existing normalized representation."""
+    if path.lower().endswith(".f32"):
+        if (not isinstance(shape, tuple) or len(shape) != 2 or
+                any(type(value) is not int or value <= 0 for value in shape)):
+            raise ValueError(f"raw float32 depth requires an exact (height, width) shape: {path}")
+        depth = np.fromfile(path, dtype="<f4")
+        if depth.size != shape[0] * shape[1]:
+            raise ValueError(
+                f"raw float32 depth size mismatch: {depth.size} != {shape[0] * shape[1]}: {path}")
+        depth = depth.reshape(shape)
+        if not np.isfinite(depth).all():
+            raise ValueError(f"raw float32 depth contains non-finite values: {path}")
+        return depth
     if path.lower().endswith(".npy"):
         depth = np.asarray(np.load(path, allow_pickle=False), dtype=np.float32).squeeze()
         if depth.ndim != 2:
@@ -184,59 +196,13 @@ def indexed_files(pattern, prefix):
 
 
 def load_subject_state_trace(path):
-    """Load the harness-only GPU SubjectState readback under its exact schema."""
-    try:
-        with open(path, encoding="utf-8") as stream:
-            payload = json.load(stream)
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"invalid subject-state trace {path}: {exc}") from exc
-    required = {
-        "schema": 1,
-        "source": "depth_subject_resolve_cs.SubjectState",
-        "capture": "every-source-frame-after-estimator-update",
-        "fields": list(SUBJECT_STATE_FIELDS),
-    }
-    if not isinstance(payload, dict):
-        raise ValueError(f"invalid subject-state trace {path}: root must be an object")
-    mismatch = {key: (expected, payload.get(key)) for key, expected in required.items()
-                if payload.get(key) != expected}
-    frames = payload.get("frames")
-    if mismatch or not isinstance(frames, list):
-        raise ValueError(
-            f"invalid subject-state trace contract {path}: fields={mismatch}, frames=list required")
-    trace = {}
-    for index, frame in enumerate(frames):
-        if not isinstance(frame, dict) or set(frame) != {"frame_id", "values"}:
-            raise ValueError(
-                f"invalid subject-state frame {index} in {path}: exact frame_id/values required")
-        frame_text = frame["frame_id"]
-        if not isinstance(frame_text, str) or not frame_text.isdigit():
-            raise ValueError(
-                f"invalid subject-state frame id {frame_text!r} at record {index} in {path}")
-        frame_id = int(frame_text)
-        values = frame["values"]
-        if (frame_id in trace or not isinstance(values, list) or
-                len(values) != len(SUBJECT_STATE_FIELDS)):
-            raise ValueError(
-                f"invalid/duplicate subject-state frame {frame_text!r} in {path}")
-        numeric = np.asarray(values)
-        if (numeric.dtype.kind not in "iu f".replace(" ", "") or
-                any(isinstance(value, (bool, np.bool_)) for value in values)):
-            raise ValueError(f"non-numeric subject-state value in frame {frame_text} of {path}")
-        numeric = numeric.astype(np.float64)
-        if not np.isfinite(numeric).all():
-            raise ValueError(f"non-finite subject-state value in frame {frame_text} of {path}")
-        trace[frame_id] = {
-            field: float(value) for field, value in zip(SUBJECT_STATE_FIELDS, numeric)
-        }
-        cut_flags = trace[frame_id]["cut_flags"]
-        if cut_flags < 0.0 or abs(cut_flags - round(cut_flags)) > 1e-6:
-            raise ValueError(
-                f"subject-state cut_flags is not a non-negative integer in frame "
-                f"{frame_text} of {path}")
-    if not trace:
-        raise ValueError(f"subject-state trace has no frames: {path}")
-    return trace
+    """Load an exact legacy-state or native cut-compatibility trace."""
+    return subject_state_contract.load_trace(path)
+
+
+def subject_state_trace_schema(path):
+    """Return the authenticated compatibility-trace role schema."""
+    return subject_state_contract.trace_schema(path)
 
 
 def validate_exposure_only_source(src_by_id, contract):
@@ -331,7 +297,7 @@ def validate_shot_state_source(src_by_id, contract):
 
 
 def apply_shot_state_contract(rows, frame_ids, trace, contract):
-    """Attach per-frame evidence from the production SubjectState transition trace.
+    """Attach per-frame evidence from an authenticated compatibility transition trace.
 
     A pulse is independently observable as both an initialized scene-age reset and entry into the
     CUT_LATCHED flag. The mismatch metric catches a missing expected cut, any extra cut, and
@@ -998,8 +964,47 @@ def _exact_binocular_geometry(mapping, shape, coverage_map=None):
     }
 
 
+DIRECT_CANONICAL_DEPTH_SEMANTICS = "canonical-pre-limiter-order-float32-v1"
+DIRECT_STRUCTURE_METRIC_SEMANTICS = "canonical-order-robust-p01-p99-v1"
+DIRECT_STRUCTURE_INSUFFICIENT_SEMANTICS = (
+    "unavailable-canonical-p01-p99-span-below-1e-3-v1"
+)
+# A scale-relative diagnostic must not manufacture confidence by expanding numerical dust to
+# [0, 1]. At the default gain this floor is below a tenth of a binocular pixel at 4K, so fields
+# rejected here have no useful rendered-order signal to score.
+DIRECT_STRUCTURE_MIN_CANONICAL_SPAN = 1.0e-3
+LEGACY_STRUCTURE_METRIC_SEMANTICS = "native-normalized-depth-v1"
+NO_STRUCTURE_METRIC_SEMANTICS = "unavailable-no-depth"
+
+
+def _structure_metric_depth(depth, depth_semantics=None):
+    """Return the coordinate used only by scale-relative structural diagnostics.
+
+    Production depth PNGs already have a normalized [0, 1] contract.  Direct replay instead
+    publishes the exact, finite, unbounded canonical coordinate.  Reusing PNG-era absolute
+    thresholds on that coordinate would make local-order support and stereo-window component
+    connectivity change under an otherwise irrelevant affine rescale.  A robust monotone map is
+    therefore applied *only* to those diagnostic comparisons; ordering, rendered geometry, GT
+    alignment, and temporal evidence continue to consume the authenticated canonical values.
+    """
+    if depth is None:
+        return None, NO_STRUCTURE_METRIC_SEMANTICS
+    values = np.asarray(depth, dtype=np.float32)
+    if depth_semantics != DIRECT_CANONICAL_DEPTH_SEMANTICS:
+        return values, LEGACY_STRUCTURE_METRIC_SEMANTICS
+    low, high = np.quantile(values.astype(np.float64), (0.01, 0.99))
+    span = float(high - low)
+    if not np.isfinite(span) or span < DIRECT_STRUCTURE_MIN_CANONICAL_SPAN:
+        return None, DIRECT_STRUCTURE_INSUFFICIENT_SEMANTICS
+    normalized = np.clip((values.astype(np.float64) - low) / span, 0.0, 1.0).astype(
+        np.float32)
+    return normalized, DIRECT_STRUCTURE_METRIC_SEMANTICS
+
+
 def exact_warp_mapping_metrics(mapping, shape, depth=None, warp_mask=None, tail=0.999,
-                               binocular_geometry=None):
+                               binocular_geometry=None, depth_semantics=None,
+                               prepared_structure_depth=None,
+                               prepared_structure_semantics=None):
     """Geometry metrics from the production shader's exact inverse map.
 
     Unlike tile phase correlation, this sees smooth/thin/local subjects and does not depend on
@@ -1119,14 +1124,26 @@ def exact_warp_mapping_metrics(mapping, shape, depth=None, warp_mask=None, tail=
     # high-is-near forward warp moves the right eye left and the left eye right, so high-near
     # ordering is positive in -disparity. Keeping that sign conversion explicit prevents the
     # comfort tails (which are directional xR-xL evidence) from being confused with depth order.
-    if depth is not None:
+    if prepared_structure_depth is None:
+        structure_depth, structure_metric_semantics = _structure_metric_depth(
+            depth, depth_semantics)
+    else:
+        structure_depth = np.asarray(prepared_structure_depth, dtype=np.float32)
+        if (depth is None or structure_depth.shape != np.asarray(depth).shape or
+                not np.isfinite(structure_depth).all() or
+                not isinstance(prepared_structure_semantics, str) or
+                not prepared_structure_semantics):
+            raise ValueError("prepared structure depth lacks matching finite semantics")
+        structure_metric_semantics = prepared_structure_semantics
+    out["_depth_structure_metric_semantics"] = structure_metric_semantics
+    if structure_depth is not None:
         out["exact_polarity_support_pct"] = 0.0
-    if depth is not None and binocular_count >= 64:
+    if structure_depth is not None and binocular_count >= 64:
         target_u = np.broadcast_to(
             binocular["target_u"][None, :], binocular["disparity"].shape)
         source_v_grid = np.broadcast_to(
             binocular["source_v"][:, None], binocular["disparity"].shape)
-        sampled_depth = _sample_scalar_uv(depth, target_u, source_v_grid)
+        sampled_depth = _sample_scalar_uv(structure_depth, target_u, source_v_grid)
         near_signed = -binocular["disparity"]
         area_weight_map = binocular["weight"]
         sampled = sampled_depth[binocular_valid]
@@ -2162,7 +2179,7 @@ def measure(dump_dir):
 def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_kind="disparity",
                       gt_depth_valid=None,
                       warp_mask=None, warp_mapping=None, warp_mapping_shape=None,
-                      src_rgb=None, hdr_scale=None, compact=False):
+                      src_rgb=None, hdr_scale=None, compact=False, depth_semantics=None):
     """Spatial metrics for one harness SBS frame and its authenticated sidecars."""
     sbs_rgb = load_rgb(path)
     sbs = rgb_luma(sbs_rgb)
@@ -2241,6 +2258,9 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
             coverage_map = hole_map < 0.5
         binocular_geometry = _exact_binocular_geometry(
             warp_mapping, warp_mapping_shape, coverage_map)
+        structure_depth, structure_metric_semantics = _structure_metric_depth(
+            depth, depth_semantics)
+        out["_depth_structure_metric_semantics"] = structure_metric_semantics
         if src_gray is not None:
             out.update(exact_visible_disparity_metrics(
                 warp_mapping, warp_mapping_shape, src_gray, warp_mask=warp_mask,
@@ -2301,10 +2321,10 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
                     out["interocular_exposure_rivalry_evidence_sufficient"] = 0.0
                     out["interocular_color_gain_rivalry_evidence_sufficient"] = 0.0
 
-                window_depth = None
-                if depth is not None:
+                window_depth = structure_depth
+                if window_depth is not None:
                     window_depth = resize_depth(
-                        depth, int(warp_mapping_shape["source_width"]),
+                        window_depth, int(warp_mapping_shape["source_width"]),
                         int(warp_mapping_shape["source_height"]))
                 window = sbs_stereo_window_metrics.measure_stereo_window_violation(
                     warp_mapping, warp_mapping_shape, perceptual_source,
@@ -2320,7 +2340,9 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
 
         out.update(exact_warp_mapping_metrics(
             warp_mapping, warp_mapping_shape, depth=depth, warp_mask=warp_mask,
-            binocular_geometry=binocular_geometry))
+            binocular_geometry=binocular_geometry, depth_semantics=depth_semantics,
+            prepared_structure_depth=structure_depth,
+            prepared_structure_semantics=structure_metric_semantics))
     return out, sbs, left
 
 
@@ -2373,7 +2395,8 @@ def _measure_sequence_spatial_job(job):
     """Load and measure one frame in a worker; return scalars only, never image arrays."""
     frame_id = job["frame_id"]
     try:
-        depth = load_depth(job["depth_path"]) if job["depth_path"] else None
+        depth = (load_depth(job["depth_path"], job.get("depth_shape"))
+                 if job["depth_path"] else None)
         src_rgb = load_rgb(job["source_path"]) if job["source_path"] else None
         src = rgb_luma(src_rgb) if src_rgb is not None else None
         gt_depth = load_depth(job["gt_depth_path"]) if job["gt_depth_path"] else None
@@ -2396,7 +2419,8 @@ def _measure_sequence_spatial_job(job):
             job["sbs_path"], depth, src, gt_depth, job["gt_kind"],
             gt_depth_valid=gt_valid, warp_mask=warp_mask,
             warp_mapping=warp_mapping, warp_mapping_shape=job["mapping_shape"],
-            src_rgb=src_rgb, hdr_scale=job["hdr_scale"], compact=job["compact"])
+            src_rgb=src_rgb, hdr_scale=job["hdr_scale"], compact=job["compact"],
+            depth_semantics=job.get("depth_semantics"))
         row["_frame_id"] = frame_id
         return row
     except Exception as exc:
@@ -2491,7 +2515,30 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
         missing_src = sorted(set(frame_ids) - set(src_by_id))
         missing_sbs = sorted(set(src_by_id) - set(frame_ids))
         raise ValueError(f"source/SBS frame-id mismatch: missing source={missing_src}, missing SBS={missing_sbs}")
-    depth_by_id = indexed_files(os.path.join(seq_dir, "depth_*.png"), "depth_")
+    depth_png_by_id = indexed_files(os.path.join(seq_dir, "depth_*.png"), "depth_")
+    depth_f32_by_id = indexed_files(os.path.join(seq_dir, "depth_*.f32"), "depth_")
+    if depth_png_by_id and depth_f32_by_id:
+        raise ValueError("ambiguous depth artifacts: both PNG and canonical float32 fields exist")
+    depth_by_id = depth_f32_by_id or depth_png_by_id
+    depth_shape_by_id = {}
+    depth_semantics_by_id = {}
+    if depth_f32_by_id:
+        contract_path = os.path.join(seq_dir, "contract.json")
+        try:
+            with open(contract_path, encoding="utf-8") as contract_file:
+                direct_contract = json.load(contract_file)
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"canonical float32 depth lacks a valid direct replay contract: {exc}") from exc
+        validated_direct = direct_geometry.validate_artifacts(
+            seq_dir, direct_contract, frame_ids)
+        if validated_direct["depth_files"] != depth_by_id:
+            raise ValueError("canonical float32 depth set differs from authenticated manifest")
+        depth_shape_by_id = validated_direct["shapes"]
+        depth_semantics_by_id = {
+            frame_id: validated_direct["geometry_descriptor"]["depth_artifact_semantics"]
+            for frame_id in frame_ids
+        }
     if depth_by_id and set(depth_by_id) != set(frame_ids):
         missing_depth = sorted(set(frame_ids) - set(depth_by_id))
         extra_depth = sorted(set(depth_by_id) - set(frame_ids))
@@ -2609,6 +2656,8 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
         "frame_id": frame_id,
         "sbs_path": sbs_by_id[frame_id],
         "depth_path": depth_by_id.get(frame_id),
+        "depth_shape": depth_shape_by_id.get(frame_id),
+        "depth_semantics": depth_semantics_by_id.get(frame_id),
         "source_path": src_by_id.get(frame_id),
         "gt_depth_path": gt_by_id.get(frame_id),
         "gt_valid_path": gt_valid_by_id.get(frame_id),
@@ -2626,16 +2675,20 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
             f"spatial metric frame order changed: expected={frame_ids}, got={measured_ids}")
     shot_state_summary = {}
     if shot_state_contract:
-        for row in rows:
-            row["shot_state_contract_support"] = 0.0
-            if shot_state_contract.get("kind") == "exposure-only":
-                row["exposure_shot_state_contract_support"] = 0.0
-            if shot_state_contract.get("kind") == "latched-motion-hard-cut":
-                row["latched_motion_contract_support"] = 0.0
         trace_path = os.path.join(seq_dir, "subject_state.json")
         trace = load_subject_state_trace(trace_path)
-        shot_state_summary = apply_shot_state_contract(
-            rows, frame_ids, trace, shot_state_contract)
+        # Native coordinate-v2 replay exports only authenticated pulse/generation compatibility
+        # words. Do not manufacture legacy subject/anchor/adaptive-pop evidence from its zeroed
+        # placeholder fields; the sequence wrapper scores V2 cut/state evidence separately.
+        if subject_state_trace_schema(trace_path) == SUBJECT_STATE_SCHEMA:
+            for row in rows:
+                row["shot_state_contract_support"] = 0.0
+                if shot_state_contract.get("kind") == "exposure-only":
+                    row["exposure_shot_state_contract_support"] = 0.0
+                if shot_state_contract.get("kind") == "latched-motion-hard-cut":
+                    row["latched_motion_contract_support"] = 0.0
+            shot_state_summary = apply_shot_state_contract(
+                rows, frame_ids, trace, shot_state_contract)
 
     static_jitters = []
     flow_temporals, depth_gt_lags = [], []
@@ -2657,7 +2710,7 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
             # Static and canonical flow-temporal scoring do not consume depth. Decode it in this
             # second pass only when authenticated GT temporal metrics can use it; spatial scoring
             # already measured depth for every frame above.
-            depth = (load_depth(depth_by_id[frame_id])
+            depth = (load_depth(depth_by_id[frame_id], depth_shape_by_id.get(frame_id))
                      if frame_id in depth_by_id and gt_by_id else None)
             src = (rgb_luma(load_rgb(src_by_id[frame_id]))
                    if frame_id in src_by_id else None)
@@ -3105,6 +3158,12 @@ def aggregate(rows):
                            sum(vals) if k in SUM_AGG else np.mean(vals))
     agg["_n"] = len(rows)
     agg["_models"] = sorted({r.get("_model", "") for r in rows})
+    depth_metric_semantics = sorted({
+        r["_depth_structure_metric_semantics"] for r in rows
+        if "_depth_structure_metric_semantics" in r
+    })
+    if depth_metric_semantics:
+        agg["_depth_structure_metric_semantics"] = depth_metric_semantics
     return agg
 
 

@@ -64,6 +64,8 @@ namespace config {
       std::string depth_model_url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx";  ///< URL to download the depth model ONNX from if <depth_model>.onnx is absent. Point this (and depth_model) elsewhere to use a different model.
       int max_encode_width = 8192;  ///< Configured maximum packed Host SBS width. The effective cap is the lower of this value and the selected codec's NVENC capability (RTX 5080: H.264 4096, HEVC/AV1 8192); wider requests are aspect-preservingly scaled.
       bool cuda_graph = true;  ///< Capture/replay the TensorRT enqueue when mapped D3D buffer addresses remain stable. Falls back to ordinary enqueue when unsupported.
+      bool parallax_v2_shadow = false;  ///< Config-file-only, default-off GPU shadow of the unclipped raw-coordinate/parallax-v2 mapping. It never selects rendered output.
+      bool parallax_v2_render = false;  ///< Config-file-only, default-off live Host-SBS renderer cutover. Enabling it also activates the authenticated V2 producer; failures latch the stream to flat identity, never legacy geometry.
     };
 
     sbs_t sbs;

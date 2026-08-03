@@ -2461,7 +2461,7 @@ with open(out_html, "w", encoding="utf-8") as f:
 decision_path = os.path.join(os.path.dirname(os.path.abspath(out_html)), "decision.json")
 with open(decision_path, "w", encoding="utf-8") as f:
     json.dump({
-        "schema": 3,
+        "schema": 4,
         "control": CTRL_NAME,
         "treatment": TREAT_NAME,
         "eval_schema": TREAT.get("meta", {}).get("eval_schema"),
@@ -2474,6 +2474,20 @@ with open(decision_path, "w", encoding="utf-8") as f:
         "treatment_engine_sha256": TREAT.get("meta", {}).get("engine_sha256"),
         "control_onnx_sha256": CTRL.get("meta", {}).get("onnx_sha256"),
         "treatment_onnx_sha256": TREAT.get("meta", {}).get("onnx_sha256"),
+        "control_model": CTRL.get("meta", {}).get("model"),
+        "treatment_model": TREAT.get("meta", {}).get("model"),
+        "control_depth_model_url": CTRL.get("meta", {}).get("depth_model_url"),
+        "treatment_depth_model_url": TREAT.get("meta", {}).get("depth_model_url"),
+        "control_preprocess_profile": CTRL.get("meta", {}).get("preprocess_profile"),
+        "treatment_preprocess_profile": TREAT.get("meta", {}).get("preprocess_profile"),
+        "control_preprocess_source_closure_sha256":
+            CTRL.get("meta", {}).get("preprocess_source_closure_sha256"),
+        "treatment_preprocess_source_closure_sha256":
+            TREAT.get("meta", {}).get("preprocess_source_closure_sha256"),
+        "control_depth_coordinate_v2_calibration_id":
+            CTRL.get("meta", {}).get("depth_coordinate_v2_calibration_id"),
+        "treatment_depth_coordinate_v2_calibration_id":
+            TREAT.get("meta", {}).get("depth_coordinate_v2_calibration_id"),
         "report_sha256": REPORT_SHA,
         "clips": CLIPS,
         "decision_clips": DECISION_CLIPS,

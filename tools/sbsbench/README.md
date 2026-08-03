@@ -17,19 +17,29 @@ images shown on the headset. This is the visual half of the host benchmark; see
      ImageNet-normalized NCHW tensor and its inverse-normalized post-tonemap preview.
    - `raw_depth.f32`, `raw_depth.png`, `raw_depth_heat.png`, `raw_shape.json`: exact model
      output plus finite-P2/P98 previews.
-   - `depth.f32` / `depth.png` / `depth_heat.png` / `depth_shape.json`: normalized and
-     temporally filtered depth.
+   - `depth.f32` / `depth.png` / `depth_heat.png` / `depth_shape.json`: legacy normalized and
+     temporally filtered depth; intentionally absent from a selected V2 package.
    - `warp_depth.f32` / `warp_depth.png` / `warp_depth_heat.png` /
-     `warp_depth_shape.json`: the actual depth sampled by the SBS reprojection shader; the
-     manifest says whether the 3x3 prefilter was applied.
-   - `adaptive_state.json`: the complete generated-schema adaptive-pop, zero-plane, cut, and
-     depth-health state, including effective normalization bounds.
+     `warp_depth_shape.json`: the actual scalar field sampled by the SBS reprojection shader. For
+     selected V2 this is the final near-preserving anisotropic 2D majorant; for legacy it is the
+     effective depth and the manifest says whether the 3x3 prefilter was applied.
+   - `adaptive_state.json`: the complete legacy adaptive-pop, zero-plane, cut, and depth-health
+     state, including effective normalization bounds. It has no authority in selected V2.
+   - `shadow_candidate_parallax.f32`, `shadow_vertical_majorant.f32`,
+     `shadow_coordinate.f32`, `shadow_final_parallax.f32`, and previews: V2's immutable pre-limiter
+     candidate, exact column-wise shear-2 intermediate, canonical coordinate diagnostic, and final
+     live position field respectively. Dump manifest schema 7 distinguishes the intermediate from
+     renderer authority.
    - `warp_map.f32`, `warp_map_shape.json`, `warp_displacement_heat.png`, `warp_mask.png`: exact
-     inverse-warp source coordinates, derived eye-pixel displacement, and pre-fill disocclusion.
+     inverse-warp source coordinates, derived eye-pixel displacement, and renderer-specific mask.
+     A V2 map is the 12-step contractive inverse. Its mask marks only inverse samples beyond the
+     finite source boundary that live rendering clamps to the nearest edge column; V2 does not
+     select internal visibility owners or synthesize internal fill. `warp_map_shape.json` schema 2
+     records this renderer-specific validity contract.
    - `sbs.png`, `dump_manifest.json`, `meta.txt`: the packed result, effective profile/config,
      texture geometry/formats, artifact contracts, and backwards-compatible summary.
 
-   The mapping/coverage files are explicitly marked unavailable in the manifest only if their
+   The mapping/mask files are explicitly marked unavailable in the manifest only if their
    dump-only shaders or diagnostic resources could not be created. No partial directory is
    published as a completed dump.
 2. Score a set and save a baseline **before** your change:
@@ -43,6 +53,136 @@ images shown on the headset. This is the visual half of the host benchmark; see
    → prints per-metric deltas (`exact_visible_pop_spread_pct 2.4 -> 2.6  +0.2 (+8%)`).
 
 Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
+
+## Mapping-v2 replay provenance
+
+`replay_depth_mapping_v2.py` distinguishes two claims that must not be conflated:
+
+- **Exact dump geometry** means the replay hashes and consumes the captured `raw_depth.f32` bytes,
+  publishes canonical-coordinate and immutable-candidate diagnostics separately from the final
+  vertical shear-2 and final anisotropic 2D majorants, and authenticates the rendered final field
+  through the direct-geometry harness contract.
+- **Authoritative raw-model provenance** additionally requires capture-time
+  `dump_manifest.json.raw_model_provenance` to bind the effective model name and URL, the ONNX
+  SHA-256, preprocessing profile, exact preprocessing shader/source closure, exact model-input
+  tensor/shape hashes, and the SHA-256 of that exact `raw_depth.f32`. A model name or URL alone is
+  descriptive; it cannot prove which ONNX or preprocessing bytes produced the tensor.
+
+Legacy Dump 3D packages created before raw-model attestation do not contain that binding. Replay therefore fails closed
+by default before creating its output directory. They can still be used for an explicitly
+unverified geometry experiment:
+
+```powershell
+python tools/sbsbench/replay_depth_mapping_v2.py `
+  --dump E:/ApolloDev/sbs_dump/dump_... `
+  --out E:/ApolloDev/mapping-v2/replay `
+  --allow-unverified-model-provenance `
+  --experimental-raw-coordinate-scale 0.5
+```
+
+The schema-6 report records `raw_model_provenance.status = "unverified"`, the reason, and the exact
+raw artifact hash. Legacy captures do **not** silently inherit the DAV2 Small `0.5` fixed
+raw-coordinate scale. They require both the unverified-provenance opt-in and the explicitly
+non-authoritative `--experimental-raw-coordinate-scale VALUE`; the resulting
+`mapping_calibration.status` is `experiment-unverified`.
+`--harness-model` only selects the harness' mandatory legacy estimator,
+whose geometry is replaced by the direct fields; it has `geometry_role = none` and
+`provenance_role = none`. The former ambiguous replay `--model` and `--raw-scale-prior` options
+are intentionally rejected.
+
+The two 2026-08-02 hair dumps use depth-coordinate contract schema 7. They remain historical input
+witnesses for explicitly unverified replay; their manifests and SBS output are not evidence of the
+schema-12 producer or final live renderer.
+
+A capture is considered authoritative only with this exact additional manifest record
+(digest values abbreviated here):
+
+```json
+{
+  "raw_model_provenance": {
+    "schema": 3,
+    "binding": "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3",
+    "depth_model": "depth_anything_v2_fp16",
+    "depth_model_url": "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",
+    "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
+    "preprocess_profile": "apollo-dav2-area-hdr-srgb-imagenet-v1",
+    "preprocess_source_closure_sha256": "5e7c210aaf090645cb12d703e2484c201db840ad541f59095a2eabbfcea2eb4a",
+    "raw_depth_sha256": "<SHA-256 of raw_depth.f32>",
+    "model_input_sha256": "<SHA-256 of model_input.f32>",
+    "model_input_shape_sha256": "<SHA-256 of model_input_shape.json>"
+  }
+}
+```
+
+Malformed, contradictory, or raw-hash-mismatched proof always aborts; the unverified override does
+not bypass corrupt provenance. “Authoritative” here authenticates the dump's model-to-raw binding,
+not HDR preview fidelity, perceptual quality, or metric ground truth.
+
+The experimental calibration identity and its `0.5` fixed coordinate scale live in the generated
+depth-coordinate-v2 contract, not in the replay script. Initially it covers only the exact
+calibrated Small ONNX and 770x434 input shape. A different but syntactically valid SHA-256, URL,
+profile, tensor shape, layout, normalization, or bound artifact hash always aborts; the legacy
+override does not downgrade a bad proof to unverified. This default-off calibration does not own
+or modify the production model registry.
+
+## Mapping-v2 exact whole-clip replay
+
+`replay_depth_mapping_v2_sequence.py` uploads each authenticated raw field and cut generation to
+one persistent GPU state, dispatches the same seven experimental compute shaders used by default-off
+live Host SBS V2, and renders the GPU-produced final anisotropic 2D majorant through Apollo's exact
+D3D SBS harness. Canonical coordinate, pre-limiter candidate, and vertical shear-2 intermediate
+remain separately attributable comparison fields:
+
+```powershell
+python tools/sbsbench/replay_depth_mapping_v2_sequence.py `
+  --raw-seq cmake-build-relwithdebinfo/sbs_eval/<run>/<clip> `
+  --frames tools/sbsbench/clips/<clip> `
+  --out E:/ApolloDev/depth-coordinate-v2-exact/<clip>
+```
+
+The wrapper requires consecutive frame IDs and complete, identical raw/SBS/depth/warp-map/
+subject-state identity sets. It binds the evaluator run's model URL, ONNX hash, preprocessing
+profile, engine hash, per-clip contract, exact raw shape, ordered raw-field hashes, and separate
+cut-pulse/generation evidence. The native harness rejects every mapping constant that differs from
+the generated experimental contract; only the explicit user pop value may vary. The emitted state
+trace records frame validity, retained scene-camera validity, calibration revision,
+confirmed-cut attribution, the exact frame-local container,
+effective gain, and input/rendered source identity. Every original color is preserved under
+`input_frames/` and independently rehashed under the rendered `frames/` timeline.
+An unusable field must render its current color with flat geometry. Without a confirmed cut, it
+retains only the scene camera so the next usable field resumes the same coordinate; an unusable
+confirmed-cut frame clears that camera, and the next usable field reacquires it. No old per-pixel
+depth is paired with current color, and there is no timed/frame-counted atomic hold.
+`depth_coordinate_v2_sequence_contract.json` hashes those outputs and the harness direct-geometry
+manifest, then independently remeasures the 4% source-U container, the
+`q >= vertical >= candidate` no-lowering chain, the `2.0/depth_width` adjacent-row bound, and the
+`0.5/depth_width` adjacent-column bound before scoring. Final-field replay uses the same 12-step
+contractive inverse as live
+V2. It has one root, no canonical visibility decision, no forward-owner pass, and no synthetic
+internal fill; its mask reports only finite-source boundary extrapolation.
+
+NumPy recomputes the coordinate only after native execution and is comparison-only: float32
+tolerances must pass, but NumPy fields never feed the renderer or the authoritative state trace.
+
+Per-frame mean/std/extrema, candidate-center drift, predicted current-mean zero translation,
+effective gain, container scale, and limiter burden are recorded as explicitly non-controlling
+diagnostics. Standard deviation is collapse evidence only; it never changes the authenticated
+fixed coordinate scale. These diagnostics audit whether a future adaptive feature is necessary
+without turning the audit itself into another adaptive loop.
+
+The native replay bypasses the legacy estimator. For scorer compatibility it republishes only the
+authenticated cut pulse/generation in a legacy-shaped state buffer; that buffer is not a subject,
+zero-plane, or adaptive-pop result. Compatibility values are retained only in
+`legacy_state_diagnostic_scorecard.json`. The authoritative renderer-quality scorecard excludes all
+`shot_state_*` metrics under a hashed scope contract; v2 controller validation comes exclusively
+from `depth_coordinate_v2_state_trace.json`. Score provenance binds the full canonical automatic-
+metric source list and aggregate hash owned by `run_eval`, rather than only the top-level scorer
+dispatcher.
+
+The per-clip harness contract identifies model name and depth schedule but does not duplicate the
+ONNX hash or raw input dimensions. This wrapper names and hashes run-level `results.json` as the
+model authority and per-clip `raw_shape.json` as the shape authority; it does not claim the fields
+are present in `contract.json`.
 
 ## Production conversion versus the developer whole-clip wrapper
 
@@ -314,7 +454,7 @@ Percent/normalized outputs are preferred; raw pixel diagnostics are never compar
 resolutions. Harness depth is 16-bit so
 sub-1/255 changes remain measurable.
 
-**Eval schema 34 / harness contract 17:** `run_eval.py` pins the profile, model, and zero-plane
+**Eval schema 36 / harness contract 18:** `run_eval.py` pins the profile, model, and zero-plane
 mode explicitly, records the exact Sunshine executable, runtime HLSL tree, engine, and ONNX
 hashes, and has no alternate warp selector. A normal report requires all four to match;
 `--report-allow-executable-diff` explicitly permits a code/shader A/B, while
@@ -361,13 +501,35 @@ gates. The two structureless-history probes require no pulse for a one-update bl
 then require a pulse on the second consecutive low-structure update and another on the different
 supported scene return. Their exact lossless A/flat/A and A/flat/B construction is authenticated
 before scoring. No readback or CPU/GPU synchronization was added to the production capture loop.
+Schema 35 additionally records the exact runtime RGB-to-model-input shader closure. Schema 36
+binds each clip's exact schema-18 producer identity, raw tensor shape, and ordered raw-file hashes;
+unsupported model contracts or shapes abstain per clip. A calibrated
+profile and V2 calibration ID are admitted only when model name/URL/ONNX, source closure, and input
+shape all match the generated schema-12 contract; otherwise the run records an explicit null
+calibration instead of silently inheriting the DAV2 scale.
+Schema 12 also binds the ordered seven-shader V2 implementation by its immutable
+source/spec/include closure. The GPU tag hashes the semantic manifest with only that
+self-referential closure digest
+replaced by a fixed sentinel; generated C++ and evidence retain the full canonical-manifest and
+independent shader-closure digests. Live state/frame-stat dumps use serialization schemas 6/2 and
+reject a missing or mismatched shader identity. State schema 6 also authenticates the full
+12-word scene state: shot-latched near-tail coverage/count, its effective near-log tau, the
+required-zero reserved word, and the probe/coverage/dense-tau constants used to derive it.
+The acquisition field selects `tau_near = lerp(2, 1, smoothstep(0.15, 0.22,
+fraction(u > 1)))`; ordinary and unusable no-cut frames retain it, while a confirmed cut replaces
+it with the new camera or clears it when depth is unusable. Rendering uses that latched tau, but
+the frame-local 4% hard container always evaluates its extrema with base `tau_near = 2`, so the
+adaptation cannot relax the original representation envelope.
+The committed schema-34 baselines are intentionally stale under this new evaluator contract and
+must be deliberately regenerated before the default baseline-gated command can pass. Use
+comparison-only runs while reviewing the new coordinate evidence; do not relabel old baselines.
 Output folders
 are cleared before reuse. `--output-every N` reduces saved artifacts while still processing every
 input frame, so sampling cannot change temporal state.
 
 There are deliberately **no qualified model labels in the current threshold contract**. Exact
 comfort, clamp, topology, binocular-conflict, and mapping-stretch candidates are
-marked `experimental` pending controlled-corruption and headset calibration, so schema-34 frames abstain with
+marked `experimental` pending controlled-corruption and headset calibration, so schema-36 frames abstain with
 `no_qualified_training_labels`. Exact mapped-source residual, color, coverage and integrity
 remain active report/run-gate evidence but have `scope: "conformance"` and no training `label`:
 they verify that the renderer reproduced the coordinate selected by its own warp, which cannot
@@ -524,8 +686,9 @@ with one update per source frame.
 
 Every A/B HTML report now writes a sibling `decision.json`. Both are generated from the same
 already-unwrapped per-clip aggregate dictionaries, so automation should consume that sidecar rather
-than reimplementing decision parsing. Sidecar schema 3 includes `metric_sha256`,
-`report_sha256`, and both inputs' executable/shader/engine/ONNX hashes, plus both canonical run
+than reimplementing decision parsing. Sidecar schema 4 includes `metric_sha256`,
+`report_sha256`, and both inputs' executable/shader/engine/ONNX hashes plus the exact model URL,
+preprocess profile/source-closure hash, and V2 calibration ID, along with both canonical run
 gates. Missing evidence and performance or
 baseline failures cannot be relabelled as a candidate by the report's metric-only A/B view. To
 check whether a depth processor compresses or clips depth:

@@ -7,6 +7,7 @@
 #include <csignal>
 #include <filesystem>
 #include <iomanip>
+#include <initializer_list>
 #include <iterator>
 #include <mutex>
 #include <set>
@@ -421,6 +422,141 @@ namespace platf {
     });
     return to_utf8(sid_text);
   }
+
+  namespace {
+    /**
+     * Temporarily enable privileges on the process token and restore their exact prior state.
+     *
+     * Process creation must not rely on Windows implicitly selecting or enabling privileges. In
+     * particular, an impersonating thread has a different effective token from the process token
+     * whose privileges authorize the cross-token launch. Keep that distinction explicit and fail
+     * closed when a requested privilege is not present in the process token.
+     */
+    class scoped_process_privileges_t {
+    public:
+      explicit scoped_process_privileges_t(
+        std::initializer_list<const char *> privilege_names
+      ) {
+        // Reserve before changing token state so allocation failure cannot strand a privilege in
+        // its enabled state while this object's constructor is still incomplete.
+        previous_states_.reserve(privilege_names.size());
+        if (!OpenProcessToken(
+              GetCurrentProcess(),
+              TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+              &process_token_
+            )) {
+          error_ = GetLastError();
+          return;
+        }
+
+        for (const auto privilege_name : privilege_names) {
+          LUID privilege_luid {};
+          if (!LookupPrivilegeValueA(nullptr, privilege_name, &privilege_luid)) {
+            error_ = GetLastError();
+            return;
+          }
+
+          TOKEN_PRIVILEGES requested {};
+          requested.PrivilegeCount = 1;
+          requested.Privileges[0].Luid = privilege_luid;
+          requested.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+          TOKEN_PRIVILEGES previous {};
+          DWORD previous_size = sizeof(previous);
+          SetLastError(ERROR_SUCCESS);
+          if (!AdjustTokenPrivileges(
+                process_token_,
+                FALSE,
+                &requested,
+                sizeof(previous),
+                &previous,
+                &previous_size
+              )) {
+            error_ = GetLastError();
+            return;
+          }
+          const auto adjust_error = GetLastError();
+          if (adjust_error == ERROR_NOT_ALL_ASSIGNED) {
+            error_ = adjust_error;
+            return;
+          }
+          if (adjust_error != ERROR_SUCCESS) {
+            error_ = adjust_error;
+            return;
+          }
+          if (previous.PrivilegeCount != 0) {
+            previous_states_.push_back(previous);
+          }
+
+          PRIVILEGE_SET required {};
+          required.PrivilegeCount = 1;
+          required.Control = PRIVILEGE_SET_ALL_NECESSARY;
+          required.Privilege[0].Luid = privilege_luid;
+          required.Privilege[0].Attributes = SE_PRIVILEGE_ENABLED;
+          BOOL enabled = FALSE;
+          if (!PrivilegeCheck(process_token_, &required, &enabled)) {
+            error_ = GetLastError();
+            return;
+          }
+          if (!enabled) {
+            error_ = ERROR_PRIVILEGE_NOT_HELD;
+            return;
+          }
+        }
+      }
+
+      scoped_process_privileges_t(const scoped_process_privileges_t &) = delete;
+      scoped_process_privileges_t &operator=(const scoped_process_privileges_t &) = delete;
+
+      ~scoped_process_privileges_t() {
+        if (!process_token_) {
+          return;
+        }
+        for (auto state = previous_states_.rbegin(); state != previous_states_.rend(); ++state) {
+          if (!AdjustTokenPrivileges(
+                process_token_,
+                FALSE,
+                &*state,
+                0,
+                nullptr,
+                nullptr
+              )) {
+            BOOST_LOG(error) << "Failed to restore a process-token privilege after user launch: "sv
+                             << GetLastError();
+          }
+        }
+        CloseHandle(process_token_);
+      }
+
+      [[nodiscard]] explicit operator bool() const {
+        return error_ == ERROR_SUCCESS;
+      }
+
+      [[nodiscard]] DWORD win32_error() const {
+        return error_;
+      }
+
+    private:
+      HANDLE process_token_ = nullptr;
+      DWORD error_ = ERROR_SUCCESS;
+      std::vector<TOKEN_PRIVILEGES> previous_states_;
+    };
+
+    std::optional<DWORD> get_token_session_id(HANDLE token) {
+      DWORD session_id = 0xFFFFFFFF;
+      DWORD returned = 0;
+      if (!GetTokenInformation(
+            token,
+            TokenSessionId,
+            &session_id,
+            sizeof(session_id),
+            &returned
+          )) {
+        return std::nullopt;
+      }
+      return session_id;
+    }
+  }  // namespace
 
   /**
    * Capture the standard primary token of the active desktop shell for an elevated tray process.
@@ -1598,7 +1734,13 @@ namespace platf {
    * @param process_info A reference to a `PROCESS_INFORMATION` structure that contains information about the new process.
    * @return A `bp::child` object representing the new process, or an empty `bp::child` object if the launch failed.
    */
-  bp::child create_boost_child_from_results(bool process_launched, const std::string &cmd, std::error_code &ec, PROCESS_INFORMATION &process_info) {
+  bp::child create_boost_child_from_results(
+    bool process_launched,
+    const DWORD process_launch_error,
+    const std::string &cmd,
+    std::error_code &ec,
+    PROCESS_INFORMATION &process_info
+  ) {
     // Use RAII to ensure the process is closed when we're done with it, even if there was an error.
     auto close_process_handles = util::fail_guard([process_launched, process_info]() {
       if (process_launched) {
@@ -1618,9 +1760,14 @@ namespace platf {
       BOOST_LOG(info) << cmd << " running with PID "sv << child.id();
       return child;
     } else {
-      auto winerror = GetLastError();
+      const auto winerror = process_launch_error == ERROR_SUCCESS ?
+                              ERROR_GEN_FAILURE :
+                              process_launch_error;
       BOOST_LOG(error) << "Failed to launch process: "sv << winerror;
-      ec = std::make_error_code(std::errc::invalid_argument);
+      ec = std::error_code {
+        static_cast<int>(winerror),
+        std::system_category(),
+      };
       // We must NOT attach the failed process here, since this case can potentially be induced by ACL
       // manipulation (denying yourself execute permission) to cause an escalation of privilege.
       // So to protect ourselves against that, we'll return an empty child process instead.
@@ -1636,6 +1783,31 @@ namespace platf {
    */
   std::error_code impersonate_current_user(HANDLE user_token, std::function<void()> callback) {
     std::error_code ec;
+    HANDLE previous_thread_token = nullptr;
+    const bool had_previous_thread_token = OpenThreadToken(
+      GetCurrentThread(),
+      TOKEN_IMPERSONATE | TOKEN_QUERY,
+      TRUE,
+      &previous_thread_token
+    ) != FALSE;
+    const auto previous_token_error = had_previous_thread_token ?
+                                        ERROR_SUCCESS :
+                                        GetLastError();
+    if (!had_previous_thread_token && previous_token_error != ERROR_NO_TOKEN) {
+      const auto winerror = previous_token_error;
+      BOOST_LOG(error) << "Failed to preserve the current thread impersonation token: "sv
+                       << winerror;
+      return std::error_code {
+        static_cast<int>(winerror),
+        std::system_category(),
+      };
+    }
+    auto previous_thread_token_guard = util::fail_guard([&]() {
+      if (previous_thread_token) {
+        CloseHandle(previous_thread_token);
+      }
+    });
+
     // Impersonate the user when launching the process. This will ensure that appropriate access
     // checks are done against the user token, not our SYSTEM token. It will also allow network
     // shares and mapped network drives to be used as launch targets, since those credentials
@@ -1648,13 +1820,15 @@ namespace platf {
       return ec;
     }
 
-    // Always end impersonation, including when the callback throws. Continuing a host thread
-    // under the interactive user's token after an exception would corrupt every later access
-    // check performed by that thread.
-    auto revert_guard = util::fail_guard([]() {
-      if (!RevertToSelf()) {
+    // Restore the exact prior effective token, including when the callback throws. RevertToSelf()
+    // is not stack-safe: an inner impersonation would otherwise discard its caller's thread token.
+    auto revert_guard = util::fail_guard([&]() {
+      const bool restored = had_previous_thread_token ?
+                              SetThreadToken(nullptr, previous_thread_token) != FALSE :
+                              RevertToSelf() != FALSE;
+      if (!restored) {
         const auto winerror = GetLastError();
-        BOOST_LOG(fatal) << "Failed to revert to self after impersonation: "sv
+        BOOST_LOG(fatal) << "Failed to restore the prior thread token after impersonation: "sv
                          << winerror;
         DebugBreak();
       }
@@ -2252,6 +2426,7 @@ namespace platf {
     }
 
     BOOL ret = FALSE;
+    DWORD process_launch_error = ERROR_SUCCESS;
     if (launch_with_user_token) {
       // A service uses the active console user's token. An elevated tray process must
       // explicitly select its linked standard token instead of inheriting elevation.
@@ -2286,12 +2461,118 @@ namespace platf {
         return bp::child();
       }
 
-      // Open the process as the current user account, elevation is handled in the token itself.
-      ec = impersonate_current_user(user_token, [&]() {
-        std::wstring env_block = create_environment_block(cloned_env);
-        std::wstring wcmd = resolve_command_string(cmd, start_dir, user_token, creation_flags);
-        ret = CreateProcessAsUserW(user_token, nullptr, (LPWSTR) wcmd.c_str(), nullptr, nullptr, !!(startup_info.StartupInfo.dwFlags & STARTF_USESTDHANDLES), creation_flags, env_block.data(), start_dir.empty() ? nullptr : start_dir.c_str(), (LPSTARTUPINFOW) &startup_info, &process_info);
-      });
+      std::wstring env_block = create_environment_block(cloned_env);
+      std::wstring wcmd;
+      if (running_as_system) {
+        // CreateProcessAsUserW is the cross-session service path. Enable the privileges on the
+        // SYSTEM process token explicitly, while retaining target impersonation so executable,
+        // working-directory, association, and network-share access is evaluated as the user.
+        scoped_process_privileges_t process_privileges {
+          SE_INCREASE_QUOTA_NAME,
+          SE_ASSIGNPRIMARYTOKEN_NAME,
+        };
+        if (!process_privileges) {
+          const auto privilege_error = process_privileges.win32_error();
+          BOOST_LOG(error) << "Could not enable the SYSTEM process privileges required for a "
+                              "user launch: "sv
+                           << privilege_error;
+          ec = std::error_code {
+            static_cast<int>(privilege_error),
+            std::system_category(),
+          };
+        } else {
+          ec = impersonate_current_user(user_token, [&]() {
+            wcmd = resolve_command_string(cmd, start_dir, user_token, creation_flags);
+            ret = CreateProcessAsUserW(
+              user_token,
+              nullptr,
+              wcmd.data(),
+              nullptr,
+              nullptr,
+              !!(startup_info.StartupInfo.dwFlags & STARTF_USESTDHANDLES),
+              creation_flags,
+              env_block.data(),
+              start_dir.empty() ? nullptr : start_dir.c_str(),
+              reinterpret_cast<LPSTARTUPINFOW>(&startup_info),
+              &process_info
+            );
+            if (!ret) {
+              // Capture before impersonation cleanup or logging can overwrite it.
+              process_launch_error = GetLastError();
+            }
+          });
+        }
+      } else {
+        // CreateProcessWithTokenW launches in the caller's session. Verify that this elevated tray
+        // and its validated Explorer token are in the same active session before using it.
+        HANDLE process_token = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &process_token)) {
+          const auto token_error = GetLastError();
+          ec = std::error_code {
+            static_cast<int>(token_error),
+            std::system_category(),
+          };
+        } else {
+          auto process_token_close = util::fail_guard([&]() {
+            CloseHandle(process_token);
+          });
+          const auto process_session = get_token_session_id(process_token);
+          const auto user_session = get_token_session_id(user_token);
+          const auto active_session = WTSGetActiveConsoleSessionId();
+          if (
+            !process_session ||
+            !user_session ||
+            *process_session != *user_session ||
+            active_session == 0xFFFFFFFF ||
+            *process_session != active_session
+          ) {
+            BOOST_LOG(error) << "Refusing a standard-user launch because the elevated tray and "
+                                "Explorer tokens are not in the same active session."sv;
+            ec = std::make_error_code(std::errc::permission_denied);
+          }
+        }
+
+        if (!ec) {
+          scoped_process_privileges_t process_privileges {
+            SE_IMPERSONATE_NAME,
+          };
+          if (!process_privileges) {
+            const auto privilege_error = process_privileges.win32_error();
+            BOOST_LOG(error) << "Could not enable SeImpersonatePrivilege for a standard-user "
+                                "worker launch: "sv
+                             << privilege_error;
+            ec = std::error_code {
+              static_cast<int>(privilege_error),
+              std::system_category(),
+            };
+          } else {
+            // Resolve all per-user command state under the target token. The actual API call must
+            // occur after restoring the elevated effective token: CreateProcessWithTokenW checks
+            // SeImpersonatePrivilege on the caller's effective token and would otherwise see the
+            // standard user's unprivileged thread token.
+            ec = impersonate_current_user(user_token, [&]() {
+              wcmd = resolve_command_string(cmd, start_dir, user_token, creation_flags);
+            });
+            if (!ec) {
+              ret = CreateProcessWithTokenW(
+                user_token,
+                0,
+                nullptr,
+                wcmd.data(),
+                creation_flags,
+                env_block.data(),
+                start_dir.empty() ? nullptr : start_dir.c_str(),
+                reinterpret_cast<LPSTARTUPINFOW>(&startup_info),
+                &process_info
+              );
+              if (!ret) {
+                // Capture before privilege restoration or logging can overwrite it.
+                process_launch_error = GetLastError();
+              }
+            }
+          }
+        }
+      }
     }
     // Otherwise, launch the process using CreateProcessW()
     // This will inherit the elevation of whatever the user launched Sunshine with.
@@ -2324,11 +2605,21 @@ namespace platf {
 
       std::wstring env_block = create_environment_block(cloned_env);
       std::wstring wcmd = resolve_command_string(cmd, start_dir, nullptr, creation_flags);
-      ret = CreateProcessW(nullptr, (LPWSTR) wcmd.c_str(), nullptr, nullptr, !!(startup_info.StartupInfo.dwFlags & STARTF_USESTDHANDLES), creation_flags, env_block.data(), start_dir.empty() ? nullptr : start_dir.c_str(), (LPSTARTUPINFOW) &startup_info, &process_info);
+      ret = CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, !!(startup_info.StartupInfo.dwFlags & STARTF_USESTDHANDLES), creation_flags, env_block.data(), start_dir.empty() ? nullptr : start_dir.c_str(), reinterpret_cast<LPSTARTUPINFOW>(&startup_info), &process_info);
+      if (!ret) {
+        // Capture before logging, handle cleanup, or another Win32 call can overwrite it.
+        process_launch_error = GetLastError();
+      }
     }
 
     // Use the results of the launch to create a bp::child object
-    return create_boost_child_from_results(ret, cmd, ec, process_info);
+    return create_boost_child_from_results(
+      ret,
+      process_launch_error,
+      cmd,
+      ec,
+      process_info
+    );
   }
   }  // namespace
 

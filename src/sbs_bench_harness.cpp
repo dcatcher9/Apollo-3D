@@ -41,9 +41,12 @@
 
   // local includes
   #include "config.h"
+  #include "crypto.h"
+  #include "depth_coordinate_v2.h"
   #include "generated/sbs_adaptive_state_contract.h"
   #include "logging.h"
   #include "sbs_perf.h"
+  #include "sbs_bench_depth_coordinate_v2.h"
   #include "video.h"
   #include "video_depth_estimator.h"
 
@@ -59,6 +62,16 @@ namespace sbs_bench {
   namespace fs = std::filesystem;
 
   namespace {
+
+    constexpr float direct_parallax_source_u_limit =
+      models::depth_coordinate_v2::direct_container_limit;
+    constexpr float direct_parallax_max_horizontal_slope =
+      models::depth_coordinate_v2::max_horizontal_slope;
+    constexpr float direct_parallax_slope_tolerance = 2.0e-5f;
+    constexpr unsigned direct_geometry_contract_schema = 21u;
+    constexpr unsigned direct_geometry_manifest_schema = 4u;
+    constexpr std::string_view direct_geometry_warp_input =
+      "external-final-parallax-with-diagnostic-order-v4";
 
     struct rgba_image {
       UINT w = 0, h = 0;
@@ -113,6 +126,31 @@ namespace sbs_bench {
       }
       escaped.push_back('"');
       return escaped;
+    }
+
+    std::string sha256_hex(std::string_view bytes) {
+      static constexpr char hex[] = "0123456789abcdef";
+      const auto digest = crypto::hash(bytes);
+      std::string encoded;
+      encoded.reserve(digest.size() * 2u);
+      for (const std::uint8_t byte : digest) {
+        encoded.push_back(hex[byte >> 4u]);
+        encoded.push_back(hex[byte & 0x0fu]);
+      }
+      return encoded;
+    }
+
+    std::string sha256_file_hex(const fs::path &path) {
+      std::ifstream stream(path, std::ios::binary);
+      if (!stream) {
+        return {};
+      }
+      std::ostringstream bytes;
+      bytes << stream.rdbuf();
+      if (!stream.good() && !stream.eof()) {
+        return {};
+      }
+      return sha256_hex(bytes.str());
     }
 
     uint16_t float_to_half(float value) {
@@ -1100,6 +1138,8 @@ namespace sbs_bench {
     struct subject_state_record {
       std::string frame_id;
       std::array<float, 12> values {};
+      bool hard_cut_pulse = false;
+      std::uint32_t hard_cut_count = 0;
     };
 
     // Benchmark-only state trace. This readback is deliberately confined to the synchronous
@@ -1107,7 +1147,9 @@ namespace sbs_bench {
     bool read_subject_state(ID3D11Device *dev, ID3D11DeviceContext *ctx,
                             ID3D11ShaderResourceView *srv,
                             ComPtr<ID3D11Buffer> &stage_cache,
-                            std::array<float, 12> &values) {
+                            std::array<float, 12> &values,
+                            bool &hard_cut_pulse,
+                            std::uint32_t &hard_cut_count) {
       if (!srv) {
         return false;
       }
@@ -1119,7 +1161,7 @@ namespace sbs_bench {
       }
       D3D11_BUFFER_DESC desc {};
       buffer->GetDesc(&desc);
-      if (desc.ByteWidth < values.size() * sizeof(float) ||
+      if (desc.ByteWidth < sbs_adaptive_state::word_count * sizeof(std::uint32_t) ||
           desc.StructureByteStride != 4 * sizeof(float)) {
         return false;
       }
@@ -1145,11 +1187,22 @@ namespace sbs_bench {
       if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
         return false;
       }
-      std::memcpy(values.data(), mapped.pData, values.size() * sizeof(float));
+      const auto *words = static_cast<const std::uint32_t *>(mapped.pData);
+      std::memcpy(values.data(), words, values.size() * sizeof(float));
+      const float pulse = std::bit_cast<float>(
+        words[sbs_adaptive_state::index(sbs_adaptive_state::word_e::hard_cut_pulse)]
+      );
+      hard_cut_count =
+        words[sbs_adaptive_state::index(sbs_adaptive_state::word_e::hard_cut_count)];
       ctx->Unmap(stage_cache.Get(), 0);
-      return std::all_of(values.begin(), values.end(), [](float value) {
-        return std::isfinite(value);
-      });
+      if (!std::isfinite(pulse) || (pulse != 0.0f && pulse != 1.0f) ||
+          !std::all_of(values.begin(), values.end(), [](float value) {
+            return std::isfinite(value);
+          })) {
+        return false;
+      }
+      hard_cut_pulse = pulse > 0.5f;
+      return true;
     }
 
     using adaptive_state_words_t = sbs_adaptive_state::words_t;
@@ -1467,13 +1520,20 @@ namespace sbs_bench {
       });
     }
 
-    bool create_cached_depth_srv(ID3D11Device *dev,
+    bool create_cached_float_srv(ID3D11Device *dev,
                                  const fs::path &path,
                                  UINT width,
                                  UINT height,
                                  ComPtr<ID3D11Texture2D> &texture,
-                                 ComPtr<ID3D11ShaderResourceView> &srv) {
+                                 ComPtr<ID3D11ShaderResourceView> &srv,
+                                 bool require_unit_range = true,
+                                 float *field_minimum = nullptr,
+                                 float *field_maximum = nullptr,
+                                 std::string *content_sha256 = nullptr,
+                                 std::vector<float> *uploaded_values = nullptr) {
+      static_assert(std::endian::native == std::endian::little);
       if (!width || !height ||
+          width > std::numeric_limits<UINT>::max() / sizeof(float) ||
           static_cast<std::uint64_t>(width) * height >
             std::numeric_limits<std::size_t>::max() / sizeof(float)) {
         return false;
@@ -1484,10 +1544,27 @@ namespace sbs_bench {
             values.data(),
             values.size() * sizeof(float)
           ) ||
-          !std::all_of(values.begin(), values.end(), [](float value) {
-            return std::isfinite(value) && value >= 0.0f && value <= 1.0f;
+          !std::all_of(values.begin(), values.end(), [require_unit_range](float value) {
+            return std::isfinite(value) &&
+                   (!require_unit_range || (value >= 0.0f && value <= 1.0f));
           })) {
         return false;
+      }
+      const auto [minimum_it, maximum_it] = std::minmax_element(values.begin(), values.end());
+      if (field_minimum) {
+        *field_minimum = *minimum_it;
+      }
+      if (field_maximum) {
+        *field_maximum = *maximum_it;
+      }
+      if (content_sha256) {
+        *content_sha256 = sha256_hex(std::string_view {
+          reinterpret_cast<const char *>(values.data()),
+          values.size() * sizeof(float)
+        });
+      }
+      if (uploaded_values) {
+        *uploaded_values = values;
       }
       D3D11_TEXTURE2D_DESC desc {};
       desc.Width = width;
@@ -1500,11 +1577,24 @@ namespace sbs_bench {
       desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
       D3D11_SUBRESOURCE_DATA initial = {
         values.data(),
-        width * sizeof(float),
+        static_cast<UINT>(width * sizeof(float)),
         0
       };
       return SUCCEEDED(dev->CreateTexture2D(&desc, &initial, &texture)) &&
              SUCCEEDED(dev->CreateShaderResourceView(texture.Get(), nullptr, &srv));
+    }
+
+    bool publish_float_field(const fs::path &path, const std::vector<float> &values) {
+      if (values.empty()) {
+        return false;
+      }
+      return publish_file_atomically(path, [&](const fs::path &temporary_path) {
+        return write_bytes_durably(
+          temporary_path,
+          values.data(),
+          values.size() * sizeof(float)
+        );
+      });
     }
 
     bool create_cached_state_srv(ID3D11Device *dev,
@@ -1986,8 +2076,11 @@ namespace sbs_bench {
       });
     }
 
-    bool write_subject_state_trace(const fs::path &path,
-                                   const std::vector<subject_state_record> &records) {
+    bool write_subject_state_trace(
+      const fs::path &path,
+      const std::vector<subject_state_record> &records,
+      const bool authenticated_cut_compatibility
+    ) {
       std::ofstream out(path);
       if (!out) {
         return false;
@@ -1995,15 +2088,28 @@ namespace sbs_bench {
       out.imbue(std::locale::classic());
       out << std::setprecision(std::numeric_limits<float>::max_digits10);
       out << "{\n"
-          << "  \"schema\": 1,\n"
-          << "  \"source\": \"depth_subject_resolve_cs.SubjectState\",\n"
-          << "  \"capture\": \"every-source-frame-after-estimator-update\",\n"
+          << "  \"schema\": " << (authenticated_cut_compatibility ? 3 : 2) << ",\n"
+          << "  \"source\": "
+          << json_string(
+               authenticated_cut_compatibility ?
+                 "depth-coordinate-v2-gpu-input.LegacyState-cut-compatibility" :
+                 "depth_subject_resolve_cs.SubjectState"
+             )
+          << ",\n"
+          << "  \"capture\": "
+          << json_string(
+               authenticated_cut_compatibility ?
+                 "every-source-frame-from-authenticated-cut-input" :
+                 "every-source-frame-after-estimator-update"
+             )
+          << ",\n"
           << "  \"fields\": [\"subject_recenter_delta\", \"scene_age\", "
              "\"subject_depth_ema\", \"initialized\", \"stretch_lo\", "
              "\"stretch_inv_range\", \"depth_change_baseline_ema\", "
              "\"adaptive_pop_ratio\", \"zero_anchor_shift_px\", "
              "\"zero_anchor_valid\", \"cut_flags\", "
-             "\"model_input_history_valid\"],\n"
+             "\"model_input_history_valid\", \"hard_cut_pulse\", "
+             "\"hard_cut_count\"],\n"
           << "  \"frames\": [\n";
       for (size_t index = 0; index < records.size(); ++index) {
         const auto &record = records[index];
@@ -2014,7 +2120,9 @@ namespace sbs_bench {
           }
           out << record.values[value_index];
         }
-        out << "]}" << (index + 1 == records.size() ? "\n" : ",\n");
+        out << ", " << (record.hard_cut_pulse ? 1 : 0)
+            << ", " << record.hard_cut_count << "]}"
+            << (index + 1 == records.size() ? "\n" : ",\n");
       }
       out << "  ]\n}\n";
       out.flush();
@@ -2117,7 +2225,8 @@ namespace sbs_bench {
     }
 
     struct opts {
-      std::string frames, out, model, depth_override_root, capabilities;
+      std::string frames, out, model, depth_override_root, direct_parallax_root;
+      std::string depth_coordinate_v2_manifest, capabilities;
       std::string scene_cache, render_cache, scene_plan;
       artifact_mode_e artifacts = artifact_mode_e::evaluation;
       bool follow = false;
@@ -2236,6 +2345,10 @@ namespace sbs_bench {
           o.depth_every = std::stoi(next("--depth-every"));
         } else if (a == "--depth-override-root") {
           o.depth_override_root = next("--depth-override-root");
+        } else if (a == "--direct-parallax-root") {
+          o.direct_parallax_root = next("--direct-parallax-root");
+        } else if (a == "--depth-coordinate-v2-manifest") {
+          o.depth_coordinate_v2_manifest = next("--depth-coordinate-v2-manifest");
         } else if (a == "--depth-override-all") {
           o.depth_override_all = true;
         } else if (a == "--subject-recenter") {
@@ -2287,6 +2400,27 @@ namespace sbs_bench {
       if (!o.scene_cache.empty() && !o.render_cache.empty()) {
         BOOST_LOG(error) << "sbs-bench: --scene-cache and --render-cache are mutually exclusive";
         return false;
+      }
+      const unsigned direct_geometry_input_count =
+        (!o.direct_parallax_root.empty() ? 1u : 0u) +
+        (!o.depth_coordinate_v2_manifest.empty() ? 1u : 0u);
+      if (direct_geometry_input_count > 0u) {
+        if (o.artifacts != artifact_mode_e::evaluation || o.follow ||
+            !o.scene_cache.empty() || !o.render_cache.empty() ||
+            !o.depth_override_root.empty() || o.depth_override_all ||
+            o.output_every != 1 || o.depth_every != 1 || o.literal_bestv2) {
+          BOOST_LOG(error)
+            << "sbs-bench: direct/v2 GPU replay requires evaluation artifacts, "
+               "depth/output cadence 1, and forbids follow, caches, depth overrides, and "
+               "--literal-bestv2";
+          return false;
+        }
+        if (direct_geometry_input_count > 1u) {
+          BOOST_LOG(error)
+            << "sbs-bench: --direct-parallax-root and --depth-coordinate-v2-manifest "
+               "are mutually exclusive";
+          return false;
+        }
       }
       if (!o.render_cache.empty()) {
         if (o.artifacts != artifact_mode_e::conversion ||
@@ -2377,6 +2511,15 @@ namespace sbs_bench {
       }
       if (!o.depth_override_root.empty() && !fs::is_directory(o.depth_override_root)) {
         BOOST_LOG(error) << "sbs-bench: --depth-override-root is not a directory";
+        return false;
+      }
+      if (!o.direct_parallax_root.empty() && !fs::is_directory(o.direct_parallax_root)) {
+        BOOST_LOG(error) << "sbs-bench: --direct-parallax-root is not a directory";
+        return false;
+      }
+      if (!o.depth_coordinate_v2_manifest.empty() &&
+          !fs::is_regular_file(o.depth_coordinate_v2_manifest)) {
+        BOOST_LOG(error) << "sbs-bench: --depth-coordinate-v2-manifest is not a file";
         return false;
       }
       if (o.depth_override_all && o.depth_override_root.empty()) {
@@ -2633,6 +2776,15 @@ namespace sbs_bench {
     sbs_perf::reset();
     auto model = pick_model(o);
     const bool replay_mode = !o.render_cache.empty();
+    // Direct replay replaces the legacy Bestv2 mapping with an authenticated, horizontally
+    // contractive final field plus independent canonical order. Native V2 sequence replay runs
+    // the production seven-shader coordinate pipeline and feeds its exact final field through the
+    // same fixed-point renderer contract.
+    const bool depth_coordinate_v2_gpu_mode =
+      !o.depth_coordinate_v2_manifest.empty();
+    const bool external_direct_parallax_mode = !o.direct_parallax_root.empty();
+    const bool direct_parallax_mode =
+      external_direct_parallax_mode || depth_coordinate_v2_gpu_mode;
     const bool whole_clip_mode = o.artifacts != artifact_mode_e::evaluation;
     const bool hdr_texture_input = pfm_input || o.simulate_hdr;
     const std::string discovered_input_frame_format =
@@ -2806,6 +2958,10 @@ namespace sbs_bench {
                     << ", literal_bestv2 " << (o.literal_bestv2 ? "on" : "off")
                     << ", depth_every " << effective_depth_every
                     << (replay_mode ? ", cache replay (TensorRT skipped)" : "")
+                    << (depth_coordinate_v2_gpu_mode ?
+                          ", native depth-coordinate-v2 final-field GPU sequence replay" :
+                          (external_direct_parallax_mode ?
+                             ", external direct final-parallax replay" : ""))
                     << " -> " << o.out;
 
     // ---- D3D device + shaders ----
@@ -2830,7 +2986,13 @@ namespace sbs_bench {
       {"SBS_SCENE_CAMERA_OVERRIDE", "1"},
       {nullptr, nullptr},
     };
-    const auto *warp_macros = replay_mode ? scene_camera_macros : nullptr;
+    const D3D_SHADER_MACRO direct_parallax_macros[] = {
+      {"SBS_DIRECT_PARALLAX", "1"},
+      {"SBS_DIRECT_PARALLAX_CONTRACTIVE", "1"},
+      {nullptr, nullptr},
+    };
+    const auto *warp_macros = direct_parallax_mode ? direct_parallax_macros :
+                              (replay_mode ? scene_camera_macros : nullptr);
     auto vs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0");
     auto ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0", warp_macros);
     auto mask_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "mask_ps", "ps_5_0", warp_macros);
@@ -2874,11 +3036,32 @@ namespace sbs_bench {
     // Built after the first source frame reveals the source/output aspect relationship.
     ComPtr<ID3D11Buffer> repro_cb;
 
+    std::unique_ptr<depth_coordinate_v2_gpu_replay> depth_coordinate_v2_gpu;
+    if (depth_coordinate_v2_gpu_mode) {
+      std::string gpu_replay_error;
+      depth_coordinate_v2_gpu = depth_coordinate_v2_gpu_replay::create(
+        dev.Get(),
+        ctx.Get(),
+        o.depth_coordinate_v2_manifest,
+        gpu_replay_error
+      );
+      if (!depth_coordinate_v2_gpu ||
+          depth_coordinate_v2_gpu->frame_count() != frames.size() ||
+          depth_coordinate_v2_gpu->model_name() != model.name) {
+        BOOST_LOG(error)
+          << "sbs-bench: cannot initialize native v2 GPU sequence replay"
+          << (gpu_replay_error.empty() ? "" : ": " + gpu_replay_error);
+        return 6;
+      }
+    }
+
     // ---- estimator ----
-    // Cache replay is deliberately a pure D3D render pass: do not even construct the estimator,
-    // because its constructor initializes TensorRT/CUDA resources.
+    // Cache and raw-v2 replay are deliberately pure D3D render passes: do not construct the
+    // TensorRT estimator. The v2 path uploads authenticated model output directly into the same
+    // seven experimental shadow compute shaders, and no legacy estimator may silently run beside
+    // it.
     std::unique_ptr<models::video_depth_estimator> estimator;
-    if (!replay_mode) {
+    if (!replay_mode && !depth_coordinate_v2_gpu_mode) {
       estimator = std::make_unique<models::video_depth_estimator>(
         dev,
         ctx,
@@ -2936,8 +3119,16 @@ namespace sbs_bench {
     UINT source_height = 0;
     const fs::path depth_override_dir = o.depth_override_root.empty() ? fs::path() :
                                           fs::path(o.depth_override_root) / fs::path(o.frames).filename();
+    // Match the depth-override clip layout so a root may hold several clips without filename
+    // collisions. External direct replay reads parallax_<id> plus order_<id>.
+    const fs::path direct_geometry_root = fs::path(o.direct_parallax_root);
+    const fs::path direct_parallax_dir = direct_geometry_root.empty() ? fs::path() :
+                                           direct_geometry_root /
+                                             fs::path(o.frames).filename();
     size_t expected_depth_override_frames = 0;
     size_t applied_depth_override_frames = 0;
+    size_t applied_direct_parallax_frames = 0;
+    nlohmann::ordered_json direct_parallax_fields = nlohmann::ordered_json::array();
     if (!depth_override_dir.empty()) {
       if (!fs::is_directory(depth_override_dir)) {
         BOOST_LOG(error) << "sbs-bench: depth-override clip directory is missing: "
@@ -2960,6 +3151,35 @@ namespace sbs_bench {
         BOOST_LOG(error) << "sbs-bench: expected " << expected_depth_override_frames
                          << " depth overrides in " << depth_override_dir << ", found "
                          << actual_depth_override_frames;
+        return 7;
+      }
+    }
+    if (!direct_parallax_dir.empty()) {
+      if (!fs::is_directory(direct_parallax_dir)) {
+        BOOST_LOG(error) << "sbs-bench: direct-parallax clip directory is missing: "
+                         << direct_parallax_dir;
+        return 7;
+      }
+      size_t actual_direct_parallax_frames = 0;
+      size_t actual_direct_order_frames = 0;
+      for (const auto &entry : fs::directory_iterator(direct_parallax_dir)) {
+        const auto filename = entry.path().filename().string();
+        if (entry.is_regular_file() && filename.starts_with("parallax_") &&
+            entry.path().extension() == ".f32") {
+          ++actual_direct_parallax_frames;
+        }
+        if (entry.is_regular_file() && filename.starts_with("order_") &&
+            entry.path().extension() == ".f32") {
+          ++actual_direct_order_frames;
+        }
+      }
+        if (actual_direct_parallax_frames != frames.size() ||
+            actual_direct_order_frames != frames.size()) {
+          BOOST_LOG(error) << "sbs-bench: expected " << frames.size()
+                         << " direct-parallax and order fields in "
+                         << direct_parallax_dir
+                         << ", found displacement=" << actual_direct_parallax_frames
+                         << " order=" << actual_direct_order_frames;
         return 7;
       }
     }
@@ -3240,6 +3460,7 @@ namespace sbs_bench {
       const scene_plan_entry *active_scene_camera = nullptr;
       ComPtr<ID3D11Texture2D> cached_depth_texture;
       ComPtr<ID3D11Buffer> cached_state_buffer;
+      depth_coordinate_v2_gpu_frame v2_gpu_frame;
       if (replay_mode) {
         const std::size_t sequence = global_sequence;
         const std::string cache_stem = scene_cache_frame_stem(sequence);
@@ -3249,7 +3470,7 @@ namespace sbs_bench {
               render_words.data(),
               sizeof(render_words)
             ) ||
-            !create_cached_depth_srv(
+            !create_cached_float_srv(
               dev.Get(),
               fs::path(o.render_cache) / (cache_stem + ".depth.r32f"),
               replay_cache_metadata.depth_width,
@@ -3315,6 +3536,24 @@ namespace sbs_bench {
         est.raw_width = static_cast<int>(replay_cache_metadata.depth_width);
         est.raw_height = static_cast<int>(replay_cache_metadata.depth_height);
         have_depth_result = true;
+      } else if (depth_coordinate_v2_gpu_mode) {
+        std::string gpu_replay_error;
+        if (!depth_coordinate_v2_gpu->dispatch(
+              fi,
+              output_id,
+              v2_gpu_frame,
+              gpu_replay_error
+            )) {
+          BOOST_LOG(error) << "sbs-bench: native v2 GPU replay failed for frame "
+                           << output_id << ": " << gpu_replay_error;
+          return 7;
+        }
+        est.depth = v2_gpu_frame.encoded_final_parallax;
+        est.subject = v2_gpu_frame.legacy_subject_state;
+        est.raw_model_depth = v2_gpu_frame.raw_depth;
+        est.raw_width = static_cast<int>(depth_coordinate_v2_gpu->width());
+        est.raw_height = static_cast<int>(depth_coordinate_v2_gpu->height());
+        have_depth_result = true;
       } else {
         if (depth_updated) {
           estimator->estimate_depth(
@@ -3361,6 +3600,144 @@ namespace sbs_bench {
         }
         est.depth = override_depth_srv;
         ++applied_depth_override_frames;
+      }
+
+      // Direct geometry replay consumes only the encoded slope-limited final field. Canonical
+      // order remains independent finite, unbounded semantic evidence; it does not control the
+      // production fixed-point renderer.
+      ComPtr<ID3D11Texture2D> direct_parallax_texture;
+      ComPtr<ID3D11ShaderResourceView> direct_parallax_srv;
+      ComPtr<ID3D11Texture2D> direct_order_texture;
+      ComPtr<ID3D11ShaderResourceView> direct_order_srv;
+      ComPtr<ID3D11Buffer> direct_parallax_cb;
+      float direct_parallax_encoded_min = 0.5f;
+      float direct_parallax_encoded_max = 0.5f;
+      float direct_parallax_max_abs = 0.0f;
+      std::string direct_parallax_sha256;
+      float direct_order_min = 0.0f;
+      float direct_order_max = 0.0f;
+      std::string direct_order_sha256;
+      std::vector<float> direct_parallax_values;
+      std::vector<float> direct_order_values;
+      if (direct_parallax_mode) {
+        D3D11_TEXTURE2D_DESC depth_desc {};
+        fs::path field_path;
+        if (depth_coordinate_v2_gpu_mode) {
+          depth_desc.Width = depth_coordinate_v2_gpu->width();
+          depth_desc.Height = depth_coordinate_v2_gpu->height();
+          depth_desc.Format = DXGI_FORMAT_R32_FLOAT;
+          direct_parallax_srv = v2_gpu_frame.encoded_final_parallax;
+          direct_order_srv = v2_gpu_frame.canonical_order;
+          direct_parallax_encoded_min = v2_gpu_frame.encoded_minimum;
+          direct_parallax_encoded_max = v2_gpu_frame.encoded_maximum;
+          direct_parallax_sha256 = v2_gpu_frame.parallax_sha256;
+          direct_order_min = v2_gpu_frame.order_minimum;
+          direct_order_max = v2_gpu_frame.order_maximum;
+          direct_order_sha256 = v2_gpu_frame.order_sha256;
+          direct_parallax_values = v2_gpu_frame.encoded_parallax_values;
+          direct_order_values = v2_gpu_frame.canonical_values;
+          field_path = fs::path(o.depth_coordinate_v2_manifest);
+        } else {
+          ComPtr<ID3D11Resource> depth_resource;
+          ComPtr<ID3D11Texture2D> depth_texture;
+          if (!est.depth ||
+              (est.depth->GetResource(&depth_resource),
+               FAILED(depth_resource.As(&depth_texture)))) {
+            BOOST_LOG(error) << "sbs-bench: direct-parallax replay needs a valid depth texture";
+            return 7;
+          }
+          depth_texture->GetDesc(&depth_desc);
+          field_path = direct_parallax_dir / ("parallax_" + output_id + ".f32");
+          const fs::path order_path =
+            direct_parallax_dir / ("order_" + output_id + ".f32");
+          if (depth_desc.Format != DXGI_FORMAT_R32_FLOAT ||
+              !create_cached_float_srv(
+                dev.Get(), field_path, depth_desc.Width, depth_desc.Height,
+                direct_parallax_texture, direct_parallax_srv,
+                true,
+                &direct_parallax_encoded_min, &direct_parallax_encoded_max,
+                &direct_parallax_sha256, &direct_parallax_values
+              ) ||
+              !create_cached_float_srv(
+                dev.Get(), order_path, depth_desc.Width, depth_desc.Height,
+                direct_order_texture, direct_order_srv,
+                false, &direct_order_min, &direct_order_max, &direct_order_sha256,
+                &direct_order_values
+              )) {
+            BOOST_LOG(error)
+              << "sbs-bench: missing or invalid direct geometry fields " << field_path
+              << " and " << order_path << " (expected finite float32-le encoded parallax [0,1]"
+              << " and unbounded order at " << depth_desc.Width << 'x'
+              << depth_desc.Height << ')';
+            return 7;
+          }
+        }
+        direct_parallax_max_abs = std::max(
+            std::abs(
+              (direct_parallax_encoded_min * 2.0f - 1.0f) *
+              direct_parallax_source_u_limit
+            ),
+            std::abs(
+              (direct_parallax_encoded_max * 2.0f - 1.0f) *
+              direct_parallax_source_u_limit
+            )
+          );
+        if (direct_parallax_max_abs > direct_parallax_source_u_limit + 2.0e-7f) {
+          BOOST_LOG(error) << "sbs-bench: direct geometry field " << field_path
+                           << " exceeds the generated source-U container ("
+                           << direct_parallax_max_abs << " > "
+                           << direct_parallax_source_u_limit << ')';
+          return 7;
+        }
+        float direct_parallax_measured_slope = 0.0f;
+        for (UINT y = 0; y < depth_desc.Height; ++y) {
+          const auto row = static_cast<std::size_t>(y) * depth_desc.Width;
+          for (UINT x = 1; x < depth_desc.Width; ++x) {
+            const auto index = row + x;
+            const double decoded_step = std::abs(
+              static_cast<double>(direct_parallax_values[index]) -
+              static_cast<double>(direct_parallax_values[index - 1u])
+            ) * 2.0 * direct_parallax_source_u_limit * depth_desc.Width;
+            direct_parallax_measured_slope = std::max(
+              direct_parallax_measured_slope,
+              static_cast<float>(decoded_step)
+            );
+          }
+        }
+        if (direct_parallax_measured_slope >
+            direct_parallax_max_horizontal_slope + direct_parallax_slope_tolerance) {
+          BOOST_LOG(error)
+            << "sbs-bench: direct-parallax field " << field_path
+            << " violates the generated horizontal slope contract ("
+            << direct_parallax_measured_slope << " > "
+            << direct_parallax_max_horizontal_slope << ')';
+          return 7;
+        }
+        // b4 is harness-only. The final field's authenticated sub-unit source-U slope makes its
+        // inverse contractive, so the renderer needs only the encoded container limit; the other
+        // words remain reserved to preserve the 16-byte constant-buffer ABI.
+        const float direct_params[4] = {
+          direct_parallax_source_u_limit,
+          0.0f,
+          0.0f,
+          0.0f,
+        };
+        direct_parallax_cb = const_buffer(dev.Get(), direct_params);
+        if (!direct_parallax_cb) {
+          BOOST_LOG(error) << "sbs-bench: cannot create direct-parallax constants";
+          return 7;
+        }
+        direct_parallax_fields.push_back({
+          {"frame_id", output_id},
+          {"width", depth_desc.Width},
+          {"height", depth_desc.Height},
+          {"parallax_sha256", direct_parallax_sha256},
+          {"maximum_absolute_source_u", direct_parallax_max_abs},
+          {"order_sha256", direct_order_sha256},
+          {"order_minimum", direct_order_min},
+          {"order_maximum", direct_order_max},
+        });
+        ++applied_direct_parallax_frames;
       }
 
       // Export one state sample for every source frame, even when --output-every skips composite
@@ -3481,6 +3858,16 @@ namespace sbs_bench {
         for (std::size_t index = 0; index < state_record.values.size(); ++index) {
           state_record.values[index] = std::bit_cast<float>(words[index]);
         }
+        state_record.hard_cut_pulse =
+          std::bit_cast<float>(
+            words[sbs_adaptive_state::index(
+              sbs_adaptive_state::word_e::hard_cut_pulse
+            )]
+          ) > 0.5f;
+        state_record.hard_cut_count =
+          words[sbs_adaptive_state::index(
+            sbs_adaptive_state::word_e::hard_cut_count
+          )];
         const auto write_frame = [&](std::ostream &out) {
           return write_adaptive_state_frame(
             out,
@@ -3518,7 +3905,9 @@ namespace sbs_bench {
         }
       } else {
         if (!read_subject_state(dev.Get(), ctx.Get(), est.subject.Get(),
-                                subject_state_stage, state_record.values)) {
+                                subject_state_stage, state_record.values,
+                                state_record.hard_cut_pulse,
+                                state_record.hard_cut_count)) {
           BOOST_LOG(error) << "sbs-bench: cannot read subject state for frame " << output_id;
           return 6;
         }
@@ -3581,8 +3970,9 @@ namespace sbs_bench {
         ctx->Begin(warp_disjoint.Get());
         ctx->End(warp_start.Get());
       }
-      ID3D11ShaderResourceView *warp_depth = est.depth.Get();
-      if (est.depth) {
+      ID3D11ShaderResourceView *warp_depth =
+        direct_parallax_mode ? direct_parallax_srv.Get() : est.depth.Get();
+      if (est.depth && !direct_parallax_mode) {
         ComPtr<ID3D11Resource> depth_resource;
         est.depth->GetResource(&depth_resource);
         ComPtr<ID3D11Texture2D> depth_texture;
@@ -3631,16 +4021,24 @@ namespace sbs_bench {
         ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
         ID3D11ShaderResourceView *cs_srvs[] = {in_srv.Get(), warp_depth, est.subject.Get()};
         ctx->CSSetShaderResources(0, 3, cs_srvs);
+        if (direct_order_srv) {
+          ctx->CSSetShaderResources(5, 1, direct_order_srv.GetAddressOf());
+        }
         ctx->CSSetUnorderedAccessViews(0, 1, &coverage_view, nullptr);
         ctx->CSSetConstantBuffers(2, 1, repro_cb.GetAddressOf());
         if (scene_camera_cb) {
           ctx->CSSetConstantBuffers(3, 1, scene_camera_cb.GetAddressOf());
+        }
+        if (direct_parallax_cb) {
+          ctx->CSSetConstantBuffers(4, 1, direct_parallax_cb.GetAddressOf());
         }
         ctx->Dispatch(((sbs_w / 2u) + 15u) / 16u, (sbs_h + 15u) / 16u, 1u);
         ID3D11UnorderedAccessView *null_uav[] = {nullptr};
         ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr};
         ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
         ctx->CSSetShaderResources(0, 3, null_cs_srvs);
+        ID3D11ShaderResourceView *null_direct_order = nullptr;
+        ctx->CSSetShaderResources(5, 1, &null_direct_order);
       };
       ctx->OMSetRenderTargets(1, sbs_rtv.GetAddressOf(), nullptr);
       ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -3655,6 +4053,9 @@ namespace sbs_bench {
       ctx->PSSetConstantBuffers(2, 1, &cb);
       if (scene_camera_cb) {
         ctx->PSSetConstantBuffers(3, 1, scene_camera_cb.GetAddressOf());
+      }
+      if (direct_parallax_cb) {
+        ctx->PSSetConstantBuffers(4, 1, direct_parallax_cb.GetAddressOf());
       }
       ctx->Draw(3, 0);
 
@@ -3809,9 +4210,32 @@ namespace sbs_bench {
           output_completed = true;
         }
         if (o.artifacts == artifact_mode_e::evaluation) {
-          char dname[64];
-          snprintf(dname, sizeof(dname), "depth_%s.png", output_id.c_str());
-          dump_depth(dev.Get(), ctx.Get(), est.depth.Get(), fs::path(o.out) / dname, depth_stage);
+          if (direct_parallax_mode) {
+            // Displacement and semantic depth intentionally remain distinct. The limiter may lower
+            // a foreground texel's final parallax without changing the canonical semantic order,
+            // so scoring the conditioned displacement as "depth" would let safety conditioning
+            // redefine the evidence used to judge itself.
+            // Republish the exact bytes uploaded to both SRVs: canonical order is the evaluator's
+            // unbounded depth authority, while encoded final parallax remains a separate geometry
+            // artifact. Their hashes are authenticated by the manifest written below.
+            const fs::path depth_path =
+              fs::path(o.out) / ("depth_" + output_id + ".f32");
+            const fs::path parallax_path =
+              fs::path(o.out) / ("parallax_" + output_id + ".f32");
+            if (!publish_float_field(depth_path, direct_order_values) ||
+                !publish_float_field(parallax_path, direct_parallax_values)) {
+              BOOST_LOG(error)
+                << "sbs-bench: cannot publish authenticated direct geometry artifacts for frame "
+                << output_id;
+              return 7;
+            }
+          } else {
+            char dname[64];
+            snprintf(dname, sizeof(dname), "depth_%s.png", output_id.c_str());
+            dump_depth(
+              dev.Get(), ctx.Get(), est.depth.Get(), fs::path(o.out) / dname, depth_stage
+            );
+          }
           if (sbs_cfg.ema_edge_change > 0.0) {
             char mname[64];
             snprintf(mname, sizeof(mname), "ema_mask_%s.png", output_id.c_str());
@@ -3825,9 +4249,11 @@ namespace sbs_bench {
           if (!raw_shape_written && est.raw_width > 0 && est.raw_height > 0) {
             std::ofstream shape(fs::path(o.out) / "raw_shape.json");
             if (shape) {
-              shape << "{\n  \"width\": " << est.raw_width << ",\n  \"height\": "
-                    << est.raw_height << ",\n  \"dtype\": \"float32-le\",\n"
-                                         "  \"stage\": \"raw model output before transform/normalization/EMA/curvature\"\n}\n";
+              shape << "{\n  \"schema\": 1,\n  \"width\": " << est.raw_width
+                    << ",\n  \"height\": " << est.raw_height
+                    << ",\n  \"dtype\": \"float32-le\",\n"
+                       "  \"layout\": \"row-major\",\n"
+                       "  \"stage\": \"raw model output before transform/normalization/EMA/curvature\"\n}\n";
               raw_shape_written = true;
             }
           }
@@ -3870,6 +4296,23 @@ namespace sbs_bench {
     }
     const std::size_t completed_frame_count =
       o.follow ? processed_frame_count : frames.size();
+    std::string direct_parallax_manifest_sha256;
+    std::string depth_coordinate_v2_state_trace_sha256;
+    if (depth_coordinate_v2_gpu_mode) {
+      const fs::path state_trace_path =
+        fs::path(o.out) / "depth_coordinate_v2_state_trace.json";
+      std::string gpu_replay_error;
+      if (!depth_coordinate_v2_gpu->write_state_trace(
+            state_trace_path,
+            gpu_replay_error
+          ) ||
+          (depth_coordinate_v2_state_trace_sha256 =
+             sha256_file_hex(state_trace_path)).empty()) {
+        BOOST_LOG(error) << "sbs-bench: cannot publish native v2 GPU state trace"
+                         << (gpu_replay_error.empty() ? "" : ": " + gpu_replay_error);
+        return 7;
+      }
+    }
     if (!o.scene_cache.empty()) {
       if (!scene_cache_contract_started ||
           completed_frame_count == 0u) {
@@ -3892,6 +4335,49 @@ namespace sbs_bench {
                        << " of " << expected_depth_override_frames << " expected depth overrides";
       return 7;
     }
+    if (direct_parallax_mode &&
+        applied_direct_parallax_frames != completed_frame_count) {
+      BOOST_LOG(error) << "sbs-bench: applied " << applied_direct_parallax_frames
+                       << " of " << completed_frame_count
+                       << " expected direct-parallax fields";
+      return 7;
+    }
+    if (direct_parallax_mode) {
+      nlohmann::ordered_json manifest = {
+        {"schema", direct_geometry_manifest_schema},
+        {"dtype", "float32-le"},
+        {"layout", "row-major"},
+        {"stored_range", {0.0, 1.0}},
+        {"zero_encoding", 0.5},
+        {"decode_source_u_one_eye", std::string {
+                                            models::depth_coordinate_v2::
+                                              direct_parallax_decode_expression
+        }},
+        {"displacement_semantics", "signed-source-u-positive-nearward-not-order"},
+        {"maximum_horizontal_source_u_slope", direct_parallax_max_horizontal_slope},
+        {"renderer_inverse", "contractive-fixed-point-12-iterations-v1"},
+        {"renderer_uses_order", false},
+        {"order_dtype", "float32-le"},
+        {"order_range", "finite-unbounded"},
+        {"order_high_is_near", true},
+        {"order_role", "diagnostic-semantic-depth-and-forward-coverage-only-v1"},
+        {"depth_artifact_semantics", "canonical-pre-limiter-order-float32-v1"},
+        {"parallax_artifact_semantics", "encoded-conditioned-final-parallax-float32-v1"},
+        {"fields", direct_parallax_fields},
+      };
+      const std::string serialized = manifest.dump(2) + "\n";
+      direct_parallax_manifest_sha256 = sha256_hex(serialized);
+      std::ofstream manifest_stream(
+        fs::path(o.out) / "direct_parallax_manifest.json",
+        std::ios::binary | std::ios::trunc
+      );
+      manifest_stream.write(serialized.data(), static_cast<std::streamsize>(serialized.size()));
+      manifest_stream.flush();
+      if (!manifest_stream.good()) {
+        BOOST_LOG(error) << "sbs-bench: cannot write direct_parallax_manifest.json";
+        return 7;
+      }
+    }
     if (o.artifacts == artifact_mode_e::evaluation && !warp_mapping_shape_written) {
       BOOST_LOG(error) << "sbs-bench: no warp mapping shape contract was written";
       return 8;
@@ -3899,7 +4385,10 @@ namespace sbs_bench {
     if (!whole_clip_mode) {
       if (subject_state_records.size() != completed_frame_count ||
           !write_subject_state_trace(
-            fs::path(o.out) / "subject_state.json", subject_state_records)) {
+            fs::path(o.out) / "subject_state.json",
+            subject_state_records,
+            depth_coordinate_v2_gpu_mode
+          )) {
         BOOST_LOG(error) << "sbs-bench: failed writing complete subject_state.json";
         return 8;
       }
@@ -3907,12 +4396,20 @@ namespace sbs_bench {
 
     sbs_perf::dump_json((fs::path(o.out) / "sbs_perf.json").string());
     if (o.artifacts == artifact_mode_e::evaluation) {
+      if (!direct_parallax_mode &&
+          (!est.raw_model_provenance || est.raw_width <= 0 || est.raw_height <= 0)) {
+        BOOST_LOG(error)
+          << "sbs-bench: ordinary evaluation completed without exact raw-model provenance";
+        return 8;
+      }
       // Machine-readable execution contract. Evaluation must not scrape human log prose: custom
       // profile names are case-sensitive and fidelity runs must prove literal Bestv2 was active.
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
-                 << "  \"schema\": 17,\n"
+                 << "  \"schema\": "
+                 << (direct_parallax_mode ? direct_geometry_contract_schema : 18u)
+                 << ",\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
                  << "  \"depth_step\": "
@@ -3929,15 +4426,109 @@ namespace sbs_bench {
                  << "  \"ema_edge_change\": " << sbs_cfg.ema_edge_change << ",\n"
                  << "  \"ema_edge_gradient\": " << sbs_cfg.ema_edge_gradient << ",\n"
                  << "  \"ema_edge_strength\": " << sbs_cfg.ema_edge_strength << ",\n"
+                 << "  \"pop_strength\": " << sbs_cfg.pop_strength << ",\n"
                  << "  \"adaptive_pop\": " << (sbs_cfg.adaptive_pop ? "true" : "false") << ",\n"
                  << "  \"adaptive_pop_max\": " << sbs_cfg.adaptive_pop_max << ",\n"
                  << "  \"zero_plane\": " << json_string(sbs_cfg.zero_plane) << ",\n"
-                 << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n"
+                 << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n";
+        if (!direct_parallax_mode) {
+          const auto &provenance = *est.raw_model_provenance;
+          contract
+            << "  \"raw_model_provenance\": {"
+               "\"schema\": 1, \"model\": "
+            << json_string(provenance.depth_model)
+            << ", \"depth_model_url\": " << json_string(provenance.depth_model_url)
+            << ", \"onnx_sha256\": " << json_string(provenance.onnx_sha256)
+            << ", \"preprocess_profile\": "
+            << json_string(provenance.preprocess_profile)
+            << ", \"preprocess_source_closure_sha256\": "
+            << json_string(provenance.preprocess_source_closure_sha256)
+            << ", \"raw_width\": " << est.raw_width
+            << ", \"raw_height\": " << est.raw_height << "},\n";
+        }
+        if (direct_parallax_mode) {
+          contract << "  \"warp_input\": "
+                   << json_string(direct_geometry_warp_input)
+                   << ",\n"
+                   << "  \"direct_parallax_frames\": "
+                   << applied_direct_parallax_frames << ",\n"
+                   << "  \"direct_parallax_manifest\": {\"file\": "
+                   << "\"direct_parallax_manifest.json\", \"schema\": "
+                   << direct_geometry_manifest_schema
+                   << ", \"sha256\": "
+                   << json_string(direct_parallax_manifest_sha256) << "},\n"
+                   << "  \"direct_parallax\": {\"enabled\": true, "
+                      "\"file_pattern\": \"parallax_<frame-id>.f32\", "
+                      "\"dtype\": \"float32-le\", \"stored_range\": [0, 1], "
+                      "\"zero_encoding\": 0.5, "
+                      "\"decode_source_u_one_eye\": \"(encoded * 2 - 1) * 0.04\", "
+                   << "\"displacement_semantics\": "
+                      "\"signed-source-u-positive-nearward-not-order\", "
+                      "\"maximum_horizontal_source_u_slope\": "
+                   << direct_parallax_max_horizontal_slope << ", "
+                      "\"renderer_inverse\": "
+                      "\"contractive-fixed-point-12-iterations-v1\", "
+                      "\"renderer_uses_order\": false, ";
+          contract <<
+                      "\"order_file_pattern\": \"order_<frame-id>.f32\", "
+                      "\"order_dtype\": \"float32-le\", "
+                      "\"order_range\": \"finite-unbounded\", "
+                       "\"order_high_is_near\": true, "
+                       "\"order_role\": "
+                   << json_string("diagnostic-semantic-depth-and-forward-coverage-only-v1")
+                   << ", "
+                       "\"depth_artifact_file_pattern\": \"depth_<frame-id>.f32\", "
+                       "\"depth_artifact_semantics\": "
+                       "\"canonical-pre-limiter-order-float32-v1\", "
+                      "\"parallax_artifact_file_pattern\": \"parallax_<frame-id>.f32\", "
+                      "\"parallax_artifact_semantics\": "
+                      "\"encoded-conditioned-final-parallax-float32-v1\", "
+                   <<
+                       "\"timing_scope\": "
+                   << json_string(
+                        depth_coordinate_v2_gpu_mode ?
+                          "native-depth-coordinate-v2; legacy estimator bypassed" :
+                          "quality-only; legacy estimator still executes"
+                      )
+                   << "},\n";
+        }
+        if (depth_coordinate_v2_gpu_mode) {
+          contract
+            << "  \"depth_coordinate_v2_gpu\": {"
+               "\"enabled\": true, "
+               "\"execution\": "
+            << json_string(sbs_bench::depth_coordinate_v2_gpu_execution)
+            << ", "
+               "\"legacy_estimator_executed\": false, "
+               "\"input_manifest_sha256\": "
+            << json_string(depth_coordinate_v2_gpu->manifest_sha256())
+            << ", \"state_trace\": {\"file\": "
+               "\"depth_coordinate_v2_state_trace.json\", \"schema\": "
+            << sbs_bench::depth_coordinate_v2_state_trace_schema << ", \"sha256\": "
+             << json_string(depth_coordinate_v2_state_trace_sha256)
+             << "}, \"render_authority\": \"gpu-canonical-and-final-fields\", "
+                "\"numpy_role\": \"comparison-only\", "
+                "\"calibration_contract_canonical_sha256\": "
+             << json_string(models::depth_coordinate_v2::contract_canonical_sha256)
+             << ", "
+                "\"pop_strength_authority\": \"contract.pop_strength-only\", "
+                "\"adaptive_pop_applied\": false},\n";
+        }
+        contract << "  \"parallax_v2_shadow\": "
+                 << (sbs_cfg.parallax_v2_shadow ? "true" : "false") << ",\n"
+                 << "  \"parallax_v2_render\": "
+                 << (sbs_cfg.parallax_v2_render ? "true" : "false") << ",\n"
                  << "  \"cuda_graph\": " << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
                  << "  \"cuda_graph_captured\": " << (cuda_graph_captured ? "true" : "false") << ",\n"
                  << "  \"subject_state\": {\"file\": \"subject_state.json\", "
-                    "\"schema\": 1, \"capture\": "
-                    "\"every-source-frame-after-estimator-update\"},\n"
+                    "\"schema\": " << (depth_coordinate_v2_gpu_mode ? 3 : 2)
+                 << ", \"capture\": "
+                 << json_string(
+                      depth_coordinate_v2_gpu_mode ?
+                        "every-source-frame-from-authenticated-cut-input" :
+                        "every-source-frame-after-estimator-update"
+                    )
+                 << "},\n"
                  << "  \"warp_mask\": {\"red\": \"forward_disocclusion_before_fill\"},\n"
                  << "  \"warp_mapping\": {\n"
                  << "    \"file_pattern\": \"warp_map_<frame-id>.f32\",\n"
@@ -4112,6 +4703,10 @@ namespace sbs_bench {
         << "    \"ema_edge_strength\": " << sbs_cfg.ema_edge_strength << ",\n"
         << "    \"cuda_graph\": "
         << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
+        << "    \"parallax_v2_shadow\": "
+        << (sbs_cfg.parallax_v2_shadow ? "true" : "false") << ",\n"
+        << "    \"parallax_v2_render\": "
+        << (sbs_cfg.parallax_v2_render ? "true" : "false") << ",\n"
         << "    \"cuda_graph_captured\": "
         << (cuda_graph_captured ? "true" : "false") << ",\n"
         << "    \"literal_bestv2\": "
