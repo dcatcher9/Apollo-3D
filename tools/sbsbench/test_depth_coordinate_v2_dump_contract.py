@@ -34,6 +34,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         checksum = dump_contract.camera_center_integrity_bits(
             document["named_values"]["center"],
             document["named_values"]["inverse_scale"],
+            document["named_values"]["convergence_curve"],
             document["named_values"]["calibration_revision"],
         )
         cls._set_state_word(document, "camera_center_integrity_bits", checksum)
@@ -45,14 +46,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         defaults = coordinate.CALIBRATED_DEFAULTS
         width, height = coordinate.MODEL_CALIBRATIONS[0].calibrated_input_shapes[0]
         texel_count = width * height
-        near_tail_coverage = 0.20
-        near_tail_count = int(near_tail_coverage * texel_count)
-        blend = ((near_tail_coverage - defaults.near_tail_coverage_low) /
-                 (defaults.near_tail_coverage_high - defaults.near_tail_coverage_low))
-        dense_weight = blend * blend * (3.0 - 2.0 * blend)
-        effective_near_log_tau = (
-            defaults.near_log_tau +
-            (defaults.near_log_tau_dense - defaults.near_log_tau) * dense_weight)
         values = {
             "center": 2.0,
             "inverse_scale": 2.0,
@@ -62,14 +55,15 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "frame_valid": 1.0,
             "confirmed_cut_count": 3,
             "contract_tag_bits": tag,
-            "latched_near_tail_coverage": near_tail_coverage,
-            "effective_near_log_tau": effective_near_log_tau,
-            "latched_near_tail_count": near_tail_count,
             "camera_center_integrity_bits": 0,
+            "mapping_state_reserved_0": 0,
+            "mapping_state_reserved_1": 0,
+            "mapping_state_reserved_2": 0,
         }
         values["camera_center_integrity_bits"] = (
             dump_contract.camera_center_integrity_bits(
                 values["center"], values["inverse_scale"],
+                values["convergence_curve"],
                 values["calibration_revision"]))
         fields = []
         for descriptor in manifest["shadow_state"]["fields"]:
@@ -90,20 +84,16 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "source_macro_count": shader.source_macro_count,
             "source_closure_sha256": shader.source_closure_sha256,
         }
-        requested_pop = 2.0
+        requested_pop = 1.0
         requested_gain = defaults.gain_per_pop * requested_pop
         constants = {
             "raw_coordinate_scale": 0.5,
             "collapse_abs_epsilon": defaults.collapse_abs_epsilon,
             "far_tau": defaults.far_tau,
             "near_log_tau": defaults.near_log_tau,
-            "near_tail_probe_u": defaults.near_tail_probe_u,
-            "near_tail_coverage_low": defaults.near_tail_coverage_low,
-            "near_tail_coverage_high": defaults.near_tail_coverage_high,
-            "near_log_tau_dense": defaults.near_log_tau_dense,
             "gain_per_pop": defaults.gain_per_pop,
             "reference_pop_strength": defaults.reference_pop_strength,
-            "reference_gain_at_pop_2":
+            "reference_gain_at_reference_pop":
                 defaults.gain_per_pop * defaults.reference_pop_strength,
             "requested_gain": requested_gain,
             "requested_pop_strength": requested_pop,
@@ -112,6 +102,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "max_vertical_shear": defaults.max_vertical_shear,
             "vertical_majorant_share": defaults.vertical_majorant_share,
             "convergence_curve_default": defaults.convergence_curve_default,
+            "stage_valley_ratio_max": defaults.stage_valley_ratio_max,
         }
         self.state = {
             "schema": dump_contract.SHADOW_STATE_DUMP_SCHEMA,
@@ -144,22 +135,19 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "convergence_curve": values["convergence_curve"],
                 "container_scale": values["container_scale"],
                 "effective_gain": requested_gain * values["container_scale"],
-                "latched_near_tail_coverage": values["latched_near_tail_coverage"],
-                "effective_near_log_tau": values["effective_near_log_tau"],
-                "latched_near_tail_count": values["latched_near_tail_count"],
                 "camera_center_integrity_bits":
                     values["camera_center_integrity_bits"],
             },
             "adaptation_semantics": {
                 "coordinate":
-                    "center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable",
+                    "immediate-first-usable-center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable",
                 "convergence_curve":
-                    "separately-scene-latched-curve-offset-currently-zero",
+                    "selected-upper-valley-or-mean-center-is-zero-plane",
                 "requested_gain": "immutable-cfg-pop-strength",
                 "container_scale":
                     "frame-local-hard-direct-parallax-attenuation-recoverable-next-frame",
-                "near_shoulder":
-                    "shot-latched-near-tail-coverage-and-effective-tau-reset-on-confirmed-cut",
+                "near_curve":
+                    "fixed-contract-logarithmic-tau-independent-of-content-occupancy",
                 "spatial_conditioner":
                     "fixed-75pct-vertical-majorant-share-then-horizontal-majorant",
             },
@@ -186,6 +174,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         vertical_descriptions = {
             "shadow_candidate_parallax.f32":
                 ("parallax-v2 pre-limiter candidate displacement", True),
+            "shadow_ownership_refined_parallax.f32":
+                ("parallax-v2 full-resolution contour ownership refinement", True),
+            "shadow_ownership_refined_parallax_shape.json":
+                ("parallax-v2 full-resolution contour ownership refinement contract", False),
+            "shadow_ownership_refined_parallax.png":
+                ("parallax-v2 full-resolution contour ownership refinement preview", False),
+            "shadow_ownership_refined_parallax_heat.png":
+                ("parallax-v2 full-resolution contour ownership refinement preview", False),
             "shadow_vertical_majorant.f32":
                 ("parallax-v2 vertical shear-limiter intermediate", False),
             "shadow_vertical_majorant_shape.json":
@@ -216,10 +212,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "parallax_v2_position_field": "shadow_final_parallax",
                 "parallax_v2_coordinate_role":
                     "shadow_coordinate is diagnostic only; it has no renderer authority",
+                "parallax_v2_ownership_refined_role":
+                    "conservative full-resolution source-contour foreground ownership applied "
+                    "to candidate before the vertical conditioner; may only raise uniquely "
+                    "owned far-side boundary texels",
                 "parallax_v2_vertical_majorant_role":
-                    "least column-wise upper envelope v+ >= candidate with adjacent-row "
-                    "source-U change <= max_vertical_shear/target_width; diagnostic evidence "
-                    "only",
+                    "least column-wise upper envelope v+ >= ownership-refined candidate with "
+                    "adjacent-row source-U change <= max_vertical_shear/target_width; "
+                    "diagnostic evidence only",
                 "parallax_v2_vertical_conditioned_role":
                     "fixed 75/25 share of column upper/lower envelopes; may raise or lower "
                     "candidate and feeds the row majorant",
@@ -228,7 +228,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "max_horizontal_slope and vertical shear <= max_vertical_shear; q may "
                     "raise or lower candidate and is the live position authority",
                 "parallax_v2_inverse":
-                    "12-step contractive fixed point; no owner pass or synthetic fill",
+                    "12-step contractive fixed point; no forward-warp owner/visibility splat and no synthetic fill",
                 "collar_defocus": {
                     "enabled": False,
                     "role": ("disabled after live hand-boundary halo regression; live color "
@@ -263,6 +263,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "width": 770, "height": 434,
                     "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41,
                 },
+                "shadow_ownership_refined_parallax": {
+                    "width": 770, "height": 434,
+                    "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41,
+                },
                 "shadow_vertical_majorant": {
                     "width": 770, "height": 434,
                     "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41,
@@ -291,22 +295,20 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         decoded = dump_contract.validate_shadow_state_document(self.state)
         self.assertEqual(decoded["calibration_revision"], 4)
         self.assertEqual(decoded["convergence_curve"], 0.0)
-        self.assertAlmostEqual(
-            decoded["effective_near_log_tau"],
-            self.state["named_values"]["effective_near_log_tau"])
         self.assertEqual(set(decoded), {
             "center", "inverse_scale", "convergence_curve", "container_scale",
             "calibration_revision", "frame_valid", "confirmed_cut_count", "contract_tag_bits",
-            "latched_near_tail_coverage", "effective_near_log_tau",
-            "latched_near_tail_count", "camera_center_integrity_bits",
+            "camera_center_integrity_bits", "mapping_state_reserved_0",
+            "mapping_state_reserved_1", "mapping_state_reserved_2",
         })
         stats = dump_contract.validate_shadow_frame_stats_document(self.frame_stats)
         self.assertEqual(stats["valid"], 1.0)
 
-    def test_schema_9_manifest_attributes_vertical_share_then_row_majorant(self):
+    def test_schema_10_manifest_attributes_ownership_then_vertical_share_and_row_majorant(self):
         decoded = dump_contract.validate_v2_dump_manifest_document(self.manifest)
         self.assertTrue(decoded["active"])
         self.assertTrue(decoded["rendered_output_selected"])
+        self.assertTrue(decoded["ownership_refined_available"])
         self.assertTrue(decoded["vertical_majorant_available"])
         self.assertTrue(decoded["vertical_conditioned_available"])
         self.assertEqual(decoded["position_field"], "shadow_final_parallax")
@@ -316,6 +318,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                   "sbs_debug_dump.cpp").read_text(encoding="utf-8")
         self.assertIn(
             f'{{"schema", {dump_contract.DUMP_MANIFEST_SCHEMA}}}', native)
+        self.assertIn('"shadow_ownership_refined_parallax"', native)
+        self.assertIn("completed.shadow_ownership_refined_parallax", native)
         self.assertIn('"shadow_vertical_majorant"', native)
         self.assertIn("completed.shadow_vertical_majorant", native)
         self.assertIn('"shadow_vertical_conditioned"', native)
@@ -324,7 +328,18 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
     def test_manifest_rejects_missing_or_misattributed_vertical_intermediate(self):
         changed = copy.deepcopy(self.manifest)
         changed["artifacts"].pop("shadow_vertical_majorant.f32")
-        with self.assertRaisesRegex(ValueError, "conditioner artifact"):
+        with self.assertRaisesRegex(ValueError, "geometry artifact"):
+            dump_contract.validate_v2_dump_manifest_document(changed)
+
+    def test_manifest_requires_the_full_resolution_ownership_intermediate(self):
+        changed = copy.deepcopy(self.manifest)
+        changed["artifacts"].pop("shadow_ownership_refined_parallax.f32")
+        with self.assertRaisesRegex(ValueError, "geometry artifact"):
+            dump_contract.validate_v2_dump_manifest_document(changed)
+
+        changed = copy.deepcopy(self.manifest)
+        changed["dimensions"]["shadow_ownership_refined_parallax"] = None
+        with self.assertRaisesRegex(ValueError, "geometry dimension"):
             dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_manifest_authenticates_live_and_diagnostic_renderer_sources(self):
@@ -353,7 +368,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         for key in (
                 "parallax_v2_render_requested",
                 "mapping_artifacts_match_selected_renderer",
-                "parallax_v2_coordinate_role"):
+                "parallax_v2_coordinate_role",
+                "parallax_v2_ownership_refined_role"):
             with self.subTest(key=key):
                 changed = copy.deepcopy(self.manifest)
                 changed["renderer"].pop(key)
@@ -380,6 +396,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "mapping_artifacts_match_selected_renderer": False,
             "parallax_v2_position_field": None,
             "parallax_v2_coordinate_role": None,
+            "parallax_v2_ownership_refined_role": None,
             "parallax_v2_vertical_majorant_role": None,
             "parallax_v2_vertical_conditioned_role": None,
             "parallax_v2_conditioner_role": None,
@@ -390,7 +407,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         inactive["parallax_v2_shadow"]["active"] = False
         inactive["parallax_v2_shadow"]["rendered_output_selected"] = False
         for name in (
-                "shadow_candidate_parallax", "shadow_vertical_majorant",
+                "shadow_candidate_parallax", "shadow_ownership_refined_parallax",
+                "shadow_vertical_majorant",
                 "shadow_vertical_conditioned",
                 "shadow_final_parallax"):
             inactive["dimensions"][name] = None
@@ -433,7 +451,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertTrue(summary["camera_valid"])
             self.assertEqual(summary["calibration_revision"], 4)
 
-    def test_single_dump_replay_validates_the_schema_9_manifest(self):
+    def test_single_dump_replay_validates_the_schema_10_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "dump_manifest.json").write_text(
@@ -442,7 +460,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             summary = _inspect_optional_v2_dump_manifest(root)
 
             self.assertEqual(summary["status"], "validated")
-            self.assertEqual(summary["manifest_schema"], 9)
+            self.assertEqual(summary["manifest_schema"], 10)
             self.assertTrue(summary["active"])
 
     def test_paired_state_rejects_both_directions_of_frame_validity_mismatch(self):
@@ -552,8 +570,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         changed["named_values"]["convergence_curve"] = 0.1
         changed["fields"][2]["value"] = 0.1
         changed["decoded"]["convergence_curve"] = 0.1
+        self._seal_camera_center(changed)
         with self.assertRaisesRegex(ValueError, "out of range"):
             dump_contract.validate_shadow_state_document(changed)
+
         changed = copy.deepcopy(self.state)
         changed["named_values"]["container_scale"] = 1.1
         changed["fields"][3]["value"] = 1.1
@@ -563,36 +583,20 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "out of range"):
             dump_contract.validate_shadow_state_document(changed)
 
-    def test_near_shoulder_and_center_integrity_are_exact_scene_latched_state(self):
+    def test_center_integrity_and_reserved_mapping_state_fail_closed(self):
         changed = copy.deepcopy(self.state)
         self._set_state_word(changed, "center", 2.25)
         with self.assertRaisesRegex(ValueError, "center integrity checksum"):
             dump_contract.validate_shadow_state_document(changed)
 
         changed = copy.deepcopy(self.state)
-        self._set_state_word(
-            changed, "latched_near_tail_count",
-            changed["named_values"]["latched_near_tail_count"] + 1)
-        changed["decoded"]["latched_near_tail_count"] += 1
-        with self.assertRaisesRegex(ValueError, "inconsistent near shoulder"):
+        self._set_state_word(changed, "mapping_state_reserved_0", 1)
+        with self.assertRaisesRegex(ValueError, "reserved mapping state"):
             dump_contract.validate_shadow_state_document(changed)
 
         changed = copy.deepcopy(self.state)
-        wrong_tau = changed["named_values"]["effective_near_log_tau"] + 0.05
-        self._set_state_word(changed, "effective_near_log_tau", wrong_tau)
-        changed["decoded"]["effective_near_log_tau"] = wrong_tau
-        with self.assertRaisesRegex(ValueError, "inconsistent near shoulder"):
-            dump_contract.validate_shadow_state_document(changed)
-
-        changed = copy.deepcopy(self.state)
-        self._set_state_word(changed, "latched_near_tail_coverage", 1.1)
-        changed["decoded"]["latched_near_tail_coverage"] = 1.1
-        with self.assertRaisesRegex(ValueError, "inconsistent near shoulder"):
-            dump_contract.validate_shadow_state_document(changed)
-
-        changed = copy.deepcopy(self.state)
-        changed["constants"]["near_tail_probe_u"] = 1.1
-        with self.assertRaisesRegex(ValueError, "generated contract"):
+        self._set_state_word(changed, "mapping_state_reserved_1", 1)
+        with self.assertRaisesRegex(ValueError, "reserved mapping state"):
             dump_contract.validate_shadow_state_document(changed)
 
         changed = copy.deepcopy(self.state)
@@ -608,25 +612,21 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "effective_gain": 0.0,
         })
         self._seal_camera_center(changed)
-        with self.assertRaisesRegex(ValueError, "out of range"):
-            dump_contract.validate_shadow_state_document(changed)
+        dump_contract.validate_shadow_state_document(changed)
 
         native = (REPO / "src" / "platform" / "windows" /
                   "sbs_debug_dump.cpp").read_text(encoding="utf-8")
         self.assertIn("camera_center_integrity_is_valid", native)
-        self.assertIn("near_tail_effective_tau_for_coverage", native)
-        self.assertIn('{"near_tail_probe_u", near_tail_probe_u}', native)
+        self.assertIn("mapping_state_reserved_valid", native)
 
     def test_invalid_state_preserves_requested_gain_but_effective_is_zero(self):
         changed = copy.deepcopy(self.state)
         replacements = {
             "center": 0.0, "inverse_scale": 0.0, "convergence_curve": 0.0,
             "container_scale": 1.0, "frame_valid": 0.0,
-            "latched_near_tail_coverage": 0.0,
-            "effective_near_log_tau": coordinate.CALIBRATED_DEFAULTS.near_log_tau,
-            "latched_near_tail_count": 0,
             "camera_center_integrity_bits": dump_contract.camera_center_integrity_bits(
-                0.0, 0.0, changed["named_values"]["calibration_revision"]),
+                0.0, 0.0, 0.0,
+                changed["named_values"]["calibration_revision"]),
         }
         for name, value in replacements.items():
             changed["named_values"][name] = value
@@ -637,10 +637,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         changed["decoded"]["latched_scale"] = 0.0
         changed["decoded"]["container_scale"] = 1.0
         changed["decoded"]["effective_gain"] = 0.0
-        changed["decoded"]["latched_near_tail_coverage"] = 0.0
-        changed["decoded"]["effective_near_log_tau"] = (
-            coordinate.CALIBRATED_DEFAULTS.near_log_tau)
-        changed["decoded"]["latched_near_tail_count"] = 0
         changed["decoded"]["camera_center_integrity_bits"] = (
             replacements["camera_center_integrity_bits"])
         dump_contract.validate_shadow_state_document(changed)

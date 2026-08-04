@@ -1,9 +1,11 @@
 # Host SBS V2 Crown Artifact: Bounded-Compromise Trial Results
 
-Status: historical investigation record. Schema-15 C75 geometry remains selected, but its live
+Status: historical investigation record. Schema-16 C75 geometry remains selected, but its live
 collar-filter companion was rejected on 2026-08-03 after matched old/new hand-scene dumps exposed
 a new translucent/soft hand-boundary halo. Manifest schema 9 records the filter as disabled and
-the live renderer again takes one native-color sample. Later sections preserve the trial history.
+the live renderer again takes one native-color sample. Schema 16 also removed the later
+shot-latched near-occupancy shoulder and uses fixed `tau_near = 2`; later sections preserve the
+schema-15 trial history rather than describing current runtime state.
 
 Date: 2026-08-03. Continues [host-sbs-v2-crown-artifact-handoff.md](host-sbs-v2-crown-artifact-handoff.md).
 

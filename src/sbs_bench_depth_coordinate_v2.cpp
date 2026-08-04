@@ -41,9 +41,9 @@ namespace sbs_bench {
   namespace shader_cache = models::host_sbs_shader_cache;
 
   namespace {
-    constexpr std::uint32_t manifest_schema = 4u;
+    constexpr std::uint32_t manifest_schema = 8u;
     constexpr std::string_view manifest_mode =
-      "depth-coordinate-v2-experimental-shadow-gpu-sequence-v5";
+      "depth-coordinate-v2-production-gpu-sequence-v10";
     constexpr float direct_container_limit = v2::direct_container_limit;
 
     const std::array<const char *, 41> trace_field_names {{
@@ -62,9 +62,6 @@ namespace sbs_bench {
       "inverse_scale",
       "latched_scale",
       "convergence_curve",
-      "latched_near_tail_coverage",
-      "effective_near_log_tau",
-      "latched_near_tail_count",
       "requested_gain",
       "container_scale",
       "effective_gain",
@@ -75,6 +72,8 @@ namespace sbs_bench {
       "candidate_center_drift_u",
       "predicted_zero_translation_source_u",
       "pre_limiter_max_abs_source_u",
+      "ownership_raised_fraction",
+      "ownership_max_raise_source_u",
       "vertical_majorant_raised_fraction",
       "vertical_majorant_max_raise_source_u",
       "final_max_abs_source_u",
@@ -85,6 +84,7 @@ namespace sbs_bench {
       "final_horizontal_slope_max",
       "final_vertical_shear_max",
       "order_sha256",
+      "ownership_refined_sha256",
       "vertical_majorant_sha256",
       "vertical_conditioned_sha256",
       "parallax_sha256",
@@ -171,8 +171,8 @@ namespace sbs_bench {
 
     ComPtr<ID3DBlob> compile_encode_shader(std::string &error) {
       // Interchange only. The controller and conditioning remain exclusively in the seven
-      // production V2 shaders; this pass changes signed [-.04,+.04] storage into the existing
-      // direct-renderer's [0,1] storage without a GPU->CPU->GPU round trip.
+      // production V2 coordinate shaders; this pass changes signed [-.04,+.04] storage into the
+      // existing direct-renderer's [0,1] storage without a GPU->CPU->GPU round trip.
       static constexpr char source[] = R"(
 Texture2D<float> SignedParallax : register(t0);
 RWTexture2D<float> EncodedParallax : register(u0);
@@ -375,6 +375,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       std::uint64_t frame_number = 0u;
       fs::path raw_path;
       std::string raw_sha256;
+      std::string source_sha256;
       std::uint32_t cut_generation = 0u;
       bool cut_pulse = false;
     };
@@ -387,6 +388,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     std::string manifest_sha256;
     std::string model_name;
     std::string cut_source;
+    std::uint32_t source_color_mode = 0u;
+    // Provenance for linear scaling already applied before the authenticated texture upload.
+    // The ownership shader reads the uploaded FP16 values directly and must not multiply twice.
+    float source_linear_scale = 1.0f;
+    UINT source_width = 0u;
+    UINT source_height = 0u;
     UINT width = 0u;
     UINT height = 0u;
     UINT reduce_groups = 0u;
@@ -396,28 +403,33 @@ void main(uint3 id : SV_DispatchThreadID) {
     std::vector<input_frame> frames;
     std::vector<nlohmann::ordered_json> trace_rows;
 
+    ComPtr<ID3D11ComputeShader> minmax_shader;
+    ComPtr<ID3D11ComputeShader> histogram_shader;
     ComPtr<ID3D11ComputeShader> moments_shader;
     ComPtr<ID3D11ComputeShader> frame_shader;
-    ComPtr<ID3D11ComputeShader> near_coverage_shader;
     ComPtr<ID3D11ComputeShader> state_shader;
     ComPtr<ID3D11ComputeShader> map_shader;
+    ComPtr<ID3D11ComputeShader> ownership_shader;
     ComPtr<ID3D11ComputeShader> coordinate_diagnostic_shader;
     ComPtr<ID3D11ComputeShader> vertical_limit_shader;
     ComPtr<ID3D11ComputeShader> limit_shader;
     ComPtr<ID3D11ComputeShader> encode_shader;
-    ComPtr<ID3D11Buffer> common_constants;
+    std::array<ComPtr<ID3D11Buffer>, 3> common_constants_by_color;
     ComPtr<ID3D11Buffer> v2_constants;
     ComPtr<ID3D11Buffer> encode_constants;
     ComPtr<ID3D11Buffer> raw_buffer;
     ComPtr<ID3D11ShaderResourceView> raw_srv;
+    ComPtr<ID3D11Buffer> minmax_raw_buffer;
+    ComPtr<ID3D11UnorderedAccessView> minmax_raw_uav;
+    ComPtr<ID3D11Buffer> histogram_buffer;
+    ComPtr<ID3D11ShaderResourceView> histogram_srv;
+    ComPtr<ID3D11UnorderedAccessView> histogram_uav;
     ComPtr<ID3D11Buffer> partial_buffer;
     ComPtr<ID3D11ShaderResourceView> partial_srv;
     ComPtr<ID3D11UnorderedAccessView> partial_uav;
     ComPtr<ID3D11Buffer> frame_buffer;
     ComPtr<ID3D11ShaderResourceView> frame_srv;
     ComPtr<ID3D11UnorderedAccessView> frame_uav;
-    ComPtr<ID3D11Buffer> near_tail_count_buffer;
-    ComPtr<ID3D11UnorderedAccessView> near_tail_count_uav;
     ComPtr<ID3D11Buffer> state_buffer;
     ComPtr<ID3D11ShaderResourceView> state_srv;
     ComPtr<ID3D11UnorderedAccessView> state_uav;
@@ -429,6 +441,9 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11Texture2D> candidate_texture;
     ComPtr<ID3D11ShaderResourceView> candidate_srv;
     ComPtr<ID3D11UnorderedAccessView> candidate_uav;
+    ComPtr<ID3D11Texture2D> ownership_texture;
+    ComPtr<ID3D11ShaderResourceView> ownership_srv;
+    ComPtr<ID3D11UnorderedAccessView> ownership_uav;
     ComPtr<ID3D11Texture2D> vertical_majorant_texture;
     ComPtr<ID3D11ShaderResourceView> vertical_majorant_srv;
     ComPtr<ID3D11UnorderedAccessView> vertical_majorant_uav;
@@ -456,9 +471,10 @@ void main(uint3 id : SV_DispatchThreadID) {
         error = std::string("invalid v2 GPU replay manifest JSON: ") + exc.what();
         return false;
       }
-      const std::array<const char *, 8> root_keys {{
+      const std::array<const char *, 11> root_keys {{
         "schema", "mode", "calibration_contract", "model_identity", "raw_shape",
-        "mapping_config", "cut_source", "frames",
+        "source_shape", "mapping_config", "source_color_mode", "source_linear_scale",
+        "cut_source", "frames",
       }};
       if (!root.is_object() || root.size() != root_keys.size() ||
           std::any_of(root_keys.begin(), root_keys.end(), [&](const char *key) {
@@ -541,6 +557,21 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
       width = static_cast<UINT>(manifest_width);
       height = static_cast<UINT>(manifest_height);
+      const auto &source_shape = root["source_shape"];
+      std::uint32_t manifest_source_width = 0u;
+      std::uint32_t manifest_source_height = 0u;
+      if (!source_shape.is_object() || source_shape.size() != 2u ||
+          !source_shape.contains("width") || !source_shape.contains("height") ||
+          !uint32_number(source_shape["width"], manifest_source_width) ||
+          !uint32_number(source_shape["height"], manifest_source_height) ||
+          manifest_source_width == 0u || manifest_source_height == 0u ||
+          manifest_source_width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+          manifest_source_height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
+        error = "v2 GPU replay manifest has invalid source-shape contract";
+        return false;
+      }
+      source_width = static_cast<UINT>(manifest_source_width);
+      source_height = static_cast<UINT>(manifest_source_height);
       model_name = identity["model"].get<std::string>();
       if (!width || !height ||
           static_cast<std::uint64_t>(width) * height >
@@ -580,10 +611,8 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
 
       mapping_config = root["mapping_config"];
-      const std::array<const char *, 14> mapping_keys {{
+      const std::array<const char *, 10> mapping_keys {{
         "raw_coordinate_scale", "collapse_abs_epsilon", "far_tau", "near_log_tau",
-        "near_tail_probe_u", "near_tail_coverage_low", "near_tail_coverage_high",
-        "near_log_tau_dense",
         "pop_strength", "gain_per_pop", "max_horizontal_slope",
         "max_vertical_shear", "vertical_majorant_share", "direct_container_limit",
       }};
@@ -604,14 +633,6 @@ void main(uint3 id : SV_DispatchThreadID) {
                          constants.collapse_abs_epsilon) ||
           !finite_number(mapping_config["far_tau"], constants.far_tau) ||
           !finite_number(mapping_config["near_log_tau"], constants.near_log_tau) ||
-          !finite_number(mapping_config["near_tail_probe_u"],
-                         constants.near_tail_probe_u) ||
-          !finite_number(mapping_config["near_tail_coverage_low"],
-                         constants.near_tail_coverage_low) ||
-          !finite_number(mapping_config["near_tail_coverage_high"],
-                         constants.near_tail_coverage_high) ||
-          !finite_number(mapping_config["near_log_tau_dense"],
-                         constants.near_log_tau_dense) ||
           !finite_number(mapping_config["pop_strength"], pop_strength) ||
           !finite_number(mapping_config["gain_per_pop"], gain_per_pop) ||
           !finite_number(mapping_config["max_horizontal_slope"],
@@ -628,17 +649,13 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
       constants.requested_gain = pop_strength * gain_per_pop;
       constants.convergence_curve_default = v2::convergence_curve_default;
-      // This harness proves the exact experimental-shadow algorithm, not a family of similarly
-      // shaped experiments.  The requested pop authority may vary within the admitted range;
+      // This harness proves the exact production V2 algorithm, not a family of similarly shaped
+      // experiments. The requested pop authority may vary within the admitted range;
       // every algorithm/safety constant must be the generated contract value bit-for-bit.
       if (constants.raw_coordinate_scale != calibration->raw_coordinate_scale ||
           constants.collapse_abs_epsilon != v2::collapse_abs_epsilon ||
           constants.far_tau != v2::far_tau ||
           constants.near_log_tau != v2::near_log_tau ||
-          constants.near_tail_probe_u != v2::near_tail_probe_u ||
-          constants.near_tail_coverage_low != v2::near_tail_coverage_low ||
-          constants.near_tail_coverage_high != v2::near_tail_coverage_high ||
-          constants.near_log_tau_dense != v2::near_log_tau_dense ||
           gain_per_pop != v2::gain_per_pop ||
           constants.max_horizontal_slope != v2::max_horizontal_slope ||
           max_vertical_shear != v2::max_vertical_shear ||
@@ -647,7 +664,16 @@ void main(uint3 id : SV_DispatchThreadID) {
           constants.convergence_curve_default != v2::convergence_curve_default ||
           pop_strength < 0.25f || pop_strength > 2.0f ||
           !std::isfinite(constants.requested_gain) || constants.requested_gain <= 0.0f) {
-        error = "v2 GPU replay mapping differs from the generated experimental-shadow contract";
+        error = "v2 GPU replay mapping differs from the generated production V2 contract";
+        return false;
+      }
+
+      if (!uint32_number(root["source_color_mode"], source_color_mode) ||
+          source_color_mode >= common_constants_by_color.size() ||
+          !finite_number(root["source_linear_scale"], source_linear_scale) ||
+          !(source_linear_scale > 0.0f) || source_linear_scale > 64.0f ||
+          (source_color_mode != 2u && source_linear_scale != 1.0f)) {
+        error = "v2 GPU replay source color interpretation is invalid";
         return false;
       }
 
@@ -665,15 +691,16 @@ void main(uint3 id : SV_DispatchThreadID) {
       std::optional<std::uint32_t> previous_generation;
       std::optional<std::uint64_t> previous_frame_number;
       for (const auto &value : frame_values) {
-        const std::array<const char *, 5> frame_keys {{
-          "frame_id", "raw_file", "raw_sha256", "hard_cut_count", "hard_cut_pulse",
+        const std::array<const char *, 6> frame_keys {{
+          "frame_id", "raw_file", "raw_sha256", "source_sha256", "hard_cut_count",
+          "hard_cut_pulse",
         }};
         if (!value.is_object() || value.size() != frame_keys.size() ||
             std::any_of(frame_keys.begin(), frame_keys.end(), [&](const char *key) {
               return !value.contains(key);
             }) ||
             !value["frame_id"].is_string() || !value["raw_file"].is_string() ||
-            !value["raw_sha256"].is_string() ||
+            !value["raw_sha256"].is_string() || !value["source_sha256"].is_string() ||
             !value["hard_cut_count"].is_number_unsigned() ||
             !value["hard_cut_pulse"].is_boolean()) {
           error = "v2 GPU replay manifest has an invalid frame record";
@@ -688,6 +715,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         );
         const auto raw_file = value["raw_file"].get<std::string>();
         frame.raw_sha256 = value["raw_sha256"].get<std::string>();
+        frame.source_sha256 = value["source_sha256"].get<std::string>();
         if (!uint32_number(value["hard_cut_count"], frame.cut_generation)) {
           error = "v2 GPU replay hard-cut generation is outside uint32";
           return false;
@@ -699,6 +727,7 @@ void main(uint3 id : SV_DispatchThreadID) {
             (previous_frame_number && frame.frame_number <= *previous_frame_number) ||
             !relative_filename(raw_file) || raw_file != "raw_" + frame.frame_id + ".f32" ||
             !sha256_is_lower_hex(frame.raw_sha256) ||
+            !sha256_is_lower_hex(frame.source_sha256) ||
             frame.cut_generation > 0xfffffffdu) {
           error = "v2 GPU replay frame identity/hash/generation is invalid";
           return false;
@@ -742,19 +771,21 @@ void main(uint3 id : SV_DispatchThreadID) {
       if (!shader_sources ||
           shader_cache::source_closure_sha256(shader_sources) !=
             v2::shader_source_closure_sha256) {
-        error = "experimental-shadow shader source closure does not match the generated V2 contract";
+        error = "production V2 shader source closure does not match the generated V2 contract";
         return false;
       }
       struct shader_target {
         const shader_cache::shader_spec *spec;
         ComPtr<ID3D11ComputeShader> *shader;
       };
-      const std::array<shader_target, 7> targets {{
+      const std::array<shader_target, 9> targets {{
+        {&shader_cache::depth_minmax, &minmax_shader},
+        {&shader_cache::depth_hist, &histogram_shader},
         {&shader_cache::depth_coordinate_v2_moments, &moments_shader},
         {&shader_cache::depth_coordinate_v2_frame_resolve, &frame_shader},
-        {&shader_cache::depth_coordinate_v2_near_coverage, &near_coverage_shader},
         {&shader_cache::depth_coordinate_v2_state_resolve, &state_shader},
         {&shader_cache::depth_coordinate_v2_map, &map_shader},
+        {&shader_cache::depth_coordinate_v2_ownership, &ownership_shader},
         {&shader_cache::depth_coordinate_v2_vertical_limit, &vertical_limit_shader},
         {&shader_cache::depth_coordinate_v2_limit, &limit_shader},
       }};
@@ -764,7 +795,7 @@ void main(uint3 id : SV_DispatchThreadID) {
               bytecode->data(), bytecode->size(), nullptr,
               target.shader->ReleaseAndGetAddressOf()
             )) || !*target.shader) {
-          error = std::string("cannot create authenticated experimental-shadow compute shader ") +
+          error = std::string("cannot create authenticated production V2 compute shader ") +
             std::string(target.spec->filename);
           return false;
         }
@@ -806,7 +837,15 @@ void main(uint3 id : SV_DispatchThreadID) {
       const std::array<float, 4> encode_words {{
         v2::direct_container_limit, 0.0f, 0.0f, 0.0f,
       }};
-      if (!create_immutable_constant_buffer(device.Get(), common_words, common_constants) ||
+      bool common_constants_ready = true;
+      for (std::uint32_t color_mode = 0u;
+           color_mode < common_constants_by_color.size();
+           ++color_mode) {
+        common_words[2] = color_mode;
+        common_constants_ready = common_constants_ready && create_immutable_constant_buffer(
+          device.Get(), common_words, common_constants_by_color[color_mode]);
+      }
+      if (!common_constants_ready ||
           !create_immutable_constant_buffer(device.Get(), constants, v2_constants) ||
           !create_immutable_constant_buffer(device.Get(), encode_words, encode_constants)) {
         error = "cannot create v2 GPU replay constant buffers";
@@ -814,10 +853,14 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
       ComPtr<ID3D11ShaderResourceView> unused_srv;
       ComPtr<ID3D11UnorderedAccessView> unused_uav;
-      const std::uint32_t initial_near_tail_count = 0u;
+      const std::array<std::uint32_t, 256> empty_histogram {};
       if (!create_structured_buffer(
             device.Get(), sizeof(float), width * height, nullptr, false,
             raw_buffer, raw_srv, unused_uav
+          ) ||
+          !create_structured_buffer(
+            device.Get(), sizeof(std::uint32_t), 256u, empty_histogram.data(), true,
+            histogram_buffer, histogram_srv, histogram_uav
           ) ||
           !create_structured_buffer(
             device.Get(), sizeof(float) * 4u, reduce_groups * 2u, nullptr, true,
@@ -829,17 +872,35 @@ void main(uint3 id : SV_DispatchThreadID) {
             frame_buffer, frame_srv, frame_uav
           ) ||
           !create_structured_buffer(
-            device.Get(), sizeof(std::uint32_t), 1u,
-            &initial_near_tail_count, true,
-            near_tail_count_buffer, unused_srv, near_tail_count_uav
-          ) ||
-          !create_structured_buffer(
             device.Get(), sizeof(float) * 4u,
             static_cast<UINT>(v2::state_vector_count), v2::state_initial_words.data(), true,
             state_buffer, state_srv, state_uav
           )) {
         error = "cannot create v2 GPU replay structured resources";
         return false;
+      }
+      {
+        const std::array<std::uint32_t, 3> initial_minmax {{0xffffffffu, 0u, 0u}};
+        D3D11_BUFFER_DESC description {};
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.ByteWidth = static_cast<UINT>(sizeof(initial_minmax));
+        description.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        description.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        D3D11_SUBRESOURCE_DATA initial_data {initial_minmax.data(), 0u, 0u};
+        D3D11_UNORDERED_ACCESS_VIEW_DESC view {};
+        view.Format = DXGI_FORMAT_R32_TYPELESS;
+        view.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        view.Buffer.NumElements = static_cast<UINT>(initial_minmax.size());
+        view.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+        if (FAILED(device->CreateBuffer(
+              &description, &initial_data, minmax_raw_buffer.ReleaseAndGetAddressOf()
+            )) ||
+            FAILED(device->CreateUnorderedAccessView(
+              minmax_raw_buffer.Get(), &view, minmax_raw_uav.ReleaseAndGetAddressOf()
+            )) || !minmax_raw_uav) {
+          error = "cannot create v2 GPU replay raw min/max resource";
+          return false;
+        }
       }
       auto legacy_words = sbs_adaptive_state::words_t {};
       for (std::size_t index = 0; index < legacy_words.size(); ++index) {
@@ -859,6 +920,10 @@ void main(uint3 id : SV_DispatchThreadID) {
           !create_float_texture(
             device.Get(), width, height,
             candidate_texture, candidate_srv, candidate_uav
+          ) ||
+          !create_float_texture(
+            device.Get(), width, height,
+            ownership_texture, ownership_srv, ownership_uav
           ) ||
           !create_float_texture(
             device.Get(), width, height,
@@ -912,6 +977,10 @@ void main(uint3 id : SV_DispatchThreadID) {
     bool dispatch_frame(
       const std::size_t sequence_index,
       const std::string_view expected_frame_id,
+      ID3D11ShaderResourceView *source_color,
+      const std::uint32_t source_color_mode,
+      const float source_linear_scale,
+      const std::string_view expected_source_sha256,
       depth_coordinate_v2_gpu_frame &result,
       std::string &error
     ) {
@@ -925,11 +994,48 @@ void main(uint3 id : SV_DispatchThreadID) {
                 std::to_string(sequence_index);
         return false;
       }
+      ComPtr<ID3D11Resource> source_resource;
+      ComPtr<ID3D11Texture2D> source_texture;
+      if (!source_color || source_color_mode >= common_constants_by_color.size() ||
+          source_color_mode != this->source_color_mode ||
+          std::bit_cast<std::uint32_t>(source_linear_scale) !=
+            std::bit_cast<std::uint32_t>(this->source_linear_scale) ||
+          expected_source_sha256 != frame.source_sha256 ||
+          (source_color->GetResource(&source_resource), !source_resource) ||
+          FAILED(source_resource.As(&source_texture)) || !source_texture) {
+        error =
+          "source color/provenance/interpretation disagrees with v2 GPU replay manifest at sequence index " +
+          std::to_string(sequence_index);
+        return false;
+      }
+      D3D11_TEXTURE2D_DESC source_description {};
+      source_texture->GetDesc(&source_description);
+      D3D11_SHADER_RESOURCE_VIEW_DESC source_view_description {};
+      source_color->GetDesc(&source_view_description);
+      const DXGI_FORMAT expected_source_format = source_color_mode == 0u ?
+                                                   DXGI_FORMAT_B8G8R8A8_UNORM :
+                                                   DXGI_FORMAT_R16G16B16A16_FLOAT;
+      if (source_description.Width != source_width ||
+          source_description.Height != source_height ||
+          source_description.MipLevels != 1u || source_description.ArraySize != 1u ||
+          source_description.SampleDesc.Count != 1u ||
+          source_description.Format != expected_source_format ||
+          source_view_description.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D ||
+          source_view_description.Format != expected_source_format ||
+          source_view_description.Texture2D.MostDetailedMip != 0u ||
+          source_view_description.Texture2D.MipLevels != 1u) {
+        error = "v2 GPU replay source texture disagrees with its authenticated shape/format";
+        return false;
+      }
       std::vector<float> raw_values;
       if (!load_raw(frame, raw_values, error)) {
         return false;
       }
       context->UpdateSubresource(raw_buffer.Get(), 0, nullptr, raw_values.data(), 0, 0);
+      const bool confirmed_cut_input = sequence_index > 0u && (
+        frame.cut_pulse ||
+        frame.cut_generation != frames[sequence_index - 1u].cut_generation
+      );
       auto legacy_words = sbs_adaptive_state::words_t {};
       for (std::size_t index = 0; index < legacy_words.size(); ++index) {
         legacy_words[index] = std::bit_cast<std::uint32_t>(
@@ -943,8 +1049,33 @@ void main(uint3 id : SV_DispatchThreadID) {
           std::bit_cast<std::uint32_t>(frame.cut_pulse ? 1.0f : 0.0f);
       context->UpdateSubresource(legacy_buffer.Get(), 0, nullptr, legacy_words.data(), 0, 0);
 
-      ID3D11Buffer *constant_buffers[] = {common_constants.Get(), v2_constants.Get()};
+      ID3D11Buffer *constant_buffers[] = {
+        common_constants_by_color[source_color_mode].Get(), v2_constants.Get()
+      };
       context->CSSetConstantBuffers(0, 2, constant_buffers);
+
+      // Reproduce the two authenticated shared passes that feed live V2. The replay resets their
+      // accumulators explicitly because it does not run the legacy percentile-EMA clear pass.
+      const std::array<std::uint32_t, 3> initial_minmax {{0xffffffffu, 0u, 0u}};
+      const UINT clear_histogram[4] = {0u, 0u, 0u, 0u};
+      context->UpdateSubresource(
+        minmax_raw_buffer.Get(), 0u, nullptr, initial_minmax.data(), 0u, 0u);
+      context->ClearUnorderedAccessViewUint(histogram_uav.Get(), clear_histogram);
+
+      context->CSSetShader(minmax_shader.Get(), nullptr, 0);
+      context->CSSetShaderResources(0, 1, raw_srv.GetAddressOf());
+      context->CSSetUnorderedAccessViews(0, 1, minmax_raw_uav.GetAddressOf(), nullptr);
+      context->Dispatch(reduce_groups, 1u, 1u);
+      unbind(1u, 1u);
+
+      context->CSSetShader(histogram_shader.Get(), nullptr, 0);
+      context->CSSetShaderResources(0, 1, raw_srv.GetAddressOf());
+      ID3D11UnorderedAccessView *histogram_uavs[] = {
+        histogram_uav.Get(), minmax_raw_uav.Get(),
+      };
+      context->CSSetUnorderedAccessViews(0, 2, histogram_uavs, nullptr);
+      context->Dispatch(reduce_groups, 1u, 1u);
+      unbind(1u, 2u);
 
       context->CSSetShader(moments_shader.Get(), nullptr, 0);
       ID3D11ShaderResourceView *moments_srvs[] = {raw_srv.Get()};
@@ -962,27 +1093,14 @@ void main(uint3 id : SV_DispatchThreadID) {
       context->Dispatch(1u, 1u, 1u);
       unbind(1u, 1u);
 
-      context->CSSetShader(near_coverage_shader.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *near_coverage_srvs[] = {
-        raw_srv.Get(), frame_srv.Get(), state_srv.Get(), legacy_srv.Get(),
-      };
-      ID3D11UnorderedAccessView *near_coverage_uavs[] = {near_tail_count_uav.Get()};
-      context->CSSetShaderResources(0, 4, near_coverage_srvs);
-      context->CSSetUnorderedAccessViews(0, 1, near_coverage_uavs, nullptr);
-      context->Dispatch(reduce_groups, 1u, 1u);
-      unbind(4u, 1u);
-
       context->CSSetShader(state_shader.Get(), nullptr, 0);
       ID3D11ShaderResourceView *state_srvs[] = {
-        frame_srv.Get(), legacy_srv.Get(),
+        frame_srv.Get(), legacy_srv.Get(), histogram_srv.Get(),
       };
-      ID3D11UnorderedAccessView *state_uavs[] = {
-        state_uav.Get(), near_tail_count_uav.Get(),
-      };
-      context->CSSetShaderResources(0, 2, state_srvs);
-      context->CSSetUnorderedAccessViews(0, 2, state_uavs, nullptr);
+      context->CSSetShaderResources(0, 3, state_srvs);
+      context->CSSetUnorderedAccessViews(0, 1, state_uav.GetAddressOf(), nullptr);
       context->Dispatch(1u, 1u, 1u);
-      unbind(2u, 2u);
+      unbind(3u, 1u);
 
       ID3D11ShaderResourceView *map_srvs[] = {raw_srv.Get(), state_srv.Get()};
 
@@ -999,8 +1117,15 @@ void main(uint3 id : SV_DispatchThreadID) {
       context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
       unbind(2u, 1u);
 
+      context->CSSetShader(ownership_shader.Get(), nullptr, 0);
+      ID3D11ShaderResourceView *ownership_srvs[] = {candidate_srv.Get(), source_color};
+      context->CSSetShaderResources(0, 2, ownership_srvs);
+      context->CSSetUnorderedAccessViews(0, 1, ownership_uav.GetAddressOf(), nullptr);
+      context->Dispatch((width + 7u) / 8u, (height + 7u) / 8u, 1u);
+      unbind(2u, 1u);
+
       context->CSSetShader(vertical_limit_shader.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *vertical_limit_srvs[] = {candidate_srv.Get()};
+      ID3D11ShaderResourceView *vertical_limit_srvs[] = {ownership_srv.Get()};
       ID3D11UnorderedAccessView *vertical_limit_uavs[] = {
         vertical_majorant_uav.Get(), vertical_conditioned_uav.Get(),
       };
@@ -1033,12 +1158,12 @@ void main(uint3 id : SV_DispatchThreadID) {
         device.Get(), context.Get(), frame_buffer.Get(), v2::frame_stats_float_count);
       const auto state_words = read_buffer_words(
         device.Get(), context.Get(), state_buffer.Get(), v2::state_float_count);
-      const auto near_tail_counter_words = read_buffer_words(
-        device.Get(), context.Get(), near_tail_count_buffer.Get(), 1u);
       const auto canonical = read_float_texture(
         device.Get(), context.Get(), coordinate_texture.Get(), width, height);
       const auto candidate = read_float_texture(
         device.Get(), context.Get(), candidate_texture.Get(), width, height);
+      const auto ownership = read_float_texture(
+        device.Get(), context.Get(), ownership_texture.Get(), width, height);
       const auto vertical_majorant = read_float_texture(
         device.Get(), context.Get(), vertical_majorant_texture.Get(), width, height);
       const auto vertical_conditioned = read_float_texture(
@@ -1050,8 +1175,8 @@ void main(uint3 id : SV_DispatchThreadID) {
       const std::size_t element_count = static_cast<std::size_t>(width) * height;
       if (frame_words.size() != v2::frame_stats_float_count ||
           state_words.size() != v2::state_float_count ||
-          near_tail_counter_words.size() != 1u || near_tail_counter_words[0] != 0u ||
           canonical.size() != element_count || candidate.size() != element_count ||
+          ownership.size() != element_count ||
           vertical_majorant.size() != element_count ||
           vertical_conditioned.size() != element_count ||
           final_values.size() != element_count || encoded.size() != element_count ||
@@ -1064,6 +1189,9 @@ void main(uint3 id : SV_DispatchThreadID) {
           return std::isfinite(value);
         }) &&
         std::all_of(candidate.begin(), candidate.end(), [](const float value) {
+          return std::isfinite(value);
+        }) &&
+        std::all_of(ownership.begin(), ownership.end(), [](const float value) {
           return std::isfinite(value);
         }) &&
         std::all_of(vertical_majorant.begin(), vertical_majorant.end(), [](const float value) {
@@ -1099,30 +1227,24 @@ void main(uint3 id : SV_DispatchThreadID) {
       const float inverse_scale = float_state(v2::inverse_scale);
       const float latched_scale = inverse_scale > 0.0f ? 1.0f / inverse_scale : 0.0f;
       const float convergence_curve = float_state(v2::convergence_curve);
-      const float latched_near_tail_coverage =
-        float_state(v2::latched_near_tail_coverage);
-      const float effective_near_log_tau = float_state(v2::effective_near_log_tau);
-      const std::uint32_t latched_near_tail_count =
-        state_words[v2::latched_near_tail_count];
       const std::uint32_t camera_center_integrity =
         state_words[v2::camera_center_integrity_bits];
       const float container_scale = float_state(v2::container_scale);
-      const bool shoulder_valid =
-        std::isfinite(latched_near_tail_coverage) &&
-        latched_near_tail_coverage >= 0.0f && latched_near_tail_coverage <= 1.0f &&
-        std::isfinite(effective_near_log_tau) &&
-        effective_near_log_tau >= constants.near_log_tau_dense &&
-        effective_near_log_tau <= constants.near_log_tau &&
-        latched_near_tail_count <= element_count;
+      const bool mapping_state_reserved_valid =
+        state_words[v2::mapping_state_reserved_0] == 0u &&
+        state_words[v2::mapping_state_reserved_1] == 0u &&
+        state_words[v2::mapping_state_reserved_2] == 0u;
       const std::uint32_t calibration_revision =
         state_words[v2::calibration_revision];
       const bool camera_integrity_valid = v2::camera_center_integrity_is_valid(
         state_words[v2::center],
         state_words[v2::inverse_scale],
+        state_words[v2::convergence_curve],
         calibration_revision,
         camera_center_integrity
       );
-      const bool camera_valid = camera_integrity_valid && shoulder_valid &&
+      const bool camera_valid = camera_integrity_valid && mapping_state_reserved_valid &&
+        v2::convergence_curve_is_valid(convergence_curve) &&
         inverse_scale > 0.0f &&
         calibration_revision > 0u &&
         v2::calibration_revision_is_valid(calibration_revision);
@@ -1135,19 +1257,11 @@ void main(uint3 id : SV_DispatchThreadID) {
                                          float_stat(v2::frame_stat_minimum) : 0.0f;
       const float observed_raw_maximum = input_valid ?
                                          float_stat(v2::frame_stat_maximum) : 0.0f;
-      const bool confirmed_cut = sequence_index > 0u && (
-        frame.cut_pulse ||
-        frame.cut_generation != frames[sequence_index - 1u].cut_generation
-      );
-      const bool previous_camera_valid = !trace_rows.empty() &&
-        trace_rows.back().at("camera_valid").get<bool>();
-      const bool acquiring = frame_valid && (!previous_camera_valid || confirmed_cut);
+      const bool confirmed_cut = confirmed_cut_input;
       const bool state_values_finite =
         std::isfinite(center) && std::isfinite(inverse_scale) &&
         std::isfinite(latched_scale) && std::isfinite(convergence_curve) &&
-        std::isfinite(container_scale) &&
-        std::isfinite(latched_near_tail_coverage) &&
-        std::isfinite(effective_near_log_tau);
+        std::isfinite(container_scale);
       if (!state_values_finite ||
           frame_valid != (input_valid && !collapsed) ||
           (frame_valid && !camera_valid) ||
@@ -1158,65 +1272,19 @@ void main(uint3 id : SV_DispatchThreadID) {
         error = "v2 GPU replay state violates frame/camera validity semantics";
         return false;
       }
-      const float expected_latched_coverage = element_count > 0u ?
-        static_cast<float>(latched_near_tail_count) / static_cast<float>(element_count) :
-        0.0f;
-      const float coverage_unit = std::clamp(
-        (latched_near_tail_coverage - constants.near_tail_coverage_low) /
-          (constants.near_tail_coverage_high - constants.near_tail_coverage_low),
-        0.0f,
-        1.0f
-      );
-      const float dense_weight = coverage_unit * coverage_unit *
-        (3.0f - 2.0f * coverage_unit);
-      const float expected_effective_near_log_tau =
-        constants.near_log_tau +
-        (constants.near_log_tau_dense - constants.near_log_tau) * dense_weight;
-      if (!shoulder_valid ||
-          std::abs(latched_near_tail_coverage - expected_latched_coverage) > 2.0e-6f ||
-          std::abs(effective_near_log_tau - expected_effective_near_log_tau) > 2.0e-6f) {
-        error = "v2 GPU replay near-tail count, coverage, or effective tau disagrees";
+      if (!mapping_state_reserved_valid) {
+        error = "v2 GPU replay produced invalid persistent mapping state";
         return false;
       }
-      if (acquiring) {
-        const float threshold = observed_mean +
-          constants.near_tail_probe_u * constants.raw_coordinate_scale;
-        const std::uint32_t expected_near_tail_count = static_cast<std::uint32_t>(
-          std::count_if(raw_values.begin(), raw_values.end(), [&](const float value) {
-            return std::isfinite(value) && value > threshold;
-          })
-        );
-        if (latched_near_tail_count != expected_near_tail_count) {
-          error = "v2 GPU replay acquisition did not latch the exact near-tail count";
-          return false;
-        }
-      } else if (previous_camera_valid && !confirmed_cut) {
+      const bool prior_camera_valid = !trace_rows.empty() &&
+        trace_rows.back().at("camera_valid").get<bool>();
+      if (!trace_rows.empty() && !confirmed_cut && prior_camera_valid) {
         const auto &previous = trace_rows.back();
-        if (latched_near_tail_count !=
-              previous.at("latched_near_tail_count").get<std::uint32_t>() ||
-            std::abs(latched_near_tail_coverage -
-                     previous.at("latched_near_tail_coverage").get<float>()) > 2.0e-6f ||
-            std::abs(effective_near_log_tau -
-                     previous.at("effective_near_log_tau").get<float>()) > 2.0e-6f) {
-          error = "v2 GPU replay relatched the near shoulder without acquisition or cut";
-          return false;
-        }
-      } else if (!camera_valid &&
-                 (latched_near_tail_count != 0u ||
-                  latched_near_tail_coverage != 0.0f ||
-                  effective_near_log_tau != constants.near_log_tau)) {
-        error = "v2 GPU replay cleared camera retained stale near-tail state";
-        return false;
-      }
-      if (!trace_rows.empty() && !frame_valid && !confirmed_cut) {
-        const auto &previous = trace_rows.back();
-        const bool previous_camera = previous.at("camera_valid").get<bool>();
-        if (camera_valid != previous_camera ||
-            (camera_valid &&
-             (std::abs(center - previous.at("center").get<float>()) > 2.0e-6f ||
-              std::abs(inverse_scale - previous.at("inverse_scale").get<float>()) >
-                2.0e-6f))) {
-          error = "v2 GPU replay moved the retained camera on unusable no-cut depth";
+        if (!camera_valid ||
+            std::abs(center - previous.at("center").get<float>()) > 2.0e-6f ||
+            std::abs(inverse_scale - previous.at("inverse_scale").get<float>()) > 2.0e-6f ||
+            calibration_revision != previous.at("calibration_revision").get<std::uint32_t>()) {
+          error = "v2 GPU replay moved the retained camera without a confirmed cut";
           return false;
         }
       }
@@ -1225,7 +1293,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       if (frame_valid && camera_valid && observed_std > 0.0f) {
         candidate_center_drift = (observed_mean - center) * inverse_scale;
         predicted_zero_translation = effective_gain * (
-          v2_curve(candidate_center_drift, constants.far_tau, effective_near_log_tau) -
+          v2_curve(candidate_center_drift, constants.far_tau, constants.near_log_tau) -
           convergence_curve
         );
       }
@@ -1247,13 +1315,16 @@ void main(uint3 id : SV_DispatchThreadID) {
           std::min(1.0f, constants.direct_container_limit / maximum_requested) : 1.0f;
         if (!std::isfinite(expected_container_scale) ||
             std::abs(container_scale - expected_container_scale) > 2.0e-5f) {
-          error = "v2 GPU replay hard container did not use the base tau-2 curve";
+          error = "v2 GPU replay hard container did not use the fixed tau-2 curve";
           return false;
         }
       }
 
       float pre_limiter_max = 0.0f;
       float final_max = 0.0f;
+      float ownership_max_raise = 0.0f;
+      std::size_t ownership_raised = 0u;
+      bool ownership_illegally_lowered = false;
       float vertical_majorant_max_raise = 0.0f;
       std::size_t vertical_majorant_raised = 0u;
       bool vertical_majorant_illegally_lowered = false;
@@ -1276,16 +1347,20 @@ void main(uint3 id : SV_DispatchThreadID) {
         v2::max_vertical_shear / static_cast<float>(width) * 1.0e-9f
       );
       for (std::size_t index = 0; index < element_count; ++index) {
-        pre_limiter_max = std::max(pre_limiter_max, std::abs(candidate[index]));
+        pre_limiter_max = std::max(pre_limiter_max, std::abs(ownership[index]));
         final_max = std::max(final_max, std::abs(final_values[index]));
-        const float vertical_raise = vertical_majorant[index] - candidate[index];
+        const float ownership_raise = ownership[index] - candidate[index];
+        ownership_max_raise = std::max(ownership_max_raise, ownership_raise);
+        ownership_raised += ownership_raise > limiter_tolerance ? 1u : 0u;
+        ownership_illegally_lowered |= ownership_raise < -limiter_tolerance;
+        const float vertical_raise = vertical_majorant[index] - ownership[index];
         vertical_majorant_max_raise = std::max(
           vertical_majorant_max_raise,
           vertical_raise
         );
         vertical_majorant_raised += vertical_raise > vertical_tolerance ? 1u : 0u;
         vertical_majorant_illegally_lowered |= vertical_raise < -vertical_tolerance;
-        const float correction = final_values[index] - candidate[index];
+        const float correction = final_values[index] - ownership[index];
         conditioner_max_raise = std::max(conditioner_max_raise, correction);
         conditioner_max_lower = std::max(conditioner_max_lower, -correction);
         conditioner_raised += correction > limiter_tolerance ? 1u : 0u;
@@ -1324,8 +1399,10 @@ void main(uint3 id : SV_DispatchThreadID) {
           return false;
         }
       }
-      if (vertical_majorant_illegally_lowered || vertical_conditioned_above_majorant ||
+      if (ownership_illegally_lowered || vertical_majorant_illegally_lowered ||
+          vertical_conditioned_above_majorant ||
           row_majorant_illegally_lowered ||
+          pre_limiter_max > direct_container_limit + 2.0e-7f ||
           final_max > direct_container_limit + 2.0e-7f ||
           horizontal_slope_max > constants.max_horizontal_slope + 2.0e-5f ||
           vertical_majorant_shear_max > v2::max_vertical_shear + 2.0e-5f ||
@@ -1345,7 +1422,7 @@ void main(uint3 id : SV_DispatchThreadID) {
                        std::any_of(canonical.begin(), canonical.end(), [](const float value) {
                          return value != 0.0f;
                        })))) {
-        error = "v2 GPU replay violated vertical-share, row-majorant, flat, container, or "
+        error = "v2 GPU replay violated ownership, vertical-share, row-majorant, flat, container, or "
                 "spatial-bound contract";
         return false;
       }
@@ -1357,6 +1434,10 @@ void main(uint3 id : SV_DispatchThreadID) {
       const std::string candidate_hash = sha256_hex(std::string_view {
         reinterpret_cast<const char *>(candidate.data()),
         candidate.size() * sizeof(float)
+      });
+      const std::string ownership_hash = sha256_hex(std::string_view {
+        reinterpret_cast<const char *>(ownership.data()),
+        ownership.size() * sizeof(float)
       });
       const std::string vertical_majorant_hash = sha256_hex(std::string_view {
         reinterpret_cast<const char *>(vertical_majorant.data()),
@@ -1392,9 +1473,6 @@ void main(uint3 id : SV_DispatchThreadID) {
         {"inverse_scale", inverse_scale},
         {"latched_scale", latched_scale},
         {"convergence_curve", convergence_curve},
-        {"latched_near_tail_coverage", latched_near_tail_coverage},
-        {"effective_near_log_tau", effective_near_log_tau},
-        {"latched_near_tail_count", latched_near_tail_count},
         {"requested_gain", constants.requested_gain},
         {"container_scale", container_scale},
         {"effective_gain", effective_gain},
@@ -1405,6 +1483,9 @@ void main(uint3 id : SV_DispatchThreadID) {
         {"candidate_center_drift_u", candidate_center_drift},
         {"predicted_zero_translation_source_u", predicted_zero_translation},
         {"pre_limiter_max_abs_source_u", pre_limiter_max},
+        {"ownership_raised_fraction",
+          static_cast<double>(ownership_raised) / static_cast<double>(element_count)},
+        {"ownership_max_raise_source_u", ownership_max_raise},
         {"vertical_majorant_raised_fraction",
           static_cast<double>(vertical_majorant_raised) /
             static_cast<double>(element_count)},
@@ -1419,6 +1500,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         {"final_horizontal_slope_max", horizontal_slope_max},
         {"final_vertical_shear_max", final_vertical_shear_max},
         {"order_sha256", order_hash},
+        {"ownership_refined_sha256", ownership_hash},
         {"vertical_majorant_sha256", vertical_majorant_hash},
         {"vertical_conditioned_sha256", vertical_conditioned_hash},
         {"parallax_sha256", parallax_hash},
@@ -1430,6 +1512,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       result.raw_depth = raw_srv;
       result.canonical_order = coordinate_srv;
       result.candidate_parallax = candidate_srv;
+      result.ownership_refined_parallax = ownership_srv;
       result.vertical_majorant = vertical_majorant_srv;
       result.vertical_conditioned = vertical_conditioned_srv;
       result.encoded_final_parallax = encoded_srv;
@@ -1437,6 +1520,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       result.raw_values = std::move(raw_values);
       result.canonical_values = canonical;
       result.candidate_parallax_values = candidate;
+      result.ownership_refined_parallax_values = ownership;
       result.vertical_majorant_values = vertical_majorant;
       result.vertical_conditioned_values = vertical_conditioned;
       result.encoded_parallax_values = encoded;
@@ -1448,6 +1532,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       result.raw_sha256 = frame.raw_sha256;
       result.order_sha256 = order_hash;
       result.candidate_sha256 = candidate_hash;
+      result.ownership_refined_sha256 = ownership_hash;
       result.vertical_majorant_sha256 = vertical_majorant_hash;
       result.vertical_conditioned_sha256 = vertical_conditioned_hash;
       result.parallax_sha256 = parallax_hash;
@@ -1505,10 +1590,23 @@ void main(uint3 id : SV_DispatchThreadID) {
   bool depth_coordinate_v2_gpu_replay::dispatch(
     const std::size_t sequence_index,
     const std::string_view expected_frame_id,
+    ID3D11ShaderResourceView *source_color,
+    const std::uint32_t source_color_mode,
+    const float source_linear_scale,
+    const std::string_view expected_source_sha256,
     depth_coordinate_v2_gpu_frame &result,
     std::string &error
   ) {
-    return impl_->dispatch_frame(sequence_index, expected_frame_id, result, error);
+    return impl_->dispatch_frame(
+      sequence_index,
+      expected_frame_id,
+      source_color,
+      source_color_mode,
+      source_linear_scale,
+      expected_source_sha256,
+      result,
+      error
+    );
   }
 
   bool depth_coordinate_v2_gpu_replay::write_state_trace(
@@ -1530,7 +1628,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       {"calibration_contract", impl_->calibration_contract},
       {"cut_source", impl_->cut_source},
       {"diagnostic_role", std::string(depth_coordinate_v2_diagnostic_role)},
-      {"diagnostic_method", "gpu-frame-moments-near-tail-and-rendered-fields-v4"},
+      {"diagnostic_method", "gpu-frame-moments-and-rendered-fields-v5"},
       {"mapping_config", impl_->mapping_config},
       {"frame_fields", std::move(fields)},
       {"frames", impl_->trace_rows},
@@ -1542,15 +1640,18 @@ void main(uint3 id : SV_DispatchThreadID) {
           {"width", impl_->width},
           {"height", impl_->height},
         }},
-        // Production state/geometry passes only. The replay's coordinate_main dispatch is
+        // Authenticated shared histogram inputs plus production state/geometry passes. The
+        // replay's coordinate_main dispatch is
         // diagnostic report materialization, exactly like live Dump 3D, and is intentionally
-        // excluded from this authenticated seven-entry sequence.
+        // excluded from this authenticated nine-entry source closure.
         {"shader_sequence", {
+          "depth_minmax_cs.hlsl",
+          "depth_hist_cs.hlsl",
           "depth_coordinate_v2_moments_cs.hlsl",
           "depth_coordinate_v2_frame_resolve_cs.hlsl",
-          "depth_coordinate_v2_near_coverage_cs.hlsl",
           "depth_coordinate_v2_state_resolve_cs.hlsl",
           "depth_coordinate_v2_map_cs.hlsl",
+          "depth_coordinate_v2_ownership_cs.hlsl",
           "depth_coordinate_v2_vertical_limit_cs.hlsl",
           "depth_coordinate_v2_limit_cs.hlsl",
         }},

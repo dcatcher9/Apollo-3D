@@ -1,16 +1,17 @@
 /**
  * @file src/sbs_bench_depth_coordinate_v2.h
- * @brief Harness-only whole-sequence execution of the experimental depth-coordinate-v2 shaders.
+ * @brief Harness-only whole-sequence execution of the production depth-coordinate-v2 shaders.
  *
  * This is deliberately not a second mapping implementation. The helper loads authenticated raw
  * DAV2 fields and hard-cut generations, keeps one GPU state buffer alive for the sequence, and
- * dispatches the same seven production V2 shader entrypoints used by video_depth_estimator. Its
+ * dispatches the same authenticated raw min/max + histogram inputs and seven V2 coordinate
+ * entrypoints used by video_depth_estimator. Its
  * candidate texture is retained as immutable pre-conditioner evidence. The column pass publishes
  * both an upper-envelope diagnostic and the authenticated 75/25 vertical share consumed by the
  * pure row majorant. The encoded final texture is the live render input for the twelve-step
  * contractive inverse. A separate
  * diagnostic-only map entrypoint materializes canonical_values for the replay report; it is not
- * part of the seven-entry production sequence or live authentication.
+ * part of the nine-entry production source closure or live authentication.
  */
 #pragma once
 
@@ -29,21 +30,22 @@
 
 namespace sbs_bench {
 
-  inline constexpr unsigned depth_coordinate_v2_state_trace_schema = 11;
+  inline constexpr unsigned depth_coordinate_v2_state_trace_schema = 16;
   inline constexpr std::string_view depth_coordinate_v2_state_trace_policy =
-    "latched-center-scale-near-tail-retained-camera-base-container-vertical-share75-row-majorant-v9";
+    "immediate-first-usable-otsu-valley-zero-fixed-scale-fixed-near-curve-retained-camera-source-ownership-container-vertical-share75-row-majorant-v15";
   inline constexpr std::string_view depth_coordinate_v2_diagnostic_role =
     "non-controlling-fixed-scale-camera-audit-v4";
   inline constexpr std::string_view depth_coordinate_v2_gpu_authority =
-    "seven-experimental-shadow-compute-shaders-persistent-gpu-state-v3";
+    "authenticated-raw-source-color-histogram-plus-seven-v2-compute-shaders-persistent-gpu-state-v7";
   inline constexpr std::string_view depth_coordinate_v2_gpu_execution =
-    "seven-experimental-shadow-compute-shaders-persistent-state-v3";
+    "authenticated-raw-source-color-histogram-plus-seven-v2-compute-shaders-persistent-state-v7";
 
   struct depth_coordinate_v2_gpu_frame {
     std::string frame_id;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_depth;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> canonical_order;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> candidate_parallax;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ownership_refined_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> vertical_majorant;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> vertical_conditioned;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> encoded_final_parallax;
@@ -51,6 +53,7 @@ namespace sbs_bench {
     std::vector<float> raw_values;
     std::vector<float> canonical_values;
     std::vector<float> candidate_parallax_values;
+    std::vector<float> ownership_refined_parallax_values;
     std::vector<float> vertical_majorant_values;
     std::vector<float> vertical_conditioned_values;
     std::vector<float> encoded_parallax_values;
@@ -62,6 +65,7 @@ namespace sbs_bench {
     std::string raw_sha256;
     std::string order_sha256;
     std::string candidate_sha256;
+    std::string ownership_refined_sha256;
     std::string vertical_majorant_sha256;
     std::string vertical_conditioned_sha256;
     std::string parallax_sha256;
@@ -87,9 +91,18 @@ namespace sbs_bench {
     const std::string &model_name() const;
     const std::string &manifest_sha256() const;
 
+    /**
+     * Dispatch one caller-owned source SRV. `expected_source_sha256` authenticates the caller's
+     * provenance binding; D3D11 cannot hash an arbitrary SRV here without a synchronous readback.
+     * The exact harness therefore hashes and decodes one immutable byte snapshot before upload.
+     */
     bool dispatch(
       std::size_t sequence_index,
       std::string_view expected_frame_id,
+      ID3D11ShaderResourceView *source_color,
+      std::uint32_t source_color_mode,
+      float source_linear_scale,
+      std::string_view expected_source_sha256,
       depth_coordinate_v2_gpu_frame &result,
       std::string &error
     );

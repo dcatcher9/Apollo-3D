@@ -2,15 +2,20 @@
 
 Apollo converts captured mono frames into host-rendered SBS with TensorRT depth estimation and one
 production live geometry implementation: Host SBS Depth Coordinate V2. The V1 occlusion-aware
-backward-probe renderer and its live selector have been removed. V2 computes exact vertical
+backward-probe renderer and its live selector have been removed. V2 first applies a conservative,
+raise-only full-resolution foreground-ownership correction to corroborated mixed boundary cells,
+then computes exact vertical
 shear-2 upper/lower envelopes, takes a fixed 75/25 orientation-selective share, then applies a pure
 slope-0.5 row majorant. The final field bounds crown shear and horizontal slope and is inverted with
-a unique 12-step contractive fixed point. Candidate, vertical upper/share, and canonical coordinate
-remain attributable evidence only. The rejected collar color filter is absent; V2 has no
+a unique 12-step contractive fixed point. Candidate, ownership-refined field, vertical upper/share,
+and canonical coordinate remain attributable evidence. Only the final row-majorant has live
+position authority. The rejected collar color filter is absent; V2 has no
 forward-owner, visibility-selection, or synthetic-fill path.
 
-Production contract schema 15 authenticates DAV2 Small, its HDR/SDR preprocessing closure, the
-seven-pass producer, the standalone live renderer, and six standard tensor shapes (`770x434`,
+Production contract schema 23 authenticates DAV2 Small, its HDR/SDR preprocessing closure, the
+reused raw min/max and histogram roots, the seven-pass coordinate producer inside a nine-root
+closure, the standalone live
+renderer, and six standard tensor shapes (`770x434`,
 `1022x434`, `1036x434`, `434x770`, `434x1022`, and `434x1036`). DAV2 Base, custom models, and custom
 tensor shapes fail flat. There is no V1 fallback. See
 `docs/host-sbs-depth-coordinate-v2.md` for the complete fail-closed contract.
@@ -29,13 +34,20 @@ Approved AR glasses connected as a Windows monitor also use an automatic local p
 1. Preserve source aspect while selecting one of the six authenticated patch-aligned tensor grids.
 2. Convert SDR or HDR capture into the authenticated DAV2 Small input domain.
 3. Infer raw depth and obtain only the confirmed cut epoch from the dedicated cut-only analysis.
-4. Acquire or retain the scene center and near-tail shoulder, then apply the fixed raw scale,
-   monotone asymmetric curve, requested pop, and exact frame-local 4% source-U container.
-5. Produce the vertical upper/lower envelopes, combine their authenticated 75/25 share, and then
-   apply the slope-0.5 row majorant entirely on the GPU.
-6. Render each eye with the unique 12-step contractive inverse. Invalid or unauthenticated current
+4. On acquisition/cuts, accept a strongly separated three-class upper valley as the zero plane or
+   fall back to the arithmetic mean on the first usable depth field. Hold that selected center
+   unchanged through every later valid, invalid, or fast-motion frame until the next confirmed cut,
+   keep convergence at exactly zero, and apply the fixed raw scale and
+   asymmetric curve, requested pop, and exact frame-local 4% source-U container.
+5. For a unique, stable candidate cliff, fractionally pull only a mixed far-side boundary cell
+   toward its existing near plateau when the exact matched full-resolution source supplies one
+   corroborating contour. Ambiguous evidence is an exact no-op; the pass never lowers parallax,
+   creates a depth edge, paints color, or fills hidden background.
+6. Produce the vertical upper/lower envelopes from that ownership-refined field, combine their
+   authenticated 75/25 share, and then apply the slope-0.5 row majorant entirely on the GPU.
+7. Render each eye with the unique 12-step contractive inverse. Invalid or unauthenticated current
    geometry renders flat rather than reusing stale depth or falling back to V1.
-7. Convert the packed SBS raster directly to the encoder format. If doubled width exceeds
+8. Convert the packed SBS raster directly to the encoder format. If doubled width exceeds
    `sbs_3d_max_encode_width` or the selected codec's runtime `NV_ENC_CAPS_WIDTH_MAX`, preserve each
    eye's aspect while scaling to the lower cap. The configured production ceiling is 8192 packed
    pixels. The production RTX 5080 reports 4096 for H.264 and 8192 for HEVC/AV1, so a 3840x2160
@@ -46,7 +58,7 @@ Approved AR glasses connected as a Windows monitor also use an automatic local p
 pop, subject stretch/recenter, min/max normalization, and zero-plane controls do not modify live
 V2 geometry. Standard stream resolutions choose among the authenticated landscape, ultrawide, and
 portrait tensor shapes automatically; a configuration override cannot authorize an unlisted shape
-or different model calibration.
+or different model calibration. Current live qualification uses `sbs_3d_pop_strength = 1.0`.
 
 ## Archived V1 processor decisions
 
@@ -217,7 +229,8 @@ selection until a hard cut.
   superseded that endpoint with a 75/25 vertical upper/lower share while keeping the row pass pure;
   this allows bounded top-row foreground compression without the global blend's lateral notch.
   The source captures are historical schema-7 input witnesses and cannot authenticate the live
-  schema-15 trial path. Qualification still requires fresh schema-15/manifest-schema-9 live dumps
+  schema-23 production path. Qualification still requires fresh schema-23/state-schema-13/
+  manifest-schema-10 live dumps
   and isolated timing; those results have not yet been recorded. Historical evidence:
   `E:\ApolloDev\majorant-row-both-confirm-20260802`.
 - Symmetric horizontal edge-band supersampling was rejected after the full core screen. It nudged
@@ -384,7 +397,8 @@ selection until a hard cut.
   verdict (jitter -6.6% vs -5.7%). Clip length and stride are not what flips temporal results here;
   content is. Do not dismiss a temporal measurement on clip-length grounds without running that
   control.
-- **The shot-latched zero-plane anchor is now resolved TWICE per shot (2026-07-25).** It was
+- **Historical V1 experiment: the shot-latched zero-plane anchor was resolved twice per shot
+  (2026-07-25).** It was
   latched on the cut frame itself, which is the same defect fixed earlier for the pop classifier
   thirty lines away in the same shader: normalization settling perturbs 50-60% of depth texels on
   the first frames, and `lo_val`/`inv_range`/`delta` feeding the anchor are raw cut-frame values
@@ -401,7 +415,10 @@ selection until a hard cut.
   retry it.** The intent was to avoid a visible convergence step by letting the plane drift and
   then lock. It converts one correction into ~8 frames of motion, and `scene_cut` -- the clip built
   to probe normalization swim across cuts -- regressed 4.900 -> 8.190 on `static_jitter_p95` (+67%),
-  driving a +17.8% core mean. Resolve twice; do not track.
+  driving a +17.8% core mean. At that time, resolving twice was preferable to tracking.
+  This experiment does not describe current Host SBS V2: the historical schema-20 transition
+  removed the second age-based resolution, and schema 23 retains the first usable new-shot center
+  until the next confirmed cut.
 - Art3D-style shot-level zero-plane placement was screened as three scene-latched treatments:
   tracked subject, depth median, and far/mid-background (P25). Each resolves its anchor through
   the final Bestv2 curve and stores the source-pixel shift, so percentile motion cannot make
@@ -655,7 +672,7 @@ and profile provenance; cover the 11-clip core and public extended suites; gener
 and `decision.json`; inspect primary-axis examples; and treat comfort/image-integrity limits as hard
 constraints. Headset evidence resolves coequal-axis tradeoffs.
 
-The harness uses contract 18 and eval schema 36. It exports raw depth, pre-warp depth, exact forward
+The harness uses contract 19 and eval schema 36. It exports raw depth, pre-warp depth, exact forward
 coverage diagnostics, and final SBS artifacts by numeric frame identity. Ground-truth depth scoring
 is scale/shift invariant but polarity preserving. MPI Sintel true-right references additionally
 score global-horizontal-registered PSNR/SSIM, local epipolar residual/coverage, and Art3D-inspired

@@ -20,14 +20,14 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 9
-SHADOW_STATE_DUMP_SCHEMA = 8
+DUMP_MANIFEST_SCHEMA = 10
+SHADOW_STATE_DUMP_SCHEMA = 13
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "bf9c97f2df69269e335e50be22f448591c4ae713b87a4997bab769f3c1d4be2b"
+    "707f3866759e2514f718a7a9dae6ed08e90077f29b86d7f925be4a76a4bc3106"
 )
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "79a715711e1d4e21b3d4d9977e2a1c9a172fc37aaa4ca786b37c62b0bc997a2d"
+    "7893c2464bc03c9bc878acffca29cdc6541de4bb73aa2fa57ac34dc5645aaf1e"
 )
 
 _CONTRACT = coordinate_contract.load_contract()
@@ -36,11 +36,6 @@ _STATE_FIELDS = tuple(_CONTRACT["shadow_state"]["fields"])
 _FRAME_STATS_FIELDS = tuple(_CONTRACT["frame_stats"]["fields"])
 _DEFAULTS = coordinate_contract.CALIBRATED_DEFAULTS
 _RESERVED_CALIBRATION_REVISION = 0xFFFFFFFF
-_CALIBRATED_TEXEL_COUNTS = tuple(sorted({
-    width * height
-    for calibration in coordinate_contract.MODEL_CALIBRATIONS
-    for width, height in calibration.calibrated_input_shapes
-}))
 
 _STATE_ROOT_KEYS = {
     "schema", "coordinate_contract", "source", "capture", "rendered_output_selected",
@@ -49,19 +44,18 @@ _STATE_ROOT_KEYS = {
 }
 _STATE_CONSTANT_KEYS = {
     "raw_coordinate_scale", "collapse_abs_epsilon", "far_tau", "near_log_tau",
-    "near_tail_probe_u", "near_tail_coverage_low", "near_tail_coverage_high",
-    "near_log_tau_dense", "gain_per_pop",
-    "reference_pop_strength", "reference_gain_at_pop_2", "requested_gain",
+    "gain_per_pop",
+    "reference_pop_strength", "reference_gain_at_reference_pop", "requested_gain",
     "requested_pop_strength", "direct_container_limit", "max_horizontal_slope",
     "max_vertical_shear", "convergence_curve_default",
+    "stage_valley_ratio_max",
     "vertical_majorant_share",
 }
 _DECODED_KEYS = {
     "frame_valid", "camera_valid", "calibration_revision", "confirmed_cut_count", "contract_tag",
     "requested_gain", "requested_pop_strength", "latched_scale",
     "convergence_curve", "container_scale", "effective_gain",
-    "latched_near_tail_coverage", "effective_near_log_tau",
-    "latched_near_tail_count", "camera_center_integrity_bits",
+    "camera_center_integrity_bits",
 }
 
 
@@ -80,12 +74,14 @@ def _uint32(value: Any, label: str) -> int:
     return value
 
 
-def camera_center_integrity_bits(center: float, inverse_scale: float, revision: int) -> int:
+def camera_center_integrity_bits(
+        center: float, inverse_scale: float, convergence_curve: float, revision: int) -> int:
     """Mirror the authenticated SM5 uint32 checksum over the latched camera center."""
 
     words = (
         struct.unpack("<I", struct.pack("<f", center))[0],
         struct.unpack("<I", struct.pack("<f", inverse_scale))[0],
+        struct.unpack("<I", struct.pack("<f", convergence_curve))[0],
         revision,
     )
     checksum = 0
@@ -107,25 +103,6 @@ def _same_number(left: Any, right: Any) -> bool:
     if not isinstance(left, (int, float)) or not isinstance(right, (int, float)):
         return False
     return math.isclose(float(left), float(right), rel_tol=1.0e-6, abs_tol=1.0e-8)
-
-
-def _expected_near_log_tau(coverage: float) -> float:
-    blend = min(max(
-        (coverage - _DEFAULTS.near_tail_coverage_low) /
-        (_DEFAULTS.near_tail_coverage_high - _DEFAULTS.near_tail_coverage_low),
-        0.0,
-    ), 1.0)
-    dense_weight = blend * blend * (3.0 - 2.0 * blend)
-    return (_DEFAULTS.near_log_tau +
-            (_DEFAULTS.near_log_tau_dense - _DEFAULTS.near_log_tau) * dense_weight)
-
-
-def _coverage_matches_calibrated_shape(coverage: float, count: int) -> bool:
-    return any(
-        count <= texel_count and math.isclose(
-            coverage, count / texel_count, rel_tol=2.0e-6, abs_tol=2.0e-7)
-        for texel_count in _CALIBRATED_TEXEL_COUNTS
-    )
 
 
 def _require_coordinate_binding(value: Any, count_key: str, count: int) -> None:
@@ -170,14 +147,14 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
         raise ValueError("shadow_state.json has unknown units")
     if document.get("adaptation_semantics") != {
             "coordinate":
-                "center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable",
+                "immediate-first-usable-center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable",
             "convergence_curve":
-                "separately-scene-latched-curve-offset-currently-zero",
+                "selected-upper-valley-or-mean-center-is-zero-plane",
             "requested_gain": "immutable-cfg-pop-strength",
             "container_scale":
                 "frame-local-hard-direct-parallax-attenuation-recoverable-next-frame",
-            "near_shoulder":
-                "shot-latched-near-tail-coverage-and-effective-tau-reset-on-confirmed-cut",
+            "near_curve":
+                "fixed-contract-logarithmic-tau-independent-of-content-occupancy",
             "spatial_conditioner":
                 "fixed-75pct-vertical-majorant-share-then-horizontal-majorant"}:
         raise ValueError("shadow_state.json has unknown adaptation semantics")
@@ -191,19 +168,16 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
         "collapse_abs_epsilon": _DEFAULTS.collapse_abs_epsilon,
         "far_tau": _DEFAULTS.far_tau,
         "near_log_tau": _DEFAULTS.near_log_tau,
-        "near_tail_probe_u": _DEFAULTS.near_tail_probe_u,
-        "near_tail_coverage_low": _DEFAULTS.near_tail_coverage_low,
-        "near_tail_coverage_high": _DEFAULTS.near_tail_coverage_high,
-        "near_log_tau_dense": _DEFAULTS.near_log_tau_dense,
         "gain_per_pop": _DEFAULTS.gain_per_pop,
         "reference_pop_strength": _DEFAULTS.reference_pop_strength,
-        "reference_gain_at_pop_2":
+        "reference_gain_at_reference_pop":
             _DEFAULTS.gain_per_pop * _DEFAULTS.reference_pop_strength,
         "direct_container_limit": _DEFAULTS.direct_container_limit,
         "max_horizontal_slope": _DEFAULTS.max_horizontal_slope,
         "max_vertical_shear": _DEFAULTS.max_vertical_shear,
         "vertical_majorant_share": _DEFAULTS.vertical_majorant_share,
         "convergence_curve_default": _DEFAULTS.convergence_curve_default,
+        "stage_valley_ratio_max": _DEFAULTS.stage_valley_ratio_max,
     }
     if any(not _same_number(constants.get(key), value)
            for key, value in expected_defaults.items()):
@@ -255,21 +229,18 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
     )
     if typed["contract_tag_bits"] != _CONTRACT_TAG:
         raise ValueError("shadow_state.json state words have the wrong contract tag")
-    coverage = float(typed["latched_near_tail_coverage"])
-    effective_tau = float(typed["effective_near_log_tau"])
-    near_tail_count = int(typed["latched_near_tail_count"])
     expected_camera_integrity = camera_center_integrity_bits(
         float(typed["center"]),
         float(typed["inverse_scale"]),
+        float(typed["convergence_curve"]),
         int(typed["calibration_revision"]),
     )
     if typed["camera_center_integrity_bits"] != expected_camera_integrity:
         raise ValueError("shadow_state.json camera center integrity checksum disagrees")
-    if (not 0.0 <= coverage <= 1.0 or
-            not _DEFAULTS.near_log_tau_dense <= effective_tau <= _DEFAULTS.near_log_tau or
-            not _same_number(effective_tau, _expected_near_log_tau(coverage)) or
-            not _coverage_matches_calibrated_shape(coverage, near_tail_count)):
-        raise ValueError("shadow_state.json has inconsistent near shoulder state")
+    if any(typed[name] != 0 for name in (
+            "mapping_state_reserved_0", "mapping_state_reserved_1",
+            "mapping_state_reserved_2")):
+        raise ValueError("shadow_state.json has nonzero reserved mapping state")
 
     decoded = document.get("decoded")
     if not isinstance(decoded, dict) or set(decoded) != _DECODED_KEYS:
@@ -284,12 +255,10 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
         decoded.get("calibration_revision"),
         "shadow_state.json decoded.calibration_revision",
     )
-    for key in ("confirmed_cut_count", "contract_tag", "latched_near_tail_count",
-                "camera_center_integrity_bits"):
+    for key in ("confirmed_cut_count", "contract_tag", "camera_center_integrity_bits"):
         _uint32(decoded.get(key), f"shadow_state.json decoded.{key}")
     for key in ("requested_gain", "requested_pop_strength", "latched_scale",
-                "convergence_curve", "container_scale", "effective_gain",
-                "latched_near_tail_coverage", "effective_near_log_tau"):
+                "convergence_curve", "container_scale", "effective_gain"):
         _finite_number(decoded.get(key), f"shadow_state.json decoded.{key}")
     expected_decoded = {
         "calibration_revision": typed["calibration_revision"],
@@ -305,20 +274,19 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
         "container_scale": typed["container_scale"],
         "effective_gain": (constants["requested_gain"] * typed["container_scale"]
                            if decoded["frame_valid"] else 0.0),
-        "latched_near_tail_coverage": coverage,
-        "effective_near_log_tau": effective_tau,
-        "latched_near_tail_count": near_tail_count,
         "camera_center_integrity_bits": expected_camera_integrity,
     }
     if any(
             (decoded.get(key) != value if key in {
                 "camera_valid", "calibration_revision", "confirmed_cut_count", "contract_tag",
-                "latched_near_tail_count", "camera_center_integrity_bits",
+                "camera_center_integrity_bits",
             } else not _same_number(decoded.get(key), value))
             for key, value in expected_decoded.items()):
         raise ValueError("shadow_state.json decoded values disagree with the state words")
+    convergence_valid = _same_number(
+        typed["convergence_curve"], _DEFAULTS.convergence_curve_default)
     if (not 0.0 <= typed["container_scale"] <= 1.0 or
-            typed["convergence_curve"] != _DEFAULTS.convergence_curve_default or
+            not convergence_valid or
             decoded["effective_gain"] < 0.0 or
             decoded["effective_gain"] > float(decoded["requested_gain"]) + 1.0e-7 or
             (decoded["camera_valid"] and not _same_number(
@@ -327,9 +295,9 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
              (not decoded["camera_valid"] or typed["container_scale"] <= 0.0)) or
             (not decoded["frame_valid"] and typed["container_scale"] != 1.0) or
             (not decoded["camera_valid"] and
-             (typed["center"] != 0.0 or typed["inverse_scale"] != 0.0 or
-              coverage != 0.0 or effective_tau != _DEFAULTS.near_log_tau or
-              near_tail_count != 0))):
+              (typed["center"] != 0.0 or typed["inverse_scale"] != 0.0 or
+              not _same_number(
+                  typed["convergence_curve"], _DEFAULTS.convergence_curve_default)))):
         raise ValueError("shadow_state.json decoded safety state is out of range")
     return typed
 
@@ -374,11 +342,11 @@ def validate_shadow_frame_stats_document(document: Any) -> Dict[str, float]:
 
 
 def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
-    """Validate the schema-9 V2 geometry fragment of ``dump_manifest.json``.
+    """Validate the schema-10 V2 geometry fragment of ``dump_manifest.json``.
 
     The full package contains legacy/color/model metadata owned by other contracts. This reader
-    deliberately validates only the candidate -> vertical envelopes/share -> row-majorant chain,
-    including the presence semantics of both authenticated intermediates.
+    deliberately validates only the candidate -> full-resolution ownership refinement -> vertical
+    envelopes/share -> row-majorant chain, including every authenticated intermediate.
     """
 
     if not isinstance(document, dict) or document.get("schema") != DUMP_MANIFEST_SCHEMA:
@@ -413,7 +381,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         if selected else None
     )
     expected_inverse = (
-        "12-step contractive fixed point; no owner pass or synthetic fill"
+        "12-step contractive fixed point; no forward-warp owner/visibility splat and no synthetic fill"
         if selected else None
     )
     expected_coordinate_role = (
@@ -435,8 +403,13 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "mask_entrypoint": "mask_ps",
     } if selected else None)
     expected_vertical_role = (
-        "least column-wise upper envelope v+ >= candidate with adjacent-row source-U change <= "
+        "least column-wise upper envelope v+ >= ownership-refined candidate with adjacent-row source-U change <= "
         "max_vertical_shear/target_width; diagnostic evidence only"
+        if selected else None
+    )
+    expected_ownership_role = (
+        "conservative full-resolution source-contour foreground ownership applied to candidate "
+        "before the vertical conditioner; may only raise uniquely owned far-side boundary texels"
         if selected else None
     )
     expected_conditioned_role = (
@@ -462,6 +435,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             renderer.get("live_shader_source") != expected_live_shader_source or
             renderer.get("parallax_v2_coordinate_role") != expected_coordinate_role or
             renderer.get("parallax_v2_position_field") != expected_position or
+            renderer.get("parallax_v2_ownership_refined_role") != expected_ownership_role or
             renderer.get("parallax_v2_vertical_majorant_role") != expected_vertical_role or
             renderer.get("parallax_v2_vertical_conditioned_role") !=
                 expected_conditioned_role or
@@ -472,6 +446,14 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     expected_artifacts = {
         "shadow_candidate_parallax.f32": (
             "parallax-v2 pre-limiter candidate displacement", True),
+        "shadow_ownership_refined_parallax.f32": (
+            "parallax-v2 full-resolution contour ownership refinement", True),
+        "shadow_ownership_refined_parallax_shape.json":
+            ("parallax-v2 full-resolution contour ownership refinement contract", False),
+        "shadow_ownership_refined_parallax.png":
+            ("parallax-v2 full-resolution contour ownership refinement preview", False),
+        "shadow_ownership_refined_parallax_heat.png":
+            ("parallax-v2 full-resolution contour ownership refinement preview", False),
         "shadow_vertical_majorant.f32": (
             "parallax-v2 vertical shear-limiter intermediate", False),
         "shadow_vertical_majorant_shape.json":
@@ -501,9 +483,10 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
                 not isinstance(descriptor.get("description"), str) or
                 not descriptor["description"]):
             raise ValueError(
-                "dump_manifest.json has an invalid vertical conditioner artifact contract")
+                "dump_manifest.json has an invalid V2 geometry artifact contract")
     dimension_names = (
-        "shadow_candidate_parallax", "shadow_vertical_majorant",
+        "shadow_candidate_parallax", "shadow_ownership_refined_parallax",
+        "shadow_vertical_majorant",
         "shadow_vertical_conditioned", "shadow_final_parallax")
     geometry_dimensions = [dimensions.get(name) for name in dimension_names]
     if active:
@@ -525,6 +508,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "rendered_output_selected": selected,
         "mapping_artifacts_match_selected_renderer": mapping_matches,
         "position_field": expected_position,
+        "ownership_refined_available": active,
         "vertical_majorant_available": active,
         "vertical_conditioned_available": active,
     }

@@ -383,6 +383,13 @@ namespace platf {
 
     virtual int convert(platf::img_t &img) = 0;
 
+    /** True when the retained source must be converted once more to consume asynchronous work.
+     * The encode loop uses this only after capture has gone idle; ordinary devices remain false.
+     */
+    virtual bool needs_conversion_poll() const {
+      return false;
+    }
+
     video::sunshine_colorspace_t colorspace;
   };
 

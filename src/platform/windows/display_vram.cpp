@@ -503,6 +503,10 @@ namespace platf::dxgi {
       return convert(img);
     }
 
+    bool needs_conversion_poll() const {
+      return depth_completion_poll_pending;
+    }
+
     int convert(platf::img_t &img_base) {
       auto &img = (img_d3d_t &) img_base;
       if (!img.blank) {
@@ -669,87 +673,221 @@ namespace platf::dxgi {
                                            (display->is_hdr() ? models::input_color_space::scrgb_hdr :
                                                                 models::input_color_space::linear_sdr) :
                                            models::input_color_space::srgb;
+          const auto current_source_timestamp = img_base.frame_timestamp;
+          const auto same_source = [](
+                                     const std::optional<std::chrono::steady_clock::time_point> &left,
+                                     const std::optional<std::chrono::steady_clock::time_point> &right
+                                   ) {
+            // A missing identity is never evidence that two source images are the same.
+            return left && right && *left == *right;
+          };
           const auto frame_id = ++sbs_frame_sequence;
           ID3D11ShaderResourceView *render_input_srv = img_ctx.encoder_input_res.get();
           matched_frame_slot_t *matched_render_slot = nullptr;
           matched_frame_slot_t *matched_candidate_slot = nullptr;
           models::estimate_result est;
+          const auto release_unknown_completion = [this](
+                                                    const std::uint64_t completed_frame_id,
+                                                    const matched_frame_slot_t *preserve_slot
+                                                  ) {
+            const auto error_now = std::chrono::steady_clock::now();
+            if (matched_unknown_frame_error_last.time_since_epoch().count() == 0 ||
+                error_now - matched_unknown_frame_error_last >= std::chrono::seconds(30)) {
+              if (matched_unknown_frame_errors_suppressed) {
+                BOOST_LOG(error) << "Matched depth completed unknown frame "sv
+                                 << completed_frame_id << "; repeating the last output ("sv
+                                 << matched_unknown_frame_errors_suppressed
+                                 << " similar occurrence(s) suppressed)."sv;
+              } else {
+                BOOST_LOG(error) << "Matched depth completed unknown frame "sv
+                                 << completed_frame_id << "; repeating the last output."sv;
+              }
+              matched_unknown_frame_error_last = error_now;
+              matched_unknown_frame_errors_suppressed = 0;
+            } else {
+              ++matched_unknown_frame_errors_suppressed;
+            }
+            // The completion consumed its inference and no longer owns the source texture.
+            // Preserve only a separately enqueued current candidate, if one exists.
+            for (auto &slot : matched_frame_slots) {
+              if (&slot != preserve_slot) {
+                slot.pending = false;
+              }
+            }
+          };
 
-          if (depth_estimator &&
-              models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
-            matched_candidate_slot = available_matched_slot();
-            // Readiness is checked before the full-resolution private-slot copy. When TensorRT is
-            // still using the previous matched frame, the output is repeated without spending a
-            // D3D11 CopyResource on a source frame that cannot be enqueued.
-            const bool estimator_ready =
-              matched_candidate_slot && depth_estimator->can_accept_frame();
-            const bool matched_copy_submitted =
-              estimator_ready &&
-              copy_matched_frame(
-                img_ctx.encoder_texture.get(),
-                *matched_candidate_slot,
-                frame_id,
-                input_color_space
-              );
-            mark_sbs_matched_copy_end(gpu_timer, matched_copy_submitted);
-            if (matched_copy_submitted) {
-              est = depth_estimator->estimate_depth(
-                matched_candidate_slot->srv.get(),
-                input_color_space,
-                frame_id,
-                snapshot_debug_inputs
-              );
-              if (est.completed_frame_valid) {
-                matched_render_slot = find_pending_matched_slot(est.completed_frame_id);
-                if (matched_render_slot) {
-                  matched_render_slot->pending = false;
-                  render_input_srv = matched_render_slot->srv.get();
-                  sbs_telemetry_last_sampled_frame_id = est.completed_frame_id;
+          if (depth_estimator && models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
+            matched_frame_slot_t *retained_source_pending_slot = nullptr;
+            for (auto &slot : matched_frame_slots) {
+              if (slot.pending && same_source(slot.source_timestamp, current_source_timestamp)) {
+                retained_source_pending_slot = &slot;
+                break;
+              }
+            }
+
+            // The encode loop calls convert() on a retained source only after capture has gone
+            // idle with accepted inference still pending. Consume that exact inference without
+            // enqueuing a duplicate for the same pixels. This is normally only a nonblocking
+            // completion read; the one-inference drain preserves correctness if the GPU is late.
+            if (retained_source_pending_slot) {
+              mark_sbs_matched_copy_end(gpu_timer, false);
+              auto recovered =
+                depth_estimator->finish_pending_depth_for_idle_recovery(
+                  input_color_space,
+                  snapshot_debug_inputs
+                );
+              if (recovered.completed_frame_valid) {
+                // Consuming a completion retires the estimator's pending work even if corrupt
+                // metadata prevents us from resolving its color slot.
+                depth_completion_poll_pending = false;
+                auto *recovered_slot =
+                  find_pending_matched_slot(recovered.completed_frame_id);
+                if (recovered_slot) {
+                  recovered_slot->pending = false;
+                  matched_render_slot = recovered_slot;
+                  render_input_srv = recovered_slot->srv.get();
+                  sbs_telemetry_last_sampled_frame_id = recovered.completed_frame_id;
+                  est = std::move(recovered);
                   if (diagnostics_enabled) {
-                    const double age_ms = std::chrono::duration<double, std::milli>(
-                                            std::chrono::steady_clock::now() - matched_render_slot->captured_at
-                    )
-                                            .count();
+                    const double age_ms =
+                      std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() -
+                        recovered_slot->captured_at
+                      )
+                        .count();
                     matched_stats_age_sum_ms += age_ms;
-                    matched_stats_age_max_ms = std::max(matched_stats_age_max_ms, age_ms);
+                    matched_stats_age_max_ms =
+                      std::max(matched_stats_age_max_ms, age_ms);
                     ++matched_stats_completions;
                     if (perf) {
                       sbs_perf::add_sample_ms("matched_frame_age", age_ms);
                     }
                   }
                 } else {
-                  const auto error_now = std::chrono::steady_clock::now();
-                  if (matched_unknown_frame_error_last.time_since_epoch().count() == 0 || error_now - matched_unknown_frame_error_last >= std::chrono::seconds(30)) {
-                    if (matched_unknown_frame_errors_suppressed) {
-                      BOOST_LOG(error) << "Matched depth completed unknown frame "sv
-                                       << est.completed_frame_id << "; repeating the last output ("sv
-                                       << matched_unknown_frame_errors_suppressed
-                                       << " similar occurrence(s) suppressed)."sv;
-                    } else {
-                      BOOST_LOG(error) << "Matched depth completed unknown frame "sv
-                                       << est.completed_frame_id << "; repeating the last output."sv;
+                  release_unknown_completion(recovered.completed_frame_id, nullptr);
+                }
+              }
+            } else {
+              matched_candidate_slot = available_matched_slot();
+              // Readiness is checked before the full-resolution private-slot copy. When TensorRT is
+              // still using the previous matched frame, the output is repeated without spending a
+              // D3D11 CopyResource on a source frame that cannot be enqueued.
+              const bool estimator_ready =
+                matched_candidate_slot && depth_estimator->can_accept_frame();
+              const bool matched_copy_submitted =
+                estimator_ready &&
+                copy_matched_frame(
+                  img_ctx.encoder_texture.get(),
+                  *matched_candidate_slot,
+                  frame_id,
+                  input_color_space,
+                  current_source_timestamp
+                );
+              mark_sbs_matched_copy_end(gpu_timer, matched_copy_submitted);
+              if (matched_copy_submitted) {
+                est = depth_estimator->estimate_depth(
+                  matched_candidate_slot->srv.get(),
+                  input_color_space,
+                  frame_id,
+                  snapshot_debug_inputs
+                );
+                if (est.completed_frame_valid) {
+                  matched_render_slot = find_pending_matched_slot(est.completed_frame_id);
+                  if (matched_render_slot) {
+                    matched_render_slot->pending = false;
+                    render_input_srv = matched_render_slot->srv.get();
+                    sbs_telemetry_last_sampled_frame_id = est.completed_frame_id;
+                    if (diagnostics_enabled) {
+                      const double age_ms = std::chrono::duration<double, std::milli>(
+                                              std::chrono::steady_clock::now() - matched_render_slot->captured_at
+                      )
+                                              .count();
+                      matched_stats_age_sum_ms += age_ms;
+                      matched_stats_age_max_ms = std::max(matched_stats_age_max_ms, age_ms);
+                      ++matched_stats_completions;
+                      if (perf) {
+                        sbs_perf::add_sample_ms("matched_frame_age", age_ms);
+                      }
                     }
-                    matched_unknown_frame_error_last = error_now;
-                    matched_unknown_frame_errors_suppressed = 0;
                   } else {
-                    ++matched_unknown_frame_errors_suppressed;
+                    release_unknown_completion(
+                      est.completed_frame_id, matched_candidate_slot);
                   }
-                  // The completed inference is no longer using its source texture. Recover the
-                  // old pending slot so a metadata mismatch cannot permanently exhaust the
-                  // bounded two-slot queue. The current candidate is handled below if enqueued.
-                  for (auto &slot : matched_frame_slots) {
-                    if (&slot != matched_candidate_slot) {
-                      slot.pending = false;
+                }
+                if (est.inference_enqueued) {
+                  matched_candidate_slot->pending = true;
+                  depth_completion_poll_pending = true;
+                }
+
+                // On the first real frame after a long idle gap, consume the just-submitted current
+                // inference once so depth is available immediately. The retained-source completion
+                // owner in video.cpp covers shorter bursts that stop before the age threshold.
+                // Normal frame cadence remains asynchronous; only a candidate already accepted by
+                // the nonblocking readiness gate can enter this one-inference drain.
+                const auto recovery_now = std::chrono::steady_clock::now();
+                const bool stale_prior_completion =
+                  matched_render_slot &&
+                  !same_source(
+                    matched_render_slot->source_timestamp,
+                    current_source_timestamp
+                  ) &&
+                  recovery_now - matched_render_slot->captured_at >
+                    models::host_sbs_v2_max_matched_repeat_age;
+                const bool stale_prior_output =
+                  !matched_render_slot && matched_output_valid &&
+                  !same_source(
+                    matched_output_source_timestamp,
+                    current_source_timestamp
+                  ) &&
+                  recovery_now - matched_output_source_at >
+                    models::host_sbs_v2_max_matched_repeat_age;
+                const bool bootstrap_current_output =
+                  !matched_render_slot && !matched_output_valid;
+                if (est.inference_enqueued && matched_candidate_slot && (stale_prior_completion || stale_prior_output || bootstrap_current_output)) {
+                  auto recovered =
+                    depth_estimator->finish_pending_depth_for_idle_recovery(
+                      input_color_space,
+                      snapshot_debug_inputs
+                    );
+                  if (recovered.completed_frame_valid) {
+                    // finish_pending consumed the estimator's sole pending inference. Release the
+                    // poll owner before fallible frame-ID lookup, just as the retained-source path
+                    // does, so corrupt metadata cannot leave a permanently pending slot.
+                    depth_completion_poll_pending = false;
+                    auto *recovered_slot =
+                      find_pending_matched_slot(recovered.completed_frame_id);
+                    if (recovered_slot) {
+                      recovered_slot->pending = false;
+                      matched_render_slot = recovered_slot;
+                      render_input_srv = recovered_slot->srv.get();
+                      sbs_telemetry_last_sampled_frame_id =
+                        recovered.completed_frame_id;
+                      est = std::move(recovered);
+                      if (diagnostics_enabled) {
+                        const double age_ms =
+                          std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() -
+                            recovered_slot->captured_at
+                          )
+                            .count();
+                        matched_stats_age_sum_ms += age_ms;
+                        matched_stats_age_max_ms =
+                          std::max(matched_stats_age_max_ms, age_ms);
+                        ++matched_stats_completions;
+                        if (perf) {
+                          sbs_perf::add_sample_ms("matched_frame_age", age_ms);
+                        }
+                      }
+                    } else {
+                      release_unknown_completion(recovered.completed_frame_id, nullptr);
                     }
                   }
                 }
               }
-              if (est.inference_enqueued) {
-                matched_candidate_slot->pending = true;
-              }
             }
           } else {
             mark_sbs_matched_copy_end(gpu_timer, false);
+            depth_completion_poll_pending = false;
           }
 
           // A poisoned CUDA/TensorRT producer cannot recover by repeating its last stereo pair:
@@ -819,8 +957,13 @@ namespace platf::dxgi {
           bool stale_v2_completion = false;
           if (matched_render_slot &&
               host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
-              repeat_now - matched_render_slot->captured_at >
-                models::host_sbs_v2_max_matched_repeat_age) {
+              !models::host_sbs_matched_completion_is_current(
+                same_source(
+                  matched_render_slot->source_timestamp,
+                  current_source_timestamp
+                ),
+                repeat_now - matched_render_slot->captured_at
+              )) {
             stale_v2_completion = true;
             matched_render_slot = nullptr;
             est = {};
@@ -830,17 +973,24 @@ namespace platf::dxgi {
             matched_output_source_at.time_since_epoch().count() != 0 ?
               repeat_now - matched_output_source_at :
               std::chrono::steady_clock::duration::max();
+          const bool output_source_unchanged =
+            same_source(
+              matched_output_source_timestamp,
+              current_source_timestamp
+            );
           const bool repeat_matched_output =
             models::host_sbs_should_repeat_matched_output(
               host_sbs_renderer,
               matched_render_slot != nullptr,
               matched_output_valid,
-              repeat_source_age
+              repeat_source_age,
+              output_source_unchanged
             );
           const bool v2_repeat_timed_out =
             stale_v2_completion ||
             (host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
              !matched_render_slot && matched_output_valid &&
+             !output_source_unchanged &&
              repeat_source_age > models::host_sbs_v2_max_matched_repeat_age);
           if (v2_repeat_timed_out && !matched_output_timeout_active) {
             matched_output_timeout_active = true;
@@ -948,6 +1098,8 @@ namespace platf::dxgi {
             if (matched_render_slot && selected_parallax_field) {
               matched_output_valid = true;
               matched_output_source_at = matched_render_slot->captured_at;
+              matched_output_source_timestamp =
+                matched_render_slot->source_timestamp;
             }
           }
 
@@ -1046,6 +1198,8 @@ namespace platf::dxgi {
               dump_frame.shadow_coordinate = est.shadow_coordinate.Get();
               dump_frame.shadow_candidate_parallax =
                 est.shadow_candidate_parallax.Get();
+              dump_frame.shadow_ownership_refined_parallax =
+                est.shadow_ownership_refined_parallax.Get();
               dump_frame.shadow_vertical_majorant =
                 est.shadow_vertical_majorant.Get();
               dump_frame.shadow_vertical_conditioned =
@@ -1199,7 +1353,9 @@ namespace platf::dxgi {
       }
       matched_output_valid = false;
       matched_output_source_at = {};
+      matched_output_source_timestamp.reset();
       matched_output_timeout_active = false;
+      depth_completion_poll_pending = false;
       sbs_dumper.cancel_pending_request();
       publish_depth_status(0);
     }
@@ -1637,6 +1793,7 @@ namespace platf::dxgi {
       shader_res_t srv;
       std::uint64_t frame_id = 0;
       models::input_color_space color_space = models::input_color_space::srgb;
+      std::optional<std::chrono::steady_clock::time_point> source_timestamp;
       std::chrono::steady_clock::time_point captured_at {};
       bool pending = false;
     };
@@ -1701,7 +1858,9 @@ namespace platf::dxgi {
       sbs_intermediate_is_linear = false;
       matched_output_valid = false;
       matched_output_source_at = {};
+      matched_output_source_timestamp.reset();
       matched_output_timeout_active = false;
+      depth_completion_poll_pending = false;
       BOOST_LOG(info) << "Host SBS intermediate storage finalized as "sv
                       << (input_is_linear ? "FP16 linear-capable."sv : "BGRA8 SDR."sv);
       return true;
@@ -1729,7 +1888,8 @@ namespace platf::dxgi {
       ID3D11Texture2D *source,
       matched_frame_slot_t &slot,
       std::uint64_t frame_id,
-      models::input_color_space color_space
+      models::input_color_space color_space,
+      std::optional<std::chrono::steady_clock::time_point> source_timestamp
     ) {
       if (!source) {
         return false;
@@ -1779,6 +1939,7 @@ namespace platf::dxgi {
       device_ctx->CopyResource(slot.texture.get(), source);
       slot.frame_id = frame_id;
       slot.color_space = color_space;
+      slot.source_timestamp = source_timestamp;
       // Production uses source age to bound V2 output repetition; this is no longer diagnostics-
       // only metadata. The aggregate age counters below remain gated by diagnostics_enabled.
       slot.captured_at = std::chrono::steady_clock::now();
@@ -2007,7 +2168,9 @@ namespace platf::dxgi {
       sbs_frame_sequence = 0;
       matched_output_valid = false;
       matched_output_source_at = {};
+      matched_output_source_timestamp.reset();
       matched_output_timeout_active = false;
+      depth_completion_poll_pending = false;
       sbs_intermediate_is_linear = false;
       matched_unknown_frame_error_last = {};
       matched_unknown_frame_errors_suppressed = 0;
@@ -2642,7 +2805,9 @@ namespace platf::dxgi {
     std::uint64_t sbs_frame_sequence = 0;
     bool matched_output_valid = false;
     std::chrono::steady_clock::time_point matched_output_source_at {};
+    std::optional<std::chrono::steady_clock::time_point> matched_output_source_timestamp;
     bool matched_output_timeout_active = false;
+    bool depth_completion_poll_pending = false;
     std::chrono::steady_clock::time_point matched_stats_started {};
     unsigned matched_stats_calls = 0;
     unsigned matched_stats_completions = 0;
@@ -3979,6 +4144,10 @@ namespace platf::dxgi {
 
     int convert(platf::img_t &img_base) override {
       return base.convert(img_base);
+    }
+
+    bool needs_conversion_poll() const override {
+      return base.needs_conversion_poll();
     }
 
   private:

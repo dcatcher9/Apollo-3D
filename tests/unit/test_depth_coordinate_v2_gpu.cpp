@@ -112,18 +112,136 @@ namespace {
     };
   }
 
+  const std::string &test_source_sha256() {
+    static const std::string value = sha256_hex("depth-coordinate-v2-test-source");
+    return value;
+  }
+
+  bool create_bgra_source_srv(
+    ID3D11Device *device,
+    const std::uint32_t width,
+    const std::uint32_t height,
+    const std::vector<std::uint32_t> &pixels,
+    ComPtr<ID3D11Texture2D> &texture,
+    ComPtr<ID3D11ShaderResourceView> &srv
+  ) {
+    if (pixels.size() != static_cast<std::size_t>(width) * height) {
+      return false;
+    }
+    D3D11_TEXTURE2D_DESC description {};
+    description.Width = width;
+    description.Height = height;
+    description.MipLevels = 1u;
+    description.ArraySize = 1u;
+    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    description.SampleDesc.Count = 1u;
+    description.Usage = D3D11_USAGE_IMMUTABLE;
+    description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA initial_data {
+      pixels.data(), static_cast<UINT>(width * sizeof(std::uint32_t)), 0u
+    };
+    return SUCCEEDED(device->CreateTexture2D(
+             &description, &initial_data, texture.ReleaseAndGetAddressOf())) &&
+           SUCCEEDED(device->CreateShaderResourceView(
+             texture.Get(), nullptr, srv.ReleaseAndGetAddressOf()));
+  }
+
+  bool create_solid_source_srv(
+    ID3D11Device *device,
+    const std::uint32_t width,
+    const std::uint32_t height,
+    ComPtr<ID3D11Texture2D> &texture,
+    ComPtr<ID3D11ShaderResourceView> &srv
+  ) {
+    return create_bgra_source_srv(
+      device,
+      width,
+      height,
+      std::vector<std::uint32_t>(static_cast<std::size_t>(width) * height, 0xff202020u),
+      texture,
+      srv
+    );
+  }
+
+  bool create_r32_source_srv(
+    ID3D11Device *device,
+    const std::uint32_t width,
+    const std::uint32_t height,
+    ComPtr<ID3D11Texture2D> &texture,
+    ComPtr<ID3D11ShaderResourceView> &srv
+  ) {
+    std::vector<float> pixels(static_cast<std::size_t>(width) * height, 0.5f);
+    D3D11_TEXTURE2D_DESC description {};
+    description.Width = width;
+    description.Height = height;
+    description.MipLevels = 1u;
+    description.ArraySize = 1u;
+    description.Format = DXGI_FORMAT_R32_FLOAT;
+    description.SampleDesc.Count = 1u;
+    description.Usage = D3D11_USAGE_IMMUTABLE;
+    description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA initial_data {
+      pixels.data(), static_cast<UINT>(width * sizeof(float)), 0u
+    };
+    return SUCCEEDED(device->CreateTexture2D(
+             &description, &initial_data, texture.ReleaseAndGetAddressOf())) &&
+           SUCCEEDED(device->CreateShaderResourceView(
+             texture.Get(), nullptr, srv.ReleaseAndGetAddressOf()));
+  }
+
+  bool create_rgba16f_source_srv(
+    ID3D11Device *device,
+    const std::uint32_t width,
+    const std::uint32_t height,
+    const std::vector<std::array<std::uint16_t, 4>> &pixels,
+    ComPtr<ID3D11Texture2D> &texture,
+    ComPtr<ID3D11ShaderResourceView> &srv
+  ) {
+    if (pixels.size() != static_cast<std::size_t>(width) * height) {
+      return false;
+    }
+    D3D11_TEXTURE2D_DESC description {};
+    description.Width = width;
+    description.Height = height;
+    description.MipLevels = 1u;
+    description.ArraySize = 1u;
+    description.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    description.SampleDesc.Count = 1u;
+    description.Usage = D3D11_USAGE_IMMUTABLE;
+    description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA initial_data {
+      pixels.data(),
+      static_cast<UINT>(width * sizeof(pixels.front())),
+      0u
+    };
+    return SUCCEEDED(device->CreateTexture2D(
+             &description, &initial_data, texture.ReleaseAndGetAddressOf())) &&
+           SUCCEEDED(device->CreateShaderResourceView(
+             texture.Get(), nullptr, srv.ReleaseAndGetAddressOf()));
+  }
+
   nlohmann::ordered_json make_replay_manifest(
     const models::depth_coordinate_v2::model_calibration_t &calibration,
     const std::string_view contract_sha256,
     const std::uint32_t width,
     const std::uint32_t height,
     const nlohmann::ordered_json &frames,
-    const float pop_strength = 2.0f
+    const float pop_strength = 2.0f,
+    const std::uint32_t source_width = 0u,
+    const std::uint32_t source_height = 0u,
+    const std::uint32_t source_color_mode = 0u,
+    const float source_linear_scale = 1.0f
   ) {
     namespace v2 = models::depth_coordinate_v2;
+    auto authenticated_frames = frames;
+    for (auto &frame : authenticated_frames) {
+      if (!frame.contains("source_sha256")) {
+        frame["source_sha256"] = test_source_sha256();
+      }
+    }
     return {
-      {"schema", 4u},
-      {"mode", "depth-coordinate-v2-experimental-shadow-gpu-sequence-v5"},
+      {"schema", 8u},
+      {"mode", "depth-coordinate-v2-production-gpu-sequence-v10"},
       {"calibration_contract", {
         {"file", "contracts/depth-coordinate-v2-v1.json"},
         {"schema", v2::contract_schema},
@@ -144,15 +262,15 @@ namespace {
         {"dtype", "float32-le"},
         {"layout", "row-major"},
       }},
+      {"source_shape", {
+        {"width", source_width ? source_width : width},
+        {"height", source_height ? source_height : height},
+      }},
       {"mapping_config", {
         {"raw_coordinate_scale", calibration.raw_coordinate_scale},
         {"collapse_abs_epsilon", v2::collapse_abs_epsilon},
         {"far_tau", v2::far_tau},
         {"near_log_tau", v2::near_log_tau},
-        {"near_tail_probe_u", v2::near_tail_probe_u},
-        {"near_tail_coverage_low", v2::near_tail_coverage_low},
-        {"near_tail_coverage_high", v2::near_tail_coverage_high},
-        {"near_log_tau_dense", v2::near_log_tau_dense},
         {"pop_strength", pop_strength},
         {"gain_per_pop", v2::gain_per_pop},
         {"max_horizontal_slope", v2::max_horizontal_slope},
@@ -160,8 +278,10 @@ namespace {
         {"vertical_majorant_share", v2::vertical_majorant_share},
         {"direct_container_limit", v2::direct_container_limit},
       }},
+      {"source_color_mode", source_color_mode},
+      {"source_linear_scale", source_linear_scale},
       {"cut_source", "unit-authenticated-hard-cut-generation"},
-      {"frames", frames},
+      {"frames", authenticated_frames},
     };
   }
 
@@ -380,10 +500,6 @@ namespace {
       v2::max_horizontal_slope,
       v2::direct_container_limit,
       v2::convergence_curve_default,
-      v2::near_tail_probe_u,
-      v2::near_tail_coverage_low,
-      v2::near_tail_coverage_high,
-      v2::near_log_tau_dense,
     };
     D3D11_BUFFER_DESC v2_constant_desc {};
     v2_constant_desc.ByteWidth = sizeof(v2_constants);
@@ -915,6 +1031,9 @@ TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionPr
     ++tested_shapes;
     const std::uint32_t width = shape.width;
     const std::uint32_t height = shape.height;
+    const std::uint32_t split = width / 2u;
+    const std::uint32_t source_width = width * 2u;
+    const std::uint32_t source_height = height * 2u;
     SCOPED_TRACE(std::to_string(width) + "x" + std::to_string(height));
 
     const fs::path shape_root = tree.path /
@@ -925,15 +1044,13 @@ TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionPr
     ));
 
     const std::size_t element_count = static_cast<std::size_t>(width) * height;
-    std::vector<float> raw(element_count);
+    std::vector<float> raw(element_count, 0.0f);
     for (std::uint32_t y = 0; y < height; ++y) {
-      for (std::uint32_t x = 0; x < width; ++x) {
-        raw[static_cast<std::size_t>(y) * width + x] =
-          -0.45f + 0.8f * static_cast<float>(x) /
-                     static_cast<float>(std::max(width - 1u, 1u)) +
-          0.1f * static_cast<float>(y) /
-                   static_cast<float>(std::max(height - 1u, 1u));
-      }
+      std::fill(
+        raw.begin() + static_cast<std::size_t>(y) * width + split,
+        raw.begin() + static_cast<std::size_t>(y + 1u) * width,
+        20.0f
+      );
     }
     const std::string raw_bytes = float_bytes(raw);
     ASSERT_TRUE(write_bytes(shape_root / "raw_0001.f32", raw_bytes));
@@ -949,7 +1066,10 @@ TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionPr
       contract_sha256,
       width,
       height,
-      frames
+      frames,
+      1.0f,
+      source_width,
+      source_height
     );
     const fs::path manifest_path = shape_root / "manifest.json";
     ASSERT_TRUE(write_bytes(manifest_path, manifest.dump(2) + "\n"));
@@ -964,9 +1084,24 @@ TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionPr
     ASSERT_NE(replay, nullptr) << error;
     EXPECT_EQ(replay->width(), width);
     EXPECT_EQ(replay->height(), height);
+    ComPtr<ID3D11Texture2D> source_texture;
+    ComPtr<ID3D11ShaderResourceView> source_srv;
+    const std::uint32_t source_edge = split * 2u - 1u;
+    std::vector<std::uint32_t> pixels(
+      static_cast<std::size_t>(source_width) * source_height, 0xff101010u);
+    for (std::uint32_t y = 0u; y < source_height; ++y) {
+      std::fill(
+        pixels.begin() + static_cast<std::size_t>(y) * source_width + source_edge,
+        pixels.begin() + static_cast<std::size_t>(y + 1u) * source_width,
+        0xfff0f0f0u
+      );
+    }
+    ASSERT_TRUE(create_bgra_source_srv(
+      warp.device.Get(), source_width, source_height, pixels, source_texture, source_srv));
 
     sbs_bench::depth_coordinate_v2_gpu_frame output;
-    ASSERT_TRUE(replay->dispatch(0u, "0001", output, error)) << error;
+    ASSERT_TRUE(replay->dispatch(
+      0u, "0001", source_srv.Get(), 0u, 1.0f, test_source_sha256(), output, error)) << error;
     EXPECT_EQ(output.canonical_values.size(), element_count);
     EXPECT_EQ(output.candidate_parallax_values.size(), element_count);
     EXPECT_EQ(output.vertical_majorant_values.size(), element_count);
@@ -977,6 +1112,28 @@ TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionPr
       output.maximum_absolute_source_u,
       v2::direct_container_limit + 2.0e-7f
     );
+    const std::uint32_t boundary_x = split - 1u;
+    for (std::uint32_t y = 0u; y < height; ++y) {
+      for (std::uint32_t x = 0u; x < width; ++x) {
+        const std::size_t index = static_cast<std::size_t>(y) * width + x;
+        if (x == boundary_x) {
+          EXPECT_GT(output.ownership_refined_parallax_values[index],
+                    output.candidate_parallax_values[index] + 1.0e-5f);
+        } else {
+          EXPECT_FLOAT_EQ(output.ownership_refined_parallax_values[index],
+                          output.candidate_parallax_values[index]);
+        }
+      }
+    }
+    const std::size_t boundary_index =
+      static_cast<std::size_t>(height / 2u) * width + boundary_x;
+    const float jump = output.candidate_parallax_values[boundary_index + 1u] -
+                       output.candidate_parallax_values[boundary_index];
+    ASSERT_GT(jump, 0.0f);
+    const float correction_fraction =
+      (output.ownership_refined_parallax_values[boundary_index] -
+       output.candidate_parallax_values[boundary_index]) / jump;
+    EXPECT_NEAR(correction_fraction, 0.5f, 2.0e-4f);
 
     const fs::path trace_path = shape_root / "trace.json";
     ASSERT_TRUE(replay->write_state_trace(trace_path, error)) << error;
@@ -992,11 +1149,1010 @@ TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionPr
   EXPECT_EQ(tested_shapes, 6u);
 }
 
-TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly) {
+TEST(DepthCoordinateV2GpuTest, FullResolutionContourRaisesOwnedBoundaryAndRejectsAmbiguity) {
+  namespace fs = std::filesystem;
+  namespace v2 = models::depth_coordinate_v2;
+  warp_device_t warp;
+  ASSERT_TRUE(warp.initialize());
+  temporary_tree_t tree;
+
+  const auto &calibration = v2::model_calibrations.front();
+  const auto shape_iterator = std::find_if(
+    v2::model_calibrated_shapes.begin(),
+    v2::model_calibrated_shapes.end(),
+    [&](const auto &candidate) {
+      return candidate.calibration_id == calibration.calibration_id;
+    }
+  );
+  ASSERT_NE(shape_iterator, v2::model_calibrated_shapes.end());
+  const std::uint32_t width = shape_iterator->width;
+  const std::uint32_t height = shape_iterator->height;
+  const std::size_t element_count = static_cast<std::size_t>(width) * height;
+  const std::uint32_t split = width / 2u;
+  const std::uint32_t source_width = 3840u;
+  const std::uint32_t source_height = 2160u;
+
+  const fs::path contract_source =
+    fs::path(SUNSHINE_SOURCE_DIR) / "tools/sbsbench/contracts/depth-coordinate-v2-v1.json";
+  const std::string contract_bytes = read_bytes(contract_source);
+  ASSERT_FALSE(contract_bytes.empty());
+  ASSERT_TRUE(write_bytes(
+    tree.path / "contracts/depth-coordinate-v2-v1.json", contract_bytes));
+
+  std::vector<float> raw(element_count, 0.0f);
+  for (std::uint32_t y = 0; y < height; ++y) {
+    std::fill(
+      raw.begin() + static_cast<std::size_t>(y) * width + split,
+      raw.begin() + static_cast<std::size_t>(y + 1u) * width,
+      20.0f
+    );
+  }
+  const std::string raw_bytes = float_bytes(raw);
+  ASSERT_TRUE(write_bytes(tree.path / "raw_00001.f32", raw_bytes));
+  ASSERT_TRUE(write_bytes(tree.path / "raw_00002.f32", raw_bytes));
+  ASSERT_TRUE(write_bytes(tree.path / "raw_00003.f32", raw_bytes));
+  ASSERT_TRUE(write_bytes(tree.path / "raw_00004.f32", raw_bytes));
+  ASSERT_TRUE(write_bytes(tree.path / "raw_00005.f32", raw_bytes));
+  const std::string source_a_sha256 = sha256_hex("ownership-positive-control-a");
+  const std::string source_b_sha256 = sha256_hex("ownership-positive-control-b");
+  const std::string ambiguous_source_sha256 = sha256_hex("ownership-ambiguous-combined");
+  const std::string reversed_source_sha256 = sha256_hex("ownership-subprofile-reversal");
+  const std::string refinement_source_sha256 =
+    sha256_hex("ownership-refinement-reversal");
+  const nlohmann::ordered_json frames = nlohmann::ordered_json::array({
+    {
+      {"frame_id", "00001"},
+      {"raw_file", "raw_00001.f32"},
+      {"raw_sha256", sha256_hex(raw_bytes)},
+      {"source_sha256", source_a_sha256},
+      {"hard_cut_count", 0u},
+      {"hard_cut_pulse", false},
+    },
+    {
+      {"frame_id", "00002"},
+      {"raw_file", "raw_00002.f32"},
+      {"raw_sha256", sha256_hex(raw_bytes)},
+      {"source_sha256", source_b_sha256},
+      {"hard_cut_count", 0u},
+      {"hard_cut_pulse", false},
+    },
+    {
+      {"frame_id", "00003"},
+      {"raw_file", "raw_00003.f32"},
+      {"raw_sha256", sha256_hex(raw_bytes)},
+      {"source_sha256", ambiguous_source_sha256},
+      {"hard_cut_count", 0u},
+      {"hard_cut_pulse", false},
+    },
+    {
+      {"frame_id", "00004"},
+      {"raw_file", "raw_00004.f32"},
+      {"raw_sha256", sha256_hex(raw_bytes)},
+      {"source_sha256", reversed_source_sha256},
+      {"hard_cut_count", 0u},
+      {"hard_cut_pulse", false},
+    },
+    {
+      {"frame_id", "00005"},
+      {"raw_file", "raw_00005.f32"},
+      {"raw_sha256", sha256_hex(raw_bytes)},
+      {"source_sha256", refinement_source_sha256},
+      {"hard_cut_count", 0u},
+      {"hard_cut_pulse", false},
+    },
+  });
+  const auto manifest = make_replay_manifest(
+    calibration, sha256_hex(contract_bytes), width, height, frames, 1.0f,
+    source_width, source_height);
+  const fs::path manifest_path = tree.path / "manifest.json";
+  ASSERT_TRUE(write_bytes(manifest_path, manifest.dump(2) + "\n"));
+
+  // At 4K, both isolated contours below are inside the supported far-cell ownership range.
+  // Keeping them as explicit positive controls proves the combined case abstains because of
+  // competing contour evidence, not because either contour lies outside the accepted window.
+  const float source_scale = static_cast<float>(source_width) / width;
+  const std::uint32_t source_edge_a = static_cast<std::uint32_t>(std::lround(
+    static_cast<float>(split) * source_scale - 0.8f * source_scale
+  ));
+  const std::uint32_t source_edge_b = static_cast<std::uint32_t>(std::lround(
+    static_cast<float>(split) * source_scale - 0.4f * source_scale
+  ));
+  std::vector<std::uint32_t> pixels(
+    static_cast<std::size_t>(source_width) * source_height, 0xff000000u);
+  for (std::uint32_t y = 0; y < source_height; ++y) {
+    std::fill(
+      pixels.begin() + static_cast<std::size_t>(y) * source_width + source_edge_a,
+      pixels.begin() + static_cast<std::size_t>(y + 1u) * source_width,
+      0xffd0d0d0u
+    );
+  }
+  ComPtr<ID3D11Texture2D> source_texture;
+  ComPtr<ID3D11ShaderResourceView> source_srv;
+  ASSERT_TRUE(create_bgra_source_srv(
+    warp.device.Get(), source_width, source_height, pixels, source_texture, source_srv));
+
+  std::string error;
+  auto replay = sbs_bench::depth_coordinate_v2_gpu_replay::create(
+    warp.device.Get(), warp.context.Get(), manifest_path, error);
+  ASSERT_NE(replay, nullptr) << error;
+
+  ComPtr<ID3D11Texture2D> wrong_size_texture;
+  ComPtr<ID3D11ShaderResourceView> wrong_size_srv;
+  ASSERT_TRUE(create_solid_source_srv(
+    warp.device.Get(), source_width - 1u, source_height,
+    wrong_size_texture, wrong_size_srv));
+  sbs_bench::depth_coordinate_v2_gpu_frame rejected_output;
+  EXPECT_FALSE(replay->dispatch(
+    0u, "00001", wrong_size_srv.Get(), 0u, 1.0f,
+    source_a_sha256, rejected_output, error));
+  EXPECT_NE(error.find("authenticated shape/format"), std::string::npos) << error;
+  error.clear();
+
+  ComPtr<ID3D11Texture2D> wrong_format_texture;
+  ComPtr<ID3D11ShaderResourceView> wrong_format_srv;
+  ASSERT_TRUE(create_r32_source_srv(
+    warp.device.Get(), source_width, source_height,
+    wrong_format_texture, wrong_format_srv));
+  EXPECT_FALSE(replay->dispatch(
+    0u, "00001", wrong_format_srv.Get(), 0u, 1.0f,
+    source_a_sha256, rejected_output, error));
+  EXPECT_NE(error.find("authenticated shape/format"), std::string::npos) << error;
+  error.clear();
+
+  sbs_bench::depth_coordinate_v2_gpu_frame output;
+  ASSERT_TRUE(replay->dispatch(
+    0u, "00001", source_srv.Get(), 0u, 1.0f, source_a_sha256, output, error)) << error;
+  ASSERT_EQ(output.candidate_parallax_values.size(), element_count);
+  ASSERT_EQ(output.ownership_refined_parallax_values.size(), element_count);
+
+  std::size_t raised = 0u;
+  for (std::size_t index = 0; index < element_count; ++index) {
+    EXPECT_GE(
+      output.ownership_refined_parallax_values[index] + 1.0e-8f,
+      output.candidate_parallax_values[index]
+    );
+    raised += output.ownership_refined_parallax_values[index] >
+      output.candidate_parallax_values[index] + 1.0e-7f ? 1u : 0u;
+  }
+  EXPECT_GT(raised, height / 2u);
+  const std::size_t center = static_cast<std::size_t>(height / 2u) * width + split - 1u;
+  EXPECT_GT(output.ownership_refined_parallax_values[center],
+            output.candidate_parallax_values[center] + 1.0e-5f);
+  EXPECT_LT(output.ownership_refined_parallax_values[center],
+            output.candidate_parallax_values[center + 1u] - 1.0e-5f);
+  EXPECT_FLOAT_EQ(output.ownership_refined_parallax_values[center - 1u],
+                  output.candidate_parallax_values[center - 1u]);
+  const float source_a_jump =
+    output.candidate_parallax_values[center + 1u] -
+    output.candidate_parallax_values[center];
+  ASSERT_GT(source_a_jump, 0.0f);
+  const float source_a_fraction =
+    (output.ownership_refined_parallax_values[center] -
+     output.candidate_parallax_values[center]) / source_a_jump;
+  const float expected_source_a_fraction =
+    (static_cast<float>(split) * source_scale -
+     static_cast<float>(source_edge_a)) / source_scale;
+  EXPECT_NEAR(source_a_fraction, expected_source_a_fraction, 2.0e-4f);
+
+  // A second isolated contour at the other supported position must also be accepted.
+  std::vector<std::uint32_t> source_b_pixels(
+    static_cast<std::size_t>(source_width) * source_height, 0xffa0a0a0u);
+  for (std::uint32_t y = 0; y < source_height; ++y) {
+    std::fill(
+      source_b_pixels.begin() + static_cast<std::size_t>(y) * source_width + source_edge_b,
+      source_b_pixels.begin() + static_cast<std::size_t>(y + 1u) * source_width,
+      0xffffffffu
+    );
+  }
+  ComPtr<ID3D11Texture2D> source_b_texture;
+  ComPtr<ID3D11ShaderResourceView> source_b_srv;
+  ASSERT_TRUE(create_bgra_source_srv(
+    warp.device.Get(), source_width, source_height, source_b_pixels,
+    source_b_texture, source_b_srv));
+  sbs_bench::depth_coordinate_v2_gpu_frame source_b_output;
+  ASSERT_TRUE(replay->dispatch(
+    1u, "00002", source_b_srv.Get(), 0u, 1.0f,
+    source_b_sha256, source_b_output, error)) << error;
+  EXPECT_GT(
+    source_b_output.ownership_refined_parallax_values[center],
+    source_b_output.candidate_parallax_values[center] + 1.0e-5f
+  );
+  const float source_b_jump =
+    source_b_output.candidate_parallax_values[center + 1u] -
+    source_b_output.candidate_parallax_values[center];
+  ASSERT_GT(source_b_jump, 0.0f);
+  const float source_b_fraction =
+    (source_b_output.ownership_refined_parallax_values[center] -
+     source_b_output.candidate_parallax_values[center]) / source_b_jump;
+  const float expected_source_b_fraction =
+    (static_cast<float>(split) * source_scale -
+     static_cast<float>(source_edge_b)) / source_scale;
+  EXPECT_NEAR(source_b_fraction, expected_source_b_fraction, 2.0e-4f);
+
+  // Combining both individually valid transitions must expose disagreement between the smoothed
+  // crossing interval and its raw bracket, and abstain instead of selecting either contour.
+  std::vector<std::uint32_t> ambiguous_pixels(
+    static_cast<std::size_t>(source_width) * source_height, 0xff000000u);
+  for (std::uint32_t y = 0; y < source_height; ++y) {
+    const auto row = ambiguous_pixels.begin() + static_cast<std::size_t>(y) * source_width;
+    std::fill(row + source_edge_a, row + source_edge_a + 1u, 0xffd0d0d0u);
+    std::fill(row + source_edge_a + 1u, row + source_edge_b, 0xffa0a0a0u);
+    std::fill(row + source_edge_b, row + source_width, 0xffffffffu);
+  }
+  ComPtr<ID3D11Texture2D> ambiguous_source_texture;
+  ComPtr<ID3D11ShaderResourceView> ambiguous_source_srv;
+  ASSERT_TRUE(create_bgra_source_srv(
+    warp.device.Get(), source_width, source_height, ambiguous_pixels,
+    ambiguous_source_texture, ambiguous_source_srv));
+  sbs_bench::depth_coordinate_v2_gpu_frame ambiguous_output;
+  ASSERT_TRUE(replay->dispatch(
+    2u,
+    "00003",
+    ambiguous_source_srv.Get(),
+    0u,
+    1.0f,
+    ambiguous_source_sha256,
+    ambiguous_output,
+    error
+  )) << error;
+  ASSERT_EQ(ambiguous_output.candidate_parallax_values.size(), element_count);
+  ASSERT_EQ(ambiguous_output.ownership_refined_parallax_values.size(), element_count);
+  for (std::size_t index = 0; index < element_count; ++index) {
+    EXPECT_FLOAT_EQ(
+      ambiguous_output.ownership_refined_parallax_values[index],
+      ambiguous_output.candidate_parallax_values[index]
+    ) << "index=" << index;
+  }
+
+  // Two individually valid contours can also sit only two 4K source pixels apart. The coarse
+  // uniqueness filter merges them, but their raw projection reverses direction between rises;
+  // ownership must conservatively abstain on that sub-profile evidence.
+  std::vector<std::uint32_t> reversed_pixels(
+    static_cast<std::size_t>(source_width) * source_height, 0xff000000u);
+  for (std::uint32_t y = 0; y < source_height; ++y) {
+    const auto row = reversed_pixels.begin() + static_cast<std::size_t>(y) * source_width;
+    row[1917u] = 0xffffffffu;
+    std::fill(row + 1919u, row + source_width, 0xffffffffu);
+  }
+  ComPtr<ID3D11Texture2D> reversed_source_texture;
+  ComPtr<ID3D11ShaderResourceView> reversed_source_srv;
+  ASSERT_TRUE(create_bgra_source_srv(
+    warp.device.Get(), source_width, source_height, reversed_pixels,
+    reversed_source_texture, reversed_source_srv));
+  sbs_bench::depth_coordinate_v2_gpu_frame reversed_output;
+  ASSERT_TRUE(replay->dispatch(
+    3u, "00004", reversed_source_srv.Get(), 0u, 1.0f,
+    reversed_source_sha256, reversed_output, error)) << error;
+  ASSERT_EQ(reversed_output.candidate_parallax_values.size(), element_count);
+  ASSERT_EQ(reversed_output.ownership_refined_parallax_values.size(), element_count);
+  for (std::size_t index = 0; index < element_count; ++index) {
+    EXPECT_FLOAT_EQ(
+      reversed_output.ownership_refined_parallax_values[index],
+      reversed_output.candidate_parallax_values[index]
+    ) << "index=" << index;
+  }
+
+  // A second two-pixel pattern aliases to a monotone coarse profile; the already-required
+  // bisection sample exposes its hidden reversal and must also force an exact no-op.
+  std::vector<std::uint32_t> refinement_pixels(
+    static_cast<std::size_t>(source_width) * source_height, 0xff000000u);
+  for (std::uint32_t y = 0; y < source_height; ++y) {
+    const auto row = refinement_pixels.begin() + static_cast<std::size_t>(y) * source_width;
+    row[1916u] = 0xffffffffu;
+    std::fill(row + 1918u, row + source_width, 0xffffffffu);
+  }
+  ComPtr<ID3D11Texture2D> refinement_source_texture;
+  ComPtr<ID3D11ShaderResourceView> refinement_source_srv;
+  ASSERT_TRUE(create_bgra_source_srv(
+    warp.device.Get(), source_width, source_height, refinement_pixels,
+    refinement_source_texture, refinement_source_srv));
+  sbs_bench::depth_coordinate_v2_gpu_frame refinement_output;
+  ASSERT_TRUE(replay->dispatch(
+    4u, "00005", refinement_source_srv.Get(), 0u, 1.0f,
+    refinement_source_sha256, refinement_output, error)) << error;
+  ASSERT_EQ(refinement_output.candidate_parallax_values.size(), element_count);
+  ASSERT_EQ(refinement_output.ownership_refined_parallax_values.size(), element_count);
+  for (std::size_t index = 0; index < element_count; ++index) {
+    EXPECT_FLOAT_EQ(
+      refinement_output.ownership_refined_parallax_values[index],
+      refinement_output.candidate_parallax_values[index]
+    ) << "index=" << index;
+  }
+}
+
+TEST(DepthCoordinateV2GpuTest, OwnershipIsResolutionAndPixelPhaseInvariant) {
+  namespace fs = std::filesystem;
+  namespace v2 = models::depth_coordinate_v2;
+  warp_device_t warp;
+  ASSERT_TRUE(warp.initialize());
+  temporary_tree_t tree;
+
+  const auto &calibration = v2::model_calibrations.front();
+  const auto shape_iterator = std::find_if(
+    v2::model_calibrated_shapes.begin(),
+    v2::model_calibrated_shapes.end(),
+    [&](const auto &candidate) {
+      return candidate.calibration_id == calibration.calibration_id;
+    }
+  );
+  ASSERT_NE(shape_iterator, v2::model_calibrated_shapes.end());
+  const std::uint32_t width = shape_iterator->width;
+  const std::uint32_t height = shape_iterator->height;
+  const std::size_t element_count = static_cast<std::size_t>(width) * height;
+  const fs::path contract_source =
+    fs::path(SUNSHINE_SOURCE_DIR) / "tools/sbsbench/contracts/depth-coordinate-v2-v1.json";
+  const std::string contract_bytes = read_bytes(contract_source);
+  ASSERT_FALSE(contract_bytes.empty());
+
+  constexpr std::array source_sizes {
+    std::pair {1280u, 720u},
+    std::pair {1920u, 1080u},
+    std::pair {2560u, 1440u},
+    std::pair {3840u, 2160u},
+  };
+  // 38 is the former 720p smoothing-threshold hole; 41 is the former contaminated-plateau
+  // under-correction; 645 and 722 exercise an exact unfiltered-0.5 endpoint phase.
+  constexpr std::array splits {38u, 39u, 41u, 256u, 257u, 645u, 722u};
+  for (std::size_t source_index = 0; source_index < source_sizes.size(); ++source_index) {
+    const auto &[source_width, source_height] = source_sizes[source_index];
+    SCOPED_TRACE(
+      "source=" + std::to_string(source_width) + "x" + std::to_string(source_height)
+    );
+    const fs::path case_root =
+      tree.path / (std::to_string(source_width) + "x" + std::to_string(source_height));
+    ASSERT_TRUE(write_bytes(
+      case_root / "contracts/depth-coordinate-v2-v1.json", contract_bytes));
+
+    nlohmann::ordered_json frames = nlohmann::ordered_json::array();
+    std::array<std::string, splits.size()> source_hashes;
+    for (std::size_t index = 0; index < splits.size(); ++index) {
+      std::vector<float> raw(element_count, 0.0f);
+      for (std::uint32_t y = 0; y < height; ++y) {
+        std::fill(
+          raw.begin() + static_cast<std::size_t>(y) * width + splits[index],
+          raw.begin() + static_cast<std::size_t>(y + 1u) * width,
+          20.0f
+        );
+      }
+      const std::string frame_id = "0000" + std::to_string(index + 1u);
+      const std::string raw_name = "raw_" + frame_id + ".f32";
+      const std::string raw_bytes = float_bytes(raw);
+      ASSERT_TRUE(write_bytes(case_root / raw_name, raw_bytes));
+      source_hashes[index] = sha256_hex(
+        std::to_string(source_width) + "x" + std::to_string(source_height) +
+        "-phase-" + std::to_string(index)
+      );
+      frames.push_back({
+        {"frame_id", frame_id},
+        {"raw_file", raw_name},
+        {"raw_sha256", sha256_hex(raw_bytes)},
+        {"source_sha256", source_hashes[index]},
+        {"hard_cut_count", index == 0u ? 0u : 1u},
+        {"hard_cut_pulse", index != 0u},
+      });
+    }
+    const auto manifest = make_replay_manifest(
+      calibration,
+      sha256_hex(contract_bytes),
+      width,
+      height,
+      frames,
+      1.0f,
+      source_width,
+      source_height
+    );
+    const fs::path manifest_path = case_root / "manifest.json";
+    ASSERT_TRUE(write_bytes(manifest_path, manifest.dump(2) + "\n"));
+    std::string error;
+    auto replay = sbs_bench::depth_coordinate_v2_gpu_replay::create(
+      warp.device.Get(), warp.context.Get(), manifest_path, error);
+    ASSERT_NE(replay, nullptr) << error;
+
+    for (std::size_t index = 0; index < splits.size(); ++index) {
+      const float source_scale = static_cast<float>(source_width) / width;
+      const std::uint32_t source_edge = static_cast<std::uint32_t>(std::lround(
+        static_cast<float>(splits[index]) * source_scale - 0.4f * source_scale
+      ));
+      std::vector<std::uint32_t> pixels(
+        static_cast<std::size_t>(source_width) * source_height, 0xff101010u);
+      for (std::uint32_t y = 0; y < source_height; ++y) {
+        std::fill(
+          pixels.begin() + static_cast<std::size_t>(y) * source_width + source_edge,
+          pixels.begin() + static_cast<std::size_t>(y + 1u) * source_width,
+          0xfff0f0f0u
+        );
+      }
+      ComPtr<ID3D11Texture2D> source_texture;
+      ComPtr<ID3D11ShaderResourceView> source_srv;
+      ASSERT_TRUE(create_bgra_source_srv(
+        warp.device.Get(), source_width, source_height, pixels, source_texture, source_srv));
+      sbs_bench::depth_coordinate_v2_gpu_frame output;
+      const std::string frame_id = "0000" + std::to_string(index + 1u);
+      ASSERT_TRUE(replay->dispatch(
+        index, frame_id, source_srv.Get(), 0u, 1.0f,
+        source_hashes[index], output, error)) << error;
+
+      std::size_t raised = 0u;
+      for (std::size_t element = 0; element < element_count; ++element) {
+        EXPECT_GE(
+          output.ownership_refined_parallax_values[element] + 1.0e-8f,
+          output.candidate_parallax_values[element]
+        );
+        raised += output.ownership_refined_parallax_values[element] >
+          output.candidate_parallax_values[element] + 1.0e-7f ? 1u : 0u;
+      }
+      EXPECT_GT(raised, height / 2u);
+      const std::size_t boundary =
+        static_cast<std::size_t>(height / 2u) * width + splits[index] - 1u;
+      const float correction =
+        output.ownership_refined_parallax_values[boundary] -
+        output.candidate_parallax_values[boundary];
+      const float full_jump =
+        output.candidate_parallax_values[boundary + 1u] -
+        output.candidate_parallax_values[boundary];
+      ASSERT_GT(full_jump, 0.0f);
+      const float correction_fraction = correction / full_jump;
+      const float expected_fraction =
+        (static_cast<float>(splits[index]) * source_scale -
+         static_cast<float>(source_edge)) / source_scale;
+      EXPECT_GE(correction_fraction, 0.10f);
+      EXPECT_LE(correction_fraction, 0.85f);
+      EXPECT_NEAR(
+        correction_fraction,
+        expected_fraction,
+        2.0e-4f
+      );
+    }
+  }
+}
+
+TEST(DepthCoordinateV2GpuTest, OwnershipColorModesPreserveEquivalentContourDecision) {
+  namespace fs = std::filesystem;
+  namespace v2 = models::depth_coordinate_v2;
+  warp_device_t warp;
+  ASSERT_TRUE(warp.initialize());
+  temporary_tree_t tree;
+
+  const auto &calibration = v2::model_calibrations.front();
+  const auto shape_iterator = std::find_if(
+    v2::model_calibrated_shapes.begin(),
+    v2::model_calibrated_shapes.end(),
+    [&](const auto &candidate) {
+      return candidate.calibration_id == calibration.calibration_id;
+    }
+  );
+  ASSERT_NE(shape_iterator, v2::model_calibrated_shapes.end());
+  const std::uint32_t width = shape_iterator->width;
+  const std::uint32_t height = shape_iterator->height;
+  const std::size_t element_count = static_cast<std::size_t>(width) * height;
+  constexpr std::uint32_t source_width = 1920u;
+  constexpr std::uint32_t source_height = 1080u;
+  constexpr std::uint32_t split = 256u;
+
+  std::vector<float> raw(element_count, 0.0f);
+  for (std::uint32_t y = 0; y < height; ++y) {
+    std::fill(
+      raw.begin() + static_cast<std::size_t>(y) * width + split,
+      raw.begin() + static_cast<std::size_t>(y + 1u) * width,
+      20.0f
+    );
+  }
+  const std::string raw_bytes = float_bytes(raw);
+  const std::string source_hash = sha256_hex("equivalent-color-mode-contour");
+  const fs::path contract_source =
+    fs::path(SUNSHINE_SOURCE_DIR) / "tools/sbsbench/contracts/depth-coordinate-v2-v1.json";
+  const std::string contract_bytes = read_bytes(contract_source);
+  ASSERT_FALSE(contract_bytes.empty());
+  const float source_scale = static_cast<float>(source_width) / width;
+  const std::uint32_t source_edge = static_cast<std::uint32_t>(std::lround(
+    static_cast<float>(split) * source_scale - 0.4f * source_scale
+  ));
+
+  std::array<float, 3> correction_fractions {};
+  for (std::uint32_t color_mode = 0u; color_mode < 3u; ++color_mode) {
+    SCOPED_TRACE("color_mode=" + std::to_string(color_mode));
+    // source_linear_scale authenticates scaling already applied before upload; the shader must
+    // not multiply it again. Exercise a >1 scRGB texel and non-unity provenance in HDR mode.
+    const float source_linear_scale = color_mode == 2u ? 2.0f : 1.0f;
+    const fs::path case_root = tree.path / ("color-mode-" + std::to_string(color_mode));
+    ASSERT_TRUE(write_bytes(
+      case_root / "contracts/depth-coordinate-v2-v1.json", contract_bytes));
+    ASSERT_TRUE(write_bytes(case_root / "raw_00001.f32", raw_bytes));
+    const nlohmann::ordered_json frames = nlohmann::ordered_json::array({{
+      {"frame_id", "00001"},
+      {"raw_file", "raw_00001.f32"},
+      {"raw_sha256", sha256_hex(raw_bytes)},
+      {"source_sha256", source_hash},
+      {"hard_cut_count", 0u},
+      {"hard_cut_pulse", false},
+    }});
+    const auto manifest = make_replay_manifest(
+      calibration,
+      sha256_hex(contract_bytes),
+      width,
+      height,
+      frames,
+      1.0f,
+      source_width,
+      source_height,
+      color_mode,
+      source_linear_scale
+    );
+    const fs::path manifest_path = case_root / "manifest.json";
+    ASSERT_TRUE(write_bytes(manifest_path, manifest.dump(2) + "\n"));
+    std::string error;
+    auto replay = sbs_bench::depth_coordinate_v2_gpu_replay::create(
+      warp.device.Get(), warp.context.Get(), manifest_path, error);
+    ASSERT_NE(replay, nullptr) << error;
+
+    ComPtr<ID3D11Texture2D> source_texture;
+    ComPtr<ID3D11ShaderResourceView> source_srv;
+    if (color_mode == 0u) {
+      std::vector<std::uint32_t> pixels(
+        static_cast<std::size_t>(source_width) * source_height, 0xff000000u);
+      for (std::uint32_t y = 0; y < source_height; ++y) {
+        std::fill(
+          pixels.begin() + static_cast<std::size_t>(y) * source_width + source_edge,
+          pixels.begin() + static_cast<std::size_t>(y + 1u) * source_width,
+          0xffffffffu
+        );
+      }
+      ASSERT_TRUE(create_bgra_source_srv(
+        warp.device.Get(), source_width, source_height, pixels,
+        source_texture, source_srv));
+    } else {
+      constexpr std::uint16_t half_one = 0x3c00u;
+      constexpr std::uint16_t half_point_two = 0x3266u;
+      constexpr std::uint16_t half_point_three = 0x34cdu;
+      constexpr std::uint16_t half_two = 0x4000u;
+      constexpr std::uint16_t half_four = 0x4400u;
+      // These ranges discriminate the transfer branches rather than merely proving that every
+      // monotone hard edge normalizes to the same crossing. Linear 0.2->0.3 clears the calibrated
+      // linear contrast floor but would fail if treated as sRGB; scRGB 2->4 survives Reinhard but
+      // collapses if the linear-SDR clamp is selected.
+      const std::uint16_t far_value =
+        color_mode == 2u ? half_two : half_point_two;
+      const std::uint16_t near_value =
+        color_mode == 2u ? half_four : half_point_three;
+      const std::array<std::uint16_t, 4> far_pixel {
+        far_value, far_value, far_value, half_one,
+      };
+      const std::array<std::uint16_t, 4> near_pixel {
+        near_value, near_value, near_value, half_one,
+      };
+      std::vector<std::array<std::uint16_t, 4>> pixels(
+        static_cast<std::size_t>(source_width) * source_height, far_pixel);
+      for (std::uint32_t y = 0; y < source_height; ++y) {
+        std::fill(
+          pixels.begin() + static_cast<std::size_t>(y) * source_width + source_edge,
+          pixels.begin() + static_cast<std::size_t>(y + 1u) * source_width,
+          near_pixel
+        );
+      }
+      ASSERT_TRUE(create_rgba16f_source_srv(
+        warp.device.Get(), source_width, source_height, pixels,
+        source_texture, source_srv));
+    }
+
+    sbs_bench::depth_coordinate_v2_gpu_frame output;
+    ASSERT_TRUE(replay->dispatch(
+      0u, "00001", source_srv.Get(), color_mode, source_linear_scale,
+      source_hash, output, error)) << error;
+    const std::size_t boundary =
+      static_cast<std::size_t>(height / 2u) * width + split - 1u;
+    const float correction =
+      output.ownership_refined_parallax_values[boundary] -
+      output.candidate_parallax_values[boundary];
+    const float jump =
+      output.candidate_parallax_values[boundary + 1u] -
+      output.candidate_parallax_values[boundary];
+    ASSERT_GT(jump, 0.0f);
+    correction_fractions[color_mode] = correction / jump;
+    const float expected_fraction =
+      (static_cast<float>(split) * source_scale -
+       static_cast<float>(source_edge)) / source_scale;
+    EXPECT_NEAR(correction_fractions[color_mode], expected_fraction, 2.0e-4f);
+  }
+
+  EXPECT_NEAR(correction_fractions[1], correction_fractions[0], 2.0e-4f);
+  EXPECT_NEAR(correction_fractions[2], correction_fractions[0], 2.0e-4f);
+}
+
+TEST(DepthCoordinateV2GpuTest, OwnershipHandlesVerticalAndReverseNearDirections) {
+  namespace fs = std::filesystem;
+  namespace v2 = models::depth_coordinate_v2;
+  warp_device_t warp;
+  ASSERT_TRUE(warp.initialize());
+  temporary_tree_t tree;
+
+  const auto &calibration = v2::model_calibrations.front();
+  const auto shape_iterator = std::find_if(
+    v2::model_calibrated_shapes.begin(),
+    v2::model_calibrated_shapes.end(),
+    [&](const auto &candidate) {
+      return candidate.calibration_id == calibration.calibration_id;
+    }
+  );
+  ASSERT_NE(shape_iterator, v2::model_calibrated_shapes.end());
+  const std::uint32_t width = shape_iterator->width;
+  const std::uint32_t height = shape_iterator->height;
+  const std::size_t element_count = static_cast<std::size_t>(width) * height;
+  constexpr std::uint32_t source_width = 1920u;
+  constexpr std::uint32_t source_height = 1080u;
+  struct direction_case_t {
+    bool vertical;
+    bool reverse;
+    std::uint32_t split;
+  };
+  constexpr std::array cases {
+    direction_case_t {false, true, 256u},
+    direction_case_t {true, false, 144u},
+    direction_case_t {true, true, 145u},
+  };
+
+  const fs::path contract_source =
+    fs::path(SUNSHINE_SOURCE_DIR) / "tools/sbsbench/contracts/depth-coordinate-v2-v1.json";
+  const std::string contract_bytes = read_bytes(contract_source);
+  ASSERT_FALSE(contract_bytes.empty());
+  ASSERT_TRUE(write_bytes(
+    tree.path / "contracts/depth-coordinate-v2-v1.json", contract_bytes));
+  nlohmann::ordered_json frames = nlohmann::ordered_json::array();
+  std::array<std::string, cases.size()> source_hashes;
+  for (std::size_t index = 0; index < cases.size(); ++index) {
+    std::vector<float> raw(element_count, 0.0f);
+    const auto &test_case = cases[index];
+    for (std::uint32_t y = 0; y < height; ++y) {
+      for (std::uint32_t x = 0; x < width; ++x) {
+        const bool near_side = test_case.vertical ?
+                                 (test_case.reverse ? y < test_case.split : y >= test_case.split) :
+                                 (test_case.reverse ? x < test_case.split : x >= test_case.split);
+        if (near_side) {
+          raw[static_cast<std::size_t>(y) * width + x] = 20.0f;
+        }
+      }
+    }
+    const std::string frame_id = "0000" + std::to_string(index + 1u);
+    const std::string raw_name = "raw_" + frame_id + ".f32";
+    const std::string raw_bytes = float_bytes(raw);
+    ASSERT_TRUE(write_bytes(tree.path / raw_name, raw_bytes));
+    source_hashes[index] = sha256_hex("direction-" + std::to_string(index));
+    frames.push_back({
+      {"frame_id", frame_id},
+      {"raw_file", raw_name},
+      {"raw_sha256", sha256_hex(raw_bytes)},
+      {"source_sha256", source_hashes[index]},
+      {"hard_cut_count", static_cast<std::uint32_t>(index)},
+      {"hard_cut_pulse", index != 0u},
+    });
+  }
+  const auto manifest = make_replay_manifest(
+    calibration, sha256_hex(contract_bytes), width, height, frames, 1.0f,
+    source_width, source_height);
+  const fs::path manifest_path = tree.path / "manifest.json";
+  ASSERT_TRUE(write_bytes(manifest_path, manifest.dump(2) + "\n"));
+  std::string error;
+  auto replay = sbs_bench::depth_coordinate_v2_gpu_replay::create(
+    warp.device.Get(), warp.context.Get(), manifest_path, error);
+  ASSERT_NE(replay, nullptr) << error;
+
+  for (std::size_t index = 0; index < cases.size(); ++index) {
+    const auto &test_case = cases[index];
+    const float scale = test_case.vertical ?
+                          static_cast<float>(source_height) / height :
+                          static_cast<float>(source_width) / width;
+    const float boundary = static_cast<float>(test_case.split) * scale;
+    const std::uint32_t source_edge = static_cast<std::uint32_t>(std::lround(
+      boundary + (test_case.reverse ? 0.4f : -0.4f) * scale
+    ));
+    std::vector<std::uint32_t> pixels(
+      static_cast<std::size_t>(source_width) * source_height, 0xff101010u);
+    for (std::uint32_t y = 0; y < source_height; ++y) {
+      for (std::uint32_t x = 0; x < source_width; ++x) {
+        const bool near_side = test_case.vertical ?
+                                 (test_case.reverse ? y < source_edge : y >= source_edge) :
+                                 (test_case.reverse ? x < source_edge : x >= source_edge);
+        if (near_side) {
+          pixels[static_cast<std::size_t>(y) * source_width + x] = 0xfff0f0f0u;
+        }
+      }
+    }
+    ComPtr<ID3D11Texture2D> source_texture;
+    ComPtr<ID3D11ShaderResourceView> source_srv;
+    ASSERT_TRUE(create_bgra_source_srv(
+      warp.device.Get(), source_width, source_height, pixels, source_texture, source_srv));
+    sbs_bench::depth_coordinate_v2_gpu_frame output;
+    const std::string frame_id = "0000" + std::to_string(index + 1u);
+    ASSERT_TRUE(replay->dispatch(
+      index, frame_id, source_srv.Get(), 0u, 1.0f,
+      source_hashes[index], output, error)) << error;
+    const std::uint32_t boundary_x = test_case.vertical ?
+                                       width / 2u :
+                                       (test_case.reverse ? test_case.split : test_case.split - 1u);
+    const std::uint32_t boundary_y = test_case.vertical ?
+                                       (test_case.reverse ? test_case.split : test_case.split - 1u) :
+                                       height / 2u;
+    const std::size_t boundary_index =
+      static_cast<std::size_t>(boundary_y) * width + boundary_x;
+    EXPECT_GT(
+      output.ownership_refined_parallax_values[boundary_index],
+      output.candidate_parallax_values[boundary_index] + 1.0e-5f
+    );
+    std::size_t raised = 0u;
+    for (std::uint32_t y = 0u; y < height; ++y) {
+      for (std::uint32_t x = 0u; x < width; ++x) {
+        const std::size_t element = static_cast<std::size_t>(y) * width + x;
+        const float candidate = output.candidate_parallax_values[element];
+        const float refined = output.ownership_refined_parallax_values[element];
+        EXPECT_GE(refined + 1.0e-8f, candidate);
+        const bool expected_boundary = test_case.vertical ?
+                                         y == boundary_y : x == boundary_x;
+        if (expected_boundary) {
+          EXPECT_GT(refined, candidate + 1.0e-5f);
+          ++raised;
+        } else {
+          EXPECT_FLOAT_EQ(refined, candidate);
+        }
+      }
+    }
+    EXPECT_EQ(raised, test_case.vertical ? width : height);
+
+    const float jump = test_case.vertical ?
+                         output.candidate_parallax_values[
+                           static_cast<std::size_t>(test_case.split) * width + boundary_x] -
+                           output.candidate_parallax_values[
+                             static_cast<std::size_t>(test_case.split - 1u) * width + boundary_x] :
+                         output.candidate_parallax_values[
+                           static_cast<std::size_t>(boundary_y) * width + test_case.split] -
+                           output.candidate_parallax_values[
+                             static_cast<std::size_t>(boundary_y) * width + test_case.split - 1u];
+    ASSERT_NE(jump, 0.0f);
+    const float correction_fraction =
+      (output.ownership_refined_parallax_values[boundary_index] -
+       output.candidate_parallax_values[boundary_index]) / std::abs(jump);
+    const float expected_fraction = test_case.reverse ?
+      (static_cast<float>(source_edge) - boundary) / scale :
+      (boundary - static_cast<float>(source_edge)) / scale;
+    EXPECT_NEAR(correction_fraction, expected_fraction, 2.0e-4f);
+  }
+}
+
+TEST(DepthCoordinateV2GpuTest, OwnershipExecutesOnPortraitTensorAndSource) {
+  namespace fs = std::filesystem;
+  namespace v2 = models::depth_coordinate_v2;
+  warp_device_t warp;
+  ASSERT_TRUE(warp.initialize());
+  temporary_tree_t tree;
+
+  const auto &calibration = v2::model_calibrations.front();
+  const auto shape_iterator = std::find_if(
+    v2::model_calibrated_shapes.begin(),
+    v2::model_calibrated_shapes.end(),
+    [&](const auto &candidate) {
+      return candidate.calibration_id == calibration.calibration_id &&
+             candidate.width == 434u && candidate.height == 770u;
+    }
+  );
+  ASSERT_NE(shape_iterator, v2::model_calibrated_shapes.end());
+  const std::uint32_t width = shape_iterator->width;
+  const std::uint32_t height = shape_iterator->height;
+  constexpr std::uint32_t source_width = 720u;
+  constexpr std::uint32_t source_height = 1280u;
+  const std::uint32_t split = height / 2u;
+  const std::size_t element_count = static_cast<std::size_t>(width) * height;
+
+  std::vector<float> raw(element_count, 0.0f);
+  std::fill(raw.begin() + static_cast<std::size_t>(split) * width, raw.end(), 20.0f);
+  const std::string raw_bytes = float_bytes(raw);
+  const std::string source_hash = sha256_hex("portrait-ownership-contour");
+  const fs::path contract_source =
+    fs::path(SUNSHINE_SOURCE_DIR) / "tools/sbsbench/contracts/depth-coordinate-v2-v1.json";
+  const std::string contract_bytes = read_bytes(contract_source);
+  ASSERT_FALSE(contract_bytes.empty());
+  ASSERT_TRUE(write_bytes(
+    tree.path / "contracts/depth-coordinate-v2-v1.json", contract_bytes));
+  ASSERT_TRUE(write_bytes(tree.path / "raw_00001.f32", raw_bytes));
+  const nlohmann::ordered_json frames = nlohmann::ordered_json::array({{
+    {"frame_id", "00001"},
+    {"raw_file", "raw_00001.f32"},
+    {"raw_sha256", sha256_hex(raw_bytes)},
+    {"source_sha256", source_hash},
+    {"hard_cut_count", 0u},
+    {"hard_cut_pulse", false},
+  }});
+  const auto manifest = make_replay_manifest(
+    calibration, sha256_hex(contract_bytes), width, height, frames, 1.0f,
+    source_width, source_height);
+  const fs::path manifest_path = tree.path / "manifest.json";
+  ASSERT_TRUE(write_bytes(manifest_path, manifest.dump(2) + "\n"));
+
+  const float source_scale = static_cast<float>(source_height) / height;
+  const float source_boundary = static_cast<float>(split) * source_scale;
+  const std::uint32_t source_edge = static_cast<std::uint32_t>(std::lround(
+    source_boundary - 0.4f * source_scale));
+  std::vector<std::uint32_t> pixels(
+    static_cast<std::size_t>(source_width) * source_height, 0xff101010u);
+  std::fill(
+    pixels.begin() + static_cast<std::size_t>(source_edge) * source_width,
+    pixels.end(),
+    0xfff0f0f0u
+  );
+  ComPtr<ID3D11Texture2D> source_texture;
+  ComPtr<ID3D11ShaderResourceView> source_srv;
+  ASSERT_TRUE(create_bgra_source_srv(
+    warp.device.Get(), source_width, source_height, pixels, source_texture, source_srv));
+
+  std::string error;
+  auto replay = sbs_bench::depth_coordinate_v2_gpu_replay::create(
+    warp.device.Get(), warp.context.Get(), manifest_path, error);
+  ASSERT_NE(replay, nullptr) << error;
+  sbs_bench::depth_coordinate_v2_gpu_frame output;
+  ASSERT_TRUE(replay->dispatch(
+    0u, "00001", source_srv.Get(), 0u, 1.0f, source_hash, output, error)) << error;
+
+  const std::uint32_t boundary_y = split - 1u;
+  for (std::uint32_t y = 0u; y < height; ++y) {
+    for (std::uint32_t x = 0u; x < width; ++x) {
+      const std::size_t index = static_cast<std::size_t>(y) * width + x;
+      if (y == boundary_y) {
+        EXPECT_GT(output.ownership_refined_parallax_values[index],
+                  output.candidate_parallax_values[index] + 1.0e-5f);
+      } else {
+        EXPECT_FLOAT_EQ(output.ownership_refined_parallax_values[index],
+                        output.candidate_parallax_values[index]);
+      }
+    }
+  }
+  const std::size_t boundary_index =
+    static_cast<std::size_t>(boundary_y) * width + width / 2u;
+  const float jump = output.candidate_parallax_values[boundary_index + width] -
+                     output.candidate_parallax_values[boundary_index];
+  ASSERT_GT(jump, 0.0f);
+  const float correction_fraction =
+    (output.ownership_refined_parallax_values[boundary_index] -
+     output.candidate_parallax_values[boundary_index]) / jump;
+  const float expected_fraction =
+    (source_boundary - static_cast<float>(source_edge)) / source_scale;
+  EXPECT_NEAR(correction_fraction, expected_fraction, 2.0e-4f);
+}
+
+TEST(DepthCoordinateV2GpuTest, StageBoundaryAdoptsAtCutAndHoldsAcrossLaterFramesOnGpu) {
   namespace fs = std::filesystem;
   namespace v2 = models::depth_coordinate_v2;
 
-  static_assert(v2::constant_float_count == 12u);
+  warp_device_t warp;
+  ASSERT_TRUE(warp.initialize());
+  temporary_tree_t tree;
+
+  const fs::path contract_source = fs::path(SUNSHINE_SOURCE_DIR) /
+    "tools/sbsbench/contracts/depth-coordinate-v2-v1.json";
+  const std::string contract_bytes = read_bytes(contract_source);
+  ASSERT_FALSE(contract_bytes.empty());
+  ASSERT_TRUE(write_bytes(
+    tree.path / "contracts/depth-coordinate-v2-v1.json", contract_bytes));
+
+  const auto &calibration = v2::model_calibrations.front();
+  const auto shape_it = std::find_if(
+    v2::model_calibrated_shapes.begin(),
+    v2::model_calibrated_shapes.end(),
+    [&](const auto &shape) {
+      return shape.calibration_id == calibration.calibration_id;
+    });
+  ASSERT_NE(shape_it, v2::model_calibrated_shapes.end());
+  const std::uint32_t width = shape_it->width;
+  const std::uint32_t height = shape_it->height;
+  const std::size_t element_count = static_cast<std::size_t>(width) * height;
+
+  // Three broad, separated stages make both Otsu splits and the upper-valley acceptance
+  // deterministic. This exact distribution selects merged bin 76. The historical
+  // T-scale value still owns acceptance, while the accepted valley itself is now zero:
+  // 0.5 + (76.5 / 128) * 5.0 = 3.48828125.
+  std::vector<float> acquired(element_count);
+  const std::size_t far_count = element_count * 4u / 10u;
+  const std::size_t middle_count = element_count * 4u / 10u;
+  const auto fill_linear = [&](const std::size_t begin, const std::size_t count,
+                               const float low, const float high) {
+    for (std::size_t offset = 0u; offset < count; ++offset) {
+      const float unit = count > 1u ?
+        static_cast<float>(offset) / static_cast<float>(count - 1u) : 0.0f;
+      acquired[begin + offset] = low + (high - low) * unit;
+    }
+  };
+  fill_linear(0u, far_count, 0.5f, 1.5f);
+  fill_linear(far_count, middle_count, 2.5f, 3.5f);
+  fill_linear(
+    far_count + middle_count,
+    element_count - far_count - middle_count,
+    5.0f,
+    5.5f
+  );
+
+  std::vector<std::vector<float>> fields(12u, acquired);
+  for (float &value : fields[1]) {
+    value += 0.25f;  // no cut: the first camera must remain latched
+  }
+  for (std::size_t index = 2u; index < fields.size(); ++index) {
+    for (float &value : fields[index]) {
+      value += index == 11u ? 1.25f : 1.0f;
+    }
+  }
+  // A later unusable update and changed evidence after it must not replace the camera acquired
+  // on the confirmed cut. Twelve updates deliberately extend beyond the former age-eight
+  // replacement horizon.
+  std::fill(fields[10].begin(), fields[10].end(), 2.0f);
+
+  nlohmann::ordered_json frames = nlohmann::ordered_json::array();
+  for (std::size_t index = 0u; index < fields.size(); ++index) {
+    const std::string frame_id = "000" + std::to_string(index + 1u);
+    const std::string raw_file = "raw_" + frame_id + ".f32";
+    const std::string bytes = float_bytes(fields[index]);
+    ASSERT_TRUE(write_bytes(tree.path / raw_file, bytes));
+    frames.push_back({
+      {"frame_id", frame_id},
+      {"raw_file", raw_file},
+      {"raw_sha256", sha256_hex(bytes)},
+      {"hard_cut_count", index >= 2u ? 1u : 0u},
+      {"hard_cut_pulse", index == 2u},
+    });
+  }
+
+  const auto manifest = make_replay_manifest(
+    calibration,
+    sha256_hex(contract_bytes),
+    width,
+    height,
+    frames,
+    1.0f
+  );
+  const fs::path manifest_path = tree.path / "manifest.json";
+  ASSERT_TRUE(write_bytes(manifest_path, manifest.dump(2) + "\n"));
+
+  std::string error;
+  auto replay = sbs_bench::depth_coordinate_v2_gpu_replay::create(
+    warp.device.Get(), warp.context.Get(), manifest_path, error);
+  ASSERT_NE(replay, nullptr) << error;
+  ComPtr<ID3D11Texture2D> source_texture;
+  ComPtr<ID3D11ShaderResourceView> source_srv;
+  ASSERT_TRUE(create_solid_source_srv(
+    warp.device.Get(), width, height, source_texture, source_srv));
+  for (std::size_t index = 0u; index < fields.size(); ++index) {
+    sbs_bench::depth_coordinate_v2_gpu_frame output;
+    const std::string frame_id = "000" + std::to_string(index + 1u);
+    ASSERT_TRUE(replay->dispatch(
+      index, frame_id, source_srv.Get(), 0u, 1.0f, test_source_sha256(), output, error)) << error;
+  }
+
+  const fs::path trace_path = tree.path / "trace.json";
+  ASSERT_TRUE(replay->write_state_trace(trace_path, error)) << error;
+  const auto trace = nlohmann::ordered_json::parse(read_bytes(trace_path));
+  ASSERT_EQ(trace.at("frames").size(), fields.size());
+  const auto &rows = trace.at("frames");
+  constexpr float first_center = 3.48828125f;
+  EXPECT_NEAR(rows[0]["center"].get<float>(), first_center, 2.0e-5f);
+  EXPECT_FLOAT_EQ(
+    rows[0]["convergence_curve"].get<float>(), v2::convergence_curve_default);
+  EXPECT_NEAR(rows[1]["center"].get<float>(), first_center, 2.0e-5f);
+  EXPECT_FLOAT_EQ(
+    rows[1]["convergence_curve"].get<float>(), v2::convergence_curve_default);
+  EXPECT_EQ(rows[1]["calibration_revision"], 1u);
+  EXPECT_NEAR(rows[2]["center"].get<float>(), first_center + 1.0f, 2.0e-5f);
+  EXPECT_FLOAT_EQ(
+    rows[2]["convergence_curve"].get<float>(), v2::convergence_curve_default);
+  EXPECT_EQ(rows[2]["confirmed_cut"], true);
+  EXPECT_EQ(rows[2]["calibration_revision"], 2u);
+  for (std::size_t index = 3u; index < fields.size(); ++index) {
+    EXPECT_NEAR(rows[index]["center"].get<float>(), first_center + 1.0f, 2.0e-5f);
+    EXPECT_EQ(rows[index]["calibration_revision"], 2u);
+  }
+  EXPECT_EQ(rows[10]["frame_valid"], false);
+  EXPECT_EQ(rows[11]["frame_valid"], true);
+  EXPECT_EQ(rows[11]["cut_attribution"], "none");
+}
+
+TEST(DepthCoordinateV2GpuTest, SevenCoordinatePassReplayLatchesRecoversAndRelatchesExactly) {
+  namespace fs = std::filesystem;
+  namespace v2 = models::depth_coordinate_v2;
+
+  static_assert(v2::constant_float_count == 8u);
   static_assert(v2::state_float_count == 12u);
   static_assert(v2::convergence_curve_default == 0.0f);
 
@@ -1037,9 +2193,9 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
   raw_fields.push_back(base);  // same shot, transient extreme
   raw_fields.back().back() = 1000.0f;
   raw_fields.push_back(base);  // same shot, hard container must recover
-  const std::size_t dense_near_count = element_count / 4u;
-  raw_fields.emplace_back(element_count, 0.0f);  // confirmed cut, dense near tail
-  std::fill_n(raw_fields.back().begin(), dense_near_count, 20.0f);
+  const std::size_t foreground_count = element_count / 4u;
+  raw_fields.emplace_back(element_count, 0.0f);  // confirmed cut, broad foreground
+  std::fill_n(raw_fields.back().begin(), foreground_count, 20.0f);
   raw_fields.emplace_back(element_count, std::numeric_limits<float>::quiet_NaN());
   raw_fields.emplace_back(element_count, 2.0f);  // finite but collapsed
   raw_fields.push_back(base);  // retained camera resumes without a gauge jump
@@ -1047,9 +2203,9 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
     value += 0.5f;
   }
   raw_fields.emplace_back(element_count, std::numeric_limits<float>::quiet_NaN());
-  const std::size_t ramp_near_count = element_count * 18u / 100u;
+  const std::size_t ramp_foreground_count = element_count * 18u / 100u;
   raw_fields.emplace_back(element_count, 0.0f);  // invalid+cut cleared; ramp reacquires
-  std::fill_n(raw_fields.back().begin(), ramp_near_count, 20.0f);
+  std::fill_n(raw_fields.back().begin(), ramp_foreground_count, 20.0f);
 
   nlohmann::ordered_json frames = nlohmann::ordered_json::array();
   for (std::size_t index = 0; index < raw_fields.size(); ++index) {
@@ -1088,10 +2244,14 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
   EXPECT_EQ(replay->width(), width);
   EXPECT_EQ(replay->height(), height);
   EXPECT_EQ(replay->manifest_sha256(), sha256_hex(manifest_bytes));
+  ComPtr<ID3D11Texture2D> source_texture;
+  ComPtr<ID3D11ShaderResourceView> source_srv;
+  ASSERT_TRUE(create_solid_source_srv(
+    warp.device.Get(), width, height, source_texture, source_srv));
 
   // Same contract tag and otherwise-valid fixed calibration, but the center was changed without
-  // resealing its integrity word. Both the coverage gate and state resolver must classify this
-  // center-only corruption as invalid, collect acquisition evidence, and replace it rather than
+  // resealing its integrity word. The state resolver must classify this center-only corruption
+  // as invalid and replace it rather than
   // retaining a plausible same-tag pseudo-camera indefinitely.
   std::vector<std::uint32_t> corrupt_same_tag(
     v2::state_initial_words.begin(), v2::state_initial_words.end());
@@ -1105,6 +2265,7 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
     v2::camera_center_integrity_for_words(
       corrupt_same_tag[v2::center],
       corrupt_same_tag[v2::inverse_scale],
+      corrupt_same_tag[v2::convergence_curve],
       corrupt_same_tag[v2::calibration_revision]
     )
   );
@@ -1120,7 +2281,16 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
       ASSERT_TRUE(replay->overwrite_state_for_testing(unknown_contract, error)) << error;
     }
     const std::string frame_id = "0000" + std::to_string(index + 1u);
-    ASSERT_TRUE(replay->dispatch(index, frame_id, outputs[index], error)) << error;
+    ASSERT_TRUE(replay->dispatch(
+      index,
+      frame_id,
+      source_srv.Get(),
+      0u,
+      1.0f,
+      test_source_sha256(),
+      outputs[index],
+      error
+    )) << error;
     ASSERT_EQ(outputs[index].canonical_values.size(), element_count);
     ASSERT_EQ(outputs[index].candidate_parallax_values.size(), element_count);
     ASSERT_EQ(outputs[index].vertical_majorant_values.size(), element_count);
@@ -1146,12 +2316,14 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
   ASSERT_EQ(trace.at("frames").size(), raw_fields.size());
   ASSERT_EQ(trace.at("frame_fields").size(), 41u);
   EXPECT_EQ(trace["producer"]["authority"],
-            "seven-experimental-shadow-compute-shaders-persistent-gpu-state-v3");
+            "authenticated-raw-source-color-histogram-plus-seven-v2-compute-shaders-persistent-gpu-state-v7");
   EXPECT_EQ(trace["producer"]["tensor_shape"]["width"], replay->width());
   EXPECT_EQ(trace["producer"]["tensor_shape"]["height"], replay->height());
-  ASSERT_EQ(trace["producer"]["shader_sequence"].size(), 7u);
-  EXPECT_EQ(trace["producer"]["shader_sequence"][2],
-            "depth_coordinate_v2_near_coverage_cs.hlsl");
+  ASSERT_EQ(trace["producer"]["shader_sequence"].size(), 9u);
+  EXPECT_EQ(trace["producer"]["shader_sequence"][4],
+            "depth_coordinate_v2_state_resolve_cs.hlsl");
+  EXPECT_EQ(trace["producer"]["shader_sequence"][6],
+            "depth_coordinate_v2_ownership_cs.hlsl");
   EXPECT_EQ(trace["producer"]["contract_canonical_sha256"],
             v2::contract_canonical_sha256);
 
@@ -1183,56 +2355,7 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
     }
   }
 
-  const auto smoothstep = [](const float low, const float high, const float value) {
-    const float unit = std::clamp((value - low) / (high - low), 0.0f, 1.0f);
-    return unit * unit * (3.0f - 2.0f * unit);
-  };
-  const auto expected_tau = [&](const float coverage) {
-    return v2::near_log_tau +
-      (v2::near_log_tau_dense - v2::near_log_tau) *
-        smoothstep(v2::near_tail_coverage_low, v2::near_tail_coverage_high, coverage);
-  };
-  for (const auto &row : rows) {
-    const auto count = row["latched_near_tail_count"].get<std::uint32_t>();
-    const float coverage = row["latched_near_tail_coverage"].get<float>();
-    EXPECT_NEAR(
-      coverage,
-      static_cast<float>(count) / static_cast<float>(element_count),
-      2.0e-6f
-    );
-    EXPECT_NEAR(row["effective_near_log_tau"].get<float>(),
-                expected_tau(coverage), 2.0e-6f);
-  }
-
-  // Sparse acquisition selects the unmodified tau-2 shoulder. The GPU-uniform gate skips the
-  // full coverage scan on an ordinary frame, so a transient extreme cannot relatch scene state.
-  EXPECT_EQ(rows[0]["latched_near_tail_count"], 0u);
-  EXPECT_FLOAT_EQ(rows[0]["latched_near_tail_coverage"].get<float>(), 0.0f);
-  EXPECT_NEAR(rows[0]["effective_near_log_tau"].get<float>(),
-              v2::near_log_tau, 2.0e-6f);
-  EXPECT_EQ(rows[1]["latched_near_tail_count"], 0u);
-  EXPECT_FLOAT_EQ(rows[1]["latched_near_tail_coverage"].get<float>(), 0.0f);
-  EXPECT_NEAR(rows[1]["effective_near_log_tau"].get<float>(),
-              v2::near_log_tau, 2.0e-6f);
-
-  // The authenticated cut replaces the sparse shoulder with exact dense coverage and tau 1.
-  const float dense_coverage = static_cast<float>(dense_near_count) /
-                               static_cast<float>(element_count);
-  EXPECT_EQ(rows[3]["latched_near_tail_count"], dense_near_count);
-  EXPECT_NEAR(rows[3]["latched_near_tail_coverage"].get<float>(),
-              dense_coverage, 2.0e-6f);
-  EXPECT_NEAR(rows[3]["effective_near_log_tau"].get<float>(),
-              v2::near_log_tau_dense, 2.0e-6f);
-  for (std::size_t index = 4u; index <= 6u; ++index) {
-    EXPECT_EQ(rows[index]["latched_near_tail_count"], dense_near_count);
-    EXPECT_NEAR(rows[index]["latched_near_tail_coverage"].get<float>(),
-                dense_coverage, 2.0e-6f);
-    EXPECT_NEAR(rows[index]["effective_near_log_tau"].get<float>(),
-                v2::near_log_tau_dense, 2.0e-6f);
-  }
-
-  // Even with an effective tau of 1, the hard container is computed from the immutable base
-  // tau-2 curve. The synthetic cut makes the two choices observably different.
+  // The map and hard container use the same immutable tau-2 curve.
   const auto curve = [](const float coordinate, const float near_tau) {
     if (coordinate < 0.0f) {
       return v2::far_tau * std::expm1(coordinate / v2::far_tau);
@@ -1259,9 +2382,7 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
       std::min(1.0f, v2::direct_container_limit / maximum_requested) : 1.0f;
   };
   const float base_container = expected_container(v2::near_log_tau);
-  const float adapted_container = expected_container(v2::near_log_tau_dense);
   EXPECT_NEAR(rows[3]["container_scale"].get<float>(), base_container, 2.0e-5f);
-  EXPECT_GT(std::abs(base_container - adapted_container), 0.05f);
 
   EXPECT_LT(rows[1]["container_scale"].get<float>(), 1.0f);
   EXPECT_FLOAT_EQ(rows[2]["container_scale"].get<float>(), 1.0f);
@@ -1285,21 +2406,10 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
   EXPECT_EQ(rows[7]["frame_valid"], false);
   EXPECT_EQ(rows[7]["camera_valid"], false);
   EXPECT_FLOAT_EQ(rows[7]["center"].get<float>(), 0.0f);
-  EXPECT_EQ(rows[7]["latched_near_tail_count"], 0u);
-  EXPECT_FLOAT_EQ(rows[7]["latched_near_tail_coverage"].get<float>(), 0.0f);
-  EXPECT_NEAR(rows[7]["effective_near_log_tau"].get<float>(),
-              v2::near_log_tau, 2.0e-6f);
   EXPECT_EQ(rows[8]["frame_valid"], true);
   EXPECT_EQ(rows[8]["camera_valid"], true);
   EXPECT_NEAR(rows[8]["center"].get<float>(),
               rows[8]["observed_mean"].get<float>(), 2.0e-5f);
-  const float ramp_coverage = static_cast<float>(ramp_near_count) /
-                              static_cast<float>(element_count);
-  EXPECT_EQ(rows[8]["latched_near_tail_count"], ramp_near_count);
-  EXPECT_NEAR(rows[8]["latched_near_tail_coverage"].get<float>(),
-              ramp_coverage, 2.0e-6f);
-  EXPECT_NEAR(rows[8]["effective_near_log_tau"].get<float>(),
-              expected_tau(ramp_coverage), 2.0e-6f);
 
   const auto expect_rejected = [&](const nlohmann::ordered_json &candidate,
                                    const std::string_view name) {
@@ -1341,8 +2451,51 @@ TEST(DepthCoordinateV2GpuTest, SevenPassReplayLatchesRecoversAndRelatchesExactly
   invalid["frames"][0]["hard_cut_count"] = 0x100000000ull;
   expect_rejected(invalid, "overflow-hard-cut-generation");
   invalid = manifest;
-  invalid["mapping_config"]["near_tail_coverage_low"] = 0.14f;
-  expect_rejected(invalid, "mismatched-near-tail-coverage-low");
+  invalid["mapping_config"]["near_log_tau"] = 1.9f;
+  expect_rejected(invalid, "mismatched-fixed-near-log-tau");
+  invalid = manifest;
+  invalid["source_color_mode"] = 3u;
+  expect_rejected(invalid, "unknown-source-color-mode");
+  invalid = manifest;
+  invalid["source_linear_scale"] = 4.0f;
+  expect_rejected(invalid, "nonlinear-scale-on-srgb-source");
+
+  auto identity_replay = sbs_bench::depth_coordinate_v2_gpu_replay::create(
+    warp.device.Get(), warp.context.Get(), manifest_path, error);
+  ASSERT_NE(identity_replay, nullptr) << error;
+  sbs_bench::depth_coordinate_v2_gpu_frame identity_output;
+  EXPECT_FALSE(identity_replay->dispatch(
+    0u,
+    "00001",
+    source_srv.Get(),
+    2u,
+    1.0f,
+    test_source_sha256(),
+    identity_output,
+    error
+  ));
+  EXPECT_FALSE(error.empty());
+  EXPECT_FALSE(identity_replay->dispatch(
+    0u,
+    "00001",
+    source_srv.Get(),
+    0u,
+    4.0f,
+    test_source_sha256(),
+    identity_output,
+    error
+  ));
+  EXPECT_FALSE(error.empty());
+  EXPECT_TRUE(identity_replay->dispatch(
+    0u,
+    "00001",
+    source_srv.Get(),
+    0u,
+    1.0f,
+    test_source_sha256(),
+    identity_output,
+    error
+  )) << error;
 }
 
 #endif  // _WIN32

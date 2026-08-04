@@ -27,27 +27,30 @@ bool Finite(float value) {
     return !isnan(value) && !isinf(value);
 }
 
-bool CameraInitialized(float4 active, float4 control, float4 shoulder) {
+bool CameraInitialized(float4 active, float4 control, float4 mapping_state) {
     uint revision = asuint(V2_STATE_CALIBRATION_REVISION(control));
     uint integrity = 0u;
     integrity = (integrity ^ asuint(V2_STATE_CENTER(active))) * 16777619u;
     integrity = (integrity ^ asuint(V2_STATE_INVERSE_SCALE(active))) * 16777619u;
+    integrity = (integrity ^ asuint(V2_STATE_CONVERGENCE_CURVE(active))) * 16777619u;
     integrity = (integrity ^ revision) * 16777619u;
+    bool convergence_valid =
+        V2_STATE_CONVERGENCE_CURVE(active) == v2_convergence_curve_default;
     return asuint(V2_STATE_CONTRACT_TAG_BITS(control)) == V2_CONTRACT_TAG &&
         Finite(V2_STATE_CENTER(active)) &&
         Finite(V2_STATE_INVERSE_SCALE(active)) &&
-        Finite(V2_STATE_CONVERGENCE_CURVE(active)) &&
+        Finite(V2_STATE_CONVERGENCE_CURVE(active)) && convergence_valid &&
         V2_STATE_INVERSE_SCALE(active) > 0.0f &&
         revision > 0u && revision != 0xffffffffu &&
-        asuint(V2_STATE_CAMERA_CENTER_INTEGRITY_BITS(shoulder)) == integrity;
+        asuint(V2_STATE_CAMERA_CENTER_INTEGRITY_BITS(mapping_state)) == integrity;
 }
 
 bool WarpAvailable() {
     float4 active = ParallaxState[V2_STATE_VECTOR_CENTER];
     float4 control = ParallaxState[V2_STATE_VECTOR_CALIBRATION_REVISION];
-    float4 shoulder = ParallaxState[V2_STATE_VECTOR_LATCHED_NEAR_TAIL_COVERAGE];
+    float4 mapping_state = ParallaxState[V2_STATE_VECTOR_CAMERA_CENTER_INTEGRITY_BITS];
     return V2_STATE_FRAME_VALID(control) > 0.5f &&
-        CameraInitialized(active, control, shoulder);
+        CameraInitialized(active, control, mapping_state);
 }
 
 bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {

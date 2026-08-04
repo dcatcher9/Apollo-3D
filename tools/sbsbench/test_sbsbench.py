@@ -173,7 +173,7 @@ class EvalContractTests(unittest.TestCase):
 
             old_contract = json.loads(json.dumps(contract))
             old_contract["schema"] = 20
-            with self.assertRaisesRegex(ValueError, "requires harness contract schema 21"):
+            with self.assertRaisesRegex(ValueError, "requires harness contract schema 23"):
                 run_eval.validate_direct_parallax_manifest(
                     artifact_dir, old_contract, {1, 2}, depth_files)
             old_contract = json.loads(json.dumps(contract))
@@ -1832,9 +1832,9 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
         self.assertIn(
-            '(direct_parallax_mode ? direct_geometry_contract_schema : 18u)',
+            '(direct_parallax_mode ? direct_geometry_contract_schema : 19u)',
             harness)
-        self.assertIn('direct_geometry_contract_schema = 21u', harness)
+        self.assertIn('direct_geometry_contract_schema = 23u', harness)
         self.assertIn('direct_geometry_manifest_schema = 4u', harness)
         self.assertIn(
             '"external-final-parallax-with-diagnostic-order-v4"',
@@ -1933,7 +1933,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn('SBS_DIRECT_CANDIDATE_PARALLAX', harness)
         self.assertNotIn('SBS_CANDIDATE_GAP_FILL', harness)
         self.assertIn(
-            '(direct_parallax_mode ? direct_geometry_contract_schema : 18u)',
+            '(direct_parallax_mode ? direct_geometry_contract_schema : 19u)',
             harness)
         self.assertIn('{"renderer_uses_order", false}', harness)
         self.assertIn(
@@ -2027,7 +2027,7 @@ class EvalContractTests(unittest.TestCase):
             conf, "apollo", "zero_plane", "median", ["--zero-plane", "background"],
             "--zero-plane"), "background")
 
-    def test_live_depth_pairing_is_bounded_and_sync_is_evaluation_only(self):
+    def test_live_depth_pairing_is_bounded_with_retained_source_completion_owner(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
             config = fh.read()
@@ -2039,8 +2039,53 @@ class EvalContractTests(unittest.TestCase):
             production = fh.read()
         self.assertIn("std::array<matched_frame_slot_t, 2>", production)
         self.assertIn("repeat_matched_output", production)
-        self.assertNotIn("finish_pending_depth", production)
+        self.assertNotIn("finish_pending_depth_for_evaluation", production)
+        self.assertIn("finish_pending_depth_for_idle_recovery", production)
+        self.assertIn("bootstrap_current_output", production)
+        self.assertIn("stale_prior_completion", production)
+        self.assertIn("retained_source_pending_slot", production)
+        self.assertIn("depth_completion_poll_pending", production)
+        self.assertIn("needs_conversion_poll() const override", production)
         self.assertNotIn("depth_frame_mode", production)
+
+        cleanup = production[
+            production.index("const auto release_unknown_completion"):
+            production.index("if (retained_source_pending_slot)")
+        ]
+        self.assertIn("if (&slot != preserve_slot)", cleanup)
+        self.assertIn("slot.pending = false;", cleanup)
+
+        retained = production[
+            production.index("if (retained_source_pending_slot)"):
+            production.index("matched_candidate_slot = available_matched_slot();")
+        ]
+        self.assertLess(
+            retained.index("depth_completion_poll_pending = false;"),
+            retained.index("find_pending_matched_slot(recovered.completed_frame_id)"))
+        self.assertIn(
+            "release_unknown_completion(recovered.completed_frame_id, nullptr);",
+            retained)
+        compact_production = "".join(production.split())
+        self.assertIn(
+            "release_unknown_completion(est.completed_frame_id,matched_candidate_slot);",
+            compact_production)
+
+        bootstrap = production[
+            production.index("const bool bootstrap_current_output"):
+            production.index("// A poisoned CUDA/TensorRT producer")
+        ]
+        self.assertLess(
+            bootstrap.index("depth_completion_poll_pending = false;"),
+            bootstrap.index("find_pending_matched_slot(recovered.completed_frame_id)"))
+        self.assertIn(
+            "release_unknown_completion(recovered.completed_frame_id, nullptr);",
+            bootstrap)
+
+        with open(os.path.join(repo, "src", "video.cpp"), encoding="utf-8") as fh:
+            encoder = fh.read()
+        self.assertIn("session->needs_conversion_poll()", encoder)
+        self.assertIn("session->convert(*last_img)", encoder)
+        self.assertIn("img->frame_timestamp = frame_timestamp", encoder)
 
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
                   encoding="utf-8") as fh:

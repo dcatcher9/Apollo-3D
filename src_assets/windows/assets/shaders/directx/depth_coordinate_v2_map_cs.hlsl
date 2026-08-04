@@ -13,8 +13,8 @@ bool CanonicalCoordinate(uint index, out float coordinate) {
     coordinate = 0.0f;
     float4 active = ShadowState[0];
     float4 control = ShadowState[1];
-    float4 shoulder = ShadowState[2];
-    if (!V2CameraStateValid(active, control, shoulder, target_w * target_h)) {
+    float4 mapping_state = ShadowState[2];
+    if (!V2CameraStateValid(active, control, mapping_state)) {
         return false;
     }
     // Current-frame validity is independent of the retained scene camera. Unusable depth maps
@@ -49,11 +49,8 @@ void main(uint3 id : SV_DispatchThreadID) {
         return;
     }
     float4 active = ShadowState[0];
-    float4 shoulder = ShadowState[2];
     float requested = v2_requested_gain *
-        (V2CurveWithNearTau(
-            coordinate,
-            V2_STATE_EFFECTIVE_NEAR_LOG_TAU(shoulder)) -
+        (V2Curve(coordinate) -
          V2_STATE_CONVERGENCE_CURVE(active));
     float candidate = requested * V2_STATE_CONTAINER_SCALE(active);
     if (!V2Finite(coordinate) || !V2Finite(candidate)) {

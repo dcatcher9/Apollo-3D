@@ -145,6 +145,7 @@ namespace platf::sbs_debug {
       texture_snapshot sbs;
       texture_snapshot shadow_coordinate;
       texture_snapshot shadow_candidate;
+      texture_snapshot shadow_ownership_refined;
       texture_snapshot shadow_vertical;
       texture_snapshot shadow_vertical_conditioned;
       texture_snapshot shadow_final;
@@ -1062,48 +1063,37 @@ namespace platf::sbs_debug {
       const bool state_frame_valid = state[frame_valid] > 0.5f;
       const auto calibration_revision_value =
         std::bit_cast<std::uint32_t>(state[calibration_revision]);
-      const float latched_near_tail_coverage_value = state[latched_near_tail_coverage];
-      const float effective_near_log_tau_value = state[effective_near_log_tau];
-      const auto latched_near_tail_count_value =
-        std::bit_cast<std::uint32_t>(state[latched_near_tail_count]);
       const auto camera_center_integrity_value =
         std::bit_cast<std::uint32_t>(state[camera_center_integrity_bits]);
+      const bool mapping_state_reserved_valid =
+        std::bit_cast<std::uint32_t>(state[mapping_state_reserved_0]) == 0u &&
+        std::bit_cast<std::uint32_t>(state[mapping_state_reserved_1]) == 0u &&
+        std::bit_cast<std::uint32_t>(state[mapping_state_reserved_2]) == 0u;
       const bool camera_center_integrity_valid = camera_center_integrity_is_valid(
         std::bit_cast<std::uint32_t>(state[center]),
         std::bit_cast<std::uint32_t>(state[inverse_scale]),
+        std::bit_cast<std::uint32_t>(state[convergence_curve]),
         calibration_revision_value,
         camera_center_integrity_value
       );
-      const float expected_near_log_tau =
-        near_tail_effective_tau_for_coverage(latched_near_tail_coverage_value);
-      const bool near_shoulder_semantics_valid =
-        std::isfinite(latched_near_tail_coverage_value) &&
-        latched_near_tail_coverage_value >= 0.0f &&
-        latched_near_tail_coverage_value <= 1.0f &&
-        std::isfinite(effective_near_log_tau_value) &&
-        effective_near_log_tau_value >= near_log_tau_dense &&
-        effective_near_log_tau_value <= near_log_tau &&
-        std::abs(effective_near_log_tau_value - expected_near_log_tau) <= 1.0e-6f;
       const bool camera_initialized =
-        camera_center_integrity_valid && near_shoulder_semantics_valid &&
+        camera_center_integrity_valid && mapping_state_reserved_valid &&
+        convergence_curve_is_valid(state[convergence_curve]) &&
         state[inverse_scale] > 0.0f &&
         calibration_revision_value > 0u &&
         calibration_revision_is_valid(calibration_revision_value);
       const bool camera_empty =
-        state[center] == 0.0f && state[inverse_scale] == 0.0f;
-      const bool near_shoulder_empty =
-        latched_near_tail_coverage_value == 0.0f &&
-        effective_near_log_tau_value == near_log_tau &&
-        latched_near_tail_count_value == 0u;
+        state[center] == 0.0f && state[inverse_scale] == 0.0f &&
+        state[convergence_curve] == convergence_curve_default;
       const bool state_semantics_valid =
-        camera_center_integrity_valid &&
+        camera_center_integrity_valid && mapping_state_reserved_valid &&
         calibration_revision_is_valid(calibration_revision_value) &&
         (state[frame_valid] == 0.0f || state[frame_valid] == 1.0f) &&
         state[container_scale] >= 0.0f && state[container_scale] <= 1.0f &&
-        state[convergence_curve] == convergence_curve_default &&
+        convergence_curve_is_valid(state[convergence_curve]) &&
         (state_frame_valid ?
            (camera_initialized && state[container_scale] > 0.0f) :
-           ((camera_initialized || (camera_empty && near_shoulder_empty)) &&
+           ((camera_initialized || camera_empty) &&
             state[container_scale] == 1.0f)) &&
         (!camera_initialized ||
          std::abs(1.0f / state[inverse_scale] -
@@ -1118,12 +1108,6 @@ namespace platf::sbs_debug {
         valid_count >= 0.0f && texel_count > 0.0f && valid_count <= texel_count &&
         valid_count == std::floor(valid_count) && texel_count == std::floor(texel_count) &&
         texel_count <= static_cast<float>(std::numeric_limits<std::uint32_t>::max());
-      const bool near_tail_count_valid = frame_counts_valid &&
-        latched_near_tail_count_value <= static_cast<std::uint32_t>(texel_count) &&
-        std::abs(
-          latched_near_tail_coverage_value -
-          static_cast<float>(latched_near_tail_count_value) / texel_count
-        ) <= 1.0e-6f;
       const bool frame_semantics_valid =
         (frame_stats[frame_stat_valid] == 0.0f ||
          frame_stats[frame_stat_valid] == 1.0f) &&
@@ -1135,7 +1119,7 @@ namespace platf::sbs_debug {
             frame_stats[frame_stat_population_std] == 0.0f &&
             frame_stats[frame_stat_minimum] == 0.0f &&
             frame_stats[frame_stat_maximum] == 0.0f));
-      if (!runtime_constants_valid || !state_semantics_valid || !near_tail_count_valid ||
+      if (!runtime_constants_valid || !state_semantics_valid ||
           !frame_semantics_valid || state_frame_valid != expected_state_frame_valid) {
         return false;
       }
@@ -1183,9 +1167,6 @@ namespace platf::sbs_debug {
         {"convergence_curve", state[convergence_curve]},
         {"container_scale", state[container_scale]},
         {"effective_gain", effective_gain_value},
-        {"latched_near_tail_coverage", latched_near_tail_coverage_value},
-        {"effective_near_log_tau", effective_near_log_tau_value},
-        {"latched_near_tail_count", latched_near_tail_count_value},
         {"camera_center_integrity_bits", camera_center_integrity_value},
       };
       const nlohmann::json state_json {
@@ -1209,13 +1190,9 @@ namespace platf::sbs_debug {
                         {"collapse_abs_epsilon", collapse_abs_epsilon},
                         {"far_tau", far_tau},
                         {"near_log_tau", near_log_tau},
-                        {"near_tail_probe_u", near_tail_probe_u},
-                        {"near_tail_coverage_low", near_tail_coverage_low},
-                        {"near_tail_coverage_high", near_tail_coverage_high},
-                        {"near_log_tau_dense", near_log_tau_dense},
                         {"gain_per_pop", gain_per_pop},
                         {"reference_pop_strength", reference_pop_strength},
-                        {"reference_gain_at_pop_2", parallax_gain},
+                        {"reference_gain_at_reference_pop", parallax_gain},
                         {"requested_gain", completed.parallax_v2_requested_gain},
                         {"requested_pop_strength", completed.parallax_v2_requested_pop_strength},
                         {"direct_container_limit", direct_container_limit},
@@ -1223,16 +1200,17 @@ namespace platf::sbs_debug {
                         {"max_vertical_shear", max_vertical_shear},
                         {"vertical_majorant_share", vertical_majorant_share},
                         {"convergence_curve_default", convergence_curve_default},
+                        {"stage_valley_ratio_max", stage_valley_ratio_max},
                       }},
         {"fields", std::move(fields)},
         {"named_values", std::move(named_values)},
         {"decoded", decoded},
         {"adaptation_semantics", {
-                                    {"coordinate", "center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable"},
-                                    {"convergence_curve", "separately-scene-latched-curve-offset-currently-zero"},
+                                    {"coordinate", "immediate-first-usable-center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable"},
+                                    {"convergence_curve", "selected-upper-valley-or-mean-center-is-zero-plane"},
                                     {"requested_gain", "immutable-cfg-pop-strength"},
                                     {"container_scale", "frame-local-hard-direct-parallax-attenuation-recoverable-next-frame"},
-                                    {"near_shoulder", "shot-latched-near-tail-coverage-and-effective-tau-reset-on-confirmed-cut"},
+                                    {"near_curve", "fixed-contract-logarithmic-tau-independent-of-content-occupancy"},
                                     {"spatial_conditioner", "fixed-75pct-vertical-majorant-share-then-horizontal-majorant"},
                                   }},
       };
@@ -1602,7 +1580,7 @@ namespace platf::sbs_debug {
           {"renderer", "depth-coordinate-v2"},
           {"pop_strength", completed.parallax_v2_requested_pop_strength},
           {"adaptive_pop", false},
-          {"zero_plane_authority", "scene-latched raw center and near-tail shoulder"},
+          {"zero_plane_authority", "scene-latched selected raw center"},
           {"depth_model", model_name},
           {"depth_model_url", effective_model_url},
           {"model_input_width", completed.model_width},
@@ -2002,6 +1980,7 @@ namespace platf::sbs_debug {
 
         const auto &shadow_coordinate = job.shadow_coordinate;
         const auto &shadow_candidate = job.shadow_candidate;
+        const auto &shadow_ownership_refined = job.shadow_ownership_refined;
         const auto &shadow_vertical = job.shadow_vertical;
         const auto &shadow_vertical_conditioned = job.shadow_vertical_conditioned;
         const auto &shadow_final = job.shadow_final;
@@ -2020,10 +1999,16 @@ namespace platf::sbs_debug {
              "parallax-v2 immutable signed pre-conditioner geometry evidence; never geometry authority"
            ) ||
            !dump_shadow_float_texture(
+             shadow_ownership_refined,
+             paths.temporary,
+             "shadow_ownership_refined_parallax",
+             "parallax-v2 signed candidate after conservative full-resolution source-contour foreground ownership; consumed by the vertical conditioner"
+           ) ||
+           !dump_shadow_float_texture(
              shadow_vertical,
              paths.temporary,
              "shadow_vertical_majorant",
-              "parallax-v2 least column-wise upper envelope; diagnostic evidence only and not consumed directly by the row limiter"
+              "parallax-v2 least column-wise upper envelope of the ownership-refined candidate; diagnostic evidence only and not consumed directly by the row limiter"
            ) ||
            !dump_shadow_float_texture(
              shadow_vertical_conditioned,
@@ -2252,11 +2237,35 @@ namespace platf::sbs_debug {
           "parallax-v2 pre-limiter candidate displacement preview",
           "Finite p2-p98 jet preview."
         );
+        artifacts["shadow_ownership_refined_parallax.f32"] = artifact_description(
+          true,
+          true,
+          "parallax-v2 full-resolution contour ownership refinement",
+          "Exact signed one-eye source-U after conservative full-resolution source-contour foreground ownership and before the vertical conditioner. The pass may only raise an authenticated candidate at a uniquely owned far-side boundary texel."
+        );
+        artifacts["shadow_ownership_refined_parallax_shape.json"] = artifact_description(
+          true,
+          false,
+          "parallax-v2 full-resolution contour ownership refinement contract",
+          "Dimensions, units, and finite scalar range for the ownership-refined candidate consumed by the vertical conditioner."
+        );
+        artifacts["shadow_ownership_refined_parallax.png"] = artifact_description(
+          true,
+          false,
+          "parallax-v2 full-resolution contour ownership refinement preview",
+          "Finite p2-p98 grayscale preview of the ownership-refined candidate."
+        );
+        artifacts["shadow_ownership_refined_parallax_heat.png"] = artifact_description(
+          true,
+          false,
+          "parallax-v2 full-resolution contour ownership refinement preview",
+          "Finite p2-p98 jet preview of the ownership-refined candidate."
+        );
         artifacts["shadow_vertical_majorant.f32"] = artifact_description(
           true,
           false,
           "parallax-v2 vertical shear-limiter intermediate",
-          "Exact signed one-eye source-U for the least column-wise upper envelope v+ >= candidate with |dv+/dy| <= max_vertical_shear/target_width; diagnostic evidence only."
+          "Exact signed one-eye source-U for the least column-wise upper envelope v+ >= ownership-refined candidate with |dv+/dy| <= max_vertical_shear/target_width; diagnostic evidence only."
         );
         artifacts["shadow_vertical_majorant_shape.json"] = artifact_description(
           true,
@@ -2426,6 +2435,8 @@ namespace platf::sbs_debug {
         dimensions["shadow_coordinate"] = texture_description(shadow_coordinate);
         dimensions["shadow_candidate_parallax"] =
           texture_description(shadow_candidate);
+        dimensions["shadow_ownership_refined_parallax"] =
+          texture_description(shadow_ownership_refined);
         dimensions["shadow_vertical_majorant"] =
           texture_description(shadow_vertical);
         dimensions["shadow_vertical_conditioned"] =
@@ -2450,7 +2461,7 @@ namespace platf::sbs_debug {
             *completed.parallax_v2_shader_provenance
           );
         nlohmann::json manifest {
-          {"schema", 9},
+          {"schema", 10},
           {"capture", "one matched, completed Host-SBS frame"},
           {"published_atomically", true},
           {"host_sbs_mode", "ai"},
@@ -2469,10 +2480,11 @@ namespace platf::sbs_debug {
                          {"mapping_artifacts_match_selected_renderer", warp_map_available && warp_mask_available},
                          {"parallax_v2_position_field", "shadow_final_parallax"},
                          {"parallax_v2_coordinate_role", "shadow_coordinate is diagnostic only; it has no renderer authority"},
-                         {"parallax_v2_vertical_majorant_role", "least column-wise upper envelope v+ >= candidate with adjacent-row source-U change <= max_vertical_shear/target_width; diagnostic evidence only"},
+                         {"parallax_v2_ownership_refined_role", "conservative full-resolution source-contour foreground ownership applied to candidate before the vertical conditioner; may only raise uniquely owned far-side boundary texels"},
+                         {"parallax_v2_vertical_majorant_role", "least column-wise upper envelope v+ >= ownership-refined candidate with adjacent-row source-U change <= max_vertical_shear/target_width; diagnostic evidence only"},
                          {"parallax_v2_vertical_conditioned_role", "fixed 75/25 share of column upper/lower envelopes; may raise or lower candidate and feeds the row majorant"},
                          {"parallax_v2_conditioner_role", "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear; q may raise or lower candidate and is the live position authority"},
-                         {"parallax_v2_inverse", "12-step contractive fixed point; no owner pass or synthetic fill"},
+                         {"parallax_v2_inverse", "12-step contractive fixed point; no forward-warp owner/visibility splat and no synthetic fill"},
                          {"collar_defocus", nlohmann::json {
                               {"enabled", false},
                               {"role", "disabled after live hand-boundary halo regression; live color uses one linear sample at the inverse-warped coordinate"},
@@ -2738,6 +2750,7 @@ namespace platf::sbs_debug {
       if (!completed.parallax_v2_render_selected ||
           !completed.parallax_v2_producer_active ||
           !completed.shadow_candidate_parallax ||
+          !completed.shadow_ownership_refined_parallax ||
           !completed.shadow_vertical_majorant || !completed.shadow_vertical_conditioned ||
           !completed.shadow_final_parallax || !completed.shadow_state ||
           !completed.shadow_frame_stats) {
@@ -2841,6 +2854,12 @@ namespace platf::sbs_debug {
         read_texture(
           device,
           ctx,
+          completed.shadow_ownership_refined_parallax,
+          job.shadow_ownership_refined
+        ) &&
+        read_texture(
+          device,
+          ctx,
           completed.shadow_vertical_majorant,
           job.shadow_vertical
         ) &&
@@ -2921,6 +2940,7 @@ namespace platf::sbs_debug {
       job.completed.sbs = nullptr;
       job.completed.shadow_coordinate = nullptr;
       job.completed.shadow_candidate_parallax = nullptr;
+      job.completed.shadow_ownership_refined_parallax = nullptr;
       job.completed.shadow_vertical_majorant = nullptr;
       job.completed.shadow_vertical_conditioned = nullptr;
       job.completed.shadow_final_parallax = nullptr;

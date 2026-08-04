@@ -422,6 +422,10 @@ namespace video {
 
     virtual int convert(platf::img_t &img) = 0;
 
+    virtual bool needs_conversion_poll() const {
+      return false;
+    }
+
     virtual void request_idr_frame() = 0;
 
     virtual void request_normal_frame() = 0;

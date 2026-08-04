@@ -15,7 +15,7 @@ E:\ApolloDev\venvs\artistic-policy\Scripts\python.exe `
 
 The tool validates at least two independent non-probe source clips. For each selected interior frame it
 authenticates the committed source pixels against the clip hash recorded by the run, requires the
-harness schema-17 exact-map/state-trace contract, checks the packed SBS/map/source geometry, and records SHA-256
+harness schema-20 exact-map/state-trace contract, checks the packed SBS/map/source geometry, and records SHA-256
 hashes for the source, SBS output, warp map, warp mask, and contracts.
 
 ## Controlled falsification matrix

@@ -39,10 +39,6 @@ EXPECTED_DEFAULT_NAMES = (
     "collapse_abs_epsilon",
     "far_tau",
     "near_log_tau",
-    "near_tail_probe_u",
-    "near_tail_coverage_low",
-    "near_tail_coverage_high",
-    "near_log_tau_dense",
     "gain_per_pop",
     "reference_pop_strength",
     "direct_container_limit",
@@ -50,6 +46,7 @@ EXPECTED_DEFAULT_NAMES = (
     "max_vertical_shear",
     "vertical_majorant_share",
     "convergence_curve_default",
+    "stage_valley_ratio_max",
 )
 EXPECTED_DEFAULT_KEYS = set(EXPECTED_DEFAULT_NAMES)
 EXPECTED_MODEL_CALIBRATION_KEYS = {
@@ -78,10 +75,6 @@ EXPECTED_CONSTANT_FIELD_NAMES = (
     "max_horizontal_slope",
     "direct_container_limit",
     "convergence_curve_default",
-    "near_tail_probe_u",
-    "near_tail_coverage_low",
-    "near_tail_coverage_high",
-    "near_log_tau_dense",
 )
 EXPECTED_FRAME_STAT_FIELD_NAMES = (
     "mean",
@@ -102,21 +95,23 @@ EXPECTED_SHADOW_STATE_FIELD_NAMES = (
     "frame_valid",
     "confirmed_cut_count",
     "contract_tag_bits",
-    "latched_near_tail_coverage",
-    "effective_near_log_tau",
-    "latched_near_tail_count",
     "camera_center_integrity_bits",
+    "mapping_state_reserved_0",
+    "mapping_state_reserved_1",
+    "mapping_state_reserved_2",
 )
 CONTRACT_TAG_SENTINEL = "contract_tag"
 PREPROCESS_SHADER_ROOT = (
     ROOT / "src_assets" / "windows" / "assets" / "shaders" / "directx")
 PREPROCESS_SHADER_SPECS = (("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),)
 PARALLAX_V2_SHADER_SPECS = (
+    ("depth_minmax_cs.hlsl", "main", "cs_5_0"),
+    ("depth_hist_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_near_coverage_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_state_resolve_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"),
+    ("depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"),
 )
@@ -345,19 +340,13 @@ def validate_contract(
             raise ValueError(f"calibrated default {name} must be positive")
     if calibrated_defaults["max_horizontal_slope"] >= 1.0:
         raise ValueError("max_horizontal_slope must be below one")
+    if not 0.0 < float(calibrated_defaults["stage_valley_ratio_max"]) <= 1.0:
+        raise ValueError("stage_valley_ratio_max must be in (0, 1]")
     majorant_share = _float32(calibrated_defaults["vertical_majorant_share"])
     minorant_share = _float32(_float32(1.0) - majorant_share)
     if majorant_share <= 0.0 or minorant_share <= 0.0:
         raise ValueError(
             "vertical_majorant_share and its complement must remain positive in float32")
-    if calibrated_defaults["near_tail_probe_u"] < 1.0:
-        raise ValueError("near_tail_probe_u must be at least the near-curve knee")
-    coverage_low = calibrated_defaults["near_tail_coverage_low"]
-    coverage_high = calibrated_defaults["near_tail_coverage_high"]
-    if not 0.0 <= coverage_low < coverage_high <= 1.0:
-        raise ValueError("near-tail coverage thresholds must satisfy 0 <= low < high <= 1")
-    if calibrated_defaults["near_log_tau_dense"] >= calibrated_defaults["near_log_tau"]:
-        raise ValueError("near_log_tau_dense must be smaller than near_log_tau")
 
     calibrations = contract.get("model_calibrations")
     if not isinstance(calibrations, list) or not calibrations:
@@ -975,8 +964,11 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"{_float_literal(defaults['max_vertical_shear'])}",
         f"#define V2_VERTICAL_MAJORANT_SHARE "
         f"{_float_literal(defaults['vertical_majorant_share'])}",
+        f"#define V2_STAGE_VALLEY_RATIO_MAX "
+        f"{_float_literal(defaults['stage_valley_ratio_max'])}",
         "static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;",
         "static const float v2_vertical_majorant_share = V2_VERTICAL_MAJORANT_SHARE;",
+        "static const float v2_stage_valley_ratio_max = V2_STAGE_VALLEY_RATIO_MAX;",
         "",
         f"cbuffer {constant_buffer['name']} : register({constant_buffer['register']}) {{",
     ]
@@ -1042,8 +1034,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--refresh-shader-identity",
         action="store_true",
-        help=("regenerate the non-circular HLSL tag, refresh the independent seven-shader "
-              "closure digest in the manifest, then regenerate both language contracts"),
+        help=("regenerate the non-circular HLSL tag, refresh the independent nine-root "
+              "shader closure digest in the manifest, then regenerate both language contracts"),
     )
     parser.add_argument("--manifest", type=Path, default=MANIFEST, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -1055,7 +1047,8 @@ def main(argv: list[str] | None = None) -> int:
             verify_shader_source_closure=False,
         )
         # The GPU tag deliberately excludes only the shader-body digest, so this first HLSL
-        # generation is final.  Hash its exact seven-shader closure, record that independent
+        # generation is final. Hash its exact two-analysis-plus-seven-coordinate-shader closure,
+        # record that independent
         # identity, and render again; the second HLSL must be byte-identical by construction.
         first_hlsl = render_hlsl(contract)
         _write_or_check(HLSL_TARGET, first_hlsl, False)

@@ -3,6 +3,9 @@
 
 #include "include/depth_coordinate_v2_contract.generated.hlsl"
 
+#define V2_STAGE_HISTOGRAM_SOURCE_BIN_COUNT 256u
+#define V2_STAGE_HISTOGRAM_BIN_COUNT 128u
+
 bool V2Finite(float value) {
     return !isnan(value) && !isinf(value);
 }
@@ -16,63 +19,47 @@ bool V2CalibrationRevisionValid(uint revision) {
     return revision > 0u && revision != 0xffffffffu;
 }
 
-// Authenticate the only otherwise-unbounded camera coordinate. The fixed inverse scale and
-// revision are included so a same-tag state assembled from different camera generations cannot
-// accidentally validate. Starting from zero deliberately keeps the generated empty-state word
-// zero while still making every acquired camera carry a deterministic non-zero checksum in the
-// ordinary case. Integer overflow is the specified modulo-2^32 checksum behavior.
-uint V2CameraCenterIntegrityBits(float4 active, float4 control) {
+// Authenticate both scene-camera coordinates. The fixed inverse scale and revision are included
+// so a same-tag state assembled from different camera generations cannot accidentally validate.
+// Starting from zero deliberately keeps the generated empty-state word zero while still making
+// every acquired camera carry a deterministic non-zero checksum in the ordinary case. Integer
+// overflow is the specified modulo-2^32 checksum behavior.
+uint V2CameraCenterIntegrityBits(
+    float4 active,
+    float4 control
+) {
     uint checksum = 0u;
     checksum = (checksum ^ asuint(V2_STATE_CENTER(active))) * 16777619u;
     checksum = (checksum ^ asuint(V2_STATE_INVERSE_SCALE(active))) * 16777619u;
+    checksum = (checksum ^ asuint(V2_STATE_CONVERGENCE_CURVE(active))) * 16777619u;
     checksum = (checksum ^ asuint(V2_STATE_CALIBRATION_REVISION(control))) * 16777619u;
     return checksum;
 }
 
-bool V2CameraCenterIntegrityValid(float4 active, float4 control, float4 shoulder) {
-    return asuint(V2_STATE_CAMERA_CENTER_INTEGRITY_BITS(shoulder)) ==
+bool V2CameraCenterIntegrityValid(float4 active, float4 control, float4 mapping_state) {
+    return asuint(V2_STATE_CAMERA_CENTER_INTEGRITY_BITS(mapping_state)) ==
         V2CameraCenterIntegrityBits(active, control);
 }
 
-void V2SealCameraCenter(float4 active, float4 control, inout float4 shoulder) {
-    V2_STATE_CAMERA_CENTER_INTEGRITY_BITS(shoulder) = asfloat(
+void V2SealCameraCenter(float4 active, float4 control, inout float4 mapping_state) {
+    V2_STATE_CAMERA_CENTER_INTEGRITY_BITS(mapping_state) = asfloat(
         V2CameraCenterIntegrityBits(active, control));
 }
 
-float V2NearDenseWeight(float coverage) {
-    return smoothstep(
-        v2_near_tail_coverage_low,
-        v2_near_tail_coverage_high,
-        coverage);
+bool V2MappingStateValid(float4 mapping_state) {
+    return asuint(V2_STATE_MAPPING_STATE_RESERVED_0(mapping_state)) == 0u &&
+        asuint(V2_STATE_MAPPING_STATE_RESERVED_1(mapping_state)) == 0u &&
+        asuint(V2_STATE_MAPPING_STATE_RESERVED_2(mapping_state)) == 0u;
 }
 
-float V2ExpectedNearTau(float coverage) {
-    return lerp(
-        v2_near_log_tau,
-        v2_near_log_tau_dense,
-        V2NearDenseWeight(coverage));
-}
-
-bool V2NearShoulderValid(float4 shoulder, uint texel_count) {
-    float coverage = V2_STATE_LATCHED_NEAR_TAIL_COVERAGE(shoulder);
-    float effective_tau = V2_STATE_EFFECTIVE_NEAR_LOG_TAU(shoulder);
-    uint count = asuint(V2_STATE_LATCHED_NEAR_TAIL_COUNT(shoulder));
-    float expected_coverage = texel_count > 0u ?
-        (float)count / (float)texel_count : 0.0f;
-    return texel_count > 0u && count <= texel_count &&
-        V2Finite(coverage) && coverage >= 0.0f && coverage <= 1.0f &&
-        V2ApproximatelyEqual(coverage, expected_coverage) &&
-        V2Finite(effective_tau) &&
-        effective_tau >= v2_near_log_tau_dense &&
-        effective_tau <= v2_near_log_tau &&
-        V2ApproximatelyEqual(effective_tau, V2ExpectedNearTau(coverage));
+bool V2ConvergenceCurveValid(float value) {
+    return value == v2_convergence_curve_default;
 }
 
 bool V2CameraStateValid(
     float4 active,
     float4 control,
-    float4 shoulder,
-    uint texel_count
+    float4 mapping_state
 ) {
     float frame_valid = V2_STATE_FRAME_VALID(control);
     float container_scale = V2_STATE_CONTAINER_SCALE(active);
@@ -82,21 +69,19 @@ bool V2CameraStateValid(
         V2Finite(v2_raw_coordinate_scale) && v2_raw_coordinate_scale > 0.0f &&
         V2Finite(V2_STATE_CENTER(active)) &&
         V2ApproximatelyEqual(V2_STATE_INVERSE_SCALE(active), expected_inverse_scale) &&
-        V2ApproximatelyEqual(
-            V2_STATE_CONVERGENCE_CURVE(active),
-            v2_convergence_curve_default) &&
+        V2ConvergenceCurveValid(V2_STATE_CONVERGENCE_CURVE(active)) &&
         V2Finite(container_scale) && container_scale > 0.0f && container_scale <= 1.0f &&
         (frame_valid == 0.0f || frame_valid == 1.0f) &&
         (frame_valid > 0.5f || container_scale == 1.0f) &&
         V2CalibrationRevisionValid(revision) &&
-        V2CameraCenterIntegrityValid(active, control, shoulder) &&
-        V2NearShoulderValid(shoulder, texel_count);
+        V2CameraCenterIntegrityValid(active, control, mapping_state) &&
+        V2MappingStateValid(mapping_state);
 }
 
 bool V2EmptyCameraStateValid(
     float4 active,
     float4 control,
-    float4 shoulder
+    float4 mapping_state
 ) {
     uint revision = asuint(V2_STATE_CALIBRATION_REVISION(control));
     return asuint(V2_STATE_CONTRACT_TAG_BITS(control)) == V2_CONTRACT_TAG &&
@@ -106,10 +91,8 @@ bool V2EmptyCameraStateValid(
         V2_STATE_CONTAINER_SCALE(active) == 1.0f &&
         (revision == 0u || V2CalibrationRevisionValid(revision)) &&
         V2_STATE_FRAME_VALID(control) == 0.0f &&
-        V2_STATE_LATCHED_NEAR_TAIL_COVERAGE(shoulder) == 0.0f &&
-        V2_STATE_EFFECTIVE_NEAR_LOG_TAU(shoulder) == v2_near_log_tau &&
-        asuint(V2_STATE_LATCHED_NEAR_TAIL_COUNT(shoulder)) == 0u &&
-        V2CameraCenterIntegrityValid(active, control, shoulder);
+        V2CameraCenterIntegrityValid(active, control, mapping_state) &&
+        V2MappingStateValid(mapping_state);
 }
 
 // D3D shader model 5 has exp/log but not expm1/log1p. Preserve precision at both C1 joins with
@@ -140,9 +123,8 @@ float V2CurveWithNearTau(float coordinate, float near_tau) {
     return 1.0f + near_tau * V2Log1p((coordinate - 1.0f) / near_tau);
 }
 
-// The base curve remains the hard-container authority. Occupancy adaptation may only choose a
-// smaller positive near tau in the map pass, so it cannot relax the container and amplify the
-// unchanged far/middle branches.
+// The fixed curve is shared by the hard-container resolver and the map pass. Keeping one curve
+// prevents content occupancy from changing the relative depth of an otherwise identical scene.
 float V2Curve(float coordinate) {
     return V2CurveWithNearTau(coordinate, v2_near_log_tau);
 }

@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """NumPy comparison oracle for the production depth-coordinate-v2 GPU mapping.
 
-The camera center is acquired from the first usable DAV2 field. Scale is a fixed authenticated
-model/shape calibration and never adapts to a frame's distribution. A separately named
-curve-space convergence value is latched with the camera and is currently exactly zero. The
-near-tail curve is selected from scene-acquisition occupancy and then held with that camera. Only
-the hard representation container adapts per frame; requested gain never becomes mutable shot
-state, and its extrema are deliberately evaluated with the conservative base near curve.
+The camera is acquired from the first usable DAV2 field.  Scale is a fixed authenticated
+model/shape calibration and never adapts to a frame's distribution.  Acquisition may place the
+zero plane at a strongly separated upper histogram valley; ambiguous fields keep the
+arithmetic-mean center.  At startup or after a confirmed cut, the first usable field establishes
+the center immediately; later valid, invalid, and fast-motion frames hold it until the next cut.
+There is no pending state or late correction. It is exactly the zero
+plane: curve-space convergence remains zero for both accepted and fallback selections.  The near
+curve remains fixed, so framing and content occupancy cannot select different transfer functions.
+Only the hard representation container adapts per frame; requested gain never becomes mutable
+shot state.
 """
 
 from dataclasses import asdict, dataclass
@@ -29,6 +33,14 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
 
 DIRECT_PARALLAX_SOURCE_U_LIMIT = V2_DEFAULTS.direct_container_limit
 
+# Scene-acquisition stage-boundary trial.  The live implementation reuses its existing 256-bin
+# raw-depth histogram and merges adjacent bins before the small one-thread Otsu resolver.  These
+# are deliberately implementation constants rather than user controls: uncertain evidence must
+# fall back to the arithmetic mean and zero convergence.
+SCENE_HISTOGRAM_SOURCE_BINS = 256
+SCENE_HISTOGRAM_BINS = 128
+SCENE_VALLEY_RATIO_MAX = V2_DEFAULTS.stage_valley_ratio_max
+
 
 def vertical_share_coefficients(majorant_share: float) -> Tuple[float, float]:
     """Return the exact float32 coefficients consumed by the HLSL vertical blend."""
@@ -44,10 +56,6 @@ class MappingV2Config:
     collapse_abs_epsilon: float = V2_DEFAULTS.collapse_abs_epsilon
     far_tau: float = V2_DEFAULTS.far_tau
     near_log_tau: float = V2_DEFAULTS.near_log_tau
-    near_tail_probe_u: float = V2_DEFAULTS.near_tail_probe_u
-    near_tail_coverage_low: float = V2_DEFAULTS.near_tail_coverage_low
-    near_tail_coverage_high: float = V2_DEFAULTS.near_tail_coverage_high
-    near_log_tau_dense: float = V2_DEFAULTS.near_log_tau_dense
     pop_strength: float = V2_DEFAULTS.reference_pop_strength
     gain_per_pop: float = V2_DEFAULTS.gain_per_pop
     max_horizontal_slope: float = V2_DEFAULTS.max_horizontal_slope
@@ -72,9 +80,47 @@ class CoordinateCalibration:
 
 
 @dataclass(frozen=True)
+class SceneCoordinateSelection:
+    """Deterministic diagnostics for one scene-camera acquisition attempt.
+
+    ``selected_center`` is the selector's controlling output; ``convergence_curve`` remains an
+    explicit zero-valued wire field so the selected center is the zero plane.  Everything else
+    explains why the conservative selector adopted the upper valley or fell back.
+    ``candidate_center`` is the stricter historical ``T - scale`` acceptance guard; an accepted
+    ``selected_center`` is ``T`` itself.
+    Split indices use the inclusive three-class convention: ``[0..i]``, ``[i+1..j]``, and
+    ``[j+1..127]``.
+    """
+
+    observed_mean: float
+    selected_center: float
+    convergence_curve: float
+    adopted: bool
+    reason: str
+    raw_min: float
+    raw_max: float
+    histogram_total: int
+    lower_split_bin: Optional[int]
+    upper_split_bin: Optional[int]
+    upper_split_raw: Optional[float]
+    candidate_center: Optional[float]
+    otsu_score: Optional[float]
+    class_counts: Optional[Tuple[int, int, int]]
+    valley_numerator: Optional[float]
+    middle_peak: Optional[float]
+    near_peak: Optional[float]
+    valley_ratio: Optional[float]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class MappingV2Diagnostics:
     shape: Tuple[int, int]
     center_mean: float
+    selected_center: float
+    scene_coordinate: SceneCoordinateSelection
     observed_std: float
     raw_coordinate_scale: float
     collapse_threshold: float
@@ -85,9 +131,6 @@ class MappingV2Diagnostics:
     canonical_p99: float
     canonical_max: float
     convergence_curve: float
-    near_tail_coverage: float
-    dense_near_weight: float
-    effective_near_log_tau: float
     curve_far_limit: float
     curve_near_limit: Optional[float]
     requested_gain: float
@@ -153,19 +196,6 @@ def _validate_config(config: MappingV2Config) -> None:
     _finite_positive("collapse_abs_epsilon", config.collapse_abs_epsilon)
     _finite_positive("far_tau", config.far_tau)
     _finite_positive("near_log_tau", config.near_log_tau)
-    _finite_positive("near_tail_probe_u", config.near_tail_probe_u)
-    if config.near_tail_probe_u < 1.0:
-        raise ValueError("near_tail_probe_u must be at least the near-curve knee")
-    for name, value in (
-            ("near_tail_coverage_low", config.near_tail_coverage_low),
-            ("near_tail_coverage_high", config.near_tail_coverage_high)):
-        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
-            raise ValueError(f"{name} must be finite and lie in [0, 1]")
-    if config.near_tail_coverage_low >= config.near_tail_coverage_high:
-        raise ValueError("near-tail coverage thresholds must be strictly ordered")
-    _finite_positive("near_log_tau_dense", config.near_log_tau_dense)
-    if config.near_log_tau_dense >= config.near_log_tau:
-        raise ValueError("near_log_tau_dense must be below near_log_tau")
     _finite_positive("pop_strength", config.pop_strength)
     _finite_positive("gain_per_pop", config.gain_per_pop)
     _finite_positive("max_horizontal_slope", config.max_horizontal_slope)
@@ -220,58 +250,227 @@ def calibrate_coordinate(
     )
 
 
-def near_tail_count_and_coverage(
-        canonical: np.ndarray,
-        config: MappingV2Config = MappingV2Config()) -> Tuple[int, float]:
-    """Measure canonical near-tail occupancy using the authenticated scene probe.
+def _scene_histogram_128(raw: np.ndarray) -> Tuple[np.ndarray, float, float]:
+    """Mirror ``depth_hist_cs`` and then merge its adjacent 256-bin pairs.
 
-    The strict ``>`` comparison intentionally matches the GPU reduction. A value at the linear
-    knee is not part of the compressed logarithmic tail.
+    Production input is FP32.  Explicit float32 operations here preserve the GPU's edge-bin
+    behavior, including forcing an exact maximum into source bin 255.  ``depth_hist_cs`` accepts
+    only non-negative finite samples, so a caller must compare the returned total with the raw
+    texel count before treating it as complete evidence.
+    """
+
+    raw32 = np.asarray(raw, dtype=np.float32)
+    raw_min32 = np.float32(np.min(raw32))
+    raw_max32 = np.float32(np.max(raw32))
+    raw_range32 = np.float32(raw_max32 - raw_min32)
+    denominator = np.maximum(raw_range32, np.float32(1.0e-12))
+    inverse_range = np.float32(
+        np.float32(SCENE_HISTOGRAM_SOURCE_BINS) / denominator)
+    valid = raw32 >= np.float32(0.0)
+    source_counts = np.zeros(SCENE_HISTOGRAM_SOURCE_BINS, dtype=np.uint64)
+    if np.any(valid):
+        deltas = np.subtract(raw32[valid], raw_min32, dtype=np.float32)
+        positions = np.multiply(deltas, inverse_range, dtype=np.float32)
+        # HLSL's cast from a non-negative float truncates toward zero.  Clamp after conversion so
+        # the exact maximum, whose scaled coordinate is normally 256, lands in the last bin.
+        indices = np.minimum(
+            positions.astype(np.uint32),
+            np.uint32(SCENE_HISTOGRAM_SOURCE_BINS - 1),
+        )
+        source_counts = np.bincount(
+            indices.astype(np.int64), minlength=SCENE_HISTOGRAM_SOURCE_BINS,
+        ).astype(np.uint64, copy=False)
+    merged = source_counts.reshape(SCENE_HISTOGRAM_BINS, 2).sum(
+        axis=1, dtype=np.uint64)
+    return merged, float(raw_min32), float(raw_max32)
+
+
+def _otsu_three_class_split(counts: np.ndarray) -> Optional[Tuple[int, int, float]]:
+    """Return the lexicographically first valid three-class Otsu split.
+
+    Score arithmetic intentionally follows the one-thread float32 shader: normalized bin centers,
+    ascending moment accumulation, inclusive class endpoints, and a strict ``>`` update.  The
+    strict comparison makes equal-score plateaus deterministic rather than dependent on a later
+    traversal or platform sort.
+    """
+
+    histogram = np.asarray(counts, dtype=np.uint64)
+    if histogram.shape != (SCENE_HISTOGRAM_BINS,):
+        raise ValueError("scene histogram must contain exactly 128 bins")
+    total_count = int(np.sum(histogram, dtype=np.uint64))
+    if total_count <= 0:
+        return None
+    centers = np.asarray(
+        [(np.float32(index) + np.float32(0.5)) / np.float32(SCENE_HISTOGRAM_BINS)
+         for index in range(SCENE_HISTOGRAM_BINS)],
+        dtype=np.float32,
+    )
+    total_moment = np.float32(0.0)
+    for index in range(SCENE_HISTOGRAM_BINS):
+        total_moment = np.float32(
+            total_moment + np.float32(histogram[index]) * centers[index])
+    global_mean = np.float32(total_moment / np.float32(total_count))
+
+    best_score = np.float32(-1.0)
+    best: Optional[Tuple[int, int, float]] = None
+    far_count = 0
+    far_moment = np.float32(0.0)
+    minimum_mass_numerator = total_count
+    for lower in range(SCENE_HISTOGRAM_BINS - 2):
+        far_count += int(histogram[lower])
+        far_moment = np.float32(
+            far_moment + np.float32(histogram[lower]) * centers[lower])
+        if far_count * SCENE_HISTOGRAM_BINS < minimum_mass_numerator:
+            continue
+        middle_count = 0
+        middle_moment = np.float32(0.0)
+        for upper in range(lower + 1, SCENE_HISTOGRAM_BINS - 1):
+            middle_count += int(histogram[upper])
+            middle_moment = np.float32(
+                middle_moment + np.float32(histogram[upper]) * centers[upper])
+            near_count = total_count - far_count - middle_count
+            if (middle_count * SCENE_HISTOGRAM_BINS < minimum_mass_numerator or
+                    near_count * SCENE_HISTOGRAM_BINS < minimum_mass_numerator):
+                continue
+            near_moment = np.float32(total_moment - far_moment - middle_moment)
+            far_mean = np.float32(far_moment / np.float32(far_count))
+            middle_mean = np.float32(middle_moment / np.float32(middle_count))
+            near_mean = np.float32(near_moment / np.float32(near_count))
+            far_delta = np.float32(far_mean - global_mean)
+            middle_delta = np.float32(middle_mean - global_mean)
+            near_delta = np.float32(near_mean - global_mean)
+            far_term = np.float32(
+                np.float32(far_count) * np.float32(far_delta * far_delta))
+            middle_term = np.float32(
+                np.float32(middle_count) * np.float32(middle_delta * middle_delta))
+            near_term = np.float32(
+                np.float32(near_count) * np.float32(near_delta * near_delta))
+            score = np.float32(np.float32(far_term + middle_term) + near_term)
+            if score > best_score:
+                best_score = score
+                best = (lower, upper, float(score))
+    return best
+
+
+def select_scene_coordinate(
+        raw_depth: np.ndarray,
+        config: MappingV2Config = MappingV2Config()) -> SceneCoordinateSelection:
+    """Select the scene-latched raw center; convergence stays exactly zero.
+
+    A valid, deeply separated upper Otsu valley may move the linear/logarithmic near-stage boundary
+    upward.  The rule abstains on incomplete histograms, shallow valleys, and candidates that do
+    not move upward from the arithmetic mean.  Abstention is exactly the former V2 camera:
+    arithmetic-mean center.  In both cases the selected center is the exact zero plane.
     """
 
     _validate_config(config)
-    values = np.asarray(canonical, dtype=np.float64)
-    if values.size == 0 or not np.isfinite(values).all():
-        raise ValueError("canonical depth must be finite and non-empty")
-    count = int(np.count_nonzero(values > config.near_tail_probe_u))
-    return count, count / values.size
+    raw = _require_raw_depth(raw_depth)
+    calibration = calibrate_coordinate(raw, config)
+    fallback = dict(
+        observed_mean=calibration.center,
+        selected_center=calibration.center,
+        convergence_curve=V2_DEFAULTS.convergence_curve_default,
+        adopted=False,
+        raw_min=calibration.raw_min,
+        raw_max=calibration.raw_max,
+    )
+    if calibration.collapsed or calibration.raw_max <= calibration.raw_min:
+        return SceneCoordinateSelection(
+            **fallback, reason="collapsed-range", histogram_total=0,
+            lower_split_bin=None, upper_split_bin=None, upper_split_raw=None,
+            candidate_center=None, otsu_score=None, class_counts=None,
+            valley_numerator=None, middle_peak=None, near_peak=None, valley_ratio=None)
 
+    counts, histogram_min, histogram_max = _scene_histogram_128(raw)
+    histogram_total = int(np.sum(counts, dtype=np.uint64))
+    if histogram_total != raw.size:
+        return SceneCoordinateSelection(
+            **fallback, reason="incomplete-gpu-histogram",
+            histogram_total=histogram_total,
+            lower_split_bin=None, upper_split_bin=None, upper_split_raw=None,
+            candidate_center=None, otsu_score=None, class_counts=None,
+            valley_numerator=None, middle_peak=None, near_peak=None, valley_ratio=None)
 
-def dense_near_weight(
-        coverage: float,
-        config: MappingV2Config = MappingV2Config()) -> float:
-    """Return the smoothstep weight selecting the dense near-tail curve."""
+    split = _otsu_three_class_split(counts)
+    if split is None:
+        return SceneCoordinateSelection(
+            **fallback, reason="no-valid-otsu-split", histogram_total=histogram_total,
+            lower_split_bin=None, upper_split_bin=None, upper_split_raw=None,
+            candidate_center=None, otsu_score=None, class_counts=None,
+            valley_numerator=None, middle_peak=None, near_peak=None, valley_ratio=None)
+    lower, upper, score = split
 
-    _validate_config(config)
-    if not math.isfinite(coverage) or not 0.0 <= coverage <= 1.0:
-        raise ValueError("near-tail coverage must be finite and lie in [0, 1]")
-    position = ((coverage - config.near_tail_coverage_low) /
-                (config.near_tail_coverage_high - config.near_tail_coverage_low))
-    clamped = min(max(position, 0.0), 1.0)
-    return clamped * clamped * (3.0 - 2.0 * clamped)
+    counts32 = counts.astype(np.float32)
+    smoothed = np.multiply(counts32, np.float32(0.5), dtype=np.float32)
+    smoothed[1:] = np.add(
+        smoothed[1:],
+        np.multiply(counts32[:-1], np.float32(0.25), dtype=np.float32),
+        dtype=np.float32,
+    )
+    smoothed[:-1] = np.add(
+        smoothed[:-1],
+        np.multiply(counts32[1:], np.float32(0.25), dtype=np.float32),
+        dtype=np.float32,
+    )
+    middle_peak = np.float32(np.max(smoothed[lower + 1:upper + 1]))
+    near_peak = np.float32(np.max(smoothed[upper + 1:]))
+    valley_numerator = np.float32(max(smoothed[upper], smoothed[upper + 1]))
+    weaker_peak = np.float32(min(middle_peak, near_peak))
+    valley_ratio = (np.float32(valley_numerator / weaker_peak)
+                    if weaker_peak > np.float32(0.0) else np.float32(np.inf))
 
+    raw_range = np.float32(np.float32(histogram_max) - np.float32(histogram_min))
+    normalized_boundary = np.float32(
+        (np.float32(upper) + np.float32(0.5)) /
+        np.float32(SCENE_HISTOGRAM_BINS))
+    upper_split_raw = np.float32(
+        np.float32(histogram_min) + np.float32(normalized_boundary * raw_range))
+    # Keep adoption identical to the production rule that previously placed the upper valley at
+    # u=1. Only after that conservative predicate succeeds does the valley itself become zero.
+    acceptance_center = np.float32(
+        upper_split_raw - np.float32(config.raw_coordinate_scale))
+    far_count = int(np.sum(counts[:lower + 1], dtype=np.uint64))
+    middle_count = int(np.sum(counts[lower + 1:upper + 1], dtype=np.uint64))
+    near_count = histogram_total - far_count - middle_count
 
-def effective_near_log_tau(
-        coverage: float,
-        config: MappingV2Config = MappingV2Config()) -> float:
-    """Interpolate from the base to dense-tail tau for one latched scene camera."""
-
-    weight = dense_near_weight(coverage, config)
-    return config.near_log_tau + weight * (
-        config.near_log_tau_dense - config.near_log_tau)
+    common = dict(
+        **fallback,
+        histogram_total=histogram_total,
+        lower_split_bin=lower,
+        upper_split_bin=upper,
+        upper_split_raw=float(upper_split_raw),
+        candidate_center=float(acceptance_center),
+        otsu_score=score,
+        class_counts=(far_count, middle_count, near_count),
+        valley_numerator=float(valley_numerator),
+        middle_peak=float(middle_peak),
+        near_peak=float(near_peak),
+        valley_ratio=float(valley_ratio),
+    )
+    if valley_ratio > np.float32(SCENE_VALLEY_RATIO_MAX):
+        return SceneCoordinateSelection(**common, reason="upper-valley-not-separated")
+    if not float(acceptance_center) > calibration.center:
+        return SceneCoordinateSelection(**common, reason="candidate-not-above-mean")
+    common.pop("selected_center")
+    common.pop("convergence_curve")
+    common.pop("adopted")
+    return SceneCoordinateSelection(
+        **common,
+        selected_center=float(upper_split_raw),
+        convergence_curve=V2_DEFAULTS.convergence_curve_default,
+        adopted=True,
+        reason="accepted-upper-stage-boundary",
+    )
 
 
 def asymmetric_curve(
         canonical: np.ndarray,
-        config: MappingV2Config,
-        *,
-        near_log_tau: Optional[float] = None) -> np.ndarray:
+        config: MappingV2Config) -> np.ndarray:
     _validate_config(config)
     values = np.asarray(canonical, dtype=np.float64)
     if not np.isfinite(values).all():
         raise ValueError("canonical depth must contain only finite values")
-    resolved_near_tau = (config.near_log_tau if near_log_tau is None else
-                         _finite_positive("effective near_log_tau", near_log_tau))
+    resolved_near_tau = config.near_log_tau
     curved = np.empty_like(values)
     far = values < 0.0
     linear = (values >= 0.0) & (values <= 1.0)
@@ -292,7 +491,6 @@ def curve_relative_coordinate(
         config: MappingV2Config = MappingV2Config(),
         *,
         convergence_curve: float = V2_DEFAULTS.convergence_curve_default,
-        near_log_tau: Optional[float] = None,
         ) -> Tuple[np.ndarray, np.ndarray]:
     raw = _require_raw_depth(raw_depth)
     if not math.isfinite(center):
@@ -301,8 +499,7 @@ def curve_relative_coordinate(
     if not math.isfinite(convergence_curve):
         raise ValueError("convergence_curve must be finite")
     canonical = (raw - center) / scale
-    curved = asymmetric_curve(
-        canonical, config, near_log_tau=near_log_tau) - convergence_curve
+    curved = asymmetric_curve(canonical, config) - convergence_curve
     if not np.isfinite(canonical).all() or not np.isfinite(curved).all():
         raise ValueError("shot calibration produced a non-finite coordinate")
     return canonical, curved
@@ -427,19 +624,19 @@ def generate_depth_mapping_v2(
     _validate_config(config)
     raw = _require_raw_depth(raw_depth)
     calibration = calibrate_coordinate(raw, config)
+    scene_coordinate = select_scene_coordinate(raw, config)
     width = raw.shape[1]
     max_step = config.max_horizontal_slope / width
     max_vertical_step = config.max_vertical_shear / width
-    convergence_curve = V2_DEFAULTS.convergence_curve_default
-    tail_coverage = 0.0
-    tail_weight = 0.0
-    scene_near_tau = config.near_log_tau
+    convergence_curve = scene_coordinate.convergence_curve
 
     if calibration.collapsed:
         zero = np.zeros(raw.shape, dtype=np.float32)
         diagnostics = MappingV2Diagnostics(
             shape=raw.shape,
             center_mean=calibration.center,
+            selected_center=scene_coordinate.selected_center,
+            scene_coordinate=scene_coordinate,
             observed_std=calibration.observed_std,
             raw_coordinate_scale=config.raw_coordinate_scale,
             collapse_threshold=config.collapse_abs_epsilon,
@@ -447,9 +644,6 @@ def generate_depth_mapping_v2(
             canonical_min=0.0, canonical_p01=0.0, canonical_p50=0.0,
             canonical_p99=0.0, canonical_max=0.0,
             convergence_curve=convergence_curve,
-            near_tail_coverage=tail_coverage,
-            dense_near_weight=tail_weight,
-            effective_near_log_tau=scene_near_tau,
             curve_far_limit=-config.far_tau - convergence_curve, curve_near_limit=None,
             requested_gain=config.parallax_gain, effective_gain=0.0,
             container_source_u_limit=config.direct_container_limit,
@@ -479,19 +673,11 @@ def generate_depth_mapping_v2(
         return MappingV2Result(
             zero.copy(), zero.copy(), zero.copy(), zero.copy(), zero, diagnostics)
 
-    canonical = (raw - calibration.center) / calibration.scale
-    _, tail_coverage = near_tail_count_and_coverage(canonical, config)
-    tail_weight = dense_near_weight(tail_coverage, config)
-    scene_near_tau = effective_near_log_tau(tail_coverage, config)
-    curve_relative = asymmetric_curve(
-        canonical, config, near_log_tau=scene_near_tau) - convergence_curve
+    canonical = (raw - scene_coordinate.selected_center) / calibration.scale
+    curve_relative = asymmetric_curve(canonical, config) - convergence_curve
     requested = curve_relative * config.parallax_gain
-    # The adaptive curve may reduce near values, but it never weakens the hard container. Compute
-    # the representation envelope from the base-tau field so changing occupancy cannot authorize
-    # more source-U displacement than the original V2 contract.
-    base_curve_relative = asymmetric_curve(canonical, config) - convergence_curve
     container_scale, _ = container_scale_for_curve_range(
-        float(np.min(base_curve_relative)), float(np.max(base_curve_relative)), config)
+        float(np.min(curve_relative)), float(np.max(curve_relative)), config)
     conditioned = requested * container_scale
     vertical_majorant = vertical_lipschitz_majorant(conditioned, max_vertical_step)
     vertical_minorant = vertical_lipschitz_minorant(conditioned, max_vertical_step)
@@ -524,6 +710,8 @@ def generate_depth_mapping_v2(
     diagnostics = MappingV2Diagnostics(
         shape=raw.shape,
         center_mean=calibration.center,
+        selected_center=scene_coordinate.selected_center,
+        scene_coordinate=scene_coordinate,
         observed_std=calibration.observed_std,
         raw_coordinate_scale=config.raw_coordinate_scale,
         collapse_threshold=config.collapse_abs_epsilon,
@@ -531,9 +719,6 @@ def generate_depth_mapping_v2(
         canonical_min=float(np.min(canonical)), canonical_p01=p01,
         canonical_p50=p50, canonical_p99=p99, canonical_max=float(np.max(canonical)),
         convergence_curve=convergence_curve,
-        near_tail_coverage=tail_coverage,
-        dense_near_weight=tail_weight,
-        effective_near_log_tau=scene_near_tau,
         curve_far_limit=-config.far_tau - convergence_curve, curve_near_limit=None,
         requested_gain=config.parallax_gain,
         effective_gain=config.parallax_gain * container_scale,
@@ -583,17 +768,19 @@ __all__ = [
     "MappingV2Config",
     "MappingV2Diagnostics",
     "MappingV2Result",
+    "SCENE_HISTOGRAM_BINS",
+    "SCENE_HISTOGRAM_SOURCE_BINS",
+    "SCENE_VALLEY_RATIO_MAX",
+    "SceneCoordinateSelection",
     "asymmetric_curve",
     "calibrate_coordinate",
     "container_scale_for_curve_range",
     "curve_relative_coordinate",
-    "dense_near_weight",
     "decode_direct_parallax",
     "encode_direct_parallax",
-    "effective_near_log_tau",
     "generate_depth_mapping_v2",
     "horizontal_lipschitz_majorant",
-    "near_tail_count_and_coverage",
+    "select_scene_coordinate",
     "vertical_lipschitz_majorant",
     "vertical_lipschitz_minorant",
 ]

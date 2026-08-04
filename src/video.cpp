@@ -52,7 +52,7 @@ namespace video {
     snapshot.valid_fields |= sbs_telemetry_valid_field::config;
     snapshot.runtime_flags &= ~sbs_telemetry_runtime_flag::adaptive_enabled;
     // Telemetry v1 requires one of its three legacy plane values whenever VALID_CONFIG is set,
-    // but it cannot represent V2's scene-latched raw center/near-tail policy. Keep the neutral
+    // but it cannot represent V2's scene-latched raw center and fixed near curve. Keep the neutral
     // compatibility value stable instead of reflecting profile.zero_plane: that setting belongs
     // to offline/evaluation and changing it must never make live telemetry claim a geometry
     // change that did not occur.
@@ -247,6 +247,10 @@ namespace video {
         return -1;
       }
       return device->convert(img);
+    }
+
+    bool needs_conversion_poll() const override {
+      return device && device->needs_conversion_poll();
     }
 
     void request_idr_frame() override {
@@ -918,6 +922,10 @@ namespace video {
               missing_frame_timestamp_warning_logged = true;
             }
             frame_timestamp = std::chrono::steady_clock::now();
+            // Persist the substitute on the retained image. Host SBS uses this value as the
+            // exact source identity when a later encode-thread timeout consumes its pending
+            // inference; a local-only timestamp would make that safe completion unmatchable.
+            img->frame_timestamp = frame_timestamp;
           }
 
           // Re-check after the potentially blocking image wait and before conversion. On Windows,
@@ -964,6 +972,23 @@ namespace video {
         frame_timestamp = std::chrono::steady_clock::now();
         if (session->convert(*last_img)) {
           BOOST_LOG(error) << "Could not activate the initialized Host SBS GPU pipeline"sv;
+          break;
+        }
+        converted_frame = true;
+      }
+
+      // Host SBS inference is intentionally one source behind during continuous capture. If the
+      // accepted inference belongs to the final frame of a burst, capture may go idle before a
+      // later convert() can consume it. The device owns the pending bit; reconvert the retained
+      // source once on this encode-thread timeout so completion and D3D rendering stay serialized
+      // on their normal owner. The device suppresses a duplicate inference for that same source.
+      if (!converted_frame && last_img && session->needs_conversion_poll()) {
+        if (lifecycle_change_requested()) {
+          break;
+        }
+        frame_timestamp = std::chrono::steady_clock::now();
+        if (session->convert(*last_img)) {
+          BOOST_LOG(error) << "Could not consume pending Host SBS depth for retained source"sv;
           break;
         }
         converted_frame = true;

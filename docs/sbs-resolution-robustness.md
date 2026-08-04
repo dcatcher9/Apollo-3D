@@ -20,22 +20,26 @@ invariants are:
 | Processor | Coordinate space | Resolution/aspect handling |
 |---|---|---|
 | TensorRT input | authenticated model patches | Standard landscape, ultrawide, and portrait streams select one of six authenticated grids: `770x434`, `1022x434`, `1036x434`, and their transposes. Configuration cannot authorize another live shape or model. |
-| V2 raw coordinate | DAV2 raw units | A fixed authenticated scale maps raw DAV2 Small output around the scene-latched center. Frame min/max, percentiles, subject recentering, and adaptive-pop values do not rescale live geometry. |
+| V2 raw coordinate | DAV2 raw units | A fixed authenticated scale maps raw DAV2 Small output around the scene-latched center. Acquisition may accept a strongly separated three-class upper stage boundary; ambiguous fields use the arithmetic mean. Frame min/max, percentiles, subject recentering, and adaptive-pop values do not rescale live geometry. |
 | Private cut evidence | normalized model grid + 434-reference texels | A separate cut-only path uses fixed EMA/min-max calibration. Only the moving-edge EMA gradient gate is scaled to the actual short side; depth-change and appearance evidence are valid-texel fractions. The private normalized depth never reaches the V2 geometry mapper or renderer. |
 | V2 candidate and conditioner | normalized source-U displacement | The literal requested pop feeds a frame-local 4% source-U container. Exact vertical shear-2 upper/lower envelopes are shared 75/25 before a pure slope-0.5 row majorant; both bounds are independent of encoder resolution. |
 | V2 inverse renderer | source UV | Both eyes solve the same bounded final field with opposite signs and a unique 12-step contractive inverse, then take one native linear color sample. There is no collar filter, V1 probe spacing, forward owner, or synthetic fill. |
 | Encoder conversion/downscale | encoded raster | The SBS intermediate is already the final encoder size. There is no second post-warp rescale; YUV conversion sees the final packed dimensions. |
 | Eval metrics/report | eye-relative/common raster | Stereo volume and vertical alignment gates use percentages. A/B evidence normalizes mismatched run sizes to a common per-eye raster before crops or heatmaps. |
 
-`sbs_3d_pop_strength` is the literal live parallax request (`0.25`-`2`, default `1.20`). Live V2
+`sbs_3d_pop_strength` is the literal live parallax request (`0.25`-`2`); the current live and
+qualification reference is `1.0`. Live V2
 does not add an adaptive-pop multiplier or use the configured legacy zero plane. It acquires its
-scene center and near-tail shoulder on the first usable field and again on a confirmed cut, then
-holds those values through the shot. Configured Base/custom models, tensor-size tuning,
+scene camera from the first usable field at startup or after a confirmed cut, then holds that
+center through every later valid, invalid, or fast-motion frame until the next confirmed cut. A
+conservative histogram selector keeps `T-0.5 > mean` as its acceptance guard and chooses either
+`center=T` or the arithmetic-mean fallback. Convergence is exactly zero in both cases, so the selected center is always the raw
+zero-disparity plane; the near curve remains fixed. Configured Base/custom models, tensor-size tuning,
 adaptive-pop, subject, normalization, and zero-plane controls remain offline/evaluator options.
 Appearance evidence combines broad RGB replacement with exposure-invariant ordinal structure and
 must still be corroborated by depth before it can pulse shot state. Geometry and appearance rearm
 independently; a depth-motion EMA admits a later geometry edge without allowing steady persistent
-evidence to periodically reset convergence. Galaxy XR validation is specified in the
+evidence to periodically reset the scene camera. Galaxy XR validation is specified in the
 [persistent-motion test plan](sbs-persistent-motion-test-plan.md).
 
 Private normalized-depth history uses `min(target_w, target_h) / 434` only for the moving-edge

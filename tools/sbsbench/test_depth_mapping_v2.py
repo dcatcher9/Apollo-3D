@@ -15,16 +15,19 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from depth_coordinate_v2_contract import CALIBRATED_DEFAULTS  # noqa: E402
 from depth_mapping_v2 import (  # noqa: E402
     MappingV2Config,
+    SCENE_HISTOGRAM_BINS,
+    SCENE_HISTOGRAM_SOURCE_BINS,
+    _otsu_three_class_split,
+    _scene_histogram_128,
     asymmetric_curve,
     calibrate_coordinate,
     container_scale_for_curve_range,
-    dense_near_weight,
+    curve_relative_coordinate,
     decode_direct_parallax,
     encode_direct_parallax,
-    effective_near_log_tau,
     generate_depth_mapping_v2,
     horizontal_lipschitz_majorant,
-    near_tail_count_and_coverage,
+    select_scene_coordinate,
     vertical_lipschitz_majorant,
     vertical_lipschitz_minorant,
 )
@@ -50,6 +53,86 @@ class DepthMappingV2Test(unittest.TestCase):
         self.assertAlmostEqual(calibration.observed_std, expected_std)
         self.assertEqual(calibration.scale, 0.5)
 
+    @staticmethod
+    def _separated_three_stage_field() -> np.ndarray:
+        rng = np.random.default_rng(123)
+        return np.concatenate((
+            rng.normal(1.0, 0.2, 7680),
+            rng.normal(2.0, 0.2, 3200),
+            rng.normal(4.0, 0.2, 1920),
+        )).reshape(100, 128)
+
+    def test_scene_histogram_exactly_merges_existing_gpu_256_bin_layout(self):
+        raw = np.arange(SCENE_HISTOGRAM_SOURCE_BINS, dtype=np.float32).reshape(16, 16)
+        counts, raw_min, raw_max = _scene_histogram_128(raw)
+        self.assertEqual(counts.shape, (SCENE_HISTOGRAM_BINS,))
+        np.testing.assert_array_equal(counts, np.full(SCENE_HISTOGRAM_BINS, 2))
+        self.assertEqual(raw_min, 0.0)
+        self.assertEqual(raw_max, 255.0)
+        # Inclusive classes and strict ascending tie retention are part of GPU parity.
+        self.assertEqual(_otsu_three_class_split(counts)[:2], (41, 84))
+
+    def test_scene_selector_adopts_only_a_deep_upper_valley(self):
+        raw = self._separated_three_stage_field()
+        selection = select_scene_coordinate(raw)
+        self.assertTrue(selection.adopted)
+        self.assertEqual(selection.reason, "accepted-upper-stage-boundary")
+        self.assertEqual(selection.lower_split_bin, 36)
+        self.assertEqual(selection.upper_split_bin, 72)
+        self.assertEqual(selection.class_counts, (7654, 3226, 1920))
+        self.assertLessEqual(selection.valley_ratio, 0.75)
+        self.assertAlmostEqual(
+            selection.candidate_center + MappingV2Config().raw_coordinate_scale,
+            selection.upper_split_raw)
+        self.assertEqual(selection.selected_center, selection.upper_split_raw)
+        self.assertGreater(selection.candidate_center, selection.observed_mean)
+        self.assertEqual(selection.convergence_curve, 0.0)
+        canonical_zero, curved_zero = curve_relative_coordinate(
+            np.asarray([[selection.selected_center]]),
+            selection.selected_center,
+            MappingV2Config().raw_coordinate_scale,
+            convergence_curve=selection.convergence_curve,
+        )
+        self.assertEqual(float(canonical_zero[0, 0]), 0.0)
+        self.assertEqual(float(curved_zero[0, 0]), 0.0)
+
+        result = generate_depth_mapping_v2(raw)
+        self.assertAlmostEqual(result.diagnostics.center_mean, selection.observed_mean)
+        self.assertAlmostEqual(result.diagnostics.selected_center, selection.selected_center)
+        self.assertEqual(result.diagnostics.scene_coordinate, selection)
+        self.assertEqual(result.diagnostics.convergence_curve, 0.0)
+
+    def test_scene_selector_abstains_on_shallow_valley_and_preserves_mean_semantics(self):
+        raw = np.linspace(1.0, 4.0, 12800, dtype=np.float32).reshape(100, 128)
+        selection = select_scene_coordinate(raw)
+        self.assertFalse(selection.adopted)
+        self.assertEqual(selection.reason, "upper-valley-not-separated")
+        self.assertEqual(selection.valley_ratio, 1.0)
+        self.assertEqual(selection.selected_center, selection.observed_mean)
+        self.assertEqual(selection.convergence_curve, 0.0)
+
+    def test_scene_selector_abstains_when_boundary_center_is_not_above_mean(self):
+        rng = np.random.default_rng(456)
+        raw = np.concatenate((
+            rng.normal(1.0, 0.2, 1500),
+            rng.normal(2.0, 0.25, 1800),
+            rng.normal(4.0, 0.25, 9500),
+        )).reshape(100, 128)
+        selection = select_scene_coordinate(raw)
+        self.assertFalse(selection.adopted)
+        self.assertEqual(selection.reason, "candidate-not-above-mean")
+        self.assertLessEqual(selection.valley_ratio, 0.75)
+        self.assertLess(selection.candidate_center, selection.observed_mean)
+        self.assertEqual(selection.selected_center, selection.observed_mean)
+
+    def test_scene_selector_falls_back_if_reused_gpu_histogram_is_incomplete(self):
+        raw = np.asarray([[-1.0, 0.0, 1.0, 2.0]], dtype=np.float64)
+        selection = select_scene_coordinate(raw)
+        self.assertFalse(selection.adopted)
+        self.assertEqual(selection.reason, "incomplete-gpu-histogram")
+        self.assertEqual(selection.histogram_total, 3)
+        self.assertEqual(selection.selected_center, float(np.mean(raw)))
+
     def test_collapse_is_absolute_and_keeps_requested_gain_diagnostic(self):
         config = MappingV2Config(
             raw_coordinate_scale=0.25, collapse_abs_epsilon=1.0e-3,
@@ -64,12 +147,10 @@ class DepthMappingV2Test(unittest.TestCase):
         self.assertEqual(result.diagnostics.convergence_curve, 0.0)
         np.testing.assert_array_equal(result.parallax, np.zeros(raw.shape, np.float32))
 
-    def test_contract_surface_has_only_scene_near_tail_adaptation(self):
+    def test_contract_surface_has_fixed_near_curve_without_occupancy_state(self):
         self.assertEqual(
             tuple(field.name for field in fields(MappingV2Config)),
             ("raw_coordinate_scale", "collapse_abs_epsilon", "far_tau", "near_log_tau",
-             "near_tail_probe_u", "near_tail_coverage_low", "near_tail_coverage_high",
-             "near_log_tau_dense",
              "pop_strength", "gain_per_pop", "max_horizontal_slope",
              "max_vertical_shear", "vertical_majorant_share",
              "direct_container_limit"))
@@ -81,48 +162,22 @@ class DepthMappingV2Test(unittest.TestCase):
                 "source_u_safety_scale", "collapse_relative_epsilon"):
             self.assertNotIn(removed, names)
 
-    def test_near_tail_coverage_selects_dense_tau_with_smoothstep(self):
-        config = MappingV2Config()
-        canonical = np.concatenate((np.full(20, 2.0), np.full(80, -0.5)))
-        count, coverage = near_tail_count_and_coverage(canonical, config)
-        self.assertEqual(count, 20)
-        self.assertAlmostEqual(coverage, 0.20)
-        position = ((coverage - config.near_tail_coverage_low) /
-                    (config.near_tail_coverage_high - config.near_tail_coverage_low))
-        expected_weight = position * position * (3.0 - 2.0 * position)
-        self.assertAlmostEqual(dense_near_weight(coverage, config), expected_weight)
-        self.assertAlmostEqual(
-            effective_near_log_tau(coverage, config),
-            config.near_log_tau + expected_weight *
-            (config.near_log_tau_dense - config.near_log_tau))
-        self.assertEqual(dense_near_weight(0.10, config), 0.0)
-        self.assertEqual(dense_near_weight(0.25, config), 1.0)
-        self.assertEqual(effective_near_log_tau(0.10, config), config.near_log_tau)
-        self.assertEqual(effective_near_log_tau(0.25, config), config.near_log_tau_dense)
-
-    def test_dense_render_curve_cannot_loosen_base_tau_container(self):
-        # Keep 25% of the zero-mean field in a very long near tail so the dense tau is selected.
+    def test_fixed_near_curve_and_container_use_the_same_tau(self):
         canonical = np.concatenate((np.full(25, 12.0), np.full(75, -4.0))).reshape(10, 10)
         config = MappingV2Config(
             raw_coordinate_scale=0.5, pop_strength=20.0, gain_per_pop=0.01,
             max_horizontal_slope=0.99)
         raw = canonical * config.raw_coordinate_scale
         result = generate_depth_mapping_v2(raw, config)
-        self.assertAlmostEqual(result.diagnostics.near_tail_coverage, 0.25)
-        self.assertEqual(result.diagnostics.dense_near_weight, 1.0)
-        self.assertEqual(
-            result.diagnostics.effective_near_log_tau, config.near_log_tau_dense)
         base_curve = asymmetric_curve(canonical, config)
-        dense_curve = asymmetric_curve(
-            canonical, config, near_log_tau=config.near_log_tau_dense)
         expected_base, _ = container_scale_for_curve_range(
             float(np.min(base_curve)), float(np.max(base_curve)), config)
-        relaxed_dense, _ = container_scale_for_curve_range(
-            float(np.min(dense_curve)), float(np.max(dense_curve)), config)
         self.assertAlmostEqual(result.diagnostics.container_scale, expected_base)
-        self.assertLess(result.diagnostics.container_scale, relaxed_dense)
+        np.testing.assert_allclose(
+            result.desired_parallax,
+            (base_curve * config.parallax_gain).astype(np.float32), rtol=1.0e-6)
 
-    def test_convergence_is_separate_curve_coordinate_and_exactly_zero(self):
+    def test_fallback_convergence_is_separate_curve_coordinate_and_exactly_zero(self):
         raw = np.asarray([[-2.0, 0.0, 2.0]], dtype=np.float64)
         result = generate_depth_mapping_v2(
             raw, MappingV2Config(raw_coordinate_scale=0.5, max_horizontal_slope=0.99))
@@ -255,14 +310,6 @@ class DepthMappingV2Test(unittest.TestCase):
             MappingV2Config(collapse_abs_epsilon=0.0),
             MappingV2Config(far_tau=0.0),
             MappingV2Config(near_log_tau=float("nan")),
-            MappingV2Config(near_tail_probe_u=0.5),
-            MappingV2Config(near_tail_coverage_low=-0.1),
-            MappingV2Config(near_tail_coverage_high=1.1),
-            MappingV2Config(
-                near_tail_coverage_low=0.22, near_tail_coverage_high=0.15),
-            MappingV2Config(near_log_tau_dense=0.0),
-            MappingV2Config(near_log_tau=1.0, near_log_tau_dense=1.0),
-            MappingV2Config(near_log_tau=1.0, near_log_tau_dense=2.0),
             MappingV2Config(pop_strength=0.0),
             MappingV2Config(gain_per_pop=-1.0),
             MappingV2Config(max_horizontal_slope=0.0),

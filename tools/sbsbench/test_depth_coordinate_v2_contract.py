@@ -36,6 +36,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             13: "0bcb9598d3e1795d789ae807cddfcd85fa0c42a51f071874b28a48cd6ceb9161",
             14: "fdfda53e49ede50fc3408c7ecdafe7076a37b8468f5d828dc4a0d47e0656f458",
             15: "09f4eae02ddfd437dbf29116c6f7f4f5c754af40a7a9124edee3c071adfc8ed6",
+            16: "ee61c7c2d02e4251cc485331b875477c165ea62c83177ae593e8bcbe1be5ca5a",
+            17: "53c9e4cbb84e9d7f44d268454c92c33b01ffa8f62b93c6ce73fdfd7ca74485b1",
+            18: "cad7fe8348bea0d5bafbbcfcc3a4b186f85e9ec0b9072c85f6471cdc171c8917",
+            19: "ae7a329e9b9c8b03535bce41daf61248702d06ce61aede0d7a4940c5a40b6209",
+            20: "a5cd4d6e2529b82f76f2b2673b3fab979720f7b6a7dca09702967f55ab440b06",
+            21: "f2d736f76207df5bf4ac624e04c0c4f977278551463013edb85a70def5172b6d",
+            22: "800a82953af68f903ddf386cc0e1f49cf6fb3a1f44e56339bc9ca2122e393849",
+            23: "6c02b78c0496abb93ecdd820cace6ac8d9fbe1107ed2a99d1e791365b07d54d8",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -43,10 +51,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x7ADF0988)
+        self.assertEqual(generator.contract_tag(contract), 0x2F52B6E0)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "7adf09889f87bc391afe42a4f56f4d38a534573c6e751ced03c01c029adecf53",
+            "2f52b6e0eda5e12d426bee3d0cf1f7a003e93fed7b7db7e48c264efbe73e9493",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -66,9 +74,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             [
                 "raw_coordinate_scale", "collapse_abs_epsilon", "far_tau", "near_log_tau",
                 "requested_gain", "max_horizontal_slope", "direct_container_limit",
-                "convergence_curve_default", "near_tail_probe_u",
-                "near_tail_coverage_low", "near_tail_coverage_high",
-                "near_log_tau_dense",
+                "convergence_curve_default",
             ],
         )
         self.assertEqual(
@@ -84,8 +90,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             [
                 "center", "inverse_scale", "convergence_curve", "container_scale",
                 "calibration_revision", "frame_valid", "confirmed_cut_count", "contract_tag_bits",
-                "latched_near_tail_coverage", "effective_near_log_tau",
-                "latched_near_tail_count", "camera_center_integrity_bits",
+                "camera_center_integrity_bits", "mapping_state_reserved_0",
+                "mapping_state_reserved_1", "mapping_state_reserved_2",
             ],
         )
         uint_fields = [field for field in fields if field["gpu_encoding"] == "uint_bits"]
@@ -95,8 +101,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 ("calibration_revision", 0),
                 ("confirmed_cut_count", 0),
                 ("contract_tag_bits", generator.CONTRACT_TAG_SENTINEL),
-                ("latched_near_tail_count", 0),
                 ("camera_center_integrity_bits", 0),
+                ("mapping_state_reserved_0", 0),
+                ("mapping_state_reserved_1", 0),
+                ("mapping_state_reserved_2", 0),
             ],
         )
         self.assertEqual(fields[2]["initial"], 0.0)
@@ -114,10 +122,6 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(mapping.collapse_abs_epsilon, defaults.collapse_abs_epsilon)
         self.assertEqual(mapping.far_tau, defaults.far_tau)
         self.assertEqual(mapping.near_log_tau, defaults.near_log_tau)
-        self.assertEqual(mapping.near_tail_probe_u, defaults.near_tail_probe_u)
-        self.assertEqual(mapping.near_tail_coverage_low, defaults.near_tail_coverage_low)
-        self.assertEqual(mapping.near_tail_coverage_high, defaults.near_tail_coverage_high)
-        self.assertEqual(mapping.near_log_tau_dense, defaults.near_log_tau_dense)
         self.assertEqual(mapping.pop_strength, defaults.reference_pop_strength)
         self.assertEqual(mapping.gain_per_pop, defaults.gain_per_pop)
         self.assertEqual(
@@ -126,6 +130,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(mapping.max_vertical_shear, defaults.max_vertical_shear)
         self.assertEqual(mapping.direct_container_limit, defaults.direct_container_limit)
         self.assertEqual(defaults.convergence_curve_default, 0.0)
+        self.assertEqual(defaults.stage_valley_ratio_max, 0.75)
+        self.assertEqual(defaults.reference_pop_strength, 1.0)
         self.assertEqual(DIRECT_PARALLAX_SOURCE_U_LIMIT, defaults.direct_container_limit)
 
     def test_model_calibration_binds_identity_preprocess_and_exact_shape(self):
@@ -209,19 +215,6 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertNotEqual(generator.render_hlsl(original), generator.render_hlsl(changed))
         self._assert_stale_check_fails(changed)
 
-    def test_near_tail_calibration_rejects_ambiguous_or_noop_ranges(self):
-        original = generator.load_contract()
-        for field, value, message in (
-                ("near_tail_probe_u", 0.99, "near_tail_probe_u"),
-                ("near_tail_coverage_low", 0.22, "coverage thresholds"),
-                ("near_tail_coverage_high", 0.15, "coverage thresholds"),
-                ("near_log_tau_dense", 2.0, "must be smaller")):
-            with self.subTest(field=field):
-                changed = copy.deepcopy(original)
-                changed["calibrated_defaults"][field] = value
-                with self.assertRaisesRegex(ValueError, message):
-                    generator.validate_contract(changed)
-
     def test_vertical_share_rejects_values_that_round_to_float32_endpoints(self):
         original = generator.load_contract()
         for value in (1.0e-50, 1.0 - 1.0e-12):
@@ -270,7 +263,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         first_prefix = None
         for offset in range(1, 4097):
             mutated = copy.deepcopy(generator.load_contract())
-            mutated["calibrated_defaults"]["reference_pop_strength"] = 2.0 + offset * 1.0e-6
+            mutated["calibrated_defaults"]["reference_pop_strength"] = 1.0 + offset * 1.0e-6
             prefix = int.from_bytes(
                 hashlib.sha256(generator.canonical_bytes(mutated)).digest()[:4], "big")
             if not generator.tag_is_finite_normal(prefix):
@@ -310,12 +303,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertIn("cbuffer DepthCoordinateV2Constants : register(b1)", hlsl)
         self.assertIn("V2_FRAME_STATS_POPULATION_STD(value)", hlsl)
         self.assertIn("V2_STATE_CONTRACT_TAG_BITS(value)", hlsl)
-        self.assertIn("V2_CONSTANT_WORD_COUNT 12u", hlsl)
+        self.assertIn("V2_CONSTANT_WORD_COUNT 8u", hlsl)
         self.assertIn("V2_FRAME_STATS_WORD_COUNT 8u", hlsl)
         self.assertIn("V2_SHADOW_STATE_WORD_COUNT 12u", hlsl)
         self.assertIn("#define V2_MAX_VERTICAL_SHEAR 2.0f", hlsl)
         self.assertIn(
             "static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;", hlsl)
+        self.assertIn("#define V2_STAGE_VALLEY_RATIO_MAX 0.75f", hlsl)
+        self.assertNotIn("V2_STAGE_CONVERGENCE_CURVE", hlsl)
         self.assertIn(
             f"V2_DIRECT_CONTAINER_LIMIT {contract['calibrated_defaults']['direct_container_limit']}f",
             hlsl,

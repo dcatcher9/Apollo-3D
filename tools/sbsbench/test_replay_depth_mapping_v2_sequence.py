@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 import numpy as np
+from PIL import Image
 
 try:
     from . import subject_state_contract, whole_clip_raw_contract
@@ -26,11 +27,13 @@ try:
         SEQUENCE_CONTRACT_SCHEMA,
         LEGACY_STATE_METRICS, RENDERER_SCORECARD_FILE, RENDERER_SCORE_CONTRACT_FILE,
         RENDERER_SCORE_CONTRACT_SCHEMA, MappingV2Config,
+        _OrderedSourceRgbFields,
         _diagnostic_summary,
         _load_authenticated_cut_pulses, _materialize_gpu_replay_inputs,
         _materialize_producer_evidence_bundle,
         _metric_contract_evidence,
         _publish_renderer_quality_score, _resolve_pop_strength, _source_frames,
+        _numpy_oracle_sequence,
         _validate_frame_source_attestation, _validate_gpu_input_manifest_evidence,
         _validate_metric_contract_evidence, _validate_producer_evidence_bundle)
 except ImportError:  # Direct execution from tools/sbsbench.
@@ -53,11 +56,13 @@ except ImportError:  # Direct execution from tools/sbsbench.
         SEQUENCE_CONTRACT_SCHEMA,
         LEGACY_STATE_METRICS, RENDERER_SCORECARD_FILE, RENDERER_SCORE_CONTRACT_FILE,
         RENDERER_SCORE_CONTRACT_SCHEMA, MappingV2Config,
+        _OrderedSourceRgbFields,
         _diagnostic_summary,
         _load_authenticated_cut_pulses, _materialize_gpu_replay_inputs,
         _materialize_producer_evidence_bundle,
         _metric_contract_evidence,
         _publish_renderer_quality_score, _resolve_pop_strength, _source_frames,
+        _numpy_oracle_sequence,
         _validate_frame_source_attestation, _validate_gpu_input_manifest_evidence,
         _validate_metric_contract_evidence, _validate_producer_evidence_bundle)
 
@@ -140,6 +145,8 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             "src_assets/windows/assets/shaders/directx/include/depth_coordinate_v2_contract.generated.hlsl",
             "src_assets/windows/assets/shaders/directx/include/depth_coordinate_v2.hlsl",
             "src_assets/windows/assets/shaders/directx/include/depth_constants.hlsl",
+            "src_assets/windows/assets/shaders/directx/depth_coordinate_v2_ownership_cs.hlsl",
+            "src_assets/windows/assets/shaders/directx/include/depth_color.hlsl",
             "src_assets/windows/assets/shaders/directx/include/sbs_warp_common.hlsl",
             "src_assets/windows/assets/shaders/directx/sbs_reprojection_ps.hlsl",
             "src_assets/windows/assets/shaders/directx/sbs_forward_coverage_cs.hlsl",
@@ -242,7 +249,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             self.assertEqual(
                 evidence["input_shape_authority"], "schema-36-per-clip-raw-manifest")
             self.assertEqual(evidence["eval_schema"], 36)
-            self.assertEqual(evidence["contract_schema"], 18)
+            self.assertEqual(evidence["contract_schema"], 19)
             self.assertEqual(evidence["raw_hash_authority"]["binding"],
                              whole_clip_raw_contract.BINDING)
             self.assertEqual(evidence["depth_model_url"], MODEL_CALIBRATIONS[0].depth_model_url)
@@ -517,9 +524,53 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "frame_1.png").write_bytes(b"one")
-            (root / "frame_00001.jpg").write_bytes(b"alias")
+            (root / "frame_00001.png").write_bytes(b"alias")
             with self.assertRaisesRegex(ValueError, "duplicate source frame ID"):
                 _source_frames(root)
+
+    def test_exact_source_frames_reject_jpeg_only_input(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "frame_00001.jpg").write_bytes(b"jpeg")
+            (root / "frame_00002.jpeg").write_bytes(b"jpeg")
+            with self.assertRaisesRegex(ValueError, "lossless frame_<id>\\.png"):
+                _source_frames(root)
+
+    def test_numpy_oracle_lazily_decodes_ordered_rgb_and_applies_ownership(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first_path = root / "frame_00001.png"
+            second_path = root / "frame_00002.png"
+            first = np.zeros((25, 25, 3), dtype=np.uint8)
+            first[8:, :, :] = 255
+            second = np.full((25, 25, 3), 73, dtype=np.uint8)
+            Image.fromarray(first, mode="RGB").save(first_path)
+            Image.fromarray(second, mode="RGB").save(second_path)
+            ordered = _OrderedSourceRgbFields(
+                {2: second_path, 1: first_path}, [1, 2])
+            np.testing.assert_array_equal(ordered[0], first)
+            np.testing.assert_array_equal(ordered[1], second)
+
+            raw = np.zeros((5, 5), dtype=np.float64)
+            raw[2:, :] = 1.0
+            config = MappingV2Config(
+                raw_coordinate_scale=0.5,
+                pop_strength=1.0,
+                gain_per_pop=0.01,
+                max_horizontal_slope=0.001,
+                max_vertical_shear=0.004,
+            )
+            _, identity_encoded, identity_rows = _numpy_oracle_sequence(
+                [raw], [1], [False], [0], "unit-ownership", config)
+            _, refined_encoded, refined_rows = _numpy_oracle_sequence(
+                [raw], [1], [False], [0], "unit-ownership", config,
+                source_rgb_fields=_OrderedSourceRgbFields({1: first_path}, [1]))
+
+            self.assertEqual(identity_rows[0]["ownership_raised_fraction"], 0.0)
+            self.assertGreater(refined_rows[0]["ownership_raised_fraction"], 0.0)
+            self.assertGreater(
+                float(np.max(np.abs(refined_encoded[0] - identity_encoded[0]))),
+                0.0)
 
     def test_cut_labels_never_control_replay_and_generation_recovers_missing_pulse(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -587,8 +638,11 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             output.mkdir()
             source_one = root / "source_one.png"
             source_two = root / "source_two.png"
-            source_one.write_bytes(b"matched-first-color")
-            source_two.write_bytes(b"current-second-color")
+            Image.fromarray(
+                np.full((3, 4, 3), 17, dtype=np.uint8), mode="RGB").save(source_one)
+            Image.fromarray(
+                np.full((3, 4, 3), 231, dtype=np.uint8), mode="RGB").save(source_two)
+            source_two_bytes = source_two.read_bytes()
             raw_one_path = root / "raw_00001.f32"
             raw_two_path = root / "raw_00002.f32"
             width, height = MODEL_CALIBRATIONS[0].calibrated_input_shapes[0]
@@ -624,25 +678,25 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             self.assertEqual(rows[1]["rendered_source_frame_id"], "00002")
             self.assertEqual(
                 (output / "frames" / "frame_00002.png").read_bytes(),
-                b"current-second-color")
+                source_two_bytes)
             self.assertEqual(
                 (output / "input_frames" / "frame_00002.png").read_bytes(),
-                b"current-second-color")
+                source_two_bytes)
             self.assertEqual(
                 rows[1]["input_source_sha256"], rows[1]["rendered_source_sha256"])
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["schema"], GPU_INPUT_MANIFEST_SCHEMA)
             self.assertEqual(manifest["mode"], GPU_INPUT_MANIFEST_MODE)
+            self.assertEqual(manifest["source_color_mode"], 0)
+            self.assertEqual(manifest["source_linear_scale"], 1.0)
+            self.assertEqual(manifest["source_shape"], {"width": 4, "height": 3})
+            self.assertEqual(
+                manifest["frames"][1]["source_sha256"], rows[1]["input_source_sha256"])
             self.assertEqual(
                 {key: manifest["mapping_config"][key] for key in (
-                    "near_tail_probe_u", "near_tail_coverage_low",
-                    "near_tail_coverage_high", "near_log_tau_dense",
-                    "vertical_majorant_share")},
+                    "near_log_tau", "vertical_majorant_share")},
                 {
-                    "near_tail_probe_u": CALIBRATED_DEFAULTS.near_tail_probe_u,
-                    "near_tail_coverage_low": CALIBRATED_DEFAULTS.near_tail_coverage_low,
-                    "near_tail_coverage_high": CALIBRATED_DEFAULTS.near_tail_coverage_high,
-                    "near_log_tau_dense": CALIBRATED_DEFAULTS.near_log_tau_dense,
+                    "near_log_tau": CALIBRATED_DEFAULTS.near_log_tau,
                     "vertical_majorant_share":
                         CALIBRATED_DEFAULTS.vertical_majorant_share,
                 })
@@ -678,15 +732,42 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 output, reference, manifest["mapping_config"],
                 "subject-state-hard-cut-generation", input_contract)
             self.assertEqual(validated["schema"], GPU_INPUT_MANIFEST_SCHEMA)
-            for name in ("model", "shape", "frame_hash"):
+            for name in (
+                    "model", "shape", "frame_hash", "source_hash",
+                    "color_mode", "linear_scale", "boolean_color_mode",
+                    "boolean_linear_scale", "oversized_linear_scale",
+                    "source_shape", "boolean_source_shape", "zero_source_shape",
+                    "oversized_source_shape"):
                 with self.subTest(corruption=name):
                     corrupt = json.loads(json.dumps(manifest))
                     if name == "model":
                         corrupt["model_identity"]["model"] = "different"
                     elif name == "shape":
                         corrupt["raw_shape"]["width"] += 1
-                    else:
+                    elif name == "frame_hash":
                         corrupt["frames"][0]["raw_sha256"] = "0" * 64
+                    elif name == "source_hash":
+                        corrupt["frames"][0]["source_sha256"] = "0" * 64
+                    elif name == "color_mode":
+                        corrupt["source_color_mode"] = 2
+                    elif name == "linear_scale":
+                        corrupt["source_linear_scale"] = 4.0
+                    elif name == "boolean_color_mode":
+                        corrupt["source_color_mode"] = False
+                    elif name == "boolean_linear_scale":
+                        corrupt["source_linear_scale"] = True
+                    elif name == "oversized_linear_scale":
+                        # Large enough that float(int) raises OverflowError, but still below
+                        # Python's default JSON integer-digit safety limit.
+                        corrupt["source_linear_scale"] = 10 ** 4000
+                    elif name == "source_shape":
+                        corrupt["source_shape"]["width"] += 1
+                    elif name == "boolean_source_shape":
+                        corrupt["source_shape"]["height"] = True
+                    elif name == "zero_source_shape":
+                        corrupt["source_shape"]["width"] = 0
+                    else:
+                        corrupt["source_shape"]["height"] = 16385
                     manifest_path.write_text(json.dumps(corrupt), encoding="utf-8")
                     reference["sha256"] = whole_clip_raw_contract.file_sha256(manifest_path)
                     with self.assertRaises(ValueError):
@@ -730,7 +811,8 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             producer_reference = _materialize_producer_evidence_bundle(
                 output, clip, run_model)
             source = workspace / "frame_00001.png"
-            source.write_bytes(b"source")
+            Image.fromarray(
+                np.full((2, 3, 3), 91, dtype=np.uint8), mode="RGB").save(source)
             calibration = MODEL_CALIBRATIONS[0]
             config = MappingV2Config(raw_coordinate_scale=calibration.raw_coordinate_scale)
             _, gpu_path = _materialize_gpu_replay_inputs(

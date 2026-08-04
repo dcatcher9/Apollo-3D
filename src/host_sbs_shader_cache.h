@@ -36,9 +36,11 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec depth_scene_cut_resolve {"depth_scene_cut_resolve_cs.hlsl"};
   inline constexpr shader_spec depth_coordinate_v2_moments {"depth_coordinate_v2_moments_cs.hlsl"};
   inline constexpr shader_spec depth_coordinate_v2_frame_resolve {"depth_coordinate_v2_frame_resolve_cs.hlsl"};
-  inline constexpr shader_spec depth_coordinate_v2_near_coverage {"depth_coordinate_v2_near_coverage_cs.hlsl"};
   inline constexpr shader_spec depth_coordinate_v2_state_resolve {"depth_coordinate_v2_state_resolve_cs.hlsl"};
   inline constexpr shader_spec depth_coordinate_v2_map {"depth_coordinate_v2_map_cs.hlsl"};
+  inline constexpr shader_spec depth_coordinate_v2_ownership {
+    "depth_coordinate_v2_ownership_cs.hlsl"
+  };
   inline constexpr shader_spec depth_coordinate_v2_coordinate_diagnostic {
     "depth_coordinate_v2_map_cs.hlsl", "coordinate_main", "cs_5_0"
   };
@@ -54,9 +56,9 @@ namespace models::host_sbs_shader_cache {
     "sbs_reprojection_v2_diagnostics_ps.hlsl", "mask_ps", "ps_5_0"
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "bf9c97f2df69269e335e50be22f448591c4ae713b87a4997bab769f3c1d4be2b";
+    "707f3866759e2514f718a7a9dae6ed08e90077f29b86d7f925be4a76a4bc3106";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    "79a715711e1d4e21b3d4d9977e2a1c9a172fc37aaa4ca786b37c62b0bc997a2d";
+    "7893c2464bc03c9bc878acffca29cdc6541de4bb73aa2fa57ac34dc5645aaf1e";
 
   inline constexpr std::array preprocess_specs {
     rgb_to_nchw,
@@ -91,11 +93,15 @@ namespace models::host_sbs_shader_cache {
   };
 
   inline constexpr std::array parallax_v2_producer_specs {
+    // The raw-range histogram is now an authenticated scene-camera input. Keep both its exact
+    // min/max producer and binning pass in the same closure as the coordinate producer.
+    depth_minmax,
+    depth_hist,
     depth_coordinate_v2_moments,
     depth_coordinate_v2_frame_resolve,
-    depth_coordinate_v2_near_coverage,
     depth_coordinate_v2_state_resolve,
     depth_coordinate_v2_map,
+    depth_coordinate_v2_ownership,
     depth_coordinate_v2_vertical_limit,
     depth_coordinate_v2_limit,
   };

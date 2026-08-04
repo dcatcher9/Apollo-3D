@@ -438,15 +438,14 @@ namespace {
       std::bit_cast<std::uint32_t>(frame_valid ? 1.0f : 0.0f);
     state[v2::contract_tag_bits] =
       known_contract ? v2::contract_tag : (v2::contract_tag ^ 1u);
-    state[v2::latched_near_tail_coverage] =
-      std::bit_cast<std::uint32_t>(0.0f);
-    state[v2::effective_near_log_tau] =
-      std::bit_cast<std::uint32_t>(v2::near_log_tau);
-    state[v2::latched_near_tail_count] = 0u;
+    state[v2::mapping_state_reserved_0] = 0u;
+    state[v2::mapping_state_reserved_1] = 0u;
+    state[v2::mapping_state_reserved_2] = 0u;
     state[v2::camera_center_integrity_bits] =
       v2::camera_center_integrity_for_words(
         state[v2::center],
         state[v2::inverse_scale],
+        state[v2::convergence_curve],
         state[v2::calibration_revision]
       );
     return state;
@@ -678,6 +677,34 @@ TEST(HostSbsV2LiveWarpGpuTest, ExecutesAuthenticatedPixelContract) {
     std::vector<float>(width, 0.10f),
     std::vector<float>(width, -3.0f),
     corrupt_center_state,
+    sentinel_clear,
+    packed_bytes,
+    error
+  )) << error;
+  expect_flat_identity(source, unpack_rgba32f(packed_bytes), width);
+
+  // Convergence is no longer an adaptive degree of freedom. Even a finite, checksum-resealed
+  // sub-epsilon value must fail closed so the live shader, CPU contract, and dump validator all
+  // enforce the same exact-zero camera contract.
+  auto nonzero_convergence_state = make_live_state(true, true);
+  nonzero_convergence_state[models::depth_coordinate_v2::convergence_curve] =
+    std::bit_cast<std::uint32_t>(1.0e-7f);
+  nonzero_convergence_state[models::depth_coordinate_v2::camera_center_integrity_bits] =
+    models::depth_coordinate_v2::camera_center_integrity_for_words(
+      nonzero_convergence_state[models::depth_coordinate_v2::center],
+      nonzero_convergence_state[models::depth_coordinate_v2::inverse_scale],
+      nonzero_convergence_state[models::depth_coordinate_v2::convergence_curve],
+      nonzero_convergence_state[models::depth_coordinate_v2::calibration_revision]
+    );
+  ASSERT_TRUE(warp.render(
+    DXGI_FORMAT_R32G32B32A32_FLOAT,
+    sizeof(rgba32f_t),
+    width,
+    height,
+    source.data(),
+    std::vector<float>(width, 0.10f),
+    std::vector<float>(width, -3.0f),
+    nonzero_convergence_state,
     sentinel_clear,
     packed_bytes,
     error

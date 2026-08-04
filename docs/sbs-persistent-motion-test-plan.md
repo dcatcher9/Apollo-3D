@@ -188,7 +188,7 @@ Small and literal configured pop. Exercise additional depth models, adaptive pop
 modes only in the offline/evaluator compatibility matrix.
 
 Record one row per depth update with the three evidence fractions, accepted-shot pulse/reason,
-scene age, arm/latch flags, depth-motion baseline, V2 camera generation, near-tail shoulder, and
+scene age, arm/latch flags, depth-motion baseline, V2 camera generation, and
 rendered disparity percentiles. Offline legacy traces may additionally record subject depth,
 stretch-band bounds, adaptive-pop ratio, and zero-plane shift. Diagnostics may use exact blocking
 offline readback. Production telemetry may use only its existing
@@ -203,8 +203,8 @@ telemetry and headset video. The contract passes when:
 
 - exposure-only changes do not produce a cut pulse or reacquire the V2 scene camera;
 - sustained motion produces no repeated shot pulses, rhythmic depth pumping, or camera resets;
-- the V2 scene center and near-tail shoulder remain stable between accepted cuts;
-- each different-depth hard cut produces exactly one shot pulse and one V2 camera/shoulder
+- the V2 scene center remains stable between accepted cuts;
+- each different-depth hard cut produces exactly one shot pulse and one V2 camera
   acquisition, without another pulse during normalization settling;
 - a true cut during persistent motion remains observable through an independently ready
   appearance arm or a relative geometry edge;

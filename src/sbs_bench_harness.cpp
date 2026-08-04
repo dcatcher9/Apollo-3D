@@ -22,6 +22,7 @@
   #include <filesystem>
   #include <fstream>
   #include <iomanip>
+  #include <iterator>
   #include <limits>
   #include <locale>
   #include <memory>
@@ -68,7 +69,7 @@ namespace sbs_bench {
     constexpr float direct_parallax_max_horizontal_slope =
       models::depth_coordinate_v2::max_horizontal_slope;
     constexpr float direct_parallax_slope_tolerance = 2.0e-5f;
-    constexpr unsigned direct_geometry_contract_schema = 21u;
+    constexpr unsigned direct_geometry_contract_schema = 23u;
     constexpr unsigned direct_geometry_manifest_schema = 4u;
     constexpr std::string_view direct_geometry_warp_input =
       "external-final-parallax-with-diagnostic-order-v4";
@@ -153,6 +154,18 @@ namespace sbs_bench {
       return sha256_hex(bytes.str());
     }
 
+    bool read_file_snapshot(const fs::path &path, std::string &bytes) {
+      std::ifstream stream(path, std::ios::binary);
+      if (!stream) {
+        return false;
+      }
+      bytes.assign(
+        std::istreambuf_iterator<char>(stream),
+        std::istreambuf_iterator<char>()
+      );
+      return !bytes.empty() && !stream.bad();
+    }
+
     uint16_t float_to_half(float value) {
       uint32_t bits;
       std::memcpy(&bits, &value, sizeof(bits));
@@ -211,14 +224,9 @@ namespace sbs_bench {
     //
     // Deliberately reject comments, grayscale Pf, alternate endianness/scales, trailing bytes,
     // non-finite values, and values outside the finite FP16 domain used by the live host path.
-    bool load_pfm(const fs::path &path, scrgb_image &out) {
+    bool load_pfm_stream(std::istream &stream, scrgb_image &out) {
       static_assert(std::endian::native == std::endian::little,
                     "PFM interchange requires a little-endian host");
-      std::ifstream stream(path, std::ios::binary);
-      if (!stream) {
-        return false;
-      }
-
       auto read_header_line = [&](std::string &line) {
         if (!std::getline(stream, line) || line.size() > 128u) {
           return false;
@@ -303,6 +311,19 @@ namespace sbs_bench {
       }
       out = std::move(decoded);
       return true;
+    }
+
+    bool load_pfm(const fs::path &path, scrgb_image &out) {
+      std::ifstream stream(path, std::ios::binary);
+      return stream && load_pfm_stream(stream, out);
+    }
+
+    bool load_pfm(std::string_view bytes, scrgb_image &out) {
+      std::istringstream stream(
+        std::string(bytes),
+        std::ios::in | std::ios::binary
+      );
+      return load_pfm_stream(stream, out);
     }
 
     bool save_pfm(const fs::path &path, UINT width, UINT height,
@@ -807,9 +828,8 @@ namespace sbs_bench {
       return SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&g_wic)));
     }
 
-    bool load_png(const fs::path &path, rgba_image &out) {
-      ComPtr<IWICBitmapDecoder> dec;
-      if (FAILED(g_wic->CreateDecoderFromFilename(path.wstring().c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec))) {
+    bool decode_wic_bgra(IWICBitmapDecoder *dec, rgba_image &out) {
+      if (!dec) {
         return false;
       }
       ComPtr<IWICBitmapFrameDecode> frame;
@@ -823,11 +843,65 @@ namespace sbs_bench {
       if (FAILED(conv->Initialize(frame.Get(), GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) {
         return false;
       }
-      if (FAILED(conv->GetSize(&out.w, &out.h))) {
+      rgba_image decoded;
+      if (FAILED(conv->GetSize(&decoded.w, &decoded.h)) ||
+          decoded.w == 0u || decoded.h == 0u ||
+          decoded.w > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+          decoded.h > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
         return false;
       }
-      out.bgra.resize((size_t) out.w * out.h * 4);
-      return SUCCEEDED(conv->CopyPixels(nullptr, out.w * 4, (UINT) out.bgra.size(), out.bgra.data()));
+      const std::uint64_t byte_count =
+        static_cast<std::uint64_t>(decoded.w) * decoded.h * 4u;
+      if (byte_count > std::numeric_limits<UINT>::max()) {
+        return false;
+      }
+      decoded.bgra.resize(static_cast<std::size_t>(byte_count));
+      if (FAILED(conv->CopyPixels(
+            nullptr,
+            decoded.w * 4u,
+            static_cast<UINT>(decoded.bgra.size()),
+            decoded.bgra.data()
+          ))) {
+        return false;
+      }
+      out = std::move(decoded);
+      return true;
+    }
+
+    bool load_png(const fs::path &path, rgba_image &out) {
+      ComPtr<IWICBitmapDecoder> dec;
+      if (FAILED(g_wic->CreateDecoderFromFilename(
+            path.wstring().c_str(),
+            nullptr,
+            GENERIC_READ,
+            WICDecodeMetadataCacheOnDemand,
+            &dec
+          ))) {
+        return false;
+      }
+      return decode_wic_bgra(dec.Get(), out);
+    }
+
+    bool load_png(std::string_view bytes, rgba_image &out) {
+      if (bytes.empty() || bytes.size() > std::numeric_limits<DWORD>::max()) {
+        return false;
+      }
+      ComPtr<IWICStream> stream;
+      ComPtr<IWICBitmapDecoder> dec;
+      if (FAILED(g_wic->CreateStream(&stream)) ||
+          FAILED(stream->InitializeFromMemory(
+            reinterpret_cast<BYTE *>(const_cast<char *>(bytes.data())),
+            static_cast<DWORD>(bytes.size())
+          )) ||
+          FAILED(g_wic->CreateDecoderFromStream(
+            stream.Get(),
+            nullptr,
+            WICDecodeMetadataCacheOnLoad,
+            &dec
+          ))) {
+        return false;
+      }
+      return decode_wic_bgra(dec.Get(), out);
     }
 
     bool load_depth_texture(ID3D11Device *dev, const fs::path &path,
@@ -3218,9 +3292,24 @@ namespace sbs_bench {
 
       rgba_image img;
       scrgb_image hdr_img;
-      const bool loaded = pfm_input ?
-                            load_pfm(current_frame, hdr_img) :
-                            load_png(current_frame, img);
+      std::string exact_source_snapshot;
+      std::string exact_source_sha256;
+      bool loaded = false;
+      if (depth_coordinate_v2_gpu_mode) {
+        // Exact replay hashes and decodes one immutable byte snapshot. Reopening the path after
+        // WIC upload would let an atomic replacement authenticate different pixels than the SRV.
+        loaded = read_file_snapshot(current_frame, exact_source_snapshot);
+        if (loaded) {
+          exact_source_sha256 = sha256_hex(exact_source_snapshot);
+          loaded = pfm_input ?
+                     load_pfm(std::string_view(exact_source_snapshot), hdr_img) :
+                     load_png(std::string_view(exact_source_snapshot), img);
+        }
+      } else {
+        loaded = pfm_input ?
+                   load_pfm(current_frame, hdr_img) :
+                   load_png(current_frame, img);
+      }
       if (!loaded) {
         if (whole_clip_mode) {
           BOOST_LOG(error) << "sbs-bench: invalid source frame " << current_frame
@@ -3543,6 +3632,10 @@ namespace sbs_bench {
         if (!depth_coordinate_v2_gpu->dispatch(
               fi,
               output_id,
+              in_srv.Get(),
+              static_cast<std::uint32_t>(input_color),
+              o.simulate_hdr ? static_cast<float>(o.hdr_scale) : 1.0f,
+              exact_source_sha256,
               v2_gpu_frame,
               gpu_replay_error
             )) {
@@ -4410,7 +4503,7 @@ namespace sbs_bench {
       if (contract) {
         contract << "{\n"
                  << "  \"schema\": "
-                 << (direct_parallax_mode ? direct_geometry_contract_schema : 18u)
+                 << (direct_parallax_mode ? direct_geometry_contract_schema : 19u)
                  << ",\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"

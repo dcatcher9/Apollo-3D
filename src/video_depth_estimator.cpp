@@ -525,6 +525,7 @@ namespace models {
   bool parallax_v2_result_is_authenticated(const estimate_result &result) {
     if (!result.completed_frame_valid || result.completed_frame_id == 0u ||
         !result.parallax_v2_producer_active || !result.shadow_candidate_parallax ||
+        !result.shadow_ownership_refined_parallax ||
         !result.shadow_vertical_majorant || !result.shadow_vertical_conditioned ||
         !result.shadow_final_parallax ||
         !result.shadow_state || !result.shadow_frame_stats ||
@@ -1041,11 +1042,14 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11Query> post_end;
       Microsoft::WRL::ComPtr<ID3D11Query> parallax_start;
       Microsoft::WRL::ComPtr<ID3D11Query> parallax_end;
+      Microsoft::WRL::ComPtr<ID3D11Query> ownership_start;
+      Microsoft::WRL::ComPtr<ID3D11Query> ownership_end;
       Microsoft::WRL::ComPtr<ID3D11Query> pre_start;
       Microsoft::WRL::ComPtr<ID3D11Query> pre_end;
       bool pending = false;
       bool has_post = false;
       bool has_parallax = false;
+      bool has_ownership = false;
       bool has_pre = false;
       std::uint64_t perf_generation = 0;
     };
@@ -1070,6 +1074,8 @@ namespace models {
             FAILED(device->CreateQuery(&desc, &slot.post_end)) ||
             FAILED(device->CreateQuery(&desc, &slot.parallax_start)) ||
             FAILED(device->CreateQuery(&desc, &slot.parallax_end)) ||
+            FAILED(device->CreateQuery(&desc, &slot.ownership_start)) ||
+            FAILED(device->CreateQuery(&desc, &slot.ownership_end)) ||
             FAILED(device->CreateQuery(&desc, &slot.pre_start)) ||
             FAILED(device->CreateQuery(&desc, &slot.pre_end))) {
           BOOST_LOG(warning) << "Depth D3D11 timing unavailable: could not create timestamp queries.";
@@ -1106,6 +1112,8 @@ namespace models {
         UINT64 post_end = 0;
         UINT64 parallax_start = 0;
         UINT64 parallax_end = 0;
+        UINT64 ownership_start = 0;
+        UINT64 ownership_end = 0;
         UINT64 pre_start = 0;
         UINT64 pre_end = 0;
         constexpr UINT nonblocking = D3D11_ASYNC_GETDATA_DONOTFLUSH;
@@ -1119,27 +1127,40 @@ namespace models {
           slot.pre_end.Get(), &pre_end, sizeof(pre_end), nonblocking);
         HRESULT parallax_start_status = S_OK;
         HRESULT parallax_end_status = S_OK;
+        HRESULT ownership_start_status = S_OK;
+        HRESULT ownership_end_status = S_OK;
         if (slot.has_parallax) {
           parallax_start_status = context->GetData(
             slot.parallax_start.Get(), &parallax_start, sizeof(parallax_start), nonblocking);
           parallax_end_status = context->GetData(
             slot.parallax_end.Get(), &parallax_end, sizeof(parallax_end), nonblocking);
         }
+        if (slot.has_ownership) {
+          ownership_start_status = context->GetData(
+            slot.ownership_start.Get(), &ownership_start, sizeof(ownership_start), nonblocking);
+          ownership_end_status = context->GetData(
+            slot.ownership_end.Get(), &ownership_end, sizeof(ownership_end), nonblocking);
+        }
         const bool any_pending =
           post_start_status == S_FALSE || post_end_status == S_FALSE ||
           pre_start_status == S_FALSE || pre_end_status == S_FALSE ||
-          parallax_start_status == S_FALSE || parallax_end_status == S_FALSE;
+          parallax_start_status == S_FALSE || parallax_end_status == S_FALSE ||
+          ownership_start_status == S_FALSE || ownership_end_status == S_FALSE;
         if (any_pending) {
           continue;
         }
         if (post_start_status == S_OK && post_end_status == S_OK &&
             pre_start_status == S_OK && pre_end_status == S_OK &&
             parallax_start_status == S_OK && parallax_end_status == S_OK &&
+            ownership_start_status == S_OK && ownership_end_status == S_OK &&
             !timing.Disjoint && timing.Frequency > 0 && post_end >= post_start &&
             pre_start >= post_end && pre_end >= pre_start &&
             (!slot.has_parallax ||
-             (parallax_start >= post_start && parallax_end >= parallax_start &&
-              post_end >= parallax_end))) {
+              (parallax_start >= post_start && parallax_end >= parallax_start &&
+               post_end >= parallax_end)) &&
+            (!slot.has_ownership ||
+             (slot.has_parallax && ownership_start >= parallax_start &&
+              ownership_end >= ownership_start && parallax_end >= ownership_end))) {
           const double to_ms = 1000.0 / static_cast<double>(timing.Frequency);
           if (slot.has_post) {
             sbs_perf::add_sample_ms_if_current(
@@ -1152,6 +1173,13 @@ namespace models {
             sbs_perf::add_sample_ms_if_current(
               "depth_parallax_gpu",
               static_cast<double>(parallax_end - parallax_start) * to_ms,
+              slot.perf_generation
+            );
+          }
+          if (slot.has_ownership) {
+            sbs_perf::add_sample_ms_if_current(
+              "depth_parallax_ownership_gpu",
+              static_cast<double>(ownership_end - ownership_start) * to_ms,
               slot.perf_generation
             );
           }
@@ -1181,6 +1209,7 @@ namespace models {
         d3d_perf_next = (index + 1) % d3d_perf_slots.size();
         slot.has_post = has_post;
         slot.has_parallax = false;
+        slot.has_ownership = false;
         slot.has_pre = has_pre;
         slot.perf_generation = sbs_perf::generation();
         context->Begin(slot.disjoint.Get());
@@ -1610,9 +1639,9 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_valid_history_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_moments_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_frame_resolve_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_near_coverage_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_state_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_map_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_ownership_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_coordinate_diagnostic_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_vertical_limit_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_limit_cs;
@@ -1688,8 +1717,11 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_frame_stats_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_frame_stats_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_frame_stats_srv;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_near_tail_count_buf;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_near_tail_count_uav;
+    // Exact 256-bin raw histogram snapshot taken before depth_minmax_ema_cs clears the shared
+    // percentile histogram. The V2 state resolver pairs adjacent bins into its 128-bin oracle.
+    Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_histogram_snapshot_buf;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>
+      depth_coordinate_v2_histogram_snapshot_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_state_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_state_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_state_srv;
@@ -1699,6 +1731,9 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_candidate_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_candidate_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_candidate_srv;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_ownership_tex;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_ownership_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_ownership_srv;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_vertical_majorant_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_vertical_majorant_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_vertical_majorant_srv;
@@ -1714,6 +1749,11 @@ namespace models {
 
     CUgraphicsResource cuda_in_res = nullptr;
     CUgraphicsResource cuda_out_res = nullptr;
+    // The accepted input is a private matched-frame texture. Retain its SRV until the exact
+    // asynchronous raw-depth completion has run the full-resolution ownership pass; this adds no
+    // color copy and keeps every RGB/depth lookup on the same D3D11 command stream.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> pending_source_srv;
+    input_color_space pending_color_space = input_color_space::srgb;
     bool has_previous_frame = false;
     std::uint64_t pending_frame_id = 0;
     bool stream_error_logged = false;
@@ -2105,6 +2145,18 @@ namespace models {
               depth_coordinate_v2::shader_source_closure_sha256;
           parallax_v2_producer_shaders_ready =
             shadow_sources && shader_identity_matches &&
+            // Recompile these shared passes from the authenticated V2 snapshot. Host V2 then
+            // cannot accidentally feed geometry with a common-shader body outside its closure.
+            create_shader(
+              shadow_sources,
+              host_sbs_shader_cache::depth_minmax,
+              depth_minmax_cs
+            ) &&
+            create_shader(
+              shadow_sources,
+              host_sbs_shader_cache::depth_hist,
+              depth_hist_cs
+            ) &&
             create_shader(
               shadow_sources,
               host_sbs_shader_cache::depth_coordinate_v2_moments,
@@ -2117,11 +2169,6 @@ namespace models {
             ) &&
             create_shader(
               shadow_sources,
-              host_sbs_shader_cache::depth_coordinate_v2_near_coverage,
-              depth_coordinate_v2_near_coverage_cs
-            ) &&
-            create_shader(
-              shadow_sources,
               host_sbs_shader_cache::depth_coordinate_v2_state_resolve,
               depth_coordinate_v2_state_resolve_cs
             ) &&
@@ -2129,6 +2176,11 @@ namespace models {
               shadow_sources,
               host_sbs_shader_cache::depth_coordinate_v2_map,
               depth_coordinate_v2_map_cs
+            ) &&
+            create_shader(
+              shadow_sources,
+              host_sbs_shader_cache::depth_coordinate_v2_ownership,
+              depth_coordinate_v2_ownership_cs
             ) &&
             create_shader(
               shadow_sources,
@@ -2466,8 +2518,8 @@ namespace models {
       depth_coordinate_v2_frame_stats_buf.Reset();
       depth_coordinate_v2_frame_stats_uav.Reset();
       depth_coordinate_v2_frame_stats_srv.Reset();
-      depth_coordinate_v2_near_tail_count_buf.Reset();
-      depth_coordinate_v2_near_tail_count_uav.Reset();
+      depth_coordinate_v2_histogram_snapshot_buf.Reset();
+      depth_coordinate_v2_histogram_snapshot_srv.Reset();
       depth_coordinate_v2_state_buf.Reset();
       depth_coordinate_v2_state_uav.Reset();
       depth_coordinate_v2_state_srv.Reset();
@@ -2477,6 +2529,9 @@ namespace models {
       depth_coordinate_v2_candidate_tex.Reset();
       depth_coordinate_v2_candidate_uav.Reset();
       depth_coordinate_v2_candidate_srv.Reset();
+      depth_coordinate_v2_ownership_tex.Reset();
+      depth_coordinate_v2_ownership_uav.Reset();
+      depth_coordinate_v2_ownership_srv.Reset();
       depth_coordinate_v2_vertical_majorant_tex.Reset();
       depth_coordinate_v2_vertical_majorant_uav.Reset();
       depth_coordinate_v2_vertical_majorant_srv.Reset();
@@ -2486,6 +2541,7 @@ namespace models {
       depth_coordinate_v2_final_tex.Reset();
       depth_coordinate_v2_final_uav.Reset();
       depth_coordinate_v2_final_srv.Reset();
+      pending_source_srv.Reset();
     }
 
     void fail_parallax_v2_producer(std::string_view reason) {
@@ -2563,7 +2619,27 @@ namespace models {
                             depth_coordinate_v2_frame_stats_buf,
                             depth_coordinate_v2_frame_stats_srv,
                             depth_coordinate_v2_frame_stats_uav
-                          ) &&
+                          );
+
+      // SRV-only copy target for the shared raw histogram. CopyResource stays entirely on the
+      // GPU queue and, unlike a second histogram dispatch, adds no extra scan or synchronization.
+      D3D11_BUFFER_DESC histogram_snapshot_desc {};
+      histogram_snapshot_desc.Usage = D3D11_USAGE_DEFAULT;
+      histogram_snapshot_desc.ByteWidth = 256u * sizeof(std::uint32_t);
+      histogram_snapshot_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      histogram_snapshot_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+      histogram_snapshot_desc.StructureByteStride = sizeof(std::uint32_t);
+      resources_ok = resources_ok &&
+                     SUCCEEDED(device->CreateBuffer(
+                       &histogram_snapshot_desc,
+                       nullptr,
+                       &depth_coordinate_v2_histogram_snapshot_buf
+                     )) &&
+                     SUCCEEDED(device->CreateShaderResourceView(
+                       depth_coordinate_v2_histogram_snapshot_buf.Get(),
+                       nullptr,
+                       &depth_coordinate_v2_histogram_snapshot_srv
+                     )) &&
                           create_float4_buffer(
                             state_vector_count,
                             state_initial_words.data(),
@@ -2571,24 +2647,6 @@ namespace models {
                             depth_coordinate_v2_state_srv,
                             depth_coordinate_v2_state_uav
                           );
-
-      const std::uint32_t initial_near_tail_count = 0u;
-      D3D11_BUFFER_DESC near_count_desc {};
-      near_count_desc.Usage = D3D11_USAGE_DEFAULT;
-      near_count_desc.ByteWidth = sizeof(initial_near_tail_count);
-      near_count_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-      near_count_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-      near_count_desc.StructureByteStride = sizeof(initial_near_tail_count);
-      D3D11_SUBRESOURCE_DATA near_count_data {&initial_near_tail_count, 0, 0};
-      resources_ok = resources_ok && SUCCEEDED(device->CreateBuffer(
-        &near_count_desc,
-        &near_count_data,
-        &depth_coordinate_v2_near_tail_count_buf
-      )) && SUCCEEDED(device->CreateUnorderedAccessView(
-        depth_coordinate_v2_near_tail_count_buf.Get(),
-        nullptr,
-        &depth_coordinate_v2_near_tail_count_uav
-      ));
 
       D3D11_TEXTURE2D_DESC texture_desc {};
       texture_desc.Width = static_cast<UINT>(target_w);
@@ -2613,9 +2671,14 @@ namespace models {
       };
       resources_ok = resources_ok &&
                      create_float_texture(
-                       depth_coordinate_v2_candidate_tex,
-                       &depth_coordinate_v2_candidate_srv,
-                       depth_coordinate_v2_candidate_uav
+                        depth_coordinate_v2_candidate_tex,
+                        &depth_coordinate_v2_candidate_srv,
+                        depth_coordinate_v2_candidate_uav
+                      ) &&
+                     create_float_texture(
+                       depth_coordinate_v2_ownership_tex,
+                       &depth_coordinate_v2_ownership_srv,
+                       depth_coordinate_v2_ownership_uav
                      ) &&
                      create_float_texture(
                        depth_coordinate_v2_vertical_majorant_tex,
@@ -2642,10 +2705,6 @@ namespace models {
         .max_horizontal_slope = max_horizontal_slope,
         .direct_container_limit = direct_container_limit,
         .convergence_curve_default = convergence_curve_default,
-        .near_tail_probe_u = near_tail_probe_u,
-        .near_tail_coverage_low = near_tail_coverage_low,
-        .near_tail_coverage_high = near_tail_coverage_high,
-        .near_log_tau_dense = near_log_tau_dense,
       };
       D3D11_BUFFER_DESC constants_desc {};
       constants_desc.Usage = D3D11_USAGE_IMMUTABLE;
@@ -2665,6 +2724,7 @@ namespace models {
 
       const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
       context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_candidate_uav.Get(), clear);
+      context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_ownership_uav.Get(), clear);
       context->ClearUnorderedAccessViewFloat(
         depth_coordinate_v2_vertical_majorant_uav.Get(),
         clear
@@ -2677,14 +2737,15 @@ namespace models {
       parallax_v2_producer_active = true;
       BOOST_LOG(info)
         << "Host SBS V2 GPU producer active at " << target_w << 'x' << target_h
-        << "; crown conditioner uses 75% vertical upper and 25% vertical lower envelope "
+        << "; full-resolution conservative foreground ownership precedes the 75% vertical "
+           "upper and 25% vertical lower envelope "
            "followed by one horizontal majorant; "
            "the renderer will authenticate its first completed field before the one-time "
            "V2-or-flat latch.";
       return true;
     }
 
-    void dispatch_parallax_v2_producer() {
+    void dispatch_parallax_v2_producer(d3d_perf_slot *perf_slot) {
       if (!parallax_v2_producer_active) {
         return;
       }
@@ -2722,44 +2783,21 @@ namespace models {
       context->CSSetShaderResources(0, 1, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
 
-      // Count the acquisition frame's canonical u > probe tail with one atomic per reduction
-      // group. State resolve consumes and clears this same-frame evidence without CPU readback.
-      context->CSSetShader(depth_coordinate_v2_near_coverage_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *near_coverage_srvs[4] = {
-        tensor_out_srv.Get(),
-        depth_coordinate_v2_frame_stats_srv.Get(),
-        depth_coordinate_v2_state_srv.Get(),
-        subject_srv.Get(),
-      };
-      context->CSSetShaderResources(0, 4, near_coverage_srvs);
-      context->CSSetUnorderedAccessViews(
-        0,
-        1,
-        depth_coordinate_v2_near_tail_count_uav.GetAddressOf(),
-        nullptr
-      );
-      context->Dispatch(reduce_groups, 1, 1);
-      ID3D11ShaderResourceView *null_srvs4[4] = {nullptr, nullptr, nullptr, nullptr};
-      context->CSSetShaderResources(0, 4, null_srvs4);
-      context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
-
-      // Latch the center only on first usable frame or a confirmed cut. The authenticated model
-      // scale is fixed. The same atomic state update latches near-tail coverage and its effective
-      // shoulder; an unusable no-cut frame publishes flat without erasing this camera.
+      // Acquire the first usable camera on startup/cut, then hold it until the next authenticated
+      // cut. The model scale is fixed. An unusable no-cut frame publishes flat without erasing
+      // the retained camera.
       context->CSSetShader(depth_coordinate_v2_state_resolve_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *state_srvs[2] = {
+      ID3D11ShaderResourceView *state_srvs[3] = {
         depth_coordinate_v2_frame_stats_srv.Get(),
         subject_srv.Get(),
+        depth_coordinate_v2_histogram_snapshot_srv.Get(),
       };
-      context->CSSetShaderResources(0, 2, state_srvs);
-      ID3D11UnorderedAccessView *state_uavs[2] = {
-        depth_coordinate_v2_state_uav.Get(),
-        depth_coordinate_v2_near_tail_count_uav.Get(),
-      };
-      context->CSSetUnorderedAccessViews(0, 2, state_uavs, nullptr);
+      context->CSSetShaderResources(0, 3, state_srvs);
+      context->CSSetUnorderedAccessViews(
+        0, 1, depth_coordinate_v2_state_uav.GetAddressOf(), nullptr);
       context->Dispatch(1, 1, 1);
-      context->CSSetShaderResources(0, 2, null_srvs3);
-      context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
+      context->CSSetShaderResources(0, 3, null_srvs3);
+      context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
 
       // Raw depth -> immutable pre-limiter candidate. The full-size canonical-coordinate field
       // is deliberately absent from production; an explicit Dump 3D dispatches it separately.
@@ -2779,10 +2817,43 @@ namespace models {
       context->CSSetShaderResources(0, 2, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
 
+      // Candidate -> conservative full-resolution RGB ownership refinement. The retained source
+      // SRV belongs to this exact asynchronous raw-depth completion. Missing source evidence is a
+      // safe identity copy; ordinary production pairing always supplies it.
+      if (pending_source_srv) {
+        context->CSSetShader(depth_coordinate_v2_ownership_cs.Get(), nullptr, 0);
+        ID3D11ShaderResourceView *ownership_srvs[2] = {
+          depth_coordinate_v2_candidate_srv.Get(),
+          pending_source_srv.Get(),
+        };
+        context->CSSetShaderResources(0, 2, ownership_srvs);
+        context->CSSetUnorderedAccessViews(
+          0,
+          1,
+          depth_coordinate_v2_ownership_uav.GetAddressOf(),
+          nullptr
+        );
+        if (perf_slot) {
+          perf_slot->has_ownership = true;
+          context->End(perf_slot->ownership_start.Get());
+        }
+        context->Dispatch((target_w + 7) / 8, (target_h + 7) / 8, 1);
+        if (perf_slot) {
+          context->End(perf_slot->ownership_end.Get());
+        }
+        context->CSSetShaderResources(0, 2, null_srvs3);
+        context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
+      } else {
+        context->CopyResource(
+          depth_coordinate_v2_ownership_tex.Get(),
+          depth_coordinate_v2_candidate_tex.Get()
+        );
+      }
+
       // Produce the exact column upper envelope plus the fixed 75/25 vertical share. The upper
       // remains diagnostic evidence; only the neutral conditioned field feeds live geometry.
       context->CSSetShader(depth_coordinate_v2_vertical_limit_cs.Get(), nullptr, 0);
-      context->CSSetShaderResources(0, 1, depth_coordinate_v2_candidate_srv.GetAddressOf());
+      context->CSSetShaderResources(0, 1, depth_coordinate_v2_ownership_srv.GetAddressOf());
       ID3D11UnorderedAccessView *vertical_envelope_uavs[2] = {
         depth_coordinate_v2_vertical_majorant_uav.Get(),
         depth_coordinate_v2_vertical_conditioned_uav.Get(),
@@ -2931,6 +3002,7 @@ namespace models {
           r.shadow_coordinate = depth_coordinate_v2_coordinate_srv;
         }
         r.shadow_candidate_parallax = depth_coordinate_v2_candidate_srv;
+        r.shadow_ownership_refined_parallax = depth_coordinate_v2_ownership_srv;
         r.shadow_vertical_majorant = depth_coordinate_v2_vertical_majorant_srv;
         r.shadow_vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv;
         r.shadow_final_parallax = depth_coordinate_v2_final_srv;
@@ -3001,7 +3073,10 @@ namespace models {
 
     // estimate() has already submitted one inference. Wait for that exact inference, consume it
     // once, and deliberately do NOT enqueue a duplicate. This is the synchronous quality oracle.
-    estimate_result finish_pending(input_color_space color_space) {
+    estimate_result finish_pending(
+      input_color_space color_space,
+      bool snapshot_debug_inputs = false
+    ) {
       auto &cuda = cuda_driver_api::get();
       if (!has_previous_frame || !cu_stream || !cuda.cuStreamSynchronize) {
         return make_result();
@@ -3020,18 +3095,54 @@ namespace models {
       if (diagnostics_enabled) {
         perf_drain(perf_depth);
       }
-      ensure_cbuffers(color_space);
+      (void) color_space;  // the pending frame owns its transfer mode
+      ensure_cbuffers(pending_color_space);
       if (!cbuffer) {
         return {};
       }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
       normalize_depth_output(d3d_timer);
       mark_d3d_post_end(d3d_timer);
+      bool raw_snapshot_valid = false;
+      bool model_input_snapshot_valid = false;
+      bool coordinate_snapshot_valid = false;
+      if (snapshot_debug_inputs) {
+        coordinate_snapshot_valid = dispatch_parallax_v2_coordinate_diagnostic();
+        raw_snapshot_valid = snapshot_buffer(
+          tensor_out_buf.Get(),
+          raw_snapshot_buf,
+          raw_snapshot_srv,
+          raw_snapshot_error_logged,
+          raw_snapshot_retry_frames,
+          "raw-depth"
+        );
+        model_input_snapshot_valid = snapshot_buffer(
+          tensor_in_buf.Get(),
+          model_input_snapshot_buf,
+          model_input_snapshot_srv,
+          model_input_snapshot_error_logged,
+          model_input_snapshot_retry_frames,
+          "model-input"
+        );
+      }
       mark_d3d_pre_start(d3d_timer);
       end_d3d_perf(d3d_timer);
       const auto completed_frame_id = pending_frame_id;
       has_previous_frame = false;  // the output buffer has been consumed; never fold it twice
-      return make_result(true, completed_frame_id);
+      // normalize_depth_output() has submitted and unbound every D3D11 read of this exact source.
+      // Drop our retained reference only after the ownership pass has consumed it.
+      pending_source_srv.Reset();
+      if (diagnostics_enabled) {
+        throughput_stats_completions++;
+      }
+      return make_result(
+        true,
+        completed_frame_id,
+        false,
+        raw_snapshot_valid,
+        model_input_snapshot_valid,
+        coordinate_snapshot_valid
+      );
     }
 
     // (Re)build the depth constant buffer. Its contents are session-constant once the model
@@ -3107,6 +3218,17 @@ namespace models {
           ID3D11UnorderedAccessView *null_uavs_h[2] = {nullptr, nullptr};
           context->CSSetUnorderedAccessViews(0, 2, null_uavs_h, nullptr);
           context->CSSetShaderResources(0, 1, &null_srv1);
+
+          // Preserve the exact raw histogram for the scene-latched V2 stage-boundary oracle
+          // before pass B clears the shared accumulator. This is a 1 KiB GPU copy with no
+          // readback, fence, or CPU/GPU synchronization.
+          if (parallax_v2_producer_active &&
+              depth_coordinate_v2_histogram_snapshot_buf) {
+            context->CopyResource(
+              depth_coordinate_v2_histogram_snapshot_buf.Get(),
+              hist_buf.Get()
+            );
+          }
         }
 
         // Pass B: fold into the EMA'd bounds and reset the accumulators (1 thread).
@@ -3272,11 +3394,11 @@ namespace models {
       // Production V2 runs after the shared scene-cut bridge so the only legacy-analysis input is
       // its confirmed-cut generation (with the same-frame pulse retained for attribution).
       if (parallax_v2_producer_active) {
-        // This nested interval covers exactly the seven v2 compute passes. It remains inside the
+        // This nested interval covers exactly the seven V2 compute passes. It remains inside the
         // inclusive depth_postprocess_gpu interval so existing benchmark semantics do not move.
         mark_d3d_parallax_start(perf_slot);
       }
-      dispatch_parallax_v2_producer();
+      dispatch_parallax_v2_producer(perf_slot);
       if (parallax_v2_producer_active) {
         mark_d3d_parallax_end(perf_slot);
       }
@@ -3644,7 +3766,10 @@ namespace models {
 
       // Shared constants for buffer_to_tex_cs, the min/max passes and rgb_to_nchw_cs.
       // Session-constant, so the buffer is built once (immutable), not mapped per frame.
-      ensure_cbuffers(color_space);
+      // The caller's color_space can already describe a new mode while the pending raw field and
+      // retained source still belong to the previous one. Always interpret that completed pair
+      // with the mode accepted alongside it.
+      ensure_cbuffers(has_previous_frame ? pending_color_space : color_space);
       if (!cbuffer) {
         mark_terminal_failure();
         return {};
@@ -3658,7 +3783,21 @@ namespace models {
       // (fully unmapped from CUDA), so consuming it here never blocks the encode thread. The
       // caller uses completed_frame_id to select the color slot that produced this exact result.
       if (has_previous_frame) {
+        ensure_cbuffers(pending_color_space);
+        if (!cbuffer) {
+          mark_terminal_failure();
+          return {};
+        }
         normalize_depth_output(d3d_timer);
+        // The ownership dispatch has now consumed and unbound the completed frame's source SRV.
+        // It is safe to release before preprocessing the newly accepted source frame.
+        pending_source_srv.Reset();
+        // Restore the newly supplied frame's transfer mode before its full-resolution preprocess.
+        ensure_cbuffers(color_space);
+        if (!cbuffer) {
+          mark_terminal_failure();
+          return {};
+        }
         // Production post-process timing ends at the normalized depth result. The two stable
         // Dump 3D copies and canonical-coordinate pass below are explicit diagnostic work and
         // must not contaminate live
@@ -3825,10 +3964,17 @@ namespace models {
 
       has_previous_frame = enqueued;
       if (enqueued) {
+        // Retain the exact private matched-frame color SRV across asynchronous TensorRT execution.
+        // The next normalize_depth_output() uses it only for local, full-resolution ownership
+        // evidence and releases it immediately after submitting that D3D11 pass.
+        pending_source_srv = input_srv;
+        pending_color_space = color_space;
         pending_frame_id = frame_id;
         if (diagnostics_enabled) {
           throughput_stats_enqueues++;
         }
+      } else {
+        pending_source_srv.Reset();
       }
 
       return make_result(
@@ -3883,6 +4029,13 @@ namespace models {
 
   estimate_result video_depth_estimator::finish_pending_depth_for_evaluation(input_color_space color_space) {
     return pimpl->finish_pending(color_space);
+  }
+
+  estimate_result video_depth_estimator::finish_pending_depth_for_idle_recovery(
+    input_color_space color_space,
+    bool snapshot_debug_inputs
+  ) {
+    return pimpl->finish_pending(color_space, snapshot_debug_inputs);
   }
 
   depth_telemetry_poll_result video_depth_estimator::poll_depth_telemetry(

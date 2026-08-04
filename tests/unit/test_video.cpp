@@ -547,16 +547,17 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
     ASSERT_TRUE(first) << producer.filename;
     ASSERT_TRUE(second) << producer.filename;
     EXPECT_EQ(first.get(), second.get()) << producer.filename;
-    EXPECT_EQ(
-      std::count_if(
+    const auto core_matches = std::count_if(
         cache::core_specs.begin(),
         cache::core_specs.end(),
         [&producer](const cache::shader_spec &core) {
           return core.filename == producer.filename;
         }
-      ),
-      0
-    ) << producer.filename;
+      );
+    const bool authenticated_shared_input =
+      producer.filename == cache::depth_minmax.filename ||
+      producer.filename == cache::depth_hist.filename;
+    EXPECT_EQ(core_matches, authenticated_shared_input ? 1 : 0) << producer.filename;
   }
 
   const auto diagnostic_sources = cache::snapshot_sources(
@@ -592,7 +593,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_TRUE(models::input_color_space_is_linear(models::input_color_space::linear_sdr));
   EXPECT_TRUE(models::input_color_space_is_linear(models::input_color_space::scrgb_hdr));
   EXPECT_FLOAT_EQ(v2::gain_per_pop, 0.00375f);
-  EXPECT_FLOAT_EQ(v2::parallax_gain, 0.0075f);
+  EXPECT_FLOAT_EQ(v2::parallax_gain, 0.00375f);
   EXPECT_FLOAT_EQ(v2::requested_pop_strength(1.2f), 1.2f);
   EXPECT_FLOAT_EQ(v2::requested_gain_for_config(1.2f), 0.0045f);
   EXPECT_FLOAT_EQ(v2::requested_pop_strength(-1.0f), 0.0f);
@@ -600,41 +601,25 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_FLOAT_EQ(v2::direct_container_limit, 0.04f);
   EXPECT_FLOAT_EQ(v2::max_horizontal_slope, 0.5f);
   EXPECT_FLOAT_EQ(v2::convergence_curve_default, 0.0f);
-  EXPECT_FLOAT_EQ(v2::near_tail_probe_u, 1.0f);
-  EXPECT_FLOAT_EQ(v2::near_tail_coverage_low, 0.15f);
-  EXPECT_FLOAT_EQ(v2::near_tail_coverage_high, 0.22f);
-  EXPECT_FLOAT_EQ(v2::near_log_tau_dense, 1.0f);
-  EXPECT_FLOAT_EQ(
-    v2::near_tail_dense_weight_for_coverage(v2::near_tail_coverage_low),
-    0.0f
-  );
-  EXPECT_FLOAT_EQ(
-    v2::near_tail_dense_weight_for_coverage(v2::near_tail_coverage_high),
-    1.0f
-  );
-  EXPECT_FLOAT_EQ(
-    v2::near_tail_effective_tau_for_coverage(v2::near_tail_coverage_low),
-    v2::near_log_tau
-  );
-  EXPECT_FLOAT_EQ(
-    v2::near_tail_effective_tau_for_coverage(v2::near_tail_coverage_high),
-    v2::near_log_tau_dense
-  );
+  EXPECT_FLOAT_EQ(v2::stage_valley_ratio_max, 0.75f);
+  EXPECT_TRUE(v2::convergence_curve_is_valid(0.0f));
+  EXPECT_FALSE(v2::convergence_curve_is_valid(-0.1f));
+  EXPECT_FLOAT_EQ(v2::near_log_tau, 2.0f);
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 15u);
-  EXPECT_EQ(v2::contract_tag, 0x7ADF0988u);
+  EXPECT_EQ(v2::contract_schema, 23u);
+  EXPECT_EQ(v2::contract_tag, 0x2F52B6E0u);
   EXPECT_EQ(
     v2::contract_canonical_sha256,
-    "09f4eae02ddfd437dbf29116c6f7f4f5c754af40a7a9124edee3c071adfc8ed6"
+    "6c02b78c0496abb93ecdd820cace6ac8d9fbe1107ed2a99d1e791365b07d54d8"
   );
   EXPECT_EQ(
     v2::contract_tag_semantic_sha256,
-    "7adf09889f87bc391afe42a4f56f4d38a534573c6e751ced03c01c029adecf53"
+    "2f52b6e0eda5e12d426bee3d0cf1f7a003e93fed7b7db7e48c264efbe73e9493"
   );
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
-  EXPECT_EQ(v2::shadow_state_dump_schema, 8u);
+  EXPECT_EQ(v2::shadow_state_dump_schema, 13u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
   EXPECT_EQ(v2::capture_provenance_manifest_key, "raw_model_provenance");
   EXPECT_EQ(
@@ -806,9 +791,9 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
       height
     )) << width << 'x' << height;
   }
-  EXPECT_EQ(v2::constant_float_count, 12u);
-  EXPECT_EQ(v2::constant_vector_count, 3u);
-  EXPECT_EQ(sizeof(v2::constants_t), 48u);
+  EXPECT_EQ(v2::constant_float_count, 8u);
+  EXPECT_EQ(v2::constant_vector_count, 2u);
+  EXPECT_EQ(sizeof(v2::constants_t), 32u);
   EXPECT_EQ(alignof(v2::constants_t), 16u);
   EXPECT_EQ(v2::frame_stats_float_count, 8u);
   EXPECT_EQ(v2::frame_stats_vector_count, 2u);
@@ -820,27 +805,19 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_STREQ(v2::constant_field_names[0], "raw_coordinate_scale");
   EXPECT_STREQ(v2::constant_field_names[4], "requested_gain");
   EXPECT_STREQ(v2::constant_field_names[7], "convergence_curve_default");
-  EXPECT_STREQ(v2::constant_field_names[8], "near_tail_probe_u");
-  EXPECT_STREQ(v2::constant_field_names[11], "near_log_tau_dense");
   EXPECT_STREQ(v2::frame_stat_names[v2::frame_stat_mean], "mean");
   EXPECT_STREQ(v2::frame_stat_names[v2::frame_stat_valid], "valid");
   EXPECT_STREQ(v2::state_field_names[v2::calibration_revision], "calibration_revision");
   EXPECT_STREQ(v2::state_field_names[v2::convergence_curve], "convergence_curve");
   EXPECT_STREQ(v2::state_field_names[v2::container_scale], "container_scale");
-  EXPECT_STREQ(
-    v2::state_field_names[v2::latched_near_tail_coverage],
-    "latched_near_tail_coverage"
-  );
-  EXPECT_STREQ(
-    v2::state_field_names[v2::effective_near_log_tau],
-    "effective_near_log_tau"
-  );
+  EXPECT_STREQ(v2::state_field_names[v2::camera_center_integrity_bits],
+               "camera_center_integrity_bits");
   EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::calibration_revision));
   EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::confirmed_cut_count));
   EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::contract_tag_bits));
-  EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::latched_near_tail_count));
   EXPECT_TRUE(v2::state_word_is_uint_bits(
     v2::state_word_e::camera_center_integrity_bits));
+  EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::mapping_state_reserved_0));
   EXPECT_FALSE(v2::state_word_is_uint_bits(v2::state_word_e::center));
   EXPECT_EQ(v2::state_initial_words[v2::calibration_revision], 0u);
   EXPECT_EQ(v2::state_initial_words[v2::confirmed_cut_count], 0u);
@@ -851,15 +828,15 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_EQ(v2::state_initial_words[v2::container_scale],
             std::bit_cast<std::uint32_t>(1.0f));
   EXPECT_EQ(v2::state_initial_words[v2::contract_tag_bits], v2::contract_tag);
-  EXPECT_EQ(
-    v2::state_initial_words[v2::effective_near_log_tau],
-    std::bit_cast<std::uint32_t>(v2::near_log_tau)
-  );
-  EXPECT_EQ(v2::state_initial_words[v2::latched_near_tail_count], 0u);
   EXPECT_EQ(v2::state_initial_words[v2::camera_center_integrity_bits], 0u);
-  EXPECT_TRUE(v2::camera_center_integrity_is_valid(0u, 0u, 0u, 0u));
+  EXPECT_EQ(v2::state_initial_words[v2::mapping_state_reserved_0], 0u);
+  EXPECT_EQ(v2::state_initial_words[v2::mapping_state_reserved_1], 0u);
+  EXPECT_EQ(v2::state_initial_words[v2::mapping_state_reserved_2], 0u);
+  EXPECT_TRUE(v2::camera_center_integrity_is_valid(0u, 0u, 0u, 0u, 0u));
   EXPECT_FALSE(v2::camera_center_integrity_is_valid(
-    std::bit_cast<std::uint32_t>(1.0f), 0u, 0u, 0u));
+    0u, 0u, std::bit_cast<std::uint32_t>(-0.1f), 0u, 0u));
+  EXPECT_FALSE(v2::camera_center_integrity_is_valid(
+    std::bit_cast<std::uint32_t>(1.0f), 0u, 0u, 0u, 0u));
   EXPECT_FALSE(v2::cut_generation_changed(7u, 7u, false));
   EXPECT_TRUE(v2::cut_generation_changed(7u, 8u, false));
   EXPECT_TRUE(v2::cut_generation_changed(7u, 7u, true));
@@ -1004,6 +981,21 @@ TEST(ParallaxV2RendererTest, AuthenticationLatchesV2OrLiveFlat) {
     true,
     models::host_sbs_v2_max_matched_repeat_age + std::chrono::milliseconds(1)
   ));
+  EXPECT_TRUE(models::host_sbs_matched_completion_is_current(
+    true,
+    models::host_sbs_v2_max_matched_repeat_age + std::chrono::hours(1)
+  ));
+  EXPECT_FALSE(models::host_sbs_matched_completion_is_current(
+    false,
+    models::host_sbs_v2_max_matched_repeat_age + std::chrono::milliseconds(1)
+  ));
+  EXPECT_TRUE(models::host_sbs_should_repeat_matched_output(
+    host_sbs_renderer_e::parallax_v2,
+    false,
+    true,
+    models::host_sbs_v2_max_matched_repeat_age + std::chrono::hours(1),
+    true
+  ));
   EXPECT_EQ(
     models::fail_host_sbs_renderer_flat(host_sbs_renderer_e::parallax_v2),
     host_sbs_renderer_e::failed_flat
@@ -1057,6 +1049,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   const auto &calibration = v2::model_calibrations.front();
   models::estimate_result result;
   result.shadow_candidate_parallax = view;
+  result.shadow_ownership_refined_parallax = view;
   result.shadow_vertical_majorant = view;
   result.shadow_vertical_conditioned = view;
   result.shadow_final_parallax = view;
@@ -1104,6 +1097,10 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   auto missing_vertical_majorant = result;
   missing_vertical_majorant.shadow_vertical_majorant.Reset();
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_vertical_majorant));
+
+  auto missing_ownership_refined = result;
+  missing_ownership_refined.shadow_ownership_refined_parallax.Reset();
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_ownership_refined));
 
   auto missing_vertical_conditioned = result;
   missing_vertical_conditioned.shadow_vertical_conditioned.Reset();
@@ -1171,7 +1168,7 @@ TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
   EXPECT_NE(source.find("parallax_v2_coordinate_binding("), std::string::npos);
   EXPECT_NE(source.find("source_closure_sha256"), std::string::npos);
   EXPECT_NE(
-    source.find("nlohmann::json manifest {\n          {\"schema\", 9}"),
+    source.find("nlohmann::json manifest {\n          {\"schema\", 10}"),
     std::string::npos
   );
   EXPECT_NE(source.find("completed.parallax_v2_render_selected"), std::string::npos);
@@ -1323,7 +1320,7 @@ TEST(ParallaxV2ContractTest, EvaluationRawArtifactsCarryProducerAttestation) {
   ASSERT_NE(provenance_gate, std::string::npos);
   ASSERT_NE(provenance_contract, std::string::npos);
   EXPECT_LT(provenance_gate, provenance_contract);
-  EXPECT_NE(harness.find("direct_geometry_contract_schema = 21u"), std::string::npos);
+  EXPECT_NE(harness.find("direct_geometry_contract_schema = 23u"), std::string::npos);
   for (const auto *field : {
          "\\\"depth_model_url\\\"",
          "\\\"onnx_sha256\\\"",
@@ -1568,6 +1565,31 @@ TEST(DirectxShaderSourceTest, DumpGeometryCompilationStaysOffTheLivePath) {
   );
   EXPECT_EQ(dump_initializer.find("sbs_forward_coverage"), std::string::npos);
   EXPECT_EQ(dump_initializer.find("sbs_reprojection_mapping_ps_hlsl"), std::string::npos);
+}
+
+TEST(ParallaxV2ContractTest, ExactGpuReplayHashesAndDecodesOneImmutableSourceSnapshot) {
+  const auto harness = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/sbs_bench_harness.cpp"
+  );
+  ASSERT_FALSE(harness.empty());
+
+  const auto snapshot = harness.find("read_file_snapshot(current_frame, exact_source_snapshot)");
+  const auto digest = harness.find("exact_source_sha256 = sha256_hex(exact_source_snapshot)", snapshot);
+  const auto memory_decode = harness.find(
+    "load_png(std::string_view(exact_source_snapshot), img)",
+    digest
+  );
+  const auto dispatch = harness.find("exact_source_sha256,", memory_decode);
+  ASSERT_NE(snapshot, std::string::npos);
+  ASSERT_NE(digest, std::string::npos);
+  ASSERT_NE(memory_decode, std::string::npos);
+  ASSERT_NE(dispatch, std::string::npos);
+  EXPECT_LT(snapshot, digest);
+  EXPECT_LT(digest, memory_decode);
+  EXPECT_LT(memory_decode, dispatch);
+  EXPECT_NE(harness.find("InitializeFromMemory"), std::string::npos);
+  EXPECT_NE(harness.find("WICDecodeMetadataCacheOnLoad"), std::string::npos);
+  EXPECT_EQ(harness.find("sha256_file_hex(current_frame)"), std::string::npos);
 }
 
 TEST(DirectxShaderSourceTest, DumpGeometryBindsMatchedAuthenticatedState) {

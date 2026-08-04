@@ -66,7 +66,7 @@ from generate_depth_coordinate_v2_contract import (  # noqa: E402
     shader_source_closure_sha256,
 )
 
-EVAL_SCHEMA = whole_clip_raw_contract.EVALUATOR_SCHEMA  # schema 36; harness 18 or direct 21
+EVAL_SCHEMA = whole_clip_raw_contract.EVALUATOR_SCHEMA  # schema 36; harness 19 or direct 22
 BASELINE_SNAPSHOT_SCHEMA = 1
 BASELINE_SNAPSHOT_FILE = "baseline_snapshot.json"
 TRAINING_LABEL_STATUS = "qualified"
@@ -1656,7 +1656,7 @@ _DIRECT_GEOMETRY_MANIFEST_V4 = direct_geometry.MANIFEST_HEADER
 
 
 def validate_direct_parallax_manifest(artifact_dir, contract, source_ids, depth_files=None):
-    """Authenticate schema-21 displacement plus diagnostic canonical-depth artifacts."""
+    """Authenticate schema-23 displacement plus diagnostic canonical-depth artifacts."""
 
     validated = direct_geometry.validate_artifacts(artifact_dir, contract, source_ids)
     if depth_files is not None and depth_files != validated["depth_files"]:
@@ -1672,8 +1672,8 @@ def authoritative_remeasurement_clip_meta(
     ``results.json`` is only a cache.  In particular, an edited ``expected_flat`` flag or a
     forged ``source_frame_count`` can change metric applicability and label completeness.  This
     function deliberately does not read the cached per-clip metadata while constructing the
-    replacement.  The source ``meta.json``, the harness contract (schema 18 for production depth,
-    schema 21 for authenticated displacement plus diagnostic-order replay), and the complete set of metric
+    replacement.  The source ``meta.json``, the harness contract (schema 19 for production depth,
+    schema 23 for authenticated displacement plus diagnostic-order replay), and the complete set of metric
     artifact identities are the authorities.
     """
     run_meta = results.get("meta")

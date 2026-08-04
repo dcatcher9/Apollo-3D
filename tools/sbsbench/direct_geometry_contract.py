@@ -24,7 +24,7 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     from depth_coordinate_v2_contract import CALIBRATED_DEFAULTS as V2_DEFAULTS  # type: ignore
 
 
-CONTRACT_SCHEMA = 21
+CONTRACT_SCHEMA = 23
 MANIFEST_SCHEMA = 4
 WARP_INPUT = "external-final-parallax-with-diagnostic-order-v4"
 SOURCE_U_LIMIT = V2_DEFAULTS.direct_container_limit

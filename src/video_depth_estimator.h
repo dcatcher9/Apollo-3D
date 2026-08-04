@@ -28,7 +28,7 @@ namespace models {
     std::string preprocess_source_closure_sha256;
   };
 
-  /** Immutable identity of the exact seven-dispatch source closure behind a live parallax-v2 result. */
+  /** Immutable identity of the nine-root producer closure behind a live parallax-v2 result. */
   struct parallax_v2_shader_provenance_t {
     std::uint32_t source_closure_schema = 0;
     std::uint32_t source_compile_flags = 0;
@@ -105,12 +105,15 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> model_input_snapshot;  ///< Optional stable NCHW/ImageNet-normalized input for the same live Dump 3D frame.
     std::shared_ptr<const raw_model_provenance_t> raw_model_provenance;  ///< Capture-time model-byte identity; copied by pointer on ordinary frames.
     // Production V2 outputs. candidate_parallax is immutable pre-conditioner evidence;
-    // vertical_majorant is the upper-envelope diagnostic, vertical_conditioned is the fixed
-    // upper/lower vertical share consumed by the pure row majorant, and final_parallax is the live
-    // position authority. coordinate is an optional Dump-3D-only snapshot, never a live resource
-    // or authentication prerequisite. The legacy `shadow_*` prefix remains for dump compatibility.
+    // ownership_refined_parallax is the full-resolution source-contour ownership result consumed
+    // by the vertical pass, vertical_majorant is the upper-envelope diagnostic,
+    // vertical_conditioned is the fixed upper/lower vertical share consumed by the pure row
+    // majorant, and final_parallax is the live position authority. coordinate is an optional
+    // Dump-3D-only snapshot, never a live resource or authentication prerequisite. The legacy
+    // `shadow_*` prefix remains for dump compatibility.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_coordinate;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_candidate_parallax;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_ownership_refined_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_majorant;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_conditioned;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_final_parallax;
@@ -135,7 +138,7 @@ namespace models {
 
   /** Fail-closed CPU authentication for a completed live V2 result.
    *
-   * This verifies the complete model/preprocess/shape and seven-dispatch source identities, the
+   * This verifies the complete model/preprocess/shape and nine-root producer source identities, the
    * presence of every production V2 resource, and the fixed-pop gain relation. Dump-only canonical
    * coordinate evidence is deliberately excluded. It does not map GPU state; the live shader
    * authenticates the per-frame contract tag before sampling geometry.
@@ -175,16 +178,31 @@ namespace models {
   inline constexpr auto host_sbs_v2_max_matched_repeat_age =
     std::chrono::milliseconds {250};
 
+  /** A retained capture may be reconverted after an arbitrarily long static interval. Its exact
+   * matched completion is still current; wall-clock age only expires geometry for an older source.
+   */
+  constexpr bool host_sbs_matched_completion_is_current(
+    const bool source_unchanged,
+    const std::chrono::steady_clock::duration completion_age
+  ) {
+    return source_unchanged ||
+           completion_age <= host_sbs_v2_max_matched_repeat_age;
+  }
+
   constexpr bool host_sbs_should_repeat_matched_output(
     const host_sbs_renderer_e renderer,
     const bool has_matched_frame,
     const bool matched_output_valid,
     const std::chrono::steady_clock::duration repeat_source_age =
-      std::chrono::steady_clock::duration::zero()
+      std::chrono::steady_clock::duration::zero(),
+    const bool source_unchanged = false
   ) {
     return renderer == host_sbs_renderer_e::parallax_v2 &&
            !has_matched_frame && matched_output_valid &&
-           repeat_source_age <= host_sbs_v2_max_matched_repeat_age;
+           host_sbs_matched_completion_is_current(
+             source_unchanged,
+             repeat_source_age
+           );
   }
 
   /** A terminal producer failure moves every nonfailed Host SBS stream to live flat identity. */
@@ -303,9 +321,21 @@ namespace models {
      *
      * It synchronizes the estimator stream, applies normalization/EMA/subject tracking exactly
      * once, and does not enqueue another inference. The offline evaluator uses this as its
-     * exact current-frame quality path; production remains bounded matched-frame async.
+     * exact current-frame quality path; production uses the separate idle-recovery entry point.
      */
     estimate_result finish_pending_depth_for_evaluation(input_color_space color_space = input_color_space::srgb);
+
+    /**
+     * @brief Consume the just-submitted live inference when capture resumed after an idle gap.
+     *
+     * The normal Host SBS path stays asynchronous. This one-inference drain is used only when the
+     * current source frame would otherwise be left flat because capture went idle before a later
+     * convert() could poll its completion. The encode thread remains the D3D context owner.
+     */
+    estimate_result finish_pending_depth_for_idle_recovery(
+      input_color_space color_space,
+      bool snapshot_debug_inputs = false
+    );
 
     /**
      * Poll completed telemetry copies and optionally enqueue one new copy after the caller has

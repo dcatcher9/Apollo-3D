@@ -1,5 +1,5 @@
 {
-  "schema": 15,
+  "schema": 23,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -12,17 +12,22 @@
     "source_macro_count": 0,
     "source_specs": [
       {
+        "source_file": "depth_minmax_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_hist_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
         "source_file": "depth_coordinate_v2_moments_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
       },
       {
         "source_file": "depth_coordinate_v2_frame_resolve_cs.hlsl",
-        "source_entrypoint": "main",
-        "source_target": "cs_5_0"
-      },
-      {
-        "source_file": "depth_coordinate_v2_near_coverage_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
       },
@@ -37,6 +42,11 @@
         "source_target": "cs_5_0"
       },
       {
+        "source_file": "depth_coordinate_v2_ownership_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
         "source_file": "depth_coordinate_v2_vertical_limit_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
@@ -47,23 +57,20 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "b2cd29990fbbda1117ea2ead9a01bca7d43543c5d8d2dce917cab75287d28351"
+    "source_closure_sha256": "509cb18f6ea8823e13a92556ad8319fab478107cf8c9e289d00711dbd2ef4089"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
     "far_tau": 0.15,
     "near_log_tau": 2.0,
-    "near_tail_probe_u": 1.0,
-    "near_tail_coverage_low": 0.15,
-    "near_tail_coverage_high": 0.22,
-    "near_log_tau_dense": 1.0,
     "gain_per_pop": 0.00375,
-    "reference_pop_strength": 2.0,
+    "reference_pop_strength": 1.0,
     "direct_container_limit": 0.04,
     "max_horizontal_slope": 0.5,
     "max_vertical_shear": 2.0,
     "vertical_majorant_share": 0.75,
-    "convergence_curve_default": 0.0
+    "convergence_curve_default": 0.0,
+    "stage_valley_ratio_max": 0.75
   },
   "model_calibrations": [
     {
@@ -173,26 +180,6 @@
       {
         "index": 7,
         "name": "convergence_curve_default",
-        "type": "float32"
-      },
-      {
-        "index": 8,
-        "name": "near_tail_probe_u",
-        "type": "float32"
-      },
-      {
-        "index": 9,
-        "name": "near_tail_coverage_low",
-        "type": "float32"
-      },
-      {
-        "index": 10,
-        "name": "near_tail_coverage_high",
-        "type": "float32"
-      },
-      {
-        "index": 11,
-        "name": "near_log_tau_dense",
         "type": "float32"
       }
     ]
@@ -304,28 +291,28 @@
       },
       {
         "index": 8,
-        "name": "latched_near_tail_coverage",
-        "type": "float32",
-        "gpu_encoding": "float",
-        "initial": 0.0
+        "name": "camera_center_integrity_bits",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
       },
       {
         "index": 9,
-        "name": "effective_near_log_tau",
-        "type": "float32",
-        "gpu_encoding": "float",
-        "initial": 2.0
+        "name": "mapping_state_reserved_0",
+        "type": "uint32",
+        "gpu_encoding": "uint_bits",
+        "initial": 0
       },
       {
         "index": 10,
-        "name": "latched_near_tail_count",
+        "name": "mapping_state_reserved_1",
         "type": "uint32",
         "gpu_encoding": "uint_bits",
         "initial": 0
       },
       {
         "index": 11,
-        "name": "camera_center_integrity_bits",
+        "name": "mapping_state_reserved_2",
         "type": "uint32",
         "gpu_encoding": "uint_bits",
         "initial": 0

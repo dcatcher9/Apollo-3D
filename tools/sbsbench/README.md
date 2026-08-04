@@ -28,11 +28,13 @@ images shown on the headset. This is the visual half of the host benchmark; see
    - `adaptive_state.json`: compatibility evidence from the legacy analysis stack, including the
      cut pulse/generation still bridged into V2. Legacy adaptive-pop, zero-plane, subject, range,
      and depth-health values have no live V2 geometry authority.
-   - `shadow_candidate_parallax.f32`, `shadow_vertical_majorant.f32`,
+   - `shadow_candidate_parallax.f32`, `shadow_ownership_refined_parallax.f32`,
+      `shadow_vertical_majorant.f32`,
      `shadow_vertical_conditioned.f32`, `shadow_coordinate.f32`,
-     `shadow_final_parallax.f32`, and previews: V2's immutable pre-conditioner candidate, exact
-     column-wise upper envelope, fixed 75/25 upper/lower vertical share, canonical coordinate
-     diagnostic, and final live position field respectively. Dump manifest schema 9 distinguishes
+      `shadow_final_parallax.f32`, and previews: V2's immutable pre-conditioner candidate,
+      conservative full-resolution source-contour ownership result, exact column-wise upper
+      envelope, fixed 75/25 upper/lower vertical share, canonical coordinate diagnostic, and final
+      live position field respectively. Dump manifest schema 10 distinguishes
      the intermediates from renderer authority and records that collar defocus is disabled after
      the live hand-boundary regression.
    - `warp_map.f32`, `warp_map_shape.json`, `warp_displacement_heat.png`, `warp_mask.png`: exact
@@ -66,7 +68,8 @@ Dependencies: `numpy` + `Pillow` only (system Python 3 is fine).
 
 - **Exact dump geometry** means the replay hashes and consumes the captured `raw_depth.f32` bytes,
   publishes canonical-coordinate and immutable-candidate diagnostics separately from the final
-  vertical upper-envelope and orientation-selective conditioned intermediates plus the final
+  ownership-refined candidate, vertical upper-envelope, and orientation-selective conditioned
+  intermediates plus the final
   row-majorant field, and authenticates the rendered final field
   through the direct-geometry harness contract.
 - **Authoritative raw-model provenance** additionally requires capture-time
@@ -87,7 +90,7 @@ python tools/sbsbench/replay_depth_mapping_v2.py `
   --experimental-raw-coordinate-scale 0.5
 ```
 
-The schema-9 report records `raw_model_provenance.status = "unverified"`, the reason, and the exact
+The schema-10 report records `raw_model_provenance.status = "unverified"`, the reason, and the exact
 raw artifact hash. Legacy captures do **not** silently inherit the DAV2 Small `0.5` fixed
 raw-coordinate scale. They require both the unverified-provenance opt-in and the explicitly
 non-authoritative `--experimental-raw-coordinate-scale VALUE`; the resulting
@@ -99,7 +102,7 @@ are intentionally rejected.
 
 The two 2026-08-02 hair dumps use depth-coordinate contract schema 7. They remain historical input
 witnesses for explicitly unverified replay; their manifests and SBS output are not evidence of the
-schema-15 producer or final live renderer.
+schema-23 producer or final live renderer.
 
 A capture is considered authoritative only with this exact additional manifest record
 (digest values abbreviated here):
@@ -126,7 +129,7 @@ not bypass corrupt provenance. “Authoritative” here authenticates the dump's
 not HDR preview fidelity, perceptual quality, or metric ground truth.
 
 The production calibration identity and its `0.5` fixed coordinate scale live in the generated
-schema-15 depth-coordinate-v2 contract, not in the replay script. It covers the exact calibrated
+schema-23 depth-coordinate-v2 contract, not in the replay script. It covers the exact calibrated
 Small ONNX at six standard tensor shapes: `770x434`, `1022x434`, `1036x434`, `434x770`,
 `434x1022`, and `434x1036`. A different but syntactically valid SHA-256, URL, profile, tensor
 shape, layout, normalization, or bound artifact hash always aborts; the legacy override does not
@@ -136,10 +139,15 @@ Host SBS.
 ## Mapping-v2 exact whole-clip replay
 
 `replay_depth_mapping_v2_sequence.py` uploads each authenticated raw field and cut generation to
-one persistent GPU state, dispatches the same seven production compute shaders used by live Host
+one persistent GPU state, dispatches the same seven coordinate compute passes used by live Host
 SBS V2, and renders the GPU-produced final orientation-selective conditioned field through
-Apollo's exact D3D SBS harness. Canonical coordinate, pre-limiter candidate, vertical upper
-envelope, and fixed vertical upper/lower share remain separately attributable comparison fields:
+Apollo's exact D3D SBS harness. Canonical coordinate, pre-limiter candidate, ownership-refined
+candidate, vertical upper envelope, and fixed vertical upper/lower share remain separately
+attributable comparison fields:
+
+The exact replay accepts lossless `frame_<id>.png` input only. Its NumPy oracle decodes with
+Pillow while the native harness decodes with WIC, so accepting JPEG would let decoder-specific
+rounding flip hard ownership gates despite identical compressed-file hashes.
 
 ```powershell
 python tools/sbsbench/replay_depth_mapping_v2_sequence.py `
@@ -160,7 +168,9 @@ effective gain, and input/rendered source identity. Every original color is pres
 An unusable field must render its current color with flat geometry. Without a confirmed cut, it
 retains only the scene camera so the next usable field resumes the same coordinate; an unusable
 confirmed-cut frame clears that camera, and the next usable field reacquires it. No old per-pixel
-depth is paired with current color, and there is no timed/frame-counted atomic hold.
+depth is paired with current color, and there is no timed/frame-counted atomic hold. The first
+usable field at startup or after that cut establishes the center once; all later valid, invalid,
+and fast-motion frames hold it until the next confirmed cut, with no pending or late correction.
 `depth_coordinate_v2_sequence_contract.json` hashes those outputs and the harness direct-geometry
 manifest, then independently remeasures the 4% source-U container, the authenticated 75/25
 vertical upper/lower share, the `2.0/depth_width` adjacent-row bound, and the
@@ -427,8 +437,10 @@ the literal `sbs_3d_pop_strength` consumed by the authenticated V2 contract.
 - `--cuda-graph on|off` — capture and replay the TensorRT enqueue when the mapped D3D tensor
   addresses remain stable. The first enqueue for a new address/shape is an uncaptured warmup.
 
-Live Host SBS uses `sbs_3d_pop_strength = F` literally. The retained adaptive-pop and zero-plane
-switches above are evaluator/offline controls only; they do not modify production V2 geometry.
+Live Host SBS uses `sbs_3d_pop_strength = F` literally. Current V2 live qualification and exact
+mapping replay use `F = 1.0` unless a treatment explicitly declares another value. The retained
+adaptive-pop and zero-plane switches above are evaluator/offline controls only; they do not modify
+production V2 geometry.
 CUDA Graph replay is enabled by default through the top-level shared control. Use
 `sbs_3d_cuda_graph = false` only
 for driver diagnosis or a controlled performance A/B; unsupported/capture-failed systems already
@@ -467,7 +479,7 @@ Percent/normalized outputs are preferred; raw pixel diagnostics are never compar
 resolutions. Harness depth is 16-bit so
 sub-1/255 changes remain measurable.
 
-**Eval schema 36 / harness contract 18:** `run_eval.py` pins the profile, model, and zero-plane
+**Eval schema 36 / harness contract 19:** `run_eval.py` pins the profile, model, and zero-plane
 mode explicitly, records the exact Sunshine executable, runtime HLSL tree, engine, and ONNX
 hashes, and has no alternate warp selector. A normal report requires all four to match;
 `--report-allow-executable-diff` explicitly permits a code/shader A/B, while
@@ -515,24 +527,29 @@ then require a pulse on the second consecutive low-structure update and another 
 supported scene return. Their exact lossless A/flat/A and A/flat/B construction is authenticated
 before scoring. No readback or CPU/GPU synchronization was added to the production capture loop.
 Schema 35 additionally records the exact runtime RGB-to-model-input shader closure. Schema 36
-binds each clip's exact schema-18 producer identity, raw tensor shape, and ordered raw-file hashes;
+binds each clip's exact schema-23 producer identity, raw tensor shape, and ordered raw-file hashes;
 unsupported model contracts or shapes abstain per clip. A calibrated
 profile and V2 calibration ID are admitted only when model name/URL/ONNX, source closure, and input
-shape all match the generated schema-15 contract; otherwise the run records an explicit null
+shape all match the generated schema-23 contract; otherwise the run records an explicit null
 calibration instead of silently inheriting the DAV2 scale.
-Schema 15 also binds the ordered seven-shader V2 implementation by its immutable
+Schema 23 also binds the reused raw min/max and histogram roots plus the ordered seven-pass V2
+coordinate implementation (nine authenticated roots total) by its immutable
 source/spec/include closure. The GPU tag hashes the semantic manifest with only that
 self-referential closure digest
 replaced by a fixed sentinel; generated C++ and evidence retain the full canonical-manifest and
-independent shader-closure digests. Live state/frame-stat dumps use serialization schemas 8/2 and
-reject a missing or mismatched shader identity. State schema 8 also authenticates the full
-12-word scene state: shot-latched near-tail coverage/count, its effective near-log tau, the
-camera-center integrity checksum, and the probe/coverage/dense-tau constants used to derive it.
-The acquisition field selects `tau_near = lerp(2, 1, smoothstep(0.15, 0.22,
-fraction(u > 1)))`; ordinary and unusable no-cut frames retain it, while a confirmed cut replaces
-it with the new camera or clears it when depth is unusable. Rendering uses that latched tau, but
-the frame-local 4% hard container always evaluates its extrema with base `tau_near = 2`, so the
-adaptation cannot relax the original representation envelope.
+independent shader-closure digests. Live state/frame-stat dumps use serialization schemas 13/2 and
+reject a missing or mismatched shader identity. State schema 13 authenticates the full 12-word
+scene state, including convergence in the camera-center integrity checksum and zeroed reserved
+words. The near curve is fixed at `tau_near = 2`. At acquisition only, adjacent pairs of the
+existing 256-bin raw histogram form a 128-bin three-class Otsu oracle. A zero-padded smoothed upper
+valley at most 75% of the weaker neighboring peak may select `center = T`, but only when the
+unchanged conservative guard `T - 0.5 > mean` passes; every ambiguous case preserves mean center. Accepted and
+fallback selections both use exactly zero convergence, so the selected center is the raw zero
+plane and Otsu adds no separate translation. At startup or after a confirmed cut, the first usable
+field establishes that center immediately. It then remains fixed through all later valid, invalid,
+and fast-motion frames until the next cut; there is no pending state, age-based replacement, or
+late correction. The frame-local 4%
+hard container evaluates the same curve that is rendered.
 The committed schema-34 baselines are intentionally stale under this new evaluator contract and
 must be deliberately regenerated before the default baseline-gated command can pass. Use
 comparison-only runs while reviewing the new coordinate evidence; do not relabel old baselines.

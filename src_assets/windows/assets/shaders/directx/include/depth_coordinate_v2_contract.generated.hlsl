@@ -3,15 +3,17 @@
 #ifndef DEPTH_COORDINATE_V2_CONTRACT_GENERATED_HLSL
 #define DEPTH_COORDINATE_V2_CONTRACT_GENERATED_HLSL
 
-#define V2_CONTRACT_SCHEMA 15u
-#define V2_CONTRACT_TAG 0x7ADF0988u
+#define V2_CONTRACT_SCHEMA 23u
+#define V2_CONTRACT_TAG 0x2F52B6E0u
 #define V2_SHADOW_STATE_WORD_COUNT 12u
 #define V2_SHADOW_STATE_VECTOR_COUNT 3u
 #define V2_DIRECT_CONTAINER_LIMIT 0.04f
 #define V2_MAX_VERTICAL_SHEAR 2.0f
 #define V2_VERTICAL_MAJORANT_SHARE 0.75f
+#define V2_STAGE_VALLEY_RATIO_MAX 0.75f
 static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;
 static const float v2_vertical_majorant_share = V2_VERTICAL_MAJORANT_SHARE;
+static const float v2_stage_valley_ratio_max = V2_STAGE_VALLEY_RATIO_MAX;
 
 cbuffer DepthCoordinateV2Constants : register(b1) {
     float v2_raw_coordinate_scale;
@@ -22,14 +24,10 @@ cbuffer DepthCoordinateV2Constants : register(b1) {
     float v2_max_horizontal_slope;
     float v2_direct_container_limit;
     float v2_convergence_curve_default;
-    float v2_near_tail_probe_u;
-    float v2_near_tail_coverage_low;
-    float v2_near_tail_coverage_high;
-    float v2_near_log_tau_dense;
 };
 
-#define V2_CONSTANT_WORD_COUNT 12u
-#define V2_CONSTANT_VECTOR_COUNT 3u
+#define V2_CONSTANT_WORD_COUNT 8u
+#define V2_CONSTANT_VECTOR_COUNT 2u
 #define V2_FRAME_STATS_WORD_COUNT 8u
 #define V2_FRAME_STATS_VECTOR_COUNT 2u
 
@@ -82,17 +80,17 @@ cbuffer DepthCoordinateV2Constants : register(b1) {
 #define V2_STATE_WORD_CONTRACT_TAG_BITS 7u
 #define V2_STATE_VECTOR_CONTRACT_TAG_BITS 1u
 #define V2_STATE_CONTRACT_TAG_BITS(value) ((value).w)
-#define V2_STATE_WORD_LATCHED_NEAR_TAIL_COVERAGE 8u
-#define V2_STATE_VECTOR_LATCHED_NEAR_TAIL_COVERAGE 2u
-#define V2_STATE_LATCHED_NEAR_TAIL_COVERAGE(value) ((value).x)
-#define V2_STATE_WORD_EFFECTIVE_NEAR_LOG_TAU 9u
-#define V2_STATE_VECTOR_EFFECTIVE_NEAR_LOG_TAU 2u
-#define V2_STATE_EFFECTIVE_NEAR_LOG_TAU(value) ((value).y)
-#define V2_STATE_WORD_LATCHED_NEAR_TAIL_COUNT 10u
-#define V2_STATE_VECTOR_LATCHED_NEAR_TAIL_COUNT 2u
-#define V2_STATE_LATCHED_NEAR_TAIL_COUNT(value) ((value).z)
-#define V2_STATE_WORD_CAMERA_CENTER_INTEGRITY_BITS 11u
+#define V2_STATE_WORD_CAMERA_CENTER_INTEGRITY_BITS 8u
 #define V2_STATE_VECTOR_CAMERA_CENTER_INTEGRITY_BITS 2u
-#define V2_STATE_CAMERA_CENTER_INTEGRITY_BITS(value) ((value).w)
+#define V2_STATE_CAMERA_CENTER_INTEGRITY_BITS(value) ((value).x)
+#define V2_STATE_WORD_MAPPING_STATE_RESERVED_0 9u
+#define V2_STATE_VECTOR_MAPPING_STATE_RESERVED_0 2u
+#define V2_STATE_MAPPING_STATE_RESERVED_0(value) ((value).y)
+#define V2_STATE_WORD_MAPPING_STATE_RESERVED_1 10u
+#define V2_STATE_VECTOR_MAPPING_STATE_RESERVED_1 2u
+#define V2_STATE_MAPPING_STATE_RESERVED_1(value) ((value).z)
+#define V2_STATE_WORD_MAPPING_STATE_RESERVED_2 11u
+#define V2_STATE_VECTOR_MAPPING_STATE_RESERVED_2 2u
+#define V2_STATE_MAPPING_STATE_RESERVED_2(value) ((value).w)
 
 #endif

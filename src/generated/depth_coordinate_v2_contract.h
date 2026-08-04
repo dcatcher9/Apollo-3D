@@ -10,10 +10,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 15u;
-  inline constexpr std::uint32_t contract_tag = 0x7ADF0988u;
-  inline constexpr std::string_view contract_canonical_sha256 = "09f4eae02ddfd437dbf29116c6f7f4f5c754af40a7a9124edee3c071adfc8ed6";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "7adf09889f87bc391afe42a4f56f4d38a534573c6e751ced03c01c029adecf53";
+  inline constexpr std::uint32_t contract_schema = 23u;
+  inline constexpr std::uint32_t contract_tag = 0x2F52B6E0u;
+  inline constexpr std::string_view contract_canonical_sha256 = "6c02b78c0496abb93ecdd820cace6ac8d9fbe1107ed2a99d1e791365b07d54d8";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "2f52b6e0eda5e12d426bee3d0cf1f7a003e93fed7b7db7e48c264efbe73e9493";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -25,7 +25,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "b2cd29990fbbda1117ea2ead9a01bca7d43543c5d8d2dce917cab75287d28351";
+  inline constexpr std::string_view shader_source_closure_sha256 = "509cb18f6ea8823e13a92556ad8319fab478107cf8c9e289d00711dbd2ef4089";
 
   struct shader_source_spec_t {
     std::string_view source_file;
@@ -33,12 +33,14 @@ namespace models::depth_coordinate_v2 {
     std::string_view source_target;
   };
 
-  inline constexpr std::array<shader_source_spec_t, 7> shader_source_specs {{
+  inline constexpr std::array<shader_source_spec_t, 9> shader_source_specs {{
+    {"depth_minmax_cs.hlsl", "main", "cs_5_0"},
+    {"depth_hist_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"},
-    {"depth_coordinate_v2_near_coverage_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_state_resolve_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"},
+    {"depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"},
   }};
@@ -46,17 +48,14 @@ namespace models::depth_coordinate_v2 {
   inline constexpr float collapse_abs_epsilon = 1e-06f;
   inline constexpr float far_tau = 0.15f;
   inline constexpr float near_log_tau = 2.0f;
-  inline constexpr float near_tail_probe_u = 1.0f;
-  inline constexpr float near_tail_coverage_low = 0.15f;
-  inline constexpr float near_tail_coverage_high = 0.22f;
-  inline constexpr float near_log_tau_dense = 1.0f;
   inline constexpr float gain_per_pop = 0.00375f;
-  inline constexpr float reference_pop_strength = 2.0f;
+  inline constexpr float reference_pop_strength = 1.0f;
   inline constexpr float direct_container_limit = 0.04f;
   inline constexpr float max_horizontal_slope = 0.5f;
   inline constexpr float max_vertical_shear = 2.0f;
   inline constexpr float vertical_majorant_share = 0.75f;
   inline constexpr float convergence_curve_default = 0.0f;
+  inline constexpr float stage_valley_ratio_max = 0.75f;
   inline constexpr std::string_view direct_parallax_decode_expression = "(encoded * 2 - 1) * 0.04";
   static_assert(convergence_curve_default == 0.0f);
   static_assert(max_horizontal_slope > 0.0f && max_horizontal_slope < 1.0f);
@@ -159,11 +158,7 @@ namespace models::depth_coordinate_v2 {
     max_horizontal_slope = 5u,
     direct_container_limit = 6u,
     convergence_curve_default = 7u,
-    near_tail_probe_u = 8u,
-    near_tail_coverage_low = 9u,
-    near_tail_coverage_high = 10u,
-    near_log_tau_dense = 11u,
-    count = 12u,
+    count = 8u,
   };
 
   constexpr std::size_t constant_index(const constant_word_e word) {
@@ -182,10 +177,6 @@ namespace models::depth_coordinate_v2 {
     "max_horizontal_slope",
     "direct_container_limit",
     "convergence_curve_default",
-    "near_tail_probe_u",
-    "near_tail_coverage_low",
-    "near_tail_coverage_high",
-    "near_log_tau_dense",
   }};
 
   struct alignas(16) constants_t {
@@ -197,10 +188,6 @@ namespace models::depth_coordinate_v2 {
     float max_horizontal_slope;
     float direct_container_limit;
     float convergence_curve_default;
-    float near_tail_probe_u;
-    float near_tail_coverage_low;
-    float near_tail_coverage_high;
-    float near_log_tau_dense;
   };
 
   static_assert(std::is_standard_layout_v<constants_t>);
@@ -216,10 +203,6 @@ namespace models::depth_coordinate_v2 {
   static_assert(offsetof(constants_t, max_horizontal_slope) == constant_index(constant_word_e::max_horizontal_slope) * sizeof(float));
   static_assert(offsetof(constants_t, direct_container_limit) == constant_index(constant_word_e::direct_container_limit) * sizeof(float));
   static_assert(offsetof(constants_t, convergence_curve_default) == constant_index(constant_word_e::convergence_curve_default) * sizeof(float));
-  static_assert(offsetof(constants_t, near_tail_probe_u) == constant_index(constant_word_e::near_tail_probe_u) * sizeof(float));
-  static_assert(offsetof(constants_t, near_tail_coverage_low) == constant_index(constant_word_e::near_tail_coverage_low) * sizeof(float));
-  static_assert(offsetof(constants_t, near_tail_coverage_high) == constant_index(constant_word_e::near_tail_coverage_high) * sizeof(float));
-  static_assert(offsetof(constants_t, near_log_tau_dense) == constant_index(constant_word_e::near_log_tau_dense) * sizeof(float));
 
   enum class frame_stat_word_e : std::size_t {
     mean = 0u,
@@ -275,10 +258,10 @@ namespace models::depth_coordinate_v2 {
     frame_valid = 5u,
     confirmed_cut_count = 6u,
     contract_tag_bits = 7u,
-    latched_near_tail_coverage = 8u,
-    effective_near_log_tau = 9u,
-    latched_near_tail_count = 10u,
-    camera_center_integrity_bits = 11u,
+    camera_center_integrity_bits = 8u,
+    mapping_state_reserved_0 = 9u,
+    mapping_state_reserved_1 = 10u,
+    mapping_state_reserved_2 = 11u,
     count = 12u,
   };
 
@@ -294,10 +277,10 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::size_t frame_valid = state_index(state_word_e::frame_valid);
   inline constexpr std::size_t confirmed_cut_count = state_index(state_word_e::confirmed_cut_count);
   inline constexpr std::size_t contract_tag_bits = state_index(state_word_e::contract_tag_bits);
-  inline constexpr std::size_t latched_near_tail_coverage = state_index(state_word_e::latched_near_tail_coverage);
-  inline constexpr std::size_t effective_near_log_tau = state_index(state_word_e::effective_near_log_tau);
-  inline constexpr std::size_t latched_near_tail_count = state_index(state_word_e::latched_near_tail_count);
   inline constexpr std::size_t camera_center_integrity_bits = state_index(state_word_e::camera_center_integrity_bits);
+  inline constexpr std::size_t mapping_state_reserved_0 = state_index(state_word_e::mapping_state_reserved_0);
+  inline constexpr std::size_t mapping_state_reserved_1 = state_index(state_word_e::mapping_state_reserved_1);
+  inline constexpr std::size_t mapping_state_reserved_2 = state_index(state_word_e::mapping_state_reserved_2);
 
   inline constexpr std::size_t state_float_count =
     state_index(state_word_e::count);
@@ -323,10 +306,10 @@ namespace models::depth_coordinate_v2 {
     {state_word_e::frame_valid, "frame_valid", "float32", state_gpu_encoding_e::float_value, std::bit_cast<std::uint32_t>(0.0f)},
     {state_word_e::confirmed_cut_count, "confirmed_cut_count", "uint32", state_gpu_encoding_e::uint_bits, 0u},
     {state_word_e::contract_tag_bits, "contract_tag_bits", "uint32", state_gpu_encoding_e::uint_bits, contract_tag},
-    {state_word_e::latched_near_tail_coverage, "latched_near_tail_coverage", "float32", state_gpu_encoding_e::float_value, std::bit_cast<std::uint32_t>(0.0f)},
-    {state_word_e::effective_near_log_tau, "effective_near_log_tau", "float32", state_gpu_encoding_e::float_value, std::bit_cast<std::uint32_t>(2.0f)},
-    {state_word_e::latched_near_tail_count, "latched_near_tail_count", "uint32", state_gpu_encoding_e::uint_bits, 0u},
     {state_word_e::camera_center_integrity_bits, "camera_center_integrity_bits", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::mapping_state_reserved_0, "mapping_state_reserved_0", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::mapping_state_reserved_1, "mapping_state_reserved_1", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::mapping_state_reserved_2, "mapping_state_reserved_2", "uint32", state_gpu_encoding_e::uint_bits, 0u},
   }};
 
   inline constexpr std::array<const char *, state_float_count> state_field_names {{
@@ -338,10 +321,10 @@ namespace models::depth_coordinate_v2 {
     "frame_valid",
     "confirmed_cut_count",
     "contract_tag_bits",
-    "latched_near_tail_coverage",
-    "effective_near_log_tau",
-    "latched_near_tail_count",
     "camera_center_integrity_bits",
+    "mapping_state_reserved_0",
+    "mapping_state_reserved_1",
+    "mapping_state_reserved_2",
   }};
 
   inline constexpr state_words_t state_initial_words {{
@@ -353,8 +336,8 @@ namespace models::depth_coordinate_v2 {
     std::bit_cast<std::uint32_t>(0.0f),
     0u,
     contract_tag,
-    std::bit_cast<std::uint32_t>(0.0f),
-    std::bit_cast<std::uint32_t>(2.0f),
+    0u,
+    0u,
     0u,
     0u,
   }};
