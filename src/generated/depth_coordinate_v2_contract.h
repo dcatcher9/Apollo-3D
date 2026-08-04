@@ -12,7 +12,7 @@
 namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t contract_schema = 23u;
   inline constexpr std::uint32_t contract_tag = 0x2F52B6E0u;
-  inline constexpr std::string_view contract_canonical_sha256 = "6c02b78c0496abb93ecdd820cace6ac8d9fbe1107ed2a99d1e791365b07d54d8";
+  inline constexpr std::string_view contract_canonical_sha256 = "6a27019e526298fc708b400dbb9bfc66238c7f40978d0dcc254aaf27b7b8fa13";
   inline constexpr std::string_view contract_tag_semantic_sha256 = "2f52b6e0eda5e12d426bee3d0cf1f7a003e93fed7b7db7e48c264efbe73e9493";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
@@ -25,7 +25,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "509cb18f6ea8823e13a92556ad8319fab478107cf8c9e289d00711dbd2ef4089";
+  inline constexpr std::string_view shader_source_closure_sha256 = "86729f7ed5492a5d74bcb952ab873b84ba70b0fb7c468399760124f46ce74d26";
 
   struct shader_source_spec_t {
     std::string_view source_file;

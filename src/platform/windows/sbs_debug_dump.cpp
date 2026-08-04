@@ -1629,6 +1629,18 @@ namespace platf::sbs_debug {
       };
     }
 
+    nlohmann::json hashed_artifact_description(
+      const bool available,
+      const bool required,
+      const std::string_view stage,
+      const std::string_view description,
+      const std::string &sha256
+    ) {
+      auto descriptor = artifact_description(available, required, stage, description);
+      descriptor["sha256"] = sha256;
+      return descriptor;
+    }
+
     std::string timestamp_string() {
       char text[32] = "unknown";
       const std::time_t now = std::time(nullptr);
@@ -2084,6 +2096,33 @@ namespace platf::sbs_debug {
           "actual orientation-selective conditioned field sampled by live V2 reprojection";
         const std::string warp_scalar_description =
           "Exact signed one-eye source-U after the fixed vertical upper/lower share and row majorant, sampled by the live V2 12-step contractive inverse.";
+        // Bind every V2 geometry field to the exact bytes written into this transaction
+        // directory. Metadata-only descriptors let a truncated or internally inconsistent
+        // geometry dump validate cleanly, which silently poisons every downstream offline
+        // investigation that trusts validated dumps.
+        const std::string warp_depth_sha256 =
+          models::file_sha256_hex(paths.temporary / "warp_depth.f32");
+        const std::string shadow_coordinate_sha256 =
+          models::file_sha256_hex(paths.temporary / "shadow_coordinate.f32");
+        const std::string shadow_candidate_sha256 =
+          models::file_sha256_hex(paths.temporary / "shadow_candidate_parallax.f32");
+        const std::string shadow_ownership_sha256 = models::file_sha256_hex(
+          paths.temporary / "shadow_ownership_refined_parallax.f32"
+        );
+        const std::string shadow_vertical_majorant_sha256 =
+          models::file_sha256_hex(paths.temporary / "shadow_vertical_majorant.f32");
+        const std::string shadow_vertical_conditioned_sha256 =
+          models::file_sha256_hex(paths.temporary / "shadow_vertical_conditioned.f32");
+        const std::string shadow_final_sha256 =
+          models::file_sha256_hex(paths.temporary / "shadow_final_parallax.f32");
+        if (warp_depth_sha256.empty() || shadow_coordinate_sha256.empty() ||
+            shadow_candidate_sha256.empty() || shadow_ownership_sha256.empty() ||
+            shadow_vertical_majorant_sha256.empty() ||
+            shadow_vertical_conditioned_sha256.empty() || shadow_final_sha256.empty()) {
+          BOOST_LOG(warning)
+            << "SBS debug dump: failed to hash a written V2 geometry field; dump rejected."sv;
+          break;
+        }
         nlohmann::json artifacts = nlohmann::json::object();
         artifacts["source.png"] = artifact_description(
           true,
@@ -2163,11 +2202,12 @@ namespace platf::sbs_debug {
           warp_scalar_stage,
           "Grayscale preview of the exact orientation-selective conditioned field sampled by the warp."
         );
-        artifacts["warp_depth.f32"] = artifact_description(
+        artifacts["warp_depth.f32"] = hashed_artifact_description(
           true,
           true,
           warp_scalar_stage,
-          warp_scalar_description
+          warp_scalar_description,
+          warp_depth_sha256
         );
         artifacts["warp_depth_shape.json"] = artifact_description(
           true,
@@ -2189,11 +2229,12 @@ namespace platf::sbs_debug {
             "Comparison-only cut flags, counters, and normalization state; no live V2 geometry authority." :
             "Unavailable; scene-cut bridge evidence never gates an authenticated live V2 dump."
         );
-        artifacts["shadow_coordinate.f32"] = artifact_description(
+        artifacts["shadow_coordinate.f32"] = hashed_artifact_description(
           true,
           true,
           "parallax-v2 canonical coordinate diagnostic",
-          "Exact float32-le unbounded canonical coordinate u; diagnostic only and never used by the live renderer."
+          "Exact float32-le unbounded canonical coordinate u; diagnostic only and never used by the live renderer.",
+          shadow_coordinate_sha256
         );
         artifacts["shadow_coordinate_shape.json"] = artifact_description(
           true,
@@ -2213,11 +2254,12 @@ namespace platf::sbs_debug {
           "parallax-v2 canonical coordinate preview",
           "Finite p2-p98 jet preview."
         );
-        artifacts["shadow_candidate_parallax.f32"] = artifact_description(
+        artifacts["shadow_candidate_parallax.f32"] = hashed_artifact_description(
           true,
           true,
           "parallax-v2 pre-limiter candidate displacement",
-          "Exact immutable signed one-eye source-U before the spatial limiter; geometry evidence only, never live render authority."
+          "Exact immutable signed one-eye source-U before the spatial limiter; geometry evidence only, never live render authority.",
+          shadow_candidate_sha256
         );
         artifacts["shadow_candidate_parallax_shape.json"] = artifact_description(
           true,
@@ -2237,11 +2279,12 @@ namespace platf::sbs_debug {
           "parallax-v2 pre-limiter candidate displacement preview",
           "Finite p2-p98 jet preview."
         );
-        artifacts["shadow_ownership_refined_parallax.f32"] = artifact_description(
+        artifacts["shadow_ownership_refined_parallax.f32"] = hashed_artifact_description(
           true,
           true,
           "parallax-v2 full-resolution contour ownership refinement",
-          "Exact signed one-eye source-U after conservative full-resolution source-contour foreground ownership and before the vertical conditioner. The pass may only raise an authenticated candidate at a uniquely owned far-side boundary texel."
+          "Exact signed one-eye source-U after conservative full-resolution source-contour foreground ownership and before the vertical conditioner. The pass may only raise an authenticated candidate at a uniquely owned far-side boundary texel.",
+          shadow_ownership_sha256
         );
         artifacts["shadow_ownership_refined_parallax_shape.json"] = artifact_description(
           true,
@@ -2261,11 +2304,12 @@ namespace platf::sbs_debug {
           "parallax-v2 full-resolution contour ownership refinement preview",
           "Finite p2-p98 jet preview of the ownership-refined candidate."
         );
-        artifacts["shadow_vertical_majorant.f32"] = artifact_description(
+        artifacts["shadow_vertical_majorant.f32"] = hashed_artifact_description(
           true,
           false,
           "parallax-v2 vertical shear-limiter intermediate",
-          "Exact signed one-eye source-U for the least column-wise upper envelope v+ >= ownership-refined candidate with |dv+/dy| <= max_vertical_shear/target_width; diagnostic evidence only."
+          "Exact signed one-eye source-U for the least column-wise upper envelope v+ >= ownership-refined candidate with |dv+/dy| <= max_vertical_shear/target_width; diagnostic evidence only.",
+          shadow_vertical_majorant_sha256
         );
         artifacts["shadow_vertical_majorant_shape.json"] = artifact_description(
           true,
@@ -2285,11 +2329,12 @@ namespace platf::sbs_debug {
           "parallax-v2 vertical shear-limiter intermediate preview",
           "Finite p2-p98 jet preview of the exact column-wise majorant."
         );
-        artifacts["shadow_vertical_conditioned.f32"] = artifact_description(
+        artifacts["shadow_vertical_conditioned.f32"] = hashed_artifact_description(
           true,
           false,
           "parallax-v2 orientation-selective vertical conditioner",
-          "Exact signed one-eye source-U after the fixed 75/25 share of the column upper/lower envelopes; may raise or lower candidate while preserving the vertical shear bound."
+          "Exact signed one-eye source-U after the fixed 75/25 share of the column upper/lower envelopes; may raise or lower candidate while preserving the vertical shear bound.",
+          shadow_vertical_conditioned_sha256
         );
         artifacts["shadow_vertical_conditioned_shape.json"] = artifact_description(
           true,
@@ -2309,11 +2354,12 @@ namespace platf::sbs_debug {
           "parallax-v2 orientation-selective vertical conditioner preview",
           "Finite p2-p98 jet preview of the exact vertical share."
         );
-        artifacts["shadow_final_parallax.f32"] = artifact_description(
+        artifacts["shadow_final_parallax.f32"] = hashed_artifact_description(
           true,
           true,
           "parallax-v2 final conditioned displacement field",
-          "Exact signed one-eye source-U after the row majorant of shadow_vertical_conditioned; q >= conditioned, |dq/dx| <= max_horizontal_slope/target_width, and |dq/dy| <= max_vertical_shear/target_width. q may raise or lower candidate. Live V2 render position authority."
+          "Exact signed one-eye source-U after the row majorant of shadow_vertical_conditioned; q >= conditioned, |dq/dx| <= max_horizontal_slope/target_width, and |dq/dy| <= max_vertical_shear/target_width. q may raise or lower candidate. Live V2 render position authority.",
+          shadow_final_sha256
         );
         artifacts["shadow_final_parallax_shape.json"] = artifact_description(
           true,
@@ -2461,7 +2507,7 @@ namespace platf::sbs_debug {
             *completed.parallax_v2_shader_provenance
           );
         nlohmann::json manifest {
-          {"schema", 10},
+          {"schema", 11},
           {"capture", "one matched, completed Host-SBS frame"},
           {"published_atomically", true},
           {"host_sbs_mode", "ai"},
@@ -2745,6 +2791,10 @@ namespace platf::sbs_debug {
         completed.raw_height != completed.model_height ||
         prepared_frame_id_ != completed.matched_frame_id
       ) {
+        // Every rejection below keeps the trigger latched, so without a backoff the next frame
+        // repeats the full-GPU-sync preflight at frame rate for as long as the condition
+        // persists. Bound the retry cadence exactly like the downstream failure paths.
+        retry_backoff_frames_ = retry_backoff_frames;
         return false;
       }
       if (!completed.parallax_v2_render_selected ||
@@ -2757,12 +2807,14 @@ namespace platf::sbs_debug {
         BOOST_LOG(warning)
           << "SBS debug dump: production V2 renderer is not selected or has an incomplete "sv
              "authenticated resource set; dump rejected (legacy live rendering is unsupported)."sv;
+        retry_backoff_frames_ = retry_backoff_frames;
         return false;
       }
       if (!completed.shadow_coordinate) {
         BOOST_LOG(warning)
           << "SBS debug dump: the explicit Dump 3D canonical-coordinate snapshot is "sv
              "unavailable; live V2 rendering remains authenticated and unaffected."sv;
+        retry_backoff_frames_ = retry_backoff_frames;
         return false;
       }
       if (completed.parallax_v2_live_renderer_source_closure_sha256 !=
@@ -2771,6 +2823,7 @@ namespace platf::sbs_debug {
         BOOST_LOG(warning)
           << "SBS debug dump: production V2 renderer source closure is missing or "sv
              "mismatched; dump rejected."sv;
+        retry_backoff_frames_ = retry_backoff_frames;
         return false;
       }
 

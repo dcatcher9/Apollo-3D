@@ -286,6 +286,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "required": required,
                     "stage": stage,
                     "description": "authenticated test artifact",
+                    **({"sha256": "0" * 64} if name.endswith(".f32") else {}),
                 }
                 for name, (stage, required) in vertical_descriptions.items()
             },
@@ -304,7 +305,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         stats = dump_contract.validate_shadow_frame_stats_document(self.frame_stats)
         self.assertEqual(stats["valid"], 1.0)
 
-    def test_schema_10_manifest_attributes_ownership_then_vertical_share_and_row_majorant(self):
+    def test_current_manifest_attributes_ownership_then_vertical_share_and_row_majorant(self):
         decoded = dump_contract.validate_v2_dump_manifest_document(self.manifest)
         self.assertTrue(decoded["active"])
         self.assertTrue(decoded["rendered_output_selected"])
@@ -330,6 +331,132 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         changed["artifacts"].pop("shadow_vertical_majorant.f32")
         with self.assertRaisesRegex(ValueError, "geometry artifact"):
             dump_contract.validate_v2_dump_manifest_document(changed)
+
+    def test_manifest_requires_content_hashes_for_geometry_fields(self):
+        for field in ("shadow_candidate_parallax.f32", "shadow_final_parallax.f32"):
+            changed = copy.deepcopy(self.manifest)
+            del changed["artifacts"][field]["sha256"]
+            with self.assertRaisesRegex(ValueError, "geometry artifact"):
+                dump_contract.validate_v2_dump_manifest_document(changed)
+            changed = copy.deepcopy(self.manifest)
+            changed["artifacts"][field]["sha256"] = "not-a-hash"
+            with self.assertRaisesRegex(ValueError, "content sha256"):
+                dump_contract.validate_v2_dump_manifest_document(changed)
+        # Preview and shape descriptors must not silently grow a hash claim.
+        changed = copy.deepcopy(self.manifest)
+        changed["artifacts"]["shadow_vertical_majorant.png"] = dict(
+            changed["artifacts"]["shadow_vertical_majorant.png"], sha256="0" * 64)
+        with self.assertRaisesRegex(ValueError, "geometry artifact"):
+            dump_contract.validate_v2_dump_manifest_document(changed)
+
+    def _write_synthetic_geometry_dump(self, root):
+        import hashlib
+
+        import numpy as np
+
+        width, height = 16, 12
+        rng = np.random.default_rng(20260804)
+        candidate = (rng.uniform(-0.002, 0.03, (height, width))).astype(np.float32)
+        ownership = candidate.copy()
+        ownership[4, 7] = np.float32(ownership[4, 7] + 0.005)  # raise-only refinement
+
+        defaults = coordinate.CALIBRATED_DEFAULTS
+        vertical_step = np.float32(defaults.max_vertical_shear / width)
+        horizontal_step = np.float32(defaults.max_horizontal_slope / width)
+        share = np.float32(defaults.vertical_majorant_share)
+        majorant = ownership.copy()
+        for row in range(1, height):
+            majorant[row] = np.maximum(majorant[row], majorant[row - 1] - vertical_step)
+        for row in range(height - 2, -1, -1):
+            majorant[row] = np.maximum(majorant[row], majorant[row + 1] - vertical_step)
+        minorant = ownership.copy()
+        for row in range(1, height):
+            minorant[row] = np.minimum(ownership[row], minorant[row - 1] + vertical_step)
+        for row in range(height - 2, -1, -1):
+            minorant[row] = np.minimum(minorant[row], minorant[row + 1] + vertical_step)
+        conditioned = (share * majorant + np.float32(1.0 - float(share)) * minorant
+                       ).astype(np.float32)
+        final = conditioned.copy()
+        for col in range(1, width):
+            final[:, col] = np.maximum(final[:, col], final[:, col - 1] - horizontal_step)
+        for col in range(width - 2, -1, -1):
+            final[:, col] = np.maximum(final[:, col], final[:, col + 1] - horizontal_step)
+
+        manifest = copy.deepcopy(self.manifest)
+        for name in manifest["dimensions"]:
+            manifest["dimensions"][name] = dict(
+                manifest["dimensions"][name], width=width, height=height)
+        fields = {
+            "shadow_candidate_parallax": candidate,
+            "shadow_ownership_refined_parallax": ownership,
+            "shadow_vertical_majorant": majorant,
+            "shadow_vertical_conditioned": conditioned,
+            "shadow_final_parallax": final,
+        }
+        for name, values in fields.items():
+            payload = values.astype("<f4").tobytes()
+            (root / f"{name}.f32").write_bytes(payload)
+            manifest["artifacts"][f"{name}.f32"]["sha256"] = hashlib.sha256(
+                payload).hexdigest()
+        (root / "dump_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8")
+        return manifest, fields
+
+    def test_geometry_verifier_accepts_consistent_chain(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_synthetic_geometry_dump(root)
+            summary = dump_contract.verify_v2_dump_geometry(root)
+            self.assertEqual(summary["width"], 16)
+            self.assertEqual(summary["height"], 12)
+
+    def test_geometry_verifier_rejects_content_and_chain_tampering(self):
+        import hashlib
+
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, fields = self._write_synthetic_geometry_dump(root)
+
+            # 1) Content byte flip: hash mismatch.
+            final_path = root / "shadow_final_parallax.f32"
+            payload = bytearray(final_path.read_bytes())
+            payload[3] ^= 0x40
+            final_path.write_bytes(bytes(payload))
+            with self.assertRaisesRegex(ValueError, "content hash mismatch"):
+                dump_contract.verify_v2_dump_geometry(root)
+
+            # 2) Consistent hash but broken recurrence: chain mismatch.
+            tampered = fields["shadow_final_parallax"].copy()
+            tampered[5, 5] = np.float32(tampered[5, 5] + 0.001)
+            tampered_bytes = tampered.astype("<f4").tobytes()
+            final_path.write_bytes(tampered_bytes)
+            manifest["artifacts"]["shadow_final_parallax.f32"]["sha256"] = (
+                hashlib.sha256(tampered_bytes).hexdigest())
+            (root / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "exact recurrence"):
+                dump_contract.verify_v2_dump_geometry(root)
+
+    def test_geometry_verifier_rejects_ownership_lowering(self):
+        import hashlib
+
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, fields = self._write_synthetic_geometry_dump(root)
+            lowered = fields["shadow_ownership_refined_parallax"].copy()
+            lowered[2, 2] = np.float32(lowered[2, 2] - 0.001)
+            payload = lowered.astype("<f4").tobytes()
+            (root / "shadow_ownership_refined_parallax.f32").write_bytes(payload)
+            manifest["artifacts"]["shadow_ownership_refined_parallax.f32"]["sha256"] = (
+                hashlib.sha256(payload).hexdigest())
+            (root / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "lowered the candidate"):
+                dump_contract.verify_v2_dump_geometry(root)
 
     def test_manifest_requires_the_full_resolution_ownership_intermediate(self):
         changed = copy.deepcopy(self.manifest)
@@ -451,7 +578,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertTrue(summary["camera_valid"])
             self.assertEqual(summary["calibration_revision"], 4)
 
-    def test_single_dump_replay_validates_the_schema_10_manifest(self):
+    def test_single_dump_replay_validates_the_current_schema_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "dump_manifest.json").write_text(
@@ -460,7 +587,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             summary = _inspect_optional_v2_dump_manifest(root)
 
             self.assertEqual(summary["status"], "validated")
-            self.assertEqual(summary["manifest_schema"], 10)
+            self.assertEqual(
+                summary["manifest_schema"], dump_contract.DUMP_MANIFEST_SCHEMA)
             self.assertTrue(summary["active"])
 
     def test_paired_state_rejects_both_directions_of_frame_validity_mismatch(self):

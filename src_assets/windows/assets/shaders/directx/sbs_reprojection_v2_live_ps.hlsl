@@ -34,8 +34,11 @@ bool CameraInitialized(float4 active, float4 control, float4 mapping_state) {
     integrity = (integrity ^ asuint(V2_STATE_INVERSE_SCALE(active))) * 16777619u;
     integrity = (integrity ^ asuint(V2_STATE_CONVERGENCE_CURVE(active))) * 16777619u;
     integrity = (integrity ^ revision) * 16777619u;
+    // Compare against the compile-time contract value: the producer constant buffer (b1) is not
+    // bound at the warp draw's pixel stage, so reading v2_convergence_curve_default here would be
+    // an unbound-resource read that only accidentally returns the correct zero.
     bool convergence_valid =
-        V2_STATE_CONVERGENCE_CURVE(active) == v2_convergence_curve_default;
+        V2_STATE_CONVERGENCE_CURVE(active) == V2_CONVERGENCE_CURVE_DEFAULT;
     return asuint(V2_STATE_CONTRACT_TAG_BITS(control)) == V2_CONTRACT_TAG &&
         Finite(V2_STATE_CENTER(active)) &&
         Finite(V2_STATE_INVERSE_SCALE(active)) &&

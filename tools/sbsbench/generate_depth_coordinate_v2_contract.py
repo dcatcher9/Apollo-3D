@@ -966,6 +966,11 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"{_float_literal(defaults['vertical_majorant_share'])}",
         f"#define V2_STAGE_VALLEY_RATIO_MAX "
         f"{_float_literal(defaults['stage_valley_ratio_max'])}",
+        # The live pixel shader authenticates the published convergence curve against this
+        # compile-time contract value. It must never read the producer constant buffer, which is
+        # not bound at the warp draw's pixel stage.
+        f"#define V2_CONVERGENCE_CURVE_DEFAULT "
+        f"{_float_literal(defaults['convergence_curve_default'])}",
         "static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;",
         "static const float v2_vertical_majorant_share = V2_VERTICAL_MAJORANT_SHARE;",
         "static const float v2_stage_valley_ratio_max = V2_STAGE_VALLEY_RATIO_MAX;",

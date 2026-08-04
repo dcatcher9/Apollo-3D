@@ -43,7 +43,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             20: "a5cd4d6e2529b82f76f2b2673b3fab979720f7b6a7dca09702967f55ab440b06",
             21: "f2d736f76207df5bf4ac624e04c0c4f977278551463013edb85a70def5172b6d",
             22: "800a82953af68f903ddf386cc0e1f49cf6fb3a1f44e56339bc9ca2122e393849",
-            23: "6c02b78c0496abb93ecdd820cace6ac8d9fbe1107ed2a99d1e791365b07d54d8",
+            23: "6a27019e526298fc708b400dbb9bfc66238c7f40978d0dcc254aaf27b7b8fa13",
         }
         contract = generator.load_contract()
         self.assertEqual(

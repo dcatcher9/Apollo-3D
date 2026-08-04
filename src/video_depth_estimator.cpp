@@ -3098,7 +3098,12 @@ namespace models {
       (void) color_space;  // the pending frame owns its transfer mode
       ensure_cbuffers(pending_color_space);
       if (!cbuffer) {
-        return {};
+        // A persistent constant-buffer allocation failure must latch terminal like every other
+        // resource failure; returning empty without latching leaves the caller retrying at the
+        // minimum-FPS cadence forever.
+        BOOST_LOG(error) << "Depth constant-buffer creation failed while finishing a pending frame";
+        mark_terminal_failure(true);
+        return make_result();
       }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
       normalize_depth_output(d3d_timer);

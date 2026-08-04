@@ -55,10 +55,21 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec parallax_v2_live_mask {
     "sbs_reprojection_v2_diagnostics_ps.hlsl", "mask_ps", "ps_5_0"
   };
+  // The shared fullscreen-triangle vertex shader produces the TexCoord that both Host SBS pixel
+  // shaders invert; it co-defines live stereo geometry and therefore belongs to both pinned
+  // closures below. Non-SBS presentation may still compile it unpinned.
+  inline constexpr shader_spec sbs_reprojection_vertex {
+    "sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0"
+  };
+  inline constexpr shader_spec sbs_flat_identity {
+    "sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"
+  };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "707f3866759e2514f718a7a9dae6ed08e90077f29b86d7f925be4a76a4bc3106";
+    "ee553e2322d7b5f519587ae611ae1e665d1a9b2fb21181f82cb6ab13d55d781d";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    "7893c2464bc03c9bc878acffca29cdc6541de4bb73aa2fa57ac34dc5645aaf1e";
+    "ab3cd80ee5bef3ea6649e088aabb5c68014e9c1f37aea0eca8670f41eaa8f28e";
+  inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
+    "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
 
   inline constexpr std::array preprocess_specs {
     rgb_to_nchw,
@@ -115,6 +126,15 @@ namespace models::host_sbs_shader_cache {
 
   inline constexpr std::array parallax_v2_live_renderer_specs {
     parallax_v2_live_renderer,
+    sbs_reprojection_vertex,
+  };
+
+  // Independent fail-flat closure. Kept separate from the live-renderer closure so an edited V2
+  // pixel shader still degrades to authenticated flat streaming, while an edited vertex shader
+  // (shared geometry) invalidates both closures and rejects Host SBS device creation outright.
+  inline constexpr std::array sbs_flat_fallback_specs {
+    sbs_flat_identity,
+    sbs_reprojection_vertex,
   };
 
   // Dump-only shader roots. These are intentionally absent from prewarm() and from the pinned

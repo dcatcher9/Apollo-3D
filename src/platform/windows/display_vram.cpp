@@ -131,13 +131,16 @@ namespace platf::dxgi {
   blob_t cursor_ps_normalize_white_hlsl;
   blob_t rgb_present_linear_to_srgb_ps_hlsl;
   blob_t rgb_present_srgb_to_linear_ps_hlsl;
-  blob_t sbs_flat_identity_ps_hlsl;
   blob_t cursor_vs_hlsl;
-  // Authenticated production Host SBS V2 shader. Dump-only entry points are snapshotted and
-  // compiled lazily by the per-device dumper, outside startup and production frame timing.
+  // Authenticated production Host SBS V2 shaders. The renderer closure covers the warp pixel
+  // shader plus the shared fullscreen vertex shader; the independent fallback closure covers the
+  // flat-identity pixel shader plus the same vertex shader. Dump-only entry points are
+  // snapshotted and compiled lazily by the per-device dumper, outside startup and production
+  // frame timing.
   models::host_sbs_shader_cache::bytecode_t sbs_reprojection_v2_live_ps_hlsl;
   std::string sbs_reprojection_v2_live_source_closure_sha256;
-  blob_t sbs_reprojection_vs_hlsl;
+  models::host_sbs_shader_cache::bytecode_t sbs_flat_identity_ps_hlsl;
+  models::host_sbs_shader_cache::bytecode_t sbs_reprojection_vs_hlsl;
 
   struct img_d3d_t: public platf::img_t {
     // These objects are owned by the display_t's ID3D11Device
@@ -2249,12 +2252,22 @@ namespace platf::dxgi {
           return -1;
         }
       }
-      create_vertex_shader_helper(sbs_reprojection_vs_hlsl, sbs_reprojection_vs);
+      if (!sbs_reprojection_vs_hlsl ||
+          FAILED(status = device->CreateVertexShader(
+                   sbs_reprojection_vs_hlsl->data(),
+                   sbs_reprojection_vs_hlsl->size(),
+                   nullptr,
+                   &sbs_reprojection_vs
+                 ))) {
+        BOOST_LOG(error) << "Failed to create vertex shader sbs_reprojection_vs_hlsl: "
+                         << util::log_hex(status);
+        return -1;
+      }
       if (sbs_on) {
         if (sbs_flat_identity_ps_hlsl) {
           const auto flat_pixel_status = device->CreatePixelShader(
-            sbs_flat_identity_ps_hlsl->GetBufferPointer(),
-            sbs_flat_identity_ps_hlsl->GetBufferSize(),
+            sbs_flat_identity_ps_hlsl->data(),
+            sbs_flat_identity_ps_hlsl->size(),
             nullptr,
             &sbs_flat_identity_ps
           );
@@ -4956,18 +4969,10 @@ namespace platf::dxgi {
     compile_pixel_shader_helper(cursor_ps_normalize_white);
     compile_pixel_shader_helper(rgb_present_linear_to_srgb_ps);
     compile_pixel_shader_helper(rgb_present_srgb_to_linear_ps);
-    // This independent current-frame identity renderer is the safety net for Host SBS. Its
-    // failure must not disable ordinary non-SBS video; a Host SBS device will reject creation
-    // only if neither this shader nor the authenticated V2 renderer can be created.
-    sbs_flat_identity_ps_hlsl = compile_pixel_shader(
-      SUNSHINE_SHADERS_DIR "/sbs_flat_identity_ps.hlsl"
-    );
-    if (!sbs_flat_identity_ps_hlsl) {
-      BOOST_LOG(warning)
-        << "Host SBS flat-identity shader is unavailable; ordinary video remains enabled."sv;
-    }
     sbs_reprojection_v2_live_ps_hlsl.reset();
     sbs_reprojection_v2_live_source_closure_sha256.clear();
+    sbs_flat_identity_ps_hlsl.reset();
+    sbs_reprojection_vs_hlsl.reset();
     namespace cache = models::host_sbs_shader_cache;
     const auto renderer_sources = cache::snapshot_sources(
       SUNSHINE_SHADERS_DIR,
@@ -4975,12 +4980,17 @@ namespace platf::dxgi {
     );
     sbs_reprojection_v2_live_source_closure_sha256 =
       cache::source_closure_sha256(renderer_sources);
-    if (renderer_sources &&
-        sbs_reprojection_v2_live_source_closure_sha256 ==
-          cache::parallax_v2_live_renderer_source_closure_sha256) {
+    const bool renderer_authenticated = renderer_sources &&
+                                        sbs_reprojection_v2_live_source_closure_sha256 ==
+                                          cache::parallax_v2_live_renderer_source_closure_sha256;
+    if (renderer_authenticated) {
       sbs_reprojection_v2_live_ps_hlsl = cache::get(
         renderer_sources,
         cache::parallax_v2_live_renderer
+      );
+      sbs_reprojection_vs_hlsl = cache::get(
+        renderer_sources,
+        cache::sbs_reprojection_vertex
       );
     }
     if (!sbs_reprojection_v2_live_ps_hlsl) {
@@ -4990,7 +5000,54 @@ namespace platf::dxgi {
         << sbs_reprojection_v2_live_source_closure_sha256 << ", expected "sv
         << cache::parallax_v2_live_renderer_source_closure_sha256 << ")."sv;
     }
-    compile_vertex_shader_helper(sbs_reprojection_vs);
+    // This independent current-frame identity renderer is the safety net for Host SBS. Its
+    // failure must not disable ordinary non-SBS video; a Host SBS device will reject creation
+    // only if neither this shader nor the authenticated V2 renderer can be created. It shares
+    // the pinned vertex shader through its own closure so an edited flat renderer (or vertex
+    // shader) cannot silently alter stereo geometry.
+    const auto fallback_sources = cache::snapshot_sources(
+      SUNSHINE_SHADERS_DIR,
+      cache::sbs_flat_fallback_specs
+    );
+    const auto fallback_closure = cache::source_closure_sha256(fallback_sources);
+    const bool fallback_authenticated = fallback_sources &&
+                                        fallback_closure ==
+                                          cache::sbs_flat_fallback_source_closure_sha256;
+    if (fallback_authenticated) {
+      sbs_flat_identity_ps_hlsl = cache::get(fallback_sources, cache::sbs_flat_identity);
+      if (!sbs_reprojection_vs_hlsl) {
+        sbs_reprojection_vs_hlsl = cache::get(
+          fallback_sources,
+          cache::sbs_reprojection_vertex
+        );
+      }
+    }
+    if (!sbs_flat_identity_ps_hlsl) {
+      BOOST_LOG(warning)
+        << "Host SBS flat-identity authentication or compilation failed; ordinary video "sv
+           "remains enabled (observed closure "sv
+        << fallback_closure << ", expected "sv
+        << cache::sbs_flat_fallback_source_closure_sha256 << ")."sv;
+    }
+    if (!sbs_reprojection_vs_hlsl) {
+      // Both Host SBS closures failed. Non-SBS presentation still needs the fullscreen-triangle
+      // vertex shader, so compile it unpinned; Host SBS device creation will reject separately
+      // because neither pinned pixel shader is available.
+      const auto vertex_only_sources = cache::snapshot_sources(
+        SUNSHINE_SHADERS_DIR,
+        std::array {cache::sbs_reprojection_vertex}
+      );
+      if (vertex_only_sources) {
+        sbs_reprojection_vs_hlsl = cache::get(
+          vertex_only_sources,
+          cache::sbs_reprojection_vertex
+        );
+      }
+      if (!sbs_reprojection_vs_hlsl) {
+        BOOST_LOG(error) << "Failed to compile the shared fullscreen vertex shader"sv;
+        return -1;
+      }
+    }
     compile_vertex_shader_helper(cursor_vs);
 
     BOOST_LOG(info) << "Compiled shaders"sv;

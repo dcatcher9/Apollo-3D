@@ -20,14 +20,14 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 10
+DUMP_MANIFEST_SCHEMA = 11
 SHADOW_STATE_DUMP_SCHEMA = 13
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "707f3866759e2514f718a7a9dae6ed08e90077f29b86d7f925be4a76a4bc3106"
+    "ee553e2322d7b5f519587ae611ae1e665d1a9b2fb21181f82cb6ab13d55d781d"
 )
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "7893c2464bc03c9bc878acffca29cdc6541de4bb73aa2fa57ac34dc5645aaf1e"
+    "ab3cd80ee5bef3ea6649e088aabb5c68014e9c1f37aea0eca8670f41eaa8f28e"
 )
 
 _CONTRACT = coordinate_contract.load_contract()
@@ -342,7 +342,7 @@ def validate_shadow_frame_stats_document(document: Any) -> Dict[str, float]:
 
 
 def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
-    """Validate the schema-10 V2 geometry fragment of ``dump_manifest.json``.
+    """Validate the schema-11 V2 geometry fragment of ``dump_manifest.json``.
 
     The full package contains legacy/color/model metadata owned by other contracts. This reader
     deliberately validates only the candidate -> full-resolution ownership refinement -> vertical
@@ -475,8 +475,14 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     }
     for name, (stage, required) in expected_artifacts.items():
         descriptor = artifacts.get(name)
+        # Exact geometry fields carry a mandatory SHA-256 of the written bytes; a manifest
+        # that describes a geometry field without binding its content is invalid.
+        hashed = name.endswith(".f32")
+        expected_keys = {"available", "required", "stage", "description"}
+        if hashed:
+            expected_keys = expected_keys | {"sha256"}
         if (not isinstance(descriptor, dict) or
-                set(descriptor) != {"available", "required", "stage", "description"} or
+                set(descriptor) != expected_keys or
                 descriptor.get("available") is not active or
                 descriptor.get("required") is not required or
                 descriptor.get("stage") != stage or
@@ -484,6 +490,9 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
                 not descriptor["description"]):
             raise ValueError(
                 "dump_manifest.json has an invalid V2 geometry artifact contract")
+        if hashed and not _is_sha256_hex(descriptor.get("sha256")):
+            raise ValueError(
+                "dump_manifest.json geometry artifact lacks a valid content sha256")
     dimension_names = (
         "shadow_candidate_parallax", "shadow_ownership_refined_parallax",
         "shadow_vertical_majorant",
@@ -514,6 +523,115 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     }
 
 
+def _is_sha256_hex(value: Any) -> bool:
+    return (isinstance(value, str) and len(value) == 64 and
+            all(c in "0123456789abcdef" for c in value))
+
+
+_GEOMETRY_CHAIN_FIELDS = (
+    "shadow_candidate_parallax",
+    "shadow_ownership_refined_parallax",
+    "shadow_vertical_majorant",
+    "shadow_vertical_conditioned",
+    "shadow_final_parallax",
+)
+
+
+def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
+    """Verify a dump directory's geometry evidence against its own manifest.
+
+    Checks, fail-closed:
+      1. every chain field's ``.f32`` bytes hash to the manifest descriptor's ``sha256``;
+      2. every field matches the manifest geometry dimensions and is entirely finite;
+      3. the conditioning chain is internally consistent in exact float32:
+         ``vertical_majorant``/``vertical_conditioned``/``final`` are bitwise equal to the
+         recurrences recomputed from ``ownership_refined``; and the ownership refinement never
+         lowers the candidate.
+
+    Returns a summary dict on success; raises ``ValueError`` on the first violation.
+    """
+
+    import hashlib
+    import json
+    import os
+
+    import numpy as np
+
+    manifest_path = os.path.join(os.fspath(dump_dir), "dump_manifest.json")
+    with open(manifest_path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    fragment = validate_v2_dump_manifest_document(manifest)
+    if not fragment["active"]:
+        raise ValueError("dump has no active V2 geometry to verify")
+
+    dimensions = manifest["dimensions"]["shadow_final_parallax"]
+    height, width = int(dimensions["height"]), int(dimensions["width"])
+    artifacts = manifest["artifacts"]
+
+    fields: Dict[str, Any] = {}
+    for name in _GEOMETRY_CHAIN_FIELDS:
+        path = os.path.join(os.fspath(dump_dir), name + ".f32")
+        with open(path, "rb") as handle:
+            payload = handle.read()
+        digest = hashlib.sha256(payload).hexdigest()
+        expected = artifacts[name + ".f32"]["sha256"]
+        if digest != expected:
+            raise ValueError(f"{name}.f32 content hash mismatch: {digest} != {expected}")
+        values = np.frombuffer(payload, dtype="<f4")
+        if values.size != width * height:
+            raise ValueError(f"{name}.f32 has {values.size} texels; expected {width * height}")
+        if not np.isfinite(values).all():
+            raise ValueError(f"{name}.f32 contains non-finite values")
+        fields[name] = values.reshape(height, width)
+
+    candidate = fields["shadow_candidate_parallax"]
+    ownership = fields["shadow_ownership_refined_parallax"]
+    if np.any(ownership < candidate):
+        raise ValueError("ownership refinement lowered the candidate field")
+
+    # Exact float32 replicas of the production recurrences (validated bitwise against the
+    # GPU intermediates; see docs/host-sbs-v2-crown-compromise-trial.md).
+    vertical_step = np.float32(_DEFAULTS.max_vertical_shear / width)
+    horizontal_step = np.float32(_DEFAULTS.max_horizontal_slope / width)
+    share = np.float32(_DEFAULTS.vertical_majorant_share)
+    share_complement = np.float32(1.0 - float(share))
+
+    majorant = ownership.astype(np.float32).copy()
+    for row in range(1, height):
+        majorant[row] = np.maximum(majorant[row], majorant[row - 1] - vertical_step)
+    for row in range(height - 2, -1, -1):
+        majorant[row] = np.maximum(majorant[row], majorant[row + 1] - vertical_step)
+    minorant = ownership.astype(np.float32).copy()
+    for row in range(1, height):
+        minorant[row] = np.minimum(ownership[row], minorant[row - 1] + vertical_step)
+    for row in range(height - 2, -1, -1):
+        minorant[row] = np.minimum(minorant[row], minorant[row + 1] + vertical_step)
+    conditioned = (share * majorant + share_complement * minorant).astype(np.float32)
+    final = conditioned.copy()
+    for col in range(1, width):
+        final[:, col] = np.maximum(final[:, col], final[:, col - 1] - horizontal_step)
+    for col in range(width - 2, -1, -1):
+        final[:, col] = np.maximum(final[:, col], final[:, col + 1] - horizontal_step)
+
+    for name, recomputed in (
+        ("shadow_vertical_majorant", majorant),
+        ("shadow_vertical_conditioned", conditioned),
+        ("shadow_final_parallax", final),
+    ):
+        if not np.array_equal(fields[name], recomputed):
+            mismatch = float(np.max(np.abs(fields[name] - recomputed)))
+            raise ValueError(
+                f"{name}.f32 is not the exact recurrence of the dumped ownership field "
+                f"(max abs diff {mismatch})")
+
+    return {
+        "width": width,
+        "height": height,
+        "texels": width * height,
+        "chain_fields_verified": list(_GEOMETRY_CHAIN_FIELDS),
+    }
+
+
 __all__ = [
     "DIAGNOSTIC_SOURCE_CLOSURE_SHA256",
     "DUMP_MANIFEST_SCHEMA",
@@ -524,4 +642,5 @@ __all__ = [
     "validate_v2_dump_manifest_document",
     "validate_shadow_frame_stats_document",
     "validate_shadow_state_document",
+    "verify_v2_dump_geometry",
 ]

@@ -11,6 +11,7 @@
 #define V2_MAX_VERTICAL_SHEAR 2.0f
 #define V2_VERTICAL_MAJORANT_SHARE 0.75f
 #define V2_STAGE_VALLEY_RATIO_MAX 0.75f
+#define V2_CONVERGENCE_CURVE_DEFAULT 0.0f
 static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;
 static const float v2_vertical_majorant_share = V2_VERTICAL_MAJORANT_SHARE;
 static const float v2_stage_valley_ratio_max = V2_STAGE_VALLEY_RATIO_MAX;

@@ -583,7 +583,8 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
     ASSERT_TRUE(second) << live.filename << ':' << live.entrypoint;
     EXPECT_EQ(first.get(), second.get()) << live.filename << ':' << live.entrypoint;
   }
-  EXPECT_EQ(cache::parallax_v2_live_renderer_specs.size(), 1u);
+  EXPECT_EQ(cache::parallax_v2_live_renderer_specs.size(), 2u);
+  EXPECT_EQ(cache::sbs_flat_fallback_specs.size(), 2u);
   EXPECT_EQ(cache::parallax_v2_live_diagnostic_specs.size(), 2u);
 }
 
@@ -612,7 +613,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_EQ(v2::contract_tag, 0x2F52B6E0u);
   EXPECT_EQ(
     v2::contract_canonical_sha256,
-    "6c02b78c0496abb93ecdd820cace6ac8d9fbe1107ed2a99d1e791365b07d54d8"
+    "6a27019e526298fc708b400dbb9bfc66238c7f40978d0dcc254aaf27b7b8fa13"
   );
   EXPECT_EQ(
     v2::contract_tag_semantic_sha256,
@@ -676,6 +677,16 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_EQ(
     models::host_sbs_shader_cache::source_closure_sha256(live_diagnostic_sources),
     models::host_sbs_shader_cache::parallax_v2_diagnostic_source_closure_sha256
+  );
+  const auto flat_fallback_sources =
+    models::host_sbs_shader_cache::snapshot_sources(
+      SUNSHINE_SHADERS_DIR,
+      models::host_sbs_shader_cache::sbs_flat_fallback_specs
+    );
+  ASSERT_TRUE(flat_fallback_sources);
+  EXPECT_EQ(
+    models::host_sbs_shader_cache::source_closure_sha256(flat_fallback_sources),
+    models::host_sbs_shader_cache::sbs_flat_fallback_source_closure_sha256
   );
   ASSERT_EQ(
     v2::shader_source_specs.size(),
@@ -1168,7 +1179,7 @@ TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
   EXPECT_NE(source.find("parallax_v2_coordinate_binding("), std::string::npos);
   EXPECT_NE(source.find("source_closure_sha256"), std::string::npos);
   EXPECT_NE(
-    source.find("nlohmann::json manifest {\n          {\"schema\", 10}"),
+    source.find("nlohmann::json manifest {\n          {\"schema\", 11}"),
     std::string::npos
   );
   EXPECT_NE(source.find("completed.parallax_v2_render_selected"), std::string::npos);
